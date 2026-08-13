@@ -29,6 +29,24 @@ def test_health_allows_packaged_app_origins() -> None:
         assert response.headers["access-control-allow-origin"] == origin
 
 
+def test_cors_allows_mutating_desktop_requests() -> None:
+    async def request() -> Response:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.options(
+                "/api/admin/settings/runtime",
+                headers={
+                    "Origin": "tauri://localhost",
+                    "Access-Control-Request-Method": "PATCH",
+                },
+            )
+
+    response = asyncio.run(request())
+
+    assert response.status_code == 200
+    assert "PATCH" in response.headers["access-control-allow-methods"]
+
+
 def test_openapi_exposes_health_contract() -> None:
     schema = get("/openapi.json").json()
 

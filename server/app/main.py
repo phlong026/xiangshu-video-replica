@@ -4,6 +4,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from app.rbac_routes import router as rbac_router
+from app.settings_routes import router as settings_router
+
 
 class HealthResponse(BaseModel):
     status: Literal["ok"]
@@ -20,9 +23,11 @@ app.add_middleware(
         "tauri://localhost",
     ],
     allow_credentials=False,
-    allow_methods=["GET"],
+    allow_methods=["GET", "POST", "PATCH", "PUT"],
     allow_headers=["Content-Type"],
 )
+app.include_router(rbac_router)
+app.include_router(settings_router)
 
 
 @app.get("/health", response_model=HealthResponse)
