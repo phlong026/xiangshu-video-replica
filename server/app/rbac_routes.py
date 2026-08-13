@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import os
 import sqlite3
+from datetime import timedelta
+from pathlib import Path
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict
 
 from app.auth import AuthenticatedUser, Database
+from app.media import storage_key_from_uri
 from app.permissions import (
     project_id_for_task,
     require_asset_access,
@@ -14,8 +18,20 @@ from app.permissions import (
     require_role,
     write_audit,
 )
+from app.settings import SettingsDecryptError, SettingsKeyMissing, SettingsRepository
+from app.storage import (
+    CloudStorageConfig,
+    LocalStorageAdapter,
+    StorageAdapter,
+    StorageBackendUnavailable,
+    create_storage_adapter,
+    require_storage_match,
+    storage_object_ref_from_uri,
+)
 
 router = APIRouter(prefix="/api", tags=["rbac"])
+DOWNLOAD_URL_EXPIRES_IN = timedelta(minutes=15)
+STORAGE_ROOT_ENV = "VIDEO_REPLICA_STORAGE_ROOT"
 
 
 class UserResponse(BaseModel):
@@ -40,6 +56,52 @@ class AssetResponse(BaseModel):
 
 class DownloadUrlResponse(BaseModel):
     url: str
+
+
+def storage_for_asset(conn: sqlite3.Connection, storage_uri: str) -> StorageAdapter:
+    reference = storage_object_ref_from_uri(storage_uri)
+    if reference.provider == "local":
+        local_storage = LocalStorageAdapter(
+            root=Path(os.environ.get(STORAGE_ROOT_ENV, "/tmp/video-replica-storage")),
+            bucket=reference.bucket,
+        )
+        require_storage_match(local_storage, reference)
+        return local_storage
+    if reference.provider not in {"cos", "oss"}:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "STORAGE_PROVIDER_UNAVAILABLE"},
+        )
+    try:
+        config = SettingsRepository(conn).load_provider_config(reference.provider)
+    except (SettingsKeyMissing, SettingsDecryptError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "STORAGE_SETTINGS_UNAVAILABLE"},
+        ) from exc
+    if config.get("bucket") != reference.bucket:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "STORAGE_BUCKET_MISMATCH"},
+        )
+    try:
+        cloud_storage = create_storage_adapter(
+            CloudStorageConfig(
+                provider=reference.provider,
+                bucket=reference.bucket,
+                endpoint=config["endpoint"],
+                access_key_id=config["access_key_id"],
+                secret_access_key=config["secret_access_key"],
+                region=config.get("region"),
+            )
+        )
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "STORAGE_SETTINGS_UNAVAILABLE"},
+        ) from exc
+    require_storage_match(cloud_storage, reference)
+    return cloud_storage
 
 
 class AuditLogResponse(BaseModel):
@@ -116,36 +178,19 @@ def create_download_url(
         entity_id=asset_id,
         metadata={"project_id": str(row["project_id"])},
     )
-    return DownloadUrlResponse(url=f"internal-dev://assets/{asset_id}/download")
-
-
-@router.post("/projects/{project_id}/generation-batches", response_model=AcceptedResponse)
-def create_generation_batch(
-    project_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
-) -> AcceptedResponse:
-    require_not_auditor(
-        conn,
-        actor=actor,
-        action="generation_batch.create",
-        entity_type="project",
-        entity_id=project_id,
-    )
-    require_project_access(
-        conn,
-        actor=actor,
-        project_id=project_id,
-        action="generation_batch.create",
-    )
-    write_audit(
-        conn,
-        actor=actor,
-        action="generation_batch.create",
-        entity_type="project",
-        entity_id=project_id,
-    )
-    return AcceptedResponse(status="accepted")
+    try:
+        storage = storage_for_asset(conn, str(row["storage_uri"]))
+        intent = storage.create_download_intent(
+            storage_key_from_uri(str(row["storage_uri"])),
+            expires_in=DOWNLOAD_URL_EXPIRES_IN,
+            can_read=True,
+        )
+    except StorageBackendUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "STORAGE_PROVIDER_UNAVAILABLE"},
+        ) from exc
+    return DownloadUrlResponse(url=intent.url)
 
 
 @router.post("/generation-tasks/{task_id}/retry", response_model=AcceptedResponse)

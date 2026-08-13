@@ -15,6 +15,8 @@ from app.storage import (
     StorageBackendUnavailable,
     StoragePermissionError,
     create_storage_adapter,
+    require_storage_match,
+    storage_object_ref_from_uri,
 )
 
 
@@ -148,3 +150,16 @@ def test_local_adapter_stores_objects_under_root_and_rejects_path_escape(tmp_pat
 
     with pytest.raises(ValueError, match="unsafe object key"):
         adapter.put_object("../escape.mp4", b"bad", content_type="video/mp4")
+
+
+def test_storage_uri_reference_rejects_wrong_provider_or_bucket() -> None:
+    reference = storage_object_ref_from_uri("cos://private-bucket/projects/p1/output.mp4")
+
+    assert reference.provider == "cos"
+    assert reference.bucket == "private-bucket"
+    assert reference.key == "projects/p1/output.mp4"
+
+    with pytest.raises(StorageBackendUnavailable, match="does not match"):
+        require_storage_match(
+            FakeStorageAdapter(provider="oss", bucket="private-bucket"), reference
+        )

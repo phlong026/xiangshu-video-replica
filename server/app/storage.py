@@ -5,7 +5,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 from urllib.parse import quote, urlencode
 
 StorageProvider = Literal["cos", "oss", "local", "fake"]
@@ -21,6 +21,13 @@ class SourceUrlExpired(RuntimeError):
 
 class StorageBackendUnavailable(RuntimeError):
     """Raised for configured cloud operations that require a real SDK/client."""
+
+
+@dataclass(frozen=True)
+class StorageObjectRef:
+    provider: StorageProvider
+    bucket: str
+    key: str
 
 
 @dataclass(frozen=True)
@@ -123,6 +130,27 @@ class CloudStorageConfig:
 
 def create_storage_adapter(config: CloudStorageConfig) -> StorageAdapter:
     return CloudStorageAdapter(config)
+
+
+def storage_object_ref_from_uri(uri: str) -> StorageObjectRef:
+    provider, separator, remainder = uri.partition("://")
+    if not separator:
+        raise ValueError(f"invalid storage uri: {uri}")
+    bucket, slash, key = remainder.partition("/")
+    if provider not in {"cos", "oss", "local", "fake"} or not bucket or not slash or not key:
+        raise ValueError(f"invalid storage uri: {uri}")
+    return StorageObjectRef(
+        provider=cast(StorageProvider, provider),
+        bucket=bucket,
+        key=_safe_key(key),
+    )
+
+
+def require_storage_match(storage: StorageAdapter, reference: StorageObjectRef) -> None:
+    if storage.provider != reference.provider or storage.bucket != reference.bucket:
+        raise StorageBackendUnavailable(
+            f"storage adapter does not match {reference.provider}://{reference.bucket}"
+        )
 
 
 class _BaseStorageAdapter:

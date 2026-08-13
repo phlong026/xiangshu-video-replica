@@ -39,8 +39,7 @@ function batchResponse(overrides = {}) {
         archive_status: "ARCHIVE_FAILED",
         quality_status: "AUDIO_OK",
         quality_issue_codes: [],
-        result_asset_id: null,
-        result_url: "fake://h3-results/task-done.mp4",
+        result_asset_id: "asset-done",
         prompt_snapshot: null,
       },
       {
@@ -50,7 +49,6 @@ function batchResponse(overrides = {}) {
         quality_status: "AUDIO_QUALITY_FAILED",
         quality_issue_codes: ["AUDIO_QUALITY_FAILED"],
         result_asset_id: null,
-        result_url: null,
         prompt_snapshot: null,
       },
     ],
@@ -128,10 +126,7 @@ describe("App", () => {
     expect(screen.getAllByText("需要处理 1")).toHaveLength(2);
     expect(screen.getByText("task-done")).toBeInTheDocument();
     expect(screen.getByText("阶段：归档失败")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "打开结果" })).toHaveAttribute(
-      "href",
-      "fake://h3-results/task-done.mp4",
-    );
+    expect(screen.getByText("结果已归档")).toBeInTheDocument();
     expect(screen.getByText("task-running")).toBeInTheDocument();
     expect(screen.getAllByText("需要处理")).toHaveLength(2);
     expect(window.localStorage.getItem("generation.batchId")).toBe("batch-1");

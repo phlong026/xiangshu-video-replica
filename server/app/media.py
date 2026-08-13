@@ -20,7 +20,7 @@ from app.permissions import (
     require_project_access,
     write_audit,
 )
-from app.storage import StorageAdapter
+from app.storage import StorageAdapter, storage_object_ref_from_uri
 
 ALLOWED_CONTENT_TYPES = {"video/mp4", "video/quicktime"}
 ALLOWED_SUFFIXES = {".mp4", ".mov"}
@@ -298,13 +298,7 @@ def validate_duration(duration_seconds: float) -> None:
 
 
 def storage_key_from_uri(uri: str) -> str:
-    marker = "://"
-    if marker not in uri:
-        raise ValueError(f"invalid storage uri: {uri}")
-    path = uri.split(marker, 1)[1]
-    if "/" not in path:
-        raise ValueError(f"invalid storage uri: {uri}")
-    return path.split("/", 1)[1]
+    return storage_object_ref_from_uri(uri).key
 
 
 def media_error(status_code: int, code: str, message: str) -> HTTPException:

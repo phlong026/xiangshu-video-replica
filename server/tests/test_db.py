@@ -35,7 +35,7 @@ def test_initialize_database_applies_sqlite_pragmas_and_migrations(tmp_path: Pat
     assert journal_mode == "wal"
     assert foreign_keys == 1
     assert busy_timeout >= 5000
-    assert alembic_versions == ["004_generation"]
+    assert alembic_versions == ["005_remove_provider_result_url"]
     assert "schema_migrations" not in tables
     assert {
         "users",
@@ -67,7 +67,7 @@ def test_alembic_upgrades_empty_database_to_head(tmp_path: Path) -> None:
             for row in conn.execute("PRAGMA foreign_key_list(generation_tasks)").fetchall()
         }
 
-    assert version == "004_generation"
+    assert version == "005_remove_provider_result_url"
     assert {
         "locked_by",
         "locked_until",
@@ -75,7 +75,6 @@ def test_alembic_upgrades_empty_database_to_head(tmp_path: Path) -> None:
         "result_asset_id",
         "prompt_snapshot_json",
         "provider_request_json",
-        "result_url",
     }.issubset(task_columns)
     assert "idx_generation_tasks_prompt_version" in task_indexes
     assert ("prompt_version_id", "versions", "id") in task_foreign_keys
@@ -120,7 +119,6 @@ def test_generation_revision_can_downgrade_to_characters(tmp_path: Path) -> None
     assert "prompt_version_id" not in task_columns
     assert "prompt_snapshot_json" not in task_columns
     assert "provider_request_json" not in task_columns
-    assert "result_url" not in task_columns
     assert "idx_generation_tasks_prompt_version" not in task_indexes
 
 

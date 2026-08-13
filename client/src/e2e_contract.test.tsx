@@ -33,7 +33,6 @@ const completedFakeBatch = {
       quality_status: "AUDIO_OK",
       quality_issue_codes: [],
       result_asset_id: "asset-fake-1",
-      result_url: "fake://h3-results/fake-h3-1.mp4",
       prompt_snapshot: { status: "LOCKED" },
     },
     {
@@ -43,7 +42,6 @@ const completedFakeBatch = {
       quality_status: "AUDIO_OK",
       quality_issue_codes: [],
       result_asset_id: "asset-fake-2",
-      result_url: "fake://h3-results/fake-h3-2.mp4",
       prompt_snapshot: { status: "LOCKED" },
     },
   ],
@@ -87,7 +85,7 @@ describe("Fake provider E2E contract", () => {
     expect(screen.getByText("task-fake-2")).toBeInTheDocument();
     expect(screen.getAllByText("阶段：已归档")).toHaveLength(2);
     expect(screen.queryByText("需要处理")).not.toBeInTheDocument();
-    expect(screen.getAllByRole("link", { name: "打开结果" })).toHaveLength(2);
+    expect(screen.getAllByText("结果已归档")).toHaveLength(2);
     expect(window.localStorage.getItem("generation.batchId")).toBe(
       "batch-fake-e2e",
     );

@@ -298,10 +298,8 @@ function TaskItem({ task }: { task: GenerationTask }) {
         {attentionNeeded ? (
           <span className="attention-tag">需要处理</span>
         ) : null}
-        {task.result_url ? (
-          <a href={task.result_url} target="_blank" rel="noreferrer">
-            打开结果
-          </a>
+        {task.result_asset_id ? (
+          <span className="muted">结果已归档</span>
         ) : (
           <span className="muted">等待结果</span>
         )}

@@ -21,7 +21,7 @@ from app.permissions import (
     require_project_access,
     write_audit,
 )
-from app.storage import StorageAdapter
+from app.storage import StorageAdapter, require_storage_match, storage_object_ref_from_uri
 
 SCRIPT_KIND = "script"
 H3_PROMPT_KIND = "h3_prompt"
@@ -31,6 +31,7 @@ TERMINAL_STATUSES = {"FAILED", "CANCELLED"}
 H3_MODEL = "MiniMax-H3"
 SUPPORTED_RESOLUTIONS = {"768P", "2K"}
 GENERATION_LEASE_SECONDS = 300
+FIRST_FRAME_URL_EXPIRES_IN = timedelta(minutes=15)
 
 
 class ScriptRequest(BaseModel):
@@ -133,7 +134,6 @@ class TaskResult(BaseModel):
     quality_status: str
     quality_issue_codes: list[str]
     result_asset_id: str | None
-    result_url: str | None
     prompt_snapshot: dict[str, Any] | None
 
 
@@ -504,15 +504,24 @@ def run_next_generation_task(
     worker_id: str,
     provider: H3Provider,
     storage: StorageAdapter,
+    first_frame_storage: StorageAdapter | None = None,
 ) -> TaskResult | None:
     lease = acquire_generation_task_lease(conn, worker_id=worker_id)
     if lease is None:
         return None
 
     task_id = str(lease["id"])
+    source_storage = first_frame_storage or storage
+    first_frame = storage_object_ref_from_uri(str(lease["first_frame_uri"]))
+    require_storage_match(source_storage, first_frame)
+    first_frame_url = source_storage.create_download_intent(
+        first_frame.key,
+        expires_in=FIRST_FRAME_URL_EXPIRES_IN,
+        can_read=True,
+    ).url
     provider_request = build_h3_request(
         prompt_text=str(lease["prompt_text"]),
-        first_frame_url=str(lease["first_frame_uri"]),
+        first_frame_url=first_frame_url,
         duration_seconds=int(lease["output_duration_seconds"]),
         resolution=str(lease["resolution"]),
     )
@@ -578,7 +587,6 @@ def run_next_generation_task(
                 quality_status = ?,
                 quality_issue_codes = ?,
                 result_asset_id = ?,
-                result_url = ?,
                 provider_request_json = ?,
                 error_code = ?,
                 error_message_redacted = ?,
@@ -595,7 +603,6 @@ def run_next_generation_task(
                 provider_result.audio_quality_status,
                 json.dumps(provider_result.quality_issue_codes, ensure_ascii=True),
                 result_asset_id,
-                provider_result.result_url,
                 json.dumps(provider_request, ensure_ascii=True, sort_keys=True),
                 error_code,
                 error_message,
@@ -636,6 +643,7 @@ def acquire_generation_task_lease(
     *,
     worker_id: str,
 ) -> dict[str, Any] | None:
+    mark_expired_active_leases_needing_attention(conn)
     locked_until = (datetime.now(UTC) + timedelta(seconds=GENERATION_LEASE_SECONDS)).isoformat()
     try:
         conn.execute("BEGIN IMMEDIATE")
@@ -736,6 +744,39 @@ def mark_task_submission_uncertain(
         )
 
 
+def mark_expired_active_leases_needing_attention(conn: sqlite3.Connection) -> None:
+    """Do not resubmit work when a worker died after a provider call may have started."""
+    with conn:
+        rows = conn.execute(
+            """
+            SELECT id, batch_id
+            FROM generation_tasks
+            WHERE status IN ('SUBMITTING', 'RUNNING', 'ARCHIVING')
+              AND locked_until IS NOT NULL
+              AND datetime(locked_until) <= CURRENT_TIMESTAMP
+            """
+        ).fetchall()
+        if not rows:
+            return
+        conn.execute(
+            """
+            UPDATE generation_tasks
+            SET
+                status = 'SUBMISSION_UNCERTAIN',
+                error_code = 'LEASE_EXPIRED_NEEDS_ATTENTION',
+                error_message_redacted = 'Worker lease expired during active provider operation.',
+                locked_by = NULL,
+                locked_until = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE status IN ('SUBMITTING', 'RUNNING', 'ARCHIVING')
+              AND locked_until IS NOT NULL
+              AND datetime(locked_until) <= CURRENT_TIMESTAMP
+            """
+        )
+    for row in rows:
+        refresh_batch_status(conn, batch_id=str(row["batch_id"]))
+
+
 def refresh_batch_status(conn: sqlite3.Connection, *, batch_id: str) -> None:
     rows = conn.execute(
         """
@@ -746,7 +787,6 @@ def refresh_batch_status(conn: sqlite3.Connection, *, batch_id: str) -> None:
             quality_status,
             quality_issue_codes,
             result_asset_id,
-            result_url,
             prompt_snapshot_json
         FROM generation_tasks
         WHERE batch_id = ?
@@ -775,7 +815,6 @@ def get_task_result(conn: sqlite3.Connection, task_id: str) -> TaskResult:
             quality_status,
             quality_issue_codes,
             result_asset_id,
-            result_url,
             prompt_snapshot_json
         FROM generation_tasks
         WHERE id = ?
@@ -818,7 +857,6 @@ def get_generation_batch(
             quality_status,
             quality_issue_codes,
             result_asset_id,
-            result_url,
             prompt_snapshot_json
         FROM generation_tasks
         WHERE batch_id = ?
@@ -1082,7 +1120,6 @@ def task_result(row: sqlite3.Row) -> TaskResult:
         quality_status=str(row["quality_status"]),
         quality_issue_codes=quality_issue_codes,
         result_asset_id=None if row["result_asset_id"] is None else str(row["result_asset_id"]),
-        result_url=None if row["result_url"] is None else str(row["result_url"]),
         prompt_snapshot=prompt_snapshot,
     )
 

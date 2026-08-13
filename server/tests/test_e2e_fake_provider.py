@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +16,7 @@ from app.db import connect_database, initialize_database
 from app.generation import FakeH3Provider, H3CreateResult, run_next_generation_task
 from app.generation_routes import get_h3_provider
 from app.main import app
-from app.storage import FakeStorageAdapter
+from app.storage import DownloadIntent, FakeStorageAdapter
 
 
 class RecordingFakeProvider(FakeH3Provider):
@@ -26,6 +27,30 @@ class RecordingFakeProvider(FakeH3Provider):
     def create_image_to_video(self, request: dict[str, Any]) -> H3CreateResult:
         self.requests.append(request)
         return super().create_image_to_video(request)
+
+
+class RecordingDownloadStorage(FakeStorageAdapter):
+    def __init__(self) -> None:
+        super().__init__(provider="fake", bucket="generation-results")
+        self.download_keys: list[str] = []
+        self.signed_first_frame_url = "https://storage.example.test/signed/first-frame.png"
+
+    def create_download_intent(
+        self,
+        key: str,
+        *,
+        expires_in: timedelta,
+        can_read: bool,
+    ) -> DownloadIntent:
+        self.download_keys.append(key)
+        assert can_read is True
+        assert expires_in <= timedelta(minutes=15)
+        return DownloadIntent(
+            method="GET",
+            url=self.signed_first_frame_url,
+            key=key,
+            expires_at=datetime.now(UTC) + expires_in,
+        )
 
 
 @pytest.fixture()
@@ -135,7 +160,33 @@ def test_fake_provider_e2e_from_locked_prompt_to_worker_progress(
     assert {task["status"] for task in payload["tasks"]} == {"SUCCEEDED"}
     assert {task["archive_status"] for task in payload["tasks"]} == {"ARCHIVED"}
     assert all(task["result_asset_id"] for task in payload["tasks"])
-    assert all(task["result_url"].startswith("fake://h3-results/") for task in payload["tasks"])
+    assert all("result_url" not in task for task in payload["tasks"])
+
+
+def test_worker_uses_temporary_storage_download_url_for_h3_first_frame(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    prompt_id = create_locked_prompt(client)
+    batch = create_batch(client, prompt_id=prompt_id, idempotency_key="signed-first-frame")
+
+    provider = RecordingFakeProvider()
+    storage = RecordingDownloadStorage()
+    with connect_database(db_path) as conn:
+        result = run_next_generation_task(
+            conn,
+            worker_id="worker-signed-url",
+            provider=provider,
+            storage=storage,
+        )
+
+    assert result is not None
+    assert (
+        batch["tasks"][0]["prompt_snapshot"]["first_frame_uri"]
+        == "fake://generation-results/first-frame.png"
+    )
+    assert storage.download_keys, "worker must ask storage for a short-lived first-frame URL"
+    assert provider.requests[0]["content"][1]["image_url"]["url"] == storage.signed_first_frame_url
 
 
 def test_generation_flow_never_creates_independent_audio_tasks(

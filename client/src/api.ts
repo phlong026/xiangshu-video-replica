@@ -12,7 +12,6 @@ export type GenerationTask = {
   quality_status: string;
   quality_issue_codes: string[];
   result_asset_id: string | null;
-  result_url: string | null;
   prompt_snapshot: Record<string, unknown> | null;
 };
 

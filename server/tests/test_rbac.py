@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from app.auth import get_database
 from app.db import connect_database, initialize_database
 from app.main import app
+from app.storage import LocalStorageAdapter
 
 
 @pytest.fixture()
@@ -21,7 +22,7 @@ def db_path(tmp_path: Path) -> Iterator[Path]:
 
 
 @pytest.fixture()
-def client(db_path: Path) -> Iterator[TestClient]:
+def client(db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     def database_override() -> Iterator[sqlite3.Connection]:
         conn = connect_database(db_path)
         try:
@@ -29,6 +30,10 @@ def client(db_path: Path) -> Iterator[TestClient]:
         finally:
             conn.close()
 
+    storage_root = tmp_path / "private-storage"
+    monkeypatch.setenv("VIDEO_REPLICA_STORAGE_ROOT", str(storage_root))
+    storage = LocalStorageAdapter(root=storage_root, bucket="private-bucket")
+    storage.put_object("outputs/asset_owned.mp4", b"video", content_type="video/mp4")
     app.dependency_overrides[get_database] = database_override
     try:
         yield TestClient(app)
@@ -77,7 +82,7 @@ def seed_rbac_data(conn: sqlite3.Connection) -> None:
                 "asset_owned",
                 "project_owned",
                 "video",
-                "local://owned.mp4",
+                "local://private-bucket/outputs/asset_owned.mp4",
                 "sha-owned",
                 12,
                 "employee_1",
@@ -173,6 +178,67 @@ def test_project_owner_can_read_asset(client: TestClient) -> None:
     assert response.status_code == 200
     assert response.json()["id"] == "asset_owned"
     assert response.json()["project_id"] == "project_owned"
+
+
+def test_project_owner_receives_short_lived_storage_download_url(client: TestClient) -> None:
+    response = client.post(
+        "/api/assets/asset_owned/download-url",
+        headers=auth_headers("employee_1"),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["url"].startswith("local://private-bucket/outputs/asset_owned.mp4?")
+    assert "method=GET" in response.json()["url"]
+
+
+def test_download_audit_does_not_store_temporary_url(client: TestClient, db_path: Path) -> None:
+    response = client.post(
+        "/api/assets/asset_owned/download-url",
+        headers=auth_headers("employee_1"),
+    )
+
+    assert response.status_code == 200
+    with connect_database(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT metadata_json
+            FROM audit_logs
+            WHERE action = 'asset.download_url.create'
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+
+    assert row is not None
+    assert "x-expires" not in str(row["metadata_json"])
+    assert "local://" not in str(row["metadata_json"])
+
+
+def test_download_rejects_cloud_asset_when_bucket_does_not_match_configuration(
+    client: TestClient,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with connect_database(db_path) as conn:
+        conn.execute(
+            "UPDATE assets SET storage_uri = ? WHERE id = ?",
+            ("cos://other-bucket/outputs/asset_owned.mp4", "asset_owned"),
+        )
+        conn.commit()
+
+    class ConfiguredStorage:
+        def load_provider_config(self, provider: str) -> dict[str, str]:
+            assert provider == "cos"
+            return {"bucket": "private-bucket"}
+
+    monkeypatch.setattr("app.rbac_routes.SettingsRepository", lambda _conn: ConfiguredStorage())
+    response = client.post(
+        "/api/assets/asset_owned/download-url",
+        headers=auth_headers("employee_1"),
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "STORAGE_BUCKET_MISMATCH"
 
 
 def test_audit_logs_are_readable_only_by_admin_and_auditor(client: TestClient) -> None:

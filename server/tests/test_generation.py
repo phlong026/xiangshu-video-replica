@@ -4,10 +4,12 @@ import json
 import sqlite3
 import threading
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
 from app.auth import get_database
@@ -91,7 +93,7 @@ def seed_data(conn: sqlite3.Connection) -> None:
                 "first_frame_owned",
                 "project_owned",
                 "image",
-                "local://first-frame.png",
+                "fake://generation-results/first-frame.png",
                 "sha-first",
                 12,
                 "image/png",
@@ -312,7 +314,7 @@ def test_prompt_must_be_locked_and_batch_keeps_locked_snapshot_without_provider_
 def test_h3_request_contract_is_i2v_text_first_frame_adaptive_and_duration_guard() -> None:
     request = build_h3_request(
         prompt_text="生成一条短视频",
-        first_frame_url="local://first-frame.png",
+        first_frame_url="fake://generation-results/first-frame.png",
         duration_seconds=10,
         resolution="768P",
     )
@@ -323,7 +325,7 @@ def test_h3_request_contract_is_i2v_text_first_frame_adaptive_and_duration_guard
             {"type": "text", "text": "生成一条短视频"},
             {
                 "type": "image_url",
-                "image_url": {"url": "local://first-frame.png"},
+                "image_url": {"url": "fake://generation-results/first-frame.png"},
                 "role": "first_frame",
             },
         ],
@@ -334,7 +336,7 @@ def test_h3_request_contract_is_i2v_text_first_frame_adaptive_and_duration_guard
     with pytest.raises(ValueError, match="duration"):
         build_h3_request(
             prompt_text="生成一条短视频",
-            first_frame_url="local://first-frame.png",
+            first_frame_url="fake://generation-results/first-frame.png",
             duration_seconds=16,
             resolution="768P",
         )
@@ -453,6 +455,52 @@ def test_generation_batch_quantity_limits_idempotency_and_fake_archive(
     assert {task["archive_status"] for task in after_worker["tasks"]} == {"ARCHIVED"}
 
 
+def test_generation_batch_create_route_is_unique_and_returns_batch_result(
+    client: TestClient,
+) -> None:
+    matching_routes = [
+        route for route in expanded_api_routes() if is_generation_batch_create_route(route)
+    ]
+    assert len(matching_routes) == 1
+
+    prompt_id = create_locked_prompt(client)
+    response = client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json={
+            "quantity": 1,
+            "prompt_version_id": prompt_id,
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+            "idempotency_key": "unique-route",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "QUEUED"
+    assert payload["progress"]["total_count"] == 1
+    assert len(payload["tasks"]) == 1
+
+
+def expanded_api_routes() -> list[APIRoute]:
+    routes: list[APIRoute] = []
+    for route in app.routes:
+        if isinstance(route, APIRoute):
+            routes.append(route)
+            continue
+        original_router = getattr(route, "original_router", None)
+        if original_router is None:
+            continue
+        routes.extend(child for child in original_router.routes if isinstance(child, APIRoute))
+    return routes
+
+
+def is_generation_batch_create_route(route: APIRoute) -> bool:
+    return route.path == "/api/projects/{project_id}/generation-batches" and "POST" in route.methods
+
+
 def test_batch_progress_counts_archive_failed_and_audio_quality(
     client: TestClient,
     db_path: Path,
@@ -490,7 +538,7 @@ def test_batch_progress_counts_archive_failed_and_audio_quality(
                 conn,
                 worker_id="worker_a",
                 provider=FakeH3Provider(audio_quality="missing"),
-                storage=FakeStorageAdapter(provider="cos", bucket="generation-results"),
+                storage=FakeStorageAdapter(provider="fake", bucket="generation-results"),
             )
             is not None
         )
@@ -509,8 +557,8 @@ def test_batch_progress_counts_archive_failed_and_audio_quality(
         headers=auth_headers("employee_1"),
     )
     progress = after_worker.json()["progress"]
-    assert progress["terminal_count"] == 1
-    assert progress["progress_percent"] == 50
+    assert progress["terminal_count"] == 2
+    assert progress["progress_percent"] == 100
     assert progress["counts"]["succeeded"] == 2
     assert progress["counts"]["needs_attention"] == 2
     assert {task["quality_status"] for task in after_worker.json()["tasks"]} == {
@@ -721,6 +769,67 @@ def test_concurrent_workers_cannot_exceed_runtime_concurrency_limit(
     assert [str(row["status"]) for row in rows] == ["PENDING", "SUCCEEDED"]
 
 
+@pytest.mark.parametrize("stale_status", ["SUBMITTING", "RUNNING", "ARCHIVING"])
+def test_worker_marks_expired_active_lease_for_manual_attention_without_resubmitting(
+    db_path: Path,
+    client: TestClient,
+    stale_status: str,
+) -> None:
+    prompt_id = create_locked_prompt(client)
+    batch = client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json={
+            "quantity": 1,
+            "prompt_version_id": prompt_id,
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+            "idempotency_key": f"expired-{stale_status.lower()}",
+        },
+    ).json()
+
+    expired_at = (datetime.now(UTC) - timedelta(minutes=10)).isoformat()
+    with connect_database(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE generation_tasks
+            SET
+                status = ?,
+                locked_by = 'dead-worker',
+                locked_until = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE batch_id = ?
+            """,
+            (stale_status, expired_at, batch["id"]),
+        )
+        conn.commit()
+
+        class FailIfCalledProvider(FakeH3Provider):
+            def create_image_to_video(self, request: dict[str, Any]) -> H3CreateResult:
+                raise AssertionError("expired active leases must not be submitted again")
+
+        run_next_generation_task(
+            conn,
+            worker_id="recovery-worker",
+            provider=FailIfCalledProvider(),
+            storage=FakeStorageAdapter(provider="fake", bucket="generation-results"),
+        )
+        row = conn.execute(
+            """
+            SELECT status, error_code, locked_by, locked_until
+            FROM generation_tasks
+            WHERE batch_id = ?
+            """,
+            (batch["id"],),
+        ).fetchone()
+
+    assert row["status"] == "SUBMISSION_UNCERTAIN"
+    assert row["error_code"] == "LEASE_EXPIRED_NEEDS_ATTENTION"
+    assert row["locked_by"] is None
+    assert row["locked_until"] is None
+
+
 def test_worker_marks_submission_uncertain_without_auto_retry(
     db_path: Path,
     client: TestClient,
@@ -794,6 +903,7 @@ def test_worker_fails_closed_for_non_fake_archive_storage(
             worker_id="worker_a",
             provider=FakeH3Provider(),
             storage=FakeStorageAdapter(provider="cos", bucket="generation-results"),
+            first_frame_storage=FakeStorageAdapter(provider="fake", bucket="generation-results"),
         )
         row = conn.execute(
             """
