@@ -23,7 +23,7 @@ from app.generation import (
 )
 from app.generation_routes import get_h3_provider
 from app.main import app
-from app.storage import FakeStorageAdapter
+from app.storage import FakeStorageAdapter, StorageBackendUnavailable
 
 
 @pytest.fixture()
@@ -877,6 +877,63 @@ def test_worker_marks_submission_uncertain_without_auto_retry(
     assert row["status"] == "SUBMISSION_UNCERTAIN"
     assert row["error_code"] == "SUBMISSION_UNCERTAIN"
     assert row["provider_task_id"] is None
+
+
+def test_worker_fails_immediately_when_first_frame_url_cannot_be_signed(
+    db_path: Path,
+    client: TestClient,
+) -> None:
+    prompt_id = create_locked_prompt(client)
+    batch = client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json={
+            "quantity": 1,
+            "prompt_version_id": prompt_id,
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+            "idempotency_key": "first-frame-signing-failure",
+        },
+    ).json()
+
+    class SigningFailureStorage(FakeStorageAdapter):
+        def create_download_intent(self, *args: Any, **kwargs: Any) -> Any:
+            raise StorageBackendUnavailable("temporary URL signer unavailable")
+
+    class FailIfCalledProvider(FakeH3Provider):
+        def create_image_to_video(self, request: dict[str, Any]) -> H3CreateResult:
+            raise AssertionError("provider must not be called before the first-frame URL is signed")
+
+    with connect_database(db_path) as conn:
+        result = run_next_generation_task(
+            conn,
+            worker_id="worker_a",
+            provider=FailIfCalledProvider(),
+            storage=SigningFailureStorage(provider="fake", bucket="generation-results"),
+        )
+        row = conn.execute(
+            """
+            SELECT status, error_code, locked_by, locked_until, submitted_at, provider_task_id
+            FROM generation_tasks
+            """
+        ).fetchone()
+
+    assert result is not None
+    assert result.status == "FAILED"
+    assert row["status"] == "FAILED"
+    assert row["error_code"] == "FIRST_FRAME_URL_SIGN_FAILED"
+    assert row["locked_by"] is None
+    assert row["locked_until"] is None
+    assert row["submitted_at"] is None
+    assert row["provider_task_id"] is None
+
+    batch_status = client.get(
+        f"/api/generation-batches/{batch['id']}",
+        headers=auth_headers("employee_1"),
+    ).json()
+    assert batch_status["status"] == "COMPLETED_WITH_FAILURES"
+    assert batch_status["progress"]["terminal_count"] == 1
 
 
 def test_worker_fails_closed_for_non_fake_archive_storage(

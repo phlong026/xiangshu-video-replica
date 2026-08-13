@@ -21,7 +21,13 @@ from app.permissions import (
     require_project_access,
     write_audit,
 )
-from app.storage import StorageAdapter, require_storage_match, storage_object_ref_from_uri
+from app.storage import (
+    StorageAdapter,
+    StorageBackendUnavailable,
+    StoragePermissionError,
+    require_storage_match,
+    storage_object_ref_from_uri,
+)
 
 SCRIPT_KIND = "script"
 H3_PROMPT_KIND = "h3_prompt"
@@ -512,13 +518,21 @@ def run_next_generation_task(
 
     task_id = str(lease["id"])
     source_storage = first_frame_storage or storage
-    first_frame = storage_object_ref_from_uri(str(lease["first_frame_uri"]))
-    require_storage_match(source_storage, first_frame)
-    first_frame_url = source_storage.create_download_intent(
-        first_frame.key,
-        expires_in=FIRST_FRAME_URL_EXPIRES_IN,
-        can_read=True,
-    ).url
+    try:
+        first_frame = storage_object_ref_from_uri(str(lease["first_frame_uri"]))
+        require_storage_match(source_storage, first_frame)
+        first_frame_url = source_storage.create_download_intent(
+            first_frame.key,
+            expires_in=FIRST_FRAME_URL_EXPIRES_IN,
+            can_read=True,
+        ).url
+    except (StorageBackendUnavailable, StoragePermissionError, ValueError):
+        mark_task_first_frame_url_sign_failed(
+            conn,
+            task_id=task_id,
+            batch_id=str(lease["batch_id"]),
+        )
+        return get_task_result(conn, task_id)
     provider_request = build_h3_request(
         prompt_text=str(lease["prompt_text"]),
         first_frame_url=first_frame_url,
@@ -742,6 +756,32 @@ def mark_task_submission_uncertain(
             """,
             (message, task_id),
         )
+
+
+def mark_task_first_frame_url_sign_failed(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    batch_id: str,
+) -> None:
+    """A provider call never started, so this is safe to mark as a normal failure."""
+    with conn:
+        conn.execute(
+            """
+            UPDATE generation_tasks
+            SET
+                status = 'FAILED',
+                error_code = 'FIRST_FRAME_URL_SIGN_FAILED',
+                error_message_redacted = 'First-frame download URL could not be signed.',
+                submitted_at = NULL,
+                locked_by = NULL,
+                locked_until = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (task_id,),
+        )
+    refresh_batch_status(conn, batch_id=batch_id)
 
 
 def mark_expired_active_leases_needing_attention(conn: sqlite3.Connection) -> None:
