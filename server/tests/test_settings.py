@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
+from typing import cast
 
 import pytest
 from cryptography.fernet import Fernet
@@ -107,7 +108,7 @@ def test_settings_migration_creates_tables_and_defaults(tmp_path: Path, settings
             """
         ).fetchone()
 
-    assert version == "002_settings"
+    assert version == "003_characters"
     assert {"provider_settings", "runtime_settings"}.issubset(tables)
     assert dict(runtime) == {
         "max_generation_count_per_batch": 4,
@@ -314,4 +315,5 @@ def test_default_provider_tester_never_claims_real_connectivity_or_paid_access()
         tester.paid_test("metaso", {"api_key": "configured"})
 
     assert error.value.status_code == 501
-    assert error.value.detail["code"] == "PROVIDER_TEST_NOT_IMPLEMENTED"
+    detail = cast(dict[str, str], error.value.detail)
+    assert detail["code"] == "PROVIDER_TEST_NOT_IMPLEMENTED"

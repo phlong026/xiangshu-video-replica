@@ -4,6 +4,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from app.analysis_routes import router as analysis_router
+from app.character_routes import router as character_router
+from app.media_routes import router as media_router
 from app.rbac_routes import router as rbac_router
 from app.settings_routes import router as settings_router
 
@@ -28,6 +31,9 @@ app.add_middleware(
 )
 app.include_router(rbac_router)
 app.include_router(settings_router)
+app.include_router(media_router)
+app.include_router(analysis_router)
+app.include_router(character_router)
 
 
 @app.get("/health", response_model=HealthResponse)
