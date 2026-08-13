@@ -1,13 +1,18 @@
 .DS_Store
 .omx/
+.claude/
 
 # Frontend
 node_modules/
 dist/
 coverage/
+*.tsbuildinfo
+client/vite.config.js
+client/vite.config.d.ts
 
 # Python
 .venv/
+.uv-cache/
 __pycache__/
 .pytest_cache/
 .ruff_cache/
@@ -15,6 +20,9 @@ __pycache__/
 
 # Rust / Tauri
 target/
+client/src-tauri/gen/
+client/src-tauri/icons/android/
+client/src-tauri/icons/ios/
 
 # Local runtime data and secrets
 .env

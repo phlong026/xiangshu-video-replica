@@ -1,0 +1,140 @@
+:root {
+  color: #f7f4ff;
+  background: #0b0911;
+  font-family:
+    Inter, "PingFang SC", "Microsoft YaHei", system-ui, -apple-system,
+    sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+  background:
+    radial-gradient(
+      circle at top right,
+      rgba(130, 87, 229, 0.2),
+      transparent 38%
+    ),
+    #0b0911;
+}
+
+button {
+  border: 0;
+  border-radius: 10px;
+  padding: 12px 18px;
+  color: #ffffff;
+  background: #7c4dff;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+button:disabled {
+  color: #a8a3b2;
+  background: #2a2731;
+  cursor: not-allowed;
+}
+
+.centered-shell {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  padding: 24px;
+}
+
+.login-card,
+.empty-state {
+  border: 1px solid #322b43;
+  border-radius: 18px;
+  background: rgba(24, 20, 32, 0.92);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.28);
+}
+
+.login-card {
+  width: min(100%, 440px);
+  padding: 40px;
+}
+
+.login-card h1,
+.app-shell h1 {
+  margin: 10px 0;
+  letter-spacing: -0.03em;
+}
+
+.login-card p,
+.empty-state p {
+  color: #aaa2ba;
+  line-height: 1.6;
+}
+
+.login-card button {
+  width: 100%;
+  margin-top: 20px;
+}
+
+.eyebrow {
+  color: #bca7ff;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.18em;
+}
+
+.app-shell {
+  min-height: 100vh;
+  padding: 32px;
+}
+
+.app-shell header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.service-badge {
+  border: 1px solid #433b52;
+  border-radius: 999px;
+  padding: 8px 12px;
+  color: #c4bccf;
+  background: #17131f;
+  font-size: 13px;
+}
+
+.service-badge--connected {
+  border-color: #276d51;
+  color: #79dda9;
+}
+
+.service-badge--disconnected {
+  border-color: #7a3f48;
+  color: #ff9aa8;
+}
+
+.empty-state {
+  margin-top: 44px;
+  padding: 48px;
+  text-align: center;
+}
+
+@media (max-width: 640px) {
+  .app-shell {
+    padding: 20px;
+  }
+
+  .app-shell header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .login-card,
+  .empty-state {
+    padding: 28px;
+  }
+}

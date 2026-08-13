@@ -1,0 +1,23 @@
+[package]
+name = "video-replica-desktop"
+version = "0.1.0"
+description = "Internal video replica desktop app"
+authors = ["Internal AI Team"]
+edition = "2021"
+
+[lib]
+name = "video_replica_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
