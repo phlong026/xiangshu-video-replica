@@ -1,0 +1,26 @@
+.DS_Store
+.omx/
+
+# Frontend
+node_modules/
+dist/
+coverage/
+
+# Python
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.py[cod]
+
+# Rust / Tauri
+target/
+
+# Local runtime data and secrets
+.env
+.env.*
+!.env.example
+data/
+*.db
+*.db-shm
+*.db-wal
