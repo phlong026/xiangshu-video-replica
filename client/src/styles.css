@@ -16,13 +16,7 @@ body {
   min-width: 320px;
   min-height: 100vh;
   margin: 0;
-  background:
-    radial-gradient(
-      circle at top right,
-      rgba(130, 87, 229, 0.2),
-      transparent 38%
-    ),
-    #0b0911;
+  background: #0b0911;
 }
 
 button {
@@ -42,6 +36,21 @@ button:disabled {
   cursor: not-allowed;
 }
 
+input {
+  width: 100%;
+  border: 1px solid #3c3448;
+  border-radius: 8px;
+  padding: 12px 14px;
+  color: #f7f4ff;
+  background: #120f18;
+  font: inherit;
+}
+
+input:focus {
+  border-color: #8e6cff;
+  outline: 2px solid rgba(142, 108, 255, 0.22);
+}
+
 .centered-shell {
   display: grid;
   min-height: 100vh;
@@ -50,9 +59,10 @@ button:disabled {
 }
 
 .login-card,
-.empty-state {
+.empty-state,
+.task-records {
   border: 1px solid #322b43;
-  border-radius: 18px;
+  border-radius: 8px;
   background: rgba(24, 20, 32, 0.92);
   box-shadow: 0 24px 80px rgba(0, 0, 0, 0.28);
 }
@@ -123,6 +133,177 @@ button:disabled {
   text-align: center;
 }
 
+.task-records {
+  margin-top: 32px;
+  padding: 28px;
+}
+
+.section-heading,
+.progress-header,
+.task-item,
+.task-actions {
+  display: flex;
+  align-items: center;
+}
+
+.section-heading,
+.progress-header,
+.task-item {
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.section-heading h2 {
+  margin: 8px 0 0;
+}
+
+.batch-id {
+  max-width: 48ch;
+  overflow: hidden;
+  border: 1px solid #3c3448;
+  border-radius: 999px;
+  padding: 8px 12px;
+  color: #d9d1e8;
+  background: #120f18;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.batch-form {
+  display: grid;
+  gap: 10px;
+  margin-top: 24px;
+}
+
+.batch-form label {
+  color: #d9d1e8;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.batch-input-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+}
+
+.status-note {
+  margin: 16px 0 0;
+  color: #ffcf8a;
+}
+
+.batch-panel {
+  margin-top: 22px;
+}
+
+.progress-header p {
+  margin: 4px 0 0;
+  color: #aaa2ba;
+}
+
+.progress-percent {
+  font-size: 40px;
+  font-weight: 800;
+}
+
+.batch-status,
+.attention-tag {
+  border-radius: 999px;
+  padding: 7px 10px;
+  color: #ffcf8a;
+  background: #332519;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.batch-status--succeeded {
+  color: #79dda9;
+  background: #143023;
+}
+
+.progress-track {
+  height: 12px;
+  overflow: hidden;
+  margin-top: 18px;
+  border-radius: 999px;
+  background: #2a2731;
+}
+
+.progress-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #79dda9;
+  transition: width 180ms ease;
+}
+
+.count-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.count-grid span {
+  border: 1px solid #332b40;
+  border-radius: 8px;
+  padding: 10px;
+  color: #d9d1e8;
+  background: #120f18;
+  font-size: 13px;
+}
+
+.attention-banner {
+  border: 1px solid #6a4b24;
+  border-radius: 8px;
+  padding: 12px;
+  color: #ffcf8a;
+  background: #241a12;
+}
+
+.task-list {
+  display: grid;
+  gap: 10px;
+  margin: 18px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.task-item {
+  border: 1px solid #332b40;
+  border-radius: 8px;
+  padding: 14px;
+  background: #120f18;
+}
+
+.task-item strong,
+.task-item span {
+  display: block;
+}
+
+.task-item span {
+  margin-top: 6px;
+  color: #aaa2ba;
+  font-size: 13px;
+}
+
+.task-actions {
+  justify-content: flex-end;
+  gap: 10px;
+  min-width: 170px;
+}
+
+.task-actions a {
+  color: #79dda9;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.muted {
+  color: #7f7889;
+}
+
 @media (max-width: 640px) {
   .app-shell {
     padding: 20px;
@@ -134,7 +315,25 @@ button:disabled {
   }
 
   .login-card,
-  .empty-state {
+  .empty-state,
+  .task-records {
     padding: 28px;
+  }
+
+  .section-heading,
+  .progress-header,
+  .task-item {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .batch-input-row,
+  .count-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .task-actions {
+    align-items: flex-start;
+    min-width: 0;
   }
 }

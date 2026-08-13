@@ -6,6 +6,7 @@ from pydantic import BaseModel
 
 from app.analysis_routes import router as analysis_router
 from app.character_routes import router as character_router
+from app.generation_routes import router as generation_router
 from app.media_routes import router as media_router
 from app.rbac_routes import router as rbac_router
 from app.settings_routes import router as settings_router
@@ -29,6 +30,7 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PATCH", "PUT"],
     allow_headers=["Content-Type", "X-Dev-User-Id"],
 )
+app.include_router(generation_router)
 app.include_router(rbac_router)
 app.include_router(settings_router)
 app.include_router(media_router)
