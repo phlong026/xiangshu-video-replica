@@ -12,6 +12,7 @@ from app.storage import (
     FakeStorageAdapter,
     LocalStorageAdapter,
     SourceUrlExpired,
+    StorageBackendUnavailable,
     StoragePermissionError,
     create_storage_adapter,
 )
@@ -47,7 +48,7 @@ def test_fake_adapter_supports_provider_switch_without_business_flow_changes() -
     assert oss_object.uri.startswith("oss://")
 
 
-def test_cloud_adapters_create_sanitized_presigned_intents_without_sdk_calls() -> None:
+def test_cloud_adapters_refuse_signing_before_real_sdk_integration() -> None:
     cases: tuple[tuple[Literal["cos", "oss"], str], ...] = (
         ("cos", "https://bucket.cos.ap-shanghai.myqcloud.com"),
         ("oss", "https://bucket.oss-cn-shanghai.aliyuncs.com"),
@@ -65,25 +66,18 @@ def test_cloud_adapters_create_sanitized_presigned_intents_without_sdk_calls() -
             )
         )
 
-        upload = adapter.create_upload_intent(
-            key="projects/p1/source/reference.mp4",
-            content_type="video/mp4",
-            expires_in=timedelta(minutes=10),
-        )
-        download = adapter.create_download_intent(
-            key="projects/p1/source/reference.mp4",
-            expires_in=timedelta(minutes=20),
-            can_read=True,
-        )
-
-        assert upload.method == "PUT"
-        assert upload.key == "tenant-a/projects/p1/source/reference.mp4"
-        assert upload.headers == {"content-type": "video/mp4"}
-        assert download.method == "GET"
-        assert "very-secret-key" not in upload.url
-        assert "very-secret-key" not in download.url
-        assert "x-storage-provider=" in upload.url
-        assert "x-storage-provider=" in download.url
+        with pytest.raises(StorageBackendUnavailable):
+            adapter.create_upload_intent(
+                key="projects/p1/source/reference.mp4",
+                content_type="video/mp4",
+                expires_in=timedelta(minutes=10),
+            )
+        with pytest.raises(StorageBackendUnavailable):
+            adapter.create_download_intent(
+                key="projects/p1/source/reference.mp4",
+                expires_in=timedelta(minutes=20),
+                can_read=True,
+            )
 
 
 def test_download_intent_requires_business_permission() -> None:

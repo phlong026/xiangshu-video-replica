@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import sqlite3
-from typing import Any
 
 from fastapi import APIRouter
 from pydantic import BaseModel, ConfigDict
@@ -63,31 +62,6 @@ def read_me(actor: AuthenticatedUser) -> UserResponse:
         display_name=actor.display_name,
         role=actor.role,
     )
-
-
-@router.patch("/admin/provider-settings", response_model=AcceptedResponse)
-def update_provider_settings(
-    payload: dict[str, Any],
-    conn: Database,
-    actor: AuthenticatedUser,
-) -> AcceptedResponse:
-    require_role(
-        conn,
-        actor=actor,
-        allowed_roles={"admin"},
-        action="provider_settings.update",
-        entity_type="provider_settings",
-        entity_id="global",
-    )
-    write_audit(
-        conn,
-        actor=actor,
-        action="provider_settings.update",
-        entity_type="provider_settings",
-        entity_id="global",
-        metadata={"fields": sorted(payload.keys())},
-    )
-    return AcceptedResponse(status="accepted")
 
 
 @router.get("/projects/{project_id}", response_model=dict[str, str])

@@ -24,7 +24,7 @@ app.add_middleware(
     ],
     allow_credentials=False,
     allow_methods=["GET", "POST", "PATCH", "PUT"],
-    allow_headers=["Content-Type"],
+    allow_headers=["Content-Type", "X-Dev-User-Id"],
 )
 app.include_router(rbac_router)
 app.include_router(settings_router)

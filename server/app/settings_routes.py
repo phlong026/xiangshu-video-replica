@@ -46,16 +46,18 @@ class ProviderTester(Protocol):
 class NoopProviderTester:
     def connection_test(self, provider: str, config: dict[str, str]) -> ProviderTestResult:
         return ProviderTestResult(
-            status="ready" if config else "not_configured",
+            status="configured_only" if config else "not_configured",
             provider=provider,
             test_kind="connection",
         )
 
     def paid_test(self, provider: str, config: dict[str, str]) -> ProviderTestResult:
-        return ProviderTestResult(
-            status="ready" if config else "not_configured",
-            provider=provider,
-            test_kind="paid",
+        raise HTTPException(
+            status_code=501,
+            detail={
+                "code": "PROVIDER_TEST_NOT_IMPLEMENTED",
+                "message": "A real provider client is required before paid tests can run.",
+            },
         )
 
 

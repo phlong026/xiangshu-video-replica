@@ -145,36 +145,6 @@ def test_dev_header_login_returns_active_user_role(client: TestClient) -> None:
     }
 
 
-def test_employee_cannot_modify_provider_settings(
-    client: TestClient,
-    db_path: Path,
-) -> None:
-    response = client.patch(
-        "/api/admin/provider-settings",
-        headers=auth_headers("employee_1"),
-        json={"provider": "metaso"},
-    )
-
-    assert response.status_code == 403
-    assert response.json()["detail"]["code"] == "ROLE_FORBIDDEN"
-    assert audit_actions(db_path) == ["security.role_denied"]
-
-
-def test_admin_can_modify_provider_settings_and_writes_audit(
-    client: TestClient,
-    db_path: Path,
-) -> None:
-    response = client.patch(
-        "/api/admin/provider-settings",
-        headers=auth_headers("admin_1"),
-        json={"provider": "metaso"},
-    )
-
-    assert response.status_code == 200
-    assert response.json() == {"status": "accepted"}
-    assert audit_actions(db_path) == ["provider_settings.update"]
-
-
 def test_auditor_cannot_generate_retry_or_download(client: TestClient) -> None:
     headers = auth_headers("auditor_1")
 

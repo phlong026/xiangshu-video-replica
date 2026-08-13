@@ -6,12 +6,18 @@ from pathlib import Path
 
 import pytest
 from cryptography.fernet import Fernet
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from app.db import connect_database, initialize_database
 from app.settings import SettingsKeyMissing, SettingsRepository
-from app.settings_routes import ProviderTestResult, get_database, get_provider_tester, router
+from app.settings_routes import (
+    NoopProviderTester,
+    ProviderTestResult,
+    get_database,
+    get_provider_tester,
+    router,
+)
 
 
 @pytest.fixture()
@@ -298,3 +304,14 @@ def test_connection_test_and_paid_test_are_separate_interfaces(client: TestClien
     assert paid.status_code == 200
     assert connection.json() == {"status": "ok", "provider": "metaso", "test_kind": "connection"}
     assert paid.json() == {"status": "ok", "provider": "metaso", "test_kind": "paid"}
+
+
+def test_default_provider_tester_never_claims_real_connectivity_or_paid_access() -> None:
+    tester = NoopProviderTester()
+
+    assert tester.connection_test("metaso", {"api_key": "configured"}).status == "configured_only"
+    with pytest.raises(HTTPException) as error:
+        tester.paid_test("metaso", {"api_key": "configured"})
+
+    assert error.value.status_code == 501
+    assert error.value.detail["code"] == "PROVIDER_TEST_NOT_IMPLEMENTED"

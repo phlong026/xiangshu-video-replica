@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import hmac
 import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -356,6 +355,26 @@ class CloudStorageAdapter(_BaseStorageAdapter):
     def put_object(self, key: str, content: bytes, *, content_type: str) -> StoredObject:
         raise StorageBackendUnavailable("cloud put_object requires the provider SDK/client")
 
+    def create_upload_intent(
+        self,
+        key: str,
+        *,
+        content_type: str,
+        expires_in: timedelta,
+    ) -> UploadIntent:
+        raise StorageBackendUnavailable("cloud upload signing requires the provider SDK/client")
+
+    def create_download_intent(
+        self,
+        key: str,
+        *,
+        expires_in: timedelta,
+        can_read: bool,
+    ) -> DownloadIntent:
+        if not can_read:
+            return super().create_download_intent(key, expires_in=expires_in, can_read=False)
+        raise StorageBackendUnavailable("cloud download signing requires the provider SDK/client")
+
     def get_object(self, key: str) -> bytes:
         raise StorageBackendUnavailable("cloud get_object requires the provider SDK/client")
 
@@ -374,22 +393,7 @@ class CloudStorageAdapter(_BaseStorageAdapter):
         )
 
     def _signed_url(self, method: str, key: str, expires_at: datetime) -> str:
-        expires = _timestamp(expires_at)
-        canonical = "\n".join([method, self.provider, self.bucket, key, str(expires), self._region])
-        signature = hmac.new(
-            self._secret_access_key.encode("utf-8"),
-            canonical.encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
-        query = urlencode(
-            {
-                "x-storage-provider": self.provider,
-                "x-access-key-id": self._access_key_id,
-                "x-expires": str(expires),
-                "x-signature": signature,
-            }
-        )
-        return f"{self._endpoint}/{quote(key)}?{query}"
+        raise StorageBackendUnavailable("cloud URL signing requires the provider SDK/client")
 
     def _delete_object(self, key: str) -> None:
         raise StorageBackendUnavailable("cloud delete_object requires the provider SDK/client")
