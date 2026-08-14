@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>镜序 Studio · 企业工作台</title>
+    <style>
+      :root {
+        --bg: #100e17;
+        --surface: #191622;
+        --surface-2: #211d2c;
+        --surface-3: #29243a;
+        --line: #363047;
+        --line-soft: #2b2639;
+        --text: #f4f1f8;
+        --muted: #aaa3b5;
+        --violet: #a98cff;
+        --violet-dark: #6c4ad4;
+        --mint: #78d9ab;
+        --amber: #efc679;
+        --danger: #e98a98;
+        --radius: 14px;
+        --density: 1;
+        color: var(--text);
+        background: var(--bg);
+        font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
+      }
+
+      * { box-sizing: border-box; }
+      body { margin: 0; min-width: 1180px; background: var(--bg); }
+      button, input { font: inherit; }
+      button { cursor: pointer; }
+
+      .shell {
+        display: grid;
+        grid-template-columns: 244px minmax(700px, 1fr) 326px;
+        grid-template-rows: 68px minmax(760px, 1fr);
+        min-height: 100vh;
+        background: radial-gradient(circle at 58% -10%, #27203a 0, transparent 34%), var(--bg);
+      }
+
+      .topbar {
+        grid-column: 1 / -1;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        border-bottom: 1px solid var(--line-soft);
+        padding: 0 26px;
+        background: rgba(16, 14, 23, .86);
+        backdrop-filter: blur(18px);
+      }
+
+      .brand, .top-actions, .nav, .inline, .company-title, .role-meta, .task-top, .project-top, .project-footer { display: flex; align-items: center; }
+      .brand { gap: 11px; min-width: 320px; }
+      .brand-mark {
+        display: grid; place-items: center; width: 31px; height: 31px;
+        border: 1px solid #c2adff; border-radius: 9px; color: #d8cbff;
+        background: linear-gradient(135deg, #554080, #282039); font-weight: 800; letter-spacing: -2px;
+      }
+      .brand strong { font-size: 15px; letter-spacing: .03em; }
+      .brand small { color: var(--muted); font-size: 11px; letter-spacing: .1em; }
+      .nav { gap: 3px; }
+      .nav button, .icon-button {
+        border: 1px solid transparent; border-radius: 8px; padding: 8px 12px;
+        color: var(--muted); background: transparent; font-size: 13px;
+      }
+      .nav button.active { color: var(--text); background: var(--surface-2); border-color: var(--line); }
+      .top-actions { gap: 11px; }
+      .connection { color: var(--mint); font-size: 12px; }
+      .connection::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 7px; border-radius: 50%; background: var(--mint); box-shadow: 0 0 0 4px rgba(120, 217, 171, .11); }
+      .avatar { display: grid; place-items: center; width: 31px; height: 31px; border-radius: 50%; background: #d8c8a8; color: #2b211c; font-size: 12px; font-weight: 800; }
+
+      aside { min-width: 0; }
+      .company-rail { border-right: 1px solid var(--line-soft); padding: 22px 14px; background: rgba(19, 16, 27, .65); }
+      .rail-heading, .section-row, .side-heading { display: flex; align-items: center; justify-content: space-between; }
+      .eyebrow { color: #bba9f3; font-size: 10px; font-weight: 800; letter-spacing: .16em; }
+      .rail-heading { margin: 3px 7px 16px; }
+      .rail-heading span:last-child { color: var(--muted); font-size: 11px; }
+      .company-list { display: grid; gap: 6px; }
+      .company-item {
+        display: grid; grid-template-columns: 29px minmax(0, 1fr) auto; align-items: center; gap: 9px;
+        width: 100%; border: 1px solid transparent; border-radius: 10px; padding: 9px; text-align: left;
+        color: var(--muted); background: transparent;
+      }
+      .company-item.selected { color: var(--text); border-color: #554570; background: #242032; }
+      .company-logo { display: grid; place-items: center; width: 29px; height: 29px; border-radius: 8px; color: #e9e2ff; background: #413658; font-size: 12px; font-weight: 800; }
+      .company-item:nth-child(2) .company-logo { background: #40544d; color: #d6efe3; }
+      .company-item:nth-child(3) .company-logo { background: #554542; color: #f4dfd8; }
+      .company-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 700; }
+      .company-count { color: var(--muted); font-size: 11px; }
+      .new-company { width: 100%; margin-top: 10px; border: 1px dashed #504568; border-radius: 10px; padding: 10px; color: #c5b7e8; background: transparent; font-size: 12px; text-align: left; }
+      .rail-note { margin: 28px 7px 0; padding-top: 18px; border-top: 1px solid var(--line-soft); color: var(--muted); font-size: 12px; line-height: 1.7; }
+      .rail-note strong { display: block; color: #ddd4ed; font-size: 12px; }
+
+      .main-canvas { min-width: 0; padding: 27px 30px 35px; }
+      .breadcrumb { color: var(--muted); font-size: 12px; }
+      .breadcrumb span { margin: 0 7px; color: #756b83; }
+      .company-header { display: flex; align-items: end; justify-content: space-between; margin: 13px 0 26px; }
+      .company-title { gap: 12px; }
+      .company-title .company-logo { width: 39px; height: 39px; border-radius: 11px; font-size: 15px; }
+      h1, h2, h3, p { margin: 0; }
+      h1 { font-size: 26px; letter-spacing: -.045em; }
+      .company-title p { margin-top: 5px; color: var(--muted); font-size: 12px; }
+      .header-stats { display: flex; gap: 23px; }
+      .stat { display: grid; gap: 3px; }
+      .stat strong { font-size: 16px; }
+      .stat span { color: var(--muted); font-size: 11px; }
+      .action-primary, .action-secondary {
+        border-radius: 9px; padding: 10px 13px; font-size: 12px; font-weight: 800;
+      }
+      .action-primary { border: 1px solid #bca8ff; color: #201631; background: #c3b0ff; }
+      .action-secondary { border: 1px solid var(--line); color: #ddd5ec; background: var(--surface-2); }
+
+      .section-row { margin: 0 0 13px; }
+      .section-title { display: flex; align-items: baseline; gap: 8px; }
+      h2 { font-size: 15px; letter-spacing: -.02em; }
+      .section-title small { color: var(--muted); font-size: 11px; }
+      .text-button { border: 0; padding: 0; color: #bba9f3; background: transparent; font-size: 12px; }
+      .roles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+      .role-card { min-width: 0; border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; background: linear-gradient(145deg, #211c2c, #191621); }
+      .role-card.focused { border-color: #705b9e; box-shadow: 0 12px 28px rgba(0,0,0,.15); }
+      .role-board { display: grid; grid-template-columns: repeat(3, 1fr) 1.1fr; gap: 2px; height: 98px; overflow: hidden; border-radius: 9px; background: #c6c4c3; }
+      .board-panel { position: relative; min-width: 0; overflow: hidden; background: linear-gradient(150deg, #d8d6d4, #9b9896); }
+      .board-panel::after { content: ""; position: absolute; left: 50%; bottom: 9px; width: 25px; height: 55px; border-radius: 18px 18px 7px 7px; transform: translateX(-50%); background: #837d79; box-shadow: 0 -16px 0 -7px #5b5450; }
+      .board-panel:nth-child(2)::after { transform: translateX(-50%) rotate(-6deg); }
+      .board-panel:nth-child(3)::after { transform: translateX(-50%) rotate(-13deg); }
+      .board-stack { display: grid; gap: 2px; }
+      .board-stack .board-panel::after { bottom: -2px; width: 34px; height: 42px; border-radius: 19px 19px 4px 4px; }
+      .role-card h3 { margin-top: 11px; font-size: 13px; }
+      .role-meta { justify-content: space-between; margin-top: 5px; color: var(--muted); font-size: 11px; }
+      .role-meta .ready { color: var(--mint); }
+      .role-add { display: grid; place-items: center; min-height: 162px; border: 1px dashed #544a68; border-radius: var(--radius); color: #bba9f3; background: rgba(34, 29, 45, .45); text-align: center; font-size: 12px; line-height: 1.65; }
+      .role-add strong { display: block; color: #ded4f3; font-size: 16px; font-weight: 500; }
+
+      .projects-section { margin-top: 30px; }
+      .filter { display: flex; gap: 6px; }
+      .filter button { border: 0; border-radius: 6px; padding: 5px 8px; color: var(--muted); background: transparent; font-size: 11px; }
+      .filter button.selected { color: #e5ddf7; background: var(--surface-3); }
+      .project-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+      .project-card { min-width: 0; border: 1px solid var(--line); border-radius: var(--radius); padding: 15px; background: rgba(28, 24, 38, .93); }
+      .project-card.attention { border-color: #6b5b42; }
+      .project-top { justify-content: space-between; gap: 12px; }
+      .project-top strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+      .tag { flex: 0 0 auto; border-radius: 999px; padding: 4px 7px; font-size: 10px; font-weight: 800; }
+      .tag.violet { color: #d5c9ff; background: #382b54; }
+      .tag.amber { color: #f2d292; background: #46361e; }
+      .tag.mint { color: #9be7bf; background: #173a2c; }
+      .step-line { display: grid; grid-template-columns: repeat(5, 1fr); gap: 3px; margin: 17px 0 11px; }
+      .step-line span { height: 3px; border-radius: 5px; background: #3a3445; }
+      .step-line span.done { background: var(--violet); }
+      .step-line span.active { background: var(--amber); }
+      .project-status { color: var(--muted); font-size: 11px; }
+      .project-footer { justify-content: space-between; margin-top: 14px; padding-top: 11px; border-top: 1px solid var(--line-soft); }
+      .project-footer span { color: #8f879c; font-size: 10px; }
+      .project-footer button { border: 0; padding: 0; color: #c5b6f5; background: transparent; font-size: 12px; font-weight: 700; }
+
+      .producer-rail { border-left: 1px solid var(--line-soft); padding: 22px 18px; background: rgba(18, 15, 26, .8); }
+      .side-heading { padding: 3px 2px 16px; }
+      .side-heading strong { font-size: 14px; }
+      .side-heading span { color: var(--muted); font-size: 11px; }
+      .production-card { border: 1px solid #52476a; border-radius: 13px; padding: 14px; background: linear-gradient(150deg, #251f33, #1b1725); }
+      .production-card h3 { font-size: 14px; }
+      .production-card > p { margin-top: 6px; color: var(--muted); font-size: 11px; line-height: 1.55; }
+      .selected-role { display: flex; align-items: center; gap: 9px; margin: 14px 0; padding: 9px; border: 1px solid var(--line); border-radius: 9px; background: rgba(13, 11, 18, .35); }
+      .mini-board { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; width: 38px; height: 38px; border-radius: 6px; overflow: hidden; background: #b9b5b2; }
+      .mini-board span { background: linear-gradient(#d8d6d4 55%, #7c756f 55%); }
+      .selected-role strong { display: block; font-size: 12px; }
+      .selected-role small { color: var(--muted); font-size: 10px; }
+      .process { display: grid; gap: 11px; margin: 16px 0; }
+      .process-row { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; align-items: center; gap: 8px; }
+      .process-no { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; color: #cfc5e6; background: #3b334d; font-size: 10px; font-weight: 800; }
+      .process-row.active .process-no { color: #261a3c; background: #bda7ff; }
+      .process-row span:nth-child(2) { font-size: 11px; }
+      .process-row small { color: var(--muted); font-size: 10px; }
+      .production-card .action-primary { width: 100%; }
+      .running-tasks { margin-top: 21px; }
+      .task-list { display: grid; gap: 8px; margin-top: 10px; }
+      .task { border: 1px solid var(--line-soft); border-radius: 10px; padding: 10px; background: #1a1623; }
+      .task-top { justify-content: space-between; gap: 8px; }
+      .task-top strong { font-size: 11px; }
+      .task-top span { color: var(--amber); font-size: 10px; }
+      .progress { height: 4px; margin-top: 9px; overflow: hidden; border-radius: 4px; background: #363040; }
+      .progress i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #8765e8, #baa4ff); }
+      .task small { display: block; margin-top: 6px; color: var(--muted); font-size: 10px; }
+
+      .modal-backdrop { position: fixed; inset: 0; z-index: 10; display: none; align-items: stretch; justify-content: flex-end; background: rgba(5, 4, 8, .58); }
+      .modal-backdrop.open { display: flex; }
+      .drawer { width: 480px; padding: 25px; overflow: auto; border-left: 1px solid #494059; background: #16131e; box-shadow: -20px 0 55px rgba(0,0,0,.35); }
+      .drawer-header { display: flex; align-items: flex-start; justify-content: space-between; }
+      .drawer h2 { margin-top: 5px; font-size: 20px; }
+      .drawer .icon-button { padding: 2px 5px; font-size: 18px; }
+      .form-section { margin-top: 23px; padding-top: 19px; border-top: 1px solid var(--line-soft); }
+      .form-section h3 { font-size: 13px; }
+      .form-section p { margin-top: 6px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+      .field-label { display: grid; gap: 7px; margin-top: 14px; color: #d9d2e7; font-size: 12px; font-weight: 700; }
+      input { width: 100%; border: 1px solid var(--line); border-radius: 8px; padding: 10px; color: var(--text); background: #100e16; outline: none; }
+      input:focus { border-color: #a68aff; }
+      .upload-box { display: grid; grid-template-columns: 43px minmax(0, 1fr) auto; align-items: center; gap: 11px; margin-top: 13px; border: 1px dashed #62567b; border-radius: 11px; padding: 12px; background: #1c1827; }
+      .upload-icon { display: grid; place-items: center; width: 43px; height: 43px; border-radius: 9px; color: #d4c7ff; background: #352a4b; font-size: 19px; }
+      .upload-box strong { display: block; font-size: 12px; }
+      .upload-box small { display: block; margin-top: 3px; color: var(--muted); font-size: 10px; }
+      .upload-box button { border: 1px solid var(--line); border-radius: 7px; padding: 7px; color: #e2daf0; background: #292333; font-size: 11px; }
+      .reference-spec { display: grid; grid-template-columns: 82px minmax(0, 1fr); gap: 12px; align-items: center; margin-top: 14px; padding: 11px; border-radius: 10px; background: #211c2a; }
+      .reference-spec .role-board { height: 68px; }
+      .reference-spec strong { font-size: 12px; }
+      .reference-spec small { display: block; margin-top: 4px; color: var(--muted); font-size: 10px; line-height: 1.55; }
+      .prompt-note { margin-top: 12px; padding: 10px; border-left: 2px solid #8e73de; color: #bdb4c9; background: #1d1828; font-size: 11px; line-height: 1.55; }
+      .drawer-footer { display: flex; justify-content: flex-end; gap: 9px; margin-top: 25px; }
+
+      #tweaks-toggle { position: fixed; right: 20px; bottom: 19px; z-index: 20; width: 40px; height: 40px; border: 1px solid #62557b; border-radius: 50%; color: #e7dfff; background: #2b243a; font-size: 12px; box-shadow: 0 8px 24px rgba(0,0,0,.3); }
+      #tweaks-panel { position: fixed; right: 20px; bottom: 67px; z-index: 20; display: none; width: 250px; border: 1px solid #4a405c; border-radius: 12px; padding: 15px; color: #ded7e9; background: #1b1724; box-shadow: 0 16px 42px rgba(0,0,0,.42); font-size: 12px; }
+      #tweaks-panel.visible { display: block; }
+      #tweaks-panel h3 { margin: 0 0 13px; font-size: 13px; }
+      #tweaks-panel label { display: grid; gap: 7px; margin-top: 12px; }
+      #tweaks-panel select, #tweaks-panel input[type="range"] { width: 100%; }
+      #tweaks-panel select { border: 1px solid var(--line); border-radius: 6px; padding: 7px; color: var(--text); background: #100e16; }
+
+      .compact .role-board { height: 76px; }
+      .compact .role-card { padding: 10px; }
+      .compact .project-card { padding: 12px; }
+      .high-contrast { --surface: #15121e; --surface-2: #231e30; --line: #514464; --muted: #bcb4c7; --violet: #c3aaff; }
+      .warm { --violet: #dca68c; --violet-dark: #a26451; --surface-2: #2b2026; --line: #56414b; --bg: #171011; }
+      @media (max-width: 1250px) { .shell { grid-template-columns: 220px minmax(640px, 1fr) 290px; } .main-canvas { padding: 24px 20px; } .roles { gap: 9px; } }
+    </style>
+  </head>
+  <body>
+    <div class="shell" data-screen-label="01 企业工作台">
+      <header class="topbar">
+        <div class="brand"><span class="brand-mark">镜</span><strong>镜序 Studio</strong><small>VIDEO REPLICA</small></div>
+        <nav class="nav" aria-label="主导航"><button class="active">工作台</button><button>任务中心</button><button>设置</button></nav>
+        <div class="top-actions"><span class="connection">本地服务已连接</span><span class="avatar">陈</span></div>
+      </header>
+
+      <aside class="company-rail">
+        <div class="rail-heading"><span class="eyebrow">CLIENT BRANDS</span><span>3 家公司</span></div>
+        <div class="company-list">
+          <button class="company-item selected"><span class="company-logo">栖</span><span class="company-name">栖川生活方式</span><span class="company-count">12</span></button>
+          <button class="company-item"><span class="company-logo">森</span><span class="company-name">森野咖啡</span><span class="company-count">6</span></button>
+          <button class="company-item"><span class="company-logo">原</span><span class="company-name">原野家居</span><span class="company-count">3</span></button>
+        </div>
+        <button class="new-company" id="open-company">＋ 新建客户品牌</button>
+        <div class="rail-note"><strong>公司即数据边界</strong>角色、项目、素材与生成记录均归属当前客户品牌。现有项目权限继续生效。</div>
+      </aside>
+
+      <main class="main-canvas">
+        <div class="breadcrumb">客户品牌 <span>/</span> 栖川生活方式</div>
+        <div class="company-header">
+          <div class="company-title"><span class="company-logo">栖</span><div><h1>栖川生活方式</h1><p>最近活动：今天 10:42 · 12 个视频项目 · 3 个已启用角色</p></div></div>
+          <div class="header-stats"><div class="stat"><strong>04</strong><span>进行中</span></div><div class="stat"><strong>18</strong><span>本月成片</span></div><button class="action-secondary" id="open-role">新建角色</button><button class="action-primary" id="open-video">新建视频</button></div>
+        </div>
+
+        <section aria-labelledby="roles-title">
+          <div class="section-row"><div class="section-title"><h2 id="roles-title">角色库</h2><small>角色属于当前公司，可被多个项目复用</small></div><button class="text-button" id="manage-roles">管理全部角色 →</button></div>
+          <div class="roles">
+            <article class="role-card focused"><div class="role-board"><div class="board-panel"></div><div class="board-panel"></div><div class="board-panel"></div><div class="board-stack"><div class="board-panel"></div><div class="board-panel"></div></div></div><h3>小柚 · 主播形象</h3><div class="role-meta"><span>五视角参考板</span><span class="ready">已启用</span></div></article>
+            <article class="role-card"><div class="role-board"><div class="board-panel"></div><div class="board-panel"></div><div class="board-panel"></div><div class="board-stack"><div class="board-panel"></div><div class="board-panel"></div></div></div><h3>林安 · 品牌主理人</h3><div class="role-meta"><span>5 张参考图</span><span class="ready">已启用</span></div></article>
+            <article class="role-card"><div class="role-board"><div class="board-panel"></div><div class="board-panel"></div><div class="board-panel"></div><div class="board-stack"><div class="board-panel"></div><div class="board-panel"></div></div></div><h3>夏晴 · 产品顾问</h3><div class="role-meta"><span>待补充侧脸图</span><span>草稿</span></div></article>
+            <button class="role-add" id="open-role-card"><div><strong>＋</strong>从一张人物照片<br />创建可复用角色</div></button>
+          </div>
+        </section>
+
+        <section class="projects-section" aria-labelledby="projects-title">
+          <div class="section-row"><div class="section-title"><h2 id="projects-title">最近处理的项目</h2><small>默认展示最近更新，支持按进度筛选</small></div><div class="filter"><button class="selected">全部</button><button>待处理</button><button>生成中</button><button>已完成</button></div></div>
+          <div class="project-grid">
+            <article class="project-card attention"><div class="project-top"><strong>夏日草本饮品 · 口播复刻</strong><span class="tag amber">待确认首帧</span></div><div class="step-line"><span class="done"></span><span class="done"></span><span class="active"></span><span></span><span></span></div><p class="project-status">角色：小柚 · 已生成 3 张候选首帧</p><div class="project-footer"><span>今天 10:42 更新</span><button>继续处理 →</button></div></article>
+            <article class="project-card"><div class="project-top"><strong>夏日新品预告 · 竖版</strong><span class="tag violet">视频生成中</span></div><div class="step-line"><span class="done"></span><span class="done"></span><span class="done"></span><span class="active"></span><span></span></div><p class="project-status">角色：林安 · H3 正在生成 2 条视频</p><div class="project-footer"><span>今天 09:18 更新</span><button>查看进度 →</button></div></article>
+            <article class="project-card"><div class="project-top"><strong>品牌故事 · 客厅场景</strong><span class="tag mint">已完成</span></div><div class="step-line"><span class="done"></span><span class="done"></span><span class="done"></span><span class="done"></span><span class="done"></span></div><p class="project-status">角色：小柚 · 已归档 4 条可下载成片</p><div class="project-footer"><span>昨天 16:26 更新</span><button>查看成片 →</button></div></article>
+            <article class="project-card"><div class="project-top"><strong>门店探访 · 咖啡制作</strong><span class="tag violet">视频已拆解</span></div><div class="step-line"><span class="done"></span><span class="done"></span><span></span><span></span><span></span></div><p class="project-status">请选择角色后生成替换人物首帧</p><div class="project-footer"><span>昨天 13:02 更新</span><button>选择角色 →</button></div></article>
+          </div>
+        </section>
+      </main>
+
+      <aside class="producer-rail">
+        <div class="side-heading"><strong>快捷生产</strong><span>新视频</span></div>
+        <section class="production-card"><h3>从参考视频开始</h3><p>先选当前公司的角色，再上传参考视频；全部工作都将在主画布继续完成。</p>
+          <div class="selected-role"><div class="mini-board"><span></span><span></span><span></span></div><div><strong>小柚 · 主播形象</strong><small>当前已选择角色</small></div></div>
+          <div class="process"><div class="process-row active"><span class="process-no">1</span><span>选择角色</span><small>已完成</small></div><div class="process-row"><span class="process-no">2</span><span>上传参考视频</span><small>4–15 秒</small></div><div class="process-row"><span class="process-no">3</span><span>确认首帧</span><small>自动带入角色</small></div><div class="process-row"><span class="process-no">4</span><span>生成视频</span><small>自定义数量</small></div></div>
+          <button class="action-primary" id="open-video-side">开始新视频</button>
+        </section>
+        <section class="running-tasks"><div class="side-heading"><strong>正在生成</strong><span>查看全部 →</span></div><div class="task-list"><article class="task"><div class="task-top"><strong>夏日新品预告 · #02</strong><span>68%</span></div><div class="progress"><i style="width:68%"></i></div><small>H3 生成中 · 已耗时 01:24</small></article><article class="task"><div class="task-top"><strong>夏日新品预告 · #01</strong><span>完成</span></div><div class="progress"><i style="width:100%"></i></div><small>已归档，可下载</small></article></div></section>
+      </aside>
+    </div>
+
+    <div class="modal-backdrop" id="company-drawer"><aside class="drawer"><div class="drawer-header"><div><span class="eyebrow">NEW CLIENT BRAND</span><h2>新建客户品牌</h2></div><button class="icon-button" data-close="company-drawer">×</button></div><div class="form-section"><h3>只保留必要信息</h3><p>公司是客户或品牌的真实业务主体，也是角色、项目和素材的归属边界。</p><label class="field-label">公司 / 品牌名称<input placeholder="例如：栖川生活方式" /></label></div><div class="drawer-footer"><button class="action-secondary" data-close="company-drawer">取消</button><button class="action-primary">创建公司</button></div></aside></div>
+
+    <div class="modal-backdrop" id="role-drawer"><aside class="drawer"><div class="drawer-header"><div><span class="eyebrow">CHARACTER FACTORY</span><h2>创建公司角色</h2></div><button class="icon-button" data-close="role-drawer">×</button></div><div class="form-section"><h3>一张照片，生成角色参考板</h3><p>角色创建完成后，可在“栖川生活方式”的所有项目中选择使用。</p><label class="field-label">角色名称<input value="小柚 · 主播形象" /></label><div class="upload-box"><span class="upload-icon">＋</span><div><strong>上传人物照片</strong><small>支持清晰正面照；系统将作为身份唯一依据</small></div><button>选择图片</button></div><div class="reference-spec"><div class="role-board"><div class="board-panel"></div><div class="board-panel"></div><div class="board-panel"></div><div class="board-stack"><div class="board-panel"></div><div class="board-panel"></div></div></div><div><strong>自动生成五视角角色参考板</strong><small>正面全身、三分之四、侧面、正面近景、三分之四近景。系统使用固定灰棚版式，不要求额外上传版式图。</small></div></div><div class="prompt-note">身份优先：保留人脸、发型、服装和饰品特征；仅按固定五格版式补全必要的全身视角。创建后仍可查看和重新生成参考板。</div></div><div class="drawer-footer"><button class="action-secondary" data-close="role-drawer">取消</button><button class="action-primary">创建并生成参考板</button></div></aside></div>
+
+    <div class="modal-backdrop" id="video-drawer"><aside class="drawer"><div class="drawer-header"><div><span class="eyebrow">NEW VIDEO PROJECT</span><h2>新建复刻视频</h2></div><button class="icon-button" data-close="video-drawer">×</button></div><div class="form-section"><h3>已选择公司角色</h3><div class="selected-role"><div class="mini-board"><span></span><span></span><span></span></div><div><strong>小柚 · 主播形象</strong><small>栖川生活方式 · 可随时切换</small></div><button class="text-button">更换</button></div><label class="field-label">视频项目名称<input placeholder="例如：夏日草本饮品 · 口播复刻" /></label><div class="upload-box"><span class="upload-icon">↑</span><div><strong>上传参考视频</strong><small>MP4 / MOV，4–15 秒，最大 50 MB</small></div><button>选择视频</button></div></div><div class="form-section"><h3>提交前系统会自动完成</h3><p>视频拆解 → 镜头卡片 → 首帧候选 → H3 图生视频。生成数量在确认首帧后设置，避免提前消耗模型额度。</p></div><div class="drawer-footer"><button class="action-secondary" data-close="video-drawer">取消</button><button class="action-primary">创建并开始拆解</button></div></aside></div>
+
+    <button id="tweaks-toggle" title="Tweaks">调</button>
+    <div id="tweaks-panel"><h3>Tweaks</h3><label>视觉方案<select id="tone"><option value="studio">A · 企业工作台（推荐）</option><option value="high-contrast">B · 高对比看板</option><option value="warm">C · 温暖资产库</option></select></label><label>信息密度<input id="density" type="range" min="0" max="1" step="1" value="0" /><span id="density-label">舒展</span></label></div>
+
+    <script>
+      const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+        "tone": "studio",
+        "density": 0
+      }/*EDITMODE-END*/;
+      const state = { ...TWEAK_DEFAULTS, ...JSON.parse(localStorage.getItem("cc-tweaks") || "{}") };
+      const root = document.documentElement;
+      const panel = document.getElementById("tweaks-panel");
+      const tone = document.getElementById("tone");
+      const density = document.getElementById("density");
+      const densityLabel = document.getElementById("density-label");
+      function applyTweaks() {
+        root.classList.remove("high-contrast", "warm", "compact");
+        if (state.tone !== "studio") root.classList.add(state.tone);
+        if (Number(state.density)) root.classList.add("compact");
+        tone.value = state.tone; density.value = state.density;
+        densityLabel.textContent = Number(state.density) ? "紧凑" : "舒展";
+        localStorage.setItem("cc-tweaks", JSON.stringify(state));
+      }
+      document.getElementById("tweaks-toggle").addEventListener("click", () => {
+        panel.classList.toggle("visible");
+        localStorage.setItem("cc-tweaks-visible", panel.classList.contains("visible"));
+      });
+      if (localStorage.getItem("cc-tweaks-visible") === "true") panel.classList.add("visible");
+      tone.addEventListener("change", (event) => { state.tone = event.target.value; applyTweaks(); });
+      density.addEventListener("input", (event) => { state.density = Number(event.target.value); applyTweaks(); });
+      function open(id) { document.getElementById(id).classList.add("open"); }
+      ["open-company"].forEach((id) => document.getElementById(id).addEventListener("click", () => open("company-drawer")));
+      ["open-role", "open-role-card", "manage-roles"].forEach((id) => document.getElementById(id).addEventListener("click", () => open("role-drawer")));
+      ["open-video", "open-video-side"].forEach((id) => document.getElementById(id).addEventListener("click", () => open("video-drawer")));
+      document.querySelectorAll("[data-close]").forEach((button) => button.addEventListener("click", () => document.getElementById(button.dataset.close).classList.remove("open")));
+      document.querySelectorAll(".modal-backdrop").forEach((backdrop) => backdrop.addEventListener("click", (event) => { if (event.target === backdrop) backdrop.classList.remove("open"); }));
+      applyTweaks();
+    </script>
+  </body>
+</html>
