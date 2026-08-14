@@ -26,6 +26,7 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "resources": ["resources/*"],
     "publisher": "Internal AI Team",
     "category": "Productivity",
     "shortDescription": "内部短视频复刻工作台",
