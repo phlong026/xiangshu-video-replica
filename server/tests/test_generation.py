@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from cryptography.fernet import Fernet
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
@@ -17,13 +18,34 @@ from app.db import connect_database, initialize_database
 from app.generation import (
     FakeH3Provider,
     H3CreateResult,
+    H3ProviderFailed,
+    MetasoH3Provider,
     SubmissionUncertain,
     build_h3_request,
     run_next_generation_task,
 )
 from app.generation_routes import get_h3_provider
+from app.generation_worker import run_worker_once
 from app.main import app
+from app.settings import SETTINGS_KEY_ENV, SettingsRepository
 from app.storage import FakeStorageAdapter, StorageBackendUnavailable
+
+
+class RecordedMetasoTransport:
+    def __init__(self, responses: list[bytes]) -> None:
+        self.responses = responses
+        self.requests: list[tuple[str, str, dict[str, str], bytes | None]] = []
+
+    def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str],
+        body: bytes | None = None,
+    ) -> bytes:
+        self.requests.append((method, url, headers, body))
+        return self.responses.pop(0)
 
 
 @pytest.fixture()
@@ -168,6 +190,7 @@ def seed_data(conn: sqlite3.Connection) -> None:
             "employee_1",
         ),
     )
+
     conn.executemany(
         """
         INSERT INTO versions (
@@ -207,6 +230,133 @@ def seed_data(conn: sqlite3.Connection) -> None:
         ],
     )
     conn.commit()
+
+
+def test_metaso_h3_provider_creates_polls_filters_and_downloads_result() -> None:
+    provider_task_id = "task-real-1"
+    result_url = "https://files.example.test/video.mp4?signature=test"
+    transport = RecordedMetasoTransport(
+        [
+            json.dumps({"task_id": provider_task_id}).encode(),
+            json.dumps(
+                {
+                    "items": [
+                        {"id": "another-task", "status": "succeeded"},
+                        {"id": provider_task_id, "status": "queued", "content": {}},
+                    ],
+                    "total": 2,
+                }
+            ).encode(),
+            json.dumps(
+                {
+                    "items": [
+                        {
+                            "id": provider_task_id,
+                            "status": "succeeded",
+                            "content": {"url": result_url},
+                        }
+                    ],
+                    "total": 1,
+                }
+            ).encode(),
+            b"generated-video-bytes",
+        ]
+    )
+    waits: list[float] = []
+    provider = MetasoH3Provider(
+        api_key="metaso-test-key",
+        transport=transport,
+        poll_interval_seconds=0.25,
+        max_poll_attempts=2,
+        sleeper=waits.append,
+        audio_quality_checker=lambda _: ("AUDIO_QUALITY_FAILED", ["AUDIO_QUALITY_FAILED"]),
+    )
+
+    result = provider.create_image_to_video(
+        build_h3_request(
+            prompt_text="生成自然运动的视频",
+            first_frame_url="https://storage.example.test/first-frame.png",
+            duration_seconds=5,
+            resolution="768P",
+        )
+    )
+
+    assert result.provider_task_id == provider_task_id
+    assert result.result_url == result_url
+    assert result.result_content == b"generated-video-bytes"
+    assert result.audio_quality_status == "AUDIO_QUALITY_FAILED"
+    assert result.quality_issue_codes == ["AUDIO_QUALITY_FAILED"]
+    assert waits == [0.25]
+    create_method, create_url, create_headers, create_body = transport.requests[0]
+    assert create_method == "POST"
+    assert create_url == "https://metaso.cn/api/minimax/v2/video_generation"
+    assert create_headers["Authorization"] == "Bearer metaso-test-key"
+    assert json.loads(create_body or b"{}") == {
+        "model": "MiniMax-H3",
+        "content": [
+            {"type": "text", "text": "生成自然运动的视频"},
+            {
+                "type": "image_url",
+                "image_url": {"url": "https://storage.example.test/first-frame.png"},
+                "role": "first_frame",
+            },
+        ],
+        "resolution": "768",
+        "duration": 5,
+        "ratio": "adaptive",
+    }
+    query_method, query_url, query_headers, query_body = transport.requests[1]
+    assert query_method == "GET"
+    assert query_url.endswith("/api/minimax/v2/query/video_generation?task_id=task-real-1")
+    assert query_headers["Authorization"] == "Bearer metaso-test-key"
+    assert query_body is None
+    download_method, download_url, download_headers, download_body = transport.requests[-1]
+    assert download_method == "GET"
+    assert download_url == result_url
+    assert "Authorization" not in download_headers
+    assert download_body is None
+
+
+def test_metaso_h3_provider_refuses_to_treat_an_unrelated_list_item_as_its_result() -> None:
+    transport = RecordedMetasoTransport(
+        [
+            b'{"task_id":"task-real-1"}',
+            b'{"items":[{"id":"another-task","status":"succeeded"}],"total":1}',
+        ]
+    )
+    provider = MetasoH3Provider(
+        api_key="metaso-test-key",
+        transport=transport,
+        poll_interval_seconds=0,
+        max_poll_attempts=1,
+    )
+
+    with pytest.raises(H3ProviderFailed, match="did not return the created task"):
+        provider.create_image_to_video(
+            build_h3_request(
+                prompt_text="生成自然运动的视频",
+                first_frame_url="https://storage.example.test/first-frame.png",
+                duration_seconds=5,
+                resolution="768P",
+            )
+        )
+
+
+def test_metaso_h3_provider_rejects_a_non_https_first_frame_url() -> None:
+    transport = RecordedMetasoTransport([])
+    provider = MetasoH3Provider(api_key="metaso-test-key", transport=transport)
+
+    with pytest.raises(H3ProviderFailed, match="HTTPS first-frame URL"):
+        provider.create_image_to_video(
+            build_h3_request(
+                prompt_text="生成自然运动的视频",
+                first_frame_url="fake://private/first-frame.png",
+                duration_seconds=5,
+                resolution="768P",
+            )
+        )
+
+    assert transport.requests == []
 
 
 def auth_headers(user_id: str) -> dict[str, str]:
@@ -640,7 +790,7 @@ def test_batch_progress_counts_archive_failed_and_audio_quality(
     }
 
 
-def test_generation_requires_owner_and_real_provider_fails_closed(client: TestClient) -> None:
+def test_generation_requires_owner_and_configured_real_provider(client: TestClient) -> None:
     prompt_id = create_locked_prompt(client)
     other_owner = client.post(
         "/api/projects/project_owned/generation-batches",
@@ -670,8 +820,42 @@ def test_generation_requires_owner_and_real_provider_fails_closed(client: TestCl
 
     assert other_owner.status_code == 403
     assert other_owner.json()["detail"]["code"] == "PROJECT_FORBIDDEN"
-    assert real_provider.status_code == 501
-    assert real_provider.json()["detail"]["code"] == "H3_QUERY_SOURCE_PENDING"
+    assert real_provider.status_code == 503
+    assert real_provider.json()["detail"]["code"] == "METASO_SETTINGS_UNAVAILABLE"
+
+
+def test_generation_can_queue_metaso_after_its_key_is_saved(
+    client: TestClient,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    key = Fernet.generate_key().decode("ascii")
+    monkeypatch.setenv(SETTINGS_KEY_ENV, key)
+    with connect_database(db_path) as conn:
+        SettingsRepository(conn, fernet=Fernet(key.encode("ascii"))).save_provider_config(
+            "metaso",
+            {"api_key": "metaso-test-key"},
+            actor_user_id="admin_1",
+        )
+
+    prompt_id = create_locked_prompt(client)
+    response = client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json={
+            "quantity": 1,
+            "prompt_version_id": prompt_id,
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 5,
+            "resolution": "768P",
+            "idempotency_key": "metaso-enabled",
+            "provider": "metaso",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "QUEUED"
+    assert response.json()["tasks"][0]["status"] == "PENDING"
 
 
 def test_locked_prompt_is_consumed_by_only_one_distinct_idempotency_key(
@@ -1010,7 +1194,116 @@ def test_worker_fails_immediately_when_first_frame_url_cannot_be_signed(
     assert batch_status["progress"]["terminal_count"] == 1
 
 
-def test_worker_fails_closed_for_non_fake_archive_storage(
+def test_worker_records_a_known_h3_provider_failure(
+    db_path: Path,
+    client: TestClient,
+) -> None:
+    prompt_id = create_locked_prompt(client)
+    client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json={
+            "quantity": 1,
+            "prompt_version_id": prompt_id,
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+            "idempotency_key": "provider-known-failure",
+        },
+    )
+
+    class FailedProvider(FakeH3Provider):
+        def create_image_to_video(self, request: dict[str, Any]) -> H3CreateResult:
+            raise H3ProviderFailed(
+                "METASO returned failed", provider_task_id="metaso-task-1", terminal=True
+            )
+
+    with connect_database(db_path) as conn:
+        result = run_next_generation_task(
+            conn,
+            worker_id="worker_a",
+            provider=FailedProvider(),
+            storage=FakeStorageAdapter(provider="fake", bucket="generation-results"),
+        )
+        row = conn.execute(
+            "SELECT status, error_code, provider_task_id FROM generation_tasks"
+        ).fetchone()
+
+    assert result is not None
+    assert result.status == "FAILED"
+    assert row["status"] == "FAILED"
+    assert row["error_code"] == "H3_PROVIDER_FAILED"
+    assert row["provider_task_id"] == "metaso-task-1"
+
+
+def test_worker_preserves_a_known_nonterminal_h3_task_for_manual_recovery(
+    db_path: Path,
+    client: TestClient,
+) -> None:
+    prompt_id = create_locked_prompt(client)
+    client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json={
+            "quantity": 1,
+            "prompt_version_id": prompt_id,
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+            "idempotency_key": "provider-recovery-needed",
+        },
+    )
+
+    class RecoveryProvider(FakeH3Provider):
+        def create_image_to_video(self, request: dict[str, Any]) -> H3CreateResult:
+            raise H3ProviderFailed("METASO query timed out", provider_task_id="metaso-task-2")
+
+    with connect_database(db_path) as conn:
+        result = run_next_generation_task(
+            conn,
+            worker_id="worker_a",
+            provider=RecoveryProvider(),
+            storage=FakeStorageAdapter(provider="fake", bucket="generation-results"),
+        )
+        row = conn.execute(
+            "SELECT status, error_code, provider_task_id FROM generation_tasks"
+        ).fetchone()
+
+    assert result is not None
+    assert result.status == "SUBMISSION_UNCERTAIN"
+    assert row["error_code"] == "SUBMISSION_UNCERTAIN"
+    assert row["provider_task_id"] == "metaso-task-2"
+
+
+def test_worker_loop_processes_all_queued_fake_tasks(
+    db_path: Path,
+    client: TestClient,
+) -> None:
+    prompt_id = create_locked_prompt(client)
+    client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json={
+            "quantity": 2,
+            "prompt_version_id": prompt_id,
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+            "idempotency_key": "worker-loop",
+        },
+    )
+
+    with connect_database(db_path) as conn:
+        processed = run_worker_once(
+            conn,
+            worker_id="worker-loop",
+            storage=FakeStorageAdapter(provider="fake", bucket="generation-results"),
+        )
+
+    assert processed == 2
+
+
+def test_worker_archives_result_with_cloud_like_storage(
     db_path: Path,
     client: TestClient,
 ) -> None:
@@ -1045,6 +1338,6 @@ def test_worker_fails_closed_for_non_fake_archive_storage(
 
     assert result is not None
     assert row["status"] == "SUCCEEDED"
-    assert row["archive_status"] == "ARCHIVE_FAILED"
-    assert row["result_asset_id"] is None
-    assert row["error_code"] == "ARCHIVE_STORAGE_UNSUPPORTED"
+    assert row["archive_status"] == "ARCHIVED"
+    assert row["result_asset_id"] is not None
+    assert row["error_code"] is None

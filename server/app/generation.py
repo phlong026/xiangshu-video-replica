@@ -2,12 +2,21 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
+import shutil
 import sqlite3
+import subprocess
+import tempfile
+import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from math import floor
-from typing import Any, Literal, cast
+from typing import Any, Literal, Protocol, cast
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode, urlparse
+from urllib.request import Request, urlopen
 from uuid import uuid4
 
 from fastapi import HTTPException
@@ -21,6 +30,7 @@ from app.permissions import (
     require_project_access,
     write_audit,
 )
+from app.settings import SettingsDecryptError, SettingsKeyMissing, SettingsRepository
 from app.storage import (
     StorageAdapter,
     StorageBackendUnavailable,
@@ -35,9 +45,16 @@ GENERATION_SCHEMA_VERSION = "c.generation.v1"
 PROMPT_STATUSES = {"SAVED", "LOCKED", "USED"}
 TERMINAL_STATUSES = {"FAILED", "CANCELLED"}
 H3_MODEL = "MiniMax-H3"
+METASO_BASE_URL = "https://metaso.cn"
+METASO_CREATE_PATH = "/api/minimax/v2/video_generation"
+METASO_QUERY_PATH = "/api/minimax/v2/query/video_generation"
 SUPPORTED_RESOLUTIONS = {"768P", "2K"}
-GENERATION_LEASE_SECONDS = 300
+# A real H3 request polls for up to five minutes. Leave headroom so another
+# worker never mistakes an active request for an abandoned lease.
+GENERATION_LEASE_SECONDS = 600
 FIRST_FRAME_URL_EXPIRES_IN = timedelta(minutes=15)
+
+logger = logging.getLogger(__name__)
 
 
 class ScriptRequest(BaseModel):
@@ -86,6 +103,23 @@ class SubmissionUncertain(RuntimeError):
     pass
 
 
+class H3ProviderFailed(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider_task_id: str | None = None,
+        terminal: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.provider_task_id = provider_task_id
+        self.terminal = terminal
+
+
+class H3ProviderSettingsUnavailable(RuntimeError):
+    pass
+
+
 class H3Provider:
     def create_image_to_video(self, request: dict[str, Any]) -> H3CreateResult:
         raise HTTPException(
@@ -98,6 +132,166 @@ class H3Provider:
                 ),
             },
         )
+
+
+class MetasoHttpTransport(Protocol):
+    def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: Mapping[str, str],
+        body: bytes | None = None,
+    ) -> bytes: ...
+
+
+class UrllibMetasoHttpTransport:
+    def __init__(self, *, timeout_seconds: float = 90.0) -> None:
+        self.timeout_seconds = timeout_seconds
+
+    def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: Mapping[str, str],
+        body: bytes | None = None,
+    ) -> bytes:
+        try:
+            request = Request(url, data=body, headers=dict(headers), method=method)
+            with urlopen(request, timeout=self.timeout_seconds) as response:  # noqa: S310
+                return cast(bytes, response.read())
+        except HTTPError as exc:
+            logger.warning("METASO H3 request failed with HTTP status %s", exc.code)
+            raise H3ProviderFailed(f"METASO returned HTTP {exc.code}") from exc
+        except (TimeoutError, URLError, OSError) as exc:
+            logger.warning("METASO H3 request failed: %s", type(exc).__name__)
+            raise H3ProviderFailed("METASO H3 request failed") from exc
+
+
+class MetasoH3Provider(H3Provider):
+    """Runs the verified METASO create, query-list, and signed-download protocol."""
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        transport: MetasoHttpTransport | None = None,
+        poll_interval_seconds: float = 3.0,
+        max_poll_attempts: int = 100,
+        sleeper: Callable[[float], None] = time.sleep,
+        audio_quality_checker: Callable[
+            [bytes], tuple[Literal["AUDIO_OK", "AUDIO_QUALITY_FAILED"], list[str]]
+        ]
+        | None = None,
+    ) -> None:
+        self.api_key = api_key
+        self.transport = transport or UrllibMetasoHttpTransport()
+        self.poll_interval_seconds = poll_interval_seconds
+        self.max_poll_attempts = max_poll_attempts
+        self.sleeper = sleeper
+        self.audio_quality_checker = audio_quality_checker or h3_audio_quality
+
+    def create_image_to_video(self, request: dict[str, Any]) -> H3CreateResult:
+        validate_h3_request(request)
+        if not _h3_request_has_https_first_frame(request):
+            raise H3ProviderFailed("METASO H3 requires an HTTPS first-frame URL")
+        provider_request = _metaso_create_request(request)
+        try:
+            response = self.transport.request(
+                "POST",
+                f"{METASO_BASE_URL}{METASO_CREATE_PATH}",
+                headers=self._api_headers(),
+                body=json.dumps(
+                    provider_request, ensure_ascii=True, separators=(",", ":")
+                ).encode(),
+            )
+        except H3ProviderFailed as exc:
+            raise SubmissionUncertain("METASO submission result is unknown") from exc
+
+        try:
+            provider_task_id = _metaso_task_id(response)
+        except H3ProviderFailed as exc:
+            raise SubmissionUncertain("METASO submission result is unknown") from exc
+        return self._poll_for_result(provider_task_id)
+
+    def _poll_for_result(self, provider_task_id: str) -> H3CreateResult:
+        for attempt in range(self.max_poll_attempts):
+            try:
+                item = self._query_task(provider_task_id)
+            except H3ProviderFailed as exc:
+                if exc.provider_task_id is not None:
+                    raise
+                raise H3ProviderFailed(str(exc), provider_task_id=provider_task_id) from exc
+            status = item.get("status")
+            if status == "succeeded":
+                result_url = _metaso_content_url(item, provider_task_id=provider_task_id)
+                try:
+                    content = self.transport.request("GET", result_url, headers={})
+                except H3ProviderFailed as exc:
+                    raise H3ProviderFailed(str(exc), provider_task_id=provider_task_id) from exc
+                audio_quality_status, quality_issue_codes = self.audio_quality_checker(content)
+                return H3CreateResult(
+                    provider_task_id=provider_task_id,
+                    status="SUCCEEDED",
+                    result_url=result_url,
+                    result_content=content,
+                    audio_quality_status=audio_quality_status,
+                    quality_issue_codes=quality_issue_codes,
+                )
+            if status in {"failed", "cancelled"}:
+                raise H3ProviderFailed(
+                    f"METASO task finished with status {status}",
+                    provider_task_id=provider_task_id,
+                    terminal=True,
+                )
+            if attempt < self.max_poll_attempts - 1:
+                self.sleeper(self.poll_interval_seconds)
+        raise H3ProviderFailed(
+            "METASO query did not return the created task as completed",
+            provider_task_id=provider_task_id,
+        )
+
+    def _query_task(self, provider_task_id: str) -> dict[str, Any]:
+        url = f"{METASO_BASE_URL}{METASO_QUERY_PATH}?{urlencode({'task_id': provider_task_id})}"
+        payload = _metaso_json_object(
+            self.transport.request("GET", url, headers=self._api_headers())
+        )
+        items = payload.get("items")
+        if not isinstance(items, list):
+            raise H3ProviderFailed(
+                "METASO query response is missing items", provider_task_id=provider_task_id
+            )
+        for item in items:
+            if isinstance(item, dict) and item.get("id") == provider_task_id:
+                return cast(dict[str, Any], item)
+        return {}
+
+    def _api_headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+
+
+def metaso_h3_provider_from_settings(conn: sqlite3.Connection) -> MetasoH3Provider:
+    try:
+        config = SettingsRepository(conn).load_provider_config("metaso")
+    except (SettingsDecryptError, SettingsKeyMissing) as exc:
+        raise H3ProviderSettingsUnavailable("METASO settings cannot be read") from exc
+    api_key = config.get("api_key")
+    if not api_key:
+        raise H3ProviderSettingsUnavailable("METASO API key is not configured")
+    return MetasoH3Provider(api_key=api_key)
+
+
+def h3_provider_for_task(conn: sqlite3.Connection, provider_name: str) -> H3Provider:
+    if provider_name == "fake_h3":
+        return FakeH3Provider()
+    if provider_name == "metaso":
+        return metaso_h3_provider_from_settings(conn)
+    raise H3ProviderSettingsUnavailable("generation task has an unsupported provider")
 
 
 @dataclass(frozen=True)
@@ -374,13 +568,15 @@ def create_generation_batch(
             "QUANTITY_EXCEEDS_LIMIT",
             f"quantity must be less than or equal to {max_quantity}",
         )
-    if request.provider != "fake_h3":
-        raise generation_error(
-            501,
-            "H3_QUERY_SOURCE_PENDING",
-            "METASO query/result archive endpoint is SOURCE_PENDING; "
-            "real provider calls are disabled.",
-        )
+    if request.provider == "metaso":
+        try:
+            metaso_h3_provider_from_settings(conn)
+        except H3ProviderSettingsUnavailable as exc:
+            raise generation_error(
+                503,
+                "METASO_SETTINGS_UNAVAILABLE",
+                "Save a readable METASO API Key before queuing a real H3 task.",
+            ) from exc
 
     request_hash = idempotency_request_hash(request)
     existing = conn.execute(
@@ -601,7 +797,7 @@ def run_next_generation_task(
     conn: sqlite3.Connection,
     *,
     worker_id: str,
-    provider: H3Provider,
+    provider: H3Provider | None,
     storage: StorageAdapter,
     first_frame_storage: StorageAdapter | None = None,
 ) -> TaskResult | None:
@@ -610,6 +806,16 @@ def run_next_generation_task(
         return None
 
     task_id = str(lease["id"])
+    if provider is None:
+        try:
+            provider = h3_provider_for_task(conn, str(lease["provider"]))
+        except H3ProviderSettingsUnavailable:
+            mark_task_provider_settings_unavailable(
+                conn,
+                task_id=task_id,
+                batch_id=str(lease["batch_id"]),
+            )
+            return get_task_result(conn, task_id)
     source_storage = first_frame_storage or storage
     try:
         first_frame = storage_object_ref_from_uri(str(lease["first_frame_uri"]))
@@ -638,24 +844,39 @@ def run_next_generation_task(
     except SubmissionUncertain as exc:
         mark_task_submission_uncertain(conn, task_id=task_id, message=str(exc))
         return get_task_result(conn, task_id)
+    except H3ProviderFailed as exc:
+        if exc.provider_task_id is not None and not exc.terminal:
+            mark_task_submission_uncertain(
+                conn,
+                task_id=task_id,
+                message="METASO task needs recovery after a nonterminal provider failure.",
+                provider_task_id=exc.provider_task_id,
+            )
+            return get_task_result(conn, task_id)
+        mark_task_provider_failed(
+            conn,
+            task_id=task_id,
+            batch_id=str(lease["batch_id"]),
+            provider_task_id=exc.provider_task_id,
+        )
+        return get_task_result(conn, task_id)
 
     result_asset_id: str | None = None
     archive_status = "ARCHIVED"
     error_code = None
     error_message = None
-    if storage.provider not in {"fake", "local"} or not provider_result.result_url.startswith(
-        "fake://"
-    ):
-        archive_status = "ARCHIVE_FAILED"
-        error_code = "ARCHIVE_STORAGE_UNSUPPORTED"
-        error_message = "Only fake/local archive storage is enabled for FakeH3 results."
-    else:
-        result_asset_id = str(uuid4())
+    try:
         stored = storage.put_object(
             f"generation-results/{task_id}.mp4",
             provider_result.result_content,
             content_type="video/mp4",
         )
+    except StorageBackendUnavailable:
+        archive_status = "ARCHIVE_FAILED"
+        error_code = "ARCHIVE_STORAGE_UNAVAILABLE"
+        error_message = "Generation result could not be archived to configured storage."
+    else:
+        result_asset_id = str(uuid4())
         with conn:
             conn.execute(
                 """
@@ -833,12 +1054,14 @@ def mark_task_submission_uncertain(
     *,
     task_id: str,
     message: str,
+    provider_task_id: str | None = None,
 ) -> None:
     with conn:
         conn.execute(
             """
             UPDATE generation_tasks
             SET
+                provider_task_id = COALESCE(?, provider_task_id),
                 status = 'SUBMISSION_UNCERTAIN',
                 error_code = 'SUBMISSION_UNCERTAIN',
                 error_message_redacted = ?,
@@ -847,8 +1070,59 @@ def mark_task_submission_uncertain(
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
             """,
-            (message, task_id),
+            (provider_task_id, message, task_id),
         )
+
+
+def mark_task_provider_settings_unavailable(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    batch_id: str,
+) -> None:
+    with conn:
+        conn.execute(
+            """
+            UPDATE generation_tasks
+            SET
+                status = 'FAILED',
+                error_code = 'METASO_SETTINGS_UNAVAILABLE',
+                error_message_redacted = 'METASO settings are unavailable to the worker.',
+                locked_by = NULL,
+                locked_until = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (task_id,),
+        )
+    refresh_batch_status(conn, batch_id=batch_id)
+
+
+def mark_task_provider_failed(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    batch_id: str,
+    provider_task_id: str | None,
+) -> None:
+    with conn:
+        conn.execute(
+            """
+            UPDATE generation_tasks
+            SET
+                provider_task_id = ?,
+                status = 'FAILED',
+                error_code = 'H3_PROVIDER_FAILED',
+                error_message_redacted = 'METASO H3 task failed or returned an invalid result.',
+                locked_by = NULL,
+                locked_until = NULL,
+                completed_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (provider_task_id, task_id),
+        )
+    refresh_batch_status(conn, batch_id=batch_id)
 
 
 def mark_task_first_frame_url_sign_failed(
@@ -1051,6 +1325,100 @@ def validate_h3_request(request: dict[str, Any]) -> None:
     duration = request.get("duration")
     if not isinstance(duration, int) or duration < 4 or duration > 15:
         raise ValueError("H3 I2V duration must be 4-15 seconds")
+
+
+def _metaso_json_object(content: bytes) -> dict[str, Any]:
+    try:
+        payload = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise H3ProviderFailed("METASO returned invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise H3ProviderFailed("METASO returned an invalid response object")
+    return cast(dict[str, Any], payload)
+
+
+def _metaso_task_id(content: bytes) -> str:
+    task_id = _metaso_json_object(content).get("task_id")
+    if not isinstance(task_id, str) or not task_id:
+        raise H3ProviderFailed("METASO create response is missing task_id")
+    return task_id
+
+
+def _metaso_create_request(request: dict[str, Any]) -> dict[str, Any]:
+    """Translate UI labels to the parameter value proven by the METASO endpoint."""
+    provider_request = dict(request)
+    if provider_request.get("resolution") == "768P":
+        provider_request["resolution"] = "768"
+    return provider_request
+
+
+def _metaso_content_url(item: dict[str, Any], *, provider_task_id: str) -> str:
+    content = item.get("content")
+    result_url = content.get("url") if isinstance(content, dict) else None
+    parsed = urlparse(result_url) if isinstance(result_url, str) else None
+    if (
+        not isinstance(result_url, str)
+        or parsed is None
+        or parsed.scheme != "https"
+        or not parsed.hostname
+    ):
+        raise H3ProviderFailed(
+            "METASO completed task is missing an HTTPS result URL",
+            provider_task_id=provider_task_id,
+            terminal=True,
+        )
+    return result_url
+
+
+def _h3_request_has_https_first_frame(request: dict[str, Any]) -> bool:
+    content = request.get("content")
+    if not isinstance(content, list) or len(content) < 2:
+        return False
+    image = content[1]
+    image_url = image.get("image_url") if isinstance(image, dict) else None
+    value = image_url.get("url") if isinstance(image_url, dict) else None
+    parsed = urlparse(value) if isinstance(value, str) else None
+    return bool(parsed and parsed.scheme == "https" and parsed.hostname)
+
+
+def h3_audio_quality(
+    content: bytes,
+) -> tuple[Literal["AUDIO_OK", "AUDIO_QUALITY_FAILED"], list[str]]:
+    ffprobe = shutil.which("ffprobe")
+    if ffprobe is None:
+        return "AUDIO_QUALITY_FAILED", ["AUDIO_VALIDATION_UNAVAILABLE"]
+    with tempfile.NamedTemporaryFile(suffix=".mp4") as temporary_video:
+        temporary_video.write(content)
+        temporary_video.flush()
+        try:
+            result = subprocess.run(
+                [
+                    ffprobe,
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "stream=codec_type",
+                    "-of",
+                    "json",
+                    temporary_video.name,
+                ],
+                capture_output=True,
+                check=False,
+                text=True,
+                timeout=5,
+            )
+        except subprocess.TimeoutExpired:
+            return "AUDIO_QUALITY_FAILED", ["AUDIO_VALIDATION_UNAVAILABLE"]
+    if result.returncode != 0:
+        return "AUDIO_QUALITY_FAILED", ["AUDIO_VALIDATION_UNAVAILABLE"]
+    try:
+        streams = json.loads(result.stdout).get("streams", [])
+    except (AttributeError, json.JSONDecodeError):
+        return "AUDIO_QUALITY_FAILED", ["AUDIO_VALIDATION_UNAVAILABLE"]
+    has_audio = any(
+        isinstance(stream, dict) and stream.get("codec_type") == "audio" for stream in streams
+    )
+    return ("AUDIO_OK", []) if has_audio else ("AUDIO_QUALITY_FAILED", ["AUDIO_QUALITY_FAILED"])
 
 
 def require_version(

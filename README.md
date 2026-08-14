@@ -26,6 +26,12 @@ uv sync --project server --locked
 npm run dev:server
 ```
 
+另开一个终端启动生成 Worker；它与 API 使用同一个 SQLite 文件，并负责真实 H3 任务的提交、查询和结果归档：
+
+```powershell
+npm run dev:worker
+```
+
 再启动桌面端：
 
 ```powershell

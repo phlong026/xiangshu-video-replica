@@ -12,6 +12,7 @@
     "check:tauri": "cargo fmt --manifest-path client/src-tauri/Cargo.toml --check && cargo check --manifest-path client/src-tauri/Cargo.toml --locked",
     "dev:client": "npm run dev --workspace client",
     "dev:server": "uv --cache-dir .uv-cache run --project server --locked uvicorn app.main:app --app-dir server --reload --host 127.0.0.1 --port 8000",
+    "dev:worker": "uv --cache-dir .uv-cache run --project server --locked python -m app.generation_worker",
     "format": "npm run format --workspace client && uv --cache-dir .uv-cache run --project server --locked ruff format server",
     "generate:api": "npm run generate:api --workspace client",
     "tauri": "npm run tauri --workspace client --",
