@@ -5,6 +5,8 @@ description: 输入一个参考视频，自动拆解完整分镜、人物与摄�
 
 # 短视频复刻 Skill V0.6
 
+> 版本说明：`V0.6` 是本 Skill 的**交付契约版本**，决定分镜 JSON 结构、`SCHEMA_VERSION`、双文件交付物与 Release Gate 校验。外层一键安装包版本为 V0.6.4，仅负责 Windows/Linux/macOS 环境引导与安装（WinGet 装 Python/FFmpeg），**不改变本契约**。两者是不同层级的版本，发布版本变化不代表交付契约升级；历史分析 JSON 的 `version` 字段仍必须为 `0.6`。
+
 ## 唯一产品目标
 
 用户只需提供一个视频文件。自动完成：
