@@ -191,6 +191,38 @@ def test_provider_minimum_required_fields_are_accepted(
     assert repo.read_provider_config(provider)["configured"] is True
 
 
+def test_apilio_can_keep_a_dedicated_analysis_key_separate_from_its_image_key(
+    conn: sqlite3.Connection,
+) -> None:
+    repo = SettingsRepository(conn)
+    repo.save_provider_config(
+        "apilio",
+        {"api_key": "image-key", "analysis_api_key": "analysis-key"},
+        actor_user_id="admin_1",
+    )
+
+    assert repo.load_provider_config("apilio") == {
+        "api_key": "image-key",
+        "analysis_api_key": "analysis-key",
+    }
+    assert repo.read_provider_config("apilio")["config"]["analysis_api_key"] == "********-key"
+
+
+def test_apilio_allows_an_analysis_key_before_an_image_key(
+    conn: sqlite3.Connection,
+) -> None:
+    repo = SettingsRepository(conn)
+
+    saved = repo.save_provider_config(
+        "apilio",
+        {"analysis_api_key": "analysis-key"},
+        actor_user_id="admin_1",
+    )
+
+    assert saved["configured"] is True
+    assert repo.load_provider_config("apilio") == {"analysis_api_key": "analysis-key"}
+
+
 @pytest.mark.parametrize("provider", ["apilio", "metaso"])
 def test_model_provider_uses_default_base_url_when_only_api_key_is_supplied(
     conn: sqlite3.Connection,

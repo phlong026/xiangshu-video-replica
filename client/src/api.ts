@@ -109,6 +109,8 @@ export type AnalysisVersion = {
   created_at: string;
 };
 
+export type AnalysisProvider = "apilio_gemini" | "fake_gemini";
+
 export type ShotCard = {
   shot_id: string;
   start_time: number;
@@ -606,6 +608,19 @@ export function readAnalysisPayload(
     duration_seconds: analysis.duration_seconds,
     shots: analysis.shots,
   };
+}
+
+export function readAnalysisProvider(
+  version: AnalysisVersion,
+): AnalysisProvider | null {
+  const responseRef = version.payload.provider_response_ref;
+  if (!isRecord(responseRef) || !isRecord(responseRef.raw)) {
+    return null;
+  }
+  const provider = responseRef.raw.provider;
+  return provider === "apilio_gemini" || provider === "fake_gemini"
+    ? provider
+    : null;
 }
 
 function isSourceFrameCandidate(value: unknown): value is SourceFrameCandidate {

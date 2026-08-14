@@ -1,10 +1,12 @@
 import { type FormEvent, useEffect, useState } from "react";
 
 import {
+  type AnalysisProvider,
   getLatestProjectAnalysis,
   getLatestProjectShotCards,
   type Project,
   readAnalysisPayload,
+  readAnalysisProvider,
   readShotCardPayload,
   type ShotCard,
   saveShotCards,
@@ -36,6 +38,8 @@ export function AnalysisWorkspace({
   project: Project;
 }) {
   const [analysisId, setAnalysisId] = useState("");
+  const [analysisProvider, setAnalysisProvider] =
+    useState<AnalysisProvider | null>(null);
   const [analysisSummary, setAnalysisSummary] = useState("");
   const [durationSeconds, setDurationSeconds] = useState(0);
   const [shots, setShots] = useState<ShotCard[]>([]);
@@ -49,6 +53,7 @@ export function AnalysisWorkspace({
     setIsLoading(true);
     setError("");
     setSaveMessage("");
+    setAnalysisProvider(null);
 
     async function loadWorkspace() {
       try {
@@ -62,6 +67,7 @@ export function AnalysisWorkspace({
           return;
         }
         setAnalysisId(version.id);
+        setAnalysisProvider(readAnalysisProvider(version));
         setAnalysisSummary(payload.summary);
         setDurationSeconds(payload.duration_seconds);
         setShots(payload.shots);
@@ -153,8 +159,19 @@ export function AnalysisWorkspace({
         <form className="analysis-form" onSubmit={handleSave}>
           <div className="analysis-summary">
             <strong>{analysisSummary}</strong>
-            <span>参考时长：{durationSeconds.toFixed(1)} 秒</span>
+            <div className="analysis-meta">
+              <span>参考时长：{durationSeconds.toFixed(1)} 秒</span>
+              {analysisProvider ? (
+                <span>拆解来源：{providerLabel(analysisProvider)}</span>
+              ) : null}
+            </div>
           </div>
+          {analysisProvider === "fake_gemini" ? (
+            <p className="status-note">
+              当前显示的是内置模拟结果。请在设置中保存 Gemini 视频分析 API
+              Key，并配置可用的 COS 或 OSS 存储后重新拆解。
+            </p>
+          ) : null}
           <CharacterSelection projectId={project.id} />
           <SourceFrameSelection
             projectId={project.id}
@@ -200,6 +217,12 @@ export function AnalysisWorkspace({
       ) : null}
     </section>
   );
+}
+
+function providerLabel(provider: AnalysisProvider) {
+  return provider === "apilio_gemini"
+    ? "Gemini 3.1 Pro（Apilio）"
+    : "内置模拟拆解（尚未调用 Gemini）";
 }
 
 function ShotInput({

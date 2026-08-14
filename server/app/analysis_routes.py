@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import timedelta
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -9,8 +10,12 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.analysis import (
     ANALYSIS_KIND,
+    APILIO_DEFAULT_BASE_URL,
     SHOT_CARD_KIND,
+    AnalysisProviderFailed,
+    ApilioGemini,
     FakeGemini,
+    VideoAnalysisProvider,
     analyze_video,
     create_analysis_version,
     create_shot_card_version,
@@ -19,14 +24,73 @@ from app.analysis import (
 )
 from app.auth import AuthenticatedUser, Database
 from app.media import is_reference_video_asset
+from app.media_routes import get_media_storage
 from app.permissions import (
     require_asset_access,
     require_not_auditor,
     require_project_access,
     write_audit,
 )
+from app.settings import SettingsDecryptError, SettingsKeyMissing, SettingsRepository
+from app.storage import (
+    StorageAdapter,
+    StorageBackendUnavailable,
+    require_storage_match,
+    storage_object_ref_from_uri,
+)
 
 router = APIRouter(prefix="/api", tags=["analysis"])
+
+
+def get_video_analysis_provider(conn: Database) -> VideoAnalysisProvider:
+    has_saved_apilio_config = (
+        conn.execute(
+            "SELECT 1 FROM provider_settings WHERE provider = ?",
+            ("apilio",),
+        ).fetchone()
+        is not None
+    )
+    try:
+        config = SettingsRepository(conn).load_provider_config("apilio")
+    except (SettingsDecryptError, SettingsKeyMissing) as exc:
+        if has_saved_apilio_config:
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "APILIO_SETTINGS_UNAVAILABLE"},
+            ) from exc
+        return FakeGemini()
+    api_key = config.get("analysis_api_key") or config.get("api_key")
+    if not api_key:
+        return FakeGemini()
+    return ApilioGemini(
+        api_key=api_key,
+        # The desktop settings page does not expose a custom Apilio endpoint.
+        # Keeping the origin fixed prevents an imported legacy base_url from
+        # receiving the configured bearer token.
+        base_url=APILIO_DEFAULT_BASE_URL,
+    )
+
+
+def signed_video_url_for_provider(storage: StorageAdapter, *, asset_uri: str) -> str:
+    try:
+        reference = storage_object_ref_from_uri(asset_uri)
+        require_storage_match(storage, reference)
+        intent = storage.create_download_intent(
+            reference.key,
+            expires_in=timedelta(minutes=15),
+            can_read=True,
+        )
+    except (StorageBackendUnavailable, ValueError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "ANALYSIS_VIDEO_URL_UNAVAILABLE"},
+        ) from exc
+    if not intent.url.startswith("https://"):
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "ANALYSIS_VIDEO_URL_UNAVAILABLE"},
+        )
+    return intent.url
 
 
 class CreateAnalysisRequest(BaseModel):
@@ -101,11 +165,29 @@ def create_project_analysis(
             },
         )
 
-    result = analyze_video(
-        video_uri=str(asset["storage_uri"]),
-        video_duration_seconds=request.duration_seconds,
-        provider=FakeGemini(),
-    )
+    provider = get_video_analysis_provider(conn)
+    video_uri = str(asset["storage_uri"])
+    if provider.requires_https_video_url:
+        video_uri = signed_video_url_for_provider(
+            get_media_storage(conn),
+            asset_uri=video_uri,
+        )
+    try:
+        result = analyze_video(
+            video_uri=video_uri,
+            video_duration_seconds=request.duration_seconds,
+            provider=provider,
+        )
+    except AnalysisProviderFailed as exc:
+        code = (
+            "ANALYSIS_PROVIDER_RATE_LIMITED"
+            if exc.http_status == 429
+            else "ANALYSIS_PROVIDER_FAILED"
+        )
+        raise HTTPException(
+            status_code=429 if exc.http_status == 429 else 502,
+            detail={"code": code},
+        ) from exc
     row = create_analysis_version(
         conn,
         project_id=project_id,

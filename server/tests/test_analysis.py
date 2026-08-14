@@ -6,13 +6,25 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from cryptography.fernet import Fernet
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from app.analysis import FakeGemini, analyze_video, parse_analysis_response
+from app.analysis import (
+    APILIO_DEFAULT_BASE_URL,
+    AnalysisProviderFailed,
+    ApilioGemini,
+    FakeGemini,
+    analyze_video,
+    parse_analysis_response,
+)
+from app.analysis_routes import get_video_analysis_provider, signed_video_url_for_provider
 from app.auth import get_database
 from app.db import connect_database, initialize_database
 from app.main import app
+from app.settings import SETTINGS_KEY_ENV, SettingsRepository
+from app.storage import FakeStorageAdapter
 
 
 @pytest.fixture()
@@ -165,6 +177,82 @@ def test_fake_gemini_analysis_repairs_invalid_json_once() -> None:
     assert result.analysis.summary == "短视频拆解"
     assert result.provider_response_ref["stored_as"] == "versions.payload_json"
     assert result.provider_response_ref["raw"]["text"] == '{"summary":'
+    assert "video_uri" not in result.provider_response_ref["raw"]
+
+
+class RecordedApilioTransport:
+    def __init__(self, response: bytes) -> None:
+        self.response = response
+        self.requests: list[tuple[str, dict[str, str], bytes]] = []
+
+    def post(
+        self, url: str, *, headers: dict[str, str], body: bytes
+    ) -> tuple[bytes, dict[str, str]]:
+        self.requests.append((url, headers, body))
+        return self.response, {"content-type": "application/json"}
+
+
+def test_apilio_gemini_uses_signed_video_url_and_records_no_secret_or_url() -> None:
+    response_text = json.dumps(valid_analysis_payload())
+    transport = RecordedApilioTransport(
+        json.dumps({"id": "chat-1", "choices": [{"message": {"content": response_text}}]}).encode()
+    )
+    provider = ApilioGemini(api_key="analysis-secret", transport=transport)
+
+    response = provider.analyze(
+        video_uri="https://storage.example/video.mp4?signature=secret",
+        duration_seconds=10,
+    )
+
+    assert response.text == response_text
+    assert response.raw == {
+        "provider": "apilio_gemini",
+        "model": "gemini-3.1-pro-preview",
+        "response_id": "chat-1",
+    }
+    url, headers, body = transport.requests[0]
+    assert url == "https://api.apilio.ai/v1/chat/completions"
+    assert headers["Authorization"] == "Bearer analysis-secret"
+    request = json.loads(body)
+    assert request["model"] == "gemini-3.1-pro-preview"
+    assert request["messages"][0]["content"][1]["image_url"]["url"].startswith("https://")
+
+
+def test_apilio_gemini_rejects_non_https_video_urls() -> None:
+    provider = ApilioGemini(api_key="analysis-secret", transport=RecordedApilioTransport(b"{}"))
+
+    with pytest.raises(AnalysisProviderFailed, match="HTTPS signed video URL"):
+        provider.analyze(video_uri="local://private/video.mp4", duration_seconds=10)
+
+
+def test_video_analysis_uses_the_fixed_apilio_origin_when_legacy_base_url_exists(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    key = Fernet.generate_key().decode("ascii")
+    monkeypatch.setenv(SETTINGS_KEY_ENV, key)
+    with connect_database(db_path) as conn:
+        SettingsRepository(conn, fernet=Fernet(key.encode("ascii"))).save_provider_config(
+            "apilio",
+            {
+                "analysis_api_key": "analysis-secret",
+                "base_url": "https://untrusted.example",
+            },
+            actor_user_id="admin_1",
+        )
+        provider = get_video_analysis_provider(conn)
+
+    assert isinstance(provider, ApilioGemini)
+    assert provider.base_url == APILIO_DEFAULT_BASE_URL
+
+
+def test_real_video_analysis_refuses_a_non_https_storage_download_intent() -> None:
+    storage = FakeStorageAdapter(provider="cos", bucket="private-video")
+
+    with pytest.raises(HTTPException) as exc_info:
+        signed_video_url_for_provider(storage, asset_uri="cos://private-video/reference.mp4")
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail["code"] == "ANALYSIS_VIDEO_URL_UNAVAILABLE"
 
 
 def test_analysis_schema_rejects_overlap_and_unknown_fields() -> None:

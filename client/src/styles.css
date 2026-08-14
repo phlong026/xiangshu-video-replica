@@ -317,6 +317,12 @@ input:focus {
   font-size: 13px;
 }
 
+.analysis-meta {
+  display: grid;
+  gap: 4px;
+  justify-items: end;
+}
+
 .character-selection {
   border: 1px solid #3c3448;
   border-radius: 8px;

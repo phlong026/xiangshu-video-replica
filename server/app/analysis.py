@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -11,6 +16,10 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 ANALYSIS_KIND = "analysis"
 SHOT_CARD_KIND = "shot_card"
 SCHEMA_VERSION = "b2.analysis.v1"
+APILIO_DEFAULT_BASE_URL = "https://api.apilio.ai"
+APILIO_GEMINI_MODEL = "gemini-3.1-pro-preview"
+
+logger = logging.getLogger(__name__)
 
 
 class ShotCard(BaseModel):
@@ -70,9 +79,125 @@ class ProviderResponse(BaseModel):
 
 
 class VideoAnalysisProvider(Protocol):
+    requires_https_video_url: bool
+
     def analyze(self, *, video_uri: str, duration_seconds: float) -> ProviderResponse: ...
 
     def repair_json(self, *, invalid_json: str, error: str) -> ProviderResponse: ...
+
+
+class AnalysisProviderFailed(RuntimeError):
+    def __init__(self, message: str, *, http_status: int | None = None) -> None:
+        super().__init__(message)
+        self.http_status = http_status
+
+
+class ApilioChatTransport(Protocol):
+    def post(
+        self, url: str, *, headers: Mapping[str, str], body: bytes
+    ) -> tuple[bytes, Mapping[str, str]]: ...
+
+
+class UrllibApilioChatTransport:
+    def __init__(self, *, timeout_seconds: float = 90.0) -> None:
+        self.timeout_seconds = timeout_seconds
+
+    def post(
+        self, url: str, *, headers: Mapping[str, str], body: bytes
+    ) -> tuple[bytes, Mapping[str, str]]:
+        try:
+            request = Request(url, data=body, headers=dict(headers), method="POST")
+            with urlopen(request, timeout=self.timeout_seconds) as response:  # noqa: S310
+                return response.read(), dict(response.headers.items())
+        except HTTPError as exc:
+            logger.warning("Apilio video analysis request failed with HTTP status %s", exc.code)
+            raise AnalysisProviderFailed(
+                f"Apilio returned HTTP {exc.code}", http_status=exc.code
+            ) from exc
+        except (TimeoutError, URLError, OSError) as exc:
+            logger.warning("Apilio video analysis request failed: %s", type(exc).__name__)
+            raise AnalysisProviderFailed("Apilio video analysis request failed") from exc
+
+
+class ApilioGemini:
+    """Apilio's OpenAI-compatible Gemini adapter for a signed reference-video URL."""
+
+    requires_https_video_url = True
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        base_url: str = APILIO_DEFAULT_BASE_URL,
+        model: str = APILIO_GEMINI_MODEL,
+        transport: ApilioChatTransport | None = None,
+    ) -> None:
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+        self.model = model
+        self.transport = transport or UrllibApilioChatTransport()
+
+    def analyze(self, *, video_uri: str, duration_seconds: float) -> ProviderResponse:
+        if not is_https_video_url(video_uri):
+            raise AnalysisProviderFailed("Gemini analysis requires an HTTPS signed video URL")
+        payload = {
+            "model": self.model,
+            "temperature": 0,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": analysis_instruction(duration_seconds)},
+                        {"type": "image_url", "image_url": {"url": video_uri}},
+                    ],
+                }
+            ],
+        }
+        text, raw = self._complete(payload)
+        return ProviderResponse(text=text, raw=raw)
+
+    def repair_json(self, *, invalid_json: str, error: str) -> ProviderResponse:
+        payload = {
+            "model": self.model,
+            "temperature": 0,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {
+                    "role": "user",
+                    "content": (
+                        "Repair the following video-analysis JSON. Return only valid JSON that "
+                        "matches the requested schema. Validation error: "
+                        f"{error}. Invalid JSON: {invalid_json}"
+                    ),
+                }
+            ],
+        }
+        text, raw = self._complete(payload)
+        return ProviderResponse(text=text, raw=raw)
+
+    def _complete(self, payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        raw_body, _ = self.transport.post(
+            f"{self.base_url}/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            body=json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode(),
+        )
+        try:
+            response = json.loads(raw_body.decode("utf-8"))
+            content = response["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise AnalysisProviderFailed("Apilio returned an invalid Gemini response") from exc
+        if not isinstance(content, str) or not content.strip():
+            raise AnalysisProviderFailed("Apilio Gemini response is missing analysis content")
+        return content, {
+            "provider": "apilio_gemini",
+            "model": self.model,
+            "response_id": response.get("id") if isinstance(response.get("id"), str) else None,
+        }
 
 
 @dataclass(init=False)
@@ -80,6 +205,7 @@ class FakeGemini:
     analysis_json: str | None = None
     repair_json_text: str | None = None
     repair_calls: int = 0
+    requires_https_video_url = False
 
     def __init__(self, analysis_json: str | None = None, repair_json: str | None = None) -> None:
         self.analysis_json = analysis_json
@@ -92,7 +218,7 @@ class FakeGemini:
         )
         return ProviderResponse(
             text=text,
-            raw={"provider": "fake_gemini", "video_uri": video_uri, "text": text},
+            raw={"provider": "fake_gemini", "text": text},
         )
 
     def repair_json(self, *, invalid_json: str, error: str) -> ProviderResponse:
@@ -148,6 +274,23 @@ def parse_analysis_response(text: str, *, duration_seconds: float) -> VideoAnaly
         raise ValueError("analysis response must be a JSON object")
     payload["duration_seconds"] = duration_seconds
     return VideoAnalysis.model_validate(payload)
+
+
+def is_https_video_url(value: str) -> bool:
+    parsed = urlparse(value)
+    return parsed.scheme == "https" and bool(parsed.hostname)
+
+
+def analysis_instruction(duration_seconds: float) -> str:
+    return (
+        "Analyze this short reference video and return valid JSON only. "
+        "Use this exact schema: summary, aspect_ratio, resolution, fps, theme, visual_style, "
+        "pace, camera_language, original_script, shots. Each shot must include shot_id, "
+        "start_time, end_time, shot_type, composition, camera_motion, subject, action, scene, "
+        "spoken_text, transition. Cover the full timeline without overlap. "
+        f"The verified duration is {duration_seconds:.3f} seconds; "
+        "do not invent a different duration."
+    )
 
 
 def create_analysis_version(

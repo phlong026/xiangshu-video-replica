@@ -12,7 +12,8 @@ ProviderName = Literal["apilio", "metaso", "cos", "oss"]
 SETTINGS_KEY_ENV = "VIDEO_REPLICA_SETTINGS_KEY"
 SECRET_FIELDS = ("api_key", "secret", "token", "password", "authorization")
 REQUIRED_PROVIDER_FIELDS: dict[ProviderName, tuple[str, ...]] = {
-    "apilio": ("api_key",),
+    # Apilio can use a dedicated Gemini key while image generation is not configured yet.
+    "apilio": (),
     "metaso": ("api_key",),
     "cos": ("access_key_id", "secret_access_key", "bucket", "region"),
     "oss": ("access_key_id", "secret_access_key", "bucket", "endpoint"),

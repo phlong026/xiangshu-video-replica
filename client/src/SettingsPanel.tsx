@@ -32,8 +32,16 @@ const PROVIDER_FORMS: Record<
   },
   apilio: {
     title: "模型服务（Apilio）",
-    description: "用于 Gemini 视频拆解与 GPT Image 2 / Nano Banana 首帧重绘。",
-    fields: [{ name: "api_key", label: "Apilio API Key", secret: true }],
+    description:
+      "默认 Key 用于图像模型；如 Gemini 使用独立令牌，可单独填写视频分析 Key。",
+    fields: [
+      { name: "api_key", label: "图像模型 API Key", secret: true },
+      {
+        name: "analysis_api_key",
+        label: "Gemini 视频分析 API Key（可选）",
+        secret: true,
+      },
+    ],
   },
   cos: {
     title: "腾讯云 COS",

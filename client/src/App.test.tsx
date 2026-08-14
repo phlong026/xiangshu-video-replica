@@ -163,6 +163,9 @@ describe("App", () => {
       kind: "analysis",
       version_number: 1,
       payload: {
+        provider_response_ref: {
+          raw: { provider: "fake_gemini" },
+        },
         analysis: {
           summary: "咖啡口播拆解",
           duration_seconds: 8,
@@ -251,6 +254,14 @@ describe("App", () => {
       await screen.findByRole("heading", { name: "镜头卡片" }),
     ).toBeInTheDocument();
     expect(screen.getByText("咖啡口播拆解")).toBeInTheDocument();
+    expect(
+      screen.getByText("拆解来源：内置模拟拆解（尚未调用 Gemini）"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "当前显示的是内置模拟结果。请在设置中保存 Gemini 视频分析 API Key，并配置可用的 COS 或 OSS 存储后重新拆解。",
+      ),
+    ).toBeInTheDocument();
     expect(screen.getByLabelText("S01 动作")).toHaveValue("已保存的动作");
     fireEvent.change(screen.getByLabelText("S01 动作"), {
       target: { value: "端起咖啡杯" },
