@@ -53,3 +53,21 @@ def test_openapi_exposes_health_contract() -> None:
     assert schema["paths"]["/health"]["get"]["responses"]["200"]["content"]["application/json"][
         "schema"
     ] == {"$ref": "#/components/schemas/HealthResponse"}
+
+
+def test_non_loopback_request_is_rejected() -> None:
+    async def request() -> Response:
+        transport = ASGITransport(app=app, client=("203.0.113.5", 54321))
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.get("/health")
+
+    response = asyncio.run(request())
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "LOOPBACK_ONLY"
+
+
+def test_loopback_request_is_allowed() -> None:
+    response = get("/health")
+
+    assert response.status_code == 200
