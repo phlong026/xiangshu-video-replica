@@ -10,6 +10,7 @@ import {
   saveShotCards,
 } from "./api";
 import { CharacterSelection } from "./CharacterSelection";
+import { SourceFrameSelection } from "./SourceFrameSelection";
 
 const SHOT_TEXT_FIELDS: Array<{
   key: Exclude<keyof ShotCard, "start_time" | "end_time">;
@@ -154,6 +155,10 @@ export function AnalysisWorkspace({
             <span>参考时长：{durationSeconds.toFixed(1)} 秒</span>
           </div>
           <CharacterSelection projectId={project.id} />
+          <SourceFrameSelection
+            projectId={project.id}
+            referenceAssetId={project.reference_asset_id}
+          />
           <div className="shot-card-list">
             {shots.map((shot, index) => (
               <fieldset className="shot-card" key={shot.shot_id}>

@@ -155,6 +155,24 @@ export type ProjectMainCharacter = {
   character_snapshot: { name?: string };
 };
 
+export type SourceFrameCandidate = {
+  asset_id: string;
+  timestamp_seconds: number;
+  score: number | null;
+};
+
+export type SourceFrameCandidates = {
+  requested_timestamps_seconds: number[];
+  candidates: SourceFrameCandidate[];
+};
+
+export type SourceFrameSelectionState = {
+  version: AnalysisVersion | null;
+  stale: boolean;
+};
+
+export type DownloadUrl = { url: string };
+
 export async function getHealth(): Promise<HealthResponse> {
   return requestJson<HealthResponse>("/health", "本地服务暂不可用");
 }
@@ -329,6 +347,104 @@ export async function chooseProjectMainCharacter(
   );
 }
 
+export async function getLatestProjectSourceFrames(
+  projectId: string,
+): Promise<AnalysisVersion | null> {
+  const response = await requestApi(
+    `/api/projects/${encodeURIComponent(projectId)}/source-frames/latest`,
+    { method: "GET" },
+  );
+  if (response.status === 404) {
+    return null;
+  }
+  if (!response.ok) {
+    throw new Error(`读取候选源画面失败（${response.status}）`);
+  }
+  return (await response.json()) as AnalysisVersion;
+}
+
+export async function getLatestProjectSourceFrameSelection(
+  projectId: string,
+): Promise<SourceFrameSelectionState> {
+  const response = await requestApi(
+    `/api/projects/${encodeURIComponent(projectId)}/source-frames/selection/latest`,
+    { method: "GET" },
+  );
+  if (response.status === 404) {
+    return { version: null, stale: false };
+  }
+  if (response.status === 409) {
+    return { version: null, stale: true };
+  }
+  if (!response.ok) {
+    throw new Error(`读取已确认源画面失败（${response.status}）`);
+  }
+  return { version: (await response.json()) as AnalysisVersion, stale: false };
+}
+
+export async function extractSourceFrames(
+  projectId: string,
+  assetId: string,
+  timestampsSeconds: number[],
+): Promise<AnalysisVersion> {
+  return requestApiJson<AnalysisVersion>(
+    `/api/projects/${encodeURIComponent(projectId)}/source-frames/extract`,
+    "提取候选源画面失败",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        asset_id: assetId,
+        timestamps_seconds: timestampsSeconds,
+      }),
+    },
+  );
+}
+
+export async function confirmSourceFrame(
+  projectId: string,
+  sourceFrameAssetId: string,
+): Promise<AnalysisVersion> {
+  return requestApiJson<AnalysisVersion>(
+    `/api/projects/${encodeURIComponent(projectId)}/source-frames/confirm`,
+    "确认源画面失败",
+    {
+      method: "POST",
+      body: JSON.stringify({ source_frame_asset_id: sourceFrameAssetId }),
+    },
+  );
+}
+
+export async function getAssetDownloadUrl(
+  assetId: string,
+): Promise<DownloadUrl> {
+  return requestApiJson<DownloadUrl>(
+    `/api/assets/${encodeURIComponent(assetId)}/download-url`,
+    "读取源画面失败",
+    { method: "POST" },
+  );
+}
+
+export function readSourceFrameCandidates(
+  version: AnalysisVersion,
+): SourceFrameCandidates | null {
+  const payload = version.payload;
+  if (
+    !isRecord(payload) ||
+    !Array.isArray(payload.requested_timestamps_seconds) ||
+    !payload.requested_timestamps_seconds.every(
+      (timestamp) => typeof timestamp === "number",
+    ) ||
+    !Array.isArray(payload.candidates) ||
+    !payload.candidates.every(isSourceFrameCandidate)
+  ) {
+    return null;
+  }
+  return {
+    requested_timestamps_seconds: payload.requested_timestamps_seconds,
+    candidates: payload.candidates,
+  };
+}
+
 export function readAnalysisPayload(
   version: AnalysisVersion,
 ): AnalysisPayload | null {
@@ -348,6 +464,15 @@ export function readAnalysisPayload(
     duration_seconds: analysis.duration_seconds,
     shots: analysis.shots,
   };
+}
+
+function isSourceFrameCandidate(value: unknown): value is SourceFrameCandidate {
+  return (
+    isRecord(value) &&
+    typeof value.asset_id === "string" &&
+    typeof value.timestamp_seconds === "number" &&
+    (typeof value.score === "number" || value.score === null)
+  );
 }
 
 export function readShotCardPayload(

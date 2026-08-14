@@ -379,6 +379,97 @@ input:focus {
   color: #aaa2ba;
 }
 
+.source-frame-selection {
+  display: grid;
+  gap: 14px;
+  border: 1px solid #3c3448;
+  border-radius: 8px;
+  padding: 16px;
+  background: #120f18;
+}
+
+.source-frame-selection h3 {
+  margin: 8px 0;
+}
+
+.source-frame-selection p {
+  margin: 0;
+  color: #aaa2ba;
+  line-height: 1.55;
+}
+
+.source-frame-timestamps {
+  display: grid;
+  gap: 7px;
+  color: #d9d1e8;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.source-frame-timestamps small,
+.source-frame-option small {
+  color: #aaa2ba;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.source-frame-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.source-frame-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+  border: 0;
+  padding: 0;
+}
+
+.source-frame-options legend {
+  grid-column: 1 / -1;
+  margin-bottom: 2px;
+  color: #d9d1e8;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.source-frame-option {
+  display: grid;
+  gap: 8px;
+  border: 1px solid #3c3448;
+  border-radius: 8px;
+  padding: 10px;
+  background: #17131f;
+  cursor: pointer;
+}
+
+.source-frame-option input {
+  width: auto;
+}
+
+.source-frame-option img,
+.source-frame-placeholder {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: 6px;
+  object-fit: cover;
+  background: #2a2731;
+}
+
+.source-frame-placeholder {
+  display: grid;
+  place-items: center;
+  color: #aaa2ba;
+  font-size: 12px;
+}
+
+.source-frame-option > span:last-child {
+  display: grid;
+  gap: 3px;
+}
+
 .shot-card-list {
   display: grid;
   gap: 14px;
