@@ -4,7 +4,7 @@ import sqlite3
 from datetime import timedelta
 from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.auth import AuthenticatedUser, Database
@@ -255,6 +255,79 @@ def create_project(
         reference_asset_id=None,
         reference_upload_status="NOT_STARTED",
     )
+
+
+@router.delete("/projects/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_unfinished_project(
+    project_id: str,
+    conn: Database,
+    actor: AuthenticatedUser,
+) -> Response:
+    require_not_auditor(
+        conn,
+        actor=actor,
+        action="project.delete",
+        entity_type="project",
+        entity_id=project_id,
+    )
+    require_project_access(conn, actor=actor, project_id=project_id, action="project.delete")
+
+    assets = conn.execute(
+        """
+        SELECT id, storage_uri, sha256, size_bytes
+        FROM assets
+        WHERE project_id = ?
+        """,
+        (project_id,),
+    ).fetchall()
+    has_completed_reference = any(
+        str(asset["sha256"]) or int(asset["size_bytes"]) > 0 for asset in assets
+    )
+    has_project_work = conn.execute(
+        """
+        SELECT 1
+        FROM versions
+        WHERE project_id = ?
+        UNION ALL
+        SELECT 1
+        FROM generation_batches
+        WHERE project_id = ?
+        LIMIT 1
+        """,
+        (project_id, project_id),
+    ).fetchone()
+    if has_completed_reference or has_project_work:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "PROJECT_DELETE_REQUIRES_UNFINISHED",
+                "message": "Only unfinished projects without completed work can be deleted.",
+            },
+        )
+
+    try:
+        for asset in assets:
+            storage = storage_for_asset(conn, str(asset["storage_uri"]))
+            storage.delete_object(
+                storage_key_from_uri(str(asset["storage_uri"])), actor_id=actor.id
+            )
+    except StorageBackendUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": "STORAGE_PROVIDER_UNAVAILABLE"},
+        ) from exc
+
+    with conn:
+        conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+    write_audit(
+        conn,
+        actor=actor,
+        action="project.delete",
+        entity_type="project",
+        entity_id=project_id,
+        metadata={"deleted_pending_asset_count": len(assets)},
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/projects/{project_id}", response_model=ProjectResponse)

@@ -502,6 +502,23 @@ def test_complete_rejects_duration_outside_precheck_window(
     assert asset.json()["size_bytes"] == 0
 
 
+def test_complete_accepts_small_container_duration_rounding_overrun(
+    client: TestClient,
+    storage: FakeStorageAdapter,
+) -> None:
+    app.dependency_overrides[get_video_probe] = lambda: FakeVideoProbe(duration_seconds=15.033333)
+    intent = create_upload_intent(client)
+    storage.put_object(str(intent["storage_key"]), b"video-bytes", content_type="video/mp4")
+
+    response = client.post(
+        f"/api/assets/{intent['asset_id']}/complete",
+        headers=auth_headers("employee_1"),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["metadata"]["duration_seconds"] == 15.033333
+
+
 def test_default_probe_failure_does_not_mark_upload_complete(
     db_path: Path,
     storage: FakeStorageAdapter,

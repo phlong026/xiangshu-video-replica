@@ -178,6 +178,59 @@ def test_employee_can_create_and_list_only_their_projects(
     assert '"name": "\\u65b0\\u7684\\u590d\\u523b\\u9879\\u76ee"' in str(row["metadata_json"])
 
 
+def test_owner_can_delete_an_unfinished_project_and_its_pending_upload(
+    client: TestClient,
+    db_path: Path,
+    tmp_path: Path,
+) -> None:
+    storage = LocalStorageAdapter(root=tmp_path / "private-storage", bucket="private-bucket")
+    storage_key = "projects/project_delete/uploads/asset-pending/reference.mp4"
+    storage.put_object(storage_key, b"pending-video", content_type="video/mp4")
+    with connect_database(db_path) as conn:
+        conn.execute(
+            "INSERT INTO projects (id, owner_user_id, name) VALUES (?, ?, ?)",
+            ("project_delete", "employee_1", "Delete Me"),
+        )
+        conn.execute(
+            """
+            INSERT INTO assets (
+                id, project_id, kind, storage_uri, sha256, size_bytes, content_type,
+                created_by_user_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "asset_pending",
+                "project_delete",
+                "reference_video",
+                f"local://private-bucket/{storage_key}",
+                "",
+                0,
+                "video/mp4",
+                "employee_1",
+            ),
+        )
+        conn.commit()
+
+    response = client.delete("/api/projects/project_delete", headers=auth_headers("employee_1"))
+
+    assert response.status_code == 204
+    assert storage.head_object(storage_key) is None
+    with connect_database(db_path) as conn:
+        project = conn.execute(
+            "SELECT id FROM projects WHERE id = ?", ("project_delete",)
+        ).fetchone()
+    assert project is None
+    assert "project.delete" in audit_actions(db_path)
+
+
+def test_project_delete_rejects_a_project_with_completed_work(client: TestClient) -> None:
+    response = client.delete("/api/projects/project_owned", headers=auth_headers("employee_1"))
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "PROJECT_DELETE_REQUIRES_UNFINISHED"
+
+
 def test_auditor_cannot_create_projects_and_admin_can_list_all_projects(
     client: TestClient,
 ) -> None:

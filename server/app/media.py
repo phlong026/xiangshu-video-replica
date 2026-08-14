@@ -28,6 +28,7 @@ ALLOWED_SUFFIXES = {".mp4", ".mov"}
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 MIN_DURATION_SECONDS = 4.0
 MAX_DURATION_SECONDS = 15.0
+DURATION_ROUNDING_TOLERANCE_SECONDS = 0.1
 UPLOAD_INTENT_EXPIRES_IN = timedelta(minutes=15)
 FFPROBE_TIMEOUT_SECONDS = 5
 
@@ -319,11 +320,14 @@ def probe_video(probe: VideoProbe, content: bytes, *, filename: str) -> VideoMet
 
 
 def validate_duration(duration_seconds: float) -> None:
-    if duration_seconds < MIN_DURATION_SECONDS or duration_seconds > MAX_DURATION_SECONDS:
+    if (
+        duration_seconds < MIN_DURATION_SECONDS - DURATION_ROUNDING_TOLERANCE_SECONDS
+        or duration_seconds > MAX_DURATION_SECONDS + DURATION_ROUNDING_TOLERANCE_SECONDS
+    ):
         raise media_error(
             422,
             "VIDEO_DURATION_OUT_OF_RANGE",
-            "Video duration must be between 4 and 15 seconds.",
+            f"检测到 {duration_seconds:.2f} 秒；参考视频需为 4–15 秒。",
         )
 
 

@@ -4,6 +4,7 @@ import {
   completeVideoUpload,
   createProject,
   createVideoUploadIntent,
+  deleteProject,
   type GenerationBatch,
   type GenerationTask,
   getGenerationBatch,
@@ -58,6 +59,7 @@ export function App() {
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [uploadStage, setUploadStage] = useState<UploadStage | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [deletingProjectId, setDeletingProjectId] = useState("");
   const [activeAnalysisProject, setActiveAnalysisProject] =
     useState<Project | null>(null);
 
@@ -275,6 +277,37 @@ export function App() {
     setUploadStage(null);
   }
 
+  async function handleDeleteProject(project: Project) {
+    const confirmed = window.confirm(
+      `删除“${project.name}”？未完成的上传文件和项目记录将一并删除，且无法恢复。`,
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setDeletingProjectId(project.id);
+    setSetupError("");
+    setSetupMessage("");
+    try {
+      await deleteProject(project.id);
+      setProjects((current) =>
+        current.filter((item) => item.id !== project.id),
+      );
+      if (pendingProject?.id === project.id) {
+        setPendingProject(null);
+        setProjectName("");
+        setReferenceVideo(null);
+      }
+      setSetupMessage(`项目“${project.name}”已删除。`);
+    } catch (error) {
+      setSetupError(
+        error instanceof Error ? error.message : "删除项目失败，请稍后重试。",
+      );
+    } finally {
+      setDeletingProjectId("");
+    }
+  }
+
   if (page === "login") {
     return (
       <main className="centered-shell">
@@ -331,7 +364,9 @@ export function App() {
           <ProjectSetupPanel
             isLoading={isProjectsLoading}
             isUploading={isUploading}
+            deletingProjectId={deletingProjectId}
             onContinueUpload={handleContinueUpload}
+            onDeleteProject={handleDeleteProject}
             onOpenAnalysis={setActiveAnalysisProject}
             onFileChange={handleReferenceVideoChange}
             onProjectNameChange={setProjectName}
@@ -399,7 +434,9 @@ export function App() {
 function ProjectSetupPanel({
   isLoading,
   isUploading,
+  deletingProjectId,
   onContinueUpload,
+  onDeleteProject,
   onOpenAnalysis,
   onFileChange,
   onProjectNameChange,
@@ -416,7 +453,9 @@ function ProjectSetupPanel({
 }: {
   isLoading: boolean;
   isUploading: boolean;
+  deletingProjectId: string;
   onContinueUpload: (project: Project) => void;
+  onDeleteProject: (project: Project) => void;
   onOpenAnalysis: (project: Project) => void;
   onFileChange: (event: ChangeEvent<HTMLInputElement>) => void;
   onProjectNameChange: (value: string) => void;
@@ -470,6 +509,16 @@ function ProjectSetupPanel({
             正在为“{pendingProject.name}”重新上传参考视频。
           </p>
         ) : null}
+        {pendingProject && !isUploading ? (
+          <button
+            className="secondary-button project-delete-button"
+            disabled={Boolean(deletingProjectId)}
+            onClick={() => onDeleteProject(pendingProject)}
+            type="button"
+          >
+            删除此项目
+          </button>
+        ) : null}
         {isUploading && uploadStage ? (
           <UploadProgress stage={uploadStage} progress={uploadProgress} />
         ) : null}
@@ -504,14 +553,24 @@ function ProjectSetupPanel({
                 </span>
               </div>
               {project.reference_upload_status !== "READY" ? (
-                <button
-                  className="secondary-button"
-                  disabled={isUploading}
-                  onClick={() => onContinueUpload(project)}
-                  type="button"
-                >
-                  继续上传
-                </button>
+                <div className="project-actions">
+                  <button
+                    className="secondary-button"
+                    disabled={isUploading || Boolean(deletingProjectId)}
+                    onClick={() => onContinueUpload(project)}
+                    type="button"
+                  >
+                    继续上传
+                  </button>
+                  <button
+                    className="secondary-button project-delete-button"
+                    disabled={isUploading || Boolean(deletingProjectId)}
+                    onClick={() => onDeleteProject(project)}
+                    type="button"
+                  >
+                    {deletingProjectId === project.id ? "正在删除" : "删除项目"}
+                  </button>
+                </div>
               ) : (
                 <button
                   className="secondary-button"

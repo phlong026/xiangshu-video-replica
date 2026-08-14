@@ -229,6 +229,16 @@ export async function createProject(name: string): Promise<Project> {
   });
 }
 
+export async function deleteProject(projectId: string): Promise<void> {
+  const response = await requestApi(
+    `/api/projects/${encodeURIComponent(projectId)}`,
+    { method: "DELETE" },
+  );
+  if (!response.ok) {
+    throw new Error(await responseErrorMessage(response, "删除项目失败"));
+  }
+}
+
 export async function createVideoUploadIntent(
   projectId: string,
   file: File,
@@ -739,7 +749,7 @@ async function requestJson<T>(path: string, errorPrefix: string): Promise<T> {
     });
 
     if (!response.ok) {
-      throw new Error(`${errorPrefix}（${response.status}）`);
+      throw new Error(await responseErrorMessage(response, errorPrefix));
     }
 
     return (await response.json()) as T;
@@ -755,7 +765,7 @@ async function requestAdminJson<T>(
 ): Promise<T> {
   const response = await requestAdmin(path, init);
   if (!response.ok) {
-    throw new Error(`${errorPrefix}（${response.status}）`);
+    throw new Error(await responseErrorMessage(response, errorPrefix));
   }
   return (await response.json()) as T;
 }
@@ -767,9 +777,27 @@ async function requestApiJson<T>(
 ): Promise<T> {
   const response = await requestApi(path, init);
   if (!response.ok) {
-    throw new Error(`${errorPrefix}（${response.status}）`);
+    throw new Error(await responseErrorMessage(response, errorPrefix));
   }
   return (await response.json()) as T;
+}
+
+async function responseErrorMessage(
+  response: Response,
+  errorPrefix: string,
+): Promise<string> {
+  try {
+    const payload: unknown = await response.json();
+    if (isRecord(payload) && isRecord(payload.detail)) {
+      const message = payload.detail.message;
+      if (typeof message === "string" && message.trim()) {
+        return `${errorPrefix}：${message}（${response.status}）`;
+      }
+    }
+  } catch {
+    // A missing or non-JSON error body must not hide the HTTP status.
+  }
+  return `${errorPrefix}（${response.status}）`;
 }
 
 async function requestAdmin(

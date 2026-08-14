@@ -303,6 +303,16 @@ input:focus {
   background: #17131f;
 }
 
+.project-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.project-delete-button {
+  color: #ffb4be;
+}
+
 .project-list span {
   color: #bca7ff;
   font-size: 12px;

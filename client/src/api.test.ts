@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  completeVideoUpload,
   createProject,
   getGenerationBatch,
   getHealth,
@@ -20,6 +21,32 @@ describe("getHealth", () => {
     );
 
     await expect(getHealth()).rejects.toThrow("本地服务暂不可用（503）");
+  });
+});
+
+describe("API error details", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("shows the server precheck message instead of only the HTTP status", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 422,
+        json: async () => ({
+          detail: {
+            code: "VIDEO_DURATION_OUT_OF_RANGE",
+            message: "检测到 16.20 秒，参考视频需为 4–15 秒。",
+          },
+        }),
+      }),
+    );
+
+    await expect(completeVideoUpload("asset-1")).rejects.toThrow(
+      "参考视频预检失败：检测到 16.20 秒，参考视频需为 4–15 秒。（422）",
+    );
   });
 });
 

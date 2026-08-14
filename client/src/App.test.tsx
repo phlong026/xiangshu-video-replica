@@ -155,6 +155,51 @@ describe("App", () => {
     ).toBeInTheDocument();
   });
 
+  it("lets an employee delete an unfinished project after confirmation", async () => {
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/health")) {
+        return Promise.resolve({ ok: true, json: async () => healthResponse });
+      }
+      if (url.endsWith("/api/projects/project-pending")) {
+        return Promise.resolve({ ok: true, status: 204 });
+      }
+      if (url.endsWith("/api/projects")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => [
+            {
+              id: "project-pending",
+              owner_user_id: "employee_1",
+              name: "等待删除",
+              status: "ACTIVE",
+              reference_asset_id: "asset-pending",
+              reference_upload_status: "UPLOAD_PENDING",
+            },
+          ],
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal(
+      "confirm",
+      vi.fn(() => true),
+    );
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+    fireEvent.click(await screen.findByRole("button", { name: "删除项目" }));
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:8000/api/projects/project-pending",
+      expect.objectContaining({ method: "DELETE" }),
+    );
+    expect(
+      await screen.findByText("项目“等待删除”已删除。"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("等待删除")).toBeNull();
+  });
+
   it("lets an employee edit and save the latest analysis shot cards", async () => {
     const analysis = {
       id: "analysis-1",
