@@ -60,6 +60,12 @@ class FakeCosBody:
         return self.content
 
 
+class FakeCosNoSuchResourceClient(FakeCosClient):
+    def head_object(self, **kwargs: object) -> dict[str, str]:
+        del kwargs
+        raise RuntimeError("NoSuchResource: The Resource You Head Not Exist")
+
+
 class FakeOssClient:
     def __init__(self) -> None:
         self.calls: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
@@ -206,6 +212,22 @@ def test_cloud_adapter_signs_and_operates_on_one_private_object(
             ("GET", "tenant-a/projects/p1/source/reference.mp4", 600),
             {"slash_safe": True},
         )
+
+
+def test_cos_head_maps_deleted_object_no_such_resource_to_none() -> None:
+    adapter = CloudStorageAdapter(
+        CloudStorageConfig(
+            provider="cos",
+            bucket="private-bucket",
+            endpoint="",
+            access_key_id="public-id",
+            secret_access_key="very-secret-key",
+            region="ap-shanghai",
+        ),
+        client=FakeCosNoSuchResourceClient(),
+    )
+
+    assert adapter.head_object("projects/p1/deleted.mp4") is None
 
 
 @pytest.mark.parametrize(

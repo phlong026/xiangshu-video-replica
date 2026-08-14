@@ -612,7 +612,13 @@ def _seconds(value: timedelta) -> int:
 
 def _is_not_found(exc: Exception) -> bool:
     status = getattr(exc, "status", None) or getattr(exc, "status_code", None)
-    return status == 404 or "NoSuchKey" in str(exc) or "NotFound" in str(exc)
+    error_text = str(exc)
+    return (
+        status == 404
+        or "NoSuchKey" in error_text
+        or "NoSuchResource" in error_text
+        or "NotFound" in error_text
+    )
 
 
 def _header(headers: dict[str, Any], name: str, default: str) -> Any:

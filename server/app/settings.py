@@ -10,7 +10,14 @@ from cryptography.fernet import Fernet, InvalidToken
 ProviderName = Literal["apilio", "metaso", "cos", "oss"]
 
 SETTINGS_KEY_ENV = "VIDEO_REPLICA_SETTINGS_KEY"
-SECRET_FIELDS = ("api_key", "secret", "token", "password", "authorization")
+SECRET_FIELDS = (
+    "api_key",
+    "access_key_id",
+    "secret",
+    "token",
+    "password",
+    "authorization",
+)
 REQUIRED_PROVIDER_FIELDS: dict[ProviderName, tuple[str, ...]] = {
     # Apilio can use a dedicated Gemini key while image generation is not configured yet.
     "apilio": (),

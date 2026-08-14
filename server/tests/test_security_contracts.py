@@ -33,6 +33,7 @@ def test_provider_config_normalization_masks_secret_like_fields() -> None:
         {
             "api_key": " metaso-secret-token ",
             "Authorization": " Bearer should-not-echo ",
+            "access_key_id": " cloud-access-id ",
             "base_url": " https://metaso.example/api ",
         }
     )
@@ -40,11 +41,13 @@ def test_provider_config_normalization_masks_secret_like_fields() -> None:
     assert normalized == {
         "api_key": "metaso-secret-token",
         "Authorization": "Bearer should-not-echo",
+        "access_key_id": "cloud-access-id",
         "base_url": "https://metaso.example/api",
     }
     assert mask_config(normalized) == {
         "api_key": "********oken",
         "Authorization": "********echo",
+        "access_key_id": "********s-id",
         "base_url": "https://metaso.example/api",
     }
 
