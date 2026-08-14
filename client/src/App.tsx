@@ -1,5 +1,5 @@
 import { type ChangeEvent, type FormEvent, useEffect, useState } from "react";
-
+import { AnalysisWorkspace } from "./AnalysisWorkspace";
 import {
   completeVideoUpload,
   createProject,
@@ -51,6 +51,8 @@ export function App() {
   const [setupMessage, setSetupMessage] = useState("");
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [activeAnalysisProject, setActiveAnalysisProject] =
+    useState<Project | null>(null);
 
   useEffect(() => {
     if (page === "login") {
@@ -314,6 +316,7 @@ export function App() {
             isLoading={isProjectsLoading}
             isUploading={isUploading}
             onContinueUpload={handleContinueUpload}
+            onOpenAnalysis={setActiveAnalysisProject}
             onFileChange={handleReferenceVideoChange}
             onProjectNameChange={setProjectName}
             onSubmit={handleProjectSetup}
@@ -326,43 +329,50 @@ export function App() {
             setupMessage={setupMessage}
             uploadProgress={uploadProgress}
           />
-          <section
-            className="task-records"
-            aria-labelledby="task-records-title"
-          >
-            <div className="section-heading">
-              <div>
-                <span className="eyebrow">TASK RECORDS</span>
-                <h2 id="task-records-title">任务记录</h2>
-              </div>
-              {activeBatchId ? (
-                <span className="batch-id">{activeBatchId}</span>
-              ) : null}
-            </div>
-
-            <form className="batch-form" onSubmit={handleBatchSubmit}>
-              <label htmlFor="batch-id">Batch ID</label>
-              <div className="batch-input-row">
-                <input
-                  id="batch-id"
-                  value={batchIdInput}
-                  placeholder="粘贴 generation batch id"
-                  onChange={(event) => setBatchIdInput(event.target.value)}
-                />
-                <button type="submit" disabled={!batchIdInput.trim()}>
-                  查询任务记录
-                </button>
-              </div>
-            </form>
-
-            <BatchStatusMessage
-              error={batchError}
-              isLoading={isBatchLoading}
-              retryDelaySeconds={retryDelaySeconds}
+          {activeAnalysisProject ? (
+            <AnalysisWorkspace
+              onClose={() => setActiveAnalysisProject(null)}
+              project={activeAnalysisProject}
             />
+          ) : (
+            <section
+              className="task-records"
+              aria-labelledby="task-records-title"
+            >
+              <div className="section-heading">
+                <div>
+                  <span className="eyebrow">TASK RECORDS</span>
+                  <h2 id="task-records-title">任务记录</h2>
+                </div>
+                {activeBatchId ? (
+                  <span className="batch-id">{activeBatchId}</span>
+                ) : null}
+              </div>
 
-            {batch ? <BatchPanel batch={batch} /> : <EmptyBatchState />}
-          </section>
+              <form className="batch-form" onSubmit={handleBatchSubmit}>
+                <label htmlFor="batch-id">Batch ID</label>
+                <div className="batch-input-row">
+                  <input
+                    id="batch-id"
+                    value={batchIdInput}
+                    placeholder="粘贴 generation batch id"
+                    onChange={(event) => setBatchIdInput(event.target.value)}
+                  />
+                  <button type="submit" disabled={!batchIdInput.trim()}>
+                    查询任务记录
+                  </button>
+                </div>
+              </form>
+
+              <BatchStatusMessage
+                error={batchError}
+                isLoading={isBatchLoading}
+                retryDelaySeconds={retryDelaySeconds}
+              />
+
+              {batch ? <BatchPanel batch={batch} /> : <EmptyBatchState />}
+            </section>
+          )}
         </>
       ) : null}
     </main>
@@ -373,6 +383,7 @@ function ProjectSetupPanel({
   isLoading,
   isUploading,
   onContinueUpload,
+  onOpenAnalysis,
   onFileChange,
   onProjectNameChange,
   onSubmit,
@@ -388,6 +399,7 @@ function ProjectSetupPanel({
   isLoading: boolean;
   isUploading: boolean;
   onContinueUpload: (project: Project) => void;
+  onOpenAnalysis: (project: Project) => void;
   onFileChange: (event: ChangeEvent<HTMLInputElement>) => void;
   onProjectNameChange: (value: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
@@ -492,7 +504,13 @@ function ProjectSetupPanel({
                   继续上传
                 </button>
               ) : (
-                <span>{project.status}</span>
+                <button
+                  className="secondary-button"
+                  onClick={() => onOpenAnalysis(project)}
+                  type="button"
+                >
+                  编辑拆解
+                </button>
               )}
             </li>
           ))}

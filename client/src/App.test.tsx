@@ -155,6 +155,128 @@ describe("App", () => {
     ).toBeInTheDocument();
   });
 
+  it("lets an employee edit and save the latest analysis shot cards", async () => {
+    const analysis = {
+      id: "analysis-1",
+      project_id: "project-ready",
+      asset_id: "asset-ready",
+      kind: "analysis",
+      version_number: 1,
+      payload: {
+        analysis: {
+          summary: "咖啡口播拆解",
+          duration_seconds: 8,
+          shots: [
+            {
+              shot_id: "S01",
+              start_time: 0,
+              end_time: 8,
+              shot_type: "近景",
+              composition: "人物居中",
+              camera_motion: "轻微推进",
+              subject: "主讲人",
+              action: "看向镜头讲话",
+              scene: "咖啡店",
+              spoken_text: "一杯好咖啡",
+              transition: "硬切",
+            },
+          ],
+        },
+      },
+      created_by_user_id: "employee_1",
+      created_at: "2030-01-01T00:00:00Z",
+    };
+    const fetchMock = vi.fn((...args: [url: string, options?: RequestInit]) => {
+      const [url] = args;
+      if (url.endsWith("/health")) {
+        return Promise.resolve({ ok: true, json: async () => healthResponse });
+      }
+      if (url.endsWith("/api/projects")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => [
+            {
+              id: "project-ready",
+              owner_user_id: "employee_1",
+              name: "咖啡复刻",
+              status: "REFERENCE_READY",
+              reference_asset_id: "asset-ready",
+              reference_upload_status: "READY",
+            },
+          ],
+        });
+      }
+      if (url.endsWith("/analysis/latest")) {
+        return Promise.resolve({ ok: true, json: async () => analysis });
+      }
+      if (url.endsWith("/shot-cards/latest")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            ...analysis,
+            id: "shot-card-1",
+            kind: "shot_card",
+            payload: {
+              source_analysis_version_id: "analysis-1",
+              duration_seconds: 8,
+              shots: [
+                {
+                  ...analysis.payload.analysis.shots[0],
+                  action: "已保存的动作",
+                },
+              ],
+            },
+          }),
+        });
+      }
+      if (url.endsWith("/analysis/analysis-1/shots")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            ...analysis,
+            id: "shot-card-1",
+            kind: "shot_card",
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+    fireEvent.click(await screen.findByRole("button", { name: "编辑拆解" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "镜头卡片" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("咖啡口播拆解")).toBeInTheDocument();
+    expect(screen.getByLabelText("S01 动作")).toHaveValue("已保存的动作");
+    fireEvent.change(screen.getByLabelText("S01 动作"), {
+      target: { value: "端起咖啡杯" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存镜头卡片" }));
+
+    expect(
+      await screen.findByText("镜头卡片已保存为版本 #1。"),
+    ).toBeInTheDocument();
+    const saveCall = fetchMock.mock.calls.find(
+      ([url]) => url === "http://127.0.0.1:8000/api/analysis/analysis-1/shots",
+    );
+    expect(saveCall).toBeDefined();
+    if (!saveCall) {
+      throw new Error("镜头卡片保存请求未发出。");
+    }
+    expect(saveCall[1]).toEqual(expect.objectContaining({ method: "PUT" }));
+    expect(JSON.parse(String((saveCall[1] as RequestInit).body))).toMatchObject(
+      {
+        shots: [
+          expect.objectContaining({ shot_id: "S01", action: "端起咖啡杯" }),
+        ],
+      },
+    );
+  });
+
   it("uploads a valid reference video, completes precheck, and starts analysis", async () => {
     class SuccessfulUploadRequest {
       onerror: (() => void) | null = null;

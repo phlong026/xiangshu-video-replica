@@ -109,6 +109,32 @@ export type AnalysisVersion = {
   created_at: string;
 };
 
+export type ShotCard = {
+  shot_id: string;
+  start_time: number;
+  end_time: number;
+  shot_type: string;
+  composition: string;
+  camera_motion: string;
+  subject: string;
+  action: string;
+  scene: string;
+  spoken_text: string;
+  transition: string;
+};
+
+export type AnalysisPayload = {
+  summary: string;
+  duration_seconds: number;
+  shots: ShotCard[];
+};
+
+export type ShotCardPayload = {
+  source_analysis_version_id: string;
+  duration_seconds: number;
+  shots: ShotCard[];
+};
+
 export async function getHealth(): Promise<HealthResponse> {
   return requestJson<HealthResponse>("/health", "本地服务暂不可用");
 }
@@ -209,6 +235,82 @@ export async function startVideoAnalysis(
       }),
     },
   );
+}
+
+export async function getLatestProjectAnalysis(
+  projectId: string,
+): Promise<AnalysisVersion> {
+  return requestApiJson<AnalysisVersion>(
+    `/api/projects/${encodeURIComponent(projectId)}/analysis/latest`,
+    "读取视频拆解失败",
+  );
+}
+
+export async function getLatestProjectShotCards(
+  projectId: string,
+): Promise<AnalysisVersion | null> {
+  const response = await requestApi(
+    `/api/projects/${encodeURIComponent(projectId)}/shot-cards/latest`,
+    {},
+  );
+  if (response.status === 404) {
+    return null;
+  }
+  if (!response.ok) {
+    throw new Error(`读取已保存镜头卡片失败（${response.status}）`);
+  }
+  return (await response.json()) as AnalysisVersion;
+}
+
+export async function saveShotCards(
+  analysisId: string,
+  shots: ShotCard[],
+): Promise<AnalysisVersion> {
+  return requestApiJson<AnalysisVersion>(
+    `/api/analysis/${encodeURIComponent(analysisId)}/shots`,
+    "保存镜头卡片失败",
+    { method: "PUT", body: JSON.stringify({ shots }) },
+  );
+}
+
+export function readAnalysisPayload(
+  version: AnalysisVersion,
+): AnalysisPayload | null {
+  const analysis = version.payload.analysis;
+  if (!isRecord(analysis) || typeof analysis.summary !== "string") {
+    return null;
+  }
+  if (
+    typeof analysis.duration_seconds !== "number" ||
+    !Array.isArray(analysis.shots) ||
+    !analysis.shots.every(isShotCard)
+  ) {
+    return null;
+  }
+  return {
+    summary: analysis.summary,
+    duration_seconds: analysis.duration_seconds,
+    shots: analysis.shots,
+  };
+}
+
+export function readShotCardPayload(
+  version: AnalysisVersion,
+): ShotCardPayload | null {
+  const payload = version.payload;
+  if (
+    typeof payload.source_analysis_version_id !== "string" ||
+    typeof payload.duration_seconds !== "number" ||
+    !Array.isArray(payload.shots) ||
+    !payload.shots.every(isShotCard)
+  ) {
+    return null;
+  }
+  return {
+    source_analysis_version_id: payload.source_analysis_version_id,
+    duration_seconds: payload.duration_seconds,
+    shots: payload.shots,
+  };
 }
 
 export async function getSettings(): Promise<SettingsSnapshot> {
@@ -379,4 +481,27 @@ function contentTypeForFile(file: File): "video/mp4" | "video/quicktime" {
   return file.name.toLowerCase().endsWith(".mov")
     ? "video/quicktime"
     : "video/mp4";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isShotCard(value: unknown): value is ShotCard {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return (
+    typeof value.shot_id === "string" &&
+    typeof value.start_time === "number" &&
+    typeof value.end_time === "number" &&
+    typeof value.shot_type === "string" &&
+    typeof value.composition === "string" &&
+    typeof value.camera_motion === "string" &&
+    typeof value.subject === "string" &&
+    typeof value.action === "string" &&
+    typeof value.scene === "string" &&
+    typeof value.spoken_text === "string" &&
+    typeof value.transition === "string"
+  );
 }

@@ -282,6 +282,81 @@ input:focus {
   font-size: 12px;
 }
 
+.analysis-workspace {
+  margin-top: 32px;
+  border: 1px solid #322b43;
+  border-radius: 10px;
+  padding: 28px;
+  background: rgba(24, 20, 32, 0.92);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.18);
+}
+
+.analysis-form {
+  display: grid;
+  gap: 18px;
+  margin-top: 22px;
+}
+
+.analysis-form > button {
+  justify-self: start;
+}
+
+.analysis-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border: 1px solid #3c3448;
+  border-radius: 8px;
+  padding: 14px;
+  background: #120f18;
+}
+
+.analysis-summary span {
+  color: #aaa2ba;
+  font-size: 13px;
+}
+
+.shot-card-list {
+  display: grid;
+  gap: 14px;
+}
+
+.shot-card {
+  min-width: 0;
+  margin: 0;
+  border: 1px solid #3c3448;
+  border-radius: 8px;
+  padding: 16px;
+  background: #17131f;
+}
+
+.shot-card legend {
+  padding: 0 6px;
+  color: #bca7ff;
+  font-weight: 800;
+}
+
+.shot-card label {
+  display: grid;
+  gap: 6px;
+  color: #d9d1e8;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.shot-time-grid,
+.shot-field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.shot-field-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 12px;
+}
+
 .settings-page {
   display: grid;
   gap: 22px;
@@ -628,8 +703,15 @@ input:focus {
   .count-grid,
   .provider-grid,
   .runtime-form,
-  .diagnostic-panel {
+  .diagnostic-panel,
+  .shot-time-grid,
+  .shot-field-grid {
     grid-template-columns: 1fr;
+  }
+
+  .analysis-summary {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .task-actions {

@@ -203,6 +203,29 @@ def test_project_owner_can_create_and_read_analysis_version(client: TestClient) 
     assert fetched.json()["id"] == body["id"]
 
 
+def test_project_owner_can_read_the_latest_analysis_version(client: TestClient) -> None:
+    first = client.post(
+        "/api/projects/project_owned/analysis",
+        json={"asset_id": "asset_owned", "duration_seconds": 10},
+        headers=auth_headers("employee_1"),
+    )
+    second = client.post(
+        "/api/projects/project_owned/analysis",
+        json={"asset_id": "asset_owned", "duration_seconds": 10},
+        headers=auth_headers("employee_1"),
+    )
+    latest = client.get(
+        "/api/projects/project_owned/analysis/latest",
+        headers=auth_headers("employee_1"),
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert latest.status_code == 200
+    assert latest.json()["id"] == second.json()["id"]
+    assert latest.json()["version_number"] == 2
+
+
 def test_analysis_routes_require_existing_rbac(client: TestClient) -> None:
     auditor = client.post(
         "/api/projects/project_owned/analysis",
@@ -284,6 +307,14 @@ def test_manual_shot_card_version_is_not_overwritten_by_new_analysis(
     assert manual.status_code == 200
     assert manual.json()["kind"] == "shot_card"
     assert manual.json()["version_number"] == 1
+
+    latest_shot_card = client.get(
+        "/api/projects/project_owned/shot-cards/latest",
+        headers=auth_headers("employee_1"),
+    )
+    assert latest_shot_card.status_code == 200
+    assert latest_shot_card.json()["id"] == manual.json()["id"]
+
     assert second.status_code == 200
     assert second.json()["version_number"] == 2
 

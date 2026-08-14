@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.analysis import (
     ANALYSIS_KIND,
+    SHOT_CARD_KIND,
     FakeGemini,
     analyze_video,
     create_analysis_version,
@@ -137,6 +138,58 @@ def read_analysis(
         project_id=str(row["project_id"]),
         action="analysis.read",
     )
+    return version_response(row)
+
+
+@router.get("/projects/{project_id}/analysis/latest", response_model=VersionResponse)
+def read_latest_project_analysis(
+    project_id: str,
+    conn: Database,
+    actor: AuthenticatedUser,
+) -> VersionResponse:
+    require_project_access(conn, actor=actor, project_id=project_id, action="analysis.read")
+    row = conn.execute(
+        """
+        SELECT id, project_id, asset_id, kind, version_number, payload_json, created_by_user_id,
+               created_at
+        FROM versions
+        WHERE project_id = ? AND kind = ?
+        ORDER BY version_number DESC
+        LIMIT 1
+        """,
+        (project_id, ANALYSIS_KIND),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "ANALYSIS_NOT_FOUND", "message": "Project has no analysis version."},
+        )
+    return version_response(row)
+
+
+@router.get("/projects/{project_id}/shot-cards/latest", response_model=VersionResponse)
+def read_latest_project_shot_card(
+    project_id: str,
+    conn: Database,
+    actor: AuthenticatedUser,
+) -> VersionResponse:
+    require_project_access(conn, actor=actor, project_id=project_id, action="shot_card.read")
+    row = conn.execute(
+        """
+        SELECT id, project_id, asset_id, kind, version_number, payload_json, created_by_user_id,
+               created_at
+        FROM versions
+        WHERE project_id = ? AND kind = ?
+        ORDER BY version_number DESC
+        LIMIT 1
+        """,
+        (project_id, SHOT_CARD_KIND),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "SHOT_CARD_NOT_FOUND", "message": "Project has no shot card version."},
+        )
     return version_response(row)
 
 
