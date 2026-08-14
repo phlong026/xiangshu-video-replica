@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.auth import AuthenticatedUser, Database
 from app.media_routes import get_media_storage
@@ -13,6 +14,7 @@ from app.permissions import require_project_access
 from app.source_frames import (
     SOURCE_FRAME_CANDIDATES_KIND,
     SOURCE_FRAME_SELECTION_KIND,
+    SOURCE_FRAME_TIMESTAMPS_SECONDS,
     FFmpegSourceFrameExtractor,
     SourceFrameExtractor,
     confirm_source_frame,
@@ -28,6 +30,20 @@ class ExtractSourceFramesRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     asset_id: str = Field(min_length=1)
+    timestamps_seconds: list[float] | None = Field(default=None, min_length=1, max_length=3)
+
+    @model_validator(mode="after")
+    def validate_timestamps(self) -> ExtractSourceFramesRequest:
+        if self.timestamps_seconds is None:
+            return self
+        if any(
+            not math.isfinite(timestamp) or timestamp < 0 or timestamp > 3
+            for timestamp in self.timestamps_seconds
+        ):
+            raise ValueError("source frame timestamps must be within the first three seconds")
+        if len(set(self.timestamps_seconds)) != len(self.timestamps_seconds):
+            raise ValueError("source frame timestamps must be unique")
+        return self
 
 
 class ConfirmSourceFrameRequest(BaseModel):
@@ -73,6 +89,7 @@ def extract_project_source_frames(
         actor=actor,
         storage=storage,
         extractor=extractor,
+        timestamps_seconds=tuple(request.timestamps_seconds or SOURCE_FRAME_TIMESTAMPS_SECONDS),
     )
     return version_response(row)
 

@@ -40,10 +40,17 @@ FFMPEG_TIMEOUT_SECONDS = 15
 class ExtractedSourceFrame:
     timestamp_seconds: float
     image: bytes
+    technical_score: float | None = None
 
 
 class SourceFrameExtractor(Protocol):
-    def extract(self, content: bytes, *, filename: str) -> list[ExtractedSourceFrame]: ...
+    def extract(
+        self,
+        content: bytes,
+        *,
+        filename: str,
+        timestamps_seconds: tuple[float, ...],
+    ) -> list[ExtractedSourceFrame]: ...
 
 
 class SourceFrameExtractorUnavailable(RuntimeError):
@@ -55,7 +62,13 @@ class SourceFrameExtractionFailed(RuntimeError):
 
 
 class FFmpegSourceFrameExtractor:
-    def extract(self, content: bytes, *, filename: str) -> list[ExtractedSourceFrame]:
+    def extract(
+        self,
+        content: bytes,
+        *,
+        filename: str,
+        timestamps_seconds: tuple[float, ...],
+    ) -> list[ExtractedSourceFrame]:
         ffmpeg = shutil.which("ffmpeg")
         if ffmpeg is None:
             raise SourceFrameExtractorUnavailable("ffmpeg is required for source frame extraction")
@@ -64,13 +77,18 @@ class FFmpegSourceFrameExtractor:
         with tempfile.NamedTemporaryFile(suffix=suffix) as video_file:
             video_file.write(content)
             video_file.flush()
-            return [
-                ExtractedSourceFrame(
-                    timestamp_seconds=timestamp,
-                    image=self._extract_jpeg(ffmpeg, video_file.name, timestamp),
+            frames = []
+            for timestamp in timestamps_seconds:
+                image = self._extract_jpeg(ffmpeg, video_file.name, timestamp)
+                grayscale = self._extract_grayscale(ffmpeg, video_file.name, timestamp)
+                frames.append(
+                    ExtractedSourceFrame(
+                        timestamp_seconds=timestamp,
+                        image=image,
+                        technical_score=score_grayscale_frame(grayscale),
+                    )
                 )
-                for timestamp in SOURCE_FRAME_TIMESTAMPS_SECONDS
-            ]
+            return frames
 
     def _extract_jpeg(self, ffmpeg: str, source_path: str, timestamp: float) -> bytes:
         command = [
@@ -102,6 +120,51 @@ class FFmpegSourceFrameExtractor:
             raise SourceFrameExtractionFailed("ffmpeg could not extract a source frame")
         return result.stdout
 
+    def _extract_grayscale(self, ffmpeg: str, source_path: str, timestamp: float) -> bytes:
+        command = [
+            ffmpeg,
+            "-v",
+            "error",
+            "-ss",
+            str(timestamp),
+            "-i",
+            source_path,
+            "-frames:v",
+            "1",
+            "-vf",
+            "scale=160:-2,format=gray",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "gray",
+            "pipe:1",
+        ]
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                check=False,
+                timeout=FFMPEG_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise SourceFrameExtractionFailed("ffmpeg timed out") from exc
+        if result.returncode != 0 or not result.stdout:
+            raise SourceFrameExtractionFailed("ffmpeg could not score a source frame")
+        return result.stdout
+
+
+def score_grayscale_frame(pixels: bytes) -> float:
+    if len(pixels) < 2:
+        return 0.0
+    count = len(pixels)
+    average = sum(pixels) / count
+    variance = sum((value - average) ** 2 for value in pixels) / count
+    contrast = min(1.0, variance**0.5 / 64)
+    detail = sum(abs(left - right) for left, right in zip(pixels, pixels[1:])) / (count - 1)
+    sharpness = min(1.0, detail / 32)
+    exposure = max(0.0, 1.0 - abs(average - 127.5) / 127.5)
+    return float(round(0.6 * sharpness + 0.25 * contrast + 0.15 * exposure, 3))
+
 
 def extract_source_frame_candidates(
     conn: sqlite3.Connection,
@@ -111,6 +174,7 @@ def extract_source_frame_candidates(
     actor: CurrentUser,
     storage: StorageAdapter,
     extractor: SourceFrameExtractor,
+    timestamps_seconds: tuple[float, ...] = SOURCE_FRAME_TIMESTAMPS_SECONDS,
 ) -> sqlite3.Row:
     require_not_auditor(
         conn,
@@ -157,7 +221,11 @@ def extract_source_frame_candidates(
         ) from exc
 
     try:
-        frames = extractor.extract(video, filename=Path(reference.key).name)
+        frames = extractor.extract(
+            video,
+            filename=Path(reference.key).name,
+            timestamps_seconds=timestamps_seconds,
+        )
     except SourceFrameExtractorUnavailable as exc:
         raise source_frame_error(
             503,
@@ -196,13 +264,14 @@ def extract_source_frame_candidates(
                 {
                     "asset_id": frame_asset_id,
                     "timestamp_seconds": frame.timestamp_seconds,
-                    "score": None,
-                    "selection_reason": "固定时间候选，等待清晰度评分。",
+                    "score": frame.technical_score,
+                    "selection_reason": "技术质量分数基于细节、对比度和曝光。",
                     "storage_uri": stored.uri,
                     "sha256": stored.sha256 or hashlib.sha256(frame.image).hexdigest(),
                     "size_bytes": stored.size,
                 }
             )
+        candidates.sort(key=technical_score_of_candidate, reverse=True)
 
         with conn:
             for candidate in candidates:
@@ -234,6 +303,7 @@ def extract_source_frame_candidates(
                 payload={
                     "schema_version": SOURCE_FRAME_SCHEMA_VERSION,
                     "source_asset_id": asset_id,
+                    "requested_timestamps_seconds": list(timestamps_seconds),
                     "candidates": candidates,
                 },
             )
@@ -274,6 +344,11 @@ def delete_created_source_frames(
             storage.delete_object(storage_key, actor_id=actor_id)
         except (OSError, StorageBackendUnavailable):
             pass
+
+
+def technical_score_of_candidate(candidate: dict[str, object]) -> float:
+    score = candidate["score"]
+    return float(score) if isinstance(score, int | float) else -1.0
 
 
 def confirm_source_frame(

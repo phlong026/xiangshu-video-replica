@@ -779,6 +779,8 @@ export interface components {
     ExtractSourceFramesRequest: {
       /** Asset Id */
       asset_id: string;
+      /** Timestamps Seconds */
+      timestamps_seconds?: number[] | null;
     };
     /** GenerationBatchRequest */
     GenerationBatchRequest: {
