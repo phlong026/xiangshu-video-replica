@@ -447,6 +447,24 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/projects/{project_id}/main-character": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Project Main Character Route */
+    get: operations["read_project_main_character_route_api_projects__project_id__main_character_get"];
+    /** Choose Main Character Route */
+    put: operations["choose_main_character_route_api_projects__project_id__main_character_put"];
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/characters": {
     parameters: {
       query?: never;
@@ -482,23 +500,6 @@ export interface paths {
     head?: never;
     /** Update Character Route */
     patch: operations["update_character_route_api_characters__character_id__patch"];
-    trace?: never;
-  };
-  "/api/projects/{project_id}/main-character": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    get?: never;
-    /** Choose Main Character Route */
-    put: operations["choose_main_character_route_api_projects__project_id__main_character_put"];
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
     trace?: never;
   };
   "/health": {
@@ -1908,6 +1909,76 @@ export interface operations {
       };
     };
   };
+  read_project_main_character_route_api_projects__project_id__main_character_get: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        project_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ProjectMainCharacterResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  choose_main_character_route_api_projects__project_id__main_character_put: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        project_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ProjectMainCharacterRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ProjectMainCharacterResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   read_characters_api_characters_get: {
     parameters: {
       query?: {
@@ -2066,43 +2137,6 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["CharacterResponse"];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  choose_main_character_route_api_projects__project_id__main_character_put: {
-    parameters: {
-      query?: never;
-      header?: {
-        "X-Dev-User-Id"?: string | null;
-      };
-      path: {
-        project_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": components["schemas"]["ProjectMainCharacterRequest"];
-      };
-    };
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ProjectMainCharacterResponse"];
         };
       };
       /** @description Validation Error */

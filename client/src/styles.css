@@ -317,6 +317,68 @@ input:focus {
   font-size: 13px;
 }
 
+.character-selection {
+  border: 1px solid #3c3448;
+  border-radius: 8px;
+  padding: 16px;
+  background: #120f18;
+}
+
+.character-selection h3 {
+  margin: 8px 0;
+}
+
+.character-selection p {
+  margin: 0;
+  color: #aaa2ba;
+  line-height: 1.55;
+}
+
+.character-selection-panel {
+  display: grid;
+  gap: 14px;
+  margin-top: 16px;
+}
+
+.character-selection-panel > button {
+  justify-self: start;
+}
+
+.character-options {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  border: 0;
+  padding: 0;
+}
+
+.character-options legend {
+  margin-bottom: 8px;
+  color: #d9d1e8;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.character-options label {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid #3c3448;
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: #17131f;
+  cursor: pointer;
+}
+
+.character-options input {
+  width: auto;
+}
+
+.character-options small {
+  color: #aaa2ba;
+}
+
 .shot-card-list {
   display: grid;
   gap: 14px;

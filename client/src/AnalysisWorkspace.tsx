@@ -9,6 +9,7 @@ import {
   type ShotCard,
   saveShotCards,
 } from "./api";
+import { CharacterSelection } from "./CharacterSelection";
 
 const SHOT_TEXT_FIELDS: Array<{
   key: Exclude<keyof ShotCard, "start_time" | "end_time">;
@@ -152,6 +153,7 @@ export function AnalysisWorkspace({
             <strong>{analysisSummary}</strong>
             <span>参考时长：{durationSeconds.toFixed(1)} 秒</span>
           </div>
+          <CharacterSelection projectId={project.id} />
           <div className="shot-card-list">
             {shots.map((shot, index) => (
               <fieldset className="shot-card" key={shot.shot_id}>

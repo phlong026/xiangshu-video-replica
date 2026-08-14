@@ -135,6 +135,26 @@ export type ShotCardPayload = {
   shots: ShotCard[];
 };
 
+export type Character = {
+  id: string;
+  name: string;
+  reference_asset_ids: string[];
+  authorization_project_ids: string[];
+  authorization_expires_at: string | null;
+  is_active: boolean;
+  created_by_user_id: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ProjectMainCharacter = {
+  project_id: string;
+  character_id: string;
+  version_id: string;
+  version_number: number;
+  character_snapshot: { name?: string };
+};
+
 export async function getHealth(): Promise<HealthResponse> {
   return requestJson<HealthResponse>("/health", "本地服务暂不可用");
 }
@@ -270,6 +290,42 @@ export async function saveShotCards(
     `/api/analysis/${encodeURIComponent(analysisId)}/shots`,
     "保存镜头卡片失败",
     { method: "PUT", body: JSON.stringify({ shots }) },
+  );
+}
+
+export async function listProjectCharacters(
+  projectId: string,
+): Promise<Character[]> {
+  return requestApiJson<Character[]>(
+    `/api/characters?project_id=${encodeURIComponent(projectId)}`,
+    "读取可用人物失败",
+  );
+}
+
+export async function getProjectMainCharacter(
+  projectId: string,
+): Promise<ProjectMainCharacter | null> {
+  const response = await requestApi(
+    `/api/projects/${encodeURIComponent(projectId)}/main-character`,
+    { method: "GET" },
+  );
+  if (response.status === 404) {
+    return null;
+  }
+  if (!response.ok) {
+    throw new Error(`读取已选人物失败（${response.status}）`);
+  }
+  return (await response.json()) as ProjectMainCharacter;
+}
+
+export async function chooseProjectMainCharacter(
+  projectId: string,
+  characterId: string,
+): Promise<ProjectMainCharacter> {
+  return requestApiJson<ProjectMainCharacter>(
+    `/api/projects/${encodeURIComponent(projectId)}/main-character`,
+    "选择人物失败",
+    { method: "PUT", body: JSON.stringify({ character_id: characterId }) },
   );
 }
 

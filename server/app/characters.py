@@ -244,6 +244,38 @@ def choose_project_main_character(
     }
 
 
+def get_project_main_character(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+) -> dict[str, object]:
+    row = conn.execute(
+        """
+        SELECT main_character.version_id, version.version_number, version.payload_json
+        FROM project_main_characters AS main_character
+        JOIN versions AS version ON version.id = main_character.version_id
+        WHERE main_character.project_id = ?
+        """,
+        (project_id,),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "MAIN_CHARACTER_NOT_FOUND",
+                "message": "Project has no main character.",
+            },
+        )
+    payload = json.loads(str(row["payload_json"]))
+    return {
+        "project_id": project_id,
+        "character_id": str(payload["character_id"]),
+        "version_id": str(row["version_id"]),
+        "version_number": int(row["version_number"]),
+        "character_snapshot": payload["character_snapshot"],
+    }
+
+
 def read_character(conn: sqlite3.Connection, character_id: str) -> CharacterData:
     row = conn.execute(
         """

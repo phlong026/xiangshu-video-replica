@@ -237,6 +237,14 @@ def test_project_main_character_selection_records_immutable_version_snapshot(
     assert selection.json()["character_snapshot"]["name"] == "Original Hero"
     assert selection.json()["version_number"] == 1
 
+    restored = client.get(
+        "/api/projects/project_owned/main-character",
+        headers=headers("employee_1"),
+    )
+    assert restored.status_code == 200
+    assert restored.json()["version_id"] == selection.json()["version_id"]
+    assert restored.json()["character_id"] == character["id"]
+
     client.patch(
         f"/api/characters/{character['id']}",
         headers=headers("admin_1"),
@@ -258,6 +266,36 @@ def test_project_main_character_selection_records_immutable_version_snapshot(
     assert row["version_number"] == 1
     assert payload["character_snapshot"]["name"] == "Original Hero"
     assert payload["character_snapshot"]["reference_asset_ids"] == ["asset_ref_2", "asset_ref_1"]
+
+
+def test_project_main_character_restore_keeps_snapshot_identity_after_character_deletion(
+    client: TestClient,
+) -> None:
+    character = create_character(
+        client,
+        name="Deleted Hero",
+        authorization_project_ids=["project_owned"],
+    )
+    selection = client.put(
+        "/api/projects/project_owned/main-character",
+        headers=headers("employee_1"),
+        json={"character_id": character["id"]},
+    )
+    assert selection.status_code == 200
+
+    deletion = client.delete(
+        f"/api/characters/{character['id']}",
+        headers=headers("admin_1"),
+    )
+    restored = client.get(
+        "/api/projects/project_owned/main-character",
+        headers=headers("employee_1"),
+    )
+
+    assert deletion.status_code == 204
+    assert restored.status_code == 200
+    assert restored.json()["character_id"] == character["id"]
+    assert restored.json()["character_snapshot"]["name"] == "Deleted Hero"
 
 
 def test_employee_cannot_manage_character_library(client: TestClient) -> None:

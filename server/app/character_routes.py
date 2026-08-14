@@ -12,6 +12,7 @@ from app.characters import (
     create_character,
     delete_character,
     get_character,
+    get_project_main_character,
     list_characters,
     update_character,
 )
@@ -69,6 +70,26 @@ class ProjectMainCharacterResponse(BaseModel):
     version_id: str
     version_number: int
     character_snapshot: dict[str, object]
+
+
+@router.get(
+    "/projects/{project_id}/main-character",
+    response_model=ProjectMainCharacterResponse,
+)
+def read_project_main_character_route(
+    project_id: str,
+    conn: Database,
+    actor: AuthenticatedUser,
+) -> ProjectMainCharacterResponse:
+    require_project_access(
+        conn,
+        actor=actor,
+        project_id=project_id,
+        action="project.main_character.read",
+    )
+    return ProjectMainCharacterResponse.model_validate(
+        get_project_main_character(conn, project_id=project_id),
+    )
 
 
 @router.get("/characters", response_model=list[CharacterResponse])

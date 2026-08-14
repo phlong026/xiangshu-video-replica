@@ -277,6 +277,117 @@ describe("App", () => {
     );
   });
 
+  it("lets an employee choose an authorized main character for the project", async () => {
+    const analysis = {
+      id: "analysis-1",
+      project_id: "project-ready",
+      asset_id: "asset-ready",
+      kind: "analysis",
+      version_number: 1,
+      payload: {
+        analysis: {
+          summary: "人物选择测试",
+          duration_seconds: 8,
+          shots: [
+            {
+              shot_id: "S01",
+              start_time: 0,
+              end_time: 8,
+              shot_type: "近景",
+              composition: "人物居中",
+              camera_motion: "固定",
+              subject: "主讲人",
+              action: "讲话",
+              scene: "室内",
+              spoken_text: "你好",
+              transition: "硬切",
+            },
+          ],
+        },
+      },
+      created_by_user_id: "employee_1",
+      created_at: "2030-01-01T00:00:00Z",
+    };
+    const fetchMock = vi.fn((...args: [url: string, options?: RequestInit]) => {
+      const [url, options] = args;
+      if (url.endsWith("/health")) {
+        return Promise.resolve({ ok: true, json: async () => healthResponse });
+      }
+      if (url.endsWith("/api/projects")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => [
+            {
+              id: "project-ready",
+              owner_user_id: "employee_1",
+              name: "人物复刻",
+              status: "REFERENCE_READY",
+              reference_asset_id: "asset-ready",
+              reference_upload_status: "READY",
+            },
+          ],
+        });
+      }
+      if (url.endsWith("/analysis/latest")) {
+        return Promise.resolve({ ok: true, json: async () => analysis });
+      }
+      if (url.endsWith("/shot-cards/latest")) {
+        return Promise.resolve({ ok: false, status: 404 });
+      }
+      if (url.includes("/api/characters?project_id=project-ready")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => [
+            {
+              id: "character-1",
+              name: "小夏",
+              reference_asset_ids: ["ref-1"],
+              authorization_project_ids: ["project-ready"],
+              authorization_expires_at: null,
+              is_active: true,
+              created_by_user_id: "admin_1",
+              created_at: "2030-01-01T00:00:00Z",
+              updated_at: "2030-01-01T00:00:00Z",
+            },
+          ],
+        });
+      }
+      if (url.endsWith("/main-character") && options?.method === "GET") {
+        return Promise.resolve({ ok: false, status: 404 });
+      }
+      if (url.endsWith("/main-character") && options?.method === "PUT") {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            project_id: "project-ready",
+            character_id: "character-1",
+            version_id: "main-character-1",
+            version_number: 1,
+            character_snapshot: { name: "小夏" },
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+    fireEvent.click(await screen.findByRole("button", { name: "编辑拆解" }));
+    fireEvent.click(await screen.findByRole("button", { name: "选择人物" }));
+    fireEvent.click(await screen.findByRole("radio", { name: /小夏/ }));
+    fireEvent.click(screen.getByRole("button", { name: "确认使用人物" }));
+
+    expect(await screen.findByText("已选择人物“小夏”。")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:8000/api/projects/project-ready/main-character",
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({ character_id: "character-1" }),
+      }),
+    );
+  });
+
   it("uploads a valid reference video, completes precheck, and starts analysis", async () => {
     class SuccessfulUploadRequest {
       onerror: (() => void) | null = null;
