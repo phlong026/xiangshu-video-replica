@@ -136,6 +136,9 @@ class H3Provider:
     def download_result(self, url: str) -> bytes:
         raise H3ProviderFailed("download_result is not implemented for this provider")
 
+    def _query_task(self, provider_task_id: str) -> dict[str, Any]:
+        raise H3ProviderFailed("_query_task is not implemented for this provider")
+
 
 class MetasoHttpTransport(Protocol):
     def request(
@@ -997,6 +1000,70 @@ def run_next_generation_task(
     return get_task_result(conn, task_id)
 
 
+def _store_and_finalize_archive(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    batch_id: str,
+    project_id: str,
+    created_by_user_id: str,
+    content: bytes,
+    storage: StorageAdapter,
+) -> TaskResult:
+    """Archive already-downloaded H3 result bytes and mark the task terminal."""
+    stored = storage.put_object(
+        f"generation-results/{task_id}.mp4",
+        content,
+        content_type="video/mp4",
+    )
+    result_asset_id = str(uuid4())
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO assets (
+                id,
+                project_id,
+                kind,
+                storage_uri,
+                sha256,
+                size_bytes,
+                content_type,
+                created_by_user_id
+            )
+            VALUES (?, ?, 'video', ?, ?, ?, ?, ?)
+            """,
+            (
+                result_asset_id,
+                project_id,
+                stored.uri,
+                stored.sha256,
+                stored.size,
+                stored.content_type,
+                created_by_user_id,
+            ),
+        )
+        conn.execute(
+            """
+            UPDATE generation_tasks
+            SET
+                status = 'SUCCEEDED',
+                archive_status = 'ARCHIVED',
+                result_asset_id = ?,
+                provider_result_url = NULL,
+                error_code = NULL,
+                error_message_redacted = NULL,
+                locked_by = NULL,
+                locked_until = NULL,
+                completed_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (result_asset_id, task_id),
+        )
+        refresh_batch_status(conn, batch_id=batch_id)
+    return get_task_result(conn, task_id)
+
+
 def _retry_archive(
     conn: sqlite3.Connection,
     *,
@@ -1029,62 +1096,101 @@ def _retry_archive(
         _release_archive_retry(conn, task_id=task_id)
         return get_task_result(conn, task_id)
     try:
-        stored = storage.put_object(
-            f"generation-results/{task_id}.mp4",
-            content,
-            content_type="video/mp4",
+        return _store_and_finalize_archive(
+            conn,
+            task_id=task_id,
+            batch_id=batch_id,
+            project_id=str(row["project_id"]),
+            created_by_user_id=str(row["created_by_user_id"]),
+            content=content,
+            storage=storage,
         )
     except Exception as exc:
         logger.warning("archive retry put failed for task %s: %s", task_id, type(exc).__name__)
         _release_archive_retry(conn, task_id=task_id)
         return get_task_result(conn, task_id)
 
-    result_asset_id = str(uuid4())
-    with conn:
-        conn.execute(
-            """
-            INSERT INTO assets (
-                id,
-                project_id,
-                kind,
-                storage_uri,
-                sha256,
-                size_bytes,
-                content_type,
-                created_by_user_id
+
+def reconcile_submission_uncertain_task(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    batch_id: str,
+    project_id: str,
+    created_by_user_id: str,
+    storage: StorageAdapter,
+    provider: H3Provider,
+) -> TaskResult:
+    """Reconcile a SUBMISSION_UNCERTAIN task against the provider.
+
+    If the provider task id is known, query it and archive the result when it
+    succeeded, or mark it terminal on an explicit provider failure. When the
+    create response was lost (no provider task id), refuse to guess: a human
+    must first confirm the charge did not occur before any resubmission.
+    """
+    row = conn.execute(
+        "SELECT status, provider_task_id FROM generation_tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        raise LookupError("generation task disappeared")
+    if row["status"] != "SUBMISSION_UNCERTAIN":
+        raise generation_error(
+            409, "TASK_NOT_UNCERTAIN", "Only SUBMISSION_UNCERTAIN tasks can be reconciled."
+        )
+    provider_task_id = row["provider_task_id"]
+    if not provider_task_id:
+        raise generation_error(
+            409,
+            "SUBMISSION_REQUIRES_MANUAL_CONFIRMATION",
+            "The submission result is unknown and there is no provider task id; "
+            "confirm the charge did not occur before deciding to resubmit.",
+        )
+    try:
+        item = provider._query_task(str(provider_task_id))
+    except H3ProviderFailed as exc:
+        raise generation_error(
+            502, "PROVIDER_QUERY_FAILED", "Provider query failed during reconciliation."
+        ) from exc
+    status = item.get("status")
+    if status == "succeeded":
+        result_url = _metaso_content_url(item, provider_task_id=str(provider_task_id))
+        try:
+            content = provider.download_result(result_url)
+        except Exception as exc:
+            raise generation_error(
+                503, "RESULT_DOWNLOAD_FAILED", "Result download failed; retry reconciliation."
+            ) from exc
+        return _store_and_finalize_archive(
+            conn,
+            task_id=task_id,
+            batch_id=batch_id,
+            project_id=project_id,
+            created_by_user_id=created_by_user_id,
+            content=content,
+            storage=storage,
+        )
+    if status in {"failed", "cancelled"}:
+        with conn:
+            conn.execute(
+                """
+                UPDATE generation_tasks
+                SET
+                    status = 'FAILED',
+                    error_code = 'PROVIDER_TERMINAL',
+                    error_message_redacted = 'Provider reports the task finished with ' || ?,
+                    locked_by = NULL,
+                    locked_until = NULL,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (str(status), task_id),
             )
-            VALUES (?, ?, 'video', ?, ?, ?, ?, ?)
-            """,
-            (
-                result_asset_id,
-                str(row["project_id"]),
-                stored.uri,
-                stored.sha256,
-                stored.size,
-                stored.content_type,
-                str(row["created_by_user_id"]),
-            ),
-        )
-        conn.execute(
-            """
-            UPDATE generation_tasks
-            SET
-                status = 'SUCCEEDED',
-                archive_status = 'ARCHIVED',
-                result_asset_id = ?,
-                provider_result_url = NULL,
-                error_code = NULL,
-                error_message_redacted = NULL,
-                locked_by = NULL,
-                locked_until = NULL,
-                completed_at = CURRENT_TIMESTAMP,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-            """,
-            (result_asset_id, task_id),
-        )
-        refresh_batch_status(conn, batch_id=batch_id)
-    return get_task_result(conn, task_id)
+            refresh_batch_status(conn, batch_id=batch_id)
+        return get_task_result(conn, task_id)
+    raise generation_error(
+        409, "PROVIDER_STILL_PROCESSING", "Provider reports the task is still running."
+    )
 
 
 def _release_archive_retry(conn: sqlite3.Connection, *, task_id: str) -> None:

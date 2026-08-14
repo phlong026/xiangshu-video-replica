@@ -8,16 +8,22 @@ from app.generation import (
     FakeH3Provider,
     GenerationBatchRequest,
     H3Provider,
+    H3ProviderSettingsUnavailable,
     PromptCompileRequest,
     ScriptRequest,
+    TaskResult,
     VersionResult,
     compile_prompt_version,
     create_generation_batch,
     create_script_version,
     get_generation_batch,
+    h3_provider_for_task,
     lock_prompt_version,
+    reconcile_submission_uncertain_task,
     version_result,
 )
+from app.media_routes import MediaStorage
+from app.permissions import require_not_auditor, require_project_access
 
 router = APIRouter(prefix="/api", tags=["generation"])
 
@@ -98,3 +104,56 @@ def read_generation_batch(
     actor: AuthenticatedUser,
 ) -> BatchResult:
     return get_generation_batch(conn, batch_id=batch_id, actor=actor)
+
+
+@router.post("/generation-tasks/{task_id}/reconcile", response_model=TaskResult)
+def reconcile_uncertain_task(
+    task_id: str,
+    conn: Database,
+    actor: AuthenticatedUser,
+    storage: MediaStorage,
+) -> TaskResult:
+    row = conn.execute(
+        """
+        SELECT
+            generation_batches.id AS batch_id,
+            generation_batches.project_id,
+            generation_batches.created_by_user_id,
+            generation_tasks.provider
+        FROM generation_tasks
+        JOIN generation_batches ON generation_batches.id = generation_tasks.batch_id
+        WHERE generation_tasks.id = ?
+        """,
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail={"code": "TASK_NOT_FOUND"})
+    require_not_auditor(
+        conn,
+        actor=actor,
+        action="generation_task.reconcile",
+        entity_type="generation_task",
+        entity_id=task_id,
+    )
+    require_project_access(
+        conn,
+        actor=actor,
+        project_id=str(row["project_id"]),
+        action="generation_task.reconcile",
+    )
+    try:
+        provider = h3_provider_for_task(conn, str(row["provider"]))
+    except H3ProviderSettingsUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "METASO_SETTINGS_UNAVAILABLE"},
+        ) from exc
+    return reconcile_submission_uncertain_task(
+        conn,
+        task_id=task_id,
+        batch_id=str(row["batch_id"]),
+        project_id=str(row["project_id"]),
+        created_by_user_id=str(row["created_by_user_id"]),
+        storage=storage,
+        provider=provider,
+    )

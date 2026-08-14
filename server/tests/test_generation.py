@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 from cryptography.fernet import Fernet
+from fastapi import HTTPException
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
@@ -23,6 +24,7 @@ from app.generation import (
     SubmissionUncertain,
     build_h3_request,
     mark_expired_active_leases_needing_attention,
+    reconcile_submission_uncertain_task,
     run_next_generation_task,
 )
 from app.generation_routes import get_h3_provider
@@ -1551,3 +1553,151 @@ def test_expired_archive_retry_lease_resets_to_retryable_not_uncertain(
 
     assert row["status"] == "SUCCEEDED"
     assert row["archive_status"] == "ARCHIVE_FAILED"
+
+
+class ReconcileSucceededProvider(MetasoH3Provider):
+    def _query_task(self, provider_task_id: str) -> dict[str, Any]:
+        return {
+            "id": provider_task_id,
+            "status": "succeeded",
+            "content": {"url": "https://example.com/results/ok.mp4"},
+        }
+
+    def download_result(self, url: str) -> bytes:
+        return b"reconciled-mp4-bytes"
+
+
+class ReconcileRunningProvider(MetasoH3Provider):
+    def _query_task(self, provider_task_id: str) -> dict[str, Any]:
+        return {"id": provider_task_id, "status": "running"}
+
+
+def test_reconcile_submission_uncertain_recovers_succeeded_result(
+    db_path: Path, client: TestClient
+) -> None:
+    prompt_id = create_locked_prompt(client)
+    client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json={
+            "quantity": 1,
+            "prompt_version_id": prompt_id,
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+            "idempotency_key": "reconcile-ok",
+        },
+    )
+
+    with connect_database(db_path) as conn:
+        task = conn.execute("SELECT id, batch_id FROM generation_tasks").fetchone()
+        conn.execute(
+            """
+            UPDATE generation_tasks
+            SET status = 'SUBMISSION_UNCERTAIN', error_code = 'SUBMISSION_UNCERTAIN',
+                provider_task_id = 'pt-123'
+            WHERE id = ?
+            """,
+            (str(task["id"]),),
+        )
+        result = reconcile_submission_uncertain_task(
+            conn,
+            task_id=str(task["id"]),
+            batch_id=str(task["batch_id"]),
+            project_id="project_owned",
+            created_by_user_id="employee_1",
+            storage=FakeStorageAdapter(provider="cos", bucket="generation-results"),
+            provider=ReconcileSucceededProvider(api_key="test-key"),
+        )
+        row = conn.execute(
+            "SELECT status, archive_status, result_asset_id FROM generation_tasks"
+        ).fetchone()
+
+    assert result is not None
+    assert row["status"] == "SUCCEEDED"
+    assert row["archive_status"] == "ARCHIVED"
+    assert row["result_asset_id"] is not None
+
+
+def test_reconcile_without_provider_task_id_requires_manual_confirmation(
+    db_path: Path, client: TestClient
+) -> None:
+    prompt_id = create_locked_prompt(client)
+    client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json={
+            "quantity": 1,
+            "prompt_version_id": prompt_id,
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+            "idempotency_key": "reconcile-manual",
+        },
+    )
+
+    with connect_database(db_path) as conn:
+        task = conn.execute("SELECT id, batch_id FROM generation_tasks").fetchone()
+        conn.execute(
+            """
+            UPDATE generation_tasks
+            SET status = 'SUBMISSION_UNCERTAIN', error_code = 'SUBMISSION_UNCERTAIN',
+                provider_task_id = NULL
+            WHERE id = ?
+            """,
+            (str(task["id"]),),
+        )
+        with pytest.raises(HTTPException) as excinfo:
+            reconcile_submission_uncertain_task(
+                conn,
+                task_id=str(task["id"]),
+                batch_id=str(task["batch_id"]),
+                project_id="project_owned",
+                created_by_user_id="employee_1",
+                storage=FakeStorageAdapter(provider="cos", bucket="generation-results"),
+                provider=ReconcileSucceededProvider(api_key="test-key"),
+            )
+
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.detail["code"] == "SUBMISSION_REQUIRES_MANUAL_CONFIRMATION"
+
+
+def test_reconcile_running_task_keeps_uncertain(db_path: Path, client: TestClient) -> None:
+    prompt_id = create_locked_prompt(client)
+    client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json={
+            "quantity": 1,
+            "prompt_version_id": prompt_id,
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+            "idempotency_key": "reconcile-running",
+        },
+    )
+
+    with connect_database(db_path) as conn:
+        task = conn.execute("SELECT id, batch_id FROM generation_tasks").fetchone()
+        conn.execute(
+            """
+            UPDATE generation_tasks
+            SET status = 'SUBMISSION_UNCERTAIN', error_code = 'SUBMISSION_UNCERTAIN',
+                provider_task_id = 'pt-running'
+            WHERE id = ?
+            """,
+            (str(task["id"]),),
+        )
+        with pytest.raises(HTTPException) as excinfo:
+            reconcile_submission_uncertain_task(
+                conn,
+                task_id=str(task["id"]),
+                batch_id=str(task["batch_id"]),
+                project_id="project_owned",
+                created_by_user_id="employee_1",
+                storage=FakeStorageAdapter(provider="cos", bucket="generation-results"),
+                provider=ReconcileRunningProvider(api_key="test-key"),
+            )
+
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.detail["code"] == "PROVIDER_STILL_PROCESSING"
