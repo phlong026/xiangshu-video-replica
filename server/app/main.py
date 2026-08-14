@@ -6,6 +6,7 @@ from pydantic import BaseModel
 
 from app.analysis_routes import router as analysis_router
 from app.character_routes import router as character_router
+from app.first_frame_routes import router as first_frame_router
 from app.generation_routes import router as generation_router
 from app.media_routes import router as media_router
 from app.rbac_routes import router as rbac_router
@@ -38,6 +39,7 @@ app.include_router(media_router)
 app.include_router(analysis_router)
 app.include_router(character_router)
 app.include_router(source_frame_router)
+app.include_router(first_frame_router)
 
 
 @app.get("/health", response_model=HealthResponse)
