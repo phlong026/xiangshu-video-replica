@@ -29,7 +29,7 @@ app.add_middleware(
         "tauri://localhost",
     ],
     allow_credentials=False,
-    allow_methods=["GET", "POST", "PATCH", "PUT"],
+    allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"],
     allow_headers=["Content-Type", "X-Dev-User-Id"],
 )
 app.include_router(generation_router)

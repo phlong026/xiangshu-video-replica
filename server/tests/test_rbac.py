@@ -150,6 +150,19 @@ def test_dev_header_login_returns_active_user_role(client: TestClient) -> None:
     }
 
 
+def test_desktop_origin_can_preflight_project_deletion(client: TestClient) -> None:
+    response = client.options(
+        "/api/projects/project_owned",
+        headers={
+            "Origin": "http://127.0.0.1:5173",
+            "Access-Control-Request-Method": "DELETE",
+        },
+    )
+
+    assert response.status_code == 200
+    assert "DELETE" in response.headers["access-control-allow-methods"]
+
+
 def test_employee_can_create_and_list_only_their_projects(
     client: TestClient,
     db_path: Path,
