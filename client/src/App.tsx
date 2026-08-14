@@ -29,6 +29,7 @@ type UploadStage =
 const BATCH_STORAGE_KEY = "generation.batchId";
 const POLL_INTERVAL_MS = 2_000;
 const MAX_RETRY_DELAY_MS = 16_000;
+const MAX_BATCH_POLL_RETRIES = 5;
 const TERMINAL_BATCH_STATUSES = new Set([
   "SUCCEEDED",
   "COMPLETED_WITH_FAILURES",
@@ -138,6 +139,7 @@ export function App() {
     let isActive = true;
     let timeoutId: number | undefined;
     let nextRetryDelayMs = POLL_INTERVAL_MS;
+    let retryCount = 0;
 
     async function loadBatch() {
       setIsBatchLoading(true);
@@ -149,14 +151,33 @@ export function App() {
         setBatch(nextBatch);
         setBatchError("");
         setRetryDelaySeconds(null);
+        retryCount = 0;
         nextRetryDelayMs = POLL_INTERVAL_MS;
         window.localStorage.setItem(BATCH_STORAGE_KEY, activeBatchId);
 
         if (!isTerminalBatch(nextBatch)) {
           timeoutId = window.setTimeout(loadBatch, POLL_INTERVAL_MS);
         }
-      } catch {
+      } catch (error) {
         if (!isActive) {
+          return;
+        }
+        const status = (error as { status?: number }).status;
+        if (status === 404) {
+          // Hard error: the batch no longer exists. Stop polling and clear it.
+          setBatchError("该任务记录不存在，已停止自动刷新。");
+          setRetryDelaySeconds(null);
+          window.localStorage.removeItem(BATCH_STORAGE_KEY);
+          setActiveBatchId("");
+          setBatch(null);
+          return;
+        }
+        retryCount += 1;
+        if (retryCount >= MAX_BATCH_POLL_RETRIES) {
+          setBatchError(
+            "网络连接失败，已停止自动刷新，请检查本地服务后手动刷新。",
+          );
+          setRetryDelaySeconds(null);
           return;
         }
         nextRetryDelayMs = Math.min(nextRetryDelayMs * 2, MAX_RETRY_DELAY_MS);

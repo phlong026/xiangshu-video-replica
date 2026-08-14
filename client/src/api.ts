@@ -2,6 +2,9 @@ import type { components } from "./generated/api";
 
 const DEFAULT_API_BASE_URL = "http://127.0.0.1:8000";
 const REQUEST_TIMEOUT_MS = 5_000;
+// Cloud/storage operations (diagnostics, presigned URLs, archive prechecks)
+// may legitimately take much longer than a normal API round-trip.
+const CLOUD_OP_TIMEOUT_MS = 60_000;
 
 type HealthResponse = components["schemas"]["HealthResponse"];
 
@@ -302,6 +305,7 @@ export async function completeVideoUpload(
     `/api/assets/${encodeURIComponent(assetId)}/complete`,
     "参考视频预检失败",
     { method: "POST" },
+    CLOUD_OP_TIMEOUT_MS,
   );
 }
 
@@ -542,6 +546,7 @@ export async function getAssetDownloadUrl(
     `/api/assets/${encodeURIComponent(assetId)}/download-url`,
     "读取源画面失败",
     { method: "POST" },
+    CLOUD_OP_TIMEOUT_MS,
   );
 }
 
@@ -714,6 +719,7 @@ export async function runSettingsDiagnostic(): Promise<SettingsDiagnosticReport>
     "/api/admin/settings/diagnostic-test",
     "测试设置失败",
     { method: "POST" },
+    CLOUD_OP_TIMEOUT_MS,
   );
 }
 
@@ -762,10 +768,14 @@ async function requestAdminJson<T>(
   path: string,
   errorPrefix: string,
   init: RequestInit = {},
+  timeoutMs: number = REQUEST_TIMEOUT_MS,
 ): Promise<T> {
-  const response = await requestAdmin(path, init);
+  const response = await requestAdmin(path, init, timeoutMs);
   if (!response.ok) {
-    throw new Error(await responseErrorMessage(response, errorPrefix));
+    const message = await responseErrorMessage(response, errorPrefix);
+    const error = new Error(message) as Error & { status?: number };
+    error.status = response.status;
+    throw error;
   }
   return (await response.json()) as T;
 }
@@ -774,10 +784,14 @@ async function requestApiJson<T>(
   path: string,
   errorPrefix: string,
   init: RequestInit = {},
+  timeoutMs: number = REQUEST_TIMEOUT_MS,
 ): Promise<T> {
-  const response = await requestApi(path, init);
+  const response = await requestApi(path, init, timeoutMs);
   if (!response.ok) {
-    throw new Error(await responseErrorMessage(response, errorPrefix));
+    const message = await responseErrorMessage(response, errorPrefix);
+    const error = new Error(message) as Error & { status?: number };
+    error.status = response.status;
+    throw error;
   }
   return (await response.json()) as T;
 }
@@ -803,12 +817,10 @@ async function responseErrorMessage(
 async function requestAdmin(
   path: string,
   init: RequestInit,
+  timeoutMs: number = REQUEST_TIMEOUT_MS,
 ): Promise<Response> {
   const controller = new AbortController();
-  const timeout = window.setTimeout(
-    () => controller.abort(),
-    REQUEST_TIMEOUT_MS,
-  );
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
   const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? DEFAULT_API_BASE_URL;
   const headers = new Headers(init.headers);
   const devUserId =
@@ -828,17 +840,23 @@ async function requestAdmin(
       headers,
       signal: controller.signal,
     });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("请求超时，请重试");
+    }
+    throw error;
   } finally {
     window.clearTimeout(timeout);
   }
 }
 
-async function requestApi(path: string, init: RequestInit): Promise<Response> {
+async function requestApi(
+  path: string,
+  init: RequestInit,
+  timeoutMs: number = REQUEST_TIMEOUT_MS,
+): Promise<Response> {
   const controller = new AbortController();
-  const timeout = window.setTimeout(
-    () => controller.abort(),
-    REQUEST_TIMEOUT_MS,
-  );
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
   const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? DEFAULT_API_BASE_URL;
   const headers = new Headers(init.headers);
   const devUserId =
@@ -858,6 +876,11 @@ async function requestApi(path: string, init: RequestInit): Promise<Response> {
       headers,
       signal: controller.signal,
     });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("请求超时，请重试");
+    }
+    throw error;
   } finally {
     window.clearTimeout(timeout);
   }

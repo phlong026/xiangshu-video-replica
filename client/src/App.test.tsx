@@ -1052,6 +1052,43 @@ describe("App", () => {
     expect(generationRequestCount).toBe(3);
   });
 
+  it("stops polling and clears storage when the batch returns 404", async () => {
+    vi.useFakeTimers();
+    let generationRequestCount = 0;
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/health")) {
+        return Promise.resolve({ ok: true, json: async () => healthResponse });
+      }
+      if (url.endsWith("/api/projects")) {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
+      generationRequestCount += 1;
+      return Promise.resolve({
+        ok: false,
+        status: 404,
+        json: async () => ({ detail: { code: "BATCH_NOT_FOUND" } }),
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+    fireEvent.change(screen.getByLabelText("Batch ID"), {
+      target: { value: "batch-missing" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "查询任务记录" }));
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(
+      screen.getByText("该任务记录不存在，已停止自动刷新。"),
+    ).toBeInTheDocument();
+    expect(window.localStorage.getItem("generation.batchId")).toBeNull();
+    expect(generationRequestCount).toBe(1);
+  });
+
   it("restores the last batch id from localStorage when reopening the workspace", async () => {
     window.localStorage.setItem("generation.batchId", "batch-restored");
     const fetchMock = vi.fn((url: string) => {
