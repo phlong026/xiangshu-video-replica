@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hmac
+import os
+import time
 from typing import Annotated
 from urllib.parse import quote
 
@@ -23,6 +26,7 @@ from app.storage import (
     cloud_storage_config_from_settings,
     create_local_storage_from_environment,
     create_storage_adapter,
+    local_download_signature,
 )
 
 router = APIRouter(prefix="/api/assets", tags=["media"])
@@ -178,3 +182,39 @@ async def put_local_object(
     content_type = request.headers.get("content-type", "application/octet-stream")
     storage.put_object(object_key, content, content_type=content_type)
     return Response(status_code=204)
+
+
+@router.get("/local-objects/{object_key:path}")
+def get_local_object(
+    object_key: str,
+    request: Request,
+    storage: MediaStorage,
+) -> Response:
+    """Serve a local-storage object through the API.
+
+    The download URL carries a short-lived HMAC signature (issued by
+    create_download_url) because an <img> tag cannot attach the dev identity
+    header. The signature is bound to the object key and expiry, so a leaked URL
+    cannot be replayed after it expires.
+    """
+    if storage.provider != "local":
+        raise HTTPException(status_code=404, detail={"code": "LOCAL_DOWNLOAD_UNAVAILABLE"})
+    expires_at = request.query_params.get("expires")
+    signature = request.query_params.get("sig")
+    secret = os.environ.get("VIDEO_REPLICA_SETTINGS_KEY", "")
+    if (
+        not expires_at
+        or not signature
+        or not secret
+        or not expires_at.isdigit()
+        or int(expires_at) < int(time.time())
+        or not hmac.compare_digest(
+            signature,
+            local_download_signature(object_key, expires_at, secret=secret),
+        )
+    ):
+        raise HTTPException(status_code=403, detail={"code": "LOCAL_DOWNLOAD_FORBIDDEN"})
+    stored = storage.head_object(object_key)
+    content = storage.get_object(object_key)
+    media_type = stored.content_type if stored is not None else "application/octet-stream"
+    return Response(content=content, media_type=media_type)

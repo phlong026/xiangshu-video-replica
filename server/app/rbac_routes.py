@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import os
 import sqlite3
+import time
 from datetime import timedelta
+from urllib.parse import quote
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Response, status
@@ -9,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.auth import AuthenticatedUser, Database
 from app.media import storage_key_from_uri
+from app.media_routes import LOCAL_API_BASE_URL
 from app.permissions import (
     project_id_for_task,
     require_asset_access,
@@ -24,6 +28,7 @@ from app.storage import (
     StorageBackendUnavailable,
     cloud_storage_config_from_settings,
     create_storage_adapter,
+    local_download_signature,
     local_storage_root,
     require_storage_match,
     storage_object_ref_from_uri,
@@ -414,8 +419,18 @@ def create_download_url(
     )
     try:
         storage = storage_for_asset(conn, str(row["storage_uri"]))
+        object_key = storage_key_from_uri(str(row["storage_uri"]))
+        if storage.provider == "local":
+            secret = os.environ.get("VIDEO_REPLICA_SETTINGS_KEY", "")
+            expires_at = str(int(time.time()) + int(DOWNLOAD_URL_EXPIRES_IN.total_seconds()))
+            signature = local_download_signature(object_key, expires_at, secret=secret)
+            url = (
+                f"{LOCAL_API_BASE_URL}/api/assets/local-objects/{quote(object_key, safe='/')}"
+                f"?expires={expires_at}&sig={signature}"
+            )
+            return DownloadUrlResponse(url=url)
         intent = storage.create_download_intent(
-            storage_key_from_uri(str(row["storage_uri"])),
+            object_key,
             expires_in=DOWNLOAD_URL_EXPIRES_IN,
             can_read=True,
         )

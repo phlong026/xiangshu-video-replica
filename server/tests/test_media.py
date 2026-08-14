@@ -562,3 +562,69 @@ def test_default_probe_failure_does_not_mark_upload_complete(
     assert row is not None
     assert int(row["size_bytes"]) == 0
     assert str(row["sha256"]) == ""
+
+
+def test_local_download_url_and_proxy(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("VIDEO_REPLICA_SETTINGS_KEY", Fernet.generate_key().decode("ascii"))
+    monkeypatch.setenv("VIDEO_REPLICA_STORAGE_ROOT", str(tmp_path / "local-storage"))
+    storage = LocalStorageAdapter(root=tmp_path / "local-storage")
+    storage.put_object(
+        "projects/project_owned/uploads/asset-1/demo.mp4",
+        b"mp4-content",
+        content_type="video/mp4",
+    )
+
+    with connect_database(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO assets (
+                id,
+                project_id,
+                kind,
+                storage_uri,
+                sha256,
+                size_bytes,
+                content_type,
+                created_by_user_id
+            )
+            VALUES (?, ?, 'video', ?, 'sha', 10, 'video/mp4', 'employee_1')
+            """,
+            (
+                "asset-1",
+                "project_owned",
+                "local://local-private/projects/project_owned/uploads/asset-1/demo.mp4",
+            ),
+        )
+
+    def database_override() -> Iterator[sqlite3.Connection]:
+        conn = connect_database(db_path)
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    app.dependency_overrides[get_database] = database_override
+    app.dependency_overrides[get_media_storage] = lambda: storage
+    try:
+        client = TestClient(app)
+        url_resp = client.post(
+            "/api/assets/asset-1/download-url", headers=auth_headers("employee_1")
+        )
+        assert url_resp.status_code == 200
+        url = url_resp.json()["url"]
+        assert url.startswith("http://127.0.0.1:8000/api/assets/local-objects/")
+
+        from urllib.parse import urlsplit
+
+        parsed = urlsplit(url)
+        path = f"{parsed.path}?{parsed.query}"
+        get_resp = client.get(path)
+        assert get_resp.status_code == 200
+        assert get_resp.content == b"mp4-content"
+
+        bad_resp = client.get(f"{path}x")
+        assert bad_resp.status_code == 403
+    finally:
+        app.dependency_overrides.clear()

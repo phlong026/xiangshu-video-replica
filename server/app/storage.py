@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -134,6 +135,12 @@ def create_storage_adapter(config: CloudStorageConfig) -> StorageAdapter:
 
 
 STORAGE_ROOT_ENV = "VIDEO_REPLICA_STORAGE_ROOT"
+
+
+def local_download_signature(key: str, expires_at: str, *, secret: str) -> str:
+    """HMAC over (key, expires_at) so a local `local://` object can be served
+    through the API without leaking the X-Dev-User-Id header to an <img> tag."""
+    return hmac.new(secret.encode(), f"{key}|{expires_at}".encode(), hashlib.sha256).hexdigest()
 
 
 def local_storage_root() -> Path:

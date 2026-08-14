@@ -374,8 +374,11 @@ def test_project_owner_receives_short_lived_storage_download_url(client: TestCli
     )
 
     assert response.status_code == 200
-    assert response.json()["url"].startswith("local://private-bucket/outputs/asset_owned.mp4?")
-    assert "method=GET" in response.json()["url"]
+    assert response.json()["url"].startswith(
+        "http://127.0.0.1:8000/api/assets/local-objects/outputs/asset_owned.mp4?"
+    )
+    assert "expires=" in response.json()["url"]
+    assert "sig=" in response.json()["url"]
 
 
 def test_download_audit_does_not_store_temporary_url(client: TestClient, db_path: Path) -> None:
