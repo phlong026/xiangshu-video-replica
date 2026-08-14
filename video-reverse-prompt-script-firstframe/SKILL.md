@@ -27,6 +27,8 @@ description: 输入一个参考视频，自动拆解完整分镜、人物与摄�
 
 ## 执行流程
 
+下方命令以 `python3` 为例；Windows 若仅有 Python Launcher，等价使用 `py -3`。
+
 ### 1. 建立隔离运行目录
 
 在当前工作区新建 `video_reverse_runs/<video_stem>_<timestamp>/`，含 `outputs/` 与 `internal/debug/`。不要复用已有运行目录——脚本会拒绝覆盖已分析的 `run_manifest.json`。

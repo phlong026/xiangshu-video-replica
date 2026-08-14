@@ -13,8 +13,8 @@ from pathlib import Path
 from typing import Dict, Iterable
 
 
-RELEASE_VERSION = "0.6.3"
-SKILL_ARCHIVE_NAME = "video-reverse-prompt-script-firstframe-v0.6.3.zip"
+RELEASE_VERSION = "0.6.4"
+SKILL_ARCHIVE_NAME = "video-reverse-prompt-script-firstframe-v0.6.4.zip"
 BUNDLE_NAME = "Video_Reverse_SkillS_V%s-OneClick" % RELEASE_VERSION
 EXCLUDED_PARTS = {"__pycache__", "video_reverse_runs", "verification", "docs"}
 EXCLUDED_NAMES = {".DS_Store"}

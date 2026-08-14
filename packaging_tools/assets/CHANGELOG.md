@@ -1,5 +1,16 @@
 # Changelog
 
+## V0.6.4
+
+Windows 环境自动引导，不改变 V0.6 的视频分析和双文件交付契约。
+
+- Windows 入口改由 PowerShell 5.1 引导，不再要求电脑预先具备 Python。
+- 缺少 Python 3.9+ 时，使用 WinGet 安静安装当前用户级 `Python.Python.3.11`。
+- 缺少 `ffmpeg`/`ffprobe` 时，使用 WinGet 安装 `Gyan.FFmpeg`，并补齐当前进程与用户 PATH。
+- WinGet 下载和 Skill 安装都有超时、退出码检查与 `install-logs/` 日志；任一环节失败则不声称安装成功。
+- 系统缺少 WinGet 时 fail-closed，明确引导安装微软 Microsoft App Installer，不使用未校验的第三方直链。
+- 外层安装/打包回归测试增加至 12 项；可安装 Skill 的 86 项测试保持全绿。
+
 ## V0.6.3
 
 迁移与维护收口，不改变用户只输入一个视频、最终只交付两个文件的产品契约。

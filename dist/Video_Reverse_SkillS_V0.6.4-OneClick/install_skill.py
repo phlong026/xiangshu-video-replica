@@ -17,7 +17,7 @@ from typing import Dict, Optional
 
 
 SKILL_NAME = "video-reverse-prompt-script-firstframe"
-ARCHIVE_NAME = "video-reverse-prompt-script-firstframe-v0.6.3.zip"
+ARCHIVE_NAME = "video-reverse-prompt-script-firstframe-v0.6.4.zip"
 
 
 class InstallError(RuntimeError):

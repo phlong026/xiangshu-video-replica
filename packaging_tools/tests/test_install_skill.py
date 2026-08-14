@@ -41,17 +41,53 @@ class PortableInstallerTests(unittest.TestCase):
             self.assertEqual(result["skill_files"], 23)
             with zipfile.ZipFile(one_click) as bundle:
                 names = set(bundle.namelist())
-            prefix = "Video_Reverse_SkillS_V0.6.3-OneClick/"
+            prefix = "Video_Reverse_SkillS_V0.6.4-OneClick/"
             for name in [
                 "install_skill.py",
                 "安装-macOS.command",
                 "安装-Linux.sh",
                 "安装-Windows.bat",
+                "安装-Windows.ps1",
                 "README-安装说明.md",
                 "SHA256SUMS.txt",
-                "video-reverse-prompt-script-firstframe-v0.6.3.zip",
+                "video-reverse-prompt-script-firstframe-v0.6.4.zip",
             ]:
                 self.assertIn(prefix + name, names)
+
+    def test_windows_entry_bootstraps_dependencies_with_winget(self):
+        assets = Path(__file__).resolve().parents[1] / "assets"
+        batch = (assets / "安装-Windows.bat").read_text(encoding="utf-8")
+        script = (assets / "安装-Windows.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("安装-Windows.ps1", batch)
+        self.assertNotIn("where python", batch.lower())
+        for text in [
+            "Python.Python.3.11",
+            "Gyan.FFmpeg",
+            "--accept-package-agreements",
+            "--accept-source-agreements",
+            "--silent",
+            "--disable-interactivity",
+            "Refresh-ProcessPath",
+            "Add-UserPathEntry",
+            "WaitForExit",
+            "install-logs",
+            "Get-PythonRunner",
+            "Test-FFmpeg",
+            "install_skill.py",
+        ]:
+            self.assertIn(text, script)
+
+    def test_windows_bootstrap_checks_winget_before_installing(self):
+        script_path = Path(__file__).resolve().parents[1] / "assets" / "安装-Windows.ps1"
+        self.assertTrue(script_path.read_bytes().startswith(b"\xef\xbb\xbf"))
+        script = script_path.read_text(encoding="utf-8")
+        self.assertIn("Get-Command winget", script)
+        self.assertIn("Microsoft App Installer", script)
+        self.assertIn("#requires -Version 5.1", script)
+        self.assertNotIn("Join-String", script)
+        self.assertNotIn("Invoke-WebRequest", script)
+        self.assertNotIn("curl", script.lower())
 
     def test_default_target_uses_codex_home(self):
         with patch.dict(os.environ, {"CODEX_HOME": "/tmp/custom-codex"}, clear=False):
