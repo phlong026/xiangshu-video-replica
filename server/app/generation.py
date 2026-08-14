@@ -553,6 +553,22 @@ def lock_prompt_version(
     return get_version(conn, prompt_version_id)
 
 
+def _find_idempotent_batch(
+    conn: sqlite3.Connection, *, actor_id: str, project_id: str, key: str
+) -> sqlite3.Row | None:
+    return cast(
+        sqlite3.Row | None,
+        conn.execute(
+            """
+            SELECT id, request_hash
+            FROM generation_batches
+            WHERE created_by_user_id = ? AND project_id = ? AND idempotency_key = ?
+            """,
+            (actor_id, project_id, key),
+        ).fetchone(),
+    )
+
+
 def create_generation_batch(
     conn: sqlite3.Connection,
     *,
@@ -594,14 +610,9 @@ def create_generation_batch(
             ) from exc
 
     request_hash = idempotency_request_hash(request)
-    existing = conn.execute(
-        """
-        SELECT id, request_hash
-        FROM generation_batches
-        WHERE created_by_user_id = ? AND idempotency_key = ?
-        """,
-        (actor.id, request.idempotency_key),
-    ).fetchone()
+    existing = _find_idempotent_batch(
+        conn, actor_id=actor.id, project_id=project_id, key=request.idempotency_key
+    )
     if existing is not None:
         if str(existing["request_hash"]) != request_hash:
             raise generation_error(
@@ -641,80 +652,96 @@ def create_generation_batch(
     request_snapshot = generation_request_snapshot(request, prompt_snapshot)
     batch_id = str(uuid4())
     used_prompt_snapshot = {**prompt_snapshot, "status": "USED"}
-    with conn:
-        cursor = conn.execute(
-            """
-            UPDATE versions
-            SET payload_json = ?
-            WHERE id = ? AND payload_json = ?
-            """,
-            (
-                json.dumps(used_prompt_snapshot, ensure_ascii=True, sort_keys=True),
-                request.prompt_version_id,
-                str(prompt["payload_json"]),
-            ),
-        )
-        if cursor.rowcount != 1:
-            raise generation_error(
-                409,
-                "PROMPT_ALREADY_USED",
-                "This LOCKED prompt was already consumed by another batch.",
-            )
-        conn.execute(
-            """
-            INSERT INTO generation_batches (
-                id,
-                project_id,
-                created_by_user_id,
-                idempotency_key,
-                request_hash,
-                request_snapshot_json,
-                status
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                batch_id,
-                project_id,
-                actor.id,
-                request.idempotency_key,
-                request_hash,
-                json.dumps(request_snapshot, ensure_ascii=True, sort_keys=True),
-                "QUEUED",
-            ),
-        )
-        for _ in range(request.quantity):
-            task_id = str(uuid4())
-            conn.execute(
+    try:
+        with conn:
+            cursor = conn.execute(
                 """
-                INSERT INTO generation_tasks (
-                    id,
-                    batch_id,
-                    generation_mode,
-                    provider,
-                    model,
-                    status,
-                    archive_status,
-                    quality_status,
-                    prompt_version_id,
-                    prompt_snapshot_json,
-                    next_poll_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                UPDATE versions
+                SET payload_json = ?
+                WHERE id = ? AND payload_json = ?
                 """,
                 (
-                    task_id,
-                    batch_id,
-                    "I2V",
-                    request.provider,
-                    H3_MODEL,
-                    "PENDING",
-                    "PENDING",
-                    "PENDING",
+                    json.dumps(used_prompt_snapshot, ensure_ascii=True, sort_keys=True),
                     request.prompt_version_id,
-                    json.dumps(prompt_snapshot, ensure_ascii=True, sort_keys=True),
+                    str(prompt["payload_json"]),
                 ),
             )
+            if cursor.rowcount != 1:
+                raise generation_error(
+                    409,
+                    "PROMPT_ALREADY_USED",
+                    "This LOCKED prompt was already consumed by another batch.",
+                )
+            conn.execute(
+                """
+                INSERT INTO generation_batches (
+                    id,
+                    project_id,
+                    created_by_user_id,
+                    idempotency_key,
+                    request_hash,
+                    request_snapshot_json,
+                    status
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    batch_id,
+                    project_id,
+                    actor.id,
+                    request.idempotency_key,
+                    request_hash,
+                    json.dumps(request_snapshot, ensure_ascii=True, sort_keys=True),
+                    "QUEUED",
+                ),
+            )
+            for _ in range(request.quantity):
+                task_id = str(uuid4())
+                conn.execute(
+                    """
+                    INSERT INTO generation_tasks (
+                        id,
+                        batch_id,
+                        generation_mode,
+                        provider,
+                        model,
+                        status,
+                        archive_status,
+                        quality_status,
+                        prompt_version_id,
+                        prompt_snapshot_json,
+                        next_poll_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    """,
+                    (
+                        task_id,
+                        batch_id,
+                        "I2V",
+                        request.provider,
+                        H3_MODEL,
+                        "PENDING",
+                        "PENDING",
+                        "PENDING",
+                        request.prompt_version_id,
+                        json.dumps(prompt_snapshot, ensure_ascii=True, sort_keys=True),
+                    ),
+                )
+    except sqlite3.IntegrityError:
+        # A concurrent request committed the same idempotency key first; return
+        # the existing batch instead of a misleading 409.
+        existing = _find_idempotent_batch(
+            conn, actor_id=actor.id, project_id=project_id, key=request.idempotency_key
+        )
+        if existing is not None:
+            if str(existing["request_hash"]) != request_hash:
+                raise generation_error(
+                    409,
+                    "IDEMPOTENCY_CONFLICT",
+                    "This idempotency key was already used for a different request.",
+                )
+            return get_generation_batch(conn, batch_id=str(existing["id"]), actor=actor)
+        raise
 
     write_audit(
         conn,

@@ -1701,3 +1701,120 @@ def test_reconcile_running_task_keeps_uncertain(db_path: Path, client: TestClien
 
     assert excinfo.value.status_code == 409
     assert excinfo.value.detail["code"] == "PROVIDER_STILL_PROCESSING"
+
+
+def _insert_locked_prompt_for_project(
+    conn: sqlite3.Connection, *, prompt_id: str, project_id: str, first_frame_asset_id: str
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO versions (
+    id, project_id, asset_id, kind, version_number, payload_json, created_by_user_id
+)
+        VALUES (?, ?, ?, 'h3_prompt', 1, ?, 'admin_1')
+        """,
+        (
+            prompt_id,
+            project_id,
+            first_frame_asset_id,
+            json.dumps(
+                {
+                    "status": "LOCKED",
+                    "first_frame_uri": f"fake://generation-results/{first_frame_asset_id}.png",
+                    "first_frame_asset_id": first_frame_asset_id,
+                    "prompt_text": "test prompt",
+                    "content_hash": "test-hash",
+                    "duration_seconds": 10,
+                    "resolution": "768P",
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+            ),
+        ),
+    )
+
+
+def test_idempotency_key_is_scoped_per_project(db_path: Path, client: TestClient) -> None:
+    with connect_database(db_path) as conn:
+        _insert_locked_prompt_for_project(
+            conn,
+            prompt_id="prompt_a",
+            project_id="project_owned",
+            first_frame_asset_id="first_frame_owned",
+        )
+        _insert_locked_prompt_for_project(
+            conn,
+            prompt_id="prompt_b",
+            project_id="project_other",
+            first_frame_asset_id="first_frame_other",
+        )
+        # project_other needs its own candidates + confirmed first-frame
+        # selection (project_owned already has both in seed_data).
+        conn.execute(
+            """
+            INSERT INTO versions (
+    id, project_id, asset_id, kind, version_number, payload_json, created_by_user_id
+)
+            VALUES (
+                'ff_cand_other', 'project_other', 'first_frame_other', 'first_frame_candidates',
+                1, ?, 'admin_1'
+            )
+            """,
+            (
+                json.dumps(
+                    {"candidates": [{"asset_id": "first_frame_other"}]},
+                    ensure_ascii=True,
+                    sort_keys=True,
+                ),
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO versions (
+    id, project_id, asset_id, kind, version_number, payload_json, created_by_user_id
+)
+            VALUES (
+                'ff_sel_other', 'project_other', 'first_frame_other', 'first_frame_selection',
+                1, ?, 'admin_1'
+            )
+            """,
+            (
+                json.dumps(
+                    {
+                        "first_frame_candidates_version_id": "ff_cand_other",
+                        "first_frame_asset_id": "first_frame_other",
+                    },
+                    ensure_ascii=True,
+                    sort_keys=True,
+                ),
+            ),
+        )
+
+    batch_a = client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("admin_1"),
+        json={
+            "quantity": 1,
+            "prompt_version_id": "prompt_a",
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+            "idempotency_key": "shared-key",
+        },
+    )
+    batch_b = client.post(
+        "/api/projects/project_other/generation-batches",
+        headers=auth_headers("admin_1"),
+        json={
+            "quantity": 1,
+            "prompt_version_id": "prompt_b",
+            "first_frame_asset_id": "first_frame_other",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+            "idempotency_key": "shared-key",
+        },
+    )
+
+    assert batch_a.status_code == 200, batch_a.text
+    assert batch_b.status_code == 200, batch_b.text
+    assert batch_a.json()["id"] != batch_b.json()["id"]
