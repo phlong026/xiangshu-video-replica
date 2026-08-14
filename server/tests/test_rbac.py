@@ -175,9 +175,7 @@ def test_employee_can_create_and_list_only_their_projects(
             "SELECT metadata_json FROM audit_logs WHERE action = 'project.create'"
         ).fetchone()
     assert row is not None
-    assert '"name": "\\u65b0\\u7684\\u590d\\u523b\\u9879\\u76ee"' in str(
-        row["metadata_json"]
-    )
+    assert '"name": "\\u65b0\\u7684\\u590d\\u523b\\u9879\\u76ee"' in str(row["metadata_json"])
 
 
 def test_auditor_cannot_create_projects_and_admin_can_list_all_projects(
@@ -196,6 +194,81 @@ def test_auditor_cannot_create_projects_and_admin_can_list_all_projects(
         "Other Project",
         "Owned Project",
     ]
+
+
+def test_project_list_exposes_reference_video_state_for_upload_recovery(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    with connect_database(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO assets (
+                id, project_id, kind, storage_uri,
+                sha256, size_bytes, content_type, created_by_user_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "reference_pending",
+                "project_owned",
+                "reference_video",
+                "cos://private-bucket/projects/project_owned/reference.mp4",
+                "",
+                0,
+                "video/mp4",
+                "employee_1",
+            ),
+        )
+        conn.commit()
+
+    response = client.get("/api/projects", headers=auth_headers("employee_1"))
+    detail = client.get("/api/projects/project_owned", headers=auth_headers("employee_1"))
+
+    assert response.status_code == 200
+    assert response.json()[0] == {
+        "id": "project_owned",
+        "owner_user_id": "employee_1",
+        "name": "Owned Project",
+        "status": "ACTIVE",
+        "reference_asset_id": "reference_pending",
+        "reference_upload_status": "UPLOAD_PENDING",
+    }
+    assert detail.json()["reference_asset_id"] == "reference_pending"
+    assert detail.json()["reference_upload_status"] == "UPLOAD_PENDING"
+
+
+def test_project_list_recognizes_legacy_reference_video_uploads(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    with connect_database(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO assets (
+                id, project_id, kind, storage_uri,
+                sha256, size_bytes, content_type, created_by_user_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "legacy_reference",
+                "project_owned",
+                "video",
+                "cos://private-bucket/projects/project_owned/uploads/legacy/reference.mp4",
+                "legacy-hash",
+                1024,
+                "video/mp4",
+                "employee_1",
+            ),
+        )
+        conn.commit()
+
+    response = client.get("/api/projects/project_owned", headers=auth_headers("employee_1"))
+
+    assert response.status_code == 200
+    assert response.json()["reference_asset_id"] == "legacy_reference"
+    assert response.json()["reference_upload_status"] == "READY"
 
 
 def test_auditor_cannot_generate_retry_or_download(client: TestClient) -> None:

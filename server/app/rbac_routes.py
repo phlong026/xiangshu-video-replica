@@ -53,6 +53,8 @@ class ProjectResponse(BaseModel):
     owner_user_id: str
     name: str
     status: str
+    reference_asset_id: str | None
+    reference_upload_status: str
 
 
 class AcceptedResponse(BaseModel):
@@ -141,18 +143,68 @@ def list_projects(
     if actor.role == "admin":
         rows = conn.execute(
             """
-            SELECT id, owner_user_id, name, status
+            SELECT
+                projects.id,
+                projects.owner_user_id,
+                projects.name,
+                projects.status,
+                reference_assets.id AS reference_asset_id,
+                CASE
+                    WHEN reference_assets.id IS NULL THEN 'NOT_STARTED'
+                    WHEN reference_assets.sha256 = '' OR reference_assets.size_bytes = 0
+                        THEN 'UPLOAD_PENDING'
+                    ELSE 'READY'
+                END AS reference_upload_status
             FROM projects
-            ORDER BY created_at DESC, rowid DESC
+            LEFT JOIN assets AS reference_assets ON reference_assets.id = (
+                SELECT assets.id
+                FROM assets
+                WHERE assets.project_id = projects.id
+                    AND (
+                        assets.kind = 'reference_video'
+                        OR (
+                            assets.kind = 'video'
+                            AND assets.storage_uri LIKE '%/projects/' || projects.id || '/uploads/%'
+                        )
+                    )
+                ORDER BY assets.created_at DESC, assets.rowid DESC
+                LIMIT 1
+            )
+            ORDER BY projects.created_at DESC, projects.rowid DESC
             """
         ).fetchall()
     else:
         rows = conn.execute(
             """
-            SELECT id, owner_user_id, name, status
+            SELECT
+                projects.id,
+                projects.owner_user_id,
+                projects.name,
+                projects.status,
+                reference_assets.id AS reference_asset_id,
+                CASE
+                    WHEN reference_assets.id IS NULL THEN 'NOT_STARTED'
+                    WHEN reference_assets.sha256 = '' OR reference_assets.size_bytes = 0
+                        THEN 'UPLOAD_PENDING'
+                    ELSE 'READY'
+                END AS reference_upload_status
             FROM projects
-            WHERE owner_user_id = ?
-            ORDER BY created_at DESC, rowid DESC
+            LEFT JOIN assets AS reference_assets ON reference_assets.id = (
+                SELECT assets.id
+                FROM assets
+                WHERE assets.project_id = projects.id
+                    AND (
+                        assets.kind = 'reference_video'
+                        OR (
+                            assets.kind = 'video'
+                            AND assets.storage_uri LIKE '%/projects/' || projects.id || '/uploads/%'
+                        )
+                    )
+                ORDER BY assets.created_at DESC, assets.rowid DESC
+                LIMIT 1
+            )
+            WHERE projects.owner_user_id = ?
+            ORDER BY projects.created_at DESC, projects.rowid DESC
             """,
             (actor.id,),
         ).fetchall()
@@ -205,6 +257,8 @@ def create_project(
         owner_user_id=actor.id,
         name=name,
         status="ACTIVE",
+        reference_asset_id=None,
+        reference_upload_status="NOT_STARTED",
     )
 
 
@@ -214,7 +268,42 @@ def read_project(
     conn: Database,
     actor: AuthenticatedUser,
 ) -> ProjectResponse:
-    row = require_project_access(conn, actor=actor, project_id=project_id, action="project.read")
+    require_project_access(conn, actor=actor, project_id=project_id, action="project.read")
+    row = conn.execute(
+        """
+        SELECT
+            projects.id,
+            projects.owner_user_id,
+            projects.name,
+            projects.status,
+            reference_assets.id AS reference_asset_id,
+            CASE
+                WHEN reference_assets.id IS NULL THEN 'NOT_STARTED'
+                WHEN reference_assets.sha256 = '' OR reference_assets.size_bytes = 0
+                    THEN 'UPLOAD_PENDING'
+                ELSE 'READY'
+            END AS reference_upload_status
+        FROM projects
+        LEFT JOIN assets AS reference_assets ON reference_assets.id = (
+            SELECT assets.id
+            FROM assets
+            WHERE assets.project_id = projects.id
+                AND (
+                    assets.kind = 'reference_video'
+                    OR (
+                        assets.kind = 'video'
+                        AND assets.storage_uri LIKE '%/projects/' || projects.id || '/uploads/%'
+                    )
+                )
+            ORDER BY assets.created_at DESC, assets.rowid DESC
+            LIMIT 1
+        )
+        WHERE projects.id = ?
+        """,
+        (project_id,),
+    ).fetchone()
+    if row is None:
+        raise RuntimeError("project disappeared after access check")
     return project_response(row)
 
 
@@ -336,11 +425,23 @@ def asset_response(row: sqlite3.Row) -> AssetResponse:
 
 
 def project_response(row: sqlite3.Row) -> ProjectResponse:
+    reference_asset_id = (
+        None
+        if "reference_asset_id" not in row.keys() or row["reference_asset_id"] is None
+        else str(row["reference_asset_id"])
+    )
+    reference_upload_status = (
+        "NOT_STARTED"
+        if "reference_upload_status" not in row.keys()
+        else str(row["reference_upload_status"])
+    )
     return ProjectResponse(
         id=str(row["id"]),
         owner_user_id=str(row["owner_user_id"]),
         name=str(row["name"]),
         status=str(row["status"]),
+        reference_asset_id=reference_asset_id,
+        reference_upload_status=reference_upload_status,
     )
 
 

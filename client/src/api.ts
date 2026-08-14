@@ -73,6 +73,8 @@ export type Project = {
   owner_user_id: string;
   name: string;
   status: string;
+  reference_asset_id: string | null;
+  reference_upload_status: "NOT_STARTED" | "UPLOAD_PENDING" | "READY";
 };
 
 export type UploadIntent = {

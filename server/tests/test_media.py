@@ -123,6 +123,7 @@ def create_upload_intent(
 
 def test_owner_can_upload_complete_and_query_video_asset(
     client: TestClient,
+    db_path: Path,
     storage: FakeStorageAdapter,
 ) -> None:
     intent = create_upload_intent(client)
@@ -142,6 +143,17 @@ def test_owner_can_upload_complete_and_query_video_asset(
     assert asset.json()["project_id"] == "project_owned"
     assert asset.json()["size_bytes"] == len(b"video-bytes")
     assert asset.json()["content_type"] == "video/mp4"
+    with connect_database(db_path) as conn:
+        project = conn.execute(
+            "SELECT status FROM projects WHERE id = ?", ("project_owned",)
+        ).fetchone()
+        uploaded_asset = conn.execute(
+            "SELECT kind FROM assets WHERE id = ?", (str(intent["asset_id"]),)
+        ).fetchone()
+    assert project is not None
+    assert project["status"] == "REFERENCE_READY"
+    assert uploaded_asset is not None
+    assert uploaded_asset["kind"] == "reference_video"
 
 
 def test_complete_upload_calculates_a_content_hash_when_storage_head_has_none(
@@ -227,6 +239,47 @@ def test_upload_intent_requires_project_owner(client: TestClient) -> None:
 
     assert response.status_code == 403
     assert response.json()["detail"]["code"] == "PROJECT_FORBIDDEN"
+
+
+def test_complete_rejects_a_non_reference_video_asset(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    with connect_database(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO assets (
+                id, project_id, kind, storage_uri,
+                sha256, size_bytes, content_type, created_by_user_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "generated_video",
+                "project_owned",
+                "video",
+                "fake://private-bucket/outputs/generated.mp4",
+                "hash",
+                10,
+                "video/mp4",
+                "employee_1",
+            ),
+        )
+        conn.commit()
+
+    response = client.post(
+        "/api/assets/generated_video/complete",
+        headers=auth_headers("employee_1"),
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "ASSET_NOT_REFERENCE_VIDEO"
+    with connect_database(db_path) as conn:
+        project = conn.execute(
+            "SELECT status FROM projects WHERE id = ?", ("project_owned",)
+        ).fetchone()
+    assert project is not None
+    assert project["status"] == "ACTIVE"
 
 
 def test_upload_intent_rejects_non_video_or_oversized_files(client: TestClient) -> None:

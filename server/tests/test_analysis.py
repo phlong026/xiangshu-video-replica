@@ -80,7 +80,7 @@ def seed_data(conn: sqlite3.Connection) -> None:
             (
                 "asset_owned",
                 "project_owned",
-                "video",
+                "reference_video",
                 "local://owned.mp4",
                 "sha-owned",
                 12,
@@ -90,7 +90,7 @@ def seed_data(conn: sqlite3.Connection) -> None:
             (
                 "asset_other",
                 "project_other",
-                "video",
+                "reference_video",
                 "local://other.mp4",
                 "sha-other",
                 12,
@@ -219,6 +219,42 @@ def test_analysis_routes_require_existing_rbac(client: TestClient) -> None:
     assert auditor.json()["detail"]["code"] == "ROLE_FORBIDDEN"
     assert other_owner.status_code == 403
     assert other_owner.json()["detail"]["code"] == "PROJECT_FORBIDDEN"
+
+
+def test_analysis_rejects_pending_or_non_reference_assets(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    with connect_database(db_path) as conn:
+        conn.execute(
+            "UPDATE assets SET sha256 = ?, size_bytes = ? WHERE id = ?",
+            ("", 0, "asset_owned"),
+        )
+        conn.execute(
+            "UPDATE assets SET kind = ? WHERE id = ?",
+            ("video", "asset_other"),
+        )
+        conn.execute(
+            "UPDATE assets SET project_id = ? WHERE id = ?",
+            ("project_owned", "asset_other"),
+        )
+        conn.commit()
+
+    pending = client.post(
+        "/api/projects/project_owned/analysis",
+        json={"asset_id": "asset_owned", "duration_seconds": 10},
+        headers=auth_headers("employee_1"),
+    )
+    wrong_kind = client.post(
+        "/api/projects/project_owned/analysis",
+        json={"asset_id": "asset_other", "duration_seconds": 10},
+        headers=auth_headers("employee_1"),
+    )
+
+    assert pending.status_code == 409
+    assert pending.json()["detail"]["code"] == "REFERENCE_VIDEO_NOT_READY"
+    assert wrong_kind.status_code == 422
+    assert wrong_kind.json()["detail"]["code"] == "ANALYSIS_ASSET_NOT_REFERENCE_VIDEO"
 
 
 def test_manual_shot_card_version_is_not_overwritten_by_new_analysis(

@@ -123,6 +123,38 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "创建并上传" })).toBeDisabled();
   });
 
+  it("lets an employee resume a pending upload from an existing project", async () => {
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/health")) {
+        return Promise.resolve({ ok: true, json: async () => healthResponse });
+      }
+      return Promise.resolve({
+        ok: true,
+        json: async () => [
+          {
+            id: "project-pending",
+            owner_user_id: "employee_1",
+            name: "待续传项目",
+            status: "ACTIVE",
+            reference_asset_id: "asset-pending",
+            reference_upload_status: "UPLOAD_PENDING",
+          },
+        ],
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+    fireEvent.click(await screen.findByRole("button", { name: "继续上传" }));
+
+    expect(screen.getByLabelText("项目名称")).toHaveValue("待续传项目");
+    expect(screen.getByLabelText("项目名称")).toBeDisabled();
+    expect(
+      screen.getByText("正在为“待续传项目”重新上传参考视频。"),
+    ).toBeInTheDocument();
+  });
+
   it("uploads a valid reference video, completes precheck, and starts analysis", async () => {
     class SuccessfulUploadRequest {
       onerror: (() => void) | null = null;
@@ -231,6 +263,8 @@ describe("App", () => {
     expect(
       screen.queryByRole("progressbar", { name: "参考视频上传进度" }),
     ).toBeNull();
+    expect(screen.getByText("参考视频已就绪")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "继续上传" })).toBeNull();
     expect(fetchMock).toHaveBeenCalledWith(
       "http://127.0.0.1:8000/api/projects/project-1/analysis",
       expect.objectContaining({

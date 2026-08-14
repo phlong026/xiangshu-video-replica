@@ -743,6 +743,10 @@ export interface components {
       name: string;
       /** Status */
       status: string;
+      /** Reference Asset Id */
+      reference_asset_id: string | null;
+      /** Reference Upload Status */
+      reference_upload_status: string;
     };
     /** PromptCompileRequest */
     PromptCompileRequest: {

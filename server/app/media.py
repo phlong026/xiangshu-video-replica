@@ -164,7 +164,16 @@ def create_upload_intent(
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (asset_id, project_id, "video", storage_uri, "", 0, content_type, actor.id),
+            (
+                asset_id,
+                project_id,
+                "reference_video",
+                storage_uri,
+                "",
+                0,
+                content_type,
+                actor.id,
+            ),
         )
 
     write_audit(
@@ -207,6 +216,12 @@ def complete_upload(
         asset_id=asset_id,
         action="asset.upload_complete",
     )
+    if not is_reference_video_asset(row):
+        raise media_error(
+            409,
+            "ASSET_NOT_REFERENCE_VIDEO",
+            "Only reference video uploads can be completed here.",
+        )
     storage_key = storage_key_from_uri(str(row["storage_uri"]))
     stored = storage.head_object(storage_key)
     if stored is None:
@@ -236,6 +251,10 @@ def complete_upload(
             """,
             (stored.uri, content_sha256, stored.size, content_type, asset_id),
         )
+        conn.execute(
+            "UPDATE projects SET status = ? WHERE id = ?",
+            ("REFERENCE_READY", str(row["project_id"])),
+        )
 
     write_audit(
         conn,
@@ -257,6 +276,14 @@ def complete_upload(
         size_bytes=stored.size,
         content_type=content_type,
         metadata=metadata,
+    )
+
+
+def is_reference_video_asset(row: sqlite3.Row) -> bool:
+    if str(row["kind"]) == "reference_video":
+        return True
+    return str(row["kind"]) == "video" and f"/projects/{row['project_id']}/uploads/" in str(
+        row["storage_uri"]
     )
 
 

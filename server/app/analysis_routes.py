@@ -17,6 +17,7 @@ from app.analysis import (
     validate_shot_cards,
 )
 from app.auth import AuthenticatedUser, Database
+from app.media import is_reference_video_asset
 from app.permissions import (
     require_asset_access,
     require_not_auditor,
@@ -80,6 +81,22 @@ def create_project_analysis(
             detail={
                 "code": "ASSET_PROJECT_MISMATCH",
                 "message": "Asset does not belong to the requested project.",
+            },
+        )
+    if not is_reference_video_asset(asset):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "ANALYSIS_ASSET_NOT_REFERENCE_VIDEO",
+                "message": "Analysis requires a reference video asset.",
+            },
+        )
+    if not str(asset["sha256"]) or int(asset["size_bytes"]) <= 0:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "REFERENCE_VIDEO_NOT_READY",
+                "message": "Reference video upload is not ready for analysis.",
             },
         )
 

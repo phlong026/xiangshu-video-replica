@@ -218,6 +218,18 @@ export function App() {
         completed.asset_id,
         completed.metadata.duration_seconds,
       );
+      setProjects((current) =>
+        current.map((item) =>
+          item.id === project.id
+            ? {
+                ...item,
+                status: "REFERENCE_READY",
+                reference_asset_id: completed.asset_id,
+                reference_upload_status: "READY",
+              }
+            : item,
+        ),
+      );
       setSetupMessage(
         `“${project.name}”已完成上传和预检（${completed.metadata.duration_seconds.toFixed(1)} 秒），已自动进入视频拆解。`,
       );
@@ -234,6 +246,15 @@ export function App() {
     } finally {
       setIsUploading(false);
     }
+  }
+
+  function handleContinueUpload(project: Project) {
+    setPendingProject(project);
+    setProjectName(project.name);
+    setReferenceVideo(null);
+    setSetupError("");
+    setSetupMessage("");
+    setUploadProgress(null);
   }
 
   if (page === "login") {
@@ -292,6 +313,7 @@ export function App() {
           <ProjectSetupPanel
             isLoading={isProjectsLoading}
             isUploading={isUploading}
+            onContinueUpload={handleContinueUpload}
             onFileChange={handleReferenceVideoChange}
             onProjectNameChange={setProjectName}
             onSubmit={handleProjectSetup}
@@ -350,6 +372,7 @@ export function App() {
 function ProjectSetupPanel({
   isLoading,
   isUploading,
+  onContinueUpload,
   onFileChange,
   onProjectNameChange,
   onSubmit,
@@ -364,6 +387,7 @@ function ProjectSetupPanel({
 }: {
   isLoading: boolean;
   isUploading: boolean;
+  onContinueUpload: (project: Project) => void;
   onFileChange: (event: ChangeEvent<HTMLInputElement>) => void;
   onProjectNameChange: (value: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
@@ -452,8 +476,24 @@ function ProjectSetupPanel({
         <ul className="project-list">
           {projects.map((project) => (
             <li key={project.id}>
-              <strong>{project.name}</strong>
-              <span>{project.status}</span>
+              <div>
+                <strong>{project.name}</strong>
+                <span>
+                  {formatReferenceStatus(project.reference_upload_status)}
+                </span>
+              </div>
+              {project.reference_upload_status !== "READY" ? (
+                <button
+                  className="secondary-button"
+                  disabled={isUploading}
+                  onClick={() => onContinueUpload(project)}
+                  type="button"
+                >
+                  继续上传
+                </button>
+              ) : (
+                <span>{project.status}</span>
+              )}
             </li>
           ))}
         </ul>
@@ -483,6 +523,17 @@ function validateReferenceVideo(file: File): string {
 
 function formatFileSize(sizeBytes: number): string {
   return `${(sizeBytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function formatReferenceStatus(
+  status: Project["reference_upload_status"],
+): string {
+  const labels: Record<Project["reference_upload_status"], string> = {
+    NOT_STARTED: "未上传参考视频",
+    UPLOAD_PENDING: "上传未完成",
+    READY: "参考视频已就绪",
+  };
+  return labels[status];
 }
 
 function ServiceBadge({ state }: { state: ServiceState }) {
