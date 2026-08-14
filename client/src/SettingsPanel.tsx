@@ -195,7 +195,8 @@ export function SettingsPanel() {
           <p>
             逐项检查已保存的服务参数并生成脱敏日志。已配置的 COS/OSS
             会创建并删除一个小测试对象，可能产生云存储请求费用；该操作不会提交
-            H3、视频或图片生成任务，未接入的服务会标记为“仅配置校验”。
+            H3、视频或图片生成任务。H3
+            与模型服务的检测只确认配置，不发起计费调用。
           </p>
         </div>
         <button type="button" onClick={testSettings} disabled={isTesting}>
@@ -313,6 +314,8 @@ function RuntimeForm({
 }) {
   const [values, setValues] = useState(runtime);
   const [status, setStatus] = useState("");
+  const isStorageChangePending =
+    values.active_storage_provider !== runtime.active_storage_provider;
 
   useEffect(() => setValues(runtime), [runtime]);
 
@@ -378,6 +381,11 @@ function RuntimeForm({
       </label>
       <div className="form-actions">
         <button type="submit">保存运行设置</button>
+        <span>
+          {isStorageChangePending
+            ? `尚未保存：将切换为${storageProviderLabel(values.active_storage_provider)}`
+            : `当前已保存：${storageProviderLabel(runtime.active_storage_provider)}`}
+        </span>
         {status ? <span role="status">{status}</span> : null}
       </div>
     </form>
@@ -452,7 +460,13 @@ function diagnosticStatusLabel(status: DiagnosticProviderResult["status"]) {
   return {
     ok: "通过",
     not_configured: "未配置",
-    configured_only: "仅配置校验",
+    configured_only: "已配置（不调用）",
     error: "失败",
   }[status];
+}
+
+function storageProviderLabel(
+  provider: RuntimeSettings["active_storage_provider"],
+) {
+  return provider === "cos" ? "腾讯云 COS" : "阿里云 OSS";
 }

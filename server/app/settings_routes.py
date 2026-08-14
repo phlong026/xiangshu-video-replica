@@ -410,12 +410,15 @@ def run_settings_diagnostic(
             status = "not_configured"
         else:
             status = "error"
-        message = {
-            "ok": "连接测试通过。",
-            "configured_only": "参数已保存；真实服务适配器尚未启用，因此未发起外部调用。",
-            "not_configured": "缺少必要参数。",
-            "error": "连接测试失败；请下载诊断日志查看上下文。",
-        }[status]
+        message = (
+            configured_only_message(provider)
+            if status == "configured_only"
+            else {
+                "ok": "连接测试通过。",
+                "not_configured": "缺少必要参数。",
+                "error": "连接测试失败；请下载诊断日志查看上下文。",
+            }[status]
+        )
         results.append(
             DiagnosticProviderResult(
                 provider=provider,
@@ -511,6 +514,24 @@ def cleanup_failed_from_http_exception(error: HTTPException) -> bool | None:
 
 def elapsed_milliseconds(started_at: float) -> int:
     return int((time.monotonic() - started_at) * 1000)
+
+
+def configured_only_message(provider: str) -> str:
+    if provider == "metaso":
+        return "".join(
+            (
+                "H3 参数已保存。测试设置不会提交会产生费用的生成任务；",
+                "实际任务由生成 Worker 处理。",
+            )
+        )
+    if provider == "apilio":
+        return "".join(
+            (
+                "模型服务参数已保存。视频拆解和首帧任务会按需调用；",
+                "测试设置不会发起计费模型请求。",
+            )
+        )
+    return "参数已保存；本次测试未发起外部调用。"
 
 
 def write_audit_log(

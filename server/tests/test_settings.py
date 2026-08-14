@@ -16,6 +16,7 @@ from app.settings_routes import (
     NoopProviderTester,
     ProviderTestResult,
     StorageProviderTester,
+    configured_only_message,
     get_database,
     get_provider_tester,
     router,
@@ -508,6 +509,25 @@ def test_default_provider_tester_never_claims_real_connectivity_or_paid_access()
     assert error.value.status_code == 501
     detail = cast(dict[str, str], error.value.detail)
     assert detail["code"] == "PROVIDER_TEST_NOT_IMPLEMENTED"
+
+
+@pytest.mark.parametrize(
+    ("provider", "expected"),
+    [
+        (
+            "metaso",
+            "H3 参数已保存。测试设置不会提交会产生费用的生成任务；实际任务由生成 Worker 处理。",
+        ),
+        (
+            "apilio",
+            "模型服务参数已保存。视频拆解和首帧任务会按需调用；测试设置不会发起计费模型请求。",
+        ),
+    ],
+)
+def test_model_provider_configuration_status_explains_the_real_task_path(
+    provider: str, expected: str
+) -> None:
+    assert configured_only_message(provider) == expected
 
 
 def test_storage_provider_tester_runs_a_recoverable_cos_connection_check() -> None:

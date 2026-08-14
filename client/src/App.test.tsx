@@ -820,6 +820,13 @@ describe("App", () => {
       "已保存，留空不修改",
     );
     expect(screen.getByText("模型服务（Apilio）")).toBeInTheDocument();
+    expect(screen.getByText("当前已保存：腾讯云 COS")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("当前对象存储"), {
+      target: { value: "oss" },
+    });
+    expect(
+      screen.getByText("尚未保存：将切换为阿里云 OSS"),
+    ).toBeInTheDocument();
     expect(
       screen.getByText(
         /可能产生云存储请求费用；该操作不会提交 H3、视频或图片生成任务/,
