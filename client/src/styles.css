@@ -470,6 +470,101 @@ input:focus {
   gap: 3px;
 }
 
+.first-frame-options .source-frame-option img,
+.first-frame-options .source-frame-placeholder {
+  aspect-ratio: 9 / 16;
+  object-fit: contain;
+}
+
+.first-frame-selection {
+  display: grid;
+  gap: 14px;
+  border: 1px solid #5b3d93;
+  border-radius: 8px;
+  padding: 16px;
+  background: linear-gradient(135deg, #181120, #120f18);
+}
+
+.first-frame-selection h3,
+.first-frame-history h4 {
+  margin: 8px 0;
+}
+
+.first-frame-selection p {
+  margin: 0;
+  color: #aaa2ba;
+  line-height: 1.55;
+}
+
+.first-frame-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(140px, 0.3fr);
+  gap: 12px;
+}
+
+.first-frame-controls label,
+.first-frame-prompt {
+  display: grid;
+  gap: 7px;
+  color: #d9d1e8;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.first-frame-prompt textarea {
+  width: 100%;
+  resize: vertical;
+  border: 1px solid #3c3448;
+  border-radius: 8px;
+  padding: 12px 14px;
+  color: #f7f4ff;
+  background: #120f18;
+  font: inherit;
+  line-height: 1.5;
+}
+
+.first-frame-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+  border: 0;
+  padding: 0;
+}
+
+.first-frame-options legend {
+  grid-column: 1 / -1;
+  margin-bottom: 2px;
+  color: #d9d1e8;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.first-frame-history {
+  border-top: 1px solid #3c3448;
+  padding-top: 12px;
+}
+
+.first-frame-history-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+button.history-version {
+  padding: 7px 10px;
+  border: 1px solid #433b52;
+  color: #d9d1e8;
+  background: #17131f;
+  font-size: 12px;
+}
+
+button.history-version--active {
+  border-color: #8e6cff;
+  color: #fff;
+  background: #3b286d;
+}
+
 .shot-card-list {
   display: grid;
   gap: 14px;

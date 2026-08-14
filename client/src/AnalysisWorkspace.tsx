@@ -10,6 +10,7 @@ import {
   saveShotCards,
 } from "./api";
 import { CharacterSelection } from "./CharacterSelection";
+import { FirstFrameSelection } from "./FirstFrameSelection";
 import { SourceFrameSelection } from "./SourceFrameSelection";
 
 const SHOT_TEXT_FIELDS: Array<{
@@ -159,6 +160,7 @@ export function AnalysisWorkspace({
             projectId={project.id}
             referenceAssetId={project.reference_asset_id}
           />
+          <FirstFrameSelection projectId={project.id} />
           <div className="shot-card-list">
             {shots.map((shot, index) => (
               <fieldset className="shot-card" key={shot.shot_id}>

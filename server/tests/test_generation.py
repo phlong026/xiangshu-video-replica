@@ -168,6 +168,44 @@ def seed_data(conn: sqlite3.Connection) -> None:
             "employee_1",
         ),
     )
+    conn.executemany(
+        """
+        INSERT INTO versions (
+            id, project_id, asset_id, kind, version_number, payload_json, created_by_user_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                "first_frame_candidates_v1",
+                "project_owned",
+                "first_frame_owned",
+                "first_frame_candidates",
+                1,
+                json.dumps(
+                    {"candidates": [{"asset_id": "first_frame_owned"}]},
+                    ensure_ascii=True,
+                    sort_keys=True,
+                ),
+                "employee_1",
+            ),
+            (
+                "first_frame_selection_v1",
+                "project_owned",
+                "first_frame_owned",
+                "first_frame_selection",
+                1,
+                json.dumps(
+                    {
+                        "first_frame_candidates_version_id": "first_frame_candidates_v1",
+                        "first_frame_asset_id": "first_frame_owned",
+                    },
+                    ensure_ascii=True,
+                    sort_keys=True,
+                ),
+                "employee_1",
+            ),
+        ],
+    )
     conn.commit()
 
 
@@ -233,6 +271,42 @@ def test_script_maps_spoken_text_to_shots_without_deleting_user_text(client: Tes
     assert payload["shot_mappings"][0]["text"] == "第一句不要切断。"
     assert payload["shot_mappings"][1]["text"] == "第二句保留原文。"
     assert payload["creates_audio_task"] is False
+
+
+def test_prompt_compile_requires_the_currently_confirmed_first_frame(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    with connect_database(db_path) as conn:
+        conn.execute(
+            "DELETE FROM versions WHERE project_id = ? AND kind = ?",
+            ("project_owned", "first_frame_selection"),
+        )
+        conn.commit()
+
+    script = client.post(
+        "/api/projects/project_owned/scripts",
+        headers=auth_headers("employee_1"),
+        json={
+            "source": "custom",
+            "text": "第一句。第二句。",
+            "shot_card_version_id": "shot_card_v1",
+        },
+    ).json()
+    response = client.post(
+        "/api/projects/project_owned/prompts/compile",
+        headers=auth_headers("employee_1"),
+        json={
+            "script_version_id": script["id"],
+            "shot_card_version_id": "shot_card_v1",
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "FIRST_FRAME_CONFIRMATION_REQUIRED"
 
 
 def test_prompt_must_be_locked_and_batch_keeps_locked_snapshot_without_provider_call(

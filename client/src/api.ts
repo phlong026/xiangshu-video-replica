@@ -171,6 +171,34 @@ export type SourceFrameSelectionState = {
   stale: boolean;
 };
 
+export type FirstFrameModel = "gpt-image-2" | "nano-banana-pro-2k";
+
+export type FirstFrameCandidate = {
+  asset_id: string;
+  storage_key: string;
+  storage_uri: string;
+  sha256: string;
+  size_bytes: number;
+  content_type: string;
+};
+
+export type FirstFrameCandidates = {
+  provider: string;
+  model: FirstFrameModel;
+  prompt: string;
+  candidates: FirstFrameCandidate[];
+};
+
+export type FirstFrameSelectionState = {
+  version: AnalysisVersion | null;
+  stale: boolean;
+};
+
+export type FirstFrameSelectionPayload = {
+  first_frame_candidates_version_id: string;
+  first_frame_asset_id: string;
+};
+
 export type DownloadUrl = { url: string };
 
 export async function getHealth(): Promise<HealthResponse> {
@@ -414,6 +442,79 @@ export async function confirmSourceFrame(
   );
 }
 
+export async function getLatestProjectFirstFrames(
+  projectId: string,
+): Promise<AnalysisVersion | null> {
+  const response = await requestApi(
+    `/api/projects/${encodeURIComponent(projectId)}/first-frames/latest`,
+    { method: "GET" },
+  );
+  if (response.status === 404) {
+    return null;
+  }
+  if (!response.ok) {
+    throw new Error(`读取候选首帧失败（${response.status}）`);
+  }
+  const version = (await response.json()) as unknown;
+  return isAnalysisVersion(version) ? version : null;
+}
+
+export async function getProjectFirstFrameHistory(
+  projectId: string,
+): Promise<AnalysisVersion[]> {
+  const versions = await requestApiJson<unknown>(
+    `/api/projects/${encodeURIComponent(projectId)}/first-frames/history`,
+    "读取首帧历史失败",
+  );
+  return Array.isArray(versions) && versions.every(isAnalysisVersion)
+    ? versions
+    : [];
+}
+
+export async function getLatestProjectFirstFrameSelection(
+  projectId: string,
+): Promise<FirstFrameSelectionState> {
+  const response = await requestApi(
+    `/api/projects/${encodeURIComponent(projectId)}/first-frames/selection/latest`,
+    { method: "GET" },
+  );
+  if (response.status === 404) {
+    return { version: null, stale: false };
+  }
+  if (response.status === 409) {
+    return { version: null, stale: true };
+  }
+  if (!response.ok) {
+    throw new Error(`读取已确认首帧失败（${response.status}）`);
+  }
+  return { version: (await response.json()) as AnalysisVersion, stale: false };
+}
+
+export async function generateFirstFrames(
+  projectId: string,
+  input: { model: FirstFrameModel; prompt: string; quantity: number },
+): Promise<AnalysisVersion> {
+  return requestApiJson<AnalysisVersion>(
+    `/api/projects/${encodeURIComponent(projectId)}/first-frames/generate`,
+    "生成人物置换首帧失败",
+    { method: "POST", body: JSON.stringify(input) },
+  );
+}
+
+export async function confirmFirstFrame(
+  projectId: string,
+  firstFrameAssetId: string,
+): Promise<AnalysisVersion> {
+  return requestApiJson<AnalysisVersion>(
+    `/api/projects/${encodeURIComponent(projectId)}/first-frames/confirm`,
+    "确认首帧失败",
+    {
+      method: "POST",
+      body: JSON.stringify({ first_frame_asset_id: firstFrameAssetId }),
+    },
+  );
+}
+
 export async function getAssetDownloadUrl(
   assetId: string,
 ): Promise<DownloadUrl> {
@@ -445,6 +546,47 @@ export function readSourceFrameCandidates(
   };
 }
 
+export function readFirstFrameCandidates(
+  version: AnalysisVersion,
+): FirstFrameCandidates | null {
+  const payload = version.payload;
+  if (
+    !isRecord(payload) ||
+    typeof payload.provider !== "string" ||
+    (payload.model !== "gpt-image-2" &&
+      payload.model !== "nano-banana-pro-2k") ||
+    typeof payload.prompt !== "string" ||
+    !Array.isArray(payload.candidates) ||
+    !payload.candidates.every(isFirstFrameCandidate)
+  ) {
+    return null;
+  }
+  return {
+    provider: payload.provider,
+    model: payload.model,
+    prompt: payload.prompt,
+    candidates: payload.candidates,
+  };
+}
+
+export function readFirstFrameSelectionPayload(
+  version: AnalysisVersion,
+): FirstFrameSelectionPayload | null {
+  const payload = version.payload;
+  if (
+    !isRecord(payload) ||
+    typeof payload.first_frame_candidates_version_id !== "string" ||
+    typeof payload.first_frame_asset_id !== "string"
+  ) {
+    return null;
+  }
+  return {
+    first_frame_candidates_version_id:
+      payload.first_frame_candidates_version_id,
+    first_frame_asset_id: payload.first_frame_asset_id,
+  };
+}
+
 export function readAnalysisPayload(
   version: AnalysisVersion,
 ): AnalysisPayload | null {
@@ -472,6 +614,18 @@ function isSourceFrameCandidate(value: unknown): value is SourceFrameCandidate {
     typeof value.asset_id === "string" &&
     typeof value.timestamp_seconds === "number" &&
     (typeof value.score === "number" || value.score === null)
+  );
+}
+
+function isFirstFrameCandidate(value: unknown): value is FirstFrameCandidate {
+  return (
+    isRecord(value) &&
+    typeof value.asset_id === "string" &&
+    typeof value.storage_key === "string" &&
+    typeof value.storage_uri === "string" &&
+    typeof value.sha256 === "string" &&
+    typeof value.size_bytes === "number" &&
+    typeof value.content_type === "string"
   );
 }
 
@@ -666,6 +820,17 @@ function contentTypeForFile(file: File): "video/mp4" | "video/quicktime" {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function isAnalysisVersion(value: unknown): value is AnalysisVersion {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.project_id === "string" &&
+    typeof value.kind === "string" &&
+    typeof value.version_number === "number" &&
+    isRecord(value.payload)
+  );
 }
 
 function isShotCard(value: unknown): value is ShotCard {

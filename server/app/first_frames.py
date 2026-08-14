@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import base64
 import hashlib
+import ipaddress
 import json
+import logging
+import socket
 import sqlite3
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal, Protocol, cast
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 from uuid import uuid4
 
 from fastapi import HTTPException
@@ -30,12 +38,21 @@ from app.storage import (
     storage_object_ref_from_uri,
 )
 
+logger = logging.getLogger(__name__)
+
 FIRST_FRAME_CANDIDATES_KIND = "first_frame_candidates"
 FIRST_FRAME_SELECTION_KIND = "first_frame_selection"
 FIRST_FRAME_SCHEMA_VERSION = "b5.first-frame.v1"
 FIRST_FRAME_MODELS = ("gpt-image-2", "nano-banana-pro-2k")
 FIRST_FRAME_IMAGE_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp"}
 MAX_FIRST_FRAME_CANDIDATES = 3
+APILIO_DEFAULT_BASE_URL = "https://api.apilio.ai"
+APILIO_IMAGE_EDIT_PATH = "/v1/images/edits"
+MAX_PROVIDER_IMAGE_BYTES = 20 * 1024 * 1024
+APILIO_OUTPUT_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36"
+)
 
 FirstFrameModel = Literal["gpt-image-2", "nano-banana-pro-2k"]
 
@@ -46,6 +63,13 @@ class GeneratedImage:
     content_type: str
 
 
+@dataclass(frozen=True)
+class ImageInput:
+    content: bytes
+    content_type: str
+    filename: str
+
+
 class ImageProvider(Protocol):
     provider_name: str
 
@@ -54,13 +78,17 @@ class ImageProvider(Protocol):
         *,
         model: FirstFrameModel,
         prompt: str,
-        source_image: bytes,
-        character_reference_images: list[bytes],
+        source_image: ImageInput,
+        character_reference_images: list[ImageInput],
         output_count: int,
     ) -> list[GeneratedImage]: ...
 
 
 class ImageProviderFailed(RuntimeError):
+    pass
+
+
+class RetryableImageProviderFailed(ImageProviderFailed):
     pass
 
 
@@ -72,15 +100,298 @@ class FakeImageProvider:
         *,
         model: FirstFrameModel,
         prompt: str,
-        source_image: bytes,
-        character_reference_images: list[bytes],
+        source_image: ImageInput,
+        character_reference_images: list[ImageInput],
         output_count: int,
     ) -> list[GeneratedImage]:
         del model, prompt, character_reference_images
         return [
-            GeneratedImage(content=source_image, content_type="image/jpeg")
+            GeneratedImage(content=source_image.content, content_type=source_image.content_type)
             for _ in range(output_count)
         ]
+
+
+class ApilioTransport(Protocol):
+    def post(
+        self, url: str, *, headers: Mapping[str, str], body: bytes
+    ) -> tuple[bytes, Mapping[str, str]]: ...
+
+    def get(self, url: str) -> tuple[bytes, Mapping[str, str]]: ...
+
+
+class UrllibApilioTransport:
+    """Small stdlib transport so provider secrets never enter the client process."""
+
+    def __init__(self, *, timeout_seconds: float = 45.0) -> None:
+        self.timeout_seconds = timeout_seconds
+
+    def post(
+        self, url: str, *, headers: Mapping[str, str], body: bytes
+    ) -> tuple[bytes, Mapping[str, str]]:
+        return self._open(Request(url, data=body, headers=dict(headers), method="POST"))
+
+    def get(self, url: str) -> tuple[bytes, Mapping[str, str]]:
+        require_safe_provider_download_url(url)
+        # Apilio's CDN rejects the default urllib user agent even for a valid signed URL.
+        return self._open(
+            Request(url, headers={"User-Agent": APILIO_OUTPUT_USER_AGENT}, method="GET")
+        )
+
+    def _open(self, request: Request) -> tuple[bytes, Mapping[str, str]]:
+        try:
+            opener = build_opener(NoRedirectHandler())
+            with opener.open(request, timeout=self.timeout_seconds) as response:
+                content_length = response.headers.get("Content-Length")
+                if content_length and int(content_length) > MAX_PROVIDER_IMAGE_BYTES:
+                    raise ImageProviderFailed("Apilio response exceeds the image size limit")
+                body = response.read(MAX_PROVIDER_IMAGE_BYTES + 1)
+                if len(body) > MAX_PROVIDER_IMAGE_BYTES:
+                    raise ImageProviderFailed("Apilio response exceeds the image size limit")
+                return body, dict(response.headers.items())
+        except HTTPError as exc:
+            logger.warning("Apilio image request failed with HTTP status %s", exc.code)
+            failure_type = (
+                RetryableImageProviderFailed
+                if exc.code == 429 or exc.code >= 500
+                else ImageProviderFailed
+            )
+            raise failure_type(f"Apilio returned HTTP {exc.code}") from exc
+        except (TimeoutError, URLError, OSError) as exc:
+            logger.warning("Apilio image request failed: %s", type(exc).__name__)
+            raise RetryableImageProviderFailed("Apilio image request failed") from exc
+
+
+class ApilioImageProvider:
+    provider_name = "apilio"
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        base_url: str = APILIO_DEFAULT_BASE_URL,
+        transport: ApilioTransport | None = None,
+    ) -> None:
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+        self.transport = transport or UrllibApilioTransport()
+
+    def edit(
+        self,
+        *,
+        model: FirstFrameModel,
+        prompt: str,
+        source_image: ImageInput,
+        character_reference_images: list[ImageInput],
+        output_count: int,
+    ) -> list[GeneratedImage]:
+        body, content_type = build_apilio_edit_multipart(
+            model=model,
+            prompt=prompt,
+            source_image=source_image,
+            character_reference_images=character_reference_images,
+            output_count=output_count,
+        )
+        raw_body, _ = self.transport.post(
+            f"{self.base_url}{APILIO_IMAGE_EDIT_PATH}",
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": content_type,
+                "Accept": "application/json",
+            },
+            body=body,
+        )
+        return self._parse_response(raw_body, output_count=output_count)
+
+    def _parse_response(self, raw_body: bytes, *, output_count: int) -> list[GeneratedImage]:
+        try:
+            payload = json.loads(raw_body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ImageProviderFailed("Apilio returned invalid JSON") from exc
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, list) or not data:
+            raise ImageProviderFailed("Apilio response is missing image output")
+        if len(data) != output_count:
+            raise ImageProviderFailed("Apilio returned an unexpected number of image outputs")
+        return [self._parse_image(item) for item in data]
+
+    def _parse_image(self, item: object) -> GeneratedImage:
+        if not isinstance(item, dict):
+            raise ImageProviderFailed("Apilio response is missing image output")
+        encoded = item.get("b64_json")
+        if isinstance(encoded, str) and encoded:
+            try:
+                content = base64.b64decode(encoded, validate=True)
+            except ValueError as exc:
+                raise ImageProviderFailed("Apilio returned invalid base64 image data") from exc
+            content_type = normalized_image_content_type(item.get("mime_type"))
+            validate_provider_image_bytes(content, content_type)
+            return GeneratedImage(content=content, content_type=content_type)
+        url = item.get("url")
+        if not isinstance(url, str) or not valid_provider_output_url(url):
+            raise ImageProviderFailed("Apilio response is missing image output")
+        content, headers = self.transport.get(url)
+        if not content:
+            raise ImageProviderFailed("Apilio returned an empty image output")
+        content_type = normalized_image_content_type(header_value(headers, "content-type"))
+        validate_provider_image_bytes(content, content_type)
+        return GeneratedImage(
+            content=content,
+            content_type=content_type,
+        )
+
+
+def build_apilio_edit_multipart(
+    *,
+    model: FirstFrameModel,
+    prompt: str,
+    source_image: ImageInput,
+    character_reference_images: list[ImageInput],
+    output_count: int,
+) -> tuple[bytes, str]:
+    boundary = f"----video-replica-{uuid4().hex}"
+    body = bytearray()
+
+    def add_field(name: str, value: str) -> None:
+        body.extend(f"--{boundary}\r\n".encode())
+        body.extend(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode())
+        body.extend(value.encode())
+        body.extend(b"\r\n")
+
+    def add_image(image: ImageInput) -> None:
+        body.extend(f"--{boundary}\r\n".encode())
+        body.extend(
+            (
+                'Content-Disposition: form-data; name="image"; '
+                f'filename="{safe_filename(image.filename)}"\r\n'
+            ).encode()
+        )
+        body.extend(f"Content-Type: {image.content_type}\r\n\r\n".encode())
+        body.extend(image.content)
+        body.extend(b"\r\n")
+
+    add_field("model", model)
+    add_field("prompt", prompt)
+    add_image(source_image)
+    for image in character_reference_images:
+        add_image(image)
+    add_field("response_format", "url")
+    add_field("n", str(output_count))
+    if model == "gpt-image-2":
+        add_field("size", "auto")
+    else:
+        add_field("aspect_ratio", image_aspect_ratio(source_image))
+        add_field("image_size", "2K")
+    body.extend(f"--{boundary}--\r\n".encode())
+    return bytes(body), f"multipart/form-data; boundary={boundary}"
+
+
+def image_aspect_ratio(image: ImageInput) -> str:
+    dimensions = png_dimensions(image.content) or jpeg_dimensions(image.content)
+    if dimensions is None:
+        return "9:16"
+    width, height = dimensions
+    target_ratio = width / height
+    supported_ratios = {
+        "1:1": 1.0,
+        "2:3": 2 / 3,
+        "3:2": 3 / 2,
+        "3:4": 3 / 4,
+        "4:3": 4 / 3,
+        "4:5": 4 / 5,
+        "5:4": 5 / 4,
+        "9:16": 9 / 16,
+        "16:9": 16 / 9,
+        "21:9": 21 / 9,
+    }
+    return min(supported_ratios, key=lambda ratio: abs(supported_ratios[ratio] - target_ratio))
+
+
+def png_dimensions(content: bytes) -> tuple[int, int] | None:
+    if len(content) < 24 or content[:8] != b"\x89PNG\r\n\x1a\n" or content[12:16] != b"IHDR":
+        return None
+    return int.from_bytes(content[16:20], "big"), int.from_bytes(content[20:24], "big")
+
+
+def jpeg_dimensions(content: bytes) -> tuple[int, int] | None:
+    if len(content) < 4 or content[:2] != b"\xff\xd8":
+        return None
+    offset = 2
+    while offset + 9 <= len(content):
+        if content[offset] != 0xFF:
+            offset += 1
+            continue
+        marker = content[offset + 1]
+        offset += 2
+        if marker in {0xD8, 0xD9}:
+            continue
+        if offset + 2 > len(content):
+            return None
+        segment_length = int.from_bytes(content[offset : offset + 2], "big")
+        if segment_length < 7 or offset + segment_length > len(content):
+            return None
+        if marker in {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}:
+            height = int.from_bytes(content[offset + 3 : offset + 5], "big")
+            width = int.from_bytes(content[offset + 5 : offset + 7], "big")
+            return width, height
+        offset += segment_length
+    return None
+
+
+def safe_filename(filename: str) -> str:
+    return "".join(char if char.isalnum() or char in {".", "-", "_"} else "_" for char in filename)
+
+
+def valid_provider_output_url(value: str) -> bool:
+    parsed = urlparse(value)
+    return parsed.scheme == "https" and bool(parsed.hostname)
+
+
+def require_safe_provider_download_url(value: str) -> None:
+    if not valid_provider_output_url(value):
+        raise ImageProviderFailed("Apilio output URL must use HTTPS")
+    hostname = urlparse(value).hostname
+    if hostname is None:
+        raise ImageProviderFailed("Apilio output URL is invalid")
+    try:
+        addresses = socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise ImageProviderFailed("Apilio output URL hostname could not be resolved") from exc
+    if not addresses:
+        raise ImageProviderFailed("Apilio output URL hostname could not be resolved")
+    for address in addresses:
+        ip = ipaddress.ip_address(address[4][0])
+        if not ip.is_global:
+            raise ImageProviderFailed("Apilio output URL must resolve to a public address")
+
+
+class NoRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(
+        self, req: Request, fp: object, code: int, msg: str, headers: object, newurl: str
+    ) -> None:
+        del req, fp, code, msg, headers, newurl
+        return None
+
+
+def header_value(headers: Mapping[str, str], name: str) -> str | None:
+    name_lower = name.lower()
+    return next((value for key, value in headers.items() if key.lower() == name_lower), None)
+
+
+def normalized_image_content_type(value: object) -> str:
+    content_type = str(value or "image/png").split(";", 1)[0].lower().strip()
+    if content_type not in FIRST_FRAME_IMAGE_CONTENT_TYPES:
+        raise ImageProviderFailed("Apilio returned an unsupported image type")
+    return content_type
+
+
+def validate_provider_image_bytes(content: bytes, content_type: str) -> None:
+    signatures = {
+        "image/jpeg": content.startswith(b"\xff\xd8\xff"),
+        "image/png": content.startswith(b"\x89PNG\r\n\x1a\n"),
+        "image/webp": len(content) >= 12 and content[:4] == b"RIFF" and content[8:12] == b"WEBP",
+    }
+    if not signatures[content_type]:
+        raise ImageProviderFailed("Apilio returned image bytes that do not match its content type")
 
 
 def generate_first_frame_candidates(
@@ -158,18 +469,18 @@ def generate_first_frame_candidates(
             "The selected character needs at least one reference image.",
         )
 
-    source_content = read_asset_content(storage, source_frame)
+    source_image = read_asset_image(storage, source_frame)
     reference_assets = [
         read_character_reference_asset(conn, asset_id=asset_id) for asset_id in reference_asset_ids
     ]
-    reference_images = [read_asset_content(storage, asset) for asset in reference_assets]
+    reference_images = [read_asset_image(storage, asset) for asset in reference_assets]
     effective_prompt = normalize_prompt(prompt, character_name=character_name)
 
     generated = edit_once_with_retry(
         provider,
         model=model,
         prompt=effective_prompt,
-        source_image=source_content,
+        source_image=source_image,
         character_reference_images=reference_images,
         quantity=quantity,
     )
@@ -431,24 +742,38 @@ def read_character_reference_asset(conn: sqlite3.Connection, *, asset_id: str) -
         raise first_frame_error(
             422, "CHARACTER_REFERENCE_NOT_FOUND", "A character reference image is missing."
         )
-    if not str(row["content_type"]).startswith("image/"):
+    if str(row["content_type"]) not in FIRST_FRAME_IMAGE_CONTENT_TYPES:
         raise first_frame_error(
-            422, "CHARACTER_REFERENCE_INVALID", "Character references must be images."
+            422,
+            "CHARACTER_REFERENCE_INVALID",
+            "Character references must be JPEG, PNG, or WebP images.",
         )
     return cast(sqlite3.Row, row)
 
 
-def read_asset_content(storage: StorageAdapter, asset: sqlite3.Row) -> bytes:
+def read_asset_image(storage: StorageAdapter, asset: sqlite3.Row) -> ImageInput:
+    content_type = str(asset["content_type"])
+    if content_type not in FIRST_FRAME_IMAGE_CONTENT_TYPES:
+        raise first_frame_error(
+            422,
+            "FIRST_FRAME_IMAGE_TYPE_UNSUPPORTED",
+            "Source and character reference images must be JPEG, PNG, or WebP.",
+        )
     try:
         reference = storage_object_ref_from_uri(str(asset["storage_uri"]))
         require_storage_match(storage, reference)
-        return storage.get_object(reference.key)
+        content = storage.get_object(reference.key)
     except (KeyError, OSError, StorageBackendUnavailable, ValueError) as exc:
         raise first_frame_error(
             503,
             "FIRST_FRAME_INPUT_STORAGE_UNAVAILABLE",
             "Source or character reference storage is temporarily unavailable.",
         ) from exc
+    return ImageInput(
+        content=content,
+        content_type=content_type,
+        filename=f"{asset['id']}.{image_extension(content_type)}",
+    )
 
 
 def edit_once_with_retry(
@@ -456,8 +781,8 @@ def edit_once_with_retry(
     *,
     model: FirstFrameModel,
     prompt: str,
-    source_image: bytes,
-    character_reference_images: list[bytes],
+    source_image: ImageInput,
+    character_reference_images: list[ImageInput],
     quantity: int,
 ) -> list[GeneratedImage]:
     for attempt in range(2):
@@ -469,13 +794,19 @@ def edit_once_with_retry(
                 character_reference_images=character_reference_images,
                 output_count=quantity,
             )
-        except ImageProviderFailed as exc:
+        except RetryableImageProviderFailed as exc:
             if attempt == 1:
                 raise first_frame_error(
                     502,
                     "FIRST_FRAME_PROVIDER_FAILED",
                     "The image provider could not generate a first frame.",
                 ) from exc
+        except ImageProviderFailed as exc:
+            raise first_frame_error(
+                502,
+                "FIRST_FRAME_PROVIDER_FAILED",
+                "The image provider could not generate a first frame.",
+            ) from exc
     raise AssertionError("image provider retry loop must return or raise")
 
 

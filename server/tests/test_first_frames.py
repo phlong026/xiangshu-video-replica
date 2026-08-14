@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from app.auth import get_database
 from app.db import connect_database, initialize_database
 from app.first_frame_routes import get_image_provider
-from app.first_frames import GeneratedImage, ImageProviderFailed
+from app.first_frames import GeneratedImage, ImageInput, RetryableImageProviderFailed
 from app.main import app
 from app.media_routes import get_media_storage
 from app.source_frame_routes import get_source_frame_extractor
@@ -29,16 +29,18 @@ class RecordingImageProvider:
         *,
         model: str,
         prompt: str,
-        source_image: bytes,
-        character_reference_images: list[bytes],
+        source_image: ImageInput,
+        character_reference_images: list[ImageInput],
         output_count: int,
     ) -> list[GeneratedImage]:
         self.calls.append(
             {
                 "model": model,
                 "prompt": prompt,
-                "source_image": source_image,
-                "character_reference_images": character_reference_images,
+                "source_image": source_image.content,
+                "character_reference_images": [
+                    image.content for image in character_reference_images
+                ],
                 "output_count": output_count,
             }
         )
@@ -57,13 +59,13 @@ class FlakyImageProvider(RecordingImageProvider):
         *,
         model: str,
         prompt: str,
-        source_image: bytes,
-        character_reference_images: list[bytes],
+        source_image: ImageInput,
+        character_reference_images: list[ImageInput],
         output_count: int,
     ) -> list[GeneratedImage]:
         if self.failures_remaining:
             self.failures_remaining -= 1
-            raise ImageProviderFailed("temporary provider failure")
+            raise RetryableImageProviderFailed("temporary provider failure")
         return super().edit(
             model=model,
             prompt=prompt,
@@ -295,6 +297,31 @@ def test_confirmed_first_frame_is_versioned_and_latest_candidates_invalidate_old
     )
     assert latest.status_code == 409
     assert latest.json()["detail"]["code"] == "FIRST_FRAME_SELECTION_STALE"
+
+
+def test_employee_can_view_newest_first_frame_candidate_versions(client: TestClient) -> None:
+    prepare_inputs(client)
+    first = client.post(
+        "/api/projects/project_owned/first-frames/generate",
+        json={"model": "gpt-image-2", "quantity": 1},
+        headers=headers("employee_1"),
+    )
+    second = client.post(
+        "/api/projects/project_owned/first-frames/generate",
+        json={"model": "nano-banana-pro-2k", "quantity": 1},
+        headers=headers("employee_1"),
+    )
+
+    response = client.get(
+        "/api/projects/project_owned/first-frames/history",
+        headers=headers("employee_1"),
+    )
+
+    assert response.status_code == 200
+    assert [version["id"] for version in response.json()] == [
+        second.json()["id"],
+        first.json()["id"],
+    ]
 
 
 def test_generation_retries_one_transient_image_provider_failure(

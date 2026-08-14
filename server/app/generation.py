@@ -258,6 +258,9 @@ def compile_prompt_version(
     )
     if str(first_frame["project_id"]) != project_id:
         raise generation_error(400, "ASSET_PROJECT_MISMATCH", "First frame is not in this project.")
+    require_confirmed_first_frame(
+        conn, project_id=project_id, first_frame_asset_id=request.first_frame_asset_id
+    )
 
     script_payload = json.loads(str(script["payload_json"]))
     shot_payload = json.loads(str(shot_card["payload_json"]))
@@ -414,6 +417,15 @@ def create_generation_batch(
     )
     if str(first_frame["project_id"]) != project_id:
         raise generation_error(400, "ASSET_PROJECT_MISMATCH", "First frame is not in this project.")
+    require_confirmed_first_frame(
+        conn, project_id=project_id, first_frame_asset_id=request.first_frame_asset_id
+    )
+    if prompt_snapshot.get("first_frame_asset_id") != request.first_frame_asset_id:
+        raise generation_error(
+            409,
+            "FIRST_FRAME_PROMPT_MISMATCH",
+            "Generation must use the first frame that was used to compile the locked prompt.",
+        )
 
     request_snapshot = generation_request_snapshot(request, prompt_snapshot)
     batch_id = str(uuid4())
@@ -502,6 +514,87 @@ def create_generation_batch(
         metadata={"project_id": project_id, "quantity": request.quantity},
     )
     return get_generation_batch(conn, batch_id=batch_id, actor=actor)
+
+
+def require_confirmed_first_frame(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    first_frame_asset_id: str,
+) -> None:
+    selection = conn.execute(
+        """
+        SELECT id, payload_json
+        FROM versions
+        WHERE project_id = ? AND kind = 'first_frame_selection'
+        ORDER BY version_number DESC
+        LIMIT 1
+        """,
+        (project_id,),
+    ).fetchone()
+    candidates = conn.execute(
+        """
+        SELECT id, payload_json
+        FROM versions
+        WHERE project_id = ? AND kind = 'first_frame_candidates'
+        ORDER BY version_number DESC
+        LIMIT 1
+        """,
+        (project_id,),
+    ).fetchone()
+    if selection is None or candidates is None:
+        raise generation_error(
+            409,
+            "FIRST_FRAME_CONFIRMATION_REQUIRED",
+            "Confirm a first-frame candidate before compiling or submitting H3 generation.",
+        )
+    try:
+        selection_payload = json.loads(str(selection["payload_json"]))
+        candidate_payload = json.loads(str(candidates["payload_json"]))
+    except json.JSONDecodeError as exc:
+        raise generation_error(
+            409,
+            "FIRST_FRAME_CONFIRMATION_REQUIRED",
+            "Confirm a first-frame candidate before compiling or submitting H3 generation.",
+        ) from exc
+    candidate_values = (
+        candidate_payload.get("candidates") if isinstance(candidate_payload, dict) else None
+    )
+    candidate_asset_ids = (
+        {
+            value.get("asset_id")
+            for value in candidate_values
+            if isinstance(value, dict) and isinstance(value.get("asset_id"), str)
+        }
+        if isinstance(candidate_values, list)
+        else set()
+    )
+    is_current_confirmation = (
+        isinstance(selection_payload, dict)
+        and selection_payload.get("first_frame_candidates_version_id") == str(candidates["id"])
+        and selection_payload.get("first_frame_asset_id") == first_frame_asset_id
+        and first_frame_asset_id in candidate_asset_ids
+    )
+    if not is_current_confirmation:
+        raise generation_error(
+            409,
+            "FIRST_FRAME_CONFIRMATION_REQUIRED",
+            "Confirm a first-frame candidate from the latest candidate set before H3 generation.",
+        )
+    if (
+        isinstance(candidate_payload, dict)
+        and candidate_payload.get("schema_version") == "b5.first-frame.v1"
+    ):
+        from app.first_frames import current_first_frame_candidates
+
+        try:
+            current_first_frame_candidates(conn, project_id=project_id)
+        except HTTPException as exc:
+            raise generation_error(
+                409,
+                "FIRST_FRAME_CONFIRMATION_REQUIRED",
+                "The confirmed first frame is stale; generate and confirm it again before H3.",
+            ) from exc
 
 
 def run_next_generation_task(

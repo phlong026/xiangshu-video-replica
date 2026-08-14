@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.auth import AuthenticatedUser, Database
 from app.first_frames import (
     FIRST_FRAME_SELECTION_KIND,
+    ApilioImageProvider,
     FakeImageProvider,
     ImageProvider,
     confirm_first_frame,
@@ -18,6 +19,7 @@ from app.first_frames import (
 )
 from app.media_routes import get_media_storage
 from app.permissions import require_project_access
+from app.settings import SettingsDecryptError, SettingsKeyMissing, SettingsRepository
 from app.source_frames import latest_version
 from app.storage import StorageAdapter
 
@@ -51,8 +53,45 @@ class VersionResponse(BaseModel):
     created_at: str
 
 
-def get_image_provider() -> ImageProvider:
-    return FakeImageProvider()
+def get_image_provider(conn: Database) -> ImageProvider:
+    has_saved_apilio_config = (
+        conn.execute(
+            "SELECT 1 FROM provider_settings WHERE provider = ?",
+            ("apilio",),
+        ).fetchone()
+        is not None
+    )
+    try:
+        config = SettingsRepository(conn).load_provider_config("apilio")
+    except (SettingsDecryptError, SettingsKeyMissing) as exc:
+        if has_saved_apilio_config:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "APILIO_SETTINGS_UNAVAILABLE",
+                    "message": (
+                        "Apilio settings cannot be decrypted. Ask an administrator to repair them."
+                    ),
+                },
+            ) from exc
+        return FakeImageProvider()
+    if not config:
+        return FakeImageProvider()
+    api_key = config.get("api_key")
+    if not api_key:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "APILIO_SETTINGS_UNAVAILABLE",
+                "message": (
+                    "Apilio API Key is unavailable. Ask an administrator to repair settings."
+                ),
+            },
+        )
+    return ApilioImageProvider(
+        api_key=api_key,
+        base_url=config.get("base_url", "https://api.apilio.ai"),
+    )
 
 
 FirstFrameStorage = Annotated[StorageAdapter, Depends(get_media_storage)]
@@ -105,6 +144,27 @@ def read_latest_first_frames(
             ) from exc
         raise
     return version_response(row)
+
+
+@router.get("/projects/{project_id}/first-frames/history", response_model=list[VersionResponse])
+def read_first_frame_history(
+    project_id: str,
+    conn: Database,
+    actor: AuthenticatedUser,
+) -> list[VersionResponse]:
+    require_project_access(conn, actor=actor, project_id=project_id, action="first_frame.read")
+    rows = conn.execute(
+        """
+        SELECT id, project_id, asset_id, kind, version_number, payload_json,
+               created_by_user_id, created_at
+        FROM versions
+        WHERE project_id = ? AND kind = ?
+        ORDER BY version_number DESC
+        LIMIT 20
+        """,
+        (project_id, "first_frame_candidates"),
+    ).fetchall()
+    return [version_response(row) for row in rows]
 
 
 @router.post("/projects/{project_id}/first-frames/confirm", response_model=VersionResponse)
