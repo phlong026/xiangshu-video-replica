@@ -260,7 +260,7 @@ export function uploadReferenceVideo(
     const devUserId =
       import.meta.env.VITE_DEV_USER_ID ??
       (import.meta.env.DEV ? "admin_1" : undefined);
-    if (devUserId) {
+    if (devUserId && isLocalApiUploadUrl(intent.url)) {
       request.setRequestHeader("X-Dev-User-Id", devUserId);
     }
     for (const [name, value] of Object.entries(intent.headers)) {
@@ -839,6 +839,18 @@ function contentTypeForFile(file: File): "video/mp4" | "video/quicktime" {
   return file.name.toLowerCase().endsWith(".mov")
     ? "video/quicktime"
     : "video/mp4";
+}
+
+function isLocalApiUploadUrl(url: string): boolean {
+  try {
+    const target = new URL(url);
+    return (
+      (target.hostname === "127.0.0.1" || target.hostname === "localhost") &&
+      target.port === "8000"
+    );
+  } catch {
+    return false;
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

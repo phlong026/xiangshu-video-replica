@@ -18,6 +18,12 @@ import "./styles.css";
 
 type Page = "login" | "projects" | "settings";
 type ServiceState = "checking" | "connected" | "disconnected";
+type UploadStage =
+  | "creating_project"
+  | "creating_upload"
+  | "uploading"
+  | "verifying"
+  | "analyzing";
 
 const BATCH_STORAGE_KEY = "generation.batchId";
 const POLL_INTERVAL_MS = 2_000;
@@ -50,6 +56,7 @@ export function App() {
   const [setupError, setSetupError] = useState("");
   const [setupMessage, setSetupMessage] = useState("");
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
+  const [uploadStage, setUploadStage] = useState<UploadStage | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [activeAnalysisProject, setActiveAnalysisProject] =
     useState<Project | null>(null);
@@ -205,6 +212,7 @@ export function App() {
     setSetupError("");
     setSetupMessage("");
     setUploadProgress(0);
+    setUploadStage(pendingProject ? "creating_upload" : "creating_project");
     try {
       const project =
         pendingProject ?? (await createProject(projectName.trim()));
@@ -212,9 +220,13 @@ export function App() {
         setPendingProject(project);
         setProjects((current) => [project, ...current]);
       }
+      setUploadStage("creating_upload");
       const intent = await createVideoUploadIntent(project.id, referenceVideo);
+      setUploadStage("uploading");
       await uploadReferenceVideo(intent, referenceVideo, setUploadProgress);
+      setUploadStage("verifying");
       const completed = await completeVideoUpload(intent.asset_id);
+      setUploadStage("analyzing");
       await startVideoAnalysis(
         project.id,
         completed.asset_id,
@@ -239,12 +251,15 @@ export function App() {
       setProjectName("");
       setReferenceVideo(null);
       setUploadProgress(null);
+      setUploadStage(null);
     } catch (error) {
       setSetupError(
         error instanceof Error
           ? `${error.message}。项目已保留，可修正设置后重新上传。`
           : "创建或上传失败。项目已保留，可修正设置后重新上传。",
       );
+      setUploadProgress(null);
+      setUploadStage(null);
     } finally {
       setIsUploading(false);
     }
@@ -257,6 +272,7 @@ export function App() {
     setSetupError("");
     setSetupMessage("");
     setUploadProgress(null);
+    setUploadStage(null);
   }
 
   if (page === "login") {
@@ -328,6 +344,7 @@ export function App() {
             setupError={setupError}
             setupMessage={setupMessage}
             uploadProgress={uploadProgress}
+            uploadStage={uploadStage}
           />
           {activeAnalysisProject ? (
             <AnalysisWorkspace
@@ -395,6 +412,7 @@ function ProjectSetupPanel({
   setupError,
   setupMessage,
   uploadProgress,
+  uploadStage,
 }: {
   isLoading: boolean;
   isUploading: boolean;
@@ -411,6 +429,7 @@ function ProjectSetupPanel({
   setupError: string;
   setupMessage: string;
   uploadProgress: number | null;
+  uploadStage: UploadStage | null;
 }) {
   return (
     <section className="project-setup" aria-labelledby="project-setup-title">
@@ -451,18 +470,8 @@ function ProjectSetupPanel({
             正在为“{pendingProject.name}”重新上传参考视频。
           </p>
         ) : null}
-        {uploadProgress !== null ? (
-          <div
-            aria-label="参考视频上传进度"
-            aria-valuemax={100}
-            aria-valuemin={0}
-            aria-valuenow={uploadProgress}
-            className="upload-progress"
-            role="progressbar"
-          >
-            <span style={{ width: `${uploadProgress}%` }} />
-            <strong>{uploadProgress}%</strong>
-          </div>
+        {isUploading && uploadStage ? (
+          <UploadProgress stage={uploadStage} progress={uploadProgress} />
         ) : null}
         {setupError ? <p className="settings-error">{setupError}</p> : null}
         {setupMessage ? <p className="setup-success">{setupMessage}</p> : null}
@@ -484,7 +493,7 @@ function ProjectSetupPanel({
       </form>
       {projectsError ? <p className="settings-error">{projectsError}</p> : null}
       {isLoading ? <p className="status-note">正在加载项目列表</p> : null}
-      {!isLoading && !projectsError && projects.length ? (
+      {!isUploading && !isLoading && !projectsError && projects.length ? (
         <ul className="project-list">
           {projects.map((project) => (
             <li key={project.id}>
@@ -516,10 +525,75 @@ function ProjectSetupPanel({
           ))}
         </ul>
       ) : null}
-      {!isLoading && !projectsError && !projects.length ? (
+      {!isUploading && !isLoading && !projectsError && !projects.length ? (
         <p className="status-note">还没有项目，从第一个参考视频开始。</p>
       ) : null}
     </section>
+  );
+}
+
+function UploadProgress({
+  progress,
+  stage,
+}: {
+  progress: number | null;
+  stage: UploadStage;
+}) {
+  const details: Record<
+    UploadStage,
+    { step: number; title: string; message: string }
+  > = {
+    creating_project: {
+      step: 1,
+      title: "正在创建项目",
+      message: "正在保存本次复刻任务。",
+    },
+    creating_upload: {
+      step: 2,
+      title: "正在准备上传",
+      message: "正在获取安全上传地址。",
+    },
+    uploading: {
+      step: 3,
+      title: "正在上传参考视频",
+      message:
+        progress && progress > 0 ? `已传输 ${progress}%` : "等待传输进度",
+    },
+    verifying: {
+      step: 4,
+      title: "正在验证参考视频",
+      message: "正在检查文件、格式和视频时长。",
+    },
+    analyzing: {
+      step: 5,
+      title: "正在启动视频拆解",
+      message: "视频已通过预检，正在创建拆解任务。",
+    },
+  };
+  const detail = details[stage];
+  const hasTransferProgress = stage === "uploading";
+  const percentage = progress ?? 0;
+  return (
+    <div className="upload-status" role="status" aria-live="polite">
+      <p className="upload-status__step">
+        步骤 {detail.step}/5 · {detail.title}
+      </p>
+      <div
+        aria-label="参考视频上传进度"
+        aria-valuemax={100}
+        aria-valuemin={0}
+        aria-valuenow={hasTransferProgress ? percentage : undefined}
+        aria-valuetext={`${detail.title}，${detail.message}`}
+        className={`upload-progress ${
+          hasTransferProgress ? "" : "upload-progress--indeterminate"
+        }`}
+        role="progressbar"
+      >
+        <span style={{ width: `${hasTransferProgress ? percentage : 100}%` }} />
+        <strong>{hasTransferProgress ? `${percentage}%` : "处理中"}</strong>
+      </div>
+      <p className="status-note">{detail.message}</p>
+    </div>
   );
 }
 

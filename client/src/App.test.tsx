@@ -536,6 +536,86 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "创建并上传" })).toBeDisabled();
   });
 
+  it("keeps the upload stage visible while the file transfer is still pending", async () => {
+    class PendingUploadRequest {
+      onerror: (() => void) | null = null;
+      onload: (() => void) | null = null;
+      ontimeout: (() => void) | null = null;
+      status = 0;
+      timeout = 0;
+      upload: { onprogress: ((event: ProgressEvent) => void) | null } = {
+        onprogress: null,
+      };
+
+      open() {}
+      setRequestHeader() {}
+      send() {}
+    }
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string, options?: RequestInit) => {
+        if (url.endsWith("/health")) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => healthResponse,
+          });
+        }
+        if (url.endsWith("/api/projects")) {
+          return Promise.resolve({
+            ok: true,
+            json: async () =>
+              options?.method === "POST"
+                ? {
+                    id: "project-1",
+                    owner_user_id: "employee_1",
+                    name: "上传中项目",
+                    status: "ACTIVE",
+                    reference_asset_id: null,
+                    reference_upload_status: "UPLOAD_PENDING",
+                  }
+                : [],
+          });
+        }
+        if (url.endsWith("/upload-intent")) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              asset_id: "asset-1",
+              project_id: "project-1",
+              storage_key: "projects/project-1/reference.mp4",
+              method: "PUT",
+              url: "https://storage.example/upload",
+              headers: { "content-type": "video/mp4" },
+              expires_at: "2030-01-01T00:00:00Z",
+            }),
+          });
+        }
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }),
+    );
+    vi.stubGlobal("XMLHttpRequest", PendingUploadRequest);
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+    fireEvent.change(screen.getByLabelText("项目名称"), {
+      target: { value: "上传中项目" },
+    });
+    fireEvent.change(screen.getByLabelText("参考视频"), {
+      target: {
+        files: [new File(["video"], "reference.mp4", { type: "video/mp4" })],
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "创建并上传" }));
+
+    expect(
+      await screen.findByText("步骤 3/5 · 正在上传参考视频"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("progressbar", { name: "参考视频上传进度" }),
+    ).toHaveAttribute("aria-valuetext", "正在上传参考视频，等待传输进度");
+  });
+
   it("keeps the created project available for an upload retry", async () => {
     class FailedUploadRequest {
       onerror: (() => void) | null = null;

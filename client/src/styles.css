@@ -237,6 +237,17 @@ input:focus {
   background: #120f18;
 }
 
+.upload-status {
+  display: grid;
+  gap: 8px;
+}
+
+.upload-status__step {
+  margin: 0;
+  color: #f0ecf8;
+  font-weight: 700;
+}
+
 .upload-progress span {
   display: block;
   height: 100%;
@@ -244,11 +255,26 @@ input:focus {
   transition: width 160ms ease-out;
 }
 
+.upload-progress.upload-progress--indeterminate span {
+  width: 45%;
+  animation: upload-pulse 1.1s ease-in-out infinite alternate;
+}
+
 .upload-progress strong {
   position: absolute;
   inset: 6px 12px;
   color: #fff;
   font-size: 12px;
+}
+
+@keyframes upload-pulse {
+  from {
+    transform: translateX(-25%);
+  }
+
+  to {
+    transform: translateX(135%);
+  }
 }
 
 .setup-success {
