@@ -42,13 +42,21 @@ fn default_boot_command() -> Option<Command> {
 }
 
 fn boot_command() -> Option<Command> {
-    // An explicit env override takes precedence (used in dev and for custom installs).
+    // An explicit env override takes precedence (used in dev and for custom
+    // installs). It is a full command line, so run it through the platform
+    // shell to tolerate paths containing spaces (e.g. `C:\Program Files\...`).
     if let Ok(raw) = std::env::var(BOOT_COMMAND_ENV) {
-        let mut parts = raw.split_whitespace();
-        let program = parts.next()?.to_string();
-        let args: Vec<String> = parts.map(str::to_string).collect();
-        let mut command = Command::new(program);
-        command.args(&args);
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return default_boot_command();
+        }
+        if cfg!(windows) {
+            let mut command = Command::new("cmd");
+            command.args(["/c", trimmed]);
+            return Some(command);
+        }
+        let mut command = Command::new("sh");
+        command.args(["-c", trimmed]);
         return Some(command);
     }
     default_boot_command()

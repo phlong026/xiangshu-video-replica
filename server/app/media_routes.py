@@ -215,6 +215,7 @@ def get_local_object(
     ):
         raise HTTPException(status_code=403, detail={"code": "LOCAL_DOWNLOAD_FORBIDDEN"})
     stored = storage.head_object(object_key)
+    if stored is None:
+        raise HTTPException(status_code=404, detail={"code": "OBJECT_NOT_FOUND"})
     content = storage.get_object(object_key)
-    media_type = stored.content_type if stored is not None else "application/octet-stream"
-    return Response(content=content, media_type=media_type)
+    return Response(content=content, media_type=stored.content_type)
