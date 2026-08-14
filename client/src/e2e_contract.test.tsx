@@ -92,7 +92,10 @@ describe("Fake provider E2E contract", () => {
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
         "http://127.0.0.1:8000/api/generation-batches/batch-fake-e2e",
-        { signal: expect.any(AbortSignal) },
+        expect.objectContaining({
+          headers: expect.any(Headers),
+          signal: expect.any(AbortSignal),
+        }),
       ),
     );
   });

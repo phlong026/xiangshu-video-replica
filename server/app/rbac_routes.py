@@ -4,9 +4,10 @@ import os
 import sqlite3
 from datetime import timedelta
 from pathlib import Path
+from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, ConfigDict
+from fastapi import APIRouter, HTTPException, status
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.auth import AuthenticatedUser, Database
 from app.media import storage_key_from_uri
@@ -39,6 +40,19 @@ class UserResponse(BaseModel):
     username: str
     display_name: str
     role: str
+
+
+class CreateProjectRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=120)
+
+
+class ProjectResponse(BaseModel):
+    id: str
+    owner_user_id: str
+    name: str
+    status: str
 
 
 class AcceptedResponse(BaseModel):
@@ -119,19 +133,89 @@ def read_me(actor: AuthenticatedUser) -> UserResponse:
     )
 
 
-@router.get("/projects/{project_id}", response_model=dict[str, str])
+@router.get("/projects", response_model=list[ProjectResponse])
+def list_projects(
+    conn: Database,
+    actor: AuthenticatedUser,
+) -> list[ProjectResponse]:
+    if actor.role == "admin":
+        rows = conn.execute(
+            """
+            SELECT id, owner_user_id, name, status
+            FROM projects
+            ORDER BY created_at DESC, rowid DESC
+            """
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT id, owner_user_id, name, status
+            FROM projects
+            WHERE owner_user_id = ?
+            ORDER BY created_at DESC, rowid DESC
+            """,
+            (actor.id,),
+        ).fetchall()
+    return [project_response(row) for row in rows]
+
+
+@router.post(
+    "/projects",
+    response_model=ProjectResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_project(
+    payload: CreateProjectRequest,
+    conn: Database,
+    actor: AuthenticatedUser,
+) -> ProjectResponse:
+    require_not_auditor(
+        conn,
+        actor=actor,
+        action="project.create",
+        entity_type="project",
+        entity_id="new",
+    )
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"code": "PROJECT_NAME_REQUIRED", "message": "Project name is required."},
+        )
+
+    project_id = str(uuid4())
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO projects (id, owner_user_id, name)
+            VALUES (?, ?, ?)
+            """,
+            (project_id, actor.id, name),
+        )
+    write_audit(
+        conn,
+        actor=actor,
+        action="project.create",
+        entity_type="project",
+        entity_id=project_id,
+        metadata={"name": name},
+    )
+    return ProjectResponse(
+        id=project_id,
+        owner_user_id=actor.id,
+        name=name,
+        status="ACTIVE",
+    )
+
+
+@router.get("/projects/{project_id}", response_model=ProjectResponse)
 def read_project(
     project_id: str,
     conn: Database,
     actor: AuthenticatedUser,
-) -> dict[str, str]:
+) -> ProjectResponse:
     row = require_project_access(conn, actor=actor, project_id=project_id, action="project.read")
-    return {
-        "id": str(row["id"]),
-        "owner_user_id": str(row["owner_user_id"]),
-        "name": str(row["name"]),
-        "status": str(row["status"]),
-    }
+    return project_response(row)
 
 
 @router.get("/assets/{asset_id}", response_model=AssetResponse)
@@ -248,6 +332,15 @@ def asset_response(row: sqlite3.Row) -> AssetResponse:
         sha256=str(row["sha256"]),
         size_bytes=int(row["size_bytes"]),
         content_type=None if row["content_type"] is None else str(row["content_type"]),
+    )
+
+
+def project_response(row: sqlite3.Row) -> ProjectResponse:
+    return ProjectResponse(
+        id=str(row["id"]),
+        owner_user_id=str(row["owner_user_id"]),
+        name=str(row["name"]),
+        status=str(row["status"]),
     )
 
 

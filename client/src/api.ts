@@ -68,6 +68,45 @@ export type SettingsDiagnosticReport = {
   download_url: string;
 };
 
+export type Project = {
+  id: string;
+  owner_user_id: string;
+  name: string;
+  status: string;
+};
+
+export type UploadIntent = {
+  asset_id: string;
+  project_id: string;
+  storage_key: string;
+  method: "PUT";
+  url: string;
+  headers: Record<string, string>;
+  expires_at: string;
+};
+
+export type CompletedUpload = {
+  asset_id: string;
+  project_id: string;
+  status: string;
+  storage_uri: string;
+  sha256: string;
+  size_bytes: number;
+  content_type: string;
+  metadata: { duration_seconds: number };
+};
+
+export type AnalysisVersion = {
+  id: string;
+  project_id: string;
+  asset_id: string | null;
+  kind: string;
+  version_number: number;
+  payload: Record<string, unknown>;
+  created_by_user_id: string | null;
+  created_at: string;
+};
+
 export async function getHealth(): Promise<HealthResponse> {
   return requestJson<HealthResponse>("/health", "本地服务暂不可用");
 }
@@ -75,9 +114,98 @@ export async function getHealth(): Promise<HealthResponse> {
 export async function getGenerationBatch(
   batchId: string,
 ): Promise<GenerationBatch> {
-  return requestJson<GenerationBatch>(
+  return requestApiJson<GenerationBatch>(
     `/api/generation-batches/${encodeURIComponent(batchId)}`,
     "任务批次暂不可用",
+  );
+}
+
+export async function listProjects(): Promise<Project[]> {
+  return requestApiJson<Project[]>("/api/projects", "项目列表暂不可用");
+}
+
+export async function createProject(name: string): Promise<Project> {
+  return requestApiJson<Project>("/api/projects", "创建项目失败", {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function createVideoUploadIntent(
+  projectId: string,
+  file: File,
+): Promise<UploadIntent> {
+  return requestApiJson<UploadIntent>(
+    "/api/assets/upload-intent",
+    "创建上传任务失败",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        project_id: projectId,
+        filename: file.name,
+        content_type: file.type || contentTypeForFile(file),
+        size_bytes: file.size,
+      }),
+    },
+  );
+}
+
+export function uploadReferenceVideo(
+  intent: UploadIntent,
+  file: File,
+  onProgress: (progressPercent: number) => void,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open(intent.method, intent.url);
+    request.timeout = REQUEST_TIMEOUT_MS * 12;
+    for (const [name, value] of Object.entries(intent.headers)) {
+      request.setRequestHeader(name, value);
+    }
+    request.upload.onprogress = (event) => {
+      if (event.lengthComputable && event.total > 0) {
+        onProgress(Math.round((event.loaded / event.total) * 100));
+      }
+    };
+    request.onload = () => {
+      if (request.status >= 200 && request.status < 300) {
+        onProgress(100);
+        resolve();
+        return;
+      }
+      reject(new Error(`上传参考视频失败（${request.status}）`));
+    };
+    request.onerror = () => reject(new Error("上传参考视频失败（网络错误）"));
+    request.ontimeout = () => reject(new Error("上传参考视频失败（请求超时）"));
+    request.send(file);
+  });
+}
+
+export async function completeVideoUpload(
+  assetId: string,
+): Promise<CompletedUpload> {
+  return requestApiJson<CompletedUpload>(
+    `/api/assets/${encodeURIComponent(assetId)}/complete`,
+    "参考视频预检失败",
+    { method: "POST" },
+  );
+}
+
+export async function startVideoAnalysis(
+  projectId: string,
+  assetId: string,
+  durationSeconds: number,
+): Promise<AnalysisVersion> {
+  return requestApiJson<AnalysisVersion>(
+    `/api/projects/${encodeURIComponent(projectId)}/analysis`,
+    "启动视频拆解失败",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        asset_id: assetId,
+        duration_seconds: durationSeconds,
+      }),
+    },
   );
 }
 
@@ -170,6 +298,18 @@ async function requestAdminJson<T>(
   return (await response.json()) as T;
 }
 
+async function requestApiJson<T>(
+  path: string,
+  errorPrefix: string,
+  init: RequestInit = {},
+): Promise<T> {
+  const response = await requestApi(path, init);
+  if (!response.ok) {
+    throw new Error(`${errorPrefix}（${response.status}）`);
+  }
+  return (await response.json()) as T;
+}
+
 async function requestAdmin(
   path: string,
   init: RequestInit,
@@ -201,4 +341,40 @@ async function requestAdmin(
   } finally {
     window.clearTimeout(timeout);
   }
+}
+
+async function requestApi(path: string, init: RequestInit): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(
+    () => controller.abort(),
+    REQUEST_TIMEOUT_MS,
+  );
+  const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? DEFAULT_API_BASE_URL;
+  const headers = new Headers(init.headers);
+  const devUserId =
+    import.meta.env.VITE_DEV_USER_ID ??
+    (import.meta.env.DEV ? "employee_1" : undefined);
+
+  if (init.body) {
+    headers.set("Content-Type", "application/json");
+  }
+  if (devUserId) {
+    headers.set("X-Dev-User-Id", devUserId);
+  }
+
+  try {
+    return await fetch(`${apiBaseUrl}${path}`, {
+      ...init,
+      headers,
+      signal: controller.signal,
+    });
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
+function contentTypeForFile(file: File): "video/mp4" | "video/quicktime" {
+  return file.name.toLowerCase().endsWith(".mov")
+    ? "video/quicktime"
+    : "video/mp4";
 }

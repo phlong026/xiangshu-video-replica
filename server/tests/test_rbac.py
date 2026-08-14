@@ -150,6 +150,54 @@ def test_dev_header_login_returns_active_user_role(client: TestClient) -> None:
     }
 
 
+def test_employee_can_create_and_list_only_their_projects(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    created = client.post(
+        "/api/projects",
+        headers=auth_headers("employee_1"),
+        json={"name": "  新的复刻项目  "},
+    )
+    listed = client.get("/api/projects", headers=auth_headers("employee_1"))
+
+    assert created.status_code == 201
+    assert created.json()["name"] == "新的复刻项目"
+    assert created.json()["owner_user_id"] == "employee_1"
+    assert created.json()["status"] == "ACTIVE"
+    assert [project["name"] for project in listed.json()] == [
+        "新的复刻项目",
+        "Owned Project",
+    ]
+
+    with connect_database(db_path) as conn:
+        row = conn.execute(
+            "SELECT metadata_json FROM audit_logs WHERE action = 'project.create'"
+        ).fetchone()
+    assert row is not None
+    assert '"name": "\\u65b0\\u7684\\u590d\\u523b\\u9879\\u76ee"' in str(
+        row["metadata_json"]
+    )
+
+
+def test_auditor_cannot_create_projects_and_admin_can_list_all_projects(
+    client: TestClient,
+) -> None:
+    forbidden = client.post(
+        "/api/projects",
+        headers=auth_headers("auditor_1"),
+        json={"name": "不应创建"},
+    )
+    listed = client.get("/api/projects", headers=auth_headers("admin_1"))
+
+    assert forbidden.status_code == 403
+    assert forbidden.json()["detail"]["code"] == "ROLE_FORBIDDEN"
+    assert [project["name"] for project in listed.json()] == [
+        "Other Project",
+        "Owned Project",
+    ]
+
+
 def test_auditor_cannot_generate_retry_or_download(client: TestClient) -> None:
     headers = auth_headers("auditor_1")
 

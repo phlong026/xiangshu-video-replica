@@ -100,6 +100,238 @@ describe("App", () => {
     });
   });
 
+  it("shows the employee project form for creating a reference-video replica", async () => {
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/health")) {
+        return Promise.resolve({ ok: true, json: async () => healthResponse });
+      }
+      return Promise.resolve({ ok: true, json: async () => [] });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "新建复刻项目" }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("项目名称")).toBeInTheDocument();
+    expect(screen.getByLabelText("参考视频")).toHaveAttribute(
+      "accept",
+      ".mp4,.mov,video/mp4,video/quicktime",
+    );
+    expect(screen.getByRole("button", { name: "创建并上传" })).toBeDisabled();
+  });
+
+  it("uploads a valid reference video, completes precheck, and starts analysis", async () => {
+    class SuccessfulUploadRequest {
+      onerror: (() => void) | null = null;
+      onload: (() => void) | null = null;
+      ontimeout: (() => void) | null = null;
+      status = 200;
+      timeout = 0;
+      upload: { onprogress: ((event: ProgressEvent) => void) | null } = {
+        onprogress: null,
+      };
+
+      open() {}
+      setRequestHeader() {}
+      send() {
+        this.upload.onprogress?.({
+          lengthComputable: true,
+          loaded: 10,
+          total: 10,
+        } as ProgressEvent);
+        this.onload?.();
+      }
+    }
+
+    let projectCollectionCalls = 0;
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/health")) {
+        return Promise.resolve({ ok: true, json: async () => healthResponse });
+      }
+      if (url.endsWith("/api/projects") && !url.includes("analysis")) {
+        projectCollectionCalls += 1;
+        const projectResponse =
+          projectCollectionCalls === 1
+            ? []
+            : {
+                id: "project-1",
+                owner_user_id: "employee_1",
+                name: "咖啡口播",
+                status: "ACTIVE",
+              };
+        return Promise.resolve({
+          ok: true,
+          json: async () => projectResponse,
+        });
+      }
+      if (url.endsWith("/upload-intent")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            asset_id: "asset-1",
+            project_id: "project-1",
+            storage_key: "projects/project-1/reference.mp4",
+            method: "PUT",
+            url: "https://storage.example/upload",
+            headers: { "content-type": "video/mp4" },
+            expires_at: "2030-01-01T00:00:00Z",
+          }),
+        });
+      }
+      if (url.endsWith("/complete")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            asset_id: "asset-1",
+            project_id: "project-1",
+            status: "uploaded",
+            storage_uri: "cos://private-bucket/reference.mp4",
+            sha256: "hash",
+            size_bytes: 10,
+            content_type: "video/mp4",
+            metadata: { duration_seconds: 8 },
+          }),
+        });
+      }
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({
+          id: "analysis-1",
+          project_id: "project-1",
+          asset_id: "asset-1",
+          kind: "analysis",
+          version_number: 1,
+          payload: {},
+          created_by_user_id: "employee_1",
+          created_at: "2030-01-01T00:00:00Z",
+        }),
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("XMLHttpRequest", SuccessfulUploadRequest);
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+    fireEvent.change(screen.getByLabelText("项目名称"), {
+      target: { value: "咖啡口播" },
+    });
+    fireEvent.change(screen.getByLabelText("参考视频"), {
+      target: {
+        files: [new File(["video"], "reference.mp4", { type: "video/mp4" })],
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "创建并上传" }));
+
+    expect(
+      await screen.findByText(/已完成上传和预检（8.0 秒），已自动进入视频拆解/),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("progressbar", { name: "参考视频上传进度" }),
+    ).toBeNull();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:8000/api/projects/project-1/analysis",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ asset_id: "asset-1", duration_seconds: 8 }),
+      }),
+    );
+  });
+
+  it("rejects unsupported reference videos before creating a project", async () => {
+    vi.stubGlobal("fetch", vi.fn());
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+    fireEvent.change(screen.getByLabelText("项目名称"), {
+      target: { value: "错误文件" },
+    });
+    fireEvent.change(screen.getByLabelText("参考视频"), {
+      target: { files: [new File(["text"], "reference.txt")] },
+    });
+
+    expect(
+      screen.getByText("只支持 MP4 或 MOV 格式的视频。"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "创建并上传" })).toBeDisabled();
+  });
+
+  it("keeps the created project available for an upload retry", async () => {
+    class FailedUploadRequest {
+      onerror: (() => void) | null = null;
+      onload: (() => void) | null = null;
+      ontimeout: (() => void) | null = null;
+      status = 500;
+      timeout = 0;
+      upload: { onprogress: ((event: ProgressEvent) => void) | null } = {
+        onprogress: null,
+      };
+
+      open() {}
+      setRequestHeader() {}
+      send() {
+        this.onload?.();
+      }
+    }
+
+    let projectCollectionCalls = 0;
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/health")) {
+        return Promise.resolve({ ok: true, json: async () => healthResponse });
+      }
+      if (url.endsWith("/api/projects")) {
+        projectCollectionCalls += 1;
+        const projectResponse =
+          projectCollectionCalls === 1
+            ? []
+            : {
+                id: "project-1",
+                owner_user_id: "employee_1",
+                name: "失败重试",
+                status: "ACTIVE",
+              };
+        return Promise.resolve({
+          ok: true,
+          json: async () => projectResponse,
+        });
+      }
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({
+          asset_id: "asset-1",
+          project_id: "project-1",
+          storage_key: "projects/project-1/reference.mp4",
+          method: "PUT",
+          url: "https://storage.example/upload",
+          headers: { "content-type": "video/mp4" },
+          expires_at: "2030-01-01T00:00:00Z",
+        }),
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("XMLHttpRequest", FailedUploadRequest);
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+    fireEvent.change(screen.getByLabelText("项目名称"), {
+      target: { value: "失败重试" },
+    });
+    fireEvent.change(screen.getByLabelText("参考视频"), {
+      target: {
+        files: [new File(["video"], "reference.mp4", { type: "video/mp4" })],
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "创建并上传" }));
+
+    expect(
+      await screen.findByText(/上传参考视频失败（500）/),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "重新上传" })).toBeEnabled();
+    expect(screen.getByLabelText("项目名称")).toBeDisabled();
+  });
+
   it("lets an admin configure providers, run a non-billing diagnostic, and download its log", async () => {
     const settingsResponse = {
       providers: {
@@ -266,11 +498,21 @@ describe("App", () => {
         },
       },
     });
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce({ ok: true, json: async () => healthResponse })
-      .mockResolvedValueOnce({ ok: true, json: async () => runningBatch })
-      .mockResolvedValueOnce({ ok: true, json: async () => doneBatch });
+    let generationRequestCount = 0;
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/health")) {
+        return Promise.resolve({ ok: true, json: async () => healthResponse });
+      }
+      if (url.endsWith("/api/projects")) {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
+      generationRequestCount += 1;
+      return Promise.resolve({
+        ok: true,
+        json: async () =>
+          generationRequestCount === 1 ? runningBatch : doneBatch,
+      });
+    });
     vi.stubGlobal("fetch", fetchMock);
 
     render(<App />);
@@ -296,16 +538,23 @@ describe("App", () => {
       await vi.advanceTimersByTimeAsync(2_000);
     });
 
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(generationRequestCount).toBe(2);
   });
 
   it("stops polling when the batch needs manual handling", async () => {
     vi.useFakeTimers();
     const attentionBatch = batchResponse({ status: "NEEDS_ATTENTION" });
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce({ ok: true, json: async () => healthResponse })
-      .mockResolvedValueOnce({ ok: true, json: async () => attentionBatch });
+    let generationRequestCount = 0;
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/health")) {
+        return Promise.resolve({ ok: true, json: async () => healthResponse });
+      }
+      if (url.endsWith("/api/projects")) {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
+      generationRequestCount += 1;
+      return Promise.resolve({ ok: true, json: async () => attentionBatch });
+    });
     vi.stubGlobal("fetch", fetchMock);
 
     render(<App />);
@@ -324,27 +573,37 @@ describe("App", () => {
       await vi.advanceTimersByTimeAsync(6_000);
     });
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(generationRequestCount).toBe(1);
   });
 
   it("backs off after poll failures while keeping the last running batch visible", async () => {
     vi.useFakeTimers();
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce({ ok: true, json: async () => healthResponse })
-      .mockResolvedValueOnce({
+    let generationRequestCount = 0;
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/health")) {
+        return Promise.resolve({ ok: true, json: async () => healthResponse });
+      }
+      if (url.endsWith("/api/projects")) {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
+      generationRequestCount += 1;
+      if (generationRequestCount === 2) {
+        return Promise.reject(new Error("network"));
+      }
+      return Promise.resolve({
         ok: true,
         json: async () =>
-          batchResponse({
-            progress: {
-              ...batchResponse().progress,
-              terminal_count: 0,
-              progress_percent: 0,
-            },
-          }),
-      })
-      .mockRejectedValueOnce(new Error("network"))
-      .mockResolvedValueOnce({ ok: true, json: async () => batchResponse() });
+          generationRequestCount === 1
+            ? batchResponse({
+                progress: {
+                  ...batchResponse().progress,
+                  terminal_count: 0,
+                  progress_percent: 0,
+                },
+              })
+            : batchResponse(),
+      });
+    });
     vi.stubGlobal("fetch", fetchMock);
 
     render(<App />);
@@ -368,14 +627,14 @@ describe("App", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(3_999);
     });
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(generationRequestCount).toBe(2);
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1);
     });
 
     expect(screen.getByText("50%")).toBeInTheDocument();
-    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(generationRequestCount).toBe(3);
   });
 
   it("restores the last batch id from localStorage when reopening the workspace", async () => {
@@ -403,7 +662,10 @@ describe("App", () => {
     expect(await screen.findByText("batch-restored")).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith(
       "http://127.0.0.1:8000/api/generation-batches/batch-restored",
-      { signal: expect.any(AbortSignal) },
+      expect.objectContaining({
+        headers: expect.any(Headers),
+        signal: expect.any(AbortSignal),
+      }),
     );
   });
 });

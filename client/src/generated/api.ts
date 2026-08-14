@@ -106,6 +106,24 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/projects": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List Projects */
+    get: operations["list_projects_api_projects_get"];
+    put?: never;
+    /** Create Project */
+    post: operations["create_project_api_projects_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/projects/{project_id}": {
     parameters: {
       query?: never;
@@ -612,6 +630,11 @@ export interface components {
       /** Duration Seconds */
       duration_seconds: number;
     };
+    /** CreateProjectRequest */
+    CreateProjectRequest: {
+      /** Name */
+      name: string;
+    };
     /** DiagnosticProviderResult */
     DiagnosticProviderResult: {
       /** Provider */
@@ -709,6 +732,17 @@ export interface components {
       character_snapshot: {
         [key: string]: unknown;
       };
+    };
+    /** ProjectResponse */
+    ProjectResponse: {
+      /** Id */
+      id: string;
+      /** Owner User Id */
+      owner_user_id: string;
+      /** Name */
+      name: string;
+      /** Status */
+      status: string;
     };
     /** PromptCompileRequest */
     PromptCompileRequest: {
@@ -1127,6 +1161,72 @@ export interface operations {
       };
     };
   };
+  list_projects_api_projects_get: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ProjectResponse"][];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  create_project_api_projects_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["CreateProjectRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ProjectResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   read_project_api_projects__project_id__get: {
     parameters: {
       query?: never;
@@ -1146,9 +1246,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          "application/json": {
-            [key: string]: string;
-          };
+          "application/json": components["schemas"]["ProjectResponse"];
         };
       };
       /** @description Validation Error */

@@ -1,10 +1,17 @@
-import { type FormEvent, useEffect, useState } from "react";
+import { type ChangeEvent, type FormEvent, useEffect, useState } from "react";
 
 import {
+  completeVideoUpload,
+  createProject,
+  createVideoUploadIntent,
   type GenerationBatch,
   type GenerationTask,
   getGenerationBatch,
   getHealth,
+  listProjects,
+  type Project,
+  startVideoAnalysis,
+  uploadReferenceVideo,
 } from "./api";
 import { SettingsPanel } from "./SettingsPanel";
 import "./styles.css";
@@ -34,6 +41,16 @@ export function App() {
   const [retryDelaySeconds, setRetryDelaySeconds] = useState<number | null>(
     null,
   );
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [projectsError, setProjectsError] = useState("");
+  const [isProjectsLoading, setIsProjectsLoading] = useState(false);
+  const [projectName, setProjectName] = useState("");
+  const [referenceVideo, setReferenceVideo] = useState<File | null>(null);
+  const [pendingProject, setPendingProject] = useState<Project | null>(null);
+  const [setupError, setSetupError] = useState("");
+  const [setupMessage, setSetupMessage] = useState("");
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
+  const [isUploading, setIsUploading] = useState(false);
 
   useEffect(() => {
     if (page === "login") {
@@ -71,6 +88,36 @@ export function App() {
       setActiveBatchId(restoredBatchId);
     }
   }, [page, activeBatchId]);
+
+  useEffect(() => {
+    if (page !== "projects") {
+      return;
+    }
+
+    let isActive = true;
+    setIsProjectsLoading(true);
+    listProjects()
+      .then((nextProjects) => {
+        if (isActive) {
+          setProjects(nextProjects);
+          setProjectsError("");
+        }
+      })
+      .catch(() => {
+        if (isActive) {
+          setProjectsError("项目列表暂不可用，请检查本地服务连接。");
+        }
+      })
+      .finally(() => {
+        if (isActive) {
+          setIsProjectsLoading(false);
+        }
+      });
+
+    return () => {
+      isActive = false;
+    };
+  }, [page]);
 
   useEffect(() => {
     if (page !== "projects" || !activeBatchId) {
@@ -132,6 +179,63 @@ export function App() {
     setActiveBatchId(nextBatchId);
   }
 
+  function handleReferenceVideoChange(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0] ?? null;
+    setReferenceVideo(file);
+    setSetupError(file ? validateReferenceVideo(file) : "");
+    setSetupMessage("");
+  }
+
+  async function handleProjectSetup(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!referenceVideo) {
+      setSetupError("请选择 4–15 秒的 MP4 或 MOV 参考视频。");
+      return;
+    }
+
+    const validationError = validateReferenceVideo(referenceVideo);
+    if (validationError) {
+      setSetupError(validationError);
+      return;
+    }
+
+    setIsUploading(true);
+    setSetupError("");
+    setSetupMessage("");
+    setUploadProgress(0);
+    try {
+      const project =
+        pendingProject ?? (await createProject(projectName.trim()));
+      if (!pendingProject) {
+        setPendingProject(project);
+        setProjects((current) => [project, ...current]);
+      }
+      const intent = await createVideoUploadIntent(project.id, referenceVideo);
+      await uploadReferenceVideo(intent, referenceVideo, setUploadProgress);
+      const completed = await completeVideoUpload(intent.asset_id);
+      await startVideoAnalysis(
+        project.id,
+        completed.asset_id,
+        completed.metadata.duration_seconds,
+      );
+      setSetupMessage(
+        `“${project.name}”已完成上传和预检（${completed.metadata.duration_seconds.toFixed(1)} 秒），已自动进入视频拆解。`,
+      );
+      setPendingProject(null);
+      setProjectName("");
+      setReferenceVideo(null);
+      setUploadProgress(null);
+    } catch (error) {
+      setSetupError(
+        error instanceof Error
+          ? `${error.message}。项目已保留，可修正设置后重新上传。`
+          : "创建或上传失败。项目已保留，可修正设置后重新上传。",
+      );
+    } finally {
+      setIsUploading(false);
+    }
+  }
+
   if (page === "login") {
     return (
       <main className="centered-shell">
@@ -184,43 +288,201 @@ export function App() {
       </header>
       {page === "settings" ? <SettingsPanel /> : null}
       {page === "projects" ? (
-        <section className="task-records" aria-labelledby="task-records-title">
-          <div className="section-heading">
-            <div>
-              <span className="eyebrow">TASK RECORDS</span>
-              <h2 id="task-records-title">任务记录</h2>
-            </div>
-            {activeBatchId ? (
-              <span className="batch-id">{activeBatchId}</span>
-            ) : null}
-          </div>
-
-          <form className="batch-form" onSubmit={handleBatchSubmit}>
-            <label htmlFor="batch-id">Batch ID</label>
-            <div className="batch-input-row">
-              <input
-                id="batch-id"
-                value={batchIdInput}
-                placeholder="粘贴 generation batch id"
-                onChange={(event) => setBatchIdInput(event.target.value)}
-              />
-              <button type="submit" disabled={!batchIdInput.trim()}>
-                查询任务记录
-              </button>
-            </div>
-          </form>
-
-          <BatchStatusMessage
-            error={batchError}
-            isLoading={isBatchLoading}
-            retryDelaySeconds={retryDelaySeconds}
+        <>
+          <ProjectSetupPanel
+            isLoading={isProjectsLoading}
+            isUploading={isUploading}
+            onFileChange={handleReferenceVideoChange}
+            onProjectNameChange={setProjectName}
+            onSubmit={handleProjectSetup}
+            pendingProject={pendingProject}
+            projectName={projectName}
+            projects={projects}
+            projectsError={projectsError}
+            referenceVideo={referenceVideo}
+            setupError={setupError}
+            setupMessage={setupMessage}
+            uploadProgress={uploadProgress}
           />
+          <section
+            className="task-records"
+            aria-labelledby="task-records-title"
+          >
+            <div className="section-heading">
+              <div>
+                <span className="eyebrow">TASK RECORDS</span>
+                <h2 id="task-records-title">任务记录</h2>
+              </div>
+              {activeBatchId ? (
+                <span className="batch-id">{activeBatchId}</span>
+              ) : null}
+            </div>
 
-          {batch ? <BatchPanel batch={batch} /> : <EmptyBatchState />}
-        </section>
+            <form className="batch-form" onSubmit={handleBatchSubmit}>
+              <label htmlFor="batch-id">Batch ID</label>
+              <div className="batch-input-row">
+                <input
+                  id="batch-id"
+                  value={batchIdInput}
+                  placeholder="粘贴 generation batch id"
+                  onChange={(event) => setBatchIdInput(event.target.value)}
+                />
+                <button type="submit" disabled={!batchIdInput.trim()}>
+                  查询任务记录
+                </button>
+              </div>
+            </form>
+
+            <BatchStatusMessage
+              error={batchError}
+              isLoading={isBatchLoading}
+              retryDelaySeconds={retryDelaySeconds}
+            />
+
+            {batch ? <BatchPanel batch={batch} /> : <EmptyBatchState />}
+          </section>
+        </>
       ) : null}
     </main>
   );
+}
+
+function ProjectSetupPanel({
+  isLoading,
+  isUploading,
+  onFileChange,
+  onProjectNameChange,
+  onSubmit,
+  pendingProject,
+  projectName,
+  projects,
+  projectsError,
+  referenceVideo,
+  setupError,
+  setupMessage,
+  uploadProgress,
+}: {
+  isLoading: boolean;
+  isUploading: boolean;
+  onFileChange: (event: ChangeEvent<HTMLInputElement>) => void;
+  onProjectNameChange: (value: string) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  pendingProject: Project | null;
+  projectName: string;
+  projects: Project[];
+  projectsError: string;
+  referenceVideo: File | null;
+  setupError: string;
+  setupMessage: string;
+  uploadProgress: number | null;
+}) {
+  return (
+    <section className="project-setup" aria-labelledby="project-setup-title">
+      <div className="section-heading">
+        <div>
+          <span className="eyebrow">START HERE</span>
+          <h2 id="project-setup-title">新建复刻项目</h2>
+          <p>上传 4–15 秒的参考视频，系统会先完成格式与时长预检。</p>
+        </div>
+        <span className="project-count">{projects.length} 个项目</span>
+      </div>
+      <form className="project-setup-form" onSubmit={onSubmit}>
+        <label htmlFor="project-name">项目名称</label>
+        <input
+          id="project-name"
+          disabled={Boolean(pendingProject) || isUploading}
+          maxLength={120}
+          onChange={(event) => onProjectNameChange(event.target.value)}
+          placeholder="例如：夏日咖啡口播复刻"
+          value={projectName}
+        />
+        <label htmlFor="reference-video">参考视频</label>
+        <input
+          id="reference-video"
+          accept=".mp4,.mov,video/mp4,video/quicktime"
+          disabled={isUploading}
+          onChange={onFileChange}
+          type="file"
+        />
+        {referenceVideo ? (
+          <p className="file-note">
+            已选择：{referenceVideo.name}（{formatFileSize(referenceVideo.size)}
+            ）
+          </p>
+        ) : null}
+        {pendingProject ? (
+          <p className="status-note">
+            正在为“{pendingProject.name}”重新上传参考视频。
+          </p>
+        ) : null}
+        {uploadProgress !== null ? (
+          <div
+            aria-label="参考视频上传进度"
+            aria-valuemax={100}
+            aria-valuemin={0}
+            aria-valuenow={uploadProgress}
+            className="upload-progress"
+            role="progressbar"
+          >
+            <span style={{ width: `${uploadProgress}%` }} />
+            <strong>{uploadProgress}%</strong>
+          </div>
+        ) : null}
+        {setupError ? <p className="settings-error">{setupError}</p> : null}
+        {setupMessage ? <p className="setup-success">{setupMessage}</p> : null}
+        <button
+          disabled={
+            isUploading ||
+            !referenceVideo ||
+            (!pendingProject && !projectName.trim()) ||
+            Boolean(referenceVideo && validateReferenceVideo(referenceVideo))
+          }
+          type="submit"
+        >
+          {isUploading
+            ? "正在上传"
+            : pendingProject
+              ? "重新上传"
+              : "创建并上传"}
+        </button>
+      </form>
+      {projectsError ? <p className="settings-error">{projectsError}</p> : null}
+      {isLoading ? <p className="status-note">正在加载项目列表</p> : null}
+      {!isLoading && !projectsError && projects.length ? (
+        <ul className="project-list">
+          {projects.map((project) => (
+            <li key={project.id}>
+              <strong>{project.name}</strong>
+              <span>{project.status}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {!isLoading && !projectsError && !projects.length ? (
+        <p className="status-note">还没有项目，从第一个参考视频开始。</p>
+      ) : null}
+    </section>
+  );
+}
+
+function validateReferenceVideo(file: File): string {
+  const filename = file.name.toLowerCase();
+  const isSupportedType =
+    file.type === "video/mp4" ||
+    file.type === "video/quicktime" ||
+    filename.endsWith(".mp4") ||
+    filename.endsWith(".mov");
+  if (!isSupportedType) {
+    return "只支持 MP4 或 MOV 格式的视频。";
+  }
+  if (file.size > 50 * 1024 * 1024) {
+    return "参考视频不能超过 50MB。";
+  }
+  return "";
+}
+
+function formatFileSize(sizeBytes: number): string {
+  return `${(sizeBytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
 function ServiceBadge({ state }: { state: ServiceState }) {
