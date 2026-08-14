@@ -1,6 +1,10 @@
 .DS_Store
 .omx/
 .claude/
+.serena/
+
+# Skill 运行时产物
+video_reverse_runs/
 
 # Frontend
 node_modules/
