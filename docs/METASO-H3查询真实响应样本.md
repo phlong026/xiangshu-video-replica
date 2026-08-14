@@ -47,8 +47,55 @@
 | 结果 URL | `content.url`（临时签名地址） | `_metaso_content_url()` 校验 HTTPS 后归档 | ✅ 匹配 |
 | 分辨率/时长/比例 | `resolution`/`duration`/`ratio` | `SUPPORTED_RESOLUTIONS`、4–15s、`adaptive` 契约 | ✅ 匹配 |
 
-## 3. G0-01 门禁进度
+## 3. 创建接口证据（用户提供 cURL 示例，2026-08-14）
 
-- ✅ **查询响应结构已确认**：`items[]` + `total`，无官方 `task{}` 形状 → 仓库 1 的 items[] 解析为正确实现。
-- ✅ **架构评审分叉裁决（响应部分）**：真实响应只有 `items[]`，仓库 1 **不需要**补 `task{}` 兼容；仓库 2 `extract_task` 的 `task{}` 分支是对 MiniMax 官方形状的冗余兼容，保留无害。
-- ⏳ 仍待证据：查询**请求** URL 形状（`?task_id=` vs 路径参数）、取消/回调能力、失败状态全集（`failed`/`cancelled` 等）、H3 结果 MP4 的原生音轨可播放性。
+```bash
+curl --request POST \
+  --url https://metaso.cn/api/minimax/v2/video_generation \
+  --header 'Authorization: Bearer <脱敏: 不记录真实密钥>' \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "model": "MiniMax-H3",
+    "content": [
+      { "type": "text", "text": "<提示词>" },
+      { "type": "image_url", "image_url": { "url": "<首帧URL>" }, "role": "first_frame" }
+    ],
+    "resolution": "2K",
+    "duration": 5,
+    "ratio": "adaptive"
+  }'
+```
+
+响应：
+
+```json
+{ "task_id": "424010985738629" }
+```
+
+**与仓库 1 实现核对**：
+
+| 项 | cURL 示例 | 仓库 1（generation.py） | 结论 |
+| --- | --- | --- | --- |
+| 创建端点 | `POST /api/minimax/v2/video_generation` | `METASO_CREATE_PATH="/api/minimax/v2/video_generation"` | ✅ 一致 |
+| 请求体 | model/content(text+image_url first_frame)/resolution/duration/ratio | `build_h3_request()` 完全同构 | ✅ 一致 |
+| 创建响应 | `{"task_id": "..."}` | `_metaso_task_id()` 读取 task_id | ✅ 一致 |
+
+## 4. 能力与价格（用户提供控制台信息，2026-08-14）
+
+- **取消 / 回调：不支持** —— 用户明确确认 METASO H3 接口不支持取消/回调。仓库 1 无 cancel 实现是**符合接口能力**的，不是缺口。
+- 时长：4–15 秒（单个 ≤ 15.5 秒）。
+- 分辨率：768P / 2K。
+- 画面比例：自动 / 21:9 / 16:9 / 4:3 / 1:1 / 3:4 / 9:16。
+- 图片素材：最多 9 张，前 5 张免费，超出按张计费（0.05 元/张）。
+- H3 Context IR：0.05 元/次（默认开启，控制台可关）。
+- 视频价格：2K 0.15 元/秒，768P 0.09 元/秒（MiniMax 官方价 2 折）。
+- 计费：按生成时长与素材计费；充值基准 4399 元 = 500000 积分。
+
+## 5. G0-01 门禁进度
+
+- ✅ **创建接口确认**：端点、请求体、响应（task_id）与仓库 1 实现一致（见 §3）。
+- ✅ **取消/回调确认**：不支持 → 无 cancel 实现为正确行为。
+- ✅ **查询响应结构确认**：`items[]` + `total`，`status="succeeded"`，仓库 1 items 解析正确，无需补 `task{}` 兼容。
+- ✅ **成功响应的状态与结果 URL 确认**：`succeeded` + `content.url`。
+- ⏳ 仍待证据：查询**请求** URL 形状（`?task_id=` vs 路径参数）、失败状态全集（`failed`/`cancelled` 形状）、H3 结果 MP4 的原生音轨可播放性。
+- ⚠️ **密钥安全**：用户示例中的 Bearer key 视作已暴露，未写入本仓库；须确认是否真实并吊销。
