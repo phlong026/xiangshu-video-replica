@@ -193,8 +193,9 @@ export function SettingsPanel() {
           <span className="eyebrow">TEST MODE</span>
           <h3 id="diagnostic-title">测试设置</h3>
           <p>
-            逐项检查已保存的服务参数并生成脱敏日志。该操作不会自动提交 H3
-            付费生成任务；未接入的真实服务会明确标记为“仅配置校验”。
+            逐项检查已保存的服务参数并生成脱敏日志。已配置的 COS/OSS
+            会创建并删除一个小测试对象，可能产生云存储请求费用；该操作不会提交
+            H3、视频或图片生成任务，未接入的服务会标记为“仅配置校验”。
           </p>
         </div>
         <button type="button" onClick={testSettings} disabled={isTesting}>

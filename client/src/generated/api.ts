@@ -855,6 +855,10 @@ export interface components {
       http_status?: number | null;
       /** Error Code */
       error_code?: string | null;
+      /** Failure Phase */
+      failure_phase?: string | null;
+      /** Cleanup Failed */
+      cleanup_failed?: boolean | null;
       /** Latency Ms */
       latency_ms?: number | null;
       /** Message */

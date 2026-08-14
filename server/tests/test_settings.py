@@ -15,10 +15,12 @@ from app.settings import SettingsKeyMissing, SettingsRepository
 from app.settings_routes import (
     NoopProviderTester,
     ProviderTestResult,
+    StorageProviderTester,
     get_database,
     get_provider_tester,
     router,
 )
+from app.storage import FakeStorageAdapter, StorageBackendUnavailable
 
 
 @pytest.fixture()
@@ -443,7 +445,11 @@ def test_diagnostic_log_keeps_http_error_codes_but_not_provider_error_details(
         def connection_test(self, provider: str, config: dict[str, str]) -> ProviderTestResult:
             raise HTTPException(
                 status_code=429,
-                detail={"code": "RATE_LIMITED", "message": "sensitive provider response"},
+                detail={
+                    "code": "RATE_LIMITED",
+                    "failure_phase": "put",
+                    "message": "sensitive provider response",
+                },
             )
 
         def paid_test(self, provider: str, config: dict[str, str]) -> ProviderTestResult:
@@ -462,6 +468,7 @@ def test_diagnostic_log_keeps_http_error_codes_but_not_provider_error_details(
     assert metaso["status"] == "error"
     assert metaso["http_status"] == 429
     assert metaso["error_code"] == "RATE_LIMITED"
+    assert metaso["failure_phase"] == "put"
     assert "sensitive provider response" not in response.text
 
 
@@ -475,3 +482,172 @@ def test_default_provider_tester_never_claims_real_connectivity_or_paid_access()
     assert error.value.status_code == 501
     detail = cast(dict[str, str], error.value.detail)
     assert detail["code"] == "PROVIDER_TEST_NOT_IMPLEMENTED"
+
+
+def test_storage_provider_tester_runs_a_recoverable_cos_connection_check() -> None:
+    class CapturingStorage(FakeStorageAdapter):
+        deleted_key: str | None = None
+
+        def delete_object(self, key: str, *, actor_id: str | None = None) -> None:
+            self.deleted_key = key
+            super().delete_object(key, actor_id=actor_id)
+
+    storage = CapturingStorage(provider="cos", bucket="video-private")
+    tester = StorageProviderTester(storage_factory=lambda _: storage)
+
+    result = tester.connection_test(
+        "cos",
+        {
+            "access_key_id": "cos-id",
+            "secret_access_key": "cos-secret",
+            "bucket": "video-private",
+            "region": "ap-shanghai",
+        },
+    )
+
+    assert result == ProviderTestResult(status="ok", provider="cos", test_kind="storage_connection")
+    assert storage.deleted_key is not None
+    assert storage.deleted_key.startswith("projects/settings-diagnostics/")
+    assert storage.head_object(storage.deleted_key) is None
+    assert [event.action for event in storage.audit_events] == ["object.deleted"]
+
+
+@pytest.mark.parametrize("provider", ["metaso", "apilio"])
+def test_storage_provider_tester_keeps_model_provider_checks_non_billing(provider: str) -> None:
+    result = StorageProviderTester().connection_test(provider, {"api_key": "configured"})
+
+    assert result == ProviderTestResult(
+        status="configured_only", provider=provider, test_kind="connection"
+    )
+
+
+def test_storage_provider_tester_redacts_cloud_failure_from_connection_result() -> None:
+    class FailingStorage(FakeStorageAdapter):
+        def put_object(self, key: str, content: bytes, *, content_type: str):  # type: ignore[no-untyped-def]
+            del key, content, content_type
+            raise StorageBackendUnavailable("provider returned sensitive detail")
+
+    tester = StorageProviderTester(
+        storage_factory=lambda _: FailingStorage(provider="cos", bucket="video-private")
+    )
+
+    with pytest.raises(HTTPException) as error:
+        tester.connection_test(
+            "cos",
+            {
+                "access_key_id": "cos-id",
+                "secret_access_key": "cos-secret",
+                "bucket": "video-private",
+                "region": "ap-shanghai",
+            },
+        )
+
+    assert error.value.status_code == 503
+    assert error.value.detail == {
+        "code": "STORAGE_CONNECTION_TEST_FAILED",
+        "cleanup_failed": False,
+        "failure_phase": "put",
+        "message": "对象存储连接测试失败；请运行测试设置并查看本地服务日志。",
+    }
+
+
+def test_storage_provider_tester_reports_cleanup_failure_without_provider_details() -> None:
+    class FailingCleanupStorage(FakeStorageAdapter):
+        def delete_object(self, key: str, *, actor_id: str | None = None) -> None:
+            del key, actor_id
+            raise StorageBackendUnavailable("provider returned sensitive cleanup detail")
+
+    tester = StorageProviderTester(
+        storage_factory=lambda _: FailingCleanupStorage(provider="cos", bucket="video-private")
+    )
+
+    with pytest.raises(HTTPException) as error:
+        tester.connection_test(
+            "cos",
+            {
+                "access_key_id": "cos-id",
+                "secret_access_key": "cos-secret",
+                "bucket": "video-private",
+                "region": "ap-shanghai",
+            },
+        )
+
+    assert error.value.status_code == 503
+    assert error.value.detail == {
+        "code": "STORAGE_CONNECTION_TEST_CLEANUP_FAILED",
+        "cleanup_failed": True,
+        "failure_phase": "delete",
+        "message": "对象存储测试对象清理失败；可能残留测试对象，请检查本地服务日志。",
+    }
+
+
+def test_storage_provider_tester_prioritizes_cleanup_failure_after_verification_error() -> None:
+    class FailingVerificationAndCleanupStorage(FakeStorageAdapter):
+        def head_object(self, key: str):  # type: ignore[no-untyped-def]
+            del key
+            raise StorageBackendUnavailable("provider returned sensitive verification detail")
+
+        def delete_object(self, key: str, *, actor_id: str | None = None) -> None:
+            del key, actor_id
+            raise StorageBackendUnavailable("provider returned sensitive cleanup detail")
+
+    tester = StorageProviderTester(
+        storage_factory=lambda _: FailingVerificationAndCleanupStorage(
+            provider="cos", bucket="video-private"
+        )
+    )
+
+    with pytest.raises(HTTPException) as error:
+        tester.connection_test(
+            "cos",
+            {
+                "access_key_id": "cos-id",
+                "secret_access_key": "cos-secret",
+                "bucket": "video-private",
+                "region": "ap-shanghai",
+            },
+        )
+
+    assert error.value.status_code == 503
+    assert error.value.detail == {
+        "code": "STORAGE_CONNECTION_TEST_CLEANUP_FAILED",
+        "cleanup_failed": True,
+        "failure_phase": "delete",
+        "message": "对象存储测试对象清理失败；可能残留测试对象，请检查本地服务日志。",
+    }
+
+
+def test_storage_provider_tester_preserves_put_failure_when_best_effort_cleanup_fails() -> None:
+    class FailingPutAndCleanupStorage(FakeStorageAdapter):
+        def put_object(self, key: str, content: bytes, *, content_type: str):  # type: ignore[no-untyped-def]
+            del key, content, content_type
+            raise StorageBackendUnavailable("provider returned sensitive upload detail")
+
+        def delete_object(self, key: str, *, actor_id: str | None = None) -> None:
+            del key, actor_id
+            raise StorageBackendUnavailable("provider returned sensitive cleanup detail")
+
+    tester = StorageProviderTester(
+        storage_factory=lambda _: FailingPutAndCleanupStorage(
+            provider="cos", bucket="video-private"
+        )
+    )
+
+    with pytest.raises(HTTPException) as error:
+        tester.connection_test(
+            "cos",
+            {
+                "access_key_id": "cos-id",
+                "secret_access_key": "cos-secret",
+                "bucket": "video-private",
+                "region": "ap-shanghai",
+            },
+        )
+
+    assert error.value.status_code == 503
+    assert error.value.detail == {
+        "code": "STORAGE_CONNECTION_TEST_FAILED",
+        "cleanup_failed": True,
+        "failure_phase": "put",
+        "message": "对象存储连接测试失败，且清理动作失败；可能残留测试对象，请查看本地服务日志。",
+    }

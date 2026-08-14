@@ -6,7 +6,7 @@ import os
 import sqlite3
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from typing import Literal, Protocol
 
@@ -16,6 +16,13 @@ from pydantic import BaseModel, Field
 
 from app.db import connect_database
 from app.settings import SettingsRepository, is_secret_field, normalize_provider
+from app.storage import (
+    CloudStorageConfig,
+    StorageAdapter,
+    StorageBackendUnavailable,
+    cloud_storage_config_from_settings,
+    create_storage_adapter,
+)
 
 DATABASE_PATH_ENV = "VIDEO_REPLICA_DB_PATH"
 
@@ -52,6 +59,8 @@ class DiagnosticProviderResult(BaseModel):
     test_kind: str
     http_status: int | None = None
     error_code: str | None = None
+    failure_phase: str | None = None
+    cleanup_failed: bool | None = None
     latency_ms: int | None = None
     message: str
 
@@ -88,6 +97,97 @@ class NoopProviderTester:
         )
 
 
+class StorageProviderTester:
+    def __init__(
+        self,
+        *,
+        fallback: ProviderTester | None = None,
+        storage_factory: Callable[[CloudStorageConfig], StorageAdapter] = create_storage_adapter,
+    ) -> None:
+        self.fallback = fallback or NoopProviderTester()
+        self.storage_factory = storage_factory
+
+    def connection_test(self, provider: str, config: dict[str, str]) -> ProviderTestResult:
+        if provider not in {"cos", "oss"}:
+            return self.fallback.connection_test(provider, config)
+        if not config:
+            return self.fallback.connection_test(provider, config)
+
+        adapter: StorageAdapter | None = None
+        cleanup_required = False
+        put_succeeded = False
+        test_key = f"projects/settings-diagnostics/{uuid.uuid4().hex}.txt"
+        payload = b"video-replica storage connection check"
+        failure_phase = "initialize"
+        operation_error: Exception | None = None
+        cleanup_error: Exception | None = None
+        try:
+            adapter = self.storage_factory(cloud_storage_config_from_settings(provider, config))
+            cleanup_required = True
+            failure_phase = "put"
+            adapter.put_object(test_key, payload, content_type="text/plain")
+            put_succeeded = True
+            failure_phase = "head"
+            metadata = adapter.head_object(test_key)
+            failure_phase = "get"
+            content = adapter.get_object(test_key)
+            failure_phase = "verify"
+            if metadata is None or metadata.size != len(payload) or content != payload:
+                raise StorageBackendUnavailable("storage connection test verification failed")
+        except Exception as exc:
+            operation_error = exc
+        finally:
+            if adapter is not None and cleanup_required:
+                try:
+                    adapter.delete_object(test_key, actor_id="settings-diagnostic")
+                except Exception as exc:
+                    cleanup_error = exc
+                    logger.error("Storage connection test cleanup failed for provider %s", provider)
+
+        if cleanup_error is not None and put_succeeded:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "STORAGE_CONNECTION_TEST_CLEANUP_FAILED",
+                    "cleanup_failed": True,
+                    "failure_phase": "delete",
+                    "message": "对象存储测试对象清理失败；可能残留测试对象，请检查本地服务日志。",
+                },
+            ) from cleanup_error
+        if isinstance(operation_error, ValueError):
+            logger.warning("Storage connection test has invalid settings for provider %s", provider)
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "STORAGE_SETTINGS_INVALID",
+                    "cleanup_failed": cleanup_error is not None,
+                    "failure_phase": failure_phase,
+                    "message": "对象存储配置无效；请检查必填参数。",
+                },
+            ) from operation_error
+        if operation_error is not None:
+            logger.warning("Storage connection test failed for provider %s", provider)
+            message = "对象存储连接测试失败；请运行测试设置并查看本地服务日志。"
+            if cleanup_error is not None:
+                message = (
+                    "对象存储连接测试失败，且清理动作失败；可能残留测试对象，请查看本地服务日志。"
+                )
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "STORAGE_CONNECTION_TEST_FAILED",
+                    "cleanup_failed": cleanup_error is not None,
+                    "failure_phase": failure_phase,
+                    "message": message,
+                },
+            ) from operation_error
+
+        return ProviderTestResult(status="ok", provider=provider, test_kind="storage_connection")
+
+    def paid_test(self, provider: str, config: dict[str, str]) -> ProviderTestResult:
+        return self.fallback.paid_test(provider, config)
+
+
 def get_database() -> Iterator[sqlite3.Connection]:
     db_path = os.environ.get(DATABASE_PATH_ENV)
     if not db_path:
@@ -97,7 +197,7 @@ def get_database() -> Iterator[sqlite3.Connection]:
 
 
 def get_provider_tester() -> ProviderTester:
-    return NoopProviderTester()
+    return StorageProviderTester()
 
 
 def current_admin(
@@ -275,6 +375,8 @@ def run_settings_diagnostic(
                     test_kind="connection",
                     http_status=exc.status_code,
                     error_code=error_code_from_http_exception(exc),
+                    failure_phase=failure_phase_from_http_exception(exc),
+                    cleanup_failed=cleanup_failed_from_http_exception(exc),
                     latency_ms=elapsed_milliseconds(started_at),
                     message="测试接口返回错误；请下载诊断日志查看错误码。",
                 )
@@ -393,6 +495,18 @@ def error_code_from_http_exception(error: HTTPException) -> str:
     if isinstance(error.detail, dict) and isinstance(error.detail.get("code"), str):
         return str(error.detail["code"])
     return "PROVIDER_CONNECTION_ERROR"
+
+
+def failure_phase_from_http_exception(error: HTTPException) -> str | None:
+    if isinstance(error.detail, dict) and isinstance(error.detail.get("failure_phase"), str):
+        return str(error.detail["failure_phase"])
+    return None
+
+
+def cleanup_failed_from_http_exception(error: HTTPException) -> bool | None:
+    if isinstance(error.detail, dict) and isinstance(error.detail.get("cleanup_failed"), bool):
+        return bool(error.detail["cleanup_failed"])
+    return None
 
 
 def elapsed_milliseconds(started_at: float) -> int:

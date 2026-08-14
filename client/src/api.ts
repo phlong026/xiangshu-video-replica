@@ -57,6 +57,8 @@ export type DiagnosticProviderResult = {
   test_kind: string;
   http_status?: number | null;
   error_code?: string | null;
+  failure_phase?: string | null;
+  cleanup_failed?: boolean | null;
   latency_ms?: number | null;
   message: string;
 };

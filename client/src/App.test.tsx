@@ -610,7 +610,7 @@ describe("App", () => {
     expect(screen.getByLabelText("项目名称")).toBeDisabled();
   });
 
-  it("lets an admin configure providers, run a non-billing diagnostic, and download its log", async () => {
+  it("lets an admin configure providers, run a non-generative diagnostic, and download its log", async () => {
     const settingsResponse = {
       providers: {
         metaso: {
@@ -695,6 +695,11 @@ describe("App", () => {
       "已保存，留空不修改",
     );
     expect(screen.getByText("模型服务（Apilio）")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /可能产生云存储请求费用；该操作不会提交 H3、视频或图片生成任务/,
+      ),
+    ).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "测试设置" }));
 
