@@ -253,6 +253,10 @@ def test_real_video_analysis_refuses_a_non_https_storage_download_intent() -> No
 
     assert exc_info.value.status_code == 503
     assert exc_info.value.detail["code"] == "ANALYSIS_VIDEO_URL_UNAVAILABLE"
+    assert exc_info.value.detail["message"] == (
+        "当前视频分析模型只能读取 HTTPS 视频；本地存储无法用于真实视频拆解。"
+        "请在设置中切换至腾讯云 COS 或阿里云 OSS 后重新上传。"
+    )
 
 
 def test_analysis_schema_rejects_overlap_and_unknown_fields() -> None:
