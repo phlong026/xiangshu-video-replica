@@ -471,7 +471,8 @@ def generate_first_frame_candidates(
 
     source_image = read_asset_image(storage, source_frame)
     reference_assets = [
-        read_character_reference_asset(conn, asset_id=asset_id) for asset_id in reference_asset_ids
+        read_character_reference_asset(conn, actor=actor, asset_id=asset_id)
+        for asset_id in reference_asset_ids
     ]
     reference_images = [read_asset_image(storage, asset) for asset in reference_assets]
     effective_prompt = normalize_prompt(prompt, character_name=character_name)
@@ -730,7 +731,9 @@ def require_current_first_frame_inputs(
         )
 
 
-def read_character_reference_asset(conn: sqlite3.Connection, *, asset_id: str) -> sqlite3.Row:
+def read_character_reference_asset(
+    conn: sqlite3.Connection, *, actor: CurrentUser, asset_id: str
+) -> sqlite3.Row:
     row = conn.execute(
         """
         SELECT id, project_id, kind, storage_uri, sha256, size_bytes, content_type
@@ -742,6 +745,10 @@ def read_character_reference_asset(conn: sqlite3.Connection, *, asset_id: str) -
         raise first_frame_error(
             422, "CHARACTER_REFERENCE_NOT_FOUND", "A character reference image is missing."
         )
+    # A character library is a workspace-global entity, but its reference images
+    # may belong to another project. Gate the read so an employee cannot pull
+    # bytes from a project they have no access to.
+    require_asset_access(conn, actor=actor, asset_id=asset_id, action="character_reference.read")
     if str(row["content_type"]) not in FIRST_FRAME_IMAGE_CONTENT_TYPES:
         raise first_frame_error(
             422,
