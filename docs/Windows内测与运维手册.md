@@ -129,6 +129,15 @@ $env:VIDEO_REPLICA_LOG_DIR = "$env:VIDEO_REPLICA_HOME\logs"
 - Provider 请求/响应样本只保存脱敏字段。
 - 失败任务要保留批次 ID、任务 ID、Provider、错误码、耗时和可复现步骤。
 
+### 3.5 设置页诊断日志
+
+内测管理员在桌面端“设置”页填写 H3、Apilio、COS、OSS 参数后，点击“测试设置”。系统会对已保存的配置逐项执行非付费连接诊断，并生成可下载的 `settings-diagnostic-<id>.json`。
+
+- 密钥输入框不会回显原值；留空保存不会覆盖已保存密钥。
+- 日志只记录 Provider、已配置字段名、测试类型、适配器能力、耗时、HTTP 状态和错误码，不记录 API Key、Secret、Authorization、Provider 原始错误文本或完整签名 URL。
+- `通过` 表示当前适配器的连接测试通过；`仅配置校验` 表示参数已保存，但真实 Provider 适配器尚未启用；`未配置` 和 `失败` 均应先下载日志再调整参数或本地服务。
+- “测试设置”不会自动创建 H3 付费视频任务。真实生成只能通过项目页中明确的生成操作发起。
+
 ## 4. 安装验证
 
 每台 Windows 内测机记录：

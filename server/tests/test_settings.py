@@ -271,6 +271,58 @@ def test_admin_updates_settings_without_echoing_secret_or_authorization(
     assert "must-not-be-stored" not in audit_metadata
 
 
+def test_admin_can_update_a_non_secret_field_without_reentering_a_saved_secret(
+    client: TestClient,
+    conn: sqlite3.Connection,
+) -> None:
+    repo = SettingsRepository(conn)
+    repo.save_provider_config(
+        "cos",
+        {
+            "access_key_id": "cos-id",
+            "secret_access_key": "cos-secret",
+            "bucket": "before-update",
+            "region": "ap-shanghai",
+        },
+        actor_user_id="admin_1",
+    )
+
+    response = client.put(
+        "/api/admin/settings/providers/cos",
+        headers=admin_headers(),
+        json={"config": {"bucket": "after-update"}},
+    )
+
+    assert response.status_code == 200
+    assert repo.load_provider_config("cos") == {
+        "access_key_id": "cos-id",
+        "secret_access_key": "cos-secret",
+        "bucket": "after-update",
+        "region": "ap-shanghai",
+    }
+
+
+def test_empty_optional_field_can_be_cleared_without_overwriting_a_secret(
+    client: TestClient,
+    conn: sqlite3.Connection,
+) -> None:
+    repo = SettingsRepository(conn)
+    repo.save_provider_config(
+        "metaso",
+        {"api_key": "metaso-secret-token", "base_url": "https://old.example/api"},
+        actor_user_id="admin_1",
+    )
+
+    response = client.put(
+        "/api/admin/settings/providers/metaso",
+        headers=admin_headers(),
+        json={"config": {"api_key": "", "base_url": ""}},
+    )
+
+    assert response.status_code == 200
+    assert repo.load_provider_config("metaso") == {"api_key": "metaso-secret-token"}
+
+
 def test_admin_can_update_runtime_limits(client: TestClient) -> None:
     response = client.patch(
         "/api/admin/settings/runtime",
@@ -312,6 +364,73 @@ def test_connection_test_and_paid_test_are_separate_interfaces(client: TestClien
     assert paid.status_code == 200
     assert connection.json() == {"status": "ok", "provider": "metaso", "test_kind": "connection"}
     assert paid.json() == {"status": "ok", "provider": "metaso", "test_kind": "paid"}
+
+
+def test_admin_can_generate_and_download_a_redacted_settings_diagnostic_log(
+    client: TestClient,
+) -> None:
+    client.put(
+        "/api/admin/settings/providers/metaso",
+        headers=admin_headers(),
+        json={"config": {"api_key": "metaso-secret-token"}},
+    )
+
+    response = client.post("/api/admin/settings/diagnostic-test", headers=admin_headers())
+
+    assert response.status_code == 200
+    report = response.json()
+    assert report["status"] == "attention"
+    assert report["generated_at"].endswith("+00:00")
+    assert report["download_url"].startswith("/api/admin/settings/diagnostic-reports/")
+    assert {item["provider"] for item in report["providers"]} == {
+        "apilio",
+        "metaso",
+        "cos",
+        "oss",
+    }
+    metaso = next(item for item in report["providers"] if item["provider"] == "metaso")
+    assert metaso["status"] == "ok"
+    assert metaso["configured_fields"] == ["api_key"]
+    assert metaso["adapter_capability"] == "connection_test"
+    assert metaso["test_kind"] == "connection"
+    assert isinstance(metaso["latency_ms"], int)
+
+    download = client.get(report["download_url"], headers=admin_headers())
+
+    assert download.status_code == 200
+    assert download.headers["content-type"].startswith("application/json")
+    assert "attachment" in download.headers["content-disposition"]
+    assert "metaso-secret-token" not in download.text
+    assert "api_key" in download.text
+
+
+def test_diagnostic_log_keeps_http_error_codes_but_not_provider_error_details(
+    client: TestClient,
+) -> None:
+    class FailingProviderTester:
+        def connection_test(self, provider: str, config: dict[str, str]) -> ProviderTestResult:
+            raise HTTPException(
+                status_code=429,
+                detail={"code": "RATE_LIMITED", "message": "sensitive provider response"},
+            )
+
+        def paid_test(self, provider: str, config: dict[str, str]) -> ProviderTestResult:
+            raise AssertionError("not called")
+
+    client.app.dependency_overrides[get_provider_tester] = FailingProviderTester
+    client.put(
+        "/api/admin/settings/providers/metaso",
+        headers=admin_headers(),
+        json={"config": {"api_key": "metaso-secret-token"}},
+    )
+
+    response = client.post("/api/admin/settings/diagnostic-test", headers=admin_headers())
+    metaso = next(item for item in response.json()["providers"] if item["provider"] == "metaso")
+
+    assert metaso["status"] == "error"
+    assert metaso["http_status"] == 429
+    assert metaso["error_code"] == "RATE_LIMITED"
+    assert "sensitive provider response" not in response.text
 
 
 def test_default_provider_tester_never_claims_real_connectivity_or_paid_access() -> None:

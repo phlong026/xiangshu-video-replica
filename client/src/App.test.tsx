@@ -63,6 +63,7 @@ describe("App", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
     vi.useRealTimers();
     window.localStorage.clear();
   });
@@ -97,6 +98,111 @@ describe("App", () => {
     expect(fetchMock).toHaveBeenCalledWith("http://127.0.0.1:8000/health", {
       signal: expect.any(AbortSignal),
     });
+  });
+
+  it("lets an admin configure providers, run a non-billing diagnostic, and download its log", async () => {
+    const settingsResponse = {
+      providers: {
+        metaso: {
+          provider: "metaso",
+          configured: true,
+          config: {},
+        },
+        apilio: { provider: "apilio", configured: false, config: {} },
+        cos: { provider: "cos", configured: false, config: {} },
+        oss: { provider: "oss", configured: false, config: {} },
+      },
+      runtime: {
+        max_generation_count_per_batch: 4,
+        max_concurrent_h3_tasks: 2,
+        active_storage_provider: "cos",
+      },
+    };
+    const diagnosticResponse = {
+      id: "diagnostic-1",
+      status: "attention",
+      providers: [
+        {
+          provider: "metaso",
+          status: "configured_only",
+          configured_fields: ["api_key"],
+          adapter_capability: "configuration_only",
+          test_kind: "connection",
+          http_status: null,
+          error_code: null,
+          latency_ms: 1,
+          message: "参数已保存；真实服务适配器尚未启用，因此未发起外部调用。",
+        },
+      ],
+      download_url:
+        "/api/admin/settings/diagnostic-reports/diagnostic-1/download",
+    };
+    const fetchMock = vi.fn((url: string, options?: RequestInit) => {
+      if (url.endsWith("/health")) {
+        return Promise.resolve({ ok: true, json: async () => healthResponse });
+      }
+      if (url.endsWith("/api/admin/settings")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => settingsResponse,
+        });
+      }
+      if (url.endsWith("/diagnostic-test") && options?.method === "POST") {
+        return Promise.resolve({
+          ok: true,
+          json: async () => diagnosticResponse,
+        });
+      }
+      if (url.endsWith("/diagnostic-reports/diagnostic-1/download")) {
+        return Promise.resolve({
+          ok: true,
+          blob: async () => new Blob(["{}"]),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const createObjectUrl = vi.fn(() => "blob:diagnostic-1");
+    const revokeObjectUrl = vi.fn();
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(
+      () => undefined,
+    );
+    vi.stubGlobal("URL", {
+      createObjectURL: createObjectUrl,
+      revokeObjectURL: revokeObjectUrl,
+    });
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "服务设置" }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("H3 API Key")).toHaveValue("");
+    expect(screen.getByLabelText("H3 API Key")).toHaveAttribute(
+      "placeholder",
+      "已保存，留空不修改",
+    );
+    expect(screen.getByText("模型服务（Apilio）")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "测试设置" }));
+
+    expect(
+      await screen.findByText("检测到需要处理的配置项"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "下载诊断日志" }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "下载诊断日志" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "http://127.0.0.1:8000/api/admin/settings/diagnostic-reports/diagnostic-1/download",
+        expect.objectContaining({ method: "GET" }),
+      ),
+    );
+    expect(createObjectUrl).toHaveBeenCalledOnce();
+    expect(revokeObjectUrl).toHaveBeenCalledWith("blob:diagnostic-1");
   });
 
   it("loads a pasted batch id and renders progress, task stages, results, and attention hints", async () => {

@@ -30,6 +30,44 @@ export type GenerationBatch = {
   tasks: GenerationTask[];
 };
 
+export type ProviderName = "metaso" | "apilio" | "cos" | "oss";
+
+export type ProviderSettings = {
+  provider: ProviderName;
+  configured: boolean;
+  config: Record<string, string>;
+};
+
+export type RuntimeSettings = {
+  max_generation_count_per_batch: number;
+  max_concurrent_h3_tasks: number;
+  active_storage_provider: "cos" | "oss";
+};
+
+export type SettingsSnapshot = {
+  providers: Record<ProviderName, ProviderSettings>;
+  runtime: RuntimeSettings;
+};
+
+export type DiagnosticProviderResult = {
+  provider: ProviderName;
+  status: "ok" | "not_configured" | "configured_only" | "error";
+  configured_fields: string[];
+  adapter_capability: "configuration_only" | "connection_test";
+  test_kind: string;
+  http_status?: number | null;
+  error_code?: string | null;
+  latency_ms?: number | null;
+  message: string;
+};
+
+export type SettingsDiagnosticReport = {
+  id: string;
+  status: "ok" | "attention";
+  providers: DiagnosticProviderResult[];
+  download_url: string;
+};
+
 export async function getHealth(): Promise<HealthResponse> {
   return requestJson<HealthResponse>("/health", "本地服务暂不可用");
 }
@@ -41,6 +79,59 @@ export async function getGenerationBatch(
     `/api/generation-batches/${encodeURIComponent(batchId)}`,
     "任务批次暂不可用",
   );
+}
+
+export async function getSettings(): Promise<SettingsSnapshot> {
+  return requestAdminJson<SettingsSnapshot>(
+    "/api/admin/settings",
+    "设置暂不可用",
+  );
+}
+
+export async function updateProviderSettings(
+  provider: ProviderName,
+  config: Record<string, string>,
+): Promise<ProviderSettings> {
+  return requestAdminJson<ProviderSettings>(
+    `/api/admin/settings/providers/${provider}`,
+    "保存设置失败",
+    { method: "PUT", body: JSON.stringify({ config }) },
+  );
+}
+
+export async function updateRuntimeSettings(
+  runtime: RuntimeSettings,
+): Promise<RuntimeSettings> {
+  return requestAdminJson<RuntimeSettings>(
+    "/api/admin/settings/runtime",
+    "保存运行设置失败",
+    { method: "PATCH", body: JSON.stringify(runtime) },
+  );
+}
+
+export async function runSettingsDiagnostic(): Promise<SettingsDiagnosticReport> {
+  return requestAdminJson<SettingsDiagnosticReport>(
+    "/api/admin/settings/diagnostic-test",
+    "测试设置失败",
+    { method: "POST" },
+  );
+}
+
+export async function downloadDiagnosticReport(
+  downloadUrl: string,
+  reportId: string,
+): Promise<void> {
+  const response = await requestAdmin(downloadUrl, { method: "GET" });
+  if (!response.ok) {
+    throw new Error(`下载诊断日志失败（${response.status}）`);
+  }
+
+  const blobUrl = URL.createObjectURL(await response.blob());
+  const anchor = document.createElement("a");
+  anchor.href = blobUrl;
+  anchor.download = `settings-diagnostic-${reportId}.json`;
+  anchor.click();
+  URL.revokeObjectURL(blobUrl);
 }
 
 async function requestJson<T>(path: string, errorPrefix: string): Promise<T> {
@@ -62,6 +153,51 @@ async function requestJson<T>(path: string, errorPrefix: string): Promise<T> {
     }
 
     return (await response.json()) as T;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
+async function requestAdminJson<T>(
+  path: string,
+  errorPrefix: string,
+  init: RequestInit = {},
+): Promise<T> {
+  const response = await requestAdmin(path, init);
+  if (!response.ok) {
+    throw new Error(`${errorPrefix}（${response.status}）`);
+  }
+  return (await response.json()) as T;
+}
+
+async function requestAdmin(
+  path: string,
+  init: RequestInit,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(
+    () => controller.abort(),
+    REQUEST_TIMEOUT_MS,
+  );
+  const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? DEFAULT_API_BASE_URL;
+  const headers = new Headers(init.headers);
+  const devUserId =
+    import.meta.env.VITE_DEV_USER_ID ??
+    (import.meta.env.DEV ? "admin_1" : undefined);
+
+  if (init.body) {
+    headers.set("Content-Type", "application/json");
+  }
+  if (devUserId) {
+    headers.set("X-Dev-User-Id", devUserId);
+  }
+
+  try {
+    return await fetch(`${apiBaseUrl}${path}`, {
+      ...init,
+      headers,
+      signal: controller.signal,
+    });
   } finally {
     window.clearTimeout(timeout);
   }

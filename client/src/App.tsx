@@ -6,9 +6,10 @@ import {
   getGenerationBatch,
   getHealth,
 } from "./api";
+import { SettingsPanel } from "./SettingsPanel";
 import "./styles.css";
 
-type Page = "login" | "projects";
+type Page = "login" | "projects" | "settings";
 type ServiceState = "checking" | "connected" | "disconnected";
 
 const BATCH_STORAGE_KEY = "generation.batchId";
@@ -35,7 +36,7 @@ export function App() {
   );
 
   useEffect(() => {
-    if (page !== "projects") {
+    if (page === "login") {
       return;
     }
 
@@ -151,44 +152,73 @@ export function App() {
       <header>
         <div>
           <span className="eyebrow">VIDEO REPLICA</span>
-          <h1>项目</h1>
+          <h1>{page === "projects" ? "项目" : "设置"}</h1>
         </div>
-        <ServiceBadge state={serviceState} />
-      </header>
-      <section className="task-records" aria-labelledby="task-records-title">
-        <div className="section-heading">
-          <div>
-            <span className="eyebrow">TASK RECORDS</span>
-            <h2 id="task-records-title">任务记录</h2>
-          </div>
-          {activeBatchId ? (
-            <span className="batch-id">{activeBatchId}</span>
-          ) : null}
-        </div>
-
-        <form className="batch-form" onSubmit={handleBatchSubmit}>
-          <label htmlFor="batch-id">Batch ID</label>
-          <div className="batch-input-row">
-            <input
-              id="batch-id"
-              value={batchIdInput}
-              placeholder="粘贴 generation batch id"
-              onChange={(event) => setBatchIdInput(event.target.value)}
-            />
-            <button type="submit" disabled={!batchIdInput.trim()}>
-              查询任务记录
+        <div className="header-actions">
+          <nav className="top-nav" aria-label="主导航">
+            <button
+              type="button"
+              className={
+                page === "projects"
+                  ? "nav-button nav-button--active"
+                  : "nav-button"
+              }
+              onClick={() => setPage("projects")}
+            >
+              项目
             </button>
+            <button
+              type="button"
+              className={
+                page === "settings"
+                  ? "nav-button nav-button--active"
+                  : "nav-button"
+              }
+              onClick={() => setPage("settings")}
+            >
+              设置
+            </button>
+          </nav>
+          <ServiceBadge state={serviceState} />
+        </div>
+      </header>
+      {page === "settings" ? <SettingsPanel /> : null}
+      {page === "projects" ? (
+        <section className="task-records" aria-labelledby="task-records-title">
+          <div className="section-heading">
+            <div>
+              <span className="eyebrow">TASK RECORDS</span>
+              <h2 id="task-records-title">任务记录</h2>
+            </div>
+            {activeBatchId ? (
+              <span className="batch-id">{activeBatchId}</span>
+            ) : null}
           </div>
-        </form>
 
-        <BatchStatusMessage
-          error={batchError}
-          isLoading={isBatchLoading}
-          retryDelaySeconds={retryDelaySeconds}
-        />
+          <form className="batch-form" onSubmit={handleBatchSubmit}>
+            <label htmlFor="batch-id">Batch ID</label>
+            <div className="batch-input-row">
+              <input
+                id="batch-id"
+                value={batchIdInput}
+                placeholder="粘贴 generation batch id"
+                onChange={(event) => setBatchIdInput(event.target.value)}
+              />
+              <button type="submit" disabled={!batchIdInput.trim()}>
+                查询任务记录
+              </button>
+            </div>
+          </form>
 
-        {batch ? <BatchPanel batch={batch} /> : <EmptyBatchState />}
-      </section>
+          <BatchStatusMessage
+            error={batchError}
+            isLoading={isBatchLoading}
+            retryDelaySeconds={retryDelaySeconds}
+          />
+
+          {batch ? <BatchPanel batch={batch} /> : <EmptyBatchState />}
+        </section>
+      ) : null}
     </main>
   );
 }

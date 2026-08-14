@@ -36,7 +36,35 @@ button:disabled {
   cursor: not-allowed;
 }
 
+button.secondary-button,
+button.nav-button {
+  border: 1px solid #433b52;
+  color: #d9d1e8;
+  background: #17131f;
+}
+
+button.nav-button {
+  padding: 8px 12px;
+  font-size: 13px;
+}
+
+button.nav-button--active {
+  border-color: #8e6cff;
+  color: #ffffff;
+  background: #3b286d;
+}
+
 input {
+  width: 100%;
+  border: 1px solid #3c3448;
+  border-radius: 8px;
+  padding: 12px 14px;
+  color: #f7f4ff;
+  background: #120f18;
+  font: inherit;
+}
+
+select {
   width: 100%;
   border: 1px solid #3c3448;
   border-radius: 8px;
@@ -108,6 +136,20 @@ input:focus {
   gap: 24px;
 }
 
+.header-actions,
+.top-nav {
+  display: flex;
+  align-items: center;
+}
+
+.header-actions {
+  gap: 14px;
+}
+
+.top-nav {
+  gap: 8px;
+}
+
 .service-badge {
   border: 1px solid #433b52;
   border-radius: 999px;
@@ -136,6 +178,154 @@ input:focus {
 .task-records {
   margin-top: 32px;
   padding: 28px;
+}
+
+.settings-page {
+  display: grid;
+  gap: 22px;
+  margin-top: 32px;
+}
+
+.settings-hint {
+  color: #aaa2ba;
+  font-size: 13px;
+}
+
+.provider-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.provider-card,
+.runtime-form,
+.diagnostic-panel,
+.settings-error {
+  border: 1px solid #322b43;
+  border-radius: 10px;
+  background: rgba(24, 20, 32, 0.92);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.18);
+}
+
+.provider-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  padding: 22px;
+}
+
+.provider-card h3,
+.runtime-form h3,
+.diagnostic-panel h3 {
+  margin: 0;
+}
+
+.provider-card p,
+.diagnostic-panel p {
+  margin: 8px 0 0;
+  color: #aaa2ba;
+  line-height: 1.55;
+}
+
+.config-state,
+.diagnostic-status {
+  align-self: start;
+  border-radius: 999px;
+  padding: 6px 9px;
+  color: #ffcf8a;
+  background: #332519;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.config-state--ready,
+.diagnostic-status--ok {
+  color: #79dda9;
+  background: #143023;
+}
+
+.diagnostic-status--configured_only {
+  color: #bca7ff;
+  background: #2d2247;
+}
+
+.diagnostic-status--error,
+.diagnostic-status--not_configured {
+  color: #ff9aa8;
+  background: #3b2029;
+}
+
+.field-stack {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 12px;
+}
+
+.field-stack label,
+.runtime-form label {
+  display: grid;
+  gap: 7px;
+  color: #d9d1e8;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.form-actions {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: center;
+  gap: 12px;
+  color: #79dda9;
+  font-size: 13px;
+}
+
+.runtime-form {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  padding: 22px;
+}
+
+.diagnostic-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 18px;
+  padding: 22px;
+}
+
+.diagnostic-result {
+  grid-column: 1 / -1;
+  border-top: 1px solid #332b40;
+  padding-top: 18px;
+}
+
+.diagnostic-result ul {
+  display: grid;
+  gap: 10px;
+  margin: 14px 0;
+  padding: 0;
+  list-style: none;
+}
+
+.diagnostic-result li {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) auto;
+  gap: 8px 12px;
+  padding: 12px;
+  border-radius: 8px;
+  background: #120f18;
+}
+
+.diagnostic-result li p {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+.settings-error {
+  margin-top: 32px;
+  padding: 16px;
+  color: #ffb4be;
+  background: #2a161d;
 }
 
 .section-heading,
@@ -314,6 +504,11 @@ input:focus {
     flex-direction: column;
   }
 
+  .header-actions {
+    align-items: flex-start;
+    flex-direction: column-reverse;
+  }
+
   .login-card,
   .empty-state,
   .task-records {
@@ -328,7 +523,10 @@ input:focus {
   }
 
   .batch-input-row,
-  .count-grid {
+  .count-grid,
+  .provider-grid,
+  .runtime-form,
+  .diagnostic-panel {
     grid-template-columns: 1fr;
   }
 
