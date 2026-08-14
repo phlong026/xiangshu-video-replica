@@ -138,7 +138,7 @@ def test_characters_migration_creates_library_tables(db_path: Path) -> None:
             ).fetchall()
         }
 
-    assert version == "007_local_storage_provider"
+    assert version == "008_provider_result_url"
     assert {"characters", "project_main_characters"}.issubset(tables)
 
 

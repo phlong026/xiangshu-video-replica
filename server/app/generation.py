@@ -133,6 +133,9 @@ class H3Provider:
             },
         )
 
+    def download_result(self, url: str) -> bytes:
+        raise H3ProviderFailed("download_result is not implemented for this provider")
+
 
 class MetasoHttpTransport(Protocol):
     def request(
@@ -252,6 +255,12 @@ class MetasoH3Provider(H3Provider):
             provider_task_id=provider_task_id,
         )
 
+    def download_result(self, url: str) -> bytes:
+        parsed = urlparse(url)
+        if parsed.scheme != "https" or not parsed.hostname:
+            raise H3ProviderFailed("METASO result URL must be HTTPS", terminal=True)
+        return self.transport.request("GET", url, headers={})
+
     def _query_task(self, provider_task_id: str) -> dict[str, Any]:
         url = f"{METASO_BASE_URL}{METASO_QUERY_PATH}?{urlencode({'task_id': provider_task_id})}"
         payload = _metaso_json_object(
@@ -310,6 +319,9 @@ class FakeH3Provider(H3Provider):
             audio_quality_status="AUDIO_OK" if audio_ok else "AUDIO_QUALITY_FAILED",
             quality_issue_codes=[] if audio_ok else ["AUDIO_QUALITY_FAILED"],
         )
+
+    def download_result(self, url: str) -> bytes:
+        return f"fake mp4 content re-downloaded from {url}".encode()
 
 
 class VersionResult(BaseModel):
@@ -810,12 +822,25 @@ def run_next_generation_task(
         try:
             provider = h3_provider_for_task(conn, str(lease["provider"]))
         except H3ProviderSettingsUnavailable:
+            if lease.get("archive_status") == "ARCHIVE_FAILED" and lease.get("provider_result_url"):
+                # Archive retry never starts a paid call; if the provider settings
+                # vanished, back off instead of failing the paid result forever.
+                _release_archive_retry(conn, task_id=task_id)
+                return get_task_result(conn, task_id)
             mark_task_provider_settings_unavailable(
                 conn,
                 task_id=task_id,
                 batch_id=str(lease["batch_id"]),
             )
             return get_task_result(conn, task_id)
+    if lease.get("archive_status") == "ARCHIVE_FAILED" and lease.get("provider_result_url"):
+        return _retry_archive(
+            conn,
+            task_id=task_id,
+            batch_id=str(lease["batch_id"]),
+            storage=storage,
+            provider=provider,
+        )
     source_storage = first_frame_storage or storage
     try:
         first_frame = storage_object_ref_from_uri(str(lease["first_frame_uri"]))
@@ -865,6 +890,7 @@ def run_next_generation_task(
     archive_status = "ARCHIVED"
     error_code = None
     error_message = None
+    retained_result_url: str | None = None
     try:
         stored = storage.put_object(
             f"generation-results/{task_id}.mp4",
@@ -875,6 +901,9 @@ def run_next_generation_task(
         archive_status = "ARCHIVE_FAILED"
         error_code = "ARCHIVE_STORAGE_UNAVAILABLE"
         error_message = "Generation result could not be archived to configured storage."
+        # Retain the provider URL so a later Worker pass can re-download and
+        # re-archive the already-paid H3 result instead of losing it.
+        retained_result_url = provider_result.result_url
     else:
         result_asset_id = str(uuid4())
         with conn:
@@ -916,6 +945,7 @@ def run_next_generation_task(
                 quality_issue_codes = ?,
                 result_asset_id = ?,
                 provider_request_json = ?,
+                provider_result_url = ?,
                 error_code = ?,
                 error_message_redacted = ?,
                 submitted_at = COALESCE(submitted_at, CURRENT_TIMESTAMP),
@@ -932,6 +962,7 @@ def run_next_generation_task(
                 json.dumps(provider_result.quality_issue_codes, ensure_ascii=True),
                 result_asset_id,
                 json.dumps(provider_request, ensure_ascii=True, sort_keys=True),
+                retained_result_url,
                 error_code,
                 error_message,
                 task_id,
@@ -964,6 +995,116 @@ def run_next_generation_task(
         )
         refresh_batch_status(conn, batch_id=str(lease["batch_id"]))
     return get_task_result(conn, task_id)
+
+
+def _retry_archive(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    batch_id: str,
+    storage: StorageAdapter,
+    provider: H3Provider,
+) -> TaskResult:
+    """Re-download a paid H3 result whose earlier archive attempt failed and
+    archive it to enterprise storage. Keeps the task retryable on failure."""
+    row = conn.execute(
+        """
+        SELECT
+            generation_tasks.provider_result_url,
+            generation_batches.project_id,
+            generation_batches.created_by_user_id
+        FROM generation_tasks
+        JOIN generation_batches ON generation_batches.id = generation_tasks.batch_id
+        WHERE generation_tasks.id = ?
+        """,
+        (task_id,),
+    ).fetchone()
+    if row is None or not row["provider_result_url"]:
+        return get_task_result(conn, task_id)
+    result_url = str(row["provider_result_url"])
+    try:
+        content = provider.download_result(result_url)
+    except Exception as exc:
+        logger.warning("archive retry download failed for task %s: %s", task_id, type(exc).__name__)
+        _release_archive_retry(conn, task_id=task_id)
+        return get_task_result(conn, task_id)
+    try:
+        stored = storage.put_object(
+            f"generation-results/{task_id}.mp4",
+            content,
+            content_type="video/mp4",
+        )
+    except Exception as exc:
+        logger.warning("archive retry put failed for task %s: %s", task_id, type(exc).__name__)
+        _release_archive_retry(conn, task_id=task_id)
+        return get_task_result(conn, task_id)
+
+    result_asset_id = str(uuid4())
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO assets (
+                id,
+                project_id,
+                kind,
+                storage_uri,
+                sha256,
+                size_bytes,
+                content_type,
+                created_by_user_id
+            )
+            VALUES (?, ?, 'video', ?, ?, ?, ?, ?)
+            """,
+            (
+                result_asset_id,
+                str(row["project_id"]),
+                stored.uri,
+                stored.sha256,
+                stored.size,
+                stored.content_type,
+                str(row["created_by_user_id"]),
+            ),
+        )
+        conn.execute(
+            """
+            UPDATE generation_tasks
+            SET
+                status = 'SUCCEEDED',
+                archive_status = 'ARCHIVED',
+                result_asset_id = ?,
+                provider_result_url = NULL,
+                error_code = NULL,
+                error_message_redacted = NULL,
+                locked_by = NULL,
+                locked_until = NULL,
+                completed_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (result_asset_id, task_id),
+        )
+        refresh_batch_status(conn, batch_id=batch_id)
+    return get_task_result(conn, task_id)
+
+
+def _release_archive_retry(conn: sqlite3.Connection, *, task_id: str) -> None:
+    """Release the lease and back off ~60s so a stuck provider/storage does not
+    cause a hot retry loop."""
+    with conn:
+        conn.execute(
+            """
+            UPDATE generation_tasks
+            SET
+                status = 'SUCCEEDED',
+                archive_status = 'ARCHIVE_FAILED',
+                locked_by = NULL,
+                locked_until = NULL,
+                next_poll_at = datetime('now', '+60 seconds'),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (task_id,),
+        )
 
 
 def acquire_generation_task_lease(
@@ -1000,7 +1141,15 @@ def acquire_generation_task_lease(
                 SELECT id
                 FROM generation_tasks
                 WHERE
-                    status IN ('PENDING', 'QUEUED')
+                    (
+                        status IN ('PENDING', 'QUEUED')
+                        OR (
+                            status = 'SUCCEEDED'
+                            AND archive_status = 'ARCHIVE_FAILED'
+                            AND provider_result_url IS NOT NULL
+                            AND provider_result_url != ''
+                        )
+                    )
                     AND (locked_until IS NULL OR locked_until <= CURRENT_TIMESTAMP)
                     AND (next_poll_at IS NULL OR next_poll_at <= CURRENT_TIMESTAMP)
                 ORDER BY created_at, id
@@ -1026,6 +1175,8 @@ def load_worker_task(conn: sqlite3.Connection, task_id: str) -> dict[str, Any]:
             generation_tasks.id,
             generation_tasks.batch_id,
             generation_tasks.provider,
+            generation_tasks.archive_status,
+            generation_tasks.provider_result_url,
             generation_batches.project_id,
             generation_batches.created_by_user_id,
             generation_batches.request_snapshot_json,
@@ -1165,6 +1316,25 @@ def mark_expired_active_leases_needing_attention(conn: sqlite3.Connection) -> No
         ).fetchall()
         if not rows:
             return
+        # Archive retries never start a paid call; an expired lease is safe to
+        # reset so another worker can re-download and re-archive the result.
+        conn.execute(
+            """
+            UPDATE generation_tasks
+            SET
+                status = 'SUCCEEDED',
+                archive_status = 'ARCHIVE_FAILED',
+                locked_by = NULL,
+                locked_until = NULL,
+                next_poll_at = datetime('now', '+60 seconds'),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE status IN ('SUBMITTING', 'RUNNING', 'ARCHIVING')
+              AND archive_status = 'ARCHIVE_FAILED'
+              AND provider_result_url IS NOT NULL
+              AND locked_until IS NOT NULL
+              AND datetime(locked_until) <= CURRENT_TIMESTAMP
+            """
+        )
         conn.execute(
             """
             UPDATE generation_tasks
@@ -1176,6 +1346,9 @@ def mark_expired_active_leases_needing_attention(conn: sqlite3.Connection) -> No
                 locked_until = NULL,
                 updated_at = CURRENT_TIMESTAMP
             WHERE status IN ('SUBMITTING', 'RUNNING', 'ARCHIVING')
+              AND NOT (
+                  archive_status = 'ARCHIVE_FAILED' AND provider_result_url IS NOT NULL
+              )
               AND locked_until IS NOT NULL
               AND datetime(locked_until) <= CURRENT_TIMESTAMP
             """

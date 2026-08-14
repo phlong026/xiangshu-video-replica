@@ -22,6 +22,7 @@ from app.generation import (
     MetasoH3Provider,
     SubmissionUncertain,
     build_h3_request,
+    mark_expired_active_leases_needing_attention,
     run_next_generation_task,
 )
 from app.generation_routes import get_h3_provider
@@ -1341,3 +1342,212 @@ def test_worker_archives_result_with_cloud_like_storage(
     assert row["archive_status"] == "ARCHIVED"
     assert row["result_asset_id"] is not None
     assert row["error_code"] is None
+
+
+def test_worker_archive_retry_recovers_after_initial_failure(
+    db_path: Path, client: TestClient
+) -> None:
+    prompt_id = create_locked_prompt(client)
+    client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json={
+            "quantity": 1,
+            "prompt_version_id": prompt_id,
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+            "idempotency_key": "archive-retry",
+        },
+    )
+
+    class FailingArchiveStorage(FakeStorageAdapter):
+        def put_object(self, key: str, content: bytes, *, content_type: str):  # type: ignore[override]
+            raise StorageBackendUnavailable("simulated archive outage")
+
+    with connect_database(db_path) as conn:
+        run_next_generation_task(
+            conn,
+            worker_id="worker_a",
+            provider=FakeH3Provider(),
+            storage=FailingArchiveStorage(provider="cos", bucket="generation-results"),
+            first_frame_storage=FakeStorageAdapter(provider="fake", bucket="generation-results"),
+        )
+        row = conn.execute(
+            """
+            SELECT status, archive_status, provider_result_url, result_asset_id
+            FROM generation_tasks
+            """
+        ).fetchone()
+        assert row["status"] == "SUCCEEDED"
+        assert row["archive_status"] == "ARCHIVE_FAILED"
+        assert row["provider_result_url"] is not None
+        assert row["result_asset_id"] is None
+
+        result = run_next_generation_task(
+            conn,
+            worker_id="worker_a",
+            provider=FakeH3Provider(),
+            storage=FakeStorageAdapter(provider="cos", bucket="generation-results"),
+            first_frame_storage=FakeStorageAdapter(provider="fake", bucket="generation-results"),
+        )
+        row2 = conn.execute(
+            """
+            SELECT status, archive_status, provider_result_url, result_asset_id
+            FROM generation_tasks
+            """
+        ).fetchone()
+
+    assert result is not None
+    assert row2["status"] == "SUCCEEDED"
+    assert row2["archive_status"] == "ARCHIVED"
+    assert row2["provider_result_url"] is None
+    assert row2["result_asset_id"] is not None
+
+
+def test_archive_retry_download_failure_keeps_task_retryable(
+    db_path: Path, client: TestClient
+) -> None:
+    prompt_id = create_locked_prompt(client)
+    client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json={
+            "quantity": 1,
+            "prompt_version_id": prompt_id,
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+            "idempotency_key": "archive-retry-fail",
+        },
+    )
+
+    class FailingArchiveStorage(FakeStorageAdapter):
+        def put_object(self, key: str, content: bytes, *, content_type: str):  # type: ignore[override]
+            raise StorageBackendUnavailable("simulated archive outage")
+
+    class FailingDownloadProvider(FakeH3Provider):
+        def download_result(self, url: str) -> bytes:
+            raise H3ProviderFailed("download failed")
+
+    with connect_database(db_path) as conn:
+        run_next_generation_task(
+            conn,
+            worker_id="worker_a",
+            provider=FakeH3Provider(),
+            storage=FailingArchiveStorage(provider="cos", bucket="generation-results"),
+            first_frame_storage=FakeStorageAdapter(provider="fake", bucket="generation-results"),
+        )
+        run_next_generation_task(
+            conn,
+            worker_id="worker_a",
+            provider=FailingDownloadProvider(),
+            storage=FakeStorageAdapter(provider="cos", bucket="generation-results"),
+            first_frame_storage=FakeStorageAdapter(provider="fake", bucket="generation-results"),
+        )
+        row = conn.execute(
+            """
+            SELECT status, archive_status, provider_result_url, next_poll_at
+            FROM generation_tasks
+            """
+        ).fetchone()
+
+    assert row["status"] == "SUCCEEDED"
+    assert row["archive_status"] == "ARCHIVE_FAILED"
+    assert row["provider_result_url"] is not None
+    assert row["next_poll_at"] is not None
+
+
+def test_archive_retry_with_missing_provider_settings_backs_off_not_fails(
+    db_path: Path, client: TestClient
+) -> None:
+    prompt_id = create_locked_prompt(client)
+    client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json={
+            "quantity": 1,
+            "prompt_version_id": prompt_id,
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+            "idempotency_key": "archive-retry-settings",
+        },
+    )
+
+    class FailingArchiveStorage(FakeStorageAdapter):
+        def put_object(self, key: str, content: bytes, *, content_type: str):  # type: ignore[override]
+            raise StorageBackendUnavailable("simulated archive outage")
+
+    with connect_database(db_path) as conn:
+        run_next_generation_task(
+            conn,
+            worker_id="worker_a",
+            provider=FakeH3Provider(),
+            storage=FailingArchiveStorage(provider="cos", bucket="generation-results"),
+            first_frame_storage=FakeStorageAdapter(provider="fake", bucket="generation-results"),
+        )
+        # Simulate a paid METASO task whose provider settings vanished.
+        conn.execute("UPDATE generation_tasks SET provider = 'metaso'")
+        run_next_generation_task(
+            conn,
+            worker_id="worker_a",
+            provider=None,
+            storage=FakeStorageAdapter(provider="cos", bucket="generation-results"),
+            first_frame_storage=FakeStorageAdapter(provider="fake", bucket="generation-results"),
+        )
+        row = conn.execute(
+            """
+            SELECT status, archive_status, provider_result_url, next_poll_at
+            FROM generation_tasks
+            """
+        ).fetchone()
+
+    assert row["status"] == "SUCCEEDED"
+    assert row["archive_status"] == "ARCHIVE_FAILED"
+    assert row["provider_result_url"] is not None
+    assert row["next_poll_at"] is not None
+
+
+def test_expired_archive_retry_lease_resets_to_retryable_not_uncertain(
+    db_path: Path, client: TestClient
+) -> None:
+    prompt_id = create_locked_prompt(client)
+    client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json={
+            "quantity": 1,
+            "prompt_version_id": prompt_id,
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+            "idempotency_key": "archive-retry-lease",
+        },
+    )
+
+    class FailingArchiveStorage(FakeStorageAdapter):
+        def put_object(self, key: str, content: bytes, *, content_type: str):  # type: ignore[override]
+            raise StorageBackendUnavailable("simulated archive outage")
+
+    with connect_database(db_path) as conn:
+        run_next_generation_task(
+            conn,
+            worker_id="worker_a",
+            provider=FakeH3Provider(),
+            storage=FailingArchiveStorage(provider="cos", bucket="generation-results"),
+            first_frame_storage=FakeStorageAdapter(provider="fake", bucket="generation-results"),
+        )
+        # Simulate a worker crash mid-retry with an expired lease.
+        conn.execute(
+            """
+            UPDATE generation_tasks
+            SET status = 'SUBMITTING', locked_by = 'worker_a',
+                locked_until = datetime('now', '-1 second')
+            """
+        )
+        mark_expired_active_leases_needing_attention(conn)
+        row = conn.execute("SELECT status, archive_status FROM generation_tasks").fetchone()
+
+    assert row["status"] == "SUCCEEDED"
+    assert row["archive_status"] == "ARCHIVE_FAILED"
