@@ -1818,3 +1818,31 @@ def test_idempotency_key_is_scoped_per_project(db_path: Path, client: TestClient
     assert batch_a.status_code == 200, batch_a.text
     assert batch_b.status_code == 200, batch_b.text
     assert batch_a.json()["id"] != batch_b.json()["id"]
+
+
+def test_metaso_batch_requires_cloud_storage(
+    db_path: Path, client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("VIDEO_REPLICA_SETTINGS_KEY", Fernet.generate_key().decode("ascii"))
+    with connect_database(db_path) as conn:
+        conn.execute("UPDATE runtime_settings SET active_storage_provider='local' WHERE id=1")
+        SettingsRepository(conn).save_provider_config(
+            "metaso", {"api_key": "metaso-key"}, actor_user_id="admin_1"
+        )
+    prompt_id = create_locked_prompt(client)
+    response = client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json={
+            "quantity": 1,
+            "prompt_version_id": prompt_id,
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+            "idempotency_key": "metaso-local",
+            "provider": "metaso",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "METASO_REQUIRES_CLOUD_STORAGE"

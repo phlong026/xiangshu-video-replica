@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.auth import AuthenticatedUser, Database
 from app.first_frames import (
+    APILIO_DEFAULT_BASE_URL,
     FIRST_FRAME_SELECTION_KIND,
     ApilioImageProvider,
     FakeImageProvider,
@@ -90,7 +91,10 @@ def get_image_provider(conn: Database) -> ImageProvider:
         )
     return ApilioImageProvider(
         api_key=api_key,
-        base_url=config.get("base_url", "https://api.apilio.ai"),
+        # The desktop settings page does not expose a custom Apilio endpoint.
+        # Keeping the origin fixed prevents an imported legacy base_url from
+        # receiving the configured bearer token (same policy as the analysis path).
+        base_url=APILIO_DEFAULT_BASE_URL,
     )
 
 

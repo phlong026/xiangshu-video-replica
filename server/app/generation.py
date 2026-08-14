@@ -608,6 +608,16 @@ def create_generation_batch(
                 "METASO_SETTINGS_UNAVAILABLE",
                 "Save a readable METASO API Key before queuing a real H3 task.",
             ) from exc
+        storage_row = conn.execute(
+            "SELECT active_storage_provider FROM runtime_settings WHERE id = 1"
+        ).fetchone()
+        if storage_row is not None and storage_row["active_storage_provider"] == "local":
+            raise generation_error(
+                422,
+                "METASO_REQUIRES_CLOUD_STORAGE",
+                "METASO H3 requires an HTTPS first-frame URL; switch storage to "
+                "COS/OSS before generating.",
+            )
 
     request_hash = idempotency_request_hash(request)
     existing = _find_idempotent_batch(
