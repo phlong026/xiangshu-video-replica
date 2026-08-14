@@ -10,6 +10,7 @@ from app.generation_routes import router as generation_router
 from app.media_routes import router as media_router
 from app.rbac_routes import router as rbac_router
 from app.settings_routes import router as settings_router
+from app.source_frame_routes import router as source_frame_router
 
 
 class HealthResponse(BaseModel):
@@ -36,6 +37,7 @@ app.include_router(settings_router)
 app.include_router(media_router)
 app.include_router(analysis_router)
 app.include_router(character_router)
+app.include_router(source_frame_router)
 
 
 @app.get("/health", response_model=HealthResponse)
