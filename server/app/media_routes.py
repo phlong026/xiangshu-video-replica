@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import os
-from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.auth import AuthenticatedUser, Database
@@ -15,9 +13,13 @@ from app.media import (
     complete_upload,
     create_upload_intent,
 )
-from app.storage import LocalStorageAdapter, StorageAdapter
-
-STORAGE_ROOT_ENV = "VIDEO_REPLICA_STORAGE_ROOT"
+from app.settings import SettingsDecryptError, SettingsKeyMissing, SettingsRepository
+from app.storage import (
+    StorageAdapter,
+    StorageBackendUnavailable,
+    cloud_storage_config_from_settings,
+    create_storage_adapter,
+)
 
 router = APIRouter(prefix="/api/assets", tags=["media"])
 
@@ -52,9 +54,18 @@ class CompleteUploadResponse(BaseModel):
     metadata: VideoMetadata
 
 
-def get_media_storage() -> StorageAdapter:
-    root = Path(os.environ.get(STORAGE_ROOT_ENV, "/tmp/video-replica-storage"))
-    return LocalStorageAdapter(root=root)
+def get_media_storage(conn: Database) -> StorageAdapter:
+    try:
+        repo = SettingsRepository(conn)
+        runtime = repo.read_runtime_settings()
+        provider = str(runtime["active_storage_provider"])
+        config = repo.load_provider_config(provider)
+        return create_storage_adapter(cloud_storage_config_from_settings(provider, config))
+    except (SettingsDecryptError, SettingsKeyMissing, StorageBackendUnavailable, ValueError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "STORAGE_SETTINGS_UNAVAILABLE"},
+        ) from exc
 
 
 def get_video_probe() -> VideoProbe:

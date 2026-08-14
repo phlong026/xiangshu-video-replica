@@ -20,10 +20,10 @@ from app.permissions import (
 )
 from app.settings import SettingsDecryptError, SettingsKeyMissing, SettingsRepository
 from app.storage import (
-    CloudStorageConfig,
     LocalStorageAdapter,
     StorageAdapter,
     StorageBackendUnavailable,
+    cloud_storage_config_from_settings,
     create_storage_adapter,
     require_storage_match,
     storage_object_ref_from_uri,
@@ -86,16 +86,9 @@ def storage_for_asset(conn: sqlite3.Connection, storage_uri: str) -> StorageAdap
         )
     try:
         cloud_storage = create_storage_adapter(
-            CloudStorageConfig(
-                provider=reference.provider,
-                bucket=reference.bucket,
-                endpoint=config["endpoint"],
-                access_key_id=config["access_key_id"],
-                secret_access_key=config["secret_access_key"],
-                region=config.get("region"),
-            )
+            cloud_storage_config_from_settings(reference.provider, config)
         )
-    except KeyError as exc:
+    except ValueError as exc:
         raise HTTPException(
             status_code=503,
             detail={"code": "STORAGE_SETTINGS_UNAVAILABLE"},

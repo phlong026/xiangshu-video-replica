@@ -4,7 +4,7 @@ import os
 import sqlite3
 import uuid
 from collections.abc import Iterator
-from typing import Protocol
+from typing import Literal, Protocol
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
@@ -29,6 +29,7 @@ class ProviderSettingsRequest(BaseModel):
 class RuntimeSettingsRequest(BaseModel):
     max_generation_count_per_batch: int
     max_concurrent_h3_tasks: int
+    active_storage_provider: Literal["cos", "oss"] | None = None
 
 
 class ProviderTestResult(BaseModel):
@@ -150,12 +151,16 @@ def update_runtime_settings(
     payload: RuntimeSettingsRequest,
     conn: sqlite3.Connection = Depends(get_database),
     admin: User = Depends(current_admin),
-) -> dict[str, int]:
+) -> dict[str, int | str]:
     repo = SettingsRepository(conn)
     try:
+        current = repo.read_runtime_settings()
         result = repo.save_runtime_settings(
             max_generation_count_per_batch=payload.max_generation_count_per_batch,
             max_concurrent_h3_tasks=payload.max_concurrent_h3_tasks,
+            active_storage_provider=str(
+                payload.active_storage_provider or current["active_storage_provider"]
+            ),
             actor_user_id=admin.id,
         )
     except ValueError as exc:

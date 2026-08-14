@@ -5,7 +5,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Literal, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 from urllib.parse import quote, urlencode
 
 StorageProvider = Literal["cos", "oss", "local", "fake"]
@@ -126,10 +126,30 @@ class CloudStorageConfig:
     secret_access_key: str
     region: str | None = None
     key_prefix: str = ""
+    timeout_seconds: int = 10
 
 
 def create_storage_adapter(config: CloudStorageConfig) -> StorageAdapter:
     return CloudStorageAdapter(config)
+
+
+def cloud_storage_config_from_settings(
+    provider: str,
+    config: dict[str, str],
+) -> CloudStorageConfig:
+    if provider not in {"cos", "oss"}:
+        raise ValueError(f"unsupported cloud storage provider: {provider}")
+    try:
+        return CloudStorageConfig(
+            provider=cast(Literal["cos", "oss"], provider),
+            bucket=config["bucket"],
+            endpoint=config.get("endpoint", ""),
+            access_key_id=config["access_key_id"],
+            secret_access_key=config["secret_access_key"],
+            region=config.get("region"),
+        )
+    except KeyError as exc:
+        raise ValueError("cloud storage settings are incomplete") from exc
 
 
 def storage_object_ref_from_uri(uri: str) -> StorageObjectRef:
@@ -369,7 +389,7 @@ class LocalStorageAdapter(_BaseStorageAdapter):
 
 
 class CloudStorageAdapter(_BaseStorageAdapter):
-    def __init__(self, config: CloudStorageConfig) -> None:
+    def __init__(self, config: CloudStorageConfig, *, client: Any | None = None) -> None:
         super().__init__(
             provider=config.provider,
             bucket=config.bucket,
@@ -379,9 +399,30 @@ class CloudStorageAdapter(_BaseStorageAdapter):
         self._access_key_id = config.access_key_id
         self._secret_access_key = config.secret_access_key
         self._region = config.region or ""
+        self._timeout_seconds = config.timeout_seconds
+        self._client = client if client is not None else self._create_provider_client()
 
     def put_object(self, key: str, content: bytes, *, content_type: str) -> StoredObject:
-        raise StorageBackendUnavailable("cloud put_object requires the provider SDK/client")
+        object_key = self._object_key(key)
+        try:
+            if self.provider == "cos":
+                self._client.put_object(
+                    Bucket=self.bucket,
+                    Key=object_key,
+                    Body=content,
+                    ContentType=content_type,
+                )
+            else:
+                self._client.put_object(object_key, content, headers={"Content-Type": content_type})
+        except Exception as exc:
+            raise StorageBackendUnavailable("cloud object upload failed") from exc
+        return _stored_object(
+            provider=self.provider,
+            bucket=self.bucket,
+            key=object_key,
+            content=content,
+            content_type=content_type,
+        )
 
     def create_upload_intent(
         self,
@@ -390,7 +431,36 @@ class CloudStorageAdapter(_BaseStorageAdapter):
         content_type: str,
         expires_in: timedelta,
     ) -> UploadIntent:
-        raise StorageBackendUnavailable("cloud upload signing requires the provider SDK/client")
+        object_key = self._object_key(key)
+        expires_at = _expires_at(expires_in)
+        headers = {"Content-Type": content_type}
+        try:
+            if self.provider == "cos":
+                url = self._client.get_presigned_url(
+                    Bucket=self.bucket,
+                    Key=object_key,
+                    Method="PUT",
+                    Expired=_seconds(expires_in),
+                    Headers=headers,
+                    SignHost=True,
+                )
+            else:
+                url = self._client.sign_url(
+                    "PUT",
+                    object_key,
+                    _seconds(expires_in),
+                    headers=headers,
+                    slash_safe=True,
+                )
+        except Exception as exc:
+            raise StorageBackendUnavailable("cloud upload URL signing failed") from exc
+        return UploadIntent(
+            method="PUT",
+            url=str(url),
+            key=object_key,
+            headers=headers,
+            expires_at=expires_at,
+        )
 
     def create_download_intent(
         self,
@@ -399,15 +469,60 @@ class CloudStorageAdapter(_BaseStorageAdapter):
         expires_in: timedelta,
         can_read: bool,
     ) -> DownloadIntent:
+        object_key = self._object_key(key)
         if not can_read:
-            return super().create_download_intent(key, expires_in=expires_in, can_read=False)
-        raise StorageBackendUnavailable("cloud download signing requires the provider SDK/client")
+            return super().create_download_intent(object_key, expires_in=expires_in, can_read=False)
+        expires_at = _expires_at(expires_in)
+        try:
+            if self.provider == "cos":
+                url = self._client.get_presigned_download_url(
+                    Bucket=self.bucket,
+                    Key=object_key,
+                    Expired=_seconds(expires_in),
+                    SignHost=True,
+                )
+            else:
+                url = self._client.sign_url(
+                    "GET",
+                    object_key,
+                    _seconds(expires_in),
+                    slash_safe=True,
+                )
+        except Exception as exc:
+            raise StorageBackendUnavailable("cloud download URL signing failed") from exc
+        return DownloadIntent(method="GET", url=str(url), key=object_key, expires_at=expires_at)
 
     def get_object(self, key: str) -> bytes:
-        raise StorageBackendUnavailable("cloud get_object requires the provider SDK/client")
+        object_key = self._object_key(key)
+        try:
+            if self.provider == "cos":
+                response = self._client.get_object(Bucket=self.bucket, Key=object_key)
+                return bytes(response["Body"].get_raw_stream().read())
+            return bytes(self._client.get_object(object_key).read())
+        except Exception as exc:
+            raise StorageBackendUnavailable("cloud object download failed") from exc
 
     def head_object(self, key: str) -> StoredObject | None:
-        raise StorageBackendUnavailable("cloud head_object requires the provider SDK/client")
+        object_key = self._object_key(key)
+        try:
+            if self.provider == "cos":
+                headers = dict(self._client.head_object(Bucket=self.bucket, Key=object_key))
+            else:
+                headers = dict(self._client.head_object(object_key).headers)
+        except Exception as exc:
+            if _is_not_found(exc):
+                return None
+            raise StorageBackendUnavailable("cloud object metadata lookup failed") from exc
+        return StoredObject(
+            provider=self.provider,
+            bucket=self.bucket,
+            key=object_key,
+            uri=f"{self.provider}://{self.bucket}/{object_key}",
+            size=int(_header(headers, "content-length", "0")),
+            content_type=str(_header(headers, "content-type", "application/octet-stream")),
+            sha256="",
+            updated_at=datetime.now(UTC),
+        )
 
     def archive_result(
         self,
@@ -416,15 +531,60 @@ class CloudStorageAdapter(_BaseStorageAdapter):
         destination_key: str,
         actor_id: str | None = None,
     ) -> StoredObject:
-        raise StorageBackendUnavailable(
-            "cloud archive_result requires an HTTP client and SDK/client"
-        )
+        return super().archive_result(source, destination_key=destination_key, actor_id=actor_id)
 
     def _signed_url(self, method: str, key: str, expires_at: datetime) -> str:
-        raise StorageBackendUnavailable("cloud URL signing requires the provider SDK/client")
+        seconds_remaining = max(1, _timestamp(expires_at) - _timestamp(datetime.now(UTC)))
+        expires_in = timedelta(seconds=seconds_remaining)
+        if method == "GET":
+            return self.create_download_intent(key, expires_in=expires_in, can_read=True).url
+        if method == "PUT":
+            return self.create_upload_intent(
+                key,
+                content_type="application/octet-stream",
+                expires_in=expires_in,
+            ).url
+        raise StorageBackendUnavailable(f"cloud URL signing does not support {method}")
 
     def _delete_object(self, key: str) -> None:
-        raise StorageBackendUnavailable("cloud delete_object requires the provider SDK/client")
+        try:
+            if self.provider == "cos":
+                self._client.delete_object(Bucket=self.bucket, Key=key)
+            else:
+                self._client.delete_object(key)
+        except Exception as exc:
+            raise StorageBackendUnavailable("cloud object deletion failed") from exc
+
+    def _create_provider_client(self) -> Any:
+        try:
+            if self.provider == "cos":
+                from qcloud_cos import CosConfig, CosS3Client  # type: ignore[import-untyped]
+
+                kwargs: dict[str, Any] = {
+                    "Region": self._region,
+                    "SecretId": self._access_key_id,
+                    "SecretKey": self._secret_access_key,
+                    "Scheme": "https",
+                    "Timeout": self._timeout_seconds,
+                }
+                if self._endpoint:
+                    kwargs["Endpoint"] = self._endpoint
+                return CosS3Client(CosConfig(**kwargs))
+
+            import oss2  # type: ignore[import-untyped]
+
+            if not self._endpoint:
+                raise ValueError("OSS endpoint is required")
+            auth = oss2.Auth(self._access_key_id, self._secret_access_key)
+            return oss2.Bucket(
+                auth,
+                self._endpoint,
+                self.bucket,
+                region=self._region or None,
+                connect_timeout=self._timeout_seconds,
+            )
+        except Exception as exc:
+            raise StorageBackendUnavailable("cloud storage client initialization failed") from exc
 
 
 def _safe_key(key: str) -> str:
@@ -444,6 +604,19 @@ def _expires_at(expires_in: timedelta) -> datetime:
 
 def _timestamp(value: datetime) -> int:
     return int(value.timestamp())
+
+
+def _seconds(value: timedelta) -> int:
+    return max(1, int(value.total_seconds()))
+
+
+def _is_not_found(exc: Exception) -> bool:
+    status = getattr(exc, "status", None) or getattr(exc, "status_code", None)
+    return status == 404 or "NoSuchKey" in str(exc) or "NotFound" in str(exc)
+
+
+def _header(headers: dict[str, Any], name: str, default: str) -> Any:
+    return next((value for key, value in headers.items() if key.lower() == name), default)
 
 
 def _stored_object(

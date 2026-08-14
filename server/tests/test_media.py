@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
+from cryptography.fernet import Fernet
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
@@ -21,6 +23,7 @@ from app.media import (
     create_upload_intent as create_media_upload_intent,
 )
 from app.media_routes import get_media_storage, get_video_probe
+from app.settings import SettingsRepository
 from app.storage import FakeStorageAdapter
 
 
@@ -139,6 +142,75 @@ def test_owner_can_upload_complete_and_query_video_asset(
     assert asset.json()["project_id"] == "project_owned"
     assert asset.json()["size_bytes"] == len(b"video-bytes")
     assert asset.json()["content_type"] == "video/mp4"
+
+
+def test_complete_upload_calculates_a_content_hash_when_storage_head_has_none(
+    db_path: Path,
+) -> None:
+    class HeadWithoutHashStorage(FakeStorageAdapter):
+        def head_object(self, key: str):  # type: ignore[no-untyped-def]
+            stored = super().head_object(key)
+            return None if stored is None else replace(stored, sha256="")
+
+    actor = CurrentUser(
+        id="employee_1",
+        username="employee_1",
+        display_name="Employee One",
+        role="employee",
+    )
+    storage = HeadWithoutHashStorage(provider="fake", bucket="private-bucket")
+    content = b"video-bytes"
+    with connect_database(db_path) as conn:
+        intent = create_media_upload_intent(
+            conn,
+            actor=actor,
+            storage=storage,
+            project_id="project_owned",
+            filename="reference.mp4",
+            content_type="video/mp4",
+            size_bytes=len(content),
+        )
+        storage.put_object(intent.storage_key, content, content_type="video/mp4")
+
+        completed = complete_upload(
+            conn,
+            actor=actor,
+            storage=storage,
+            probe=FakeVideoProbe(duration_seconds=8.0),
+            asset_id=intent.asset_id,
+        )
+
+    assert completed.sha256 == hashlib.sha256(content).hexdigest()
+
+
+def test_media_storage_uses_the_selected_cloud_provider(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VIDEO_REPLICA_SETTINGS_KEY", Fernet.generate_key().decode("ascii"))
+    selected_storage = FakeStorageAdapter(provider="oss", bucket="private-bucket")
+    monkeypatch.setattr("app.media_routes.create_storage_adapter", lambda _: selected_storage)
+
+    with connect_database(db_path) as conn:
+        repo = SettingsRepository(conn)
+        repo.save_provider_config(
+            "oss",
+            {
+                "access_key_id": "oss-id",
+                "secret_access_key": "oss-secret",
+                "bucket": "private-bucket",
+                "endpoint": "https://oss.example",
+            },
+            actor_user_id="admin_1",
+        )
+        repo.save_runtime_settings(
+            max_generation_count_per_batch=4,
+            max_concurrent_h3_tasks=2,
+            active_storage_provider="oss",
+            actor_user_id="admin_1",
+        )
+
+        assert get_media_storage(conn) is selected_storage
 
 
 def test_upload_intent_requires_project_owner(client: TestClient) -> None:

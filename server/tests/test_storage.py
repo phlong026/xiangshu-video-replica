@@ -1,23 +1,95 @@
 from __future__ import annotations
 
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Literal
 
 import pytest
 
 from app.storage import (
     ArchiveSource,
+    CloudStorageAdapter,
     CloudStorageConfig,
     FakeStorageAdapter,
     LocalStorageAdapter,
     SourceUrlExpired,
     StorageBackendUnavailable,
     StoragePermissionError,
-    create_storage_adapter,
     require_storage_match,
     storage_object_ref_from_uri,
 )
+
+
+class FakeCosClient:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    def get_presigned_url(self, **kwargs: object) -> str:
+        self.calls.append(("presign", kwargs))
+        return "https://cos.example/upload"
+
+    def get_presigned_download_url(self, **kwargs: object) -> str:
+        self.calls.append(("download", kwargs))
+        return "https://cos.example/download"
+
+    def put_object(self, **kwargs: object) -> None:
+        self.calls.append(("put", kwargs))
+
+    def get_object(self, **kwargs: object) -> dict[str, object]:
+        self.calls.append(("get", kwargs))
+        return {"Body": FakeCosBody(b"video")}
+
+    def head_object(self, **kwargs: object) -> dict[str, str]:
+        self.calls.append(("head", kwargs))
+        return {"Content-Length": "5", "Content-Type": "video/mp4"}
+
+    def delete_object(self, **kwargs: object) -> None:
+        self.calls.append(("delete", kwargs))
+
+
+class FakeCosBody:
+    def __init__(self, content: bytes) -> None:
+        self.content = content
+
+    def get_raw_stream(self) -> FakeCosBody:
+        return self
+
+    def read(self) -> bytes:
+        return self.content
+
+
+class FakeOssClient:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
+
+    def sign_url(self, *args: object, **kwargs: object) -> str:
+        self.calls.append(("sign", args, kwargs))
+        return f"https://oss.example/{args[1]}"
+
+    def put_object(self, *args: object, **kwargs: object) -> None:
+        self.calls.append(("put", args, kwargs))
+
+    def get_object(self, *args: object, **kwargs: object) -> FakeOssResponse:
+        self.calls.append(("get", args, kwargs))
+        return FakeOssResponse(b"video", {"Content-Type": "video/mp4"})
+
+    def head_object(self, *args: object, **kwargs: object) -> FakeOssResponse:
+        self.calls.append(("head", args, kwargs))
+        return FakeOssResponse(b"", {"content-length": "5", "content-type": "video/mp4"})
+
+    def delete_object(self, *args: object, **kwargs: object) -> None:
+        self.calls.append(("delete", args, kwargs))
+
+
+class FakeOssResponse:
+    def __init__(self, content: bytes, headers: dict[str, str]) -> None:
+        self.content = content
+        self.headers = headers
+
+    def read(self) -> bytes:
+        return self.content
 
 
 def _flow(adapter: FakeStorageAdapter) -> tuple[str, str]:
@@ -50,36 +122,154 @@ def test_fake_adapter_supports_provider_switch_without_business_flow_changes() -
     assert oss_object.uri.startswith("oss://")
 
 
-def test_cloud_adapters_refuse_signing_before_real_sdk_integration() -> None:
-    cases: tuple[tuple[Literal["cos", "oss"], str], ...] = (
-        ("cos", "https://bucket.cos.ap-shanghai.myqcloud.com"),
-        ("oss", "https://bucket.oss-cn-shanghai.aliyuncs.com"),
+@pytest.mark.parametrize(
+    ("provider", "endpoint", "region", "client"),
+    [
+        ("cos", "", "ap-shanghai", FakeCosClient()),
+        ("oss", "https://oss-cn-shanghai.aliyuncs.com", None, FakeOssClient()),
+    ],
+)
+def test_cloud_adapter_signs_and_operates_on_one_private_object(
+    provider: Literal["cos", "oss"],
+    endpoint: str,
+    region: str | None,
+    client: object,
+) -> None:
+    adapter = CloudStorageAdapter(
+        CloudStorageConfig(
+            provider=provider,
+            bucket="private-bucket",
+            endpoint=endpoint,
+            access_key_id="public-id",
+            secret_access_key="very-secret-key",
+            region=region,
+            key_prefix="tenant-a",
+        ),
+        client=client,
     )
-    for provider, endpoint in cases:
-        adapter = create_storage_adapter(
-            CloudStorageConfig(
-                provider=provider,
-                bucket="private-bucket",
-                endpoint=endpoint,
-                access_key_id="public-id",
-                secret_access_key="very-secret-key",
-                region="ap-shanghai",
-                key_prefix="tenant-a",
-            )
+
+    upload = adapter.create_upload_intent(
+        key="projects/p1/source/reference.mp4",
+        content_type="video/mp4",
+        expires_in=timedelta(minutes=10),
+    )
+    download = adapter.create_download_intent(
+        upload.key,
+        expires_in=timedelta(minutes=10),
+        can_read=True,
+    )
+    stored = adapter.put_object(upload.key, b"video", content_type="video/mp4")
+    head = adapter.head_object(upload.key)
+
+    assert upload.method == "PUT"
+    assert upload.headers == {"Content-Type": "video/mp4"}
+    assert download.method == "GET"
+    assert stored.uri == f"{provider}://private-bucket/tenant-a/projects/p1/source/reference.mp4"
+    assert adapter.get_object(upload.key) == b"video"
+    assert head is not None
+    assert head.size == 5
+    assert head.content_type == "video/mp4"
+
+    adapter.delete_object(upload.key, actor_id="admin")
+
+    if provider == "cos":
+        calls = client.calls
+        assert calls[0] == (
+            "presign",
+            {
+                "Bucket": "private-bucket",
+                "Key": "tenant-a/projects/p1/source/reference.mp4",
+                "Method": "PUT",
+                "Expired": 600,
+                "Headers": {"Content-Type": "video/mp4"},
+                "SignHost": True,
+            },
+        )
+        assert calls[1] == (
+            "download",
+            {
+                "Bucket": "private-bucket",
+                "Key": "tenant-a/projects/p1/source/reference.mp4",
+                "Expired": 600,
+                "SignHost": True,
+            },
+        )
+    else:
+        calls = client.calls
+        assert calls[0] == (
+            "sign",
+            ("PUT", "tenant-a/projects/p1/source/reference.mp4", 600),
+            {"headers": {"Content-Type": "video/mp4"}, "slash_safe": True},
+        )
+        assert calls[1] == (
+            "sign",
+            ("GET", "tenant-a/projects/p1/source/reference.mp4", 600),
+            {"slash_safe": True},
         )
 
-        with pytest.raises(StorageBackendUnavailable):
-            adapter.create_upload_intent(
-                key="projects/p1/source/reference.mp4",
-                content_type="video/mp4",
-                expires_in=timedelta(minutes=10),
-            )
-        with pytest.raises(StorageBackendUnavailable):
-            adapter.create_download_intent(
-                key="projects/p1/source/reference.mp4",
-                expires_in=timedelta(minutes=20),
-                can_read=True,
-            )
+
+@pytest.mark.parametrize(
+    ("provider", "endpoint", "region"),
+    [
+        ("cos", "", "ap-shanghai"),
+        ("oss", "https://oss-cn-shanghai.aliyuncs.com", None),
+    ],
+)
+def test_cloud_adapter_configures_sdk_timeouts(
+    provider: Literal["cos", "oss"],
+    endpoint: str,
+    region: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    if provider == "cos":
+
+        class FakeCosConfig:
+            def __init__(self, **kwargs: object) -> None:
+                captured.update(kwargs)
+
+        class FakeCosS3Client:
+            def __init__(self, config: object) -> None:
+                captured["config"] = config
+
+        monkeypatch.setitem(
+            sys.modules,
+            "qcloud_cos",
+            SimpleNamespace(CosConfig=FakeCosConfig, CosS3Client=FakeCosS3Client),
+        )
+    else:
+
+        class FakeOssAuth:
+            def __init__(self, access_key_id: str, secret_access_key: str) -> None:
+                captured["auth"] = (access_key_id, secret_access_key)
+
+        class FakeOssBucket:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                captured["bucket_args"] = args
+                captured.update(kwargs)
+
+        monkeypatch.setitem(
+            sys.modules,
+            "oss2",
+            SimpleNamespace(Auth=FakeOssAuth, Bucket=FakeOssBucket),
+        )
+
+    CloudStorageAdapter(
+        CloudStorageConfig(
+            provider=provider,
+            bucket="private-bucket",
+            endpoint=endpoint,
+            access_key_id="public-id",
+            secret_access_key="very-secret-key",
+            region=region,
+        )
+    )
+
+    if provider == "cos":
+        assert captured["Timeout"] == 10
+    else:
+        assert captured["connect_timeout"] == 10
 
 
 def test_download_intent_requires_business_permission() -> None:

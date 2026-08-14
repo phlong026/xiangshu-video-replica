@@ -102,17 +102,18 @@ def test_settings_migration_creates_tables_and_defaults(tmp_path: Path, settings
         }
         runtime = conn.execute(
             """
-            SELECT max_generation_count_per_batch, max_concurrent_h3_tasks
+            SELECT max_generation_count_per_batch, max_concurrent_h3_tasks, active_storage_provider
             FROM runtime_settings
             WHERE id = 1
             """
         ).fetchone()
 
-    assert version == "005_remove_provider_result_url"
+    assert version == "006_active_storage_provider"
     assert {"provider_settings", "runtime_settings"}.issubset(tables)
     assert dict(runtime) == {
         "max_generation_count_per_batch": 4,
         "max_concurrent_h3_tasks": 2,
+        "active_storage_provider": "cos",
     }
 
 
@@ -165,7 +166,6 @@ def test_provider_config_is_encrypted_at_rest_and_masked_on_read(
                 "secret_access_key": "cos-secret",
                 "bucket": "video-private",
                 "region": "ap-shanghai",
-                "endpoint": "https://cos.example",
             },
         ),
         (
@@ -174,7 +174,6 @@ def test_provider_config_is_encrypted_at_rest_and_masked_on_read(
                 "access_key_id": "oss-id",
                 "secret_access_key": "oss-secret",
                 "bucket": "video-private",
-                "region": "cn-shanghai",
                 "endpoint": "https://oss.example",
             },
         ),
@@ -217,17 +216,20 @@ def test_runtime_limits_are_saved_and_validated(conn: sqlite3.Connection) -> Non
     repo.save_runtime_settings(
         max_generation_count_per_batch=8,
         max_concurrent_h3_tasks=3,
+        active_storage_provider="oss",
         actor_user_id="admin_1",
     )
 
     assert repo.read_runtime_settings() == {
         "max_generation_count_per_batch": 8,
         "max_concurrent_h3_tasks": 3,
+        "active_storage_provider": "oss",
     }
     with pytest.raises(ValueError, match="max_generation_count_per_batch"):
         repo.save_runtime_settings(
             max_generation_count_per_batch=0,
             max_concurrent_h3_tasks=3,
+            active_storage_provider="cos",
             actor_user_id="admin_1",
         )
 
@@ -273,13 +275,18 @@ def test_admin_can_update_runtime_limits(client: TestClient) -> None:
     response = client.patch(
         "/api/admin/settings/runtime",
         headers=admin_headers(),
-        json={"max_generation_count_per_batch": 6, "max_concurrent_h3_tasks": 4},
+        json={
+            "max_generation_count_per_batch": 6,
+            "max_concurrent_h3_tasks": 4,
+            "active_storage_provider": "oss",
+        },
     )
 
     assert response.status_code == 200
     assert response.json() == {
         "max_generation_count_per_batch": 6,
         "max_concurrent_h3_tasks": 4,
+        "active_storage_provider": "oss",
     }
 
 

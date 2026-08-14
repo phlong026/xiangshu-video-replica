@@ -14,12 +14,13 @@ SECRET_FIELDS = ("api_key", "secret", "token", "password", "authorization")
 REQUIRED_PROVIDER_FIELDS: dict[ProviderName, tuple[str, ...]] = {
     "apilio": ("api_key",),
     "metaso": ("api_key",),
-    "cos": ("access_key_id", "secret_access_key", "bucket", "region", "endpoint"),
-    "oss": ("access_key_id", "secret_access_key", "bucket", "region", "endpoint"),
+    "cos": ("access_key_id", "secret_access_key", "bucket", "region"),
+    "oss": ("access_key_id", "secret_access_key", "bucket", "endpoint"),
 }
-DEFAULT_RUNTIME_SETTINGS = {
+DEFAULT_RUNTIME_SETTINGS: dict[str, int | str] = {
     "max_generation_count_per_batch": 4,
     "max_concurrent_h3_tasks": 2,
+    "active_storage_provider": "cos",
 }
 
 
@@ -109,11 +110,13 @@ class SettingsRepository:
         *,
         max_generation_count_per_batch: int,
         max_concurrent_h3_tasks: int,
+        active_storage_provider: str,
         actor_user_id: str,
-    ) -> dict[str, int]:
+    ) -> dict[str, int | str]:
         validate_runtime_settings(
             max_generation_count_per_batch=max_generation_count_per_batch,
             max_concurrent_h3_tasks=max_concurrent_h3_tasks,
+            active_storage_provider=active_storage_provider,
         )
         with self.conn:
             self.conn.execute(
@@ -122,29 +125,32 @@ class SettingsRepository:
                     id,
                     max_generation_count_per_batch,
                     max_concurrent_h3_tasks,
+                    active_storage_provider,
                     updated_by_user_id,
                     created_at,
                     updated_at
                 )
-                VALUES (1, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                VALUES (1, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 ON CONFLICT(id) DO UPDATE SET
                     max_generation_count_per_batch = excluded.max_generation_count_per_batch,
                     max_concurrent_h3_tasks = excluded.max_concurrent_h3_tasks,
+                    active_storage_provider = excluded.active_storage_provider,
                     updated_by_user_id = excluded.updated_by_user_id,
                     updated_at = CURRENT_TIMESTAMP
                 """,
                 (
                     max_generation_count_per_batch,
                     max_concurrent_h3_tasks,
+                    active_storage_provider,
                     actor_user_id,
                 ),
             )
         return self.read_runtime_settings()
 
-    def read_runtime_settings(self) -> dict[str, int]:
+    def read_runtime_settings(self) -> dict[str, int | str]:
         row = self.conn.execute(
             """
-            SELECT max_generation_count_per_batch, max_concurrent_h3_tasks
+            SELECT max_generation_count_per_batch, max_concurrent_h3_tasks, active_storage_provider
             FROM runtime_settings
             WHERE id = 1
             """
@@ -154,6 +160,7 @@ class SettingsRepository:
         return {
             "max_generation_count_per_batch": int(row["max_generation_count_per_batch"]),
             "max_concurrent_h3_tasks": int(row["max_concurrent_h3_tasks"]),
+            "active_storage_provider": str(row["active_storage_provider"]),
         }
 
 
@@ -190,11 +197,14 @@ def validate_runtime_settings(
     *,
     max_generation_count_per_batch: int,
     max_concurrent_h3_tasks: int,
+    active_storage_provider: str,
 ) -> None:
     if max_generation_count_per_batch < 1:
         raise ValueError("max_generation_count_per_batch must be at least 1")
     if max_concurrent_h3_tasks < 1:
         raise ValueError("max_concurrent_h3_tasks must be at least 1")
+    if active_storage_provider not in {"cos", "oss"}:
+        raise ValueError("active_storage_provider must be cos or oss")
 
 
 def mask_config(config: dict[str, str]) -> dict[str, str]:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import sqlite3
@@ -221,8 +222,10 @@ def complete_upload(
         content_type=content_type,
         size_bytes=stored.size,
     )
-    metadata = probe_video(probe, storage.get_object(storage_key), filename=Path(storage_key).name)
+    content = storage.get_object(storage_key)
+    metadata = probe_video(probe, content, filename=Path(storage_key).name)
     validate_duration(metadata.duration_seconds)
+    content_sha256 = hashlib.sha256(content).hexdigest()
 
     with conn:
         conn.execute(
@@ -231,7 +234,7 @@ def complete_upload(
             SET storage_uri = ?, sha256 = ?, size_bytes = ?, content_type = ?
             WHERE id = ?
             """,
-            (stored.uri, stored.sha256, stored.size, content_type, asset_id),
+            (stored.uri, content_sha256, stored.size, content_type, asset_id),
         )
 
     write_audit(
@@ -250,7 +253,7 @@ def complete_upload(
         project_id=str(row["project_id"]),
         status="uploaded",
         storage_uri=stored.uri,
-        sha256=stored.sha256,
+        sha256=content_sha256,
         size_bytes=stored.size,
         content_type=content_type,
         metadata=metadata,
