@@ -42,7 +42,7 @@ class ProviderSettingsRequest(BaseModel):
 class RuntimeSettingsRequest(BaseModel):
     max_generation_count_per_batch: int
     max_concurrent_h3_tasks: int
-    active_storage_provider: Literal["cos", "oss"] | None = None
+    active_storage_provider: Literal["cos", "oss", "local"] | None = None
 
 
 class ProviderTestResult(BaseModel):

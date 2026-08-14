@@ -211,8 +211,8 @@ def validate_runtime_settings(
         raise ValueError("max_generation_count_per_batch must be at least 1")
     if max_concurrent_h3_tasks < 1:
         raise ValueError("max_concurrent_h3_tasks must be at least 1")
-    if active_storage_provider not in {"cos", "oss"}:
-        raise ValueError("active_storage_provider must be cos or oss")
+    if active_storage_provider not in {"cos", "oss", "local"}:
+        raise ValueError("active_storage_provider must be cos, oss or local")
 
 
 def mask_config(config: dict[str, str]) -> dict[str, str]:

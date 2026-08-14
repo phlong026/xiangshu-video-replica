@@ -133,6 +133,26 @@ def create_storage_adapter(config: CloudStorageConfig) -> StorageAdapter:
     return CloudStorageAdapter(config)
 
 
+STORAGE_ROOT_ENV = "VIDEO_REPLICA_STORAGE_ROOT"
+
+
+def local_storage_root() -> Path:
+    """Resolve the local storage root; fail fast when the env var is missing."""
+    root = os.environ.get(STORAGE_ROOT_ENV)
+    if not root:
+        raise StorageBackendUnavailable(f"{STORAGE_ROOT_ENV} is required for local storage")
+    return Path(root)
+
+
+def create_local_storage_from_environment() -> StorageAdapter:
+    """Build the local-filesystem storage adapter for local/dev runs.
+
+    `active_storage_provider="local"` lets a machine without cloud storage
+    credentials (e.g. a macOS dev box) run the full upload/archive flow.
+    """
+    return LocalStorageAdapter(root=local_storage_root())
+
+
 def cloud_storage_config_from_settings(
     provider: str,
     config: dict[str, str],

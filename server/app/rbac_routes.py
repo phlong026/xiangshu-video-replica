@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import os
 import sqlite3
 from datetime import timedelta
-from pathlib import Path
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, status
@@ -26,13 +24,13 @@ from app.storage import (
     StorageBackendUnavailable,
     cloud_storage_config_from_settings,
     create_storage_adapter,
+    local_storage_root,
     require_storage_match,
     storage_object_ref_from_uri,
 )
 
 router = APIRouter(prefix="/api", tags=["rbac"])
 DOWNLOAD_URL_EXPIRES_IN = timedelta(minutes=15)
-STORAGE_ROOT_ENV = "VIDEO_REPLICA_STORAGE_ROOT"
 
 
 class UserResponse(BaseModel):
@@ -77,10 +75,7 @@ class DownloadUrlResponse(BaseModel):
 def storage_for_asset(conn: sqlite3.Connection, storage_uri: str) -> StorageAdapter:
     reference = storage_object_ref_from_uri(storage_uri)
     if reference.provider == "local":
-        local_storage = LocalStorageAdapter(
-            root=Path(os.environ.get(STORAGE_ROOT_ENV, "/tmp/video-replica-storage")),
-            bucket=reference.bucket,
-        )
+        local_storage = LocalStorageAdapter(root=local_storage_root(), bucket=reference.bucket)
         require_storage_match(local_storage, reference)
         return local_storage
     if reference.provider not in {"cos", "oss"}:

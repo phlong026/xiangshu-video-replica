@@ -257,6 +257,12 @@ export function uploadReferenceVideo(
     const request = new XMLHttpRequest();
     request.open(intent.method, intent.url);
     request.timeout = REQUEST_TIMEOUT_MS * 12;
+    const devUserId =
+      import.meta.env.VITE_DEV_USER_ID ??
+      (import.meta.env.DEV ? "admin_1" : undefined);
+    if (devUserId) {
+      request.setRequestHeader("X-Dev-User-Id", devUserId);
+    }
     for (const [name, value] of Object.entries(intent.headers)) {
       request.setRequestHeader(name, value);
     }

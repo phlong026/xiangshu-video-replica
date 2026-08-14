@@ -38,6 +38,16 @@ npm run dev:worker
 npm run tauri:dev
 ```
 
+### 本地存储（无云存储凭据的开发机）
+
+开发机没有 COS/OSS 凭据时，可将运行设置切换为本地文件系统存储，走完完整上传/归档流程：
+
+```powershell
+$env:VIDEO_REPLICA_STORAGE_ROOT = "C:\video-replica-storage"   # 本地存储根目录（必填）
+```
+
+在管理员设置中将 `active_storage_provider` 设为 `local`。local 模式下上传不依赖云厂商签名 URL，而是经 `http://127.0.0.1:8000/api/assets/local-objects/...` 由服务端落盘到 `VIDEO_REPLICA_STORAGE_ROOT`。该模式仅用于本地/内测，不应在生产启用（生产保持 COS/OSS）。
+
 如只调试浏览器界面，可运行 `npm run dev:client`。
 
 ## 检查与构建

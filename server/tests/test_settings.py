@@ -110,7 +110,7 @@ def test_settings_migration_creates_tables_and_defaults(tmp_path: Path, settings
             """
         ).fetchone()
 
-    assert version == "006_active_storage_provider"
+    assert version == "007_local_storage_provider"
     assert {"provider_settings", "runtime_settings"}.issubset(tables)
     assert dict(runtime) == {
         "max_generation_count_per_batch": 4,
@@ -268,6 +268,17 @@ def test_runtime_limits_are_saved_and_validated(conn: sqlite3.Connection) -> Non
         )
 
 
+def test_local_storage_provider_is_allowed(conn: sqlite3.Connection) -> None:
+    repo = SettingsRepository(conn)
+    repo.save_runtime_settings(
+        max_generation_count_per_batch=4,
+        max_concurrent_h3_tasks=2,
+        active_storage_provider="local",
+        actor_user_id="admin_1",
+    )
+    assert repo.read_runtime_settings()["active_storage_provider"] == "local"
+
+
 def test_employee_cannot_update_or_read_settings(client: TestClient) -> None:
     headers = {"X-Dev-User-Id": "employee_1"}
 
@@ -374,6 +385,21 @@ def test_admin_can_update_runtime_limits(client: TestClient) -> None:
         "max_concurrent_h3_tasks": 4,
         "active_storage_provider": "oss",
     }
+
+
+def test_admin_can_enable_local_storage_via_api(client: TestClient) -> None:
+    response = client.patch(
+        "/api/admin/settings/runtime",
+        headers=admin_headers(),
+        json={
+            "max_generation_count_per_batch": 4,
+            "max_concurrent_h3_tasks": 2,
+            "active_storage_provider": "local",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["active_storage_provider"] == "local"
 
 
 def test_connection_test_and_paid_test_are_separate_interfaces(client: TestClient) -> None:

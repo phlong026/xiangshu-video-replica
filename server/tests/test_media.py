@@ -24,7 +24,7 @@ from app.media import (
 )
 from app.media_routes import get_media_storage, get_video_probe
 from app.settings import SettingsRepository
-from app.storage import FakeStorageAdapter
+from app.storage import FakeStorageAdapter, LocalStorageAdapter
 
 
 @dataclass(frozen=True)
@@ -223,6 +223,156 @@ def test_media_storage_uses_the_selected_cloud_provider(
         )
 
         assert get_media_storage(conn) is selected_storage
+
+
+def test_get_media_storage_uses_local_adapter_when_provider_is_local(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("VIDEO_REPLICA_SETTINGS_KEY", Fernet.generate_key().decode("ascii"))
+    root = tmp_path / "local-storage"
+    monkeypatch.setenv("VIDEO_REPLICA_STORAGE_ROOT", str(root))
+
+    with connect_database(db_path) as conn:
+        repo = SettingsRepository(conn)
+        repo.save_runtime_settings(
+            max_generation_count_per_batch=4,
+            max_concurrent_h3_tasks=2,
+            active_storage_provider="local",
+            actor_user_id="admin_1",
+        )
+
+        storage = get_media_storage(conn)
+        assert isinstance(storage, LocalStorageAdapter)
+        assert storage.root == root.resolve()
+
+
+def test_get_media_storage_local_without_root_raises(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("VIDEO_REPLICA_SETTINGS_KEY", Fernet.generate_key().decode("ascii"))
+    monkeypatch.delenv("VIDEO_REPLICA_STORAGE_ROOT", raising=False)
+
+    with connect_database(db_path) as conn:
+        repo = SettingsRepository(conn)
+        repo.save_runtime_settings(
+            max_generation_count_per_batch=4,
+            max_concurrent_h3_tasks=2,
+            active_storage_provider="local",
+            actor_user_id="admin_1",
+        )
+
+        with pytest.raises(HTTPException) as excinfo:
+            get_media_storage(conn)
+        assert excinfo.value.status_code == 503
+        assert isinstance(excinfo.value.detail, dict)
+        assert excinfo.value.detail["code"] == "STORAGE_SETTINGS_UNAVAILABLE"
+
+
+def test_local_storage_intent_url_and_upload_endpoint(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("VIDEO_REPLICA_SETTINGS_KEY", Fernet.generate_key().decode("ascii"))
+    root = tmp_path / "local-storage"
+    monkeypatch.setenv("VIDEO_REPLICA_STORAGE_ROOT", str(root))
+    storage = LocalStorageAdapter(root=root)
+
+    def database_override() -> Iterator[sqlite3.Connection]:
+        conn = connect_database(db_path)
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    app.dependency_overrides[get_database] = database_override
+    app.dependency_overrides[get_media_storage] = lambda: storage
+    try:
+        client = TestClient(app)
+
+        intent_resp = client.post(
+            "/api/assets/upload-intent",
+            headers=auth_headers("employee_1"),
+            json={
+                "project_id": "project_owned",
+                "filename": "clip.mp4",
+                "content_type": "video/mp4",
+                "size_bytes": 123,
+            },
+        )
+        assert intent_resp.status_code == 200
+        intent = intent_resp.json()
+        assert intent["url"].startswith("http://127.0.0.1:8000/api/assets/local-objects/")
+
+        put_resp = client.put(
+            f"/api/assets/local-objects/{intent['storage_key']}",
+            content=b"mp4-bytes",
+            headers=auth_headers("employee_1"),
+        )
+        assert put_resp.status_code == 204
+        assert storage.get_object(intent["storage_key"]) == b"mp4-bytes"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_local_upload_endpoint_rejects_non_local_storage(client: TestClient) -> None:
+    response = client.put(
+        "/api/assets/local-objects/projects/x/uploads/a/v.mp4",
+        content=b"bytes",
+        headers=auth_headers("employee_1"),
+    )
+    assert response.status_code == 404
+
+
+def test_local_upload_endpoint_enforces_role_and_project_gates(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("VIDEO_REPLICA_SETTINGS_KEY", Fernet.generate_key().decode("ascii"))
+    monkeypatch.setenv("VIDEO_REPLICA_STORAGE_ROOT", str(tmp_path / "local-storage"))
+    monkeypatch.setattr("app.media_routes.MAX_UPLOAD_BYTES", 8)
+    storage = LocalStorageAdapter(root=tmp_path / "local-storage")
+
+    def database_override() -> Iterator[sqlite3.Connection]:
+        conn = connect_database(db_path)
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    app.dependency_overrides[get_database] = database_override
+    app.dependency_overrides[get_media_storage] = lambda: storage
+    try:
+        client = TestClient(app)
+        key = "projects/project_owned/uploads/asset-1/demo.mp4"
+
+        auditor_resp = client.put(
+            f"/api/assets/local-objects/{key}",
+            content=b"x",
+            headers=auth_headers("auditor_1"),
+        )
+        assert auditor_resp.status_code == 403
+
+        denied_resp = client.put(
+            f"/api/assets/local-objects/{key}",
+            content=b"x",
+            headers=auth_headers("employee_2"),
+        )
+        assert denied_resp.status_code == 403
+
+        ok_resp = client.put(
+            f"/api/assets/local-objects/{key}",
+            content=b"mp4",
+            headers=auth_headers("employee_1"),
+        )
+        assert ok_resp.status_code == 204
+        assert storage.get_object(key) == b"mp4"
+
+        big_resp = client.put(
+            f"/api/assets/local-objects/{key}",
+            content=b"x" * 9,
+            headers=auth_headers("employee_1"),
+        )
+        assert big_resp.status_code == 413
+    finally:
+        app.dependency_overrides.clear()
 
 
 def test_upload_intent_requires_project_owner(client: TestClient) -> None:
