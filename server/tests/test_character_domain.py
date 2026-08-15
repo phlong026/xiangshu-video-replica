@@ -7,7 +7,13 @@ from pathlib import Path
 import pytest
 from alembic import command
 
-from app.characters import get_project_main_character
+from app.auth import CurrentUser
+from app.characters import (
+    choose_project_main_character,
+    create_character,
+    get_project_main_character,
+    update_character,
+)
 from app.db import alembic_config, connect_database, initialize_database
 from app.main import app
 
@@ -360,6 +366,107 @@ def test_legacy_character_upgrade_preserves_revoked_and_expired_authorization(
         "legacy-identity:character_bad_scope": ("REVOKED", "REVOKED"),
         "legacy-identity:character_bad_expiry": ("EXPIRED", "EXPIRED"),
     }
+
+
+def test_legacy_selection_write_path_keeps_character_version_link_synchronized(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "legacy-character-selection.db"
+    command.upgrade(alembic_config(db_path), "011_add_archive_retry_count")
+    _seed_legacy_character(db_path)
+    with connect_database(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO characters (
+                id, name, reference_asset_ids_json, authorization_project_ids_json,
+                is_active, created_by_user_id
+            )
+            VALUES (
+                'character_second', 'Second Hero', '["asset_ref_1"]',
+                '["project_legacy"]', 1, 'admin_1'
+            )
+            """
+        )
+        conn.commit()
+    command.upgrade(alembic_config(db_path), "head")
+
+    employee = CurrentUser(
+        id="employee_1",
+        username="employee",
+        display_name="Employee",
+        role="employee",
+    )
+    admin = CurrentUser(
+        id="admin_1",
+        username="admin",
+        display_name="Admin",
+        role="admin",
+    )
+    with connect_database(db_path) as conn:
+        choose_project_main_character(
+            conn,
+            actor=employee,
+            project_id="project_legacy",
+            character_id="character_second",
+        )
+        linked_version = conn.execute(
+            """
+            SELECT character_version_id
+            FROM project_main_characters
+            WHERE project_id = 'project_legacy'
+            """
+        ).fetchone()[0]
+
+        update_character(
+            conn,
+            character_id="character_second",
+            name="Changed Second Hero",
+            reference_asset_ids=None,
+            authorization_project_ids=None,
+            authorization_expires_at=None,
+            clear_authorization_expires_at=False,
+            is_active=None,
+        )
+        choose_project_main_character(
+            conn,
+            actor=employee,
+            project_id="project_legacy",
+            character_id="character_second",
+        )
+        stale_version = conn.execute(
+            """
+            SELECT character_version_id
+            FROM project_main_characters
+            WHERE project_id = 'project_legacy'
+            """
+        ).fetchone()[0]
+
+        created_after_migration = create_character(
+            conn,
+            actor=admin,
+            name="Post Migration Hero",
+            reference_asset_ids=["asset_ref_1"],
+            authorization_project_ids=["project_legacy"],
+            authorization_expires_at=None,
+            is_active=True,
+        )
+        choose_project_main_character(
+            conn,
+            actor=employee,
+            project_id="project_legacy",
+            character_id=created_after_migration.id,
+        )
+        cleared_version = conn.execute(
+            """
+            SELECT character_version_id
+            FROM project_main_characters
+            WHERE project_id = 'project_legacy'
+            """
+        ).fetchone()[0]
+
+    assert linked_version == "legacy-version:character_second"
+    assert stale_version is None
+    assert cleared_version is None
 
 
 def test_character_domain_constraints_reject_invalid_and_ambiguous_records(
