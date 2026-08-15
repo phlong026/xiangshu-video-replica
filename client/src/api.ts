@@ -221,6 +221,17 @@ export async function getGenerationBatch(
   );
 }
 
+export async function reconcileUncertainTask(
+  taskId: string,
+): Promise<GenerationTask> {
+  return requestApiJson<GenerationTask>(
+    `/api/generation-tasks/${encodeURIComponent(taskId)}/reconcile`,
+    "任务对账失败",
+    { method: "POST" },
+    CLOUD_OP_TIMEOUT_MS,
+  );
+}
+
 export async function listProjects(): Promise<Project[]> {
   return requestApiJson<Project[]>("/api/projects", "项目列表暂不可用");
 }

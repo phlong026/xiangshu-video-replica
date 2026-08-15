@@ -11,6 +11,7 @@ import {
   getHealth,
   listProjects,
   type Project,
+  reconcileUncertainTask,
   startVideoAnalysis,
   uploadReferenceVideo,
 } from "./api";
@@ -218,6 +219,19 @@ export function App() {
     }
     setBatchIdInput(nextBatchId);
     setActiveBatchId(nextBatchId);
+  }
+
+  async function handleReconcile(taskId: string) {
+    try {
+      await reconcileUncertainTask(taskId);
+      if (activeBatchId) {
+        const nextBatch = await getGenerationBatch(activeBatchId);
+        setBatch(nextBatch);
+        setBatchError("");
+      }
+    } catch {
+      setBatchError("任务对账失败，请重试。");
+    }
   }
 
   function handleReferenceVideoChange(event: ChangeEvent<HTMLInputElement>) {
@@ -452,7 +466,11 @@ export function App() {
                 retryDelaySeconds={retryDelaySeconds}
               />
 
-              {batch ? <BatchPanel batch={batch} /> : <EmptyBatchState />}
+              {batch ? (
+                <BatchPanel batch={batch} onReconcile={handleReconcile} />
+              ) : (
+                <EmptyBatchState />
+              )}
             </section>
           )}
         </>
@@ -759,7 +777,13 @@ function BatchStatusMessage({
   return null;
 }
 
-function BatchPanel({ batch }: { batch: GenerationBatch }) {
+function BatchPanel({
+  batch,
+  onReconcile,
+}: {
+  batch: GenerationBatch;
+  onReconcile: (taskId: string) => void;
+}) {
   const counts = batch.progress.counts;
 
   return (
@@ -802,14 +826,20 @@ function BatchPanel({ batch }: { batch: GenerationBatch }) {
       ) : null}
       <ul className="task-list">
         {batch.tasks.map((task) => (
-          <TaskItem key={task.id} task={task} />
+          <TaskItem key={task.id} task={task} onReconcile={onReconcile} />
         ))}
       </ul>
     </div>
   );
 }
 
-function TaskItem({ task }: { task: GenerationTask }) {
+function TaskItem({
+  task,
+  onReconcile,
+}: {
+  task: GenerationTask;
+  onReconcile?: (taskId: string) => void;
+}) {
   const attentionNeeded = taskNeedsAttention(task);
 
   return (
@@ -821,6 +851,11 @@ function TaskItem({ task }: { task: GenerationTask }) {
       <div className="task-actions">
         {attentionNeeded ? (
           <span className="attention-tag">需要处理</span>
+        ) : null}
+        {task.status === "SUBMISSION_UNCERTAIN" ? (
+          <button type="button" onClick={() => onReconcile?.(task.id)}>
+            对账
+          </button>
         ) : null}
         {task.result_asset_id ? (
           <span className="muted">结果已归档</span>
