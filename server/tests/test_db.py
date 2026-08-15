@@ -352,3 +352,45 @@ def test_backup_cli_can_backup_and_restore_database(tmp_path: Path) -> None:
     with connect_database(restored_path) as conn:
         count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
     assert count == 1
+
+
+def test_migration_007_downgrade_resets_local_to_cos(tmp_path: Path) -> None:
+    db_path = tmp_path / "downgrade-007.db"
+    with initialize_database(db_path) as conn:
+        conn.execute("UPDATE runtime_settings SET active_storage_provider='local' WHERE id=1")
+        conn.commit()
+
+    command.downgrade(alembic_config(db_path), "006_active_storage_provider")
+
+    with connect_database(db_path) as conn:
+        provider = conn.execute(
+            "SELECT active_storage_provider FROM runtime_settings WHERE id = 1"
+        ).fetchone()[0]
+    assert provider == "cos"
+
+
+def test_migration_009_downgrade_fails_on_cross_project_duplicate_key(tmp_path: Path) -> None:
+    db_path = tmp_path / "downgrade-009.db"
+    with initialize_database(db_path) as conn:
+        conn.execute(
+            "INSERT INTO users (id, username, display_name, role) VALUES ('u1','u1','U','employee')"
+        )
+        conn.executemany(
+            "INSERT INTO projects (id, owner_user_id, name) VALUES (?, 'u1', ?)",
+            [("p1", "P1"), ("p2", "P2")],
+        )
+        conn.executemany(
+            """
+            INSERT INTO generation_batches (
+                id, project_id, created_by_user_id, idempotency_key, request_hash,
+                request_snapshot_json, status
+            ) VALUES (?, ?, 'u1', 'same-key', ?, '{}', 'QUEUED')
+            """,
+            [("b1", "p1", "h1"), ("b2", "p2", "h2")],
+        )
+        conn.commit()
+
+    # The pre-009 constraint (created_by_user_id, idempotency_key) is a superset;
+    # downgrading with the same key across two projects must fail.
+    with pytest.raises(Exception):
+        command.downgrade(alembic_config(db_path), "008_provider_result_url")
