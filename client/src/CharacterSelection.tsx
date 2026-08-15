@@ -94,6 +94,15 @@ export function CharacterSelection({ projectId }: { projectId: string }) {
       </div>
       {isOpen ? (
         <div className="character-selection-panel">
+          <div className="panel-header">
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() => setIsOpen(false)}
+            >
+              关闭
+            </button>
+          </div>
           {isLoading ? <p className="status-note">正在读取可用人物</p> : null}
           {error ? <p className="settings-error">{error}</p> : null}
           {!isLoading && !error && !characters.length ? (

@@ -732,7 +732,7 @@ function formatReferenceStatus(
     UPLOAD_PENDING: "上传未完成",
     READY: "参考视频已就绪",
   };
-  return labels[status];
+  return labels[status] ?? status;
 }
 
 function ServiceBadge({ state }: { state: ServiceState }) {
@@ -901,7 +901,7 @@ function taskNeedsAttention(task: GenerationTask) {
   return (
     task.status === "SUBMISSION_UNCERTAIN" ||
     task.archive_status === "ARCHIVE_FAILED" ||
-    task.quality_issue_codes.includes("AUDIO_QUALITY_FAILED")
+    (task.quality_issue_codes ?? []).includes("AUDIO_QUALITY_FAILED")
   );
 }
 

@@ -15,6 +15,11 @@ import { CharacterSelection } from "./CharacterSelection";
 import { FirstFrameSelection } from "./FirstFrameSelection";
 import { SourceFrameSelection } from "./SourceFrameSelection";
 
+function toNonNegativeTime(value: string): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+}
+
 const SHOT_TEXT_FIELDS: Array<{
   key: Exclude<keyof ShotCard, "start_time" | "end_time">;
   label: string;
@@ -110,7 +115,9 @@ export function AnalysisWorkspace({
           return shot;
         }
         const nextValue =
-          key === "start_time" || key === "end_time" ? Number(value) : value;
+          key === "start_time" || key === "end_time"
+            ? toNonNegativeTime(value)
+            : value;
         return { ...shot, [key]: nextValue } as ShotCard;
       }),
     );
@@ -120,6 +127,10 @@ export function AnalysisWorkspace({
   async function handleSave(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!analysisId) {
+      return;
+    }
+    if (shots.some((shot) => shot.end_time < shot.start_time)) {
+      setError("镜头时间无效：结束时间不能早于开始时间。");
       return;
     }
     setIsSaving(true);
