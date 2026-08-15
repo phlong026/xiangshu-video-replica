@@ -201,12 +201,16 @@ def test_empty_database_upgrade_creates_character_domain_constraints(tmp_path: P
         }
         version_indexes = {row[1] for row in conn.execute("PRAGMA index_list(character_versions)")}
         asset_indexes = {row[1] for row in conn.execute("PRAGMA index_list(character_assets)")}
+        asset_columns = {
+            row[1]: row for row in conn.execute("PRAGMA table_info(assets)").fetchall()
+        }
 
-    assert version == "012_character_domain"
+    assert version == "013_character_identity_assets"
     assert CHARACTER_DOMAIN_TABLES.issubset(tables)
     assert "character_version_id" in main_character_columns
     assert "uq_character_versions_persona_version" in version_indexes
     assert "uq_character_assets_published_view" in asset_indexes
+    assert asset_columns["project_id"][3] == 0
 
 
 def test_legacy_character_upgrade_backfills_domain_and_preserves_project_snapshot(
@@ -248,6 +252,9 @@ def test_legacy_character_upgrade_backfills_domain_and_preserves_project_snapsho
     assert version["version_number"] == 1
     assert version["status"] == "PUBLISHED"
     assert version["provider"] == "legacy-import"
+    assert version["template_version"] == "legacy-character-v1"
+    assert len(str(version["template_hash"])) == 64
+    assert json.loads(version["required_view_types_json"]) == []
     assert json.loads(version["persona_snapshot_json"]) == legacy_snapshot
 
     assert [(row["asset_id"], row["candidate_number"]) for row in assets] == [
@@ -271,6 +278,35 @@ def test_legacy_character_upgrade_backfills_domain_and_preserves_project_snapsho
     )
     assert restored["version_id"] == "snapshot_v1"
     assert restored["character_snapshot"] == legacy_snapshot
+
+
+def test_legacy_template_hash_backfill_is_reversible(tmp_path: Path) -> None:
+    db_path = tmp_path / "legacy-template-hash-roundtrip.db"
+    command.upgrade(alembic_config(db_path), "011_add_archive_retry_count")
+    _seed_legacy_character(db_path)
+    command.upgrade(alembic_config(db_path), "012_character_domain")
+    with connect_database(db_path) as conn:
+        before = conn.execute(
+            "SELECT template_version, template_hash FROM character_versions"
+        ).fetchone()
+    assert before["template_version"] is None
+    assert before["template_hash"] is None
+
+    command.upgrade(alembic_config(db_path), "013_character_identity_assets")
+    with connect_database(db_path) as conn:
+        upgraded = conn.execute(
+            "SELECT template_version, template_hash FROM character_versions"
+        ).fetchone()
+    assert upgraded["template_version"] == "legacy-character-v1"
+    assert len(str(upgraded["template_hash"])) == 64
+
+    command.downgrade(alembic_config(db_path), "012_character_domain")
+    with connect_database(db_path) as conn:
+        downgraded = conn.execute(
+            "SELECT template_version, template_hash FROM character_versions"
+        ).fetchone()
+    assert downgraded["template_version"] is None
+    assert downgraded["template_hash"] is None
 
 
 def test_character_domain_downgrade_and_reupgrade_preserve_legacy_data(tmp_path: Path) -> None:
@@ -315,6 +351,77 @@ def test_character_domain_downgrade_and_reupgrade_preserve_legacy_data(tmp_path:
     assert json.loads(imported_version["persona_snapshot_json"]) == legacy_snapshot
     assert project_link["character_version_id"] == imported_version["id"]
     assert project_link["version_id"] == "snapshot_v1"
+
+
+def test_character_identity_asset_downgrade_roundtrip_preserves_object_and_reference(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "character-identity-asset-roundtrip.db"
+    with initialize_database(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO users (id, username, display_name, role)
+            VALUES ('admin_1', 'admin', 'Admin', 'admin')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO assets (
+                id, project_id, kind, storage_uri, sha256, size_bytes,
+                content_type, created_by_user_id
+            )
+            VALUES (
+                'identity-source-1', NULL, 'character_source_image',
+                'local://private/users/admin_1/identities/identity-1/source/identity-source-1.png',
+                'source-sha', 128, 'image/png', 'admin_1'
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO person_identities (
+                id, owner_user_id, display_name, authorization_status,
+                authorization_scope, source_asset_id, source_quality_status,
+                status, created_by
+            )
+            VALUES (
+                'identity-1', 'admin_1', 'Hero', 'AUTHORIZED', '["internal"]',
+                'identity-source-1', 'PASSED', 'ACTIVE', 'admin_1'
+            )
+            """
+        )
+        conn.commit()
+
+    command.downgrade(alembic_config(db_path), "012_character_domain")
+    with connect_database(db_path) as conn:
+        downgraded = conn.execute(
+            "SELECT project_id, storage_uri FROM assets WHERE id = 'identity-source-1'"
+        ).fetchone()
+        identity_source = conn.execute(
+            "SELECT source_asset_id FROM person_identities WHERE id = 'identity-1'"
+        ).fetchone()[0]
+
+    assert downgraded["project_id"] == "migration-character-assets-project"
+    assert str(downgraded["storage_uri"]).endswith(
+        "/users/admin_1/identities/identity-1/source/identity-source-1.png"
+    )
+    assert identity_source == "identity-source-1"
+
+    command.upgrade(alembic_config(db_path), "head")
+    with connect_database(db_path) as conn:
+        upgraded = conn.execute(
+            "SELECT project_id FROM assets WHERE id = 'identity-source-1'"
+        ).fetchone()
+        placeholder_project = conn.execute(
+            "SELECT 1 FROM projects WHERE id = 'migration-character-assets-project'"
+        ).fetchone()
+        placeholder_user = conn.execute(
+            "SELECT 1 FROM users WHERE id = 'migration-character-assets'"
+        ).fetchone()
+
+    assert upgraded["project_id"] is None
+    assert placeholder_project is None
+    assert placeholder_user is None
 
 
 def test_legacy_character_upgrade_preserves_revoked_and_expired_authorization(
@@ -419,6 +526,7 @@ def test_legacy_selection_write_path_keeps_character_version_link_synchronized(
 
         update_character(
             conn,
+            actor=admin,
             character_id="character_second",
             name="Changed Second Hero",
             reference_asset_ids=None,
@@ -465,8 +573,8 @@ def test_legacy_selection_write_path_keeps_character_version_link_synchronized(
         ).fetchone()[0]
 
     assert linked_version == "legacy-version:character_second"
-    assert stale_version is None
-    assert cleared_version is None
+    assert stale_version == "legacy-version:character_second:2"
+    assert cleared_version == f"legacy-version:{created_after_migration.id}"
 
 
 def test_character_domain_constraints_reject_invalid_and_ambiguous_records(

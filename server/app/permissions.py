@@ -8,6 +8,7 @@ from uuid import uuid4
 from fastapi import HTTPException
 
 from app.auth import CurrentUser, Role
+from app.character_policy import identity_values_are_current
 
 
 def write_audit(
@@ -139,8 +140,57 @@ def require_asset_access(
             detail={"code": "ASSET_NOT_FOUND", "message": "Asset does not exist."},
         )
 
-    require_project_access(conn, actor=actor, project_id=str(row["project_id"]), action=action)
-    return cast(sqlite3.Row, row)
+    if row["project_id"] is not None:
+        require_project_access(conn, actor=actor, project_id=str(row["project_id"]), action=action)
+        return cast(sqlite3.Row, row)
+
+    if actor.role in {"admin", "auditor"}:
+        return cast(sqlite3.Row, row)
+
+    published_character = conn.execute(
+        """
+        SELECT
+            identity.authorization_status,
+            identity.authorization_expires_at,
+            identity.source_quality_status,
+            identity.status AS identity_status
+        FROM character_assets AS character_asset
+        JOIN character_versions AS version
+          ON version.id = character_asset.character_version_id
+        JOIN character_personas AS persona ON persona.id = version.persona_id
+        JOIN person_identities AS identity ON identity.id = persona.identity_id
+        WHERE character_asset.asset_id = ?
+          AND character_asset.review_status = 'APPROVED'
+          AND character_asset.is_published_selection = 1
+          AND version.status = 'PUBLISHED'
+        LIMIT 1
+        """,
+        (asset_id,),
+    ).fetchone()
+    if published_character is not None and character_identity_is_current(published_character):
+        return cast(sqlite3.Row, row)
+
+    write_audit(
+        conn,
+        actor=actor,
+        action="security.asset_denied",
+        entity_type="asset",
+        entity_id=asset_id,
+        metadata={"attempted_action": action},
+    )
+    raise forbidden(
+        "ASSET_FORBIDDEN",
+        "Employee access is limited to published assets with current portrait authorization.",
+    )
+
+
+def character_identity_is_current(row: sqlite3.Row) -> bool:
+    return identity_values_are_current(
+        status=row["identity_status"],
+        authorization_status=row["authorization_status"],
+        authorization_expires_at=row["authorization_expires_at"],
+        source_quality_status=row["source_quality_status"],
+    )
 
 
 def project_id_for_task(conn: sqlite3.Connection, task_id: str) -> str:

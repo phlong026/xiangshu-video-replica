@@ -74,7 +74,7 @@ class AcceptedResponse(BaseModel):
 
 class AssetResponse(BaseModel):
     id: str
-    project_id: str
+    project_id: str | None
     kind: str
     sha256: str
     size_bytes: int
@@ -551,7 +551,7 @@ def read_audit_logs(
 def asset_response(row: sqlite3.Row) -> AssetResponse:
     return AssetResponse(
         id=str(row["id"]),
-        project_id=str(row["project_id"]),
+        project_id=None if row["project_id"] is None else str(row["project_id"]),
         kind=str(row["kind"]),
         sha256=str(row["sha256"]),
         size_bytes=int(row["size_bytes"]),
