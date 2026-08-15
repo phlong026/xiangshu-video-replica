@@ -503,8 +503,7 @@ def complete_authorization_upload(
         entity_id=identity_id,
     )
     identity = read_identity_row(conn, identity_id)
-    if str(identity["status"]) == "ARCHIVED":
-        raise character_error(409, "IDENTITY_ARCHIVED", "已归档人物身份不能更新授权。")
+    require_identity_accepts_authorization_upload(identity)
     asset, stored, content = read_uploaded_identity_asset(
         conn,
         storage=storage,
@@ -522,7 +521,7 @@ def complete_authorization_upload(
     validate_authorization_content(content, content_type=content_type)
     sha256 = hashlib.sha256(content).hexdigest()
     metadata = completed_asset_metadata(asset, stored_uri=stored.uri, stored_size=stored.size)
-    identity_was_archived = False
+    state_error: HTTPException | None = None
     with conn:
         update_completed_asset(
             conn,
@@ -534,17 +533,20 @@ def complete_authorization_upload(
             metadata=metadata,
         )
         latest_identity = read_identity_row(conn, identity_id)
-        identity_was_archived = str(latest_identity["status"]) == "ARCHIVED"
-        authorization_status = (
-            "EXPIRED"
-            if authorization_is_expired(latest_identity["authorization_expires_at"])
-            else "AUTHORIZED"
-        )
-        next_status = identity_status_after_evidence(
-            authorization_status=authorization_status,
-            source_quality_status=str(latest_identity["source_quality_status"]),
-        )
-        if not identity_was_archived:
+        try:
+            require_identity_accepts_authorization_upload(latest_identity)
+        except HTTPException as exc:
+            state_error = exc
+        if state_error is None:
+            authorization_status = (
+                "EXPIRED"
+                if authorization_is_expired(latest_identity["authorization_expires_at"])
+                else "AUTHORIZED"
+            )
+            next_status = identity_status_after_evidence(
+                authorization_status=authorization_status,
+                source_quality_status=str(latest_identity["source_quality_status"]),
+            )
             conn.execute(
                 """
                 UPDATE person_identities
@@ -554,16 +556,20 @@ def complete_authorization_upload(
                 """,
                 (asset_id, authorization_status, next_status, identity_id),
             )
-    if identity_was_archived:
+    if state_error is not None:
+        detail = cast(dict[str, object], state_error.detail)
         write_audit(
             conn,
             actor=actor,
             action="person_identity.authorization_upload.discarded",
             entity_type="asset",
             entity_id=asset_id,
-            metadata={"identity_id": identity_id, "reason": "IDENTITY_ARCHIVED"},
+            metadata={
+                "identity_id": identity_id,
+                "reason": str(detail.get("code", "IDENTITY_STATE_CHANGED")),
+            },
         )
-        raise character_error(409, "IDENTITY_ARCHIVED", "已归档人物身份不能更新授权。")
+        raise state_error
     write_audit(
         conn,
         actor=actor,
@@ -634,8 +640,8 @@ def complete_source_upload(
     quality = evaluate_source_image_quality(width=width, height=height, inspection=inspection)
     metadata = completed_asset_metadata(asset, stored_uri=stored.uri, stored_size=stored.size)
     metadata["quality"] = quality.model_dump(mode="json")
-    next_status = "ACTIVE" if quality.passed else "DRAFT"
     state_error: HTTPException | None = None
+    identity_source_updated = False
     with conn:
         update_completed_asset(
             conn,
@@ -651,7 +657,9 @@ def complete_source_upload(
             require_current_authorization(latest_identity)
         except HTTPException as exc:
             state_error = exc
-        if state_error is None:
+        if state_error is None and (
+            quality.passed or not identity_has_usable_source(latest_identity)
+        ):
             conn.execute(
                 """
                 UPDATE person_identities
@@ -659,8 +667,14 @@ def complete_source_upload(
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
                 """,
-                (asset_id, "PASSED" if quality.passed else "FAILED", next_status, identity_id),
+                (
+                    asset_id,
+                    "PASSED" if quality.passed else "FAILED",
+                    "ACTIVE" if quality.passed else "DRAFT",
+                    identity_id,
+                ),
             )
+            identity_source_updated = True
         conn.execute(
             """
             INSERT INTO external_call_logs (
@@ -697,6 +711,7 @@ def complete_source_upload(
             "identity_id": identity_id,
             "issue_codes": quality.issue_codes,
             "quality_passed": quality.passed,
+            "identity_source_updated": identity_source_updated,
             "sha256": sha256,
         },
     )
@@ -1358,6 +1373,13 @@ def require_current_authorization(identity: sqlite3.Row) -> None:
         )
 
 
+def require_identity_accepts_authorization_upload(identity: sqlite3.Row) -> None:
+    if str(identity["status"]) == "ARCHIVED":
+        raise character_error(409, "IDENTITY_ARCHIVED", "已归档人物身份不能更新授权。")
+    if str(identity["status"]) == "REVOKED" or str(identity["authorization_status"]) == "REVOKED":
+        raise character_error(409, "IDENTITY_REVOKED", "已撤销人物身份不能更新授权。")
+
+
 def require_identity_active(identity: sqlite3.Row) -> None:
     if not effective_identity_is_active(identity):
         raise character_error(
@@ -1379,6 +1401,10 @@ def effective_identity_state(row: sqlite3.Row) -> tuple[str, str]:
 def effective_identity_is_active(row: sqlite3.Row) -> bool:
     authorization_status, status = effective_identity_state(row)
     return authorization_status == "AUTHORIZED" and status == "ACTIVE"
+
+
+def identity_has_usable_source(row: sqlite3.Row) -> bool:
+    return row["source_asset_id"] is not None and effective_identity_is_active(row)
 
 
 def identity_available_to_employee(conn: sqlite3.Connection, row: sqlite3.Row) -> bool:
@@ -1568,6 +1594,7 @@ def persist_source_inspection_failure(
     metadata = completed_asset_metadata(asset, stored_uri=stored_uri, stored_size=stored_size)
     metadata["inspection_status"] = "ERROR"
     state_error: HTTPException | None = None
+    identity_source_updated = False
     with conn:
         update_completed_asset(
             conn,
@@ -1583,7 +1610,7 @@ def persist_source_inspection_failure(
             require_current_authorization(latest_identity)
         except HTTPException as exc:
             state_error = exc
-        if state_error is None:
+        if state_error is None and not identity_has_usable_source(latest_identity):
             conn.execute(
                 """
                 UPDATE person_identities
@@ -1593,6 +1620,7 @@ def persist_source_inspection_failure(
                 """,
                 (str(asset["id"]), identity_id),
             )
+            identity_source_updated = True
         conn.execute(
             """
             INSERT INTO external_call_logs (
@@ -1615,6 +1643,7 @@ def persist_source_inspection_failure(
         metadata={
             "identity_id": identity_id,
             "identity_state_changed": state_error is not None,
+            "identity_source_updated": identity_source_updated,
         },
     )
     return state_error

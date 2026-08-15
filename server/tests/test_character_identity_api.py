@@ -17,6 +17,7 @@ from app.character_identity import (
     REQUIRED_CHARACTER_VIEW_TYPES,
     SourceImageInspection,
     SourceImageInspector,
+    SourceImageInspectorFailed,
     approved_character_asset_key,
     generated_character_asset_key,
 )
@@ -373,6 +374,92 @@ def test_source_quality_failure_is_actionable_and_does_not_activate_identity(
     assert "WATERMARK_DETECTED" in json.loads(str(metadata))["quality"]["issue_codes"]
 
 
+def test_failed_replacement_source_keeps_previous_active_source(
+    client: TestClient,
+    storage: FakeStorageAdapter,
+    inspector: FakeSourceImageInspector,
+) -> None:
+    identity = activate_identity(client, storage)
+    original_source_asset_id = identity["source_asset_id"]
+    inspector.result = SourceImageInspection(
+        person_count=2,
+        face_count=2,
+        face_visible=False,
+        sharpness_score=0.2,
+        occlusion_detected=True,
+        watermark_detected=True,
+        notes=["replacement rejected"],
+        provider="fake-source-inspector",
+        model="fake-source-v1",
+    )
+    image = png_header()
+    intent = client.post(
+        f"/api/person-identities/{identity['id']}/source-upload-intent",
+        headers=headers("admin_1"),
+        json={
+            "filename": "replacement.png",
+            "content_type": "image/png",
+            "size_bytes": len(image),
+        },
+    ).json()
+    storage.put_object(str(intent["storage_key"]), image, content_type="image/png")
+
+    response = client.post(
+        f"/api/person-identities/{identity['id']}/source-upload-complete",
+        headers=headers("admin_1"),
+        json={"asset_id": intent["asset_id"]},
+    )
+    restored = client.get(
+        f"/api/person-identities/{identity['id']}",
+        headers=headers("admin_1"),
+    ).json()
+
+    assert response.status_code == 422
+    assert restored["status"] == "ACTIVE"
+    assert restored["source_quality_status"] == "PASSED"
+    assert restored["source_asset_id"] == original_source_asset_id
+
+
+def test_replacement_inspection_failure_keeps_previous_active_source(
+    client: TestClient,
+    storage: FakeStorageAdapter,
+) -> None:
+    identity = activate_identity(client, storage)
+    original_source_asset_id = identity["source_asset_id"]
+    image = png_header()
+    intent = client.post(
+        f"/api/person-identities/{identity['id']}/source-upload-intent",
+        headers=headers("admin_1"),
+        json={
+            "filename": "replacement.png",
+            "content_type": "image/png",
+            "size_bytes": len(image),
+        },
+    ).json()
+    storage.put_object(str(intent["storage_key"]), image, content_type="image/png")
+
+    class FailingInspector:
+        def inspect(self, content: bytes, *, content_type: str) -> SourceImageInspection:
+            raise SourceImageInspectorFailed("provider unavailable")
+
+    app.dependency_overrides[get_source_image_inspector] = lambda: FailingInspector()
+    response = client.post(
+        f"/api/person-identities/{identity['id']}/source-upload-complete",
+        headers=headers("admin_1"),
+        json={"asset_id": intent["asset_id"]},
+    )
+    restored = client.get(
+        f"/api/person-identities/{identity['id']}",
+        headers=headers("admin_1"),
+    ).json()
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "SOURCE_IMAGE_INSPECTOR_UNAVAILABLE"
+    assert restored["status"] == "ACTIVE"
+    assert restored["source_quality_status"] == "PASSED"
+    assert restored["source_asset_id"] == original_source_asset_id
+
+
 def test_source_completion_does_not_reactivate_identity_archived_during_inspection(
     client: TestClient,
     db_path: Path,
@@ -419,6 +506,62 @@ def test_source_completion_does_not_reactivate_identity_archived_during_inspecti
         ).fetchone()
     assert archived["status"] == "ARCHIVED"
     assert archived["source_asset_id"] == identity["source_asset_id"]
+
+
+def test_authorization_completion_does_not_undo_concurrent_revocation(
+    client: TestClient,
+    db_path: Path,
+    storage: FakeStorageAdapter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity = create_identity(client)
+    identity_id = str(identity["id"])
+    content = b"%PDF-1.7\nauthorization"
+    intent = client.post(
+        f"/api/person-identities/{identity_id}/authorization-upload-intent",
+        headers=headers("admin_1"),
+        json={
+            "filename": "authorization.pdf",
+            "content_type": "application/pdf",
+            "size_bytes": len(content),
+        },
+    ).json()
+    storage.put_object(str(intent["storage_key"]), content, content_type="application/pdf")
+    original_get_object = storage.get_object
+
+    def revoke_before_read(object_key: str) -> bytes:
+        with connect_database(db_path) as conn:
+            conn.execute(
+                """
+                UPDATE person_identities
+                SET authorization_status = 'REVOKED', status = 'REVOKED'
+                WHERE id = ?
+                """,
+                (identity_id,),
+            )
+            conn.commit()
+        return original_get_object(object_key)
+
+    monkeypatch.setattr(storage, "get_object", revoke_before_read)
+    response = client.post(
+        f"/api/person-identities/{identity_id}/authorization-upload-complete",
+        headers=headers("admin_1"),
+        json={"asset_id": intent["asset_id"]},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "IDENTITY_REVOKED"
+    with connect_database(db_path) as conn:
+        revoked = conn.execute(
+            """
+            SELECT authorization_status, status, authorization_asset_id
+            FROM person_identities WHERE id = ?
+            """,
+            (identity_id,),
+        ).fetchone()
+    assert revoked["authorization_status"] == "REVOKED"
+    assert revoked["status"] == "REVOKED"
+    assert revoked["authorization_asset_id"] is None
 
 
 def test_persona_versions_freeze_snapshots_and_history_is_not_rewritten(
