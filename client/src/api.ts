@@ -5,6 +5,8 @@ const REQUEST_TIMEOUT_MS = 5_000;
 // Cloud/storage operations (diagnostics, presigned URLs, archive prechecks)
 // may legitimately take much longer than a normal API round-trip.
 const CLOUD_OP_TIMEOUT_MS = 60_000;
+// The server-side video provider permits a 90s response window.
+const ANALYSIS_TIMEOUT_MS = 120_000;
 export const SESSION_EXPIRED_EVENT = "video-replica:session-expired";
 
 type HealthResponse = components["schemas"]["HealthResponse"];
@@ -635,7 +637,11 @@ export async function startVideoAnalysis(
   const payload =
     durationSeconds === undefined
       ? { asset_id: assetId }
-      : { asset_id: assetId, duration_seconds: durationSeconds };
+      : {
+          asset_id: assetId,
+          duration_seconds: durationSeconds,
+          reuse_existing: true,
+        };
   return requestApiJson<AnalysisVersion>(
     `/api/projects/${encodeURIComponent(projectId)}/analysis`,
     "启动视频拆解失败",
@@ -643,6 +649,7 @@ export async function startVideoAnalysis(
       method: "POST",
       body: JSON.stringify(payload),
     },
+    ANALYSIS_TIMEOUT_MS,
   );
 }
 

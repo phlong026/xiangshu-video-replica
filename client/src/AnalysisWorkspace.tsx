@@ -68,6 +68,7 @@ export function AnalysisWorkspace({
 
   useEffect(() => {
     if (
+      !readOnly &&
       project.analysis_status === "PENDING" &&
       forceLoadProjectId !== project.id
     ) {
@@ -139,7 +140,13 @@ export function AnalysisWorkspace({
     return () => {
       isActive = false;
     };
-  }, [forceLoadProjectId, project.analysis_status, project.id, reloadToken]);
+  }, [
+    forceLoadProjectId,
+    project.analysis_status,
+    project.id,
+    readOnly,
+    reloadToken,
+  ]);
 
   function reloadWorkspace() {
     reloadTokenRef.current += 1;
@@ -249,9 +256,18 @@ export function AnalysisWorkspace({
             参考视频已经就绪。系统会先确认是否已有拆解结果，再安全地启动本步骤。
           </p>
           {readOnly ? (
-            <span className="status-note">
-              当前身份只能查看，不能启动拆解。
-            </span>
+            <>
+              <span className="status-note">
+                当前身份只能查看，不能启动拆解。
+              </span>
+              <button
+                className="secondary-button"
+                onClick={reloadWorkspace}
+                type="button"
+              >
+                重新检查视频拆解
+              </button>
+            </>
           ) : (
             <button
               disabled={isStartingAnalysis || !project.reference_asset_id}

@@ -533,6 +533,7 @@ export function App() {
   }
 
   function markAnalysisReady(projectId: string) {
+    setSetupError("");
     setProjects((current) =>
       current.map((project) =>
         project.id === projectId

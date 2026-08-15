@@ -1596,6 +1596,11 @@ export interface components {
       asset_id: string;
       /** Duration Seconds */
       duration_seconds?: number | null;
+      /**
+       * Reuse Existing
+       * @default false
+       */
+      reuse_existing: boolean;
     };
     /** CreateProjectRequest */
     CreateProjectRequest: {

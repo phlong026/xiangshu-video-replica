@@ -8,6 +8,7 @@ import {
   getHealth,
   getSettings,
   SESSION_EXPIRED_EVENT,
+  startVideoAnalysis,
   uploadReferenceVideo,
 } from "./api";
 
@@ -129,6 +130,36 @@ describe("createProject", () => {
     const options = fetchMock.mock.calls[0]?.[1] as RequestInit;
     expect((options.headers as Headers).get("X-Dev-User-Id")).toBe(
       "employee_1",
+    );
+  });
+});
+
+describe("startVideoAnalysis", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("uses the provider-sized timeout and marks automatic starts as recoverable", async () => {
+    const timeoutSpy = vi.spyOn(window, "setTimeout");
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: "analysis-1" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await startVideoAnalysis("project-1", "asset-1", 8);
+
+    expect(timeoutSpy).toHaveBeenCalledWith(expect.any(Function), 120_000);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:8000/api/projects/project-1/analysis",
+      expect.objectContaining({
+        body: JSON.stringify({
+          asset_id: "asset-1",
+          duration_seconds: 8,
+          reuse_existing: true,
+        }),
+      }),
     );
   });
 });

@@ -359,6 +359,7 @@ describe("App", () => {
             status: "REFERENCE_READY",
             reference_asset_id: "asset-ready",
             reference_upload_status: "READY",
+            analysis_status: "PENDING",
           },
           {
             id: "project-pending",
@@ -563,7 +564,9 @@ describe("App", () => {
     expect(
       await screen.findByRole("button", { name: "开始视频拆解" }),
     ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "开始视频拆解" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "开始视频拆解" }),
+    );
 
     expect(await screen.findByText("恢复后的拆解结果")).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith(
@@ -1028,9 +1031,166 @@ describe("App", () => {
       "http://127.0.0.1:8000/api/projects/project-1/analysis",
       expect.objectContaining({
         method: "POST",
-        body: JSON.stringify({ asset_id: "asset-1", duration_seconds: 8 }),
+        body: JSON.stringify({
+          asset_id: "asset-1",
+          duration_seconds: 8,
+          reuse_existing: true,
+        }),
       }),
     );
+  });
+
+  it("clears the automatic-analysis error after recovery succeeds", async () => {
+    class SuccessfulUploadRequest {
+      onerror: (() => void) | null = null;
+      onload: (() => void) | null = null;
+      ontimeout: (() => void) | null = null;
+      status = 200;
+      timeout = 0;
+      upload: { onprogress: ((event: ProgressEvent) => void) | null } = {
+        onprogress: null,
+      };
+
+      open() {}
+      setRequestHeader() {}
+      send() {
+        this.onload?.();
+      }
+    }
+
+    const analysis = {
+      id: "analysis-recovered",
+      project_id: "project-recovery",
+      asset_id: "asset-recovery",
+      kind: "analysis",
+      version_number: 1,
+      payload: {
+        analysis: {
+          summary: "恢复成功",
+          duration_seconds: 8,
+          shots: [
+            {
+              shot_id: "S01",
+              start_time: 0,
+              end_time: 8,
+              shot_type: "近景",
+              composition: "人物居中",
+              camera_motion: "固定",
+              subject: "主讲人",
+              action: "讲话",
+              scene: "室内",
+              spoken_text: "你好",
+              transition: "硬切",
+            },
+          ],
+        },
+      },
+      created_by_user_id: "employee_1",
+      created_at: "2030-01-01T00:00:00Z",
+    };
+    let analysisPostCalls = 0;
+    const fetchMock = vi.fn((url: string, options?: RequestInit) => {
+      if (url.endsWith("/health")) {
+        return Promise.resolve({ ok: true, json: async () => healthResponse });
+      }
+      if (url.endsWith("/api/projects") && !url.includes("analysis")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () =>
+            options?.method === "POST"
+              ? {
+                  id: "project-recovery",
+                  owner_user_id: "employee_1",
+                  name: "失败后恢复",
+                  status: "ACTIVE",
+                  reference_asset_id: null,
+                  reference_upload_status: "NOT_STARTED",
+                  analysis_status: "NOT_READY",
+                }
+              : [],
+        });
+      }
+      if (url.endsWith("/upload-intent")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            asset_id: "asset-recovery",
+            project_id: "project-recovery",
+            storage_key: "projects/project-recovery/reference.mp4",
+            method: "PUT",
+            url: "https://storage.example/upload",
+            headers: { "content-type": "video/mp4" },
+            expires_at: "2030-01-01T00:00:00Z",
+          }),
+        });
+      }
+      if (url.endsWith("/complete")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            asset_id: "asset-recovery",
+            project_id: "project-recovery",
+            status: "uploaded",
+            storage_uri: "cos://private-bucket/reference.mp4",
+            sha256: "hash",
+            size_bytes: 10,
+            content_type: "video/mp4",
+            metadata: { duration_seconds: 8 },
+          }),
+        });
+      }
+      if (url.endsWith("/analysis") && options?.method === "POST") {
+        analysisPostCalls += 1;
+        return analysisPostCalls === 1
+          ? Promise.resolve({
+              ok: false,
+              status: 502,
+              json: async () => ({
+                detail: { message: "模型暂时不可用" },
+              }),
+            })
+          : Promise.resolve({ ok: true, json: async () => analysis });
+      }
+      if (url.endsWith("/analysis/latest")) {
+        return Promise.resolve({ ok: true, json: async () => analysis });
+      }
+      if (url.endsWith("/shot-cards/latest")) {
+        return Promise.resolve({ ok: false, status: 404 });
+      }
+      if (
+        url.endsWith("/source-frames/latest") ||
+        url.endsWith("/source-frames/selection/latest") ||
+        url.endsWith("/first-frames/latest") ||
+        url.endsWith("/first-frames/selection/latest")
+      ) {
+        return Promise.resolve({ ok: false, status: 404 });
+      }
+      if (url.endsWith("/first-frames/history")) {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
+      return Promise.resolve({ ok: true, json: async () => [] });
+    });
+    vi.stubGlobal("fetch", withAuth(fetchMock));
+    vi.stubGlobal("XMLHttpRequest", SuccessfulUploadRequest);
+
+    render(<App />);
+    await enterWorkspace();
+    openNewReplica();
+    fireEvent.change(screen.getByLabelText("项目名称"), {
+      target: { value: "失败后恢复" },
+    });
+    fireEvent.change(screen.getByLabelText("参考视频"), {
+      target: {
+        files: [new File(["video"], "reference.mp4", { type: "video/mp4" })],
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "创建并上传" }));
+
+    expect(await screen.findByText(/模型暂时不可用/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "开始视频拆解" }));
+
+    expect(await screen.findByText("恢复成功")).toBeInTheDocument();
+    expect(screen.queryByText(/模型暂时不可用/)).toBeNull();
   });
 
   it("rejects unsupported reference videos before creating a project", async () => {

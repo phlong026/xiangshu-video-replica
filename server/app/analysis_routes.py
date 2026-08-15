@@ -107,6 +107,7 @@ class CreateAnalysisRequest(BaseModel):
     asset_id: str = Field(min_length=1)
     # Reference videos are capped at 15s; keep the analysis time axis bounded.
     duration_seconds: float | None = Field(default=None, gt=0, le=15)
+    reuse_existing: bool = False
 
 
 class UpdateShotCardsRequest(BaseModel):
@@ -174,7 +175,8 @@ def create_project_analysis(
             },
         )
 
-    if request.duration_seconds is None:
+    should_reuse = request.duration_seconds is None or request.reuse_existing
+    if should_reuse:
         existing = find_analysis_version_for_asset(
             conn,
             project_id=project_id,
@@ -244,7 +246,7 @@ def create_project_analysis(
             status_code=429 if exc.http_status == 429 else 502,
             detail={"code": code},
         ) from exc
-    if request.duration_seconds is None:
+    if should_reuse:
         row, created = create_or_recover_analysis_version(
             conn,
             project_id=project_id,

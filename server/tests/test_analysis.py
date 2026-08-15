@@ -414,6 +414,65 @@ def test_concurrent_analysis_recovery_creates_only_one_version(
     assert version_count == 1
 
 
+def test_concurrent_idempotent_analysis_starts_create_only_one_version(
+    client: TestClient,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    barrier = threading.Barrier(2)
+    calls_lock = threading.Lock()
+
+    class BarrierFakeGemini(FakeGemini):
+        analysis_calls = 0
+
+        def analyze(self, *, video_uri: str, duration_seconds: float) -> ProviderResponse:
+            with calls_lock:
+                self.analysis_calls += 1
+            barrier.wait(timeout=5)
+            return super().analyze(video_uri=video_uri, duration_seconds=duration_seconds)
+
+    provider = BarrierFakeGemini()
+    monkeypatch.setattr(
+        "app.analysis_routes.get_video_analysis_provider",
+        lambda _conn: provider,
+    )
+    responses = []
+    responses_lock = threading.Lock()
+
+    def start() -> None:
+        response = client.post(
+            "/api/projects/project_owned/analysis",
+            json={
+                "asset_id": "asset_owned",
+                "duration_seconds": 10,
+                "reuse_existing": True,
+            },
+            headers=auth_headers("employee_1"),
+        )
+        with responses_lock:
+            responses.append(response)
+
+    threads = [threading.Thread(target=start), threading.Thread(target=start)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert [response.status_code for response in responses] == [200, 200]
+    assert provider.analysis_calls == 2
+    assert len({response.json()["id"] for response in responses}) == 1
+    with connect_database(db_path) as conn:
+        version_count = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM versions
+            WHERE project_id = ? AND asset_id = ? AND kind = ?
+            """,
+            ("project_owned", "asset_owned", "analysis"),
+        ).fetchone()[0]
+    assert version_count == 1
+
+
 def test_project_owner_can_read_the_latest_analysis_version(client: TestClient) -> None:
     first = client.post(
         "/api/projects/project_owned/analysis",
