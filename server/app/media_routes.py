@@ -176,6 +176,9 @@ async def put_local_object(
         project_id=project_id,
         action="asset.object.put",
     )
+    content_length = request.headers.get("content-length")
+    if content_length and content_length.isdigit() and int(content_length) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail={"code": "PAYLOAD_TOO_LARGE"})
     content = await request.body()
     if len(content) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail={"code": "PAYLOAD_TOO_LARGE"})
