@@ -12,6 +12,7 @@ from fastapi import HTTPException
 from app.auth import CurrentUser
 
 MAIN_CHARACTER_VERSION_KIND = "main_character"
+LEGACY_CHARACTER_VERSION_PREFIX = "legacy-version:"
 
 
 @dataclass(frozen=True)
@@ -187,6 +188,12 @@ def choose_project_main_character(
         raise character_not_available()
 
     snapshot = character_snapshot(character)
+    compatibility_snapshot_json = json.dumps(
+        snapshot,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     version_number = next_version_number(conn, project_id)
     version_id = str(uuid4())
     payload = {
@@ -224,16 +231,35 @@ def choose_project_main_character(
                 project_id,
                 character_id,
                 version_id,
+                character_version_id,
                 selected_by_user_id
             )
-            VALUES (?, ?, ?, ?)
+            VALUES (
+                ?,
+                ?,
+                ?,
+                (
+                    SELECT id
+                    FROM character_versions
+                    WHERE id = ? AND persona_snapshot_json = ?
+                ),
+                ?
+            )
             ON CONFLICT(project_id) DO UPDATE SET
                 character_id = excluded.character_id,
                 version_id = excluded.version_id,
+                character_version_id = excluded.character_version_id,
                 selected_by_user_id = excluded.selected_by_user_id,
                 selected_at = CURRENT_TIMESTAMP
             """,
-            (project_id, character_id, version_id, actor.id),
+            (
+                project_id,
+                character_id,
+                version_id,
+                f"{LEGACY_CHARACTER_VERSION_PREFIX}{character_id}",
+                compatibility_snapshot_json,
+                actor.id,
+            ),
         )
     return {
         "project_id": project_id,
