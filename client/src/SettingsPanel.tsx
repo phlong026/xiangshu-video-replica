@@ -322,6 +322,15 @@ function RuntimeForm({
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setStatus("");
+    const limitsValid =
+      Number.isInteger(values.max_generation_count_per_batch) &&
+      values.max_generation_count_per_batch >= 1 &&
+      Number.isInteger(values.max_concurrent_h3_tasks) &&
+      values.max_concurrent_h3_tasks >= 1;
+    if (!limitsValid) {
+      setStatus("单次数量上限与最大并发数必须为 ≥1 的整数");
+      return;
+    }
     try {
       await onSave(values);
       setStatus("运行设置已保存");

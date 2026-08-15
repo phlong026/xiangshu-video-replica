@@ -849,7 +849,10 @@ describe("App", () => {
       ),
     );
     expect(createObjectUrl).toHaveBeenCalledOnce();
-    expect(revokeObjectUrl).toHaveBeenCalledWith("blob:diagnostic-1");
+    await waitFor(
+      () => expect(revokeObjectUrl).toHaveBeenCalledWith("blob:diagnostic-1"),
+      { timeout: 2_000 },
+    );
   });
 
   it("loads a pasted batch id and renders progress, task stages, results, and attention hints", async () => {

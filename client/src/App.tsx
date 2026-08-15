@@ -30,6 +30,7 @@ const BATCH_STORAGE_KEY = "generation.batchId";
 const POLL_INTERVAL_MS = 2_000;
 const MAX_RETRY_DELAY_MS = 16_000;
 const MAX_BATCH_POLL_RETRIES = 5;
+const HEALTH_RETRY_INTERVAL_MS = 5_000;
 const TERMINAL_BATCH_STATUSES = new Set([
   "SUCCEEDED",
   "COMPLETED_WITH_FAILURES",
@@ -70,22 +71,30 @@ export function App() {
     }
 
     let isActive = true;
+    let timeoutId: number | undefined;
     setServiceState("checking");
 
-    getHealth()
-      .then(() => {
+    async function checkHealth() {
+      try {
+        await getHealth();
         if (isActive) {
           setServiceState("connected");
         }
-      })
-      .catch(() => {
+      } catch {
         if (isActive) {
           setServiceState("disconnected");
+          // Keep retrying so the badge recovers once the local backend is up.
+          timeoutId = window.setTimeout(checkHealth, HEALTH_RETRY_INTERVAL_MS);
         }
-      });
+      }
+    }
+    void checkHealth();
 
     return () => {
       isActive = false;
+      if (timeoutId !== undefined) {
+        window.clearTimeout(timeoutId);
+      }
     };
   }, [page]);
 

@@ -254,7 +254,9 @@ export async function createVideoUploadIntent(
       body: JSON.stringify({
         project_id: projectId,
         filename: file.name,
-        content_type: file.type || contentTypeForFile(file),
+        // Derive from the extension so a generic/empty file.type (e.g.
+        // application/octet-stream from some file managers) is normalized.
+        content_type: contentTypeForFile(file),
         size_bytes: file.size,
       }),
     },
@@ -737,7 +739,8 @@ export async function downloadDiagnosticReport(
   anchor.href = blobUrl;
   anchor.download = `settings-diagnostic-${reportId}.json`;
   anchor.click();
-  URL.revokeObjectURL(blobUrl);
+  // Defer revocation so WebView2/WKWebView have time to start the download.
+  window.setTimeout(() => URL.revokeObjectURL(blobUrl), 1_000);
 }
 
 async function requestJson<T>(path: string, errorPrefix: string): Promise<T> {
