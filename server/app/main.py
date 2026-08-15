@@ -12,6 +12,7 @@ from app.analysis_routes import router as analysis_router
 from app.character_contracts import character_domain_openapi_schemas
 from app.character_generation_routes import router as character_generation_router
 from app.character_identity_routes import router as character_identity_router
+from app.character_reference_routes import router as character_reference_router
 from app.character_routes import router as character_router
 from app.first_frame_routes import router as first_frame_router
 from app.generation_routes import router as generation_router
@@ -89,6 +90,7 @@ app.include_router(analysis_router)
 app.include_router(character_router)
 app.include_router(character_identity_router)
 app.include_router(character_generation_router)
+app.include_router(character_reference_router)
 app.include_router(source_frame_router)
 app.include_router(first_frame_router)
 

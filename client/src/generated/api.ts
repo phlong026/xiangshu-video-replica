@@ -866,6 +866,40 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/projects/{project_id}/character-reference-selection": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Select Character References */
+    post: operations["select_character_references_api_projects__project_id__character_reference_selection_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/projects/{project_id}/character-reference-selection/latest": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Latest Character Reference Selection */
+    get: operations["read_latest_character_reference_selection_api_projects__project_id__character_reference_selection_latest_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/projects/{project_id}/source-frames/extract": {
     parameters: {
       query?: never;
@@ -1360,6 +1394,32 @@ export interface components {
       /** Usage Scope Json */
       usage_scope_json?: string[] | null;
     };
+    /** CharacterReferenceSelection */
+    CharacterReferenceSelection: {
+      /** Id */
+      id: string;
+      /** Project Id */
+      project_id: string;
+      /** Source Frame Version Id */
+      source_frame_version_id: string;
+      /** Character Version Id */
+      character_version_id: string;
+      /** Recommended Asset Ids Json */
+      recommended_asset_ids_json: string[];
+      /** Selected Asset Ids Json */
+      selected_asset_ids_json: string[];
+      /** Recommendation Reason Json */
+      recommendation_reason_json: Record<string, never>;
+      /** Character Version Snapshot Json */
+      character_version_snapshot_json: Record<string, never>;
+      /** Selected By */
+      selected_by: string | null;
+      /**
+       * Selected At
+       * Format: date-time
+       */
+      selected_at: string;
+    };
     /** CharacterRegenerationRequest */
     CharacterRegenerationRequest: {
       /** Idempotency Key */
@@ -1526,6 +1586,9 @@ export interface components {
     ConfirmSourceFrameRequest: {
       /** Source Frame Asset Id */
       source_frame_asset_id: string;
+      character_features?:
+        | components["schemas"]["SourceFrameCharacterFeatures"]
+        | null;
     };
     /** CreateAnalysisRequest */
     CreateAnalysisRequest: {
@@ -1835,6 +1898,11 @@ export interface components {
       /** Shot Card Version Id */
       shot_card_version_id: string;
     };
+    /** SelectCharacterReferencesRequest */
+    SelectCharacterReferencesRequest: {
+      /** Selected Asset Ids */
+      selected_asset_ids?: string[] | null;
+    };
     /** SettingsDiagnosticReport */
     SettingsDiagnosticReport: {
       /** Id */
@@ -1850,6 +1918,31 @@ export interface components {
       providers: components["schemas"]["DiagnosticProviderResult"][];
       /** Download Url */
       download_url: string;
+    };
+    /** SourceFrameCharacterFeatures */
+    SourceFrameCharacterFeatures: {
+      /**
+       * Orientation
+       * @enum {string}
+       */
+      orientation:
+        | "FRONT"
+        | "LEFT_45"
+        | "RIGHT_45"
+        | "LEFT_SIDE"
+        | "RIGHT_SIDE";
+      /**
+       * Shot Size
+       * @enum {string}
+       */
+      shot_size: "CLOSE_UP" | "HALF_BODY" | "FULL_BODY";
+      /** Face Visible */
+      face_visible: boolean;
+      /**
+       * Body Completeness
+       * @enum {string}
+       */
+      body_completeness: "FACE_ONLY" | "UPPER_BODY" | "FULL_BODY" | "PARTIAL";
     };
     /** SourceImageQualityResult */
     SourceImageQualityResult: {
@@ -1994,30 +2087,6 @@ export interface components {
       created_by_user_id: string | null;
       /** Created At */
       created_at: string;
-    };
-    /** CharacterReferenceSelection */
-    CharacterReferenceSelection: {
-      /** Id */
-      id: string;
-      /** Project Id */
-      project_id: string;
-      /** Source Frame Version Id */
-      source_frame_version_id: string;
-      /** Character Version Id */
-      character_version_id: string;
-      /** Recommended Asset Ids Json */
-      recommended_asset_ids_json: string[];
-      /** Selected Asset Ids Json */
-      selected_asset_ids_json: string[];
-      /** Recommendation Reason Json */
-      recommendation_reason_json: Record<string, never>;
-      /** Selected By */
-      selected_by: string | null;
-      /**
-       * Selected At
-       * Format: date-time
-       */
-      selected_at: string;
     };
   };
   responses: never;
@@ -4138,6 +4207,76 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["CharacterGenerationTask"][];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  select_character_references_api_projects__project_id__character_reference_selection_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        project_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["SelectCharacterReferencesRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["CharacterReferenceSelection"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_latest_character_reference_selection_api_projects__project_id__character_reference_selection_latest_get: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        project_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["CharacterReferenceSelection"];
         };
       };
       /** @description Validation Error */

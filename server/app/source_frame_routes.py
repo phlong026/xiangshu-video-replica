@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -46,10 +46,20 @@ class ExtractSourceFramesRequest(BaseModel):
         return self
 
 
+class SourceFrameCharacterFeatures(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    orientation: Literal["FRONT", "LEFT_45", "RIGHT_45", "LEFT_SIDE", "RIGHT_SIDE"]
+    shot_size: Literal["CLOSE_UP", "HALF_BODY", "FULL_BODY"]
+    face_visible: bool
+    body_completeness: Literal["FACE_ONLY", "UPPER_BODY", "FULL_BODY", "PARTIAL"]
+
+
 class ConfirmSourceFrameRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     source_frame_asset_id: str = Field(min_length=1)
+    character_features: SourceFrameCharacterFeatures | None = None
 
 
 class VersionResponse(BaseModel):
@@ -125,6 +135,9 @@ def confirm_project_source_frame(
         project_id=project_id,
         source_frame_asset_id=request.source_frame_asset_id,
         actor=actor,
+        character_features=(
+            None if request.character_features is None else request.character_features.model_dump()
+        ),
     )
     return version_response(row)
 

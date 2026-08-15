@@ -133,6 +133,7 @@ CHARACTER_DOMAIN_SCHEMAS = {
         "recommended_asset_ids_json",
         "selected_asset_ids_json",
         "recommendation_reason_json",
+        "character_version_snapshot_json",
         "selected_by",
         "selected_at",
     },
@@ -232,8 +233,11 @@ def test_empty_database_upgrade_creates_character_domain_constraints(tmp_path: P
         asset_columns = {
             row[1]: row for row in conn.execute("PRAGMA table_info(assets)").fetchall()
         }
+        reference_selection_columns = {
+            row[1]: row for row in conn.execute("PRAGMA table_info(character_reference_selections)")
+        }
 
-    assert version == "015_character_asset_publication"
+    assert version == "016_character_reference_snapshot"
     assert CHARACTER_DOMAIN_TABLES.issubset(tables)
     assert "character_version_id" in main_character_columns
     assert "uq_character_versions_persona_version" in version_indexes
@@ -268,6 +272,7 @@ def test_empty_database_upgrade_creates_character_domain_constraints(tmp_path: P
         "id",
     ) in call_log_foreign_keys
     assert asset_columns["project_id"][3] == 0
+    assert reference_selection_columns["character_version_snapshot_json"][3] == 1
 
 
 def test_legacy_character_upgrade_backfills_domain_and_preserves_project_snapshot(
@@ -511,7 +516,7 @@ def test_character_image_generation_migration_downgrade_roundtrip(tmp_path: Path
             row[1] for row in conn.execute("PRAGMA table_info(external_call_logs)")
         }
 
-    assert upgraded_version == "015_character_asset_publication"
+    assert upgraded_version == "016_character_reference_snapshot"
     assert "idempotency_key" in upgraded_task_columns
     assert "character_generation_task_id" in upgraded_log_columns
 
@@ -539,8 +544,38 @@ def test_character_asset_publication_migration_downgrade_roundtrip(tmp_path: Pat
     with connect_database(db_path) as conn:
         upgraded_version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
         upgraded_columns = {row[1] for row in conn.execute("PRAGMA table_info(character_versions)")}
-    assert upgraded_version == "015_character_asset_publication"
+    assert upgraded_version == "016_character_reference_snapshot"
     assert {"publication_snapshot_json", "publication_hash"} <= upgraded_columns
+
+
+def test_character_reference_snapshot_migration_downgrade_roundtrip(tmp_path: Path) -> None:
+    db_path = tmp_path / "character-reference-snapshot-roundtrip.db"
+    config = alembic_config(db_path)
+    command.upgrade(config, "head")
+
+    with connect_database(db_path) as conn:
+        columns = {
+            row[1]: row for row in conn.execute("PRAGMA table_info(character_reference_selections)")
+        }
+    assert columns["character_version_snapshot_json"][3] == 1
+
+    command.downgrade(config, "015_character_asset_publication")
+    with connect_database(db_path) as conn:
+        downgraded_version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+        downgraded_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(character_reference_selections)")
+        }
+    assert downgraded_version == "015_character_asset_publication"
+    assert "character_version_snapshot_json" not in downgraded_columns
+
+    command.upgrade(config, "head")
+    with connect_database(db_path) as conn:
+        upgraded_version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+        upgraded_columns = {
+            row[1]: row for row in conn.execute("PRAGMA table_info(character_reference_selections)")
+        }
+    assert upgraded_version == "016_character_reference_snapshot"
+    assert upgraded_columns["character_version_snapshot_json"][3] == 1
 
 
 def test_character_image_generation_migration_backfills_existing_tasks(tmp_path: Path) -> None:

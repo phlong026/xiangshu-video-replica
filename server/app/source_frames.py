@@ -357,6 +357,7 @@ def confirm_source_frame(
     project_id: str,
     source_frame_asset_id: str,
     actor: CurrentUser,
+    character_features: dict[str, object] | None = None,
 ) -> sqlite3.Row:
     require_not_auditor(
         conn,
@@ -408,18 +409,22 @@ def confirm_source_frame(
             "The selected source frame is not valid for this project.",
         )
 
+    selection_payload: dict[str, object] = {
+        "schema_version": SOURCE_FRAME_SCHEMA_VERSION,
+        "source_frame_candidates_version_id": str(candidate_version["id"]),
+        "source_frame_asset_id": source_frame_asset_id,
+        "timestamp_seconds": candidate["timestamp_seconds"],
+    }
+    if character_features is not None:
+        selection_payload["character_features"] = character_features
+
     row = insert_version(
         conn,
         project_id=project_id,
         asset_id=source_frame_asset_id,
         kind=SOURCE_FRAME_SELECTION_KIND,
         created_by_user_id=actor.id,
-        payload={
-            "schema_version": SOURCE_FRAME_SCHEMA_VERSION,
-            "source_frame_candidates_version_id": str(candidate_version["id"]),
-            "source_frame_asset_id": source_frame_asset_id,
-            "timestamp_seconds": candidate["timestamp_seconds"],
-        },
+        payload=selection_payload,
     )
     write_audit(
         conn,

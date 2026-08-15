@@ -168,7 +168,15 @@ def test_owner_can_extract_candidates_and_confirm_one(
 
     confirmed = client.post(
         "/api/projects/project_owned/source-frames/confirm",
-        json={"source_frame_asset_id": candidates[1]["asset_id"]},
+        json={
+            "source_frame_asset_id": candidates[1]["asset_id"],
+            "character_features": {
+                "orientation": "LEFT_45",
+                "shot_size": "HALF_BODY",
+                "face_visible": True,
+                "body_completeness": "UPPER_BODY",
+            },
+        },
         headers=auth_headers("employee_1"),
     )
     latest = client.get(
@@ -178,6 +186,12 @@ def test_owner_can_extract_candidates_and_confirm_one(
 
     assert confirmed.status_code == 200
     assert confirmed.json()["payload"]["source_frame_asset_id"] == candidates[1]["asset_id"]
+    assert confirmed.json()["payload"]["character_features"] == {
+        "orientation": "LEFT_45",
+        "shot_size": "HALF_BODY",
+        "face_visible": True,
+        "body_completeness": "UPPER_BODY",
+    }
     assert latest.status_code == 200
     assert latest.json()["id"] == confirmed.json()["id"]
     with connect_database(db_path) as conn:
