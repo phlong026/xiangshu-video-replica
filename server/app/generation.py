@@ -1051,56 +1051,64 @@ def _store_and_finalize_archive(
     storage: StorageAdapter,
 ) -> TaskResult:
     """Archive already-downloaded H3 result bytes and mark the task terminal."""
-    stored = storage.put_object(
-        f"generation-results/{task_id}.mp4",
-        content,
-        content_type="video/mp4",
-    )
+    object_key = f"generation-results/{task_id}.mp4"
+    stored = storage.put_object(object_key, content, content_type="video/mp4")
     result_asset_id = str(uuid4())
-    with conn:
-        conn.execute(
-            """
-            INSERT INTO assets (
-                id,
-                project_id,
-                kind,
-                storage_uri,
-                sha256,
-                size_bytes,
-                content_type,
-                created_by_user_id
+    try:
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO assets (
+                    id,
+                    project_id,
+                    kind,
+                    storage_uri,
+                    sha256,
+                    size_bytes,
+                    content_type,
+                    created_by_user_id
+                )
+                VALUES (?, ?, 'video', ?, ?, ?, ?, ?)
+                """,
+                (
+                    result_asset_id,
+                    project_id,
+                    stored.uri,
+                    stored.sha256,
+                    stored.size,
+                    stored.content_type,
+                    created_by_user_id,
+                ),
             )
-            VALUES (?, ?, 'video', ?, ?, ?, ?, ?)
-            """,
-            (
-                result_asset_id,
-                project_id,
-                stored.uri,
-                stored.sha256,
-                stored.size,
-                stored.content_type,
-                created_by_user_id,
-            ),
-        )
-        conn.execute(
-            """
-            UPDATE generation_tasks
-            SET
-                status = 'SUCCEEDED',
-                archive_status = 'ARCHIVED',
-                result_asset_id = ?,
-                provider_result_url = NULL,
-                error_code = NULL,
-                error_message_redacted = NULL,
-                locked_by = NULL,
-                locked_until = NULL,
-                completed_at = CURRENT_TIMESTAMP,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-            """,
-            (result_asset_id, task_id),
-        )
-        refresh_batch_status(conn, batch_id=batch_id)
+            conn.execute(
+                """
+                UPDATE generation_tasks
+                SET
+                    status = 'SUCCEEDED',
+                    archive_status = 'ARCHIVED',
+                    result_asset_id = ?,
+                    provider_result_url = NULL,
+                    error_code = NULL,
+                    error_message_redacted = NULL,
+                    locked_by = NULL,
+                    locked_until = NULL,
+                    completed_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (result_asset_id, task_id),
+            )
+            refresh_batch_status(conn, batch_id=batch_id)
+    except Exception:
+        # The object was written outside the DB transaction; remove it if the
+        # asset/task rows could not be committed, so no orphan object is left.
+        try:
+            storage.delete_object(object_key, actor_id=None)
+        except Exception as cleanup_exc:
+            logger.warning(
+                "archive cleanup failed for task %s: %s", task_id, type(cleanup_exc).__name__
+            )
+        raise
     return get_task_result(conn, task_id)
 
 
