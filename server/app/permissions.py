@@ -101,7 +101,7 @@ def require_project_access(
             detail={"code": "PROJECT_NOT_FOUND", "message": "Project does not exist."},
         )
 
-    if actor.role == "admin" or str(row["owner_user_id"]) == actor.id:
+    if actor.role in {"admin", "auditor"} or str(row["owner_user_id"]) == actor.id:
         return cast(sqlite3.Row, row)
 
     write_audit(

@@ -11,6 +11,10 @@ if "%VIDEO_REPLICA_SETTINGS_KEY%"=="" (
   echo VIDEO_REPLICA_SETTINGS_KEY is required
   exit /b 1
 )
+if "%VIDEO_REPLICA_DESKTOP_USER_ID%"=="" (
+  echo VIDEO_REPLICA_DESKTOP_USER_ID is required
+  exit /b 1
+)
 if "%VIDEO_REPLICA_STORAGE_ROOT%"=="" set VIDEO_REPLICA_STORAGE_ROOT=%CD%\storage
 
 rem PyInstaller 等分发形态下,用 VIDEO_REPLICA_SERVER_CMD / WORKER_CMD 指向产物可执行文件。

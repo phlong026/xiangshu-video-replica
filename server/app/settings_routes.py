@@ -2,19 +2,20 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import sqlite3
 import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Literal, Protocol
+from typing import Annotated, Literal, Protocol
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from app.db import connect_database
+from app.auth import AuthenticatedUser, CurrentUser, Database
+from app.auth import get_database as auth_get_database
+from app.permissions import require_role
 from app.settings import SettingsRepository, is_secret_field, normalize_provider
 from app.storage import (
     CloudStorageConfig,
@@ -24,15 +25,9 @@ from app.storage import (
     create_storage_adapter,
 )
 
-DATABASE_PATH_ENV = "VIDEO_REPLICA_DB_PATH"
-
 router = APIRouter(prefix="/api/admin/settings", tags=["settings"])
 logger = logging.getLogger(__name__)
-
-
-class User(BaseModel):
-    id: str
-    role: str
+get_database = auth_get_database
 
 
 class ProviderSettingsRequest(BaseModel):
@@ -188,50 +183,29 @@ class StorageProviderTester:
         return self.fallback.paid_test(provider, config)
 
 
-def get_database() -> Iterator[sqlite3.Connection]:
-    db_path = os.environ.get(DATABASE_PATH_ENV)
-    if not db_path:
-        raise HTTPException(status_code=500, detail={"code": "DATABASE_NOT_CONFIGURED"})
-    with connect_database(db_path) as conn:
-        yield conn
-
-
 def get_provider_tester() -> ProviderTester:
     return StorageProviderTester()
 
 
-def current_admin(
-    conn: sqlite3.Connection = Depends(get_database),
-    x_dev_user_id: str | None = Header(default=None, alias="X-Dev-User-Id"),
-) -> User:
-    if not x_dev_user_id:
-        raise HTTPException(status_code=401, detail={"code": "AUTH_REQUIRED"})
+def require_settings_admin(conn: Database, actor: AuthenticatedUser) -> CurrentUser:
+    require_role(
+        conn,
+        actor=actor,
+        allowed_roles={"admin"},
+        action="settings.manage",
+        entity_type="settings",
+        entity_id="admin_settings",
+    )
+    return actor
 
-    row = conn.execute(
-        "SELECT id, role FROM users WHERE id = ? AND is_active = 1",
-        (x_dev_user_id,),
-    ).fetchone()
-    if row is None:
-        raise HTTPException(status_code=401, detail={"code": "AUTH_REQUIRED"})
 
-    user = User(id=str(row["id"]), role=str(row["role"]))
-    if user.role != "admin":
-        write_audit_log(
-            conn,
-            actor_user_id=user.id,
-            action="security.role_denied",
-            entity_type="settings",
-            entity_id="provider_settings",
-            metadata_json='{"required_role":"admin"}',
-        )
-        raise HTTPException(status_code=403, detail={"code": "ROLE_FORBIDDEN"})
-    return user
+SettingsAdmin = Annotated[CurrentUser, Depends(require_settings_admin)]
 
 
 @router.get("")
 def read_settings(
-    conn: sqlite3.Connection = Depends(get_database),
-    _: User = Depends(current_admin),
+    conn: Database,
+    _: SettingsAdmin,
 ) -> dict[str, object]:
     repo = SettingsRepository(conn)
     return {
@@ -244,8 +218,8 @@ def read_settings(
 def update_provider_settings(
     provider: str,
     payload: ProviderSettingsRequest,
-    conn: sqlite3.Connection = Depends(get_database),
-    admin: User = Depends(current_admin),
+    conn: Database,
+    admin: SettingsAdmin,
 ) -> dict[str, object]:
     provider_name = normalize_provider(provider)
     repo = SettingsRepository(conn)
@@ -277,8 +251,8 @@ def update_provider_settings(
 @router.patch("/runtime")
 def update_runtime_settings(
     payload: RuntimeSettingsRequest,
-    conn: sqlite3.Connection = Depends(get_database),
-    admin: User = Depends(current_admin),
+    conn: Database,
+    admin: SettingsAdmin,
 ) -> dict[str, int | str]:
     repo = SettingsRepository(conn)
     try:
@@ -311,8 +285,8 @@ def update_runtime_settings(
 @router.post("/providers/{provider}/connection-test")
 def connection_test(
     provider: str,
-    conn: sqlite3.Connection = Depends(get_database),
-    _: User = Depends(current_admin),
+    conn: Database,
+    _: SettingsAdmin,
     tester: ProviderTester = Depends(get_provider_tester),
 ) -> ProviderTestResult:
     provider_name = normalize_provider(provider)
@@ -323,8 +297,8 @@ def connection_test(
 @router.post("/providers/{provider}/paid-test")
 def paid_test(
     provider: str,
-    conn: sqlite3.Connection = Depends(get_database),
-    _: User = Depends(current_admin),
+    conn: Database,
+    _: SettingsAdmin,
     tester: ProviderTester = Depends(get_provider_tester),
 ) -> ProviderTestResult:
     provider_name = normalize_provider(provider)
@@ -334,8 +308,8 @@ def paid_test(
 
 @router.post("/diagnostic-test", response_model=SettingsDiagnosticReport)
 def run_settings_diagnostic(
-    conn: sqlite3.Connection = Depends(get_database),
-    admin: User = Depends(current_admin),
+    conn: Database,
+    admin: SettingsAdmin,
     tester: ProviderTester = Depends(get_provider_tester),
 ) -> SettingsDiagnosticReport:
     repo = SettingsRepository(conn)
@@ -459,8 +433,8 @@ def run_settings_diagnostic(
 @router.get("/diagnostic-reports/{report_id}/download")
 def download_settings_diagnostic(
     report_id: str,
-    conn: sqlite3.Connection = Depends(get_database),
-    _: User = Depends(current_admin),
+    conn: Database,
+    _: SettingsAdmin,
 ) -> Response:
     row = conn.execute(
         """

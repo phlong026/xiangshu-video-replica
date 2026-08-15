@@ -10,6 +10,45 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 
 const healthResponse = { status: "ok", service: "video-replica-api" };
+const employeeUser = {
+  id: "employee_1",
+  username: "employee_1",
+  display_name: "林夏",
+  role: "employee",
+};
+const adminUser = {
+  id: "admin_1",
+  username: "admin_1",
+  display_name: "管理员",
+  role: "admin",
+};
+const auditorUser = {
+  id: "auditor_1",
+  username: "auditor_1",
+  display_name: "审计员",
+  role: "auditor",
+};
+
+type FetchMock = (url: string, options?: RequestInit) => Promise<unknown>;
+
+function withAuth(handler: FetchMock, user = employeeUser) {
+  return vi.fn((url: string, options?: RequestInit) => {
+    if (url.endsWith("/api/auth/me")) {
+      return Promise.resolve({ ok: true, json: async () => user });
+    }
+    return handler(url, options);
+  });
+}
+
+async function enterWorkspace() {
+  fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+  await act(async () => {
+    await Promise.resolve();
+  });
+  expect(
+    screen.getByRole("heading", { name: "项目工作台" }),
+  ).toBeInTheDocument();
+}
 
 function batchResponse(overrides = {}) {
   return {
@@ -69,7 +108,7 @@ describe("App", () => {
   });
 
   it("starts on the internal login screen", () => {
-    vi.stubGlobal("fetch", vi.fn());
+    vi.stubGlobal("fetch", withAuth(vi.fn()));
 
     render(<App />);
 
@@ -86,10 +125,10 @@ describe("App", () => {
       ok: true,
       json: async () => ({ status: "ok", service: "video-replica-api" }),
     });
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", withAuth(fetchMock));
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+    await enterWorkspace();
 
     expect(
       screen.getByRole("heading", { name: "项目工作台" }),
@@ -101,12 +140,42 @@ describe("App", () => {
       "nav-button--active",
     );
     expect(screen.getByRole("button", { name: /人物库/ })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "设置" })).toBeNull();
+    expect(screen.getByText("林夏")).toBeInTheDocument();
+    expect(screen.getByText("普通员工")).toBeInTheDocument();
     await waitFor(() =>
       expect(screen.getByText("本地服务已连接")).toBeInTheDocument(),
     );
     expect(fetchMock).toHaveBeenCalledWith("http://127.0.0.1:8000/health", {
       signal: expect.any(AbortSignal),
     });
+  });
+
+  it("keeps the user on login when auth/me rejects the session", async () => {
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/api/auth/me")) {
+        return Promise.resolve({
+          ok: false,
+          status: 401,
+          json: async () => ({ detail: { message: "missing identity" } }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => healthResponse });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+
+    expect(
+      await screen.findByText("身份验证失败：missing identity（401）"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("登录已失效，请重新进入工作台。")).toBeNull();
+    expect(screen.queryByRole("navigation", { name: "主导航" })).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      "http://127.0.0.1:8000/health",
+      expect.anything(),
+    );
   });
 
   it("shows the employee project form for creating a reference-video replica", async () => {
@@ -116,10 +185,10 @@ describe("App", () => {
       }
       return Promise.resolve({ ok: true, json: async () => [] });
     });
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", withAuth(fetchMock));
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+    await enterWorkspace();
 
     expect(
       await screen.findByRole("heading", { name: "新建复刻项目" }),
@@ -130,6 +199,146 @@ describe("App", () => {
       ".mp4,.mov,video/mp4,video/quicktime",
     );
     expect(screen.getByRole("button", { name: "创建并上传" })).toBeDisabled();
+  });
+
+  it("shows an auditor a read-only project list without write actions", async () => {
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/health")) {
+        return Promise.resolve({ ok: true, json: async () => healthResponse });
+      }
+      if (url.endsWith("/analysis/latest")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            id: "analysis-1",
+            project_id: "project-ready",
+            asset_id: "asset-ready",
+            kind: "analysis",
+            version_number: 1,
+            payload: {
+              analysis: {
+                summary: "只读拆解",
+                duration_seconds: 8,
+                shots: [
+                  {
+                    shot_id: "S01",
+                    start_time: 0,
+                    end_time: 8,
+                    shot_type: "近景",
+                    composition: "人物居中",
+                    camera_motion: "固定",
+                    subject: "主讲人",
+                    action: "讲话",
+                    scene: "室内",
+                    spoken_text: "你好",
+                    transition: "硬切",
+                  },
+                ],
+              },
+            },
+            created_by_user_id: "employee_1",
+            created_at: "2030-01-01T00:00:00Z",
+          }),
+        });
+      }
+      if (url.endsWith("/shot-cards/latest")) {
+        return Promise.resolve({ ok: false, status: 404 });
+      }
+      if (
+        url.endsWith("/source-frames/latest") ||
+        url.endsWith("/source-frames/selection/latest") ||
+        url.endsWith("/first-frames/latest") ||
+        url.endsWith("/first-frames/selection/latest")
+      ) {
+        return Promise.resolve({ ok: false, status: 404 });
+      }
+      if (url.endsWith("/first-frames/history")) {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
+      return Promise.resolve({
+        ok: true,
+        json: async () => [
+          {
+            id: "project-ready",
+            owner_user_id: "employee_1",
+            name: "已归档项目",
+            status: "REFERENCE_READY",
+            reference_asset_id: "asset-ready",
+            reference_upload_status: "READY",
+          },
+          {
+            id: "project-pending",
+            owner_user_id: "employee_1",
+            name: "上传中项目",
+            status: "ACTIVE",
+            reference_asset_id: "asset-pending",
+            reference_upload_status: "UPLOAD_PENDING",
+          },
+        ],
+      });
+    });
+    vi.stubGlobal("fetch", withAuth(fetchMock, auditorUser));
+
+    render(<App />);
+    await enterWorkspace();
+
+    expect(screen.getAllByText("审计员")).toHaveLength(2);
+    expect(
+      screen.getByText(
+        "当前为只读身份，可查看项目和任务记录，不能创建、上传、编辑、删除或重试。",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "创建并上传" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "继续上传" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "删除项目" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "编辑拆解" })).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "查看拆解" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "查看拆解" }));
+    expect(
+      await screen.findByText(
+        "当前为只读身份，可查看拆解、候选画面和历史版本，不能保存、选择或生成。",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("S01 动作")).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "保存镜头卡片" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "选择人物" })).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "重新生成候选首帧" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "确认用于 H3 的首帧" }),
+    ).toBeDisabled();
+  });
+
+  it("returns to login and clears the current user when a local API returns 401", async () => {
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/health")) {
+        return Promise.resolve({ ok: true, json: async () => healthResponse });
+      }
+      if (url.endsWith("/api/projects")) {
+        return Promise.resolve({
+          ok: false,
+          status: 401,
+          json: async () => ({ detail: { message: "session expired" } }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => [] });
+    });
+    vi.stubGlobal("fetch", withAuth(fetchMock));
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+
+    expect(
+      await screen.findByText("登录已失效，请重新进入工作台。"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "短视频复刻工作台" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("林夏")).toBeNull();
   });
 
   it("lets an employee resume a pending upload from an existing project", async () => {
@@ -151,10 +360,10 @@ describe("App", () => {
         ],
       });
     });
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", withAuth(fetchMock));
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+    await enterWorkspace();
     fireEvent.click(await screen.findByRole("button", { name: "继续上传" }));
 
     expect(screen.getByLabelText("项目名称")).toHaveValue("待续传项目");
@@ -189,14 +398,14 @@ describe("App", () => {
       }
       return Promise.resolve({ ok: true, json: async () => ({}) });
     });
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", withAuth(fetchMock));
     vi.stubGlobal(
       "confirm",
       vi.fn(() => true),
     );
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+    await enterWorkspace();
     fireEvent.click(await screen.findByRole("button", { name: "删除项目" }));
 
     expect(fetchMock).toHaveBeenCalledWith(
@@ -298,10 +507,10 @@ describe("App", () => {
       }
       return Promise.resolve({ ok: true, json: async () => ({}) });
     });
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", withAuth(fetchMock));
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+    await enterWorkspace();
     fireEvent.click(await screen.findByRole("button", { name: "编辑拆解" }));
 
     expect(
@@ -437,10 +646,10 @@ describe("App", () => {
       }
       return Promise.resolve({ ok: true, json: async () => ({}) });
     });
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", withAuth(fetchMock));
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+    await enterWorkspace();
     fireEvent.click(await screen.findByRole("button", { name: "编辑拆解" }));
     fireEvent.click(await screen.findByRole("button", { name: "选择人物" }));
     fireEvent.click(await screen.findByRole("radio", { name: /小夏/ }));
@@ -543,11 +752,11 @@ describe("App", () => {
         }),
       });
     });
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", withAuth(fetchMock));
     vi.stubGlobal("XMLHttpRequest", SuccessfulUploadRequest);
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+    await enterWorkspace();
     fireEvent.change(screen.getByLabelText("项目名称"), {
       target: { value: "咖啡口播" },
     });
@@ -576,10 +785,10 @@ describe("App", () => {
   });
 
   it("rejects unsupported reference videos before creating a project", async () => {
-    vi.stubGlobal("fetch", vi.fn());
+    vi.stubGlobal("fetch", withAuth(vi.fn()));
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+    await enterWorkspace();
     fireEvent.change(screen.getByLabelText("项目名称"), {
       target: { value: "错误文件" },
     });
@@ -615,7 +824,7 @@ describe("App", () => {
 
     vi.stubGlobal(
       "fetch",
-      vi.fn((url: string, options?: RequestInit) => {
+      withAuth((url: string, options?: RequestInit) => {
         if (url.endsWith("/health")) {
           return Promise.resolve({
             ok: true,
@@ -658,7 +867,7 @@ describe("App", () => {
     vi.stubGlobal("XMLHttpRequest", PendingUploadRequest);
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+    await enterWorkspace();
     fireEvent.change(screen.getByLabelText("项目名称"), {
       target: { value: "上传中项目" },
     });
@@ -731,11 +940,11 @@ describe("App", () => {
         }),
       });
     });
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", withAuth(fetchMock));
     vi.stubGlobal("XMLHttpRequest", FailedUploadRequest);
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+    await enterWorkspace();
     fireEvent.change(screen.getByLabelText("项目名称"), {
       target: { value: "失败重试" },
     });
@@ -814,7 +1023,7 @@ describe("App", () => {
       }
       return Promise.resolve({ ok: true, json: async () => ({}) });
     });
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", withAuth(fetchMock, adminUser));
     const createObjectUrl = vi.fn(() => "blob:diagnostic-1");
     const revokeObjectUrl = vi.fn();
     vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(
@@ -826,7 +1035,7 @@ describe("App", () => {
     });
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+    await enterWorkspace();
     fireEvent.click(screen.getByRole("button", { name: "设置" }));
 
     expect(
@@ -886,10 +1095,10 @@ describe("App", () => {
         json: async () => batchResponse(),
       });
     });
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", withAuth(fetchMock));
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+    await enterWorkspace();
     fireEvent.change(screen.getByLabelText("Batch ID"), {
       target: { value: " batch-1 " },
     });
@@ -949,10 +1158,10 @@ describe("App", () => {
           generationRequestCount === 1 ? runningBatch : doneBatch,
       });
     });
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", withAuth(fetchMock));
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+    await enterWorkspace();
     fireEvent.change(screen.getByLabelText("Batch ID"), {
       target: { value: "batch-1" },
     });
@@ -991,10 +1200,10 @@ describe("App", () => {
       generationRequestCount += 1;
       return Promise.resolve({ ok: true, json: async () => attentionBatch });
     });
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", withAuth(fetchMock));
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+    await enterWorkspace();
     fireEvent.change(screen.getByLabelText("Batch ID"), {
       target: { value: "batch-attention" },
     });
@@ -1040,10 +1249,10 @@ describe("App", () => {
             : batchResponse(),
       });
     });
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", withAuth(fetchMock));
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+    await enterWorkspace();
     fireEvent.change(screen.getByLabelText("Batch ID"), {
       target: { value: "batch-1" },
     });
@@ -1090,10 +1299,10 @@ describe("App", () => {
         json: async () => ({ detail: { code: "BATCH_NOT_FOUND" } }),
       });
     });
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", withAuth(fetchMock));
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+    await enterWorkspace();
     fireEvent.change(screen.getByLabelText("Batch ID"), {
       target: { value: "batch-missing" },
     });
@@ -1124,10 +1333,10 @@ describe("App", () => {
         json: async () => batchResponse({ id: "batch-restored" }),
       });
     });
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", withAuth(fetchMock));
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+    await enterWorkspace();
 
     expect(
       await screen.findByDisplayValue("batch-restored"),

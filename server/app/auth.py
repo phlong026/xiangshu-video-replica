@@ -13,6 +13,8 @@ from app.db import connect_database
 
 Role = Literal["employee", "admin", "auditor"]
 VALID_ROLES: set[str] = {"employee", "admin", "auditor"}
+DESKTOP_USER_ID_ENV = "VIDEO_REPLICA_DESKTOP_USER_ID"
+ALLOW_DEV_IDENTITY_HEADER_ENV = "VIDEO_REPLICA_ALLOW_DEV_IDENTITY_HEADER"
 
 
 @dataclass(frozen=True)
@@ -48,12 +50,16 @@ def get_current_user(
     conn: Database,
     dev_user_id: Annotated[str | None, Header(alias="X-Dev-User-Id")] = None,
 ) -> CurrentUser:
-    if not dev_user_id:
+    return authenticate_user(conn, identity_user_id(dev_user_id))
+
+
+def authenticate_user(conn: sqlite3.Connection, user_id: str | None) -> CurrentUser:
+    if not user_id:
         raise HTTPException(
             status_code=401,
             detail={
-                "code": "AUTH_REQUIRED",
-                "message": "Internal dev login requires X-Dev-User-Id.",
+                "code": "AUTH_DESKTOP_IDENTITY_REQUIRED",
+                "message": "VIDEO_REPLICA_DESKTOP_USER_ID is required for desktop API requests.",
             },
         )
 
@@ -63,7 +69,7 @@ def get_current_user(
         FROM users
         WHERE id = ? AND is_active = 1
         """,
-        (dev_user_id,),
+        (user_id,),
     ).fetchone()
     if row is None:
         raise HTTPException(
@@ -87,3 +93,20 @@ def get_current_user(
 
 
 AuthenticatedUser = Annotated[CurrentUser, Depends(get_current_user)]
+
+
+def identity_user_id(dev_user_id: str | None) -> str | None:
+    desktop_user_id = os.environ.get(DESKTOP_USER_ID_ENV)
+    if desktop_user_id:
+        return desktop_user_id
+    if os.environ.get(ALLOW_DEV_IDENTITY_HEADER_ENV) == "1":
+        return dev_user_id
+    return None
+
+
+def identity_source(dev_user_id: str | None) -> str:
+    if os.environ.get(DESKTOP_USER_ID_ENV):
+        return "desktop"
+    if os.environ.get(ALLOW_DEV_IDENTITY_HEADER_ENV) == "1" and dev_user_id:
+        return "dev_header"
+    return "none"

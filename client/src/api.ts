@@ -5,8 +5,17 @@ const REQUEST_TIMEOUT_MS = 5_000;
 // Cloud/storage operations (diagnostics, presigned URLs, archive prechecks)
 // may legitimately take much longer than a normal API round-trip.
 const CLOUD_OP_TIMEOUT_MS = 60_000;
+export const SESSION_EXPIRED_EVENT = "video-replica:session-expired";
 
 type HealthResponse = components["schemas"]["HealthResponse"];
+export type UserRole = "employee" | "admin" | "auditor";
+
+export type CurrentUser = {
+  id: string;
+  username: string;
+  display_name: string;
+  role: UserRole;
+};
 
 export type GenerationTask = {
   id: string;
@@ -212,6 +221,14 @@ export async function getHealth(): Promise<HealthResponse> {
   return requestJson<HealthResponse>("/health", "本地服务暂不可用");
 }
 
+export async function getCurrentUser(): Promise<CurrentUser> {
+  const user = await requestApiJson<unknown>("/api/auth/me", "身份验证失败");
+  if (!isCurrentUser(user)) {
+    throw new Error("身份验证失败：本地服务返回的用户信息无效");
+  }
+  return user;
+}
+
 export async function getGenerationBatch(
   batchId: string,
 ): Promise<GenerationBatch> {
@@ -286,9 +303,7 @@ export function uploadReferenceVideo(
     // Scale the timeout with the payload (~200KB/s) so large 50MB uploads are
     // not cut off on slow links, while small files keep a tight bound.
     request.timeout = Math.max(60_000, Math.ceil(file.size / 200));
-    const devUserId =
-      import.meta.env.VITE_DEV_USER_ID ??
-      (import.meta.env.DEV ? "admin_1" : undefined);
+    const devUserId = getDevelopmentUserId();
     if (devUserId && isLocalApiUploadUrl(intent.url)) {
       request.setRequestHeader("X-Dev-User-Id", devUserId);
     }
@@ -304,6 +319,11 @@ export function uploadReferenceVideo(
       if (request.status >= 200 && request.status < 300) {
         onProgress(100);
         resolve();
+        return;
+      }
+      if (request.status === 401 && isLocalApiUploadUrl(intent.url)) {
+        emitSessionExpired();
+        reject(new Error("登录已失效，请重新进入工作台。"));
         return;
       }
       reject(new Error(`上传参考视频失败（${request.status}）`));
@@ -845,35 +865,7 @@ async function requestAdmin(
   init: RequestInit,
   timeoutMs: number = REQUEST_TIMEOUT_MS,
 ): Promise<Response> {
-  const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
-  const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? DEFAULT_API_BASE_URL;
-  const headers = new Headers(init.headers);
-  const devUserId =
-    import.meta.env.VITE_DEV_USER_ID ??
-    (import.meta.env.DEV ? "admin_1" : undefined);
-
-  if (init.body) {
-    headers.set("Content-Type", "application/json");
-  }
-  if (devUserId) {
-    headers.set("X-Dev-User-Id", devUserId);
-  }
-
-  try {
-    return await fetch(`${apiBaseUrl}${path}`, {
-      ...init,
-      headers,
-      signal: controller.signal,
-    });
-  } catch (error) {
-    if (error instanceof DOMException && error.name === "AbortError") {
-      throw new Error("请求超时，请重试");
-    }
-    throw error;
-  } finally {
-    window.clearTimeout(timeout);
-  }
+  return requestApi(path, init, timeoutMs);
 }
 
 async function requestApi(
@@ -885,9 +877,7 @@ async function requestApi(
   const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
   const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? DEFAULT_API_BASE_URL;
   const headers = new Headers(init.headers);
-  const devUserId =
-    import.meta.env.VITE_DEV_USER_ID ??
-    (import.meta.env.DEV ? "employee_1" : undefined);
+  const devUserId = getDevelopmentUserId();
 
   if (init.body) {
     headers.set("Content-Type", "application/json");
@@ -897,11 +887,15 @@ async function requestApi(
   }
 
   try {
-    return await fetch(`${apiBaseUrl}${path}`, {
+    const response = await fetch(`${apiBaseUrl}${path}`, {
       ...init,
       headers,
       signal: controller.signal,
     });
+    if (response.status === 401 && path !== "/api/auth/me") {
+      emitSessionExpired();
+    }
+    return response;
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") {
       throw new Error("请求超时，请重试");
@@ -910,6 +904,21 @@ async function requestApi(
   } finally {
     window.clearTimeout(timeout);
   }
+}
+
+function getDevelopmentUserId(): string | undefined {
+  if (!import.meta.env.DEV) {
+    return undefined;
+  }
+  const explicitUserId = import.meta.env.VITE_DEV_USER_ID;
+  if (explicitUserId?.trim()) {
+    return explicitUserId.trim();
+  }
+  return "employee_1";
+}
+
+function emitSessionExpired() {
+  window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT));
 }
 
 function contentTypeForFile(file: File): "video/mp4" | "video/quicktime" {
@@ -932,6 +941,18 @@ function isLocalApiUploadUrl(url: string): boolean {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isCurrentUser(value: unknown): value is CurrentUser {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.username === "string" &&
+    typeof value.display_name === "string" &&
+    (value.role === "employee" ||
+      value.role === "admin" ||
+      value.role === "auditor")
+  );
 }
 
 function isAnalysisVersion(value: unknown): value is AnalysisVersion {

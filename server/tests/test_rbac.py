@@ -52,8 +52,11 @@ def seed_rbac_data(conn: sqlite3.Connection) -> None:
             ("employee_2", "employee_2", "Employee Two", "employee"),
             ("admin_1", "admin_1", "Admin One", "admin"),
             ("auditor_1", "auditor_1", "Auditor One", "auditor"),
+            ("inactive_1", "inactive_1", "Inactive One", "employee"),
+            ("owner_1", "owner_1", "Owner One", "owner"),
         ],
     )
+    conn.execute("UPDATE users SET is_active = 0 WHERE id = ?", ("inactive_1",))
     conn.executemany(
         """
         INSERT INTO projects (id, owner_user_id, name)
@@ -148,6 +151,120 @@ def test_dev_header_login_returns_active_user_role(client: TestClient) -> None:
         "display_name": "Employee One",
         "role": "employee",
     }
+
+
+def test_desktop_identity_login_works_without_dev_header(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VIDEO_REPLICA_DESKTOP_USER_ID", "employee_1")
+    monkeypatch.delenv("VIDEO_REPLICA_ALLOW_DEV_IDENTITY_HEADER", raising=False)
+
+    response = client.get("/api/auth/me")
+
+    assert response.status_code == 200
+    assert response.json()["id"] == "employee_1"
+
+
+def test_dev_header_is_disabled_by_default(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("VIDEO_REPLICA_DESKTOP_USER_ID", raising=False)
+    monkeypatch.delenv("VIDEO_REPLICA_ALLOW_DEV_IDENTITY_HEADER", raising=False)
+
+    response = client.get("/api/auth/me", headers=auth_headers("employee_1"))
+
+    assert response.status_code == 401
+    assert response.json()["detail"]["code"] == "AUTH_DESKTOP_IDENTITY_REQUIRED"
+
+
+def test_desktop_identity_ignores_spoofed_dev_header(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VIDEO_REPLICA_DESKTOP_USER_ID", "employee_1")
+    monkeypatch.setenv("VIDEO_REPLICA_ALLOW_DEV_IDENTITY_HEADER", "1")
+
+    response = client.get("/api/auth/me", headers=auth_headers("admin_1"))
+
+    assert response.status_code == 200
+    assert response.json()["id"] == "employee_1"
+    assert response.json()["role"] == "employee"
+
+
+@pytest.mark.parametrize(
+    ("user_id", "expected_status", "expected_code"),
+    [
+        ("inactive_1", 401, "AUTH_INVALID"),
+        ("missing_1", 401, "AUTH_INVALID"),
+        ("owner_1", 403, "ROLE_INVALID"),
+    ],
+)
+def test_desktop_identity_rejects_inactive_missing_or_invalid_role(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    user_id: str,
+    expected_status: int,
+    expected_code: str,
+) -> None:
+    monkeypatch.setenv("VIDEO_REPLICA_DESKTOP_USER_ID", user_id)
+
+    response = client.get("/api/auth/me")
+
+    assert response.status_code == expected_status
+    assert response.json()["detail"]["code"] == expected_code
+
+
+def test_auth_me_records_login_success(client: TestClient, db_path: Path) -> None:
+    response = client.get("/api/auth/me", headers=auth_headers("employee_1"))
+
+    assert response.status_code == 200
+    with connect_database(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT actor_user_id, action, entity_type, entity_id, metadata_json
+            FROM audit_logs
+            WHERE action = 'auth.login_success'
+            """
+        ).fetchone()
+    assert row is not None
+    assert dict(row) == {
+        "actor_user_id": "employee_1",
+        "action": "auth.login_success",
+        "entity_type": "user",
+        "entity_id": "employee_1",
+        "metadata_json": "{}",
+    }
+
+
+def test_auth_me_records_login_failure_without_storing_identity_header(
+    client: TestClient,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("VIDEO_REPLICA_DESKTOP_USER_ID", raising=False)
+    monkeypatch.delenv("VIDEO_REPLICA_ALLOW_DEV_IDENTITY_HEADER", raising=False)
+
+    response = client.get("/api/auth/me", headers=auth_headers("employee_1"))
+
+    assert response.status_code == 401
+    with connect_database(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT actor_user_id, action, entity_type, entity_id, metadata_json
+            FROM audit_logs
+            WHERE action = 'auth.login_failure'
+            """
+        ).fetchone()
+    assert row is not None
+    assert row["actor_user_id"] is None
+    assert row["entity_type"] == "auth"
+    assert row["entity_id"] == "current_user"
+    assert row["metadata_json"] == (
+        '{"code":"AUTH_DESKTOP_IDENTITY_REQUIRED","identity_source":"none"}'
+    )
+    assert "employee_1" not in row["metadata_json"]
 
 
 def test_desktop_origin_can_preflight_project_deletion(client: TestClient) -> None:
@@ -260,6 +377,24 @@ def test_auditor_cannot_create_projects_and_admin_can_list_all_projects(
         "Other Project",
         "Owned Project",
     ]
+
+
+def test_auditor_can_read_all_project_asset_and_task_evidence(client: TestClient) -> None:
+    headers = auth_headers("auditor_1")
+
+    projects = client.get("/api/projects", headers=headers)
+    project = client.get("/api/projects/project_owned", headers=headers)
+    asset = client.get("/api/assets/asset_owned", headers=headers)
+    batch = client.get("/api/generation-batches/batch_owned", headers=headers)
+
+    assert projects.status_code == 200
+    assert [item["name"] for item in projects.json()] == [
+        "Other Project",
+        "Owned Project",
+    ]
+    assert project.status_code == 200
+    assert asset.status_code == 200
+    assert batch.status_code == 200
 
 
 def test_project_list_exposes_reference_video_state_for_upload_recovery(

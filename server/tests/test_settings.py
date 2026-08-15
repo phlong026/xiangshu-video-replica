@@ -80,6 +80,7 @@ def seed_users(conn: sqlite3.Connection) -> None:
         [
             ("admin_1", "admin_1", "Admin One", "admin"),
             ("employee_1", "employee_1", "Employee One", "employee"),
+            ("auditor_1", "auditor_1", "Auditor One", "auditor"),
         ],
     )
     conn.commit()
@@ -280,20 +281,65 @@ def test_local_storage_provider_is_allowed(conn: sqlite3.Connection) -> None:
     assert repo.read_runtime_settings()["active_storage_provider"] == "local"
 
 
-def test_employee_cannot_update_or_read_settings(client: TestClient) -> None:
-    headers = {"X-Dev-User-Id": "employee_1"}
+@pytest.mark.parametrize(
+    ("user_id", "expected_status"),
+    [
+        ("admin_1", 200),
+        ("employee_1", 403),
+        ("auditor_1", 403),
+    ],
+)
+def test_settings_read_uses_admin_role_matrix(
+    client: TestClient,
+    conn: sqlite3.Connection,
+    user_id: str,
+    expected_status: int,
+) -> None:
+    response = client.get("/api/admin/settings", headers={"X-Dev-User-Id": user_id})
 
-    read_response = client.get("/api/admin/settings", headers=headers)
-    update_response = client.put(
+    assert response.status_code == expected_status
+    if expected_status == 403:
+        assert response.json()["detail"]["code"] == "ROLE_FORBIDDEN"
+        audit = conn.execute(
+            """
+            SELECT action, actor_user_id, entity_type, entity_id, metadata_json
+            FROM audit_logs
+            WHERE action = 'security.role_denied'
+            ORDER BY rowid DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        assert audit is not None
+        assert dict(audit)["actor_user_id"] == user_id
+        assert dict(audit)["entity_type"] == "settings"
+    else:
+        assert "providers" in response.json()
+
+
+@pytest.mark.parametrize(
+    ("user_id", "expected_status"),
+    [
+        ("admin_1", 200),
+        ("employee_1", 403),
+        ("auditor_1", 403),
+    ],
+)
+def test_settings_update_uses_admin_role_matrix(
+    client: TestClient,
+    user_id: str,
+    expected_status: int,
+) -> None:
+    response = client.put(
         "/api/admin/settings/providers/metaso",
-        headers=headers,
+        headers={"X-Dev-User-Id": user_id},
         json={"config": {"api_key": "secret", "base_url": "https://metaso.example/api"}},
     )
 
-    assert read_response.status_code == 403
-    assert update_response.status_code == 403
-    assert read_response.json()["detail"]["code"] == "ROLE_FORBIDDEN"
-    assert update_response.json()["detail"]["code"] == "ROLE_FORBIDDEN"
+    assert response.status_code == expected_status
+    if expected_status == 403:
+        assert response.json()["detail"]["code"] == "ROLE_FORBIDDEN"
+    else:
+        assert response.json()["configured"] is True
 
 
 def test_admin_updates_settings_without_echoing_secret_or_authorization(

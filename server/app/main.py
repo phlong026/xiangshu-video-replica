@@ -49,10 +49,10 @@ async def require_loopback_client(
 ) -> Response:
     """Reject requests that did not originate from this machine.
 
-    The dev identity header X-Dev-User-Id is trusted only because the API is
-    bound to the loopback interface. This middleware fails closed if the API
-    is ever started on 0.0.0.0 or exposed through a tunnel/port-forward: any
-    non-loopback caller gets 403 before any identity or business logic runs.
+    Loopback is one layer of the desktop threat model, not an authentication
+    mechanism. Release requests use the server-configured desktop identity;
+    X-Dev-User-Id is accepted only when development identity mode is explicitly
+    enabled. Any non-loopback caller gets 403 before identity or business logic.
     """
     host = request.client.host if request.client is not None else ""
     try:

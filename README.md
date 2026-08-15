@@ -1,6 +1,6 @@
 # 短视频复刻工作台
 
-内部员工使用的 Windows 桌面端。当前实现范围为 V1.2 计划的本地可验证骨架，Windows 内测交付配置已补齐；真实 Provider、签名和 Windows 实机打包仍需按门禁记录。
+内部员工使用的 Windows 桌面端。当前实现按 V1.3 任务清单逐项收口；本地质量、受保护主分支、人物领域契约和桌面身份/RBAC 已进入可验证状态，真实 Provider、签名和 Windows 实机打包仍需按门禁记录。
 
 ## 环境要求
 
@@ -20,9 +20,10 @@ uv sync --project server --locked
 
 ## 本地开发
 
-先启动 FastAPI：
+开发身份 Header 默认关闭。先把服务端显式切到开发身份模式；`VITE_DEV_USER_ID` 必须对应当前 SQLite `users` 表中一个已启用的用户，未设置时客户端开发服务器默认使用 `employee_1`：
 
 ```powershell
+$env:VIDEO_REPLICA_ALLOW_DEV_IDENTITY_HEADER = "1"
 npm run dev:server
 ```
 
@@ -35,8 +36,11 @@ npm run dev:worker
 再启动桌面端：
 
 ```powershell
+$env:VITE_DEV_USER_ID = "employee_1" # 调试设置页时改为现有 admin 用户 ID
 npm run tauri:dev
 ```
+
+开发 Header 只在 Vite 开发构建中发送；生产构建即使误设 `VITE_DEV_USER_ID` 也会忽略它。发布/内测运行必须由服务端设置 `VIDEO_REPLICA_DESKTOP_USER_ID`，`/api/auth/me` 再从数据库读取显示名称和角色，客户端不能自行声明 admin 身份。
 
 ### 本地存储（无云存储凭据的开发机）
 
@@ -84,6 +88,7 @@ Windows 内测、升级、卸载、SQLite 备份恢复和日志策略见 `docs/W
 $env:VIDEO_REPLICA_HOME = "$env:LOCALAPPDATA\VideoReplicaWorkbench"
 $env:VIDEO_REPLICA_DB_PATH = "$env:VIDEO_REPLICA_HOME\data\app.db"
 $env:VIDEO_REPLICA_LOG_DIR = "$env:VIDEO_REPLICA_HOME\logs"
+$env:VIDEO_REPLICA_DESKTOP_USER_ID = "内部用户ID" # 必须对应 users 表中的已启用用户
 ```
 
 SQLite 数据库只允许放本机磁盘，不放 COS、OSS、NAS、网盘同步或网络共享目录。升级前先用 `server/app/backup.py` 生成备份，升级后比对项目、任务、版本和审计计数；未完成 Windows 安装包测试、真实 Provider 验收和 10-20 个真实项目试跑前，只能标记为 `LOCALLY_VERIFIED` 或 `UNSIGNED_INTERNAL_TEST`。

@@ -38,9 +38,11 @@ const SHOT_TEXT_FIELDS: Array<{
 export function AnalysisWorkspace({
   onClose,
   project,
+  readOnly = false,
 }: {
   onClose: () => void;
   project: Project;
+  readOnly?: boolean;
 }) {
   const [analysisId, setAnalysisId] = useState("");
   const [analysisProvider, setAnalysisProvider] =
@@ -109,6 +111,9 @@ export function AnalysisWorkspace({
   }, [project.id]);
 
   function updateShot(index: number, key: keyof ShotCard, value: string) {
+    if (readOnly) {
+      return;
+    }
     setShots((current) =>
       current.map((shot, shotIndex) => {
         if (shotIndex !== index) {
@@ -126,6 +131,9 @@ export function AnalysisWorkspace({
 
   async function handleSave(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (readOnly) {
+      return;
+    }
     if (!analysisId) {
       return;
     }
@@ -184,13 +192,19 @@ export function AnalysisWorkspace({
               Key，并配置可用的 COS 或 OSS 存储后重新拆解。
             </p>
           ) : null}
+          {readOnly ? (
+            <p className="status-note">
+              当前为只读身份，可查看拆解、候选画面和历史版本，不能保存、选择或生成。
+            </p>
+          ) : null}
           <div className="analysis-workspace-grid">
             <div className="analysis-primary">
               <SourceFrameSelection
                 projectId={project.id}
                 referenceAssetId={project.reference_asset_id}
+                readOnly={readOnly}
               />
-              <FirstFrameSelection projectId={project.id} />
+              <FirstFrameSelection projectId={project.id} readOnly={readOnly} />
               <div className="shot-card-list">
                 {shots.map((shot, index) => (
                   <fieldset className="shot-card" key={shot.shot_id}>
@@ -201,6 +215,7 @@ export function AnalysisWorkspace({
                         onChange={(value) =>
                           updateShot(index, "start_time", value)
                         }
+                        readOnly={readOnly}
                         type="number"
                         value={String(shot.start_time)}
                       />
@@ -209,6 +224,7 @@ export function AnalysisWorkspace({
                         onChange={(value) =>
                           updateShot(index, "end_time", value)
                         }
+                        readOnly={readOnly}
                         type="number"
                         value={String(shot.end_time)}
                       />
@@ -219,6 +235,7 @@ export function AnalysisWorkspace({
                           key={key}
                           label={`${shot.shot_id} ${label}`}
                           onChange={(value) => updateShot(index, key, value)}
+                          readOnly={readOnly}
                           value={shot[key]}
                         />
                       ))}
@@ -229,12 +246,14 @@ export function AnalysisWorkspace({
               {saveMessage ? (
                 <p className="setup-success">{saveMessage}</p>
               ) : null}
-              <button disabled={isSaving || !analysisId} type="submit">
-                {isSaving ? "正在保存" : "保存镜头卡片"}
-              </button>
+              {readOnly ? null : (
+                <button disabled={isSaving || !analysisId} type="submit">
+                  {isSaving ? "正在保存" : "保存镜头卡片"}
+                </button>
+              )}
             </div>
             <aside className="analysis-sidebar" aria-label="当前人物设定">
-              <CharacterSelection projectId={project.id} />
+              <CharacterSelection projectId={project.id} readOnly={readOnly} />
             </aside>
           </div>
         </form>
@@ -288,11 +307,13 @@ function providerLabel(provider: AnalysisProvider) {
 function ShotInput({
   label,
   onChange,
+  readOnly = false,
   type = "text",
   value,
 }: {
   label: string;
   onChange: (value: string) => void;
+  readOnly?: boolean;
   type?: "number" | "text";
   value: string;
 }) {
@@ -300,6 +321,7 @@ function ShotInput({
     <label>
       {label}
       <input
+        disabled={readOnly}
         min={type === "number" ? 0 : undefined}
         onChange={(event) => onChange(event.target.value)}
         step={type === "number" ? "0.1" : undefined}

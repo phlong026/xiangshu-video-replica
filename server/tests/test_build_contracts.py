@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import stat
+import subprocess
 import tomllib
 from pathlib import Path
 
@@ -55,3 +59,49 @@ def test_pull_requests_run_linux_quality_and_windows_nsis_gates() -> None:
     assert "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97" in workflow
     assert "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" in workflow
     assert ".cargo-target/release/bundle/nsis/*.exe" in workflow
+
+
+def test_posix_backend_launcher_executes_default_commands(tmp_path: Path) -> None:
+    launcher = tmp_path / "start-backend.sh"
+    shutil.copy2(REPO_ROOT / "client/src-tauri/resources/start-backend.sh", launcher)
+    launcher.chmod(launcher.stat().st_mode | stat.S_IXUSR)
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_uv = fake_bin / "uv"
+    fake_uv.write_text(
+        """#!/bin/sh
+case "$*" in
+  *uvicorn*) printf '%s' "$*" > "$TEST_SERVER_MARKER" ;;
+  *generation_worker*) printf '%s' "$*" > "$TEST_WORKER_MARKER" ;;
+  *) exit 64 ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    fake_uv.chmod(fake_uv.stat().st_mode | stat.S_IXUSR)
+
+    server_marker = tmp_path / "server.args"
+    worker_marker = tmp_path / "worker.args"
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+        "TEST_SERVER_MARKER": str(server_marker),
+        "TEST_WORKER_MARKER": str(worker_marker),
+        "VIDEO_REPLICA_DB_PATH": str(tmp_path / "app.db"),
+        "VIDEO_REPLICA_SETTINGS_KEY": "test-settings-key",
+        "VIDEO_REPLICA_DESKTOP_USER_ID": "employee_1",
+    }
+
+    result = subprocess.run(
+        ["bash", str(launcher)],
+        check=False,
+        capture_output=True,
+        env=env,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "uvicorn app.main:app" in server_marker.read_text(encoding="utf-8")
+    assert "python -m app.generation_worker" in worker_marker.read_text(encoding="utf-8")

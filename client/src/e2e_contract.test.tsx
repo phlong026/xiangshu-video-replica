@@ -59,6 +59,17 @@ describe("Fake provider E2E contract", () => {
 
   it("renders the locked prompt batch progress and archived fake results", async () => {
     const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/api/auth/me")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            id: "employee_1",
+            username: "employee_1",
+            display_name: "林夏",
+            role: "employee",
+          }),
+        });
+      }
       if (url.endsWith("/health")) {
         return Promise.resolve({
           ok: true,
@@ -74,7 +85,7 @@ describe("Fake provider E2E contract", () => {
 
     render(<App />);
     fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
-    fireEvent.change(screen.getByLabelText("Batch ID"), {
+    fireEvent.change(await screen.findByLabelText("Batch ID"), {
       target: { value: " batch-fake-e2e " },
     });
     fireEvent.click(screen.getByRole("button", { name: "查询任务记录" }));
