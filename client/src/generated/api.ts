@@ -89,6 +89,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/generation-tasks/{task_id}/reconcile": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Reconcile Uncertain Task */
+    post: operations["reconcile_uncertain_task_api_generation_tasks__task_id__reconcile_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/auth/me": {
     parameters: {
       query?: never;
@@ -135,7 +152,8 @@ export interface paths {
     get: operations["read_project_api_projects__project_id__get"];
     put?: never;
     post?: never;
-    delete?: never;
+    /** Delete Unfinished Project */
+    delete: operations["delete_unfinished_project_api_projects__project_id__delete"];
     options?: never;
     head?: never;
     patch?: never;
@@ -356,6 +374,40 @@ export interface paths {
     put?: never;
     /** Complete Asset Upload */
     post: operations["complete_asset_upload_api_assets__asset_id__complete_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/assets/local-objects/{object_key}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get Local Object
+     * @description Serve a local-storage object through the API.
+     *
+     *     The download URL carries a short-lived HMAC signature (issued by
+     *     create_download_url) because an <img> tag cannot attach the dev identity
+     *     header. The signature is bound to the object key and expiry, so a leaked URL
+     *     cannot be replayed after it expires.
+     */
+    get: operations["get_local_object_api_assets_local_objects__object_key__get"];
+    /**
+     * Put Local Object
+     * @description Receive a raw PUT body and write it to the local storage adapter.
+     *
+     *     Only reachable when the runtime storage provider is `local`; the desktop
+     *     client uploads the reference video here instead of a `local://` scheme URL.
+     *     Keeps the same role/project gates as the cloud intent flow: auditors are
+     *     read-only and only the project owner/admin may write objects.
+     */
+    put: operations["put_local_object_api_assets_local_objects__object_key__put"];
+    post?: never;
     delete?: never;
     options?: never;
     head?: never;
@@ -1013,7 +1065,7 @@ export interface components {
       /** Max Concurrent H3 Tasks */
       max_concurrent_h3_tasks: number;
       /** Active Storage Provider */
-      active_storage_provider?: ("cos" | "oss") | null;
+      active_storage_provider?: ("cos" | "oss" | "local") | null;
     };
     /** ScriptRequest */
     ScriptRequest: {
@@ -1169,6 +1221,283 @@ export interface components {
     VideoMetadata: {
       /** Duration Seconds */
       duration_seconds: number;
+    };
+    /** CharacterAsset */
+    CharacterAsset: {
+      /** Id */
+      id: string;
+      /** Character Version Id */
+      character_version_id: string;
+      /** Asset Id */
+      asset_id: string | null;
+      /**
+       * View Type
+       * @enum {string}
+       */
+      view_type:
+        | "FRONT_FACE"
+        | "FRONT_HALF"
+        | "FRONT_FULL"
+        | "LEFT_45"
+        | "RIGHT_45"
+        | "LEFT_SIDE"
+        | "RIGHT_SIDE"
+        | "IMPORTED_REFERENCE";
+      /** Candidate Number */
+      candidate_number: number;
+      /** Generation Task Id */
+      generation_task_id: string | null;
+      /** Auto Quality Json */
+      auto_quality_json: {
+        [key: string]: unknown;
+      };
+      /**
+       * Review Status
+       * @enum {string}
+       */
+      review_status: "NOT_REVIEWED" | "APPROVED" | "REJECTED";
+      /** Is Published Selection */
+      is_published_selection: boolean;
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string;
+    };
+    /** CharacterAssetReview */
+    CharacterAssetReview: {
+      /** Id */
+      id: string;
+      /** Character Asset Id */
+      character_asset_id: string;
+      /** Reviewer User Id */
+      reviewer_user_id: string | null;
+      /**
+       * Decision
+       * @enum {string}
+       */
+      decision: "APPROVED" | "REJECTED";
+      /** Issue Codes Json */
+      issue_codes_json: string[];
+      /** Comment */
+      comment: string | null;
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string;
+    };
+    /** CharacterGenerationTask */
+    CharacterGenerationTask: {
+      /** Id */
+      id: string;
+      /** Character Version Id */
+      character_version_id: string;
+      /**
+       * View Type
+       * @enum {string}
+       */
+      view_type:
+        | "FRONT_FACE"
+        | "FRONT_HALF"
+        | "FRONT_FULL"
+        | "LEFT_45"
+        | "RIGHT_45"
+        | "LEFT_SIDE"
+        | "RIGHT_SIDE";
+      /** Provider */
+      provider: string;
+      /** Model */
+      model: string;
+      /** Request Snapshot Json */
+      request_snapshot_json: {
+        [key: string]: unknown;
+      };
+      /**
+       * Status
+       * @enum {string}
+       */
+      status: "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED";
+      /** Provider Task Id */
+      provider_task_id: string | null;
+      /** Error Code */
+      error_code: string | null;
+      /** Cost Amount */
+      cost_amount: number | null;
+      /** Started At */
+      started_at: string | null;
+      /** Completed At */
+      completed_at: string | null;
+    };
+    /** CharacterPersona */
+    CharacterPersona: {
+      /** Id */
+      id: string;
+      /** Identity Id */
+      identity_id: string;
+      /** Name */
+      name: string;
+      /** Occupation */
+      occupation: string | null;
+      /** Scene Description */
+      scene_description: string | null;
+      /** Appearance Constraints Json */
+      appearance_constraints_json: {
+        [key: string]: unknown;
+      };
+      /** Costume Description */
+      costume_description: string | null;
+      /** Default Background */
+      default_background: string | null;
+      /** Positive Prompt */
+      positive_prompt: string | null;
+      /** Negative Prompt */
+      negative_prompt: string | null;
+      /** Usage Scope Json */
+      usage_scope_json: string[];
+      /** Created By */
+      created_by: string | null;
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string;
+      /**
+       * Updated At
+       * Format: date-time
+       */
+      updated_at: string;
+    };
+    /** CharacterReferenceSelection */
+    CharacterReferenceSelection: {
+      /** Id */
+      id: string;
+      /** Project Id */
+      project_id: string;
+      /** Source Frame Version Id */
+      source_frame_version_id: string;
+      /** Character Version Id */
+      character_version_id: string;
+      /** Recommended Asset Ids Json */
+      recommended_asset_ids_json: string[];
+      /** Selected Asset Ids Json */
+      selected_asset_ids_json: string[];
+      /** Recommendation Reason Json */
+      recommendation_reason_json: {
+        [key: string]: unknown;
+      };
+      /** Selected By */
+      selected_by: string | null;
+      /**
+       * Selected At
+       * Format: date-time
+       */
+      selected_at: string;
+    };
+    /** CharacterVersion */
+    CharacterVersion: {
+      /** Id */
+      id: string;
+      /** Persona Id */
+      persona_id: string;
+      /** Version Number */
+      version_number: number;
+      /**
+       * Status
+       * @enum {string}
+       */
+      status:
+        | "DRAFT"
+        | "GENERATING"
+        | "REVIEWING"
+        | "PUBLISHED"
+        | "FAILED"
+        | "ARCHIVED";
+      /** Source Asset Id */
+      source_asset_id: string | null;
+      /** Source Sha256 */
+      source_sha256: string | null;
+      /** Persona Snapshot Json */
+      persona_snapshot_json: {
+        [key: string]: unknown;
+      };
+      /** Provider */
+      provider: string | null;
+      /** Model */
+      model: string | null;
+      /** Generation Params Json */
+      generation_params_json: {
+        [key: string]: unknown;
+      };
+      /** Template Version */
+      template_version: string | null;
+      /** Template Hash */
+      template_hash: string | null;
+      /** Required View Types Json */
+      required_view_types_json: (
+        | "FRONT_FACE"
+        | "FRONT_HALF"
+        | "FRONT_FULL"
+        | "LEFT_45"
+        | "RIGHT_45"
+        | "LEFT_SIDE"
+        | "RIGHT_SIDE"
+      )[];
+      /** Published By */
+      published_by: string | null;
+      /** Published At */
+      published_at: string | null;
+      /** Created By */
+      created_by: string | null;
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string;
+    };
+    /** PersonIdentity */
+    PersonIdentity: {
+      /** Id */
+      id: string;
+      /** Owner User Id */
+      owner_user_id: string | null;
+      /** Display Name */
+      display_name: string;
+      /**
+       * Authorization Status
+       * @enum {string}
+       */
+      authorization_status: "PENDING" | "AUTHORIZED" | "EXPIRED" | "REVOKED";
+      /** Authorization Asset Id */
+      authorization_asset_id: string | null;
+      /** Authorization Scope */
+      authorization_scope: string[];
+      /** Authorization Expires At */
+      authorization_expires_at: string | null;
+      /** Source Asset Id */
+      source_asset_id: string | null;
+      /**
+       * Source Quality Status
+       * @enum {string}
+       */
+      source_quality_status: "PENDING" | "PASSED" | "FAILED" | "IMPORTED";
+      /**
+       * Status
+       * @enum {string}
+       */
+      status: "DRAFT" | "ACTIVE" | "EXPIRED" | "REVOKED" | "ARCHIVED";
+      /** Created By */
+      created_by: string | null;
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string;
+      /**
+       * Updated At
+       * Format: date-time
+       */
+      updated_at: string;
     };
   };
   responses: never;
@@ -1359,6 +1688,39 @@ export interface operations {
       };
     };
   };
+  reconcile_uncertain_task_api_generation_tasks__task_id__reconcile_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        task_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["TaskResult"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   read_me_api_auth_me_get: {
     parameters: {
       query?: never;
@@ -1477,6 +1839,37 @@ export interface operations {
         content: {
           "application/json": components["schemas"]["ProjectResponse"];
         };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  delete_unfinished_project_api_projects__project_id__delete: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        project_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      204: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
       };
       /** @description Validation Error */
       422: {
@@ -1913,6 +2306,70 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["CompleteUploadResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  get_local_object_api_assets_local_objects__object_key__get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        object_key: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": unknown;
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  put_local_object_api_assets_local_objects__object_key__put: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        object_key: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": unknown;
         };
       };
       /** @description Validation Error */

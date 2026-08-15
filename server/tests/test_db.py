@@ -35,7 +35,7 @@ def test_initialize_database_applies_sqlite_pragmas_and_migrations(tmp_path: Pat
     assert journal_mode == "wal"
     assert foreign_keys == 1
     assert busy_timeout >= 5000
-    assert alembic_versions == ["011_add_archive_retry_count"]
+    assert alembic_versions == ["012_character_domain"]
     assert "schema_migrations" not in tables
     assert {
         "users",
@@ -48,6 +48,13 @@ def test_initialize_database_applies_sqlite_pragmas_and_migrations(tmp_path: Pat
         "audit_logs",
         "characters",
         "project_main_characters",
+        "person_identities",
+        "character_personas",
+        "character_versions",
+        "character_assets",
+        "character_asset_reviews",
+        "character_generation_tasks",
+        "character_reference_selections",
     }.issubset(tables)
 
 
@@ -67,7 +74,7 @@ def test_alembic_upgrades_empty_database_to_head(tmp_path: Path) -> None:
             for row in conn.execute("PRAGMA foreign_key_list(generation_tasks)").fetchall()
         }
 
-    assert version == "011_add_archive_retry_count"
+    assert version == "012_character_domain"
     assert {
         "locked_by",
         "locked_until",

@@ -1,13 +1,15 @@
 import ipaddress
 from collections.abc import Awaitable, Callable
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app.analysis_routes import router as analysis_router
+from app.character_contracts import character_domain_openapi_schemas
 from app.character_routes import router as character_router
 from app.first_frame_routes import router as first_frame_router
 from app.generation_routes import router as generation_router
@@ -26,7 +28,19 @@ class HealthResponse(BaseModel):
     service: str
 
 
-app = FastAPI(title="Video Replica API", version="0.1.0")
+class VideoReplicaAPI(FastAPI):
+    def openapi(self) -> dict[str, Any]:
+        if self.openapi_schema is not None:
+            return self.openapi_schema
+        schema = get_openapi(title=self.title, version=self.version, routes=self.routes)
+        schema.setdefault("components", {}).setdefault("schemas", {}).update(
+            character_domain_openapi_schemas()
+        )
+        self.openapi_schema = schema
+        return schema
+
+
+app = VideoReplicaAPI(title="Video Replica API", version="0.1.0")
 
 
 @app.middleware("http")

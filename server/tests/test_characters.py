@@ -138,8 +138,18 @@ def test_characters_migration_creates_library_tables(db_path: Path) -> None:
             ).fetchall()
         }
 
-    assert version == "011_add_archive_retry_count"
-    assert {"characters", "project_main_characters"}.issubset(tables)
+    assert version == "012_character_domain"
+    assert {
+        "characters",
+        "project_main_characters",
+        "person_identities",
+        "character_personas",
+        "character_versions",
+        "character_assets",
+        "character_asset_reviews",
+        "character_generation_tasks",
+        "character_reference_selections",
+    }.issubset(tables)
 
 
 def test_admin_crud_preserves_reference_order_and_employee_reads_only_available(
