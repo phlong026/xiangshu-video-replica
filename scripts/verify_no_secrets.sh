@@ -3,11 +3,15 @@ set -euo pipefail
 
 scan_paths=(
   "server/app"
+  "server/migrations"
   "client/src"
   "client/src-tauri"
   "package.json"
   "client/package.json"
   "server/pyproject.toml"
+  "packaging_tools"
+  "scripts"
+  "docs"
 )
 
 patterns=(

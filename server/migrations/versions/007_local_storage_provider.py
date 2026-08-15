@@ -20,9 +20,12 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Note: SQLite batch_alter_table rebuilds the table with the narrowed CHECK;
-    # if any row already holds 'local', the downgrade fails on the CHECK.
-    # Restore 'local' rows to 'cos' first if a downgrade is ever needed.
+    # SQLite batch_alter_table rebuilds the table with the narrowed CHECK, so any
+    # row still holding 'local' would fail the downgrade. Reset them to 'cos' first.
+    op.execute(
+        "UPDATE runtime_settings SET active_storage_provider = 'cos' "
+        "WHERE active_storage_provider = 'local'"
+    )
     with op.batch_alter_table("runtime_settings") as batch_op:
         batch_op.drop_constraint("ck_runtime_settings_active_storage_provider", type_="check")
         batch_op.create_check_constraint(
