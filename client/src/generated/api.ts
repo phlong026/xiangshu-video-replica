@@ -535,6 +535,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/projects/{project_id}/character-versions/available": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Available Project Character Versions */
+    get: operations["read_available_project_character_versions_api_projects__project_id__character_versions_available_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/characters/{character_id}": {
     parameters: {
       query?: never;
@@ -1816,17 +1833,74 @@ export interface components {
       /** Status */
       status?: "ARCHIVED" | null;
     };
+    /** ProjectCharacterAssetOption */
+    ProjectCharacterAssetOption: {
+      /** Character Asset Id */
+      character_asset_id: string;
+      /** Asset Id */
+      asset_id: string;
+      /**
+       * View Type
+       * @enum {string}
+       */
+      view_type:
+        | "FRONT_FACE"
+        | "FRONT_HALF"
+        | "FRONT_FULL"
+        | "LEFT_45"
+        | "RIGHT_45"
+        | "LEFT_SIDE"
+        | "RIGHT_SIDE";
+    };
+    /** ProjectCharacterVersionOption */
+    ProjectCharacterVersionOption: {
+      /** Character Version Id */
+      character_version_id: string;
+      /** Version Number */
+      version_number: number;
+      /** Identity Id */
+      identity_id: string;
+      /** Identity Name */
+      identity_name: string;
+      /** Authorization Expires At */
+      authorization_expires_at: string | null;
+      /** Persona Id */
+      persona_id: string;
+      /** Persona Snapshot Json */
+      persona_snapshot_json: Record<string, never>;
+      /** Provider */
+      provider: string | null;
+      /** Model */
+      model: string | null;
+      /** Template Version */
+      template_version: string | null;
+      /** Template Hash */
+      template_hash: string | null;
+      /**
+       * Published At
+       * Format: date-time
+       */
+      published_at: string;
+      /** Publication Hash */
+      publication_hash: string;
+      /** Assets */
+      assets: components["schemas"]["ProjectCharacterAssetOption"][];
+    };
     /** ProjectMainCharacterRequest */
     ProjectMainCharacterRequest: {
       /** Character Id */
-      character_id: string;
+      character_id?: string | null;
+      /** Character Version Id */
+      character_version_id?: string | null;
     };
     /** ProjectMainCharacterResponse */
     ProjectMainCharacterResponse: {
       /** Project Id */
       project_id: string;
       /** Character Id */
-      character_id: string;
+      character_id: string | null;
+      /** Character Version Id */
+      character_version_id: string | null;
       /** Version Id */
       version_id: string;
       /** Version Number */
@@ -3273,6 +3347,39 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["CharacterResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_available_project_character_versions_api_projects__project_id__character_versions_available_get: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        project_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ProjectCharacterVersionOption"][];
         };
       };
       /** @description Validation Error */

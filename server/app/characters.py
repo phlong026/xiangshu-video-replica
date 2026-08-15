@@ -321,6 +321,7 @@ def choose_project_main_character(
     return {
         "project_id": project_id,
         "character_id": character_id,
+        "character_version_id": None,
         "version_id": version_id,
         "version_number": version_number,
         "character_snapshot": snapshot,
@@ -334,7 +335,10 @@ def get_project_main_character(
 ) -> dict[str, object]:
     row = conn.execute(
         """
-        SELECT main_character.version_id, version.version_number, version.payload_json
+        SELECT
+            main_character.version_id,
+            version.version_number,
+            version.payload_json
         FROM project_main_characters AS main_character
         JOIN versions AS version ON version.id = main_character.version_id
         WHERE main_character.project_id = ?
@@ -352,7 +356,14 @@ def get_project_main_character(
     payload = json.loads(str(row["payload_json"]))
     return {
         "project_id": project_id,
-        "character_id": str(payload["character_id"]),
+        "character_id": (
+            None if payload.get("character_id") is None else str(payload["character_id"])
+        ),
+        "character_version_id": (
+            None
+            if payload.get("character_version_id") is None
+            else str(payload["character_version_id"])
+        ),
         "version_id": str(row["version_id"]),
         "version_number": int(row["version_number"]),
         "character_snapshot": payload["character_snapshot"],

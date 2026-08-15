@@ -1,16 +1,69 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  chooseProjectMainCharacterVersion,
   completeVideoUpload,
   createProject,
   getCurrentUser,
   getGenerationBatch,
   getHealth,
   getSettings,
+  listProjectCharacterVersions,
   SESSION_EXPIRED_EVENT,
   startVideoAnalysis,
   uploadReferenceVideo,
 } from "./api";
+
+describe("project character version selection", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("loads only project-approved immutable character versions", async () => {
+    const versions = [{ character_version_id: "character-version-3" }];
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => versions,
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(listProjectCharacterVersions("project 1")).resolves.toEqual(
+      versions,
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:8000/api/projects/project%201/character-versions/available",
+      expect.objectContaining({
+        headers: expect.any(Headers),
+        signal: expect.any(AbortSignal),
+      }),
+    );
+  });
+
+  it("selects by immutable character version id", async () => {
+    const selection = {
+      project_id: "project-1",
+      character_version_id: "character-version-3",
+    };
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => selection,
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      chooseProjectMainCharacterVersion("project-1", "character-version-3"),
+    ).resolves.toEqual(selection);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:8000/api/projects/project-1/main-character",
+      expect.objectContaining({
+        body: JSON.stringify({ character_version_id: "character-version-3" }),
+        headers: expect.any(Headers),
+        method: "PUT",
+        signal: expect.any(AbortSignal),
+      }),
+    );
+  });
+});
 
 describe("getHealth", () => {
   afterEach(() => {
