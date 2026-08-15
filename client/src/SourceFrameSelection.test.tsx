@@ -121,4 +121,19 @@ describe("SourceFrameSelection", () => {
     expect(screen.getByRole("radio", { name: /候选 1/ })).toBeDisabled();
     expect(screen.getByRole("button", { name: "确认源画面" })).toBeDisabled();
   });
+
+  it("does not request protected preview downloads for a read-only auditor", async () => {
+    render(
+      <SourceFrameSelection
+        projectId="project-1"
+        readOnly
+        referenceAssetId="reference-1"
+      />,
+    );
+
+    expect(
+      await screen.findByText(/只读身份不加载素材预览/),
+    ).toBeInTheDocument();
+    expect(getAssetDownloadUrl).not.toHaveBeenCalled();
+  });
 });

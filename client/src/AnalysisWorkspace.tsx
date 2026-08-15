@@ -194,7 +194,7 @@ export function AnalysisWorkspace({
           ) : null}
           {readOnly ? (
             <p className="status-note">
-              当前为只读身份，可查看拆解、候选画面和历史版本，不能保存、选择或生成。
+              当前为只读身份，可查看拆解、候选记录和历史版本；不会请求素材下载链接，也不能保存、选择或生成。
             </p>
           ) : null}
           <div className="analysis-workspace-grid">

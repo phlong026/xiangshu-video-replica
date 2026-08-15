@@ -74,6 +74,9 @@ export function SourceFrameSelection({
         setSelectedAssetId("");
         setStatus("");
       }
+      if (readOnly) {
+        return;
+      }
       const previewResults = await Promise.allSettled(
         payload.candidates.map(async (candidate) => {
           const download = await getAssetDownloadUrl(candidate.asset_id);
@@ -108,7 +111,7 @@ export function SourceFrameSelection({
         setIsLoading(false);
       }
     }
-  }, [projectId]);
+  }, [projectId, readOnly]);
 
   useEffect(() => {
     void loadCandidates();
@@ -238,8 +241,15 @@ export function SourceFrameSelection({
       {!isLoading && !error && candidates.length === 0 ? (
         <p className="file-note">尚未提取候选源画面。</p>
       ) : null}
+      {readOnly && candidates.length > 0 ? (
+        <p className="status-note">只读身份不加载素材预览。</p>
+      ) : null}
       <fieldset className="source-frame-options">
-        <legend>选择一张用于后续人物置换和首帧生成</legend>
+        <legend>
+          {readOnly
+            ? "候选记录（素材预览需要下载权限）"
+            : "选择一张用于后续人物置换和首帧生成"}
+        </legend>
         {candidates.map((candidate, index) => (
           <label
             className={
@@ -266,7 +276,9 @@ export function SourceFrameSelection({
               <span className="source-frame-placeholder">
                 {failedPreviewAssetIds.includes(candidate.asset_id)
                   ? "预览加载失败，请重新提取"
-                  : "预览加载中"}
+                  : readOnly
+                    ? "预览不可用"
+                    : "预览加载中"}
               </span>
             )}
             <span>

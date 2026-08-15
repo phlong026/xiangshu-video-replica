@@ -164,4 +164,13 @@ describe("FirstFrameSelection", () => {
     ).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: /首帧候选 1/ })).not.toBeChecked();
   });
+
+  it("does not request protected preview downloads for a read-only auditor", async () => {
+    render(<FirstFrameSelection projectId="project-1" readOnly />);
+
+    expect(
+      await screen.findByText(/只读身份不加载素材预览/),
+    ).toBeInTheDocument();
+    expect(getAssetDownloadUrl).not.toHaveBeenCalled();
+  });
 });
