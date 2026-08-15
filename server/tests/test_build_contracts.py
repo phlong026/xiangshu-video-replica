@@ -28,3 +28,30 @@ def test_python_quality_commands_survive_a_relocated_virtualenv() -> None:
     assert "--locked pytest" not in scripts["check"]
     assert "--locked pytest" not in scripts["test"]
     assert "--locked pytest" not in scripts["test:e2e"]
+
+
+def test_pull_requests_run_linux_quality_and_windows_nsis_gates() -> None:
+    workflow_path = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+
+    assert workflow_path.exists()
+    workflow = workflow_path.read_text(encoding="utf-8")
+    assert "pull_request:" in workflow
+    assert "push:" in workflow
+    assert workflow.count("branches: [main]") == 2
+    assert "pull_request_target:" not in workflow
+    assert "permissions:\n  contents: read" in workflow
+    assert workflow.count("persist-credentials: false") == 3
+    assert "runs-on: ubuntu-24.04" in workflow
+    assert "npm run check:security" in workflow
+    assert "run: npm run check\n" in workflow
+    assert "npm run build" in workflow
+    assert "npm audit --audit-level=high" in workflow
+    assert "cargo test --manifest-path client/src-tauri/Cargo.toml --locked" in workflow
+    assert "runs-on: windows-2025" in workflow
+    assert "npm run check:tauri" in workflow
+    assert "npm run tauri:build -- --bundles nsis" in workflow
+    assert workflow.count("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1") == 3
+    assert workflow.count("actions/setup-node@820762786026740c76f36085b0efc47a31fe5020") == 3
+    assert "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97" in workflow
+    assert "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" in workflow
+    assert ".cargo-target/release/bundle/nsis/*.exe" in workflow
