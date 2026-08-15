@@ -55,6 +55,9 @@ SUPPORTED_RESOLUTIONS = {"768P", "2K"}
 # worker never mistakes an active request for an abandoned lease.
 GENERATION_LEASE_SECONDS = 600
 FIRST_FRAME_URL_EXPIRES_IN = timedelta(minutes=15)
+# Cap archive retries so a permanently expired provider URL does not keep the
+# paid task spinning in ARCHIVE_FAILED forever.
+MAX_ARCHIVE_RETRIES = 5
 
 logger = logging.getLogger(__name__)
 
@@ -871,7 +874,7 @@ def run_next_generation_task(
             if lease.get("archive_status") == "ARCHIVE_FAILED" and lease.get("provider_result_url"):
                 # Archive retry never starts a paid call; if the provider settings
                 # vanished, back off instead of failing the paid result forever.
-                _release_archive_retry(conn, task_id=task_id)
+                _release_archive_retry(conn, task_id=task_id, batch_id=str(lease["batch_id"]))
                 return get_task_result(conn, task_id)
             mark_task_provider_settings_unavailable(
                 conn,
@@ -1144,7 +1147,7 @@ def _retry_archive(
         content = provider.download_result(result_url)
     except Exception as exc:
         logger.warning("archive retry download failed for task %s: %s", task_id, type(exc).__name__)
-        _release_archive_retry(conn, task_id=task_id)
+        _release_archive_retry(conn, task_id=task_id, batch_id=batch_id)
         return get_task_result(conn, task_id)
     try:
         return _store_and_finalize_archive(
@@ -1158,7 +1161,7 @@ def _retry_archive(
         )
     except Exception as exc:
         logger.warning("archive retry put failed for task %s: %s", task_id, type(exc).__name__)
-        _release_archive_retry(conn, task_id=task_id)
+        _release_archive_retry(conn, task_id=task_id, batch_id=batch_id)
         return get_task_result(conn, task_id)
 
 
@@ -1244,23 +1247,51 @@ def reconcile_submission_uncertain_task(
     )
 
 
-def _release_archive_retry(conn: sqlite3.Connection, *, task_id: str) -> None:
+def _release_archive_retry(conn: sqlite3.Connection, *, task_id: str, batch_id: str) -> None:
     """Release the lease and back off ~60s so a stuck provider/storage does not
-    cause a hot retry loop."""
+    cause a hot retry loop. Once retries are exhausted, the task is failed so a
+    permanently expired provider URL does not spin forever."""
     with conn:
+        row = conn.execute(
+            "SELECT archive_retry_count FROM generation_tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        next_count = int(row["archive_retry_count"]) + 1 if row is not None else 1
+        if next_count >= MAX_ARCHIVE_RETRIES:
+            conn.execute(
+                """
+                UPDATE generation_tasks
+                SET
+                    status = 'FAILED',
+                    archive_status = 'ARCHIVE_FAILED',
+                    provider_result_url = NULL,
+                    archive_retry_count = ?,
+                    error_code = 'ARCHIVE_RETRY_EXHAUSTED',
+                    error_message_redacted =
+                        'Archive retries exhausted; the provider URL may have expired.',
+                    locked_by = NULL,
+                    locked_until = NULL,
+                    next_poll_at = NULL,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (next_count, task_id),
+            )
+            refresh_batch_status(conn, batch_id=batch_id)
+            return
         conn.execute(
             """
             UPDATE generation_tasks
             SET
                 status = 'SUCCEEDED',
                 archive_status = 'ARCHIVE_FAILED',
+                archive_retry_count = ?,
                 locked_by = NULL,
                 locked_until = NULL,
                 next_poll_at = datetime('now', '+60 seconds'),
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
             """,
-            (task_id,),
+            (next_count, task_id),
         )
 
 

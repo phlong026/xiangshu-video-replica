@@ -138,7 +138,7 @@ def test_characters_migration_creates_library_tables(db_path: Path) -> None:
             ).fetchall()
         }
 
-    assert version == "010_add_asset_metadata"
+    assert version == "011_add_archive_retry_count"
     assert {"characters", "project_main_characters"}.issubset(tables)
 
 

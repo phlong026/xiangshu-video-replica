@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 from app.auth import get_database
 from app.db import connect_database, initialize_database
 from app.generation import (
+    MAX_ARCHIVE_RETRIES,
     FakeH3Provider,
     H3CreateResult,
     H3ProviderFailed,
@@ -1856,3 +1857,60 @@ def test_metaso_batch_requires_cloud_storage(
 
     assert response.status_code == 422
     assert response.json()["detail"]["code"] == "METASO_REQUIRES_CLOUD_STORAGE"
+
+
+def test_archive_retry_exhausts_to_terminal_failure(
+    db_path: Path, client: TestClient
+) -> None:
+    prompt_id = create_locked_prompt(client)
+    client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json={
+            "quantity": 1,
+            "prompt_version_id": prompt_id,
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+            "idempotency_key": "archive-retry-exhaust",
+        },
+    )
+
+    class FailingArchiveStorage(FakeStorageAdapter):
+        def put_object(self, key: str, content: bytes, *, content_type: str):  # type: ignore[override]
+            raise StorageBackendUnavailable("simulated archive outage")
+
+    class FailingDownloadProvider(FakeH3Provider):
+        def download_result(self, url: str) -> bytes:
+            raise H3ProviderFailed("download failed")
+
+    with connect_database(db_path) as conn:
+        run_next_generation_task(
+            conn,
+            worker_id="worker_a",
+            provider=FakeH3Provider(),
+            storage=FailingArchiveStorage(provider="cos", bucket="generation-results"),
+            first_frame_storage=FakeStorageAdapter(provider="fake", bucket="generation-results"),
+        )
+        for _ in range(MAX_ARCHIVE_RETRIES):
+            # Each failed attempt backs off 60s via next_poll_at; fast-forward so
+            # the next acquire picks the task up again.
+            conn.execute(
+                "UPDATE generation_tasks SET next_poll_at = datetime('now', '-1 second')"
+            )
+            run_next_generation_task(
+                conn,
+                worker_id="worker_a",
+                provider=FailingDownloadProvider(),
+                storage=FakeStorageAdapter(provider="cos", bucket="generation-results"),
+                first_frame_storage=FakeStorageAdapter(
+                    provider="fake", bucket="generation-results"
+                ),
+            )
+        row = conn.execute(
+            "SELECT status, archive_status, provider_result_url, error_code FROM generation_tasks"
+        ).fetchone()
+
+    assert row["status"] == "FAILED"
+    assert row["error_code"] == "ARCHIVE_RETRY_EXHAUSTED"
+    assert row["provider_result_url"] is None
