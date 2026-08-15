@@ -53,8 +53,19 @@ def restore_database(backup_path: str | Path, target_path: str | Path) -> Path:
 
 def run_daily_backup(source_path: str | Path, backup_dir: str | Path) -> Path:
     source = Path(source_path)
-    timestamp = datetime.now(UTC).strftime("%Y%m%d")
-    return backup_database(source, Path(backup_dir) / f"{source.stem}-{timestamp}.db")
+    timestamp = datetime.now(UTC).strftime("%Y%m%d%H%M")
+    backup_path = backup_database(source, Path(backup_dir) / f"{source.stem}-{timestamp}.db")
+    _prune_backups(Path(backup_dir), source.stem, keep=BACKUP_RETENTION_COUNT)
+    return backup_path
+
+
+BACKUP_RETENTION_COUNT = 30
+
+
+def _prune_backups(backup_dir: Path, stem: str, *, keep: int) -> None:
+    backups = sorted(backup_dir.glob(f"{stem}-*.db"))
+    for stale in backups[:-keep]:
+        stale.unlink(missing_ok=True)
 
 
 def _check_integrity(conn: sqlite3.Connection) -> None:
