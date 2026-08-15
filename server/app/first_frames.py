@@ -19,6 +19,9 @@ from fastapi import HTTPException
 
 from app.analysis import insert_version
 from app.auth import CurrentUser
+from app.character_reference_matching import (
+    current_character_reference_selection_for_generation,
+)
 from app.characters import character_is_available, get_project_main_character, read_character
 from app.permissions import (
     require_asset_access,
@@ -68,6 +71,17 @@ class ImageInput:
     content: bytes
     content_type: str
     filename: str
+
+
+@dataclass(frozen=True)
+class FirstFrameCharacterInputs:
+    main_character_version_id: str
+    character_snapshot: dict[str, object]
+    reference_asset_ids: list[str]
+    character_name: str
+    authorized_project_ids: list[str]
+    character_reference_selection_id: str | None = None
+    character_version_id: str | None = None
 
 
 class ImageProvider(Protocol):
@@ -437,53 +451,23 @@ def generate_first_frame_candidates(
             422, "SOURCE_FRAME_INVALID", "The confirmed source frame is invalid."
         )
 
-    main_character = get_project_main_character(conn, project_id=project_id)
-    character = read_character(conn, str(main_character["character_id"]))
-    if not character_is_available(character, project_id=project_id):
-        raise first_frame_error(
-            422,
-            "CHARACTER_NOT_AVAILABLE",
-            "The selected character is inactive, expired, or not authorized for this project.",
-        )
-    character_snapshot = main_character["character_snapshot"]
-    if not isinstance(character_snapshot, dict):
-        raise first_frame_error(
-            409, "MAIN_CHARACTER_SNAPSHOT_INVALID", "Select the character again."
-        )
-    reference_asset_ids = character_snapshot.get("reference_asset_ids")
-    character_name = character_snapshot.get("name")
-    if not isinstance(reference_asset_ids, list) or not all(
-        isinstance(asset_id, str) for asset_id in reference_asset_ids
-    ):
-        raise first_frame_error(
-            409, "MAIN_CHARACTER_SNAPSHOT_INVALID", "Select the character again."
-        )
-    if not isinstance(character_name, str) or not character_name:
-        raise first_frame_error(
-            409, "MAIN_CHARACTER_SNAPSHOT_INVALID", "Select the character again."
-        )
-    if not reference_asset_ids:
-        raise first_frame_error(
-            422,
-            "CHARACTER_REFERENCE_REQUIRED",
-            "The selected character needs at least one reference image.",
-        )
-
-    authorized_project_ids = character_snapshot.get("authorization_project_ids") or []
-    if not isinstance(authorized_project_ids, list):
-        authorized_project_ids = []
+    character_inputs = resolve_first_frame_character_inputs(
+        conn,
+        project_id=project_id,
+        source_frame_selection_version_id=str(source_selection["id"]),
+    )
     source_image = read_asset_image(storage, source_frame)
     reference_assets = [
         read_character_reference_asset(
             conn,
             actor=actor,
             asset_id=asset_id,
-            authorized_project_ids=authorized_project_ids,
+            authorized_project_ids=character_inputs.authorized_project_ids,
         )
-        for asset_id in reference_asset_ids
+        for asset_id in character_inputs.reference_asset_ids
     ]
     reference_images = [read_asset_image(storage, asset) for asset in reference_assets]
-    effective_prompt = normalize_prompt(prompt, character_name=character_name)
+    effective_prompt = normalize_prompt(prompt, character_name=character_inputs.character_name)
 
     generated = edit_once_with_retry(
         provider,
@@ -506,7 +490,9 @@ def generate_first_frame_candidates(
         conn,
         project_id=project_id,
         source_frame_selection_version_id=str(source_selection["id"]),
-        main_character_version_id=str(main_character["version_id"]),
+        main_character_version_id=character_inputs.main_character_version_id,
+        character_reference_selection_id=(character_inputs.character_reference_selection_id),
+        character_version_id=character_inputs.character_version_id,
     )
 
     created_assets: list[tuple[str, str]] = []
@@ -549,24 +535,30 @@ def generate_first_frame_candidates(
                         actor.id,
                     ),
                 )
+            version_payload: dict[str, object] = {
+                "schema_version": FIRST_FRAME_SCHEMA_VERSION,
+                "source_frame_selection_version_id": str(source_selection["id"]),
+                "source_frame_asset_id": source_frame_asset_id,
+                "main_character_version_id": character_inputs.main_character_version_id,
+                "character_snapshot": character_inputs.character_snapshot,
+                "character_reference_asset_ids": character_inputs.reference_asset_ids,
+                "provider": provider.provider_name,
+                "model": model,
+                "prompt": effective_prompt,
+                "candidates": candidates,
+            }
+            if character_inputs.character_reference_selection_id is not None:
+                version_payload["character_reference_selection_id"] = (
+                    character_inputs.character_reference_selection_id
+                )
+                version_payload["character_version_id"] = character_inputs.character_version_id
             row = insert_version(
                 conn,
                 project_id=project_id,
                 asset_id=source_frame_asset_id,
                 kind=FIRST_FRAME_CANDIDATES_KIND,
                 created_by_user_id=actor.id,
-                payload={
-                    "schema_version": FIRST_FRAME_SCHEMA_VERSION,
-                    "source_frame_selection_version_id": str(source_selection["id"]),
-                    "source_frame_asset_id": source_frame_asset_id,
-                    "main_character_version_id": str(main_character["version_id"]),
-                    "character_snapshot": character_snapshot,
-                    "character_reference_asset_ids": reference_asset_ids,
-                    "provider": provider.provider_name,
-                    "model": model,
-                    "prompt": effective_prompt,
-                    "candidates": candidates,
-                },
+                payload=version_payload,
             )
     except sqlite3.Error as exc:
         delete_created_first_frames(storage, created_assets, actor_id=actor.id)
@@ -681,6 +673,83 @@ def current_source_frame_selection(
     return cast(dict[str, object], payload | {"id": str(selection["id"])})
 
 
+def resolve_first_frame_character_inputs(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    source_frame_selection_version_id: str,
+) -> FirstFrameCharacterInputs:
+    reference_selection = current_character_reference_selection_for_generation(
+        conn,
+        project_id=project_id,
+        source_frame_version_id=source_frame_selection_version_id,
+    )
+    if reference_selection is not None:
+        snapshot = reference_selection.character_version_snapshot_json
+        persona_snapshot = snapshot.get("persona_snapshot_json")
+        if not isinstance(persona_snapshot, dict):
+            raise stale_first_frame_inputs()
+        character_name = persona_snapshot.get("name")
+        if not isinstance(character_name, str) or not character_name:
+            raise stale_first_frame_inputs()
+        main_character_version_id = snapshot.get("main_character_version_id")
+        if not isinstance(main_character_version_id, str):
+            raise stale_first_frame_inputs()
+        return FirstFrameCharacterInputs(
+            main_character_version_id=main_character_version_id,
+            character_snapshot=snapshot,
+            reference_asset_ids=reference_selection.selected_asset_ids_json,
+            character_name=character_name,
+            authorized_project_ids=[],
+            character_reference_selection_id=reference_selection.id,
+            character_version_id=reference_selection.character_version_id,
+        )
+
+    main_character = get_project_main_character(conn, project_id=project_id)
+    character = read_character(conn, str(main_character["character_id"]))
+    if not character_is_available(character, project_id=project_id):
+        raise first_frame_error(
+            422,
+            "CHARACTER_NOT_AVAILABLE",
+            "The selected character is inactive, expired, or not authorized for this project.",
+        )
+    character_snapshot = main_character["character_snapshot"]
+    if not isinstance(character_snapshot, dict):
+        raise first_frame_error(
+            409, "MAIN_CHARACTER_SNAPSHOT_INVALID", "Select the character again."
+        )
+    reference_asset_ids = character_snapshot.get("reference_asset_ids")
+    character_name = character_snapshot.get("name")
+    if not isinstance(reference_asset_ids, list) or not all(
+        isinstance(asset_id, str) for asset_id in reference_asset_ids
+    ):
+        raise first_frame_error(
+            409, "MAIN_CHARACTER_SNAPSHOT_INVALID", "Select the character again."
+        )
+    if not isinstance(character_name, str) or not character_name:
+        raise first_frame_error(
+            409, "MAIN_CHARACTER_SNAPSHOT_INVALID", "Select the character again."
+        )
+    if not reference_asset_ids:
+        raise first_frame_error(
+            422,
+            "CHARACTER_REFERENCE_REQUIRED",
+            "The selected character needs at least one reference image.",
+        )
+    authorized_project_ids = character_snapshot.get("authorization_project_ids") or []
+    if not isinstance(authorized_project_ids, list) or not all(
+        isinstance(project, str) for project in authorized_project_ids
+    ):
+        authorized_project_ids = []
+    return FirstFrameCharacterInputs(
+        main_character_version_id=str(main_character["version_id"]),
+        character_snapshot=character_snapshot,
+        reference_asset_ids=cast(list[str], reference_asset_ids),
+        character_name=character_name,
+        authorized_project_ids=cast(list[str], authorized_project_ids),
+    )
+
+
 def current_first_frame_candidates(conn: sqlite3.Connection, *, project_id: str) -> sqlite3.Row:
     candidates = latest_version(conn, project_id, FIRST_FRAME_CANDIDATES_KIND)
     if candidates is None:
@@ -694,7 +763,18 @@ def current_first_frame_candidates(conn: sqlite3.Connection, *, project_id: str)
         )
     source_version_id = payload.get("source_frame_selection_version_id")
     main_character_version_id = payload.get("main_character_version_id")
+    reference_selection_id = payload.get("character_reference_selection_id")
+    character_version_id = payload.get("character_version_id")
     if not isinstance(source_version_id, str) or not isinstance(main_character_version_id, str):
+        raise first_frame_error(
+            409, "FIRST_FRAME_CANDIDATES_INVALID", "Generate first-frame candidates again."
+        )
+    if (reference_selection_id is None) != (character_version_id is None) or (
+        reference_selection_id is not None
+        and (
+            not isinstance(reference_selection_id, str) or not isinstance(character_version_id, str)
+        )
+    ):
         raise first_frame_error(
             409, "FIRST_FRAME_CANDIDATES_INVALID", "Generate first-frame candidates again."
         )
@@ -703,6 +783,8 @@ def current_first_frame_candidates(conn: sqlite3.Connection, *, project_id: str)
         project_id=project_id,
         source_frame_selection_version_id=source_version_id,
         main_character_version_id=main_character_version_id,
+        character_reference_selection_id=reference_selection_id,
+        character_version_id=character_version_id,
     )
     return candidates
 
@@ -713,7 +795,34 @@ def require_current_first_frame_inputs(
     project_id: str,
     source_frame_selection_version_id: str,
     main_character_version_id: str,
+    character_reference_selection_id: str | None = None,
+    character_version_id: str | None = None,
 ) -> None:
+    if character_reference_selection_id is not None and character_version_id is not None:
+        try:
+            source_selection = current_source_frame_selection(conn, project_id=project_id)
+            reference_selection = current_character_reference_selection_for_generation(
+                conn,
+                project_id=project_id,
+                source_frame_version_id=source_frame_selection_version_id,
+                expected_selection_id=character_reference_selection_id,
+            )
+        except HTTPException as exc:
+            if exc.status_code in {404, 409}:
+                raise stale_first_frame_inputs() from exc
+            raise
+        if (
+            str(source_selection["id"]) != source_frame_selection_version_id
+            or reference_selection is None
+            or reference_selection.character_version_id != character_version_id
+            or reference_selection.character_version_snapshot_json.get("main_character_version_id")
+            != main_character_version_id
+        ):
+            raise stale_first_frame_inputs()
+        return
+    if character_reference_selection_id is not None or character_version_id is not None:
+        raise stale_first_frame_inputs()
+
     try:
         source_selection = current_source_frame_selection(conn, project_id=project_id)
         main_character = get_project_main_character(conn, project_id=project_id)
@@ -737,6 +846,14 @@ def require_current_first_frame_inputs(
             "FIRST_FRAME_CANDIDATES_STALE",
             "Generate first-frame candidates again using the current source frame and character.",
         )
+
+
+def stale_first_frame_inputs() -> HTTPException:
+    return first_frame_error(
+        409,
+        "FIRST_FRAME_CANDIDATES_STALE",
+        "Generate first-frame candidates again using the current source frame and character.",
+    )
 
 
 def read_character_reference_asset(

@@ -156,6 +156,7 @@ class CharacterReferenceSelection(CharacterContract):
     recommended_asset_ids_json: list[str]
     selected_asset_ids_json: list[str]
     recommendation_reason_json: dict[str, object]
+    character_version_snapshot_json: dict[str, object]
     selected_by: str | None
     selected_at: datetime
 

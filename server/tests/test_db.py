@@ -35,7 +35,7 @@ def test_initialize_database_applies_sqlite_pragmas_and_migrations(tmp_path: Pat
     assert journal_mode == "wal"
     assert foreign_keys == 1
     assert busy_timeout >= 5000
-    assert alembic_versions == ["015_character_asset_publication"]
+    assert alembic_versions == ["016_character_reference_snapshot"]
     assert "schema_migrations" not in tables
     assert {
         "users",
@@ -74,7 +74,7 @@ def test_alembic_upgrades_empty_database_to_head(tmp_path: Path) -> None:
             for row in conn.execute("PRAGMA foreign_key_list(generation_tasks)").fetchall()
         }
 
-    assert version == "015_character_asset_publication"
+    assert version == "016_character_reference_snapshot"
     assert {
         "locked_by",
         "locked_until",
