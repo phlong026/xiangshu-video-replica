@@ -469,9 +469,17 @@ def generate_first_frame_candidates(
             "The selected character needs at least one reference image.",
         )
 
+    authorized_project_ids = character_snapshot.get("authorization_project_ids") or []
+    if not isinstance(authorized_project_ids, list):
+        authorized_project_ids = []
     source_image = read_asset_image(storage, source_frame)
     reference_assets = [
-        read_character_reference_asset(conn, actor=actor, asset_id=asset_id)
+        read_character_reference_asset(
+            conn,
+            actor=actor,
+            asset_id=asset_id,
+            authorized_project_ids=authorized_project_ids,
+        )
         for asset_id in reference_asset_ids
     ]
     reference_images = [read_asset_image(storage, asset) for asset in reference_assets]
@@ -732,7 +740,11 @@ def require_current_first_frame_inputs(
 
 
 def read_character_reference_asset(
-    conn: sqlite3.Connection, *, actor: CurrentUser, asset_id: str
+    conn: sqlite3.Connection,
+    *,
+    actor: CurrentUser,
+    asset_id: str,
+    authorized_project_ids: list[str],
 ) -> sqlite3.Row:
     row = conn.execute(
         """
@@ -747,8 +759,15 @@ def read_character_reference_asset(
         )
     # A character library is a workspace-global entity, but its reference images
     # may belong to another project. Gate the read so an employee cannot pull
-    # bytes from a project they have no access to.
-    require_asset_access(conn, actor=actor, asset_id=asset_id, action="character_reference.read")
+    # bytes from a project they have no access to, unless that project is within
+    # the character's declared authorization scope (cross-project library use).
+    try:
+        require_asset_access(
+            conn, actor=actor, asset_id=asset_id, action="character_reference.read"
+        )
+    except HTTPException:
+        if str(row["project_id"]) not in authorized_project_ids:
+            raise
     if str(row["content_type"]) not in FIRST_FRAME_IMAGE_CONTENT_TYPES:
         raise first_frame_error(
             422,
