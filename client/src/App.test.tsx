@@ -50,6 +50,14 @@ async function enterWorkspace() {
   ).toBeInTheDocument();
 }
 
+function openNewReplica() {
+  fireEvent.click(screen.getByRole("button", { name: "新建复刻" }));
+}
+
+function openTaskRecords() {
+  fireEvent.click(screen.getByRole("button", { name: "任务记录" }));
+}
+
 function batchResponse(overrides = {}) {
   return {
     id: "batch-1",
@@ -98,6 +106,7 @@ function batchResponse(overrides = {}) {
 describe("App", () => {
   beforeEach(() => {
     window.localStorage.clear();
+    window.location.hash = "";
   });
 
   afterEach(() => {
@@ -105,6 +114,7 @@ describe("App", () => {
     vi.restoreAllMocks();
     vi.useRealTimers();
     window.localStorage.clear();
+    window.location.hash = "";
   });
 
   it("starts on the internal login screen", () => {
@@ -136,10 +146,12 @@ describe("App", () => {
     expect(
       screen.getByRole("navigation", { name: "主导航" }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "工作台" })).toHaveClass(
+    expect(screen.getByRole("button", { name: "项目" })).toHaveClass(
       "nav-button--active",
     );
-    expect(screen.getByRole("button", { name: /人物库/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "新建复刻" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "人物库" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "任务记录" })).toBeEnabled();
     expect(screen.queryByRole("button", { name: "设置" })).toBeNull();
     expect(screen.getByText("林夏")).toBeInTheDocument();
     expect(screen.getByText("普通员工")).toBeInTheDocument();
@@ -149,6 +161,54 @@ describe("App", () => {
     expect(fetchMock).toHaveBeenCalledWith("http://127.0.0.1:8000/health", {
       signal: expect.any(AbortSignal),
     });
+  });
+
+  it("restores an allowed deep link and renders one shared five-entry shell", async () => {
+    window.location.hash = "#characters";
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/health")) {
+        return Promise.resolve({ ok: true, json: async () => healthResponse });
+      }
+      return Promise.resolve({ ok: true, json: async () => [] });
+    });
+    vi.stubGlobal("fetch", withAuth(fetchMock, adminUser));
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "人物库" }),
+    ).toBeInTheDocument();
+    for (const label of ["项目", "新建复刻", "人物库", "任务记录", "设置"]) {
+      expect(screen.getByRole("button", { name: label })).toBeEnabled();
+    }
+    expect(screen.getByRole("button", { name: "人物库" })).toHaveClass(
+      "nav-button--active",
+    );
+    expect(window.location.hash).toBe("#characters");
+  });
+
+  it("falls back from an unauthorized deep link and hides write-only entries", async () => {
+    window.location.hash = "#new";
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/health")) {
+        return Promise.resolve({ ok: true, json: async () => healthResponse });
+      }
+      return Promise.resolve({ ok: true, json: async () => [] });
+    });
+    vi.stubGlobal("fetch", withAuth(fetchMock, auditorUser));
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "项目工作台" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "新建复刻" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "设置" })).toBeNull();
+    expect(screen.getByRole("button", { name: "人物库" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "任务记录" })).toBeEnabled();
+    expect(window.location.hash).toBe("#projects");
   });
 
   it("keeps the user on login when auth/me rejects the session", async () => {
@@ -178,7 +238,7 @@ describe("App", () => {
     );
   });
 
-  it("shows the employee project form for creating a reference-video replica", async () => {
+  it("separates the employee project list from reference-video creation", async () => {
     const fetchMock = vi.fn((url: string) => {
       if (url.endsWith("/health")) {
         return Promise.resolve({ ok: true, json: async () => healthResponse });
@@ -189,6 +249,18 @@ describe("App", () => {
 
     render(<App />);
     await enterWorkspace();
+
+    expect(
+      await screen.findByRole("heading", { name: "项目列表" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText("项目名称")).toBeNull();
+    expect(
+      screen.queryByText(
+        "当前为只读身份，可查看项目和任务记录，不能创建、上传、编辑、删除或重试。",
+      ),
+    ).toBeNull();
+
+    openNewReplica();
 
     expect(
       await screen.findByRole("heading", { name: "新建复刻项目" }),
@@ -366,6 +438,10 @@ describe("App", () => {
     await enterWorkspace();
     fireEvent.click(await screen.findByRole("button", { name: "继续上传" }));
 
+    expect(window.location.hash).toBe("#new");
+    expect(
+      screen.getByRole("heading", { name: "新建复刻项目" }),
+    ).toBeInTheDocument();
     expect(screen.getByLabelText("项目名称")).toHaveValue("待续传项目");
     expect(screen.getByLabelText("项目名称")).toBeDisabled();
     expect(
@@ -757,6 +833,7 @@ describe("App", () => {
 
     render(<App />);
     await enterWorkspace();
+    openNewReplica();
     fireEvent.change(screen.getByLabelText("项目名称"), {
       target: { value: "咖啡口播" },
     });
@@ -773,7 +850,6 @@ describe("App", () => {
     expect(
       screen.queryByRole("progressbar", { name: "参考视频上传进度" }),
     ).toBeNull();
-    expect(screen.getByText("参考视频已就绪")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "继续上传" })).toBeNull();
     expect(fetchMock).toHaveBeenCalledWith(
       "http://127.0.0.1:8000/api/projects/project-1/analysis",
@@ -789,6 +865,7 @@ describe("App", () => {
 
     render(<App />);
     await enterWorkspace();
+    openNewReplica();
     fireEvent.change(screen.getByLabelText("项目名称"), {
       target: { value: "错误文件" },
     });
@@ -868,6 +945,7 @@ describe("App", () => {
 
     render(<App />);
     await enterWorkspace();
+    openNewReplica();
     fireEvent.change(screen.getByLabelText("项目名称"), {
       target: { value: "上传中项目" },
     });
@@ -945,6 +1023,7 @@ describe("App", () => {
 
     render(<App />);
     await enterWorkspace();
+    openNewReplica();
     fireEvent.change(screen.getByLabelText("项目名称"), {
       target: { value: "失败重试" },
     });
@@ -1099,6 +1178,7 @@ describe("App", () => {
 
     render(<App />);
     await enterWorkspace();
+    openTaskRecords();
     fireEvent.change(screen.getByLabelText("Batch ID"), {
       target: { value: " batch-1 " },
     });
@@ -1162,6 +1242,7 @@ describe("App", () => {
 
     render(<App />);
     await enterWorkspace();
+    openTaskRecords();
     fireEvent.change(screen.getByLabelText("Batch ID"), {
       target: { value: "batch-1" },
     });
@@ -1204,6 +1285,7 @@ describe("App", () => {
 
     render(<App />);
     await enterWorkspace();
+    openTaskRecords();
     fireEvent.change(screen.getByLabelText("Batch ID"), {
       target: { value: "batch-attention" },
     });
@@ -1253,6 +1335,7 @@ describe("App", () => {
 
     render(<App />);
     await enterWorkspace();
+    openTaskRecords();
     fireEvent.change(screen.getByLabelText("Batch ID"), {
       target: { value: "batch-1" },
     });
@@ -1303,6 +1386,7 @@ describe("App", () => {
 
     render(<App />);
     await enterWorkspace();
+    openTaskRecords();
     fireEvent.change(screen.getByLabelText("Batch ID"), {
       target: { value: "batch-missing" },
     });
@@ -1337,6 +1421,7 @@ describe("App", () => {
 
     render(<App />);
     await enterWorkspace();
+    openTaskRecords();
 
     expect(
       await screen.findByDisplayValue("batch-restored"),
