@@ -103,7 +103,8 @@ class CreateAnalysisRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     asset_id: str = Field(min_length=1)
-    duration_seconds: float = Field(gt=0)
+    # Reference videos are capped at 15s; keep the analysis time axis bounded.
+    duration_seconds: float = Field(gt=0, le=15)
 
 
 class UpdateShotCardsRequest(BaseModel):

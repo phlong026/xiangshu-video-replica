@@ -66,7 +66,7 @@ class ScriptRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     source: Literal["original", "custom"]
-    text: str
+    text: str = Field(max_length=8000)
     shot_card_version_id: str = Field(min_length=1)
 
 
@@ -1338,7 +1338,10 @@ def acquire_generation_task_lease(
                             AND provider_result_url != ''
                         )
                     )
-                    AND (locked_until IS NULL OR locked_until <= CURRENT_TIMESTAMP)
+                    AND (
+                        locked_until IS NULL
+                        OR datetime(locked_until) <= CURRENT_TIMESTAMP
+                    )
                     AND (next_poll_at IS NULL OR next_poll_at <= CURRENT_TIMESTAMP)
                 ORDER BY created_at, id
                 LIMIT 1
@@ -1786,7 +1789,7 @@ def h3_audio_quality(
                 text=True,
                 timeout=5,
             )
-        except subprocess.TimeoutExpired:
+        except (subprocess.TimeoutExpired, OSError):
             return "AUDIO_QUALITY_FAILED", ["AUDIO_VALIDATION_UNAVAILABLE"]
     if result.returncode != 0:
         return "AUDIO_QUALITY_FAILED", ["AUDIO_VALIDATION_UNAVAILABLE"]
