@@ -1595,7 +1595,12 @@ export interface components {
       /** Asset Id */
       asset_id: string;
       /** Duration Seconds */
-      duration_seconds: number;
+      duration_seconds?: number | null;
+      /**
+       * Reuse Existing
+       * @default false
+       */
+      reuse_existing: boolean;
     };
     /** CreateProjectRequest */
     CreateProjectRequest: {
@@ -1843,6 +1848,8 @@ export interface components {
       reference_asset_id: string | null;
       /** Reference Upload Status */
       reference_upload_status: string;
+      /** Analysis Status */
+      analysis_status: string;
     };
     /** PromptCompileRequest */
     PromptCompileRequest: {

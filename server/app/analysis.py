@@ -309,20 +309,91 @@ def create_analysis_version(
     created_by_user_id: str,
     result: AnalysisResult,
 ) -> sqlite3.Row:
-    payload = {
-        "schema_version": SCHEMA_VERSION,
-        "analysis": result.analysis.model_dump(mode="json"),
-        "source_asset": {"id": asset_id, "storage_uri": asset_uri},
-        "provider_response_ref": result.provider_response_ref,
-    }
     return insert_version(
         conn,
         project_id=project_id,
         asset_id=asset_id,
         kind=ANALYSIS_KIND,
         created_by_user_id=created_by_user_id,
-        payload=payload,
+        payload=analysis_version_payload(
+            asset_id=asset_id,
+            asset_uri=asset_uri,
+            result=result,
+        ),
     )
+
+
+def create_or_recover_analysis_version(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    asset_id: str,
+    asset_uri: str,
+    created_by_user_id: str,
+    result: AnalysisResult,
+) -> tuple[sqlite3.Row, bool]:
+    """Create one analysis version, or reuse the winner of a concurrent recovery."""
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        existing = find_analysis_version_for_asset(
+            conn,
+            project_id=project_id,
+            asset_id=asset_id,
+        )
+        if existing is not None:
+            conn.commit()
+            return existing, False
+        row = _insert_version(
+            conn,
+            project_id=project_id,
+            asset_id=asset_id,
+            kind=ANALYSIS_KIND,
+            created_by_user_id=created_by_user_id,
+            payload=analysis_version_payload(
+                asset_id=asset_id,
+                asset_uri=asset_uri,
+                result=result,
+            ),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return row, True
+
+
+def find_analysis_version_for_asset(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    asset_id: str,
+) -> sqlite3.Row | None:
+    row = conn.execute(
+        """
+        SELECT id, project_id, asset_id, kind, version_number, payload_json,
+               created_by_user_id, created_at
+        FROM versions
+        WHERE project_id = ? AND asset_id = ? AND kind = ?
+        ORDER BY version_number DESC
+        LIMIT 1
+        """,
+        (project_id, asset_id, ANALYSIS_KIND),
+    ).fetchone()
+    return None if row is None else cast(sqlite3.Row, row)
+
+
+def analysis_version_payload(
+    *,
+    asset_id: str,
+    asset_uri: str,
+    result: AnalysisResult,
+) -> dict[str, Any]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "analysis": result.analysis.model_dump(mode="json"),
+        "source_asset": {"id": asset_id, "storage_uri": asset_uri},
+        "provider_response_ref": result.provider_response_ref,
+    }
 
 
 def create_shot_card_version(
@@ -378,6 +449,27 @@ def insert_version(
     created_by_user_id: str,
     payload: dict[str, Any],
 ) -> sqlite3.Row:
+    row = _insert_version(
+        conn,
+        project_id=project_id,
+        asset_id=asset_id,
+        kind=kind,
+        created_by_user_id=created_by_user_id,
+        payload=payload,
+    )
+    conn.commit()
+    return row
+
+
+def _insert_version(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    asset_id: str | None,
+    kind: str,
+    created_by_user_id: str,
+    payload: dict[str, Any],
+) -> sqlite3.Row:
     version_number = next_version_number(conn, project_id=project_id, kind=kind)
     version_id = str(uuid4())
     conn.execute(
@@ -403,7 +495,6 @@ def insert_version(
             created_by_user_id,
         ),
     )
-    conn.commit()
     return get_version(conn, version_id)
 
 

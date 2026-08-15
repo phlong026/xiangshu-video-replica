@@ -18,7 +18,9 @@ from app.analysis import (
     VideoAnalysisProvider,
     analyze_video,
     create_analysis_version,
+    create_or_recover_analysis_version,
     create_shot_card_version,
+    find_analysis_version_for_asset,
     get_version,
     validate_shot_cards,
 )
@@ -104,7 +106,8 @@ class CreateAnalysisRequest(BaseModel):
 
     asset_id: str = Field(min_length=1)
     # Reference videos are capped at 15s; keep the analysis time axis bounded.
-    duration_seconds: float = Field(gt=0, le=15)
+    duration_seconds: float | None = Field(default=None, gt=0, le=15)
+    reuse_existing: bool = False
 
 
 class UpdateShotCardsRequest(BaseModel):
@@ -172,6 +175,24 @@ def create_project_analysis(
             },
         )
 
+    should_reuse = request.duration_seconds is None or request.reuse_existing
+    if should_reuse:
+        existing = find_analysis_version_for_asset(
+            conn,
+            project_id=project_id,
+            asset_id=request.asset_id,
+        )
+        if existing is not None:
+            write_audit(
+                conn,
+                actor=actor,
+                action="analysis.recover_existing",
+                entity_type="version",
+                entity_id=str(existing["id"]),
+                metadata={"project_id": project_id, "asset_id": request.asset_id},
+            )
+            return version_response(existing)
+
     provider = get_video_analysis_provider(conn)
     video_uri = str(asset["storage_uri"])
     if provider.requires_https_video_url:
@@ -182,11 +203,26 @@ def create_project_analysis(
     metadata_row = conn.execute(
         "SELECT metadata_json FROM assets WHERE id = ?", (request.asset_id,)
     ).fetchone()
-    measured_duration = request.duration_seconds
+    measured_duration: float | None = None
     if metadata_row is not None:
         metadata = json.loads(str(metadata_row["metadata_json"]))
-        measured_duration = float(metadata.get("duration_seconds", request.duration_seconds))
-    if abs(measured_duration - request.duration_seconds) > 1.0:
+        stored_duration = metadata.get("duration_seconds")
+        if isinstance(stored_duration, int | float):
+            measured_duration = float(stored_duration)
+    if measured_duration is None:
+        measured_duration = request.duration_seconds
+    if measured_duration is None:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "ANALYSIS_DURATION_UNAVAILABLE",
+                "message": "Reference video duration is unavailable; upload it again.",
+            },
+        )
+    if (
+        request.duration_seconds is not None
+        and abs(measured_duration - request.duration_seconds) > 1.0
+    ):
         raise HTTPException(
             status_code=400,
             detail={
@@ -210,18 +246,29 @@ def create_project_analysis(
             status_code=429 if exc.http_status == 429 else 502,
             detail={"code": code},
         ) from exc
-    row = create_analysis_version(
-        conn,
-        project_id=project_id,
-        asset_id=request.asset_id,
-        asset_uri=str(asset["storage_uri"]),
-        created_by_user_id=actor.id,
-        result=result,
-    )
+    if should_reuse:
+        row, created = create_or_recover_analysis_version(
+            conn,
+            project_id=project_id,
+            asset_id=request.asset_id,
+            asset_uri=str(asset["storage_uri"]),
+            created_by_user_id=actor.id,
+            result=result,
+        )
+    else:
+        row = create_analysis_version(
+            conn,
+            project_id=project_id,
+            asset_id=request.asset_id,
+            asset_uri=str(asset["storage_uri"]),
+            created_by_user_id=actor.id,
+            result=result,
+        )
+        created = True
     write_audit(
         conn,
         actor=actor,
-        action="analysis.create",
+        action="analysis.create" if created else "analysis.recover_existing",
         entity_type="version",
         entity_id=str(row["id"]),
         metadata={"project_id": project_id, "asset_id": request.asset_id},

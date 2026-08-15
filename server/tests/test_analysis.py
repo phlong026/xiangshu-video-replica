@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from app.analysis import (
     AnalysisProviderFailed,
     ApilioGemini,
     FakeGemini,
+    ProviderResponse,
     analyze_video,
     parse_analysis_response,
 )
@@ -293,6 +295,182 @@ def test_project_owner_can_create_and_read_analysis_version(client: TestClient) 
 
     assert fetched.status_code == 200
     assert fetched.json()["id"] == body["id"]
+
+
+def test_analysis_can_restore_duration_from_completed_asset_metadata(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    with connect_database(db_path) as conn:
+        conn.execute(
+            "UPDATE assets SET metadata_json = ? WHERE id = ?",
+            (json.dumps({"duration_seconds": 8}), "asset_owned"),
+        )
+        conn.commit()
+
+    response = client.post(
+        "/api/projects/project_owned/analysis",
+        json={"asset_id": "asset_owned"},
+        headers=auth_headers("employee_1"),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["payload"]["analysis"]["duration_seconds"] == 8
+
+
+def test_analysis_recovery_reuses_the_existing_version(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    first = client.post(
+        "/api/projects/project_owned/analysis",
+        json={"asset_id": "asset_owned", "duration_seconds": 10},
+        headers=auth_headers("employee_1"),
+    )
+    recovered = client.post(
+        "/api/projects/project_owned/analysis",
+        json={"asset_id": "asset_owned"},
+        headers=auth_headers("employee_1"),
+    )
+
+    assert first.status_code == 200
+    assert recovered.status_code == 200
+    assert recovered.json()["id"] == first.json()["id"]
+    assert recovered.json()["version_number"] == 1
+
+    with connect_database(db_path) as conn:
+        version_count = conn.execute(
+            "SELECT COUNT(*) FROM versions WHERE project_id = ? AND kind = ?",
+            ("project_owned", "analysis"),
+        ).fetchone()[0]
+        audit = conn.execute(
+            "SELECT action FROM audit_logs WHERE action = ?",
+            ("analysis.recover_existing",),
+        ).fetchone()
+
+    assert version_count == 1
+    assert audit is not None
+
+
+def test_concurrent_analysis_recovery_creates_only_one_version(
+    client: TestClient,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with connect_database(db_path) as conn:
+        conn.execute(
+            "UPDATE assets SET metadata_json = ? WHERE id = ?",
+            (json.dumps({"duration_seconds": 8}), "asset_owned"),
+        )
+        conn.commit()
+
+    barrier = threading.Barrier(2)
+    calls_lock = threading.Lock()
+
+    class BarrierFakeGemini(FakeGemini):
+        analysis_calls = 0
+
+        def analyze(self, *, video_uri: str, duration_seconds: float) -> ProviderResponse:
+            with calls_lock:
+                self.analysis_calls += 1
+            barrier.wait(timeout=5)
+            return super().analyze(video_uri=video_uri, duration_seconds=duration_seconds)
+
+    provider = BarrierFakeGemini()
+    monkeypatch.setattr(
+        "app.analysis_routes.get_video_analysis_provider",
+        lambda _conn: provider,
+    )
+    responses = []
+    responses_lock = threading.Lock()
+
+    def recover() -> None:
+        response = client.post(
+            "/api/projects/project_owned/analysis",
+            json={"asset_id": "asset_owned"},
+            headers=auth_headers("employee_1"),
+        )
+        with responses_lock:
+            responses.append(response)
+
+    threads = [threading.Thread(target=recover), threading.Thread(target=recover)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert [response.status_code for response in responses] == [200, 200]
+    assert provider.analysis_calls == 2
+    assert len({response.json()["id"] for response in responses}) == 1
+    with connect_database(db_path) as conn:
+        version_count = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM versions
+            WHERE project_id = ? AND asset_id = ? AND kind = ?
+            """,
+            ("project_owned", "asset_owned", "analysis"),
+        ).fetchone()[0]
+    assert version_count == 1
+
+
+def test_concurrent_idempotent_analysis_starts_create_only_one_version(
+    client: TestClient,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    barrier = threading.Barrier(2)
+    calls_lock = threading.Lock()
+
+    class BarrierFakeGemini(FakeGemini):
+        analysis_calls = 0
+
+        def analyze(self, *, video_uri: str, duration_seconds: float) -> ProviderResponse:
+            with calls_lock:
+                self.analysis_calls += 1
+            barrier.wait(timeout=5)
+            return super().analyze(video_uri=video_uri, duration_seconds=duration_seconds)
+
+    provider = BarrierFakeGemini()
+    monkeypatch.setattr(
+        "app.analysis_routes.get_video_analysis_provider",
+        lambda _conn: provider,
+    )
+    responses = []
+    responses_lock = threading.Lock()
+
+    def start() -> None:
+        response = client.post(
+            "/api/projects/project_owned/analysis",
+            json={
+                "asset_id": "asset_owned",
+                "duration_seconds": 10,
+                "reuse_existing": True,
+            },
+            headers=auth_headers("employee_1"),
+        )
+        with responses_lock:
+            responses.append(response)
+
+    threads = [threading.Thread(target=start), threading.Thread(target=start)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert [response.status_code for response in responses] == [200, 200]
+    assert provider.analysis_calls == 2
+    assert len({response.json()["id"] for response in responses}) == 1
+    with connect_database(db_path) as conn:
+        version_count = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM versions
+            WHERE project_id = ? AND asset_id = ? AND kind = ?
+            """,
+            ("project_owned", "asset_owned", "analysis"),
+        ).fetchone()[0]
+    assert version_count == 1
 
 
 def test_project_owner_can_read_the_latest_analysis_version(client: TestClient) -> None:
