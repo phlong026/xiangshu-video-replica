@@ -178,10 +178,25 @@ def create_project_analysis(
             get_media_storage(conn),
             asset_uri=video_uri,
         )
+    metadata_row = conn.execute(
+        "SELECT metadata_json FROM assets WHERE id = ?", (request.asset_id,)
+    ).fetchone()
+    measured_duration = request.duration_seconds
+    if metadata_row is not None:
+        metadata = json.loads(str(metadata_row["metadata_json"]))
+        measured_duration = float(metadata.get("duration_seconds", request.duration_seconds))
+    if abs(measured_duration - request.duration_seconds) > 1.0:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "ANALYSIS_DURATION_MISMATCH",
+                "message": "Requested duration does not match the reference video.",
+            },
+        )
     try:
         result = analyze_video(
             video_uri=video_uri,
-            video_duration_seconds=request.duration_seconds,
+            video_duration_seconds=measured_duration,
             provider=provider,
         )
     except AnalysisProviderFailed as exc:

@@ -247,10 +247,26 @@ def complete_upload(
         conn.execute(
             """
             UPDATE assets
-            SET storage_uri = ?, sha256 = ?, size_bytes = ?, content_type = ?
+            SET
+                storage_uri = ?,
+                sha256 = ?,
+                size_bytes = ?,
+                content_type = ?,
+                metadata_json = ?
             WHERE id = ?
             """,
-            (stored.uri, content_sha256, stored.size, content_type, asset_id),
+            (
+                stored.uri,
+                content_sha256,
+                stored.size,
+                content_type,
+                json.dumps(
+                    {"duration_seconds": metadata.duration_seconds},
+                    ensure_ascii=True,
+                    sort_keys=True,
+                ),
+                asset_id,
+            ),
         )
         conn.execute(
             "UPDATE projects SET status = ? WHERE id = ?",

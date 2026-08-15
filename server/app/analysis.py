@@ -254,9 +254,16 @@ def analyze_video(
     response = provider.analyze(video_uri=video_uri, duration_seconds=video_duration_seconds)
     try:
         analysis = parse_analysis_response(response.text, duration_seconds=video_duration_seconds)
-    except (json.JSONDecodeError, ValidationError) as exc:
+    except (json.JSONDecodeError, ValidationError, ValueError) as exc:
         repaired = provider.repair_json(invalid_json=response.text, error=str(exc))
-        analysis = parse_analysis_response(repaired.text, duration_seconds=video_duration_seconds)
+        try:
+            analysis = parse_analysis_response(
+                repaired.text, duration_seconds=video_duration_seconds
+            )
+        except (json.JSONDecodeError, ValidationError, ValueError) as repair_exc:
+            raise AnalysisProviderFailed(
+                "Provider returned invalid JSON even after a repair attempt"
+            ) from repair_exc
         return AnalysisResult(
             analysis=analysis,
             provider_response_ref=_provider_response_ref(response.raw, repaired.raw),
