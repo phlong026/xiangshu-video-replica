@@ -137,7 +137,7 @@ def read_available_project_character_versions(
         project_id=project_id,
         action="project.main_character.options.read",
     )
-    return list_available_project_character_versions(conn)
+    return list_available_project_character_versions(conn, project_id=project_id)
 
 
 @router.post("/characters", response_model=CharacterResponse, status_code=status.HTTP_201_CREATED)

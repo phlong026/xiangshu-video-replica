@@ -78,6 +78,8 @@ def seed_version(
     authorization_expires_at: str = "2035-01-01T00:00:00+00:00",
     source_quality_status: str = "PASSED",
     published_asset_count: int = 7,
+    authorization_scope: tuple[str, ...] = ("internal-short-video",),
+    usage_scope: tuple[str, ...] = ("internal-short-video",),
 ) -> SeededVersion:
     identity_id = f"identity-{key}"
     persona_id = f"persona-{key}"
@@ -86,6 +88,7 @@ def seed_version(
         "name": f"{key} 项目经理",
         "occupation": "乡墅项目经理",
         "costume_description": "深色工装",
+        "usage_scope_json": list(usage_scope),
     }
     persona_snapshot_json = encode_json(persona_snapshot)
     template_hash = hashlib.sha256(f"template-{key}".encode()).hexdigest()
@@ -178,7 +181,7 @@ def seed_version(
                 authorization_asset_id, authorization_scope,
                 authorization_expires_at, source_asset_id,
                 source_quality_status, status, created_by
-            ) VALUES (?, 'employee_1', ?, ?, ?, '["internal-short-video"]',
+            ) VALUES (?, 'employee_1', ?, ?, ?, ?,
                       ?, ?, ?, ?, 'admin_1')
             """,
             (
@@ -186,6 +189,7 @@ def seed_version(
                 f"{key} 荣哥",
                 authorization_status,
                 authorization_asset_id,
+                encode_json(list(authorization_scope)),
                 authorization_expires_at,
                 source_asset_id,
                 source_quality_status,
@@ -197,10 +201,14 @@ def seed_version(
             INSERT INTO character_personas (
                 id, identity_id, name, occupation, costume_description,
                 usage_scope_json, created_by
-            ) VALUES (?, ?, ?, '乡墅项目经理', '深色工装',
-                      '["internal-short-video"]', 'admin_1')
+            ) VALUES (?, ?, ?, '乡墅项目经理', '深色工装', ?, 'admin_1')
             """,
-            (persona_id, identity_id, f"{key} 项目经理"),
+            (
+                persona_id,
+                identity_id,
+                f"{key} 项目经理",
+                encode_json(list(usage_scope)),
+            ),
         )
         conn.execute(
             """
@@ -255,6 +263,28 @@ def test_project_lists_only_current_published_versions_with_seven_assets(
     db_path: Path,
 ) -> None:
     available = seed_version(db_path, key="available")
+    localized = seed_version(
+        db_path,
+        key="localized",
+        authorization_scope=("内部短视频",),
+        usage_scope=("内部短视频",),
+    )
+    project_scoped = seed_version(
+        db_path,
+        key="project-scoped",
+        authorization_scope=("project-owned",),
+        usage_scope=("project-owned",),
+    )
+    wrong_authorization_scope = seed_version(
+        db_path,
+        key="wrong-authorization-scope",
+        authorization_scope=("培训材料",),
+    )
+    wrong_persona_scope = seed_version(
+        db_path,
+        key="wrong-persona-scope",
+        usage_scope=("培训材料",),
+    )
     seed_version(db_path, key="draft", status="DRAFT")
     seed_version(
         db_path,
@@ -284,7 +314,11 @@ def test_project_lists_only_current_published_versions_with_seven_assets(
             headers=headers(user_id),
         )
         assert response.status_code == 200
-        assert [item["character_version_id"] for item in response.json()] == [available.version_id]
+        assert [item["character_version_id"] for item in response.json()] == [
+            available.version_id,
+            localized.version_id,
+            project_scoped.version_id,
+        ]
         option = response.json()[0]
         assert option["identity_name"] == "available 荣哥"
         assert option["persona_snapshot_json"]["name"] == "available 项目经理"
@@ -300,6 +334,15 @@ def test_project_lists_only_current_published_versions_with_seven_assets(
     )
     assert forbidden.status_code == 403
     assert forbidden.json()["detail"]["code"] == "PROJECT_FORBIDDEN"
+
+    for unavailable in (wrong_authorization_scope, wrong_persona_scope):
+        denied = client.put(
+            "/api/projects/project-owned/main-character",
+            headers=headers("employee_1"),
+            json={"character_version_id": unavailable.version_id},
+        )
+        assert denied.status_code == 422
+        assert denied.json()["detail"]["code"] == "CHARACTER_VERSION_NOT_AVAILABLE"
 
 
 def test_project_selects_character_version_once_and_restores_frozen_snapshot(

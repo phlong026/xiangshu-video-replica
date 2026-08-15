@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 USABLE_SOURCE_QUALITY_STATUSES = frozenset({"PASSED", "IMPORTED"})
+INTERNAL_SHORT_VIDEO_SCOPES = frozenset({"internal-short-video", "内部短视频"})
 
 
 def effective_identity_state_values(
@@ -54,3 +55,10 @@ def authorization_is_expired(value: object) -> bool:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC) <= datetime.now(UTC)
+
+
+def scope_allows_project(scope: object, *, project_id: str) -> bool:
+    if not isinstance(scope, (list, tuple, set, frozenset)):
+        return False
+    values = {str(value).strip() for value in scope if str(value).strip()}
+    return project_id in values or bool(values & INTERNAL_SHORT_VIDEO_SCOPES)

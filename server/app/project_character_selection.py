@@ -20,7 +20,7 @@ from app.character_identity import (
     encode_json,
     parse_datetime,
 )
-from app.character_policy import identity_values_are_current
+from app.character_policy import identity_values_are_current, scope_allows_project
 from app.characters import (
     MAIN_CHARACTER_VERSION_KIND,
     get_project_main_character,
@@ -35,6 +35,7 @@ SELECTION_SNAPSHOT_SCHEMA_VERSION = "project-character-selection.v1"
 def list_available_project_character_versions(
     conn: sqlite3.Connection,
     *,
+    project_id: str,
     character_version_id: str | None = None,
 ) -> list[ProjectCharacterVersionOption]:
     version_rows = conn.execute(
@@ -56,6 +57,7 @@ def list_available_project_character_versions(
             identity.display_name AS identity_name,
             identity.authorization_status,
             identity.authorization_asset_id,
+            identity.authorization_scope,
             identity.authorization_expires_at,
             identity.source_asset_id,
             identity.source_quality_status,
@@ -115,6 +117,7 @@ def list_available_project_character_versions(
         option = available_option_from_rows(
             row,
             assets_by_version.get(str(row["character_version_id"]), []),
+            project_id=project_id,
         )
         if option is not None:
             options.append(option)
@@ -132,6 +135,7 @@ def choose_project_character_version(
         conn.execute("BEGIN IMMEDIATE")
         options = list_available_project_character_versions(
             conn,
+            project_id=project_id,
             character_version_id=character_version_id,
         )
         if not options:
@@ -248,11 +252,22 @@ def choose_project_character_version(
 def available_option_from_rows(
     version: sqlite3.Row,
     asset_rows: list[sqlite3.Row],
+    *,
+    project_id: str,
 ) -> ProjectCharacterVersionOption | None:
     try:
         version_id = str(version["character_version_id"])
         required_views = decode_string_list(version["required_view_types_json"])
         if required_views != list(REQUIRED_CHARACTER_VIEW_TYPES):
+            return None
+        persona_snapshot = decode_object(version["persona_snapshot_json"])
+        if not scope_allows_project(
+            decode_string_list(version["authorization_scope"]),
+            project_id=project_id,
+        ) or not scope_allows_project(
+            persona_snapshot.get("usage_scope_json"),
+            project_id=project_id,
+        ):
             return None
         publication_json = str(version["publication_snapshot_json"])
         publication_hash = str(version["publication_hash"])
@@ -296,7 +311,7 @@ def available_option_from_rows(
                 None if expires_at is None else parse_datetime(str(expires_at))
             ),
             persona_id=str(version["persona_id"]),
-            persona_snapshot_json=decode_object(version["persona_snapshot_json"]),
+            persona_snapshot_json=persona_snapshot,
             provider=None if version["provider"] is None else str(version["provider"]),
             model=None if version["model"] is None else str(version["model"]),
             template_version=(
