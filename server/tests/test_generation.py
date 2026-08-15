@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import sqlite3
 import threading
 from collections.abc import Iterator
@@ -32,6 +33,11 @@ from app.generation_worker import run_worker_once
 from app.main import app
 from app.settings import SETTINGS_KEY_ENV, SettingsRepository
 from app.storage import FakeStorageAdapter, StorageBackendUnavailable
+
+
+def _fake_public_dns(hostname: str, port: int, type: int) -> list[tuple[object, ...]]:
+    del hostname, type
+    return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))]
 
 
 class RecordedMetasoTransport:
@@ -235,7 +241,10 @@ def seed_data(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def test_metaso_h3_provider_creates_polls_filters_and_downloads_result() -> None:
+def test_metaso_h3_provider_creates_polls_filters_and_downloads_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.generation.socket.getaddrinfo", _fake_public_dns)
     provider_task_id = "task-real-1"
     result_url = "https://files.example.test/video.mp4?signature=test"
     transport = RecordedMetasoTransport(
@@ -1573,8 +1582,9 @@ class ReconcileRunningProvider(MetasoH3Provider):
 
 
 def test_reconcile_submission_uncertain_recovers_succeeded_result(
-    db_path: Path, client: TestClient
+    db_path: Path, client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr("app.generation.socket.getaddrinfo", _fake_public_dns)
     prompt_id = create_locked_prompt(client)
     client.post(
         "/api/projects/project_owned/generation-batches",

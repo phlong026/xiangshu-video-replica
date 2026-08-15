@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import logging
 import re
 import shutil
+import socket
 import sqlite3
 import subprocess
 import tempfile
@@ -262,6 +264,7 @@ class MetasoH3Provider(H3Provider):
         parsed = urlparse(url)
         if parsed.scheme != "https" or not parsed.hostname:
             raise H3ProviderFailed("METASO result URL must be HTTPS", terminal=True)
+        _require_public_https_host(parsed.hostname)
         return self.transport.request("GET", url, headers={})
 
     def _query_task(self, provider_task_id: str) -> dict[str, Any]:
@@ -1668,6 +1671,23 @@ def _metaso_create_request(request: dict[str, Any]) -> dict[str, Any]:
     return provider_request
 
 
+def _require_public_https_host(hostname: str) -> None:
+    """Reject result URLs that resolve to private/loopback/link-local addresses
+    so a compromised METASO response cannot drive server-side SSRF."""
+    try:
+        addresses = socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise H3ProviderFailed("METASO result URL hostname could not be resolved") from exc
+    if not addresses:
+        raise H3ProviderFailed("METASO result URL hostname could not be resolved")
+    for address in addresses:
+        ip = ipaddress.ip_address(address[4][0])
+        if not ip.is_global:
+            raise H3ProviderFailed(
+                "METASO result URL must resolve to a public address", terminal=True
+            )
+
+
 def _metaso_content_url(item: dict[str, Any], *, provider_task_id: str) -> str:
     content = item.get("content")
     result_url = content.get("url") if isinstance(content, dict) else None
@@ -1683,6 +1703,7 @@ def _metaso_content_url(item: dict[str, Any], *, provider_task_id: str) -> str:
             provider_task_id=provider_task_id,
             terminal=True,
         )
+    _require_public_https_host(parsed.hostname)
     return result_url
 
 
