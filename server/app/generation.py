@@ -602,6 +602,22 @@ def create_generation_batch(
             "QUANTITY_EXCEEDS_LIMIT",
             f"quantity must be less than or equal to {max_quantity}",
         )
+    request_hash = idempotency_request_hash(request)
+    existing = _find_idempotent_batch(
+        conn, actor_id=actor.id, project_id=project_id, key=request.idempotency_key
+    )
+    if existing is not None:
+        if str(existing["request_hash"]) != request_hash:
+            raise generation_error(
+                409,
+                "IDEMPOTENCY_CONFLICT",
+                "This idempotency key was already used for a different request.",
+            )
+        return get_generation_batch(conn, batch_id=str(existing["id"]), actor=actor)
+
+    # Preflight a new (non-idempotent) METASO submission after the idempotency
+    # check so a replayed key returns the existing batch even when the current
+    # storage provider cannot run a fresh METASO job.
     if request.provider == "metaso":
         try:
             metaso_h3_provider_from_settings(conn)
@@ -621,19 +637,6 @@ def create_generation_batch(
                 "METASO H3 requires an HTTPS first-frame URL; switch storage to "
                 "COS/OSS before generating.",
             )
-
-    request_hash = idempotency_request_hash(request)
-    existing = _find_idempotent_batch(
-        conn, actor_id=actor.id, project_id=project_id, key=request.idempotency_key
-    )
-    if existing is not None:
-        if str(existing["request_hash"]) != request_hash:
-            raise generation_error(
-                409,
-                "IDEMPOTENCY_CONFLICT",
-                "This idempotency key was already used for a different request.",
-            )
-        return get_generation_batch(conn, batch_id=str(existing["id"]), actor=actor)
 
     prompt = require_version(
         conn,
