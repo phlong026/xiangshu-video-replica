@@ -127,11 +127,21 @@ class CharacterGenerationTask(CharacterContract):
     view_type: RequiredCharacterViewType
     provider: str
     model: str
+    idempotency_key: str
+    request_hash: str
+    candidate_number: int
     request_snapshot_json: dict[str, object]
     status: CharacterGenerationTaskStatus
     provider_task_id: str | None
+    attempt: int
+    max_attempts: int
     error_code: str | None
+    error_message_redacted: str | None
     cost_amount: float | None
+    next_poll_at: datetime | None
+    created_by: str | None
+    created_at: datetime
+    updated_at: datetime
     started_at: datetime | None
     completed_at: datetime | None
 
