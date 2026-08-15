@@ -27,9 +27,7 @@ def initialize_database(db_path: str | Path) -> sqlite3.Connection:
     # :memory: cannot survive Alembic's separate connection; reject it so a
     # caller gets a clear error instead of an empty, table-less database.
     if str(db_path) == ":memory:":
-        raise ValueError(
-            "initialize_database does not support ':memory:'; use a temp file path"
-        )
+        raise ValueError("initialize_database does not support ':memory:'; use a temp file path")
     upgrade_database(db_path)
     return connect_database(db_path)
 

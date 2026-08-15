@@ -1859,9 +1859,7 @@ def test_metaso_batch_requires_cloud_storage(
     assert response.json()["detail"]["code"] == "METASO_REQUIRES_CLOUD_STORAGE"
 
 
-def test_archive_retry_exhausts_to_terminal_failure(
-    db_path: Path, client: TestClient
-) -> None:
+def test_archive_retry_exhausts_to_terminal_failure(db_path: Path, client: TestClient) -> None:
     prompt_id = create_locked_prompt(client)
     client.post(
         "/api/projects/project_owned/generation-batches",
@@ -1895,9 +1893,7 @@ def test_archive_retry_exhausts_to_terminal_failure(
         for _ in range(MAX_ARCHIVE_RETRIES):
             # Each failed attempt backs off 60s via next_poll_at; fast-forward so
             # the next acquire picks the task up again.
-            conn.execute(
-                "UPDATE generation_tasks SET next_poll_at = datetime('now', '-1 second')"
-            )
+            conn.execute("UPDATE generation_tasks SET next_poll_at = datetime('now', '-1 second')")
             run_next_generation_task(
                 conn,
                 worker_id="worker_a",

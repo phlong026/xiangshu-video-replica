@@ -25,6 +25,7 @@ __pycache__/
 
 # Rust / Tauri
 target/
+.cargo-target/
 client/src-tauri/gen/
 client/src-tauri/icons/android/
 client/src-tauri/icons/ios/
