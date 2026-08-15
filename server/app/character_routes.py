@@ -163,6 +163,7 @@ def update_character_route(
     )
     character = update_character(
         conn,
+        actor=actor,
         character_id=character_id,
         name=payload.name,
         reference_asset_ids=payload.reference_asset_ids,
@@ -188,7 +189,7 @@ def delete_character_route(
         entity_type="character",
         entity_id=character_id,
     )
-    delete_character(conn, character_id=character_id)
+    delete_character(conn, actor=actor, character_id=character_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from dataclasses import dataclass
@@ -10,9 +11,18 @@ from uuid import uuid4
 from fastapi import HTTPException
 
 from app.auth import CurrentUser
+from app.permissions import write_audit
 
 MAIN_CHARACTER_VERSION_KIND = "main_character"
+LEGACY_IDENTITY_PREFIX = "legacy-identity:"
+LEGACY_PERSONA_PREFIX = "legacy-persona:"
 LEGACY_CHARACTER_VERSION_PREFIX = "legacy-version:"
+LEGACY_CHARACTER_ASSET_PREFIX = "legacy-asset:"
+LEGACY_CHARACTER_TEMPLATE_VERSION = "legacy-character-v1"
+LEGACY_CHARACTER_TEMPLATE = (
+    "Grandfather an imported legacy character snapshot without claiming seven generated views."
+)
+LEGACY_CHARACTER_TEMPLATE_HASH = hashlib.sha256(LEGACY_CHARACTER_TEMPLATE.encode()).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -115,12 +125,22 @@ def create_character(
                 actor.id,
             ),
         )
-    return read_character(conn, character_id)
+        character = read_character(conn, character_id)
+        sync_legacy_character_domain(conn, actor=actor, character=character)
+    write_audit(
+        conn,
+        actor=actor,
+        action="character.create",
+        entity_type="character",
+        entity_id=character_id,
+    )
+    return character
 
 
 def update_character(
     conn: sqlite3.Connection,
     *,
+    actor: CurrentUser,
     character_id: str,
     name: str | None,
     reference_asset_ids: list[str] | None,
@@ -155,6 +175,7 @@ def update_character(
         updates.append("is_active = ?")
         params.append(1 if is_active else 0)
 
+    updated_fields = [assignment.split(" =", 1)[0] for assignment in updates]
     if updates:
         updates.append("updated_at = CURRENT_TIMESTAMP")
         params.append(character_id)
@@ -167,13 +188,45 @@ def update_character(
                 """,
                 params,
             )
-    return read_character(conn, character_id)
+            character = read_character(conn, character_id)
+            sync_legacy_character_domain(conn, actor=actor, character=character)
+    else:
+        character = read_character(conn, character_id)
+    write_audit(
+        conn,
+        actor=actor,
+        action="character.update",
+        entity_type="character",
+        entity_id=character_id,
+        metadata={"updated_fields": updated_fields},
+    )
+    return character
 
 
-def delete_character(conn: sqlite3.Connection, *, character_id: str) -> None:
+def delete_character(
+    conn: sqlite3.Connection,
+    *,
+    actor: CurrentUser,
+    character_id: str,
+) -> None:
     read_character(conn, character_id)
     with conn:
+        conn.execute(
+            """
+            UPDATE person_identities
+            SET status = 'ARCHIVED', updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (f"{LEGACY_IDENTITY_PREFIX}{character_id}",),
+        )
         conn.execute("DELETE FROM characters WHERE id = ?", (character_id,))
+    write_audit(
+        conn,
+        actor=actor,
+        action="character.delete",
+        entity_type="character",
+        entity_id=character_id,
+    )
 
 
 def choose_project_main_character(
@@ -240,8 +293,12 @@ def choose_project_main_character(
                 ?,
                 (
                     SELECT id
-                    FROM character_versions
-                    WHERE id = ? AND persona_snapshot_json = ?
+                    FROM character_versions AS compatibility_version
+                    WHERE compatibility_version.persona_id = ?
+                      AND compatibility_version.status = 'PUBLISHED'
+                      AND compatibility_version.persona_snapshot_json = ?
+                    ORDER BY compatibility_version.version_number DESC
+                    LIMIT 1
                 ),
                 ?
             )
@@ -256,7 +313,7 @@ def choose_project_main_character(
                 project_id,
                 character_id,
                 version_id,
-                f"{LEGACY_CHARACTER_VERSION_PREFIX}{character_id}",
+                f"{LEGACY_PERSONA_PREFIX}{character_id}",
                 compatibility_snapshot_json,
                 actor.id,
             ),
@@ -300,6 +357,182 @@ def get_project_main_character(
         "version_number": int(row["version_number"]),
         "character_snapshot": payload["character_snapshot"],
     }
+
+
+def sync_legacy_character_domain(
+    conn: sqlite3.Connection,
+    *,
+    actor: CurrentUser,
+    character: CharacterData,
+) -> str:
+    identity_id = f"{LEGACY_IDENTITY_PREFIX}{character.id}"
+    persona_id = f"{LEGACY_PERSONA_PREFIX}{character.id}"
+    status, authorization_status = legacy_identity_status(character)
+    scope_json = encode_json_list(character.authorization_project_ids)
+    source_asset_id = character.reference_asset_ids[0] if character.reference_asset_ids else None
+    source_sha256 = asset_sha256(conn, source_asset_id)
+    snapshot_json = json.dumps(
+        character_snapshot(character),
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    identity_exists = conn.execute(
+        "SELECT 1 FROM person_identities WHERE id = ?",
+        (identity_id,),
+    ).fetchone()
+    if identity_exists is None:
+        conn.execute(
+            """
+            INSERT INTO person_identities (
+                id, owner_user_id, display_name, authorization_status,
+                authorization_scope, authorization_expires_at, source_asset_id,
+                source_quality_status, status, created_by
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'IMPORTED', ?, ?)
+            """,
+            (
+                identity_id,
+                actor.id,
+                character.name,
+                authorization_status,
+                scope_json,
+                character.authorization_expires_at,
+                source_asset_id,
+                status,
+                actor.id,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO character_personas (
+                id, identity_id, name, appearance_constraints_json,
+                usage_scope_json, created_by
+            )
+            VALUES (?, ?, ?, '{}', ?, ?)
+            """,
+            (persona_id, identity_id, character.name, scope_json, actor.id),
+        )
+    else:
+        conn.execute(
+            """
+            UPDATE person_identities
+            SET display_name = ?, authorization_status = ?, authorization_scope = ?,
+                authorization_expires_at = ?, source_asset_id = ?,
+                source_quality_status = 'IMPORTED', status = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                character.name,
+                authorization_status,
+                scope_json,
+                character.authorization_expires_at,
+                source_asset_id,
+                status,
+                identity_id,
+            ),
+        )
+        conn.execute(
+            """
+            UPDATE character_personas
+            SET name = ?, usage_scope_json = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (character.name, scope_json, persona_id),
+        )
+
+    version_number = next_legacy_character_version_number(conn, persona_id)
+    version_id = legacy_character_version_id(character.id, version_number)
+    conn.execute(
+        """
+        INSERT INTO character_versions (
+            id, persona_id, version_number, status, source_asset_id,
+            source_sha256, persona_snapshot_json, provider, model,
+            generation_params_json, template_version, template_hash,
+            required_view_types_json,
+            published_by, published_at, created_by
+        )
+        VALUES (
+            ?, ?, ?, 'PUBLISHED', ?, ?, ?, 'legacy-write-through',
+            'legacy-character-v1', '{}', ?, ?, '[]', ?, CURRENT_TIMESTAMP, ?
+        )
+        """,
+        (
+            version_id,
+            persona_id,
+            version_number,
+            source_asset_id,
+            source_sha256,
+            snapshot_json,
+            LEGACY_CHARACTER_TEMPLATE_VERSION,
+            LEGACY_CHARACTER_TEMPLATE_HASH,
+            actor.id,
+            actor.id,
+        ),
+    )
+    for candidate_number, asset_id in enumerate(character.reference_asset_ids, start=1):
+        conn.execute(
+            """
+            INSERT INTO character_assets (
+                id, character_version_id, asset_id, view_type,
+                candidate_number, auto_quality_json, review_status,
+                is_published_selection
+            )
+            VALUES (?, ?, ?, 'IMPORTED_REFERENCE', ?, '{}', 'APPROVED', ?)
+            """,
+            (
+                legacy_character_asset_id(character.id, version_number, candidate_number),
+                version_id,
+                asset_id,
+                candidate_number,
+                1 if candidate_number == 1 else 0,
+            ),
+        )
+    return version_id
+
+
+def next_legacy_character_version_number(conn: sqlite3.Connection, persona_id: str) -> int:
+    row = conn.execute(
+        """
+        SELECT COALESCE(MAX(version_number), 0) + 1
+        FROM character_versions
+        WHERE persona_id = ?
+        """,
+        (persona_id,),
+    ).fetchone()
+    return int(row[0])
+
+
+def legacy_character_version_id(character_id: str, version_number: int) -> str:
+    base = f"{LEGACY_CHARACTER_VERSION_PREFIX}{character_id}"
+    return base if version_number == 1 else f"{base}:{version_number}"
+
+
+def legacy_character_asset_id(
+    character_id: str,
+    version_number: int,
+    candidate_number: int,
+) -> str:
+    base = f"{LEGACY_CHARACTER_ASSET_PREFIX}{character_id}"
+    if version_number == 1:
+        return f"{base}:{candidate_number}"
+    return f"{base}:{version_number}:{candidate_number}"
+
+
+def legacy_identity_status(character: CharacterData) -> tuple[str, str]:
+    if not character.is_active:
+        return "REVOKED", "REVOKED"
+    if is_expired(character.authorization_expires_at):
+        return "EXPIRED", "EXPIRED"
+    return "ACTIVE", "AUTHORIZED"
+
+
+def asset_sha256(conn: sqlite3.Connection, asset_id: str | None) -> str | None:
+    if asset_id is None:
+        return None
+    row = conn.execute("SELECT sha256 FROM assets WHERE id = ?", (asset_id,)).fetchone()
+    return None if row is None else str(row[0])
 
 
 def read_character(conn: sqlite3.Connection, character_id: str) -> CharacterData:

@@ -554,6 +554,199 @@ export interface paths {
     patch: operations["update_character_route_api_characters__character_id__patch"];
     trace?: never;
   };
+  "/api/person-identities": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Person Identities */
+    get: operations["read_person_identities_api_person_identities_get"];
+    put?: never;
+    /** Create Person Identity Route */
+    post: operations["create_person_identity_route_api_person_identities_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/person-identities/{identity_id}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Person Identity */
+    get: operations["read_person_identity_api_person_identities__identity_id__get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    /** Update Person Identity Route */
+    patch: operations["update_person_identity_route_api_person_identities__identity_id__patch"];
+    trace?: never;
+  };
+  "/api/person-identities/{identity_id}/authorization-upload-intent": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Create Authorization Upload Intent */
+    post: operations["create_authorization_upload_intent_api_person_identities__identity_id__authorization_upload_intent_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/person-identities/{identity_id}/authorization-upload-complete": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Complete Authorization Upload Route */
+    post: operations["complete_authorization_upload_route_api_person_identities__identity_id__authorization_upload_complete_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/person-identities/{identity_id}/source-upload-intent": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Create Source Upload Intent */
+    post: operations["create_source_upload_intent_api_person_identities__identity_id__source_upload_intent_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/person-identities/{identity_id}/source-upload-complete": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Complete Source Upload Route */
+    post: operations["complete_source_upload_route_api_person_identities__identity_id__source_upload_complete_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/person-identities/{identity_id}/personas": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Character Personas */
+    get: operations["read_character_personas_api_person_identities__identity_id__personas_get"];
+    put?: never;
+    /** Create Character Persona Route */
+    post: operations["create_character_persona_route_api_person_identities__identity_id__personas_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/character-personas/{persona_id}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Character Persona */
+    get: operations["read_character_persona_api_character_personas__persona_id__get"];
+    put?: never;
+    post?: never;
+    /** Delete Character Persona Route */
+    delete: operations["delete_character_persona_route_api_character_personas__persona_id__delete"];
+    options?: never;
+    head?: never;
+    /** Update Character Persona Route */
+    patch: operations["update_character_persona_route_api_character_personas__persona_id__patch"];
+    trace?: never;
+  };
+  "/api/character-personas/{persona_id}/versions": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Character Versions */
+    get: operations["read_character_versions_api_character_personas__persona_id__versions_get"];
+    put?: never;
+    /** Create Character Version Route */
+    post: operations["create_character_version_route_api_character_personas__persona_id__versions_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/character-versions/{version_id}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Character Version */
+    get: operations["read_character_version_api_character_versions__version_id__get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/character-versions/{version_id}/archive": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Archive Character Version Route */
+    post: operations["archive_character_version_route_api_character_versions__version_id__archive_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/projects/{project_id}/source-frames/extract": {
     parameters: {
       query?: never;
@@ -738,7 +931,7 @@ export interface components {
       /** Id */
       id: string;
       /** Project Id */
-      project_id: string;
+      project_id: string | null;
       /** Kind */
       kind: string;
       /** Sha256 */
@@ -806,6 +999,91 @@ export interface components {
        */
       is_active: boolean;
     };
+    /** CharacterPersona */
+    CharacterPersona: {
+      /** Id */
+      id: string;
+      /** Identity Id */
+      identity_id: string;
+      /** Name */
+      name: string;
+      /** Occupation */
+      occupation: string | null;
+      /** Scene Description */
+      scene_description: string | null;
+      /** Appearance Constraints Json */
+      appearance_constraints_json: {
+        [key: string]: unknown;
+      };
+      /** Costume Description */
+      costume_description: string | null;
+      /** Default Background */
+      default_background: string | null;
+      /** Positive Prompt */
+      positive_prompt: string | null;
+      /** Negative Prompt */
+      negative_prompt: string | null;
+      /** Usage Scope Json */
+      usage_scope_json: string[];
+      /** Created By */
+      created_by: string | null;
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string;
+      /**
+       * Updated At
+       * Format: date-time
+       */
+      updated_at: string;
+    };
+    /** CharacterPersonaCreateRequest */
+    CharacterPersonaCreateRequest: {
+      /** Name */
+      name: string;
+      /** Occupation */
+      occupation?: string | null;
+      /** Scene Description */
+      scene_description?: string | null;
+      /** Appearance Constraints Json */
+      appearance_constraints_json?: {
+        [key: string]: unknown;
+      };
+      /** Costume Description */
+      costume_description?: string | null;
+      /** Default Background */
+      default_background?: string | null;
+      /** Positive Prompt */
+      positive_prompt?: string | null;
+      /** Negative Prompt */
+      negative_prompt?: string | null;
+      /** Usage Scope Json */
+      usage_scope_json?: string[];
+    };
+    /** CharacterPersonaUpdateRequest */
+    CharacterPersonaUpdateRequest: {
+      /** Name */
+      name?: string | null;
+      /** Occupation */
+      occupation?: string | null;
+      /** Scene Description */
+      scene_description?: string | null;
+      /** Appearance Constraints Json */
+      appearance_constraints_json?: {
+        [key: string]: unknown;
+      } | null;
+      /** Costume Description */
+      costume_description?: string | null;
+      /** Default Background */
+      default_background?: string | null;
+      /** Positive Prompt */
+      positive_prompt?: string | null;
+      /** Negative Prompt */
+      negative_prompt?: string | null;
+      /** Usage Scope Json */
+      usage_scope_json?: string[] | null;
+    };
     /** CharacterResponse */
     CharacterResponse: {
       /** Id */
@@ -845,6 +1123,83 @@ export interface components {
       /** Is Active */
       is_active?: boolean | null;
     };
+    /** CharacterVersion */
+    CharacterVersion: {
+      /** Id */
+      id: string;
+      /** Persona Id */
+      persona_id: string;
+      /** Version Number */
+      version_number: number;
+      /**
+       * Status
+       * @enum {string}
+       */
+      status:
+        | "DRAFT"
+        | "GENERATING"
+        | "REVIEWING"
+        | "PUBLISHED"
+        | "FAILED"
+        | "ARCHIVED";
+      /** Source Asset Id */
+      source_asset_id: string | null;
+      /** Source Sha256 */
+      source_sha256: string | null;
+      /** Persona Snapshot Json */
+      persona_snapshot_json: {
+        [key: string]: unknown;
+      };
+      /** Provider */
+      provider: string | null;
+      /** Model */
+      model: string | null;
+      /** Generation Params Json */
+      generation_params_json: {
+        [key: string]: unknown;
+      };
+      /** Template Version */
+      template_version: string | null;
+      /** Template Hash */
+      template_hash: string | null;
+      /** Required View Types Json */
+      required_view_types_json: (
+        | "FRONT_FACE"
+        | "FRONT_HALF"
+        | "FRONT_FULL"
+        | "LEFT_45"
+        | "RIGHT_45"
+        | "LEFT_SIDE"
+        | "RIGHT_SIDE"
+      )[];
+      /** Published By */
+      published_by: string | null;
+      /** Published At */
+      published_at: string | null;
+      /** Created By */
+      created_by: string | null;
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string;
+    };
+    /** CharacterVersionCreateRequest */
+    CharacterVersionCreateRequest: {
+      /** Provider */
+      provider: string;
+      /** Model */
+      model: string;
+      /** Generation Params Json */
+      generation_params_json?: {
+        [key: string]: unknown;
+      };
+    };
+    /** CompleteIdentityUploadRequest */
+    CompleteIdentityUploadRequest: {
+      /** Asset Id */
+      asset_id: string;
+    };
     /** CompleteUploadResponse */
     CompleteUploadResponse: {
       /** Asset Id */
@@ -862,6 +1217,19 @@ export interface components {
       /** Content Type */
       content_type: string;
       metadata: components["schemas"]["VideoMetadata"];
+    };
+    /** CompletedSourceImage */
+    CompletedSourceImage: {
+      identity: components["schemas"]["PersonIdentity"];
+      /** Asset Id */
+      asset_id: string;
+      /** Sha256 */
+      sha256: string;
+      /** Size Bytes */
+      size_bytes: number;
+      /** Content Type */
+      content_type: string;
+      quality: components["schemas"]["SourceImageQualityResult"];
     };
     /** ConfirmFirstFrameRequest */
     ConfirmFirstFrameRequest: {
@@ -884,6 +1252,30 @@ export interface components {
     CreateProjectRequest: {
       /** Name */
       name: string;
+    };
+    /** CreatedIdentityUploadIntent */
+    CreatedIdentityUploadIntent: {
+      /** Asset Id */
+      asset_id: string;
+      /** Identity Id */
+      identity_id: string;
+      /**
+       * Purpose
+       * @enum {string}
+       */
+      purpose: "authorization" | "source";
+      /** Storage Key */
+      storage_key: string;
+      /** Method */
+      method: string;
+      /** Url */
+      url: string;
+      /** Headers */
+      headers: {
+        [key: string]: string;
+      };
+      /** Expires At */
+      expires_at: string;
     };
     /** DiagnosticProviderResult */
     DiagnosticProviderResult: {
@@ -990,6 +1382,85 @@ export interface components {
       /** Service */
       service: string;
     };
+    /** IdentityUploadIntentRequest */
+    IdentityUploadIntentRequest: {
+      /** Filename */
+      filename: string;
+      /** Content Type */
+      content_type: string;
+      /** Size Bytes */
+      size_bytes: number;
+    };
+    /** PersonIdentity */
+    PersonIdentity: {
+      /** Id */
+      id: string;
+      /** Owner User Id */
+      owner_user_id: string | null;
+      /** Display Name */
+      display_name: string;
+      /**
+       * Authorization Status
+       * @enum {string}
+       */
+      authorization_status: "PENDING" | "AUTHORIZED" | "EXPIRED" | "REVOKED";
+      /** Authorization Asset Id */
+      authorization_asset_id: string | null;
+      /** Authorization Scope */
+      authorization_scope: string[];
+      /** Authorization Expires At */
+      authorization_expires_at: string | null;
+      /** Source Asset Id */
+      source_asset_id: string | null;
+      /**
+       * Source Quality Status
+       * @enum {string}
+       */
+      source_quality_status: "PENDING" | "PASSED" | "FAILED" | "IMPORTED";
+      /**
+       * Status
+       * @enum {string}
+       */
+      status: "DRAFT" | "ACTIVE" | "EXPIRED" | "REVOKED" | "ARCHIVED";
+      /** Created By */
+      created_by: string | null;
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string;
+      /**
+       * Updated At
+       * Format: date-time
+       */
+      updated_at: string;
+    };
+    /** PersonIdentityCreateRequest */
+    PersonIdentityCreateRequest: {
+      /** Display Name */
+      display_name: string;
+      /** Owner User Id */
+      owner_user_id?: string | null;
+      /** Authorization Scope */
+      authorization_scope: string[];
+      /** Authorization Expires At */
+      authorization_expires_at?: string | null;
+    };
+    /** PersonIdentityUpdateRequest */
+    PersonIdentityUpdateRequest: {
+      /** Display Name */
+      display_name?: string | null;
+      /** Owner User Id */
+      owner_user_id?: string | null;
+      /** Authorization Scope */
+      authorization_scope?: string[] | null;
+      /** Authorization Expires At */
+      authorization_expires_at?: string | null;
+      /** Authorization Status */
+      authorization_status?: "REVOKED" | null;
+      /** Status */
+      status?: "ARCHIVED" | null;
+    };
     /** ProjectMainCharacterRequest */
     ProjectMainCharacterRequest: {
       /** Character Id */
@@ -1094,6 +1565,35 @@ export interface components {
       providers: components["schemas"]["DiagnosticProviderResult"][];
       /** Download Url */
       download_url: string;
+    };
+    /** SourceImageQualityResult */
+    SourceImageQualityResult: {
+      /** Passed */
+      passed: boolean;
+      /** Width */
+      width: number;
+      /** Height */
+      height: number;
+      /** Person Count */
+      person_count: number;
+      /** Face Count */
+      face_count: number;
+      /** Face Visible */
+      face_visible: boolean;
+      /** Sharpness Score */
+      sharpness_score: number;
+      /** Occlusion Detected */
+      occlusion_detected: boolean;
+      /** Watermark Detected */
+      watermark_detected: boolean;
+      /** Issue Codes */
+      issue_codes: string[];
+      /** Notes */
+      notes: string[];
+      /** Provider */
+      provider: string;
+      /** Model */
+      model: string;
     };
     /** TaskResult */
     TaskResult: {
@@ -1329,45 +1829,6 @@ export interface components {
       /** Completed At */
       completed_at: string | null;
     };
-    /** CharacterPersona */
-    CharacterPersona: {
-      /** Id */
-      id: string;
-      /** Identity Id */
-      identity_id: string;
-      /** Name */
-      name: string;
-      /** Occupation */
-      occupation: string | null;
-      /** Scene Description */
-      scene_description: string | null;
-      /** Appearance Constraints Json */
-      appearance_constraints_json: {
-        [key: string]: unknown;
-      };
-      /** Costume Description */
-      costume_description: string | null;
-      /** Default Background */
-      default_background: string | null;
-      /** Positive Prompt */
-      positive_prompt: string | null;
-      /** Negative Prompt */
-      negative_prompt: string | null;
-      /** Usage Scope Json */
-      usage_scope_json: string[];
-      /** Created By */
-      created_by: string | null;
-      /**
-       * Created At
-       * Format: date-time
-       */
-      created_at: string;
-      /**
-       * Updated At
-       * Format: date-time
-       */
-      updated_at: string;
-    };
     /** CharacterReferenceSelection */
     CharacterReferenceSelection: {
       /** Id */
@@ -1393,111 +1854,6 @@ export interface components {
        * Format: date-time
        */
       selected_at: string;
-    };
-    /** CharacterVersion */
-    CharacterVersion: {
-      /** Id */
-      id: string;
-      /** Persona Id */
-      persona_id: string;
-      /** Version Number */
-      version_number: number;
-      /**
-       * Status
-       * @enum {string}
-       */
-      status:
-        | "DRAFT"
-        | "GENERATING"
-        | "REVIEWING"
-        | "PUBLISHED"
-        | "FAILED"
-        | "ARCHIVED";
-      /** Source Asset Id */
-      source_asset_id: string | null;
-      /** Source Sha256 */
-      source_sha256: string | null;
-      /** Persona Snapshot Json */
-      persona_snapshot_json: {
-        [key: string]: unknown;
-      };
-      /** Provider */
-      provider: string | null;
-      /** Model */
-      model: string | null;
-      /** Generation Params Json */
-      generation_params_json: {
-        [key: string]: unknown;
-      };
-      /** Template Version */
-      template_version: string | null;
-      /** Template Hash */
-      template_hash: string | null;
-      /** Required View Types Json */
-      required_view_types_json: (
-        | "FRONT_FACE"
-        | "FRONT_HALF"
-        | "FRONT_FULL"
-        | "LEFT_45"
-        | "RIGHT_45"
-        | "LEFT_SIDE"
-        | "RIGHT_SIDE"
-      )[];
-      /** Published By */
-      published_by: string | null;
-      /** Published At */
-      published_at: string | null;
-      /** Created By */
-      created_by: string | null;
-      /**
-       * Created At
-       * Format: date-time
-       */
-      created_at: string;
-    };
-    /** PersonIdentity */
-    PersonIdentity: {
-      /** Id */
-      id: string;
-      /** Owner User Id */
-      owner_user_id: string | null;
-      /** Display Name */
-      display_name: string;
-      /**
-       * Authorization Status
-       * @enum {string}
-       */
-      authorization_status: "PENDING" | "AUTHORIZED" | "EXPIRED" | "REVOKED";
-      /** Authorization Asset Id */
-      authorization_asset_id: string | null;
-      /** Authorization Scope */
-      authorization_scope: string[];
-      /** Authorization Expires At */
-      authorization_expires_at: string | null;
-      /** Source Asset Id */
-      source_asset_id: string | null;
-      /**
-       * Source Quality Status
-       * @enum {string}
-       */
-      source_quality_status: "PENDING" | "PASSED" | "FAILED" | "IMPORTED";
-      /**
-       * Status
-       * @enum {string}
-       */
-      status: "DRAFT" | "ACTIVE" | "EXPIRED" | "REVOKED" | "ARCHIVED";
-      /** Created By */
-      created_by: string | null;
-      /**
-       * Created At
-       * Format: date-time
-       */
-      created_at: string;
-      /**
-       * Updated At
-       * Format: date-time
-       */
-      updated_at: string;
     };
   };
   responses: never;
@@ -2784,6 +3140,597 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["CharacterResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_person_identities_api_person_identities_get: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["PersonIdentity"][];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  create_person_identity_route_api_person_identities_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["PersonIdentityCreateRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["PersonIdentity"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_person_identity_api_person_identities__identity_id__get: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        identity_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["PersonIdentity"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  update_person_identity_route_api_person_identities__identity_id__patch: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        identity_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["PersonIdentityUpdateRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["PersonIdentity"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  create_authorization_upload_intent_api_person_identities__identity_id__authorization_upload_intent_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        identity_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["IdentityUploadIntentRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["CreatedIdentityUploadIntent"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  complete_authorization_upload_route_api_person_identities__identity_id__authorization_upload_complete_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        identity_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["CompleteIdentityUploadRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["PersonIdentity"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  create_source_upload_intent_api_person_identities__identity_id__source_upload_intent_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        identity_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["IdentityUploadIntentRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["CreatedIdentityUploadIntent"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  complete_source_upload_route_api_person_identities__identity_id__source_upload_complete_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        identity_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["CompleteIdentityUploadRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["CompletedSourceImage"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_character_personas_api_person_identities__identity_id__personas_get: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        identity_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["CharacterPersona"][];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  create_character_persona_route_api_person_identities__identity_id__personas_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        identity_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["CharacterPersonaCreateRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["CharacterPersona"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_character_persona_api_character_personas__persona_id__get: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        persona_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["CharacterPersona"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  delete_character_persona_route_api_character_personas__persona_id__delete: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        persona_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      204: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  update_character_persona_route_api_character_personas__persona_id__patch: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        persona_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["CharacterPersonaUpdateRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["CharacterPersona"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_character_versions_api_character_personas__persona_id__versions_get: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        persona_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["CharacterVersion"][];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  create_character_version_route_api_character_personas__persona_id__versions_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        persona_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["CharacterVersionCreateRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["CharacterVersion"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_character_version_api_character_versions__version_id__get: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        version_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["CharacterVersion"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  archive_character_version_route_api_character_versions__version_id__archive_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        version_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["CharacterVersion"];
         };
       };
       /** @description Validation Error */

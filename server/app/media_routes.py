@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hmac
+import json
 import os
 import time
 from typing import Annotated
@@ -18,7 +19,7 @@ from app.media import (
     complete_upload,
     create_upload_intent,
 )
-from app.permissions import require_not_auditor, require_project_access
+from app.permissions import require_not_auditor, require_project_access, require_role
 from app.settings import SettingsDecryptError, SettingsKeyMissing, SettingsRepository
 from app.storage import (
     StorageAdapter,
@@ -159,23 +160,65 @@ async def put_local_object(
     """
     if storage.provider != "local":
         raise HTTPException(status_code=404, detail={"code": "LOCAL_UPLOAD_UNAVAILABLE"})
-    require_not_auditor(
-        conn,
-        actor=actor,
-        action="asset.object.put",
-        entity_type="asset",
-        entity_id=object_key,
-    )
     prefix = "projects/"
-    if not object_key.startswith(prefix) or "/" not in object_key[len(prefix) :]:
-        raise HTTPException(status_code=400, detail={"code": "INVALID_OBJECT_KEY"})
-    project_id = object_key[len(prefix) :].split("/", 1)[0]
-    require_project_access(
-        conn,
-        actor=actor,
-        project_id=project_id,
-        action="asset.object.put",
-    )
+    expected_content_type: str | None = None
+    expected_size: int | None = None
+    if object_key.startswith(prefix) and "/" in object_key[len(prefix) :]:
+        require_not_auditor(
+            conn,
+            actor=actor,
+            action="asset.object.put",
+            entity_type="asset",
+            entity_id=object_key,
+        )
+        project_id = object_key[len(prefix) :].split("/", 1)[0]
+        require_project_access(
+            conn,
+            actor=actor,
+            project_id=project_id,
+            action="asset.object.put",
+        )
+    else:
+        require_role(
+            conn,
+            actor=actor,
+            allowed_roles={"admin"},
+            action="asset.object.put",
+            entity_type="asset",
+            entity_id=object_key,
+        )
+        storage_uri = f"{storage.provider}://{storage.bucket}/{object_key}"
+        pending = conn.execute(
+            """
+            SELECT id, kind, content_type, metadata_json
+            FROM assets
+            WHERE project_id IS NULL AND storage_uri = ? AND sha256 = '' AND size_bytes = 0
+            """,
+            (storage_uri,),
+        ).fetchone()
+        if pending is None:
+            raise HTTPException(status_code=400, detail={"code": "INVALID_OBJECT_KEY"})
+        try:
+            metadata = json.loads(str(pending["metadata_json"]))
+        except json.JSONDecodeError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "IDENTITY_UPLOAD_INTENT_INVALID"},
+            ) from exc
+        if (
+            str(pending["kind"]) not in {"character_authorization", "character_source_image"}
+            or not isinstance(metadata, dict)
+            or metadata.get("upload_status") != "PENDING"
+            or metadata.get("object_key") != object_key
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "IDENTITY_UPLOAD_INTENT_INVALID"},
+            )
+        expected_content_type = str(pending["content_type"])
+        requested_size = metadata.get("requested_size_bytes")
+        if isinstance(requested_size, int):
+            expected_size = requested_size
     content_length = request.headers.get("content-length")
     if content_length and content_length.isdigit() and int(content_length) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail={"code": "PAYLOAD_TOO_LARGE"})
@@ -183,6 +226,10 @@ async def put_local_object(
     if len(content) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail={"code": "PAYLOAD_TOO_LARGE"})
     content_type = request.headers.get("content-type", "application/octet-stream")
+    if expected_content_type is not None and content_type != expected_content_type:
+        raise HTTPException(status_code=415, detail={"code": "CONTENT_TYPE_MISMATCH"})
+    if expected_size is not None and len(content) != expected_size:
+        raise HTTPException(status_code=409, detail={"code": "UPLOAD_SIZE_MISMATCH"})
     storage.put_object(object_key, content, content_type=content_type)
     return Response(status_code=204)
 

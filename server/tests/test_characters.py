@@ -138,7 +138,7 @@ def test_characters_migration_creates_library_tables(db_path: Path) -> None:
             ).fetchall()
         }
 
-    assert version == "012_character_domain"
+    assert version == "013_character_identity_assets"
     assert {
         "characters",
         "project_main_characters",
@@ -317,3 +317,131 @@ def test_employee_cannot_manage_character_library(client: TestClient) -> None:
 
     assert response.status_code == 403
     assert response.json()["detail"]["code"] == "ROLE_FORBIDDEN"
+
+
+def test_legacy_character_writes_create_immutable_domain_versions_and_archive_identity(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    character = create_character(
+        client,
+        name="Compatibility Hero",
+        authorization_project_ids=["project_owned"],
+    )
+    character_id = str(character["id"])
+
+    first_selection = client.put(
+        "/api/projects/project_owned/main-character",
+        headers=headers("employee_1"),
+        json={"character_id": character_id},
+    )
+    assert first_selection.status_code == 200
+
+    update = client.patch(
+        f"/api/characters/{character_id}",
+        headers=headers("admin_1"),
+        json={"name": "Compatibility Hero V2", "reference_asset_ids": ["asset_ref_1"]},
+    )
+    assert update.status_code == 200
+    second_selection = client.put(
+        "/api/projects/project_owned/main-character",
+        headers=headers("employee_1"),
+        json={"character_id": character_id},
+    )
+    assert second_selection.status_code == 200
+    employee_identities = client.get(
+        "/api/person-identities",
+        headers=headers("employee_1"),
+    )
+    employee_personas = client.get(
+        f"/api/person-identities/legacy-identity:{character_id}/personas",
+        headers=headers("employee_1"),
+    )
+    employee_versions = client.get(
+        f"/api/character-personas/legacy-persona:{character_id}/versions",
+        headers=headers("employee_1"),
+    )
+
+    with connect_database(db_path) as conn:
+        identity = conn.execute(
+            "SELECT * FROM person_identities WHERE id = ?",
+            (f"legacy-identity:{character_id}",),
+        ).fetchone()
+        persona = conn.execute(
+            "SELECT * FROM character_personas WHERE id = ?",
+            (f"legacy-persona:{character_id}",),
+        ).fetchone()
+        versions = conn.execute(
+            """
+            SELECT
+                id, version_number, status, persona_snapshot_json,
+                template_version, template_hash, required_view_types_json
+            FROM character_versions
+            WHERE persona_id = ?
+            ORDER BY version_number
+            """,
+            (f"legacy-persona:{character_id}",),
+        ).fetchall()
+        linked_version = conn.execute(
+            """
+            SELECT character_version_id FROM project_main_characters
+            WHERE project_id = 'project_owned'
+            """
+        ).fetchone()[0]
+        audits = {
+            str(row[0])
+            for row in conn.execute(
+                """
+                SELECT action FROM audit_logs
+                WHERE entity_id = ?
+                """,
+                (character_id,),
+            ).fetchall()
+        }
+
+    assert identity["display_name"] == "Compatibility Hero V2"
+    assert identity["status"] == "ACTIVE"
+    assert persona["name"] == "Compatibility Hero V2"
+    assert [row["version_number"] for row in versions] == [1, 2]
+    assert [row["status"] for row in versions] == ["PUBLISHED", "PUBLISHED"]
+    assert employee_identities.status_code == 200
+    assert [row["id"] for row in employee_identities.json()] == [f"legacy-identity:{character_id}"]
+    assert employee_identities.json()[0]["source_asset_id"] is None
+    assert [row["id"] for row in employee_personas.json()] == [f"legacy-persona:{character_id}"]
+    assert [row["version_number"] for row in employee_versions.json()] == [1, 2]
+    assert all(row["source_asset_id"] is None for row in employee_versions.json())
+    assert all(row["template_version"] == "legacy-character-v1" for row in versions)
+    assert all(len(str(row["template_hash"])) == 64 for row in versions)
+    assert all(json.loads(str(row["required_view_types_json"])) == [] for row in versions)
+    assert json.loads(str(versions[0]["persona_snapshot_json"]))["name"] == ("Compatibility Hero")
+    assert json.loads(str(versions[1]["persona_snapshot_json"]))["name"] == (
+        "Compatibility Hero V2"
+    )
+    assert linked_version == versions[1]["id"]
+    assert {"character.create", "character.update"}.issubset(audits)
+
+    deletion = client.delete(
+        f"/api/characters/{character_id}",
+        headers=headers("admin_1"),
+    )
+    assert deletion.status_code == 204
+    with connect_database(db_path) as conn:
+        archived = conn.execute(
+            "SELECT status FROM person_identities WHERE id = ?",
+            (f"legacy-identity:{character_id}",),
+        ).fetchone()[0]
+        version_count = conn.execute(
+            "SELECT COUNT(*) FROM character_versions WHERE persona_id = ?",
+            (f"legacy-persona:{character_id}",),
+        ).fetchone()[0]
+        delete_audit = conn.execute(
+            """
+            SELECT 1 FROM audit_logs
+            WHERE action = 'character.delete' AND entity_id = ?
+            """,
+            (character_id,),
+        ).fetchone()
+
+    assert archived == "ARCHIVED"
+    assert version_count == 2
+    assert delete_audit is not None
