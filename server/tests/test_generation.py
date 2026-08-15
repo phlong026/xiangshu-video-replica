@@ -1914,3 +1914,47 @@ def test_archive_retry_exhausts_to_terminal_failure(
     assert row["status"] == "FAILED"
     assert row["error_code"] == "ARCHIVE_RETRY_EXHAUSTED"
     assert row["provider_result_url"] is None
+
+
+def test_reconcile_route_guards_and_rejects_non_uncertain_task(
+    db_path: Path, client: TestClient
+) -> None:
+    from app.media_routes import get_media_storage
+
+    app.dependency_overrides[get_media_storage] = lambda: FakeStorageAdapter(
+        provider="fake", bucket="g"
+    )
+    prompt_id = create_locked_prompt(client)
+    client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json={
+            "quantity": 1,
+            "prompt_version_id": prompt_id,
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+            "idempotency_key": "reconcile-route",
+        },
+    )
+    with connect_database(db_path) as conn:
+        task_id = str(conn.execute("SELECT id FROM generation_tasks").fetchone()["id"])
+
+    # Missing task -> 404
+    missing = client.post(
+        "/api/generation-tasks/not-exist/reconcile", headers=auth_headers("employee_1")
+    )
+    assert missing.status_code == 404
+
+    # Auditor is read-only -> 403
+    auditor = client.post(
+        f"/api/generation-tasks/{task_id}/reconcile", headers=auth_headers("auditor_1")
+    )
+    assert auditor.status_code == 403
+
+    # A non-UNCERTAIN task is rejected before any provider call -> 409
+    normal = client.post(
+        f"/api/generation-tasks/{task_id}/reconcile", headers=auth_headers("employee_1")
+    )
+    assert normal.status_code == 409
+    assert normal.json()["detail"]["code"] == "TASK_NOT_UNCERTAIN"
