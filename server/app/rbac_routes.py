@@ -1,16 +1,24 @@
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import time
 from datetime import timedelta
+from typing import Annotated
 from urllib.parse import quote
 from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException, Response, status
+from fastapi import APIRouter, Header, HTTPException, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.auth import AuthenticatedUser, Database
+from app.auth import (
+    AuthenticatedUser,
+    Database,
+    authenticate_user,
+    identity_source,
+    identity_user_id,
+)
 from app.media import storage_key_from_uri
 from app.media_routes import LOCAL_API_BASE_URL
 from app.permissions import (
@@ -126,7 +134,22 @@ class AuditLogResponse(BaseModel):
 
 
 @router.get("/auth/me", response_model=UserResponse)
-def read_me(actor: AuthenticatedUser) -> UserResponse:
+def read_me(
+    conn: Database,
+    dev_user_id: Annotated[str | None, Header(alias="X-Dev-User-Id")] = None,
+) -> UserResponse:
+    try:
+        actor = authenticate_user(conn, identity_user_id(dev_user_id))
+    except HTTPException as exc:
+        write_login_failure(conn, error=exc, identity_source_name=identity_source(dev_user_id))
+        raise
+    write_audit(
+        conn,
+        actor=actor,
+        action="auth.login_success",
+        entity_type="user",
+        entity_id=actor.id,
+    )
     return UserResponse(
         id=actor.id,
         username=actor.username,
@@ -135,12 +158,41 @@ def read_me(actor: AuthenticatedUser) -> UserResponse:
     )
 
 
+def write_login_failure(
+    conn: sqlite3.Connection,
+    *,
+    error: HTTPException,
+    identity_source_name: str,
+) -> None:
+    code = "AUTH_UNKNOWN"
+    if isinstance(error.detail, dict) and isinstance(error.detail.get("code"), str):
+        code = str(error.detail["code"])
+    conn.execute(
+        """
+        INSERT INTO audit_logs (id, actor_user_id, action, entity_type, entity_id, metadata_json)
+        VALUES (?, NULL, ?, ?, ?, ?)
+        """,
+        (
+            str(uuid4()),
+            "auth.login_failure",
+            "auth",
+            "current_user",
+            json.dumps(
+                {"code": code, "identity_source": identity_source_name},
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+        ),
+    )
+    conn.commit()
+
+
 @router.get("/projects", response_model=list[ProjectResponse])
 def list_projects(
     conn: Database,
     actor: AuthenticatedUser,
 ) -> list[ProjectResponse]:
-    if actor.role == "admin":
+    if actor.role in {"admin", "auditor"}:
         rows = conn.execute(
             """
             SELECT

@@ -12,9 +12,11 @@ import {
 
 export function SourceFrameSelection({
   projectId,
+  readOnly = false,
   referenceAssetId,
 }: {
   projectId: string;
+  readOnly?: boolean;
   referenceAssetId: string | null;
 }) {
   const [candidates, setCandidates] = useState<SourceFrameCandidate[]>([]);
@@ -136,6 +138,9 @@ export function SourceFrameSelection({
   }
 
   async function handleExtract() {
+    if (readOnly) {
+      return;
+    }
     if (!referenceAssetId) {
       setError("参考视频尚未就绪，不能提取源画面。");
       return;
@@ -166,6 +171,9 @@ export function SourceFrameSelection({
   }
 
   async function handleConfirm() {
+    if (readOnly) {
+      return;
+    }
     if (!selectedAssetId || !previewUrls[selectedAssetId]) {
       setError("请先加载并查看候选源画面预览，再进行确认。");
       return;
@@ -207,7 +215,7 @@ export function SourceFrameSelection({
           <input
             aria-describedby="source-frame-time-hint"
             aria-label="重新取帧时间点（秒）"
-            disabled={isSubmitting}
+            disabled={readOnly || isSubmitting}
             onChange={(event) => setTimestampsText(event.target.value)}
             value={timestampsText}
           />
@@ -217,7 +225,7 @@ export function SourceFrameSelection({
         </label>
         <button
           className="secondary-button"
-          disabled={isSubmitting || !referenceAssetId}
+          disabled={readOnly || isSubmitting || !referenceAssetId}
           onClick={handleExtract}
           type="button"
         >
@@ -243,7 +251,7 @@ export function SourceFrameSelection({
           >
             <input
               checked={selectedAssetId === candidate.asset_id}
-              disabled={!previewUrls[candidate.asset_id]}
+              disabled={readOnly || !previewUrls[candidate.asset_id]}
               name="source-frame"
               onChange={() => setSelectedAssetId(candidate.asset_id)}
               type="radio"
@@ -272,14 +280,18 @@ export function SourceFrameSelection({
           </label>
         ))}
       </fieldset>
-      <button
-        className="source-frame-confirm"
-        disabled={isSubmitting || !selectedAssetId}
-        onClick={handleConfirm}
-        type="button"
-      >
-        确认源画面
-      </button>
+      {readOnly ? (
+        <p className="status-note">只读身份不能重新提取或确认源画面。</p>
+      ) : (
+        <button
+          className="source-frame-confirm"
+          disabled={isSubmitting || !selectedAssetId}
+          onClick={handleConfirm}
+          type="button"
+        >
+          确认源画面
+        </button>
+      )}
     </section>
   );
 }

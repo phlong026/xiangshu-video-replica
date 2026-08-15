@@ -17,7 +17,13 @@ import {
 const DEFAULT_PROMPT =
   "保留原图的镜头位置、人物姿态、动作、场景、构图、道具、光线与色调，只将原人物身份替换为角色库人物；保持自然皮肤、正确肢体和真实透视；不得增加或删除主体。";
 
-export function FirstFrameSelection({ projectId }: { projectId: string }) {
+export function FirstFrameSelection({
+  projectId,
+  readOnly = false,
+}: {
+  projectId: string;
+  readOnly?: boolean;
+}) {
   const [version, setVersion] = useState<AnalysisVersion | null>(null);
   const [latestVersionId, setLatestVersionId] = useState("");
   const [history, setHistory] = useState<AnalysisVersion[]>([]);
@@ -141,6 +147,9 @@ export function FirstFrameSelection({ projectId }: { projectId: string }) {
   const selectedPreview = previewUrls[selectedAssetId];
 
   async function handleGenerate() {
+    if (readOnly) {
+      return;
+    }
     if (!Number.isInteger(quantity) || quantity < 1 || quantity > 3) {
       setError("候选数量必须是 1–3 的整数。");
       return;
@@ -168,6 +177,9 @@ export function FirstFrameSelection({ projectId }: { projectId: string }) {
   }
 
   async function handleConfirm() {
+    if (readOnly) {
+      return;
+    }
     if (!selectedAssetId || !selectedPreview || isHistoryVersion) {
       setError("请先加载并查看最新候选首帧预览，再进行确认。");
       return;
@@ -208,7 +220,7 @@ export function FirstFrameSelection({ projectId }: { projectId: string }) {
           首帧模型
           <select
             aria-label="首帧模型"
-            disabled={isSubmitting}
+            disabled={readOnly || isSubmitting}
             onChange={(event) =>
               setModel(event.target.value as FirstFrameModel)
             }
@@ -224,7 +236,7 @@ export function FirstFrameSelection({ projectId }: { projectId: string }) {
           候选数量
           <input
             aria-label="候选数量"
-            disabled={isSubmitting}
+            disabled={readOnly || isSubmitting}
             max="3"
             min="1"
             onChange={(event) => setQuantity(Number(event.target.value))}
@@ -237,19 +249,24 @@ export function FirstFrameSelection({ projectId }: { projectId: string }) {
         首帧编辑提示词
         <textarea
           aria-label="首帧编辑提示词"
-          disabled={isSubmitting}
+          disabled={readOnly || isSubmitting}
           onChange={(event) => setPrompt(event.target.value)}
           rows={5}
           value={prompt}
         />
       </label>
       <div className="source-frame-actions">
-        <button disabled={isSubmitting} onClick={handleGenerate} type="button">
+        <button
+          disabled={readOnly || isSubmitting}
+          onClick={handleGenerate}
+          type="button"
+        >
           {isSubmitting ? "正在生成" : "重新生成候选首帧"}
         </button>
         <button
           className="secondary-button"
           disabled={
+            readOnly ||
             isSubmitting ||
             !selectedAssetId ||
             !selectedPreview ||
@@ -281,7 +298,11 @@ export function FirstFrameSelection({ projectId }: { projectId: string }) {
               <FirstFrameOption
                 candidate={candidate}
                 checked={selectedAssetId === candidate.asset_id}
-                disabled={!previewUrls[candidate.asset_id] || isHistoryVersion}
+                disabled={
+                  readOnly ||
+                  !previewUrls[candidate.asset_id] ||
+                  isHistoryVersion
+                }
                 index={index}
                 key={candidate.asset_id}
                 onSelect={() => setSelectedAssetId(candidate.asset_id)}
@@ -295,6 +316,9 @@ export function FirstFrameSelection({ projectId }: { projectId: string }) {
         className="first-frame-history"
         aria-labelledby="first-frame-history-title"
       >
+        {readOnly ? (
+          <p className="status-note">只读身份不能生成或确认首帧。</p>
+        ) : null}
         <h4 id="first-frame-history-title">历史生成版本</h4>
         {history.length === 0 ? (
           <p className="file-note">暂无历史版本。</p>

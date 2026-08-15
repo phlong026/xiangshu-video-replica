@@ -3,9 +3,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   completeVideoUpload,
   createProject,
+  getCurrentUser,
   getGenerationBatch,
   getHealth,
   getSettings,
+  SESSION_EXPIRED_EVENT,
   uploadReferenceVideo,
 } from "./api";
 
@@ -131,12 +133,98 @@ describe("createProject", () => {
   });
 });
 
+describe("getCurrentUser", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  });
+
+  it("loads the current user from auth/me using the unified development identity", async () => {
+    const user = {
+      id: "employee_1",
+      username: "employee_1",
+      display_name: "林夏",
+      role: "employee",
+    };
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => user,
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(getCurrentUser()).resolves.toEqual(user);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:8000/api/auth/me",
+      expect.objectContaining({
+        headers: expect.any(Headers),
+        signal: expect.any(AbortSignal),
+      }),
+    );
+    const options = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect((options.headers as Headers).get("X-Dev-User-Id")).toBe(
+      "employee_1",
+    );
+  });
+
+  it("does not fallback to a development identity in production builds", async () => {
+    vi.stubEnv("DEV", false);
+    vi.stubEnv("PROD", true);
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 401,
+      json: async () => ({ detail: { message: "missing identity" } }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(getCurrentUser()).rejects.toThrow(
+      "身份验证失败：missing identity（401）",
+    );
+    const options = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect((options.headers as Headers).has("X-Dev-User-Id")).toBe(false);
+  });
+
+  it("ignores an explicitly configured development identity in production builds", async () => {
+    vi.stubEnv("DEV", false);
+    vi.stubEnv("PROD", true);
+    vi.stubEnv("VITE_DEV_USER_ID", "admin_1");
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 401,
+      json: async () => ({ detail: { message: "missing identity" } }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(getCurrentUser()).rejects.toThrow(
+      "身份验证失败：missing identity（401）",
+    );
+    const options = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect((options.headers as Headers).has("X-Dev-User-Id")).toBe(false);
+  });
+});
+
 describe("admin API authentication", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
   });
 
-  it("uses the admin development user for settings", async () => {
+  it("uses the same development identity for settings unless explicitly overridden", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ providers: {}, runtime: {} }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await getSettings();
+
+    const options = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect((options.headers as Headers).get("X-Dev-User-Id")).toBe(
+      "employee_1",
+    );
+  });
+
+  it("allows an explicit VITE_DEV_USER_ID to switch the local identity", async () => {
+    vi.stubEnv("VITE_DEV_USER_ID", "admin_1");
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ providers: {}, runtime: {} }),
@@ -153,6 +241,7 @@ describe("admin API authentication", () => {
 describe("uploadReferenceVideo", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
   });
 
   it("does not send the development identity header to a cloud presigned URL", async () => {
@@ -248,7 +337,57 @@ describe("uploadReferenceVideo", () => {
     );
 
     expect(LocalUploadRequest.latest?.headers.get("X-Dev-User-Id")).toBe(
-      "admin_1",
+      "employee_1",
     );
+  });
+
+  it("emits the unified session-expired event when a local upload returns 401", async () => {
+    class UnauthorizedUploadRequest {
+      static latest: UnauthorizedUploadRequest | null = null;
+      headers = new Map<string, string>();
+      onerror: (() => void) | null = null;
+      onload: (() => void) | null = null;
+      ontimeout: (() => void) | null = null;
+      status = 401;
+      timeout = 0;
+      upload: { onprogress: ((event: ProgressEvent) => void) | null } = {
+        onprogress: null,
+      };
+
+      constructor() {
+        UnauthorizedUploadRequest.latest = this;
+      }
+
+      open() {}
+      setRequestHeader(name: string, value: string) {
+        this.headers.set(name, value);
+      }
+      send() {
+        this.onload?.();
+      }
+    }
+
+    const onSessionExpired = vi.fn();
+    window.addEventListener(SESSION_EXPIRED_EVENT, onSessionExpired);
+    vi.stubGlobal("XMLHttpRequest", UnauthorizedUploadRequest);
+
+    await expect(
+      uploadReferenceVideo(
+        {
+          asset_id: "asset-1",
+          project_id: "project-1",
+          storage_key: "projects/project-1/reference.mp4",
+          method: "PUT",
+          url: "http://127.0.0.1:8000/api/assets/local-objects/projects/project-1/reference.mp4",
+          headers: { "Content-Type": "video/mp4" },
+          expires_at: "2030-01-01T00:00:00Z",
+        },
+        new File(["video"], "reference.mp4", { type: "video/mp4" }),
+        vi.fn(),
+      ),
+    ).rejects.toThrow("登录已失效，请重新进入工作台。");
+
+    expect(onSessionExpired).toHaveBeenCalledOnce();
+    window.removeEventListener(SESSION_EXPIRED_EVENT, onSessionExpired);
   });
 });

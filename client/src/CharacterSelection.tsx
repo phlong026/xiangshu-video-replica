@@ -7,7 +7,13 @@ import {
   listProjectCharacters,
 } from "./api";
 
-export function CharacterSelection({ projectId }: { projectId: string }) {
+export function CharacterSelection({
+  projectId,
+  readOnly = false,
+}: {
+  projectId: string;
+  readOnly?: boolean;
+}) {
   const [characters, setCharacters] = useState<Character[]>([]);
   const [selectedCharacterId, setSelectedCharacterId] = useState("");
   const [selectedCharacterName, setSelectedCharacterName] = useState("");
@@ -45,6 +51,9 @@ export function CharacterSelection({ projectId }: { projectId: string }) {
   }
 
   async function saveSelection() {
+    if (readOnly) {
+      return;
+    }
     if (!selectedCharacterId) {
       return;
     }
@@ -89,7 +98,7 @@ export function CharacterSelection({ projectId }: { projectId: string }) {
           onClick={openSelection}
           type="button"
         >
-          选择人物
+          {readOnly ? "查看人物" : "选择人物"}
         </button>
       </div>
       {isOpen ? (
@@ -117,6 +126,7 @@ export function CharacterSelection({ projectId }: { projectId: string }) {
                 <label key={character.id}>
                   <input
                     checked={selectedCharacterId === character.id}
+                    disabled={readOnly}
                     name="main-character"
                     onChange={() => {
                       setSelectedCharacterId(character.id);
@@ -132,13 +142,17 @@ export function CharacterSelection({ projectId }: { projectId: string }) {
             </fieldset>
           ) : null}
           {message ? <p className="setup-success">{message}</p> : null}
-          <button
-            disabled={isLoading || isSaving || !selectedCharacterId}
-            onClick={saveSelection}
-            type="button"
-          >
-            {isSaving ? "正在保存" : "确认使用人物"}
-          </button>
+          {readOnly ? (
+            <p className="status-note">只读身份不能更改项目人物。</p>
+          ) : (
+            <button
+              disabled={isLoading || isSaving || !selectedCharacterId}
+              onClick={saveSelection}
+              type="button"
+            >
+              {isSaving ? "正在保存" : "确认使用人物"}
+            </button>
+          )}
         </div>
       ) : null}
     </section>

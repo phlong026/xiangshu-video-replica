@@ -7,17 +7,20 @@ import {
 } from "react";
 import { AnalysisWorkspace } from "./AnalysisWorkspace";
 import {
+  type CurrentUser,
   completeVideoUpload,
   createProject,
   createVideoUploadIntent,
   deleteProject,
   type GenerationBatch,
   type GenerationTask,
+  getCurrentUser,
   getGenerationBatch,
   getHealth,
   listProjects,
   type Project,
   reconcileUncertainTask,
+  SESSION_EXPIRED_EVENT,
   startVideoAnalysis,
   uploadReferenceVideo,
 } from "./api";
@@ -48,6 +51,10 @@ const TERMINAL_BATCH_STATUSES = new Set([
 
 export function App() {
   const [page, setPage] = useState<Page>("login");
+  const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
+  const [loginError, setLoginError] = useState("");
+  const [sessionMessage, setSessionMessage] = useState("");
+  const [isLoginLoading, setIsLoginLoading] = useState(false);
   const [serviceState, setServiceState] = useState<ServiceState>("checking");
   const [batchIdInput, setBatchIdInput] = useState("");
   const [activeBatchId, setActiveBatchId] = useState("");
@@ -72,9 +79,27 @@ export function App() {
   const [deletingProjectId, setDeletingProjectId] = useState("");
   const [activeAnalysisProject, setActiveAnalysisProject] =
     useState<Project | null>(null);
+  const canWrite = currentUser?.role !== "auditor";
+  const isAdmin = currentUser?.role === "admin";
 
   useEffect(() => {
-    if (page === "login") {
+    function handleSessionExpired() {
+      setCurrentUser(null);
+      setPage("login");
+      setActiveAnalysisProject(null);
+      setPendingProject(null);
+      setSessionMessage("登录已失效，请重新进入工作台。");
+      setLoginError("");
+    }
+
+    window.addEventListener(SESSION_EXPIRED_EVENT, handleSessionExpired);
+    return () => {
+      window.removeEventListener(SESSION_EXPIRED_EVENT, handleSessionExpired);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (page === "login" || !currentUser) {
       return;
     }
 
@@ -104,7 +129,7 @@ export function App() {
         window.clearTimeout(timeoutId);
       }
     };
-  }, [page]);
+  }, [page, currentUser]);
 
   useEffect(() => {
     if (page !== "projects" || activeBatchId) {
@@ -229,6 +254,9 @@ export function App() {
   }
 
   async function handleReconcile(taskId: string) {
+    if (!canWrite) {
+      return;
+    }
     try {
       await reconcileUncertainTask(taskId);
       if (activeBatchId) {
@@ -250,6 +278,9 @@ export function App() {
 
   async function handleProjectSetup(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!canWrite) {
+      return;
+    }
     if (!referenceVideo) {
       setSetupError("请选择 4–15 秒的 MP4 或 MOV 参考视频。");
       return;
@@ -341,6 +372,9 @@ export function App() {
   }
 
   async function handleDeleteProject(project: Project) {
+    if (!canWrite) {
+      return;
+    }
     const confirmed = window.confirm(
       `删除“${project.name}”？未完成的上传文件和项目记录将一并删除，且无法恢复。`,
     );
@@ -372,18 +406,48 @@ export function App() {
   }
 
   if (page === "login") {
+    async function handleLogin() {
+      setIsLoginLoading(true);
+      setLoginError("");
+      setSessionMessage("");
+      try {
+        const user = await getCurrentUser();
+        setCurrentUser(user);
+        setPage("projects");
+      } catch (error) {
+        setCurrentUser(null);
+        setLoginError(loginErrorMessage(error));
+      } finally {
+        setIsLoginLoading(false);
+      }
+    }
+
     return (
       <main className="centered-shell">
         <section className="login-card" aria-labelledby="app-title">
           <span className="eyebrow">INTERNAL PREVIEW</span>
           <h1 id="app-title">短视频复刻工作台</h1>
           <p>面向内部员工的 P0 工程骨架</p>
-          <button type="button" onClick={() => setPage("projects")}>
-            进入工作台
+          {sessionMessage ? (
+            <p className="settings-error" role="alert">
+              {sessionMessage}
+            </p>
+          ) : null}
+          {loginError ? (
+            <p className="settings-error" role="alert">
+              {loginError}
+            </p>
+          ) : null}
+          <button type="button" disabled={isLoginLoading} onClick={handleLogin}>
+            {isLoginLoading ? "正在验证身份" : "进入工作台"}
           </button>
         </section>
       </main>
     );
+  }
+
+  if (!currentUser) {
+    return null;
   }
 
   const workspaceTitle =
@@ -407,6 +471,9 @@ export function App() {
   }
 
   function showSettings() {
+    if (!isAdmin) {
+      return;
+    }
     setActiveAnalysisProject(null);
     setPage("settings");
   }
@@ -415,6 +482,8 @@ export function App() {
     <main className="app-shell">
       <AppSidebar
         activePage={page}
+        currentUser={currentUser}
+        isAdmin={isAdmin}
         onProjects={showProjects}
         onSettings={showSettings}
         onWorkspace={showWorkspace}
@@ -435,6 +504,7 @@ export function App() {
             <AnalysisWorkspace
               onClose={() => setActiveAnalysisProject(null)}
               project={activeAnalysisProject}
+              readOnly={!canWrite}
             />
           ) : null}
           {page === "projects" && !activeAnalysisProject ? (
@@ -443,6 +513,7 @@ export function App() {
                 isLoading={isProjectsLoading}
                 isUploading={isUploading}
                 deletingProjectId={deletingProjectId}
+                canWrite={canWrite}
                 onCancelUpload={handleCancelUpload}
                 onContinueUpload={handleContinueUpload}
                 onDeleteProject={handleDeleteProject}
@@ -496,7 +567,11 @@ export function App() {
                 />
 
                 {batch ? (
-                  <BatchPanel batch={batch} onReconcile={handleReconcile} />
+                  <BatchPanel
+                    batch={batch}
+                    canWrite={canWrite}
+                    onReconcile={handleReconcile}
+                  />
                 ) : (
                   <EmptyBatchState />
                 )}
@@ -511,11 +586,15 @@ export function App() {
 
 function AppSidebar({
   activePage,
+  currentUser,
+  isAdmin,
   onProjects,
   onSettings,
   onWorkspace,
 }: {
   activePage: Page;
+  currentUser: CurrentUser;
+  isAdmin: boolean;
   onProjects: () => void;
   onSettings: () => void;
   onWorkspace: () => void;
@@ -564,26 +643,30 @@ function AppSidebar({
           人物库
           <small className="nav-planned-badge">开发中</small>
         </button>
-        <button
-          className={
-            activePage === "settings"
-              ? "nav-button nav-button--active"
-              : "nav-button"
-          }
-          onClick={onSettings}
-          type="button"
-        >
-          <SidebarIcon name="settings" />
-          设置
-        </button>
+        {isAdmin ? (
+          <button
+            className={
+              activePage === "settings"
+                ? "nav-button nav-button--active"
+                : "nav-button"
+            }
+            onClick={onSettings}
+            type="button"
+          >
+            <SidebarIcon name="settings" />
+            设置
+          </button>
+        ) : null}
       </nav>
       <div className="sidebar-user">
         <span className="sidebar-user__avatar" aria-hidden="true">
           <SidebarIcon name="user" />
         </span>
         <span>
-          <strong>内部员工</strong>
-          <small className="sidebar-user__subtitle">创作团队</small>
+          <strong>{currentUser.display_name}</strong>
+          <small className="sidebar-user__subtitle">
+            {formatRole(currentUser.role)}
+          </small>
         </span>
       </div>
     </aside>
@@ -626,6 +709,7 @@ function SidebarIcon({
 }
 
 function ProjectSetupPanel({
+  canWrite,
   isLoading,
   isUploading,
   deletingProjectId,
@@ -646,6 +730,7 @@ function ProjectSetupPanel({
   uploadProgress,
   uploadStage,
 }: {
+  canWrite: boolean;
   isLoading: boolean;
   isUploading: boolean;
   deletingProjectId: string;
@@ -676,78 +761,86 @@ function ProjectSetupPanel({
         </div>
         <span className="project-count">{projects.length} 个项目</span>
       </div>
-      <form className="project-setup-form" onSubmit={onSubmit}>
-        <label htmlFor="project-name">项目名称</label>
-        <input
-          id="project-name"
-          disabled={Boolean(pendingProject) || isUploading}
-          maxLength={120}
-          onChange={(event) => onProjectNameChange(event.target.value)}
-          placeholder="例如：夏日咖啡口播复刻"
-          value={projectName}
-        />
-        <label htmlFor="reference-video">参考视频</label>
-        <input
-          id="reference-video"
-          accept=".mp4,.mov,video/mp4,video/quicktime"
-          disabled={isUploading}
-          onChange={onFileChange}
-          type="file"
-        />
-        {referenceVideo ? (
-          <p className="file-note">
-            已选择：{referenceVideo.name}（{formatFileSize(referenceVideo.size)}
-            ）
-          </p>
-        ) : null}
-        {pendingProject ? (
-          <p className="status-note">
-            正在为“{pendingProject.name}”重新上传参考视频。
-          </p>
-        ) : null}
-        {pendingProject && !isUploading ? (
+      {canWrite ? (
+        <form className="project-setup-form" onSubmit={onSubmit}>
+          <label htmlFor="project-name">项目名称</label>
+          <input
+            id="project-name"
+            disabled={Boolean(pendingProject) || isUploading}
+            maxLength={120}
+            onChange={(event) => onProjectNameChange(event.target.value)}
+            placeholder="例如：夏日咖啡口播复刻"
+            value={projectName}
+          />
+          <label htmlFor="reference-video">参考视频</label>
+          <input
+            id="reference-video"
+            accept=".mp4,.mov,video/mp4,video/quicktime"
+            disabled={isUploading}
+            onChange={onFileChange}
+            type="file"
+          />
+          {referenceVideo ? (
+            <p className="file-note">
+              已选择：{referenceVideo.name}（
+              {formatFileSize(referenceVideo.size)}）
+            </p>
+          ) : null}
+          {pendingProject ? (
+            <p className="status-note">
+              正在为“{pendingProject.name}”重新上传参考视频。
+            </p>
+          ) : null}
+          {pendingProject && !isUploading ? (
+            <button
+              className="secondary-button project-delete-button"
+              disabled={Boolean(deletingProjectId)}
+              onClick={() => onDeleteProject(pendingProject)}
+              type="button"
+            >
+              删除此项目
+            </button>
+          ) : null}
+          {isUploading && uploadStage ? (
+            <div className="upload-status-actions">
+              <UploadProgress stage={uploadStage} progress={uploadProgress} />
+              {uploadStage === "verifying" ||
+              uploadStage === "analyzing" ? null : (
+                <button
+                  className="secondary-button"
+                  onClick={onCancelUpload}
+                  type="button"
+                >
+                  取消上传
+                </button>
+              )}
+            </div>
+          ) : null}
+          {setupError ? <p className="settings-error">{setupError}</p> : null}
+          {setupMessage ? (
+            <p className="setup-success">{setupMessage}</p>
+          ) : null}
           <button
-            className="secondary-button project-delete-button"
-            disabled={Boolean(deletingProjectId)}
-            onClick={() => onDeleteProject(pendingProject)}
-            type="button"
+            disabled={
+              isUploading ||
+              !referenceVideo ||
+              (!pendingProject && !projectName.trim()) ||
+              Boolean(referenceVideo && validateReferenceVideo(referenceVideo))
+            }
+            type="submit"
           >
-            删除此项目
+            {isUploading
+              ? "正在上传"
+              : pendingProject
+                ? "重新上传"
+                : "创建并上传"}
           </button>
-        ) : null}
-        {isUploading && uploadStage ? (
-          <div className="upload-status-actions">
-            <UploadProgress stage={uploadStage} progress={uploadProgress} />
-            {uploadStage === "verifying" ||
-            uploadStage === "analyzing" ? null : (
-              <button
-                className="secondary-button"
-                onClick={onCancelUpload}
-                type="button"
-              >
-                取消上传
-              </button>
-            )}
-          </div>
-        ) : null}
-        {setupError ? <p className="settings-error">{setupError}</p> : null}
-        {setupMessage ? <p className="setup-success">{setupMessage}</p> : null}
-        <button
-          disabled={
-            isUploading ||
-            !referenceVideo ||
-            (!pendingProject && !projectName.trim()) ||
-            Boolean(referenceVideo && validateReferenceVideo(referenceVideo))
-          }
-          type="submit"
-        >
-          {isUploading
-            ? "正在上传"
-            : pendingProject
-              ? "重新上传"
-              : "创建并上传"}
-        </button>
-      </form>
+        </form>
+      ) : (
+        <p className="status-note">
+          当前为只读身份，可查看项目和任务记录，不能创建、上传、编辑、删除或重试。
+        </p>
+      )}
       {projectsError ? <p className="settings-error">{projectsError}</p> : null}
       {isLoading ? <p className="status-note">正在加载项目列表</p> : null}
       {!isUploading && !isLoading && !projectsError && projects.length ? (
@@ -760,7 +853,7 @@ function ProjectSetupPanel({
                   {formatReferenceStatus(project.reference_upload_status)}
                 </span>
               </div>
-              {project.reference_upload_status !== "READY" ? (
+              {project.reference_upload_status !== "READY" && canWrite ? (
                 <div className="project-actions">
                   <button
                     className="secondary-button"
@@ -779,15 +872,15 @@ function ProjectSetupPanel({
                     {deletingProjectId === project.id ? "正在删除" : "删除项目"}
                   </button>
                 </div>
-              ) : (
+              ) : project.reference_upload_status === "READY" ? (
                 <button
                   className="secondary-button"
                   onClick={() => onOpenAnalysis(project)}
                   type="button"
                 >
-                  编辑拆解
+                  {canWrite ? "编辑拆解" : "查看拆解"}
                 </button>
-              )}
+              ) : null}
             </li>
           ))}
         </ul>
@@ -939,9 +1032,11 @@ function BatchStatusMessage({
 
 function BatchPanel({
   batch,
+  canWrite,
   onReconcile,
 }: {
   batch: GenerationBatch;
+  canWrite: boolean;
   onReconcile: (taskId: string) => void;
 }) {
   const counts = batch.progress.counts;
@@ -986,7 +1081,12 @@ function BatchPanel({
       ) : null}
       <ul className="task-list">
         {batch.tasks.map((task) => (
-          <TaskItem key={task.id} task={task} onReconcile={onReconcile} />
+          <TaskItem
+            key={task.id}
+            canWrite={canWrite}
+            task={task}
+            onReconcile={onReconcile}
+          />
         ))}
       </ul>
     </div>
@@ -994,9 +1094,11 @@ function BatchPanel({
 }
 
 function TaskItem({
+  canWrite,
   task,
   onReconcile,
 }: {
+  canWrite: boolean;
   task: GenerationTask;
   onReconcile?: (taskId: string) => void;
 }) {
@@ -1012,7 +1114,7 @@ function TaskItem({
         {attentionNeeded ? (
           <span className="attention-tag">需要处理</span>
         ) : null}
-        {task.status === "SUBMISSION_UNCERTAIN" ? (
+        {canWrite && task.status === "SUBMISSION_UNCERTAIN" ? (
           <button type="button" onClick={() => onReconcile?.(task.id)}>
             对账
           </button>
@@ -1091,4 +1193,23 @@ function formatStatus(status: string) {
   };
 
   return labels[status] ?? status;
+}
+
+function formatRole(role: CurrentUser["role"]) {
+  const labels: Record<CurrentUser["role"], string> = {
+    admin: "管理员",
+    auditor: "审计员",
+    employee: "普通员工",
+  };
+  return labels[role];
+}
+
+function loginErrorMessage(error: unknown) {
+  if (error instanceof Error && error.message.trim()) {
+    if (error.message === "Failed to fetch") {
+      return "本地服务未连接，请启动本地服务后重试。";
+    }
+    return error.message;
+  }
+  return "身份验证失败，请检查本地服务后重试。";
 }

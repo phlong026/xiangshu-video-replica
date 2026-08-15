@@ -61,7 +61,10 @@ client/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/
 ```powershell
 $env:VIDEO_REPLICA_HOME = "$env:LOCALAPPDATA\VideoReplicaWorkbench"
 $env:VIDEO_REPLICA_DB_PATH = "$env:VIDEO_REPLICA_HOME\data\app.db"
+$env:VIDEO_REPLICA_DESKTOP_USER_ID = "内部用户ID"
 ```
+
+`VIDEO_REPLICA_DESKTOP_USER_ID` 必须对应 `users` 表中 `is_active = 1` 的内部用户。桌面端以 `/api/auth/me` 返回结果作为身份真源；发布环境不设置 `VIDEO_REPLICA_ALLOW_DEV_IDENTITY_HEADER`，也不使用 `VITE_DEV_USER_ID`。服务端配置桌面身份后会忽略客户端伪造的 `X-Dev-User-Id`。
 
 目录结构：
 
