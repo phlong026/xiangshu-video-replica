@@ -4,12 +4,20 @@ from fastapi import APIRouter, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.auth import AuthenticatedUser, Database
+from app.character_asset_review import (
+    list_character_asset_reviews,
+    publish_character_version,
+    review_character_asset,
+)
 from app.character_contracts import (
     CharacterAsset,
+    CharacterAssetReview,
+    CharacterAssetReviewDecision,
     CharacterGenerationTask,
+    CharacterVersion,
     RequiredCharacterViewType,
 )
-from app.character_identity_routes import CharacterAdmin
+from app.character_identity_routes import CharacterAdmin, CharacterStorage
 from app.character_image_generation import (
     create_character_generation_tasks,
     list_character_assets,
@@ -32,6 +40,20 @@ class CharacterRegenerationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     idempotency_key: str = Field(min_length=1, max_length=128)
+
+
+class CharacterAssetReviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision: CharacterAssetReviewDecision
+    issue_codes: list[str] = Field(default_factory=list, max_length=16)
+    comment: str | None = Field(default=None, max_length=1000)
+
+
+class CharacterVersionPublishRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    selected_asset_ids: dict[RequiredCharacterViewType, str] = Field(min_length=1)
 
 
 @router.post(
@@ -84,6 +106,63 @@ def read_character_assets(
         conn,
         actor=actor,
         version_id=version_id,
+    )
+
+
+@router.post(
+    "/character-assets/{character_asset_id}/review",
+    response_model=CharacterAssetReview,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_character_asset_review(
+    character_asset_id: str,
+    payload: CharacterAssetReviewRequest,
+    conn: Database,
+    actor: CharacterAdmin,
+) -> CharacterAssetReview:
+    return review_character_asset(
+        conn,
+        actor=actor,
+        character_asset_id=character_asset_id,
+        decision=payload.decision,
+        issue_codes=payload.issue_codes,
+        comment=payload.comment,
+    )
+
+
+@router.get(
+    "/character-assets/{character_asset_id}/reviews",
+    response_model=list[CharacterAssetReview],
+)
+def read_character_asset_reviews(
+    character_asset_id: str,
+    conn: Database,
+    actor: AuthenticatedUser,
+) -> list[CharacterAssetReview]:
+    return list_character_asset_reviews(
+        conn,
+        actor=actor,
+        character_asset_id=character_asset_id,
+    )
+
+
+@router.post(
+    "/character-versions/{version_id}/publish",
+    response_model=CharacterVersion,
+)
+def publish_character_version_route(
+    version_id: str,
+    payload: CharacterVersionPublishRequest,
+    conn: Database,
+    actor: CharacterAdmin,
+    storage: CharacterStorage,
+) -> CharacterVersion:
+    return publish_character_version(
+        conn,
+        actor=actor,
+        version_id=version_id,
+        selected_asset_ids=payload.selected_asset_ids,
+        storage=storage,
     )
 
 

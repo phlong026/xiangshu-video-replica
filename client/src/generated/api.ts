@@ -798,6 +798,57 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/character-assets/{character_asset_id}/review": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Create Character Asset Review */
+    post: operations["create_character_asset_review_api_character_assets__character_asset_id__review_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/character-assets/{character_asset_id}/reviews": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Character Asset Reviews */
+    get: operations["read_character_asset_reviews_api_character_assets__character_asset_id__reviews_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/character-versions/{version_id}/publish": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Publish Character Version Route */
+    post: operations["publish_character_version_route_api_character_versions__version_id__publish_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/character-assets/{character_asset_id}/regenerate": {
     parameters: {
       query?: never;
@@ -1091,6 +1142,41 @@ export interface components {
        */
       created_at: string;
     };
+    /** CharacterAssetReview */
+    CharacterAssetReview: {
+      /** Id */
+      id: string;
+      /** Character Asset Id */
+      character_asset_id: string;
+      /** Reviewer User Id */
+      reviewer_user_id: string | null;
+      /**
+       * Decision
+       * @enum {string}
+       */
+      decision: "APPROVED" | "REJECTED";
+      /** Issue Codes Json */
+      issue_codes_json: string[];
+      /** Comment */
+      comment: string | null;
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string;
+    };
+    /** CharacterAssetReviewRequest */
+    CharacterAssetReviewRequest: {
+      /**
+       * Decision
+       * @enum {string}
+       */
+      decision: "APPROVED" | "REJECTED";
+      /** Issue Codes */
+      issue_codes?: string[];
+      /** Comment */
+      comment?: string | null;
+    };
     /** CharacterCreateRequest */
     CharacterCreateRequest: {
       /** Name */
@@ -1367,6 +1453,10 @@ export interface components {
       published_by: string | null;
       /** Published At */
       published_at: string | null;
+      /** Publication Snapshot Json */
+      publication_snapshot_json: Record<string, never> | null;
+      /** Publication Hash */
+      publication_hash: string | null;
       /** Created By */
       created_by: string | null;
       /**
@@ -1383,6 +1473,13 @@ export interface components {
       model: string;
       /** Generation Params Json */
       generation_params_json?: Record<string, never>;
+    };
+    /** CharacterVersionPublishRequest */
+    CharacterVersionPublishRequest: {
+      /** Selected Asset Ids */
+      selected_asset_ids: {
+        [key: string]: string;
+      };
     };
     /** CompleteIdentityUploadRequest */
     CompleteIdentityUploadRequest: {
@@ -1896,29 +1993,6 @@ export interface components {
       /** Created By User Id */
       created_by_user_id: string | null;
       /** Created At */
-      created_at: string;
-    };
-    /** CharacterAssetReview */
-    CharacterAssetReview: {
-      /** Id */
-      id: string;
-      /** Character Asset Id */
-      character_asset_id: string;
-      /** Reviewer User Id */
-      reviewer_user_id: string | null;
-      /**
-       * Decision
-       * @enum {string}
-       */
-      decision: "APPROVED" | "REJECTED";
-      /** Issue Codes Json */
-      issue_codes_json: string[];
-      /** Comment */
-      comment: string | null;
-      /**
-       * Created At
-       * Format: date-time
-       */
       created_at: string;
     };
     /** CharacterReferenceSelection */
@@ -3920,6 +3994,113 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["CharacterAsset"][];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  create_character_asset_review_api_character_assets__character_asset_id__review_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        character_asset_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["CharacterAssetReviewRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["CharacterAssetReview"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_character_asset_reviews_api_character_assets__character_asset_id__reviews_get: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        character_asset_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["CharacterAssetReview"][];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  publish_character_version_route_api_character_versions__version_id__publish_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        version_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["CharacterVersionPublishRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["CharacterVersion"];
         };
       };
       /** @description Validation Error */

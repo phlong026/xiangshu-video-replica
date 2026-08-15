@@ -75,6 +75,8 @@ CHARACTER_DOMAIN_SCHEMAS = {
         "required_view_types_json",
         "published_by",
         "published_at",
+        "publication_snapshot_json",
+        "publication_hash",
         "created_by",
         "created_at",
     },
@@ -210,6 +212,9 @@ def test_empty_database_upgrade_creates_character_domain_constraints(tmp_path: P
             row[1] for row in conn.execute("PRAGMA table_info(project_main_characters)")
         }
         version_indexes = {row[1] for row in conn.execute("PRAGMA index_list(character_versions)")}
+        version_columns = {
+            row[1]: row for row in conn.execute("PRAGMA table_info(character_versions)")
+        }
         asset_indexes = {row[1] for row in conn.execute("PRAGMA index_list(character_assets)")}
         task_columns = {
             row[1]: row for row in conn.execute("PRAGMA table_info(character_generation_tasks)")
@@ -228,10 +233,11 @@ def test_empty_database_upgrade_creates_character_domain_constraints(tmp_path: P
             row[1]: row for row in conn.execute("PRAGMA table_info(assets)").fetchall()
         }
 
-    assert version == "014_character_image_generation"
+    assert version == "015_character_asset_publication"
     assert CHARACTER_DOMAIN_TABLES.issubset(tables)
     assert "character_version_id" in main_character_columns
     assert "uq_character_versions_persona_version" in version_indexes
+    assert {"publication_snapshot_json", "publication_hash"} <= set(version_columns)
     assert "uq_character_assets_published_view" in asset_indexes
     assert {
         "idempotency_key",
@@ -505,9 +511,36 @@ def test_character_image_generation_migration_downgrade_roundtrip(tmp_path: Path
             row[1] for row in conn.execute("PRAGMA table_info(external_call_logs)")
         }
 
-    assert upgraded_version == "014_character_image_generation"
+    assert upgraded_version == "015_character_asset_publication"
     assert "idempotency_key" in upgraded_task_columns
     assert "character_generation_task_id" in upgraded_log_columns
+
+
+def test_character_asset_publication_migration_downgrade_roundtrip(tmp_path: Path) -> None:
+    db_path = tmp_path / "character-asset-publication-roundtrip.db"
+    config = alembic_config(db_path)
+    command.upgrade(config, "head")
+
+    with connect_database(db_path) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(character_versions)")}
+    assert {"publication_snapshot_json", "publication_hash"} <= columns
+
+    command.downgrade(config, "014_character_image_generation")
+    with connect_database(db_path) as conn:
+        downgraded_version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+        downgraded_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(character_versions)")
+        }
+    assert downgraded_version == "014_character_image_generation"
+    assert "publication_snapshot_json" not in downgraded_columns
+    assert "publication_hash" not in downgraded_columns
+
+    command.upgrade(config, "head")
+    with connect_database(db_path) as conn:
+        upgraded_version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+        upgraded_columns = {row[1] for row in conn.execute("PRAGMA table_info(character_versions)")}
+    assert upgraded_version == "015_character_asset_publication"
+    assert {"publication_snapshot_json", "publication_hash"} <= upgraded_columns
 
 
 def test_character_image_generation_migration_backfills_existing_tasks(tmp_path: Path) -> None:
@@ -781,6 +814,22 @@ def test_character_domain_constraints_reject_invalid_and_ambiguous_records(
             VALUES ('v1', 'p1', 1, 'DRAFT')
             """
         )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                UPDATE character_versions
+                SET publication_snapshot_json = '{}'
+                WHERE id = 'v1'
+                """
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                UPDATE character_versions
+                SET publication_snapshot_json = '{}', publication_hash = 'short'
+                WHERE id = 'v1'
+                """
+            )
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute(
                 """

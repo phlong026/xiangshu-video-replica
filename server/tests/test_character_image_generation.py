@@ -810,6 +810,11 @@ def test_desktop_worker_generates_all_views_and_writes_redacted_evidence(
     assert {str(asset["view_type"]) for asset in assets} == REQUIRED_VIEWS
     assert {int(asset["candidate_number"]) for asset in assets} == {1}
     assert {str(asset["review_status"]) for asset in assets} == {"NOT_REVIEWED"}
+    quality_results = [json.loads(str(asset["auto_quality_json"])) for asset in assets]
+    assert {quality["schema_version"] for quality in quality_results} == {"character-quality.v1"}
+    assert all(quality["simulated"] is True for quality in quality_results)
+    assert all(quality["blocking_issue_codes"] == [] for quality in quality_results)
+    assert all("identity_consistency" in quality["scores"] for quality in quality_results)
     assert version_status == "REVIEWING"
     assert len(calls) == 7
     assert all(call["request_hash"] and call["response_asset_id"] for call in calls)

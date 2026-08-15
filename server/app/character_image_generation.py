@@ -14,6 +14,7 @@ from uuid import uuid4
 from fastapi import HTTPException
 
 from app.auth import CurrentUser
+from app.character_asset_quality import inspect_fake_character_asset
 from app.character_contracts import (
     CharacterAsset,
     CharacterGenerationTask,
@@ -579,6 +580,14 @@ def run_next_character_generation_task(
             )
         result = selected_provider.generate_view(request)
         validate_character_image_result(result)
+        try:
+            auto_quality = inspect_fake_character_asset(result.content, view_type=request.view_type)
+        except ValueError as exc:
+            raise CharacterImageProviderFailed(
+                "CHARACTER_PROVIDER_INVALID_RESPONSE",
+                "character image provider returned an invalid response",
+                retriable=False,
+            ) from exc
     except CharacterImageProviderFailed as exc:
         return finish_character_generation_failure(
             conn,
@@ -693,7 +702,7 @@ def run_next_character_generation_task(
                 candidate_number, generation_task_id, auto_quality_json,
                 review_status, is_published_selection
             )
-            VALUES (?, ?, ?, ?, ?, ?, '{}', 'NOT_REVIEWED', 0)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'NOT_REVIEWED', 0)
             """,
             (
                 character_asset_id,
@@ -702,6 +711,7 @@ def run_next_character_generation_task(
                 str(task["view_type"]),
                 int(task["candidate_number"]),
                 str(task["id"]),
+                encode_json(auto_quality),
             ),
         )
         updated = conn.execute(
