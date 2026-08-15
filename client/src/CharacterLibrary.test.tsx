@@ -172,10 +172,12 @@ describe("CharacterLibrary", () => {
   beforeEach(() => {
     assets = viewTypes.map(candidate);
     vi.clearAllMocks();
+    window.localStorage.clear();
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
+    window.localStorage.clear();
   });
 
   it("renders identity, persona, version history and seven fixed review slots", async () => {
@@ -305,6 +307,30 @@ describe("CharacterLibrary", () => {
     expect(await screen.findByText("预览失败")).toBeInTheDocument();
   });
 
+  it("reuses the batch idempotency key after an uncertain generation response", async () => {
+    prepareLoadedLibrary();
+    vi.mocked(api.generateCharacterAssets)
+      .mockRejectedValueOnce(new Error("请求超时，提交结果未知"))
+      .mockResolvedValueOnce([]);
+
+    render(<CharacterLibrary userRole="admin" />);
+    const generateButton = await screen.findByRole("button", {
+      name: "开始生成 7 类视角",
+    });
+    fireEvent.click(generateButton);
+    expect(
+      await screen.findByText("请求超时，提交结果未知"),
+    ).toBeInTheDocument();
+    fireEvent.click(generateButton);
+
+    await waitFor(() =>
+      expect(api.generateCharacterAssets).toHaveBeenCalledTimes(2),
+    );
+    const firstInput = vi.mocked(api.generateCharacterAssets).mock.calls[0][1];
+    const retryInput = vi.mocked(api.generateCharacterAssets).mock.calls[1][1];
+    expect(retryInput.idempotency_key).toBe(firstInput.idempotency_key);
+  });
+
   it("lets an admin create an active identity, persona and draft version without internal ids", async () => {
     vi.mocked(api.listPersonIdentities).mockResolvedValue([]);
     vi.mocked(api.createPersonIdentity).mockResolvedValue({
@@ -398,6 +424,25 @@ describe("CharacterLibrary", () => {
     fireEvent.click(screen.getByRole("button", { name: "创建并上传授权" }));
 
     expect(await screen.findByText("上传真人源图")).toBeInTheDocument();
+    expect(api.createPersonIdentity).toHaveBeenCalledWith(
+      expect.objectContaining({
+        authorization_expires_at: new Date(
+          2035,
+          0,
+          1,
+          23,
+          59,
+          59,
+          999,
+        ).toISOString(),
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "关闭" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "继续完成人物身份" }),
+    );
+    expect(await screen.findByText("上传真人源图")).toBeInTheDocument();
+    expect(api.createPersonIdentity).toHaveBeenCalledTimes(1);
     fireEvent.change(screen.getByLabelText("真人源图"), {
       target: {
         files: [new File(["png"], "source.png", { type: "image/png" })],

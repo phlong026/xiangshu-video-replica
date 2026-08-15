@@ -53,6 +53,8 @@ const REQUIRED_VIEWS: ReadonlyArray<{
 
 const TERMINAL_GENERATION_STATUSES = new Set(["SUCCEEDED", "FAILED"]);
 const CHARACTER_POLL_INTERVAL_MS = 2_000;
+const GENERATION_SUBMISSION_STORAGE_PREFIX =
+  "character.generate-all.idempotency";
 
 export function CharacterLibrary({ userRole }: { userRole: UserRole }) {
   const isAdmin = userRole === "admin";
@@ -77,7 +79,9 @@ export function CharacterLibrary({ userRole }: { userRole: UserRole }) {
   const [busyAction, setBusyAction] = useState("");
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
-  const [showIdentityWizard, setShowIdentityWizard] = useState(false);
+  const [identityWizardIdentity, setIdentityWizardIdentity] = useState<
+    PersonIdentity | null | undefined
+  >(undefined);
   const [personaEditor, setPersonaEditor] = useState<"create" | "edit" | null>(
     null,
   );
@@ -206,6 +210,7 @@ export function CharacterLibrary({ userRole }: { userRole: UserRole }) {
         }
         setAssets(nextAssets);
         setGenerationTasks(nextTasks);
+        clearKnownGenerationSubmission(versionId, nextTasks);
         setError("");
       } catch (loadError) {
         if (requestSequence === versionRequestSequence.current) {
@@ -431,13 +436,15 @@ export function CharacterLibrary({ userRole }: { userRole: UserRole }) {
     if (!selectedVersion) {
       return;
     }
+    const submissionKey = generationSubmissionKey(selectedVersion.id);
     setBusyAction("generate-all");
     setError("");
     try {
       const tasks = await generateCharacterAssets(selectedVersion.id, {
-        idempotency_key: idempotencyKey("character-all"),
+        idempotency_key: submissionKey,
         candidates_per_view: 1,
       });
+      clearGenerationSubmissionKey(selectedVersion.id, submissionKey);
       setGenerationTasks(tasks);
       setMessage("七类视角生成任务已提交，页面会自动刷新。");
       await refreshVersionData(selectedVersion.id);
@@ -534,7 +541,7 @@ export function CharacterLibrary({ userRole }: { userRole: UserRole }) {
           <p>真人授权、人设、版本、七视角资产与人工审核使用同一条证据链。</p>
         </div>
         {isAdmin ? (
-          <button type="button" onClick={() => setShowIdentityWizard(true)}>
+          <button type="button" onClick={() => setIdentityWizardIdentity(null)}>
             创建人物身份
           </button>
         ) : (
@@ -560,12 +567,13 @@ export function CharacterLibrary({ userRole }: { userRole: UserRole }) {
         </p>
       ) : null}
 
-      {showIdentityWizard ? (
+      {identityWizardIdentity !== undefined ? (
         <IdentityWizard
-          onCancel={() => setShowIdentityWizard(false)}
+          initialIdentity={identityWizardIdentity}
+          onCancel={() => setIdentityWizardIdentity(undefined)}
           onComplete={(completed) => {
             handleIdentityChanged(completed);
-            setShowIdentityWizard(false);
+            setIdentityWizardIdentity(undefined);
             setMessage("人物身份已激活，可继续创建人设。");
           }}
           onIdentityChanged={handleIdentityChanged}
@@ -621,6 +629,11 @@ export function CharacterLibrary({ userRole }: { userRole: UserRole }) {
             <>
               <IdentitySummary
                 identity={selectedIdentity}
+                onResume={
+                  isAdmin && selectedIdentity.status === "DRAFT"
+                    ? () => setIdentityWizardIdentity(selectedIdentity)
+                    : undefined
+                }
                 userRole={userRole}
               />
               <section
@@ -862,9 +875,11 @@ export function CharacterLibrary({ userRole }: { userRole: UserRole }) {
 
 function IdentitySummary({
   identity,
+  onResume,
   userRole,
 }: {
   identity: PersonIdentity;
+  onResume?: () => void;
   userRole: UserRole;
 }) {
   return (
@@ -904,6 +919,11 @@ function IdentitySummary({
             <dd>{identity.authorization_scope.join("、") || "未填写"}</dd>
           </div>
         </dl>
+        {onResume ? (
+          <button className="secondary-button" type="button" onClick={onResume}>
+            继续完成人物身份
+          </button>
+        ) : null}
         {userRole === "auditor" ? (
           <p className="evidence-note">
             审计身份可读元数据，但不能创建源图下载链接。
@@ -915,23 +935,37 @@ function IdentitySummary({
 }
 
 function IdentityWizard({
+  initialIdentity,
   onCancel,
   onComplete,
   onIdentityChanged,
 }: {
+  initialIdentity: PersonIdentity | null;
   onCancel: () => void;
   onComplete: (identity: PersonIdentity) => void;
   onIdentityChanged: (identity: PersonIdentity) => void;
 }) {
   const [phase, setPhase] = useState<
     "authorization" | "source" | "quality" | "confirm"
-  >("authorization");
-  const [displayName, setDisplayName] = useState("");
-  const [authorizationScope, setAuthorizationScope] = useState("");
-  const [expiresOn, setExpiresOn] = useState("");
+  >(
+    initialIdentity?.authorization_status === "AUTHORIZED"
+      ? "source"
+      : "authorization",
+  );
+  const [displayName, setDisplayName] = useState(
+    initialIdentity?.display_name ?? "",
+  );
+  const [authorizationScope, setAuthorizationScope] = useState(
+    initialIdentity?.authorization_scope.join("、") ?? "",
+  );
+  const [expiresOn, setExpiresOn] = useState(
+    localDateInputValue(initialIdentity?.authorization_expires_at),
+  );
   const [authorizationFile, setAuthorizationFile] = useState<File | null>(null);
   const [sourceFile, setSourceFile] = useState<File | null>(null);
-  const [identity, setIdentity] = useState<PersonIdentity | null>(null);
+  const [identity, setIdentity] = useState<PersonIdentity | null>(
+    initialIdentity,
+  );
   const [sourceResult, setSourceResult] =
     useState<CompletedIdentitySource | null>(null);
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
@@ -954,7 +988,7 @@ function IdentityWizard({
           display_name: displayName.trim(),
           authorization_scope: scopes,
           authorization_expires_at: expiresOn
-            ? new Date(`${expiresOn}T23:59:59Z`).toISOString()
+            ? endOfLocalDayIso(expiresOn)
             : null,
         }));
       setIdentity(currentIdentity);
@@ -1027,7 +1061,9 @@ function IdentityWizard({
     >
       <div className="identity-wizard-heading">
         <div>
-          <h3 id="identity-wizard-title">创建人物身份</h3>
+          <h3 id="identity-wizard-title">
+            {initialIdentity ? "继续人物身份" : "创建人物身份"}
+          </h3>
           <p>授权、源图、质量结果、确认</p>
         </div>
         <button className="secondary-button" type="button" onClick={onCancel}>
@@ -1610,6 +1646,59 @@ function errorMessage(error: unknown, fallback: string): string {
 
 function idempotencyKey(prefix: string): string {
   return `${prefix}:${crypto.randomUUID()}`;
+}
+
+function generationSubmissionStorageKey(versionId: string): string {
+  return `${GENERATION_SUBMISSION_STORAGE_PREFIX}:${versionId}`;
+}
+
+function generationSubmissionKey(versionId: string): string {
+  const storageKey = generationSubmissionStorageKey(versionId);
+  const existing = window.localStorage.getItem(storageKey);
+  if (existing) {
+    return existing;
+  }
+  const created = idempotencyKey("character-all");
+  window.localStorage.setItem(storageKey, created);
+  return created;
+}
+
+function clearGenerationSubmissionKey(
+  versionId: string,
+  expectedKey: string,
+): void {
+  const storageKey = generationSubmissionStorageKey(versionId);
+  if (window.localStorage.getItem(storageKey) === expectedKey) {
+    window.localStorage.removeItem(storageKey);
+  }
+}
+
+function clearKnownGenerationSubmission(
+  versionId: string,
+  tasks: CharacterGenerationTask[],
+): void {
+  const storedKey = window.localStorage.getItem(
+    generationSubmissionStorageKey(versionId),
+  );
+  if (storedKey && tasks.some((task) => task.idempotency_key === storedKey)) {
+    clearGenerationSubmissionKey(versionId, storedKey);
+  }
+}
+
+function endOfLocalDayIso(value: string): string {
+  const [year, month, day] = value.split("-").map(Number);
+  return new Date(year, month - 1, day, 23, 59, 59, 999).toISOString();
+}
+
+function localDateInputValue(value: string | null | undefined): string {
+  if (!value) {
+    return "";
+  }
+  const date = new Date(value);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function formatDate(value: string): string {
