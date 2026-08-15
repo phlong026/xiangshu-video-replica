@@ -102,6 +102,9 @@ export function FirstFrameSelection({
         } else {
           setStatus("");
         }
+        if (readOnly) {
+          return;
+        }
         const previews = await Promise.allSettled(
           payload.candidates.map(async (candidate) => {
             const download = await getAssetDownloadUrl(candidate.asset_id);
@@ -132,7 +135,7 @@ export function FirstFrameSelection({
         }
       }
     },
-    [projectId],
+    [projectId, readOnly],
   );
 
   useEffect(() => {
@@ -292,8 +295,15 @@ export function FirstFrameSelection({
               模拟输出：尚未调用 Apilio 真实模型。
             </p>
           ) : null}
+          {readOnly ? (
+            <p className="status-note">只读身份不加载素材预览。</p>
+          ) : null}
           <fieldset className="first-frame-options">
-            <legend>查看候选效果，选择一张作为已确认首帧</legend>
+            <legend>
+              {readOnly
+                ? "候选记录（素材预览需要下载权限）"
+                : "查看候选效果，选择一张作为已确认首帧"}
+            </legend>
             {payload.candidates.map((candidate, index) => (
               <FirstFrameOption
                 candidate={candidate}
@@ -307,6 +317,7 @@ export function FirstFrameSelection({
                 key={candidate.asset_id}
                 onSelect={() => setSelectedAssetId(candidate.asset_id)}
                 previewUrl={previewUrls[candidate.asset_id]}
+                readOnly={readOnly}
               />
             ))}
           </fieldset>
@@ -351,6 +362,7 @@ function FirstFrameOption({
   index,
   onSelect,
   previewUrl,
+  readOnly,
 }: {
   candidate: FirstFrameCandidate;
   checked: boolean;
@@ -358,6 +370,7 @@ function FirstFrameOption({
   index: number;
   onSelect: () => void;
   previewUrl: string | undefined;
+  readOnly: boolean;
 }) {
   return (
     <label
@@ -379,7 +392,7 @@ function FirstFrameOption({
         <img alt={`首帧候选 ${index + 1}`} src={previewUrl} />
       ) : (
         <span className="source-frame-placeholder">
-          预览加载失败，请重新生成
+          {readOnly ? "预览不可用" : "预览加载失败，请重新生成"}
         </span>
       )}
       <span>
