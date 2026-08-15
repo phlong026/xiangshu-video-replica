@@ -1,4 +1,10 @@
-import { type ChangeEvent, type FormEvent, useEffect, useState } from "react";
+import {
+  type ChangeEvent,
+  type FormEvent,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { AnalysisWorkspace } from "./AnalysisWorkspace";
 import {
   completeVideoUpload,
@@ -62,6 +68,7 @@ export function App() {
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [uploadStage, setUploadStage] = useState<UploadStage | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const uploadAbortRef = useRef<AbortController | null>(null);
   const [deletingProjectId, setDeletingProjectId] = useState("");
   const [activeAnalysisProject, setActiveAnalysisProject] =
     useState<Project | null>(null);
@@ -258,6 +265,8 @@ export function App() {
     setSetupError("");
     setSetupMessage("");
     setUploadProgress(0);
+    const controller = new AbortController();
+    uploadAbortRef.current = controller;
     setUploadStage(pendingProject ? "creating_upload" : "creating_project");
     try {
       const project =
@@ -269,7 +278,12 @@ export function App() {
       setUploadStage("creating_upload");
       const intent = await createVideoUploadIntent(project.id, referenceVideo);
       setUploadStage("uploading");
-      await uploadReferenceVideo(intent, referenceVideo, setUploadProgress);
+      await uploadReferenceVideo(
+        intent,
+        referenceVideo,
+        setUploadProgress,
+        controller.signal,
+      );
       setUploadStage("verifying");
       const completed = await completeVideoUpload(intent.asset_id);
       setUploadStage("analyzing");
@@ -307,8 +321,13 @@ export function App() {
       setUploadProgress(null);
       setUploadStage(null);
     } finally {
+      uploadAbortRef.current = null;
       setIsUploading(false);
     }
+  }
+
+  function handleCancelUpload() {
+    uploadAbortRef.current?.abort();
   }
 
   function handleContinueUpload(project: Project) {
@@ -367,115 +386,242 @@ export function App() {
     );
   }
 
+  const workspaceTitle =
+    page === "settings"
+      ? "设置"
+      : (activeAnalysisProject?.name ?? "项目工作台");
+  const breadcrumb =
+    page === "settings"
+      ? "工作台 / 设置"
+      : activeAnalysisProject
+        ? `项目 / ${activeAnalysisProject.name}`
+        : "工作台 / 项目";
+
+  function showWorkspace() {
+    setPage("projects");
+  }
+
+  function showProjects() {
+    setActiveAnalysisProject(null);
+    setPage("projects");
+  }
+
+  function showSettings() {
+    setActiveAnalysisProject(null);
+    setPage("settings");
+  }
+
   return (
     <main className="app-shell">
-      <header>
-        <div>
-          <span className="eyebrow">VIDEO REPLICA</span>
-          <h1>{page === "projects" ? "项目" : "设置"}</h1>
-        </div>
-        <div className="header-actions">
-          <nav className="top-nav" aria-label="主导航">
-            <button
-              type="button"
-              className={
-                page === "projects"
-                  ? "nav-button nav-button--active"
-                  : "nav-button"
-              }
-              onClick={() => setPage("projects")}
-            >
-              项目
-            </button>
-            <button
-              type="button"
-              className={
-                page === "settings"
-                  ? "nav-button nav-button--active"
-                  : "nav-button"
-              }
-              onClick={() => setPage("settings")}
-            >
-              设置
-            </button>
-          </nav>
-          <ServiceBadge state={serviceState} />
-        </div>
-      </header>
-      {page === "settings" ? <SettingsPanel /> : null}
-      {page === "projects" ? (
-        <>
-          <ProjectSetupPanel
-            isLoading={isProjectsLoading}
-            isUploading={isUploading}
-            deletingProjectId={deletingProjectId}
-            onContinueUpload={handleContinueUpload}
-            onDeleteProject={handleDeleteProject}
-            onOpenAnalysis={setActiveAnalysisProject}
-            onFileChange={handleReferenceVideoChange}
-            onProjectNameChange={setProjectName}
-            onSubmit={handleProjectSetup}
-            pendingProject={pendingProject}
-            projectName={projectName}
-            projects={projects}
-            projectsError={projectsError}
-            referenceVideo={referenceVideo}
-            setupError={setupError}
-            setupMessage={setupMessage}
-            uploadProgress={uploadProgress}
-            uploadStage={uploadStage}
-          />
-          {activeAnalysisProject ? (
+      <AppSidebar
+        activePage={page}
+        onProjects={showProjects}
+        onSettings={showSettings}
+        onWorkspace={showWorkspace}
+      />
+      <section className="workspace-stage">
+        <header className="workspace-header">
+          <div>
+            <p className="workspace-breadcrumb">{breadcrumb}</p>
+            <div className="workspace-title-row">
+              <h1>{workspaceTitle}</h1>
+              <ServiceBadge state={serviceState} />
+            </div>
+          </div>
+        </header>
+        <div className="workspace-body">
+          {page === "settings" ? <SettingsPanel /> : null}
+          {page === "projects" && activeAnalysisProject ? (
             <AnalysisWorkspace
               onClose={() => setActiveAnalysisProject(null)}
               project={activeAnalysisProject}
             />
-          ) : (
-            <section
-              className="task-records"
-              aria-labelledby="task-records-title"
-            >
-              <div className="section-heading">
-                <div>
-                  <span className="eyebrow">TASK RECORDS</span>
-                  <h2 id="task-records-title">任务记录</h2>
-                </div>
-                {activeBatchId ? (
-                  <span className="batch-id">{activeBatchId}</span>
-                ) : null}
-              </div>
-
-              <form className="batch-form" onSubmit={handleBatchSubmit}>
-                <label htmlFor="batch-id">Batch ID</label>
-                <div className="batch-input-row">
-                  <input
-                    id="batch-id"
-                    value={batchIdInput}
-                    placeholder="粘贴 generation batch id"
-                    onChange={(event) => setBatchIdInput(event.target.value)}
-                  />
-                  <button type="submit" disabled={!batchIdInput.trim()}>
-                    查询任务记录
-                  </button>
-                </div>
-              </form>
-
-              <BatchStatusMessage
-                error={batchError}
-                isLoading={isBatchLoading}
-                retryDelaySeconds={retryDelaySeconds}
+          ) : null}
+          {page === "projects" && !activeAnalysisProject ? (
+            <>
+              <ProjectSetupPanel
+                isLoading={isProjectsLoading}
+                isUploading={isUploading}
+                deletingProjectId={deletingProjectId}
+                onCancelUpload={handleCancelUpload}
+                onContinueUpload={handleContinueUpload}
+                onDeleteProject={handleDeleteProject}
+                onOpenAnalysis={setActiveAnalysisProject}
+                onFileChange={handleReferenceVideoChange}
+                onProjectNameChange={setProjectName}
+                onSubmit={handleProjectSetup}
+                pendingProject={pendingProject}
+                projectName={projectName}
+                projects={projects}
+                projectsError={projectsError}
+                referenceVideo={referenceVideo}
+                setupError={setupError}
+                setupMessage={setupMessage}
+                uploadProgress={uploadProgress}
+                uploadStage={uploadStage}
               />
+              <section
+                className="task-records"
+                aria-labelledby="task-records-title"
+              >
+                <div className="section-heading">
+                  <div>
+                    <span className="eyebrow">TASK RECORDS</span>
+                    <h2 id="task-records-title">任务记录</h2>
+                  </div>
+                  {activeBatchId ? (
+                    <span className="batch-id">{activeBatchId}</span>
+                  ) : null}
+                </div>
 
-              {batch ? (
-                <BatchPanel batch={batch} onReconcile={handleReconcile} />
-              ) : (
-                <EmptyBatchState />
-              )}
-            </section>
-          )}
-        </>
-      ) : null}
+                <form className="batch-form" onSubmit={handleBatchSubmit}>
+                  <label htmlFor="batch-id">Batch ID</label>
+                  <div className="batch-input-row">
+                    <input
+                      id="batch-id"
+                      value={batchIdInput}
+                      placeholder="粘贴 generation batch id"
+                      onChange={(event) => setBatchIdInput(event.target.value)}
+                    />
+                    <button type="submit" disabled={!batchIdInput.trim()}>
+                      查询任务记录
+                    </button>
+                  </div>
+                </form>
+
+                <BatchStatusMessage
+                  error={batchError}
+                  isLoading={isBatchLoading}
+                  retryDelaySeconds={retryDelaySeconds}
+                />
+
+                {batch ? (
+                  <BatchPanel batch={batch} onReconcile={handleReconcile} />
+                ) : (
+                  <EmptyBatchState />
+                )}
+              </section>
+            </>
+          ) : null}
+        </div>
+      </section>
     </main>
+  );
+}
+
+function AppSidebar({
+  activePage,
+  onProjects,
+  onSettings,
+  onWorkspace,
+}: {
+  activePage: Page;
+  onProjects: () => void;
+  onSettings: () => void;
+  onWorkspace: () => void;
+}) {
+  return (
+    <aside className="app-sidebar">
+      <div className="app-brand">
+        <span className="brand-mark" aria-hidden="true">
+          <svg
+            aria-hidden="true"
+            className="brand-mark__icon"
+            viewBox="0 0 24 24"
+          >
+            <path d="M8 6.8v10.4L17 12 8 6.8Z" />
+          </svg>
+        </span>
+        <span>
+          <strong>短视频复刻</strong>
+          <small className="app-brand__subtitle">内部创作工作台</small>
+        </span>
+      </div>
+      <nav className="sidebar-nav" aria-label="主导航">
+        <button
+          className={
+            activePage === "projects"
+              ? "nav-button nav-button--active"
+              : "nav-button"
+          }
+          onClick={onWorkspace}
+          type="button"
+        >
+          <SidebarIcon name="workspace" />
+          工作台
+        </button>
+        <button className="nav-button" onClick={onProjects} type="button">
+          <SidebarIcon name="projects" />
+          项目
+        </button>
+        <button
+          aria-label="人物库（开发中）"
+          className="nav-button nav-button--planned"
+          disabled
+          type="button"
+        >
+          <SidebarIcon name="characters" />
+          人物库
+          <small className="nav-planned-badge">开发中</small>
+        </button>
+        <button
+          className={
+            activePage === "settings"
+              ? "nav-button nav-button--active"
+              : "nav-button"
+          }
+          onClick={onSettings}
+          type="button"
+        >
+          <SidebarIcon name="settings" />
+          设置
+        </button>
+      </nav>
+      <div className="sidebar-user">
+        <span className="sidebar-user__avatar" aria-hidden="true">
+          <SidebarIcon name="user" />
+        </span>
+        <span>
+          <strong>内部员工</strong>
+          <small className="sidebar-user__subtitle">创作团队</small>
+        </span>
+      </div>
+    </aside>
+  );
+}
+
+function SidebarIcon({
+  name,
+}: {
+  name: "characters" | "projects" | "settings" | "user" | "workspace";
+}) {
+  if (name === "workspace") {
+    return (
+      <svg aria-hidden="true" className="sidebar-icon" viewBox="0 0 24 24">
+        <path d="m4 11 8-7 8 7v8a1 1 0 0 1-1 1h-5v-6h-4v6H5a1 1 0 0 1-1-1v-8Z" />
+      </svg>
+    );
+  }
+  if (name === "projects") {
+    return (
+      <svg aria-hidden="true" className="sidebar-icon" viewBox="0 0 24 24">
+        <path d="M3.5 7.5h17v12h-17v-12Zm0 0 2-3h5l2 3" />
+      </svg>
+    );
+  }
+  if (name === "characters" || name === "user") {
+    return (
+      <svg aria-hidden="true" className="sidebar-icon" viewBox="0 0 24 24">
+        <circle cx="12" cy="8" r="3.5" />
+        <path d="M5 20c.5-4 2.8-6 7-6s6.5 2 7 6" />
+      </svg>
+    );
+  }
+  return (
+    <svg aria-hidden="true" className="sidebar-icon" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="3" />
+      <path d="M12 2v3m0 14v3M2 12h3m14 0h3M4.9 4.9 7 7m10 10 2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1" />
+    </svg>
   );
 }
 
@@ -483,6 +629,7 @@ function ProjectSetupPanel({
   isLoading,
   isUploading,
   deletingProjectId,
+  onCancelUpload,
   onContinueUpload,
   onDeleteProject,
   onOpenAnalysis,
@@ -502,6 +649,7 @@ function ProjectSetupPanel({
   isLoading: boolean;
   isUploading: boolean;
   deletingProjectId: string;
+  onCancelUpload: () => void;
   onContinueUpload: (project: Project) => void;
   onDeleteProject: (project: Project) => void;
   onOpenAnalysis: (project: Project) => void;
@@ -568,7 +716,19 @@ function ProjectSetupPanel({
           </button>
         ) : null}
         {isUploading && uploadStage ? (
-          <UploadProgress stage={uploadStage} progress={uploadProgress} />
+          <div className="upload-status-actions">
+            <UploadProgress stage={uploadStage} progress={uploadProgress} />
+            {uploadStage === "verifying" ||
+            uploadStage === "analyzing" ? null : (
+              <button
+                className="secondary-button"
+                onClick={onCancelUpload}
+                type="button"
+              >
+                取消上传
+              </button>
+            )}
+          </div>
         ) : null}
         {setupError ? <p className="settings-error">{setupError}</p> : null}
         {setupMessage ? <p className="setup-success">{setupMessage}</p> : null}

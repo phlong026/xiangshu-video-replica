@@ -164,6 +164,7 @@ export function AnalysisWorkspace({
           返回项目
         </button>
       </div>
+      <WorkflowSteps />
       {isLoading ? <p className="status-note">正在读取视频拆解</p> : null}
       {error ? <p className="settings-error">{error}</p> : null}
       {!isLoading && !error ? (
@@ -183,50 +184,98 @@ export function AnalysisWorkspace({
               Key，并配置可用的 COS 或 OSS 存储后重新拆解。
             </p>
           ) : null}
-          <CharacterSelection projectId={project.id} />
-          <SourceFrameSelection
-            projectId={project.id}
-            referenceAssetId={project.reference_asset_id}
-          />
-          <FirstFrameSelection projectId={project.id} />
-          <div className="shot-card-list">
-            {shots.map((shot, index) => (
-              <fieldset className="shot-card" key={shot.shot_id}>
-                <legend>镜头 {index + 1}</legend>
-                <div className="shot-time-grid">
-                  <ShotInput
-                    label={`${shot.shot_id} 开始时间`}
-                    onChange={(value) => updateShot(index, "start_time", value)}
-                    type="number"
-                    value={String(shot.start_time)}
-                  />
-                  <ShotInput
-                    label={`${shot.shot_id} 结束时间`}
-                    onChange={(value) => updateShot(index, "end_time", value)}
-                    type="number"
-                    value={String(shot.end_time)}
-                  />
-                </div>
-                <div className="shot-field-grid">
-                  {SHOT_TEXT_FIELDS.map(({ key, label }) => (
-                    <ShotInput
-                      key={key}
-                      label={`${shot.shot_id} ${label}`}
-                      onChange={(value) => updateShot(index, key, value)}
-                      value={shot[key]}
-                    />
-                  ))}
-                </div>
-              </fieldset>
-            ))}
+          <div className="analysis-workspace-grid">
+            <div className="analysis-primary">
+              <SourceFrameSelection
+                projectId={project.id}
+                referenceAssetId={project.reference_asset_id}
+              />
+              <FirstFrameSelection projectId={project.id} />
+              <div className="shot-card-list">
+                {shots.map((shot, index) => (
+                  <fieldset className="shot-card" key={shot.shot_id}>
+                    <legend>镜头 {index + 1}</legend>
+                    <div className="shot-time-grid">
+                      <ShotInput
+                        label={`${shot.shot_id} 开始时间`}
+                        onChange={(value) =>
+                          updateShot(index, "start_time", value)
+                        }
+                        type="number"
+                        value={String(shot.start_time)}
+                      />
+                      <ShotInput
+                        label={`${shot.shot_id} 结束时间`}
+                        onChange={(value) =>
+                          updateShot(index, "end_time", value)
+                        }
+                        type="number"
+                        value={String(shot.end_time)}
+                      />
+                    </div>
+                    <div className="shot-field-grid">
+                      {SHOT_TEXT_FIELDS.map(({ key, label }) => (
+                        <ShotInput
+                          key={key}
+                          label={`${shot.shot_id} ${label}`}
+                          onChange={(value) => updateShot(index, key, value)}
+                          value={shot[key]}
+                        />
+                      ))}
+                    </div>
+                  </fieldset>
+                ))}
+              </div>
+              {saveMessage ? (
+                <p className="setup-success">{saveMessage}</p>
+              ) : null}
+              <button disabled={isSaving || !analysisId} type="submit">
+                {isSaving ? "正在保存" : "保存镜头卡片"}
+              </button>
+            </div>
+            <aside className="analysis-sidebar" aria-label="当前人物设定">
+              <CharacterSelection projectId={project.id} />
+            </aside>
           </div>
-          {saveMessage ? <p className="setup-success">{saveMessage}</p> : null}
-          <button disabled={isSaving || !analysisId} type="submit">
-            {isSaving ? "正在保存" : "保存镜头卡片"}
-          </button>
         </form>
       ) : null}
     </section>
+  );
+}
+
+function WorkflowSteps() {
+  const steps = [
+    "上传参考视频",
+    "视频拆解",
+    "选择源画面",
+    "首帧生成",
+    "生成结果",
+  ];
+
+  return (
+    <ol className="workflow-steps" aria-label="复刻流程">
+      {steps.map((step, index) => {
+        const isComplete = index < 2;
+        const isCurrent = index === 2;
+        return (
+          <li
+            className={
+              isCurrent
+                ? "workflow-step workflow-step--current"
+                : isComplete
+                  ? "workflow-step workflow-step--complete"
+                  : "workflow-step"
+            }
+            key={step}
+          >
+            <span aria-hidden="true">{isComplete ? "✓" : index + 1}</span>
+            <strong aria-current={isCurrent ? "step" : undefined}>
+              {step}
+            </strong>
+          </li>
+        );
+      })}
+    </ol>
   );
 }
 

@@ -91,7 +91,16 @@ describe("App", () => {
     render(<App />);
     fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
 
-    expect(screen.getByRole("heading", { name: "项目" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "项目工作台" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("navigation", { name: "主导航" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "工作台" })).toHaveClass(
+      "nav-button--active",
+    );
+    expect(screen.getByRole("button", { name: /人物库/ })).toBeDisabled();
     await waitFor(() =>
       expect(screen.getByText("本地服务已连接")).toBeInTheDocument(),
     );
@@ -296,9 +305,12 @@ describe("App", () => {
     fireEvent.click(await screen.findByRole("button", { name: "编辑拆解" }));
 
     expect(
+      screen.getByRole("heading", { name: "咖啡复刻" }),
+    ).toBeInTheDocument();
+    expect(
       await screen.findByRole("heading", { name: "镜头卡片" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("咖啡口播拆解")).toBeInTheDocument();
+    expect(await screen.findByText("咖啡口播拆解")).toBeInTheDocument();
     expect(
       screen.getByText("拆解来源：内置模拟拆解（尚未调用 Gemini）"),
     ).toBeInTheDocument();
@@ -583,6 +595,7 @@ describe("App", () => {
 
   it("keeps the upload stage visible while the file transfer is still pending", async () => {
     class PendingUploadRequest {
+      onabort: (() => void) | null = null;
       onerror: (() => void) | null = null;
       onload: (() => void) | null = null;
       ontimeout: (() => void) | null = null;
@@ -595,6 +608,9 @@ describe("App", () => {
       open() {}
       setRequestHeader() {}
       send() {}
+      abort() {
+        this.onabort?.();
+      }
     }
 
     vi.stubGlobal(
@@ -659,6 +675,8 @@ describe("App", () => {
     expect(
       screen.getByRole("progressbar", { name: "参考视频上传进度" }),
     ).toHaveAttribute("aria-valuetext", "正在上传参考视频，等待传输进度");
+    fireEvent.click(screen.getByRole("button", { name: "取消上传" }));
+    expect(await screen.findByText(/上传已取消/)).toBeInTheDocument();
   });
 
   it("keeps the created project available for an upload retry", async () => {

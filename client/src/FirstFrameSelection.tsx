@@ -336,7 +336,13 @@ function FirstFrameOption({
   previewUrl: string | undefined;
 }) {
   return (
-    <label className="source-frame-option">
+    <label
+      className={
+        checked
+          ? "source-frame-option source-frame-option--selected"
+          : "source-frame-option"
+      }
+    >
       <input
         checked={checked}
         disabled={disabled}

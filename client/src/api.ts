@@ -278,11 +278,14 @@ export function uploadReferenceVideo(
   intent: UploadIntent,
   file: File,
   onProgress: (progressPercent: number) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const request = new XMLHttpRequest();
     request.open(intent.method, intent.url);
-    request.timeout = REQUEST_TIMEOUT_MS * 12;
+    // Scale the timeout with the payload (~200KB/s) so large 50MB uploads are
+    // not cut off on slow links, while small files keep a tight bound.
+    request.timeout = Math.max(60_000, Math.ceil(file.size / 200));
     const devUserId =
       import.meta.env.VITE_DEV_USER_ID ??
       (import.meta.env.DEV ? "admin_1" : undefined);
@@ -307,6 +310,15 @@ export function uploadReferenceVideo(
     };
     request.onerror = () => reject(new Error("上传参考视频失败（网络错误）"));
     request.ontimeout = () => reject(new Error("上传参考视频失败（请求超时）"));
+    request.onabort = () => reject(new Error("上传已取消"));
+    if (signal) {
+      const onAbort = () => request.abort();
+      if (signal.aborted) {
+        request.abort();
+      } else {
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
+    }
     request.send(file);
   });
 }

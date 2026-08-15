@@ -201,34 +201,27 @@ export function SourceFrameSelection({
           技术画质参考只用于排序；请以人物可见性和替换效果为准，手动确认一张。
         </p>
       </div>
-      <label className="source-frame-timestamps">
-        重新取帧时间点（秒）
-        <input
-          aria-describedby="source-frame-time-hint"
-          aria-label="重新取帧时间点（秒）"
-          disabled={isSubmitting}
-          onChange={(event) => setTimestampsText(event.target.value)}
-          value={timestampsText}
-        />
-        <small id="source-frame-time-hint">
-          支持 1–3 个首 3 秒内的时间点，以逗号分隔。
-        </small>
-      </label>
-      <div className="source-frame-actions">
+      <div className="source-frame-toolbar">
+        <label className="source-frame-timestamps">
+          重新取帧时间点（秒）
+          <input
+            aria-describedby="source-frame-time-hint"
+            aria-label="重新取帧时间点（秒）"
+            disabled={isSubmitting}
+            onChange={(event) => setTimestampsText(event.target.value)}
+            value={timestampsText}
+          />
+          <small id="source-frame-time-hint">
+            支持 1–3 个首 3 秒内的时间点，以逗号分隔。
+          </small>
+        </label>
         <button
+          className="secondary-button"
           disabled={isSubmitting || !referenceAssetId}
           onClick={handleExtract}
           type="button"
         >
           {isSubmitting ? "正在处理" : "重新提取候选"}
-        </button>
-        <button
-          className="secondary-button"
-          disabled={isSubmitting || !selectedAssetId}
-          onClick={handleConfirm}
-          type="button"
-        >
-          确认源画面
         </button>
       </div>
       {isLoading ? <p className="status-note">正在读取候选源画面</p> : null}
@@ -240,7 +233,14 @@ export function SourceFrameSelection({
       <fieldset className="source-frame-options">
         <legend>选择一张用于后续人物置换和首帧生成</legend>
         {candidates.map((candidate, index) => (
-          <label className="source-frame-option" key={candidate.asset_id}>
+          <label
+            className={
+              selectedAssetId === candidate.asset_id
+                ? "source-frame-option source-frame-option--selected"
+                : "source-frame-option"
+            }
+            key={candidate.asset_id}
+          >
             <input
               checked={selectedAssetId === candidate.asset_id}
               disabled={!previewUrls[candidate.asset_id]}
@@ -272,6 +272,14 @@ export function SourceFrameSelection({
           </label>
         ))}
       </fieldset>
+      <button
+        className="source-frame-confirm"
+        disabled={isSubmitting || !selectedAssetId}
+        onClick={handleConfirm}
+        type="button"
+      >
+        确认源画面
+      </button>
     </section>
   );
 }
