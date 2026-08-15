@@ -105,11 +105,21 @@ CHARACTER_DOMAIN_SCHEMAS = {
         "view_type",
         "provider",
         "model",
+        "idempotency_key",
+        "request_hash",
+        "candidate_number",
         "request_snapshot_json",
         "status",
         "provider_task_id",
+        "attempt",
+        "max_attempts",
         "error_code",
+        "error_message_redacted",
         "cost_amount",
+        "next_poll_at",
+        "created_by",
+        "created_at",
+        "updated_at",
         "started_at",
         "completed_at",
     },
@@ -201,15 +211,56 @@ def test_empty_database_upgrade_creates_character_domain_constraints(tmp_path: P
         }
         version_indexes = {row[1] for row in conn.execute("PRAGMA index_list(character_versions)")}
         asset_indexes = {row[1] for row in conn.execute("PRAGMA index_list(character_assets)")}
+        task_columns = {
+            row[1]: row for row in conn.execute("PRAGMA table_info(character_generation_tasks)")
+        }
+        task_indexes = {
+            row[1] for row in conn.execute("PRAGMA index_list(character_generation_tasks)")
+        }
+        call_log_columns = {
+            row[1]: row for row in conn.execute("PRAGMA table_info(external_call_logs)")
+        }
+        call_log_foreign_keys = {
+            (row["from"], row["table"], row["to"])
+            for row in conn.execute("PRAGMA foreign_key_list(external_call_logs)")
+        }
         asset_columns = {
             row[1]: row for row in conn.execute("PRAGMA table_info(assets)").fetchall()
         }
 
-    assert version == "013_character_identity_assets"
+    assert version == "014_character_image_generation"
     assert CHARACTER_DOMAIN_TABLES.issubset(tables)
     assert "character_version_id" in main_character_columns
     assert "uq_character_versions_persona_version" in version_indexes
     assert "uq_character_assets_published_view" in asset_indexes
+    assert {
+        "idempotency_key",
+        "request_hash",
+        "candidate_number",
+        "attempt",
+        "max_attempts",
+        "locked_by",
+        "locked_until",
+        "next_poll_at",
+        "error_message_redacted",
+        "created_by",
+        "created_at",
+        "updated_at",
+    }.issubset(task_columns)
+    assert task_columns["idempotency_key"][3] == 1
+    assert task_columns["request_hash"][3] == 1
+    assert task_columns["candidate_number"][3] == 1
+    assert task_columns["attempt"][3] == 1
+    assert task_columns["max_attempts"][3] == 1
+    assert "idx_character_generation_tasks_lease" in task_indexes
+    assert "uq_character_generation_tasks_idempotency" in task_indexes
+    assert "uq_character_generation_tasks_candidate" in task_indexes
+    assert "character_generation_task_id" in call_log_columns
+    assert (
+        "character_generation_task_id",
+        "character_generation_tasks",
+        "id",
+    ) in call_log_foreign_keys
     assert asset_columns["project_id"][3] == 0
 
 
@@ -422,6 +473,114 @@ def test_character_identity_asset_downgrade_roundtrip_preserves_object_and_refer
     assert upgraded["project_id"] is None
     assert placeholder_project is None
     assert placeholder_user is None
+
+
+def test_character_image_generation_migration_downgrade_roundtrip(tmp_path: Path) -> None:
+    db_path = tmp_path / "character-image-generation-roundtrip.db"
+    command.upgrade(alembic_config(db_path), "head")
+
+    command.downgrade(alembic_config(db_path), "013_character_identity_assets")
+
+    with connect_database(db_path) as conn:
+        downgraded_version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+        downgraded_task_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(character_generation_tasks)")
+        }
+        downgraded_log_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(external_call_logs)")
+        }
+
+    assert downgraded_version == "013_character_identity_assets"
+    assert "idempotency_key" not in downgraded_task_columns
+    assert "character_generation_task_id" not in downgraded_log_columns
+
+    command.upgrade(alembic_config(db_path), "head")
+
+    with connect_database(db_path) as conn:
+        upgraded_version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+        upgraded_task_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(character_generation_tasks)")
+        }
+        upgraded_log_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(external_call_logs)")
+        }
+
+    assert upgraded_version == "014_character_image_generation"
+    assert "idempotency_key" in upgraded_task_columns
+    assert "character_generation_task_id" in upgraded_log_columns
+
+
+def test_character_image_generation_migration_backfills_existing_tasks(tmp_path: Path) -> None:
+    db_path = tmp_path / "character-image-generation-backfill.db"
+    config = alembic_config(db_path)
+    command.upgrade(config, "013_character_identity_assets")
+
+    with connect_database(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO users (id, username, display_name, role)
+            VALUES ('user-1', 'admin', '管理员', 'admin')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO person_identities (
+                id, display_name, authorization_status, authorization_scope,
+                source_quality_status, status, created_by
+            ) VALUES (
+                'identity-1', '角色', 'AUTHORIZED', '["character_generation"]',
+                'PASSED', 'ACTIVE', 'user-1'
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO character_personas (id, identity_id, name, created_by)
+            VALUES ('persona-1', 'identity-1', '角色人设', 'user-1')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO character_versions (
+                id, persona_id, version_number, provider, model, created_by
+            ) VALUES ('version-1', 'persona-1', 1, 'fake', 'fake-character-v1', 'user-1')
+            """
+        )
+        conn.executemany(
+            """
+            INSERT INTO character_generation_tasks (
+                id, character_version_id, view_type, provider, model
+            ) VALUES (?, 'version-1', 'FRONT_FACE', 'fake', 'fake-character-v1')
+            """,
+            [("legacy-task-1",), ("legacy-task-2",)],
+        )
+        conn.commit()
+
+    command.upgrade(config, "head")
+
+    with connect_database(db_path) as conn:
+        tasks = conn.execute(
+            """
+            SELECT id, idempotency_key, request_hash, candidate_number,
+                   attempt, max_attempts, created_at, updated_at
+            FROM character_generation_tasks
+            ORDER BY candidate_number
+            """
+        ).fetchall()
+
+    assert [row["candidate_number"] for row in tasks] == [1, 2]
+    assert [row["idempotency_key"] for row in tasks] == [
+        "legacy:legacy-task-1",
+        "legacy:legacy-task-2",
+    ]
+    assert [row["request_hash"] for row in tasks] == [
+        "legacy:legacy-task-1",
+        "legacy:legacy-task-2",
+    ]
+    assert all(row["attempt"] == 0 for row in tasks)
+    assert all(row["max_attempts"] == 3 for row in tasks)
+    assert all(row["created_at"] is not None for row in tasks)
+    assert all(row["updated_at"] is not None for row in tasks)
 
 
 def test_legacy_character_upgrade_preserves_revoked_and_expired_authorization(

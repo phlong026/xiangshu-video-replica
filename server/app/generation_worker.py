@@ -9,6 +9,10 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
+from app.character_image_generation import (
+    CharacterImageProvider,
+    run_next_character_generation_task,
+)
 from app.db import connect_database
 from app.generation import run_next_generation_task
 from app.media_routes import get_media_storage
@@ -22,19 +26,36 @@ def run_worker_once(
     *,
     worker_id: str,
     storage: StorageAdapter,
+    character_provider: CharacterImageProvider | None = None,
 ) -> int:
     """Process all currently eligible tasks, then return so SQLite connections stay short-lived."""
     processed = 0
-    while (
-        run_next_generation_task(
-            conn,
-            worker_id=worker_id,
-            provider=None,
-            storage=storage,
-        )
-        is not None
-    ):
-        processed += 1
+    while True:
+        processed_round = False
+        if (
+            run_next_generation_task(
+                conn,
+                worker_id=worker_id,
+                provider=None,
+                storage=storage,
+            )
+            is not None
+        ):
+            processed += 1
+            processed_round = True
+        if (
+            run_next_character_generation_task(
+                conn,
+                worker_id=worker_id,
+                provider=character_provider,
+                storage=storage,
+            )
+            is not None
+        ):
+            processed += 1
+            processed_round = True
+        if not processed_round:
+            break
     return processed
 
 

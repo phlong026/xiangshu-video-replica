@@ -747,6 +747,74 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/character-versions/{version_id}/generate-assets": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Generate Character Assets */
+    post: operations["generate_character_assets_api_character_versions__version_id__generate_assets_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/character-versions/{version_id}/generation-tasks": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Character Generation Tasks */
+    get: operations["read_character_generation_tasks_api_character_versions__version_id__generation_tasks_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/character-versions/{version_id}/assets": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Character Assets */
+    get: operations["read_character_assets_api_character_versions__version_id__assets_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/character-assets/{character_asset_id}/regenerate": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Regenerate Character Asset Route */
+    post: operations["regenerate_character_asset_route_api_character_assets__character_asset_id__regenerate_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/projects/{project_id}/source-frames/extract": {
     parameters: {
       query?: never;
@@ -983,6 +1051,46 @@ export interface components {
       /** Tasks */
       tasks: components["schemas"]["TaskResult"][];
     };
+    /** CharacterAsset */
+    CharacterAsset: {
+      /** Id */
+      id: string;
+      /** Character Version Id */
+      character_version_id: string;
+      /** Asset Id */
+      asset_id: string | null;
+      /**
+       * View Type
+       * @enum {string}
+       */
+      view_type:
+        | "FRONT_FACE"
+        | "FRONT_HALF"
+        | "FRONT_FULL"
+        | "LEFT_45"
+        | "RIGHT_45"
+        | "LEFT_SIDE"
+        | "RIGHT_SIDE"
+        | "IMPORTED_REFERENCE";
+      /** Candidate Number */
+      candidate_number: number;
+      /** Generation Task Id */
+      generation_task_id: string | null;
+      /** Auto Quality Json */
+      auto_quality_json: Record<string, never>;
+      /**
+       * Review Status
+       * @enum {string}
+       */
+      review_status: "NOT_REVIEWED" | "APPROVED" | "REJECTED";
+      /** Is Published Selection */
+      is_published_selection: boolean;
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string;
+    };
     /** CharacterCreateRequest */
     CharacterCreateRequest: {
       /** Name */
@@ -999,6 +1107,94 @@ export interface components {
        */
       is_active: boolean;
     };
+    /** CharacterGenerationRequest */
+    CharacterGenerationRequest: {
+      /** Idempotency Key */
+      idempotency_key: string;
+      /** View Types */
+      view_types?:
+        | (
+            | "FRONT_FACE"
+            | "FRONT_HALF"
+            | "FRONT_FULL"
+            | "LEFT_45"
+            | "RIGHT_45"
+            | "LEFT_SIDE"
+            | "RIGHT_SIDE"
+          )[]
+        | null;
+      /**
+       * Candidates Per View
+       * @default 1
+       */
+      candidates_per_view: number;
+    };
+    /** CharacterGenerationTask */
+    CharacterGenerationTask: {
+      /** Id */
+      id: string;
+      /** Character Version Id */
+      character_version_id: string;
+      /**
+       * View Type
+       * @enum {string}
+       */
+      view_type:
+        | "FRONT_FACE"
+        | "FRONT_HALF"
+        | "FRONT_FULL"
+        | "LEFT_45"
+        | "RIGHT_45"
+        | "LEFT_SIDE"
+        | "RIGHT_SIDE";
+      /** Provider */
+      provider: string;
+      /** Model */
+      model: string;
+      /** Idempotency Key */
+      idempotency_key: string;
+      /** Request Hash */
+      request_hash: string;
+      /** Candidate Number */
+      candidate_number: number;
+      /** Request Snapshot Json */
+      request_snapshot_json: Record<string, never>;
+      /**
+       * Status
+       * @enum {string}
+       */
+      status: "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED";
+      /** Provider Task Id */
+      provider_task_id: string | null;
+      /** Attempt */
+      attempt: number;
+      /** Max Attempts */
+      max_attempts: number;
+      /** Error Code */
+      error_code: string | null;
+      /** Error Message Redacted */
+      error_message_redacted: string | null;
+      /** Cost Amount */
+      cost_amount: number | null;
+      /** Next Poll At */
+      next_poll_at: string | null;
+      /** Created By */
+      created_by: string | null;
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string;
+      /**
+       * Updated At
+       * Format: date-time
+       */
+      updated_at: string;
+      /** Started At */
+      started_at: string | null;
+      /** Completed At */
+      completed_at: string | null;
+    };
     /** CharacterPersona */
     CharacterPersona: {
       /** Id */
@@ -1012,9 +1208,7 @@ export interface components {
       /** Scene Description */
       scene_description: string | null;
       /** Appearance Constraints Json */
-      appearance_constraints_json: {
-        [key: string]: unknown;
-      };
+      appearance_constraints_json: Record<string, never>;
       /** Costume Description */
       costume_description: string | null;
       /** Default Background */
@@ -1047,9 +1241,7 @@ export interface components {
       /** Scene Description */
       scene_description?: string | null;
       /** Appearance Constraints Json */
-      appearance_constraints_json?: {
-        [key: string]: unknown;
-      };
+      appearance_constraints_json?: Record<string, never>;
       /** Costume Description */
       costume_description?: string | null;
       /** Default Background */
@@ -1070,9 +1262,7 @@ export interface components {
       /** Scene Description */
       scene_description?: string | null;
       /** Appearance Constraints Json */
-      appearance_constraints_json?: {
-        [key: string]: unknown;
-      } | null;
+      appearance_constraints_json?: Record<string, never> | null;
       /** Costume Description */
       costume_description?: string | null;
       /** Default Background */
@@ -1083,6 +1273,11 @@ export interface components {
       negative_prompt?: string | null;
       /** Usage Scope Json */
       usage_scope_json?: string[] | null;
+    };
+    /** CharacterRegenerationRequest */
+    CharacterRegenerationRequest: {
+      /** Idempotency Key */
+      idempotency_key: string;
     };
     /** CharacterResponse */
     CharacterResponse: {
@@ -1147,17 +1342,13 @@ export interface components {
       /** Source Sha256 */
       source_sha256: string | null;
       /** Persona Snapshot Json */
-      persona_snapshot_json: {
-        [key: string]: unknown;
-      };
+      persona_snapshot_json: Record<string, never>;
       /** Provider */
       provider: string | null;
       /** Model */
       model: string | null;
       /** Generation Params Json */
-      generation_params_json: {
-        [key: string]: unknown;
-      };
+      generation_params_json: Record<string, never>;
       /** Template Version */
       template_version: string | null;
       /** Template Hash */
@@ -1191,9 +1382,7 @@ export interface components {
       /** Model */
       model: string;
       /** Generation Params Json */
-      generation_params_json?: {
-        [key: string]: unknown;
-      };
+      generation_params_json?: Record<string, never>;
     };
     /** CompleteIdentityUploadRequest */
     CompleteIdentityUploadRequest: {
@@ -1377,6 +1566,7 @@ export interface components {
       /**
        * Status
        * @constant
+       * @enum {string}
        */
       status: "ok";
       /** Service */
@@ -1477,9 +1667,7 @@ export interface components {
       /** Version Number */
       version_number: number;
       /** Character Snapshot */
-      character_snapshot: {
-        [key: string]: unknown;
-      };
+      character_snapshot: Record<string, never>;
     };
     /** ProjectResponse */
     ProjectResponse: {
@@ -1610,16 +1798,12 @@ export interface components {
       /** Result Asset Id */
       result_asset_id: string | null;
       /** Prompt Snapshot */
-      prompt_snapshot: {
-        [key: string]: unknown;
-      } | null;
+      prompt_snapshot: Record<string, never> | null;
     };
     /** UpdateShotCardsRequest */
     UpdateShotCardsRequest: {
       /** Shots */
-      shots: {
-        [key: string]: unknown;
-      }[];
+      shots: Record<string, never>[];
     };
     /** UploadIntentRequest */
     UploadIntentRequest: {
@@ -1670,31 +1854,6 @@ export interface components {
       msg: string;
       /** Error Type */
       type: string;
-      /** Input */
-      input?: unknown;
-      /** Context */
-      ctx?: Record<string, never>;
-    };
-    /** VersionResponse */
-    VersionResponse: {
-      /** Id */
-      id: string;
-      /** Project Id */
-      project_id: string;
-      /** Asset Id */
-      asset_id: string | null;
-      /** Kind */
-      kind: string;
-      /** Version Number */
-      version_number: number;
-      /** Payload */
-      payload: {
-        [key: string]: unknown;
-      };
-      /** Created By User Id */
-      created_by_user_id: string | null;
-      /** Created At */
-      created_at: string;
     };
     /** VersionResult */
     VersionResult: {
@@ -1709,9 +1868,7 @@ export interface components {
       /** Version Number */
       version_number: number;
       /** Payload */
-      payload: {
-        [key: string]: unknown;
-      };
+      payload: Record<string, never>;
       /** Created By User Id */
       created_by_user_id: string | null;
       /** Created At */
@@ -1722,46 +1879,23 @@ export interface components {
       /** Duration Seconds */
       duration_seconds: number;
     };
-    /** CharacterAsset */
-    CharacterAsset: {
+    /** VersionResponse */
+    app__first_frame_routes__VersionResponse: {
       /** Id */
       id: string;
-      /** Character Version Id */
-      character_version_id: string;
+      /** Project Id */
+      project_id: string;
       /** Asset Id */
       asset_id: string | null;
-      /**
-       * View Type
-       * @enum {string}
-       */
-      view_type:
-        | "FRONT_FACE"
-        | "FRONT_HALF"
-        | "FRONT_FULL"
-        | "LEFT_45"
-        | "RIGHT_45"
-        | "LEFT_SIDE"
-        | "RIGHT_SIDE"
-        | "IMPORTED_REFERENCE";
-      /** Candidate Number */
-      candidate_number: number;
-      /** Generation Task Id */
-      generation_task_id: string | null;
-      /** Auto Quality Json */
-      auto_quality_json: {
-        [key: string]: unknown;
-      };
-      /**
-       * Review Status
-       * @enum {string}
-       */
-      review_status: "NOT_REVIEWED" | "APPROVED" | "REJECTED";
-      /** Is Published Selection */
-      is_published_selection: boolean;
-      /**
-       * Created At
-       * Format: date-time
-       */
+      /** Kind */
+      kind: string;
+      /** Version Number */
+      version_number: number;
+      /** Payload */
+      payload: Record<string, never>;
+      /** Created By User Id */
+      created_by_user_id: string | null;
+      /** Created At */
       created_at: string;
     };
     /** CharacterAssetReview */
@@ -1787,48 +1921,6 @@ export interface components {
        */
       created_at: string;
     };
-    /** CharacterGenerationTask */
-    CharacterGenerationTask: {
-      /** Id */
-      id: string;
-      /** Character Version Id */
-      character_version_id: string;
-      /**
-       * View Type
-       * @enum {string}
-       */
-      view_type:
-        | "FRONT_FACE"
-        | "FRONT_HALF"
-        | "FRONT_FULL"
-        | "LEFT_45"
-        | "RIGHT_45"
-        | "LEFT_SIDE"
-        | "RIGHT_SIDE";
-      /** Provider */
-      provider: string;
-      /** Model */
-      model: string;
-      /** Request Snapshot Json */
-      request_snapshot_json: {
-        [key: string]: unknown;
-      };
-      /**
-       * Status
-       * @enum {string}
-       */
-      status: "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED";
-      /** Provider Task Id */
-      provider_task_id: string | null;
-      /** Error Code */
-      error_code: string | null;
-      /** Cost Amount */
-      cost_amount: number | null;
-      /** Started At */
-      started_at: string | null;
-      /** Completed At */
-      completed_at: string | null;
-    };
     /** CharacterReferenceSelection */
     CharacterReferenceSelection: {
       /** Id */
@@ -1844,9 +1936,7 @@ export interface components {
       /** Selected Asset Ids Json */
       selected_asset_ids_json: string[];
       /** Recommendation Reason Json */
-      recommendation_reason_json: {
-        [key: string]: unknown;
-      };
+      recommendation_reason_json: Record<string, never>;
       /** Selected By */
       selected_by: string | null;
       /**
@@ -2385,9 +2475,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          "application/json": {
-            [key: string]: unknown;
-          };
+          "application/json": Record<string, never>;
         };
       };
       /** @description Validation Error */
@@ -2424,9 +2512,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          "application/json": {
-            [key: string]: unknown;
-          };
+          "application/json": Record<string, never>;
         };
       };
       /** @description Validation Error */
@@ -2762,7 +2848,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          "application/json": components["schemas"]["VersionResponse"];
+          "application/json": components["schemas"]["app__first_frame_routes__VersionResponse"];
         };
       };
       /** @description Validation Error */
@@ -2795,7 +2881,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          "application/json": components["schemas"]["VersionResponse"];
+          "application/json": components["schemas"]["app__first_frame_routes__VersionResponse"];
         };
       };
       /** @description Validation Error */
@@ -2828,7 +2914,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          "application/json": components["schemas"]["VersionResponse"];
+          "application/json": components["schemas"]["app__first_frame_routes__VersionResponse"];
         };
       };
       /** @description Validation Error */
@@ -2861,7 +2947,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          "application/json": components["schemas"]["VersionResponse"];
+          "application/json": components["schemas"]["app__first_frame_routes__VersionResponse"];
         };
       };
       /** @description Validation Error */
@@ -2898,7 +2984,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          "application/json": components["schemas"]["VersionResponse"];
+          "application/json": components["schemas"]["app__first_frame_routes__VersionResponse"];
         };
       };
       /** @description Validation Error */
@@ -3744,6 +3830,146 @@ export interface operations {
       };
     };
   };
+  generate_character_assets_api_character_versions__version_id__generate_assets_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        version_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["CharacterGenerationRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      202: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["CharacterGenerationTask"][];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_character_generation_tasks_api_character_versions__version_id__generation_tasks_get: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        version_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["CharacterGenerationTask"][];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_character_assets_api_character_versions__version_id__assets_get: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        version_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["CharacterAsset"][];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  regenerate_character_asset_route_api_character_assets__character_asset_id__regenerate_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        character_asset_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["CharacterRegenerationRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      202: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["CharacterGenerationTask"][];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   extract_project_source_frames_api_projects__project_id__source_frames_extract_post: {
     parameters: {
       query?: never;
@@ -3767,7 +3993,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          "application/json": components["schemas"]["VersionResponse"];
+          "application/json": components["schemas"]["app__first_frame_routes__VersionResponse"];
         };
       };
       /** @description Validation Error */
@@ -3800,7 +4026,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          "application/json": components["schemas"]["VersionResponse"];
+          "application/json": components["schemas"]["app__first_frame_routes__VersionResponse"];
         };
       };
       /** @description Validation Error */
@@ -3837,7 +4063,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          "application/json": components["schemas"]["VersionResponse"];
+          "application/json": components["schemas"]["app__first_frame_routes__VersionResponse"];
         };
       };
       /** @description Validation Error */
@@ -3870,7 +4096,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          "application/json": components["schemas"]["VersionResponse"];
+          "application/json": components["schemas"]["app__first_frame_routes__VersionResponse"];
         };
       };
       /** @description Validation Error */
@@ -3907,7 +4133,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          "application/json": components["schemas"]["VersionResponse"];
+          "application/json": components["schemas"]["app__first_frame_routes__VersionResponse"];
         };
       };
       /** @description Validation Error */
@@ -3940,7 +4166,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          "application/json": components["schemas"]["VersionResponse"];
+          "application/json": components["schemas"]["app__first_frame_routes__VersionResponse"];
         };
       };
       /** @description Validation Error */
@@ -3973,7 +4199,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          "application/json": components["schemas"]["VersionResponse"][];
+          "application/json": components["schemas"]["app__first_frame_routes__VersionResponse"][];
         };
       };
       /** @description Validation Error */
@@ -4010,7 +4236,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          "application/json": components["schemas"]["VersionResponse"];
+          "application/json": components["schemas"]["app__first_frame_routes__VersionResponse"];
         };
       };
       /** @description Validation Error */
@@ -4043,7 +4269,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          "application/json": components["schemas"]["VersionResponse"];
+          "application/json": components["schemas"]["app__first_frame_routes__VersionResponse"];
         };
       };
       /** @description Validation Error */

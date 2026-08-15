@@ -112,7 +112,7 @@ def test_settings_migration_creates_tables_and_defaults(tmp_path: Path, settings
             """
         ).fetchone()
 
-    assert version == "013_character_identity_assets"
+    assert version == "014_character_image_generation"
     assert {"provider_settings", "runtime_settings"}.issubset(tables)
     assert dict(runtime) == {
         "max_generation_count_per_batch": 4,
