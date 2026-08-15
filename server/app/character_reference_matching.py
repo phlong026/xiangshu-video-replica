@@ -183,6 +183,7 @@ def current_character_reference_selection_for_generation(
     project_id: str,
     source_frame_version_id: str,
     expected_selection_id: str | None = None,
+    require_usable_character: bool = True,
 ) -> CharacterReferenceSelection | None:
     row = latest_character_reference_selection_row(conn, project_id=project_id)
     if row is None:
@@ -216,12 +217,17 @@ def current_character_reference_selection_for_generation(
             or not 1 <= len(selection.selected_asset_ids_json) <= 4
             or len(set(selection.selected_asset_ids_json)) != len(selection.selected_asset_ids_json)
             or any(asset_id not in published_ids for asset_id in selection.selected_asset_ids_json)
-            or str(version["status"]) != "PUBLISHED"
-            or not identity_values_are_current(
-                status=identity["status"],
-                authorization_status=identity["authorization_status"],
-                authorization_expires_at=identity["authorization_expires_at"],
-                source_quality_status=identity["source_quality_status"],
+            or (
+                require_usable_character
+                and (
+                    str(version["status"]) != "PUBLISHED"
+                    or not identity_values_are_current(
+                        status=identity["status"],
+                        authorization_status=identity["authorization_status"],
+                        authorization_expires_at=identity["authorization_expires_at"],
+                        source_quality_status=identity["source_quality_status"],
+                    )
+                )
             )
         ):
             raise stale_reference_selection()

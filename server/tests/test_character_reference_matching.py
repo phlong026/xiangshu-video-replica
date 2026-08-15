@@ -630,3 +630,63 @@ def test_first_frame_generation_uses_frozen_reference_selection_not_new_persona_
     )
     assert stale.status_code == 409
     assert stale.json()["detail"]["code"] == "FIRST_FRAME_CANDIDATES_STALE"
+
+
+@pytest.mark.parametrize("character_invalidator", ["version_archived", "authorization_expired"])
+def test_character_invalidation_blocks_new_generation_but_preserves_first_frame_history(
+    client: TestClient,
+    db_path: Path,
+    character_invalidator: str,
+) -> None:
+    selection = client.post(
+        "/api/projects/project-owned/character-reference-selection",
+        headers=headers("employee_1"),
+        json={},
+    )
+    assert selection.status_code == 201
+    generated = client.post(
+        "/api/projects/project-owned/first-frames/generate",
+        headers=headers("employee_1"),
+        json={"model": "nano-banana-pro-2k", "quantity": 1},
+    )
+    assert generated.status_code == 200
+    first_frame_asset_id = generated.json()["payload"]["candidates"][0]["asset_id"]
+    confirmed = client.post(
+        "/api/projects/project-owned/first-frames/confirm",
+        headers=headers("employee_1"),
+        json={"first_frame_asset_id": first_frame_asset_id},
+    )
+    assert confirmed.status_code == 200
+
+    with connect_database(db_path) as conn:
+        if character_invalidator == "version_archived":
+            conn.execute(
+                "UPDATE character_versions SET status = 'ARCHIVED' "
+                "WHERE id = 'character-version-v1'"
+            )
+        else:
+            conn.execute(
+                "UPDATE person_identities SET authorization_expires_at = '2020-01-01T00:00:00Z' "
+                "WHERE id = 'identity-1'"
+            )
+        conn.commit()
+
+    historical_candidates = client.get(
+        "/api/projects/project-owned/first-frames/latest",
+        headers=headers("employee_1"),
+    )
+    historical_selection = client.get(
+        "/api/projects/project-owned/first-frames/selection/latest",
+        headers=headers("employee_1"),
+    )
+    new_generation = client.post(
+        "/api/projects/project-owned/first-frames/generate",
+        headers=headers("employee_1"),
+        json={"model": "nano-banana-pro-2k", "quantity": 1},
+    )
+
+    assert historical_candidates.status_code == 200
+    assert historical_candidates.json()["id"] == generated.json()["id"]
+    assert historical_selection.status_code == 200
+    assert historical_selection.json()["id"] == confirmed.json()["id"]
+    assert new_generation.status_code == 409

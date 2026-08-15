@@ -493,6 +493,7 @@ def generate_first_frame_candidates(
         main_character_version_id=character_inputs.main_character_version_id,
         character_reference_selection_id=(character_inputs.character_reference_selection_id),
         character_version_id=character_inputs.character_version_id,
+        require_usable_character=True,
     )
 
     created_assets: list[tuple[str, str]] = []
@@ -797,6 +798,7 @@ def require_current_first_frame_inputs(
     main_character_version_id: str,
     character_reference_selection_id: str | None = None,
     character_version_id: str | None = None,
+    require_usable_character: bool = False,
 ) -> None:
     if character_reference_selection_id is not None and character_version_id is not None:
         try:
@@ -806,6 +808,7 @@ def require_current_first_frame_inputs(
                 project_id=project_id,
                 source_frame_version_id=source_frame_selection_version_id,
                 expected_selection_id=character_reference_selection_id,
+                require_usable_character=require_usable_character,
             )
         except HTTPException as exc:
             if exc.status_code in {404, 409}:
