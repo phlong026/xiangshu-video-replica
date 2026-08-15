@@ -94,6 +94,8 @@ class CharacterVersion(CharacterContract):
     required_view_types_json: list[RequiredCharacterViewType]
     published_by: str | None
     published_at: datetime | None
+    publication_snapshot_json: dict[str, object] | None
+    publication_hash: str | None
     created_by: str | None
     created_at: datetime
 

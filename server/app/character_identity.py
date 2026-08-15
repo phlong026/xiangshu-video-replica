@@ -1336,6 +1336,12 @@ def version_from_row(row: sqlite3.Row, *, redact_source: bool) -> CharacterVersi
         ),
         published_by=optional_text(row["published_by"]),
         published_at=parse_optional_datetime(row["published_at"]),
+        publication_snapshot_json=(
+            None
+            if row["publication_snapshot_json"] is None
+            else decode_object(row["publication_snapshot_json"])
+        ),
+        publication_hash=optional_text(row["publication_hash"]),
         created_by=optional_text(row["created_by"]),
         created_at=parse_datetime(str(row["created_at"])),
     )
