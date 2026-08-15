@@ -1179,10 +1179,10 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "alembic", specifier = "==1.17.2" },
-    { name = "cos-python-sdk-v5", specifier = ">=1.9.44" },
+    { name = "cos-python-sdk-v5", specifier = "==1.9.44" },
     { name = "cryptography", specifier = "==50.0.0" },
     { name = "fastapi", specifier = "==0.141.1" },
-    { name = "oss2", specifier = ">=2.19.1" },
+    { name = "oss2", specifier = "==2.19.1" },
     { name = "uvicorn", specifier = "==0.52.2" },
 ]
 
