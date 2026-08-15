@@ -85,6 +85,7 @@ describe("Fake provider E2E contract", () => {
 
     render(<App />);
     fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+    fireEvent.click(await screen.findByRole("button", { name: "任务记录" }));
     fireEvent.change(await screen.findByLabelText("Batch ID"), {
       target: { value: " batch-fake-e2e " },
     });

@@ -24,10 +24,12 @@ import {
   startVideoAnalysis,
   uploadReferenceVideo,
 } from "./api";
+import { CharacterLibrary } from "./CharacterLibrary";
 import { SettingsPanel } from "./SettingsPanel";
 import "./styles.css";
 
-type Page = "login" | "projects" | "settings";
+type WorkspacePage = "characters" | "new" | "projects" | "settings" | "tasks";
+type Page = "login" | WorkspacePage;
 type ServiceState = "checking" | "connected" | "disconnected";
 type UploadStage =
   | "creating_project"
@@ -80,7 +82,6 @@ export function App() {
   const [activeAnalysisProject, setActiveAnalysisProject] =
     useState<Project | null>(null);
   const canWrite = currentUser?.role !== "auditor";
-  const isAdmin = currentUser?.role === "admin";
 
   useEffect(() => {
     function handleSessionExpired() {
@@ -97,6 +98,25 @@ export function App() {
       window.removeEventListener(SESSION_EXPIRED_EVENT, handleSessionExpired);
     };
   }, []);
+
+  useEffect(() => {
+    if (!currentUser) {
+      return;
+    }
+    const authenticatedUser = currentUser;
+    function syncDeepLink() {
+      const nextPage = workspacePageFromHash(authenticatedUser);
+      ensureWorkspaceHash(nextPage);
+      setActiveAnalysisProject(null);
+      setPage(nextPage);
+    }
+    window.addEventListener("hashchange", syncDeepLink);
+    window.addEventListener("popstate", syncDeepLink);
+    return () => {
+      window.removeEventListener("hashchange", syncDeepLink);
+      window.removeEventListener("popstate", syncDeepLink);
+    };
+  }, [currentUser]);
 
   useEffect(() => {
     if (page === "login" || !currentUser) {
@@ -132,7 +152,7 @@ export function App() {
   }, [page, currentUser]);
 
   useEffect(() => {
-    if (page !== "projects" || activeBatchId) {
+    if (page !== "tasks" || activeBatchId) {
       return;
     }
 
@@ -174,7 +194,7 @@ export function App() {
   }, [page]);
 
   useEffect(() => {
-    if (page !== "projects" || !activeBatchId) {
+    if (page !== "tasks" || !activeBatchId) {
       return;
     }
 
@@ -282,7 +302,7 @@ export function App() {
       return;
     }
     if (!referenceVideo) {
-      setSetupError("请选择 4–15 秒的 MP4 或 MOV 参考视频。");
+      setSetupError("请选择 4 至 15 秒的 MP4 或 MOV 参考视频。");
       return;
     }
 
@@ -362,6 +382,9 @@ export function App() {
   }
 
   function handleContinueUpload(project: Project) {
+    window.history.pushState(null, "", "#new");
+    setActiveAnalysisProject(null);
+    setPage("new");
     setPendingProject(project);
     setProjectName(project.name);
     setReferenceVideo(null);
@@ -412,8 +435,10 @@ export function App() {
       setSessionMessage("");
       try {
         const user = await getCurrentUser();
+        const nextPage = workspacePageFromHash(user);
+        ensureWorkspaceHash(nextPage);
         setCurrentUser(user);
-        setPage("projects");
+        setPage(nextPage);
       } catch (error) {
         setCurrentUser(null);
         setLoginError(loginErrorMessage(error));
@@ -450,32 +475,27 @@ export function App() {
     return null;
   }
 
+  const workspacePage = page as WorkspacePage;
+  const currentRole = currentUser.role;
   const workspaceTitle =
-    page === "settings"
-      ? "设置"
-      : (activeAnalysisProject?.name ?? "项目工作台");
-  const breadcrumb =
-    page === "settings"
-      ? "工作台 / 设置"
-      : activeAnalysisProject
-        ? `项目 / ${activeAnalysisProject.name}`
-        : "工作台 / 项目";
+    activeAnalysisProject?.name ?? pageTitle(workspacePage);
+  const breadcrumb = activeAnalysisProject
+    ? `项目 / ${activeAnalysisProject.name}`
+    : `工作台 / ${pageTitle(workspacePage)}`;
 
-  function showWorkspace() {
-    setPage("projects");
-  }
-
-  function showProjects() {
-    setActiveAnalysisProject(null);
-    setPage("projects");
-  }
-
-  function showSettings() {
-    if (!isAdmin) {
+  function navigateTo(nextPage: WorkspacePage) {
+    if (!workspacePageAllowed(nextPage, currentRole)) {
       return;
     }
+    window.history.pushState(null, "", `#${nextPage}`);
     setActiveAnalysisProject(null);
-    setPage("settings");
+    setPage(nextPage);
+  }
+
+  function openAnalysis(project: Project) {
+    window.history.pushState(null, "", "#projects");
+    setPage("projects");
+    setActiveAnalysisProject(project);
   }
 
   return (
@@ -483,10 +503,7 @@ export function App() {
       <AppSidebar
         activePage={page}
         currentUser={currentUser}
-        isAdmin={isAdmin}
-        onProjects={showProjects}
-        onSettings={showSettings}
-        onWorkspace={showWorkspace}
+        onNavigate={navigateTo}
       />
       <section className="workspace-stage">
         <header className="workspace-header">
@@ -500,6 +517,9 @@ export function App() {
         </header>
         <div className="workspace-body">
           {page === "settings" ? <SettingsPanel /> : null}
+          {page === "characters" ? (
+            <CharacterLibrary userRole={currentUser.role} />
+          ) : null}
           {page === "projects" && activeAnalysisProject ? (
             <AnalysisWorkspace
               onClose={() => setActiveAnalysisProject(null)}
@@ -507,76 +527,77 @@ export function App() {
               readOnly={!canWrite}
             />
           ) : null}
-          {page === "projects" && !activeAnalysisProject ? (
-            <>
-              <ProjectSetupPanel
-                isLoading={isProjectsLoading}
-                isUploading={isUploading}
-                deletingProjectId={deletingProjectId}
-                canWrite={canWrite}
-                onCancelUpload={handleCancelUpload}
-                onContinueUpload={handleContinueUpload}
-                onDeleteProject={handleDeleteProject}
-                onOpenAnalysis={setActiveAnalysisProject}
-                onFileChange={handleReferenceVideoChange}
-                onProjectNameChange={setProjectName}
-                onSubmit={handleProjectSetup}
-                pendingProject={pendingProject}
-                projectName={projectName}
-                projects={projects}
-                projectsError={projectsError}
-                referenceVideo={referenceVideo}
-                setupError={setupError}
-                setupMessage={setupMessage}
-                uploadProgress={uploadProgress}
-                uploadStage={uploadStage}
-              />
-              <section
-                className="task-records"
-                aria-labelledby="task-records-title"
-              >
-                <div className="section-heading">
-                  <div>
-                    <span className="eyebrow">TASK RECORDS</span>
-                    <h2 id="task-records-title">任务记录</h2>
-                  </div>
-                  {activeBatchId ? (
-                    <span className="batch-id">{activeBatchId}</span>
-                  ) : null}
+          {(page === "projects" || page === "new") && !activeAnalysisProject ? (
+            <ProjectSetupPanel
+              mode={page === "new" ? "create" : "list"}
+              isLoading={isProjectsLoading}
+              isUploading={isUploading}
+              deletingProjectId={deletingProjectId}
+              canWrite={canWrite}
+              onCancelUpload={handleCancelUpload}
+              onContinueUpload={handleContinueUpload}
+              onDeleteProject={handleDeleteProject}
+              onOpenAnalysis={openAnalysis}
+              onFileChange={handleReferenceVideoChange}
+              onProjectNameChange={setProjectName}
+              onSubmit={handleProjectSetup}
+              pendingProject={pendingProject}
+              projectName={projectName}
+              projects={projects}
+              projectsError={projectsError}
+              referenceVideo={referenceVideo}
+              setupError={setupError}
+              setupMessage={setupMessage}
+              uploadProgress={uploadProgress}
+              uploadStage={uploadStage}
+            />
+          ) : null}
+          {page === "tasks" ? (
+            <section
+              className="task-records"
+              aria-labelledby="task-records-title"
+            >
+              <div className="section-heading">
+                <div>
+                  <span className="eyebrow">TASK RECORDS</span>
+                  <h2 id="task-records-title">任务记录</h2>
                 </div>
+                {activeBatchId ? (
+                  <span className="batch-id">{activeBatchId}</span>
+                ) : null}
+              </div>
 
-                <form className="batch-form" onSubmit={handleBatchSubmit}>
-                  <label htmlFor="batch-id">Batch ID</label>
-                  <div className="batch-input-row">
-                    <input
-                      id="batch-id"
-                      value={batchIdInput}
-                      placeholder="粘贴 generation batch id"
-                      onChange={(event) => setBatchIdInput(event.target.value)}
-                    />
-                    <button type="submit" disabled={!batchIdInput.trim()}>
-                      查询任务记录
-                    </button>
-                  </div>
-                </form>
-
-                <BatchStatusMessage
-                  error={batchError}
-                  isLoading={isBatchLoading}
-                  retryDelaySeconds={retryDelaySeconds}
-                />
-
-                {batch ? (
-                  <BatchPanel
-                    batch={batch}
-                    canWrite={canWrite}
-                    onReconcile={handleReconcile}
+              <form className="batch-form" onSubmit={handleBatchSubmit}>
+                <label htmlFor="batch-id">Batch ID</label>
+                <div className="batch-input-row">
+                  <input
+                    id="batch-id"
+                    value={batchIdInput}
+                    placeholder="粘贴 generation batch id"
+                    onChange={(event) => setBatchIdInput(event.target.value)}
                   />
-                ) : (
-                  <EmptyBatchState />
-                )}
-              </section>
-            </>
+                  <button type="submit" disabled={!batchIdInput.trim()}>
+                    查询任务记录
+                  </button>
+                </div>
+              </form>
+
+              <BatchStatusMessage
+                error={batchError}
+                isLoading={isBatchLoading}
+                retryDelaySeconds={retryDelaySeconds}
+              />
+
+              {batch ? (
+                <BatchPanel
+                  batch={batch}
+                  canWrite={canWrite}
+                  onReconcile={handleReconcile}
+                />
+              ) : (
+                <EmptyBatchState />
+              )}
+            </section>
           ) : null}
         </div>
       </section>
@@ -587,18 +608,33 @@ export function App() {
 function AppSidebar({
   activePage,
   currentUser,
-  isAdmin,
-  onProjects,
-  onSettings,
-  onWorkspace,
+  onNavigate,
 }: {
   activePage: Page;
   currentUser: CurrentUser;
-  isAdmin: boolean;
-  onProjects: () => void;
-  onSettings: () => void;
-  onWorkspace: () => void;
+  onNavigate: (page: WorkspacePage) => void;
 }) {
+  const items: Array<{
+    icon: "characters" | "new" | "projects" | "settings" | "tasks";
+    label: string;
+    page: WorkspacePage;
+  }> = [
+    { icon: "projects", label: "项目", page: "projects" },
+    ...(currentUser.role === "auditor"
+      ? []
+      : [{ icon: "new" as const, label: "新建复刻", page: "new" as const }]),
+    { icon: "characters", label: "人物库", page: "characters" },
+    { icon: "tasks", label: "任务记录", page: "tasks" },
+    ...(currentUser.role === "admin"
+      ? [
+          {
+            icon: "settings" as const,
+            label: "设置",
+            page: "settings" as const,
+          },
+        ]
+      : []),
+  ];
   return (
     <aside className="app-sidebar">
       <div className="app-brand">
@@ -617,46 +653,22 @@ function AppSidebar({
         </span>
       </div>
       <nav className="sidebar-nav" aria-label="主导航">
-        <button
-          className={
-            activePage === "projects"
-              ? "nav-button nav-button--active"
-              : "nav-button"
-          }
-          onClick={onWorkspace}
-          type="button"
-        >
-          <SidebarIcon name="workspace" />
-          工作台
-        </button>
-        <button className="nav-button" onClick={onProjects} type="button">
-          <SidebarIcon name="projects" />
-          项目
-        </button>
-        <button
-          aria-label="人物库（开发中）"
-          className="nav-button nav-button--planned"
-          disabled
-          type="button"
-        >
-          <SidebarIcon name="characters" />
-          人物库
-          <small className="nav-planned-badge">开发中</small>
-        </button>
-        {isAdmin ? (
+        {items.map((item) => (
           <button
+            aria-current={activePage === item.page ? "page" : undefined}
             className={
-              activePage === "settings"
+              activePage === item.page
                 ? "nav-button nav-button--active"
                 : "nav-button"
             }
-            onClick={onSettings}
+            key={item.page}
+            onClick={() => onNavigate(item.page)}
             type="button"
           >
-            <SidebarIcon name="settings" />
-            设置
+            <SidebarIcon name={item.icon} />
+            {item.label}
           </button>
-        ) : null}
+        ))}
       </nav>
       <div className="sidebar-user">
         <span className="sidebar-user__avatar" aria-hidden="true">
@@ -676,16 +688,16 @@ function AppSidebar({
 function SidebarIcon({
   name,
 }: {
-  name: "characters" | "projects" | "settings" | "user" | "workspace";
+  name: "characters" | "new" | "projects" | "settings" | "tasks" | "user";
 }) {
-  if (name === "workspace") {
+  if (name === "new") {
     return (
       <svg aria-hidden="true" className="sidebar-icon" viewBox="0 0 24 24">
         <path d="m4 11 8-7 8 7v8a1 1 0 0 1-1 1h-5v-6h-4v6H5a1 1 0 0 1-1-1v-8Z" />
       </svg>
     );
   }
-  if (name === "projects") {
+  if (name === "projects" || name === "tasks") {
     return (
       <svg aria-hidden="true" className="sidebar-icon" viewBox="0 0 24 24">
         <path d="M3.5 7.5h17v12h-17v-12Zm0 0 2-3h5l2 3" />
@@ -710,6 +722,7 @@ function SidebarIcon({
 
 function ProjectSetupPanel({
   canWrite,
+  mode,
   isLoading,
   isUploading,
   deletingProjectId,
@@ -731,6 +744,7 @@ function ProjectSetupPanel({
   uploadStage,
 }: {
   canWrite: boolean;
+  mode: "create" | "list";
   isLoading: boolean;
   isUploading: boolean;
   deletingProjectId: string;
@@ -751,17 +765,29 @@ function ProjectSetupPanel({
   uploadProgress: number | null;
   uploadStage: UploadStage | null;
 }) {
+  const isCreateMode = mode === "create";
+  const titleId = isCreateMode ? "project-create-title" : "project-list-title";
   return (
-    <section className="project-setup" aria-labelledby="project-setup-title">
+    <section className="project-setup" aria-labelledby={titleId}>
       <div className="section-heading">
         <div>
-          <span className="eyebrow">START HERE</span>
-          <h2 id="project-setup-title">新建复刻项目</h2>
-          <p>上传 4–15 秒的参考视频，系统会先完成格式与时长预检。</p>
+          <span className="eyebrow">
+            {isCreateMode ? "START HERE" : "PROJECTS"}
+          </span>
+          <h2 id={titleId}>{isCreateMode ? "新建复刻项目" : "项目列表"}</h2>
+          <p>
+            {isCreateMode
+              ? "上传 4 至 15 秒的参考视频，系统会先完成格式与时长预检。"
+              : "查看项目状态，并继续上传或进入视频拆解。"}
+          </p>
         </div>
-        <span className="project-count">{projects.length} 个项目</span>
+        {!isCreateMode ? (
+          <span className="project-count">{projects.length} 个项目</span>
+        ) : null}
       </div>
-      {canWrite ? (
+      {setupError ? <p className="settings-error">{setupError}</p> : null}
+      {setupMessage ? <p className="setup-success">{setupMessage}</p> : null}
+      {isCreateMode && canWrite ? (
         <form className="project-setup-form" onSubmit={onSubmit}>
           <label htmlFor="project-name">项目名称</label>
           <input
@@ -816,10 +842,6 @@ function ProjectSetupPanel({
               )}
             </div>
           ) : null}
-          {setupError ? <p className="settings-error">{setupError}</p> : null}
-          {setupMessage ? (
-            <p className="setup-success">{setupMessage}</p>
-          ) : null}
           <button
             disabled={
               isUploading ||
@@ -836,14 +858,23 @@ function ProjectSetupPanel({
                 : "创建并上传"}
           </button>
         </form>
-      ) : (
+      ) : null}
+      {!isCreateMode && !canWrite ? (
         <p className="status-note">
           当前为只读身份，可查看项目和任务记录，不能创建、上传、编辑、删除或重试。
         </p>
-      )}
-      {projectsError ? <p className="settings-error">{projectsError}</p> : null}
-      {isLoading ? <p className="status-note">正在加载项目列表</p> : null}
-      {!isUploading && !isLoading && !projectsError && projects.length ? (
+      ) : null}
+      {!isCreateMode && projectsError ? (
+        <p className="settings-error">{projectsError}</p>
+      ) : null}
+      {!isCreateMode && isLoading ? (
+        <p className="status-note">正在加载项目列表</p>
+      ) : null}
+      {!isCreateMode &&
+      !isUploading &&
+      !isLoading &&
+      !projectsError &&
+      projects.length ? (
         <ul className="project-list">
           {projects.map((project) => (
             <li key={project.id}>
@@ -885,8 +916,14 @@ function ProjectSetupPanel({
           ))}
         </ul>
       ) : null}
-      {!isUploading && !isLoading && !projectsError && !projects.length ? (
-        <p className="status-note">还没有项目，从第一个参考视频开始。</p>
+      {!isCreateMode &&
+      !isUploading &&
+      !isLoading &&
+      !projectsError &&
+      !projects.length ? (
+        <p className="status-note">
+          还没有项目，请从“新建复刻”创建第一个项目。
+        </p>
       ) : null}
     </section>
   );
@@ -1193,6 +1230,47 @@ function formatStatus(status: string) {
   };
 
   return labels[status] ?? status;
+}
+
+function workspacePageFromHash(user: CurrentUser): WorkspacePage {
+  const requested = window.location.hash.replace(/^#/, "") as WorkspacePage;
+  return workspacePageAllowed(requested, user.role) ? requested : "projects";
+}
+
+function workspacePageAllowed(
+  page: WorkspacePage,
+  role: CurrentUser["role"],
+): boolean {
+  if (
+    !(
+      ["characters", "new", "projects", "settings", "tasks"] as string[]
+    ).includes(page)
+  ) {
+    return false;
+  }
+  if (page === "settings") {
+    return role === "admin";
+  }
+  if (page === "new") {
+    return role !== "auditor";
+  }
+  return true;
+}
+
+function ensureWorkspaceHash(page: WorkspacePage) {
+  if (window.location.hash !== `#${page}`) {
+    window.history.replaceState(null, "", `#${page}`);
+  }
+}
+
+function pageTitle(page: WorkspacePage): string {
+  return {
+    characters: "人物库",
+    new: "新建复刻",
+    projects: "项目工作台",
+    settings: "设置",
+    tasks: "任务记录",
+  }[page];
 }
 
 function formatRole(role: CurrentUser["role"]) {

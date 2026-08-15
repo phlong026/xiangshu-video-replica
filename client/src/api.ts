@@ -217,6 +217,58 @@ export type FirstFrameSelectionPayload = {
 
 export type DownloadUrl = { url: string };
 
+export type PersonIdentity = components["schemas"]["PersonIdentity"];
+export type CharacterPersona = Omit<
+  components["schemas"]["CharacterPersona"],
+  "appearance_constraints_json"
+> & { appearance_constraints_json: Record<string, unknown> };
+export type CharacterVersion = Omit<
+  components["schemas"]["CharacterVersion"],
+  | "generation_params_json"
+  | "persona_snapshot_json"
+  | "publication_snapshot_json"
+> & {
+  generation_params_json: Record<string, unknown>;
+  persona_snapshot_json: Record<string, unknown>;
+  publication_snapshot_json: Record<string, unknown> | null;
+};
+export type CharacterAsset = Omit<
+  components["schemas"]["CharacterAsset"],
+  "auto_quality_json"
+> & { auto_quality_json: Record<string, unknown> };
+export type CharacterAssetReview =
+  components["schemas"]["CharacterAssetReview"];
+export type CharacterGenerationTask = Omit<
+  components["schemas"]["CharacterGenerationTask"],
+  "request_snapshot_json"
+> & { request_snapshot_json: Record<string, unknown> };
+export type IdentityUploadPurpose = "authorization" | "source";
+export type IdentityUploadIntent =
+  components["schemas"]["CreatedIdentityUploadIntent"];
+export type CompletedIdentitySource =
+  components["schemas"]["CompletedSourceImage"];
+export type RequiredCharacterViewType =
+  components["schemas"]["CharacterGenerationTask"]["view_type"];
+export type CharacterReviewDecision = "APPROVED" | "REJECTED";
+
+export type CharacterPersonaInput = {
+  name: string;
+  occupation?: string | null;
+  scene_description?: string | null;
+  appearance_constraints_json?: Record<string, unknown>;
+  costume_description?: string | null;
+  default_background?: string | null;
+  positive_prompt?: string | null;
+  negative_prompt?: string | null;
+  usage_scope_json?: string[];
+};
+
+export type CharacterVersionInput = {
+  provider: string;
+  model: string;
+  generation_params_json: Record<string, unknown>;
+};
+
 export async function getHealth(): Promise<HealthResponse> {
   return requestJson<HealthResponse>("/health", "本地服务暂不可用");
 }
@@ -297,6 +349,29 @@ export function uploadReferenceVideo(
   onProgress: (progressPercent: number) => void,
   signal?: AbortSignal,
 ): Promise<void> {
+  return uploadStorageObject(intent, file, onProgress, "上传参考视频", signal);
+}
+
+export function uploadIdentityAsset(
+  intent: IdentityUploadIntent,
+  file: File,
+  onProgress: (progressPercent: number) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  return uploadStorageObject(intent, file, onProgress, "上传人物资料", signal);
+}
+
+function uploadStorageObject(
+  intent: {
+    headers: Record<string, string>;
+    method: string;
+    url: string;
+  },
+  file: File,
+  onProgress: (progressPercent: number) => void,
+  errorPrefix: string,
+  signal?: AbortSignal,
+): Promise<void> {
   return new Promise((resolve, reject) => {
     const request = new XMLHttpRequest();
     request.open(intent.method, intent.url);
@@ -326,10 +401,11 @@ export function uploadReferenceVideo(
         reject(new Error("登录已失效，请重新进入工作台。"));
         return;
       }
-      reject(new Error(`上传参考视频失败（${request.status}）`));
+      reject(new Error(`${errorPrefix}失败（${request.status}）`));
     };
-    request.onerror = () => reject(new Error("上传参考视频失败（网络错误）"));
-    request.ontimeout = () => reject(new Error("上传参考视频失败（请求超时）"));
+    request.onerror = () => reject(new Error(`${errorPrefix}失败（网络错误）`));
+    request.ontimeout = () =>
+      reject(new Error(`${errorPrefix}失败（请求超时）`));
     request.onabort = () => reject(new Error("上传已取消"));
     if (signal) {
       const onAbort = () => request.abort();
@@ -341,6 +417,202 @@ export function uploadReferenceVideo(
     }
     request.send(file);
   });
+}
+
+export async function listPersonIdentities(): Promise<PersonIdentity[]> {
+  return requestApiJson<PersonIdentity[]>(
+    "/api/person-identities",
+    "读取人物身份失败",
+  );
+}
+
+export async function createPersonIdentity(input: {
+  display_name: string;
+  authorization_scope: string[];
+  authorization_expires_at: string | null;
+}): Promise<PersonIdentity> {
+  return requestApiJson<PersonIdentity>(
+    "/api/person-identities",
+    "创建人物身份失败",
+    { method: "POST", body: JSON.stringify(input) },
+  );
+}
+
+export async function createIdentityUploadIntent(
+  identityId: string,
+  purpose: IdentityUploadPurpose,
+  file: File,
+): Promise<IdentityUploadIntent> {
+  return requestApiJson<IdentityUploadIntent>(
+    `/api/person-identities/${encodeURIComponent(identityId)}/${purpose}-upload-intent`,
+    purpose === "authorization" ? "创建授权上传失败" : "创建源图上传失败",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        filename: file.name,
+        content_type: contentTypeForIdentityFile(file),
+        size_bytes: file.size,
+      }),
+    },
+  );
+}
+
+export async function completeIdentityAuthorizationUpload(
+  identityId: string,
+  assetId: string,
+): Promise<PersonIdentity> {
+  return requestApiJson<PersonIdentity>(
+    `/api/person-identities/${encodeURIComponent(identityId)}/authorization-upload-complete`,
+    "确认授权文件失败",
+    { method: "POST", body: JSON.stringify({ asset_id: assetId }) },
+    CLOUD_OP_TIMEOUT_MS,
+  );
+}
+
+export async function completeIdentitySourceUpload(
+  identityId: string,
+  assetId: string,
+): Promise<CompletedIdentitySource> {
+  return requestApiJson<CompletedIdentitySource>(
+    `/api/person-identities/${encodeURIComponent(identityId)}/source-upload-complete`,
+    "检查真人源图失败",
+    { method: "POST", body: JSON.stringify({ asset_id: assetId }) },
+    CLOUD_OP_TIMEOUT_MS,
+  );
+}
+
+export async function listCharacterPersonas(
+  identityId: string,
+): Promise<CharacterPersona[]> {
+  return requestApiJson<CharacterPersona[]>(
+    `/api/person-identities/${encodeURIComponent(identityId)}/personas`,
+    "读取人物人设失败",
+  );
+}
+
+export async function createCharacterPersona(
+  identityId: string,
+  input: CharacterPersonaInput,
+): Promise<CharacterPersona> {
+  return requestApiJson<CharacterPersona>(
+    `/api/person-identities/${encodeURIComponent(identityId)}/personas`,
+    "创建人物人设失败",
+    { method: "POST", body: JSON.stringify(input) },
+  );
+}
+
+export async function updateCharacterPersona(
+  personaId: string,
+  input: CharacterPersonaInput,
+): Promise<CharacterPersona> {
+  return requestApiJson<CharacterPersona>(
+    `/api/character-personas/${encodeURIComponent(personaId)}`,
+    "更新人物人设失败",
+    { method: "PATCH", body: JSON.stringify(input) },
+  );
+}
+
+export async function listCharacterVersions(
+  personaId: string,
+): Promise<CharacterVersion[]> {
+  return requestApiJson<CharacterVersion[]>(
+    `/api/character-personas/${encodeURIComponent(personaId)}/versions`,
+    "读取角色版本失败",
+  );
+}
+
+export async function createCharacterVersion(
+  personaId: string,
+  input: CharacterVersionInput,
+): Promise<CharacterVersion> {
+  return requestApiJson<CharacterVersion>(
+    `/api/character-personas/${encodeURIComponent(personaId)}/versions`,
+    "创建角色版本失败",
+    { method: "POST", body: JSON.stringify(input) },
+  );
+}
+
+export async function listCharacterGenerationTasks(
+  versionId: string,
+): Promise<CharacterGenerationTask[]> {
+  return requestApiJson<CharacterGenerationTask[]>(
+    `/api/character-versions/${encodeURIComponent(versionId)}/generation-tasks`,
+    "读取人物生成任务失败",
+  );
+}
+
+export async function listCharacterAssets(
+  versionId: string,
+): Promise<CharacterAsset[]> {
+  return requestApiJson<CharacterAsset[]>(
+    `/api/character-versions/${encodeURIComponent(versionId)}/assets`,
+    "读取人物视角资产失败",
+  );
+}
+
+export async function generateCharacterAssets(
+  versionId: string,
+  input: {
+    idempotency_key: string;
+    candidates_per_view: number;
+    view_types?: RequiredCharacterViewType[];
+  },
+): Promise<CharacterGenerationTask[]> {
+  return requestApiJson<CharacterGenerationTask[]>(
+    `/api/character-versions/${encodeURIComponent(versionId)}/generate-assets`,
+    "启动人物视角生成失败",
+    { method: "POST", body: JSON.stringify(input) },
+    CLOUD_OP_TIMEOUT_MS,
+  );
+}
+
+export async function regenerateCharacterAsset(
+  characterAssetId: string,
+  idempotencyKey: string,
+): Promise<CharacterGenerationTask[]> {
+  return requestApiJson<CharacterGenerationTask[]>(
+    `/api/character-assets/${encodeURIComponent(characterAssetId)}/regenerate`,
+    "重新生成人物视角失败",
+    {
+      method: "POST",
+      body: JSON.stringify({ idempotency_key: idempotencyKey }),
+    },
+    CLOUD_OP_TIMEOUT_MS,
+  );
+}
+
+export async function reviewCharacterAsset(
+  characterAssetId: string,
+  decision: CharacterReviewDecision,
+  comment: string,
+): Promise<CharacterAssetReview> {
+  return requestApiJson<CharacterAssetReview>(
+    `/api/character-assets/${encodeURIComponent(characterAssetId)}/review`,
+    decision === "APPROVED" ? "批准人物资产失败" : "驳回人物资产失败",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        decision,
+        issue_codes: decision === "REJECTED" ? ["MANUAL_REJECT"] : [],
+        comment: comment.trim() || null,
+      }),
+    },
+  );
+}
+
+export async function publishCharacterVersion(
+  versionId: string,
+  selectedAssetIds: Record<RequiredCharacterViewType, string>,
+): Promise<CharacterVersion> {
+  return requestApiJson<CharacterVersion>(
+    `/api/character-versions/${encodeURIComponent(versionId)}/publish`,
+    "发布角色版本失败",
+    {
+      method: "POST",
+      body: JSON.stringify({ selected_asset_ids: selectedAssetIds }),
+    },
+    CLOUD_OP_TIMEOUT_MS,
+  );
 }
 
 export async function completeVideoUpload(
@@ -925,6 +1197,20 @@ function contentTypeForFile(file: File): "video/mp4" | "video/quicktime" {
   return file.name.toLowerCase().endsWith(".mov")
     ? "video/quicktime"
     : "video/mp4";
+}
+
+function contentTypeForIdentityFile(file: File): string {
+  const name = file.name.toLowerCase();
+  if (name.endsWith(".pdf")) {
+    return "application/pdf";
+  }
+  if (name.endsWith(".jpg") || name.endsWith(".jpeg")) {
+    return "image/jpeg";
+  }
+  if (name.endsWith(".png")) {
+    return "image/png";
+  }
+  return file.type || "application/octet-stream";
 }
 
 function isLocalApiUploadUrl(url: string): boolean {
