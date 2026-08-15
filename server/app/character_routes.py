@@ -3,9 +3,10 @@ from __future__ import annotations
 from datetime import datetime
 
 from fastapi import APIRouter, Query, Response, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.auth import AuthenticatedUser, Database
+from app.character_contracts import ProjectCharacterVersionOption
 from app.characters import (
     CharacterData,
     choose_project_main_character,
@@ -17,6 +18,10 @@ from app.characters import (
     update_character,
 )
 from app.permissions import require_not_auditor, require_project_access, require_role
+from app.project_character_selection import (
+    choose_project_character_version,
+    list_available_project_character_versions,
+)
 
 router = APIRouter(prefix="/api", tags=["characters"])
 
@@ -59,14 +64,22 @@ class CharacterResponse(BaseModel):
 class ProjectMainCharacterRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    character_id: str
+    character_id: str | None = Field(default=None, min_length=1)
+    character_version_id: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def require_one_selection_source(self) -> ProjectMainCharacterRequest:
+        if (self.character_id is None) == (self.character_version_id is None):
+            raise ValueError("Provide exactly one character selection source.")
+        return self
 
 
 class ProjectMainCharacterResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     project_id: str
-    character_id: str
+    character_id: str | None
+    character_version_id: str | None
     version_id: str
     version_number: int
     character_snapshot: dict[str, object]
@@ -107,6 +120,24 @@ def read_characters(
         )
     characters = list_characters(conn, actor=actor, project_id=project_id)
     return [character_response(character) for character in characters]
+
+
+@router.get(
+    "/projects/{project_id}/character-versions/available",
+    response_model=list[ProjectCharacterVersionOption],
+)
+def read_available_project_character_versions(
+    project_id: str,
+    conn: Database,
+    actor: AuthenticatedUser,
+) -> list[ProjectCharacterVersionOption]:
+    require_project_access(
+        conn,
+        actor=actor,
+        project_id=project_id,
+        action="project.main_character.options.read",
+    )
+    return list_available_project_character_versions(conn)
 
 
 @router.post("/characters", response_model=CharacterResponse, status_code=status.HTTP_201_CREATED)
@@ -216,12 +247,21 @@ def choose_main_character_route(
         project_id=project_id,
         action="project.main_character.choose",
     )
-    result = choose_project_main_character(
-        conn,
-        actor=actor,
-        project_id=project_id,
-        character_id=payload.character_id,
-    )
+    if payload.character_version_id is not None:
+        result = choose_project_character_version(
+            conn,
+            actor=actor,
+            project_id=project_id,
+            character_version_id=payload.character_version_id,
+        )
+    else:
+        assert payload.character_id is not None
+        result = choose_project_main_character(
+            conn,
+            actor=actor,
+            project_id=project_id,
+            character_id=payload.character_id,
+        )
     return ProjectMainCharacterResponse.model_validate(result)
 
 

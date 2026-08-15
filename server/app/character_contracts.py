@@ -161,6 +161,29 @@ class CharacterReferenceSelection(CharacterContract):
     selected_at: datetime
 
 
+class ProjectCharacterAssetOption(CharacterContract):
+    character_asset_id: str
+    asset_id: str
+    view_type: RequiredCharacterViewType
+
+
+class ProjectCharacterVersionOption(CharacterContract):
+    character_version_id: str
+    version_number: int
+    identity_id: str
+    identity_name: str
+    authorization_expires_at: datetime | None
+    persona_id: str
+    persona_snapshot_json: dict[str, object]
+    provider: str | None
+    model: str | None
+    template_version: str | None
+    template_hash: str | None
+    published_at: datetime
+    publication_hash: str
+    assets: list[ProjectCharacterAssetOption]
+
+
 CHARACTER_DOMAIN_MODELS = (
     PersonIdentity,
     CharacterPersona,

@@ -1,4 +1,10 @@
-import { type FormEvent, useEffect, useRef, useState } from "react";
+import {
+  type FormEvent,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 
 import {
   type AnalysisProvider,
@@ -60,6 +66,8 @@ export function AnalysisWorkspace({
   const [isSaving, setIsSaving] = useState(false);
   const [isAnalysisMissing, setIsAnalysisMissing] = useState(false);
   const [isStartingAnalysis, setIsStartingAnalysis] = useState(false);
+  const [characterSelectionProjectId, setCharacterSelectionProjectId] =
+    useState("");
   const [reloadToken, setReloadToken] = useState(0);
   const [forceLoadProjectId, setForceLoadProjectId] = useState<string | null>(
     null,
@@ -147,6 +155,13 @@ export function AnalysisWorkspace({
     readOnly,
     reloadToken,
   ]);
+
+  const handleCharacterSelectionChange = useCallback(
+    (hasSelection: boolean) => {
+      setCharacterSelectionProjectId(hasSelection ? project.id : "");
+    },
+    [project.id],
+  );
 
   function reloadWorkspace() {
     reloadTokenRef.current += 1;
@@ -237,7 +252,11 @@ export function AnalysisWorkspace({
           返回项目
         </button>
       </div>
-      <ProjectWorkflowSteps currentStep={2} />
+      <ProjectWorkflowSteps
+        currentStep={
+          analysisId ? (characterSelectionProjectId === project.id ? 4 : 3) : 2
+        }
+      />
       {isLoading ? <p className="status-note">正在读取视频拆解</p> : null}
       {error ? <p className="settings-error">{error}</p> : null}
       {!isLoading && error && !isAnalysisMissing ? (
@@ -357,7 +376,11 @@ export function AnalysisWorkspace({
               )}
             </div>
             <aside className="analysis-sidebar" aria-label="当前人物设定">
-              <CharacterSelection projectId={project.id} readOnly={readOnly} />
+              <CharacterSelection
+                onSelectionChange={handleCharacterSelectionChange}
+                projectId={project.id}
+                readOnly={readOnly}
+              />
             </aside>
           </div>
         </form>

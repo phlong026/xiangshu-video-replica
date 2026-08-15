@@ -399,7 +399,9 @@ describe("App", () => {
     ).toBeInTheDocument();
     expect(screen.getByLabelText("S01 动作")).toBeDisabled();
     expect(screen.queryByRole("button", { name: "保存镜头卡片" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "选择人物" })).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "查看角色版本" }),
+    ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "重新生成候选首帧" }),
     ).toBeDisabled();
@@ -825,20 +827,40 @@ describe("App", () => {
       if (url.endsWith("/shot-cards/latest")) {
         return Promise.resolve({ ok: false, status: 404 });
       }
-      if (url.includes("/api/characters?project_id=project-ready")) {
+      if (url.endsWith("/character-versions/available")) {
         return Promise.resolve({
           ok: true,
           json: async () => [
             {
-              id: "character-1",
-              name: "小夏",
-              reference_asset_ids: ["ref-1"],
-              authorization_project_ids: ["project-ready"],
+              character_version_id: "character-version-3",
+              version_number: 3,
+              identity_id: "identity-1",
+              identity_name: "小夏",
               authorization_expires_at: null,
-              is_active: true,
-              created_by_user_id: "admin_1",
-              created_at: "2030-01-01T00:00:00Z",
-              updated_at: "2030-01-01T00:00:00Z",
+              persona_id: "persona-1",
+              persona_snapshot_json: {
+                name: "乡墅项目管理专家",
+                occupation: "项目管理",
+              },
+              provider: "fake_character",
+              model: "fake-character-v1",
+              template_version: "character-prompt-v1",
+              template_hash: "template-hash",
+              published_at: "2030-01-01T00:00:00Z",
+              publication_hash: "publication-hash",
+              assets: [
+                "FRONT_FACE",
+                "FRONT_HALF",
+                "FRONT_FULL",
+                "LEFT_45",
+                "RIGHT_45",
+                "LEFT_SIDE",
+                "RIGHT_SIDE",
+              ].map((viewType) => ({
+                character_asset_id: `character-asset-${viewType}`,
+                asset_id: `asset-${viewType}`,
+                view_type: viewType,
+              })),
             },
           ],
         });
@@ -851,10 +873,24 @@ describe("App", () => {
           ok: true,
           json: async () => ({
             project_id: "project-ready",
-            character_id: "character-1",
+            character_id: null,
+            character_version_id: "character-version-3",
             version_id: "main-character-1",
             version_number: 1,
-            character_snapshot: { name: "小夏" },
+            character_snapshot: {
+              schema_version: "project-character-selection.v1",
+              character_version_id: "character-version-3",
+              character_version_number: 3,
+              identity: {
+                id: "identity-1",
+                display_name: "小夏",
+                authorization_expires_at: null,
+              },
+              persona_snapshot_json: { name: "乡墅项目管理专家" },
+              provider: "fake_character",
+              model: "fake-character-v1",
+              published_assets: [],
+            },
           }),
         });
       }
@@ -865,16 +901,34 @@ describe("App", () => {
     render(<App />);
     await enterWorkspace();
     fireEvent.click(await screen.findByRole("button", { name: "继续编辑" }));
-    fireEvent.click(await screen.findByRole("button", { name: "选择人物" }));
-    fireEvent.click(await screen.findByRole("radio", { name: /小夏/ }));
-    fireEvent.click(screen.getByRole("button", { name: "确认使用人物" }));
+    const chooseVersionButton = await screen.findByRole("button", {
+      name: "选择角色版本",
+    });
+    await waitFor(() => expect(chooseVersionButton).toBeEnabled());
+    fireEvent.click(chooseVersionButton);
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "http://127.0.0.1:8000/api/projects/project-ready/character-versions/available",
+        expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      ),
+    );
+    fireEvent.click(
+      await screen.findByRole("radio", { name: /小夏.*乡墅项目管理专家.*V3/ }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "确认角色版本" }));
 
-    expect(await screen.findByText("已选择人物“小夏”。")).toBeInTheDocument();
+    expect(
+      await screen.findByText("已选择角色“小夏 · 乡墅项目管理专家 V3”。"),
+    ).toBeInTheDocument();
+    expect(screen.getByTitle("选择起始帧")).toHaveAttribute(
+      "aria-current",
+      "step",
+    );
     expect(fetchMock).toHaveBeenCalledWith(
       "http://127.0.0.1:8000/api/projects/project-ready/main-character",
       expect.objectContaining({
         method: "PUT",
-        body: JSON.stringify({ character_id: "character-1" }),
+        body: JSON.stringify({ character_version_id: "character-version-3" }),
       }),
     );
   });
@@ -1187,7 +1241,9 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "创建并上传" }));
 
     expect(await screen.findByText(/模型暂时不可用/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "开始视频拆解" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "开始视频拆解" }),
+    );
 
     expect(await screen.findByText("恢复成功")).toBeInTheDocument();
     expect(screen.queryByText(/模型暂时不可用/)).toBeNull();

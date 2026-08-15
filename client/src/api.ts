@@ -166,12 +166,41 @@ export type Character = {
   updated_at: string;
 };
 
-export type ProjectMainCharacter = {
-  project_id: string;
-  character_id: string;
-  version_id: string;
-  version_number: number;
-  character_snapshot: { name?: string };
+export type ProjectMainCharacter = Omit<
+  components["schemas"]["ProjectMainCharacterResponse"],
+  "character_snapshot"
+> & {
+  character_snapshot: ProjectCharacterSnapshot;
+};
+
+export type ProjectCharacterAssetOption =
+  components["schemas"]["ProjectCharacterAssetOption"];
+
+export type ProjectCharacterVersionOption = Omit<
+  components["schemas"]["ProjectCharacterVersionOption"],
+  "persona_snapshot_json"
+> & {
+  persona_snapshot_json: Record<string, unknown>;
+};
+
+export type ProjectCharacterSnapshot = {
+  name?: string;
+  schema_version?: string;
+  character_version_id?: string;
+  character_version_number?: number;
+  identity?: {
+    id?: string;
+    display_name?: string;
+    authorization_expires_at?: string | null;
+  };
+  persona_snapshot_json?: Record<string, unknown>;
+  provider?: string | null;
+  model?: string | null;
+  template_version?: string | null;
+  template_hash?: string | null;
+  published_at?: string;
+  publication_hash?: string;
+  published_assets?: ProjectCharacterAssetOption[];
 };
 
 export type SourceFrameCandidate = {
@@ -698,6 +727,15 @@ export async function listProjectCharacters(
   );
 }
 
+export async function listProjectCharacterVersions(
+  projectId: string,
+): Promise<ProjectCharacterVersionOption[]> {
+  return requestApiJson<ProjectCharacterVersionOption[]>(
+    `/api/projects/${encodeURIComponent(projectId)}/character-versions/available`,
+    "读取可用角色版本失败",
+  );
+}
+
 export async function getProjectMainCharacter(
   projectId: string,
 ): Promise<ProjectMainCharacter | null> {
@@ -722,6 +760,20 @@ export async function chooseProjectMainCharacter(
     `/api/projects/${encodeURIComponent(projectId)}/main-character`,
     "选择人物失败",
     { method: "PUT", body: JSON.stringify({ character_id: characterId }) },
+  );
+}
+
+export async function chooseProjectMainCharacterVersion(
+  projectId: string,
+  characterVersionId: string,
+): Promise<ProjectMainCharacter> {
+  return requestApiJson<ProjectMainCharacter>(
+    `/api/projects/${encodeURIComponent(projectId)}/main-character`,
+    "选择角色版本失败",
+    {
+      method: "PUT",
+      body: JSON.stringify({ character_version_id: characterVersionId }),
+    },
   );
 }
 
