@@ -442,12 +442,19 @@ def test_publish_freezes_seven_approved_assets_and_is_idempotent(
         f"/api/character-versions/{seeded.version_id}/assets",
         headers=headers("employee_1"),
     )
+    employee_version = client.get(
+        f"/api/character-versions/{seeded.version_id}",
+        headers=headers("employee_1"),
+    )
     employee_asset = client.get(
         f"/api/assets/{selected[0]['asset_id']}",
         headers=headers("employee_1"),
     )
     assert employee_assets.status_code == 200
     assert len(employee_assets.json()) == 7
+    assert employee_version.status_code == 200
+    assert employee_version.json()["source_sha256"] is None
+    assert "source_sha256" not in employee_version.json()["publication_snapshot_json"]
     assert employee_asset.status_code == 200
 
     immutable_review = review_asset(

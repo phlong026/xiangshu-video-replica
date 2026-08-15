@@ -529,7 +529,6 @@ def publication_snapshot(
         "published_at": published_at,
         "required_view_types": [item.selected.view_type for item in prepared],
         "schema_version": CHARACTER_PUBLICATION_SCHEMA_VERSION,
-        "source_sha256": str(version["source_sha256"]),
         "template_hash": version["template_hash"],
         "template_version": version["template_version"],
     }
