@@ -1898,15 +1898,20 @@ def calculate_progress(tasks: list[TaskResult]) -> BatchProgress:
         archive_status = task.archive_status
         needs_attention = False
         if status == "SUCCEEDED":
-            counts["succeeded"] += 1
             if archive_status == "ARCHIVED":
+                counts["succeeded"] += 1
                 terminal_count += 1
+            # SUCCEEDED + ARCHIVE_FAILED: the paid result is not deliverable yet,
+            # so it is not counted as a success; it shows under needs_attention.
         elif status == "FAILED":
             counts["failed"] += 1
             terminal_count += 1
         elif status == "CANCELLED":
             counts["cancelled"] += 1
             terminal_count += 1
+        elif status == "SUBMISSION_UNCERTAIN":
+            # Paid-protection state: never counted as pending; needs attention.
+            pass
         elif status == "SUBMITTING":
             counts["submitting"] += 1
         elif status == "QUEUED":
@@ -1936,6 +1941,10 @@ def calculate_progress(tasks: list[TaskResult]) -> BatchProgress:
 
 def batch_status(stored_status: str, progress: BatchProgress) -> str:
     if progress.total_count == progress.terminal_count:
+        # Even when every task is terminal, audio/archive quality failures must
+        # surface as NEEDS_ATTENTION instead of being masked by SUCCEEDED.
+        if progress.counts["needs_attention"]:
+            return "NEEDS_ATTENTION"
         if progress.counts["failed"] or progress.counts["cancelled"]:
             return "COMPLETED_WITH_FAILURES"
         return "SUCCEEDED"
