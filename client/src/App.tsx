@@ -25,6 +25,7 @@ import {
   uploadReferenceVideo,
 } from "./api";
 import { CharacterLibrary } from "./CharacterLibrary";
+import { ProjectWorkflowSteps } from "./ProjectWorkflowSteps";
 import { SettingsPanel } from "./SettingsPanel";
 import "./styles.css";
 
@@ -96,6 +97,18 @@ export function App() {
     window.addEventListener(SESSION_EXPIRED_EVENT, handleSessionExpired);
     return () => {
       window.removeEventListener(SESSION_EXPIRED_EVENT, handleSessionExpired);
+    };
+  }, []);
+
+  useEffect(() => {
+    function abortActiveUpload() {
+      uploadAbortRef.current?.abort();
+    }
+
+    window.addEventListener("pagehide", abortActiveUpload);
+    return () => {
+      window.removeEventListener("pagehide", abortActiveUpload);
+      abortActiveUpload();
     };
   }, []);
 
@@ -319,6 +332,7 @@ export function App() {
     const controller = new AbortController();
     uploadAbortRef.current = controller;
     setUploadStage(pendingProject ? "creating_upload" : "creating_project");
+    let readyProject: Project | null = null;
     try {
       const project =
         pendingProject ?? (await createProject(projectName.trim()));
@@ -337,38 +351,58 @@ export function App() {
       );
       setUploadStage("verifying");
       const completed = await completeVideoUpload(intent.asset_id);
+      const uploadedProject: Project = {
+        ...project,
+        status: "REFERENCE_READY",
+        reference_asset_id: completed.asset_id,
+        reference_upload_status: "READY",
+        analysis_status: "PENDING",
+      };
+      readyProject = uploadedProject;
+      setPendingProject(uploadedProject);
+      setProjects((current) =>
+        current.map((item) =>
+          item.id === project.id ? uploadedProject : item,
+        ),
+      );
+      setSetupMessage(
+        `“${project.name}”已完成上传和预检（${completed.metadata.duration_seconds.toFixed(1)} 秒），已自动进入视频拆解。`,
+      );
       setUploadStage("analyzing");
       await startVideoAnalysis(
         project.id,
         completed.asset_id,
         completed.metadata.duration_seconds,
       );
+      const analyzedProject: Project = {
+        ...uploadedProject,
+        analysis_status: "READY",
+      };
       setProjects((current) =>
         current.map((item) =>
-          item.id === project.id
-            ? {
-                ...item,
-                status: "REFERENCE_READY",
-                reference_asset_id: completed.asset_id,
-                reference_upload_status: "READY",
-              }
-            : item,
+          item.id === project.id ? analyzedProject : item,
         ),
-      );
-      setSetupMessage(
-        `“${project.name}”已完成上传和预检（${completed.metadata.duration_seconds.toFixed(1)} 秒），已自动进入视频拆解。`,
       );
       setPendingProject(null);
       setProjectName("");
       setReferenceVideo(null);
       setUploadProgress(null);
       setUploadStage(null);
+      openAnalysis(analyzedProject);
     } catch (error) {
-      setSetupError(
-        error instanceof Error
-          ? `${error.message}。项目已保留，可修正设置后重新上传。`
-          : "创建或上传失败。项目已保留，可修正设置后重新上传。",
-      );
+      const message =
+        error instanceof Error ? error.message : "创建或上传失败。";
+      if (readyProject) {
+        setSetupError(
+          `${message}。参考视频与项目已保留，可在视频拆解步骤继续。`,
+        );
+        setPendingProject(null);
+        setProjectName("");
+        setReferenceVideo(null);
+        openAnalysis(readyProject);
+      } else {
+        setSetupError(`${message}。项目已保留，可修正设置后重新上传。`);
+      }
       setUploadProgress(null);
       setUploadStage(null);
     } finally {
@@ -498,6 +532,21 @@ export function App() {
     setActiveAnalysisProject(project);
   }
 
+  function markAnalysisReady(projectId: string) {
+    setProjects((current) =>
+      current.map((project) =>
+        project.id === projectId
+          ? { ...project, analysis_status: "READY" }
+          : project,
+      ),
+    );
+    setActiveAnalysisProject((current) =>
+      current?.id === projectId
+        ? { ...current, analysis_status: "READY" }
+        : current,
+    );
+  }
+
   return (
     <main className="app-shell">
       <AppSidebar
@@ -521,11 +570,20 @@ export function App() {
             <CharacterLibrary userRole={currentUser.role} />
           ) : null}
           {page === "projects" && activeAnalysisProject ? (
-            <AnalysisWorkspace
-              onClose={() => setActiveAnalysisProject(null)}
-              project={activeAnalysisProject}
-              readOnly={!canWrite}
-            />
+            <>
+              {setupError ? (
+                <p className="settings-error">{setupError}</p>
+              ) : null}
+              {setupMessage ? (
+                <p className="setup-success">{setupMessage}</p>
+              ) : null}
+              <AnalysisWorkspace
+                onClose={() => setActiveAnalysisProject(null)}
+                onAnalysisReady={markAnalysisReady}
+                project={activeAnalysisProject}
+                readOnly={!canWrite}
+              />
+            </>
           ) : null}
           {(page === "projects" || page === "new") && !activeAnalysisProject ? (
             <ProjectSetupPanel
@@ -785,6 +843,7 @@ function ProjectSetupPanel({
           <span className="project-count">{projects.length} 个项目</span>
         ) : null}
       </div>
+      {isCreateMode ? <ProjectWorkflowSteps currentStep={1} /> : null}
       {setupError ? <p className="settings-error">{setupError}</p> : null}
       {setupMessage ? <p className="setup-success">{setupMessage}</p> : null}
       {isCreateMode && canWrite ? (
@@ -880,9 +939,12 @@ function ProjectSetupPanel({
             <li key={project.id}>
               <div>
                 <strong>{project.name}</strong>
-                <span>
-                  {formatReferenceStatus(project.reference_upload_status)}
-                </span>
+                <div className="project-statuses">
+                  <span>
+                    {formatReferenceStatus(project.reference_upload_status)}
+                  </span>
+                  <span>{formatAnalysisStatus(project.analysis_status)}</span>
+                </div>
               </div>
               {project.reference_upload_status !== "READY" && canWrite ? (
                 <div className="project-actions">
@@ -892,7 +954,7 @@ function ProjectSetupPanel({
                     onClick={() => onContinueUpload(project)}
                     type="button"
                   >
-                    继续上传
+                    继续编辑
                   </button>
                   <button
                     className="secondary-button project-delete-button"
@@ -909,7 +971,7 @@ function ProjectSetupPanel({
                   onClick={() => onOpenAnalysis(project)}
                   type="button"
                 >
-                  {canWrite ? "编辑拆解" : "查看拆解"}
+                  {canWrite ? "继续编辑" : "查看项目"}
                 </button>
               ) : null}
             </li>
@@ -1023,6 +1085,17 @@ function formatReferenceStatus(
     READY: "参考视频已就绪",
   };
   return labels[status] ?? status;
+}
+
+function formatAnalysisStatus(
+  status: Project["analysis_status"] | undefined,
+): string {
+  const labels: Record<Project["analysis_status"], string> = {
+    NOT_READY: "等待参考视频",
+    PENDING: "视频拆解待开始",
+    READY: "视频拆解已完成",
+  };
+  return status ? labels[status] : "拆解状态待确认";
 }
 
 function ServiceBadge({ state }: { state: ServiceState }) {

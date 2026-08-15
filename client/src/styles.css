@@ -523,6 +523,13 @@ input:focus {
   font-size: 12px;
 }
 
+.project-statuses {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-top: 4px;
+}
+
 .analysis-workspace {
   margin-top: 0;
   padding: 0;
@@ -534,10 +541,32 @@ input:focus {
   margin-top: 24px;
 }
 
+.analysis-missing-state {
+  display: grid;
+  gap: 10px;
+  max-width: 680px;
+  margin-top: 24px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 22px;
+  background: var(--panel);
+}
+
+.analysis-missing-state p {
+  margin: 0;
+  color: #aaa2ba;
+  line-height: 1.55;
+}
+
+.analysis-missing-state button,
+.analysis-retry-button {
+  justify-self: start;
+}
+
 .workflow-steps {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 0;
+  gap: 16px 0;
   margin: 28px 0 0;
   padding: 0;
   list-style: none;
@@ -568,6 +597,10 @@ input:focus {
   content: none;
 }
 
+.workflow-step:nth-child(5n)::after {
+  content: none;
+}
+
 .workflow-step > span {
   display: grid;
   flex: 0 0 auto;
@@ -581,11 +614,22 @@ input:focus {
 }
 
 .workflow-step strong {
+  position: relative;
+  z-index: 1;
   overflow: hidden;
+  padding-right: 6px;
   font-size: 13px;
   font-weight: 560;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.analysis-workspace .workflow-step strong {
+  background: var(--bg);
+}
+
+.project-setup .workflow-step strong {
+  background: #12121e;
 }
 
 .workflow-step--complete,

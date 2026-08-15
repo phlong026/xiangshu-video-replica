@@ -1,4 +1,4 @@
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 
 import {
   type AnalysisProvider,
@@ -10,9 +10,11 @@ import {
   readShotCardPayload,
   type ShotCard,
   saveShotCards,
+  startVideoAnalysis,
 } from "./api";
 import { CharacterSelection } from "./CharacterSelection";
 import { FirstFrameSelection } from "./FirstFrameSelection";
+import { ProjectWorkflowSteps } from "./ProjectWorkflowSteps";
 import { SourceFrameSelection } from "./SourceFrameSelection";
 
 function toNonNegativeTime(value: string): number {
@@ -36,10 +38,12 @@ const SHOT_TEXT_FIELDS: Array<{
 ];
 
 export function AnalysisWorkspace({
+  onAnalysisReady,
   onClose,
   project,
   readOnly = false,
 }: {
+  onAnalysisReady: (projectId: string) => void;
   onClose: () => void;
   project: Project;
   readOnly?: boolean;
@@ -54,18 +58,39 @@ export function AnalysisWorkspace({
   const [saveMessage, setSaveMessage] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
+  const [isAnalysisMissing, setIsAnalysisMissing] = useState(false);
+  const [isStartingAnalysis, setIsStartingAnalysis] = useState(false);
+  const [reloadToken, setReloadToken] = useState(0);
+  const [forceLoadProjectId, setForceLoadProjectId] = useState<string | null>(
+    null,
+  );
+  const reloadTokenRef = useRef(0);
 
   useEffect(() => {
+    if (
+      project.analysis_status === "PENDING" &&
+      forceLoadProjectId !== project.id
+    ) {
+      setIsLoading(false);
+      setError("");
+      setSaveMessage("");
+      setAnalysisProvider(null);
+      setIsAnalysisMissing(true);
+      return;
+    }
+
+    const loadAttempt = reloadToken;
     let isActive = true;
     setIsLoading(true);
     setError("");
     setSaveMessage("");
     setAnalysisProvider(null);
+    setIsAnalysisMissing(false);
 
     async function loadWorkspace() {
       try {
         const version = await getLatestProjectAnalysis(project.id);
-        if (!isActive) {
+        if (!isActive || loadAttempt !== reloadTokenRef.current) {
           return;
         }
         const payload = readAnalysisPayload(version);
@@ -74,6 +99,7 @@ export function AnalysisWorkspace({
           return;
         }
         setAnalysisId(version.id);
+        setIsAnalysisMissing(false);
         setAnalysisProvider(readAnalysisProvider(version));
         setAnalysisSummary(payload.summary);
         setDurationSeconds(payload.duration_seconds);
@@ -90,11 +116,16 @@ export function AnalysisWorkspace({
         }
       } catch (requestError) {
         if (isActive) {
-          setError(
-            requestError instanceof Error
-              ? requestError.message
-              : "读取视频拆解失败。",
-          );
+          if ((requestError as { status?: number }).status === 404) {
+            setIsAnalysisMissing(true);
+            setError("");
+          } else {
+            setError(
+              requestError instanceof Error
+                ? requestError.message
+                : "读取视频拆解失败。",
+            );
+          }
         }
       } finally {
         if (isActive) {
@@ -108,7 +139,34 @@ export function AnalysisWorkspace({
     return () => {
       isActive = false;
     };
-  }, [project.id]);
+  }, [forceLoadProjectId, project.analysis_status, project.id, reloadToken]);
+
+  function reloadWorkspace() {
+    reloadTokenRef.current += 1;
+    setReloadToken(reloadTokenRef.current);
+  }
+
+  async function handleStartAnalysis() {
+    if (readOnly || !project.reference_asset_id) {
+      return;
+    }
+    setIsStartingAnalysis(true);
+    setError("");
+    try {
+      await startVideoAnalysis(project.id, project.reference_asset_id);
+      onAnalysisReady(project.id);
+      setForceLoadProjectId(project.id);
+      reloadWorkspace();
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : "启动视频拆解失败。",
+      );
+    } finally {
+      setIsStartingAnalysis(false);
+    }
+  }
 
   function updateShot(index: number, key: keyof ShotCard, value: string) {
     if (readOnly) {
@@ -172,10 +230,40 @@ export function AnalysisWorkspace({
           返回项目
         </button>
       </div>
-      <WorkflowSteps />
+      <ProjectWorkflowSteps currentStep={2} />
       {isLoading ? <p className="status-note">正在读取视频拆解</p> : null}
       {error ? <p className="settings-error">{error}</p> : null}
-      {!isLoading && !error ? (
+      {!isLoading && error && !isAnalysisMissing ? (
+        <button
+          className="secondary-button analysis-retry-button"
+          onClick={reloadWorkspace}
+          type="button"
+        >
+          重新加载视频拆解
+        </button>
+      ) : null}
+      {!isLoading && isAnalysisMissing ? (
+        <div className="analysis-missing-state">
+          <strong>视频拆解待开始</strong>
+          <p>
+            参考视频已经就绪。系统会先确认是否已有拆解结果，再安全地启动本步骤。
+          </p>
+          {readOnly ? (
+            <span className="status-note">
+              当前身份只能查看，不能启动拆解。
+            </span>
+          ) : (
+            <button
+              disabled={isStartingAnalysis || !project.reference_asset_id}
+              onClick={handleStartAnalysis}
+              type="button"
+            >
+              {isStartingAnalysis ? "正在开始拆解" : "开始视频拆解"}
+            </button>
+          )}
+        </div>
+      ) : null}
+      {!isLoading && !error && !isAnalysisMissing ? (
         <form className="analysis-form" onSubmit={handleSave}>
           <div className="analysis-summary">
             <strong>{analysisSummary}</strong>
@@ -259,42 +347,6 @@ export function AnalysisWorkspace({
         </form>
       ) : null}
     </section>
-  );
-}
-
-function WorkflowSteps() {
-  const steps = [
-    "上传参考视频",
-    "视频拆解",
-    "选择源画面",
-    "首帧生成",
-    "生成结果",
-  ];
-
-  return (
-    <ol className="workflow-steps" aria-label="复刻流程">
-      {steps.map((step, index) => {
-        const isComplete = index < 2;
-        const isCurrent = index === 2;
-        return (
-          <li
-            className={
-              isCurrent
-                ? "workflow-step workflow-step--current"
-                : isComplete
-                  ? "workflow-step workflow-step--complete"
-                  : "workflow-step"
-            }
-            key={step}
-          >
-            <span aria-hidden="true">{isComplete ? "✓" : index + 1}</span>
-            <strong aria-current={isCurrent ? "step" : undefined}>
-              {step}
-            </strong>
-          </li>
-        );
-      })}
-    </ol>
   );
 }
 

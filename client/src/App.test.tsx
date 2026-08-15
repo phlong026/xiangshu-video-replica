@@ -4,6 +4,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -273,6 +274,27 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "创建并上传" })).toBeDisabled();
   });
 
+  it("shows the shared ten-step project flow when creating a replica", async () => {
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/health")) {
+        return Promise.resolve({ ok: true, json: async () => healthResponse });
+      }
+      return Promise.resolve({ ok: true, json: async () => [] });
+    });
+    vi.stubGlobal("fetch", withAuth(fetchMock));
+
+    render(<App />);
+    await enterWorkspace();
+    openNewReplica();
+
+    const flow = screen.getByRole("list", { name: "复刻项目流程" });
+    expect(within(flow).getAllByRole("listitem")).toHaveLength(10);
+    expect(within(flow).getByText("上传参考视频")).toHaveAttribute(
+      "aria-current",
+      "step",
+    );
+  });
+
   it("shows an auditor a read-only project list without write actions", async () => {
     const fetchMock = vi.fn((url: string) => {
       if (url.endsWith("/health")) {
@@ -361,14 +383,14 @@ describe("App", () => {
       ),
     ).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "创建并上传" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "继续上传" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "继续编辑" })).toBeNull();
     expect(screen.queryByRole("button", { name: "删除项目" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "编辑拆解" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "继续编辑" })).toBeNull();
     expect(
-      screen.getByRole("button", { name: "查看拆解" }),
+      screen.getByRole("button", { name: "查看项目" }),
     ).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "查看拆解" }));
+    fireEvent.click(screen.getByRole("button", { name: "查看项目" }));
     expect(
       await screen.findByText(
         "当前为只读身份，可查看拆解、候选记录和历史版本；不会请求素材下载链接，也不能保存、选择或生成。",
@@ -436,7 +458,7 @@ describe("App", () => {
 
     render(<App />);
     await enterWorkspace();
-    fireEvent.click(await screen.findByRole("button", { name: "继续上传" }));
+    fireEvent.click(await screen.findByRole("button", { name: "继续编辑" }));
 
     expect(window.location.hash).toBe("#new");
     expect(
@@ -447,6 +469,119 @@ describe("App", () => {
     expect(
       screen.getByText("正在为“待续传项目”重新上传参考视频。"),
     ).toBeInTheDocument();
+  });
+
+  it("resumes a ready project at video analysis without creating another project", async () => {
+    let analysisReady = false;
+    const analysis = {
+      id: "analysis-recovered",
+      project_id: "project-ready",
+      asset_id: "asset-ready",
+      kind: "analysis",
+      version_number: 1,
+      payload: {
+        analysis: {
+          summary: "恢复后的拆解结果",
+          duration_seconds: 8,
+          shots: [
+            {
+              shot_id: "S01",
+              start_time: 0,
+              end_time: 8,
+              shot_type: "近景",
+              composition: "人物居中",
+              camera_motion: "固定",
+              subject: "主讲人",
+              action: "讲话",
+              scene: "室内",
+              spoken_text: "你好",
+              transition: "硬切",
+            },
+          ],
+        },
+      },
+      created_by_user_id: "employee_1",
+      created_at: "2030-01-01T00:00:00Z",
+    };
+    const fetchMock = vi.fn((url: string, options?: RequestInit) => {
+      if (url.endsWith("/health")) {
+        return Promise.resolve({ ok: true, json: async () => healthResponse });
+      }
+      if (url.endsWith("/api/projects")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => [
+            {
+              id: "project-ready",
+              owner_user_id: "employee_1",
+              name: "待拆解项目",
+              status: "REFERENCE_READY",
+              reference_asset_id: "asset-ready",
+              reference_upload_status: "READY",
+              analysis_status: "PENDING",
+            },
+          ],
+        });
+      }
+      if (url.endsWith("/analysis/latest")) {
+        return analysisReady
+          ? Promise.resolve({ ok: true, json: async () => analysis })
+          : Promise.resolve({
+              ok: false,
+              status: 404,
+              json: async () => ({
+                detail: { message: "Project has no analysis version." },
+              }),
+            });
+      }
+      if (url.endsWith("/analysis") && options?.method === "POST") {
+        analysisReady = true;
+        return Promise.resolve({ ok: true, json: async () => analysis });
+      }
+      if (url.endsWith("/shot-cards/latest")) {
+        return Promise.resolve({ ok: false, status: 404 });
+      }
+      if (
+        url.endsWith("/source-frames/latest") ||
+        url.endsWith("/source-frames/selection/latest") ||
+        url.endsWith("/first-frames/latest") ||
+        url.endsWith("/first-frames/selection/latest")
+      ) {
+        return Promise.resolve({ ok: false, status: 404 });
+      }
+      if (url.endsWith("/first-frames/history")) {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
+      return Promise.resolve({ ok: true, json: async () => [] });
+    });
+    vi.stubGlobal("fetch", withAuth(fetchMock));
+
+    render(<App />);
+    await enterWorkspace();
+    fireEvent.click(await screen.findByRole("button", { name: "继续编辑" }));
+
+    expect(
+      await screen.findByRole("button", { name: "开始视频拆解" }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "开始视频拆解" }));
+
+    expect(await screen.findByText("恢复后的拆解结果")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:8000/api/projects/project-ready/analysis",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ asset_id: "asset-ready" }),
+      }),
+    );
+    expect(
+      fetchMock.mock.calls.filter(
+        ([url, options]) =>
+          url.endsWith("/api/projects") && options?.method === "POST",
+      ),
+    ).toHaveLength(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "返回项目" }));
+    expect(await screen.findByText("视频拆解已完成")).toBeInTheDocument();
   });
 
   it("lets an employee delete an unfinished project after confirmation", async () => {
@@ -587,7 +722,7 @@ describe("App", () => {
 
     render(<App />);
     await enterWorkspace();
-    fireEvent.click(await screen.findByRole("button", { name: "编辑拆解" }));
+    fireEvent.click(await screen.findByRole("button", { name: "继续编辑" }));
 
     expect(
       screen.getByRole("heading", { name: "咖啡复刻" }),
@@ -726,7 +861,7 @@ describe("App", () => {
 
     render(<App />);
     await enterWorkspace();
-    fireEvent.click(await screen.findByRole("button", { name: "编辑拆解" }));
+    fireEvent.click(await screen.findByRole("button", { name: "继续编辑" }));
     fireEvent.click(await screen.findByRole("button", { name: "选择人物" }));
     fireEvent.click(await screen.findByRole("radio", { name: /小夏/ }));
     fireEvent.click(screen.getByRole("button", { name: "确认使用人物" }));
@@ -814,6 +949,20 @@ describe("App", () => {
           }),
         });
       }
+      if (url.endsWith("/shot-cards/latest")) {
+        return Promise.resolve({ ok: false, status: 404 });
+      }
+      if (
+        url.endsWith("/source-frames/latest") ||
+        url.endsWith("/source-frames/selection/latest") ||
+        url.endsWith("/first-frames/latest") ||
+        url.endsWith("/first-frames/selection/latest")
+      ) {
+        return Promise.resolve({ ok: false, status: 404 });
+      }
+      if (url.endsWith("/first-frames/history")) {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
       return Promise.resolve({
         ok: true,
         json: async () => ({
@@ -822,7 +971,27 @@ describe("App", () => {
           asset_id: "asset-1",
           kind: "analysis",
           version_number: 1,
-          payload: {},
+          payload: {
+            analysis: {
+              summary: "咖啡口播拆解完成",
+              duration_seconds: 8,
+              shots: [
+                {
+                  shot_id: "S01",
+                  start_time: 0,
+                  end_time: 8,
+                  shot_type: "近景",
+                  composition: "人物居中",
+                  camera_motion: "固定",
+                  subject: "主讲人",
+                  action: "讲话",
+                  scene: "咖啡店",
+                  spoken_text: "你好",
+                  transition: "硬切",
+                },
+              ],
+            },
+          },
           created_by_user_id: "employee_1",
           created_at: "2030-01-01T00:00:00Z",
         }),
@@ -847,6 +1016,10 @@ describe("App", () => {
     expect(
       await screen.findByText(/已完成上传和预检（8.0 秒），已自动进入视频拆解/),
     ).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "镜头卡片" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("咖啡口播拆解完成")).toBeInTheDocument();
     expect(
       screen.queryByRole("progressbar", { name: "参考视频上传进度" }),
     ).toBeNull();
@@ -963,6 +1136,93 @@ describe("App", () => {
       screen.getByRole("progressbar", { name: "参考视频上传进度" }),
     ).toHaveAttribute("aria-valuetext", "正在上传参考视频，等待传输进度");
     fireEvent.click(screen.getByRole("button", { name: "取消上传" }));
+    expect(await screen.findByText(/上传已取消/)).toBeInTheDocument();
+  });
+
+  it("aborts an in-flight upload when the desktop page is unloaded", async () => {
+    let abortCalls = 0;
+    class PendingUploadRequest {
+      onabort: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      onload: (() => void) | null = null;
+      ontimeout: (() => void) | null = null;
+      status = 0;
+      timeout = 0;
+      upload: { onprogress: ((event: ProgressEvent) => void) | null } = {
+        onprogress: null,
+      };
+
+      open() {}
+      setRequestHeader() {}
+      send() {}
+      abort() {
+        abortCalls += 1;
+        this.onabort?.();
+      }
+    }
+
+    vi.stubGlobal(
+      "fetch",
+      withAuth((url: string, options?: RequestInit) => {
+        if (url.endsWith("/health")) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => healthResponse,
+          });
+        }
+        if (url.endsWith("/api/projects")) {
+          return Promise.resolve({
+            ok: true,
+            json: async () =>
+              options?.method === "POST"
+                ? {
+                    id: "project-unload",
+                    owner_user_id: "employee_1",
+                    name: "关闭窗口测试",
+                    status: "ACTIVE",
+                    reference_asset_id: null,
+                    reference_upload_status: "UPLOAD_PENDING",
+                    analysis_status: "NOT_READY",
+                  }
+                : [],
+          });
+        }
+        if (url.endsWith("/upload-intent")) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              asset_id: "asset-unload",
+              project_id: "project-unload",
+              storage_key: "projects/project-unload/reference.mp4",
+              method: "PUT",
+              url: "https://storage.example/upload",
+              headers: { "content-type": "video/mp4" },
+              expires_at: "2030-01-01T00:00:00Z",
+            }),
+          });
+        }
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }),
+    );
+    vi.stubGlobal("XMLHttpRequest", PendingUploadRequest);
+
+    render(<App />);
+    await enterWorkspace();
+    openNewReplica();
+    fireEvent.change(screen.getByLabelText("项目名称"), {
+      target: { value: "关闭窗口测试" },
+    });
+    fireEvent.change(screen.getByLabelText("参考视频"), {
+      target: {
+        files: [new File(["video"], "reference.mp4", { type: "video/mp4" })],
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "创建并上传" }));
+    await screen.findByText("步骤 3/5 · 正在上传参考视频");
+
+    act(() => window.dispatchEvent(new Event("pagehide")));
+
+    await waitFor(() => expect(abortCalls).toBe(1));
     expect(await screen.findByText(/上传已取消/)).toBeInTheDocument();
   });
 

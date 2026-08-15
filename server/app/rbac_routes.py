@@ -66,6 +66,7 @@ class ProjectResponse(BaseModel):
     status: str
     reference_asset_id: str | None
     reference_upload_status: str
+    analysis_status: str
 
 
 class AcceptedResponse(BaseModel):
@@ -206,7 +207,20 @@ def list_projects(
                     WHEN reference_assets.sha256 = '' OR reference_assets.size_bytes = 0
                         THEN 'UPLOAD_PENDING'
                     ELSE 'READY'
-                END AS reference_upload_status
+                END AS reference_upload_status,
+                CASE
+                    WHEN reference_assets.id IS NULL
+                        OR reference_assets.sha256 = ''
+                        OR reference_assets.size_bytes = 0
+                        THEN 'NOT_READY'
+                    WHEN EXISTS (
+                        SELECT 1 FROM versions
+                        WHERE versions.project_id = projects.id
+                            AND versions.kind = 'analysis'
+                            AND versions.asset_id = reference_assets.id
+                    ) THEN 'READY'
+                    ELSE 'PENDING'
+                END AS analysis_status
             FROM projects
             LEFT JOIN assets AS reference_assets ON reference_assets.id = (
                 SELECT assets.id
@@ -239,7 +253,20 @@ def list_projects(
                     WHEN reference_assets.sha256 = '' OR reference_assets.size_bytes = 0
                         THEN 'UPLOAD_PENDING'
                     ELSE 'READY'
-                END AS reference_upload_status
+                END AS reference_upload_status,
+                CASE
+                    WHEN reference_assets.id IS NULL
+                        OR reference_assets.sha256 = ''
+                        OR reference_assets.size_bytes = 0
+                        THEN 'NOT_READY'
+                    WHEN EXISTS (
+                        SELECT 1 FROM versions
+                        WHERE versions.project_id = projects.id
+                            AND versions.kind = 'analysis'
+                            AND versions.asset_id = reference_assets.id
+                    ) THEN 'READY'
+                    ELSE 'PENDING'
+                END AS analysis_status
             FROM projects
             LEFT JOIN assets AS reference_assets ON reference_assets.id = (
                 SELECT assets.id
@@ -311,6 +338,7 @@ def create_project(
         status="ACTIVE",
         reference_asset_id=None,
         reference_upload_status="NOT_STARTED",
+        analysis_status="NOT_READY",
     )
 
 
@@ -407,7 +435,20 @@ def read_project(
                 WHEN reference_assets.sha256 = '' OR reference_assets.size_bytes = 0
                     THEN 'UPLOAD_PENDING'
                 ELSE 'READY'
-            END AS reference_upload_status
+            END AS reference_upload_status,
+            CASE
+                WHEN reference_assets.id IS NULL
+                    OR reference_assets.sha256 = ''
+                    OR reference_assets.size_bytes = 0
+                    THEN 'NOT_READY'
+                WHEN EXISTS (
+                    SELECT 1 FROM versions
+                    WHERE versions.project_id = projects.id
+                        AND versions.kind = 'analysis'
+                        AND versions.asset_id = reference_assets.id
+                ) THEN 'READY'
+                ELSE 'PENDING'
+            END AS analysis_status
         FROM projects
         LEFT JOIN assets AS reference_assets ON reference_assets.id = (
             SELECT assets.id
@@ -570,6 +611,9 @@ def project_response(row: sqlite3.Row) -> ProjectResponse:
         if "reference_upload_status" not in row.keys()
         else str(row["reference_upload_status"])
     )
+    analysis_status = (
+        "NOT_READY" if "analysis_status" not in row.keys() else str(row["analysis_status"])
+    )
     return ProjectResponse(
         id=str(row["id"]),
         owner_user_id=str(row["owner_user_id"]),
@@ -577,6 +621,7 @@ def project_response(row: sqlite3.Row) -> ProjectResponse:
         status=str(row["status"]),
         reference_asset_id=reference_asset_id,
         reference_upload_status=reference_upload_status,
+        analysis_status=analysis_status,
     )
 
 

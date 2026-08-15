@@ -434,9 +434,11 @@ def test_project_list_exposes_reference_video_state_for_upload_recovery(
         "status": "ACTIVE",
         "reference_asset_id": "reference_pending",
         "reference_upload_status": "UPLOAD_PENDING",
+        "analysis_status": "NOT_READY",
     }
     assert detail.json()["reference_asset_id"] == "reference_pending"
     assert detail.json()["reference_upload_status"] == "UPLOAD_PENDING"
+    assert detail.json()["analysis_status"] == "NOT_READY"
 
 
 def test_project_list_recognizes_legacy_reference_video_uploads(
@@ -470,6 +472,85 @@ def test_project_list_recognizes_legacy_reference_video_uploads(
     assert response.status_code == 200
     assert response.json()["reference_asset_id"] == "legacy_reference"
     assert response.json()["reference_upload_status"] == "READY"
+    assert response.json()["analysis_status"] == "PENDING"
+
+
+def test_project_list_marks_existing_analysis_as_ready(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    with connect_database(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO assets (
+                id, project_id, kind, storage_uri,
+                sha256, size_bytes, content_type, created_by_user_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "reference_ready",
+                "project_owned",
+                "reference_video",
+                "cos://private-bucket/projects/project_owned/reference.mp4",
+                "ready-hash",
+                1024,
+                "video/mp4",
+                "employee_1",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO versions (
+                id, project_id, asset_id, kind, version_number,
+                payload_json, created_by_user_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "analysis_ready",
+                "project_owned",
+                "reference_ready",
+                "analysis",
+                1,
+                "{}",
+                "employee_1",
+            ),
+        )
+        conn.commit()
+
+    response = client.get("/api/projects/project_owned", headers=auth_headers("employee_1"))
+
+    assert response.status_code == 200
+    assert response.json()["analysis_status"] == "READY"
+
+    with connect_database(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO assets (
+                id, project_id, kind, storage_uri,
+                sha256, size_bytes, content_type, created_by_user_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "reference_newer",
+                "project_owned",
+                "reference_video",
+                "cos://private-bucket/projects/project_owned/reference-newer.mp4",
+                "newer-hash",
+                2048,
+                "video/mp4",
+                "employee_1",
+            ),
+        )
+        conn.commit()
+
+    stale = client.get("/api/projects/project_owned", headers=auth_headers("employee_1"))
+
+    assert stale.status_code == 200
+    assert stale.json()["reference_asset_id"] == "reference_newer"
+    assert stale.json()["analysis_status"] == "PENDING"
 
 
 def test_auditor_cannot_generate_retry_or_download(client: TestClient) -> None:

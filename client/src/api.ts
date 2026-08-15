@@ -89,6 +89,7 @@ export type Project = {
   status: string;
   reference_asset_id: string | null;
   reference_upload_status: "NOT_STARTED" | "UPLOAD_PENDING" | "READY";
+  analysis_status: "NOT_READY" | "PENDING" | "READY";
 };
 
 export type UploadIntent = {
@@ -629,17 +630,18 @@ export async function completeVideoUpload(
 export async function startVideoAnalysis(
   projectId: string,
   assetId: string,
-  durationSeconds: number,
+  durationSeconds?: number,
 ): Promise<AnalysisVersion> {
+  const payload =
+    durationSeconds === undefined
+      ? { asset_id: assetId }
+      : { asset_id: assetId, duration_seconds: durationSeconds };
   return requestApiJson<AnalysisVersion>(
     `/api/projects/${encodeURIComponent(projectId)}/analysis`,
     "启动视频拆解失败",
     {
       method: "POST",
-      body: JSON.stringify({
-        asset_id: assetId,
-        duration_seconds: durationSeconds,
-      }),
+      body: JSON.stringify(payload),
     },
   );
 }
