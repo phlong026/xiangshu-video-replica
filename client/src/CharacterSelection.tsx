@@ -21,10 +21,12 @@ const VIEW_LABELS: Record<ProjectCharacterAssetOption["view_type"], string> = {
 
 export function CharacterSelection({
   onSelectionChange,
+  onVersionChange,
   projectId,
   readOnly = false,
 }: {
   onSelectionChange?: (hasSelection: boolean) => void;
+  onVersionChange?: (selection: ProjectMainCharacter | null) => void;
   projectId: string;
   readOnly?: boolean;
 }) {
@@ -57,6 +59,7 @@ export function CharacterSelection({
         setCurrentSelection(restoredSelection);
         setSelectedVersionId(restoredSelection?.character_version_id ?? "");
         onSelectionChange?.(restoredSelection !== null);
+        onVersionChange?.(restoredSelection);
       })
       .catch((requestError) => {
         if (!active) {
@@ -68,6 +71,7 @@ export function CharacterSelection({
             : "读取当前角色版本失败。",
         );
         onSelectionChange?.(false);
+        onVersionChange?.(null);
       })
       .finally(() => {
         if (active) {
@@ -77,7 +81,7 @@ export function CharacterSelection({
     return () => {
       active = false;
     };
-  }, [onSelectionChange, projectId]);
+  }, [onSelectionChange, onVersionChange, projectId]);
 
   async function openSelection() {
     setIsOpen(true);
@@ -112,6 +116,7 @@ export function CharacterSelection({
       );
       setCurrentSelection(selection);
       onSelectionChange?.(true);
+      onVersionChange?.(selection);
       const summary = selectionSummary(selection);
       setMessage(
         summary

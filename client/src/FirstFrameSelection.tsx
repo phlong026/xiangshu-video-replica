@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   type AnalysisVersion,
+  type CharacterReferenceSelection,
   confirmFirstFrame,
   type FirstFrameCandidate,
   type FirstFrameModel,
@@ -18,11 +19,15 @@ const DEFAULT_PROMPT =
   "保留原图的镜头位置、人物姿态、动作、场景、构图、道具、光线与色调，只将原人物身份替换为角色库人物；保持自然皮肤、正确肢体和真实透视；不得增加或删除主体。";
 
 export function FirstFrameSelection({
+  onSelectionChange,
   projectId,
   readOnly = false,
+  referenceSelection,
 }: {
+  onSelectionChange?: (selection: AnalysisVersion | null) => void;
   projectId: string;
   readOnly?: boolean;
+  referenceSelection: CharacterReferenceSelection;
 }) {
   const [version, setVersion] = useState<AnalysisVersion | null>(null);
   const [latestVersionId, setLatestVersionId] = useState("");
@@ -37,16 +42,21 @@ export function FirstFrameSelection({
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const loadRequestId = useRef(0);
+  const referenceSelectionId = referenceSelection.id;
 
   const load = useCallback(
     async (preferredVersion?: AnalysisVersion) => {
+      if (!referenceSelectionId) {
+        return;
+      }
       const requestId = loadRequestId.current + 1;
       loadRequestId.current = requestId;
       const isCurrentRequest = () => requestId === loadRequestId.current;
       setIsLoading(true);
       setError("");
+      onSelectionChange?.(null);
       try {
-        const [latest, selection, versions] = await Promise.all([
+        const [latestState, selection, versions] = await Promise.all([
           getLatestProjectFirstFrames(projectId),
           getLatestProjectFirstFrameSelection(projectId),
           getProjectFirstFrameHistory(projectId),
@@ -54,6 +64,7 @@ export function FirstFrameSelection({
         if (!isCurrentRequest()) {
           return;
         }
+        const latest = latestState.version;
         const displayVersion = preferredVersion ?? latest;
         setLatestVersionId(latest?.id ?? "");
         setHistory(versions);
@@ -62,9 +73,9 @@ export function FirstFrameSelection({
         setPreviewUrls({});
         if (!displayVersion) {
           setStatus(
-            selection.stale
+            latestState.stale || selection.stale
               ? "上游输入已更新，请重新生成人物置换首帧。"
-              : "确认源画面并选择人物后，可生成人物置换首帧。",
+              : "人物参考图已确认，可以生成人物置换首帧。",
           );
           return;
         }
@@ -93,6 +104,7 @@ export function FirstFrameSelection({
         if (isCurrentConfirmation && typeof confirmedAssetId === "string") {
           setSelectedAssetId(confirmedAssetId);
           setStatus("当前候选首帧已确认，将作为后续 H3 提示词的唯一首帧输入。");
+          onSelectionChange?.(selection.version);
         } else if (selection.stale) {
           setStatus("上游输入已更新，请重新生成人物置换首帧。");
         } else if (selection.version) {
@@ -135,7 +147,7 @@ export function FirstFrameSelection({
         }
       }
     },
-    [projectId, readOnly],
+    [onSelectionChange, projectId, readOnly, referenceSelectionId],
   );
 
   useEffect(() => {
@@ -165,6 +177,8 @@ export function FirstFrameSelection({
         model,
         prompt,
         quantity,
+        character_version_id: referenceSelection.character_version_id,
+        character_reference_selection_id: referenceSelection.id,
       });
       setStatus("候选首帧已更新，请查看后手动确认一张。");
       await load(generated);
@@ -190,13 +204,14 @@ export function FirstFrameSelection({
     setIsSubmitting(true);
     setError("");
     try {
-      await confirmFirstFrame(projectId, selectedAssetId);
+      const selection = await confirmFirstFrame(projectId, selectedAssetId);
       const selectedIndex = payload?.candidates.findIndex(
         (candidate) => candidate.asset_id === selectedAssetId,
       );
       setStatus(
         `已确认首帧候选 ${(selectedIndex ?? 0) + 1}。保存镜头卡片并锁定 H3 提示词后，才能创建视频批次。`,
       );
+      onSelectionChange?.(selection);
     } catch (requestError) {
       setError(
         requestError instanceof Error ? requestError.message : "确认首帧失败。",
@@ -252,7 +267,7 @@ export function FirstFrameSelection({
         首帧编辑提示词
         <textarea
           aria-label="首帧编辑提示词"
-          disabled={readOnly || isSubmitting}
+          disabled={readOnly || isSubmitting || !referenceSelection}
           onChange={(event) => setPrompt(event.target.value)}
           rows={5}
           value={prompt}

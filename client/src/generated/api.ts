@@ -883,6 +883,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/projects/{project_id}/character-reference-recommendation": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Character Reference Recommendation */
+    get: operations["read_character_reference_recommendation_api_projects__project_id__character_reference_recommendation_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/projects/{project_id}/character-reference-selection": {
     parameters: {
       query?: never;
@@ -1411,6 +1428,21 @@ export interface components {
       /** Usage Scope Json */
       usage_scope_json?: string[] | null;
     };
+    /** CharacterReferenceRecommendation */
+    CharacterReferenceRecommendation: {
+      /** Source Frame Version Id */
+      source_frame_version_id: string;
+      /** Character Version Id */
+      character_version_id: string;
+      /** Recommended Asset Ids Json */
+      recommended_asset_ids_json: string[];
+      /** Candidate Assets */
+      candidate_assets: components["schemas"]["ProjectCharacterAssetOption"][];
+      /** Recommendation Reason Json */
+      recommendation_reason_json: Record<string, never>;
+      /** Character Version Snapshot Json */
+      character_version_snapshot_json: Record<string, never>;
+    };
     /** CharacterReferenceSelection */
     CharacterReferenceSelection: {
       /** Id */
@@ -1706,6 +1738,10 @@ export interface components {
        * @default 1
        */
       quantity: number;
+      /** Character Version Id */
+      character_version_id?: string | null;
+      /** Character Reference Selection Id */
+      character_reference_selection_id?: string | null;
     };
     /** GenerationBatchRequest */
     GenerationBatchRequest: {
@@ -4321,6 +4357,39 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["CharacterGenerationTask"][];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_character_reference_recommendation_api_projects__project_id__character_reference_recommendation_get: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        project_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["CharacterReferenceRecommendation"];
         };
       };
       /** @description Validation Error */

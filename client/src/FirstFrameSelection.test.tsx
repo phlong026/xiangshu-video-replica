@@ -11,6 +11,19 @@ import {
 } from "./api";
 import { FirstFrameSelection } from "./FirstFrameSelection";
 
+const referenceSelection = {
+  id: "reference-selection-1",
+  project_id: "project-1",
+  source_frame_version_id: "source-selection-1",
+  character_version_id: "character-version-3",
+  recommended_asset_ids_json: ["character-front"],
+  selected_asset_ids_json: ["character-front"],
+  recommendation_reason_json: {},
+  character_version_snapshot_json: {},
+  selected_by: "employee_1",
+  selected_at: "2030-01-01T00:00:00Z",
+};
+
 vi.mock("./api", () => ({
   confirmFirstFrame: vi.fn(),
   generateFirstFrames: vi.fn(),
@@ -58,7 +71,10 @@ const candidatesVersion = {
 describe("FirstFrameSelection", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(getLatestProjectFirstFrames).mockResolvedValue(candidatesVersion);
+    vi.mocked(getLatestProjectFirstFrames).mockResolvedValue({
+      version: candidatesVersion,
+      stale: false,
+    });
     vi.mocked(getProjectFirstFrameHistory).mockResolvedValue([
       candidatesVersion,
     ]);
@@ -79,7 +95,12 @@ describe("FirstFrameSelection", () => {
   });
 
   it("shows the Apilio model, candidates, and requires a visible choice before confirmation", async () => {
-    render(<FirstFrameSelection projectId="project-1" />);
+    render(
+      <FirstFrameSelection
+        projectId="project-1"
+        referenceSelection={referenceSelection}
+      />,
+    );
 
     expect(await screen.findByText("人物置换首帧")).toBeInTheDocument();
     expect(
@@ -107,7 +128,12 @@ describe("FirstFrameSelection", () => {
   });
 
   it("allows the employee to change the model, edit the prompt, and regenerate candidates", async () => {
-    render(<FirstFrameSelection projectId="project-1" />);
+    render(
+      <FirstFrameSelection
+        projectId="project-1"
+        referenceSelection={referenceSelection}
+      />,
+    );
     await screen.findByText("人物置换首帧");
 
     fireEvent.change(screen.getByLabelText("首帧模型"), {
@@ -126,16 +152,26 @@ describe("FirstFrameSelection", () => {
         model: "gpt-image-2",
         prompt: "Use the selected character identity.",
         quantity: 2,
+        character_version_id: "character-version-3",
+        character_reference_selection_id: "reference-selection-1",
       }),
     );
   });
 
   it("clearly marks local fake output instead of presenting it as a provider result", async () => {
     vi.mocked(getLatestProjectFirstFrames).mockResolvedValue({
-      ...candidatesVersion,
-      payload: { ...candidatesVersion.payload, provider: "fake" },
+      stale: false,
+      version: {
+        ...candidatesVersion,
+        payload: { ...candidatesVersion.payload, provider: "fake" },
+      },
     });
-    render(<FirstFrameSelection projectId="project-1" />);
+    render(
+      <FirstFrameSelection
+        projectId="project-1"
+        referenceSelection={referenceSelection}
+      />,
+    );
 
     expect(
       await screen.findByText("模拟输出：尚未调用 Apilio 真实模型。"),
@@ -155,7 +191,12 @@ describe("FirstFrameSelection", () => {
         },
       },
     });
-    render(<FirstFrameSelection projectId="project-1" />);
+    render(
+      <FirstFrameSelection
+        projectId="project-1"
+        referenceSelection={referenceSelection}
+      />,
+    );
 
     expect(
       await screen.findByText(
@@ -166,11 +207,36 @@ describe("FirstFrameSelection", () => {
   });
 
   it("does not request protected preview downloads for a read-only auditor", async () => {
-    render(<FirstFrameSelection projectId="project-1" readOnly />);
+    render(
+      <FirstFrameSelection
+        projectId="project-1"
+        readOnly
+        referenceSelection={referenceSelection}
+      />,
+    );
 
     expect(
       await screen.findByText(/只读身份不加载素材预览/),
     ).toBeInTheDocument();
     expect(getAssetDownloadUrl).not.toHaveBeenCalled();
+  });
+
+  it("treats a stale latest generation as an upstream gate instead of a load error", async () => {
+    vi.mocked(getLatestProjectFirstFrames).mockResolvedValue({
+      version: null,
+      stale: true,
+    });
+
+    render(
+      <FirstFrameSelection
+        projectId="project-1"
+        referenceSelection={referenceSelection}
+      />,
+    );
+
+    expect(
+      await screen.findByText("上游输入已更新，请重新生成人物置换首帧。"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/读取候选首帧失败/)).toBeNull();
   });
 });

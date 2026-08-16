@@ -11,7 +11,12 @@ from uuid import uuid4
 from fastapi import HTTPException
 
 from app.auth import CurrentUser
-from app.character_contracts import CharacterReferenceSelection, RequiredCharacterViewType
+from app.character_contracts import (
+    CharacterReferenceRecommendation,
+    CharacterReferenceSelection,
+    ProjectCharacterAssetOption,
+    RequiredCharacterViewType,
+)
 from app.character_identity import (
     REQUIRED_CHARACTER_VIEW_TYPES,
     decode_object,
@@ -65,6 +70,7 @@ class ReferenceSelectionInputs:
     character_version_id: str
     recommended_asset_ids: list[str]
     selected_asset_ids: list[str]
+    candidate_assets: list[ProjectCharacterAssetOption]
     recommendation_reason: dict[str, object]
     character_version_snapshot: dict[str, object]
 
@@ -177,6 +183,33 @@ def get_latest_character_reference_selection(
     return character_reference_selection_from_row(row)
 
 
+def get_character_reference_recommendation(
+    conn: sqlite3.Connection,
+    *,
+    actor: CurrentUser,
+    project_id: str,
+) -> CharacterReferenceRecommendation:
+    require_project_access(
+        conn,
+        actor=actor,
+        project_id=project_id,
+        action="character_reference.read",
+    )
+    inputs = load_reference_selection_inputs(
+        conn,
+        project_id=project_id,
+        requested_asset_ids=None,
+    )
+    return CharacterReferenceRecommendation(
+        source_frame_version_id=inputs.source_frame_version_id,
+        character_version_id=inputs.character_version_id,
+        recommended_asset_ids_json=inputs.recommended_asset_ids,
+        candidate_assets=inputs.candidate_assets,
+        recommendation_reason_json=inputs.recommendation_reason,
+        character_version_snapshot_json=inputs.character_version_snapshot,
+    )
+
+
 def current_character_reference_selection_for_generation(
     conn: sqlite3.Connection,
     *,
@@ -279,6 +312,14 @@ def load_reference_selection_inputs(
         publication_snapshot=publication_snapshot,
     )
     candidate_asset_ids = [assets_by_view[view].asset_id for view in REQUIRED_CHARACTER_VIEW_TYPES]
+    candidate_assets = [
+        ProjectCharacterAssetOption(
+            character_asset_id=assets_by_view[view].character_asset_id,
+            asset_id=assets_by_view[view].asset_id,
+            view_type=view,
+        )
+        for view in REQUIRED_CHARACTER_VIEW_TYPES
+    ]
     body_view = recommended_body_view(source_features)
     recommended_views: list[RequiredCharacterViewType] = [body_view, "FRONT_FACE"]
     recommended_asset_ids = unique_ids(
@@ -328,6 +369,7 @@ def load_reference_selection_inputs(
         character_version_id=character_version_id,
         recommended_asset_ids=recommended_asset_ids,
         selected_asset_ids=selected,
+        candidate_assets=candidate_assets,
         recommendation_reason=recommendation_reason,
         character_version_snapshot=character_version_snapshot,
     )

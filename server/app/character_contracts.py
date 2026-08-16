@@ -167,6 +167,15 @@ class ProjectCharacterAssetOption(CharacterContract):
     view_type: RequiredCharacterViewType
 
 
+class CharacterReferenceRecommendation(CharacterContract):
+    source_frame_version_id: str
+    character_version_id: str
+    recommended_asset_ids_json: list[str]
+    candidate_assets: list[ProjectCharacterAssetOption]
+    recommendation_reason_json: dict[str, object]
+    character_version_snapshot_json: dict[str, object]
+
+
 class ProjectCharacterVersionOption(CharacterContract):
     character_version_id: str
     version_number: int

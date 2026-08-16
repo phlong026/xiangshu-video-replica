@@ -90,10 +90,12 @@ describe("CharacterSelection", () => {
   it("restores the frozen role version as soon as the project opens", async () => {
     vi.mocked(api.getProjectMainCharacter).mockResolvedValue(selected);
     const onSelectionChange = vi.fn();
+    const onVersionChange = vi.fn();
 
     render(
       <CharacterSelection
         onSelectionChange={onSelectionChange}
+        onVersionChange={onVersionChange}
         projectId="project-1"
       />,
     );
@@ -103,6 +105,7 @@ describe("CharacterSelection", () => {
     expect(screen.getByText("授权有效至 2035-01-01")).toBeInTheDocument();
     expect(api.getProjectMainCharacter).toHaveBeenCalledWith("project-1");
     expect(onSelectionChange).toHaveBeenLastCalledWith(true);
+    expect(onVersionChange).toHaveBeenLastCalledWith(selected);
   });
 
   it("shows only server-approved options with all seven published assets", async () => {

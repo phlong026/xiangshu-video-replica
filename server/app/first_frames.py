@@ -418,6 +418,8 @@ def generate_first_frame_candidates(
     model: FirstFrameModel,
     prompt: str | None,
     quantity: int,
+    character_version_id: str | None = None,
+    character_reference_selection_id: str | None = None,
 ) -> sqlite3.Row:
     require_not_auditor(
         conn,
@@ -455,6 +457,8 @@ def generate_first_frame_candidates(
         conn,
         project_id=project_id,
         source_frame_selection_version_id=str(source_selection["id"]),
+        expected_character_version_id=character_version_id,
+        expected_reference_selection_id=character_reference_selection_id,
     )
     source_image = read_asset_image(storage, source_frame)
     reference_assets = [
@@ -517,6 +521,18 @@ def generate_first_frame_candidates(
             )
 
         with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            require_current_first_frame_inputs(
+                conn,
+                project_id=project_id,
+                source_frame_selection_version_id=str(source_selection["id"]),
+                main_character_version_id=character_inputs.main_character_version_id,
+                character_reference_selection_id=(
+                    character_inputs.character_reference_selection_id
+                ),
+                character_version_id=character_inputs.character_version_id,
+                require_usable_character=True,
+            )
             for candidate in candidates:
                 conn.execute(
                     """
@@ -561,6 +577,9 @@ def generate_first_frame_candidates(
                 created_by_user_id=actor.id,
                 payload=version_payload,
             )
+    except HTTPException:
+        delete_created_first_frames(storage, created_assets, actor_id=actor.id)
+        raise
     except sqlite3.Error as exc:
         delete_created_first_frames(storage, created_assets, actor_id=actor.id)
         raise first_frame_error(
@@ -679,13 +698,27 @@ def resolve_first_frame_character_inputs(
     *,
     project_id: str,
     source_frame_selection_version_id: str,
+    expected_character_version_id: str | None = None,
+    expected_reference_selection_id: str | None = None,
 ) -> FirstFrameCharacterInputs:
-    reference_selection = current_character_reference_selection_for_generation(
-        conn,
-        project_id=project_id,
-        source_frame_version_id=source_frame_selection_version_id,
-    )
+    try:
+        reference_selection = current_character_reference_selection_for_generation(
+            conn,
+            project_id=project_id,
+            source_frame_version_id=source_frame_selection_version_id,
+        )
+    except HTTPException as exc:
+        if exc.status_code in {404, 409}:
+            raise first_frame_binding_stale() from exc
+        raise
     if reference_selection is not None:
+        if expected_character_version_id is None or expected_reference_selection_id is None:
+            raise first_frame_binding_required()
+        if (
+            reference_selection.character_version_id != expected_character_version_id
+            or reference_selection.id != expected_reference_selection_id
+        ):
+            raise first_frame_binding_stale()
         snapshot = reference_selection.character_version_snapshot_json
         persona_snapshot = snapshot.get("persona_snapshot_json")
         if not isinstance(persona_snapshot, dict):
@@ -705,6 +738,9 @@ def resolve_first_frame_character_inputs(
             character_reference_selection_id=reference_selection.id,
             character_version_id=reference_selection.character_version_id,
         )
+
+    if expected_character_version_id is not None or expected_reference_selection_id is not None:
+        raise first_frame_binding_stale()
 
     main_character = get_project_main_character(conn, project_id=project_id)
     character = read_character(conn, str(main_character["character_id"]))
@@ -856,6 +892,22 @@ def stale_first_frame_inputs() -> HTTPException:
         409,
         "FIRST_FRAME_CANDIDATES_STALE",
         "Generate first-frame candidates again using the current source frame and character.",
+    )
+
+
+def first_frame_binding_required() -> HTTPException:
+    return first_frame_error(
+        422,
+        "CHARACTER_REFERENCE_BINDING_REQUIRED",
+        "Confirm the current character references before generating first-frame candidates.",
+    )
+
+
+def first_frame_binding_stale() -> HTTPException:
+    return first_frame_error(
+        409,
+        "FIRST_FRAME_INPUT_BINDING_STALE",
+        "The character reference binding changed. Confirm the current references again.",
     )
 
 
