@@ -201,9 +201,12 @@ export function GenerationComposer({
     Number.isInteger(duration) && duration >= 4 && duration <= 15;
   const promptParametersMatch = Boolean(
     promptVersion &&
-      readPayloadNumber(promptVersion, "output_duration_seconds") ===
-        duration &&
-      readPayloadString(promptVersion, "resolution") === resolution,
+      payloadMatchesOrMissing(
+        promptVersion,
+        "output_duration_seconds",
+        duration,
+      ) &&
+      payloadMatchesOrMissing(promptVersion, "resolution", resolution),
   );
   const canCompile = Boolean(
     !readOnly &&
@@ -747,6 +750,15 @@ function readPayloadNumber(
 ): number | null {
   const value = version?.payload[key];
   return typeof value === "number" ? value : null;
+}
+
+function payloadMatchesOrMissing(
+  version: GenerationVersion,
+  key: string,
+  expected: number | string,
+): boolean {
+  const frozen = version.payload[key];
+  return frozen == null || frozen === expected;
 }
 
 function readScriptSource(version: GenerationVersion | null): ScriptSource {

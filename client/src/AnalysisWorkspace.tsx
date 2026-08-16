@@ -299,7 +299,7 @@ export function AnalysisWorkspace({
   }
 
   function updateShot(index: number, key: keyof ShotCard, value: string) {
-    if (readOnly) {
+    if (readOnly || isSaving) {
       return;
     }
     setShots((current) =>
@@ -473,7 +473,7 @@ export function AnalysisWorkspace({
                         onChange={(value) =>
                           updateShot(index, "start_time", value)
                         }
-                        readOnly={readOnly}
+                        readOnly={readOnly || isSaving}
                         type="number"
                         value={String(shot.start_time)}
                       />
@@ -482,7 +482,7 @@ export function AnalysisWorkspace({
                         onChange={(value) =>
                           updateShot(index, "end_time", value)
                         }
-                        readOnly={readOnly}
+                        readOnly={readOnly || isSaving}
                         type="number"
                         value={String(shot.end_time)}
                       />
@@ -493,7 +493,7 @@ export function AnalysisWorkspace({
                           key={key}
                           label={`${shot.shot_id} ${label}`}
                           onChange={(value) => updateShot(index, key, value)}
-                          readOnly={readOnly}
+                          readOnly={readOnly || isSaving}
                           value={shot[key]}
                         />
                       ))}

@@ -45,7 +45,28 @@ SCRIPT_KIND = "script"
 H3_PROMPT_KIND = "h3_prompt"
 GENERATION_SCHEMA_VERSION = "c.generation.v1"
 H3_PROMPT_TEMPLATE_VERSION = "h3.prompt.v1"
-H3_PROMPT_TEMPLATE_HASH = hashlib.sha256(b"compile_prompt_text:h3.prompt.v1").hexdigest()
+H3_PROMPT_TEMPLATE_SPEC = (
+    (
+        "intro",
+        "生成一条 {duration_seconds} 秒、{resolution}、写实短视频，从提供的首帧自然开始。",
+    ),
+    ("continuity", "保持首帧人物身份、服装、发型、场景和光线连续。"),
+    (
+        "shot",
+        "[{start:.1f}-{end:.1f}s] {shot_type}，{composition}，{camera_motion}；"
+        "{subject}{action}，场景：{scene}，转场：{transition}。口播意图：{spoken}",
+    ),
+    ("script", "口播意图：{full_text}"),
+    ("outro", "环境音与音乐保持自然；不要增加无关人物，不要身份突变、肢体异常或画面闪烁。"),
+)
+H3_PROMPT_TEMPLATES = dict(H3_PROMPT_TEMPLATE_SPEC)
+H3_PROMPT_TEMPLATE_HASH = hashlib.sha256(
+    json.dumps(
+        H3_PROMPT_TEMPLATE_SPEC,
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode()
+).hexdigest()
 PROMPT_STATUSES = {"SAVED", "LOCKED", "USED"}
 TERMINAL_STATUSES = {"FAILED", "CANCELLED"}
 H3_MODEL = "MiniMax-H3"
@@ -2329,8 +2350,11 @@ def compile_prompt_text(
     resolution: str,
 ) -> str:
     lines = [
-        f"生成一条 {duration_seconds} 秒、{resolution}、写实短视频，从提供的首帧自然开始。",
-        "保持首帧人物身份、服装、发型、场景和光线连续。",
+        H3_PROMPT_TEMPLATES["intro"].format(
+            duration_seconds=duration_seconds,
+            resolution=resolution,
+        ),
+        H3_PROMPT_TEMPLATES["continuity"],
     ]
     mappings_by_shot = {
         str(mapping["shot_id"]): str(mapping["text"])
@@ -2341,8 +2365,7 @@ def compile_prompt_text(
         shot_id = str(shot["shot_id"])
         spoken = mappings_by_shot.get(shot_id, str(shot.get("spoken_text", "")))
         lines.append(
-            "[{start:.1f}-{end:.1f}s] {shot_type}，{composition}，{camera_motion}；"
-            "{subject}{action}，场景：{scene}，转场：{transition}。口播意图：{spoken}".format(
+            H3_PROMPT_TEMPLATES["shot"].format(
                 start=float(shot["start_time"]),
                 end=float(shot["end_time"]),
                 shot_type=shot["shot_type"],
@@ -2355,8 +2378,8 @@ def compile_prompt_text(
                 spoken=spoken,
             )
         )
-    lines.append(f"口播意图：{script_payload['full_text']}")
-    lines.append("环境音与音乐保持自然；不要增加无关人物，不要身份突变、肢体异常或画面闪烁。")
+    lines.append(H3_PROMPT_TEMPLATES["script"].format(full_text=script_payload["full_text"]))
+    lines.append(H3_PROMPT_TEMPLATES["outro"])
     return "\n".join(lines)
 
 

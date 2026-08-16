@@ -293,6 +293,42 @@ describe("GenerationComposer", () => {
     ).toBeInTheDocument();
   });
 
+  it("keeps a legacy locked prompt without frozen parameters usable", async () => {
+    vi.mocked(api.getLatestScriptVersion).mockResolvedValue({
+      version: {
+        ...baseVersion,
+        id: "script-1",
+        payload: {
+          source: "original",
+          full_text: props.originalScript,
+          shot_card_version_id: "shot-card-1",
+          shot_mappings: [],
+        },
+      },
+      stale: false,
+      stale_reasons: [],
+    });
+    const legacyPayload: Record<string, unknown> = {
+      ...promptVersion("LOCKED").payload,
+    };
+    delete legacyPayload.output_duration_seconds;
+    delete legacyPayload.resolution;
+    vi.mocked(api.getLatestGenerationPrompt).mockResolvedValue({
+      version: { ...promptVersion("LOCKED"), payload: legacyPayload },
+      stale: false,
+      stale_reasons: [],
+    });
+
+    render(<GenerationComposer {...props} />);
+
+    expect(
+      await screen.findByRole("button", { name: "创建 1 个生成任务" }),
+    ).toBeEnabled();
+    expect(
+      screen.queryByText("生成参数已变化，请重新编译 Prompt。"),
+    ).not.toBeInTheDocument();
+  });
+
   it("requires saving visible script edits before prompt compilation", async () => {
     vi.mocked(api.getLatestScriptVersion).mockResolvedValue({
       version: {

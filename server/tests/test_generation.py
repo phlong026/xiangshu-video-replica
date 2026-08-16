@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import socket
 import sqlite3
@@ -975,6 +976,20 @@ def test_batch_rejects_parameters_that_differ_from_the_locked_prompt(
 
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "PROMPT_PARAMETERS_MISMATCH"
+
+
+def test_h3_template_hash_is_derived_from_the_rendering_spec() -> None:
+    import app.generation as generation
+
+    template_spec = getattr(generation, "H3_PROMPT_TEMPLATE_SPEC", None)
+    assert template_spec is not None
+    canonical_spec = json.dumps(
+        template_spec,
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode()
+
+    assert generation.H3_PROMPT_TEMPLATE_HASH == hashlib.sha256(canonical_spec).hexdigest()
 
 
 def test_h3_request_contract_is_i2v_text_first_frame_adaptive_and_duration_guard() -> None:
