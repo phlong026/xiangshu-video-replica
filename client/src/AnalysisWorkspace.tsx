@@ -71,6 +71,7 @@ export function AnalysisWorkspace({
   const [durationSeconds, setDurationSeconds] = useState(0);
   const [shots, setShots] = useState<ShotCard[]>([]);
   const [shotCardVersionId, setShotCardVersionId] = useState("");
+  const [shotCardsDirty, setShotCardsDirty] = useState(false);
   const [error, setError] = useState("");
   const [saveMessage, setSaveMessage] = useState("");
   const [isLoading, setIsLoading] = useState(true);
@@ -117,6 +118,7 @@ export function AnalysisWorkspace({
     setAnalysisProvider(null);
     setIsAnalysisMissing(false);
     setShotCardVersionId("");
+    setShotCardsDirty(false);
 
     async function loadWorkspace() {
       try {
@@ -136,6 +138,7 @@ export function AnalysisWorkspace({
         setOriginalScript(payload.original_script);
         setDurationSeconds(payload.duration_seconds);
         setShots(payload.shots);
+        setShotCardsDirty(false);
         const savedShotCardVersion = await getLatestProjectShotCards(
           project.id,
         );
@@ -146,6 +149,7 @@ export function AnalysisWorkspace({
         if (savedShotCards?.source_analysis_version_id === version.id) {
           setShots(savedShotCards.shots);
           setShotCardVersionId(savedShotCardVersion.id);
+          setShotCardsDirty(false);
         }
       } catch (requestError) {
         if (isActive) {
@@ -189,6 +193,7 @@ export function AnalysisWorkspace({
     setCharacterReferenceSelection(null);
     setFirstFrameSelection(null);
     setGenerationStep(7);
+    setShotCardsDirty(false);
     characterSelectionVersionIdRef.current = null;
     sourceFrameSelectionIdRef.current = null;
     characterReferenceSelectionIdRef.current = null;
@@ -310,6 +315,8 @@ export function AnalysisWorkspace({
       }),
     );
     setSaveMessage("");
+    setShotCardsDirty(true);
+    setGenerationStep(7);
   }
 
   async function handleSave(event: FormEvent<HTMLFormElement>) {
@@ -330,6 +337,7 @@ export function AnalysisWorkspace({
     try {
       const savedVersion = await saveShotCards(analysisId, shots);
       setShotCardVersionId(savedVersion.id);
+      setShotCardsDirty(false);
       setSaveMessage(`镜头卡片已保存为版本 #${savedVersion.version_number}。`);
     } catch (requestError) {
       setError(
@@ -501,7 +509,7 @@ export function AnalysisWorkspace({
                   {isSaving ? "正在保存" : "保存镜头卡片"}
                 </button>
               )}
-              {firstFramePayload && shotCardVersionId ? (
+              {firstFramePayload && shotCardVersionId && !shotCardsDirty ? (
                 <GenerationComposer
                   analysisVersionId={analysisId}
                   characterVersionId={
@@ -520,7 +528,9 @@ export function AnalysisWorkspace({
                 />
               ) : firstFramePayload ? (
                 <p className="workflow-gate-note">
-                  请先保存当前镜头卡片，再确认口播稿并编译 Prompt。
+                  {shotCardsDirty
+                    ? "镜头卡片已编辑，请保存后再继续生成。"
+                    : "请先保存当前镜头卡片，再确认口播稿并编译 Prompt。"}
                 </p>
               ) : null}
             </div>

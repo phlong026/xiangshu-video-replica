@@ -5,6 +5,7 @@ import {
   createGenerationBatch,
   createScriptVersion,
   type GenerationBatch,
+  type GenerationBatchInput,
   type GenerationRuntimeLimits,
   type GenerationVersion,
   getGenerationRuntimeLimits,
@@ -36,6 +37,8 @@ const DEFAULT_LIMITS: GenerationRuntimeLimits = {
   max_quantity: 1,
   estimated_cost_per_task: null,
 };
+
+const sessionIdempotencyRecords = new Map<string, IdempotencyRecord>();
 
 export function GenerationComposer({
   analysisVersionId,
@@ -72,6 +75,8 @@ export function GenerationComposer({
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [isLoading, setIsLoading] = useState(true);
+  const [recoveryRecord, setRecoveryRecord] =
+    useState<IdempotencyRecord | null>(null);
   const [busyAction, setBusyAction] = useState<
     "script" | "compile" | "prompt" | "lock" | "batch" | null
   >(null);
@@ -83,7 +88,10 @@ export function GenerationComposer({
   useEffect(() => {
     actionGenerationRef.current += 1;
     isCreatingBatchRef.current = false;
-    idempotencyRecordRef.current = null;
+    const storageKey = idempotencyStorageKey(projectId);
+    const restoredRecord = restoreIdempotencyRecord(storageKey);
+    idempotencyRecordRef.current = restoredRecord;
+    setRecoveryRecord(restoredRecord);
     setBusyAction(null);
     const loadGeneration = loadGenerationRef.current + 1;
     loadGenerationRef.current = loadGeneration;
@@ -185,6 +193,12 @@ export function GenerationComposer({
   const duration = Number(outputDuration);
   const durationValid =
     Number.isInteger(duration) && duration >= 4 && duration <= 15;
+  const promptParametersMatch = Boolean(
+    promptVersion &&
+      readPayloadNumber(promptVersion, "output_duration_seconds") ===
+        duration &&
+      readPayloadString(promptVersion, "resolution") === resolution,
+  );
   const canCompile = Boolean(
     !readOnly && scriptVersion && !scriptStale && !busyAction && durationValid,
   );
@@ -194,13 +208,17 @@ export function GenerationComposer({
       promptStatus === "LOCKED" &&
       !promptStale &&
       !promptDirty &&
+      promptParametersMatch &&
       quantity !== null &&
       durationValid &&
       !busyAction,
   );
   const workflowStep =
     scriptVersion && !scriptStale
-      ? promptVersion && !promptStale && promptStatus === "LOCKED"
+      ? promptVersion &&
+        !promptStale &&
+        promptStatus === "LOCKED" &&
+        promptParametersMatch
         ? 9
         : 8
       : 7;
@@ -372,55 +390,66 @@ export function GenerationComposer({
     ) {
       return;
     }
+    const provider = import.meta.env.DEV ? "fake_h3" : "metaso";
+    const request: Omit<GenerationBatchInput, "idempotency_key"> = {
+      quantity,
+      prompt_version_id: promptVersion.id,
+      first_frame_asset_id: firstFrameAssetId,
+      output_duration_seconds: duration,
+      resolution,
+      provider,
+      fake_audio_quality: "ok",
+    };
+    const storageKey = idempotencyStorageKey(projectId);
+    const idempotencyRecord = restoreOrCreateIdempotencyRecord(
+      storageKey,
+      request,
+      idempotencyRecordRef.current,
+    );
+    idempotencyRecordRef.current = idempotencyRecord;
+    setRecoveryRecord(idempotencyRecord);
+    await submitBatch(idempotencyRecord);
+  }
+
+  async function recoverBatch() {
+    if (
+      !recoveryRecord ||
+      readOnly ||
+      busyAction ||
+      isCreatingBatchRef.current
+    ) {
+      return;
+    }
+    idempotencyRecordRef.current = recoveryRecord;
+    await submitBatch(recoveryRecord);
+  }
+
+  async function submitBatch(idempotencyRecord: IdempotencyRecord) {
     const actionGeneration = actionGenerationRef.current + 1;
     actionGenerationRef.current = actionGeneration;
     isCreatingBatchRef.current = true;
     setBusyAction("batch");
     setError("");
     setMessage("");
-    const provider = import.meta.env.DEV ? "fake_h3" : "metaso";
-    const fingerprint = JSON.stringify({
-      promptVersionId: promptVersion.id,
-      firstFrameAssetId,
-      duration,
-      resolution,
-      quantity,
-      provider,
-    });
-    const storageKey = `generation.idempotency.${projectId}`;
-    const idempotencyRecord = restoreOrCreateIdempotencyRecord(
-      storageKey,
-      fingerprint,
-      idempotencyRecordRef.current,
-    );
-    idempotencyRecordRef.current = idempotencyRecord;
+    const storageKey = idempotencyStorageKey(projectId);
     try {
-      const batch = await createGenerationBatch(projectId, {
-        quantity,
-        prompt_version_id: promptVersion.id,
-        first_frame_asset_id: firstFrameAssetId,
-        output_duration_seconds: duration,
-        resolution,
-        idempotency_key: idempotencyRecord.key,
-        provider,
-        fake_audio_quality: "ok",
-      });
+      const batch = await createGenerationBatch(
+        projectId,
+        idempotencyRecord.request,
+      );
       if (actionGeneration !== actionGenerationRef.current) {
         return;
       }
       if (
         batch.project_id !== projectId ||
-        batch.prompt_version_id !== promptVersion.id
+        batch.prompt_version_id !== idempotencyRecord.request.prompt_version_id
       ) {
         setError("服务返回的批次不属于当前项目或 Prompt，请在任务记录中核对。");
         return;
       }
-      try {
-        window.localStorage.removeItem(storageKey);
-      } catch {
-        // The remote batch is already created; storage cleanup must not hide it.
-      }
+      clearIdempotencyRecord(storageKey, idempotencyRecord);
       idempotencyRecordRef.current = null;
+      setRecoveryRecord(null);
       onWorkflowStepChange(10);
       onBatchCreated(batch);
     } catch (requestError) {
@@ -480,6 +509,9 @@ export function GenerationComposer({
       ) : null}
       {promptStale ? (
         <p className="attention-banner">上游输入已变化，请重新编译 Prompt。</p>
+      ) : null}
+      {promptVersion && !promptParametersMatch ? (
+        <p className="attention-banner">生成参数已变化，请重新编译 Prompt。</p>
       ) : null}
       {error ? <p className="settings-error">{error}</p> : null}
       {message ? <p className="setup-success">{message}</p> : null}
@@ -671,6 +703,16 @@ export function GenerationComposer({
             ? "正在创建任务"
             : `创建 ${quantity ?? (quantityInput || "0")} 个生成任务`}
         </button>
+        {recoveryRecord ? (
+          <button
+            className="secondary-button"
+            disabled={readOnly || Boolean(busyAction)}
+            onClick={recoverBatch}
+            type="button"
+          >
+            恢复已提交批次
+          </button>
+        ) : null}
       </fieldset>
     </section>
   );
@@ -773,41 +815,110 @@ function quantityValidationError(
 type IdempotencyRecord = {
   fingerprint: string;
   key: string;
+  request: GenerationBatchInput;
 };
 
-function restoreOrCreateIdempotencyRecord(
+function idempotencyStorageKey(projectId: string): string {
+  return `generation.idempotency.${projectId}`;
+}
+
+function requestFingerprint(
+  request: Omit<GenerationBatchInput, "idempotency_key">,
+): string {
+  return JSON.stringify(request);
+}
+
+function restoreIdempotencyRecord(
   storageKey: string,
-  fingerprint: string,
-  memoryRecord: IdempotencyRecord | null,
-): IdempotencyRecord {
-  if (memoryRecord?.fingerprint === fingerprint) {
+): IdempotencyRecord | null {
+  const memoryRecord = sessionIdempotencyRecords.get(storageKey);
+  if (memoryRecord) {
     return memoryRecord;
   }
   try {
     const saved = window.localStorage.getItem(storageKey);
-    if (saved) {
-      const parsed = JSON.parse(saved) as {
-        fingerprint?: unknown;
-        key?: unknown;
-      };
-      if (
-        parsed.fingerprint === fingerprint &&
-        typeof parsed.key === "string"
-      ) {
-        return { fingerprint, key: parsed.key };
-      }
+    if (!saved) {
+      return null;
+    }
+    const parsed: unknown = JSON.parse(saved);
+    if (isIdempotencyRecord(parsed)) {
+      sessionIdempotencyRecords.set(storageKey, parsed);
+      return parsed;
     }
   } catch {
-    // A malformed recovery record is replaced below.
+    // Recovery also works from the session map when browser storage is blocked.
+  }
+  return null;
+}
+
+function restoreOrCreateIdempotencyRecord(
+  storageKey: string,
+  request: Omit<GenerationBatchInput, "idempotency_key">,
+  memoryRecord: IdempotencyRecord | null,
+): IdempotencyRecord {
+  const fingerprint = requestFingerprint(request);
+  if (memoryRecord?.fingerprint === fingerprint) {
+    return memoryRecord;
+  }
+  const savedRecord = restoreIdempotencyRecord(storageKey);
+  if (savedRecord?.fingerprint === fingerprint) {
+    return savedRecord;
   }
   const key = createIdempotencyKey();
-  const record = { fingerprint, key };
+  const record = {
+    fingerprint,
+    key,
+    request: { ...request, idempotency_key: key },
+  };
+  sessionIdempotencyRecords.set(storageKey, record);
   try {
     window.localStorage.setItem(storageKey, JSON.stringify(record));
   } catch {
     // Keep the in-memory record so an offline retry still reuses the key.
   }
   return record;
+}
+
+function clearIdempotencyRecord(storageKey: string, record: IdempotencyRecord) {
+  if (sessionIdempotencyRecords.get(storageKey)?.key === record.key) {
+    sessionIdempotencyRecords.delete(storageKey);
+  }
+  try {
+    window.localStorage.removeItem(storageKey);
+  } catch {
+    // The remote batch is already visible; cleanup must not hide the result.
+  }
+}
+
+function isIdempotencyRecord(value: unknown): value is IdempotencyRecord {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const record = value as Partial<IdempotencyRecord>;
+  const request = record.request as Partial<GenerationBatchInput> | undefined;
+  if (
+    typeof record.fingerprint !== "string" ||
+    typeof record.key !== "string" ||
+    !request ||
+    request.idempotency_key !== record.key ||
+    typeof request.quantity !== "number" ||
+    typeof request.prompt_version_id !== "string" ||
+    typeof request.first_frame_asset_id !== "string" ||
+    typeof request.output_duration_seconds !== "number" ||
+    (request.resolution !== "768P" && request.resolution !== "2K") ||
+    (request.provider !== "fake_h3" && request.provider !== "metaso") ||
+    (request.fake_audio_quality !== "ok" &&
+      request.fake_audio_quality !== "missing")
+  ) {
+    return false;
+  }
+  const { idempotency_key: _key, ...requestWithoutKey } = request;
+  return (
+    record.fingerprint ===
+    requestFingerprint(
+      requestWithoutKey as Omit<GenerationBatchInput, "idempotency_key">,
+    )
+  );
 }
 
 function createIdempotencyKey(): string {

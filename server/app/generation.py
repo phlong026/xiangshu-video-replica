@@ -492,6 +492,14 @@ def version_stale_reasons(conn: sqlite3.Connection, *, row: sqlite3.Row) -> list
     if current_prompt is None or str(current_prompt["id"]) != str(row["id"]):
         reasons.append("PROMPT_SUPERSEDED")
 
+    frozen_template_version = payload.get("template_version")
+    frozen_template_hash = payload.get("template_hash")
+    if (
+        frozen_template_version is not None
+        and frozen_template_version != H3_PROMPT_TEMPLATE_VERSION
+    ) or (frozen_template_hash is not None and frozen_template_hash != H3_PROMPT_TEMPLATE_HASH):
+        reasons.append("TEMPLATE_SUPERSEDED")
+
     frozen_script_id = payload.get("script_version_id")
     if isinstance(frozen_script_id, str):
         script = latest_version(conn, project_id=project_id, kind=SCRIPT_KIND)
@@ -1074,6 +1082,16 @@ def create_generation_batch(
                 409,
                 "PROMPT_NOT_LOCKED",
                 "Generation requires a LOCKED prompt.",
+            )
+        frozen_duration = prompt_snapshot.get("output_duration_seconds")
+        frozen_resolution = prompt_snapshot.get("resolution")
+        if (frozen_duration is not None and frozen_duration != request.output_duration_seconds) or (
+            frozen_resolution is not None and frozen_resolution != request.resolution
+        ):
+            raise generation_error(
+                409,
+                "PROMPT_PARAMETERS_MISMATCH",
+                "Generation parameters must match the locked prompt snapshot.",
             )
         first_frame = require_asset_access(
             conn,

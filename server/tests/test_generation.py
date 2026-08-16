@@ -749,6 +749,57 @@ def test_prompt_revision_freezes_sources_and_batch_reports_staleness(
     assert replay.json()["stale"] is True
 
 
+@pytest.mark.parametrize(
+    ("template_attribute", "next_value"),
+    [
+        ("H3_PROMPT_TEMPLATE_VERSION", "h3.prompt.v2"),
+        ("H3_PROMPT_TEMPLATE_HASH", "new-template-hash"),
+    ],
+)
+def test_prompt_becomes_stale_when_the_compiler_template_changes(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    template_attribute: str,
+    next_value: str,
+) -> None:
+    script = client.post(
+        "/api/projects/project_owned/scripts",
+        headers=auth_headers("employee_1"),
+        json={
+            "source": "custom",
+            "text": "模板变化前的口播稿。",
+            "shot_card_version_id": "shot_card_v1",
+        },
+    ).json()
+    prompt = client.post(
+        "/api/projects/project_owned/prompts/compile",
+        headers=auth_headers("employee_1"),
+        json={
+            "script_version_id": script["id"],
+            "shot_card_version_id": "shot_card_v1",
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+        },
+    ).json()
+    monkeypatch.setattr(f"app.generation.{template_attribute}", next_value)
+
+    state = client.get(
+        "/api/projects/project_owned/prompts/latest",
+        headers=auth_headers("employee_1"),
+    )
+    rejected_lock = client.post(
+        f"/api/projects/project_owned/prompts/{prompt['id']}/lock",
+        headers=auth_headers("employee_1"),
+    )
+
+    assert state.status_code == 200
+    assert state.json()["stale"] is True
+    assert state.json()["stale_reasons"] == ["TEMPLATE_SUPERSEDED"]
+    assert rejected_lock.status_code == 409
+    assert rejected_lock.json()["detail"]["code"] == "PROMPT_STALE"
+
+
 def test_prompt_compile_rejects_a_superseded_script(client: TestClient) -> None:
     first_script = client.post(
         "/api/projects/project_owned/scripts",
@@ -896,6 +947,34 @@ def test_prompt_must_be_locked_and_batch_keeps_locked_snapshot_without_provider_
     assert json.loads(str(stored["prompt_snapshot_json"]))["status"] == "LOCKED"
     assert stored["provider_task_id"] is None
     assert stored["provider_request_json"] is None
+
+
+@pytest.mark.parametrize(
+    ("duration_seconds", "resolution"),
+    [(15, "768P"), (10, "2K")],
+)
+def test_batch_rejects_parameters_that_differ_from_the_locked_prompt(
+    client: TestClient,
+    duration_seconds: int,
+    resolution: str,
+) -> None:
+    prompt_id = create_locked_prompt(client)
+
+    response = client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json={
+            "quantity": 1,
+            "prompt_version_id": prompt_id,
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": duration_seconds,
+            "resolution": resolution,
+            "idempotency_key": f"parameter-mismatch-{duration_seconds}-{resolution}",
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "PROMPT_PARAMETERS_MISMATCH"
 
 
 def test_h3_request_contract_is_i2v_text_first_frame_adaptive_and_duration_guard() -> None:
@@ -1209,7 +1288,7 @@ def test_generation_can_queue_metaso_after_its_key_is_saved(
             "quantity": 1,
             "prompt_version_id": prompt_id,
             "first_frame_asset_id": "first_frame_owned",
-            "output_duration_seconds": 5,
+            "output_duration_seconds": 10,
             "resolution": "768P",
             "idempotency_key": "metaso-enabled",
             "provider": "metaso",

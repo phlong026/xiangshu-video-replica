@@ -77,6 +77,20 @@ const firstFrameSelection = {
   },
 };
 
+const editableShot: api.ShotCard = {
+  shot_id: "S01",
+  start_time: 0,
+  end_time: 8,
+  shot_type: "中景",
+  composition: "居中",
+  camera_motion: "固定",
+  subject: "人物",
+  action: "讲述",
+  scene: "咖啡馆",
+  spoken_text: "原始口播稿",
+  transition: "无",
+};
+
 vi.mock("./CharacterSelection", () => ({
   CharacterSelection: ({ onVersionChange }: apiMockProps) => (
     <>
@@ -413,5 +427,76 @@ describe("AnalysisWorkspace workflow gates", () => {
     expect(onBatchCreated).toHaveBeenCalledWith(
       expect.objectContaining({ id: "batch-1" }),
     );
+  });
+
+  it("closes generation when the visible shot cards have unsaved edits", async () => {
+    vi.mocked(api.getLatestProjectAnalysis).mockResolvedValue({
+      id: "analysis-1",
+      project_id: "project-1",
+      asset_id: "reference-video-1",
+      kind: "analysis",
+      version_number: 1,
+      payload: {
+        analysis: {
+          summary: "拆解完成",
+          duration_seconds: 8,
+          original_script: "原始口播稿",
+          shots: [editableShot],
+        },
+      },
+      created_by_user_id: "employee_1",
+      created_at: "2030-01-01T00:00:00Z",
+    });
+    vi.mocked(api.getLatestProjectShotCards).mockResolvedValue({
+      id: "shot-card-2",
+      project_id: "project-1",
+      asset_id: null,
+      kind: "shot_card",
+      version_number: 2,
+      payload: {
+        source_analysis_version_id: "analysis-1",
+        duration_seconds: 8,
+        shots: [editableShot],
+      },
+      created_by_user_id: "employee_1",
+      created_at: "2030-01-01T00:00:00Z",
+    });
+
+    render(
+      <AnalysisWorkspace
+        onAnalysisReady={vi.fn()}
+        onBatchCreated={vi.fn()}
+        onClose={vi.fn()}
+        project={{
+          id: "project-1",
+          owner_user_id: "employee_1",
+          name: "镜头编辑门禁",
+          status: "REFERENCE_READY",
+          reference_asset_id: "reference-video-1",
+          reference_upload_status: "READY",
+          analysis_status: "READY",
+        }}
+      />,
+    );
+
+    expect(await screen.findByText("拆解完成")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "完成角色选择" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成源画面" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成人物参考" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成置换首帧" }));
+    expect(
+      screen.getByText("生成输入：shot-card-2/first-frame-1/原始口播稿"),
+    ).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("S01 场景"), {
+      target: { value: "未保存的新场景" },
+    });
+
+    expect(
+      screen.queryByText("生成输入：shot-card-2/first-frame-1/原始口播稿"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText("镜头卡片已编辑，请保存后再继续生成。"),
+    ).toBeInTheDocument();
   });
 });

@@ -50,7 +50,7 @@ const props = {
   shotCardVersionId: "shot-card-1",
 };
 
-function promptVersion(status: "SAVED" | "LOCKED" = "SAVED") {
+function promptVersion(status: "SAVED" | "LOCKED" | "USED" = "SAVED") {
   return {
     ...baseVersion,
     id: "prompt-1",
@@ -256,6 +256,43 @@ describe("GenerationComposer", () => {
     ).toBeEnabled();
   });
 
+  it("requires prompt recompilation after generation parameters change", async () => {
+    vi.mocked(api.getLatestScriptVersion).mockResolvedValue({
+      version: {
+        ...baseVersion,
+        id: "script-1",
+        payload: {
+          source: "original",
+          full_text: props.originalScript,
+          shot_card_version_id: "shot-card-1",
+          shot_mappings: [],
+        },
+      },
+      stale: false,
+      stale_reasons: [],
+    });
+    vi.mocked(api.getLatestGenerationPrompt).mockResolvedValue({
+      version: promptVersion("LOCKED"),
+      stale: false,
+      stale_reasons: [],
+    });
+
+    render(<GenerationComposer {...props} />);
+    const createButton = await screen.findByRole("button", {
+      name: "创建 1 个生成任务",
+    });
+    expect(createButton).toBeEnabled();
+
+    fireEvent.change(screen.getByLabelText("成片时长"), {
+      target: { value: "15" },
+    });
+
+    expect(createButton).toBeDisabled();
+    expect(
+      screen.getByText("生成参数已变化，请重新编译 Prompt。"),
+    ).toBeInTheDocument();
+  });
+
   it("keeps one idempotency key across duplicate clicks and an offline retry", async () => {
     vi.mocked(api.getLatestScriptVersion).mockResolvedValue({
       version: {
@@ -417,7 +454,9 @@ describe("GenerationComposer", () => {
         }),
     );
 
-    const { rerender } = render(<GenerationComposer {...props} />);
+    const { rerender } = render(
+      <GenerationComposer {...props} projectId="project-old" />,
+    );
     fireEvent.click(
       await screen.findByRole("button", { name: "创建 1 个生成任务" }),
     );
@@ -454,7 +493,7 @@ describe("GenerationComposer", () => {
     expect(props.onBatchCreated).not.toHaveBeenCalled();
   });
 
-  it("ignores a completed batch after the composer unmounts", async () => {
+  it("recovers an ignored paid batch after storage-blocked composer teardown", async () => {
     vi.mocked(api.getLatestScriptVersion).mockResolvedValue({
       version: {
         ...baseVersion,
@@ -469,51 +508,77 @@ describe("GenerationComposer", () => {
       stale: false,
       stale_reasons: [],
     });
-    vi.mocked(api.getLatestGenerationPrompt).mockResolvedValue({
-      version: promptVersion("LOCKED"),
+    vi.mocked(api.getLatestGenerationPrompt)
+      .mockResolvedValueOnce({
+        version: promptVersion("LOCKED"),
+        stale: false,
+        stale_reasons: [],
+      })
+      .mockResolvedValueOnce({
+        version: promptVersion("USED"),
+        stale: false,
+        stale_reasons: [],
+      });
+    const recoveredBatch: api.GenerationBatch = {
+      id: "batch-after-unmount",
+      project_id: "project-1",
+      prompt_version_id: "prompt-1",
+      status: "QUEUED",
+      quantity: 1,
       stale: false,
-      stale_reasons: [],
-    });
+      progress: {
+        total_count: 1,
+        terminal_count: 0,
+        progress_percent: 0,
+        counts: {},
+      },
+      tasks: [],
+    };
     let resolveBatch: ((batch: api.GenerationBatch) => void) | undefined;
-    vi.mocked(api.createGenerationBatch).mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          resolveBatch = resolve;
-        }),
-    );
+    vi.mocked(api.createGenerationBatch)
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveBatch = resolve;
+          }),
+      )
+      .mockResolvedValueOnce(recoveredBatch);
+    const storageWrite = vi
+      .spyOn(Storage.prototype, "setItem")
+      .mockImplementation(() => {
+        throw new DOMException("storage blocked", "SecurityError");
+      });
 
     const { unmount } = render(<GenerationComposer {...props} />);
     fireEvent.click(
       await screen.findByRole("button", { name: "创建 1 个生成任务" }),
     );
-    const idempotencyKey = window.localStorage.getItem(
-      "generation.idempotency.project-1",
-    );
-    expect(idempotencyKey).not.toBeNull();
+    const idempotencyKey = vi.mocked(api.createGenerationBatch).mock.calls[0][1]
+      .idempotency_key;
+    expect(idempotencyKey).toBeTruthy();
+    expect(
+      window.localStorage.getItem("generation.idempotency.project-1"),
+    ).toBeNull();
     unmount();
 
     await act(async () => {
-      resolveBatch?.({
-        id: "batch-after-unmount",
-        project_id: "project-1",
-        prompt_version_id: "prompt-1",
-        status: "QUEUED",
-        quantity: 1,
-        stale: false,
-        progress: {
-          total_count: 1,
-          terminal_count: 0,
-          progress_percent: 0,
-          counts: {},
-        },
-        tasks: [],
-      });
+      resolveBatch?.(recoveredBatch);
       await Promise.resolve();
     });
 
     expect(props.onBatchCreated).not.toHaveBeenCalled();
+
+    render(<GenerationComposer {...props} />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "恢复已提交批次" }),
+    );
+    await waitFor(() =>
+      expect(api.createGenerationBatch).toHaveBeenCalledTimes(2),
+    );
     expect(
-      window.localStorage.getItem("generation.idempotency.project-1"),
+      vi.mocked(api.createGenerationBatch).mock.calls[1][1].idempotency_key,
     ).toBe(idempotencyKey);
+    expect(props.onBatchCreated).toHaveBeenCalledWith(recoveredBatch);
+    storageWrite.mockRestore();
   });
 });
