@@ -39,6 +39,8 @@ const DEFAULT_LIMITS: GenerationRuntimeLimits = {
 };
 
 const sessionIdempotencyRecords = new Map<string, IdempotencyRecord>();
+const RECOVERY_CONFLICT_MESSAGE =
+  "存在待恢复的已提交批次，请先恢复后再更改生成请求。";
 
 export function GenerationComposer({
   analysisVersionId,
@@ -199,6 +201,26 @@ export function GenerationComposer({
   const duration = Number(outputDuration);
   const durationValid =
     Number.isInteger(duration) && duration >= 4 && duration <= 15;
+  const provider: GenerationBatchInput["provider"] = import.meta.env.DEV
+    ? "fake_h3"
+    : "metaso";
+  const batchRequest: Omit<GenerationBatchInput, "idempotency_key"> | null =
+    promptVersion && quantity !== null && durationValid
+      ? {
+          quantity,
+          prompt_version_id: promptVersion.id,
+          first_frame_asset_id: firstFrameAssetId,
+          output_duration_seconds: duration,
+          resolution,
+          provider,
+          fake_audio_quality: "ok",
+        }
+      : null;
+  const recoveryRecordConflicts = Boolean(
+    recoveryRecord &&
+      batchRequest &&
+      recoveryRecord.fingerprint !== requestFingerprint(batchRequest),
+  );
   const promptParametersMatch = Boolean(
     promptVersion &&
       payloadMatchesOrMissing(
@@ -227,6 +249,7 @@ export function GenerationComposer({
       promptParametersMatch &&
       quantity !== null &&
       durationValid &&
+      !recoveryRecordConflicts &&
       !busyAction,
   );
   const workflowStep =
@@ -400,28 +423,26 @@ export function GenerationComposer({
   async function createBatch() {
     if (
       !promptVersion ||
-      quantity === null ||
+      !batchRequest ||
       !canCreateBatch ||
       isCreatingBatchRef.current
     ) {
       return;
     }
-    const provider = import.meta.env.DEV ? "fake_h3" : "metaso";
-    const request: Omit<GenerationBatchInput, "idempotency_key"> = {
-      quantity,
-      prompt_version_id: promptVersion.id,
-      first_frame_asset_id: firstFrameAssetId,
-      output_duration_seconds: duration,
-      resolution,
-      provider,
-      fake_audio_quality: "ok",
-    };
     const storageKey = idempotencyStorageKey(projectId);
     const idempotencyRecord = restoreOrCreateIdempotencyRecord(
       storageKey,
-      request,
+      batchRequest,
       idempotencyRecordRef.current,
     );
+    if (!idempotencyRecord) {
+      const unresolvedRecord =
+        idempotencyRecordRef.current ?? restoreIdempotencyRecord(storageKey);
+      idempotencyRecordRef.current = unresolvedRecord;
+      setRecoveryRecord(unresolvedRecord);
+      setError(RECOVERY_CONFLICT_MESSAGE);
+      return;
+    }
     idempotencyRecordRef.current = idempotencyRecord;
     setRecoveryRecord(idempotencyRecord);
     await submitBatch(idempotencyRecord);
@@ -719,6 +740,9 @@ export function GenerationComposer({
             </span>
           </div>
         ) : null}
+        {recoveryRecordConflicts ? (
+          <p className="attention-banner">{RECOVERY_CONFLICT_MESSAGE}</p>
+        ) : null}
         <button disabled={!canCreateBatch} onClick={createBatch} type="button">
           {busyAction === "batch"
             ? "正在创建任务"
@@ -885,14 +909,14 @@ function restoreOrCreateIdempotencyRecord(
   storageKey: string,
   request: Omit<GenerationBatchInput, "idempotency_key">,
   memoryRecord: IdempotencyRecord | null,
-): IdempotencyRecord {
+): IdempotencyRecord | null {
   const fingerprint = requestFingerprint(request);
-  if (memoryRecord?.fingerprint === fingerprint) {
-    return memoryRecord;
+  if (memoryRecord) {
+    return memoryRecord.fingerprint === fingerprint ? memoryRecord : null;
   }
   const savedRecord = restoreIdempotencyRecord(storageKey);
-  if (savedRecord?.fingerprint === fingerprint) {
-    return savedRecord;
+  if (savedRecord) {
+    return savedRecord.fingerprint === fingerprint ? savedRecord : null;
   }
   const key = createIdempotencyKey();
   const record = {

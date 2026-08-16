@@ -628,7 +628,7 @@ def test_prompt_revision_freezes_sources_and_batch_reports_staleness(
     assert compiled.status_code == 200
     compiled_payload = compiled.json()["payload"]
     assert compiled_payload["status"] == "SAVED"
-    assert compiled_payload["template_version"] == "h3.prompt.v1"
+    assert compiled_payload["template_version"] == "h3.prompt.v2"
     assert len(compiled_payload["template_hash"]) == 64
     assert compiled_payload["source_analysis_version_id"] is None
     assert compiled_payload["script_version_id"] == script["id"]
@@ -750,10 +750,46 @@ def test_prompt_revision_freezes_sources_and_batch_reports_staleness(
     assert replay.json()["stale"] is True
 
 
+def test_prompt_compiler_rescales_shot_timeline_to_output_duration(
+    client: TestClient,
+) -> None:
+    script = client.post(
+        "/api/projects/project_owned/scripts",
+        headers=auth_headers("employee_1"),
+        json={
+            "source": "custom",
+            "text": "第一句。第二句。",
+            "shot_card_version_id": "shot_card_v1",
+        },
+    ).json()
+
+    compiled = client.post(
+        "/api/projects/project_owned/prompts/compile",
+        headers=auth_headers("employee_1"),
+        json={
+            "script_version_id": script["id"],
+            "shot_card_version_id": "shot_card_v1",
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 4,
+            "resolution": "768P",
+        },
+    )
+
+    assert compiled.status_code == 200
+    payload = compiled.json()["payload"]
+    assert payload["template_version"] == "h3.prompt.v2"
+    assert payload["source_duration_seconds"] == 10
+    assert payload["timeline_scale_factor"] == 0.4
+    assert "生成一条 4 秒" in payload["prompt_text"]
+    assert "[0.0-2.0s]" in payload["prompt_text"]
+    assert "[2.0-4.0s]" in payload["prompt_text"]
+    assert "[5.0-10.0s]" not in payload["prompt_text"]
+
+
 @pytest.mark.parametrize(
     ("template_attribute", "next_value"),
     [
-        ("H3_PROMPT_TEMPLATE_VERSION", "h3.prompt.v2"),
+        ("H3_PROMPT_TEMPLATE_VERSION", "h3.prompt.v3"),
         ("H3_PROMPT_TEMPLATE_HASH", "new-template-hash"),
     ],
 )

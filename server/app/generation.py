@@ -44,7 +44,7 @@ from app.storage import (
 SCRIPT_KIND = "script"
 H3_PROMPT_KIND = "h3_prompt"
 GENERATION_SCHEMA_VERSION = "c.generation.v1"
-H3_PROMPT_TEMPLATE_VERSION = "h3.prompt.v1"
+H3_PROMPT_TEMPLATE_VERSION = "h3.prompt.v2"
 H3_PROMPT_TEMPLATE_SPEC = (
     (
         "intro",
@@ -795,9 +795,12 @@ def compile_prompt_version(
         )
 
         shot_payload = json.loads(str(shot_card["payload_json"]))
+        source_duration_seconds = shot_timeline_duration(shot_payload)
+        timeline_scale_factor = request.output_duration_seconds / source_duration_seconds
         prompt_text = compile_prompt_text(
             script_payload=script_payload,
             shot_payload=shot_payload,
+            source_duration_seconds=source_duration_seconds,
             duration_seconds=request.output_duration_seconds,
             resolution=request.resolution,
         )
@@ -813,6 +816,9 @@ def compile_prompt_version(
             "shot_card_version_id": request.shot_card_version_id,
             "first_frame_asset_id": request.first_frame_asset_id,
             "first_frame_uri": str(first_frame["storage_uri"]),
+            "source_duration_seconds": source_duration_seconds,
+            "timeline_scale_factor": timeline_scale_factor,
+            "timeline_policy": "linear_scale_to_output.v1",
             "output_duration_seconds": request.output_duration_seconds,
             "resolution": request.resolution,
             **first_frame_sources,
@@ -2346,6 +2352,7 @@ def compile_prompt_text(
     *,
     script_payload: dict[str, Any],
     shot_payload: dict[str, Any],
+    source_duration_seconds: float,
     duration_seconds: int,
     resolution: str,
 ) -> str:
@@ -2361,13 +2368,16 @@ def compile_prompt_text(
         for mapping in script_payload.get("shot_mappings", [])
         if isinstance(mapping, dict)
     }
+    timeline_scale = duration_seconds / source_duration_seconds
     for shot in shot_payload["shots"]:
         shot_id = str(shot["shot_id"])
         spoken = mappings_by_shot.get(shot_id, str(shot.get("spoken_text", "")))
+        start = max(0.0, min(float(duration_seconds), float(shot["start_time"]) * timeline_scale))
+        end = max(start, min(float(duration_seconds), float(shot["end_time"]) * timeline_scale))
         lines.append(
             H3_PROMPT_TEMPLATES["shot"].format(
-                start=float(shot["start_time"]),
-                end=float(shot["end_time"]),
+                start=start,
+                end=end,
                 shot_type=shot["shot_type"],
                 composition=shot["composition"],
                 camera_motion=shot["camera_motion"],
@@ -2381,6 +2391,28 @@ def compile_prompt_text(
     lines.append(H3_PROMPT_TEMPLATES["script"].format(full_text=script_payload["full_text"]))
     lines.append(H3_PROMPT_TEMPLATES["outro"])
     return "\n".join(lines)
+
+
+def shot_timeline_duration(shot_payload: dict[str, Any]) -> float:
+    source_duration = shot_payload.get("duration_seconds")
+    if isinstance(source_duration, (int, float)) and not isinstance(source_duration, bool):
+        duration = float(source_duration)
+        if duration > 0:
+            return duration
+    shots = shot_payload.get("shots")
+    if isinstance(shots, list):
+        end_times = [
+            float(shot["end_time"])
+            for shot in shots
+            if isinstance(shot, dict) and isinstance(shot.get("end_time"), (int, float))
+        ]
+        if end_times and max(end_times) > 0:
+            return max(end_times)
+    raise generation_error(
+        409,
+        "SHOT_CARD_TIMELINE_INVALID",
+        "Shot-card timeline has no valid source duration.",
+    )
 
 
 def generation_request_snapshot(

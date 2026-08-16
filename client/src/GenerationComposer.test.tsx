@@ -583,6 +583,82 @@ describe("GenerationComposer", () => {
     expect(secondKey).toBe(firstKey);
   });
 
+  it("blocks a different paid request until the unresolved batch is recovered", async () => {
+    vi.mocked(api.getLatestScriptVersion).mockResolvedValue({
+      version: {
+        ...baseVersion,
+        id: "script-1",
+        payload: {
+          source: "original",
+          full_text: props.originalScript,
+          shot_card_version_id: "shot-card-1",
+          shot_mappings: [],
+        },
+      },
+      stale: false,
+      stale_reasons: [],
+    });
+    vi.mocked(api.getLatestGenerationPrompt).mockResolvedValue({
+      version: promptVersion("LOCKED"),
+      stale: false,
+      stale_reasons: [],
+    });
+    const recoveredBatch: api.GenerationBatch = {
+      id: "batch-original-request",
+      project_id: "project-1",
+      prompt_version_id: "prompt-1",
+      status: "QUEUED",
+      quantity: 1,
+      stale: false,
+      progress: {
+        total_count: 1,
+        terminal_count: 0,
+        progress_percent: 0,
+        counts: {},
+      },
+      tasks: [],
+    };
+    vi.mocked(api.createGenerationBatch)
+      .mockRejectedValueOnce(new Error("网络连接失败"))
+      .mockResolvedValueOnce(recoveredBatch);
+
+    render(<GenerationComposer {...props} />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "创建 1 个生成任务" }),
+    );
+    expect(await screen.findByText("网络连接失败")).toBeInTheDocument();
+
+    const firstRequest = vi.mocked(api.createGenerationBatch).mock.calls[0][1];
+    fireEvent.change(screen.getByLabelText("生成数量"), {
+      target: { value: "2" },
+    });
+
+    const conflictingCreate = screen.getByRole("button", {
+      name: "创建 2 个生成任务",
+    });
+    expect(conflictingCreate).toBeDisabled();
+    expect(
+      screen.getByText("存在待恢复的已提交批次，请先恢复后再更改生成请求。"),
+    ).toBeInTheDocument();
+    fireEvent.click(conflictingCreate);
+    expect(api.createGenerationBatch).toHaveBeenCalledOnce();
+    expect(
+      JSON.parse(
+        window.localStorage.getItem("generation.idempotency.project-1") ??
+          "null",
+      ).key,
+    ).toBe(firstRequest.idempotency_key);
+
+    fireEvent.click(screen.getByRole("button", { name: "恢复已提交批次" }));
+    await waitFor(() =>
+      expect(api.createGenerationBatch).toHaveBeenCalledTimes(2),
+    );
+    expect(vi.mocked(api.createGenerationBatch).mock.calls[1][1]).toEqual(
+      firstRequest,
+    );
+    expect(props.onBatchCreated).toHaveBeenCalledWith(recoveredBatch);
+  });
+
   it("still creates a batch when browser recovery storage is unavailable", async () => {
     vi.mocked(api.getLatestScriptVersion).mockResolvedValue({
       version: {
