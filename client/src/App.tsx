@@ -589,6 +589,7 @@ export function App() {
                 <p className="setup-success">{setupMessage}</p>
               ) : null}
               <AnalysisWorkspace
+                currentUserId={currentUser.id}
                 onClose={() => setActiveAnalysisProject(null)}
                 onAnalysisReady={markAnalysisReady}
                 onBatchCreated={openCreatedBatch}

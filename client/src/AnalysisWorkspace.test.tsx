@@ -255,6 +255,7 @@ describe("AnalysisWorkspace workflow gates", () => {
   it("preserves downstream gates for idempotent confirmations and rolls back on a changed character", async () => {
     render(
       <AnalysisWorkspace
+        currentUserId="employee_1"
         onAnalysisReady={vi.fn()}
         onBatchCreated={vi.fn()}
         onClose={vi.fn()}
@@ -324,6 +325,7 @@ describe("AnalysisWorkspace workflow gates", () => {
   it("keeps first-frame history visible while the current source selection is stale", async () => {
     render(
       <AnalysisWorkspace
+        currentUserId="employee_1"
         onAnalysisReady={vi.fn()}
         onBatchCreated={vi.fn()}
         onClose={vi.fn()}
@@ -357,6 +359,7 @@ describe("AnalysisWorkspace workflow gates", () => {
   it("keeps legacy first-frame history and generation reachable without a seven-view selection", async () => {
     render(
       <AnalysisWorkspace
+        currentUserId="employee_1"
         onAnalysisReady={vi.fn()}
         onBatchCreated={vi.fn()}
         onClose={vi.fn()}
@@ -403,6 +406,7 @@ describe("AnalysisWorkspace workflow gates", () => {
 
     render(
       <AnalysisWorkspace
+        currentUserId="employee_1"
         onAnalysisReady={vi.fn()}
         onBatchCreated={onBatchCreated}
         onClose={vi.fn()}
@@ -473,6 +477,7 @@ describe("AnalysisWorkspace workflow gates", () => {
 
     render(
       <AnalysisWorkspace
+        currentUserId="employee_1"
         onAnalysisReady={vi.fn()}
         onBatchCreated={vi.fn()}
         onClose={vi.fn()}
@@ -506,6 +511,19 @@ describe("AnalysisWorkspace workflow gates", () => {
     ).not.toBeInTheDocument();
     expect(
       screen.getByText("镜头卡片已编辑，请保存后再继续生成。"),
+    ).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("S01 场景"), {
+      target: { value: "咖啡馆" },
+    });
+
+    expect(
+      screen.getByText("生成输入：shot-card-2/first-frame-1/原始口播稿"),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "保存镜头卡片" }));
+    expect(api.saveShotCards).not.toHaveBeenCalled();
+    expect(
+      screen.getByText("镜头卡片没有改动，无需重复保存。"),
     ).toBeInTheDocument();
   });
 
@@ -543,6 +561,7 @@ describe("AnalysisWorkspace workflow gates", () => {
     });
     render(
       <AnalysisWorkspace
+        currentUserId="employee_1"
         onAnalysisReady={vi.fn()}
         onBatchCreated={vi.fn()}
         onClose={vi.fn()}
@@ -625,6 +644,7 @@ describe("AnalysisWorkspace workflow gates", () => {
 
     render(
       <AnalysisWorkspace
+        currentUserId="employee_1"
         onAnalysisReady={vi.fn()}
         onBatchCreated={vi.fn()}
         onClose={vi.fn()}

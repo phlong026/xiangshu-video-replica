@@ -20,6 +20,7 @@ type ScriptSource = "original" | "custom";
 type GenerationComposerProps = {
   analysisVersionId: string;
   characterVersionId: string | null;
+  currentUserId: string;
   durationSeconds: number;
   firstFrameAssetId: string;
   firstFrameSelectionVersionId: string;
@@ -45,6 +46,7 @@ const RECOVERY_CONFLICT_MESSAGE =
 export function GenerationComposer({
   analysisVersionId,
   characterVersionId,
+  currentUserId,
   durationSeconds,
   firstFrameAssetId,
   firstFrameSelectionVersionId,
@@ -90,7 +92,7 @@ export function GenerationComposer({
   useEffect(() => {
     actionGenerationRef.current += 1;
     isCreatingBatchRef.current = false;
-    const storageKey = idempotencyStorageKey(projectId);
+    const storageKey = idempotencyStorageKey(currentUserId, projectId);
     const restoredRecord = restoreIdempotencyRecord(storageKey);
     idempotencyRecordRef.current = restoredRecord;
     setRecoveryRecord(restoredRecord);
@@ -178,6 +180,7 @@ export function GenerationComposer({
     };
   }, [
     characterVersionId,
+    currentUserId,
     firstFrameAssetId,
     firstFrameSelectionVersionId,
     originalScript,
@@ -429,7 +432,7 @@ export function GenerationComposer({
     ) {
       return;
     }
-    const storageKey = idempotencyStorageKey(projectId);
+    const storageKey = idempotencyStorageKey(currentUserId, projectId);
     const idempotencyRecord = restoreOrCreateIdempotencyRecord(
       storageKey,
       batchRequest,
@@ -468,7 +471,7 @@ export function GenerationComposer({
     setBusyAction("batch");
     setError("");
     setMessage("");
-    const storageKey = idempotencyStorageKey(projectId);
+    const storageKey = idempotencyStorageKey(currentUserId, projectId);
     try {
       const batch = await createGenerationBatch(
         projectId,
@@ -883,8 +886,11 @@ type IdempotencyRecord = {
   request: GenerationBatchInput;
 };
 
-function idempotencyStorageKey(projectId: string): string {
-  return `generation.idempotency.${projectId}`;
+function idempotencyStorageKey(
+  currentUserId: string,
+  projectId: string,
+): string {
+  return `generation.idempotency/${encodeURIComponent(currentUserId)}/${encodeURIComponent(projectId)}`;
 }
 
 function requestFingerprint(

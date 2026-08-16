@@ -35,6 +35,33 @@ function toNonNegativeTime(value: string): number {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
 }
 
+function copyShotCards(shots: ShotCard[]): ShotCard[] {
+  return shots.map((shot) => ({ ...shot }));
+}
+
+function shotCardsEqual(left: ShotCard[], right: ShotCard[]): boolean {
+  return (
+    left.length === right.length &&
+    left.every((shot, index) => {
+      const other = right[index];
+      return (
+        other !== undefined &&
+        shot.shot_id === other.shot_id &&
+        shot.start_time === other.start_time &&
+        shot.end_time === other.end_time &&
+        shot.shot_type === other.shot_type &&
+        shot.composition === other.composition &&
+        shot.camera_motion === other.camera_motion &&
+        shot.subject === other.subject &&
+        shot.action === other.action &&
+        shot.scene === other.scene &&
+        shot.spoken_text === other.spoken_text &&
+        shot.transition === other.transition
+      );
+    })
+  );
+}
+
 const SHOT_TEXT_FIELDS: Array<{
   key: Exclude<keyof ShotCard, "start_time" | "end_time">;
   label: string;
@@ -51,12 +78,14 @@ const SHOT_TEXT_FIELDS: Array<{
 ];
 
 export function AnalysisWorkspace({
+  currentUserId,
   onAnalysisReady,
   onBatchCreated,
   onClose,
   project,
   readOnly = false,
 }: {
+  currentUserId: string;
   onAnalysisReady: (projectId: string) => void;
   onBatchCreated: (batch: GenerationBatch) => void;
   onClose: () => void;
@@ -95,6 +124,7 @@ export function AnalysisWorkspace({
   const characterSelectionVersionIdRef = useRef<string | null>(null);
   const sourceFrameSelectionIdRef = useRef<string | null>(null);
   const characterReferenceSelectionIdRef = useRef<string | null>(null);
+  const savedShotsRef = useRef<ShotCard[]>([]);
 
   useEffect(() => {
     if (
@@ -119,6 +149,7 @@ export function AnalysisWorkspace({
     setIsAnalysisMissing(false);
     setShotCardVersionId("");
     setShotCardsDirty(false);
+    savedShotsRef.current = [];
 
     async function loadWorkspace() {
       try {
@@ -138,6 +169,7 @@ export function AnalysisWorkspace({
         setOriginalScript(payload.original_script);
         setDurationSeconds(payload.duration_seconds);
         setShots(payload.shots);
+        savedShotsRef.current = copyShotCards(payload.shots);
         setShotCardsDirty(false);
         const savedShotCardVersion = await getLatestProjectShotCards(
           project.id,
@@ -148,6 +180,7 @@ export function AnalysisWorkspace({
         const savedShotCards = readShotCardPayload(savedShotCardVersion);
         if (savedShotCards?.source_analysis_version_id === version.id) {
           setShots(savedShotCards.shots);
+          savedShotsRef.current = copyShotCards(savedShotCards.shots);
           setShotCardVersionId(savedShotCardVersion.id);
           setShotCardsDirty(false);
         }
@@ -194,6 +227,7 @@ export function AnalysisWorkspace({
     setFirstFrameSelection(null);
     setGenerationStep(7);
     setShotCardsDirty(false);
+    savedShotsRef.current = [];
     characterSelectionVersionIdRef.current = null;
     sourceFrameSelectionIdRef.current = null;
     characterReferenceSelectionIdRef.current = null;
@@ -302,21 +336,23 @@ export function AnalysisWorkspace({
     if (readOnly || isSaving) {
       return;
     }
-    setShots((current) =>
-      current.map((shot, shotIndex) => {
-        if (shotIndex !== index) {
-          return shot;
-        }
-        const nextValue =
-          key === "start_time" || key === "end_time"
-            ? toNonNegativeTime(value)
-            : value;
-        return { ...shot, [key]: nextValue } as ShotCard;
-      }),
-    );
+    const nextShots = shots.map((shot, shotIndex) => {
+      if (shotIndex !== index) {
+        return shot;
+      }
+      const nextValue =
+        key === "start_time" || key === "end_time"
+          ? toNonNegativeTime(value)
+          : value;
+      return { ...shot, [key]: nextValue } as ShotCard;
+    });
+    const isDirty = !shotCardsEqual(nextShots, savedShotsRef.current);
+    setShots(nextShots);
     setSaveMessage("");
-    setShotCardsDirty(true);
-    setGenerationStep(7);
+    setShotCardsDirty(isDirty);
+    if (isDirty) {
+      setGenerationStep(7);
+    }
   }
 
   async function handleSave(event: FormEvent<HTMLFormElement>) {
@@ -341,6 +377,7 @@ export function AnalysisWorkspace({
     setSaveMessage("");
     try {
       const savedVersion = await saveShotCards(analysisId, shots);
+      savedShotsRef.current = copyShotCards(shots);
       setShotCardVersionId(savedVersion.id);
       setShotCardsDirty(false);
       setSaveMessage(`镜头卡片已保存为版本 #${savedVersion.version_number}。`);
@@ -520,6 +557,7 @@ export function AnalysisWorkspace({
                   characterVersionId={
                     characterSelection?.character_version_id ?? null
                   }
+                  currentUserId={currentUserId}
                   durationSeconds={durationSeconds}
                   firstFrameAssetId={firstFramePayload.first_frame_asset_id}
                   firstFrameSelectionVersionId={firstFrameSelection?.id ?? ""}

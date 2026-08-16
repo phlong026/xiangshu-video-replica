@@ -38,6 +38,7 @@ const baseVersion = {
 const props = {
   analysisVersionId: "analysis-1",
   characterVersionId: "character-version-1",
+  currentUserId: "employee_1",
   durationSeconds: 10,
   firstFrameAssetId: "first-frame-1",
   firstFrameSelectionVersionId: "first-frame-selection-1",
@@ -644,8 +645,9 @@ describe("GenerationComposer", () => {
     expect(api.createGenerationBatch).toHaveBeenCalledOnce();
     expect(
       JSON.parse(
-        window.localStorage.getItem("generation.idempotency.project-1") ??
-          "null",
+        window.localStorage.getItem(
+          "generation.idempotency/employee_1/project-1",
+        ) ?? "null",
       ).key,
     ).toBe(firstRequest.idempotency_key);
 
@@ -657,6 +659,71 @@ describe("GenerationComposer", () => {
       firstRequest,
     );
     expect(props.onBatchCreated).toHaveBeenCalledWith(recoveredBatch);
+  });
+
+  it("does not restore another authenticated user's paid recovery record", async () => {
+    vi.mocked(api.getLatestScriptVersion).mockResolvedValue({
+      version: {
+        ...baseVersion,
+        id: "script-1",
+        payload: {
+          source: "original",
+          full_text: props.originalScript,
+          shot_card_version_id: "shot-card-1",
+          shot_mappings: [],
+        },
+      },
+      stale: false,
+      stale_reasons: [],
+    });
+    vi.mocked(api.getLatestGenerationPrompt).mockResolvedValue({
+      version: promptVersion("LOCKED"),
+      stale: false,
+      stale_reasons: [],
+    });
+    vi.mocked(api.createGenerationBatch).mockRejectedValueOnce(
+      new Error("网络连接失败"),
+    );
+    const projectId = "project-user-scope";
+    const employeeStorageKey =
+      "generation.idempotency/employee_scope/project-user-scope";
+
+    const { rerender } = render(
+      <GenerationComposer
+        {...props}
+        currentUserId="employee_scope"
+        projectId={projectId}
+      />,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "创建 1 个生成任务" }),
+    );
+    expect(await screen.findByText("网络连接失败")).toBeInTheDocument();
+    expect(window.localStorage.getItem(employeeStorageKey)).not.toBeNull();
+
+    rerender(
+      <GenerationComposer
+        {...props}
+        currentUserId="admin_scope"
+        projectId={projectId}
+      />,
+    );
+    await screen.findByRole("button", { name: "创建 1 个生成任务" });
+    expect(
+      screen.queryByRole("button", { name: "恢复已提交批次" }),
+    ).not.toBeInTheDocument();
+    expect(window.localStorage.getItem(employeeStorageKey)).not.toBeNull();
+
+    rerender(
+      <GenerationComposer
+        {...props}
+        currentUserId="employee_scope"
+        projectId={projectId}
+      />,
+    );
+    expect(
+      await screen.findByRole("button", { name: "恢复已提交批次" }),
+    ).toBeInTheDocument();
   });
 
   it("releases the recovery record after a definitive batch rejection", async () => {
@@ -698,7 +765,9 @@ describe("GenerationComposer", () => {
       screen.queryByRole("button", { name: "恢复已提交批次" }),
     ).not.toBeInTheDocument();
     expect(
-      window.localStorage.getItem("generation.idempotency.project-1"),
+      window.localStorage.getItem(
+        "generation.idempotency/employee_1/project-1",
+      ),
     ).toBeNull();
   });
 
@@ -741,7 +810,9 @@ describe("GenerationComposer", () => {
         screen.getByRole("button", { name: "恢复已提交批次" }),
       ).toBeInTheDocument();
       expect(
-        window.localStorage.getItem(`generation.idempotency.${projectId}`),
+        window.localStorage.getItem(
+          `generation.idempotency/employee_1/${projectId}`,
+        ),
       ).not.toBeNull();
     },
   );
@@ -941,7 +1012,9 @@ describe("GenerationComposer", () => {
       .idempotency_key;
     expect(idempotencyKey).toBeTruthy();
     expect(
-      window.localStorage.getItem("generation.idempotency.project-1"),
+      window.localStorage.getItem(
+        "generation.idempotency/employee_1/project-1",
+      ),
     ).toBeNull();
     unmount();
 
