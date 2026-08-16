@@ -497,6 +497,46 @@ async function verifyFailureRecoveryPaths(page, runDir) {
     path: path.join(runDir, "screenshots", "1280x720-failure-recovery.png"),
     fullPage: true,
   });
+  await verifyCompactViewport(page, runDir);
+}
+
+async function verifyCompactViewport(page, runDir) {
+  await page.setViewportSize({ width: 1024, height: 768 });
+  await expect(
+    page.getByRole("heading", { level: 1, name: "任务记录" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("progressbar", { name: "批次进度" }),
+  ).toHaveAttribute("aria-valuenow", "100");
+  await expect(page.locator("li.task-result-card")).toHaveCount(3);
+
+  const metrics = await page.evaluate(() => ({
+    viewport: {
+      height: window.innerHeight,
+      width: window.innerWidth,
+    },
+    document: {
+      clientWidth: document.documentElement.clientWidth,
+      scrollWidth: document.documentElement.scrollWidth,
+    },
+    body: {
+      clientWidth: document.body.clientWidth,
+      scrollWidth: document.body.scrollWidth,
+    },
+  }));
+  expect(metrics.viewport).toEqual({ height: 768, width: 1024 });
+  expect(metrics.document.scrollWidth).toBe(metrics.document.clientWidth);
+  expect(metrics.body.scrollWidth).toBe(metrics.body.clientWidth);
+
+  await writeFile(
+    path.join(runDir, "logs", "1024x768-layout.json"),
+    `${JSON.stringify({ ...metrics, horizontal_overflow: false }, null, 2)}\n`,
+    "utf8",
+  );
+  await page.screenshot({
+    path: path.join(runDir, "screenshots", "1024x768-failure-recovery.png"),
+    fullPage: true,
+  });
 }
 
 async function refreshActiveBatch(page) {
