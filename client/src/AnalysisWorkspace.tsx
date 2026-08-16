@@ -509,7 +509,10 @@ export function AnalysisWorkspace({
                   {isSaving ? "正在保存" : "保存镜头卡片"}
                 </button>
               )}
-              {firstFramePayload && shotCardVersionId && !shotCardsDirty ? (
+              {firstFramePayload &&
+              shotCardVersionId &&
+              !shotCardsDirty &&
+              !isSaving ? (
                 <GenerationComposer
                   analysisVersionId={analysisId}
                   characterVersionId={
@@ -528,9 +531,11 @@ export function AnalysisWorkspace({
                 />
               ) : firstFramePayload ? (
                 <p className="workflow-gate-note">
-                  {shotCardsDirty
-                    ? "镜头卡片已编辑，请保存后再继续生成。"
-                    : "请先保存当前镜头卡片，再确认口播稿并编译 Prompt。"}
+                  {isSaving
+                    ? "镜头卡片正在保存，请完成后再继续生成。"
+                    : shotCardsDirty
+                      ? "镜头卡片已编辑，请保存后再继续生成。"
+                      : "请先保存当前镜头卡片，再确认口播稿并编译 Prompt。"}
                 </p>
               ) : null}
             </div>

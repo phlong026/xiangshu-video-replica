@@ -559,10 +559,24 @@ describe("AnalysisWorkspace workflow gates", () => {
     );
 
     expect(await screen.findByText("拆解完成")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "完成角色选择" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成源画面" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成人物参考" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成置换首帧" }));
+    expect(
+      screen.getByText("生成输入：shot-card-2/first-frame-1/原始口播稿"),
+    ).toBeInTheDocument();
+
     fireEvent.click(screen.getByRole("button", { name: "保存镜头卡片" }));
 
     expect(screen.getByLabelText("S01 场景")).toBeDisabled();
     expect(screen.getByRole("button", { name: "正在保存" })).toBeDisabled();
+    expect(
+      screen.queryByText("生成输入：shot-card-2/first-frame-1/原始口播稿"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText("镜头卡片正在保存，请完成后再继续生成。"),
+    ).toBeInTheDocument();
 
     resolveSave?.({
       id: "shot-card-3",
