@@ -221,6 +221,39 @@ describe("generation workflow API", () => {
       "保存口播稿失败：网络连接失败，请检查本地服务",
     );
   });
+
+  it("preserves the server error code on generation failures", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 409,
+        json: async () => ({
+          detail: {
+            code: "PROMPT_STALE",
+            message: "Upstream inputs changed.",
+          },
+        }),
+      }),
+    );
+
+    const error = await createGenerationBatch("project-1", {
+      quantity: 1,
+      prompt_version_id: "prompt-1",
+      first_frame_asset_id: "frame-1",
+      output_duration_seconds: 10,
+      resolution: "768P",
+      idempotency_key: "key-1",
+      provider: "fake_h3",
+      fake_audio_quality: "ok",
+    }).catch((requestError: unknown) => requestError);
+
+    expect(error).toMatchObject({
+      status: 409,
+      code: "PROMPT_STALE",
+      message: "上游内容已变化，请重新确认后再试",
+    });
+  });
 });
 
 describe("character reference and first-frame binding", () => {

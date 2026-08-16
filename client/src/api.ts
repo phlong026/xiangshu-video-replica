@@ -1335,9 +1335,10 @@ async function requestAdminJson<T>(
 ): Promise<T> {
   const response = await requestAdmin(path, init, timeoutMs);
   if (!response.ok) {
-    const message = await responseErrorMessage(response, errorPrefix);
-    const error = new Error(message) as Error & { status?: number };
+    const details = await responseErrorDetails(response, errorPrefix);
+    const error = new Error(details.message) as RequestError;
     error.status = response.status;
+    error.code = details.code;
     throw error;
   }
   return (await response.json()) as T;
@@ -1351,9 +1352,10 @@ async function requestApiJson<T>(
 ): Promise<T> {
   const response = await requestApi(path, init, timeoutMs);
   if (!response.ok) {
-    const message = await responseErrorMessage(response, errorPrefix);
-    const error = new Error(message) as Error & { status?: number };
+    const details = await responseErrorDetails(response, errorPrefix);
+    const error = new Error(details.message) as RequestError;
     error.status = response.status;
+    error.code = details.code;
     throw error;
   }
   return (await response.json()) as T;
@@ -1373,7 +1375,7 @@ async function requestGenerationJson<T>(
 }
 
 function generationRequestError(error: unknown, errorPrefix: string): Error {
-  const status = (error as { status?: number }).status;
+  const { status, code } = error as RequestError;
   const statusMessage =
     status === 401
       ? "登录已失效，请重新进入工作台"
@@ -1389,8 +1391,9 @@ function generationRequestError(error: unknown, errorPrefix: string): Error {
                 ? "生成服务暂不可用，请稍后重试"
                 : null;
   if (statusMessage) {
-    const mapped = new Error(statusMessage) as Error & { status?: number };
+    const mapped = new Error(statusMessage) as RequestError;
     mapped.status = status;
+    mapped.code = code;
     return mapped;
   }
   if (error instanceof Error && error.message === "请求超时，请重试") {
@@ -1406,18 +1409,31 @@ async function responseErrorMessage(
   response: Response,
   errorPrefix: string,
 ): Promise<string> {
+  return (await responseErrorDetails(response, errorPrefix)).message;
+}
+
+type RequestError = Error & { status?: number; code?: string };
+
+async function responseErrorDetails(
+  response: Response,
+  errorPrefix: string,
+): Promise<{ message: string; code?: string }> {
   try {
     const payload: unknown = await response.json();
     if (isRecord(payload) && isRecord(payload.detail)) {
       const message = payload.detail.message;
+      const code = payload.detail.code;
       if (typeof message === "string" && message.trim()) {
-        return `${errorPrefix}：${message}（${response.status}）`;
+        return {
+          message: `${errorPrefix}：${message}（${response.status}）`,
+          code: typeof code === "string" ? code : undefined,
+        };
       }
     }
   } catch {
     // A missing or non-JSON error body must not hide the HTTP status.
   }
-  return `${errorPrefix}（${response.status}）`;
+  return { message: `${errorPrefix}（${response.status}）` };
 }
 
 async function requestAdmin(

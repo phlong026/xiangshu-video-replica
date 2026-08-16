@@ -1172,6 +1172,40 @@ def test_generation_batch_quantity_limits_idempotency_and_fake_archive(
     assert {task["archive_status"] for task in after_worker["tasks"]} == {"ARCHIVED"}
 
 
+def test_generation_batch_replay_ignores_a_later_lower_quantity_limit(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    prompt_id = create_locked_prompt(client)
+    request = {
+        "quantity": 3,
+        "prompt_version_id": prompt_id,
+        "first_frame_asset_id": "first_frame_owned",
+        "output_duration_seconds": 10,
+        "resolution": "768P",
+        "idempotency_key": "limit-change-replay",
+    }
+    first = client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json=request,
+    )
+    assert first.status_code == 200
+
+    with connect_database(db_path) as conn:
+        conn.execute("UPDATE runtime_settings SET max_generation_count_per_batch = 1 WHERE id = 1")
+        conn.commit()
+
+    replay = client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json=request,
+    )
+
+    assert replay.status_code == 200
+    assert replay.json()["id"] == first.json()["id"]
+
+
 def test_generation_batch_create_route_is_unique_and_returns_batch_result(
     client: TestClient,
 ) -> None:

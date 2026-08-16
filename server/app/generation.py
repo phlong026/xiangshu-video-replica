@@ -1025,14 +1025,6 @@ def create_generation_batch(
         project_id=project_id,
         action="generation_batch.create",
     )
-    runtime = read_runtime_limits(conn)
-    max_quantity = runtime["max_generation_count_per_batch"]
-    if request.quantity > max_quantity:
-        raise generation_error(
-            422,
-            "QUANTITY_EXCEEDS_LIMIT",
-            f"quantity must be less than or equal to {max_quantity}",
-        )
     request_hash = idempotency_request_hash(request)
     existing = _find_idempotent_batch(
         conn, actor_id=actor.id, project_id=project_id, key=request.idempotency_key
@@ -1045,29 +1037,6 @@ def create_generation_batch(
                 "This idempotency key was already used for a different request.",
             )
         return get_generation_batch(conn, batch_id=str(existing["id"]), actor=actor)
-
-    # Preflight a new (non-idempotent) METASO submission after the idempotency
-    # check so a replayed key returns the existing batch even when the current
-    # storage provider cannot run a fresh METASO job.
-    if request.provider == "metaso":
-        try:
-            metaso_h3_provider_from_settings(conn)
-        except H3ProviderSettingsUnavailable as exc:
-            raise generation_error(
-                503,
-                "METASO_SETTINGS_UNAVAILABLE",
-                "Save a readable METASO API Key before queuing a real H3 task.",
-            ) from exc
-        storage_row = conn.execute(
-            "SELECT active_storage_provider FROM runtime_settings WHERE id = 1"
-        ).fetchone()
-        if storage_row is not None and storage_row["active_storage_provider"] == "local":
-            raise generation_error(
-                422,
-                "METASO_REQUIRES_CLOUD_STORAGE",
-                "METASO H3 requires an HTTPS first-frame URL; switch storage to "
-                "COS/OSS before generating.",
-            )
 
     try:
         conn.execute("BEGIN IMMEDIATE")
@@ -1090,6 +1059,37 @@ def create_generation_batch(
                 batch_id=str(concurrent_existing["id"]),
                 actor=actor,
             )
+
+        runtime = read_runtime_limits(conn)
+        max_quantity = runtime["max_generation_count_per_batch"]
+        if request.quantity > max_quantity:
+            raise generation_error(
+                422,
+                "QUANTITY_EXCEEDS_LIMIT",
+                f"quantity must be less than or equal to {max_quantity}",
+            )
+
+        # Mutable runtime/provider preflights apply only to a genuinely new
+        # submission. Replayed keys return above even if settings changed.
+        if request.provider == "metaso":
+            try:
+                metaso_h3_provider_from_settings(conn)
+            except H3ProviderSettingsUnavailable as exc:
+                raise generation_error(
+                    503,
+                    "METASO_SETTINGS_UNAVAILABLE",
+                    "Save a readable METASO API Key before queuing a real H3 task.",
+                ) from exc
+            storage_row = conn.execute(
+                "SELECT active_storage_provider FROM runtime_settings WHERE id = 1"
+            ).fetchone()
+            if storage_row is not None and storage_row["active_storage_provider"] == "local":
+                raise generation_error(
+                    422,
+                    "METASO_REQUIRES_CLOUD_STORAGE",
+                    "METASO H3 requires an HTTPS first-frame URL; switch storage to "
+                    "COS/OSS before generating.",
+                )
 
         prompt = require_version(
             conn,

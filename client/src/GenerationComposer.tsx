@@ -490,7 +490,18 @@ export function GenerationComposer({
       onWorkflowStepChange(10);
       onBatchCreated(batch);
     } catch (requestError) {
+      const definitiveRejection = isDefinitiveBatchRejection(requestError);
+      if (definitiveRejection) {
+        clearIdempotencyRecord(storageKey, idempotencyRecord);
+      }
       if (actionGeneration === actionGenerationRef.current) {
+        if (
+          definitiveRejection &&
+          idempotencyRecordRef.current?.key === idempotencyRecord.key
+        ) {
+          idempotencyRecordRef.current = null;
+          setRecoveryRecord(null);
+        }
         setError(errorMessage(requestError, "创建视频生成批次失败。"));
       }
     } finally {
@@ -938,10 +949,41 @@ function clearIdempotencyRecord(storageKey: string, record: IdempotencyRecord) {
     sessionIdempotencyRecords.delete(storageKey);
   }
   try {
-    window.localStorage.removeItem(storageKey);
+    const saved = window.localStorage.getItem(storageKey);
+    if (!saved) {
+      return;
+    }
+    const parsed: unknown = JSON.parse(saved);
+    if (isIdempotencyRecord(parsed) && parsed.key === record.key) {
+      window.localStorage.removeItem(storageKey);
+    }
   } catch {
     // The remote batch is already visible; cleanup must not hide the result.
   }
+}
+
+function isDefinitiveBatchRejection(error: unknown): boolean {
+  const { status, code } = error as { status?: number; code?: string };
+  if (status === 400) {
+    return code === "ASSET_PROJECT_MISMATCH";
+  }
+  if (status === 422) {
+    return (
+      code === "QUANTITY_EXCEEDS_LIMIT" ||
+      code === "METASO_REQUIRES_CLOUD_STORAGE"
+    );
+  }
+  if (status !== 409) {
+    return false;
+  }
+  return (
+    code === "PROMPT_STALE" ||
+    code === "PROMPT_NOT_LOCKED" ||
+    code === "PROMPT_PARAMETERS_MISMATCH" ||
+    code === "FIRST_FRAME_CONFIRMATION_REQUIRED" ||
+    code === "FIRST_FRAME_PROMPT_MISMATCH" ||
+    code === "PROMPT_ALREADY_USED"
+  );
 }
 
 function isIdempotencyRecord(value: unknown): value is IdempotencyRecord {

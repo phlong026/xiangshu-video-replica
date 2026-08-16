@@ -659,6 +659,93 @@ describe("GenerationComposer", () => {
     expect(props.onBatchCreated).toHaveBeenCalledWith(recoveredBatch);
   });
 
+  it("releases the recovery record after a definitive batch rejection", async () => {
+    vi.mocked(api.getLatestScriptVersion).mockResolvedValue({
+      version: {
+        ...baseVersion,
+        id: "script-1",
+        payload: {
+          source: "original",
+          full_text: props.originalScript,
+          shot_card_version_id: "shot-card-1",
+          shot_mappings: [],
+        },
+      },
+      stale: false,
+      stale_reasons: [],
+    });
+    vi.mocked(api.getLatestGenerationPrompt).mockResolvedValue({
+      version: promptVersion("LOCKED"),
+      stale: false,
+      stale_reasons: [],
+    });
+    vi.mocked(api.createGenerationBatch).mockRejectedValueOnce(
+      Object.assign(new Error("上游内容已变化，请重新确认后再试"), {
+        status: 409,
+        code: "PROMPT_STALE",
+      }),
+    );
+
+    render(<GenerationComposer {...props} />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "创建 1 个生成任务" }),
+    );
+
+    expect(
+      await screen.findByText("上游内容已变化，请重新确认后再试"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "恢复已提交批次" }),
+    ).not.toBeInTheDocument();
+    expect(
+      window.localStorage.getItem("generation.idempotency.project-1"),
+    ).toBeNull();
+  });
+
+  it.each([401, 403, 404, 429])(
+    "keeps the recovery record after ambiguous HTTP %s",
+    async (status) => {
+      const projectId = `project-${status}`;
+      vi.mocked(api.getLatestScriptVersion).mockResolvedValue({
+        version: {
+          ...baseVersion,
+          id: "script-1",
+          payload: {
+            source: "original",
+            full_text: props.originalScript,
+            shot_card_version_id: "shot-card-1",
+            shot_mappings: [],
+          },
+        },
+        stale: false,
+        stale_reasons: [],
+      });
+      vi.mocked(api.getLatestGenerationPrompt).mockResolvedValue({
+        version: promptVersion("LOCKED"),
+        stale: false,
+        stale_reasons: [],
+      });
+      vi.mocked(api.createGenerationBatch).mockRejectedValueOnce(
+        Object.assign(new Error("当前无法确认批次结果"), { status }),
+      );
+
+      render(<GenerationComposer {...props} projectId={projectId} />);
+      fireEvent.click(
+        await screen.findByRole("button", { name: "创建 1 个生成任务" }),
+      );
+
+      expect(
+        await screen.findByText("当前无法确认批次结果"),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "恢复已提交批次" }),
+      ).toBeInTheDocument();
+      expect(
+        window.localStorage.getItem(`generation.idempotency.${projectId}`),
+      ).not.toBeNull();
+    },
+  );
+
   it("still creates a batch when browser recovery storage is unavailable", async () => {
     vi.mocked(api.getLatestScriptVersion).mockResolvedValue({
       version: {
