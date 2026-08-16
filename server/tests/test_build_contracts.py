@@ -138,3 +138,89 @@ esac
     assert "python -m app.bootstrap" in bootstrap_marker.read_text(encoding="utf-8")
     assert "python -m uvicorn app.main:app" in server_marker.read_text(encoding="utf-8")
     assert "python -m app.generation_worker" in worker_marker.read_text(encoding="utf-8")
+
+
+def test_packaged_launchers_reject_partial_command_overrides(tmp_path: Path) -> None:
+    launcher = tmp_path / "start-backend.sh"
+    shutil.copy2(REPO_ROOT / "client/src-tauri/resources/start-backend.sh", launcher)
+    launcher.chmod(launcher.stat().st_mode | stat.S_IXUSR)
+
+    partial_overrides = (
+        {
+            "VIDEO_REPLICA_SERVER_CMD": "/usr/bin/true",
+            "VIDEO_REPLICA_WORKER_CMD": "/usr/bin/true",
+        },
+        {
+            "VIDEO_REPLICA_BOOTSTRAP_CMD": "/usr/bin/true",
+            "VIDEO_REPLICA_SERVER_CMD": "/usr/bin/true",
+        },
+        {
+            "VIDEO_REPLICA_BOOTSTRAP_CMD": "/usr/bin/true",
+            "VIDEO_REPLICA_WORKER_CMD": "/usr/bin/true",
+        },
+    )
+    expected_error = "packaged bootstrap, server, and worker commands must be set together"
+    for overrides in partial_overrides:
+        env = {
+            **os.environ,
+            "VIDEO_REPLICA_DB_PATH": str(tmp_path / "app.db"),
+            "VIDEO_REPLICA_DESKTOP_USER_ID": "employee_1",
+            **overrides,
+        }
+        result = subprocess.run(
+            ["bash", str(launcher)],
+            check=False,
+            capture_output=True,
+            env=env,
+            text=True,
+            timeout=10,
+        )
+
+        assert result.returncode != 0
+        assert expected_error in result.stderr
+
+    windows_launcher = (REPO_ROOT / "client/src-tauri/resources/start-backend.bat").read_text(
+        encoding="utf-8"
+    )
+    distribution_plan = (REPO_ROOT / "docs/服务端分发与自动拉起方案.md").read_text(encoding="utf-8")
+    assert expected_error in windows_launcher
+    assert "VIDEO_REPLICA_BOOTSTRAP_CMD" in distribution_plan
+
+
+def test_posix_packaged_launcher_runs_without_uv_or_server_sources(tmp_path: Path) -> None:
+    launcher = tmp_path / "start-backend.sh"
+    shutil.copy2(REPO_ROOT / "client/src-tauri/resources/start-backend.sh", launcher)
+    launcher.chmod(launcher.stat().st_mode | stat.S_IXUSR)
+
+    marker_dir = tmp_path / "markers"
+    marker_dir.mkdir()
+    commands: dict[str, Path] = {}
+    for name in ("bootstrap", "server", "worker"):
+        command = tmp_path / name
+        command.write_text(
+            f"#!/bin/sh\nprintf '%s' '{name}' > '{marker_dir / name}'\n",
+            encoding="utf-8",
+        )
+        command.chmod(command.stat().st_mode | stat.S_IXUSR)
+        commands[name] = command
+
+    env = {
+        **os.environ,
+        "PATH": "/usr/bin:/bin",
+        "VIDEO_REPLICA_DB_PATH": str(tmp_path / "app.db"),
+        "VIDEO_REPLICA_DESKTOP_USER_ID": "employee_1",
+        "VIDEO_REPLICA_BOOTSTRAP_CMD": str(commands["bootstrap"]),
+        "VIDEO_REPLICA_SERVER_CMD": str(commands["server"]),
+        "VIDEO_REPLICA_WORKER_CMD": str(commands["worker"]),
+    }
+    result = subprocess.run(
+        ["bash", str(launcher)],
+        check=False,
+        capture_output=True,
+        env=env,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert {path.name for path in marker_dir.iterdir()} == {"bootstrap", "server", "worker"}

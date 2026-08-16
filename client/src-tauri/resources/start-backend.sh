@@ -10,6 +10,14 @@ export VIDEO_REPLICA_DB_PATH="${VIDEO_REPLICA_DB_PATH:?VIDEO_REPLICA_DB_PATH is 
 export VIDEO_REPLICA_DESKTOP_USER_ID="${VIDEO_REPLICA_DESKTOP_USER_ID:?VIDEO_REPLICA_DESKTOP_USER_ID is required}"
 export VIDEO_REPLICA_STORAGE_ROOT="${VIDEO_REPLICA_STORAGE_ROOT:-$SCRIPT_DIR/storage}"
 
+# 打包命令是一个整体，禁止一部分走 sidecar、另一部分误回退到开发目录。
+if [[ -n "${VIDEO_REPLICA_BOOTSTRAP_CMD:-}" || -n "${VIDEO_REPLICA_SERVER_CMD:-}" || -n "${VIDEO_REPLICA_WORKER_CMD:-}" ]]; then
+  if [[ -z "${VIDEO_REPLICA_BOOTSTRAP_CMD:-}" || -z "${VIDEO_REPLICA_SERVER_CMD:-}" || -z "${VIDEO_REPLICA_WORKER_CMD:-}" ]]; then
+    echo "packaged bootstrap, server, and worker commands must be set together" >&2
+    exit 1
+  fi
+fi
+
 # 先迁移旧数据库并验证已保存凭据可解密，再并发启动 API 和 Worker。
 if [[ -n "${VIDEO_REPLICA_BOOTSTRAP_CMD:-}" ]]; then
   sh -c "$VIDEO_REPLICA_BOOTSTRAP_CMD"
@@ -17,7 +25,8 @@ else
   uv --cache-dir .uv-cache run --project server --locked python -m app.bootstrap
 fi
 
-# PyInstaller 等分发形态下,用 VIDEO_REPLICA_SERVER_CMD / WORKER_CMD 指向产物可执行文件。
+# PyInstaller 等分发形态下,用 BOOTSTRAP_CMD / SERVER_CMD / WORKER_CMD
+# 分别指向不依赖开发目录的打包产物。
 # 默认命令使用参数数组直接执行；只有受信任的部署覆盖值需要由 shell 解析。
 start_server() {
   if [[ -n "${VIDEO_REPLICA_SERVER_CMD:-}" ]]; then

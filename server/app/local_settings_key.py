@@ -117,6 +117,8 @@ def _load_or_create_macos_key(runner: CommandRunner, generated_key: str) -> str:
     if existing is not None:
         return existing
 
+    # `security -w` without an inline password opens two prompts. Supplying
+    # both answers on stdin keeps the generated key out of the process argv.
     result = _run(
         runner,
         (
