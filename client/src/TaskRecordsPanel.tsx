@@ -48,6 +48,8 @@ export function TaskRecordsPanel({
   const [batchIdInput, setBatchIdInput] = useState(restoredBatchId);
   const [activeBatchId, setActiveBatchId] = useState(restoredBatchId);
   const activeBatchIdRef = useRef(restoredBatchId);
+  const requeuedTaskIdsRef = useRef<Set<string>>(new Set());
+  const [pollingRevision, setPollingRevision] = useState(0);
   const [batch, setBatch] = useState<GenerationBatch | null>(handoffBatch);
   const [batchError, setBatchError] = useState("");
   const [isBatchLoading, setIsBatchLoading] = useState(false);
@@ -88,6 +90,7 @@ export function TaskRecordsPanel({
       setBatchPaymentConfirmed(false);
       setTaskActionReasons({});
       setTaskPaymentConfirmations({});
+      requeuedTaskIdsRef.current.clear();
       storeBatchId(batchId);
     },
     [],
@@ -145,6 +148,7 @@ export function TaskRecordsPanel({
     onHandoffConsumed();
   }, [handoffBatch, onHandoffConsumed, selectBatch]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: pollingRevision intentionally restarts a poller that stopped on a terminal batch.
   useEffect(() => {
     if (!activeBatchId) {
       return;
@@ -168,7 +172,10 @@ export function TaskRecordsPanel({
         retryCount = 0;
         nextRetryDelayMs = POLL_INTERVAL_MS;
         storeBatchId(activeBatchId);
-        if (!isTerminalBatch(nextBatch)) {
+        if (
+          !isTerminalBatch(nextBatch) ||
+          hasRequeuedTaskStillProcessing(nextBatch, requeuedTaskIdsRef.current)
+        ) {
           timeoutId = window.setTimeout(loadBatch, POLL_INTERVAL_MS);
         }
       } catch (error) {
@@ -211,7 +218,7 @@ export function TaskRecordsPanel({
         window.clearTimeout(timeoutId);
       }
     };
-  }, [activeBatchId]);
+  }, [activeBatchId, pollingRevision]);
 
   function handleBatchSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -267,11 +274,13 @@ export function TaskRecordsPanel({
       actionKey,
     );
     setActiveTaskAction(actionKey);
+    let retryAccepted = false;
     try {
       await retryGenerationTask(task.id, {
         idempotency_key: operationKey,
         retry_reason: reason,
       });
+      retryAccepted = true;
       if (activeBatchIdRef.current !== batchIdAtStart) {
         return;
       }
@@ -287,6 +296,10 @@ export function TaskRecordsPanel({
         setBatchError("任务安全重试失败，请检查当前状态后再试。");
       }
     } finally {
+      if (retryAccepted && activeBatchIdRef.current === batchIdAtStart) {
+        requeuedTaskIdsRef.current.add(task.id);
+        setPollingRevision((current) => current + 1);
+      }
       setActiveTaskAction((current) => (current === actionKey ? "" : current));
     }
   }
@@ -303,11 +316,13 @@ export function TaskRecordsPanel({
       actionKey,
     );
     setActiveTaskAction(actionKey);
+    let confirmationAccepted = false;
     try {
       await confirmGenerationTaskNotCharged(task.id, {
         idempotency_key: operationKey,
         reason,
       });
+      confirmationAccepted = true;
       if (activeBatchIdRef.current !== batchIdAtStart) {
         return;
       }
@@ -323,6 +338,10 @@ export function TaskRecordsPanel({
         setBatchError("确认未计费失败，任务未重新入队。");
       }
     } finally {
+      if (confirmationAccepted && activeBatchIdRef.current === batchIdAtStart) {
+        requeuedTaskIdsRef.current.add(task.id);
+        setPollingRevision((current) => current + 1);
+      }
       setActiveTaskAction((current) => (current === actionKey ? "" : current));
     }
   }
@@ -1149,6 +1168,28 @@ function isTerminalBatch(batch: GenerationBatch) {
     TERMINAL_BATCH_STATUSES.has(batch.status) ||
     (batch.progress.total_count > 0 &&
       batch.progress.terminal_count === batch.progress.total_count)
+  );
+}
+
+function hasRequeuedTaskStillProcessing(
+  batch: GenerationBatch,
+  requeuedTaskIds: Set<string>,
+) {
+  for (const taskId of requeuedTaskIds) {
+    const task = batch.tasks.find((candidate) => candidate.id === taskId);
+    if (!task || isRequeuedTaskSettled(task)) {
+      requeuedTaskIds.delete(taskId);
+    }
+  }
+  return requeuedTaskIds.size > 0;
+}
+
+function isRequeuedTaskSettled(task: GenerationTask) {
+  return (
+    task.archive_status === "ARCHIVED" ||
+    task.status === "FAILED" ||
+    task.status === "CANCELLED" ||
+    task.status === "SUBMISSION_UNCERTAIN"
   );
 }
 

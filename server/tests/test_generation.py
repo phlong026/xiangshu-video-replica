@@ -23,10 +23,12 @@ from app.generation import (
     FakeH3Provider,
     H3CreateResult,
     H3ProviderFailed,
+    H3ProviderSettingsUnavailable,
     MetasoH3Provider,
     SubmissionUncertain,
     build_h3_request,
     mark_expired_active_leases_needing_attention,
+    mark_task_submission_uncertain,
     reconcile_submission_uncertain_task,
     run_next_generation_task,
 )
@@ -2310,8 +2312,13 @@ def test_generation_batch_list_filters_and_enforces_project_scope(
         insert_generation_history(
             conn,
             batch_id="batch-owned-uncertain",
-            batch_status="NEEDS_ATTENTION",
-            task_status="SUBMISSION_UNCERTAIN",
+            batch_status="QUEUED",
+            task_status="SUBMITTING",
+        )
+        mark_task_submission_uncertain(
+            conn,
+            task_id="batch-owned-uncertain-task",
+            message="Submission result is unknown.",
         )
         insert_generation_history(
             conn,
@@ -3373,15 +3380,17 @@ def test_reconcile_route_is_idempotent_and_audited(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.media_routes import get_media_storage
+    import app.generation_routes as generation_routes_module
 
     monkeypatch.setattr("app.generation.socket.getaddrinfo", _fake_public_dns)
     monkeypatch.setattr(
         "app.generation_routes.h3_provider_for_task",
         lambda _conn, _provider: ReconcileSucceededProvider(api_key="test-key"),
     )
-    app.dependency_overrides[get_media_storage] = lambda: FakeStorageAdapter(
-        provider="cos", bucket="generation-results"
+    monkeypatch.setattr(
+        generation_routes_module,
+        "get_media_storage",
+        lambda _conn: FakeStorageAdapter(provider="cos", bucket="generation-results"),
     )
     prompt_id = create_locked_prompt(client)
     created = client.post(
@@ -3414,6 +3423,27 @@ def test_reconcile_route_is_idempotent_and_audited(
         f"/api/generation-tasks/{task_id}/reconcile",
         headers=auth_headers("employee_1"),
         json=payload,
+    )
+
+    def unavailable_storage(*_args: object, **_kwargs: object) -> FakeStorageAdapter:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "STORAGE_SETTINGS_UNAVAILABLE"},
+        )
+
+    def unavailable_provider(*_args: object, **_kwargs: object) -> FakeH3Provider:
+        raise H3ProviderSettingsUnavailable("provider settings removed")
+
+    monkeypatch.setattr(
+        generation_routes_module,
+        "get_media_storage",
+        unavailable_storage,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        generation_routes_module,
+        "h3_provider_for_task",
+        unavailable_provider,
     )
     replay = client.post(
         f"/api/generation-tasks/{task_id}/reconcile",

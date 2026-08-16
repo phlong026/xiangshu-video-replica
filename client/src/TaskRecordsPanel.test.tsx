@@ -155,7 +155,7 @@ describe("TaskRecordsPanel", () => {
   });
 
   afterEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     vi.restoreAllMocks();
     vi.useRealTimers();
     window.localStorage.clear();
@@ -601,6 +601,230 @@ describe("TaskRecordsPanel", () => {
     );
     expect(screen.getByText("task-b")).toBeInTheDocument();
     expect(screen.queryByText("task-a")).not.toBeInTheDocument();
+  });
+
+  it("restarts polling after a safe retry requeues a terminal task", async () => {
+    const failed = batch({
+      status: "COMPLETED_WITH_FAILURES",
+      quantity: 1,
+      progress: {
+        total_count: 1,
+        terminal_count: 1,
+        progress_percent: 100,
+        counts: {
+          pending: 0,
+          submitting: 0,
+          queued: 0,
+          running: 0,
+          archiving: 0,
+          succeeded: 0,
+          failed: 1,
+          cancelled: 0,
+          needs_attention: 0,
+        },
+      },
+      tasks: [
+        task({
+          id: "task-retry-poll",
+          status: "FAILED",
+          stage: "FAILED",
+          archive_status: "PENDING",
+          quality_status: "PENDING",
+          result_asset_id: null,
+          available_actions: ["RETRY"],
+        }),
+      ],
+    });
+    const requeued = batch({
+      status: "QUEUED",
+      quantity: 1,
+      progress: {
+        total_count: 1,
+        terminal_count: 0,
+        progress_percent: 0,
+        counts: {
+          pending: 1,
+          submitting: 0,
+          queued: 0,
+          running: 0,
+          archiving: 0,
+          succeeded: 0,
+          failed: 0,
+          cancelled: 0,
+          needs_attention: 0,
+        },
+      },
+      tasks: [
+        task({
+          id: "task-retry-poll",
+          status: "PENDING",
+          stage: "PENDING",
+          archive_status: "PENDING",
+          quality_status: "PENDING",
+          result_asset_id: null,
+        }),
+      ],
+    });
+    const completed = batch({
+      status: "SUCCEEDED",
+      quantity: 1,
+      progress: {
+        total_count: 1,
+        terminal_count: 1,
+        progress_percent: 100,
+        counts: {
+          pending: 0,
+          submitting: 0,
+          queued: 0,
+          running: 0,
+          archiving: 0,
+          succeeded: 1,
+          failed: 0,
+          cancelled: 0,
+          needs_attention: 0,
+        },
+      },
+      tasks: [task({ id: "task-retry-poll", stage: "COMPLETED" })],
+    });
+    vi.mocked(api.getGenerationBatch)
+      .mockResolvedValueOnce(failed)
+      .mockResolvedValueOnce(requeued)
+      .mockResolvedValueOnce(completed);
+    vi.mocked(api.retryGenerationTask).mockResolvedValue(requeued.tasks[0]);
+
+    render(
+      <TaskRecordsPanel
+        handoffBatch={null}
+        onHandoffConsumed={vi.fn()}
+        userRole="employee"
+      />,
+    );
+
+    const retry = await screen.findByRole("button", {
+      name: "安全重试 task-retry-poll",
+    });
+    fireEvent.change(screen.getByLabelText("处理原因 task-retry-poll"), {
+      target: { value: "本地签名服务已恢复" },
+    });
+    fireEvent.click(retry);
+
+    await waitFor(() =>
+      expect(api.getGenerationBatch).toHaveBeenCalledTimes(3),
+    );
+    expect(await screen.findByText("阶段：已归档")).toBeInTheDocument();
+  });
+
+  it("restarts polling after an admin confirms an uncertain task was not charged", async () => {
+    const uncertain = batch({
+      status: "NEEDS_ATTENTION",
+      quantity: 1,
+      progress: {
+        total_count: 1,
+        terminal_count: 0,
+        progress_percent: 0,
+        counts: {
+          pending: 0,
+          submitting: 0,
+          queued: 0,
+          running: 0,
+          archiving: 0,
+          succeeded: 0,
+          failed: 0,
+          cancelled: 0,
+          needs_attention: 1,
+        },
+      },
+      tasks: [
+        task({
+          id: "task-confirm-poll",
+          status: "SUBMISSION_UNCERTAIN",
+          stage: "SUBMISSION_UNCERTAIN",
+          archive_status: "PENDING",
+          quality_status: "PENDING",
+          result_asset_id: null,
+          available_actions: ["CONFIRM_NOT_CHARGED"],
+        }),
+      ],
+    });
+    const requeued = batch({
+      status: "QUEUED",
+      quantity: 1,
+      progress: {
+        total_count: 1,
+        terminal_count: 0,
+        progress_percent: 0,
+        counts: {
+          pending: 1,
+          submitting: 0,
+          queued: 0,
+          running: 0,
+          archiving: 0,
+          succeeded: 0,
+          failed: 0,
+          cancelled: 0,
+          needs_attention: 0,
+        },
+      },
+      tasks: [
+        task({
+          id: "task-confirm-poll",
+          status: "PENDING",
+          stage: "PENDING",
+          archive_status: "PENDING",
+          quality_status: "PENDING",
+          result_asset_id: null,
+        }),
+      ],
+    });
+    const completed = batch({
+      status: "SUCCEEDED",
+      quantity: 1,
+      progress: {
+        total_count: 1,
+        terminal_count: 1,
+        progress_percent: 100,
+        counts: {
+          pending: 0,
+          submitting: 0,
+          queued: 0,
+          running: 0,
+          archiving: 0,
+          succeeded: 1,
+          failed: 0,
+          cancelled: 0,
+          needs_attention: 0,
+        },
+      },
+      tasks: [task({ id: "task-confirm-poll", stage: "COMPLETED" })],
+    });
+    vi.mocked(api.getGenerationBatch)
+      .mockResolvedValueOnce(uncertain)
+      .mockResolvedValueOnce(requeued)
+      .mockResolvedValueOnce(completed);
+    vi.mocked(api.confirmGenerationTaskNotCharged).mockResolvedValue(
+      requeued.tasks[0],
+    );
+
+    render(
+      <TaskRecordsPanel
+        handoffBatch={null}
+        onHandoffConsumed={vi.fn()}
+        userRole="admin"
+      />,
+    );
+
+    const confirm = await screen.findByRole("button", {
+      name: "确认未计费 task-confirm-poll",
+    });
+    fireEvent.change(screen.getByLabelText("处理原因 task-confirm-poll"), {
+      target: { value: "账单已确认未计费" },
+    });
+    fireEvent.click(confirm);
+
+    await waitFor(() =>
+      expect(api.getGenerationBatch).toHaveBeenCalledTimes(3),
+    );
+    expect(await screen.findByText("阶段：已归档")).toBeInTheDocument();
   });
 
   it("offers only server-approved retry, reconcile, and admin confirmation actions", async () => {

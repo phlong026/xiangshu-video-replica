@@ -2622,8 +2622,8 @@ def reconcile_generation_task(
     created_by_user_id: str,
     actor: CurrentUser,
     request: ReconcileGenerationTaskRequest,
-    storage: StorageAdapter,
-    provider: H3Provider,
+    storage_factory: Callable[[], StorageAdapter],
+    provider_factory: Callable[[], H3Provider],
 ) -> TaskResult:
     action = "RECONCILE"
     request_hash = generation_task_operation_hash(
@@ -2776,6 +2776,8 @@ def reconcile_generation_task(
         raise
 
     try:
+        storage = storage_factory()
+        provider = provider_factory()
         result = reconcile_submission_uncertain_task(
             conn,
             task_id=task_id,
@@ -3083,6 +3085,10 @@ def mark_task_submission_uncertain(
     provider_task_id: str | None = None,
 ) -> None:
     with conn:
+        row = conn.execute(
+            "SELECT batch_id FROM generation_tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
         conn.execute(
             """
             UPDATE generation_tasks
@@ -3098,6 +3104,8 @@ def mark_task_submission_uncertain(
             """,
             (provider_task_id, message, task_id),
         )
+        if row is not None:
+            _refresh_batch_status_in_transaction(conn, batch_id=str(row["batch_id"]))
 
 
 def mark_task_provider_settings_unavailable(

@@ -42,7 +42,7 @@ from app.generation import (
     version_result,
     version_state,
 )
-from app.media_routes import MediaStorage
+from app.media_routes import get_media_storage
 from app.permissions import require_not_auditor, require_project_access, require_role
 
 router = APIRouter(prefix="/api", tags=["generation"])
@@ -368,7 +368,6 @@ def reconcile_uncertain_task(
     task_id: str,
     conn: Database,
     actor: AuthenticatedUser,
-    storage: MediaStorage,
     request: ReconcileGenerationTaskRequest | None = None,
 ) -> TaskResult:
     row = _generation_task_context(conn, task_id)
@@ -387,13 +386,16 @@ def reconcile_uncertain_task(
     )
     if request is None:
         raise HTTPException(status_code=422, detail={"code": "RECONCILE_REQUEST_REQUIRED"})
-    try:
-        provider = h3_provider_for_task(conn, str(row["provider"]))
-    except H3ProviderSettingsUnavailable as exc:
-        raise HTTPException(
-            status_code=503,
-            detail={"code": "METASO_SETTINGS_UNAVAILABLE"},
-        ) from exc
+
+    def provider_factory() -> H3Provider:
+        try:
+            return h3_provider_for_task(conn, str(row["provider"]))
+        except H3ProviderSettingsUnavailable as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "METASO_SETTINGS_UNAVAILABLE"},
+            ) from exc
+
     return reconcile_generation_task(
         conn,
         task_id=task_id,
@@ -402,6 +404,6 @@ def reconcile_uncertain_task(
         created_by_user_id=str(row["created_by_user_id"]),
         actor=actor,
         request=request,
-        storage=storage,
-        provider=provider,
+        storage_factory=lambda: get_media_storage(conn),
+        provider_factory=provider_factory,
     )
