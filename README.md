@@ -57,6 +57,8 @@ $env:VIDEO_REPLICA_STORAGE_ROOT = "C:\video-replica-storage"   # 本地存储根
 
 Provider API Key 和云存储凭证加密后写入 `VIDEO_REPLICA_DB_PATH` 指向的 SQLite，不写入浏览器 `localStorage`。启动前 `app.bootstrap` 会自动执行 Alembic 迁移并验证已保存配置可解密；失败时 API 和 Worker 不会启动，也不会覆盖原配置。
 
+从历史 OSS 版本升级时，若 `assets.storage_uri` 仍存在 `oss://` 对象，迁移会拒绝继续，保留 OSS 凭证和原数据。必须先将对象及 URI 迁移到 COS 或受控本地存储，再重新执行升级；不允许通过删除凭证来静默遗弃历史素材。
+
 - macOS 未显式设置 `VIDEO_REPLICA_SETTINGS_KEY` 时，主密钥自动创建并复用于当前用户钥匙串。
 - Windows 未显式设置该变量时，主密钥由当前用户 DPAPI 保护，密文保存在 `%LOCALAPPDATA%\VideoReplicaWorkbench\secrets\settings-key.dpapi`。
 - 服务器或集中部署可由安全的 Secret 注入机制显式提供 `VIDEO_REPLICA_SETTINGS_KEY`；桌面系统只会在该值成功解密当前数据库后将其导入系统密钥存储。不支持系统密钥存储的服务器每次启动必须复用同一值；主密钥不得写入仓库、启动脚本或日志。

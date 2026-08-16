@@ -171,6 +171,7 @@ $env:VIDEO_REPLICA_LOG_DIR = "$env:VIDEO_REPLICA_HOME\logs"
 2. 执行手动备份。
 3. 记录数据库 SHA256、表数量、关键业务计数。
 4. 记录 1 个未完成批次和 1 个已完成批次的 ID。
+5. 查询 `assets.storage_uri` 是否还有 `oss://` 对象；若有，先迁移对象和 URI，不得删除 OSS 凭证后强行升级。
 
 升级：
 

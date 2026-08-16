@@ -211,6 +211,63 @@ def test_remove_oss_migration_purges_settings_and_selects_safe_fallback(
         )
 
 
+def test_remove_oss_migration_refuses_to_orphan_legacy_assets(tmp_path: Path) -> None:
+    db_path = tmp_path / "remove-oss-with-assets.db"
+    command.upgrade(alembic_config(db_path), "017_generation_task_retry_lineage")
+
+    with connect_database(db_path) as conn:
+        conn.execute(
+            "INSERT INTO users (id, username, display_name, role) "
+            "VALUES ('admin', 'admin', 'Admin', 'admin')"
+        )
+        conn.execute(
+            "INSERT INTO projects (id, owner_user_id, name) "
+            "VALUES ('project-1', 'admin', 'Legacy OSS project')"
+        )
+        conn.execute(
+            "INSERT INTO assets ("
+            "id, project_id, kind, storage_uri, sha256, size_bytes, content_type, "
+            "created_by_user_id"
+            ") VALUES ("
+            "'asset-1', 'project-1', 'video', 'oss://legacy-bucket/video.mp4', "
+            "'legacy-sha256', 1, 'video/mp4', 'admin'"
+            ")"
+        )
+        conn.execute(
+            "INSERT INTO provider_settings (provider, encrypted_config, updated_by_user_id) "
+            "VALUES ('oss', 'encrypted-oss', 'admin')"
+        )
+        conn.execute(
+            "UPDATE runtime_settings SET active_storage_provider = 'oss', "
+            "updated_by_user_id = 'admin' WHERE id = 1"
+        )
+        conn.commit()
+
+    with pytest.raises(RuntimeError, match="OSS-backed assets must be migrated"):
+        command.upgrade(alembic_config(db_path), "head")
+
+    with connect_database(db_path) as conn:
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == (
+            "017_generation_task_retry_lineage"
+        )
+        assert (
+            conn.execute(
+                "SELECT encrypted_config FROM provider_settings WHERE provider = 'oss'"
+            ).fetchone()[0]
+            == "encrypted-oss"
+        )
+        assert (
+            conn.execute(
+                "SELECT active_storage_provider FROM runtime_settings WHERE id = 1"
+            ).fetchone()[0]
+            == "oss"
+        )
+        assert (
+            conn.execute("SELECT storage_uri FROM assets WHERE id = 'asset-1'").fetchone()[0]
+            == "oss://legacy-bucket/video.mp4"
+        )
+
+
 def test_runtime_bootstrap_upgrades_an_existing_database_before_startup(
     tmp_path: Path,
 ) -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlalchemy as sa
 from alembic import op
 
 revision = "018_remove_oss_storage"
@@ -9,6 +10,15 @@ depends_on = None
 
 
 def upgrade() -> None:
+    connection = op.get_bind()
+    legacy_asset = connection.execute(
+        sa.text("SELECT 1 FROM assets WHERE LOWER(storage_uri) LIKE 'oss://%' LIMIT 1")
+    ).fetchone()
+    if legacy_asset is not None:
+        raise RuntimeError(
+            "OSS-backed assets must be migrated to COS or local storage before removing OSS support"
+        )
+
     # Purging the encrypted OSS row is intentional: keeping an unreachable
     # credential would contradict the product decision to remove this provider.
     op.execute(
