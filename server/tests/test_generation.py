@@ -28,6 +28,7 @@ from app.generation import (
     SubmissionUncertain,
     build_h3_request,
     generation_task_operation_hash,
+    h3_provider_for_task,
     mark_expired_active_leases_needing_attention,
     mark_task_submission_uncertain,
     reconcile_submission_uncertain_task,
@@ -3060,6 +3061,79 @@ def test_worker_loop_processes_all_queued_fake_tasks(
         )
 
     assert processed == 2
+
+
+def test_worker_loop_can_stop_after_one_task_for_observable_progress(
+    db_path: Path,
+    client: TestClient,
+) -> None:
+    prompt_id = create_locked_prompt(client)
+    created = client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json={
+            "quantity": 2,
+            "prompt_version_id": prompt_id,
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+            "idempotency_key": "worker-loop-one-task",
+        },
+    ).json()
+    storage = FakeStorageAdapter(provider="fake", bucket="generation-results")
+
+    with connect_database(db_path) as conn:
+        processed = run_worker_once(
+            conn,
+            worker_id="worker-loop-limited",
+            storage=storage,
+            max_tasks=1,
+        )
+
+    first_progress = client.get(
+        f"/api/generation-batches/{created['id']}",
+        headers=auth_headers("employee_1"),
+    ).json()["progress"]
+    with connect_database(db_path) as conn:
+        remaining = run_worker_once(
+            conn,
+            worker_id="worker-loop-remainder",
+            storage=storage,
+            max_tasks=1,
+        )
+
+    assert processed == 1
+    assert first_progress["terminal_count"] == 1
+    assert first_progress["progress_percent"] == 50
+    assert remaining == 1
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected_exception"),
+    [
+        ("provider_failed", H3ProviderFailed),
+        ("submission_uncertain", SubmissionUncertain),
+    ],
+)
+def test_fake_h3_provider_supports_deterministic_gate1_failures(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: str,
+    expected_exception: type[Exception],
+) -> None:
+    monkeypatch.setenv("VIDEO_REPLICA_FAKE_H3_OUTCOME", outcome)
+    request = build_h3_request(
+        prompt_text="Gate 1 deterministic failure",
+        first_frame_url="https://storage.example.test/first-frame.png",
+        duration_seconds=10,
+        resolution="768P",
+    )
+
+    with connect_database(db_path) as conn:
+        provider = h3_provider_for_task(conn, "fake_h3")
+
+    with pytest.raises(expected_exception):
+        provider.create_image_to_video(request)
 
 
 def test_worker_archives_result_with_cloud_like_storage(

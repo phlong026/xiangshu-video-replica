@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -11,6 +12,8 @@ from typing import Any, Literal, Protocol, cast
 from urllib.parse import quote, urlencode
 
 StorageProvider = Literal["cos", "oss", "local", "fake"]
+
+logger = logging.getLogger(__name__)
 
 
 class StoragePermissionError(PermissionError):
@@ -372,8 +375,16 @@ class LocalStorageAdapter(_BaseStorageAdapter):
     def put_object(self, key: str, content: bytes, *, content_type: str) -> StoredObject:
         object_key = self._object_key(key)
         path = self._path_for(object_key)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(content)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+        except OSError as exc:
+            logger.warning(
+                "local object write failed for key %s: %s",
+                object_key,
+                type(exc).__name__,
+            )
+            raise StorageBackendUnavailable("local object upload failed") from exc
         return _stored_object(
             provider=self.provider,
             bucket=self.bucket,
