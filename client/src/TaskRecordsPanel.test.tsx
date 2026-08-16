@@ -14,6 +14,7 @@ vi.mock("./api", async () => {
   const actual = await vi.importActual<typeof import("./api")>("./api");
   return {
     ...actual,
+    downloadGenerationResult: vi.fn(),
     getGenerationBatch: vi.fn(),
     getGenerationResultDownloadUrl: vi.fn(),
     listGenerationBatches: vi.fn(),
@@ -135,8 +136,8 @@ describe("TaskRecordsPanel", () => {
     vi.mocked(api.getGenerationBatch).mockResolvedValue(batch());
     vi.mocked(api.getGenerationResultDownloadUrl)
       .mockResolvedValueOnce({ url: "https://signed.example/preview-1.mp4" })
-      .mockResolvedValueOnce({ url: "https://signed.example/preview-2.mp4" })
-      .mockResolvedValueOnce({ url: "https://signed.example/download.mp4" });
+      .mockResolvedValueOnce({ url: "https://signed.example/preview-2.mp4" });
+    vi.mocked(api.downloadGenerationResult).mockResolvedValue();
     vi.mocked(api.retryGenerationTask).mockImplementation(async (_taskId) =>
       task(),
     );
@@ -162,10 +163,6 @@ describe("TaskRecordsPanel", () => {
   });
 
   it("opens the newest project batch and renders quality, preview, and fresh download actions", async () => {
-    const anchorClick = vi
-      .spyOn(HTMLAnchorElement.prototype, "click")
-      .mockImplementation(() => undefined);
-
     render(
       <TaskRecordsPanel
         handoffBatch={null}
@@ -214,12 +211,11 @@ describe("TaskRecordsPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: "下载 MP4 task-ok" }));
 
     await waitFor(() =>
-      expect(api.getGenerationResultDownloadUrl).toHaveBeenNthCalledWith(
-        3,
+      expect(api.downloadGenerationResult).toHaveBeenCalledWith(
         "asset-ok",
+        "task-ok.mp4",
       ),
     );
-    expect(anchorClick).toHaveBeenCalledOnce();
   });
 
   it("appends cursor pages without duplicating an existing batch", async () => {

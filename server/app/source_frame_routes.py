@@ -104,22 +104,16 @@ def extract_project_source_frames(
     return version_response(row)
 
 
-@router.get("/projects/{project_id}/source-frames/latest", response_model=VersionResponse)
+@router.get("/projects/{project_id}/source-frames/latest", response_model=VersionResponse | None)
 def read_latest_source_frames(
     project_id: str,
     conn: Database,
     actor: AuthenticatedUser,
-) -> VersionResponse:
+) -> VersionResponse | None:
     require_project_access(conn, actor=actor, project_id=project_id, action="source_frame.read")
     row = latest_version(conn, project_id, SOURCE_FRAME_CANDIDATES_KIND)
     if row is None:
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "code": "SOURCE_FRAME_CANDIDATES_NOT_FOUND",
-                "message": "No source frames found.",
-            },
-        )
+        return None
     return version_response(row)
 
 
@@ -144,23 +138,17 @@ def confirm_project_source_frame(
 
 @router.get(
     "/projects/{project_id}/source-frames/selection/latest",
-    response_model=VersionResponse,
+    response_model=VersionResponse | None,
 )
 def read_latest_source_frame_selection(
     project_id: str,
     conn: Database,
     actor: AuthenticatedUser,
-) -> VersionResponse:
+) -> VersionResponse | None:
     require_project_access(conn, actor=actor, project_id=project_id, action="source_frame.read")
     row = latest_version(conn, project_id, SOURCE_FRAME_SELECTION_KIND)
     if row is None:
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "code": "SOURCE_FRAME_SELECTION_NOT_FOUND",
-                "message": "No source frame confirmed.",
-            },
-        )
+        return None
     payload = json.loads(str(row["payload_json"]))
     candidate_version_id = payload.get("source_frame_candidates_version_id")
     current_candidates = latest_version(conn, project_id, SOURCE_FRAME_CANDIDATES_KIND)

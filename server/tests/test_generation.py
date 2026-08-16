@@ -3136,6 +3136,30 @@ def test_fake_h3_provider_supports_deterministic_gate1_failures(
         provider.create_image_to_video(request)
 
 
+def test_fake_h3_provider_uses_explicit_gate1_result_fixture(
+    db_path: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture_content = b"\x00\x00\x00\x18ftypisomvalid-gate1-video"
+    fixture_path = tmp_path / "gate1-result.mp4"
+    fixture_path.write_bytes(fixture_content)
+    monkeypatch.setenv("VIDEO_REPLICA_FAKE_H3_RESULT_PATH", str(fixture_path))
+    request = build_h3_request(
+        prompt_text="Gate 1 playable result",
+        first_frame_url="https://storage.example.test/first-frame.png",
+        duration_seconds=10,
+        resolution="768P",
+    )
+
+    with connect_database(db_path) as conn:
+        provider = h3_provider_for_task(conn, "fake_h3")
+
+    result = provider.create_image_to_video(request)
+    assert result.result_content == fixture_content
+    assert provider.download_result(result.result_url) == fixture_content
+
+
 def test_worker_archives_result_with_cloud_like_storage(
     db_path: Path,
     client: TestClient,

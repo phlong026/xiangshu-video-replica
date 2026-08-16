@@ -206,3 +206,14 @@ def test_run_gate1_records_git_metadata_failure(
     assert "git metadata unavailable" in (run_dir / "logs" / "harness-error.log").read_text(
         encoding="utf-8"
     )
+
+
+def test_playwright_argument_separator_is_not_forwarded() -> None:
+    assert gate1_e2e.normalize_playwright_arguments(["--", "--grep", "@positive"]) == [
+        "--grep",
+        "@positive",
+    ]
+    assert gate1_e2e.normalize_playwright_arguments(["--grep", "@positive"]) == [
+        "--grep",
+        "@positive",
+    ]

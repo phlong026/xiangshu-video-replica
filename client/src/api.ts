@@ -543,6 +543,28 @@ export async function getGenerationResultDownloadUrl(
   );
 }
 
+export async function downloadGenerationResult(
+  assetId: string,
+  filename: string,
+): Promise<void> {
+  const { url } = await getGenerationResultDownloadUrl(assetId);
+  const controller = new AbortController();
+  const timeout = window.setTimeout(
+    () => controller.abort(),
+    CLOUD_OP_TIMEOUT_MS,
+  );
+
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) {
+      throw new Error(`下载生成结果失败（${response.status}）`);
+    }
+    downloadBlob(await response.blob(), filename);
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
 export async function reconcileUncertainTask(
   taskId: string,
   input: ReconcileGenerationTaskInput,
@@ -926,7 +948,8 @@ export async function getLatestProjectShotCards(
   if (!response.ok) {
     throw new Error(`读取已保存镜头卡片失败（${response.status}）`);
   }
-  return (await response.json()) as AnalysisVersion;
+  const version = (await response.json()) as unknown;
+  return isAnalysisVersion(version) ? version : null;
 }
 
 export async function saveShotCards(
@@ -971,7 +994,7 @@ export async function getProjectMainCharacter(
   if (!response.ok) {
     throw new Error(`读取已选人物失败（${response.status}）`);
   }
-  return (await response.json()) as ProjectMainCharacter;
+  return (await response.json()) as ProjectMainCharacter | null;
 }
 
 export async function chooseProjectMainCharacter(
@@ -1012,7 +1035,8 @@ export async function getLatestProjectSourceFrames(
   if (!response.ok) {
     throw new Error(`读取候选源画面失败（${response.status}）`);
   }
-  return (await response.json()) as AnalysisVersion;
+  const version = (await response.json()) as unknown;
+  return isAnalysisVersion(version) ? version : null;
 }
 
 export async function getLatestProjectSourceFrameSelection(
@@ -1031,7 +1055,11 @@ export async function getLatestProjectSourceFrameSelection(
   if (!response.ok) {
     throw new Error(`读取已确认源画面失败（${response.status}）`);
   }
-  return { version: (await response.json()) as AnalysisVersion, stale: false };
+  const version = (await response.json()) as unknown;
+  return {
+    version: isAnalysisVersion(version) ? version : null,
+    stale: false,
+  };
 }
 
 export async function extractSourceFrames(
@@ -1092,7 +1120,7 @@ export async function getLatestCharacterReferenceSelection(
   if (!response.ok) {
     throw new Error(`读取已确认人物参考图失败（${response.status}）`);
   }
-  return (await response.json()) as CharacterReferenceSelection;
+  return (await response.json()) as CharacterReferenceSelection | null;
 }
 
 export async function selectCharacterReferences(
@@ -1160,7 +1188,11 @@ export async function getLatestProjectFirstFrameSelection(
   if (!response.ok) {
     throw new Error(`读取已确认首帧失败（${response.status}）`);
   }
-  return { version: (await response.json()) as AnalysisVersion, stale: false };
+  const version = (await response.json()) as unknown;
+  return {
+    version: isAnalysisVersion(version) ? version : null,
+    stale: false,
+  };
 }
 
 export async function generateFirstFrames(
@@ -1388,11 +1420,17 @@ export async function downloadDiagnosticReport(
     throw new Error(`下载诊断日志失败（${response.status}）`);
   }
 
-  const blobUrl = URL.createObjectURL(await response.blob());
+  downloadBlob(await response.blob(), `settings-diagnostic-${reportId}.json`);
+}
+
+function downloadBlob(blob: Blob, filename: string): void {
+  const blobUrl = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = blobUrl;
-  anchor.download = `settings-diagnostic-${reportId}.json`;
+  anchor.download = filename;
+  document.body.append(anchor);
   anchor.click();
+  anchor.remove();
   // Defer revocation so WebView2/WKWebView have time to start the download.
   window.setTimeout(() => URL.revokeObjectURL(blobUrl), 1_000);
 }

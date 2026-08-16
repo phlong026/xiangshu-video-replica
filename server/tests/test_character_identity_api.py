@@ -21,6 +21,9 @@ from app.character_identity import (
     approved_character_asset_key,
     generated_character_asset_key,
 )
+from app.character_identity import (
+    FakeSourceImageInspector as Gate1SourceImageInspector,
+)
 from app.character_identity_routes import (
     get_character_storage,
     get_source_image_inspector,
@@ -880,6 +883,29 @@ def test_unconfigured_source_inspector_fails_closed(
 
     assert error.value.status_code == 503
     assert error.value.detail["code"] == "SOURCE_IMAGE_INSPECTOR_NOT_CONFIGURED"
+
+
+def test_gate1_fake_source_inspector_requires_explicit_environment_opt_in(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VIDEO_REPLICA_FAKE_SOURCE_IMAGE_INSPECTOR", "1")
+
+    with connect_database(db_path) as conn:
+        inspector = get_source_image_inspector(conn)
+
+    assert isinstance(inspector, Gate1SourceImageInspector)
+    assert inspector.inspect(b"png", content_type="image/png") == SourceImageInspection(
+        person_count=1,
+        face_count=1,
+        face_visible=True,
+        sharpness_score=0.95,
+        occlusion_detected=False,
+        watermark_detected=False,
+        notes=["Gate 1 内置模拟检查"],
+        provider="fake-source-inspector",
+        model="fake-source-inspector-v1",
+    )
 
 
 def test_null_required_identity_and_persona_updates_return_validation_errors(

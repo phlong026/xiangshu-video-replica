@@ -3886,7 +3886,9 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          "application/json": components["schemas"]["app__first_frame_routes__VersionResponse"];
+          "application/json":
+            | components["schemas"]["app__first_frame_routes__VersionResponse"]
+            | null;
         };
       };
       /** @description Validation Error */
@@ -3956,7 +3958,9 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          "application/json": components["schemas"]["ProjectMainCharacterResponse"];
+          "application/json":
+            | components["schemas"]["ProjectMainCharacterResponse"]
+            | null;
         };
       };
       /** @description Validation Error */
@@ -5138,7 +5142,9 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          "application/json": components["schemas"]["CharacterReferenceSelection"];
+          "application/json":
+            | components["schemas"]["CharacterReferenceSelection"]
+            | null;
         };
       };
       /** @description Validation Error */
@@ -5208,7 +5214,9 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          "application/json": components["schemas"]["app__first_frame_routes__VersionResponse"];
+          "application/json":
+            | components["schemas"]["app__first_frame_routes__VersionResponse"]
+            | null;
         };
       };
       /** @description Validation Error */
@@ -5278,7 +5286,9 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          "application/json": components["schemas"]["app__first_frame_routes__VersionResponse"];
+          "application/json":
+            | components["schemas"]["app__first_frame_routes__VersionResponse"]
+            | null;
         };
       };
       /** @description Validation Error */
@@ -5348,7 +5358,9 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          "application/json": components["schemas"]["app__first_frame_routes__VersionResponse"];
+          "application/json":
+            | components["schemas"]["app__first_frame_routes__VersionResponse"]
+            | null;
         };
       };
       /** @description Validation Error */
@@ -5451,7 +5463,9 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          "application/json": components["schemas"]["app__first_frame_routes__VersionResponse"];
+          "application/json":
+            | components["schemas"]["app__first_frame_routes__VersionResponse"]
+            | null;
         };
       };
       /** @description Validation Error */

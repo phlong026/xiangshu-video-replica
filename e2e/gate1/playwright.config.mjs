@@ -19,9 +19,11 @@ export default defineConfig({
     ["json", { outputFile: `${runDir}/logs/playwright-report.json` }],
   ],
   use: {
+    actionTimeout: 10_000,
     baseURL: process.env.GATE1_WEB_URL ?? "http://127.0.0.1:5173",
     channel: "chrome",
     headless: true,
+    navigationTimeout: 30_000,
     viewport: { width: 1280, height: 720 },
     acceptDownloads: true,
     trace: "on",

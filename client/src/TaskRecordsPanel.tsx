@@ -8,6 +8,7 @@ import {
 
 import {
   confirmGenerationTaskNotCharged,
+  downloadGenerationResult,
   type GenerationBatch,
   type GenerationBatchListItem,
   type GenerationTask,
@@ -459,18 +460,11 @@ export function TaskRecordsPanel({
     setActiveResultAction(actionKey);
     setResultErrors((current) => ({ ...current, [task.id]: "" }));
     try {
-      const result = await getGenerationResultDownloadUrl(task.result_asset_id);
-      const anchor = document.createElement("a");
-      anchor.href = result.url;
-      anchor.download = `${task.id}.mp4`;
-      anchor.rel = "noopener noreferrer";
-      document.body.append(anchor);
-      anchor.click();
-      anchor.remove();
+      await downloadGenerationResult(task.result_asset_id, `${task.id}.mp4`);
     } catch {
       setResultErrors((current) => ({
         ...current,
-        [task.id]: "下载链接获取失败，请重试。",
+        [task.id]: "下载失败，请重试。",
       }));
     } finally {
       setActiveResultAction((current) =>

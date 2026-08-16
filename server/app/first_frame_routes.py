@@ -134,12 +134,12 @@ def generate_project_first_frames(
     return version_response(row)
 
 
-@router.get("/projects/{project_id}/first-frames/latest", response_model=VersionResponse)
+@router.get("/projects/{project_id}/first-frames/latest", response_model=VersionResponse | None)
 def read_latest_first_frames(
     project_id: str,
     conn: Database,
     actor: AuthenticatedUser,
-) -> VersionResponse:
+) -> VersionResponse | None:
     require_project_access(conn, actor=actor, project_id=project_id, action="first_frame.read")
     try:
         row = current_first_frame_candidates(conn, project_id=project_id)
@@ -149,13 +149,7 @@ def read_latest_first_frames(
             and isinstance(exc.detail, dict)
             and exc.detail.get("code") == "FIRST_FRAME_CANDIDATES_NOT_FOUND"
         ):
-            raise HTTPException(
-                status_code=404,
-                detail={
-                    "code": "FIRST_FRAME_CANDIDATES_NOT_FOUND",
-                    "message": "No first frames found.",
-                },
-            ) from exc
+            return None
         raise
     return version_response(row)
 
@@ -198,22 +192,19 @@ def confirm_project_first_frame(
     )
 
 
-@router.get("/projects/{project_id}/first-frames/selection/latest", response_model=VersionResponse)
+@router.get(
+    "/projects/{project_id}/first-frames/selection/latest",
+    response_model=VersionResponse | None,
+)
 def read_latest_first_frame_selection(
     project_id: str,
     conn: Database,
     actor: AuthenticatedUser,
-) -> VersionResponse:
+) -> VersionResponse | None:
     require_project_access(conn, actor=actor, project_id=project_id, action="first_frame.read")
     row = latest_version(conn, project_id, FIRST_FRAME_SELECTION_KIND)
     if row is None:
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "code": "FIRST_FRAME_SELECTION_NOT_FOUND",
-                "message": "No first frame confirmed.",
-            },
-        )
+        return None
     payload = json.loads(str(row["payload_json"]))
     try:
         candidates = current_first_frame_candidates(conn, project_id=project_id)
@@ -223,13 +214,7 @@ def read_latest_first_frame_selection(
             and isinstance(exc.detail, dict)
             and exc.detail.get("code") == "FIRST_FRAME_CANDIDATES_NOT_FOUND"
         ):
-            raise HTTPException(
-                status_code=404,
-                detail={
-                    "code": "FIRST_FRAME_SELECTION_NOT_FOUND",
-                    "message": "No first frame confirmed.",
-                },
-            ) from exc
+            return None
         raise
     if payload.get("first_frame_candidates_version_id") != str(candidates["id"]):
         raise HTTPException(

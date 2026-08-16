@@ -8,6 +8,7 @@ import {
   createGenerationBatch,
   createProject,
   createScriptVersion,
+  downloadGenerationResult,
   generateFirstFrames,
   getCharacterReferenceRecommendation,
   getCurrentUser,
@@ -46,6 +47,50 @@ const generationVersion = {
 describe("generation workflow API", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it("downloads a signed cross-origin result through a local blob URL", async () => {
+    vi.useFakeTimers();
+    const resultBlob = new Blob(["video"], { type: "video/mp4" });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ url: "https://signed.example/result.mp4" }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        blob: async () => resultBlob,
+      });
+    const createObjectUrl = vi.fn(() => "blob:generation-result");
+    const revokeObjectUrl = vi.fn();
+    const anchorClick = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(() => undefined);
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("URL", {
+      createObjectURL: createObjectUrl,
+      revokeObjectURL: revokeObjectUrl,
+    });
+
+    await downloadGenerationResult("asset 1", "task-1.mp4");
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "http://127.0.0.1:8000/api/assets/asset%201/download-url",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "https://signed.example/result.mp4",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(createObjectUrl).toHaveBeenCalledWith(resultBlob);
+    expect(anchorClick).toHaveBeenCalledOnce();
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(revokeObjectUrl).toHaveBeenCalledWith("blob:generation-result");
   });
 
   it("covers script, prompt, runtime, batch, retry and result download routes", async () => {

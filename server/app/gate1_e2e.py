@@ -332,6 +332,8 @@ def run_gate1(
                 "VIDEO_REPLICA_DB_PATH": str(database_path),
                 "VIDEO_REPLICA_SETTINGS_KEY": settings_key,
                 "VIDEO_REPLICA_DESKTOP_USER_ID": "gate1_admin",
+                "VIDEO_REPLICA_FAKE_H3_RESULT_PATH": str(paths.media_dir / "reference.mp4"),
+                "VIDEO_REPLICA_FAKE_SOURCE_IMAGE_INSPECTOR": "1",
                 "VIDEO_REPLICA_STORAGE_ROOT": str(storage_root),
             }
         )
@@ -551,6 +553,10 @@ def _default_run_id() -> str:
     return datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
 
 
+def normalize_playwright_arguments(arguments: list[str]) -> list[str]:
+    return arguments[1:] if arguments[:1] == ["--"] else arguments
+
+
 def main() -> None:
     repository_root = Path(__file__).resolve().parents[2]
     parser = argparse.ArgumentParser(description="Run the local desktop Gate 1 Playwright flow")
@@ -567,7 +573,7 @@ def main() -> None:
             repository_root=repository_root,
             output_root=args.output_root,
             run_id=args.run_id,
-            playwright_arguments=args.playwright_args,
+            playwright_arguments=normalize_playwright_arguments(args.playwright_args),
         )
     )
 
