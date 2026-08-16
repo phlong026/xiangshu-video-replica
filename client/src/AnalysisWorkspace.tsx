@@ -327,6 +327,11 @@ export function AnalysisWorkspace({
     if (!analysisId) {
       return;
     }
+    if (shotCardVersionId && !shotCardsDirty) {
+      setError("");
+      setSaveMessage("镜头卡片没有改动，无需重复保存。");
+      return;
+    }
     if (shots.some((shot) => shot.end_time < shot.start_time)) {
       setError("镜头时间无效：结束时间不能早于开始时间。");
       return;
@@ -509,10 +514,7 @@ export function AnalysisWorkspace({
                   {isSaving ? "正在保存" : "保存镜头卡片"}
                 </button>
               )}
-              {firstFramePayload &&
-              shotCardVersionId &&
-              !shotCardsDirty &&
-              !isSaving ? (
+              {firstFramePayload && shotCardVersionId && !shotCardsDirty ? (
                 <GenerationComposer
                   analysisVersionId={analysisId}
                   characterVersionId={

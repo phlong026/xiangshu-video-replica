@@ -171,16 +171,23 @@ vi.mock("./GenerationComposer", () => ({
     onBatchCreated,
     onWorkflowStepChange,
     originalScript,
+    readOnly,
     shotCardVersionId,
   }: generationComposerMockProps) => (
     <div>
       <span>
         生成输入：{shotCardVersionId}/{firstFrameAssetId}/{originalScript}
       </span>
+      <textarea
+        aria-label="生成草稿"
+        defaultValue="草稿初始值"
+        readOnly={readOnly}
+      />
       <button onClick={() => onWorkflowStepChange?.(9)} type="button">
         模拟锁定 Prompt
       </button>
       <button
+        disabled={readOnly}
         onClick={() =>
           onBatchCreated?.({
             id: "batch-1",
@@ -218,6 +225,7 @@ type generationComposerMockProps = {
   onBatchCreated?: (value: unknown) => void;
   onWorkflowStepChange?: (step: number) => void;
   originalScript?: string;
+  readOnly?: boolean;
   shotCardVersionId?: string;
 };
 
@@ -501,7 +509,81 @@ describe("AnalysisWorkspace workflow gates", () => {
     ).toBeInTheDocument();
   });
 
-  it("prevents shot edits while an older draft is being saved", async () => {
+  it("skips unchanged shot-card saves without losing generation drafts", async () => {
+    vi.mocked(api.getLatestProjectAnalysis).mockResolvedValue({
+      id: "analysis-1",
+      project_id: "project-1",
+      asset_id: "reference-video-1",
+      kind: "analysis",
+      version_number: 1,
+      payload: {
+        analysis: {
+          summary: "拆解完成",
+          duration_seconds: 8,
+          original_script: "原始口播稿",
+          shots: [editableShot],
+        },
+      },
+      created_by_user_id: "employee_1",
+      created_at: "2030-01-01T00:00:00Z",
+    });
+    vi.mocked(api.getLatestProjectShotCards).mockResolvedValue({
+      id: "shot-card-2",
+      project_id: "project-1",
+      asset_id: null,
+      kind: "shot_card",
+      version_number: 2,
+      payload: {
+        source_analysis_version_id: "analysis-1",
+        duration_seconds: 8,
+        shots: [editableShot],
+      },
+      created_by_user_id: "employee_1",
+      created_at: "2030-01-01T00:00:00Z",
+    });
+    render(
+      <AnalysisWorkspace
+        onAnalysisReady={vi.fn()}
+        onBatchCreated={vi.fn()}
+        onClose={vi.fn()}
+        project={{
+          id: "project-1",
+          owner_user_id: "employee_1",
+          name: "保存竞态门禁",
+          status: "REFERENCE_READY",
+          reference_asset_id: "reference-video-1",
+          reference_upload_status: "READY",
+          analysis_status: "READY",
+        }}
+      />,
+    );
+
+    expect(await screen.findByText("拆解完成")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "完成角色选择" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成源画面" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成人物参考" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成置换首帧" }));
+    expect(
+      screen.getByText("生成输入：shot-card-2/first-frame-1/原始口播稿"),
+    ).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("生成草稿"), {
+      target: { value: "未保存的生成草稿" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "保存镜头卡片" }));
+
+    expect(api.saveShotCards).not.toHaveBeenCalled();
+    expect(
+      screen.getByText("生成输入：shot-card-2/first-frame-1/原始口播稿"),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("生成草稿")).toHaveValue("未保存的生成草稿");
+    expect(screen.getByRole("button", { name: "模拟创建批次" })).toBeEnabled();
+    expect(
+      screen.getByText("镜头卡片没有改动，无需重复保存。"),
+    ).toBeInTheDocument();
+  });
+
+  it("prevents shot edits while a changed draft is being saved", async () => {
     vi.mocked(api.getLatestProjectAnalysis).mockResolvedValue({
       id: "analysis-1",
       project_id: "project-1",
@@ -559,24 +641,14 @@ describe("AnalysisWorkspace workflow gates", () => {
     );
 
     expect(await screen.findByText("拆解完成")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "完成角色选择" }));
-    fireEvent.click(screen.getByRole("button", { name: "完成源画面" }));
-    fireEvent.click(screen.getByRole("button", { name: "完成人物参考" }));
-    fireEvent.click(screen.getByRole("button", { name: "完成置换首帧" }));
-    expect(
-      screen.getByText("生成输入：shot-card-2/first-frame-1/原始口播稿"),
-    ).toBeInTheDocument();
-
+    fireEvent.change(screen.getByLabelText("S01 场景"), {
+      target: { value: "已修改的场景" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "保存镜头卡片" }));
 
+    expect(api.saveShotCards).toHaveBeenCalledOnce();
     expect(screen.getByLabelText("S01 场景")).toBeDisabled();
     expect(screen.getByRole("button", { name: "正在保存" })).toBeDisabled();
-    expect(
-      screen.queryByText("生成输入：shot-card-2/first-frame-1/原始口播稿"),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.getByText("镜头卡片正在保存，请完成后再继续生成。"),
-    ).toBeInTheDocument();
 
     resolveSave?.({
       id: "shot-card-3",
