@@ -239,4 +239,56 @@ describe("FirstFrameSelection", () => {
     ).toBeInTheDocument();
     expect(screen.queryByText(/读取候选首帧失败/)).toBeNull();
   });
+
+  it("keeps the valid latest confirmation while browsing history", async () => {
+    const historicalVersion = {
+      ...candidatesVersion,
+      id: "first-frame-candidates-1",
+      version_number: 1,
+      payload: {
+        ...candidatesVersion.payload,
+        candidates: [
+          {
+            ...candidatesVersion.payload.candidates[0],
+            asset_id: "historical-first-1",
+          },
+        ],
+      },
+    };
+    const confirmedSelection = {
+      ...candidatesVersion,
+      id: "first-frame-selection-1",
+      kind: "first_frame_selection",
+      payload: {
+        first_frame_candidates_version_id: candidatesVersion.id,
+        first_frame_asset_id: "first-1",
+      },
+    };
+    vi.mocked(getProjectFirstFrameHistory).mockResolvedValue([
+      candidatesVersion,
+      historicalVersion,
+    ]);
+    vi.mocked(getLatestProjectFirstFrameSelection).mockResolvedValue({
+      version: confirmedSelection,
+      stale: false,
+    });
+    const onSelectionChange = vi.fn();
+    render(
+      <FirstFrameSelection
+        onSelectionChange={onSelectionChange}
+        projectId="project-1"
+        referenceSelection={referenceSelection}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(onSelectionChange).toHaveBeenLastCalledWith(confirmedSelection),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "版本 #1" }));
+
+    expect(
+      await screen.findByText("正在查看历史版本；仅最新候选可确认用于 H3。"),
+    ).toBeInTheDocument();
+    expect(onSelectionChange).toHaveBeenLastCalledWith(confirmedSelection);
+  });
 });

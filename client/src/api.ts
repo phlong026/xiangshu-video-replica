@@ -238,6 +238,9 @@ export type CharacterReferenceSelection = Omit<
   recommendation_reason_json: Record<string, unknown>;
 };
 
+export type SelectCharacterReferencesInput =
+  components["schemas"]["SelectCharacterReferencesRequest"];
+
 export type FirstFrameModel = "gpt-image-2" | "nano-banana-pro-2k";
 
 export type FirstFrameCandidate = {
@@ -894,14 +897,14 @@ export async function getLatestCharacterReferenceSelection(
 
 export async function selectCharacterReferences(
   projectId: string,
-  selectedAssetIds: string[],
+  input: SelectCharacterReferencesInput,
 ): Promise<CharacterReferenceSelection> {
   return requestApiJson<CharacterReferenceSelection>(
     `/api/projects/${encodeURIComponent(projectId)}/character-reference-selection`,
     "确认人物参考图失败",
     {
       method: "POST",
-      body: JSON.stringify({ selected_asset_ids: selectedAssetIds }),
+      body: JSON.stringify(input),
     },
   );
 }

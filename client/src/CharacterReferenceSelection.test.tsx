@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import * as api from "./api";
@@ -110,10 +116,11 @@ describe("CharacterReferenceSelection", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "确认人物参考" }));
     await waitFor(() =>
-      expect(api.selectCharacterReferences).toHaveBeenCalledWith("project-1", [
-        "asset-LEFT_SIDE",
-        "asset-FRONT_FACE",
-      ]),
+      expect(api.selectCharacterReferences).toHaveBeenCalledWith("project-1", {
+        selected_asset_ids: ["asset-LEFT_SIDE", "asset-FRONT_FACE"],
+        source_frame_selection_version_id: "source-selection-1",
+        character_version_id: "character-version-3",
+      }),
     );
     expect(onSelectionChange).toHaveBeenLastCalledWith(savedSelection);
   });
@@ -185,9 +192,11 @@ describe("CharacterReferenceSelection", () => {
     fireEvent.click(screen.getByRole("button", { name: "确认人物参考" }));
 
     await waitFor(() =>
-      expect(api.selectCharacterReferences).toHaveBeenCalledWith("project-1", [
-        "asset-FRONT_FACE",
-      ]),
+      expect(api.selectCharacterReferences).toHaveBeenCalledWith("project-1", {
+        selected_asset_ids: ["asset-FRONT_FACE"],
+        source_frame_selection_version_id: "source-selection-1",
+        character_version_id: "character-version-3",
+      }),
     );
   });
 
@@ -218,5 +227,48 @@ describe("CharacterReferenceSelection", () => {
     }
 
     resolveSelection?.();
+  });
+
+  it("ignores a confirmation response after the source input changes", async () => {
+    let resolveSelection:
+      | ((selection: typeof savedSelection) => void)
+      | undefined;
+    const pendingSelection = new Promise<typeof savedSelection>((resolve) => {
+      resolveSelection = resolve;
+    });
+    vi.mocked(api.selectCharacterReferences).mockReturnValue(pendingSelection);
+    const onSelectionChange = vi.fn();
+    const { rerender } = render(
+      <CharacterReferenceSelection
+        characterSelection={characterSelection}
+        onSelectionChange={onSelectionChange}
+        projectId="project-1"
+        sourceFrameSelection={sourceFrameSelection}
+      />,
+    );
+
+    await screen.findByText("人物参考图");
+    fireEvent.click(screen.getByRole("button", { name: "确认人物参考" }));
+    await waitFor(() =>
+      expect(api.selectCharacterReferences).toHaveBeenCalledOnce(),
+    );
+    rerender(
+      <CharacterReferenceSelection
+        characterSelection={characterSelection}
+        onSelectionChange={onSelectionChange}
+        projectId="project-1"
+        sourceFrameSelection={{
+          ...sourceFrameSelection,
+          id: "source-selection-2",
+        }}
+      />,
+    );
+
+    await act(async () => {
+      resolveSelection?.(savedSelection);
+      await pendingSelection;
+    });
+
+    expect(onSelectionChange).not.toHaveBeenCalledWith(savedSelection);
   });
 });

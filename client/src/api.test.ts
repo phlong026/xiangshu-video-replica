@@ -58,7 +58,11 @@ describe("character reference and first-frame binding", () => {
     };
 
     await confirmSourceFrame("project-1", "source-1", features);
-    await selectCharacterReferences("project-1", ["reference-1"]);
+    await selectCharacterReferences("project-1", {
+      selected_asset_ids: ["reference-1"],
+      source_frame_selection_version_id: "source-selection-1",
+      character_version_id: "character-version-1",
+    });
 
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
@@ -75,7 +79,11 @@ describe("character reference and first-frame binding", () => {
       2,
       "http://127.0.0.1:8000/api/projects/project-1/character-reference-selection",
       expect.objectContaining({
-        body: JSON.stringify({ selected_asset_ids: ["reference-1"] }),
+        body: JSON.stringify({
+          selected_asset_ids: ["reference-1"],
+          source_frame_selection_version_id: "source-selection-1",
+          character_version_id: "character-version-1",
+        }),
         method: "POST",
       }),
     );

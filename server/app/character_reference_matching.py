@@ -88,6 +88,8 @@ def create_character_reference_selection(
     *,
     actor: CurrentUser,
     project_id: str,
+    expected_source_frame_version_id: str,
+    expected_character_version_id: str,
     selected_asset_ids: list[str] | None,
 ) -> CharacterReferenceSelection:
     require_not_auditor(
@@ -111,6 +113,15 @@ def create_character_reference_selection(
             project_id=project_id,
             requested_asset_ids=selected_asset_ids,
         )
+        if (
+            inputs.source_frame_version_id != expected_source_frame_version_id
+            or inputs.character_version_id != expected_character_version_id
+        ):
+            raise reference_error(
+                409,
+                "CHARACTER_REFERENCE_INPUT_BINDING_STALE",
+                "源画面或角色版本已变化，请重新查看并确认人物参考图。",
+            )
         latest = latest_character_reference_selection_row(conn, project_id=project_id)
         if latest is not None and selection_row_matches(latest, inputs):
             conn.commit()

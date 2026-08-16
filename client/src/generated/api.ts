@@ -2017,6 +2017,10 @@ export interface components {
     };
     /** SelectCharacterReferencesRequest */
     SelectCharacterReferencesRequest: {
+      /** Source Frame Selection Version Id */
+      source_frame_selection_version_id: string;
+      /** Character Version Id */
+      character_version_id: string;
       /** Selected Asset Ids */
       selected_asset_ids?: string[] | null;
     };

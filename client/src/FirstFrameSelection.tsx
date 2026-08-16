@@ -54,7 +54,6 @@ export function FirstFrameSelection({
       const isCurrentRequest = () => requestId === loadRequestId.current;
       setIsLoading(true);
       setError("");
-      onSelectionChange?.(null);
       try {
         const [latestState, selection, versions] = await Promise.all([
           getLatestProjectFirstFrames(projectId),
@@ -66,6 +65,24 @@ export function FirstFrameSelection({
         }
         const latest = latestState.version;
         const displayVersion = preferredVersion ?? latest;
+        const latestPayload = latest ? readFirstFrameCandidates(latest) : null;
+        const confirmedSelection = selection.version
+          ? readFirstFrameSelectionPayload(selection.version)
+          : null;
+        const confirmedAssetId = confirmedSelection?.first_frame_asset_id;
+        const currentSelection =
+          !latestState.stale &&
+          !selection.stale &&
+          latest &&
+          latestPayload &&
+          confirmedSelection?.first_frame_candidates_version_id === latest.id &&
+          typeof confirmedAssetId === "string" &&
+          latestPayload.candidates.some(
+            (candidate) => candidate.asset_id === confirmedAssetId,
+          )
+            ? selection.version
+            : null;
+        onSelectionChange?.(currentSelection);
         setLatestVersionId(latest?.id ?? "");
         setHistory(versions);
         setVersion(displayVersion);
@@ -86,31 +103,15 @@ export function FirstFrameSelection({
         }
         setModel(payload.model);
         setPrompt(payload.prompt);
-        const confirmedSelection = selection.version
-          ? readFirstFrameSelectionPayload(selection.version)
-          : null;
-        const confirmedAssetId = confirmedSelection?.first_frame_asset_id;
-        const isCurrentConfirmation =
-          !selection.stale &&
-          displayVersion.id === latest?.id &&
-          confirmedSelection?.first_frame_candidates_version_id ===
-            latest?.id &&
-          Boolean(
-            confirmedAssetId &&
-              payload.candidates.some(
-                (candidate) => candidate.asset_id === confirmedAssetId,
-              ),
-          );
-        if (isCurrentConfirmation && typeof confirmedAssetId === "string") {
-          setSelectedAssetId(confirmedAssetId);
-          setStatus("当前候选首帧已确认，将作为后续 H3 提示词的唯一首帧输入。");
-          onSelectionChange?.(selection.version);
-        } else if (selection.stale) {
+        if (latestState.stale || selection.stale) {
           setStatus("上游输入已更新，请重新生成人物置换首帧。");
-        } else if (selection.version) {
-          setStatus("已确认首帧与当前候选不一致，请重新确认最新候选。");
         } else if (displayVersion.id !== latest?.id) {
           setStatus("正在查看历史版本；仅最新候选可确认用于 H3。");
+        } else if (currentSelection && typeof confirmedAssetId === "string") {
+          setSelectedAssetId(confirmedAssetId);
+          setStatus("当前候选首帧已确认，将作为后续 H3 提示词的唯一首帧输入。");
+        } else if (selection.version) {
+          setStatus("已确认首帧与当前候选不一致，请重新确认最新候选。");
         } else {
           setStatus("");
         }
@@ -135,6 +136,7 @@ export function FirstFrameSelection({
         );
       } catch (requestError) {
         if (isCurrentRequest()) {
+          onSelectionChange?.(null);
           setError(
             requestError instanceof Error
               ? requestError.message

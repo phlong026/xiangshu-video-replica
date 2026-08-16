@@ -52,6 +52,7 @@ export function CharacterReferenceSelection({
     loadRequestId.current = requestId;
     const isCurrentRequest = () => requestId === loadRequestId.current;
     setIsLoading(true);
+    setIsSubmitting(false);
     setError("");
     setStatus("");
     setPreviewUrls({});
@@ -178,23 +179,34 @@ export function CharacterReferenceSelection({
       setError("请选择并查看 1–4 张人物参考图后再确认。");
       return;
     }
+    const requestId = loadRequestId.current;
     setIsSubmitting(true);
     setError("");
     try {
-      const selection = await selectCharacterReferences(
-        projectId,
-        selectedAssetIds,
-      );
+      const selection = await selectCharacterReferences(projectId, {
+        selected_asset_ids: selectedAssetIds,
+        source_frame_selection_version_id:
+          recommendation.source_frame_version_id,
+        character_version_id: recommendation.character_version_id,
+      });
+      if (requestId !== loadRequestId.current) {
+        return;
+      }
       setStatus("当前人物参考图已确认。");
       onSelectionChange?.(selection);
     } catch (requestError) {
+      if (requestId !== loadRequestId.current) {
+        return;
+      }
       setError(
         requestError instanceof Error
           ? requestError.message
           : "确认人物参考图失败。",
       );
     } finally {
-      setIsSubmitting(false);
+      if (requestId === loadRequestId.current) {
+        setIsSubmitting(false);
+      }
     }
   }
 
