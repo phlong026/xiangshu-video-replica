@@ -2,22 +2,259 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   chooseProjectMainCharacterVersion,
+  compileGenerationPrompt,
   completeVideoUpload,
   confirmSourceFrame,
+  createGenerationBatch,
   createProject,
+  createScriptVersion,
   generateFirstFrames,
   getCharacterReferenceRecommendation,
   getCurrentUser,
   getGenerationBatch,
+  getGenerationResultDownloadUrl,
+  getGenerationRuntimeLimits,
   getHealth,
+  getLatestGenerationPrompt,
   getLatestProjectFirstFrames,
+  getLatestScriptVersion,
   getSettings,
   listProjectCharacterVersions,
+  lockGenerationPrompt,
+  retryGenerationTask,
+  reviseGenerationPrompt,
   SESSION_EXPIRED_EVENT,
   selectCharacterReferences,
   startVideoAnalysis,
   uploadReferenceVideo,
 } from "./api";
+
+const generationVersion = {
+  id: "version-1",
+  project_id: "project-1",
+  asset_id: null,
+  kind: "script",
+  version_number: 1,
+  payload: {},
+  created_by_user_id: "employee_1",
+  created_at: "2030-01-01T00:00:00Z",
+};
+
+describe("generation workflow API", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("covers script, prompt, runtime, batch, retry and result download routes", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => generationVersion })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          version: generationVersion,
+          stale: false,
+          stale_reasons: [],
+        }),
+      })
+      .mockResolvedValueOnce({ ok: true, json: async () => generationVersion })
+      .mockResolvedValueOnce({ ok: true, json: async () => generationVersion })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          version: generationVersion,
+          stale: false,
+          stale_reasons: [],
+        }),
+      })
+      .mockResolvedValueOnce({ ok: true, json: async () => generationVersion })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          min_quantity: 1,
+          max_quantity: 4,
+          estimated_cost_per_task: null,
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          id: "batch-1",
+          project_id: "project-1",
+          prompt_version_id: "prompt-1",
+          status: "QUEUED",
+          quantity: 2,
+          stale: false,
+          progress: {
+            total_count: 2,
+            terminal_count: 0,
+            progress_percent: 0,
+            counts: {},
+          },
+          tasks: [],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ status: "accepted" }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ url: "https://download.example/result.mp4" }),
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createScriptVersion("project 1", {
+      source: "custom",
+      text: "口播稿",
+      shot_card_version_id: "shot-1",
+    });
+    await getLatestScriptVersion("project 1");
+    await compileGenerationPrompt("project 1", {
+      script_version_id: "script-1",
+      shot_card_version_id: "shot-1",
+      first_frame_asset_id: "frame-1",
+      output_duration_seconds: 10,
+      resolution: "768P",
+    });
+    await reviseGenerationPrompt("project 1", {
+      base_prompt_version_id: "prompt-1",
+      prompt_text: "修订 Prompt",
+    });
+    await getLatestGenerationPrompt("project 1");
+    await lockGenerationPrompt("project 1", "prompt 1");
+    await getGenerationRuntimeLimits();
+    await createGenerationBatch("project 1", {
+      quantity: 2,
+      prompt_version_id: "prompt-1",
+      first_frame_asset_id: "frame-1",
+      output_duration_seconds: 10,
+      resolution: "768P",
+      idempotency_key: "key-1",
+      provider: "fake_h3",
+      fake_audio_quality: "ok",
+    });
+    await retryGenerationTask("task 1");
+    await getGenerationResultDownloadUrl("asset 1");
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "http://127.0.0.1:8000/api/projects/project%201/scripts",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          source: "custom",
+          text: "口播稿",
+          shot_card_version_id: "shot-1",
+        }),
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      4,
+      "http://127.0.0.1:8000/api/projects/project%201/prompts/revise",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      6,
+      "http://127.0.0.1:8000/api/projects/project%201/prompts/prompt%201/lock",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      8,
+      "http://127.0.0.1:8000/api/projects/project%201/generation-batches",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      9,
+      "http://127.0.0.1:8000/api/generation-tasks/task%201/retry",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      10,
+      "http://127.0.0.1:8000/api/assets/asset%201/download-url",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it.each([
+    [401, "登录已失效，请重新进入工作台"],
+    [403, "当前账号无权执行此操作"],
+    [409, "上游内容已变化，请重新确认后再试"],
+    [422, "生成参数无效，请检查后重试"],
+    [429, "请求过于频繁，请稍后重试"],
+    [500, "生成服务暂不可用，请稍后重试"],
+  ])("maps generation HTTP %s to a Chinese error", async (status, message) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status,
+        json: async () => ({}),
+      }),
+    );
+
+    await expect(
+      createScriptVersion("project-1", {
+        source: "custom",
+        text: "口播稿",
+        shot_card_version_id: "shot-1",
+      }),
+    ).rejects.toThrow(message);
+  });
+
+  it("maps generation timeout and offline failures to Chinese errors", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(new DOMException("aborted", "AbortError"))
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    vi.stubGlobal("fetch", fetchMock);
+    const input = {
+      source: "custom" as const,
+      text: "口播稿",
+      shot_card_version_id: "shot-1",
+    };
+
+    await expect(createScriptVersion("project-1", input)).rejects.toThrow(
+      "保存口播稿失败：请求超时，请重试",
+    );
+    await expect(createScriptVersion("project-1", input)).rejects.toThrow(
+      "保存口播稿失败：网络连接失败，请检查本地服务",
+    );
+  });
+
+  it("preserves the server error code on generation failures", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 409,
+        json: async () => ({
+          detail: {
+            code: "PROMPT_STALE",
+            message: "Upstream inputs changed.",
+          },
+        }),
+      }),
+    );
+
+    const error = await createGenerationBatch("project-1", {
+      quantity: 1,
+      prompt_version_id: "prompt-1",
+      first_frame_asset_id: "frame-1",
+      output_duration_seconds: 10,
+      resolution: "768P",
+      idempotency_key: "key-1",
+      provider: "fake_h3",
+      fake_audio_quality: "ok",
+    }).catch((requestError: unknown) => requestError);
+
+    expect(error).toMatchObject({
+      status: 409,
+      code: "PROMPT_STALE",
+      message: "上游内容已变化，请重新确认后再试",
+    });
+  });
+});
 
 describe("character reference and first-frame binding", () => {
   afterEach(() => {

@@ -10,12 +10,14 @@ import {
   type AnalysisProvider,
   type AnalysisVersion,
   type CharacterReferenceSelection as CharacterReferenceSelectionValue,
+  type GenerationBatch,
   getLatestProjectAnalysis,
   getLatestProjectShotCards,
   type Project,
   type ProjectMainCharacter,
   readAnalysisPayload,
   readAnalysisProvider,
+  readFirstFrameSelectionPayload,
   readShotCardPayload,
   type ShotCard,
   saveShotCards,
@@ -24,12 +26,40 @@ import {
 import { CharacterReferenceSelection } from "./CharacterReferenceSelection";
 import { CharacterSelection } from "./CharacterSelection";
 import { FirstFrameSelection } from "./FirstFrameSelection";
+import { GenerationComposer } from "./GenerationComposer";
 import { ProjectWorkflowSteps } from "./ProjectWorkflowSteps";
 import { SourceFrameSelection } from "./SourceFrameSelection";
 
 function toNonNegativeTime(value: string): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+}
+
+function copyShotCards(shots: ShotCard[]): ShotCard[] {
+  return shots.map((shot) => ({ ...shot }));
+}
+
+function shotCardsEqual(left: ShotCard[], right: ShotCard[]): boolean {
+  return (
+    left.length === right.length &&
+    left.every((shot, index) => {
+      const other = right[index];
+      return (
+        other !== undefined &&
+        shot.shot_id === other.shot_id &&
+        shot.start_time === other.start_time &&
+        shot.end_time === other.end_time &&
+        shot.shot_type === other.shot_type &&
+        shot.composition === other.composition &&
+        shot.camera_motion === other.camera_motion &&
+        shot.subject === other.subject &&
+        shot.action === other.action &&
+        shot.scene === other.scene &&
+        shot.spoken_text === other.spoken_text &&
+        shot.transition === other.transition
+      );
+    })
+  );
 }
 
 const SHOT_TEXT_FIELDS: Array<{
@@ -47,14 +77,26 @@ const SHOT_TEXT_FIELDS: Array<{
   { key: "transition", label: "转场" },
 ];
 
+type UpstreamBusySource =
+  | "character"
+  | "source-frame"
+  | "reference"
+  | "first-frame";
+
 export function AnalysisWorkspace({
+  currentUserId,
   onAnalysisReady,
+  onBatchCreated,
   onClose,
+  onWorkspaceBusyChange,
   project,
   readOnly = false,
 }: {
+  currentUserId: string;
   onAnalysisReady: (projectId: string) => void;
+  onBatchCreated: (batch: GenerationBatch) => void;
   onClose: () => void;
+  onWorkspaceBusyChange?: (isBusy: boolean) => void;
   project: Project;
   readOnly?: boolean;
 }) {
@@ -62,12 +104,17 @@ export function AnalysisWorkspace({
   const [analysisProvider, setAnalysisProvider] =
     useState<AnalysisProvider | null>(null);
   const [analysisSummary, setAnalysisSummary] = useState("");
+  const [originalScript, setOriginalScript] = useState("");
   const [durationSeconds, setDurationSeconds] = useState(0);
   const [shots, setShots] = useState<ShotCard[]>([]);
+  const [shotCardVersionId, setShotCardVersionId] = useState("");
+  const [shotCardsDirty, setShotCardsDirty] = useState(false);
   const [error, setError] = useState("");
   const [saveMessage, setSaveMessage] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
+  const [isGenerationBusy, setIsGenerationBusy] = useState(false);
+  const [isUpstreamBusy, setIsUpstreamBusy] = useState(false);
   const [isAnalysisMissing, setIsAnalysisMissing] = useState(false);
   const [isStartingAnalysis, setIsStartingAnalysis] = useState(false);
   const [characterSelection, setCharacterSelection] =
@@ -78,14 +125,19 @@ export function AnalysisWorkspace({
     useState<CharacterReferenceSelectionValue | null>(null);
   const [firstFrameSelection, setFirstFrameSelection] =
     useState<AnalysisVersion | null>(null);
+  const [generationStep, setGenerationStep] = useState(7);
   const [reloadToken, setReloadToken] = useState(0);
   const [forceLoadProjectId, setForceLoadProjectId] = useState<string | null>(
     null,
   );
   const reloadTokenRef = useRef(0);
+  const isGenerationBusyRef = useRef(false);
+  const isWorkspaceBusyRef = useRef(false);
+  const upstreamBusyCountsRef = useRef(new Map<UpstreamBusySource, number>());
   const characterSelectionVersionIdRef = useRef<string | null>(null);
   const sourceFrameSelectionIdRef = useRef<string | null>(null);
   const characterReferenceSelectionIdRef = useRef<string | null>(null);
+  const savedShotsRef = useRef<ShotCard[]>([]);
 
   useEffect(() => {
     if (
@@ -108,6 +160,9 @@ export function AnalysisWorkspace({
     setSaveMessage("");
     setAnalysisProvider(null);
     setIsAnalysisMissing(false);
+    setShotCardVersionId("");
+    setShotCardsDirty(false);
+    savedShotsRef.current = [];
 
     async function loadWorkspace() {
       try {
@@ -124,8 +179,11 @@ export function AnalysisWorkspace({
         setIsAnalysisMissing(false);
         setAnalysisProvider(readAnalysisProvider(version));
         setAnalysisSummary(payload.summary);
+        setOriginalScript(payload.original_script);
         setDurationSeconds(payload.duration_seconds);
         setShots(payload.shots);
+        savedShotsRef.current = copyShotCards(payload.shots);
+        setShotCardsDirty(false);
         const savedShotCardVersion = await getLatestProjectShotCards(
           project.id,
         );
@@ -135,6 +193,9 @@ export function AnalysisWorkspace({
         const savedShotCards = readShotCardPayload(savedShotCardVersion);
         if (savedShotCards?.source_analysis_version_id === version.id) {
           setShots(savedShotCards.shots);
+          savedShotsRef.current = copyShotCards(savedShotCards.shots);
+          setShotCardVersionId(savedShotCardVersion.id);
+          setShotCardsDirty(false);
         }
       } catch (requestError) {
         if (isActive) {
@@ -177,6 +238,14 @@ export function AnalysisWorkspace({
     setSourceFrameSelection(null);
     setCharacterReferenceSelection(null);
     setFirstFrameSelection(null);
+    setGenerationStep(7);
+    setShotCardsDirty(false);
+    isGenerationBusyRef.current = false;
+    isWorkspaceBusyRef.current = false;
+    upstreamBusyCountsRef.current.clear();
+    setIsGenerationBusy(false);
+    setIsUpstreamBusy(false);
+    savedShotsRef.current = [];
     characterSelectionVersionIdRef.current = null;
     sourceFrameSelectionIdRef.current = null;
     characterReferenceSelectionIdRef.current = null;
@@ -184,6 +253,9 @@ export function AnalysisWorkspace({
 
   const handleCharacterSelectionChange = useCallback(
     (selection: ProjectMainCharacter | null) => {
+      if (isGenerationBusyRef.current) {
+        return;
+      }
       const nextVersionId = selection?.version_id ?? null;
       const bindingChanged =
         nextVersionId !== characterSelectionVersionIdRef.current;
@@ -202,6 +274,9 @@ export function AnalysisWorkspace({
 
   const handleSourceFrameSelectionChange = useCallback(
     (selection: AnalysisVersion | null) => {
+      if (isGenerationBusyRef.current) {
+        return;
+      }
       const nextSelectionId = selection?.id ?? null;
       const bindingChanged =
         nextSelectionId !== sourceFrameSelectionIdRef.current;
@@ -218,6 +293,9 @@ export function AnalysisWorkspace({
 
   const handleCharacterReferenceSelectionChange = useCallback(
     (selection: CharacterReferenceSelectionValue | null) => {
+      if (isGenerationBusyRef.current) {
+        return;
+      }
       const nextSelectionId = selection?.id ?? null;
       const bindingChanged =
         nextSelectionId !== characterReferenceSelectionIdRef.current;
@@ -232,12 +310,74 @@ export function AnalysisWorkspace({
 
   const handleFirstFrameSelectionChange = useCallback(
     (selection: AnalysisVersion | null) => {
+      if (isGenerationBusyRef.current) {
+        return;
+      }
       setFirstFrameSelection(selection);
     },
     [],
   );
 
   const legacyCharacterSelected = Boolean(characterSelection?.character_id);
+  const firstFramePayload = firstFrameSelection
+    ? readFirstFrameSelectionPayload(firstFrameSelection)
+    : null;
+
+  const handleGenerationBusyChange = useCallback(
+    (busy: boolean) => {
+      isGenerationBusyRef.current = busy;
+      const workspaceBusy = busy || upstreamBusyCountsRef.current.size > 0;
+      isWorkspaceBusyRef.current = workspaceBusy;
+      onWorkspaceBusyChange?.(workspaceBusy);
+      setIsGenerationBusy(busy);
+    },
+    [onWorkspaceBusyChange],
+  );
+
+  const handleUpstreamBusyChange = useCallback(
+    (source: UpstreamBusySource, busy: boolean) => {
+      const currentCount = upstreamBusyCountsRef.current.get(source) ?? 0;
+      if (busy) {
+        upstreamBusyCountsRef.current.set(source, currentCount + 1);
+      } else if (currentCount > 1) {
+        upstreamBusyCountsRef.current.set(source, currentCount - 1);
+      } else {
+        upstreamBusyCountsRef.current.delete(source);
+      }
+      const upstreamBusy = upstreamBusyCountsRef.current.size > 0;
+      const workspaceBusy = isGenerationBusyRef.current || upstreamBusy;
+      isWorkspaceBusyRef.current = workspaceBusy;
+      onWorkspaceBusyChange?.(workspaceBusy);
+      setIsUpstreamBusy(upstreamBusy);
+    },
+    [onWorkspaceBusyChange],
+  );
+
+  const handleCharacterBusyChange = useCallback(
+    (busy: boolean) => handleUpstreamBusyChange("character", busy),
+    [handleUpstreamBusyChange],
+  );
+  const handleSourceFrameBusyChange = useCallback(
+    (busy: boolean) => handleUpstreamBusyChange("source-frame", busy),
+    [handleUpstreamBusyChange],
+  );
+  const handleReferenceBusyChange = useCallback(
+    (busy: boolean) => handleUpstreamBusyChange("reference", busy),
+    [handleUpstreamBusyChange],
+  );
+  const handleFirstFrameBusyChange = useCallback(
+    (busy: boolean) => handleUpstreamBusyChange("first-frame", busy),
+    [handleUpstreamBusyChange],
+  );
+
+  const isWorkspaceBusy = isGenerationBusy || isUpstreamBusy;
+
+  function handleClose() {
+    if (isWorkspaceBusyRef.current) {
+      return;
+    }
+    onClose();
+  }
 
   const workflowStep = !analysisId
     ? 2
@@ -249,7 +389,9 @@ export function AnalysisWorkspace({
           ? 5
           : !firstFrameSelection
             ? 6
-            : 7;
+            : shotCardsDirty
+              ? 7
+              : generationStep;
 
   function reloadWorkspace() {
     reloadTokenRef.current += 1;
@@ -279,30 +421,36 @@ export function AnalysisWorkspace({
   }
 
   function updateShot(index: number, key: keyof ShotCard, value: string) {
-    if (readOnly) {
+    if (readOnly || isSaving || isWorkspaceBusyRef.current) {
       return;
     }
-    setShots((current) =>
-      current.map((shot, shotIndex) => {
-        if (shotIndex !== index) {
-          return shot;
-        }
-        const nextValue =
-          key === "start_time" || key === "end_time"
-            ? toNonNegativeTime(value)
-            : value;
-        return { ...shot, [key]: nextValue } as ShotCard;
-      }),
-    );
+    const nextShots = shots.map((shot, shotIndex) => {
+      if (shotIndex !== index) {
+        return shot;
+      }
+      const nextValue =
+        key === "start_time" || key === "end_time"
+          ? toNonNegativeTime(value)
+          : value;
+      return { ...shot, [key]: nextValue } as ShotCard;
+    });
+    const isDirty = !shotCardsEqual(nextShots, savedShotsRef.current);
+    setShots(nextShots);
     setSaveMessage("");
+    setShotCardsDirty(isDirty);
   }
 
   async function handleSave(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (readOnly) {
+    if (readOnly || isSaving || isWorkspaceBusyRef.current) {
       return;
     }
     if (!analysisId) {
+      return;
+    }
+    if (shotCardVersionId && !shotCardsDirty) {
+      setError("");
+      setSaveMessage("镜头卡片没有改动，无需重复保存。");
       return;
     }
     if (shots.some((shot) => shot.end_time < shot.start_time)) {
@@ -314,6 +462,10 @@ export function AnalysisWorkspace({
     setSaveMessage("");
     try {
       const savedVersion = await saveShotCards(analysisId, shots);
+      savedShotsRef.current = copyShotCards(shots);
+      setShotCardVersionId(savedVersion.id);
+      setGenerationStep(7);
+      setShotCardsDirty(false);
       setSaveMessage(`镜头卡片已保存为版本 #${savedVersion.version_number}。`);
     } catch (requestError) {
       setError(
@@ -336,7 +488,12 @@ export function AnalysisWorkspace({
             “{project.name}”的自动拆解结果。保存后会创建独立的人工修订版本。
           </p>
         </div>
-        <button className="secondary-button" onClick={onClose} type="button">
+        <button
+          className="secondary-button"
+          disabled={isWorkspaceBusy}
+          onClick={handleClose}
+          type="button"
+        >
           返回项目
         </button>
       </div>
@@ -404,10 +561,15 @@ export function AnalysisWorkspace({
               当前为只读身份，可查看拆解、候选记录和历史版本；不会请求素材下载链接，也不能保存、选择或生成。
             </p>
           ) : null}
-          <div className="analysis-workspace-grid">
+          <fieldset
+            aria-busy={isWorkspaceBusy}
+            className="analysis-workspace-grid"
+            disabled={isWorkspaceBusy}
+          >
             <div className="analysis-primary">
               {characterSelection ? (
                 <SourceFrameSelection
+                  onBusyChange={handleSourceFrameBusyChange}
                   onSelectionChange={handleSourceFrameSelectionChange}
                   projectId={project.id}
                   referenceAssetId={project.reference_asset_id}
@@ -423,6 +585,7 @@ export function AnalysisWorkspace({
               sourceFrameSelection ? (
                 <CharacterReferenceSelection
                   characterSelection={characterSelection}
+                  onBusyChange={handleReferenceBusyChange}
                   onSelectionChange={handleCharacterReferenceSelectionChange}
                   projectId={project.id}
                   readOnly={readOnly}
@@ -432,6 +595,7 @@ export function AnalysisWorkspace({
               {characterSelection ? (
                 <FirstFrameSelection
                   legacyCharacterSelected={legacyCharacterSelected}
+                  onBusyChange={handleFirstFrameBusyChange}
                   onSelectionChange={handleFirstFrameSelectionChange}
                   projectId={project.id}
                   readOnly={readOnly}
@@ -449,7 +613,7 @@ export function AnalysisWorkspace({
                         onChange={(value) =>
                           updateShot(index, "start_time", value)
                         }
-                        readOnly={readOnly}
+                        readOnly={readOnly || isSaving || isWorkspaceBusy}
                         type="number"
                         value={String(shot.start_time)}
                       />
@@ -458,7 +622,7 @@ export function AnalysisWorkspace({
                         onChange={(value) =>
                           updateShot(index, "end_time", value)
                         }
-                        readOnly={readOnly}
+                        readOnly={readOnly || isSaving || isWorkspaceBusy}
                         type="number"
                         value={String(shot.end_time)}
                       />
@@ -469,7 +633,7 @@ export function AnalysisWorkspace({
                           key={key}
                           label={`${shot.shot_id} ${label}`}
                           onChange={(value) => updateShot(index, key, value)}
-                          readOnly={readOnly}
+                          readOnly={readOnly || isSaving || isWorkspaceBusy}
                           value={shot[key]}
                         />
                       ))}
@@ -481,19 +645,60 @@ export function AnalysisWorkspace({
                 <p className="setup-success">{saveMessage}</p>
               ) : null}
               {readOnly ? null : (
-                <button disabled={isSaving || !analysisId} type="submit">
+                <button
+                  disabled={isSaving || isWorkspaceBusy || !analysisId}
+                  type="submit"
+                >
                   {isSaving ? "正在保存" : "保存镜头卡片"}
                 </button>
               )}
+              {firstFramePayload && shotCardVersionId ? (
+                <>
+                  {isSaving || shotCardsDirty ? (
+                    <p className="workflow-gate-note">
+                      {isSaving
+                        ? "镜头卡片正在保存，请完成后再继续生成。"
+                        : "镜头卡片已编辑，请保存后再继续生成。"}
+                    </p>
+                  ) : null}
+                  <GenerationComposer
+                    analysisVersionId={analysisId}
+                    characterVersionId={
+                      characterSelection?.character_version_id ?? null
+                    }
+                    currentUserId={currentUserId}
+                    durationSeconds={durationSeconds}
+                    firstFrameAssetId={firstFramePayload.first_frame_asset_id}
+                    firstFrameSelectionVersionId={firstFrameSelection?.id ?? ""}
+                    onBatchCreated={onBatchCreated}
+                    onBusyChange={handleGenerationBusyChange}
+                    onWorkflowStepChange={setGenerationStep}
+                    originalScript={originalScript}
+                    projectId={project.id}
+                    readOnly={
+                      readOnly || isSaving || shotCardsDirty || isWorkspaceBusy
+                    }
+                    referenceSelectionId={
+                      characterReferenceSelection?.id ?? null
+                    }
+                    shotCardVersionId={shotCardVersionId}
+                  />
+                </>
+              ) : firstFramePayload ? (
+                <p className="workflow-gate-note">
+                  请先保存当前镜头卡片，再确认口播稿并编译 Prompt。
+                </p>
+              ) : null}
             </div>
             <aside className="analysis-sidebar" aria-label="当前人物设定">
               <CharacterSelection
+                onBusyChange={handleCharacterBusyChange}
                 onVersionChange={handleCharacterSelectionChange}
                 projectId={project.id}
                 readOnly={readOnly}
               />
             </aside>
-          </div>
+          </fieldset>
         </form>
       ) : null}
     </section>

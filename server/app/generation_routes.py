@@ -7,20 +7,26 @@ from app.generation import (
     BatchResult,
     FakeH3Provider,
     GenerationBatchRequest,
+    GenerationRuntimeLimits,
     H3Provider,
     H3ProviderSettingsUnavailable,
     PromptCompileRequest,
+    PromptRevisionRequest,
     ScriptRequest,
     TaskResult,
     VersionResult,
+    VersionState,
     compile_prompt_version,
     create_generation_batch,
     create_script_version,
+    generation_runtime_limits,
     get_generation_batch,
     h3_provider_for_task,
     lock_prompt_version,
     reconcile_submission_uncertain_task,
+    revise_prompt_version,
     version_result,
+    version_state,
 )
 from app.media_routes import MediaStorage
 from app.permissions import require_not_auditor, require_project_access
@@ -43,6 +49,20 @@ def create_project_script(
     return version_result(row)
 
 
+@router.get("/projects/{project_id}/scripts/latest", response_model=VersionState)
+def read_latest_project_script(
+    project_id: str,
+    conn: Database,
+    actor: AuthenticatedUser,
+) -> VersionState:
+    return version_state(
+        conn,
+        project_id=project_id,
+        actor=actor,
+        kind="script",
+    )
+
+
 @router.post("/projects/{project_id}/prompts/compile", response_model=VersionResult)
 def compile_project_prompt(
     project_id: str,
@@ -52,6 +72,36 @@ def compile_project_prompt(
 ) -> VersionResult:
     row = compile_prompt_version(conn, project_id=project_id, actor=actor, request=request)
     return version_result(row)
+
+
+@router.post("/projects/{project_id}/prompts/revise", response_model=VersionResult)
+def revise_project_prompt(
+    project_id: str,
+    request: PromptRevisionRequest,
+    conn: Database,
+    actor: AuthenticatedUser,
+) -> VersionResult:
+    row = revise_prompt_version(
+        conn,
+        project_id=project_id,
+        actor=actor,
+        request=request,
+    )
+    return version_result(row)
+
+
+@router.get("/projects/{project_id}/prompts/latest", response_model=VersionState)
+def read_latest_project_prompt(
+    project_id: str,
+    conn: Database,
+    actor: AuthenticatedUser,
+) -> VersionState:
+    return version_state(
+        conn,
+        project_id=project_id,
+        actor=actor,
+        kind="h3_prompt",
+    )
 
 
 @router.post(
@@ -104,6 +154,14 @@ def read_generation_batch(
     actor: AuthenticatedUser,
 ) -> BatchResult:
     return get_generation_batch(conn, batch_id=batch_id, actor=actor)
+
+
+@router.get("/generation/runtime-limits", response_model=GenerationRuntimeLimits)
+def read_generation_runtime_limits(
+    conn: Database,
+    _actor: AuthenticatedUser,
+) -> GenerationRuntimeLimits:
+    return generation_runtime_limits(conn)
 
 
 @router.post("/generation-tasks/{task_id}/reconcile", response_model=TaskResult)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import socket
 import sqlite3
@@ -414,7 +415,42 @@ def create_locked_prompt(
     return str(locked.json()["id"])
 
 
+def insert_next_shot_card_version(
+    db_path: Path,
+    *,
+    version_id: str = "shot_card_v2",
+) -> None:
+    with connect_database(db_path) as conn:
+        previous = conn.execute(
+            "SELECT payload_json FROM versions WHERE id = 'shot_card_v1'"
+        ).fetchone()
+        assert previous is not None
+        payload = json.loads(str(previous["payload_json"]))
+        payload["source_analysis_version_id"] = "analysis_v2"
+        conn.execute(
+            """
+            INSERT INTO versions (
+                id, project_id, asset_id, kind, version_number, payload_json, created_by_user_id
+            ) VALUES (?, 'project_owned', NULL, 'shot_card', 2, ?, 'employee_1')
+            """,
+            (version_id, json.dumps(payload, ensure_ascii=True, sort_keys=True)),
+        )
+        conn.commit()
+
+
 def test_script_maps_spoken_text_to_shots_without_deleting_user_text(client: TestClient) -> None:
+    blank = client.post(
+        "/api/projects/project_owned/scripts",
+        headers=auth_headers("employee_1"),
+        json={
+            "source": "custom",
+            "text": "   ",
+            "shot_card_version_id": "shot_card_v1",
+        },
+    )
+    assert blank.status_code == 422
+    assert blank.json()["detail"]["code"] == "SCRIPT_TEXT_REQUIRED"
+
     response = client.post(
         "/api/projects/project_owned/scripts",
         headers=auth_headers("employee_1"),
@@ -434,6 +470,408 @@ def test_script_maps_spoken_text_to_shots_without_deleting_user_text(client: Tes
     assert payload["shot_mappings"][0]["text"] == "第一句不要切断。"
     assert payload["shot_mappings"][1]["text"] == "第二句保留原文。"
     assert payload["creates_audio_task"] is False
+
+
+def test_generation_workflow_exposes_runtime_limits_and_script_staleness(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    runtime = client.get(
+        "/api/generation/runtime-limits",
+        headers=auth_headers("employee_1"),
+    )
+    assert runtime.status_code == 200
+    assert runtime.json() == {
+        "min_quantity": 1,
+        "max_quantity": 4,
+        "estimated_cost_per_task": None,
+    }
+
+    missing = client.get(
+        "/api/projects/project_owned/scripts/latest",
+        headers=auth_headers("employee_1"),
+    )
+    assert missing.status_code == 200
+    assert missing.json() == {"version": None, "stale": False, "stale_reasons": []}
+
+    script = client.post(
+        "/api/projects/project_owned/scripts",
+        headers=auth_headers("employee_1"),
+        json={
+            "source": "original",
+            "text": "原始第一句。原始第二句。",
+            "shot_card_version_id": "shot_card_v1",
+        },
+    )
+    assert script.status_code == 200
+
+    current = client.get(
+        "/api/projects/project_owned/scripts/latest",
+        headers=auth_headers("employee_1"),
+    )
+    assert current.status_code == 200
+    assert current.json()["version"]["id"] == script.json()["id"]
+    assert current.json()["stale"] is False
+
+    insert_next_shot_card_version(db_path)
+
+    stale = client.get(
+        "/api/projects/project_owned/scripts/latest",
+        headers=auth_headers("employee_1"),
+    )
+    assert stale.status_code == 200
+    assert stale.json()["stale"] is True
+    assert stale.json()["stale_reasons"] == ["SHOT_CARD_SUPERSEDED"]
+
+    rejected = client.post(
+        "/api/projects/project_owned/scripts",
+        headers=auth_headers("employee_1"),
+        json={
+            "source": "custom",
+            "text": "不能绑定旧镜头卡。",
+            "shot_card_version_id": "shot_card_v1",
+        },
+    )
+    assert rejected.status_code == 409
+    assert rejected.json()["detail"]["code"] == "SHOT_CARD_STALE"
+
+
+def test_new_analysis_makes_the_existing_shot_card_and_script_stale(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    with connect_database(db_path) as conn:
+        shot_card = conn.execute(
+            "SELECT payload_json FROM versions WHERE id = 'shot_card_v1'"
+        ).fetchone()
+        assert shot_card is not None
+        shot_payload = json.loads(str(shot_card["payload_json"]))
+        shot_payload["source_analysis_version_id"] = "analysis_v1"
+        conn.execute(
+            "UPDATE versions SET payload_json = ? WHERE id = 'shot_card_v1'",
+            (json.dumps(shot_payload, ensure_ascii=True, sort_keys=True),),
+        )
+        conn.execute(
+            """
+            INSERT INTO versions (
+                id, project_id, asset_id, kind, version_number, payload_json, created_by_user_id
+            ) VALUES ('analysis_v1', 'project_owned', NULL, 'analysis', 1, '{}', 'employee_1')
+            """
+        )
+        conn.commit()
+
+    script = client.post(
+        "/api/projects/project_owned/scripts",
+        headers=auth_headers("employee_1"),
+        json={
+            "source": "original",
+            "text": "跟随第一版分析。",
+            "shot_card_version_id": "shot_card_v1",
+        },
+    )
+    assert script.status_code == 200
+
+    with connect_database(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO versions (
+                id, project_id, asset_id, kind, version_number, payload_json, created_by_user_id
+            ) VALUES ('analysis_v2', 'project_owned', NULL, 'analysis', 2, '{}', 'employee_1')
+            """
+        )
+        conn.commit()
+
+    state = client.get(
+        "/api/projects/project_owned/scripts/latest",
+        headers=auth_headers("employee_1"),
+    )
+    assert state.status_code == 200
+    assert state.json()["stale"] is True
+    assert state.json()["stale_reasons"] == ["ANALYSIS_SUPERSEDED"]
+
+    rejected = client.post(
+        "/api/projects/project_owned/scripts",
+        headers=auth_headers("employee_1"),
+        json={
+            "source": "original",
+            "text": "不能继续绑定旧分析。",
+            "shot_card_version_id": "shot_card_v1",
+        },
+    )
+    assert rejected.status_code == 409
+    assert rejected.json()["detail"]["code"] == "SHOT_CARD_STALE"
+
+
+def test_prompt_revision_freezes_sources_and_batch_reports_staleness(
+    client: TestClient,
+) -> None:
+    script = client.post(
+        "/api/projects/project_owned/scripts",
+        headers=auth_headers("employee_1"),
+        json={
+            "source": "custom",
+            "text": "第一句。第二句。",
+            "shot_card_version_id": "shot_card_v1",
+        },
+    ).json()
+    compiled = client.post(
+        "/api/projects/project_owned/prompts/compile",
+        headers=auth_headers("employee_1"),
+        json={
+            "script_version_id": script["id"],
+            "shot_card_version_id": "shot_card_v1",
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+        },
+    )
+    assert compiled.status_code == 200
+    compiled_payload = compiled.json()["payload"]
+    assert compiled_payload["status"] == "SAVED"
+    assert compiled_payload["template_version"] == "h3.prompt.v2"
+    assert len(compiled_payload["template_hash"]) == 64
+    assert compiled_payload["source_analysis_version_id"] is None
+    assert compiled_payload["script_version_id"] == script["id"]
+    assert compiled_payload["shot_card_version_id"] == "shot_card_v1"
+    assert compiled_payload["first_frame_candidates_version_id"] == "first_frame_candidates_v1"
+    assert compiled_payload["first_frame_selection_version_id"] == "first_frame_selection_v1"
+    assert compiled_payload["character_version_id"] is None
+    assert compiled_payload["character_reference_selection_id"] is None
+
+    blank_revision = client.post(
+        "/api/projects/project_owned/prompts/revise",
+        headers=auth_headers("employee_1"),
+        json={
+            "base_prompt_version_id": compiled.json()["id"],
+            "prompt_text": "   ",
+        },
+    )
+    assert blank_revision.status_code == 422
+    assert blank_revision.json()["detail"]["code"] == "PROMPT_TEXT_REQUIRED"
+
+    revised = client.post(
+        "/api/projects/project_owned/prompts/revise",
+        headers=auth_headers("employee_1"),
+        json={
+            "base_prompt_version_id": compiled.json()["id"],
+            "prompt_text": "人工修订后的 H3 Prompt",
+        },
+    )
+    assert revised.status_code == 200
+    revised_payload = revised.json()["payload"]
+    assert revised.json()["version_number"] == 2
+    assert revised_payload["status"] == "SAVED"
+    assert revised_payload["prompt_text"] == "人工修订后的 H3 Prompt"
+    assert revised_payload["base_prompt_version_id"] == compiled.json()["id"]
+    assert revised_payload["script_version_id"] == script["id"]
+    assert revised_payload["content_hash"] != compiled_payload["content_hash"]
+
+    stale_old_lock = client.post(
+        f"/api/projects/project_owned/prompts/{compiled.json()['id']}/lock",
+        headers=auth_headers("employee_1"),
+    )
+    assert stale_old_lock.status_code == 409
+    assert stale_old_lock.json()["detail"]["code"] == "PROMPT_STALE"
+
+    prompt_state = client.get(
+        "/api/projects/project_owned/prompts/latest",
+        headers=auth_headers("employee_1"),
+    )
+    assert prompt_state.status_code == 200
+    assert prompt_state.json()["version"]["id"] == revised.json()["id"]
+    assert prompt_state.json()["stale"] is False
+
+    locked = client.post(
+        f"/api/projects/project_owned/prompts/{revised.json()['id']}/lock",
+        headers=auth_headers("employee_1"),
+    )
+    assert locked.status_code == 200
+
+    created = client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json={
+            "quantity": 2,
+            "prompt_version_id": revised.json()["id"],
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+            "idempotency_key": "workflow-key",
+        },
+    )
+    assert created.status_code == 200
+    assert created.json()["project_id"] == "project_owned"
+    assert created.json()["prompt_version_id"] == revised.json()["id"]
+    assert created.json()["stale"] is False
+    assert created.json()["tasks"][0]["prompt_snapshot"]["prompt_text"] == (
+        "人工修订后的 H3 Prompt"
+    )
+
+    newer_script = client.post(
+        "/api/projects/project_owned/scripts",
+        headers=auth_headers("employee_1"),
+        json={
+            "source": "custom",
+            "text": "这是更新后的口播稿。",
+            "shot_card_version_id": "shot_card_v1",
+        },
+    )
+    assert newer_script.status_code == 200
+
+    stale_prompt = client.get(
+        "/api/projects/project_owned/prompts/latest",
+        headers=auth_headers("employee_1"),
+    )
+    assert stale_prompt.status_code == 200
+    assert stale_prompt.json()["stale"] is True
+    assert stale_prompt.json()["stale_reasons"] == ["SCRIPT_SUPERSEDED"]
+
+    stale_batch = client.get(
+        f"/api/generation-batches/{created.json()['id']}",
+        headers=auth_headers("employee_1"),
+    )
+    assert stale_batch.status_code == 200
+    assert stale_batch.json()["stale"] is True
+
+    replay = client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json={
+            "quantity": 2,
+            "prompt_version_id": revised.json()["id"],
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+            "idempotency_key": "workflow-key",
+        },
+    )
+    assert replay.status_code == 200
+    assert replay.json()["id"] == created.json()["id"]
+    assert replay.json()["stale"] is True
+
+
+def test_prompt_compiler_rescales_shot_timeline_to_output_duration(
+    client: TestClient,
+) -> None:
+    script = client.post(
+        "/api/projects/project_owned/scripts",
+        headers=auth_headers("employee_1"),
+        json={
+            "source": "custom",
+            "text": "第一句。第二句。",
+            "shot_card_version_id": "shot_card_v1",
+        },
+    ).json()
+
+    compiled = client.post(
+        "/api/projects/project_owned/prompts/compile",
+        headers=auth_headers("employee_1"),
+        json={
+            "script_version_id": script["id"],
+            "shot_card_version_id": "shot_card_v1",
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 4,
+            "resolution": "768P",
+        },
+    )
+
+    assert compiled.status_code == 200
+    payload = compiled.json()["payload"]
+    assert payload["template_version"] == "h3.prompt.v2"
+    assert payload["source_duration_seconds"] == 10
+    assert payload["timeline_scale_factor"] == 0.4
+    assert "生成一条 4 秒" in payload["prompt_text"]
+    assert "[0.0-2.0s]" in payload["prompt_text"]
+    assert "[2.0-4.0s]" in payload["prompt_text"]
+    assert "[5.0-10.0s]" not in payload["prompt_text"]
+
+
+@pytest.mark.parametrize(
+    ("template_attribute", "next_value"),
+    [
+        ("H3_PROMPT_TEMPLATE_VERSION", "h3.prompt.v3"),
+        ("H3_PROMPT_TEMPLATE_HASH", "new-template-hash"),
+    ],
+)
+def test_prompt_becomes_stale_when_the_compiler_template_changes(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    template_attribute: str,
+    next_value: str,
+) -> None:
+    script = client.post(
+        "/api/projects/project_owned/scripts",
+        headers=auth_headers("employee_1"),
+        json={
+            "source": "custom",
+            "text": "模板变化前的口播稿。",
+            "shot_card_version_id": "shot_card_v1",
+        },
+    ).json()
+    prompt = client.post(
+        "/api/projects/project_owned/prompts/compile",
+        headers=auth_headers("employee_1"),
+        json={
+            "script_version_id": script["id"],
+            "shot_card_version_id": "shot_card_v1",
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+        },
+    ).json()
+    monkeypatch.setattr(f"app.generation.{template_attribute}", next_value)
+
+    state = client.get(
+        "/api/projects/project_owned/prompts/latest",
+        headers=auth_headers("employee_1"),
+    )
+    rejected_lock = client.post(
+        f"/api/projects/project_owned/prompts/{prompt['id']}/lock",
+        headers=auth_headers("employee_1"),
+    )
+
+    assert state.status_code == 200
+    assert state.json()["stale"] is True
+    assert state.json()["stale_reasons"] == ["TEMPLATE_SUPERSEDED"]
+    assert rejected_lock.status_code == 409
+    assert rejected_lock.json()["detail"]["code"] == "PROMPT_STALE"
+
+
+def test_prompt_compile_rejects_a_superseded_script(client: TestClient) -> None:
+    first_script = client.post(
+        "/api/projects/project_owned/scripts",
+        headers=auth_headers("employee_1"),
+        json={
+            "source": "custom",
+            "text": "旧口播稿。",
+            "shot_card_version_id": "shot_card_v1",
+        },
+    ).json()
+    latest_script = client.post(
+        "/api/projects/project_owned/scripts",
+        headers=auth_headers("employee_1"),
+        json={
+            "source": "custom",
+            "text": "新口播稿。",
+            "shot_card_version_id": "shot_card_v1",
+        },
+    )
+    assert latest_script.status_code == 200
+
+    response = client.post(
+        "/api/projects/project_owned/prompts/compile",
+        headers=auth_headers("employee_1"),
+        json={
+            "script_version_id": first_script["id"],
+            "shot_card_version_id": "shot_card_v1",
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "SCRIPT_STALE"
 
 
 def test_prompt_compile_requires_the_currently_confirmed_first_frame(
@@ -546,6 +984,48 @@ def test_prompt_must_be_locked_and_batch_keeps_locked_snapshot_without_provider_
     assert json.loads(str(stored["prompt_snapshot_json"]))["status"] == "LOCKED"
     assert stored["provider_task_id"] is None
     assert stored["provider_request_json"] is None
+
+
+@pytest.mark.parametrize(
+    ("duration_seconds", "resolution"),
+    [(15, "768P"), (10, "2K")],
+)
+def test_batch_rejects_parameters_that_differ_from_the_locked_prompt(
+    client: TestClient,
+    duration_seconds: int,
+    resolution: str,
+) -> None:
+    prompt_id = create_locked_prompt(client)
+
+    response = client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json={
+            "quantity": 1,
+            "prompt_version_id": prompt_id,
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": duration_seconds,
+            "resolution": resolution,
+            "idempotency_key": f"parameter-mismatch-{duration_seconds}-{resolution}",
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "PROMPT_PARAMETERS_MISMATCH"
+
+
+def test_h3_template_hash_is_derived_from_the_rendering_spec() -> None:
+    import app.generation as generation
+
+    template_spec = getattr(generation, "H3_PROMPT_TEMPLATE_SPEC", None)
+    assert template_spec is not None
+    canonical_spec = json.dumps(
+        template_spec,
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode()
+
+    assert generation.H3_PROMPT_TEMPLATE_HASH == hashlib.sha256(canonical_spec).hexdigest()
 
 
 def test_h3_request_contract_is_i2v_text_first_frame_adaptive_and_duration_guard() -> None:
@@ -690,6 +1170,40 @@ def test_generation_batch_quantity_limits_idempotency_and_fake_archive(
     assert after_worker["progress"]["terminal_count"] == 3
     assert after_worker["progress"]["progress_percent"] == 100
     assert {task["archive_status"] for task in after_worker["tasks"]} == {"ARCHIVED"}
+
+
+def test_generation_batch_replay_ignores_a_later_lower_quantity_limit(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    prompt_id = create_locked_prompt(client)
+    request = {
+        "quantity": 3,
+        "prompt_version_id": prompt_id,
+        "first_frame_asset_id": "first_frame_owned",
+        "output_duration_seconds": 10,
+        "resolution": "768P",
+        "idempotency_key": "limit-change-replay",
+    }
+    first = client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json=request,
+    )
+    assert first.status_code == 200
+
+    with connect_database(db_path) as conn:
+        conn.execute("UPDATE runtime_settings SET max_generation_count_per_batch = 1 WHERE id = 1")
+        conn.commit()
+
+    replay = client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json=request,
+    )
+
+    assert replay.status_code == 200
+    assert replay.json()["id"] == first.json()["id"]
 
 
 def test_generation_batch_create_route_is_unique_and_returns_batch_result(
@@ -859,7 +1373,7 @@ def test_generation_can_queue_metaso_after_its_key_is_saved(
             "quantity": 1,
             "prompt_version_id": prompt_id,
             "first_frame_asset_id": "first_frame_owned",
-            "output_duration_seconds": 5,
+            "output_duration_seconds": 10,
             "resolution": "768P",
             "idempotency_key": "metaso-enabled",
             "provider": "metaso",

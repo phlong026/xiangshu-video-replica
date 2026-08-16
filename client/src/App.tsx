@@ -1,6 +1,7 @@
 import {
   type ChangeEvent,
   type FormEvent,
+  useCallback,
   useEffect,
   useRef,
   useState,
@@ -82,12 +83,29 @@ export function App() {
   const [deletingProjectId, setDeletingProjectId] = useState("");
   const [activeAnalysisProject, setActiveAnalysisProject] =
     useState<Project | null>(null);
+  const [isAnalysisWorkspaceBusy, setIsAnalysisWorkspaceBusy] = useState(false);
+  const activeAnalysisBusyRef = useRef(false);
+  const activeAnalysisSessionRef = useRef(0);
   const canWrite = currentUser?.role !== "auditor";
+
+  const handleAnalysisWorkspaceBusyChange = useCallback(
+    (session: number, busy: boolean) => {
+      if (session !== activeAnalysisSessionRef.current) {
+        return;
+      }
+      activeAnalysisBusyRef.current = busy;
+      setIsAnalysisWorkspaceBusy(busy);
+    },
+    [],
+  );
 
   useEffect(() => {
     function handleSessionExpired() {
       setCurrentUser(null);
       setPage("login");
+      activeAnalysisSessionRef.current += 1;
+      activeAnalysisBusyRef.current = false;
+      setIsAnalysisWorkspaceBusy(false);
       setActiveAnalysisProject(null);
       setPendingProject(null);
       setSessionMessage("登录已失效，请重新进入工作台。");
@@ -118,8 +136,15 @@ export function App() {
     }
     const authenticatedUser = currentUser;
     function syncDeepLink() {
+      if (activeAnalysisBusyRef.current) {
+        ensureWorkspaceHash("projects");
+        return;
+      }
       const nextPage = workspacePageFromHash(authenticatedUser);
       ensureWorkspaceHash(nextPage);
+      activeAnalysisSessionRef.current += 1;
+      activeAnalysisBusyRef.current = false;
+      setIsAnalysisWorkspaceBusy(false);
       setActiveAnalysisProject(null);
       setPage(nextPage);
     }
@@ -169,7 +194,7 @@ export function App() {
       return;
     }
 
-    const restoredBatchId = window.localStorage.getItem(BATCH_STORAGE_KEY);
+    const restoredBatchId = readStoredBatchId();
     if (restoredBatchId) {
       setBatchIdInput(restoredBatchId);
       setActiveBatchId(restoredBatchId);
@@ -228,7 +253,7 @@ export function App() {
         setRetryDelaySeconds(null);
         retryCount = 0;
         nextRetryDelayMs = POLL_INTERVAL_MS;
-        window.localStorage.setItem(BATCH_STORAGE_KEY, activeBatchId);
+        storeBatchId(activeBatchId);
 
         if (!isTerminalBatch(nextBatch)) {
           timeoutId = window.setTimeout(loadBatch, POLL_INTERVAL_MS);
@@ -242,7 +267,7 @@ export function App() {
           // Hard error: the batch no longer exists. Stop polling and clear it.
           setBatchError("该任务记录不存在，已停止自动刷新。");
           setRetryDelaySeconds(null);
-          window.localStorage.removeItem(BATCH_STORAGE_KEY);
+          clearStoredBatchId();
           setActiveBatchId("");
           setBatch(null);
           return;
@@ -511,6 +536,7 @@ export function App() {
 
   const workspacePage = page as WorkspacePage;
   const currentRole = currentUser.role;
+  const analysisWorkspaceSession = activeAnalysisSessionRef.current;
   const workspaceTitle =
     activeAnalysisProject?.name ?? pageTitle(workspacePage);
   const breadcrumb = activeAnalysisProject
@@ -521,15 +547,45 @@ export function App() {
     if (!workspacePageAllowed(nextPage, currentRole)) {
       return;
     }
+    if (activeAnalysisProject && activeAnalysisBusyRef.current) {
+      return;
+    }
+    transitionToPage(nextPage);
+  }
+
+  function transitionToPage(nextPage: WorkspacePage) {
     window.history.pushState(null, "", `#${nextPage}`);
+    activeAnalysisSessionRef.current += 1;
+    activeAnalysisBusyRef.current = false;
+    setIsAnalysisWorkspaceBusy(false);
     setActiveAnalysisProject(null);
     setPage(nextPage);
   }
 
   function openAnalysis(project: Project) {
     window.history.pushState(null, "", "#projects");
+    activeAnalysisSessionRef.current += 1;
+    activeAnalysisBusyRef.current = false;
+    setIsAnalysisWorkspaceBusy(false);
     setPage("projects");
     setActiveAnalysisProject(project);
+  }
+
+  function closeAnalysis() {
+    activeAnalysisSessionRef.current += 1;
+    activeAnalysisBusyRef.current = false;
+    setIsAnalysisWorkspaceBusy(false);
+    setActiveAnalysisProject(null);
+  }
+
+  function openCreatedBatch(nextBatch: GenerationBatch) {
+    setBatch(nextBatch);
+    setBatchError("");
+    setRetryDelaySeconds(null);
+    setBatchIdInput(nextBatch.id);
+    setActiveBatchId(nextBatch.id);
+    storeBatchId(nextBatch.id);
+    transitionToPage("tasks");
   }
 
   function markAnalysisReady(projectId: string) {
@@ -553,6 +609,7 @@ export function App() {
       <AppSidebar
         activePage={page}
         currentUser={currentUser}
+        navigationDisabled={isAnalysisWorkspaceBusy}
         onNavigate={navigateTo}
       />
       <section className="workspace-stage">
@@ -579,8 +636,16 @@ export function App() {
                 <p className="setup-success">{setupMessage}</p>
               ) : null}
               <AnalysisWorkspace
-                onClose={() => setActiveAnalysisProject(null)}
+                currentUserId={currentUser.id}
+                onClose={closeAnalysis}
                 onAnalysisReady={markAnalysisReady}
+                onBatchCreated={openCreatedBatch}
+                onWorkspaceBusyChange={(busy) =>
+                  handleAnalysisWorkspaceBusyChange(
+                    analysisWorkspaceSession,
+                    busy,
+                  )
+                }
                 project={activeAnalysisProject}
                 readOnly={!canWrite}
               />
@@ -667,10 +732,12 @@ export function App() {
 function AppSidebar({
   activePage,
   currentUser,
+  navigationDisabled,
   onNavigate,
 }: {
   activePage: Page;
   currentUser: CurrentUser;
+  navigationDisabled: boolean;
   onNavigate: (page: WorkspacePage) => void;
 }) {
   const items: Array<{
@@ -720,6 +787,7 @@ function AppSidebar({
                 ? "nav-button nav-button--active"
                 : "nav-button"
             }
+            disabled={navigationDisabled}
             key={item.page}
             onClick={() => onNavigate(item.page)}
             type="button"
@@ -1187,6 +1255,11 @@ function BatchPanel({
           </span>
         ))}
       </div>
+      {batch.stale ? (
+        <p className="stale-banner" role="status">
+          该批次的上游版本已更新；结果仍可查看，但不能作为当前版本的交付依据。
+        </p>
+      ) : null}
       {counts.needs_attention ? (
         <p className="attention-banner">需要处理 {counts.needs_attention}</p>
       ) : null}
@@ -1345,6 +1418,30 @@ function pageTitle(page: WorkspacePage): string {
     settings: "设置",
     tasks: "任务记录",
   }[page];
+}
+
+function readStoredBatchId(): string | null {
+  try {
+    return window.localStorage.getItem(BATCH_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function storeBatchId(batchId: string): void {
+  try {
+    window.localStorage.setItem(BATCH_STORAGE_KEY, batchId);
+  } catch {
+    // The active batch remains available in memory when browser storage is blocked.
+  }
+}
+
+function clearStoredBatchId(): void {
+  try {
+    window.localStorage.removeItem(BATCH_STORAGE_KEY);
+  } catch {
+    // A blocked storage backend must not interrupt task navigation or polling.
+  }
 }
 
 function formatRole(role: CurrentUser["role"]) {

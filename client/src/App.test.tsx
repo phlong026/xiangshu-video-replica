@@ -62,8 +62,11 @@ function openTaskRecords() {
 function batchResponse(overrides = {}) {
   return {
     id: "batch-1",
+    project_id: "project-1",
+    prompt_version_id: "prompt-1",
     status: "RUNNING",
     quantity: 2,
+    stale: false,
     progress: {
       total_count: 2,
       terminal_count: 1,
@@ -1554,6 +1557,10 @@ describe("App", () => {
       download_url:
         "/api/admin/settings/diagnostic-reports/diagnostic-1/download",
     };
+    let resolveRuntimeSave: ((response: unknown) => void) | undefined;
+    const runtimeSaveResponse = new Promise<unknown>((resolve) => {
+      resolveRuntimeSave = resolve;
+    });
     const fetchMock = vi.fn((url: string, options?: RequestInit) => {
       if (url.endsWith("/health")) {
         return Promise.resolve({ ok: true, json: async () => healthResponse });
@@ -1563,6 +1570,12 @@ describe("App", () => {
           ok: true,
           json: async () => settingsResponse,
         });
+      }
+      if (
+        url.endsWith("/api/admin/settings/runtime") &&
+        options?.method === "PATCH"
+      ) {
+        return runtimeSaveResponse;
       }
       if (url.endsWith("/diagnostic-test") && options?.method === "POST") {
         return Promise.resolve({
@@ -1609,6 +1622,29 @@ describe("App", () => {
     expect(
       screen.getByText("尚未保存：将切换为阿里云 OSS"),
     ).toBeInTheDocument();
+    await act(async () => Promise.resolve());
+    expect(
+      screen.getByText("尚未保存：将切换为阿里云 OSS"),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "保存运行设置" }));
+    expect(screen.getByLabelText("当前对象存储")).toBeDisabled();
+    expect(screen.getByLabelText("单次生成数量上限")).toBeDisabled();
+    expect(screen.getByLabelText("H3 最大并发数")).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "正在保存运行设置" }),
+    ).toBeDisabled();
+    await act(async () => {
+      resolveRuntimeSave?.({
+        ok: true,
+        json: async () => ({
+          ...settingsResponse.runtime,
+          active_storage_provider: "oss",
+        }),
+      });
+      await Promise.resolve();
+    });
+    expect(await screen.findByText("运行设置已保存")).toBeInTheDocument();
+    expect(screen.getByLabelText("当前对象存储")).toBeEnabled();
     expect(
       screen.getByText(
         /可能产生云存储请求费用；该操作不会提交 H3、视频或图片生成任务/,
@@ -1669,6 +1705,33 @@ describe("App", () => {
     expect(screen.getByText("task-running")).toBeInTheDocument();
     expect(screen.getAllByText("需要处理")).toHaveLength(2);
     expect(window.localStorage.getItem("generation.batchId")).toBe("batch-1");
+  });
+
+  it("marks a batch as historical when its frozen inputs are stale", async () => {
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/health")) {
+        return Promise.resolve({ ok: true, json: async () => healthResponse });
+      }
+      return Promise.resolve({
+        ok: true,
+        json: async () => batchResponse({ stale: true }),
+      });
+    });
+    vi.stubGlobal("fetch", withAuth(fetchMock));
+
+    render(<App />);
+    await enterWorkspace();
+    openTaskRecords();
+    fireEvent.change(screen.getByLabelText("Batch ID"), {
+      target: { value: "batch-1" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "查询任务记录" }));
+
+    expect(
+      await screen.findByText(
+        "该批次的上游版本已更新；结果仍可查看，但不能作为当前版本的交付依据。",
+      ),
+    ).toBeInTheDocument();
   });
 
   it("polls running batches every two seconds and stops after the terminal state", async () => {

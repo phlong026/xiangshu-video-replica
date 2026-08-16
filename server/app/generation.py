@@ -44,6 +44,29 @@ from app.storage import (
 SCRIPT_KIND = "script"
 H3_PROMPT_KIND = "h3_prompt"
 GENERATION_SCHEMA_VERSION = "c.generation.v1"
+H3_PROMPT_TEMPLATE_VERSION = "h3.prompt.v2"
+H3_PROMPT_TEMPLATE_SPEC = (
+    (
+        "intro",
+        "生成一条 {duration_seconds} 秒、{resolution}、写实短视频，从提供的首帧自然开始。",
+    ),
+    ("continuity", "保持首帧人物身份、服装、发型、场景和光线连续。"),
+    (
+        "shot",
+        "[{start:.1f}-{end:.1f}s] {shot_type}，{composition}，{camera_motion}；"
+        "{subject}{action}，场景：{scene}，转场：{transition}。口播意图：{spoken}",
+    ),
+    ("script", "口播意图：{full_text}"),
+    ("outro", "环境音与音乐保持自然；不要增加无关人物，不要身份突变、肢体异常或画面闪烁。"),
+)
+H3_PROMPT_TEMPLATES = dict(H3_PROMPT_TEMPLATE_SPEC)
+H3_PROMPT_TEMPLATE_HASH = hashlib.sha256(
+    json.dumps(
+        H3_PROMPT_TEMPLATE_SPEC,
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode()
+).hexdigest()
 PROMPT_STATUSES = {"SAVED", "LOCKED", "USED"}
 TERMINAL_STATUSES = {"FAILED", "CANCELLED"}
 H3_MODEL = "MiniMax-H3"
@@ -78,6 +101,13 @@ class PromptCompileRequest(BaseModel):
     first_frame_asset_id: str = Field(min_length=1)
     output_duration_seconds: int = Field(ge=4, le=15)
     resolution: Literal["768P", "2K"] = "768P"
+
+
+class PromptRevisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    base_prompt_version_id: str = Field(min_length=1)
+    prompt_text: str = Field(min_length=1, max_length=20_000)
 
 
 class GenerationBatchRequest(BaseModel):
@@ -346,6 +376,22 @@ class VersionResult(BaseModel):
     created_at: str
 
 
+class VersionState(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    version: VersionResult | None
+    stale: bool
+    stale_reasons: list[str]
+
+
+class GenerationRuntimeLimits(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    min_quantity: int = 1
+    max_quantity: int
+    estimated_cost_per_task: float | None = None
+
+
 class TaskResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -371,8 +417,11 @@ class BatchResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str
+    project_id: str
+    prompt_version_id: str
     status: str
     quantity: int
+    stale: bool
     progress: BatchProgress
     tasks: list[TaskResult]
 
@@ -381,6 +430,206 @@ class BatchResult(BaseModel):
         if self.quantity != self.progress.total_count:
             raise ValueError("quantity must match progress total_count")
         return self
+
+
+def latest_version(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    kind: str,
+) -> sqlite3.Row | None:
+    return cast(
+        sqlite3.Row | None,
+        conn.execute(
+            """
+            SELECT id, project_id, asset_id, kind, version_number, payload_json,
+                   created_by_user_id, created_at
+            FROM versions
+            WHERE project_id = ? AND kind = ?
+            ORDER BY version_number DESC
+            LIMIT 1
+            """,
+            (project_id, kind),
+        ).fetchone(),
+    )
+
+
+def require_latest_version(
+    conn: sqlite3.Connection,
+    *,
+    row: sqlite3.Row,
+    project_id: str,
+    kind: str,
+    code: str,
+    message: str,
+) -> None:
+    latest = latest_version(conn, project_id=project_id, kind=kind)
+    if latest is None or str(latest["id"]) != str(row["id"]):
+        raise generation_error(409, code, message)
+
+
+def version_state(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    actor: CurrentUser,
+    kind: str,
+) -> VersionState:
+    require_project_access(
+        conn,
+        actor=actor,
+        project_id=project_id,
+        action=f"{kind}.read",
+    )
+    row = latest_version(conn, project_id=project_id, kind=kind)
+    if row is None:
+        return VersionState(version=None, stale=False, stale_reasons=[])
+    reasons = version_stale_reasons(conn, row=row)
+    return VersionState(
+        version=version_result(row),
+        stale=bool(reasons),
+        stale_reasons=reasons,
+    )
+
+
+def version_stale_reasons(conn: sqlite3.Connection, *, row: sqlite3.Row) -> list[str]:
+    project_id = str(row["project_id"])
+    kind = str(row["kind"])
+    payload = json.loads(str(row["payload_json"]))
+    reasons: list[str] = []
+
+    if kind == SCRIPT_KIND:
+        shot_card = latest_version(conn, project_id=project_id, kind="shot_card")
+        if shot_card is None or payload.get("shot_card_version_id") != str(shot_card["id"]):
+            reasons.append("SHOT_CARD_SUPERSEDED")
+        else:
+            reasons.extend(shot_card_stale_reasons(conn, row=shot_card))
+        return reasons
+
+    if kind != H3_PROMPT_KIND:
+        return reasons
+
+    current_prompt = latest_version(conn, project_id=project_id, kind=H3_PROMPT_KIND)
+    if current_prompt is None or str(current_prompt["id"]) != str(row["id"]):
+        reasons.append("PROMPT_SUPERSEDED")
+
+    frozen_template_version = payload.get("template_version")
+    frozen_template_hash = payload.get("template_hash")
+    if (
+        frozen_template_version is not None
+        and frozen_template_version != H3_PROMPT_TEMPLATE_VERSION
+    ) or (frozen_template_hash is not None and frozen_template_hash != H3_PROMPT_TEMPLATE_HASH):
+        reasons.append("TEMPLATE_SUPERSEDED")
+
+    frozen_script_id = payload.get("script_version_id")
+    if isinstance(frozen_script_id, str):
+        script = latest_version(conn, project_id=project_id, kind=SCRIPT_KIND)
+        if script is None or frozen_script_id != str(script["id"]):
+            reasons.append("SCRIPT_SUPERSEDED")
+        else:
+            reasons.extend(version_stale_reasons(conn, row=script))
+
+    frozen_shot_card_id = payload.get("shot_card_version_id")
+    if isinstance(frozen_shot_card_id, str):
+        shot_card = latest_version(conn, project_id=project_id, kind="shot_card")
+        if shot_card is None or frozen_shot_card_id != str(shot_card["id"]):
+            if "SHOT_CARD_SUPERSEDED" not in reasons:
+                reasons.append("SHOT_CARD_SUPERSEDED")
+        else:
+            reasons.extend(
+                reason
+                for reason in shot_card_stale_reasons(conn, row=shot_card)
+                if reason not in reasons
+            )
+
+    first_frame_asset_id = payload.get("first_frame_asset_id")
+    if not isinstance(first_frame_asset_id, str):
+        reasons.append("FIRST_FRAME_SUPERSEDED")
+        return reasons
+    try:
+        current_sources = confirmed_first_frame_sources(
+            conn,
+            project_id=project_id,
+            first_frame_asset_id=first_frame_asset_id,
+        )
+    except HTTPException:
+        reasons.append("FIRST_FRAME_SUPERSEDED")
+        return reasons
+
+    for key in (
+        "first_frame_candidates_version_id",
+        "first_frame_selection_version_id",
+        "source_frame_selection_version_id",
+        "main_character_version_id",
+        "character_version_id",
+        "character_reference_selection_id",
+    ):
+        frozen_value = payload.get(key)
+        if frozen_value is not None and frozen_value != current_sources.get(key):
+            reasons.append("FIRST_FRAME_SUPERSEDED")
+            break
+    return reasons
+
+
+def shot_card_stale_reasons(
+    conn: sqlite3.Connection,
+    *,
+    row: sqlite3.Row,
+) -> list[str]:
+    payload = json.loads(str(row["payload_json"]))
+    source_analysis_version_id = payload.get("source_analysis_version_id")
+    if not isinstance(source_analysis_version_id, str):
+        return []
+    analysis = latest_version(
+        conn,
+        project_id=str(row["project_id"]),
+        kind="analysis",
+    )
+    if analysis is None or source_analysis_version_id != str(analysis["id"]):
+        return ["ANALYSIS_SUPERSEDED"]
+    return []
+
+
+def confirmed_first_frame_sources(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    first_frame_asset_id: str,
+) -> dict[str, str | None]:
+    require_confirmed_first_frame(
+        conn,
+        project_id=project_id,
+        first_frame_asset_id=first_frame_asset_id,
+    )
+    selection = latest_version(
+        conn,
+        project_id=project_id,
+        kind="first_frame_selection",
+    )
+    candidates = latest_version(
+        conn,
+        project_id=project_id,
+        kind="first_frame_candidates",
+    )
+    if selection is None or candidates is None:
+        raise generation_error(
+            409,
+            "FIRST_FRAME_CONFIRMATION_REQUIRED",
+            "Confirm a first-frame candidate before compiling or submitting H3 generation.",
+        )
+    candidate_payload = json.loads(str(candidates["payload_json"]))
+    return {
+        "first_frame_candidates_version_id": str(candidates["id"]),
+        "first_frame_selection_version_id": str(selection["id"]),
+        "source_frame_selection_version_id": candidate_payload.get(
+            "source_frame_selection_version_id"
+        ),
+        "main_character_version_id": candidate_payload.get("main_character_version_id"),
+        "character_version_id": candidate_payload.get("character_version_id"),
+        "character_reference_selection_id": candidate_payload.get(
+            "character_reference_selection_id"
+        ),
+    }
 
 
 def create_script_version(
@@ -398,35 +647,60 @@ def create_script_version(
         entity_id=project_id,
     )
     require_project_access(conn, actor=actor, project_id=project_id, action="script.create")
-    shot_card = require_version(
-        conn,
-        version_id=request.shot_card_version_id,
-        project_id=project_id,
-        kind="shot_card",
-    )
-    shot_payload = json.loads(str(shot_card["payload_json"]))
-    text = request.text.strip()
-    payload = {
-        "schema_version": GENERATION_SCHEMA_VERSION,
-        "source": request.source,
-        "full_text": text,
-        "char_count": len(text),
-        "estimated_duration_seconds": estimate_spoken_duration(text),
-        "shot_card_version_id": request.shot_card_version_id,
-        "shot_mappings": map_script_to_shots(
-            text,
-            cast(list[dict[str, Any]], shot_payload["shots"]),
-        ),
-        "creates_audio_task": False,
-    }
-    row = insert_version(
-        conn,
-        project_id=project_id,
-        asset_id=None,
-        kind=SCRIPT_KIND,
-        created_by_user_id=actor.id,
-        payload=payload,
-    )
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        shot_card = require_version(
+            conn,
+            version_id=request.shot_card_version_id,
+            project_id=project_id,
+            kind="shot_card",
+        )
+        require_latest_version(
+            conn,
+            row=shot_card,
+            project_id=project_id,
+            kind="shot_card",
+            code="SHOT_CARD_STALE",
+            message="Save the script against the latest shot-card version.",
+        )
+        if shot_card_stale_reasons(conn, row=shot_card):
+            raise generation_error(
+                409,
+                "SHOT_CARD_STALE",
+                "Save the latest analysis as a new shot-card version before editing the script.",
+            )
+        shot_payload = json.loads(str(shot_card["payload_json"]))
+        text = request.text.strip()
+        if not text:
+            raise generation_error(
+                422,
+                "SCRIPT_TEXT_REQUIRED",
+                "Script text cannot be blank.",
+            )
+        payload = {
+            "schema_version": GENERATION_SCHEMA_VERSION,
+            "source": request.source,
+            "full_text": text,
+            "char_count": len(text),
+            "estimated_duration_seconds": estimate_spoken_duration(text),
+            "shot_card_version_id": request.shot_card_version_id,
+            "shot_mappings": map_script_to_shots(
+                text,
+                cast(list[dict[str, Any]], shot_payload["shots"]),
+            ),
+            "creates_audio_task": False,
+        }
+        row = insert_version(
+            conn,
+            project_id=project_id,
+            asset_id=None,
+            kind=SCRIPT_KIND,
+            created_by_user_id=actor.id,
+            payload=payload,
+        )
+    except Exception:
+        conn.rollback()
+        raise
     write_audit(
         conn,
         actor=actor,
@@ -453,58 +727,113 @@ def compile_prompt_version(
         entity_id=project_id,
     )
     require_project_access(conn, actor=actor, project_id=project_id, action="prompt.compile")
-    script = require_version(
-        conn,
-        version_id=request.script_version_id,
-        project_id=project_id,
-        kind=SCRIPT_KIND,
-    )
-    shot_card = require_version(
-        conn,
-        version_id=request.shot_card_version_id,
-        project_id=project_id,
-        kind="shot_card",
-    )
-    first_frame = require_asset_access(
-        conn,
-        actor=actor,
-        asset_id=request.first_frame_asset_id,
-        action="prompt.compile",
-    )
-    if str(first_frame["project_id"]) != project_id:
-        raise generation_error(400, "ASSET_PROJECT_MISMATCH", "First frame is not in this project.")
-    require_confirmed_first_frame(
-        conn, project_id=project_id, first_frame_asset_id=request.first_frame_asset_id
-    )
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        script = require_version(
+            conn,
+            version_id=request.script_version_id,
+            project_id=project_id,
+            kind=SCRIPT_KIND,
+        )
+        require_latest_version(
+            conn,
+            row=script,
+            project_id=project_id,
+            kind=SCRIPT_KIND,
+            code="SCRIPT_STALE",
+            message="Compile the prompt from the latest script version.",
+        )
+        if version_stale_reasons(conn, row=script):
+            raise generation_error(
+                409,
+                "SCRIPT_STALE",
+                "Save a script from the current analysis and shot-card version.",
+            )
+        shot_card = require_version(
+            conn,
+            version_id=request.shot_card_version_id,
+            project_id=project_id,
+            kind="shot_card",
+        )
+        require_latest_version(
+            conn,
+            row=shot_card,
+            project_id=project_id,
+            kind="shot_card",
+            code="SHOT_CARD_STALE",
+            message="Compile the prompt from the latest shot-card version.",
+        )
+        if shot_card_stale_reasons(conn, row=shot_card):
+            raise generation_error(
+                409,
+                "SHOT_CARD_STALE",
+                "Save the latest analysis as a new shot-card version before compiling.",
+            )
+        script_payload = json.loads(str(script["payload_json"]))
+        if script_payload.get("shot_card_version_id") != request.shot_card_version_id:
+            raise generation_error(
+                409,
+                "SCRIPT_SHOT_CARD_MISMATCH",
+                "The current script was saved against a different shot-card version.",
+            )
+        first_frame = require_asset_access(
+            conn,
+            actor=actor,
+            asset_id=request.first_frame_asset_id,
+            action="prompt.compile",
+        )
+        if str(first_frame["project_id"]) != project_id:
+            raise generation_error(
+                400,
+                "ASSET_PROJECT_MISMATCH",
+                "First frame is not in this project.",
+            )
+        first_frame_sources = confirmed_first_frame_sources(
+            conn,
+            project_id=project_id,
+            first_frame_asset_id=request.first_frame_asset_id,
+        )
 
-    script_payload = json.loads(str(script["payload_json"]))
-    shot_payload = json.loads(str(shot_card["payload_json"]))
-    prompt_text = compile_prompt_text(
-        script_payload=script_payload,
-        shot_payload=shot_payload,
-        duration_seconds=request.output_duration_seconds,
-        resolution=request.resolution,
-    )
-    payload = {
-        "schema_version": GENERATION_SCHEMA_VERSION,
-        "status": "SAVED",
-        "prompt_text": prompt_text,
-        "content_hash": content_hash(prompt_text),
-        "script_version_id": request.script_version_id,
-        "shot_card_version_id": request.shot_card_version_id,
-        "first_frame_asset_id": request.first_frame_asset_id,
-        "first_frame_uri": str(first_frame["storage_uri"]),
-        "output_duration_seconds": request.output_duration_seconds,
-        "resolution": request.resolution,
-    }
-    row = insert_version(
-        conn,
-        project_id=project_id,
-        asset_id=request.first_frame_asset_id,
-        kind=H3_PROMPT_KIND,
-        created_by_user_id=actor.id,
-        payload=payload,
-    )
+        shot_payload = json.loads(str(shot_card["payload_json"]))
+        source_duration_seconds = shot_timeline_duration(shot_payload)
+        timeline_scale_factor = request.output_duration_seconds / source_duration_seconds
+        prompt_text = compile_prompt_text(
+            script_payload=script_payload,
+            shot_payload=shot_payload,
+            source_duration_seconds=source_duration_seconds,
+            duration_seconds=request.output_duration_seconds,
+            resolution=request.resolution,
+        )
+        payload = {
+            "schema_version": GENERATION_SCHEMA_VERSION,
+            "status": "SAVED",
+            "prompt_text": prompt_text,
+            "content_hash": content_hash(prompt_text),
+            "template_version": H3_PROMPT_TEMPLATE_VERSION,
+            "template_hash": H3_PROMPT_TEMPLATE_HASH,
+            "source_analysis_version_id": shot_payload.get("source_analysis_version_id"),
+            "script_version_id": request.script_version_id,
+            "shot_card_version_id": request.shot_card_version_id,
+            "first_frame_asset_id": request.first_frame_asset_id,
+            "first_frame_uri": str(first_frame["storage_uri"]),
+            "source_duration_seconds": source_duration_seconds,
+            "timeline_scale_factor": timeline_scale_factor,
+            "timeline_policy": "linear_scale_to_output.v1",
+            "output_duration_seconds": request.output_duration_seconds,
+            "resolution": request.resolution,
+            **first_frame_sources,
+        }
+        row = insert_version(
+            conn,
+            project_id=project_id,
+            asset_id=request.first_frame_asset_id,
+            kind=H3_PROMPT_KIND,
+            created_by_user_id=actor.id,
+            payload=payload,
+        )
+    except Exception:
+        conn.rollback()
+        raise
     write_audit(
         conn,
         actor=actor,
@@ -512,6 +841,85 @@ def compile_prompt_version(
         entity_type="version",
         entity_id=str(row["id"]),
         metadata={"project_id": project_id},
+    )
+    return row
+
+
+def revise_prompt_version(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    actor: CurrentUser,
+    request: PromptRevisionRequest,
+) -> sqlite3.Row:
+    require_not_auditor(
+        conn,
+        actor=actor,
+        action="prompt.revise",
+        entity_type="project",
+        entity_id=project_id,
+    )
+    require_project_access(conn, actor=actor, project_id=project_id, action="prompt.revise")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        base = require_version(
+            conn,
+            version_id=request.base_prompt_version_id,
+            project_id=project_id,
+            kind=H3_PROMPT_KIND,
+        )
+        require_latest_version(
+            conn,
+            row=base,
+            project_id=project_id,
+            kind=H3_PROMPT_KIND,
+            code="PROMPT_STALE",
+            message="Revise the latest prompt version.",
+        )
+        stale_reasons = version_stale_reasons(conn, row=base)
+        if stale_reasons:
+            raise generation_error(
+                409,
+                "PROMPT_STALE",
+                "Upstream inputs changed; compile a new prompt before editing.",
+            )
+        prompt_text = request.prompt_text.strip()
+        if not prompt_text:
+            raise generation_error(
+                422,
+                "PROMPT_TEXT_REQUIRED",
+                "Prompt text cannot be blank.",
+            )
+        payload = json.loads(str(base["payload_json"]))
+        payload.update(
+            {
+                "status": "SAVED",
+                "prompt_text": prompt_text,
+                "content_hash": content_hash(prompt_text),
+                "base_prompt_version_id": request.base_prompt_version_id,
+            }
+        )
+        row = insert_version(
+            conn,
+            project_id=project_id,
+            asset_id=None if base["asset_id"] is None else str(base["asset_id"]),
+            kind=H3_PROMPT_KIND,
+            created_by_user_id=actor.id,
+            payload=payload,
+        )
+    except Exception:
+        conn.rollback()
+        raise
+    write_audit(
+        conn,
+        actor=actor,
+        action="prompt.revise",
+        entity_type="version",
+        entity_id=str(row["id"]),
+        metadata={
+            "project_id": project_id,
+            "base_prompt_version_id": request.base_prompt_version_id,
+        },
     )
     return row
 
@@ -530,24 +938,44 @@ def lock_prompt_version(
         entity_type="version",
         entity_id=prompt_version_id,
     )
-    row = require_version(
-        conn,
-        version_id=prompt_version_id,
-        project_id=project_id,
-        kind=H3_PROMPT_KIND,
-    )
     require_project_access(conn, actor=actor, project_id=project_id, action="prompt.lock")
-    payload = json.loads(str(row["payload_json"]))
-    if payload["status"] == "USED":
-        return row
-    if payload["status"] not in {"SAVED", "LOCKED"}:
-        raise generation_error(409, "PROMPT_STATUS_INVALID", "Prompt cannot be locked.")
-    payload["status"] = "LOCKED"
-    with conn:
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = require_version(
+            conn,
+            version_id=prompt_version_id,
+            project_id=project_id,
+            kind=H3_PROMPT_KIND,
+        )
+        require_latest_version(
+            conn,
+            row=row,
+            project_id=project_id,
+            kind=H3_PROMPT_KIND,
+            code="PROMPT_STALE",
+            message="Lock the latest prompt version.",
+        )
+        if version_stale_reasons(conn, row=row):
+            raise generation_error(
+                409,
+                "PROMPT_STALE",
+                "Upstream inputs changed; compile a new prompt before locking.",
+            )
+        payload = json.loads(str(row["payload_json"]))
+        if payload["status"] == "USED":
+            conn.rollback()
+            return row
+        if payload["status"] not in {"SAVED", "LOCKED"}:
+            raise generation_error(409, "PROMPT_STATUS_INVALID", "Prompt cannot be locked.")
+        payload["status"] = "LOCKED"
         conn.execute(
             "UPDATE versions SET payload_json = ? WHERE id = ?",
             (json.dumps(payload, ensure_ascii=True, sort_keys=True), prompt_version_id),
         )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     write_audit(
         conn,
         actor=actor,
@@ -597,14 +1025,6 @@ def create_generation_batch(
         project_id=project_id,
         action="generation_batch.create",
     )
-    runtime = read_runtime_limits(conn)
-    max_quantity = runtime["max_generation_count_per_batch"]
-    if request.quantity > max_quantity:
-        raise generation_error(
-            422,
-            "QUANTITY_EXCEEDS_LIMIT",
-            f"quantity must be less than or equal to {max_quantity}",
-        )
     request_hash = idempotency_request_hash(request)
     existing = _find_idempotent_batch(
         conn, actor_id=actor.id, project_id=project_id, key=request.idempotency_key
@@ -618,135 +1038,191 @@ def create_generation_batch(
             )
         return get_generation_batch(conn, batch_id=str(existing["id"]), actor=actor)
 
-    # Preflight a new (non-idempotent) METASO submission after the idempotency
-    # check so a replayed key returns the existing batch even when the current
-    # storage provider cannot run a fresh METASO job.
-    if request.provider == "metaso":
-        try:
-            metaso_h3_provider_from_settings(conn)
-        except H3ProviderSettingsUnavailable as exc:
-            raise generation_error(
-                503,
-                "METASO_SETTINGS_UNAVAILABLE",
-                "Save a readable METASO API Key before queuing a real H3 task.",
-            ) from exc
-        storage_row = conn.execute(
-            "SELECT active_storage_provider FROM runtime_settings WHERE id = 1"
-        ).fetchone()
-        if storage_row is not None and storage_row["active_storage_provider"] == "local":
-            raise generation_error(
-                422,
-                "METASO_REQUIRES_CLOUD_STORAGE",
-                "METASO H3 requires an HTTPS first-frame URL; switch storage to "
-                "COS/OSS before generating.",
-            )
-
-    prompt = require_version(
-        conn,
-        version_id=request.prompt_version_id,
-        project_id=project_id,
-        kind=H3_PROMPT_KIND,
-    )
-    prompt_snapshot = json.loads(str(prompt["payload_json"]))
-    if prompt_snapshot.get("status") != "LOCKED":
-        raise generation_error(409, "PROMPT_NOT_LOCKED", "Generation requires a LOCKED prompt.")
-    first_frame = require_asset_access(
-        conn,
-        actor=actor,
-        asset_id=request.first_frame_asset_id,
-        action="generation_batch.create",
-    )
-    if str(first_frame["project_id"]) != project_id:
-        raise generation_error(400, "ASSET_PROJECT_MISMATCH", "First frame is not in this project.")
-    require_confirmed_first_frame(
-        conn, project_id=project_id, first_frame_asset_id=request.first_frame_asset_id
-    )
-    if prompt_snapshot.get("first_frame_asset_id") != request.first_frame_asset_id:
-        raise generation_error(
-            409,
-            "FIRST_FRAME_PROMPT_MISMATCH",
-            "Generation must use the first frame that was used to compile the locked prompt.",
-        )
-
-    request_snapshot = generation_request_snapshot(request, prompt_snapshot)
-    batch_id = str(uuid4())
-    used_prompt_snapshot = {**prompt_snapshot, "status": "USED"}
     try:
-        with conn:
-            cursor = conn.execute(
-                """
-                UPDATE versions
-                SET payload_json = ?
-                WHERE id = ? AND payload_json = ?
-                """,
-                (
-                    json.dumps(used_prompt_snapshot, ensure_ascii=True, sort_keys=True),
-                    request.prompt_version_id,
-                    str(prompt["payload_json"]),
-                ),
-            )
-            if cursor.rowcount != 1:
+        conn.execute("BEGIN IMMEDIATE")
+        concurrent_existing = _find_idempotent_batch(
+            conn,
+            actor_id=actor.id,
+            project_id=project_id,
+            key=request.idempotency_key,
+        )
+        if concurrent_existing is not None:
+            conn.rollback()
+            if str(concurrent_existing["request_hash"]) != request_hash:
                 raise generation_error(
                     409,
-                    "PROMPT_ALREADY_USED",
-                    "This LOCKED prompt was already consumed by another batch.",
+                    "IDEMPOTENCY_CONFLICT",
+                    "This idempotency key was already used for a different request.",
                 )
+            return get_generation_batch(
+                conn,
+                batch_id=str(concurrent_existing["id"]),
+                actor=actor,
+            )
+
+        runtime = read_runtime_limits(conn)
+        max_quantity = runtime["max_generation_count_per_batch"]
+        if request.quantity > max_quantity:
+            raise generation_error(
+                422,
+                "QUANTITY_EXCEEDS_LIMIT",
+                f"quantity must be less than or equal to {max_quantity}",
+            )
+
+        # Mutable runtime/provider preflights apply only to a genuinely new
+        # submission. Replayed keys return above even if settings changed.
+        if request.provider == "metaso":
+            try:
+                metaso_h3_provider_from_settings(conn)
+            except H3ProviderSettingsUnavailable as exc:
+                raise generation_error(
+                    503,
+                    "METASO_SETTINGS_UNAVAILABLE",
+                    "Save a readable METASO API Key before queuing a real H3 task.",
+                ) from exc
+            storage_row = conn.execute(
+                "SELECT active_storage_provider FROM runtime_settings WHERE id = 1"
+            ).fetchone()
+            if storage_row is not None and storage_row["active_storage_provider"] == "local":
+                raise generation_error(
+                    422,
+                    "METASO_REQUIRES_CLOUD_STORAGE",
+                    "METASO H3 requires an HTTPS first-frame URL; switch storage to "
+                    "COS/OSS before generating.",
+                )
+
+        prompt = require_version(
+            conn,
+            version_id=request.prompt_version_id,
+            project_id=project_id,
+            kind=H3_PROMPT_KIND,
+        )
+        if version_stale_reasons(conn, row=prompt):
+            raise generation_error(
+                409,
+                "PROMPT_STALE",
+                "Upstream inputs changed; compile and lock a new prompt before generating.",
+            )
+        prompt_snapshot = json.loads(str(prompt["payload_json"]))
+        if prompt_snapshot.get("status") != "LOCKED":
+            raise generation_error(
+                409,
+                "PROMPT_NOT_LOCKED",
+                "Generation requires a LOCKED prompt.",
+            )
+        frozen_duration = prompt_snapshot.get("output_duration_seconds")
+        frozen_resolution = prompt_snapshot.get("resolution")
+        if (frozen_duration is not None and frozen_duration != request.output_duration_seconds) or (
+            frozen_resolution is not None and frozen_resolution != request.resolution
+        ):
+            raise generation_error(
+                409,
+                "PROMPT_PARAMETERS_MISMATCH",
+                "Generation parameters must match the locked prompt snapshot.",
+            )
+        first_frame = require_asset_access(
+            conn,
+            actor=actor,
+            asset_id=request.first_frame_asset_id,
+            action="generation_batch.create",
+        )
+        if str(first_frame["project_id"]) != project_id:
+            raise generation_error(
+                400,
+                "ASSET_PROJECT_MISMATCH",
+                "First frame is not in this project.",
+            )
+        require_confirmed_first_frame(
+            conn,
+            project_id=project_id,
+            first_frame_asset_id=request.first_frame_asset_id,
+        )
+        if prompt_snapshot.get("first_frame_asset_id") != request.first_frame_asset_id:
+            raise generation_error(
+                409,
+                "FIRST_FRAME_PROMPT_MISMATCH",
+                "Generation must use the first frame that was used to compile the locked prompt.",
+            )
+
+        request_snapshot = generation_request_snapshot(request, prompt_snapshot)
+        batch_id = str(uuid4())
+        used_prompt_snapshot = {**prompt_snapshot, "status": "USED"}
+        cursor = conn.execute(
+            """
+            UPDATE versions
+            SET payload_json = ?
+            WHERE id = ? AND payload_json = ?
+            """,
+            (
+                json.dumps(used_prompt_snapshot, ensure_ascii=True, sort_keys=True),
+                request.prompt_version_id,
+                str(prompt["payload_json"]),
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise generation_error(
+                409,
+                "PROMPT_ALREADY_USED",
+                "This LOCKED prompt was already consumed by another batch.",
+            )
+        conn.execute(
+            """
+            INSERT INTO generation_batches (
+                id,
+                project_id,
+                created_by_user_id,
+                idempotency_key,
+                request_hash,
+                request_snapshot_json,
+                status
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                batch_id,
+                project_id,
+                actor.id,
+                request.idempotency_key,
+                request_hash,
+                json.dumps(request_snapshot, ensure_ascii=True, sort_keys=True),
+                "QUEUED",
+            ),
+        )
+        for _ in range(request.quantity):
+            task_id = str(uuid4())
             conn.execute(
                 """
-                INSERT INTO generation_batches (
+                INSERT INTO generation_tasks (
                     id,
-                    project_id,
-                    created_by_user_id,
-                    idempotency_key,
-                    request_hash,
-                    request_snapshot_json,
-                    status
+                    batch_id,
+                    generation_mode,
+                    provider,
+                    model,
+                    status,
+                    archive_status,
+                    quality_status,
+                    prompt_version_id,
+                    prompt_snapshot_json,
+                    next_poll_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 """,
                 (
+                    task_id,
                     batch_id,
-                    project_id,
-                    actor.id,
-                    request.idempotency_key,
-                    request_hash,
-                    json.dumps(request_snapshot, ensure_ascii=True, sort_keys=True),
-                    "QUEUED",
+                    "I2V",
+                    request.provider,
+                    H3_MODEL,
+                    "PENDING",
+                    "PENDING",
+                    "PENDING",
+                    request.prompt_version_id,
+                    json.dumps(prompt_snapshot, ensure_ascii=True, sort_keys=True),
                 ),
             )
-            for _ in range(request.quantity):
-                task_id = str(uuid4())
-                conn.execute(
-                    """
-                    INSERT INTO generation_tasks (
-                        id,
-                        batch_id,
-                        generation_mode,
-                        provider,
-                        model,
-                        status,
-                        archive_status,
-                        quality_status,
-                        prompt_version_id,
-                        prompt_snapshot_json,
-                        next_poll_at
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                    """,
-                    (
-                        task_id,
-                        batch_id,
-                        "I2V",
-                        request.provider,
-                        H3_MODEL,
-                        "PENDING",
-                        "PENDING",
-                        "PENDING",
-                        request.prompt_version_id,
-                        json.dumps(prompt_snapshot, ensure_ascii=True, sort_keys=True),
-                    ),
-                )
+        conn.commit()
     except sqlite3.IntegrityError:
+        conn.rollback()
         # A concurrent request committed the same idempotency key first; return
         # the existing batch instead of a misleading 409.
         existing = _find_idempotent_batch(
@@ -760,6 +1236,9 @@ def create_generation_batch(
                     "This idempotency key was already used for a different request.",
                 )
             return get_generation_batch(conn, batch_id=str(existing["id"]), actor=actor)
+        raise
+    except Exception:
+        conn.rollback()
         raise
 
     write_audit(
@@ -1605,7 +2084,7 @@ def get_generation_batch(
 ) -> BatchResult:
     batch = conn.execute(
         """
-        SELECT id, project_id, status
+        SELECT id, project_id, request_snapshot_json, status
         FROM generation_batches
         WHERE id = ?
         """,
@@ -1638,10 +2117,33 @@ def get_generation_batch(
     tasks = [task_result(row) for row in rows]
     progress = calculate_progress(tasks)
     status = batch_status(str(batch["status"]), progress)
+    try:
+        request_snapshot = json.loads(str(batch["request_snapshot_json"]))
+    except json.JSONDecodeError:
+        request_snapshot = {}
+    prompt_version_id = request_snapshot.get("prompt_version_id")
+    stale = True
+    if isinstance(prompt_version_id, str):
+        try:
+            prompt = require_version(
+                conn,
+                version_id=prompt_version_id,
+                project_id=str(batch["project_id"]),
+                kind=H3_PROMPT_KIND,
+            )
+        except HTTPException:
+            stale = True
+        else:
+            stale = bool(version_stale_reasons(conn, row=prompt))
+    else:
+        prompt_version_id = "unknown"
     return BatchResult(
         id=str(batch["id"]),
+        project_id=str(batch["project_id"]),
+        prompt_version_id=prompt_version_id,
         status=status,
         quantity=len(tasks),
+        stale=stale,
         progress=progress,
         tasks=tasks,
     )
@@ -1850,26 +2352,32 @@ def compile_prompt_text(
     *,
     script_payload: dict[str, Any],
     shot_payload: dict[str, Any],
+    source_duration_seconds: float,
     duration_seconds: int,
     resolution: str,
 ) -> str:
     lines = [
-        f"生成一条 {duration_seconds} 秒、{resolution}、写实短视频，从提供的首帧自然开始。",
-        "保持首帧人物身份、服装、发型、场景和光线连续。",
+        H3_PROMPT_TEMPLATES["intro"].format(
+            duration_seconds=duration_seconds,
+            resolution=resolution,
+        ),
+        H3_PROMPT_TEMPLATES["continuity"],
     ]
     mappings_by_shot = {
         str(mapping["shot_id"]): str(mapping["text"])
         for mapping in script_payload.get("shot_mappings", [])
         if isinstance(mapping, dict)
     }
+    timeline_scale = duration_seconds / source_duration_seconds
     for shot in shot_payload["shots"]:
         shot_id = str(shot["shot_id"])
         spoken = mappings_by_shot.get(shot_id, str(shot.get("spoken_text", "")))
+        start = max(0.0, min(float(duration_seconds), float(shot["start_time"]) * timeline_scale))
+        end = max(start, min(float(duration_seconds), float(shot["end_time"]) * timeline_scale))
         lines.append(
-            "[{start:.1f}-{end:.1f}s] {shot_type}，{composition}，{camera_motion}；"
-            "{subject}{action}，场景：{scene}，转场：{transition}。口播意图：{spoken}".format(
-                start=float(shot["start_time"]),
-                end=float(shot["end_time"]),
+            H3_PROMPT_TEMPLATES["shot"].format(
+                start=start,
+                end=end,
                 shot_type=shot["shot_type"],
                 composition=shot["composition"],
                 camera_motion=shot["camera_motion"],
@@ -1880,9 +2388,31 @@ def compile_prompt_text(
                 spoken=spoken,
             )
         )
-    lines.append(f"口播意图：{script_payload['full_text']}")
-    lines.append("环境音与音乐保持自然；不要增加无关人物，不要身份突变、肢体异常或画面闪烁。")
+    lines.append(H3_PROMPT_TEMPLATES["script"].format(full_text=script_payload["full_text"]))
+    lines.append(H3_PROMPT_TEMPLATES["outro"])
     return "\n".join(lines)
+
+
+def shot_timeline_duration(shot_payload: dict[str, Any]) -> float:
+    source_duration = shot_payload.get("duration_seconds")
+    if isinstance(source_duration, (int, float)) and not isinstance(source_duration, bool):
+        duration = float(source_duration)
+        if duration > 0:
+            return duration
+    shots = shot_payload.get("shots")
+    if isinstance(shots, list):
+        end_times = [
+            float(shot["end_time"])
+            for shot in shots
+            if isinstance(shot, dict) and isinstance(shot.get("end_time"), (int, float))
+        ]
+        if end_times and max(end_times) > 0:
+            return max(end_times)
+    raise generation_error(
+        409,
+        "SHOT_CARD_TIMELINE_INVALID",
+        "Shot-card timeline has no valid source duration.",
+    )
 
 
 def generation_request_snapshot(
@@ -1895,6 +2425,22 @@ def generation_request_snapshot(
         "quantity": request.quantity,
         "prompt_version_id": request.prompt_version_id,
         "prompt_content_hash": prompt_snapshot["content_hash"],
+        "prompt_text": prompt_snapshot.get("prompt_text"),
+        "template_version": prompt_snapshot.get("template_version"),
+        "template_hash": prompt_snapshot.get("template_hash"),
+        "source_analysis_version_id": prompt_snapshot.get("source_analysis_version_id"),
+        "script_version_id": prompt_snapshot.get("script_version_id"),
+        "shot_card_version_id": prompt_snapshot.get("shot_card_version_id"),
+        "first_frame_candidates_version_id": prompt_snapshot.get(
+            "first_frame_candidates_version_id"
+        ),
+        "first_frame_selection_version_id": prompt_snapshot.get("first_frame_selection_version_id"),
+        "source_frame_selection_version_id": prompt_snapshot.get(
+            "source_frame_selection_version_id"
+        ),
+        "main_character_version_id": prompt_snapshot.get("main_character_version_id"),
+        "character_version_id": prompt_snapshot.get("character_version_id"),
+        "character_reference_selection_id": prompt_snapshot.get("character_reference_selection_id"),
         "first_frame_asset_id": request.first_frame_asset_id,
         "output_duration_seconds": request.output_duration_seconds,
         "resolution": request.resolution,
@@ -1923,6 +2469,13 @@ def read_runtime_limits(conn: sqlite3.Connection) -> dict[str, int]:
         "max_generation_count_per_batch": int(row["max_generation_count_per_batch"]),
         "max_concurrent_h3_tasks": int(row["max_concurrent_h3_tasks"]),
     }
+
+
+def generation_runtime_limits(conn: sqlite3.Connection) -> GenerationRuntimeLimits:
+    runtime = read_runtime_limits(conn)
+    return GenerationRuntimeLimits(
+        max_quantity=runtime["max_generation_count_per_batch"],
+    )
 
 
 def calculate_progress(tasks: list[TaskResult]) -> BatchProgress:

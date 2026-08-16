@@ -208,9 +208,11 @@ describe("CharacterReferenceSelection", () => {
           resolveSelection = () => resolve(savedSelection);
         }),
     );
+    const onBusyChange = vi.fn();
     render(
       <CharacterReferenceSelection
         characterSelection={characterSelection}
+        onBusyChange={onBusyChange}
         projectId="project-1"
         sourceFrameSelection={sourceFrameSelection}
       />,
@@ -222,11 +224,13 @@ describe("CharacterReferenceSelection", () => {
     await waitFor(() =>
       expect(api.selectCharacterReferences).toHaveBeenCalledOnce(),
     );
+    expect(onBusyChange).toHaveBeenLastCalledWith(true);
     for (const checkbox of screen.getAllByRole("checkbox")) {
       expect(checkbox).toBeDisabled();
     }
 
     resolveSelection?.();
+    await waitFor(() => expect(onBusyChange).toHaveBeenLastCalledWith(false));
   });
 
   it("ignores a confirmation response after the source input changes", async () => {

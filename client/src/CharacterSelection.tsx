@@ -20,11 +20,13 @@ const VIEW_LABELS: Record<ProjectCharacterAssetOption["view_type"], string> = {
 };
 
 export function CharacterSelection({
+  onBusyChange,
   onSelectionChange,
   onVersionChange,
   projectId,
   readOnly = false,
 }: {
+  onBusyChange?: (isBusy: boolean) => void;
   onSelectionChange?: (hasSelection: boolean) => void;
   onVersionChange?: (selection: ProjectMainCharacter | null) => void;
   projectId: string;
@@ -106,6 +108,7 @@ export function CharacterSelection({
     if (readOnly || !selectedVersionId) {
       return;
     }
+    onBusyChange?.(true);
     setIsSaving(true);
     setError("");
     setMessage("");
@@ -131,6 +134,7 @@ export function CharacterSelection({
       );
     } finally {
       setIsSaving(false);
+      onBusyChange?.(false);
     }
   }
 

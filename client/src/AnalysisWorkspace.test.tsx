@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AnalysisWorkspace } from "./AnalysisWorkspace";
 import * as api from "./api";
@@ -9,6 +9,7 @@ vi.mock("./api", async (importOriginal) => {
     ...actual,
     getLatestProjectAnalysis: vi.fn(),
     getLatestProjectShotCards: vi.fn(),
+    saveShotCards: vi.fn(),
   };
 });
 
@@ -70,64 +71,126 @@ const firstFrameSelection = {
   ...sourceSelection,
   id: "first-frame-selection-1",
   kind: "first_frame_selection",
+  asset_id: "first-frame-1",
+  payload: {
+    first_frame_candidates_version_id: "first-frame-candidates-1",
+    first_frame_asset_id: "first-frame-1",
+  },
+};
+
+const editableShot: api.ShotCard = {
+  shot_id: "S01",
+  start_time: 0,
+  end_time: 8,
+  shot_type: "中景",
+  composition: "居中",
+  camera_motion: "固定",
+  subject: "人物",
+  action: "讲述",
+  scene: "咖啡馆",
+  spoken_text: "原始口播稿",
+  transition: "无",
 };
 
 vi.mock("./CharacterSelection", () => ({
-  CharacterSelection: ({ onVersionChange }: apiMockProps) => (
+  CharacterSelection: ({
+    onBusyChange,
+    onVersionChange,
+    readOnly,
+  }: apiMockProps) => (
     <>
       <button
+        disabled={readOnly}
         onClick={() => onVersionChange?.(characterSelection)}
         type="button"
       >
         完成角色选择
       </button>
       <button
+        disabled={readOnly}
         onClick={() => onVersionChange?.(changedCharacterSelection)}
         type="button"
       >
         切换角色版本
       </button>
       <button
+        disabled={readOnly}
         onClick={() => onVersionChange?.(legacyCharacterSelection)}
         type="button"
       >
         恢复历史兼容人物
+      </button>
+      <button onClick={() => onBusyChange?.(true)} type="button">
+        模拟角色保存中
+      </button>
+      <button onClick={() => onBusyChange?.(false)} type="button">
+        模拟角色保存完成
       </button>
     </>
   ),
 }));
 
 vi.mock("./SourceFrameSelection", () => ({
-  SourceFrameSelection: ({ onSelectionChange }: apiMockProps) => (
+  SourceFrameSelection: ({
+    onBusyChange,
+    onSelectionChange,
+    readOnly,
+  }: apiMockProps) => (
     <>
       <button
+        disabled={readOnly}
         onClick={() => onSelectionChange?.(sourceSelection)}
         type="button"
       >
         完成源画面
       </button>
-      <button onClick={() => onSelectionChange?.(null)} type="button">
+      <button
+        disabled={readOnly}
+        onClick={() => onSelectionChange?.(null)}
+        type="button"
+      >
         标记源画面失效
+      </button>
+      <button onClick={() => onBusyChange?.(true)} type="button">
+        模拟源画面保存中
+      </button>
+      <button onClick={() => onBusyChange?.(false)} type="button">
+        模拟源画面保存完成
       </button>
     </>
   ),
 }));
 
 vi.mock("./CharacterReferenceSelection", () => ({
-  CharacterReferenceSelection: ({ onSelectionChange }: apiMockProps) => (
-    <button
-      onClick={() => onSelectionChange?.(referenceSelection)}
-      type="button"
-    >
-      完成人物参考
-    </button>
+  CharacterReferenceSelection: ({
+    onBusyChange,
+    onSelectionChange,
+    readOnly,
+  }: apiMockProps) => (
+    <>
+      <button
+        disabled={readOnly}
+        onClick={() => onSelectionChange?.(referenceSelection)}
+        type="button"
+      >
+        完成人物参考
+      </button>
+      <button onClick={() => onBusyChange?.(true)} type="button">
+        模拟人物参考保存中
+      </button>
+      <button onClick={() => onBusyChange?.(false)} type="button">
+        模拟人物参考保存完成
+      </button>
+    </>
   ),
 }));
 
 vi.mock("./FirstFrameSelection", () => ({
   FirstFrameSelection: ({
     legacyCharacterSelected,
+    onBusyChange,
     onSelectionChange,
+    readOnly,
     referenceSelection: currentReferenceSelection,
   }: apiMockProps) => (
     <>
@@ -136,21 +199,105 @@ vi.mock("./FirstFrameSelection", () => ({
         <span>历史兼容首帧可用</span>
       ) : null}
       <button
+        disabled={readOnly}
         onClick={() => onSelectionChange?.(firstFrameSelection)}
         type="button"
       >
         完成置换首帧
       </button>
+      <button onClick={() => onBusyChange?.(true)} type="button">
+        模拟首帧保存中
+      </button>
+      <button onClick={() => onBusyChange?.(false)} type="button">
+        模拟首帧保存完成
+      </button>
     </>
+  ),
+}));
+
+vi.mock("./GenerationComposer", () => ({
+  GenerationComposer: ({
+    firstFrameAssetId,
+    onBatchCreated,
+    onBusyChange,
+    onWorkflowStepChange,
+    originalScript,
+    readOnly,
+    shotCardVersionId,
+  }: generationComposerMockProps) => (
+    <div>
+      <span>
+        生成输入：{shotCardVersionId}/{firstFrameAssetId}/{originalScript}
+      </span>
+      <textarea
+        aria-label="生成草稿"
+        defaultValue="草稿初始值"
+        readOnly={readOnly}
+      />
+      <button onClick={() => onWorkflowStepChange?.(9)} type="button">
+        模拟锁定 Prompt
+      </button>
+      <button onClick={() => onBusyChange?.(true)} type="button">
+        模拟生成处理中
+      </button>
+      <button onClick={() => onBusyChange?.(false)} type="button">
+        模拟生成完成
+      </button>
+      <button
+        disabled={readOnly}
+        onClick={() =>
+          onBatchCreated?.({
+            id: "batch-1",
+            project_id: "project-1",
+            prompt_version_id: "prompt-1",
+            status: "QUEUED",
+            quantity: 1,
+            stale: false,
+            progress: {
+              total_count: 1,
+              terminal_count: 0,
+              progress_percent: 0,
+              counts: {},
+            },
+            tasks: [],
+          })
+        }
+        type="button"
+      >
+        模拟创建批次
+      </button>
+    </div>
   ),
 }));
 
 type apiMockProps = {
   legacyCharacterSelected?: boolean;
+  onBusyChange?: (isBusy: boolean) => void;
   onSelectionChange?: (value: unknown) => void;
   onVersionChange?: (value: unknown) => void;
+  readOnly?: boolean;
   referenceSelection?: unknown;
 };
+
+type generationComposerMockProps = {
+  firstFrameAssetId?: string;
+  onBatchCreated?: (value: unknown) => void;
+  onBusyChange?: (isBusy: boolean) => void;
+  onWorkflowStepChange?: (step: number) => void;
+  originalScript?: string;
+  readOnly?: boolean;
+  shotCardVersionId?: string;
+};
+
+function readReactProps<T>(element: Element): T {
+  const reactPropsKey = Object.keys(element).find((key) =>
+    key.startsWith("__reactProps$"),
+  );
+  if (!reactPropsKey) {
+    throw new Error("React props are unavailable for the test element.");
+  }
+  return (element as unknown as Record<string, T>)[reactPropsKey];
+}
 
 describe("AnalysisWorkspace workflow gates", () => {
   beforeEach(() => {
@@ -162,7 +309,12 @@ describe("AnalysisWorkspace workflow gates", () => {
       kind: "analysis",
       version_number: 1,
       payload: {
-        analysis: { summary: "拆解完成", duration_seconds: 8, shots: [] },
+        analysis: {
+          summary: "拆解完成",
+          duration_seconds: 8,
+          original_script: "原始口播稿",
+          shots: [],
+        },
       },
       created_by_user_id: "employee_1",
       created_at: "2030-01-01T00:00:00Z",
@@ -173,7 +325,9 @@ describe("AnalysisWorkspace workflow gates", () => {
   it("preserves downstream gates for idempotent confirmations and rolls back on a changed character", async () => {
     render(
       <AnalysisWorkspace
+        currentUserId="employee_1"
         onAnalysisReady={vi.fn()}
+        onBatchCreated={vi.fn()}
         onClose={vi.fn()}
         project={{
           id: "project-1",
@@ -241,7 +395,9 @@ describe("AnalysisWorkspace workflow gates", () => {
   it("keeps first-frame history visible while the current source selection is stale", async () => {
     render(
       <AnalysisWorkspace
+        currentUserId="employee_1"
         onAnalysisReady={vi.fn()}
+        onBatchCreated={vi.fn()}
         onClose={vi.fn()}
         project={{
           id: "project-1",
@@ -273,7 +429,9 @@ describe("AnalysisWorkspace workflow gates", () => {
   it("keeps legacy first-frame history and generation reachable without a seven-view selection", async () => {
     render(
       <AnalysisWorkspace
+        currentUserId="employee_1"
         onAnalysisReady={vi.fn()}
+        onBatchCreated={vi.fn()}
         onClose={vi.fn()}
         project={{
           id: "project-1",
@@ -297,5 +455,394 @@ describe("AnalysisWorkspace workflow gates", () => {
       "aria-current",
       "step",
     );
+  });
+
+  it("opens generation only with a saved shot card and forwards the created batch", async () => {
+    const onBatchCreated = vi.fn();
+    const onWorkspaceBusyChange = vi.fn();
+    vi.mocked(api.getLatestProjectShotCards).mockResolvedValue({
+      id: "shot-card-2",
+      project_id: "project-1",
+      asset_id: null,
+      kind: "shot_card",
+      version_number: 2,
+      payload: {
+        source_analysis_version_id: "analysis-1",
+        duration_seconds: 8,
+        shots: [],
+      },
+      created_by_user_id: "employee_1",
+      created_at: "2030-01-01T00:00:00Z",
+    });
+
+    render(
+      <AnalysisWorkspace
+        currentUserId="employee_1"
+        onAnalysisReady={vi.fn()}
+        onBatchCreated={onBatchCreated}
+        onClose={vi.fn()}
+        onWorkspaceBusyChange={onWorkspaceBusyChange}
+        project={{
+          id: "project-1",
+          owner_user_id: "employee_1",
+          name: "生成闭环测试",
+          status: "REFERENCE_READY",
+          reference_asset_id: "reference-video-1",
+          reference_upload_status: "READY",
+          analysis_status: "READY",
+        }}
+      />,
+    );
+
+    expect(await screen.findByText("拆解完成")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "完成角色选择" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成源画面" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成人物参考" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成置换首帧" }));
+
+    expect(
+      screen.getByText("生成输入：shot-card-2/first-frame-1/原始口播稿"),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "模拟锁定 Prompt" }));
+    expect(screen.getByTitle("设置数量并生成")).toHaveAttribute(
+      "aria-current",
+      "step",
+    );
+    for (const [startLabel, finishLabel] of [
+      ["模拟角色保存中", "模拟角色保存完成"],
+      ["模拟源画面保存中", "模拟源画面保存完成"],
+      ["模拟人物参考保存中", "模拟人物参考保存完成"],
+      ["模拟首帧保存中", "模拟首帧保存完成"],
+    ]) {
+      fireEvent.click(screen.getByRole("button", { name: startLabel }));
+      expect(onWorkspaceBusyChange).toHaveBeenLastCalledWith(true);
+      expect(
+        screen.getByRole("button", { name: "模拟创建批次" }),
+      ).toBeDisabled();
+      fireEvent.click(screen.getByRole("button", { name: "模拟创建批次" }));
+      expect(onBatchCreated).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole("button", { name: finishLabel }));
+      expect(onWorkspaceBusyChange).toHaveBeenLastCalledWith(false);
+      expect(
+        screen.getByRole("button", { name: "模拟创建批次" }),
+      ).toBeEnabled();
+    }
+    fireEvent.click(screen.getByRole("button", { name: "模拟角色保存中" }));
+    fireEvent.click(screen.getByRole("button", { name: "模拟角色保存中" }));
+    fireEvent.click(screen.getByRole("button", { name: "模拟角色保存完成" }));
+    expect(screen.getByRole("button", { name: "模拟创建批次" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "模拟角色保存完成" }));
+    expect(screen.getByRole("button", { name: "模拟创建批次" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "模拟创建批次" }));
+    expect(onBatchCreated).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "batch-1" }),
+    );
+  });
+
+  it("blocks generation without losing drafts while shot edits are reverted", async () => {
+    vi.mocked(api.getLatestProjectAnalysis).mockResolvedValue({
+      id: "analysis-1",
+      project_id: "project-1",
+      asset_id: "reference-video-1",
+      kind: "analysis",
+      version_number: 1,
+      payload: {
+        analysis: {
+          summary: "拆解完成",
+          duration_seconds: 8,
+          original_script: "原始口播稿",
+          shots: [editableShot],
+        },
+      },
+      created_by_user_id: "employee_1",
+      created_at: "2030-01-01T00:00:00Z",
+    });
+    vi.mocked(api.getLatestProjectShotCards).mockResolvedValue({
+      id: "shot-card-2",
+      project_id: "project-1",
+      asset_id: null,
+      kind: "shot_card",
+      version_number: 2,
+      payload: {
+        source_analysis_version_id: "analysis-1",
+        duration_seconds: 8,
+        shots: [editableShot],
+      },
+      created_by_user_id: "employee_1",
+      created_at: "2030-01-01T00:00:00Z",
+    });
+
+    render(
+      <AnalysisWorkspace
+        currentUserId="employee_1"
+        onAnalysisReady={vi.fn()}
+        onBatchCreated={vi.fn()}
+        onClose={vi.fn()}
+        project={{
+          id: "project-1",
+          owner_user_id: "employee_1",
+          name: "镜头编辑门禁",
+          status: "REFERENCE_READY",
+          reference_asset_id: "reference-video-1",
+          reference_upload_status: "READY",
+          analysis_status: "READY",
+        }}
+      />,
+    );
+
+    expect(await screen.findByText("拆解完成")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "完成角色选择" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成源画面" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成人物参考" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成置换首帧" }));
+    expect(
+      screen.getByText("生成输入：shot-card-2/first-frame-1/原始口播稿"),
+    ).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("生成草稿"), {
+      target: { value: "未保存的生成草稿" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "模拟锁定 Prompt" }));
+    expect(screen.getByTitle("设置数量并生成")).toHaveAttribute(
+      "aria-current",
+      "step",
+    );
+    const sceneInput = screen.getByLabelText("S01 场景");
+    const form = sceneInput.closest("form");
+    if (!form) {
+      throw new Error("Analysis form is unavailable.");
+    }
+    const staleSceneHandler = readReactProps<{
+      onChange: (event: { target: { value: string } }) => void;
+    }>(sceneInput).onChange;
+    const staleSubmitHandler = readReactProps<{
+      onSubmit: (event: { preventDefault: () => void }) => void;
+    }>(form).onSubmit;
+
+    fireEvent.click(screen.getByRole("button", { name: "模拟生成处理中" }));
+    act(() => {
+      staleSceneHandler({ target: { value: "旧闭包不应写入" } });
+      staleSubmitHandler({ preventDefault: vi.fn() });
+    });
+    expect(screen.getByLabelText("S01 场景")).toBeDisabled();
+    expect(screen.getByLabelText("S01 场景")).toHaveValue("咖啡馆");
+    expect(api.saveShotCards).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "保存镜头卡片" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "返回项目" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "切换角色版本" })).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "标记源画面失效" }),
+    ).toBeDisabled();
+    expect(screen.getByRole("button", { name: "完成人物参考" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "完成置换首帧" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "切换角色版本" }));
+    expect(
+      screen.getByText("生成输入：shot-card-2/first-frame-1/原始口播稿"),
+    ).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("S01 场景"), {
+      target: { value: "处理中不应写入" },
+    });
+    expect(screen.getByLabelText("S01 场景")).toHaveValue("咖啡馆");
+    fireEvent.click(screen.getByRole("button", { name: "模拟生成完成" }));
+    expect(screen.getByLabelText("S01 场景")).toBeEnabled();
+
+    fireEvent.change(screen.getByLabelText("S01 场景"), {
+      target: { value: "未保存的新场景" },
+    });
+
+    expect(
+      screen.getByText("生成输入：shot-card-2/first-frame-1/原始口播稿"),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("生成草稿")).toHaveValue("未保存的生成草稿");
+    expect(screen.getByLabelText("生成草稿")).toHaveAttribute("readonly");
+    expect(screen.getByRole("button", { name: "模拟创建批次" })).toBeDisabled();
+    expect(screen.getByTitle("确认口播稿")).toHaveAttribute(
+      "aria-current",
+      "step",
+    );
+    expect(
+      screen.getByText("镜头卡片已编辑，请保存后再继续生成。"),
+    ).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("S01 场景"), {
+      target: { value: "咖啡馆" },
+    });
+
+    expect(
+      screen.getByText("生成输入：shot-card-2/first-frame-1/原始口播稿"),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("生成草稿")).toHaveValue("未保存的生成草稿");
+    expect(screen.getByLabelText("生成草稿")).not.toHaveAttribute("readonly");
+    expect(screen.getByTitle("设置数量并生成")).toHaveAttribute(
+      "aria-current",
+      "step",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "保存镜头卡片" }));
+    expect(api.saveShotCards).not.toHaveBeenCalled();
+    expect(
+      screen.getByText("镜头卡片没有改动，无需重复保存。"),
+    ).toBeInTheDocument();
+  });
+
+  it("skips unchanged shot-card saves without losing generation drafts", async () => {
+    vi.mocked(api.getLatestProjectAnalysis).mockResolvedValue({
+      id: "analysis-1",
+      project_id: "project-1",
+      asset_id: "reference-video-1",
+      kind: "analysis",
+      version_number: 1,
+      payload: {
+        analysis: {
+          summary: "拆解完成",
+          duration_seconds: 8,
+          original_script: "原始口播稿",
+          shots: [editableShot],
+        },
+      },
+      created_by_user_id: "employee_1",
+      created_at: "2030-01-01T00:00:00Z",
+    });
+    vi.mocked(api.getLatestProjectShotCards).mockResolvedValue({
+      id: "shot-card-2",
+      project_id: "project-1",
+      asset_id: null,
+      kind: "shot_card",
+      version_number: 2,
+      payload: {
+        source_analysis_version_id: "analysis-1",
+        duration_seconds: 8,
+        shots: [editableShot],
+      },
+      created_by_user_id: "employee_1",
+      created_at: "2030-01-01T00:00:00Z",
+    });
+    render(
+      <AnalysisWorkspace
+        currentUserId="employee_1"
+        onAnalysisReady={vi.fn()}
+        onBatchCreated={vi.fn()}
+        onClose={vi.fn()}
+        project={{
+          id: "project-1",
+          owner_user_id: "employee_1",
+          name: "保存竞态门禁",
+          status: "REFERENCE_READY",
+          reference_asset_id: "reference-video-1",
+          reference_upload_status: "READY",
+          analysis_status: "READY",
+        }}
+      />,
+    );
+
+    expect(await screen.findByText("拆解完成")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "完成角色选择" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成源画面" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成人物参考" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成置换首帧" }));
+    expect(
+      screen.getByText("生成输入：shot-card-2/first-frame-1/原始口播稿"),
+    ).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("生成草稿"), {
+      target: { value: "未保存的生成草稿" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "保存镜头卡片" }));
+
+    expect(api.saveShotCards).not.toHaveBeenCalled();
+    expect(
+      screen.getByText("生成输入：shot-card-2/first-frame-1/原始口播稿"),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("生成草稿")).toHaveValue("未保存的生成草稿");
+    expect(screen.getByRole("button", { name: "模拟创建批次" })).toBeEnabled();
+    expect(
+      screen.getByText("镜头卡片没有改动，无需重复保存。"),
+    ).toBeInTheDocument();
+  });
+
+  it("prevents shot edits while a changed draft is being saved", async () => {
+    vi.mocked(api.getLatestProjectAnalysis).mockResolvedValue({
+      id: "analysis-1",
+      project_id: "project-1",
+      asset_id: "reference-video-1",
+      kind: "analysis",
+      version_number: 1,
+      payload: {
+        analysis: {
+          summary: "拆解完成",
+          duration_seconds: 8,
+          original_script: "原始口播稿",
+          shots: [editableShot],
+        },
+      },
+      created_by_user_id: "employee_1",
+      created_at: "2030-01-01T00:00:00Z",
+    });
+    vi.mocked(api.getLatestProjectShotCards).mockResolvedValue({
+      id: "shot-card-2",
+      project_id: "project-1",
+      asset_id: null,
+      kind: "shot_card",
+      version_number: 2,
+      payload: {
+        source_analysis_version_id: "analysis-1",
+        duration_seconds: 8,
+        shots: [editableShot],
+      },
+      created_by_user_id: "employee_1",
+      created_at: "2030-01-01T00:00:00Z",
+    });
+    let resolveSave: ((version: api.AnalysisVersion) => void) | undefined;
+    vi.mocked(api.saveShotCards).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveSave = resolve;
+        }),
+    );
+
+    render(
+      <AnalysisWorkspace
+        currentUserId="employee_1"
+        onAnalysisReady={vi.fn()}
+        onBatchCreated={vi.fn()}
+        onClose={vi.fn()}
+        project={{
+          id: "project-1",
+          owner_user_id: "employee_1",
+          name: "保存竞态门禁",
+          status: "REFERENCE_READY",
+          reference_asset_id: "reference-video-1",
+          reference_upload_status: "READY",
+          analysis_status: "READY",
+        }}
+      />,
+    );
+
+    expect(await screen.findByText("拆解完成")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("S01 场景"), {
+      target: { value: "已修改的场景" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存镜头卡片" }));
+
+    expect(api.saveShotCards).toHaveBeenCalledOnce();
+    expect(screen.getByLabelText("S01 场景")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "正在保存" })).toBeDisabled();
+
+    resolveSave?.({
+      id: "shot-card-3",
+      project_id: "project-1",
+      asset_id: null,
+      kind: "shot_card",
+      version_number: 3,
+      payload: {
+        source_analysis_version_id: "analysis-1",
+        duration_seconds: 8,
+        shots: [editableShot],
+      },
+      created_by_user_id: "employee_1",
+      created_at: "2030-01-01T00:00:01Z",
+    });
+    expect(
+      await screen.findByText(/镜头卡片已保存为版本 #3/),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("S01 场景")).toBeEnabled();
   });
 });

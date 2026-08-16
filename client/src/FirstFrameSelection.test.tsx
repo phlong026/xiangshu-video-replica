@@ -368,8 +368,10 @@ describe("FirstFrameSelection", () => {
     );
     vi.mocked(confirmFirstFrame).mockReturnValue(pendingConfirmation);
     const onSelectionChange = vi.fn();
+    const onBusyChange = vi.fn();
     const { rerender } = render(
       <FirstFrameSelection
+        onBusyChange={onBusyChange}
         onSelectionChange={onSelectionChange}
         projectId="project-1"
         referenceSelection={referenceSelection}
@@ -381,9 +383,11 @@ describe("FirstFrameSelection", () => {
     fireEvent.click(screen.getByRole("radio", { name: /首帧候选 1/ }));
     fireEvent.click(screen.getByRole("button", { name: "确认用于 H3 的首帧" }));
     await waitFor(() => expect(confirmFirstFrame).toHaveBeenCalledOnce());
+    expect(onBusyChange).toHaveBeenLastCalledWith(true);
 
     rerender(
       <FirstFrameSelection
+        onBusyChange={onBusyChange}
         onSelectionChange={onSelectionChange}
         projectId="project-1"
         referenceSelection={{
@@ -399,6 +403,7 @@ describe("FirstFrameSelection", () => {
     });
 
     expect(onSelectionChange).not.toHaveBeenCalledWith(confirmedSelection);
+    expect(onBusyChange).toHaveBeenLastCalledWith(false);
   });
 
   it("ignores a legacy confirmation response after the source selection changes", async () => {
