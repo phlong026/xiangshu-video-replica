@@ -44,6 +44,28 @@ export type GenerationBatch = Omit<
   components["schemas"]["BatchResult"],
   "tasks"
 > & { tasks: GenerationTask[] };
+export type GenerationTaskSummary = components["schemas"]["TaskSummary"];
+export type GenerationBatchListItem = Omit<
+  components["schemas"]["GenerationBatchListItem"],
+  "tasks"
+> & { tasks: GenerationTaskSummary[] };
+export type GenerationBatchListPage = Omit<
+  components["schemas"]["GenerationBatchListPage"],
+  "items"
+> & { items: GenerationBatchListItem[] };
+export type GenerationBatchListFilters = {
+  projectId?: string;
+  createdByUserId?: string;
+  status?:
+    | "PENDING"
+    | "QUEUED"
+    | "NEEDS_ATTENTION"
+    | "SUCCEEDED"
+    | "COMPLETED_WITH_FAILURES";
+  needsAttention?: boolean;
+  limit?: number;
+  cursor?: string;
+};
 
 export type ProviderName = "metaso" | "apilio" | "cos" | "oss";
 
@@ -426,6 +448,35 @@ export async function getGenerationBatch(
   return requestApiJson<GenerationBatch>(
     `/api/generation-batches/${encodeURIComponent(batchId)}`,
     "任务批次暂不可用",
+  );
+}
+
+export async function listGenerationBatches(
+  filters: GenerationBatchListFilters = {},
+): Promise<GenerationBatchListPage> {
+  const query = new URLSearchParams();
+  if (filters.projectId) {
+    query.set("project_id", filters.projectId);
+  }
+  if (filters.createdByUserId) {
+    query.set("created_by_user_id", filters.createdByUserId);
+  }
+  if (filters.status) {
+    query.set("status", filters.status);
+  }
+  if (filters.needsAttention !== undefined) {
+    query.set("needs_attention", String(filters.needsAttention));
+  }
+  if (filters.limit !== undefined) {
+    query.set("limit", String(filters.limit));
+  }
+  if (filters.cursor) {
+    query.set("cursor", filters.cursor);
+  }
+  const suffix = query.size ? `?${query.toString()}` : "";
+  return requestApiJson<GenerationBatchListPage>(
+    `/api/generation-batches${suffix}`,
+    "任务记录列表暂不可用",
   );
 }
 

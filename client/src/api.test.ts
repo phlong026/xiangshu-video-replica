@@ -19,6 +19,7 @@ import {
   getLatestProjectFirstFrames,
   getLatestScriptVersion,
   getSettings,
+  listGenerationBatches,
   listProjectCharacterVersions,
   lockGenerationPrompt,
   retryGenerationTask,
@@ -499,6 +500,46 @@ describe("getGenerationBatch", () => {
     await expect(getGenerationBatch("missing")).rejects.toThrow(
       "任务批次暂不可用（404）",
     );
+  });
+});
+
+describe("listGenerationBatches", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("loads a filtered cursor page without sending a request body", async () => {
+    const page = {
+      items: [],
+      next_cursor: "next-cursor",
+    };
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => page,
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      listGenerationBatches({
+        projectId: "project 1",
+        createdByUserId: "admin 1",
+        status: "NEEDS_ATTENTION",
+        needsAttention: true,
+        limit: 10,
+        cursor: "cursor/value",
+      }),
+    ).resolves.toEqual(page);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:8000/api/generation-batches?project_id=project+1&created_by_user_id=admin+1&status=NEEDS_ATTENTION&needs_attention=true&limit=10&cursor=cursor%2Fvalue",
+      expect.objectContaining({
+        headers: expect.any(Headers),
+        signal: expect.any(AbortSignal),
+      }),
+    );
+    const request = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(request.method).toBeUndefined();
+    expect(request.body).toBeUndefined();
   });
 });
 

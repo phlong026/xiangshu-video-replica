@@ -59,6 +59,14 @@ function openTaskRecords() {
   fireEvent.click(screen.getByRole("button", { name: "任务记录" }));
 }
 
+function isBatchHistoryRequest(url: string) {
+  return url.includes("/api/generation-batches?");
+}
+
+function emptyBatchHistory() {
+  return { items: [], next_cursor: null };
+}
+
 function batchResponse(overrides = {}) {
   return {
     id: "batch-1",
@@ -1770,6 +1778,12 @@ describe("App", () => {
       if (url.endsWith("/api/projects")) {
         return Promise.resolve({ ok: true, json: async () => [] });
       }
+      if (isBatchHistoryRequest(url)) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => emptyBatchHistory(),
+        });
+      }
       generationRequestCount += 1;
       return Promise.resolve({
         ok: true,
@@ -1817,6 +1831,12 @@ describe("App", () => {
       if (url.endsWith("/api/projects")) {
         return Promise.resolve({ ok: true, json: async () => [] });
       }
+      if (isBatchHistoryRequest(url)) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => emptyBatchHistory(),
+        });
+      }
       generationRequestCount += 1;
       return Promise.resolve({ ok: true, json: async () => attentionBatch });
     });
@@ -1851,6 +1871,12 @@ describe("App", () => {
       }
       if (url.endsWith("/api/projects")) {
         return Promise.resolve({ ok: true, json: async () => [] });
+      }
+      if (isBatchHistoryRequest(url)) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => emptyBatchHistory(),
+        });
       }
       generationRequestCount += 1;
       if (generationRequestCount === 2) {
@@ -1913,6 +1939,12 @@ describe("App", () => {
       }
       if (url.endsWith("/api/projects")) {
         return Promise.resolve({ ok: true, json: async () => [] });
+      }
+      if (isBatchHistoryRequest(url)) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => emptyBatchHistory(),
+        });
       }
       generationRequestCount += 1;
       return Promise.resolve({
