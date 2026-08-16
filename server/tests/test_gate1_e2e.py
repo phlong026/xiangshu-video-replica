@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import socket
 import subprocess
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
@@ -12,6 +14,7 @@ import pytest
 
 import app.gate1_e2e as gate1_e2e
 from app.gate1_e2e import (
+    ApiRestartController,
     ManagedProcesses,
     generate_test_media,
     prepare_gate1_run,
@@ -140,6 +143,83 @@ def test_managed_processes_continue_cleanup_after_one_stop_error(
     assert calls == 2
     assert first.poll() is not None
     assert second.poll() is not None
+
+
+def test_managed_processes_retains_ownership_when_explicit_stop_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    processes = ManagedProcesses()
+    process = processes.start(
+        name="retained",
+        command=[sys.executable, "-c", "import time; time.sleep(60)"],
+        cwd=tmp_path,
+        env={},
+        log_path=tmp_path / "retained.log",
+    )
+    original_stop = gate1_e2e._stop_process_tree
+    calls = 0
+
+    def fail_before_first_stop(target: subprocess.Popen[bytes]) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("explicit stop failed")
+        original_stop(target)
+
+    monkeypatch.setattr(gate1_e2e, "_stop_process_tree", fail_before_first_stop)
+
+    with pytest.raises(RuntimeError, match="explicit stop failed"):
+        processes.stop(process)
+
+    assert process.poll() is None
+    processes.close()
+    assert calls == 2
+    assert process.poll() is not None
+
+
+def test_api_restart_controller_replaces_the_service_and_acknowledges_request(
+    tmp_path: Path,
+) -> None:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    request_path = tmp_path / "restart-request.json"
+    completion_path = tmp_path / "restart-completion.json"
+    log_path = tmp_path / "api.log"
+
+    with ManagedProcesses() as processes:
+        controller = ApiRestartController(
+            processes=processes,
+            command=[
+                sys.executable,
+                "-m",
+                "http.server",
+                str(port),
+                "--bind",
+                "127.0.0.1",
+            ],
+            cwd=tmp_path,
+            env={},
+            log_path=log_path,
+            health_url=f"http://127.0.0.1:{port}/",
+            request_path=request_path,
+            completion_path=completion_path,
+            poll_interval_seconds=0.01,
+        )
+        controller.start()
+        try:
+            request_path.write_text('{"request_id":"restart-test"}\n', encoding="utf-8")
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and not completion_path.exists():
+                time.sleep(0.01)
+            assert json.loads(completion_path.read_text(encoding="utf-8")) == {
+                "request_id": "restart-test",
+                "status": "ready",
+            }
+            assert log_path.read_text(encoding="utf-8").count("[harness] started api") == 2
+        finally:
+            controller.close()
 
 
 def test_wait_for_http_accepts_a_ready_service() -> None:

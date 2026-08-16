@@ -14,13 +14,14 @@ vi.mock("./api", async () => {
   const actual = await vi.importActual<typeof import("./api")>("./api");
   return {
     ...actual,
+    createGenerationResultPreviewUrl: vi.fn(),
     downloadGenerationResult: vi.fn(),
     getGenerationBatch: vi.fn(),
-    getGenerationResultDownloadUrl: vi.fn(),
     listGenerationBatches: vi.fn(),
     regenerateGenerationBatch: vi.fn(),
     regenerateGenerationTask: vi.fn(),
     retryGenerationTask: vi.fn(),
+    revokeGenerationResultPreviewUrl: vi.fn(),
     confirmGenerationTaskNotCharged: vi.fn(),
     reconcileUncertainTask: vi.fn(),
   };
@@ -134,9 +135,9 @@ describe("TaskRecordsPanel", () => {
       next_cursor: null,
     });
     vi.mocked(api.getGenerationBatch).mockResolvedValue(batch());
-    vi.mocked(api.getGenerationResultDownloadUrl)
-      .mockResolvedValueOnce({ url: "https://signed.example/preview-1.mp4" })
-      .mockResolvedValueOnce({ url: "https://signed.example/preview-2.mp4" });
+    vi.mocked(api.createGenerationResultPreviewUrl)
+      .mockResolvedValueOnce("blob:preview-1")
+      .mockResolvedValueOnce("blob:preview-2");
     vi.mocked(api.downloadGenerationResult).mockResolvedValue();
     vi.mocked(api.retryGenerationTask).mockImplementation(async (_taskId) =>
       task(),
@@ -196,17 +197,13 @@ describe("TaskRecordsPanel", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "加载预览 task-ok" }));
     const video = await screen.findByLabelText("结果预览 task-ok");
-    expect(video).toHaveAttribute(
-      "src",
-      "https://signed.example/preview-1.mp4",
-    );
+    expect(video).toHaveAttribute("src", "blob:preview-1");
+    expect(video).toHaveAttribute("preload", "auto");
 
     fireEvent.click(screen.getByRole("button", { name: "刷新预览 task-ok" }));
-    await waitFor(() =>
-      expect(video).toHaveAttribute(
-        "src",
-        "https://signed.example/preview-2.mp4",
-      ),
+    await waitFor(() => expect(video).toHaveAttribute("src", "blob:preview-2"));
+    expect(api.revokeGenerationResultPreviewUrl).toHaveBeenCalledWith(
+      "blob:preview-1",
     );
     fireEvent.click(screen.getByRole("button", { name: "下载 MP4 task-ok" }));
 
@@ -215,6 +212,43 @@ describe("TaskRecordsPanel", () => {
         "asset-ok",
         "task-ok.mp4",
       ),
+    );
+  });
+
+  it("releases a preview URL that finishes after the panel unmounts", async () => {
+    let resolvePreview: (url: string) => void = () => undefined;
+    const pendingPreview = new Promise<string>((resolve) => {
+      resolvePreview = resolve;
+    });
+    vi.mocked(api.createGenerationResultPreviewUrl).mockReset();
+    vi.mocked(api.createGenerationResultPreviewUrl).mockReturnValue(
+      pendingPreview,
+    );
+
+    const { unmount } = render(
+      <TaskRecordsPanel
+        handoffBatch={null}
+        onHandoffConsumed={vi.fn()}
+        userRole="employee"
+      />,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "加载预览 task-ok" }),
+    );
+    await waitFor(() =>
+      expect(api.createGenerationResultPreviewUrl).toHaveBeenCalledWith(
+        "asset-ok",
+      ),
+    );
+
+    unmount();
+    await act(async () => {
+      resolvePreview("blob:late-preview");
+      await pendingPreview;
+    });
+
+    expect(api.revokeGenerationResultPreviewUrl).toHaveBeenCalledWith(
+      "blob:late-preview",
     );
   });
 
@@ -301,7 +335,7 @@ describe("TaskRecordsPanel", () => {
     expect(
       screen.queryByRole("button", { name: /付费重新生成|整批付费再次生成/ }),
     ).not.toBeInTheDocument();
-    expect(api.getGenerationResultDownloadUrl).not.toHaveBeenCalled();
+    expect(api.createGenerationResultPreviewUrl).not.toHaveBeenCalled();
   });
 
   it("requires an explicit reason and payment confirmation before regenerating a frozen batch", async () => {

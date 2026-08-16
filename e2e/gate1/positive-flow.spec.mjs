@@ -1,9 +1,10 @@
-import { mkdir, readFile, stat } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { expect, test } from "@playwright/test";
 
 import { observePage, requiredRunDir } from "./evidence.mjs";
+import { restartApi, withBrokenGenerationArchive } from "./runtime.mjs";
 import { runWorkerOnce } from "./worker.mjs";
 
 const VIEW_NAMES = [
@@ -16,11 +17,14 @@ const VIEW_NAMES = [
   "右侧面",
 ];
 
-test("@positive creates a character and downloads three completed videos through the UI", async ({
+test("@positive creates a character, restarts, and restores three completed videos", async ({
+  browser,
+  context,
   page,
 }) => {
   const runDir = requiredRunDir();
-  const evidence = observePage(page);
+  const evidenceRuns = [{ name: "positive-flow", evidence: observePage(page) }];
+  let recoveryContext = null;
 
   try {
     await enterWorkspace(page);
@@ -55,12 +59,33 @@ test("@positive creates a character and downloads three completed videos through
       path: path.join(runDir, "screenshots", "1280x720-positive-results.png"),
       fullPage: true,
     });
+
+    await context.close();
+    await restartApi();
+    recoveryContext = await browser.newContext({
+      acceptDownloads: true,
+      baseURL: requiredEnvironmentPath("GATE1_WEB_URL"),
+      recordVideo: { dir: path.join(runDir, "browser", "recovery-video") },
+      viewport: { width: 1280, height: 720 },
+    });
+    const recoveryPage = await recoveryContext.newPage();
+    evidenceRuns.push({
+      name: "recovery-flow",
+      evidence: observePage(recoveryPage),
+    });
+    await verifyRestoredWorkspace(recoveryPage, runDir);
+    await verifyFailureRecoveryPaths(recoveryPage, runDir);
   } finally {
-    await evidence.save(runDir, "positive-flow");
+    await Promise.all(
+      evidenceRuns.map(({ evidence, name }) => evidence.save(runDir, name)),
+    );
+    await recoveryContext?.close();
   }
 
-  expect(evidence.consoleErrors).toEqual([]);
-  expect(evidence.networkFailures).toEqual([]);
+  for (const { evidence } of evidenceRuns) {
+    expect(evidence.consoleErrors).toEqual([]);
+    expect(evidence.networkFailures).toEqual([]);
+  }
 });
 
 async function enterWorkspace(page) {
@@ -237,7 +262,7 @@ async function previewAndDownloadResults(page, runDir) {
       .poll(() =>
         videos.nth(expectedVideos - 1).evaluate((video) => video.readyState),
       )
-      .toBeGreaterThan(0);
+      .toBe(4);
   }
 
   const downloadDir = path.join(runDir, "downloads");
@@ -256,6 +281,246 @@ async function previewAndDownloadResults(page, runDir) {
     expect(content.length).toBeGreaterThan(8);
     expect(content.subarray(4, 8).toString("ascii")).toBe("ftyp");
   }
+}
+
+async function verifyRestoredWorkspace(page, runDir) {
+  await enterWorkspace(page);
+  await expect(page.getByRole("heading", { name: "项目列表" })).toBeVisible();
+  await expect(page.getByText("Gate 1 夏日咖啡馆口播")).toBeVisible();
+
+  await page.getByRole("button", { name: "人物库" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Gate 1 林夏", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("版本已发布，内容不可修改").first(),
+  ).toBeVisible();
+
+  await page.getByRole("button", { name: "任务记录" }).click();
+  await expect(
+    page.getByRole("progressbar", { name: "批次进度" }),
+  ).toHaveAttribute("aria-valuenow", "100");
+  await expect(page.getByRole("button", { name: /^下载 MP4 / })).toHaveCount(3);
+  const previewResponsePromise = page.waitForResponse(
+    (response) =>
+      response
+        .url()
+        .includes("/api/assets/local-objects/generation-results/") &&
+      response.ok(),
+  );
+  await page
+    .getByRole("button", { name: /^加载预览 / })
+    .first()
+    .click();
+  const previewResponse = await previewResponsePromise;
+  const video = page.getByLabel(/^结果预览 /).first();
+  await expect
+    .poll(() => video.evaluate((element) => element.readyState))
+    .toBe(4);
+  await previewResponse.finished();
+
+  const [download] = await Promise.all([
+    page.waitForEvent("download"),
+    page
+      .getByRole("button", { name: /^下载 MP4 / })
+      .first()
+      .click(),
+  ]);
+  const targetPath = path.join(runDir, "downloads", "recovered-result.mp4");
+  await download.saveAs(targetPath);
+  const content = await readFile(targetPath);
+  expect(content.subarray(4, 8).toString("ascii")).toBe("ftyp");
+  await page.screenshot({
+    path: path.join(runDir, "screenshots", "1280x720-recovered-results.png"),
+    fullPage: true,
+  });
+}
+
+async function verifyFailureRecoveryPaths(page, runDir) {
+  await page
+    .getByLabel("整批重生成原因")
+    .fill("Gate 1 验证异常分类与不重复付费边界");
+  await page.getByLabel("确认新建 3 个付费任务").check();
+  await page.getByRole("button", { name: "整批付费再次生成" }).click();
+  await expect(
+    page.getByRole("progressbar", { name: "批次进度" }),
+  ).toHaveAttribute("aria-valuenow", "0");
+
+  await runWorkerOnce({
+    label: "failure-submission-uncertain",
+    fakeH3Outcome: "submission_uncertain",
+  });
+  await runWorkerOnce({
+    label: "failure-provider-terminal",
+    fakeH3Outcome: "provider_failed",
+  });
+  await withBrokenGenerationArchive(() =>
+    runWorkerOnce({ label: "failure-archive", fakeH3Outcome: "ok" }),
+  );
+  await refreshActiveBatch(page);
+
+  const failedCard = taskCardForStage(page, "失败");
+  const archiveCard = taskCardForStage(page, "归档失败");
+  const uncertainCard = taskCardForStage(page, "提交结果待确认");
+  await expect(failedCard).toHaveCount(1);
+  await expect(archiveCard).toHaveCount(1);
+  await expect(uncertainCard).toHaveCount(1);
+  await expect(page.locator(".attention-banner")).toHaveText("需要处理 2");
+
+  const failedTaskId = await taskIdFromCard(failedCard);
+  const archiveTaskId = await taskIdFromCard(archiveCard);
+  const uncertainTaskId = await taskIdFromCard(uncertainCard);
+  const archiveProviderTail = await archiveCard
+    .getByText(/^Provider 尾号 /)
+    .textContent();
+  expect(archiveProviderTail).toMatch(/^Provider 尾号 \S+$/);
+
+  await expect(
+    failedCard.getByText(
+      "METASO H3 task failed or returned an invalid result.",
+    ),
+  ).toBeVisible();
+  await expect(
+    failedCard.getByLabel(`重新生成原因 ${failedTaskId}`),
+  ).toBeVisible();
+  await expect(
+    failedCard.getByLabel(`确认为任务 ${failedTaskId} 新增一次付费生成`),
+  ).toBeVisible();
+  await expect(
+    failedCard.getByLabel(`付费重新生成 ${failedTaskId}`),
+  ).toBeDisabled();
+
+  await expect(
+    archiveCard.getByText(
+      "Generation result could not be archived to configured storage.",
+    ),
+  ).toBeVisible();
+  await expect(
+    archiveCard.getByLabel(`重试归档 ${archiveTaskId}`),
+  ).toBeDisabled();
+  await expect(
+    archiveCard.getByLabel(new RegExp(`付费重新生成 ${archiveTaskId}`)),
+  ).toHaveCount(0);
+  await expect(
+    archiveCard.getByText("尝试 1 次 · 归档重试 0 次"),
+  ).toBeVisible();
+
+  await expect(
+    uncertainCard.getByText("Fake H3 submission result is unknown"),
+  ).toBeVisible();
+  await expect(
+    uncertainCard.getByText("Provider 尾号未公开", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    uncertainCard.getByLabel(`确认未计费 ${uncertainTaskId}`),
+  ).toBeDisabled();
+  await expect(
+    uncertainCard.getByLabel(new RegExp(`付费重新生成 ${uncertainTaskId}`)),
+  ).toHaveCount(0);
+
+  await archiveCard
+    .getByLabel(`处理原因 ${archiveTaskId}`)
+    .fill("已恢复本地归档目录，只重试已付费结果的归档");
+  await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        response
+          .url()
+          .endsWith(`/api/generation-tasks/${archiveTaskId}/retry`) &&
+        response.ok(),
+    ),
+    archiveCard.getByLabel(`重试归档 ${archiveTaskId}`).click(),
+  ]);
+  await runWorkerOnce({ label: "failure-archive-safe-retry" });
+  const retriedArchiveCard = taskCardById(page, archiveTaskId);
+  await expect(retriedArchiveCard.getByText("阶段：已归档")).toBeVisible({
+    timeout: 15_000,
+  });
+  await expect(
+    retriedArchiveCard.getByText(archiveProviderTail ?? ""),
+  ).toBeVisible();
+  await expect(
+    retriedArchiveCard.getByText("尝试 1 次 · 归档重试 0 次"),
+  ).toBeVisible();
+
+  await uncertainCard
+    .getByLabel(`处理原因 ${uncertainTaskId}`)
+    .fill("已核对 Fake H3 未产生计费与 Provider 任务");
+  await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        response
+          .url()
+          .endsWith(
+            `/api/generation-tasks/${uncertainTaskId}/confirm-not-charged`,
+          ) &&
+        response.ok(),
+    ),
+    uncertainCard.getByLabel(`确认未计费 ${uncertainTaskId}`).click(),
+  ]);
+  await runWorkerOnce({ label: "failure-uncertain-admin-requeue" });
+  const recoveredUncertainCard = taskCardById(page, uncertainTaskId);
+  await expect(recoveredUncertainCard.getByText("阶段：已归档")).toBeVisible({
+    timeout: 15_000,
+  });
+  await expect(
+    recoveredUncertainCard.getByText("尝试 2 次 · 归档重试 0 次"),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("progressbar", { name: "批次进度" }),
+  ).toHaveAttribute("aria-valuenow", "100");
+  await expect(page.getByText("需要处理 2", { exact: true })).toHaveCount(0);
+
+  const output = {
+    failed: { task_id: failedTaskId, required_action: "paid_regeneration" },
+    archive_failed: {
+      task_id: archiveTaskId,
+      provider_tail_before_retry: archiveProviderTail,
+      attempt_after_retry: 1,
+      archive_retry_performed: true,
+      failed_archive_retry_count: 0,
+    },
+    submission_uncertain: {
+      task_id: uncertainTaskId,
+      admin_confirmation_required: true,
+      attempt_after_confirmation: 2,
+    },
+  };
+  await writeFile(
+    path.join(runDir, "logs", "failure-recovery-summary.json"),
+    `${JSON.stringify(output, null, 2)}\n`,
+    "utf8",
+  );
+  await page.screenshot({
+    path: path.join(runDir, "screenshots", "1280x720-failure-recovery.png"),
+    fullPage: true,
+  });
+}
+
+async function refreshActiveBatch(page) {
+  const activeBatch = page.locator("button.batch-history-card--active");
+  await expect(activeBatch).toHaveCount(1);
+  await activeBatch.click();
+}
+
+function taskCardForStage(page, stage) {
+  return page
+    .locator("li.task-result-card")
+    .filter({ hasText: `阶段：${stage}` });
+}
+
+function taskCardById(page, taskId) {
+  return page.locator("li.task-result-card").filter({ hasText: taskId });
+}
+
+async function taskIdFromCard(card) {
+  const value = (
+    await card.locator(".task-result-heading strong").textContent()
+  )?.trim();
+  expect(value).toBeTruthy();
+  return value;
 }
 
 function viewSlot(page, name) {

@@ -543,10 +543,31 @@ export async function getGenerationResultDownloadUrl(
   );
 }
 
+export async function createGenerationResultPreviewUrl(
+  assetId: string,
+): Promise<string> {
+  const blob = await fetchGenerationResultBlob(assetId, "加载生成结果预览失败");
+  return URL.createObjectURL(blob);
+}
+
+export function revokeGenerationResultPreviewUrl(url: string): void {
+  URL.revokeObjectURL(url);
+}
+
 export async function downloadGenerationResult(
   assetId: string,
   filename: string,
 ): Promise<void> {
+  downloadBlob(
+    await fetchGenerationResultBlob(assetId, "下载生成结果失败"),
+    filename,
+  );
+}
+
+async function fetchGenerationResultBlob(
+  assetId: string,
+  errorPrefix: string,
+): Promise<Blob> {
   const { url } = await getGenerationResultDownloadUrl(assetId);
   const controller = new AbortController();
   const timeout = window.setTimeout(
@@ -557,9 +578,9 @@ export async function downloadGenerationResult(
   try {
     const response = await fetch(url, { signal: controller.signal });
     if (!response.ok) {
-      throw new Error(`下载生成结果失败（${response.status}）`);
+      throw new Error(`${errorPrefix}（${response.status}）`);
     }
-    downloadBlob(await response.blob(), filename);
+    return await response.blob();
   } finally {
     window.clearTimeout(timeout);
   }

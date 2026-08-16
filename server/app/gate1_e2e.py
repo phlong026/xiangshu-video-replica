@@ -15,6 +15,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Event, Thread
 from typing import BinaryIO
 from urllib.error import URLError
 from urllib.request import urlopen
@@ -105,6 +106,107 @@ class ManagedProcesses:
                 managed.log_file.close()
         if first_error is not None:
             raise first_error
+
+    def stop(self, process: subprocess.Popen[bytes]) -> None:
+        for index, managed in enumerate(self._processes):
+            if managed.process is not process:
+                continue
+            _stop_process_tree(managed.process)
+            managed.log_file.close()
+            self._processes.pop(index)
+            return
+        raise ValueError("process is not managed")
+
+
+class ApiRestartController:
+    """Restart the isolated API when Playwright writes a local control request."""
+
+    def __init__(
+        self,
+        *,
+        processes: ManagedProcesses,
+        command: list[str],
+        cwd: Path,
+        env: Mapping[str, str],
+        log_path: Path,
+        health_url: str,
+        request_path: Path,
+        completion_path: Path,
+        poll_interval_seconds: float = 0.1,
+    ) -> None:
+        self._processes = processes
+        self._command = command
+        self._cwd = cwd
+        self._env = env
+        self._log_path = log_path
+        self._health_url = health_url
+        self._request_path = request_path
+        self._completion_path = completion_path
+        self._poll_interval_seconds = poll_interval_seconds
+        self._stop_event = Event()
+        self._thread: Thread | None = None
+        self._process: subprocess.Popen[bytes] | None = None
+        self._failure: BaseException | None = None
+        self._last_request_id = ""
+
+    def start(self) -> None:
+        self._start_api()
+        self._thread = Thread(target=self._watch, name="gate1-api-restart", daemon=True)
+        self._thread.start()
+
+    def close(self) -> None:
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=35)
+            if self._thread.is_alive():
+                raise RuntimeError("Gate 1 API restart controller did not stop")
+        if self._failure is not None:
+            raise RuntimeError("Gate 1 API restart failed") from self._failure
+
+    def _start_api(self) -> None:
+        self._process = self._processes.start(
+            name="api",
+            command=self._command,
+            cwd=self._cwd,
+            env=self._env,
+            log_path=self._log_path,
+        )
+        wait_for_http(self._health_url)
+
+    def _watch(self) -> None:
+        while not self._stop_event.wait(self._poll_interval_seconds):
+            request_id = self._read_request_id()
+            if not request_id or request_id == self._last_request_id:
+                continue
+            self._last_request_id = request_id
+            try:
+                assert self._process is not None
+                _append_text(self._log_path, f"\n[harness] restart requested id={request_id}\n")
+                self._processes.stop(self._process)
+                self._start_api()
+                self._write_completion(request_id, status="ready")
+            except BaseException as exc:
+                self._failure = exc
+                self._write_completion(request_id, status="failed")
+                return
+
+    def _read_request_id(self) -> str:
+        try:
+            request = json.loads(self._request_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return ""
+        request_id = request.get("request_id") if isinstance(request, dict) else None
+        if not isinstance(request_id, str):
+            return ""
+        return request_id if re.fullmatch(r"[A-Za-z0-9-]{1,128}", request_id) else ""
+
+    def _write_completion(self, request_id: str, *, status: str) -> None:
+        temporary_path = self._completion_path.with_suffix(".tmp")
+        temporary_path.write_text(
+            json.dumps({"request_id": request_id, "status": status}) + "\n",
+            encoding="utf-8",
+        )
+        temporary_path.replace(self._completion_path)
 
 
 def prepare_gate1_run(output_root: Path, *, run_id: str) -> Gate1RunPaths:
@@ -356,8 +458,10 @@ def run_gate1(
         _write_run_metadata(paths, commit_sha=commit_sha, media=media)
 
         with ManagedProcesses() as processes:
-            processes.start(
-                name="api",
+            api_restart_request_path = paths.runtime_dir / "api-restart-request.json"
+            api_restart_completion_path = paths.runtime_dir / "api-restart-completion.json"
+            api_controller = ApiRestartController(
+                processes=processes,
                 command=[
                     "uv",
                     "--cache-dir",
@@ -378,69 +482,78 @@ def run_gate1(
                 cwd=repository_root,
                 env=runtime_env,
                 log_path=paths.logs_dir / "api.log",
+                health_url="http://127.0.0.1:8000/health",
+                request_path=api_restart_request_path,
+                completion_path=api_restart_completion_path,
             )
-            wait_for_http("http://127.0.0.1:8000/health")
-            processes.start(
-                name="vite",
-                command=[
-                    "npm",
-                    "run",
-                    "dev",
-                    "--workspace",
-                    "client",
-                    "--",
-                    "--host",
-                    "127.0.0.1",
-                    "--port",
-                    "5173",
-                ],
-                cwd=repository_root,
-                env=runtime_env,
-                log_path=paths.logs_dir / "vite.log",
-            )
-            wait_for_http("http://127.0.0.1:5173/")
+            api_controller.start()
+            try:
+                processes.start(
+                    name="vite",
+                    command=[
+                        "npm",
+                        "run",
+                        "dev",
+                        "--workspace",
+                        "client",
+                        "--",
+                        "--host",
+                        "127.0.0.1",
+                        "--port",
+                        "5173",
+                    ],
+                    cwd=repository_root,
+                    env=runtime_env,
+                    log_path=paths.logs_dir / "vite.log",
+                )
+                wait_for_http("http://127.0.0.1:5173/")
 
-            playwright_env = runtime_env.copy()
-            playwright_env.update(
-                {
-                    "GATE1_RUN_DIR": str(paths.run_dir),
-                    "GATE1_WEB_URL": "http://127.0.0.1:5173",
-                    "GATE1_API_URL": "http://127.0.0.1:8000",
-                    "GATE1_MEDIA_DIR": str(paths.media_dir),
-                    "GATE1_WORKER_COMMAND": json.dumps(
-                        [
-                            "uv",
-                            "--cache-dir",
-                            ".uv-cache",
-                            "run",
-                            "--project",
-                            "server",
-                            "--locked",
-                            "python",
-                            "-m",
-                            "app.generation_worker",
-                            "--once",
-                        ]
-                    ),
-                }
-            )
-            playwright_command = [
-                "npx",
-                "playwright",
-                "test",
-                "--config",
-                "e2e/gate1/playwright.config.mjs",
-                *(playwright_arguments or []),
-            ]
-            playwright_process = processes.start(
-                name="playwright",
-                command=playwright_command,
-                cwd=repository_root,
-                env=playwright_env,
-                log_path=paths.logs_dir / "playwright.log",
-            )
-            exit_code = playwright_process.wait()
-            status = "passed" if exit_code == 0 else "failed"
+                playwright_env = runtime_env.copy()
+                playwright_env.update(
+                    {
+                        "GATE1_RUN_DIR": str(paths.run_dir),
+                        "GATE1_WEB_URL": "http://127.0.0.1:5173",
+                        "GATE1_API_URL": "http://127.0.0.1:8000",
+                        "GATE1_API_RESTART_REQUEST_PATH": str(api_restart_request_path),
+                        "GATE1_API_RESTART_COMPLETION_PATH": str(api_restart_completion_path),
+                        "GATE1_MEDIA_DIR": str(paths.media_dir),
+                        "GATE1_STORAGE_ROOT": str(storage_root),
+                        "GATE1_WORKER_COMMAND": json.dumps(
+                            [
+                                "uv",
+                                "--cache-dir",
+                                ".uv-cache",
+                                "run",
+                                "--project",
+                                "server",
+                                "--locked",
+                                "python",
+                                "-m",
+                                "app.generation_worker",
+                                "--once",
+                            ]
+                        ),
+                    }
+                )
+                playwright_command = [
+                    "npx",
+                    "playwright",
+                    "test",
+                    "--config",
+                    "e2e/gate1/playwright.config.mjs",
+                    *(playwright_arguments or []),
+                ]
+                playwright_process = processes.start(
+                    name="playwright",
+                    command=playwright_command,
+                    cwd=repository_root,
+                    env=playwright_env,
+                    log_path=paths.logs_dir / "playwright.log",
+                )
+                exit_code = playwright_process.wait()
+                status = "passed" if exit_code == 0 else "failed"
+            finally:
+                api_controller.close()
     except BaseException:
         status = "failed"
         (paths.logs_dir / "harness-error.log").write_text(
