@@ -1557,6 +1557,10 @@ describe("App", () => {
       download_url:
         "/api/admin/settings/diagnostic-reports/diagnostic-1/download",
     };
+    let resolveRuntimeSave: ((response: unknown) => void) | undefined;
+    const runtimeSaveResponse = new Promise<unknown>((resolve) => {
+      resolveRuntimeSave = resolve;
+    });
     const fetchMock = vi.fn((url: string, options?: RequestInit) => {
       if (url.endsWith("/health")) {
         return Promise.resolve({ ok: true, json: async () => healthResponse });
@@ -1566,6 +1570,12 @@ describe("App", () => {
           ok: true,
           json: async () => settingsResponse,
         });
+      }
+      if (
+        url.endsWith("/api/admin/settings/runtime") &&
+        options?.method === "PATCH"
+      ) {
+        return runtimeSaveResponse;
       }
       if (url.endsWith("/diagnostic-test") && options?.method === "POST") {
         return Promise.resolve({
@@ -1616,6 +1626,25 @@ describe("App", () => {
     expect(
       screen.getByText("尚未保存：将切换为阿里云 OSS"),
     ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "保存运行设置" }));
+    expect(screen.getByLabelText("当前对象存储")).toBeDisabled();
+    expect(screen.getByLabelText("单次生成数量上限")).toBeDisabled();
+    expect(screen.getByLabelText("H3 最大并发数")).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "正在保存运行设置" }),
+    ).toBeDisabled();
+    await act(async () => {
+      resolveRuntimeSave?.({
+        ok: true,
+        json: async () => ({
+          ...settingsResponse.runtime,
+          active_storage_provider: "oss",
+        }),
+      });
+      await Promise.resolve();
+    });
+    expect(await screen.findByText("运行设置已保存")).toBeInTheDocument();
+    expect(screen.getByLabelText("当前对象存储")).toBeEnabled();
     expect(
       screen.getByText(
         /可能产生云存储请求费用；该操作不会提交 H3、视频或图片生成任务/,

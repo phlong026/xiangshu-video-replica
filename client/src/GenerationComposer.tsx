@@ -185,6 +185,12 @@ export function GenerationComposer({
   ]);
 
   const promptStatus = readPayloadString(promptVersion, "status");
+  const scriptDirty = Boolean(
+    scriptVersion &&
+      (scriptSource !== readScriptSource(scriptVersion) ||
+        scriptText.trim() !==
+          (readPayloadString(scriptVersion, "full_text") ?? "").trim()),
+  );
   const promptDirty = Boolean(
     promptVersion && promptText.trim() !== savedPromptText.trim(),
   );
@@ -200,12 +206,18 @@ export function GenerationComposer({
       readPayloadString(promptVersion, "resolution") === resolution,
   );
   const canCompile = Boolean(
-    !readOnly && scriptVersion && !scriptStale && !busyAction && durationValid,
+    !readOnly &&
+      scriptVersion &&
+      !scriptStale &&
+      !scriptDirty &&
+      !busyAction &&
+      durationValid,
   );
   const canCreateBatch = Boolean(
     !readOnly &&
       promptVersion &&
       promptStatus === "LOCKED" &&
+      !scriptDirty &&
       !promptStale &&
       !promptDirty &&
       promptParametersMatch &&
@@ -214,7 +226,7 @@ export function GenerationComposer({
       !busyAction,
   );
   const workflowStep =
-    scriptVersion && !scriptStale
+    scriptVersion && !scriptStale && !scriptDirty
       ? promptVersion &&
         !promptStale &&
         promptStatus === "LOCKED" &&
@@ -506,6 +518,9 @@ export function GenerationComposer({
 
       {scriptStale ? (
         <p className="attention-banner">镜头卡已变化，请重新保存口播稿。</p>
+      ) : null}
+      {scriptDirty ? (
+        <p className="attention-banner">口播稿有未保存修改，请先保存。</p>
       ) : null}
       {promptStale ? (
         <p className="attention-banner">上游输入已变化，请重新编译 Prompt。</p>

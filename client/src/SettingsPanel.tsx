@@ -314,6 +314,7 @@ function RuntimeForm({
 }) {
   const [values, setValues] = useState(runtime);
   const [status, setStatus] = useState("");
+  const [isSaving, setIsSaving] = useState(false);
   const previousRuntimeRef = useRef(runtime);
   const isStorageChangePending =
     values.active_storage_provider !== runtime.active_storage_provider;
@@ -328,6 +329,9 @@ function RuntimeForm({
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (isSaving) {
+      return;
+    }
     setStatus("");
     const limitsValid =
       Number.isInteger(values.max_generation_count_per_batch) &&
@@ -338,11 +342,14 @@ function RuntimeForm({
       setStatus("单次数量上限与最大并发数必须为 ≥1 的整数");
       return;
     }
+    setIsSaving(true);
     try {
       await onSave(values);
       setStatus("运行设置已保存");
     } catch {
       setStatus("运行设置保存失败");
+    } finally {
+      setIsSaving(false);
     }
   }
 
@@ -355,6 +362,7 @@ function RuntimeForm({
       <label>
         当前对象存储
         <select
+          disabled={isSaving}
           value={values.active_storage_provider}
           onChange={(event) =>
             setValues((current) => ({
@@ -370,6 +378,7 @@ function RuntimeForm({
       <label>
         单次生成数量上限
         <input
+          disabled={isSaving}
           type="number"
           min="1"
           value={values.max_generation_count_per_batch}
@@ -384,6 +393,7 @@ function RuntimeForm({
       <label>
         H3 最大并发数
         <input
+          disabled={isSaving}
           type="number"
           min="1"
           value={values.max_concurrent_h3_tasks}
@@ -396,7 +406,9 @@ function RuntimeForm({
         />
       </label>
       <div className="form-actions">
-        <button type="submit">保存运行设置</button>
+        <button disabled={isSaving} type="submit">
+          {isSaving ? "正在保存运行设置" : "保存运行设置"}
+        </button>
         <span>
           {isStorageChangePending
             ? `尚未保存：将切换为${storageProviderLabel(values.active_storage_provider)}`

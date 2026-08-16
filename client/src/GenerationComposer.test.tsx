@@ -293,6 +293,48 @@ describe("GenerationComposer", () => {
     ).toBeInTheDocument();
   });
 
+  it("requires saving visible script edits before prompt compilation", async () => {
+    vi.mocked(api.getLatestScriptVersion).mockResolvedValue({
+      version: {
+        ...baseVersion,
+        id: "script-1",
+        payload: {
+          source: "custom",
+          full_text: "已保存的自定义稿",
+          shot_card_version_id: "shot-card-1",
+          shot_mappings: [],
+        },
+      },
+      stale: false,
+      stale_reasons: [],
+    });
+    vi.mocked(api.getLatestGenerationPrompt).mockResolvedValue({
+      version: promptVersion("LOCKED"),
+      stale: false,
+      stale_reasons: [],
+    });
+
+    render(<GenerationComposer {...props} />);
+    const compileButton = await screen.findByRole("button", {
+      name: "编译 H3 Prompt",
+    });
+    expect(compileButton).toBeEnabled();
+    const createButton = screen.getByRole("button", {
+      name: "创建 1 个生成任务",
+    });
+    expect(createButton).toBeEnabled();
+
+    fireEvent.change(screen.getByLabelText("口播稿内容"), {
+      target: { value: "尚未保存的新稿" },
+    });
+
+    expect(compileButton).toBeDisabled();
+    expect(createButton).toBeDisabled();
+    expect(
+      screen.getByText("口播稿有未保存修改，请先保存。"),
+    ).toBeInTheDocument();
+  });
+
   it("keeps one idempotency key across duplicate clicks and an offline retry", async () => {
     vi.mocked(api.getLatestScriptVersion).mockResolvedValue({
       version: {
