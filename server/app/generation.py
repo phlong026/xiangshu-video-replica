@@ -80,6 +80,9 @@ SUPPORTED_RESOLUTIONS = {"768P", "2K"}
 # A real H3 request polls for up to five minutes. Leave headroom so another
 # worker never mistakes an active request for an abandoned lease.
 GENERATION_LEASE_SECONDS = 600
+# Reconciliation performs one provider query plus optional download/archive;
+# fifteen minutes exceeds those bounded calls while still recovering crashes.
+RECONCILIATION_RESERVATION_SECONDS = 900
 FIRST_FRAME_URL_EXPIRES_IN = timedelta(minutes=15)
 # Cap archive retries so a permanently expired provider URL does not keep the
 # paid task spinning in ARCHIVE_FAILED forever.
@@ -190,6 +193,13 @@ class H3ProviderFailed(RuntimeError):
 
 class H3ProviderSettingsUnavailable(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class ReconcileReservation:
+    id: str
+    actor: CurrentUser
+    idempotency_key: str
 
 
 class H3Provider:
@@ -2118,13 +2128,28 @@ def _store_and_finalize_archive(
     created_by_user_id: str,
     content: bytes,
     storage: StorageAdapter,
+    reconcile_reservation: ReconcileReservation | None = None,
 ) -> TaskResult:
     """Archive already-downloaded H3 result bytes and mark the task terminal."""
-    object_key = f"generation-results/{task_id}.mp4"
+    object_key = (
+        f"generation-results/{task_id}/{reconcile_reservation.id}.mp4"
+        if reconcile_reservation is not None
+        else f"generation-results/{task_id}.mp4"
+    )
     stored = storage.put_object(object_key, content, content_type="video/mp4")
     result_asset_id = str(uuid4())
+    task_state_guard = (
+        "AND status = 'SUBMISSION_UNCERTAIN' AND result_asset_id IS NULL"
+        if reconcile_reservation is not None
+        else ""
+    )
     try:
         with conn:
+            if reconcile_reservation is not None:
+                _renew_reconcile_reservation_in_transaction(
+                    conn,
+                    reservation_id=reconcile_reservation.id,
+                )
             conn.execute(
                 """
                 INSERT INTO assets (
@@ -2149,8 +2174,8 @@ def _store_and_finalize_archive(
                     created_by_user_id,
                 ),
             )
-            conn.execute(
-                """
+            task_update = conn.execute(
+                f"""
                 UPDATE generation_tasks
                 SET
                     status = 'SUCCEEDED',
@@ -2164,10 +2189,23 @@ def _store_and_finalize_archive(
                     completed_at = CURRENT_TIMESTAMP,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
+                {task_state_guard}
                 """,
                 (result_asset_id, task_id),
             )
-            refresh_batch_status(conn, batch_id=batch_id)
+            if reconcile_reservation is not None and task_update.rowcount != 1:
+                raise _reconcile_reservation_lost()
+            _refresh_batch_status_in_transaction(conn, batch_id=batch_id)
+            result = get_task_result(conn, task_id)
+            if reconcile_reservation is not None:
+                _complete_reconcile_operation_in_transaction(
+                    conn,
+                    reservation=reconcile_reservation,
+                    task_id=task_id,
+                    batch_id=batch_id,
+                    project_id=project_id,
+                    result=result,
+                )
     except Exception:
         # The object was written outside the DB transaction; remove it if the
         # asset/task rows could not be committed, so no orphan object is left.
@@ -2178,7 +2216,7 @@ def _store_and_finalize_archive(
                 "archive cleanup failed for task %s: %s", task_id, type(cleanup_exc).__name__
             )
         raise
-    return get_task_result(conn, task_id)
+    return result
 
 
 def _retry_archive(
@@ -2298,6 +2336,139 @@ def _record_completed_task_operation(
             task_id,
             json.dumps(dict(response), ensure_ascii=True, sort_keys=True),
         ),
+    )
+
+
+def _release_stale_reconcile_reservation(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    batch_id: str,
+    project_id: str,
+    actor: CurrentUser,
+) -> None:
+    row = conn.execute(
+        """
+        SELECT id, idempotency_key
+        FROM generation_task_operations
+        WHERE task_id = ? AND action = 'RECONCILE' AND result_status = 'PENDING'
+          AND datetime(updated_at) <= datetime('now', ?)
+        """,
+        (task_id, f"-{RECONCILIATION_RESERVATION_SECONDS} seconds"),
+    ).fetchone()
+    if row is None:
+        return
+    conn.execute(
+        """
+        DELETE FROM generation_task_operations
+        WHERE id = ? AND result_status = 'PENDING'
+        """,
+        (str(row["id"]),),
+    )
+    insert_audit(
+        conn,
+        actor=actor,
+        action="generation_task.reconcile_stale_reservation_released",
+        entity_type="generation_task",
+        entity_id=task_id,
+        metadata={
+            "batch_id": batch_id,
+            "project_id": project_id,
+            "idempotency_key_hash": content_hash(str(row["idempotency_key"])),
+            "reservation_timeout_seconds": RECONCILIATION_RESERVATION_SECONDS,
+        },
+    )
+
+
+def _renew_reconcile_reservation(
+    conn: sqlite3.Connection,
+    *,
+    reservation: ReconcileReservation | None,
+) -> None:
+    if reservation is None:
+        return
+    with conn:
+        _renew_reconcile_reservation_in_transaction(conn, reservation_id=reservation.id)
+
+
+def _renew_reconcile_reservation_in_transaction(
+    conn: sqlite3.Connection,
+    *,
+    reservation_id: str,
+) -> None:
+    cursor = conn.execute(
+        """
+        UPDATE generation_task_operations
+        SET updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND action = 'RECONCILE' AND result_status = 'PENDING'
+        """,
+        (reservation_id,),
+    )
+    if cursor.rowcount != 1:
+        raise _reconcile_reservation_lost()
+
+
+def _reconcile_reservation_lost() -> HTTPException:
+    return generation_error(
+        409,
+        "RECONCILE_RESERVATION_LOST",
+        "The reconciliation reservation expired and was taken over; retry the request.",
+    )
+
+
+def _complete_reconcile_operation_in_transaction(
+    conn: sqlite3.Connection,
+    *,
+    reservation: ReconcileReservation,
+    task_id: str,
+    batch_id: str,
+    project_id: str,
+    result: TaskResult,
+) -> None:
+    cursor = conn.execute(
+        """
+        UPDATE generation_task_operations
+        SET
+            result_status = 'COMPLETED',
+            response_snapshot_json = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND actor_user_id = ? AND task_id = ?
+          AND action = 'RECONCILE' AND idempotency_key = ? AND result_status = 'PENDING'
+        """,
+        (
+            json.dumps(
+                {
+                    "status": result.status,
+                    "archive_status": result.archive_status,
+                    "result_asset_id": result.result_asset_id,
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+            ),
+            reservation.id,
+            reservation.actor.id,
+            task_id,
+            reservation.idempotency_key,
+        ),
+    )
+    if cursor.rowcount != 1:
+        raise _reconcile_reservation_lost()
+    insert_audit(
+        conn,
+        actor=reservation.actor,
+        action=(
+            "generation_task.reconcile_archived"
+            if result.archive_status == "ARCHIVED"
+            else "generation_task.reconcile_terminal_failed"
+        ),
+        entity_type="generation_task",
+        entity_id=task_id,
+        metadata={
+            "batch_id": batch_id,
+            "project_id": project_id,
+            "status": result.status,
+            "archive_status": result.archive_status,
+        },
     )
 
 
@@ -2626,6 +2797,7 @@ def reconcile_generation_task(
     provider_factory: Callable[[], H3Provider],
 ) -> TaskResult:
     action = "RECONCILE"
+    operation_id: str | None = None
     request_hash = generation_task_operation_hash(
         action=action,
         task_id=task_id,
@@ -2653,6 +2825,14 @@ def reconcile_generation_task(
                 409,
                 "TASK_SUPERSEDED",
                 "This historical task has already been replaced.",
+            )
+        if str(row["status"]) == "SUBMISSION_UNCERTAIN":
+            _release_stale_reconcile_reservation(
+                conn,
+                task_id=task_id,
+                batch_id=batch_id,
+                project_id=project_id,
+                actor=actor,
             )
         existing = _idempotent_task_operation(
             conn,
@@ -2730,6 +2910,7 @@ def reconcile_generation_task(
                 "SUBMISSION_REQUIRES_MANUAL_CONFIRMATION",
                 "There is no provider task id; an admin must confirm no charge occurred.",
             )
+        operation_id = str(uuid4())
         conn.execute(
             """
             INSERT INTO generation_task_operations (
@@ -2739,7 +2920,7 @@ def reconcile_generation_task(
             VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING')
             """,
             (
-                str(uuid4()),
+                operation_id,
                 task_id,
                 actor.id,
                 action,
@@ -2775,8 +2956,14 @@ def reconcile_generation_task(
         conn.rollback()
         raise
 
+    if operation_id is None:
+        raise RuntimeError("reconciliation reservation was not created")
+    reservation = ReconcileReservation(
+        id=operation_id,
+        actor=actor,
+        idempotency_key=request.idempotency_key,
+    )
     try:
-        storage = storage_factory()
         provider = provider_factory()
         result = reconcile_submission_uncertain_task(
             conn,
@@ -2784,65 +2971,20 @@ def reconcile_generation_task(
             batch_id=batch_id,
             project_id=project_id,
             created_by_user_id=created_by_user_id,
-            storage=storage,
+            storage_factory=storage_factory,
             provider=provider,
+            reconcile_reservation=reservation,
         )
     except Exception:
         with conn:
             conn.execute(
                 """
                 DELETE FROM generation_task_operations
-                WHERE actor_user_id = ? AND task_id = ? AND action = ?
-                  AND idempotency_key = ? AND result_status = 'PENDING'
+                WHERE id = ? AND result_status = 'PENDING'
                 """,
-                (actor.id, task_id, action, request.idempotency_key),
+                (operation_id,),
             )
         raise
-
-    with conn:
-        conn.execute(
-            """
-            UPDATE generation_task_operations
-            SET
-                result_status = 'COMPLETED',
-                response_snapshot_json = ?,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE actor_user_id = ? AND task_id = ? AND action = ? AND idempotency_key = ?
-            """,
-            (
-                json.dumps(
-                    {
-                        "status": result.status,
-                        "archive_status": result.archive_status,
-                        "result_asset_id": result.result_asset_id,
-                    },
-                    ensure_ascii=True,
-                    sort_keys=True,
-                ),
-                actor.id,
-                task_id,
-                action,
-                request.idempotency_key,
-            ),
-        )
-        audit_action = (
-            "generation_task.reconcile_archived"
-            if result.archive_status == "ARCHIVED"
-            else "generation_task.reconcile_terminal_failed"
-        )
-        insert_audit(
-            conn,
-            actor=actor,
-            action=audit_action,
-            entity_type="generation_task",
-            entity_id=task_id,
-            metadata={
-                "batch_id": batch_id,
-                "project_id": project_id,
-                "status": result.status,
-                "archive_status": result.archive_status,
-            },
-        )
     return result
 
 
@@ -2853,8 +2995,9 @@ def reconcile_submission_uncertain_task(
     batch_id: str,
     project_id: str,
     created_by_user_id: str,
-    storage: StorageAdapter,
+    storage_factory: Callable[[], StorageAdapter],
     provider: H3Provider,
+    reconcile_reservation: ReconcileReservation | None = None,
 ) -> TaskResult:
     """Reconcile a SUBMISSION_UNCERTAIN task against the provider.
 
@@ -2881,12 +3024,14 @@ def reconcile_submission_uncertain_task(
             "The submission result is unknown and there is no provider task id; "
             "confirm the charge did not occur before deciding to resubmit.",
         )
+    _renew_reconcile_reservation(conn, reservation=reconcile_reservation)
     try:
         item = provider._query_task(str(provider_task_id))
     except H3ProviderFailed as exc:
         raise generation_error(
             502, "PROVIDER_QUERY_FAILED", "Provider query failed during reconciliation."
         ) from exc
+    _renew_reconcile_reservation(conn, reservation=reconcile_reservation)
     status = item.get("status")
     if status == "succeeded":
         result_url = _metaso_content_url(item, provider_task_id=str(provider_task_id))
@@ -2896,6 +3041,8 @@ def reconcile_submission_uncertain_task(
             raise generation_error(
                 503, "RESULT_DOWNLOAD_FAILED", "Result download failed; retry reconciliation."
             ) from exc
+        _renew_reconcile_reservation(conn, reservation=reconcile_reservation)
+        storage = storage_factory()
         return _store_and_finalize_archive(
             conn,
             task_id=task_id,
@@ -2904,11 +3051,17 @@ def reconcile_submission_uncertain_task(
             created_by_user_id=created_by_user_id,
             content=content,
             storage=storage,
+            reconcile_reservation=reconcile_reservation,
         )
     if status in {"failed", "cancelled"}:
         with conn:
-            conn.execute(
-                """
+            if reconcile_reservation is not None:
+                _renew_reconcile_reservation_in_transaction(
+                    conn,
+                    reservation_id=reconcile_reservation.id,
+                )
+            task_update = conn.execute(
+                f"""
                 UPDATE generation_tasks
                 SET
                     status = 'FAILED',
@@ -2918,11 +3071,24 @@ def reconcile_submission_uncertain_task(
                     locked_until = NULL,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
+                {"AND status = 'SUBMISSION_UNCERTAIN'" if reconcile_reservation is not None else ""}
                 """,
                 (str(status), task_id),
             )
-            refresh_batch_status(conn, batch_id=batch_id)
-        return get_task_result(conn, task_id)
+            if reconcile_reservation is not None and task_update.rowcount != 1:
+                raise _reconcile_reservation_lost()
+            _refresh_batch_status_in_transaction(conn, batch_id=batch_id)
+            result = get_task_result(conn, task_id)
+            if reconcile_reservation is not None:
+                _complete_reconcile_operation_in_transaction(
+                    conn,
+                    reservation=reconcile_reservation,
+                    task_id=task_id,
+                    batch_id=batch_id,
+                    project_id=project_id,
+                    result=result,
+                )
+        return result
     raise generation_error(
         409, "PROVIDER_STILL_PROCESSING", "Provider reports the task is still running."
     )

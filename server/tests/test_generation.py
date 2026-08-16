@@ -27,6 +27,7 @@ from app.generation import (
     MetasoH3Provider,
     SubmissionUncertain,
     build_h3_request,
+    generation_task_operation_hash,
     mark_expired_active_leases_needing_attention,
     mark_task_submission_uncertain,
     reconcile_submission_uncertain_task,
@@ -3327,6 +3328,11 @@ class ReconcileRunningProvider(MetasoH3Provider):
         return {"id": provider_task_id, "status": "running"}
 
 
+class ReconcileFailedProvider(MetasoH3Provider):
+    def _query_task(self, provider_task_id: str) -> dict[str, Any]:
+        return {"id": provider_task_id, "status": "failed"}
+
+
 def test_reconcile_submission_uncertain_recovers_succeeded_result(
     db_path: Path, client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3362,7 +3368,7 @@ def test_reconcile_submission_uncertain_recovers_succeeded_result(
             batch_id=str(task["batch_id"]),
             project_id="project_owned",
             created_by_user_id="employee_1",
-            storage=FakeStorageAdapter(provider="cos", bucket="generation-results"),
+            storage_factory=lambda: FakeStorageAdapter(provider="cos", bucket="generation-results"),
             provider=ReconcileSucceededProvider(api_key="test-key"),
         )
         row = conn.execute(
@@ -3478,6 +3484,311 @@ def test_reconcile_route_is_idempotent_and_audited(
     assert completed_audits == 1
 
 
+@pytest.mark.parametrize("reuse_idempotency_key", [True, False])
+def test_reconcile_route_recovers_an_abandoned_pending_reservation(
+    db_path: Path,
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    reuse_idempotency_key: bool,
+) -> None:
+    import app.generation_routes as generation_routes_module
+
+    monkeypatch.setattr(
+        generation_routes_module,
+        "h3_provider_for_task",
+        lambda _conn, _provider: ReconcileFailedProvider(api_key="test-key"),
+    )
+    monkeypatch.setattr(
+        generation_routes_module,
+        "get_media_storage",
+        lambda _conn: FakeStorageAdapter(provider="cos", bucket="generation-results"),
+    )
+    prompt_id = create_locked_prompt(client)
+    created = client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json={
+            "quantity": 1,
+            "prompt_version_id": prompt_id,
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+            "idempotency_key": "reconcile-stale-reservation-batch",
+        },
+    )
+    task_id = created.json()["tasks"][0]["id"]
+    operation_key = "reconcile-stale-reservation-operation"
+    request_hash = generation_task_operation_hash(
+        action="RECONCILE",
+        task_id=task_id,
+        payload={},
+    )
+    with connect_database(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE generation_tasks
+            SET status = 'SUBMISSION_UNCERTAIN', error_code = 'SUBMISSION_UNCERTAIN',
+                provider_task_id = 'provider-stale-reservation'
+            WHERE id = ?
+            """,
+            (task_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO generation_task_operations (
+                id, task_id, actor_user_id, action, idempotency_key,
+                request_hash, result_task_id, result_status, updated_at
+            )
+            VALUES (
+                'stale-reconcile-operation', ?, 'employee_1', 'RECONCILE', ?,
+                ?, ?, 'PENDING', datetime('now', '-1 day')
+            )
+            """,
+            (task_id, operation_key, request_hash, task_id),
+        )
+        conn.commit()
+
+    response = client.post(
+        f"/api/generation-tasks/{task_id}/reconcile",
+        headers=auth_headers("employee_1"),
+        json={
+            "idempotency_key": (
+                operation_key if reuse_idempotency_key else "replacement-reconcile-operation"
+            )
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "FAILED"
+    with connect_database(db_path) as conn:
+        operations = conn.execute(
+            """
+            SELECT id, result_status
+            FROM generation_task_operations
+            WHERE task_id = ? AND action = 'RECONCILE'
+            """,
+            (task_id,),
+        ).fetchall()
+        recovery_audits = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM audit_logs
+            WHERE action = 'generation_task.reconcile_stale_reservation_released'
+              AND entity_id = ?
+            """,
+            (task_id,),
+        ).fetchone()[0]
+
+    assert len(operations) == 1
+    assert operations[0]["result_status"] == "COMPLETED"
+    assert operations[0]["id"] != "stale-reconcile-operation"
+    assert recovery_audits == 1
+
+
+def test_reconcile_provider_failure_does_not_require_storage_settings(
+    db_path: Path,
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.generation_routes as generation_routes_module
+
+    storage_calls = 0
+
+    def unavailable_storage(*_args: object, **_kwargs: object) -> FakeStorageAdapter:
+        nonlocal storage_calls
+        storage_calls += 1
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "STORAGE_SETTINGS_UNAVAILABLE"},
+        )
+
+    monkeypatch.setattr(
+        generation_routes_module,
+        "h3_provider_for_task",
+        lambda _conn, _provider: ReconcileFailedProvider(api_key="test-key"),
+    )
+    monkeypatch.setattr(
+        generation_routes_module,
+        "get_media_storage",
+        unavailable_storage,
+    )
+    prompt_id = create_locked_prompt(client)
+    created = client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json={
+            "quantity": 1,
+            "prompt_version_id": prompt_id,
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+            "idempotency_key": "reconcile-without-storage-batch",
+        },
+    )
+    task_id = created.json()["tasks"][0]["id"]
+    with connect_database(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE generation_tasks
+            SET status = 'SUBMISSION_UNCERTAIN', error_code = 'SUBMISSION_UNCERTAIN',
+                provider_task_id = 'provider-failed-without-storage'
+            WHERE id = ?
+            """,
+            (task_id,),
+        )
+        conn.commit()
+
+    response = client.post(
+        f"/api/generation-tasks/{task_id}/reconcile",
+        headers=auth_headers("employee_1"),
+        json={"idempotency_key": "reconcile-without-storage-operation"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "FAILED"
+    assert storage_calls == 0
+
+
+def test_reconcile_lost_reservation_cannot_finalize_an_archived_result(
+    db_path: Path,
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.generation_routes as generation_routes_module
+
+    uploaded_keys: list[str] = []
+    replaced_reservation_ids: list[str] = []
+
+    class TakeoverDuringArchiveStorage(FakeStorageAdapter):
+        def put_object(self, key: str, content: bytes, *, content_type: str):  # type: ignore[override]
+            stored = super().put_object(key, content, content_type=content_type)
+            uploaded_keys.append(key)
+            with connect_database(db_path) as takeover_conn:
+                replaced = takeover_conn.execute(
+                    """
+                    SELECT id FROM generation_task_operations
+                    WHERE task_id = ? AND action = 'RECONCILE' AND result_status = 'PENDING'
+                    """,
+                    (task_id,),
+                ).fetchone()
+                assert replaced is not None
+                replaced_reservation_ids.append(str(replaced["id"]))
+                takeover_conn.execute(
+                    """
+                    DELETE FROM generation_task_operations
+                    WHERE task_id = ? AND action = 'RECONCILE' AND result_status = 'PENDING'
+                    """,
+                    (task_id,),
+                )
+                takeover_conn.execute(
+                    """
+                    INSERT INTO generation_task_operations (
+                        id, task_id, actor_user_id, action, idempotency_key,
+                        request_hash, result_task_id, result_status
+                    )
+                    VALUES (
+                        'replacement-reconcile-reservation', ?, 'employee_1',
+                        'RECONCILE', 'replacement-after-takeover', ?, ?, 'PENDING'
+                    )
+                    """,
+                    (
+                        task_id,
+                        generation_task_operation_hash(
+                            action="RECONCILE",
+                            task_id=task_id,
+                            payload={},
+                        ),
+                        task_id,
+                    ),
+                )
+                takeover_conn.commit()
+            return stored
+
+    storage = TakeoverDuringArchiveStorage(
+        provider="cos",
+        bucket="generation-results",
+    )
+    monkeypatch.setattr("app.generation.socket.getaddrinfo", _fake_public_dns)
+    monkeypatch.setattr(
+        generation_routes_module,
+        "h3_provider_for_task",
+        lambda _conn, _provider: ReconcileSucceededProvider(api_key="test-key"),
+    )
+    monkeypatch.setattr(
+        generation_routes_module,
+        "get_media_storage",
+        lambda _conn: storage,
+    )
+    prompt_id = create_locked_prompt(client)
+    created = client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json={
+            "quantity": 1,
+            "prompt_version_id": prompt_id,
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+            "idempotency_key": "reconcile-takeover-batch",
+        },
+    )
+    task_id = created.json()["tasks"][0]["id"]
+    with connect_database(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE generation_tasks
+            SET status = 'SUBMISSION_UNCERTAIN', error_code = 'SUBMISSION_UNCERTAIN',
+                provider_task_id = 'provider-reconcile-takeover'
+            WHERE id = ?
+            """,
+            (task_id,),
+        )
+        conn.commit()
+
+    response = client.post(
+        f"/api/generation-tasks/{task_id}/reconcile",
+        headers=auth_headers("employee_1"),
+        json={"idempotency_key": "old-reconcile-reservation"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "RECONCILE_RESERVATION_LOST"
+    assert len(uploaded_keys) == 1
+    assert uploaded_keys[0] == (f"generation-results/{task_id}/{replaced_reservation_ids[0]}.mp4")
+    assert storage.head_object(uploaded_keys[0]) is None
+    with connect_database(db_path) as conn:
+        task_row = conn.execute(
+            "SELECT status, archive_status, result_asset_id FROM generation_tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        asset_count = conn.execute(
+            "SELECT COUNT(*) FROM assets WHERE project_id = 'project_owned' AND kind = 'video'"
+        ).fetchone()[0]
+        completed_audits = conn.execute(
+            """
+            SELECT COUNT(*) FROM audit_logs
+            WHERE action = 'generation_task.reconcile_archived' AND entity_id = ?
+            """,
+            (task_id,),
+        ).fetchone()[0]
+        operations = conn.execute(
+            """
+            SELECT id, result_status FROM generation_task_operations
+            WHERE task_id = ? AND action = 'RECONCILE'
+            """,
+            (task_id,),
+        ).fetchall()
+
+    assert task_row["status"] == "SUBMISSION_UNCERTAIN"
+    assert task_row["archive_status"] == "PENDING"
+    assert task_row["result_asset_id"] is None
+    assert asset_count == 0
+    assert completed_audits == 0
+    assert [(row["id"], row["result_status"]) for row in operations] == [
+        ("replacement-reconcile-reservation", "PENDING")
+    ]
+
+
 def test_reconcile_without_provider_task_id_requires_manual_confirmation(
     db_path: Path, client: TestClient
 ) -> None:
@@ -3513,7 +3824,9 @@ def test_reconcile_without_provider_task_id_requires_manual_confirmation(
                 batch_id=str(task["batch_id"]),
                 project_id="project_owned",
                 created_by_user_id="employee_1",
-                storage=FakeStorageAdapter(provider="cos", bucket="generation-results"),
+                storage_factory=lambda: FakeStorageAdapter(
+                    provider="cos", bucket="generation-results"
+                ),
                 provider=ReconcileSucceededProvider(api_key="test-key"),
             )
 
@@ -3554,7 +3867,9 @@ def test_reconcile_running_task_keeps_uncertain(db_path: Path, client: TestClien
                 batch_id=str(task["batch_id"]),
                 project_id="project_owned",
                 created_by_user_id="employee_1",
-                storage=FakeStorageAdapter(provider="cos", bucket="generation-results"),
+                storage_factory=lambda: FakeStorageAdapter(
+                    provider="cos", bucket="generation-results"
+                ),
                 provider=ReconcileRunningProvider(api_key="test-key"),
             )
 
