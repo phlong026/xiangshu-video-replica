@@ -210,13 +210,18 @@ export function AnalysisWorkspace({
     [],
   );
 
+  const legacyCharacterSelected = Boolean(
+    characterSelection?.character_id &&
+      !characterSelection.character_version_id,
+  );
+
   const workflowStep = !analysisId
     ? 2
     : !characterSelection
       ? 3
       : !sourceFrameSelection
         ? 4
-        : !characterReferenceSelection
+        : !legacyCharacterSelected && !characterReferenceSelection
           ? 5
           : !firstFrameSelection
             ? 6
@@ -389,7 +394,8 @@ export function AnalysisWorkspace({
                   请先在右侧选择角色版本，再确认源画面。
                 </p>
               )}
-              {characterSelection && sourceFrameSelection ? (
+              {characterSelection?.character_version_id &&
+              sourceFrameSelection ? (
                 <CharacterReferenceSelection
                   characterSelection={characterSelection}
                   onSelectionChange={handleCharacterReferenceSelectionChange}
@@ -398,8 +404,9 @@ export function AnalysisWorkspace({
                   sourceFrameSelection={sourceFrameSelection}
                 />
               ) : null}
-              {characterReferenceSelection ? (
+              {characterSelection && sourceFrameSelection ? (
                 <FirstFrameSelection
+                  legacyCharacterSelected={legacyCharacterSelected}
                   onSelectionChange={handleFirstFrameSelectionChange}
                   projectId={project.id}
                   readOnly={readOnly}

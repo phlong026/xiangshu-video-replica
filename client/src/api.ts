@@ -243,6 +243,9 @@ export type SelectCharacterReferencesInput =
 
 export type FirstFrameModel = "gpt-image-2" | "nano-banana-pro-2k";
 
+export type GenerateFirstFramesInput =
+  components["schemas"]["GenerateFirstFramesRequest"];
+
 export type FirstFrameCandidate = {
   asset_id: string;
   storage_key: string;
@@ -965,13 +968,7 @@ export async function getLatestProjectFirstFrameSelection(
 
 export async function generateFirstFrames(
   projectId: string,
-  input: {
-    model: FirstFrameModel;
-    prompt: string;
-    quantity: number;
-    character_version_id: string;
-    character_reference_selection_id: string;
-  },
+  input: GenerateFirstFramesInput,
 ): Promise<AnalysisVersion> {
   return requestApiJson<AnalysisVersion>(
     `/api/projects/${encodeURIComponent(projectId)}/first-frames/generate`,

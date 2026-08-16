@@ -19,15 +19,17 @@ const DEFAULT_PROMPT =
   "保留原图的镜头位置、人物姿态、动作、场景、构图、道具、光线与色调，只将原人物身份替换为角色库人物；保持自然皮肤、正确肢体和真实透视；不得增加或删除主体。";
 
 export function FirstFrameSelection({
+  legacyCharacterSelected = false,
   onSelectionChange,
   projectId,
   readOnly = false,
   referenceSelection,
 }: {
+  legacyCharacterSelected?: boolean;
   onSelectionChange?: (selection: AnalysisVersion | null) => void;
   projectId: string;
   readOnly?: boolean;
-  referenceSelection: CharacterReferenceSelection;
+  referenceSelection: CharacterReferenceSelection | null;
 }) {
   const [version, setVersion] = useState<AnalysisVersion | null>(null);
   const [latestVersionId, setLatestVersionId] = useState("");
@@ -42,13 +44,11 @@ export function FirstFrameSelection({
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const loadRequestId = useRef(0);
-  const referenceSelectionId = referenceSelection.id;
+  const referenceSelectionId = referenceSelection?.id ?? "";
+  const canGenerate = Boolean(referenceSelection || legacyCharacterSelected);
 
   const load = useCallback(
     async (preferredVersion?: AnalysisVersion) => {
-      if (!referenceSelectionId) {
-        return;
-      }
       const requestId = loadRequestId.current + 1;
       loadRequestId.current = requestId;
       const isCurrentRequest = () => requestId === loadRequestId.current;
@@ -92,7 +92,11 @@ export function FirstFrameSelection({
           setStatus(
             latestState.stale || selection.stale
               ? "上游输入已更新，请重新生成人物置换首帧。"
-              : "人物参考图已确认，可以生成人物置换首帧。",
+              : referenceSelectionId
+                ? "人物参考图已确认，可以生成人物置换首帧。"
+                : legacyCharacterSelected
+                  ? "历史兼容人物已恢复，可以继续生成首帧。"
+                  : "请先确认人物参考图；已有首帧历史仍可查看。",
           );
           return;
         }
@@ -149,7 +153,13 @@ export function FirstFrameSelection({
         }
       }
     },
-    [onSelectionChange, projectId, readOnly, referenceSelectionId],
+    [
+      legacyCharacterSelected,
+      onSelectionChange,
+      projectId,
+      readOnly,
+      referenceSelectionId,
+    ],
   );
 
   useEffect(() => {
@@ -167,6 +177,10 @@ export function FirstFrameSelection({
     if (readOnly) {
       return;
     }
+    if (!canGenerate) {
+      setError("请先确认当前人物参考图，再生成新的置换首帧。");
+      return;
+    }
     if (!Number.isInteger(quantity) || quantity < 1 || quantity > 3) {
       setError("候选数量必须是 1–3 的整数。");
       return;
@@ -175,12 +189,17 @@ export function FirstFrameSelection({
     setError("");
     setStatus("");
     try {
+      const binding = referenceSelection
+        ? {
+            character_version_id: referenceSelection.character_version_id,
+            character_reference_selection_id: referenceSelection.id,
+          }
+        : {};
       const generated = await generateFirstFrames(projectId, {
         model,
         prompt,
         quantity,
-        character_version_id: referenceSelection.character_version_id,
-        character_reference_selection_id: referenceSelection.id,
+        ...binding,
       });
       setStatus("候选首帧已更新，请查看后手动确认一张。");
       await load(generated);
@@ -232,7 +251,9 @@ export function FirstFrameSelection({
         <span className="eyebrow">FIRST FRAME</span>
         <h3 id="first-frame-title">人物置换首帧</h3>
         <p>
-          以已确认的源画面和角色库参考图生成。确认后才允许它进入后续 H3 提示词。
+          {legacyCharacterSelected
+            ? "当前项目使用历史兼容人物；已有首帧历史可追溯，新生成沿用冻结的旧人物快照。"
+            : "以已确认的源画面和角色库参考图生成。确认后才允许它进入后续 H3 提示词。"}
         </p>
       </div>
       <div className="first-frame-controls">
@@ -240,7 +261,7 @@ export function FirstFrameSelection({
           首帧模型
           <select
             aria-label="首帧模型"
-            disabled={readOnly || isSubmitting}
+            disabled={readOnly || isSubmitting || !canGenerate}
             onChange={(event) =>
               setModel(event.target.value as FirstFrameModel)
             }
@@ -256,7 +277,7 @@ export function FirstFrameSelection({
           候选数量
           <input
             aria-label="候选数量"
-            disabled={readOnly || isSubmitting}
+            disabled={readOnly || isSubmitting || !canGenerate}
             max="3"
             min="1"
             onChange={(event) => setQuantity(Number(event.target.value))}
@@ -269,7 +290,7 @@ export function FirstFrameSelection({
         首帧编辑提示词
         <textarea
           aria-label="首帧编辑提示词"
-          disabled={readOnly || isSubmitting || !referenceSelection}
+          disabled={readOnly || isSubmitting || !canGenerate}
           onChange={(event) => setPrompt(event.target.value)}
           rows={5}
           value={prompt}
@@ -277,7 +298,7 @@ export function FirstFrameSelection({
       </label>
       <div className="source-frame-actions">
         <button
-          disabled={readOnly || isSubmitting}
+          disabled={readOnly || isSubmitting || !canGenerate}
           onClick={handleGenerate}
           type="button"
         >

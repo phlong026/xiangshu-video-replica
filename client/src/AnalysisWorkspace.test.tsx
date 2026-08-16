@@ -21,6 +21,18 @@ const characterSelection = {
   character_snapshot: { name: "林夏" },
 };
 
+const legacyCharacterSelection = {
+  project_id: "project-1",
+  character_id: "legacy-character-1",
+  character_version_id: null,
+  version_id: "main-character-legacy-1",
+  version_number: 1,
+  character_snapshot: {
+    name: "历史人物",
+    reference_asset_ids: ["legacy-reference-1"],
+  },
+};
+
 const sourceSelection = {
   id: "source-selection-1",
   project_id: "project-1",
@@ -55,9 +67,20 @@ const firstFrameSelection = {
 
 vi.mock("./CharacterSelection", () => ({
   CharacterSelection: ({ onVersionChange }: apiMockProps) => (
-    <button onClick={() => onVersionChange?.(characterSelection)} type="button">
-      完成角色选择
-    </button>
+    <>
+      <button
+        onClick={() => onVersionChange?.(characterSelection)}
+        type="button"
+      >
+        完成角色选择
+      </button>
+      <button
+        onClick={() => onVersionChange?.(legacyCharacterSelection)}
+        type="button"
+      >
+        恢复历史兼容人物
+      </button>
+    </>
   ),
 }));
 
@@ -81,19 +104,30 @@ vi.mock("./CharacterReferenceSelection", () => ({
 }));
 
 vi.mock("./FirstFrameSelection", () => ({
-  FirstFrameSelection: ({ onSelectionChange }: apiMockProps) => (
-    <button
-      onClick={() => onSelectionChange?.(firstFrameSelection)}
-      type="button"
-    >
-      完成置换首帧
-    </button>
+  FirstFrameSelection: ({
+    legacyCharacterSelected,
+    onSelectionChange,
+    referenceSelection: currentReferenceSelection,
+  }: apiMockProps) => (
+    <>
+      {legacyCharacterSelected && !currentReferenceSelection ? (
+        <span>历史兼容首帧可用</span>
+      ) : null}
+      <button
+        onClick={() => onSelectionChange?.(firstFrameSelection)}
+        type="button"
+      >
+        完成置换首帧
+      </button>
+    </>
   ),
 }));
 
 type apiMockProps = {
+  legacyCharacterSelected?: boolean;
   onSelectionChange?: (value: unknown) => void;
   onVersionChange?: (value: unknown) => void;
+  referenceSelection?: unknown;
 };
 
 describe("AnalysisWorkspace workflow gates", () => {
@@ -166,5 +200,34 @@ describe("AnalysisWorkspace workflow gates", () => {
     );
     expect(screen.queryByText("完成人物参考")).toBeNull();
     expect(screen.queryByText("完成置换首帧")).toBeNull();
+  });
+
+  it("keeps legacy first-frame history and generation reachable without a seven-view selection", async () => {
+    render(
+      <AnalysisWorkspace
+        onAnalysisReady={vi.fn()}
+        onClose={vi.fn()}
+        project={{
+          id: "project-1",
+          owner_user_id: "employee_1",
+          name: "历史项目",
+          status: "REFERENCE_READY",
+          reference_asset_id: "reference-video-1",
+          reference_upload_status: "READY",
+          analysis_status: "READY",
+        }}
+      />,
+    );
+
+    expect(await screen.findByText("拆解完成")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "恢复历史兼容人物" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成源画面" }));
+
+    expect(screen.queryByText("完成人物参考")).toBeNull();
+    expect(screen.getByText("历史兼容首帧可用")).toBeInTheDocument();
+    expect(screen.getByTitle("确认置换首帧")).toHaveAttribute(
+      "aria-current",
+      "step",
+    );
   });
 });

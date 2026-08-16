@@ -158,6 +158,30 @@ describe("FirstFrameSelection", () => {
     );
   });
 
+  it("loads history and uses the binding-less generation path for a legacy character", async () => {
+    render(
+      <FirstFrameSelection
+        legacyCharacterSelected
+        projectId="project-1"
+        referenceSelection={null}
+      />,
+    );
+    await screen.findByRole("button", { name: "版本 #2" });
+
+    fireEvent.change(screen.getByLabelText("首帧编辑提示词"), {
+      target: { value: "Keep the legacy character identity." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "重新生成候选首帧" }));
+
+    await waitFor(() =>
+      expect(generateFirstFrames).toHaveBeenCalledWith("project-1", {
+        model: "nano-banana-pro-2k",
+        prompt: "Keep the legacy character identity.",
+        quantity: 1,
+      }),
+    );
+  });
+
   it("clearly marks local fake output instead of presenting it as a provider result", async () => {
     vi.mocked(getLatestProjectFirstFrames).mockResolvedValue({
       stale: false,
