@@ -34,6 +34,35 @@ def test_python_quality_commands_survive_a_relocated_virtualenv() -> None:
     assert "--locked pytest" not in scripts["test:e2e"]
 
 
+def test_api_uses_the_project_interpreter_instead_of_a_global_uvicorn() -> None:
+    package = json.loads((REPO_ROOT / "package.json").read_text(encoding="utf-8"))
+
+    assert "python -m uvicorn" in package["scripts"]["dev:server"]
+
+
+def test_local_start_commands_upgrade_the_database_before_api_or_worker() -> None:
+    package = json.loads((REPO_ROOT / "package.json").read_text(encoding="utf-8"))
+    posix_launcher = (REPO_ROOT / "client/src-tauri/resources/start-backend.sh").read_text(
+        encoding="utf-8"
+    )
+    windows_launcher = (REPO_ROOT / "client/src-tauri/resources/start-backend.bat").read_text(
+        encoding="utf-8"
+    )
+
+    server_command = package["scripts"]["dev:server"]
+    worker_command = package["scripts"]["dev:worker"]
+    assert server_command.index("python -m app.bootstrap") < server_command.index(
+        "python -m uvicorn"
+    )
+    assert worker_command.index("python -m app.bootstrap") < worker_command.index(
+        "python -m app.generation_worker"
+    )
+    assert posix_launcher.index("python -m app.bootstrap") < posix_launcher.index("start_server")
+    assert windows_launcher.index("python -m app.bootstrap") < windows_launcher.index(
+        'start "video-replica-api"'
+    )
+
+
 def test_pull_requests_run_linux_quality_and_windows_nsis_gates() -> None:
     workflow_path = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 
@@ -72,6 +101,7 @@ def test_posix_backend_launcher_executes_default_commands(tmp_path: Path) -> Non
     fake_uv.write_text(
         """#!/bin/sh
 case "$*" in
+  *app.bootstrap*) printf '%s' "$*" > "$TEST_BOOTSTRAP_MARKER" ;;
   *uvicorn*) printf '%s' "$*" > "$TEST_SERVER_MARKER" ;;
   *generation_worker*) printf '%s' "$*" > "$TEST_WORKER_MARKER" ;;
   *) exit 64 ;;
@@ -83,11 +113,13 @@ esac
 
     server_marker = tmp_path / "server.args"
     worker_marker = tmp_path / "worker.args"
+    bootstrap_marker = tmp_path / "bootstrap.args"
     env = {
         **os.environ,
         "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
         "TEST_SERVER_MARKER": str(server_marker),
         "TEST_WORKER_MARKER": str(worker_marker),
+        "TEST_BOOTSTRAP_MARKER": str(bootstrap_marker),
         "VIDEO_REPLICA_DB_PATH": str(tmp_path / "app.db"),
         "VIDEO_REPLICA_SETTINGS_KEY": "test-settings-key",
         "VIDEO_REPLICA_DESKTOP_USER_ID": "employee_1",
@@ -103,5 +135,6 @@ esac
     )
 
     assert result.returncode == 0, result.stderr
-    assert "uvicorn app.main:app" in server_marker.read_text(encoding="utf-8")
+    assert "python -m app.bootstrap" in bootstrap_marker.read_text(encoding="utf-8")
+    assert "python -m uvicorn app.main:app" in server_marker.read_text(encoding="utf-8")
     assert "python -m app.generation_worker" in worker_marker.read_text(encoding="utf-8")

@@ -75,7 +75,7 @@ export type GenerationBatchListFilters = {
   cursor?: string;
 };
 
-export type ProviderName = "metaso" | "apilio" | "cos" | "oss";
+export type ProviderName = "metaso" | "apilio" | "cos";
 
 export type ProviderSettings = {
   provider: ProviderName;
@@ -86,7 +86,7 @@ export type ProviderSettings = {
 export type RuntimeSettings = {
   max_generation_count_per_batch: number;
   max_concurrent_h3_tasks: number;
-  active_storage_provider: "cos" | "oss";
+  active_storage_provider: "cos" | "local";
 };
 
 export type SettingsSnapshot = {

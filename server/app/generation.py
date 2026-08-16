@@ -37,7 +37,7 @@ from app.permissions import (
     require_project_access,
     write_audit,
 )
-from app.settings import SettingsDecryptError, SettingsKeyMissing, SettingsRepository
+from app.settings import SettingsRepository, SettingsUnavailableError
 from app.storage import (
     StorageAdapter,
     StorageBackendUnavailable,
@@ -377,7 +377,7 @@ class MetasoH3Provider(H3Provider):
 def metaso_h3_provider_from_settings(conn: sqlite3.Connection) -> MetasoH3Provider:
     try:
         config = SettingsRepository(conn).load_provider_config("metaso")
-    except (SettingsDecryptError, SettingsKeyMissing) as exc:
+    except SettingsUnavailableError as exc:
         raise H3ProviderSettingsUnavailable("METASO settings cannot be read") from exc
     api_key = config.get("api_key")
     if not api_key:
@@ -1245,7 +1245,7 @@ def create_generation_batch(
                     422,
                     "METASO_REQUIRES_CLOUD_STORAGE",
                     "METASO H3 requires an HTTPS first-frame URL; switch storage to "
-                    "COS/OSS before generating.",
+                    "COS before generating.",
                 )
 
         prompt = require_version(
@@ -1845,8 +1845,7 @@ def require_regeneration_provider_ready(
         raise generation_error(
             422,
             "METASO_REQUIRES_CLOUD_STORAGE",
-            "METASO H3 requires an HTTPS first-frame URL; switch storage to "
-            "COS/OSS before generating.",
+            "METASO H3 requires an HTTPS first-frame URL; switch storage to COS before generating.",
         )
 
 

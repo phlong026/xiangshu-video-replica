@@ -200,25 +200,25 @@ def test_media_storage_uses_the_selected_cloud_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("VIDEO_REPLICA_SETTINGS_KEY", Fernet.generate_key().decode("ascii"))
-    selected_storage = FakeStorageAdapter(provider="oss", bucket="private-bucket")
+    selected_storage = FakeStorageAdapter(provider="cos", bucket="private-bucket")
     monkeypatch.setattr("app.media_routes.create_storage_adapter", lambda _: selected_storage)
 
     with connect_database(db_path) as conn:
         repo = SettingsRepository(conn)
         repo.save_provider_config(
-            "oss",
+            "cos",
             {
-                "access_key_id": "oss-id",
-                "secret_access_key": "oss-secret",
+                "access_key_id": "cos-id",
+                "secret_access_key": "cos-secret",
                 "bucket": "private-bucket",
-                "endpoint": "https://oss.example",
+                "region": "ap-shanghai",
             },
             actor_user_id="admin_1",
         )
         repo.save_runtime_settings(
             max_generation_count_per_batch=4,
             max_concurrent_h3_tasks=2,
-            active_storage_provider="oss",
+            active_storage_provider="cos",
             actor_user_id="admin_1",
         )
 
@@ -567,7 +567,10 @@ def test_default_probe_failure_does_not_mark_upload_complete(
 def test_local_download_url_and_proxy(
     db_path: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("VIDEO_REPLICA_SETTINGS_KEY", Fernet.generate_key().decode("ascii"))
+    key = Fernet.generate_key().decode("ascii")
+    monkeypatch.delenv("VIDEO_REPLICA_SETTINGS_KEY", raising=False)
+    monkeypatch.delenv("VIDEO_REPLICA_DISABLE_LOCAL_KEYSTORE", raising=False)
+    monkeypatch.setattr("app.settings.load_or_create_local_settings_key", lambda: key)
     monkeypatch.setenv("VIDEO_REPLICA_STORAGE_ROOT", str(tmp_path / "local-storage"))
     storage = LocalStorageAdapter(root=tmp_path / "local-storage")
     storage.put_object(

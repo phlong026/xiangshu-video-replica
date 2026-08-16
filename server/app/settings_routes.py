@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from app.auth import AuthenticatedUser, CurrentUser, Database
 from app.auth import get_database as auth_get_database
 from app.permissions import require_role
-from app.settings import SettingsRepository, is_secret_field, normalize_provider
+from app.settings import ProviderName, SettingsRepository, is_secret_field, normalize_provider
 from app.storage import (
     CloudStorageConfig,
     StorageAdapter,
@@ -37,7 +37,7 @@ class ProviderSettingsRequest(BaseModel):
 class RuntimeSettingsRequest(BaseModel):
     max_generation_count_per_batch: int
     max_concurrent_h3_tasks: int
-    active_storage_provider: Literal["cos", "oss", "local"] | None = None
+    active_storage_provider: Literal["cos", "local"] | None = None
 
 
 class ProviderTestResult(BaseModel):
@@ -103,7 +103,7 @@ class StorageProviderTester:
         self.storage_factory = storage_factory
 
     def connection_test(self, provider: str, config: dict[str, str]) -> ProviderTestResult:
-        if provider not in {"cos", "oss"}:
+        if provider != "cos":
             return self.fallback.connection_test(provider, config)
         if not config:
             return self.fallback.connection_test(provider, config)
@@ -202,6 +202,19 @@ def require_settings_admin(conn: Database, actor: AuthenticatedUser) -> CurrentU
 SettingsAdmin = Annotated[CurrentUser, Depends(require_settings_admin)]
 
 
+def require_supported_provider(provider: str) -> ProviderName:
+    try:
+        return normalize_provider(provider)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "UNSUPPORTED_PROVIDER",
+                "message": "该服务已不受支持。",
+            },
+        ) from exc
+
+
 @router.get("")
 def read_settings(
     conn: Database,
@@ -221,7 +234,7 @@ def update_provider_settings(
     conn: Database,
     admin: SettingsAdmin,
 ) -> dict[str, object]:
-    provider_name = normalize_provider(provider)
+    provider_name = require_supported_provider(provider)
     repo = SettingsRepository(conn)
     try:
         saved_config = repo.load_provider_config(provider_name)
@@ -289,7 +302,7 @@ def connection_test(
     _: SettingsAdmin,
     tester: ProviderTester = Depends(get_provider_tester),
 ) -> ProviderTestResult:
-    provider_name = normalize_provider(provider)
+    provider_name = require_supported_provider(provider)
     config = SettingsRepository(conn).load_provider_config(provider_name)
     return tester.connection_test(provider_name, config)
 
@@ -301,7 +314,7 @@ def paid_test(
     _: SettingsAdmin,
     tester: ProviderTester = Depends(get_provider_tester),
 ) -> ProviderTestResult:
-    provider_name = normalize_provider(provider)
+    provider_name = require_supported_provider(provider)
     config = SettingsRepository(conn).load_provider_config(provider_name)
     return tester.paid_test(provider_name, config)
 
@@ -315,7 +328,7 @@ def run_settings_diagnostic(
     repo = SettingsRepository(conn)
     results: list[DiagnosticProviderResult] = []
 
-    for provider in ("metaso", "apilio", "cos", "oss"):
+    for provider in ("metaso", "apilio", "cos"):
         config = repo.load_provider_config(provider)
         configured_fields = sorted(config)
         if not config:
@@ -409,7 +422,9 @@ def run_settings_diagnostic(
 
     report_id = str(uuid.uuid4())
     report_status: Literal["ok", "attention"] = (
-        "ok" if all(result.status == "ok" for result in results) else "attention"
+        "ok"
+        if all(result.status in {"ok", "configured_only"} for result in results)
+        else "attention"
     )
     download_url = f"/api/admin/settings/diagnostic-reports/{report_id}/download"
     report = SettingsDiagnosticReport(

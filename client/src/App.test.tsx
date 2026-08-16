@@ -752,7 +752,7 @@ describe("App", () => {
     ).toBeInTheDocument();
     expect(
       screen.getByText(
-        "当前显示的是内置模拟结果。请在设置中保存 Gemini 视频分析 API Key，并配置可用的 COS 或 OSS 存储后重新拆解。",
+        "当前显示的是内置模拟结果。请在设置中保存 Gemini 视频分析 API Key，并配置可用的 COS 存储后重新拆解。",
       ),
     ).toBeInTheDocument();
     expect(screen.getByLabelText("S01 动作")).toHaveValue("已保存的动作");
@@ -1538,12 +1538,11 @@ describe("App", () => {
         },
         apilio: { provider: "apilio", configured: false, config: {} },
         cos: { provider: "cos", configured: false, config: {} },
-        oss: { provider: "oss", configured: false, config: {} },
       },
       runtime: {
         max_generation_count_per_batch: 4,
         max_concurrent_h3_tasks: 2,
-        active_storage_provider: "cos",
+        active_storage_provider: "local",
       },
     };
     const diagnosticResponse = {
@@ -1560,6 +1559,17 @@ describe("App", () => {
           error_code: null,
           latency_ms: 1,
           message: "参数已保存；真实服务适配器尚未启用，因此未发起外部调用。",
+        },
+        {
+          provider: "oss",
+          status: "error",
+          configured_fields: ["bucket"],
+          adapter_capability: "connection_test",
+          test_kind: "connection",
+          http_status: 503,
+          error_code: "LEGACY_PROVIDER",
+          latency_ms: 0,
+          message: "旧版诊断结果不应在新界面中渲染。",
         },
       ],
       download_url:
@@ -1623,16 +1633,17 @@ describe("App", () => {
       "已保存，留空不修改",
     );
     expect(screen.getByText("模型服务（Apilio）")).toBeInTheDocument();
-    expect(screen.getByText("当前已保存：腾讯云 COS")).toBeInTheDocument();
+    expect(screen.getByText("当前已保存：本地存储")).toBeInTheDocument();
+    expect(screen.queryByText("阿里云 OSS")).not.toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("当前对象存储"), {
-      target: { value: "oss" },
+      target: { value: "cos" },
     });
     expect(
-      screen.getByText("尚未保存：将切换为阿里云 OSS"),
+      screen.getByText("尚未保存：将切换为腾讯云 COS"),
     ).toBeInTheDocument();
     await act(async () => Promise.resolve());
     expect(
-      screen.getByText("尚未保存：将切换为阿里云 OSS"),
+      screen.getByText("尚未保存：将切换为腾讯云 COS"),
     ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "保存运行设置" }));
     expect(screen.getByLabelText("当前对象存储")).toBeDisabled();
@@ -1646,7 +1657,7 @@ describe("App", () => {
         ok: true,
         json: async () => ({
           ...settingsResponse.runtime,
-          active_storage_provider: "oss",
+          active_storage_provider: "cos",
         }),
       });
       await Promise.resolve();
@@ -1660,6 +1671,10 @@ describe("App", () => {
     ).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "测试设置" }));
+    expect(await screen.findByText("已配置（不调用）")).toBeInTheDocument();
+    expect(
+      screen.queryByText("旧版诊断结果不应在新界面中渲染。"),
+    ).not.toBeInTheDocument();
 
     expect(
       await screen.findByText("检测到需要处理的配置项"),
@@ -1679,6 +1694,36 @@ describe("App", () => {
       () => expect(revokeObjectUrl).toHaveBeenCalledWith("blob:diagnostic-1"),
       { timeout: 2_000 },
     );
+  });
+
+  it("tells an admin that saved settings remain when the local key is unavailable", async () => {
+    const message =
+      "本地配置仍保存在数据库中，但当前主密钥缺失或不匹配；系统未覆盖已保存配置。";
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/health")) {
+        return Promise.resolve({ ok: true, json: async () => healthResponse });
+      }
+      if (url.endsWith("/api/admin/settings")) {
+        return Promise.resolve({
+          ok: false,
+          status: 503,
+          json: async () => ({
+            detail: {
+              code: "SETTINGS_CONFIGURATION_UNAVAILABLE",
+              message,
+            },
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    vi.stubGlobal("fetch", withAuth(fetchMock, adminUser));
+
+    render(<App />);
+    await enterWorkspace();
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(message);
   });
 
   it("loads a pasted batch id and renders progress, task stages, results, and attention hints", async () => {

@@ -36,7 +36,7 @@ from app.character_identity import (
 )
 from app.media_routes import LOCAL_API_BASE_URL, get_media_storage
 from app.permissions import require_role
-from app.settings import SettingsDecryptError, SettingsKeyMissing, SettingsRepository
+from app.settings import SettingsRepository, SettingsUnavailableError
 from app.storage import StorageAdapter
 
 router = APIRouter(prefix="/api", tags=["character-identities"])
@@ -125,7 +125,7 @@ def get_source_image_inspector(conn: Database) -> SourceImageInspector:
     )
     try:
         config = SettingsRepository(conn).load_provider_config("apilio")
-    except (SettingsDecryptError, SettingsKeyMissing) as exc:
+    except SettingsUnavailableError as exc:
         code = (
             "APILIO_SETTINGS_UNAVAILABLE"
             if has_saved_config

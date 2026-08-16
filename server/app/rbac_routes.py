@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 import time
 from datetime import timedelta
@@ -28,7 +27,7 @@ from app.permissions import (
     require_role,
     write_audit,
 )
-from app.settings import SettingsDecryptError, SettingsKeyMissing, SettingsRepository
+from app.settings import SettingsRepository, SettingsUnavailableError, settings_encryption_key
 from app.storage import (
     LocalStorageAdapter,
     StorageAdapter,
@@ -87,14 +86,14 @@ def storage_for_asset(conn: sqlite3.Connection, storage_uri: str) -> StorageAdap
         local_storage = LocalStorageAdapter(root=local_storage_root(), bucket=reference.bucket)
         require_storage_match(local_storage, reference)
         return local_storage
-    if reference.provider not in {"cos", "oss"}:
+    if reference.provider != "cos":
         raise HTTPException(
             status_code=503,
             detail={"code": "STORAGE_PROVIDER_UNAVAILABLE"},
         )
     try:
         config = SettingsRepository(conn).load_provider_config(reference.provider)
-    except (SettingsKeyMissing, SettingsDecryptError) as exc:
+    except SettingsUnavailableError as exc:
         raise HTTPException(
             status_code=503,
             detail={"code": "STORAGE_SETTINGS_UNAVAILABLE"},
@@ -509,7 +508,7 @@ def create_download_url(
         storage = storage_for_asset(conn, str(row["storage_uri"]))
         object_key = storage_key_from_uri(str(row["storage_uri"]))
         if storage.provider == "local":
-            secret = os.environ.get("VIDEO_REPLICA_SETTINGS_KEY", "")
+            secret = settings_encryption_key()
             expires_at = str(int(time.time()) + int(DOWNLOAD_URL_EXPIRES_IN.total_seconds()))
             signature = local_download_signature(object_key, expires_at, secret=secret)
             url = (

@@ -11,7 +11,12 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from app.db import connect_database, initialize_database
-from app.settings import SettingsKeyMissing, SettingsRepository
+from app.settings import (
+    SettingsDecryptError,
+    SettingsKeyMissing,
+    SettingsRepository,
+    fernet_from_environment,
+)
 from app.settings_routes import (
     NoopProviderTester,
     ProviderTestResult,
@@ -112,7 +117,7 @@ def test_settings_migration_creates_tables_and_defaults(tmp_path: Path, settings
             """
         ).fetchone()
 
-    assert version == "017_generation_task_retry_lineage"
+    assert version == "018_remove_oss_storage"
     assert {"provider_settings", "runtime_settings"}.issubset(tables)
     assert dict(runtime) == {
         "max_generation_count_per_batch": 4,
@@ -129,6 +134,20 @@ def test_master_key_must_come_from_environment(
     with initialize_database(tmp_path / "settings.db") as conn:
         with pytest.raises(SettingsKeyMissing):
             SettingsRepository(conn)
+
+
+def test_master_key_uses_local_secure_store_when_environment_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    key = Fernet.generate_key().decode("ascii")
+    monkeypatch.delenv("VIDEO_REPLICA_SETTINGS_KEY", raising=False)
+    monkeypatch.delenv("VIDEO_REPLICA_DISABLE_LOCAL_KEYSTORE", raising=False)
+    monkeypatch.setattr("app.settings.load_or_create_local_settings_key", lambda: key)
+
+    fernet = fernet_from_environment()
+    payload = b"persistent settings"
+
+    assert fernet.decrypt(fernet.encrypt(payload)) == payload
 
 
 def test_provider_config_is_encrypted_at_rest_and_masked_on_read(
@@ -158,6 +177,137 @@ def test_provider_config_is_encrypted_at_rest_and_masked_on_read(
     assert actual == {"api_key": "metaso-secret-token", "base_url": "https://metaso.example/api"}
 
 
+def test_provider_config_survives_database_reopen(
+    db_path: Path,
+    settings_key: str,
+) -> None:
+    with connect_database(db_path) as conn:
+        SettingsRepository(conn).save_provider_config(
+            "cos",
+            {
+                "access_key_id": "cos-id",
+                "secret_access_key": "cos-secret",
+                "bucket": "video-private",
+                "region": "ap-shanghai",
+            },
+            actor_user_id="admin_1",
+        )
+
+    with connect_database(db_path) as reopened:
+        stored = SettingsRepository(reopened).load_provider_config("cos")
+
+    assert settings_key
+    assert stored == {
+        "access_key_id": "cos-id",
+        "secret_access_key": "cos-secret",
+        "bucket": "video-private",
+        "region": "ap-shanghai",
+    }
+
+
+def test_provider_config_remains_encrypted_when_reopened_with_the_wrong_key(
+    db_path: Path,
+) -> None:
+    with connect_database(db_path) as conn:
+        SettingsRepository(conn).save_provider_config(
+            "metaso",
+            {"api_key": "metaso-secret"},
+            actor_user_id="admin_1",
+        )
+
+    with connect_database(db_path) as reopened:
+        with pytest.raises(SettingsDecryptError, match="cannot be decrypted"):
+            SettingsRepository(reopened, fernet=Fernet(Fernet.generate_key())).load_provider_config(
+                "metaso"
+            )
+
+        assert (
+            reopened.execute(
+                "SELECT COUNT(*) FROM provider_settings WHERE provider = 'metaso'"
+            ).fetchone()[0]
+            == 1
+        )
+
+
+def test_settings_api_reports_wrong_key_without_deleting_saved_config(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with connect_database(db_path) as conn:
+        SettingsRepository(conn).save_provider_config(
+            "metaso",
+            {"api_key": "metaso-secret"},
+            actor_user_id="admin_1",
+        )
+
+    monkeypatch.setenv(
+        "VIDEO_REPLICA_SETTINGS_KEY",
+        Fernet.generate_key().decode("ascii"),
+    )
+    from app.main import app as production_app
+
+    def override_database() -> Iterator[sqlite3.Connection]:
+        with connect_database(db_path) as connection:
+            yield connection
+
+    production_app.dependency_overrides[get_database] = override_database
+    try:
+        with TestClient(production_app, raise_server_exceptions=False) as api:
+            response = api.get("/api/admin/settings", headers=admin_headers())
+    finally:
+        production_app.dependency_overrides.clear()
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": {
+            "code": "SETTINGS_CONFIGURATION_UNAVAILABLE",
+            "message": "本地配置仍保存在数据库中，但当前主密钥缺失或不匹配；系统未覆盖已保存配置。",
+        }
+    }
+    with connect_database(db_path) as conn:
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM provider_settings WHERE provider = 'metaso'"
+            ).fetchone()[0]
+            == 1
+        )
+
+
+def test_bootstrap_persists_an_explicit_key_only_after_saved_settings_decrypt(
+    db_path: Path,
+    settings_key: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.bootstrap import bootstrap_runtime
+
+    monkeypatch.delenv("VIDEO_REPLICA_DISABLE_LOCAL_KEYSTORE", raising=False)
+
+    with connect_database(db_path) as conn:
+        SettingsRepository(conn).save_provider_config(
+            "metaso",
+            {"api_key": "metaso-secret"},
+            actor_user_id="admin_1",
+        )
+
+    persisted: list[str] = []
+    monkeypatch.setattr("app.bootstrap.persist_local_settings_key", persisted.append)
+
+    bootstrap_runtime(db_path)
+
+    assert persisted == [settings_key]
+
+    persisted.clear()
+    monkeypatch.setenv("VIDEO_REPLICA_SETTINGS_KEY", Fernet.generate_key().decode("ascii"))
+    with pytest.raises(SettingsDecryptError):
+        bootstrap_runtime(db_path)
+    assert persisted == []
+
+    monkeypatch.setenv("VIDEO_REPLICA_SETTINGS_KEY", settings_key)
+    monkeypatch.setenv("VIDEO_REPLICA_DISABLE_LOCAL_KEYSTORE", "1")
+    bootstrap_runtime(db_path)
+    assert persisted == []
+
+
 @pytest.mark.parametrize(
     ("provider", "config"),
     [
@@ -170,15 +320,6 @@ def test_provider_config_is_encrypted_at_rest_and_masked_on_read(
                 "secret_access_key": "cos-secret",
                 "bucket": "video-private",
                 "region": "ap-shanghai",
-            },
-        ),
-        (
-            "oss",
-            {
-                "access_key_id": "oss-id",
-                "secret_access_key": "oss-secret",
-                "bucket": "video-private",
-                "endpoint": "https://oss.example",
             },
         ),
     ],
@@ -243,7 +384,23 @@ def test_missing_provider_required_field_is_rejected(conn: sqlite3.Connection) -
     repo = SettingsRepository(conn)
 
     with pytest.raises(ValueError, match="missing required setting"):
-        repo.save_provider_config("oss", {"bucket": "video-private"}, actor_user_id="admin_1")
+        repo.save_provider_config("cos", {"bucket": "video-private"}, actor_user_id="admin_1")
+
+
+def test_oss_provider_is_rejected(conn: sqlite3.Connection) -> None:
+    repo = SettingsRepository(conn)
+
+    with pytest.raises(ValueError, match="unsupported provider: oss"):
+        repo.save_provider_config(
+            "oss",
+            {
+                "access_key_id": "oss-id",
+                "secret_access_key": "oss-secret",
+                "bucket": "video-private",
+                "endpoint": "https://oss.example",
+            },
+            actor_user_id="admin_1",
+        )
 
 
 def test_runtime_limits_are_saved_and_validated(conn: sqlite3.Connection) -> None:
@@ -252,14 +409,14 @@ def test_runtime_limits_are_saved_and_validated(conn: sqlite3.Connection) -> Non
     repo.save_runtime_settings(
         max_generation_count_per_batch=8,
         max_concurrent_h3_tasks=3,
-        active_storage_provider="oss",
+        active_storage_provider="cos",
         actor_user_id="admin_1",
     )
 
     assert repo.read_runtime_settings() == {
         "max_generation_count_per_batch": 8,
         "max_concurrent_h3_tasks": 3,
-        "active_storage_provider": "oss",
+        "active_storage_provider": "cos",
     }
     with pytest.raises(ValueError, match="max_generation_count_per_batch"):
         repo.save_runtime_settings(
@@ -279,6 +436,18 @@ def test_local_storage_provider_is_allowed(conn: sqlite3.Connection) -> None:
         actor_user_id="admin_1",
     )
     assert repo.read_runtime_settings()["active_storage_provider"] == "local"
+
+
+def test_oss_runtime_provider_is_rejected(conn: sqlite3.Connection) -> None:
+    repo = SettingsRepository(conn)
+
+    with pytest.raises(ValueError, match="active_storage_provider must be cos or local"):
+        repo.save_runtime_settings(
+            max_generation_count_per_batch=4,
+            max_concurrent_h3_tasks=2,
+            active_storage_provider="oss",
+            actor_user_id="admin_1",
+        )
 
 
 @pytest.mark.parametrize(
@@ -422,7 +591,7 @@ def test_admin_can_update_runtime_limits(client: TestClient) -> None:
         json={
             "max_generation_count_per_batch": 6,
             "max_concurrent_h3_tasks": 4,
-            "active_storage_provider": "oss",
+            "active_storage_provider": "cos",
         },
     )
 
@@ -430,8 +599,42 @@ def test_admin_can_update_runtime_limits(client: TestClient) -> None:
     assert response.json() == {
         "max_generation_count_per_batch": 6,
         "max_concurrent_h3_tasks": 4,
-        "active_storage_provider": "oss",
+        "active_storage_provider": "cos",
     }
+
+
+def test_admin_cannot_enable_removed_oss_storage(client: TestClient) -> None:
+    response = client.patch(
+        "/api/admin/settings/runtime",
+        headers=admin_headers(),
+        json={
+            "max_generation_count_per_batch": 6,
+            "max_concurrent_h3_tasks": 4,
+            "active_storage_provider": "oss",
+        },
+    )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "payload"),
+    [
+        ("put", "/api/admin/settings/providers/oss", {"config": {"bucket": "removed"}}),
+        ("post", "/api/admin/settings/providers/oss/connection-test", None),
+        ("post", "/api/admin/settings/providers/oss/paid-test", None),
+    ],
+)
+def test_removed_oss_provider_routes_return_validation_error(
+    client: TestClient,
+    method: str,
+    path: str,
+    payload: dict[str, object] | None,
+) -> None:
+    response = client.request(method, path, headers=admin_headers(), json=payload)
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "UNSUPPORTED_PROVIDER"
 
 
 def test_admin_can_enable_local_storage_via_api(client: TestClient) -> None:
@@ -493,7 +696,6 @@ def test_admin_can_generate_and_download_a_redacted_settings_diagnostic_log(
         "apilio",
         "metaso",
         "cos",
-        "oss",
     }
     metaso = next(item for item in report["providers"] if item["provider"] == "metaso")
     assert metaso["status"] == "ok"
@@ -509,6 +711,48 @@ def test_admin_can_generate_and_download_a_redacted_settings_diagnostic_log(
     assert "attachment" in download.headers["content-disposition"]
     assert "metaso-secret-token" not in download.text
     assert "api_key" in download.text
+
+
+def test_configuration_only_model_checks_do_not_mark_a_complete_report_as_attention(
+    client: TestClient,
+) -> None:
+    client.put(
+        "/api/admin/settings/providers/metaso",
+        headers=admin_headers(),
+        json={"config": {"api_key": "metaso-secret-token"}},
+    )
+    client.put(
+        "/api/admin/settings/providers/apilio",
+        headers=admin_headers(),
+        json={"config": {"analysis_api_key": "analysis-secret-token"}},
+    )
+    client.put(
+        "/api/admin/settings/providers/cos",
+        headers=admin_headers(),
+        json={
+            "config": {
+                "access_key_id": "cos-id",
+                "secret_access_key": "cos-secret",
+                "bucket": "video-private",
+                "region": "ap-shanghai",
+            }
+        },
+    )
+    storage = FakeStorageAdapter(provider="cos", bucket="video-private")
+    client.app.dependency_overrides[get_provider_tester] = lambda: StorageProviderTester(
+        storage_factory=lambda _: storage
+    )
+
+    response = client.post("/api/admin/settings/diagnostic-test", headers=admin_headers())
+
+    assert response.status_code == 200
+    report = response.json()
+    assert report["status"] == "ok"
+    assert {item["provider"]: item["status"] for item in report["providers"]} == {
+        "metaso": "configured_only",
+        "apilio": "configured_only",
+        "cos": "ok",
+    }
 
 
 def test_diagnostic_log_keeps_http_error_codes_but_not_provider_error_details(

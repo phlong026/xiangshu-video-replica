@@ -553,7 +553,7 @@ export function AnalysisWorkspace({
           {analysisProvider === "fake_gemini" ? (
             <p className="status-note">
               当前显示的是内置模拟结果。请在设置中保存 Gemini 视频分析 API
-              Key，并配置可用的 COS 或 OSS 存储后重新拆解。
+              Key，并配置可用的 COS 存储后重新拆解。
             </p>
           ) : null}
           {readOnly ? (

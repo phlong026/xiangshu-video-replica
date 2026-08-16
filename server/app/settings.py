@@ -3,13 +3,17 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from functools import lru_cache
 from typing import Any, Literal
 
 from cryptography.fernet import Fernet, InvalidToken
 
-ProviderName = Literal["apilio", "metaso", "cos", "oss"]
+from app.local_settings_key import LocalSettingsKeyStoreError, load_or_create_local_settings_key
+
+ProviderName = Literal["apilio", "metaso", "cos"]
 
 SETTINGS_KEY_ENV = "VIDEO_REPLICA_SETTINGS_KEY"
+LOCAL_KEYSTORE_DISABLED_ENV = "VIDEO_REPLICA_DISABLE_LOCAL_KEYSTORE"
 SECRET_FIELDS = (
     "api_key",
     "access_key_id",
@@ -23,7 +27,6 @@ REQUIRED_PROVIDER_FIELDS: dict[ProviderName, tuple[str, ...]] = {
     "apilio": (),
     "metaso": ("api_key",),
     "cos": ("access_key_id", "secret_access_key", "bucket", "region"),
-    "oss": ("access_key_id", "secret_access_key", "bucket", "endpoint"),
 }
 DEFAULT_RUNTIME_SETTINGS: dict[str, int | str] = {
     "max_generation_count_per_batch": 4,
@@ -32,11 +35,19 @@ DEFAULT_RUNTIME_SETTINGS: dict[str, int | str] = {
 }
 
 
-class SettingsKeyMissing(RuntimeError):
+class SettingsUnavailableError(RuntimeError):
     pass
 
 
-class SettingsDecryptError(RuntimeError):
+class SettingsKeyMissing(SettingsUnavailableError):
+    pass
+
+
+class SettingsKeyInvalid(SettingsUnavailableError):
+    pass
+
+
+class SettingsDecryptError(SettingsUnavailableError):
     pass
 
 
@@ -173,10 +184,34 @@ class SettingsRepository:
 
 
 def fernet_from_environment() -> Fernet:
+    return Fernet(settings_encryption_key().encode("ascii"))
+
+
+def settings_encryption_key() -> str:
     key = os.environ.get(SETTINGS_KEY_ENV)
     if not key:
-        raise SettingsKeyMissing(f"{SETTINGS_KEY_ENV} is required")
-    return Fernet(key.encode("ascii"))
+        if os.environ.get(LOCAL_KEYSTORE_DISABLED_ENV) == "1":
+            raise SettingsKeyMissing(f"{SETTINGS_KEY_ENV} is required")
+        try:
+            key = _local_settings_key()
+        except LocalSettingsKeyStoreError as exc:
+            raise SettingsKeyMissing(
+                f"{SETTINGS_KEY_ENV} or an operating-system key store is required"
+            ) from exc
+    try:
+        Fernet(key.encode("ascii"))
+    except (UnicodeEncodeError, ValueError) as exc:
+        raise SettingsKeyInvalid("settings encryption key is invalid") from exc
+    return key
+
+
+@lru_cache(maxsize=1)
+def _local_settings_key() -> str:
+    return load_or_create_local_settings_key()
+
+
+def clear_local_settings_key_cache() -> None:
+    _local_settings_key.cache_clear()
 
 
 def normalize_provider(provider: str) -> ProviderName:
@@ -211,8 +246,8 @@ def validate_runtime_settings(
         raise ValueError("max_generation_count_per_batch must be at least 1")
     if max_concurrent_h3_tasks < 1:
         raise ValueError("max_concurrent_h3_tasks must be at least 1")
-    if active_storage_provider not in {"cos", "oss", "local"}:
-        raise ValueError("active_storage_provider must be cos, oss or local")
+    if active_storage_provider not in {"cos", "local"}:
+        raise ValueError("active_storage_provider must be cos or local")
 
 
 def mask_config(config: dict[str, str]) -> dict[str, str]:

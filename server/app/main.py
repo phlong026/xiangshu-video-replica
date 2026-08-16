@@ -1,4 +1,5 @@
 import ipaddress
+import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal
 
@@ -18,12 +19,14 @@ from app.first_frame_routes import router as first_frame_router
 from app.generation_routes import router as generation_router
 from app.media_routes import router as media_router
 from app.rbac_routes import router as rbac_router
+from app.settings import SettingsUnavailableError
 from app.settings_routes import router as settings_router
 from app.source_frame_routes import router as source_frame_router
 
 # Non-loopback hosts that are still accepted: TestClient uses "testclient",
 # and "localhost" is a loopback alias but not parseable as an IP address.
 LOOPBACK_ALIASES = {"localhost", "testclient"}
+logger = logging.getLogger(__name__)
 
 
 class HealthResponse(BaseModel):
@@ -44,6 +47,25 @@ class VideoReplicaAPI(FastAPI):
 
 
 app = VideoReplicaAPI(title="Video Replica API", version="0.1.0")
+
+
+@app.exception_handler(SettingsUnavailableError)
+async def settings_unavailable_handler(
+    _: Request,
+    error: SettingsUnavailableError,
+) -> JSONResponse:
+    logger.error("Local settings are unavailable: %s", type(error).__name__)
+    return JSONResponse(
+        status_code=503,
+        content={
+            "detail": {
+                "code": "SETTINGS_CONFIGURATION_UNAVAILABLE",
+                "message": (
+                    "本地配置仍保存在数据库中，但当前主密钥缺失或不匹配；系统未覆盖已保存配置。"
+                ),
+            }
+        },
+    )
 
 
 @app.middleware("http")

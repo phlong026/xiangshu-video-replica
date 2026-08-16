@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hmac
 import json
-import os
 import time
 from typing import Annotated
 from urllib.parse import quote
@@ -20,7 +19,7 @@ from app.media import (
     create_upload_intent,
 )
 from app.permissions import require_not_auditor, require_project_access, require_role
-from app.settings import SettingsDecryptError, SettingsKeyMissing, SettingsRepository
+from app.settings import SettingsRepository, SettingsUnavailableError, settings_encryption_key
 from app.storage import (
     StorageAdapter,
     StorageBackendUnavailable,
@@ -73,7 +72,7 @@ def get_media_storage(conn: Database) -> StorageAdapter:
             return create_local_storage_from_environment()
         config = repo.load_provider_config(provider)
         return create_storage_adapter(cloud_storage_config_from_settings(provider, config))
-    except (SettingsDecryptError, SettingsKeyMissing, StorageBackendUnavailable, ValueError) as exc:
+    except (SettingsUnavailableError, StorageBackendUnavailable, ValueError) as exc:
         raise HTTPException(
             status_code=503,
             detail={"code": "STORAGE_SETTINGS_UNAVAILABLE"},
@@ -251,7 +250,7 @@ def get_local_object(
         raise HTTPException(status_code=404, detail={"code": "LOCAL_DOWNLOAD_UNAVAILABLE"})
     expires_at = request.query_params.get("expires")
     signature = request.query_params.get("sig")
-    secret = os.environ.get("VIDEO_REPLICA_SETTINGS_KEY", "")
+    secret = settings_encryption_key()
     if (
         not expires_at
         or not signature

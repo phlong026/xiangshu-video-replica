@@ -33,7 +33,7 @@ from app.permissions import (
     require_project_access,
     write_audit,
 )
-from app.settings import SettingsDecryptError, SettingsKeyMissing, SettingsRepository
+from app.settings import SettingsRepository, SettingsUnavailableError
 from app.storage import (
     StorageAdapter,
     StorageBackendUnavailable,
@@ -54,7 +54,7 @@ def get_video_analysis_provider(conn: Database) -> VideoAnalysisProvider:
     )
     try:
         config = SettingsRepository(conn).load_provider_config("apilio")
-    except (SettingsDecryptError, SettingsKeyMissing) as exc:
+    except SettingsUnavailableError as exc:
         if has_saved_apilio_config:
             raise HTTPException(
                 status_code=503,
@@ -94,7 +94,7 @@ def signed_video_url_for_provider(storage: StorageAdapter, *, asset_uri: str) ->
                 "code": "ANALYSIS_VIDEO_URL_UNAVAILABLE",
                 "message": (
                     "当前视频分析模型只能读取 HTTPS 视频；本地存储无法用于真实视频拆解。"
-                    "请在设置中切换至腾讯云 COS 或阿里云 OSS 后重新上传。"
+                    "请在设置中切换至腾讯云 COS 后重新上传。"
                 ),
             },
         )
