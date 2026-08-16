@@ -426,6 +426,94 @@ describe("GenerationComposer", () => {
     expect(prompt).toHaveValue("等待保存的修订");
   });
 
+  it("blocks prompt recompilation while manual edits are unsaved", async () => {
+    vi.mocked(api.getLatestScriptVersion).mockResolvedValue({
+      version: {
+        ...baseVersion,
+        id: "script-1",
+        payload: {
+          source: "original",
+          full_text: props.originalScript,
+          shot_card_version_id: "shot-card-1",
+          shot_mappings: [],
+        },
+      },
+      stale: false,
+      stale_reasons: [],
+    });
+    vi.mocked(api.getLatestGenerationPrompt).mockResolvedValue({
+      version: promptVersion(),
+      stale: false,
+      stale_reasons: [],
+    });
+
+    render(<GenerationComposer {...props} />);
+    const compileButton = await screen.findByRole("button", {
+      name: "编译 H3 Prompt",
+    });
+    fireEvent.change(screen.getByLabelText("H3 Prompt 内容"), {
+      target: { value: "尚未保存的手工修订" },
+    });
+
+    expect(compileButton).toBeDisabled();
+    fireEvent.click(compileButton);
+    expect(api.compileGenerationPrompt).not.toHaveBeenCalled();
+  });
+
+  it("freezes prompt editing while recompilation is pending", async () => {
+    vi.mocked(api.getLatestScriptVersion).mockResolvedValue({
+      version: {
+        ...baseVersion,
+        id: "script-1",
+        payload: {
+          source: "original",
+          full_text: props.originalScript,
+          shot_card_version_id: "shot-card-1",
+          shot_mappings: [],
+        },
+      },
+      stale: false,
+      stale_reasons: [],
+    });
+    vi.mocked(api.getLatestGenerationPrompt).mockResolvedValue({
+      version: promptVersion(),
+      stale: false,
+      stale_reasons: [],
+    });
+    let resolveCompile:
+      | ((version: ReturnType<typeof promptVersion>) => void)
+      | undefined;
+    vi.mocked(api.compileGenerationPrompt).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveCompile = resolve;
+        }),
+    );
+
+    render(<GenerationComposer {...props} />);
+    const prompt = await screen.findByLabelText("H3 Prompt 内容");
+    fireEvent.click(screen.getByRole("button", { name: "编译 H3 Prompt" }));
+
+    expect(prompt).toHaveAttribute("readonly");
+    expect(screen.getByRole("button", { name: "正在编译" })).toBeDisabled();
+
+    await act(async () => {
+      resolveCompile?.({
+        ...promptVersion(),
+        id: "prompt-2",
+        version_number: 2,
+        payload: {
+          ...promptVersion().payload,
+          prompt_text: "重新编译后的 Prompt",
+        },
+      });
+      await Promise.resolve();
+    });
+
+    expect(prompt).not.toHaveAttribute("readonly");
+    expect(prompt).toHaveValue("重新编译后的 Prompt");
+  });
+
   it("keeps one idempotency key across duplicate clicks and an offline retry", async () => {
     vi.mocked(api.getLatestScriptVersion).mockResolvedValue({
       version: {

@@ -213,6 +213,7 @@ export function GenerationComposer({
       scriptVersion &&
       !scriptStale &&
       !scriptDirty &&
+      !promptDirty &&
       !busyAction &&
       durationValid,
   );
@@ -633,6 +634,7 @@ export function GenerationComposer({
                 onChange={(event) => setPromptText(event.target.value)}
                 readOnly={
                   readOnly ||
+                  busyAction === "compile" ||
                   busyAction === "prompt" ||
                   promptStatus === "LOCKED" ||
                   promptStatus === "USED"
