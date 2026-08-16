@@ -11,7 +11,7 @@ from app.auth import CurrentUser, Role
 from app.character_policy import identity_values_are_current
 
 
-def write_audit(
+def insert_audit(
     conn: sqlite3.Connection,
     *,
     actor: CurrentUser,
@@ -33,6 +33,25 @@ def write_audit(
             entity_id,
             json.dumps(metadata or {}, ensure_ascii=True, sort_keys=True),
         ),
+    )
+
+
+def write_audit(
+    conn: sqlite3.Connection,
+    *,
+    actor: CurrentUser,
+    action: str,
+    entity_type: str,
+    entity_id: str,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    insert_audit(
+        conn,
+        actor=actor,
+        action=action,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        metadata=metadata,
     )
     conn.commit()
 

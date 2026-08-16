@@ -174,6 +174,40 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/generation-tasks/{task_id}/retry": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Retry Task */
+    post: operations["retry_task_api_generation_tasks__task_id__retry_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/generation-tasks/{task_id}/confirm-not-charged": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Confirm Task Not Charged */
+    post: operations["confirm_task_not_charged_api_generation_tasks__task_id__confirm_not_charged_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/generation-tasks/{task_id}/reconcile": {
     parameters: {
       query?: never;
@@ -272,23 +306,6 @@ export interface paths {
     put?: never;
     /** Create Download Url */
     post: operations["create_download_url_api_assets__asset_id__download_url_post"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/generation-tasks/{task_id}/retry": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    get?: never;
-    put?: never;
-    /** Retry Generation Task */
-    post: operations["retry_generation_task_api_generation_tasks__task_id__retry_post"];
     delete?: never;
     options?: never;
     head?: never;
@@ -1193,11 +1210,6 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
   schemas: {
-    /** AcceptedResponse */
-    AcceptedResponse: {
-      /** Status */
-      status: string;
-    };
     /** AssetResponse */
     AssetResponse: {
       /** Id */
@@ -1722,6 +1734,13 @@ export interface components {
       /** First Frame Asset Id */
       first_frame_asset_id: string;
     };
+    /** ConfirmNotChargedRequest */
+    ConfirmNotChargedRequest: {
+      /** Idempotency Key */
+      idempotency_key: string;
+      /** Reason */
+      reason: string;
+    };
     /** ConfirmSourceFrameRequest */
     ConfirmSourceFrameRequest: {
       /** Source Frame Asset Id */
@@ -1917,6 +1936,13 @@ export interface components {
       max_quantity: number;
       /** Estimated Cost Per Task */
       estimated_cost_per_task?: number | null;
+    };
+    /** GenerationTaskRetryRequest */
+    GenerationTaskRetryRequest: {
+      /** Idempotency Key */
+      idempotency_key: string;
+      /** Retry Reason */
+      retry_reason: string;
     };
     /** HTTPValidationError */
     HTTPValidationError: {
@@ -2145,6 +2171,11 @@ export interface components {
       /** Test Kind */
       test_kind: string;
     };
+    /** ReconcileGenerationTaskRequest */
+    ReconcileGenerationTaskRequest: {
+      /** Idempotency Key */
+      idempotency_key: string;
+    };
     /** RuntimeSettingsRequest */
     RuntimeSettingsRequest: {
       /** Max Generation Count Per Batch */
@@ -2287,6 +2318,23 @@ export interface components {
       completed_at: string | null;
       /** Duration Seconds */
       duration_seconds: number | null;
+      /** Retry Of Task Id */
+      retry_of_task_id: string | null;
+      /** Superseded By Task Id */
+      superseded_by_task_id: string | null;
+      /** Superseded At */
+      superseded_at: string | null;
+      /** Retry Reason */
+      retry_reason: string | null;
+      /** Retry Requested At */
+      retry_requested_at: string | null;
+      /** Available Actions */
+      available_actions: (
+        | "RETRY"
+        | "RECONCILE"
+        | "CONFIRM_NOT_CHARGED"
+        | "REGENERATE"
+      )[];
       /** Prompt Snapshot */
       prompt_snapshot: Record<string, never> | null;
     };
@@ -2332,6 +2380,23 @@ export interface components {
       completed_at: string | null;
       /** Duration Seconds */
       duration_seconds: number | null;
+      /** Retry Of Task Id */
+      retry_of_task_id: string | null;
+      /** Superseded By Task Id */
+      superseded_by_task_id: string | null;
+      /** Superseded At */
+      superseded_at: string | null;
+      /** Retry Reason */
+      retry_reason: string | null;
+      /** Retry Requested At */
+      retry_requested_at: string | null;
+      /** Available Actions */
+      available_actions: (
+        | "RETRY"
+        | "RECONCILE"
+        | "CONFIRM_NOT_CHARGED"
+        | "REGENERATE"
+      )[];
     };
     /** UpdateShotCardsRequest */
     UpdateShotCardsRequest: {
@@ -2808,6 +2873,84 @@ export interface operations {
       };
     };
   };
+  retry_task_api_generation_tasks__task_id__retry_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        task_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: {
+      content: {
+        "application/json":
+          | components["schemas"]["GenerationTaskRetryRequest"]
+          | null;
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["TaskResult"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  confirm_task_not_charged_api_generation_tasks__task_id__confirm_not_charged_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        task_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: {
+      content: {
+        "application/json":
+          | components["schemas"]["ConfirmNotChargedRequest"]
+          | null;
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["TaskResult"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   reconcile_uncertain_task_api_generation_tasks__task_id__reconcile_post: {
     parameters: {
       query?: never;
@@ -2819,7 +2962,13 @@ export interface operations {
       };
       cookie?: never;
     };
-    requestBody?: never;
+    requestBody?: {
+      content: {
+        "application/json":
+          | components["schemas"]["ReconcileGenerationTaskRequest"]
+          | null;
+      };
+    };
     responses: {
       /** @description Successful Response */
       200: {
@@ -3055,39 +3204,6 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["DownloadUrlResponse"];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  retry_generation_task_api_generation_tasks__task_id__retry_post: {
-    parameters: {
-      query?: never;
-      header?: {
-        "X-Dev-User-Id"?: string | null;
-      };
-      path: {
-        task_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["AcceptedResponse"];
         };
       };
       /** @description Validation Error */

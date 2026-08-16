@@ -450,7 +450,10 @@ def insert_generation_history(
     quality_status: str = "PENDING",
     quality_issue_codes: list[str] | None = None,
     provider_task_id: str | None = None,
+    provider_result_url: str | None = None,
     result_asset_id: str | None = None,
+    error_code: str | None = "SAFE_ERROR",
+    next_poll_at: str | None = None,
     created_at: str = "2026-08-16 10:00:00",
     submitted_at: str | None = None,
     started_at: str | None = None,
@@ -470,7 +473,14 @@ def insert_generation_history(
             created_by_user_id,
             f"key-{batch_id}",
             f"hash-{batch_id}",
-            json.dumps({"prompt_version_id": f"prompt-{batch_id}"}, sort_keys=True),
+            json.dumps(
+                {
+                    "prompt_version_id": f"prompt-{batch_id}",
+                    "output_duration_seconds": 10,
+                    "resolution": "768P",
+                },
+                sort_keys=True,
+            ),
             batch_status,
             created_at,
             created_at,
@@ -483,11 +493,12 @@ def insert_generation_history(
             status, attempt, archive_status, archive_retry_count,
             quality_status, quality_issue_codes, error_code,
             error_message_redacted, result_asset_id, estimated_cost, actual_cost,
-            submitted_at, started_at, completed_at, created_at, updated_at
+            submitted_at, started_at, completed_at, created_at, updated_at,
+            prompt_snapshot_json, provider_result_url, next_poll_at
         )
         VALUES (?, ?, 'I2V', 'fake_h3', 'MiniMax-H3', ?, ?, 2, ?, 1, ?, ?,
-                'SAFE_ERROR', 'A redacted failure summary.', ?, 1.25, 1.5,
-                ?, ?, ?, ?, ?)
+                ?, 'A redacted failure summary.', ?, 1.25, 1.5,
+                ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             f"{batch_id}-task",
@@ -497,14 +508,358 @@ def insert_generation_history(
             archive_status,
             quality_status,
             json.dumps(quality_issue_codes or []),
+            error_code,
             result_asset_id,
             submitted_at,
             started_at,
             completed_at,
             created_at,
             created_at,
+            json.dumps(
+                {
+                    "prompt_text": "test prompt",
+                    "first_frame_uri": "fake://generation-results/first-frame.png",
+                },
+                sort_keys=True,
+            ),
+            provider_result_url,
+            next_poll_at,
         ),
     )
+
+
+class ArchiveOnlyRetryProvider(FakeH3Provider):
+    def __init__(self) -> None:
+        self.create_calls = 0
+        self.download_calls = 0
+
+    def create_image_to_video(self, request: dict[str, Any]) -> H3CreateResult:
+        del request
+        self.create_calls += 1
+        raise AssertionError("archive retry must not create a new provider task")
+
+    def download_result(self, url: str) -> bytes:
+        assert url == "https://provider.example/result.mp4"
+        self.download_calls += 1
+        return b"archived-result"
+
+
+class CountingRetryProvider(FakeH3Provider):
+    def __init__(self) -> None:
+        self.create_calls = 0
+
+    def create_image_to_video(self, request: dict[str, Any]) -> H3CreateResult:
+        self.create_calls += 1
+        return super().create_image_to_video(request)
+
+
+def test_retry_archive_failed_is_idempotent_and_never_creates_provider_task(
+    db_path: Path, client: TestClient
+) -> None:
+    with connect_database(db_path) as conn:
+        insert_generation_history(
+            conn,
+            batch_id="archive-retry",
+            batch_status="PARTIAL_FAILED",
+            task_status="SUCCEEDED",
+            archive_status="ARCHIVE_FAILED",
+            provider_task_id="provider-paid-1",
+            provider_result_url="https://provider.example/result.mp4",
+        )
+        conn.commit()
+
+    request = {"idempotency_key": "retry-archive-1", "retry_reason": "重新归档成片"}
+    first = client.post(
+        "/api/generation-tasks/archive-retry-task/retry",
+        headers=auth_headers("employee_1"),
+        json=request,
+    )
+    replay = client.post(
+        "/api/generation-tasks/archive-retry-task/retry",
+        headers=auth_headers("employee_1"),
+        json=request,
+    )
+
+    assert first.status_code == 200
+    assert replay.status_code == 200
+    assert first.json()["id"] == "archive-retry-task"
+    assert first.json()["status"] == "SUCCEEDED"
+
+    provider = ArchiveOnlyRetryProvider()
+    with connect_database(db_path) as conn:
+        queued = conn.execute(
+            "SELECT next_poll_at FROM generation_tasks WHERE id = ?",
+            ("archive-retry-task",),
+        ).fetchone()
+        operation_count = conn.execute(
+            "SELECT COUNT(*) FROM generation_task_operations WHERE task_id = ?",
+            ("archive-retry-task",),
+        ).fetchone()[0]
+        audit_count = conn.execute(
+            "SELECT COUNT(*) FROM audit_logs WHERE action = ? AND entity_id = ?",
+            ("generation_task.archive_retry_queued", "archive-retry-task"),
+        ).fetchone()[0]
+        assert queued["next_poll_at"] is not None
+
+        result = run_next_generation_task(
+            conn,
+            worker_id="archive-worker",
+            provider=provider,
+            storage=FakeStorageAdapter(provider="cos", bucket="generation-results"),
+        )
+
+    assert operation_count == 1
+    assert audit_count == 1
+    assert provider.create_calls == 0
+    assert provider.download_calls == 1
+    assert result is not None
+    assert result.archive_status == "ARCHIVED"
+
+
+def test_retry_pre_provider_failure_requeues_once_and_records_lineage(
+    db_path: Path, client: TestClient
+) -> None:
+    with connect_database(db_path) as conn:
+        insert_generation_history(
+            conn,
+            batch_id="safe-retry",
+            batch_status="FAILED",
+            task_status="FAILED",
+            error_code="FIRST_FRAME_URL_SIGN_FAILED",
+        )
+        conn.commit()
+
+    request = {"idempotency_key": "retry-safe-1", "retry_reason": "修复首帧签名后重试"}
+    first = client.post(
+        "/api/generation-tasks/safe-retry-task/retry",
+        headers=auth_headers("employee_1"),
+        json=request,
+    )
+    replay = client.post(
+        "/api/generation-tasks/safe-retry-task/retry",
+        headers=auth_headers("employee_1"),
+        json=request,
+    )
+
+    assert first.status_code == 200
+    assert replay.status_code == 200
+    assert first.json()["status"] == "PENDING"
+    assert first.json()["retry_reason"] == "修复首帧签名后重试"
+
+    with connect_database(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT status, error_code, error_message_redacted, next_poll_at,
+                   retry_reason, retry_requested_by_user_id, retry_requested_at
+            FROM generation_tasks WHERE id = ?
+            """,
+            ("safe-retry-task",),
+        ).fetchone()
+        operation_count = conn.execute(
+            "SELECT COUNT(*) FROM generation_task_operations WHERE task_id = ?",
+            ("safe-retry-task",),
+        ).fetchone()[0]
+
+    assert row["status"] == "PENDING"
+    assert row["error_code"] is None
+    assert row["error_message_redacted"] is None
+    assert row["next_poll_at"] is not None
+    assert row["retry_reason"] == "修复首帧签名后重试"
+    assert row["retry_requested_by_user_id"] == "employee_1"
+    assert row["retry_requested_at"] is not None
+    assert operation_count == 1
+
+    provider = CountingRetryProvider()
+    with connect_database(db_path) as conn:
+        storage = FakeStorageAdapter(provider="fake", bucket="generation-results")
+        result = run_next_generation_task(
+            conn,
+            worker_id="safe-retry-worker",
+            provider=provider,
+            storage=storage,
+        )
+        no_duplicate = run_next_generation_task(
+            conn,
+            worker_id="safe-retry-worker",
+            provider=provider,
+            storage=storage,
+        )
+
+    assert result is not None
+    assert result.status == "SUCCEEDED"
+    assert result.attempt == 3
+    assert no_duplicate is None
+    assert provider.create_calls == 1
+
+
+@pytest.mark.parametrize(
+    (
+        "batch_id",
+        "task_status",
+        "archive_status",
+        "quality_status",
+        "provider_task_id",
+        "error_code",
+        "expected_code",
+    ),
+    [
+        (
+            "archive-missing",
+            "FAILED",
+            "ARCHIVE_FAILED",
+            "PENDING",
+            "paid-provider-id",
+            "ARCHIVE_RETRY_EXHAUSTED",
+            "ARCHIVE_RESULT_UNAVAILABLE",
+        ),
+        (
+            "provider-failed",
+            "FAILED",
+            "PENDING",
+            "PENDING",
+            "paid-provider-id",
+            "H3_PROVIDER_FAILED",
+            "REQUIRES_PAID_REGENERATION",
+        ),
+        (
+            "uncertain-known",
+            "SUBMISSION_UNCERTAIN",
+            "PENDING",
+            "PENDING",
+            "provider-known",
+            "SUBMISSION_UNCERTAIN",
+            "MUST_RECONCILE_SUBMISSION",
+        ),
+        (
+            "audio-failed",
+            "SUCCEEDED",
+            "ARCHIVED",
+            "AUDIO_QUALITY_FAILED",
+            "provider-paid-id",
+            None,
+            "REQUIRES_PAID_REGENERATION",
+        ),
+    ],
+)
+def test_retry_rejects_unsafe_state_transitions(
+    db_path: Path,
+    client: TestClient,
+    batch_id: str,
+    task_status: str,
+    archive_status: str,
+    quality_status: str,
+    provider_task_id: str | None,
+    error_code: str | None,
+    expected_code: str,
+) -> None:
+    with connect_database(db_path) as conn:
+        insert_generation_history(
+            conn,
+            batch_id=batch_id,
+            batch_status="FAILED",
+            task_status=task_status,
+            archive_status=archive_status,
+            quality_status=quality_status,
+            provider_task_id=provider_task_id,
+            error_code=error_code,
+        )
+        conn.commit()
+
+    response = client.post(
+        f"/api/generation-tasks/{batch_id}-task/retry",
+        headers=auth_headers("employee_1"),
+        json={"idempotency_key": f"retry-{batch_id}", "retry_reason": "请求安全重试"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == expected_code
+
+
+def test_retry_idempotency_key_conflicts_when_payload_changes(
+    db_path: Path, client: TestClient
+) -> None:
+    with connect_database(db_path) as conn:
+        insert_generation_history(
+            conn,
+            batch_id="retry-conflict",
+            batch_status="FAILED",
+            task_status="FAILED",
+            error_code="FIRST_FRAME_URL_SIGN_FAILED",
+        )
+        conn.commit()
+
+    first = client.post(
+        "/api/generation-tasks/retry-conflict-task/retry",
+        headers=auth_headers("employee_1"),
+        json={"idempotency_key": "same-retry-key", "retry_reason": "第一次原因"},
+    )
+    conflict = client.post(
+        "/api/generation-tasks/retry-conflict-task/retry",
+        headers=auth_headers("employee_1"),
+        json={"idempotency_key": "same-retry-key", "retry_reason": "不同原因"},
+    )
+
+    assert first.status_code == 200
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"]["code"] == "IDEMPOTENCY_CONFLICT"
+
+
+def test_only_admin_can_confirm_an_unbilled_uncertain_submission(
+    db_path: Path, client: TestClient
+) -> None:
+    with connect_database(db_path) as conn:
+        insert_generation_history(
+            conn,
+            batch_id="confirm-unbilled",
+            batch_status="NEEDS_ATTENTION",
+            task_status="SUBMISSION_UNCERTAIN",
+            error_code="SUBMISSION_UNCERTAIN",
+        )
+        conn.commit()
+
+    payload = {"idempotency_key": "confirm-unbilled-1", "reason": "已核对供应商账单，未产生扣费"}
+    employee = client.post(
+        "/api/generation-tasks/confirm-unbilled-task/confirm-not-charged",
+        headers=auth_headers("employee_1"),
+        json=payload,
+    )
+    admin = client.post(
+        "/api/generation-tasks/confirm-unbilled-task/confirm-not-charged",
+        headers=auth_headers("admin_1"),
+        json=payload,
+    )
+    replay = client.post(
+        "/api/generation-tasks/confirm-unbilled-task/confirm-not-charged",
+        headers=auth_headers("admin_1"),
+        json=payload,
+    )
+
+    assert employee.status_code == 403
+    assert admin.status_code == 200
+    assert replay.status_code == 200
+    assert admin.json()["status"] == "PENDING"
+
+    with connect_database(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT status, billing_confirmation_status, billing_confirmed_by_user_id,
+                   billing_confirmed_at, billing_confirmation_reason, submitted_at
+            FROM generation_tasks WHERE id = ?
+            """,
+            ("confirm-unbilled-task",),
+        ).fetchone()
+        operation_count = conn.execute(
+            "SELECT COUNT(*) FROM generation_task_operations WHERE task_id = ? AND action = ?",
+            ("confirm-unbilled-task", "CONFIRM_NOT_CHARGED"),
+        ).fetchone()[0]
+
+    assert row["status"] == "PENDING"
+    assert row["billing_confirmation_status"] == "CONFIRMED_NOT_CHARGED"
+    assert row["billing_confirmed_by_user_id"] == "admin_1"
+    assert row["billing_confirmed_at"] is not None
+    assert row["billing_confirmation_reason"] == payload["reason"]
+    assert row["submitted_at"] is None
+    assert operation_count == 1
 
 
 def test_script_maps_spoken_text_to_shots_without_deleting_user_text(client: TestClient) -> None:
@@ -1428,6 +1783,18 @@ def test_generation_batch_list_filters_and_enforces_project_scope(
         )
         insert_generation_history(
             conn,
+            batch_id="batch-owned-superseded-quality",
+            batch_status="COMPLETED_WITH_FAILURES",
+            task_status="SUCCEEDED",
+            archive_status="ARCHIVED",
+            quality_status="AUDIO_QUALITY_FAILED",
+        )
+        conn.execute(
+            "UPDATE generation_tasks SET superseded_by_task_id = ? WHERE batch_id = ?",
+            ("replacement-task", "batch-owned-superseded-quality"),
+        )
+        insert_generation_history(
+            conn,
             batch_id="batch-other-normal",
             project_id="project_other",
             created_by_user_id="employee_2",
@@ -1466,6 +1833,7 @@ def test_generation_batch_list_filters_and_enforces_project_scope(
     assert {item["id"] for item in employee.json()["items"]} == {
         "batch-owned-normal",
         "batch-owned-quality-status-only",
+        "batch-owned-superseded-quality",
         "batch-owned-uncertain",
     }
     assert forbidden_project.status_code == 403
@@ -1481,7 +1849,13 @@ def test_generation_batch_list_filters_and_enforces_project_scope(
     )
     assert quality_status_only["needs_attention_count"] == 1
     assert quality_status_only["tasks"][0]["stage"] == "QUALITY_FAILED"
-    assert [item["id"] for item in normal.json()["items"]] == ["batch-owned-normal"]
+    assert [item["id"] for item in normal.json()["items"]] == [
+        "batch-owned-superseded-quality",
+        "batch-owned-normal",
+    ]
+    superseded = normal.json()["items"][0]
+    assert superseded["needs_attention_count"] == 0
+    assert superseded["tasks"][0]["available_actions"] == []
     assert [item["id"] for item in by_creator.json()["items"]] == ["batch-owned-normal"]
     assert [item["id"] for item in by_status.json()["items"]] == [
         "batch-owned-uncertain",
@@ -2454,6 +2828,86 @@ def test_reconcile_submission_uncertain_recovers_succeeded_result(
     assert row["result_asset_id"] is not None
 
 
+def test_reconcile_route_is_idempotent_and_audited(
+    db_path: Path,
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.media_routes import get_media_storage
+
+    monkeypatch.setattr("app.generation.socket.getaddrinfo", _fake_public_dns)
+    monkeypatch.setattr(
+        "app.generation_routes.h3_provider_for_task",
+        lambda _conn, _provider: ReconcileSucceededProvider(api_key="test-key"),
+    )
+    app.dependency_overrides[get_media_storage] = lambda: FakeStorageAdapter(
+        provider="cos", bucket="generation-results"
+    )
+    prompt_id = create_locked_prompt(client)
+    created = client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json={
+            "quantity": 1,
+            "prompt_version_id": prompt_id,
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+            "idempotency_key": "reconcile-route-idempotent",
+        },
+    )
+    task_id = created.json()["tasks"][0]["id"]
+    with connect_database(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE generation_tasks
+            SET status = 'SUBMISSION_UNCERTAIN', error_code = 'SUBMISSION_UNCERTAIN',
+                provider_task_id = 'provider-reconcile-route'
+            WHERE id = ?
+            """,
+            (task_id,),
+        )
+        conn.commit()
+
+    payload = {"idempotency_key": "reconcile-operation-1"}
+    first = client.post(
+        f"/api/generation-tasks/{task_id}/reconcile",
+        headers=auth_headers("employee_1"),
+        json=payload,
+    )
+    replay = client.post(
+        f"/api/generation-tasks/{task_id}/reconcile",
+        headers=auth_headers("employee_1"),
+        json=payload,
+    )
+
+    assert first.status_code == 200
+    assert replay.status_code == 200
+    assert first.json()["result_asset_id"] == replay.json()["result_asset_id"]
+    with connect_database(db_path) as conn:
+        result_asset_count = conn.execute(
+            "SELECT COUNT(*) FROM assets WHERE kind = 'video' AND id = ?",
+            (first.json()["result_asset_id"],),
+        ).fetchone()[0]
+        operation_count = conn.execute(
+            "SELECT COUNT(*) FROM generation_task_operations WHERE task_id = ? AND action = ?",
+            (task_id, "RECONCILE"),
+        ).fetchone()[0]
+        requested_audits = conn.execute(
+            "SELECT COUNT(*) FROM audit_logs WHERE action = ? AND entity_id = ?",
+            ("generation_task.reconcile_requested", task_id),
+        ).fetchone()[0]
+        completed_audits = conn.execute(
+            "SELECT COUNT(*) FROM audit_logs WHERE action = ? AND entity_id = ?",
+            ("generation_task.reconcile_archived", task_id),
+        ).fetchone()[0]
+
+    assert result_asset_count == 1
+    assert operation_count == 1
+    assert requested_audits == 1
+    assert completed_audits == 1
+
+
 def test_reconcile_without_provider_task_id_requires_manual_confirmation(
     db_path: Path, client: TestClient
 ) -> None:
@@ -2774,7 +3228,9 @@ def test_reconcile_route_guards_and_rejects_non_uncertain_task(
 
     # A non-UNCERTAIN task is rejected before any provider call -> 409
     normal = client.post(
-        f"/api/generation-tasks/{task_id}/reconcile", headers=auth_headers("employee_1")
+        f"/api/generation-tasks/{task_id}/reconcile",
+        headers=auth_headers("employee_1"),
+        json={"idempotency_key": "reconcile-normal-task"},
     )
     assert normal.status_code == 409
     assert normal.json()["detail"]["code"] == "TASK_NOT_UNCERTAIN"

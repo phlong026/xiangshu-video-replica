@@ -45,6 +45,12 @@ export type GenerationBatch = Omit<
   "tasks"
 > & { tasks: GenerationTask[] };
 export type GenerationTaskSummary = components["schemas"]["TaskSummary"];
+export type GenerationTaskRetryInput =
+  components["schemas"]["GenerationTaskRetryRequest"];
+export type ConfirmNotChargedInput =
+  components["schemas"]["ConfirmNotChargedRequest"];
+export type ReconcileGenerationTaskInput =
+  components["schemas"]["ReconcileGenerationTaskRequest"];
 export type GenerationBatchListItem = Omit<
   components["schemas"]["GenerationBatchListItem"],
   "tasks"
@@ -482,11 +488,23 @@ export async function listGenerationBatches(
 
 export async function retryGenerationTask(
   taskId: string,
-): Promise<components["schemas"]["AcceptedResponse"]> {
-  return requestGenerationJson<components["schemas"]["AcceptedResponse"]>(
+  input: GenerationTaskRetryInput,
+): Promise<GenerationTask> {
+  return requestGenerationJson<GenerationTask>(
     `/api/generation-tasks/${encodeURIComponent(taskId)}/retry`,
     "重试生成任务失败",
-    { method: "POST" },
+    { method: "POST", body: JSON.stringify(input) },
+  );
+}
+
+export async function confirmGenerationTaskNotCharged(
+  taskId: string,
+  input: ConfirmNotChargedInput,
+): Promise<GenerationTask> {
+  return requestGenerationJson<GenerationTask>(
+    `/api/generation-tasks/${encodeURIComponent(taskId)}/confirm-not-charged`,
+    "确认任务未计费失败",
+    { method: "POST", body: JSON.stringify(input) },
   );
 }
 
@@ -503,11 +521,12 @@ export async function getGenerationResultDownloadUrl(
 
 export async function reconcileUncertainTask(
   taskId: string,
+  input: ReconcileGenerationTaskInput,
 ): Promise<GenerationTask> {
   return requestApiJson<GenerationTask>(
     `/api/generation-tasks/${encodeURIComponent(taskId)}/reconcile`,
     "任务对账失败",
-    { method: "POST" },
+    { method: "POST", body: JSON.stringify(input) },
     CLOUD_OP_TIMEOUT_MS,
   );
 }

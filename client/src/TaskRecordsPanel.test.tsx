@@ -17,6 +17,8 @@ vi.mock("./api", async () => {
     getGenerationBatch: vi.fn(),
     getGenerationResultDownloadUrl: vi.fn(),
     listGenerationBatches: vi.fn(),
+    retryGenerationTask: vi.fn(),
+    confirmGenerationTaskNotCharged: vi.fn(),
     reconcileUncertainTask: vi.fn(),
   };
 });
@@ -43,6 +45,12 @@ function task(overrides: Partial<api.GenerationTask> = {}): api.GenerationTask {
     started_at: "2026-08-16 10:00:01",
     completed_at: "2026-08-16 10:00:06",
     duration_seconds: 5,
+    retry_of_task_id: null,
+    superseded_by_task_id: null,
+    superseded_at: null,
+    retry_reason: null,
+    retry_requested_at: null,
+    available_actions: [],
     prompt_snapshot: null,
     ...overrides,
   };
@@ -127,6 +135,15 @@ describe("TaskRecordsPanel", () => {
       .mockResolvedValueOnce({ url: "https://signed.example/preview-1.mp4" })
       .mockResolvedValueOnce({ url: "https://signed.example/preview-2.mp4" })
       .mockResolvedValueOnce({ url: "https://signed.example/download.mp4" });
+    vi.mocked(api.retryGenerationTask).mockImplementation(async (_taskId) =>
+      task(),
+    );
+    vi.mocked(api.confirmGenerationTaskNotCharged).mockImplementation(
+      async (_taskId) => task(),
+    );
+    vi.mocked(api.reconcileUncertainTask).mockImplementation(async (_taskId) =>
+      task(),
+    );
   });
 
   afterEach(() => {
@@ -248,6 +265,7 @@ describe("TaskRecordsPanel", () => {
           task({
             status: "SUBMISSION_UNCERTAIN",
             stage: "SUBMISSION_UNCERTAIN",
+            available_actions: ["RECONCILE"],
           }),
         ],
       }),
@@ -271,7 +289,10 @@ describe("TaskRecordsPanel", () => {
       screen.queryByRole("button", { name: /下载 MP4/ }),
     ).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "对账" }),
+      screen.queryByRole("button", { name: /对账/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /安全重试|重试归档|确认未计费/ }),
     ).not.toBeInTheDocument();
     expect(api.getGenerationResultDownloadUrl).not.toHaveBeenCalled();
   });
@@ -323,6 +344,7 @@ describe("TaskRecordsPanel", () => {
               id: "task-a",
               status: "SUBMISSION_UNCERTAIN",
               stage: "SUBMISSION_UNCERTAIN",
+              available_actions: ["RECONCILE"],
             }),
           ],
         }),
@@ -344,6 +366,7 @@ describe("TaskRecordsPanel", () => {
                 id: "task-a",
                 status: "SUBMISSION_UNCERTAIN",
                 stage: "SUBMISSION_UNCERTAIN",
+                available_actions: ["RECONCILE"],
               }),
             ],
           }),
@@ -357,7 +380,7 @@ describe("TaskRecordsPanel", () => {
       />,
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "对账" }));
+    fireEvent.click(await screen.findByRole("button", { name: "对账 task-a" }));
     fireEvent.click(screen.getByRole("button", { name: "打开批次 batch-2" }));
     expect(await screen.findByText("task-b")).toBeInTheDocument();
 
@@ -366,8 +389,112 @@ describe("TaskRecordsPanel", () => {
       await Promise.resolve();
     });
 
-    expect(api.reconcileUncertainTask).toHaveBeenCalledWith("task-a");
+    expect(api.reconcileUncertainTask).toHaveBeenCalledWith(
+      "task-a",
+      expect.objectContaining({ idempotency_key: expect.any(String) }),
+    );
     expect(screen.getByText("task-b")).toBeInTheDocument();
     expect(screen.queryByText("task-a")).not.toBeInTheDocument();
+  });
+
+  it("offers only server-approved retry, reconcile, and admin confirmation actions", async () => {
+    vi.mocked(api.getGenerationBatch).mockResolvedValue(
+      batch({
+        quantity: 3,
+        progress: {
+          total_count: 3,
+          terminal_count: 1,
+          progress_percent: 33,
+          counts: {
+            pending: 0,
+            submitting: 0,
+            queued: 0,
+            running: 0,
+            archiving: 0,
+            succeeded: 0,
+            failed: 0,
+            cancelled: 0,
+            needs_attention: 3,
+          },
+        },
+        tasks: [
+          task({
+            id: "task-archive",
+            archive_status: "ARCHIVE_FAILED",
+            stage: "ARCHIVE_FAILED",
+            result_asset_id: null,
+            available_actions: ["RETRY"],
+          }),
+          task({
+            id: "task-reconcile",
+            status: "SUBMISSION_UNCERTAIN",
+            stage: "SUBMISSION_UNCERTAIN",
+            result_asset_id: null,
+            available_actions: ["RECONCILE"],
+          }),
+          task({
+            id: "task-confirm",
+            status: "SUBMISSION_UNCERTAIN",
+            stage: "SUBMISSION_UNCERTAIN",
+            result_asset_id: null,
+            available_actions: ["CONFIRM_NOT_CHARGED"],
+          }),
+        ],
+      }),
+    );
+
+    render(
+      <TaskRecordsPanel
+        handoffBatch={null}
+        onHandoffConsumed={vi.fn()}
+        userRole="admin"
+      />,
+    );
+
+    const retryButton = await screen.findByRole("button", {
+      name: "重试归档 task-archive",
+    });
+    expect(retryButton).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("处理原因 task-archive"), {
+      target: { value: "对象存储已恢复" },
+    });
+    fireEvent.click(retryButton);
+    await waitFor(() =>
+      expect(api.retryGenerationTask).toHaveBeenCalledWith(
+        "task-archive",
+        expect.objectContaining({
+          idempotency_key: expect.any(String),
+          retry_reason: "对象存储已恢复",
+        }),
+      ),
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "对账 task-reconcile" }),
+    );
+    await waitFor(() =>
+      expect(api.reconcileUncertainTask).toHaveBeenCalledWith(
+        "task-reconcile",
+        expect.objectContaining({ idempotency_key: expect.any(String) }),
+      ),
+    );
+
+    const confirmButton = screen.getByRole("button", {
+      name: "确认未计费 task-confirm",
+    });
+    expect(confirmButton).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("处理原因 task-confirm"), {
+      target: { value: "供应商账单已核对" },
+    });
+    fireEvent.click(confirmButton);
+    await waitFor(() =>
+      expect(api.confirmGenerationTaskNotCharged).toHaveBeenCalledWith(
+        "task-confirm",
+        expect.objectContaining({
+          idempotency_key: expect.any(String),
+          reason: "供应商账单已核对",
+        }),
+      ),
+    );
   });
 });

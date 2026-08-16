@@ -135,7 +135,10 @@ describe("generation workflow API", () => {
       provider: "fake_h3",
       fake_audio_quality: "ok",
     });
-    await retryGenerationTask("task 1");
+    await retryGenerationTask("task 1", {
+      idempotency_key: "retry-key-1",
+      retry_reason: "重新归档",
+    });
     await getGenerationResultDownloadUrl("asset 1");
 
     expect(fetchMock).toHaveBeenNthCalledWith(
@@ -168,7 +171,13 @@ describe("generation workflow API", () => {
     expect(fetchMock).toHaveBeenNthCalledWith(
       9,
       "http://127.0.0.1:8000/api/generation-tasks/task%201/retry",
-      expect.objectContaining({ method: "POST" }),
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          idempotency_key: "retry-key-1",
+          retry_reason: "重新归档",
+        }),
+      }),
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       10,

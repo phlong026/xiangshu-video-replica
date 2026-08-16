@@ -1802,6 +1802,39 @@ button.history-version--active {
   background: #17131f;
 }
 
+.task-resolution-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 10px;
+  border: 1px solid #4d3b62;
+  border-radius: 10px;
+  padding: 12px;
+  background: #171220;
+}
+
+.task-resolution-controls label {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+
+.task-resolution-controls label span {
+  margin: 0;
+  color: #d8bcff;
+  font-weight: 700;
+}
+
+.task-resolution-controls input {
+  width: 100%;
+}
+
+.task-resolution-note {
+  margin: 0;
+  color: #ffcf8a;
+  font-size: 13px;
+}
+
 .quality-summary {
   border: 1px solid #28563d;
   border-radius: 10px;
@@ -2657,6 +2690,14 @@ button.regenerate-button {
     max-width: 100%;
     overflow-wrap: anywhere;
     white-space: normal;
+  }
+
+  .task-resolution-controls {
+    grid-template-columns: 1fr;
+  }
+
+  .task-resolution-controls button {
+    width: 100%;
   }
 
   .character-library-toolbar,

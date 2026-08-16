@@ -7,6 +7,7 @@ import {
 } from "react";
 
 import {
+  confirmGenerationTaskNotCharged,
   type GenerationBatch,
   type GenerationBatchListItem,
   type GenerationTask,
@@ -14,6 +15,7 @@ import {
   getGenerationResultDownloadUrl,
   listGenerationBatches,
   reconcileUncertainTask,
+  retryGenerationTask,
   type UserRole,
 } from "./api";
 
@@ -60,6 +62,11 @@ export function TaskRecordsPanel({
   const [previewUrls, setPreviewUrls] = useState<Record<string, string>>({});
   const [resultErrors, setResultErrors] = useState<Record<string, string>>({});
   const [activeResultAction, setActiveResultAction] = useState("");
+  const [activeTaskAction, setActiveTaskAction] = useState("");
+  const [taskActionReasons, setTaskActionReasons] = useState<
+    Record<string, string>
+  >({});
+  const taskOperationKeysRef = useRef<Record<string, string>>({});
   const canOperate = userRole !== "auditor";
 
   const selectBatch = useCallback(
@@ -208,8 +215,16 @@ export function TaskRecordsPanel({
       return;
     }
     const batchIdAtStart = activeBatchId;
+    const actionKey = `${taskId}:reconcile`;
+    const operationKey = operationIdempotencyKey(
+      taskOperationKeysRef.current,
+      actionKey,
+    );
+    setActiveTaskAction(actionKey);
     try {
-      await reconcileUncertainTask(taskId);
+      await reconcileUncertainTask(taskId, {
+        idempotency_key: operationKey,
+      });
       if (activeBatchIdRef.current !== batchIdAtStart) {
         return;
       }
@@ -219,10 +234,85 @@ export function TaskRecordsPanel({
       }
       setBatch(nextBatch);
       setBatchError("");
+      delete taskOperationKeysRef.current[actionKey];
     } catch {
       if (activeBatchIdRef.current === batchIdAtStart) {
         setBatchError("任务对账失败，请重试。");
       }
+    } finally {
+      setActiveTaskAction((current) => (current === actionKey ? "" : current));
+    }
+  }
+
+  async function handleRetry(task: GenerationTask) {
+    const reason = taskActionReasons[task.id]?.trim();
+    if (!canOperate || !activeBatchId || !reason) {
+      return;
+    }
+    const batchIdAtStart = activeBatchId;
+    const actionKey = `${task.id}:retry:${reason}`;
+    const operationKey = operationIdempotencyKey(
+      taskOperationKeysRef.current,
+      actionKey,
+    );
+    setActiveTaskAction(actionKey);
+    try {
+      await retryGenerationTask(task.id, {
+        idempotency_key: operationKey,
+        retry_reason: reason,
+      });
+      if (activeBatchIdRef.current !== batchIdAtStart) {
+        return;
+      }
+      const nextBatch = await getGenerationBatch(batchIdAtStart);
+      if (activeBatchIdRef.current !== batchIdAtStart) {
+        return;
+      }
+      setBatch(nextBatch);
+      setBatchError("");
+      delete taskOperationKeysRef.current[actionKey];
+    } catch {
+      if (activeBatchIdRef.current === batchIdAtStart) {
+        setBatchError("任务安全重试失败，请检查当前状态后再试。");
+      }
+    } finally {
+      setActiveTaskAction((current) => (current === actionKey ? "" : current));
+    }
+  }
+
+  async function handleConfirmNotCharged(task: GenerationTask) {
+    const reason = taskActionReasons[task.id]?.trim();
+    if (userRole !== "admin" || !activeBatchId || !reason) {
+      return;
+    }
+    const batchIdAtStart = activeBatchId;
+    const actionKey = `${task.id}:confirm-not-charged:${reason}`;
+    const operationKey = operationIdempotencyKey(
+      taskOperationKeysRef.current,
+      actionKey,
+    );
+    setActiveTaskAction(actionKey);
+    try {
+      await confirmGenerationTaskNotCharged(task.id, {
+        idempotency_key: operationKey,
+        reason,
+      });
+      if (activeBatchIdRef.current !== batchIdAtStart) {
+        return;
+      }
+      const nextBatch = await getGenerationBatch(batchIdAtStart);
+      if (activeBatchIdRef.current !== batchIdAtStart) {
+        return;
+      }
+      setBatch(nextBatch);
+      setBatchError("");
+      delete taskOperationKeysRef.current[actionKey];
+    } catch {
+      if (activeBatchIdRef.current === batchIdAtStart) {
+        setBatchError("确认未计费失败，任务未重新入队。");
+      }
+    } finally {
+      setActiveTaskAction((current) => (current === actionKey ? "" : current));
     }
   }
 
@@ -372,13 +462,24 @@ export function TaskRecordsPanel({
           {batch ? (
             <BatchPanel
               activeResultAction={activeResultAction}
+              activeTaskAction={activeTaskAction}
               batch={batch}
               canOperate={canOperate}
+              onConfirmNotCharged={handleConfirmNotCharged}
               onDownload={handleDownload}
               onPreview={handlePreview}
               onReconcile={handleReconcile}
+              onRetry={handleRetry}
+              onTaskActionReasonChange={(taskId, reason) =>
+                setTaskActionReasons((current) => ({
+                  ...current,
+                  [taskId]: reason,
+                }))
+              }
               previewUrls={previewUrls}
               resultErrors={resultErrors}
+              taskActionReasons={taskActionReasons}
+              userRole={userRole}
             />
           ) : (
             <EmptyBatchState hasHistory={batchHistory.length > 0} />
@@ -432,22 +533,34 @@ function BatchStatusMessage({
 
 function BatchPanel({
   activeResultAction,
+  activeTaskAction,
   batch,
   canOperate,
+  onConfirmNotCharged,
   onDownload,
   onPreview,
   onReconcile,
+  onRetry,
+  onTaskActionReasonChange,
   previewUrls,
   resultErrors,
+  taskActionReasons,
+  userRole,
 }: {
   activeResultAction: string;
+  activeTaskAction: string;
   batch: GenerationBatch;
   canOperate: boolean;
+  onConfirmNotCharged: (task: GenerationTask) => void;
   onDownload: (task: GenerationTask) => void;
   onPreview: (task: GenerationTask) => void;
   onReconcile: (taskId: string) => void;
+  onRetry: (task: GenerationTask) => void;
+  onTaskActionReasonChange: (taskId: string, reason: string) => void;
   previewUrls: Record<string, string>;
   resultErrors: Record<string, string>;
+  taskActionReasons: Record<string, string>;
+  userRole: UserRole;
 }) {
   const counts = batch.progress.counts;
   return (
@@ -497,14 +610,20 @@ function BatchPanel({
         {batch.tasks.map((task) => (
           <TaskItem
             activeResultAction={activeResultAction}
+            activeTaskAction={activeTaskAction}
             canOperate={canOperate}
             key={task.id}
+            onConfirmNotCharged={onConfirmNotCharged}
             onDownload={onDownload}
             onPreview={onPreview}
             onReconcile={onReconcile}
+            onRetry={onRetry}
+            onTaskActionReasonChange={onTaskActionReasonChange}
             previewUrl={previewUrls[task.id]}
             resultError={resultErrors[task.id]}
             task={task}
+            taskActionReason={taskActionReasons[task.id] ?? ""}
+            userRole={userRole}
           />
         ))}
       </ul>
@@ -514,22 +633,34 @@ function BatchPanel({
 
 function TaskItem({
   activeResultAction,
+  activeTaskAction,
   canOperate,
+  onConfirmNotCharged,
   onDownload,
   onPreview,
   onReconcile,
+  onRetry,
+  onTaskActionReasonChange,
   previewUrl,
   resultError,
   task,
+  taskActionReason,
+  userRole,
 }: {
   activeResultAction: string;
+  activeTaskAction: string;
   canOperate: boolean;
+  onConfirmNotCharged: (task: GenerationTask) => void;
   onDownload: (task: GenerationTask) => void;
   onPreview: (task: GenerationTask) => void;
   onReconcile: (taskId: string) => void;
+  onRetry: (task: GenerationTask) => void;
+  onTaskActionReasonChange: (taskId: string, reason: string) => void;
   previewUrl?: string;
   resultError?: string;
   task: GenerationTask;
+  taskActionReason: string;
+  userRole: UserRole;
 }) {
   const attentionNeeded = taskNeedsAttention(task);
   const audioFailed =
@@ -538,6 +669,16 @@ function TaskItem({
   const qualityPassed = task.quality_status === "AUDIO_OK";
   const previewAction = `${task.id}:preview`;
   const downloadAction = `${task.id}:download`;
+  const availableActions = task.available_actions ?? [];
+  const canRetry = canOperate && availableActions.includes("RETRY");
+  const canReconcile = canOperate && availableActions.includes("RECONCILE");
+  const requiresAdminConfirmation = availableActions.includes(
+    "CONFIRM_NOT_CHARGED",
+  );
+  const canConfirmNotCharged =
+    userRole === "admin" && requiresAdminConfirmation;
+  const actionReason = taskActionReason.trim();
+  const taskActionBusy = Boolean(activeTaskAction);
 
   return (
     <li className="task-item task-result-card">
@@ -550,13 +691,66 @@ function TaskItem({
           {attentionNeeded ? (
             <span className="attention-tag">需要处理</span>
           ) : null}
-          {canOperate && task.status === "SUBMISSION_UNCERTAIN" ? (
-            <button type="button" onClick={() => onReconcile(task.id)}>
+          {canReconcile ? (
+            <button
+              aria-label={`对账 ${task.id}`}
+              disabled={taskActionBusy}
+              type="button"
+              onClick={() => onReconcile(task.id)}
+            >
               对账
             </button>
           ) : null}
         </div>
       </div>
+
+      {canRetry || canConfirmNotCharged ? (
+        <div className="task-resolution-controls">
+          <label>
+            <span>处理原因</span>
+            <input
+              aria-label={`处理原因 ${task.id}`}
+              disabled={taskActionBusy}
+              maxLength={500}
+              onChange={(event) =>
+                onTaskActionReasonChange(task.id, event.target.value)
+              }
+              placeholder="填写本次处理依据"
+              value={taskActionReason}
+            />
+          </label>
+          {canRetry ? (
+            <button
+              aria-label={`${task.archive_status === "ARCHIVE_FAILED" ? "重试归档" : "安全重试"} ${task.id}`}
+              disabled={!actionReason || taskActionBusy}
+              onClick={() => onRetry(task)}
+              type="button"
+            >
+              {task.archive_status === "ARCHIVE_FAILED"
+                ? "重试归档"
+                : "安全重试"}
+            </button>
+          ) : null}
+          {canConfirmNotCharged ? (
+            <button
+              aria-label={`确认未计费 ${task.id}`}
+              disabled={!actionReason || taskActionBusy}
+              onClick={() => onConfirmNotCharged(task)}
+              type="button"
+            >
+              确认未计费并重新入队
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+      {canOperate && requiresAdminConfirmation && userRole !== "admin" ? (
+        <p className="task-resolution-note">
+          需管理员核对账单并确认未计费后才能重提。
+        </p>
+      ) : null}
+      {canOperate && availableActions.includes("REGENERATE") ? (
+        <p className="task-resolution-note">该任务只能走显式付费重新生成。</p>
+      ) : null}
 
       <div className="task-metadata-grid">
         <span>耗时 {formatDuration(task.duration_seconds)}</span>
@@ -676,6 +870,23 @@ function appendUniqueBatches(
 ): GenerationBatchListItem[] {
   const existingIds = new Set(current.map((item) => item.id));
   return [...current, ...incoming.filter((item) => !existingIds.has(item.id))];
+}
+
+function operationIdempotencyKey(
+  keys: Record<string, string>,
+  actionKey: string,
+): string {
+  const existing = keys[actionKey];
+  if (existing) {
+    return existing;
+  }
+  const randomPart =
+    typeof globalThis.crypto?.randomUUID === "function"
+      ? globalThis.crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const created = `generation-task:${randomPart}`;
+  keys[actionKey] = created;
+  return created;
 }
 
 function isTerminalBatch(batch: GenerationBatch) {
