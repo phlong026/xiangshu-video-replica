@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   type AnalysisVersion,
+  type CharacterReferenceSelection,
   confirmFirstFrame,
   type FirstFrameCandidate,
   type FirstFrameModel,
@@ -18,11 +19,19 @@ const DEFAULT_PROMPT =
   "保留原图的镜头位置、人物姿态、动作、场景、构图、道具、光线与色调，只将原人物身份替换为角色库人物；保持自然皮肤、正确肢体和真实透视；不得增加或删除主体。";
 
 export function FirstFrameSelection({
+  legacyCharacterSelected = false,
+  onSelectionChange,
   projectId,
   readOnly = false,
+  referenceSelection,
+  sourceFrameSelectionId,
 }: {
+  legacyCharacterSelected?: boolean;
+  onSelectionChange?: (selection: AnalysisVersion | null) => void;
   projectId: string;
   readOnly?: boolean;
+  referenceSelection: CharacterReferenceSelection | null;
+  sourceFrameSelectionId: string | null;
 }) {
   const [version, setVersion] = useState<AnalysisVersion | null>(null);
   const [latestVersionId, setLatestVersionId] = useState("");
@@ -37,6 +46,10 @@ export function FirstFrameSelection({
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const loadRequestId = useRef(0);
+  const referenceSelectionId = referenceSelection?.id ?? "";
+  const canGenerate =
+    Boolean(sourceFrameSelectionId) &&
+    Boolean(referenceSelection || legacyCharacterSelected);
 
   const load = useCallback(
     async (preferredVersion?: AnalysisVersion) => {
@@ -44,9 +57,10 @@ export function FirstFrameSelection({
       loadRequestId.current = requestId;
       const isCurrentRequest = () => requestId === loadRequestId.current;
       setIsLoading(true);
+      setIsSubmitting(false);
       setError("");
       try {
-        const [latest, selection, versions] = await Promise.all([
+        const [latestState, selection, versions] = await Promise.all([
           getLatestProjectFirstFrames(projectId),
           getLatestProjectFirstFrameSelection(projectId),
           getProjectFirstFrameHistory(projectId),
@@ -54,7 +68,26 @@ export function FirstFrameSelection({
         if (!isCurrentRequest()) {
           return;
         }
+        const latest = latestState.version;
         const displayVersion = preferredVersion ?? latest;
+        const latestPayload = latest ? readFirstFrameCandidates(latest) : null;
+        const confirmedSelection = selection.version
+          ? readFirstFrameSelectionPayload(selection.version)
+          : null;
+        const confirmedAssetId = confirmedSelection?.first_frame_asset_id;
+        const currentSelection =
+          !latestState.stale &&
+          !selection.stale &&
+          latest &&
+          latestPayload &&
+          confirmedSelection?.first_frame_candidates_version_id === latest.id &&
+          typeof confirmedAssetId === "string" &&
+          latestPayload.candidates.some(
+            (candidate) => candidate.asset_id === confirmedAssetId,
+          )
+            ? selection.version
+            : null;
+        onSelectionChange?.(currentSelection);
         setLatestVersionId(latest?.id ?? "");
         setHistory(versions);
         setVersion(displayVersion);
@@ -62,9 +95,15 @@ export function FirstFrameSelection({
         setPreviewUrls({});
         if (!displayVersion) {
           setStatus(
-            selection.stale
+            latestState.stale || selection.stale
               ? "上游输入已更新，请重新生成人物置换首帧。"
-              : "确认源画面并选择人物后，可生成人物置换首帧。",
+              : !sourceFrameSelectionId
+                ? "请先确认当前源画面；已有首帧历史仍可查看。"
+                : referenceSelectionId
+                  ? "人物参考图已确认，可以生成人物置换首帧。"
+                  : legacyCharacterSelected
+                    ? "历史兼容人物已恢复，可以继续生成首帧。"
+                    : "请先确认人物参考图；已有首帧历史仍可查看。",
           );
           return;
         }
@@ -75,30 +114,15 @@ export function FirstFrameSelection({
         }
         setModel(payload.model);
         setPrompt(payload.prompt);
-        const confirmedSelection = selection.version
-          ? readFirstFrameSelectionPayload(selection.version)
-          : null;
-        const confirmedAssetId = confirmedSelection?.first_frame_asset_id;
-        const isCurrentConfirmation =
-          !selection.stale &&
-          displayVersion.id === latest?.id &&
-          confirmedSelection?.first_frame_candidates_version_id ===
-            latest?.id &&
-          Boolean(
-            confirmedAssetId &&
-              payload.candidates.some(
-                (candidate) => candidate.asset_id === confirmedAssetId,
-              ),
-          );
-        if (isCurrentConfirmation && typeof confirmedAssetId === "string") {
-          setSelectedAssetId(confirmedAssetId);
-          setStatus("当前候选首帧已确认，将作为后续 H3 提示词的唯一首帧输入。");
-        } else if (selection.stale) {
+        if (latestState.stale || selection.stale) {
           setStatus("上游输入已更新，请重新生成人物置换首帧。");
-        } else if (selection.version) {
-          setStatus("已确认首帧与当前候选不一致，请重新确认最新候选。");
         } else if (displayVersion.id !== latest?.id) {
           setStatus("正在查看历史版本；仅最新候选可确认用于 H3。");
+        } else if (currentSelection && typeof confirmedAssetId === "string") {
+          setSelectedAssetId(confirmedAssetId);
+          setStatus("当前候选首帧已确认，将作为后续 H3 提示词的唯一首帧输入。");
+        } else if (selection.version) {
+          setStatus("已确认首帧与当前候选不一致，请重新确认最新候选。");
         } else {
           setStatus("");
         }
@@ -123,6 +147,7 @@ export function FirstFrameSelection({
         );
       } catch (requestError) {
         if (isCurrentRequest()) {
+          onSelectionChange?.(null);
           setError(
             requestError instanceof Error
               ? requestError.message
@@ -135,7 +160,14 @@ export function FirstFrameSelection({
         }
       }
     },
-    [projectId, readOnly],
+    [
+      legacyCharacterSelected,
+      onSelectionChange,
+      projectId,
+      readOnly,
+      referenceSelectionId,
+      sourceFrameSelectionId,
+    ],
   );
 
   useEffect(() => {
@@ -153,29 +185,49 @@ export function FirstFrameSelection({
     if (readOnly) {
       return;
     }
+    if (!canGenerate) {
+      setError("请先确认当前源画面和人物参考图，再生成新的置换首帧。");
+      return;
+    }
     if (!Number.isInteger(quantity) || quantity < 1 || quantity > 3) {
       setError("候选数量必须是 1–3 的整数。");
       return;
     }
+    const requestId = loadRequestId.current;
     setIsSubmitting(true);
     setError("");
     setStatus("");
     try {
+      const binding = referenceSelection
+        ? {
+            character_version_id: referenceSelection.character_version_id,
+            character_reference_selection_id: referenceSelection.id,
+          }
+        : {};
       const generated = await generateFirstFrames(projectId, {
         model,
         prompt,
         quantity,
+        ...binding,
       });
+      if (requestId !== loadRequestId.current) {
+        return;
+      }
       setStatus("候选首帧已更新，请查看后手动确认一张。");
       await load(generated);
     } catch (requestError) {
+      if (requestId !== loadRequestId.current) {
+        return;
+      }
       setError(
         requestError instanceof Error
           ? requestError.message
           : "生成人物置换首帧失败。",
       );
     } finally {
-      setIsSubmitting(false);
+      if (requestId === loadRequestId.current) {
+        setIsSubmitting(false);
+      }
     }
   }
 
@@ -187,22 +239,32 @@ export function FirstFrameSelection({
       setError("请先加载并查看最新候选首帧预览，再进行确认。");
       return;
     }
+    const requestId = loadRequestId.current;
     setIsSubmitting(true);
     setError("");
     try {
-      await confirmFirstFrame(projectId, selectedAssetId);
+      const selection = await confirmFirstFrame(projectId, selectedAssetId);
+      if (requestId !== loadRequestId.current) {
+        return;
+      }
       const selectedIndex = payload?.candidates.findIndex(
         (candidate) => candidate.asset_id === selectedAssetId,
       );
       setStatus(
         `已确认首帧候选 ${(selectedIndex ?? 0) + 1}。保存镜头卡片并锁定 H3 提示词后，才能创建视频批次。`,
       );
+      onSelectionChange?.(selection);
     } catch (requestError) {
+      if (requestId !== loadRequestId.current) {
+        return;
+      }
       setError(
         requestError instanceof Error ? requestError.message : "确认首帧失败。",
       );
     } finally {
-      setIsSubmitting(false);
+      if (requestId === loadRequestId.current) {
+        setIsSubmitting(false);
+      }
     }
   }
 
@@ -215,7 +277,9 @@ export function FirstFrameSelection({
         <span className="eyebrow">FIRST FRAME</span>
         <h3 id="first-frame-title">人物置换首帧</h3>
         <p>
-          以已确认的源画面和角色库参考图生成。确认后才允许它进入后续 H3 提示词。
+          {legacyCharacterSelected
+            ? "当前项目使用历史兼容人物；已有首帧历史可追溯，新生成沿用冻结的旧人物快照。"
+            : "以已确认的源画面和角色库参考图生成。确认后才允许它进入后续 H3 提示词。"}
         </p>
       </div>
       <div className="first-frame-controls">
@@ -223,7 +287,7 @@ export function FirstFrameSelection({
           首帧模型
           <select
             aria-label="首帧模型"
-            disabled={readOnly || isSubmitting}
+            disabled={readOnly || isSubmitting || !canGenerate}
             onChange={(event) =>
               setModel(event.target.value as FirstFrameModel)
             }
@@ -239,7 +303,7 @@ export function FirstFrameSelection({
           候选数量
           <input
             aria-label="候选数量"
-            disabled={readOnly || isSubmitting}
+            disabled={readOnly || isSubmitting || !canGenerate}
             max="3"
             min="1"
             onChange={(event) => setQuantity(Number(event.target.value))}
@@ -252,7 +316,7 @@ export function FirstFrameSelection({
         首帧编辑提示词
         <textarea
           aria-label="首帧编辑提示词"
-          disabled={readOnly || isSubmitting}
+          disabled={readOnly || isSubmitting || !canGenerate}
           onChange={(event) => setPrompt(event.target.value)}
           rows={5}
           value={prompt}
@@ -260,7 +324,7 @@ export function FirstFrameSelection({
       </label>
       <div className="source-frame-actions">
         <button
-          disabled={readOnly || isSubmitting}
+          disabled={readOnly || isSubmitting || !canGenerate}
           onClick={handleGenerate}
           type="button"
         >

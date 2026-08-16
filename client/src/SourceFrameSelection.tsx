@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
+  type AnalysisVersion,
   confirmSourceFrame,
   extractSourceFrames,
   getAssetDownloadUrl,
@@ -8,13 +9,16 @@ import {
   getLatestProjectSourceFrames,
   readSourceFrameCandidates,
   type SourceFrameCandidate,
+  type SourceFrameCharacterFeatures,
 } from "./api";
 
 export function SourceFrameSelection({
+  onSelectionChange,
   projectId,
   readOnly = false,
   referenceAssetId,
 }: {
+  onSelectionChange?: (selection: AnalysisVersion | null) => void;
   projectId: string;
   readOnly?: boolean;
   referenceAssetId: string | null;
@@ -25,6 +29,10 @@ export function SourceFrameSelection({
     [],
   );
   const [selectedAssetId, setSelectedAssetId] = useState("");
+  const [orientation, setOrientation] = useState("");
+  const [shotSize, setShotSize] = useState("");
+  const [faceVisibility, setFaceVisibility] = useState("");
+  const [bodyCompleteness, setBodyCompleteness] = useState("");
   const [timestampsText, setTimestampsText] = useState("0.5, 1.5, 2.5");
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
@@ -32,11 +40,19 @@ export function SourceFrameSelection({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const loadRequestId = useRef(0);
 
+  const resetFeatures = useCallback(() => {
+    setOrientation("");
+    setShotSize("");
+    setFaceVisibility("");
+    setBodyCompleteness("");
+  }, []);
+
   const loadCandidates = useCallback(async () => {
     const requestId = loadRequestId.current + 1;
     loadRequestId.current = requestId;
     const isCurrentRequest = () => requestId === loadRequestId.current;
     setIsLoading(true);
+    setIsSubmitting(false);
     setError("");
     try {
       const [version, selection] = await Promise.all([
@@ -51,6 +67,8 @@ export function SourceFrameSelection({
         setPreviewUrls({});
         setFailedPreviewAssetIds([]);
         setSelectedAssetId("");
+        resetFeatures();
+        onSelectionChange?.(null);
         setStatus(selection.stale ? "候选已更新，请重新确认源画面。" : "");
         return;
       }
@@ -64,15 +82,34 @@ export function SourceFrameSelection({
       setFailedPreviewAssetIds([]);
       setTimestampsText(payload.requested_timestamps_seconds.join(", "));
       const confirmedAssetId = selection.version?.payload.source_frame_asset_id;
-      if (typeof confirmedAssetId === "string") {
+      const confirmedFeatures = selection.version
+        ? readCharacterFeatures(selection.version)
+        : null;
+      if (typeof confirmedAssetId === "string" && confirmedFeatures) {
         setSelectedAssetId(confirmedAssetId);
+        setOrientation(confirmedFeatures.orientation);
+        setShotSize(confirmedFeatures.shot_size);
+        setFaceVisibility(
+          confirmedFeatures.face_visible ? "VISIBLE" : "HIDDEN",
+        );
+        setBodyCompleteness(confirmedFeatures.body_completeness);
         setStatus("当前候选源画面已确认。");
+        onSelectionChange?.(selection.version);
+      } else if (typeof confirmedAssetId === "string") {
+        setSelectedAssetId(confirmedAssetId);
+        resetFeatures();
+        setStatus("已保存的源画面缺少人物特征，请重新确认源画面。");
+        onSelectionChange?.(null);
       } else if (selection.stale) {
         setSelectedAssetId("");
+        resetFeatures();
         setStatus("候选已更新，请重新确认源画面。");
+        onSelectionChange?.(null);
       } else {
         setSelectedAssetId("");
+        resetFeatures();
         setStatus("");
+        onSelectionChange?.(null);
       }
       if (readOnly) {
         return;
@@ -106,12 +143,18 @@ export function SourceFrameSelection({
           ? requestError.message
           : "读取候选源画面失败。",
       );
+      onSelectionChange?.(null);
     } finally {
       if (isCurrentRequest()) {
         setIsLoading(false);
       }
     }
-  }, [projectId, readOnly]);
+  }, [onSelectionChange, projectId, readOnly, resetFeatures]);
+
+  function invalidateConfirmation() {
+    setStatus("源画面或人物特征已修改，请重新确认。");
+    onSelectionChange?.(null);
+  }
 
   useEffect(() => {
     void loadCandidates();
@@ -153,23 +196,34 @@ export function SourceFrameSelection({
       setError("请输入 1–3 个首 3 秒内且不重复的时间点，例如 0.5, 1.5, 2.5。");
       return;
     }
+    const requestId = loadRequestId.current + 1;
+    loadRequestId.current = requestId;
     setIsSubmitting(true);
-    loadRequestId.current += 1;
     setError("");
     setStatus("");
     try {
       await extractSourceFrames(projectId, referenceAssetId, timestamps);
+      if (requestId !== loadRequestId.current) {
+        return;
+      }
       setSelectedAssetId("");
+      resetFeatures();
+      onSelectionChange?.(null);
       setStatus("候选源画面已更新，请选择并确认一张。");
       await loadCandidates();
     } catch (requestError) {
+      if (requestId !== loadRequestId.current) {
+        return;
+      }
       setError(
         requestError instanceof Error
           ? requestError.message
           : "提取候选源画面失败。",
       );
     } finally {
-      setIsSubmitting(false);
+      if (requestId === loadRequestId.current) {
+        setIsSubmitting(false);
+      }
     }
   }
 
@@ -177,26 +231,50 @@ export function SourceFrameSelection({
     if (readOnly) {
       return;
     }
-    if (!selectedAssetId || !previewUrls[selectedAssetId]) {
+    const characterFeatures = currentCharacterFeatures(
+      orientation,
+      shotSize,
+      faceVisibility,
+      bodyCompleteness,
+    );
+    if (
+      !selectedAssetId ||
+      !previewUrls[selectedAssetId] ||
+      !characterFeatures
+    ) {
       setError("请先加载并查看候选源画面预览，再进行确认。");
       return;
     }
+    const requestId = loadRequestId.current;
     setIsSubmitting(true);
     setError("");
     try {
-      await confirmSourceFrame(projectId, selectedAssetId);
+      const selection = await confirmSourceFrame(
+        projectId,
+        selectedAssetId,
+        characterFeatures,
+      );
+      if (requestId !== loadRequestId.current) {
+        return;
+      }
       const selectedIndex = candidates.findIndex(
         (candidate) => candidate.asset_id === selectedAssetId,
       );
       setStatus(`已确认候选源画面 ${selectedIndex + 1}。`);
+      onSelectionChange?.(selection);
     } catch (requestError) {
+      if (requestId !== loadRequestId.current) {
+        return;
+      }
       setError(
         requestError instanceof Error
           ? requestError.message
           : "确认源画面失败。",
       );
     } finally {
-      setIsSubmitting(false);
+      if (requestId === loadRequestId.current) {
+        setIsSubmitting(false);
+      }
     }
   }
 
@@ -212,6 +290,79 @@ export function SourceFrameSelection({
           技术画质参考只用于排序；请以人物可见性和替换效果为准，手动确认一张。
         </p>
       </div>
+      <fieldset className="source-frame-features">
+        <legend>人物替换特征（需人工确认）</legend>
+        <label>
+          人物朝向
+          <select
+            aria-label="人物朝向"
+            disabled={readOnly || isSubmitting}
+            onChange={(event) => {
+              setOrientation(event.target.value);
+              invalidateConfirmation();
+            }}
+            value={orientation}
+          >
+            <option value="">请选择</option>
+            <option value="FRONT">正面</option>
+            <option value="LEFT_45">左 45°</option>
+            <option value="RIGHT_45">右 45°</option>
+            <option value="LEFT_SIDE">左侧面</option>
+            <option value="RIGHT_SIDE">右侧面</option>
+          </select>
+        </label>
+        <label>
+          人物景别
+          <select
+            aria-label="人物景别"
+            disabled={readOnly || isSubmitting}
+            onChange={(event) => {
+              setShotSize(event.target.value);
+              invalidateConfirmation();
+            }}
+            value={shotSize}
+          >
+            <option value="">请选择</option>
+            <option value="CLOSE_UP">近景</option>
+            <option value="HALF_BODY">半身</option>
+            <option value="FULL_BODY">全身</option>
+          </select>
+        </label>
+        <label>
+          面部可见性
+          <select
+            aria-label="面部可见性"
+            disabled={readOnly || isSubmitting}
+            onChange={(event) => {
+              setFaceVisibility(event.target.value);
+              invalidateConfirmation();
+            }}
+            value={faceVisibility}
+          >
+            <option value="">请选择</option>
+            <option value="VISIBLE">清晰可见</option>
+            <option value="HIDDEN">不可见或遮挡</option>
+          </select>
+        </label>
+        <label>
+          身体完整度
+          <select
+            aria-label="身体完整度"
+            disabled={readOnly || isSubmitting}
+            onChange={(event) => {
+              setBodyCompleteness(event.target.value);
+              invalidateConfirmation();
+            }}
+            value={bodyCompleteness}
+          >
+            <option value="">请选择</option>
+            <option value="FACE_ONLY">仅面部</option>
+            <option value="UPPER_BODY">上半身</option>
+            <option value="FULL_BODY">全身</option>
+            <option value="PARTIAL">局部可见</option>
+          </select>
+        </label>
+      </fieldset>
       <div className="source-frame-toolbar">
         <label className="source-frame-timestamps">
           重新取帧时间点（秒）
@@ -261,9 +412,14 @@ export function SourceFrameSelection({
           >
             <input
               checked={selectedAssetId === candidate.asset_id}
-              disabled={readOnly || !previewUrls[candidate.asset_id]}
+              disabled={
+                readOnly || isSubmitting || !previewUrls[candidate.asset_id]
+              }
               name="source-frame"
-              onChange={() => setSelectedAssetId(candidate.asset_id)}
+              onChange={() => {
+                setSelectedAssetId(candidate.asset_id);
+                invalidateConfirmation();
+              }}
               type="radio"
               value={candidate.asset_id}
             />
@@ -297,7 +453,17 @@ export function SourceFrameSelection({
       ) : (
         <button
           className="source-frame-confirm"
-          disabled={isSubmitting || !selectedAssetId}
+          disabled={
+            isSubmitting ||
+            !selectedAssetId ||
+            !previewUrls[selectedAssetId] ||
+            !currentCharacterFeatures(
+              orientation,
+              shotSize,
+              faceVisibility,
+              bodyCompleteness,
+            )
+          }
           onClick={handleConfirm}
           type="button"
         >
@@ -306,4 +472,61 @@ export function SourceFrameSelection({
       )}
     </section>
   );
+}
+
+function readCharacterFeatures(
+  version: AnalysisVersion,
+): SourceFrameCharacterFeatures | null {
+  const value = version.payload.character_features;
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const features = value as Record<string, unknown>;
+  return currentCharacterFeatures(
+    features.orientation,
+    features.shot_size,
+    features.face_visible === true
+      ? "VISIBLE"
+      : features.face_visible === false
+        ? "HIDDEN"
+        : "",
+    features.body_completeness,
+  );
+}
+
+function currentCharacterFeatures(
+  orientation: unknown,
+  shotSize: unknown,
+  faceVisibility: unknown,
+  bodyCompleteness: unknown,
+): SourceFrameCharacterFeatures | null {
+  const orientations = [
+    "FRONT",
+    "LEFT_45",
+    "RIGHT_45",
+    "LEFT_SIDE",
+    "RIGHT_SIDE",
+  ] as const;
+  const shotSizes = ["CLOSE_UP", "HALF_BODY", "FULL_BODY"] as const;
+  const completeness = [
+    "FACE_ONLY",
+    "UPPER_BODY",
+    "FULL_BODY",
+    "PARTIAL",
+  ] as const;
+  if (
+    !orientations.includes(orientation as (typeof orientations)[number]) ||
+    !shotSizes.includes(shotSize as (typeof shotSizes)[number]) ||
+    (faceVisibility !== "VISIBLE" && faceVisibility !== "HIDDEN") ||
+    !completeness.includes(bodyCompleteness as (typeof completeness)[number])
+  ) {
+    return null;
+  }
+  return {
+    orientation: orientation as SourceFrameCharacterFeatures["orientation"],
+    shot_size: shotSize as SourceFrameCharacterFeatures["shot_size"],
+    face_visible: faceVisibility === "VISIBLE",
+    body_completeness:
+      bodyCompleteness as SourceFrameCharacterFeatures["body_completeness"],
+  };
 }

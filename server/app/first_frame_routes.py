@@ -5,7 +5,7 @@ import sqlite3
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.auth import AuthenticatedUser, Database
 from app.first_frames import (
@@ -33,6 +33,14 @@ class GenerateFirstFramesRequest(BaseModel):
     model: Literal["gpt-image-2", "nano-banana-pro-2k"] = "nano-banana-pro-2k"
     prompt: str | None = Field(default=None, max_length=4000)
     quantity: int = Field(default=1, ge=1, le=3)
+    character_version_id: str | None = Field(default=None, min_length=1)
+    character_reference_selection_id: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def validate_character_binding(self) -> GenerateFirstFramesRequest:
+        if (self.character_version_id is None) != (self.character_reference_selection_id is None):
+            raise ValueError("character version and reference selection must be supplied together")
+        return self
 
 
 class ConfirmFirstFrameRequest(BaseModel):
@@ -120,6 +128,8 @@ def generate_project_first_frames(
         model=request.model,
         prompt=request.prompt,
         quantity=request.quantity,
+        character_version_id=request.character_version_id,
+        character_reference_selection_id=request.character_reference_selection_id,
     )
     return version_response(row)
 

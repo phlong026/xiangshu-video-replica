@@ -219,7 +219,32 @@ export type SourceFrameSelectionState = {
   stale: boolean;
 };
 
+export type SourceFrameCharacterFeatures =
+  components["schemas"]["SourceFrameCharacterFeatures"];
+
+export type CharacterReferenceRecommendation = Omit<
+  components["schemas"]["CharacterReferenceRecommendation"],
+  "character_version_snapshot_json" | "recommendation_reason_json"
+> & {
+  character_version_snapshot_json: Record<string, unknown>;
+  recommendation_reason_json: Record<string, unknown>;
+};
+
+export type CharacterReferenceSelection = Omit<
+  components["schemas"]["CharacterReferenceSelection"],
+  "character_version_snapshot_json" | "recommendation_reason_json"
+> & {
+  character_version_snapshot_json: Record<string, unknown>;
+  recommendation_reason_json: Record<string, unknown>;
+};
+
+export type SelectCharacterReferencesInput =
+  components["schemas"]["SelectCharacterReferencesRequest"];
+
 export type FirstFrameModel = "gpt-image-2" | "nano-banana-pro-2k";
+
+export type GenerateFirstFramesInput =
+  components["schemas"]["GenerateFirstFramesRequest"];
 
 export type FirstFrameCandidate = {
   asset_id: string;
@@ -833,32 +858,81 @@ export async function extractSourceFrames(
 export async function confirmSourceFrame(
   projectId: string,
   sourceFrameAssetId: string,
+  characterFeatures: SourceFrameCharacterFeatures,
 ): Promise<AnalysisVersion> {
   return requestApiJson<AnalysisVersion>(
     `/api/projects/${encodeURIComponent(projectId)}/source-frames/confirm`,
     "确认源画面失败",
     {
       method: "POST",
-      body: JSON.stringify({ source_frame_asset_id: sourceFrameAssetId }),
+      body: JSON.stringify({
+        source_frame_asset_id: sourceFrameAssetId,
+        character_features: characterFeatures,
+      }),
     },
   );
 }
 
-export async function getLatestProjectFirstFrames(
+export async function getCharacterReferenceRecommendation(
   projectId: string,
-): Promise<AnalysisVersion | null> {
+): Promise<CharacterReferenceRecommendation> {
+  return requestApiJson<CharacterReferenceRecommendation>(
+    `/api/projects/${encodeURIComponent(projectId)}/character-reference-recommendation`,
+    "读取人物参考图推荐失败",
+  );
+}
+
+export async function getLatestCharacterReferenceSelection(
+  projectId: string,
+): Promise<CharacterReferenceSelection | null> {
   const response = await requestApi(
-    `/api/projects/${encodeURIComponent(projectId)}/first-frames/latest`,
+    `/api/projects/${encodeURIComponent(projectId)}/character-reference-selection/latest`,
     { method: "GET" },
   );
   if (response.status === 404) {
     return null;
   }
   if (!response.ok) {
+    throw new Error(`读取已确认人物参考图失败（${response.status}）`);
+  }
+  return (await response.json()) as CharacterReferenceSelection;
+}
+
+export async function selectCharacterReferences(
+  projectId: string,
+  input: SelectCharacterReferencesInput,
+): Promise<CharacterReferenceSelection> {
+  return requestApiJson<CharacterReferenceSelection>(
+    `/api/projects/${encodeURIComponent(projectId)}/character-reference-selection`,
+    "确认人物参考图失败",
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
+  );
+}
+
+export async function getLatestProjectFirstFrames(
+  projectId: string,
+): Promise<FirstFrameSelectionState> {
+  const response = await requestApi(
+    `/api/projects/${encodeURIComponent(projectId)}/first-frames/latest`,
+    { method: "GET" },
+  );
+  if (response.status === 404) {
+    return { version: null, stale: false };
+  }
+  if (response.status === 409) {
+    return { version: null, stale: true };
+  }
+  if (!response.ok) {
     throw new Error(`读取候选首帧失败（${response.status}）`);
   }
   const version = (await response.json()) as unknown;
-  return isAnalysisVersion(version) ? version : null;
+  return {
+    version: isAnalysisVersion(version) ? version : null,
+    stale: false,
+  };
 }
 
 export async function getProjectFirstFrameHistory(
@@ -894,7 +968,7 @@ export async function getLatestProjectFirstFrameSelection(
 
 export async function generateFirstFrames(
   projectId: string,
-  input: { model: FirstFrameModel; prompt: string; quantity: number },
+  input: GenerateFirstFramesInput,
 ): Promise<AnalysisVersion> {
   return requestApiJson<AnalysisVersion>(
     `/api/projects/${encodeURIComponent(projectId)}/first-frames/generate`,

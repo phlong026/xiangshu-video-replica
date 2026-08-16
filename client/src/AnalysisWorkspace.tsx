@@ -8,9 +8,12 @@ import {
 
 import {
   type AnalysisProvider,
+  type AnalysisVersion,
+  type CharacterReferenceSelection as CharacterReferenceSelectionValue,
   getLatestProjectAnalysis,
   getLatestProjectShotCards,
   type Project,
+  type ProjectMainCharacter,
   readAnalysisPayload,
   readAnalysisProvider,
   readShotCardPayload,
@@ -18,6 +21,7 @@ import {
   saveShotCards,
   startVideoAnalysis,
 } from "./api";
+import { CharacterReferenceSelection } from "./CharacterReferenceSelection";
 import { CharacterSelection } from "./CharacterSelection";
 import { FirstFrameSelection } from "./FirstFrameSelection";
 import { ProjectWorkflowSteps } from "./ProjectWorkflowSteps";
@@ -66,13 +70,22 @@ export function AnalysisWorkspace({
   const [isSaving, setIsSaving] = useState(false);
   const [isAnalysisMissing, setIsAnalysisMissing] = useState(false);
   const [isStartingAnalysis, setIsStartingAnalysis] = useState(false);
-  const [characterSelectionProjectId, setCharacterSelectionProjectId] =
-    useState("");
+  const [characterSelection, setCharacterSelection] =
+    useState<ProjectMainCharacter | null>(null);
+  const [sourceFrameSelection, setSourceFrameSelection] =
+    useState<AnalysisVersion | null>(null);
+  const [characterReferenceSelection, setCharacterReferenceSelection] =
+    useState<CharacterReferenceSelectionValue | null>(null);
+  const [firstFrameSelection, setFirstFrameSelection] =
+    useState<AnalysisVersion | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
   const [forceLoadProjectId, setForceLoadProjectId] = useState<string | null>(
     null,
   );
   const reloadTokenRef = useRef(0);
+  const characterSelectionVersionIdRef = useRef<string | null>(null);
+  const sourceFrameSelectionIdRef = useRef<string | null>(null);
+  const characterReferenceSelectionIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (
@@ -156,12 +169,87 @@ export function AnalysisWorkspace({
     reloadToken,
   ]);
 
+  useEffect(() => {
+    if (!project.id) {
+      return;
+    }
+    setCharacterSelection(null);
+    setSourceFrameSelection(null);
+    setCharacterReferenceSelection(null);
+    setFirstFrameSelection(null);
+    characterSelectionVersionIdRef.current = null;
+    sourceFrameSelectionIdRef.current = null;
+    characterReferenceSelectionIdRef.current = null;
+  }, [project.id]);
+
   const handleCharacterSelectionChange = useCallback(
-    (hasSelection: boolean) => {
-      setCharacterSelectionProjectId(hasSelection ? project.id : "");
+    (selection: ProjectMainCharacter | null) => {
+      const nextVersionId = selection?.version_id ?? null;
+      const bindingChanged =
+        nextVersionId !== characterSelectionVersionIdRef.current;
+      characterSelectionVersionIdRef.current = nextVersionId;
+      setCharacterSelection(selection);
+      if (bindingChanged) {
+        sourceFrameSelectionIdRef.current = null;
+        characterReferenceSelectionIdRef.current = null;
+        setSourceFrameSelection(null);
+        setCharacterReferenceSelection(null);
+        setFirstFrameSelection(null);
+      }
     },
-    [project.id],
+    [],
   );
+
+  const handleSourceFrameSelectionChange = useCallback(
+    (selection: AnalysisVersion | null) => {
+      const nextSelectionId = selection?.id ?? null;
+      const bindingChanged =
+        nextSelectionId !== sourceFrameSelectionIdRef.current;
+      sourceFrameSelectionIdRef.current = nextSelectionId;
+      setSourceFrameSelection(selection);
+      if (bindingChanged) {
+        characterReferenceSelectionIdRef.current = null;
+        setCharacterReferenceSelection(null);
+        setFirstFrameSelection(null);
+      }
+    },
+    [],
+  );
+
+  const handleCharacterReferenceSelectionChange = useCallback(
+    (selection: CharacterReferenceSelectionValue | null) => {
+      const nextSelectionId = selection?.id ?? null;
+      const bindingChanged =
+        nextSelectionId !== characterReferenceSelectionIdRef.current;
+      characterReferenceSelectionIdRef.current = nextSelectionId;
+      setCharacterReferenceSelection(selection);
+      if (bindingChanged) {
+        setFirstFrameSelection(null);
+      }
+    },
+    [],
+  );
+
+  const handleFirstFrameSelectionChange = useCallback(
+    (selection: AnalysisVersion | null) => {
+      setFirstFrameSelection(selection);
+    },
+    [],
+  );
+
+  const legacyCharacterSelected = Boolean(characterSelection?.character_id);
+
+  const workflowStep = !analysisId
+    ? 2
+    : !characterSelection
+      ? 3
+      : !sourceFrameSelection
+        ? 4
+        : !legacyCharacterSelected && !characterReferenceSelection
+          ? 5
+          : !firstFrameSelection
+            ? 6
+            : 7;
 
   function reloadWorkspace() {
     reloadTokenRef.current += 1;
@@ -252,11 +340,7 @@ export function AnalysisWorkspace({
           返回项目
         </button>
       </div>
-      <ProjectWorkflowSteps
-        currentStep={
-          analysisId ? (characterSelectionProjectId === project.id ? 4 : 3) : 2
-        }
-      />
+      <ProjectWorkflowSteps currentStep={workflowStep} />
       {isLoading ? <p className="status-note">正在读取视频拆解</p> : null}
       {error ? <p className="settings-error">{error}</p> : null}
       {!isLoading && error && !isAnalysisMissing ? (
@@ -322,12 +406,39 @@ export function AnalysisWorkspace({
           ) : null}
           <div className="analysis-workspace-grid">
             <div className="analysis-primary">
-              <SourceFrameSelection
-                projectId={project.id}
-                referenceAssetId={project.reference_asset_id}
-                readOnly={readOnly}
-              />
-              <FirstFrameSelection projectId={project.id} readOnly={readOnly} />
+              {characterSelection ? (
+                <SourceFrameSelection
+                  onSelectionChange={handleSourceFrameSelectionChange}
+                  projectId={project.id}
+                  referenceAssetId={project.reference_asset_id}
+                  readOnly={readOnly}
+                />
+              ) : (
+                <p className="workflow-gate-note">
+                  请先在右侧选择角色版本，再确认源画面。
+                </p>
+              )}
+              {!legacyCharacterSelected &&
+              characterSelection?.character_version_id &&
+              sourceFrameSelection ? (
+                <CharacterReferenceSelection
+                  characterSelection={characterSelection}
+                  onSelectionChange={handleCharacterReferenceSelectionChange}
+                  projectId={project.id}
+                  readOnly={readOnly}
+                  sourceFrameSelection={sourceFrameSelection}
+                />
+              ) : null}
+              {characterSelection ? (
+                <FirstFrameSelection
+                  legacyCharacterSelected={legacyCharacterSelected}
+                  onSelectionChange={handleFirstFrameSelectionChange}
+                  projectId={project.id}
+                  readOnly={readOnly}
+                  referenceSelection={characterReferenceSelection}
+                  sourceFrameSelectionId={sourceFrameSelection?.id ?? null}
+                />
+              ) : null}
               <div className="shot-card-list">
                 {shots.map((shot, index) => (
                   <fieldset className="shot-card" key={shot.shot_id}>
@@ -377,7 +488,7 @@ export function AnalysisWorkspace({
             </div>
             <aside className="analysis-sidebar" aria-label="当前人物设定">
               <CharacterSelection
-                onSelectionChange={handleCharacterSelectionChange}
+                onVersionChange={handleCharacterSelectionChange}
                 projectId={project.id}
                 readOnly={readOnly}
               />

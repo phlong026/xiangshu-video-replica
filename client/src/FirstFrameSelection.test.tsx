@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -10,6 +16,19 @@ import {
   getProjectFirstFrameHistory,
 } from "./api";
 import { FirstFrameSelection } from "./FirstFrameSelection";
+
+const referenceSelection = {
+  id: "reference-selection-1",
+  project_id: "project-1",
+  source_frame_version_id: "source-selection-1",
+  character_version_id: "character-version-3",
+  recommended_asset_ids_json: ["character-front"],
+  selected_asset_ids_json: ["character-front"],
+  recommendation_reason_json: {},
+  character_version_snapshot_json: {},
+  selected_by: "employee_1",
+  selected_at: "2030-01-01T00:00:00Z",
+};
 
 vi.mock("./api", () => ({
   confirmFirstFrame: vi.fn(),
@@ -58,7 +77,10 @@ const candidatesVersion = {
 describe("FirstFrameSelection", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(getLatestProjectFirstFrames).mockResolvedValue(candidatesVersion);
+    vi.mocked(getLatestProjectFirstFrames).mockResolvedValue({
+      version: candidatesVersion,
+      stale: false,
+    });
     vi.mocked(getProjectFirstFrameHistory).mockResolvedValue([
       candidatesVersion,
     ]);
@@ -79,7 +101,13 @@ describe("FirstFrameSelection", () => {
   });
 
   it("shows the Apilio model, candidates, and requires a visible choice before confirmation", async () => {
-    render(<FirstFrameSelection projectId="project-1" />);
+    render(
+      <FirstFrameSelection
+        projectId="project-1"
+        referenceSelection={referenceSelection}
+        sourceFrameSelectionId="source-selection-1"
+      />,
+    );
 
     expect(await screen.findByText("人物置换首帧")).toBeInTheDocument();
     expect(
@@ -107,7 +135,13 @@ describe("FirstFrameSelection", () => {
   });
 
   it("allows the employee to change the model, edit the prompt, and regenerate candidates", async () => {
-    render(<FirstFrameSelection projectId="project-1" />);
+    render(
+      <FirstFrameSelection
+        projectId="project-1"
+        referenceSelection={referenceSelection}
+        sourceFrameSelectionId="source-selection-1"
+      />,
+    );
     await screen.findByText("人物置换首帧");
 
     fireEvent.change(screen.getByLabelText("首帧模型"), {
@@ -126,16 +160,70 @@ describe("FirstFrameSelection", () => {
         model: "gpt-image-2",
         prompt: "Use the selected character identity.",
         quantity: 2,
+        character_version_id: "character-version-3",
+        character_reference_selection_id: "reference-selection-1",
       }),
     );
   });
 
+  it("loads history and uses the binding-less generation path for a legacy character", async () => {
+    render(
+      <FirstFrameSelection
+        legacyCharacterSelected
+        projectId="project-1"
+        referenceSelection={null}
+        sourceFrameSelectionId="source-selection-1"
+      />,
+    );
+    await screen.findByRole("button", { name: "版本 #2" });
+
+    fireEvent.change(screen.getByLabelText("首帧编辑提示词"), {
+      target: { value: "Keep the legacy character identity." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "重新生成候选首帧" }));
+
+    await waitFor(() =>
+      expect(generateFirstFrames).toHaveBeenCalledWith("project-1", {
+        model: "nano-banana-pro-2k",
+        prompt: "Keep the legacy character identity.",
+        quantity: 1,
+      }),
+    );
+  });
+
+  it("keeps legacy history visible but disables generation without a current source", async () => {
+    render(
+      <FirstFrameSelection
+        legacyCharacterSelected
+        projectId="project-1"
+        referenceSelection={null}
+        sourceFrameSelectionId={null}
+      />,
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "版本 #2" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "重新生成候选首帧" }),
+    ).toBeDisabled();
+  });
+
   it("clearly marks local fake output instead of presenting it as a provider result", async () => {
     vi.mocked(getLatestProjectFirstFrames).mockResolvedValue({
-      ...candidatesVersion,
-      payload: { ...candidatesVersion.payload, provider: "fake" },
+      stale: false,
+      version: {
+        ...candidatesVersion,
+        payload: { ...candidatesVersion.payload, provider: "fake" },
+      },
     });
-    render(<FirstFrameSelection projectId="project-1" />);
+    render(
+      <FirstFrameSelection
+        projectId="project-1"
+        referenceSelection={referenceSelection}
+        sourceFrameSelectionId="source-selection-1"
+      />,
+    );
 
     expect(
       await screen.findByText("模拟输出：尚未调用 Apilio 真实模型。"),
@@ -155,7 +243,13 @@ describe("FirstFrameSelection", () => {
         },
       },
     });
-    render(<FirstFrameSelection projectId="project-1" />);
+    render(
+      <FirstFrameSelection
+        projectId="project-1"
+        referenceSelection={referenceSelection}
+        sourceFrameSelectionId="source-selection-1"
+      />,
+    );
 
     expect(
       await screen.findByText(
@@ -166,11 +260,196 @@ describe("FirstFrameSelection", () => {
   });
 
   it("does not request protected preview downloads for a read-only auditor", async () => {
-    render(<FirstFrameSelection projectId="project-1" readOnly />);
+    render(
+      <FirstFrameSelection
+        projectId="project-1"
+        readOnly
+        referenceSelection={referenceSelection}
+        sourceFrameSelectionId="source-selection-1"
+      />,
+    );
 
     expect(
       await screen.findByText(/只读身份不加载素材预览/),
     ).toBeInTheDocument();
     expect(getAssetDownloadUrl).not.toHaveBeenCalled();
+  });
+
+  it("treats a stale latest generation as an upstream gate instead of a load error", async () => {
+    vi.mocked(getLatestProjectFirstFrames).mockResolvedValue({
+      version: null,
+      stale: true,
+    });
+
+    render(
+      <FirstFrameSelection
+        projectId="project-1"
+        referenceSelection={referenceSelection}
+        sourceFrameSelectionId="source-selection-1"
+      />,
+    );
+
+    expect(
+      await screen.findByText("上游输入已更新，请重新生成人物置换首帧。"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/读取候选首帧失败/)).toBeNull();
+  });
+
+  it("keeps the valid latest confirmation while browsing history", async () => {
+    const historicalVersion = {
+      ...candidatesVersion,
+      id: "first-frame-candidates-1",
+      version_number: 1,
+      payload: {
+        ...candidatesVersion.payload,
+        candidates: [
+          {
+            ...candidatesVersion.payload.candidates[0],
+            asset_id: "historical-first-1",
+          },
+        ],
+      },
+    };
+    const confirmedSelection = {
+      ...candidatesVersion,
+      id: "first-frame-selection-1",
+      kind: "first_frame_selection",
+      payload: {
+        first_frame_candidates_version_id: candidatesVersion.id,
+        first_frame_asset_id: "first-1",
+      },
+    };
+    vi.mocked(getProjectFirstFrameHistory).mockResolvedValue([
+      candidatesVersion,
+      historicalVersion,
+    ]);
+    vi.mocked(getLatestProjectFirstFrameSelection).mockResolvedValue({
+      version: confirmedSelection,
+      stale: false,
+    });
+    const onSelectionChange = vi.fn();
+    render(
+      <FirstFrameSelection
+        onSelectionChange={onSelectionChange}
+        projectId="project-1"
+        referenceSelection={referenceSelection}
+        sourceFrameSelectionId="source-selection-1"
+      />,
+    );
+
+    await waitFor(() =>
+      expect(onSelectionChange).toHaveBeenLastCalledWith(confirmedSelection),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "版本 #1" }));
+
+    expect(
+      await screen.findByText("正在查看历史版本；仅最新候选可确认用于 H3。"),
+    ).toBeInTheDocument();
+    expect(onSelectionChange).toHaveBeenLastCalledWith(confirmedSelection);
+  });
+
+  it("ignores a confirmation response after the reference input changes", async () => {
+    const confirmedSelection = {
+      ...candidatesVersion,
+      id: "first-frame-selection-1",
+      kind: "first_frame_selection",
+      payload: {
+        first_frame_candidates_version_id: candidatesVersion.id,
+        first_frame_asset_id: "first-1",
+      },
+    };
+    let resolveConfirmation:
+      | ((selection: typeof confirmedSelection) => void)
+      | undefined;
+    const pendingConfirmation = new Promise<typeof confirmedSelection>(
+      (resolve) => {
+        resolveConfirmation = resolve;
+      },
+    );
+    vi.mocked(confirmFirstFrame).mockReturnValue(pendingConfirmation);
+    const onSelectionChange = vi.fn();
+    const { rerender } = render(
+      <FirstFrameSelection
+        onSelectionChange={onSelectionChange}
+        projectId="project-1"
+        referenceSelection={referenceSelection}
+        sourceFrameSelectionId="source-selection-1"
+      />,
+    );
+
+    await screen.findByAltText("首帧候选 1");
+    fireEvent.click(screen.getByRole("radio", { name: /首帧候选 1/ }));
+    fireEvent.click(screen.getByRole("button", { name: "确认用于 H3 的首帧" }));
+    await waitFor(() => expect(confirmFirstFrame).toHaveBeenCalledOnce());
+
+    rerender(
+      <FirstFrameSelection
+        onSelectionChange={onSelectionChange}
+        projectId="project-1"
+        referenceSelection={{
+          ...referenceSelection,
+          id: "reference-selection-2",
+        }}
+        sourceFrameSelectionId="source-selection-1"
+      />,
+    );
+    await act(async () => {
+      resolveConfirmation?.(confirmedSelection);
+      await pendingConfirmation;
+    });
+
+    expect(onSelectionChange).not.toHaveBeenCalledWith(confirmedSelection);
+  });
+
+  it("ignores a legacy confirmation response after the source selection changes", async () => {
+    const confirmedSelection = {
+      ...candidatesVersion,
+      id: "first-frame-selection-legacy",
+      kind: "first_frame_selection",
+      payload: {
+        first_frame_candidates_version_id: candidatesVersion.id,
+        first_frame_asset_id: "first-1",
+      },
+    };
+    let resolveConfirmation:
+      | ((selection: typeof confirmedSelection) => void)
+      | undefined;
+    const pendingConfirmation = new Promise<typeof confirmedSelection>(
+      (resolve) => {
+        resolveConfirmation = resolve;
+      },
+    );
+    vi.mocked(confirmFirstFrame).mockReturnValue(pendingConfirmation);
+    const onSelectionChange = vi.fn();
+    const { rerender } = render(
+      <FirstFrameSelection
+        legacyCharacterSelected
+        onSelectionChange={onSelectionChange}
+        projectId="project-1"
+        referenceSelection={null}
+        sourceFrameSelectionId="source-selection-1"
+      />,
+    );
+
+    await screen.findByAltText("首帧候选 1");
+    fireEvent.click(screen.getByRole("radio", { name: /首帧候选 1/ }));
+    fireEvent.click(screen.getByRole("button", { name: "确认用于 H3 的首帧" }));
+    await waitFor(() => expect(confirmFirstFrame).toHaveBeenCalledOnce());
+
+    rerender(
+      <FirstFrameSelection
+        legacyCharacterSelected
+        onSelectionChange={onSelectionChange}
+        projectId="project-1"
+        referenceSelection={null}
+        sourceFrameSelectionId="source-selection-2"
+      />,
+    );
+    await act(async () => {
+      resolveConfirmation?.(confirmedSelection);
+      await pendingConfirmation;
+    });
+
+    expect(onSelectionChange).not.toHaveBeenCalledWith(confirmedSelection);
   });
 });

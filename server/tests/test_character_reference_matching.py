@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from app.analysis import insert_version
 from app.auth import get_database
 from app.character_identity import REQUIRED_CHARACTER_VIEW_TYPES, encode_json
 from app.character_reference_matching import SourceFrameFeatures, recommended_body_view
@@ -18,7 +19,7 @@ from app.first_frame_routes import get_image_provider
 from app.first_frames import GeneratedImage, ImageInput
 from app.main import app
 from app.media_routes import get_media_storage
-from app.storage import FakeStorageAdapter
+from app.storage import FakeStorageAdapter, StoredObject
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,45 @@ class RecordingImageProvider:
             GeneratedImage(content=f"first-frame-{index}".encode(), content_type="image/png")
             for index in range(output_count)
         ]
+
+
+class SourceSelectionChangingStorage(FakeStorageAdapter):
+    def __init__(self, delegate: FakeStorageAdapter, db_path: Path) -> None:
+        super().__init__(provider="fake", bucket=delegate.bucket)
+        self._objects = delegate._objects
+        self.db_path = db_path
+        self.changed = False
+        self.first_frame_keys: list[str] = []
+
+    def put_object(self, key: str, content: bytes, *, content_type: str) -> StoredObject:
+        stored = super().put_object(key, content, content_type=content_type)
+        if "/first-frames/" not in key:
+            return stored
+        self.first_frame_keys.append(key)
+        if self.changed:
+            return stored
+        self.changed = True
+        with connect_database(self.db_path) as conn:
+            current = conn.execute(
+                """
+                SELECT asset_id, payload_json
+                FROM versions
+                WHERE project_id = ? AND kind = 'source_frame_selection'
+                ORDER BY version_number DESC
+                LIMIT 1
+                """,
+                ("project-owned",),
+            ).fetchone()
+            assert current is not None
+            insert_version(
+                conn,
+                project_id="project-owned",
+                asset_id=str(current["asset_id"]),
+                kind="source_frame_selection",
+                created_by_user_id="employee_1",
+                payload=json.loads(str(current["payload_json"])),
+            )
+        return stored
 
 
 @pytest.fixture()
@@ -379,6 +419,19 @@ def context(db_path: Path) -> SeededReferenceContext:
     )
 
 
+def reference_selection_payload(
+    seeded: SeededReferenceContext,
+    selected_asset_ids: list[str] | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "source_frame_selection_version_id": seeded.source_selection_id,
+        "character_version_id": seeded.character_version_id,
+    }
+    if selected_asset_ids is not None:
+        payload["selected_asset_ids"] = selected_asset_ids
+    return payload
+
+
 @pytest.mark.parametrize(
     ("features", "expected"),
     [
@@ -405,12 +458,12 @@ def test_default_selection_freezes_recommendation_and_reopens_idempotently(
     created = client.post(
         "/api/projects/project-owned/character-reference-selection",
         headers=headers("employee_1"),
-        json={},
+        json=reference_selection_payload(seeded),
     )
     replay = client.post(
         "/api/projects/project-owned/character-reference-selection",
         headers=headers("employee_1"),
-        json={},
+        json=reference_selection_payload(seeded),
     )
     latest = client.get(
         "/api/projects/project-owned/character-reference-selection/latest",
@@ -452,6 +505,54 @@ def test_default_selection_freezes_recommendation_and_reopens_idempotently(
     assert audit_count == 1
 
 
+def test_recommendation_preview_is_read_only_and_lists_all_published_assets(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    seeded = context(db_path)
+
+    preview = client.get(
+        "/api/projects/project-owned/character-reference-recommendation",
+        headers=headers("employee_1"),
+    )
+    auditor_preview = client.get(
+        "/api/projects/project-owned/character-reference-recommendation",
+        headers=headers("auditor_1"),
+    )
+    forbidden = client.get(
+        "/api/projects/project-owned/character-reference-recommendation",
+        headers=headers("employee_2"),
+    )
+
+    assert preview.status_code == 200
+    body = preview.json()
+    assert body["source_frame_version_id"] == seeded.source_selection_id
+    assert body["character_version_id"] == seeded.character_version_id
+    assert body["recommended_asset_ids_json"] == [
+        seeded.approved_asset_by_view["RIGHT_45"],
+        seeded.approved_asset_by_view["FRONT_FACE"],
+    ]
+    assert [asset["view_type"] for asset in body["candidate_assets"]] == list(
+        REQUIRED_CHARACTER_VIEW_TYPES
+    )
+    assert {asset["asset_id"] for asset in body["candidate_assets"]} == set(
+        seeded.approved_asset_by_view.values()
+    )
+    assert body["recommendation_reason_json"]["body_view_type"] == "RIGHT_45"
+    assert auditor_preview.json() == body
+    assert forbidden.status_code == 403
+    with connect_database(db_path) as conn:
+        selection_count = conn.execute(
+            "SELECT COUNT(*) FROM character_reference_selections WHERE project_id = ?",
+            (seeded.project_id,),
+        ).fetchone()[0]
+        audit_count = conn.execute(
+            "SELECT COUNT(*) FROM audit_logs WHERE action = 'character_reference.select'"
+        ).fetchone()[0]
+    assert selection_count == 0
+    assert audit_count == 0
+
+
 def test_employee_can_choose_one_to_four_published_assets_and_roles_fail_closed(
     client: TestClient,
     db_path: Path,
@@ -466,27 +567,27 @@ def test_employee_can_choose_one_to_four_published_assets_and_roles_fail_closed(
     created = client.post(
         "/api/projects/project-owned/character-reference-selection",
         headers=headers("employee_1"),
-        json={"selected_asset_ids": selected_ids},
+        json=reference_selection_payload(seeded, selected_ids),
     )
     foreign = client.post(
         "/api/projects/project-owned/character-reference-selection",
         headers=headers("employee_1"),
-        json={"selected_asset_ids": ["authorization-asset"]},
+        json=reference_selection_payload(seeded, ["authorization-asset"]),
     )
     too_many = client.post(
         "/api/projects/project-owned/character-reference-selection",
         headers=headers("employee_1"),
-        json={"selected_asset_ids": list(seeded.approved_asset_by_view.values())[:5]},
+        json=reference_selection_payload(seeded, list(seeded.approved_asset_by_view.values())[:5]),
     )
     other_employee = client.post(
         "/api/projects/project-owned/character-reference-selection",
         headers=headers("employee_2"),
-        json={},
+        json=reference_selection_payload(seeded),
     )
     auditor = client.post(
         "/api/projects/project-owned/character-reference-selection",
         headers=headers("auditor_1"),
-        json={},
+        json=reference_selection_payload(seeded),
     )
 
     assert created.status_code == 201
@@ -498,10 +599,58 @@ def test_employee_can_choose_one_to_four_published_assets_and_roles_fail_closed(
     assert auditor.status_code == 403
 
 
+def test_selection_rejects_an_input_binding_that_changed_before_persistence(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    seeded = context(db_path)
+    missing_binding = client.post(
+        "/api/projects/project-owned/character-reference-selection",
+        headers=headers("employee_1"),
+        json={"selected_asset_ids": [seeded.approved_asset_by_view["FRONT_FACE"]]},
+    )
+    assert missing_binding.status_code == 422
+
+    with connect_database(db_path) as conn:
+        current = conn.execute(
+            "SELECT asset_id, payload_json FROM versions WHERE id = ?",
+            (seeded.source_selection_id,),
+        ).fetchone()
+        assert current is not None
+        insert_version(
+            conn,
+            project_id=seeded.project_id,
+            asset_id=str(current["asset_id"]),
+            kind="source_frame_selection",
+            created_by_user_id="employee_1",
+            payload=json.loads(str(current["payload_json"])),
+        )
+
+    stale = client.post(
+        "/api/projects/project-owned/character-reference-selection",
+        headers=headers("employee_1"),
+        json={
+            "selected_asset_ids": [seeded.approved_asset_by_view["FRONT_FACE"]],
+            "source_frame_selection_version_id": seeded.source_selection_id,
+            "character_version_id": seeded.character_version_id,
+        },
+    )
+
+    assert stale.status_code == 409
+    assert stale.json()["detail"]["code"] == "CHARACTER_REFERENCE_INPUT_BINDING_STALE"
+    with connect_database(db_path) as conn:
+        selection_count = conn.execute(
+            "SELECT COUNT(*) FROM character_reference_selections WHERE project_id = ?",
+            (seeded.project_id,),
+        ).fetchone()[0]
+    assert selection_count == 0
+
+
 def test_selection_rejects_missing_features_stale_source_and_unavailable_character(
     client: TestClient,
     db_path: Path,
 ) -> None:
+    seeded = context(db_path)
     with connect_database(db_path) as conn:
         selection = conn.execute(
             "SELECT payload_json FROM versions WHERE id = 'source-selection-v1'"
@@ -516,7 +665,7 @@ def test_selection_rejects_missing_features_stale_source_and_unavailable_charact
     missing_features = client.post(
         "/api/projects/project-owned/character-reference-selection",
         headers=headers("employee_1"),
-        json={},
+        json=reference_selection_payload(seeded),
     )
     assert missing_features.status_code == 409
     assert missing_features.json()["detail"]["code"] == "SOURCE_FRAME_FEATURES_REQUIRED"
@@ -542,7 +691,7 @@ def test_selection_rejects_missing_features_stale_source_and_unavailable_charact
     stale = client.post(
         "/api/projects/project-owned/character-reference-selection",
         headers=headers("employee_1"),
-        json={},
+        json=reference_selection_payload(seeded),
     )
     assert stale.status_code == 409
     assert stale.json()["detail"]["code"] == "SOURCE_FRAME_SELECTION_STALE"
@@ -556,7 +705,7 @@ def test_selection_rejects_missing_features_stale_source_and_unavailable_charact
     archived = client.post(
         "/api/projects/project-owned/character-reference-selection",
         headers=headers("employee_1"),
-        json={},
+        json=reference_selection_payload(seeded),
     )
     assert archived.status_code == 409
     assert archived.json()["detail"]["code"] == "CHARACTER_VERSION_NOT_PUBLISHED"
@@ -576,9 +725,29 @@ def test_first_frame_generation_uses_frozen_reference_selection_not_new_persona_
     selection = client.post(
         "/api/projects/project-owned/character-reference-selection",
         headers=headers("employee_1"),
-        json={"selected_asset_ids": selected_ids},
+        json=reference_selection_payload(seeded, selected_ids),
     )
     assert selection.status_code == 201
+
+    missing_binding = client.post(
+        "/api/projects/project-owned/first-frames/generate",
+        headers=headers("employee_1"),
+        json={"model": "nano-banana-pro-2k", "quantity": 1},
+    )
+    mismatched_binding = client.post(
+        "/api/projects/project-owned/first-frames/generate",
+        headers=headers("employee_1"),
+        json={
+            "model": "nano-banana-pro-2k",
+            "quantity": 1,
+            "character_version_id": "character-version-other",
+            "character_reference_selection_id": selection.json()["id"],
+        },
+    )
+    assert missing_binding.status_code == 422
+    assert missing_binding.json()["detail"]["code"] == "CHARACTER_REFERENCE_BINDING_REQUIRED"
+    assert mismatched_binding.status_code == 409
+    assert mismatched_binding.json()["detail"]["code"] == "FIRST_FRAME_INPUT_BINDING_STALE"
 
     with connect_database(db_path) as conn:
         conn.execute(
@@ -600,7 +769,12 @@ def test_first_frame_generation_uses_frozen_reference_selection_not_new_persona_
     generated = client.post(
         "/api/projects/project-owned/first-frames/generate",
         headers=headers("employee_1"),
-        json={"model": "nano-banana-pro-2k", "quantity": 1},
+        json={
+            "model": "nano-banana-pro-2k",
+            "quantity": 1,
+            "character_version_id": seeded.character_version_id,
+            "character_reference_selection_id": selection.json()["id"],
+        },
     )
 
     assert generated.status_code == 200
@@ -632,22 +806,69 @@ def test_first_frame_generation_uses_frozen_reference_selection_not_new_persona_
     assert stale.json()["detail"]["code"] == "FIRST_FRAME_CANDIDATES_STALE"
 
 
+def test_first_frame_generation_rechecks_binding_inside_final_write_transaction(
+    client: TestClient,
+    db_path: Path,
+    storage: FakeStorageAdapter,
+) -> None:
+    seeded = context(db_path)
+    selection = client.post(
+        "/api/projects/project-owned/character-reference-selection",
+        headers=headers("employee_1"),
+        json=reference_selection_payload(seeded),
+    )
+    assert selection.status_code == 201
+    racing_storage = SourceSelectionChangingStorage(storage, db_path)
+    app.dependency_overrides[get_media_storage] = lambda: racing_storage
+
+    generated = client.post(
+        "/api/projects/project-owned/first-frames/generate",
+        headers=headers("employee_1"),
+        json={
+            "model": "nano-banana-pro-2k",
+            "quantity": 1,
+            "character_version_id": seeded.character_version_id,
+            "character_reference_selection_id": selection.json()["id"],
+        },
+    )
+
+    assert generated.status_code == 409
+    assert generated.json()["detail"]["code"] == "FIRST_FRAME_CANDIDATES_STALE"
+    assert len(racing_storage.first_frame_keys) == 1
+    assert racing_storage.head_object(racing_storage.first_frame_keys[0]) is None
+    with connect_database(db_path) as conn:
+        version_count = conn.execute(
+            "SELECT COUNT(*) FROM versions WHERE kind = 'first_frame_candidates'"
+        ).fetchone()[0]
+        asset_count = conn.execute(
+            "SELECT COUNT(*) FROM assets WHERE kind = 'first_frame'"
+        ).fetchone()[0]
+    assert version_count == 0
+    assert asset_count == 0
+
+
 @pytest.mark.parametrize("character_invalidator", ["version_archived", "authorization_expired"])
 def test_character_invalidation_blocks_new_generation_but_preserves_first_frame_history(
     client: TestClient,
     db_path: Path,
     character_invalidator: str,
 ) -> None:
+    seeded = context(db_path)
     selection = client.post(
         "/api/projects/project-owned/character-reference-selection",
         headers=headers("employee_1"),
-        json={},
+        json=reference_selection_payload(seeded),
     )
     assert selection.status_code == 201
     generated = client.post(
         "/api/projects/project-owned/first-frames/generate",
         headers=headers("employee_1"),
-        json={"model": "nano-banana-pro-2k", "quantity": 1},
+        json={
+            "model": "nano-banana-pro-2k",
+            "quantity": 1,
+            "character_version_id": "character-version-v1",
+            "character_reference_selection_id": selection.json()["id"],
+        },
     )
     assert generated.status_code == 200
     first_frame_asset_id = generated.json()["payload"]["candidates"][0]["asset_id"]
@@ -682,7 +903,12 @@ def test_character_invalidation_blocks_new_generation_but_preserves_first_frame_
     new_generation = client.post(
         "/api/projects/project-owned/first-frames/generate",
         headers=headers("employee_1"),
-        json={"model": "nano-banana-pro-2k", "quantity": 1},
+        json={
+            "model": "nano-banana-pro-2k",
+            "quantity": 1,
+            "character_version_id": "character-version-v1",
+            "character_reference_selection_id": selection.json()["id"],
+        },
     )
 
     assert historical_candidates.status_code == 200

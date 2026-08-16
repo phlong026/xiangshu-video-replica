@@ -403,11 +403,11 @@ describe("App", () => {
       screen.getByRole("button", { name: "查看角色版本" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "重新生成候选首帧" }),
-    ).toBeDisabled();
+      screen.getByText("请先在右侧选择角色版本，再确认源画面。"),
+    ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "确认用于 H3 的首帧" }),
-    ).toBeDisabled();
+      screen.queryByRole("button", { name: "重新生成候选首帧" }),
+    ).toBeNull();
   });
 
   it("returns to login and clears the current user when a local API returns 401", async () => {
@@ -1076,7 +1076,7 @@ describe("App", () => {
     expect(
       await screen.findByRole("heading", { name: "镜头卡片" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("咖啡口播拆解完成")).toBeInTheDocument();
+    expect(await screen.findByText("咖啡口播拆解完成")).toBeInTheDocument();
     expect(
       screen.queryByRole("progressbar", { name: "参考视频上传进度" }),
     ).toBeNull();

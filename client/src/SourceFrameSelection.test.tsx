@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -53,7 +59,15 @@ describe("SourceFrameSelection", () => {
       ...candidatesVersion,
       id: "source-selection-1",
       kind: "source_frame_selection",
-      payload: { source_frame_asset_id: "source-1" },
+      payload: {
+        source_frame_asset_id: "source-1",
+        character_features: {
+          orientation: "FRONT",
+          shot_size: "HALF_BODY",
+          face_visible: true,
+          body_completeness: "UPPER_BODY",
+        },
+      },
     });
     vi.mocked(extractSourceFrames).mockResolvedValue(candidatesVersion);
   });
@@ -76,10 +90,27 @@ describe("SourceFrameSelection", () => {
     expect(screen.getByRole("button", { name: "确认源画面" })).toBeDisabled();
 
     fireEvent.click(screen.getByRole("radio", { name: /候选 1/ }));
+    fireEvent.change(screen.getByLabelText("人物朝向"), {
+      target: { value: "FRONT" },
+    });
+    fireEvent.change(screen.getByLabelText("人物景别"), {
+      target: { value: "HALF_BODY" },
+    });
+    fireEvent.change(screen.getByLabelText("面部可见性"), {
+      target: { value: "VISIBLE" },
+    });
+    fireEvent.change(screen.getByLabelText("身体完整度"), {
+      target: { value: "UPPER_BODY" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "确认源画面" }));
 
     await waitFor(() =>
-      expect(confirmSourceFrame).toHaveBeenCalledWith("project-1", "source-1"),
+      expect(confirmSourceFrame).toHaveBeenCalledWith("project-1", "source-1", {
+        orientation: "FRONT",
+        shot_size: "HALF_BODY",
+        face_visible: true,
+        body_completeness: "UPPER_BODY",
+      }),
     );
     expect(await screen.findByText("已确认候选源画面 1。")).toBeInTheDocument();
   });
@@ -135,5 +166,188 @@ describe("SourceFrameSelection", () => {
       await screen.findByText(/只读身份不加载素材预览/),
     ).toBeInTheDocument();
     expect(getAssetDownloadUrl).not.toHaveBeenCalled();
+  });
+
+  it("requires a legacy selection without character features to be confirmed again", async () => {
+    const onSelectionChange = vi.fn();
+    vi.mocked(getLatestProjectSourceFrameSelection).mockResolvedValue({
+      stale: false,
+      version: {
+        ...candidatesVersion,
+        id: "source-selection-legacy",
+        kind: "source_frame_selection",
+        payload: { source_frame_asset_id: "source-1" },
+      },
+    });
+
+    render(
+      <SourceFrameSelection
+        onSelectionChange={onSelectionChange}
+        projectId="project-1"
+        referenceAssetId="reference-1"
+      />,
+    );
+
+    expect(
+      await screen.findByText(/缺少人物特征，请重新确认源画面/),
+    ).toBeInTheDocument();
+    expect(onSelectionChange).toHaveBeenLastCalledWith(null);
+    expect(screen.getByRole("button", { name: "确认源画面" })).toBeDisabled();
+  });
+
+  it("locks candidate choice while confirmation is in flight", async () => {
+    let resolveConfirmation: (() => void) | undefined;
+    vi.mocked(confirmSourceFrame).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveConfirmation = () =>
+            resolve({
+              ...candidatesVersion,
+              id: "source-selection-1",
+              kind: "source_frame_selection",
+              payload: {
+                source_frame_asset_id: "source-1",
+                character_features: {
+                  orientation: "FRONT",
+                  shot_size: "HALF_BODY",
+                  face_visible: true,
+                  body_completeness: "UPPER_BODY",
+                },
+              },
+            });
+        }),
+    );
+    render(
+      <SourceFrameSelection
+        projectId="project-1"
+        referenceAssetId="reference-1"
+      />,
+    );
+
+    await screen.findByText("候选源画面");
+    fireEvent.click(screen.getByRole("radio", { name: /候选 1/ }));
+    fireEvent.change(screen.getByLabelText("人物朝向"), {
+      target: { value: "FRONT" },
+    });
+    fireEvent.change(screen.getByLabelText("人物景别"), {
+      target: { value: "HALF_BODY" },
+    });
+    fireEvent.change(screen.getByLabelText("面部可见性"), {
+      target: { value: "VISIBLE" },
+    });
+    fireEvent.change(screen.getByLabelText("身体完整度"), {
+      target: { value: "UPPER_BODY" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "确认源画面" }));
+
+    await waitFor(() => expect(confirmSourceFrame).toHaveBeenCalledOnce());
+    expect(screen.getByRole("radio", { name: /候选 1/ })).toBeDisabled();
+    expect(screen.getByRole("radio", { name: /候选 2/ })).toBeDisabled();
+
+    resolveConfirmation?.();
+  });
+
+  it("ignores a confirmation response after the project input changes", async () => {
+    const savedSelection = {
+      ...candidatesVersion,
+      id: "source-selection-1",
+      kind: "source_frame_selection",
+      payload: {
+        source_frame_asset_id: "source-1",
+        character_features: {
+          orientation: "FRONT",
+          shot_size: "HALF_BODY",
+          face_visible: true,
+          body_completeness: "UPPER_BODY",
+        },
+      },
+    };
+    let resolveConfirmation:
+      | ((selection: typeof savedSelection) => void)
+      | undefined;
+    const pendingConfirmation = new Promise<typeof savedSelection>(
+      (resolve) => {
+        resolveConfirmation = resolve;
+      },
+    );
+    vi.mocked(confirmSourceFrame).mockReturnValue(pendingConfirmation);
+    const onSelectionChange = vi.fn();
+    const { rerender } = render(
+      <SourceFrameSelection
+        onSelectionChange={onSelectionChange}
+        projectId="project-1"
+        referenceAssetId="reference-1"
+      />,
+    );
+
+    await screen.findByAltText("候选源画面 1");
+    fireEvent.click(screen.getByRole("radio", { name: /候选 1/ }));
+    fireEvent.change(screen.getByLabelText("人物朝向"), {
+      target: { value: "FRONT" },
+    });
+    fireEvent.change(screen.getByLabelText("人物景别"), {
+      target: { value: "HALF_BODY" },
+    });
+    fireEvent.change(screen.getByLabelText("面部可见性"), {
+      target: { value: "VISIBLE" },
+    });
+    fireEvent.change(screen.getByLabelText("身体完整度"), {
+      target: { value: "UPPER_BODY" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "确认源画面" }));
+    await waitFor(() => expect(confirmSourceFrame).toHaveBeenCalledOnce());
+
+    rerender(
+      <SourceFrameSelection
+        onSelectionChange={onSelectionChange}
+        projectId="project-2"
+        referenceAssetId="reference-2"
+      />,
+    );
+    await act(async () => {
+      resolveConfirmation?.(savedSelection);
+      await pendingConfirmation;
+    });
+
+    expect(onSelectionChange).not.toHaveBeenCalledWith(savedSelection);
+  });
+
+  it("does not reload an old project after a stale extraction completes", async () => {
+    let resolveExtraction:
+      | ((version: typeof candidatesVersion) => void)
+      | undefined;
+    const pendingExtraction = new Promise<typeof candidatesVersion>(
+      (resolve) => {
+        resolveExtraction = resolve;
+      },
+    );
+    vi.mocked(extractSourceFrames).mockReturnValue(pendingExtraction);
+    const { rerender } = render(
+      <SourceFrameSelection
+        projectId="project-1"
+        referenceAssetId="reference-1"
+      />,
+    );
+
+    await screen.findByText("候选源画面");
+    fireEvent.click(screen.getByRole("button", { name: "重新提取候选" }));
+    await waitFor(() => expect(extractSourceFrames).toHaveBeenCalledOnce());
+    rerender(
+      <SourceFrameSelection
+        projectId="project-2"
+        referenceAssetId="reference-2"
+      />,
+    );
+    await waitFor(() =>
+      expect(getLatestProjectSourceFrames).toHaveBeenCalledWith("project-2"),
+    );
+    const loadCount = vi.mocked(getLatestProjectSourceFrames).mock.calls.length;
+
+    await act(async () => {
+      resolveExtraction?.(candidatesVersion);
+      await pendingExtraction;
+    });
+
+    expect(getLatestProjectSourceFrames).toHaveBeenCalledTimes(loadCount);
   });
 });

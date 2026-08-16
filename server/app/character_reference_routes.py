@@ -4,9 +4,10 @@ from fastapi import APIRouter, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.auth import AuthenticatedUser, Database
-from app.character_contracts import CharacterReferenceSelection
+from app.character_contracts import CharacterReferenceRecommendation, CharacterReferenceSelection
 from app.character_reference_matching import (
     create_character_reference_selection,
+    get_character_reference_recommendation,
     get_latest_character_reference_selection,
 )
 
@@ -16,7 +17,25 @@ router = APIRouter(prefix="/api", tags=["character-references"])
 class SelectCharacterReferencesRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    source_frame_selection_version_id: str = Field(min_length=1)
+    character_version_id: str = Field(min_length=1)
     selected_asset_ids: list[str] | None = Field(default=None, min_length=1, max_length=4)
+
+
+@router.get(
+    "/projects/{project_id}/character-reference-recommendation",
+    response_model=CharacterReferenceRecommendation,
+)
+def read_character_reference_recommendation(
+    project_id: str,
+    conn: Database,
+    actor: AuthenticatedUser,
+) -> CharacterReferenceRecommendation:
+    return get_character_reference_recommendation(
+        conn,
+        actor=actor,
+        project_id=project_id,
+    )
 
 
 @router.post(
@@ -34,6 +53,8 @@ def select_character_references(
         conn,
         actor=actor,
         project_id=project_id,
+        expected_source_frame_version_id=request.source_frame_selection_version_id,
+        expected_character_version_id=request.character_version_id,
         selected_asset_ids=request.selected_asset_ids,
     )
 

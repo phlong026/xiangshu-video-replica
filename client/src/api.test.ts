@@ -3,16 +3,129 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   chooseProjectMainCharacterVersion,
   completeVideoUpload,
+  confirmSourceFrame,
   createProject,
+  generateFirstFrames,
+  getCharacterReferenceRecommendation,
   getCurrentUser,
   getGenerationBatch,
   getHealth,
+  getLatestProjectFirstFrames,
   getSettings,
   listProjectCharacterVersions,
   SESSION_EXPIRED_EVENT,
+  selectCharacterReferences,
   startVideoAnalysis,
   uploadReferenceVideo,
 } from "./api";
+
+describe("character reference and first-frame binding", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("reads recommendations without creating a selection", async () => {
+    const recommendation = { recommended_asset_ids_json: ["asset-1"] };
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => recommendation,
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      getCharacterReferenceRecommendation("project 1"),
+    ).resolves.toEqual(recommendation);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:8000/api/projects/project%201/character-reference-recommendation",
+      expect.objectContaining({
+        headers: expect.any(Headers),
+        signal: expect.any(AbortSignal),
+      }),
+    );
+  });
+
+  it("sends explicit source features and selected character references", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: "saved" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const features = {
+      orientation: "FRONT" as const,
+      shot_size: "HALF_BODY" as const,
+      face_visible: true,
+      body_completeness: "UPPER_BODY" as const,
+    };
+
+    await confirmSourceFrame("project-1", "source-1", features);
+    await selectCharacterReferences("project-1", {
+      selected_asset_ids: ["reference-1"],
+      source_frame_selection_version_id: "source-selection-1",
+      character_version_id: "character-version-1",
+    });
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "http://127.0.0.1:8000/api/projects/project-1/source-frames/confirm",
+      expect.objectContaining({
+        body: JSON.stringify({
+          source_frame_asset_id: "source-1",
+          character_features: features,
+        }),
+        method: "POST",
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "http://127.0.0.1:8000/api/projects/project-1/character-reference-selection",
+      expect.objectContaining({
+        body: JSON.stringify({
+          selected_asset_ids: ["reference-1"],
+          source_frame_selection_version_id: "source-selection-1",
+          character_version_id: "character-version-1",
+        }),
+        method: "POST",
+      }),
+    );
+  });
+
+  it("maps a stale latest generation and sends the frozen binding on regeneration", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, status: 409 })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ id: "first-frame-candidates-1" }),
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(getLatestProjectFirstFrames("project-1")).resolves.toEqual({
+      version: null,
+      stale: true,
+    });
+    await generateFirstFrames("project-1", {
+      model: "nano-banana-pro-2k",
+      prompt: "replace",
+      quantity: 1,
+      character_version_id: "character-version-1",
+      character_reference_selection_id: "reference-selection-1",
+    });
+
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "http://127.0.0.1:8000/api/projects/project-1/first-frames/generate",
+      expect.objectContaining({
+        body: JSON.stringify({
+          model: "nano-banana-pro-2k",
+          prompt: "replace",
+          quantity: 1,
+          character_version_id: "character-version-1",
+          character_reference_selection_id: "reference-selection-1",
+        }),
+        method: "POST",
+      }),
+    );
+  });
+});
 
 describe("project character version selection", () => {
   afterEach(() => {

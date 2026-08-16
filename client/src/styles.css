@@ -871,6 +871,33 @@ input:focus {
   margin-top: 24px;
 }
 
+.source-frame-features {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+  border: 1px solid #3c3448;
+  border-radius: 8px;
+  padding: 14px;
+  background: rgba(17, 15, 24, 0.74);
+}
+
+.source-frame-features legend,
+.character-reference-options legend {
+  padding: 0 6px;
+  color: #d9d1e8;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.source-frame-features label {
+  display: grid;
+  gap: 7px;
+  color: #aaa2ba;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .source-frame-options {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -966,6 +993,52 @@ input:focus {
   border-radius: 10px;
   padding: 22px;
   background: rgba(18, 15, 28, 0.88);
+}
+
+.character-reference-selection {
+  display: grid;
+  gap: 14px;
+  border: 1px solid #51406f;
+  border-radius: 10px;
+  padding: 22px;
+  background: rgba(16, 14, 25, 0.88);
+}
+
+.character-reference-selection h3 {
+  margin: 8px 0;
+}
+
+.character-reference-selection p {
+  margin: 0;
+  color: #aaa2ba;
+  line-height: 1.55;
+}
+
+.character-reference-options {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+  border: 0;
+  padding: 0;
+}
+
+.character-reference-options legend {
+  grid-column: 1 / -1;
+}
+
+.character-reference-options .source-frame-option img,
+.character-reference-options .source-frame-placeholder {
+  aspect-ratio: 3 / 4;
+}
+
+.workflow-gate-note {
+  margin: 0;
+  border: 1px dashed #4b405c;
+  border-radius: 8px;
+  padding: 18px;
+  color: #aaa2ba;
+  background: rgba(14, 14, 24, 0.56);
 }
 
 .first-frame-selection h3,
@@ -2049,7 +2122,9 @@ button.regenerate-button {
   }
 
   .source-frame-options,
-  .first-frame-options {
+  .first-frame-options,
+  .character-reference-options,
+  .source-frame-features {
     grid-template-columns: 1fr;
   }
 
