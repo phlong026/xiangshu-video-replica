@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AnalysisWorkspace } from "./AnalysisWorkspace";
 import * as api from "./api";
@@ -93,21 +93,24 @@ const editableShot: api.ShotCard = {
 };
 
 vi.mock("./CharacterSelection", () => ({
-  CharacterSelection: ({ onVersionChange }: apiMockProps) => (
+  CharacterSelection: ({ onVersionChange, readOnly }: apiMockProps) => (
     <>
       <button
+        disabled={readOnly}
         onClick={() => onVersionChange?.(characterSelection)}
         type="button"
       >
         完成角色选择
       </button>
       <button
+        disabled={readOnly}
         onClick={() => onVersionChange?.(changedCharacterSelection)}
         type="button"
       >
         切换角色版本
       </button>
       <button
+        disabled={readOnly}
         onClick={() => onVersionChange?.(legacyCharacterSelection)}
         type="button"
       >
@@ -118,15 +121,20 @@ vi.mock("./CharacterSelection", () => ({
 }));
 
 vi.mock("./SourceFrameSelection", () => ({
-  SourceFrameSelection: ({ onSelectionChange }: apiMockProps) => (
+  SourceFrameSelection: ({ onSelectionChange, readOnly }: apiMockProps) => (
     <>
       <button
+        disabled={readOnly}
         onClick={() => onSelectionChange?.(sourceSelection)}
         type="button"
       >
         完成源画面
       </button>
-      <button onClick={() => onSelectionChange?.(null)} type="button">
+      <button
+        disabled={readOnly}
+        onClick={() => onSelectionChange?.(null)}
+        type="button"
+      >
         标记源画面失效
       </button>
     </>
@@ -134,8 +142,12 @@ vi.mock("./SourceFrameSelection", () => ({
 }));
 
 vi.mock("./CharacterReferenceSelection", () => ({
-  CharacterReferenceSelection: ({ onSelectionChange }: apiMockProps) => (
+  CharacterReferenceSelection: ({
+    onSelectionChange,
+    readOnly,
+  }: apiMockProps) => (
     <button
+      disabled={readOnly}
       onClick={() => onSelectionChange?.(referenceSelection)}
       type="button"
     >
@@ -148,6 +160,7 @@ vi.mock("./FirstFrameSelection", () => ({
   FirstFrameSelection: ({
     legacyCharacterSelected,
     onSelectionChange,
+    readOnly,
     referenceSelection: currentReferenceSelection,
   }: apiMockProps) => (
     <>
@@ -156,6 +169,7 @@ vi.mock("./FirstFrameSelection", () => ({
         <span>历史兼容首帧可用</span>
       ) : null}
       <button
+        disabled={readOnly}
         onClick={() => onSelectionChange?.(firstFrameSelection)}
         type="button"
       >
@@ -224,6 +238,7 @@ type apiMockProps = {
   legacyCharacterSelected?: boolean;
   onSelectionChange?: (value: unknown) => void;
   onVersionChange?: (value: unknown) => void;
+  readOnly?: boolean;
   referenceSelection?: unknown;
 };
 
@@ -236,6 +251,16 @@ type generationComposerMockProps = {
   readOnly?: boolean;
   shotCardVersionId?: string;
 };
+
+function readReactProps<T>(element: Element): T {
+  const reactPropsKey = Object.keys(element).find((key) =>
+    key.startsWith("__reactProps$"),
+  );
+  if (!reactPropsKey) {
+    throw new Error("React props are unavailable for the test element.");
+  }
+  return (element as unknown as Record<string, T>)[reactPropsKey];
+}
 
 describe("AnalysisWorkspace workflow gates", () => {
   beforeEach(() => {
@@ -517,9 +542,38 @@ describe("AnalysisWorkspace workflow gates", () => {
       "aria-current",
       "step",
     );
+    const sceneInput = screen.getByLabelText("S01 场景");
+    const form = sceneInput.closest("form");
+    if (!form) {
+      throw new Error("Analysis form is unavailable.");
+    }
+    const staleSceneHandler = readReactProps<{
+      onChange: (event: { target: { value: string } }) => void;
+    }>(sceneInput).onChange;
+    const staleSubmitHandler = readReactProps<{
+      onSubmit: (event: { preventDefault: () => void }) => void;
+    }>(form).onSubmit;
+
     fireEvent.click(screen.getByRole("button", { name: "模拟生成处理中" }));
+    act(() => {
+      staleSceneHandler({ target: { value: "旧闭包不应写入" } });
+      staleSubmitHandler({ preventDefault: vi.fn() });
+    });
     expect(screen.getByLabelText("S01 场景")).toBeDisabled();
+    expect(screen.getByLabelText("S01 场景")).toHaveValue("咖啡馆");
+    expect(api.saveShotCards).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: "保存镜头卡片" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "返回项目" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "切换角色版本" })).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "标记源画面失效" }),
+    ).toBeDisabled();
+    expect(screen.getByRole("button", { name: "完成人物参考" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "完成置换首帧" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "切换角色版本" }));
+    expect(
+      screen.getByText("生成输入：shot-card-2/first-frame-1/原始口播稿"),
+    ).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("S01 场景"), {
       target: { value: "处理中不应写入" },
     });

@@ -680,6 +680,10 @@ input:focus {
   grid-template-columns: minmax(0, 1fr) minmax(220px, 270px);
   align-items: start;
   gap: 18px;
+  min-inline-size: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
 }
 
 .analysis-primary {

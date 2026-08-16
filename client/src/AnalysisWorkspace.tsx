@@ -122,6 +122,7 @@ export function AnalysisWorkspace({
     null,
   );
   const reloadTokenRef = useRef(0);
+  const isGenerationBusyRef = useRef(false);
   const characterSelectionVersionIdRef = useRef<string | null>(null);
   const sourceFrameSelectionIdRef = useRef<string | null>(null);
   const characterReferenceSelectionIdRef = useRef<string | null>(null);
@@ -228,6 +229,7 @@ export function AnalysisWorkspace({
     setFirstFrameSelection(null);
     setGenerationStep(7);
     setShotCardsDirty(false);
+    isGenerationBusyRef.current = false;
     setIsGenerationBusy(false);
     savedShotsRef.current = [];
     characterSelectionVersionIdRef.current = null;
@@ -237,6 +239,9 @@ export function AnalysisWorkspace({
 
   const handleCharacterSelectionChange = useCallback(
     (selection: ProjectMainCharacter | null) => {
+      if (isGenerationBusyRef.current) {
+        return;
+      }
       const nextVersionId = selection?.version_id ?? null;
       const bindingChanged =
         nextVersionId !== characterSelectionVersionIdRef.current;
@@ -255,6 +260,9 @@ export function AnalysisWorkspace({
 
   const handleSourceFrameSelectionChange = useCallback(
     (selection: AnalysisVersion | null) => {
+      if (isGenerationBusyRef.current) {
+        return;
+      }
       const nextSelectionId = selection?.id ?? null;
       const bindingChanged =
         nextSelectionId !== sourceFrameSelectionIdRef.current;
@@ -271,6 +279,9 @@ export function AnalysisWorkspace({
 
   const handleCharacterReferenceSelectionChange = useCallback(
     (selection: CharacterReferenceSelectionValue | null) => {
+      if (isGenerationBusyRef.current) {
+        return;
+      }
       const nextSelectionId = selection?.id ?? null;
       const bindingChanged =
         nextSelectionId !== characterReferenceSelectionIdRef.current;
@@ -285,6 +296,9 @@ export function AnalysisWorkspace({
 
   const handleFirstFrameSelectionChange = useCallback(
     (selection: AnalysisVersion | null) => {
+      if (isGenerationBusyRef.current) {
+        return;
+      }
       setFirstFrameSelection(selection);
     },
     [],
@@ -294,6 +308,18 @@ export function AnalysisWorkspace({
   const firstFramePayload = firstFrameSelection
     ? readFirstFrameSelectionPayload(firstFrameSelection)
     : null;
+
+  const handleGenerationBusyChange = useCallback((busy: boolean) => {
+    isGenerationBusyRef.current = busy;
+    setIsGenerationBusy(busy);
+  }, []);
+
+  function handleClose() {
+    if (isGenerationBusyRef.current) {
+      return;
+    }
+    onClose();
+  }
 
   const workflowStep = !analysisId
     ? 2
@@ -337,7 +363,7 @@ export function AnalysisWorkspace({
   }
 
   function updateShot(index: number, key: keyof ShotCard, value: string) {
-    if (readOnly || isSaving || isGenerationBusy) {
+    if (readOnly || isSaving || isGenerationBusyRef.current) {
       return;
     }
     const nextShots = shots.map((shot, shotIndex) => {
@@ -358,7 +384,7 @@ export function AnalysisWorkspace({
 
   async function handleSave(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (readOnly || isGenerationBusy) {
+    if (readOnly || isSaving || isGenerationBusyRef.current) {
       return;
     }
     if (!analysisId) {
@@ -404,7 +430,12 @@ export function AnalysisWorkspace({
             “{project.name}”的自动拆解结果。保存后会创建独立的人工修订版本。
           </p>
         </div>
-        <button className="secondary-button" onClick={onClose} type="button">
+        <button
+          className="secondary-button"
+          disabled={isGenerationBusy}
+          onClick={handleClose}
+          type="button"
+        >
           返回项目
         </button>
       </div>
@@ -472,7 +503,11 @@ export function AnalysisWorkspace({
               当前为只读身份，可查看拆解、候选记录和历史版本；不会请求素材下载链接，也不能保存、选择或生成。
             </p>
           ) : null}
-          <div className="analysis-workspace-grid">
+          <fieldset
+            aria-busy={isGenerationBusy}
+            className="analysis-workspace-grid"
+            disabled={isGenerationBusy}
+          >
             <div className="analysis-primary">
               {characterSelection ? (
                 <SourceFrameSelection
@@ -575,7 +610,7 @@ export function AnalysisWorkspace({
                     firstFrameAssetId={firstFramePayload.first_frame_asset_id}
                     firstFrameSelectionVersionId={firstFrameSelection?.id ?? ""}
                     onBatchCreated={onBatchCreated}
-                    onBusyChange={setIsGenerationBusy}
+                    onBusyChange={handleGenerationBusyChange}
                     onWorkflowStepChange={setGenerationStep}
                     originalScript={originalScript}
                     projectId={project.id}
@@ -601,7 +636,7 @@ export function AnalysisWorkspace({
                 readOnly={readOnly}
               />
             </aside>
-          </div>
+          </fieldset>
         </form>
       ) : null}
     </section>
