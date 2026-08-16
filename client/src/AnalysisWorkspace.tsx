@@ -436,7 +436,7 @@ export function AnalysisWorkspace({
                   projectId={project.id}
                   readOnly={readOnly}
                   referenceSelection={characterReferenceSelection}
-                  sourceFrameConfirmed={Boolean(sourceFrameSelection)}
+                  sourceFrameSelectionId={sourceFrameSelection?.id ?? null}
                 />
               ) : null}
               <div className="shot-card-list">

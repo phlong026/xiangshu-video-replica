@@ -105,7 +105,7 @@ describe("FirstFrameSelection", () => {
       <FirstFrameSelection
         projectId="project-1"
         referenceSelection={referenceSelection}
-        sourceFrameConfirmed
+        sourceFrameSelectionId="source-selection-1"
       />,
     );
 
@@ -139,7 +139,7 @@ describe("FirstFrameSelection", () => {
       <FirstFrameSelection
         projectId="project-1"
         referenceSelection={referenceSelection}
-        sourceFrameConfirmed
+        sourceFrameSelectionId="source-selection-1"
       />,
     );
     await screen.findByText("人物置换首帧");
@@ -172,7 +172,7 @@ describe("FirstFrameSelection", () => {
         legacyCharacterSelected
         projectId="project-1"
         referenceSelection={null}
-        sourceFrameConfirmed
+        sourceFrameSelectionId="source-selection-1"
       />,
     );
     await screen.findByRole("button", { name: "版本 #2" });
@@ -197,7 +197,7 @@ describe("FirstFrameSelection", () => {
         legacyCharacterSelected
         projectId="project-1"
         referenceSelection={null}
-        sourceFrameConfirmed={false}
+        sourceFrameSelectionId={null}
       />,
     );
 
@@ -221,7 +221,7 @@ describe("FirstFrameSelection", () => {
       <FirstFrameSelection
         projectId="project-1"
         referenceSelection={referenceSelection}
-        sourceFrameConfirmed
+        sourceFrameSelectionId="source-selection-1"
       />,
     );
 
@@ -247,7 +247,7 @@ describe("FirstFrameSelection", () => {
       <FirstFrameSelection
         projectId="project-1"
         referenceSelection={referenceSelection}
-        sourceFrameConfirmed
+        sourceFrameSelectionId="source-selection-1"
       />,
     );
 
@@ -265,7 +265,7 @@ describe("FirstFrameSelection", () => {
         projectId="project-1"
         readOnly
         referenceSelection={referenceSelection}
-        sourceFrameConfirmed
+        sourceFrameSelectionId="source-selection-1"
       />,
     );
 
@@ -285,7 +285,7 @@ describe("FirstFrameSelection", () => {
       <FirstFrameSelection
         projectId="project-1"
         referenceSelection={referenceSelection}
-        sourceFrameConfirmed
+        sourceFrameSelectionId="source-selection-1"
       />,
     );
 
@@ -333,7 +333,7 @@ describe("FirstFrameSelection", () => {
         onSelectionChange={onSelectionChange}
         projectId="project-1"
         referenceSelection={referenceSelection}
-        sourceFrameConfirmed
+        sourceFrameSelectionId="source-selection-1"
       />,
     );
 
@@ -373,7 +373,7 @@ describe("FirstFrameSelection", () => {
         onSelectionChange={onSelectionChange}
         projectId="project-1"
         referenceSelection={referenceSelection}
-        sourceFrameConfirmed
+        sourceFrameSelectionId="source-selection-1"
       />,
     );
 
@@ -390,7 +390,59 @@ describe("FirstFrameSelection", () => {
           ...referenceSelection,
           id: "reference-selection-2",
         }}
-        sourceFrameConfirmed
+        sourceFrameSelectionId="source-selection-1"
+      />,
+    );
+    await act(async () => {
+      resolveConfirmation?.(confirmedSelection);
+      await pendingConfirmation;
+    });
+
+    expect(onSelectionChange).not.toHaveBeenCalledWith(confirmedSelection);
+  });
+
+  it("ignores a legacy confirmation response after the source selection changes", async () => {
+    const confirmedSelection = {
+      ...candidatesVersion,
+      id: "first-frame-selection-legacy",
+      kind: "first_frame_selection",
+      payload: {
+        first_frame_candidates_version_id: candidatesVersion.id,
+        first_frame_asset_id: "first-1",
+      },
+    };
+    let resolveConfirmation:
+      | ((selection: typeof confirmedSelection) => void)
+      | undefined;
+    const pendingConfirmation = new Promise<typeof confirmedSelection>(
+      (resolve) => {
+        resolveConfirmation = resolve;
+      },
+    );
+    vi.mocked(confirmFirstFrame).mockReturnValue(pendingConfirmation);
+    const onSelectionChange = vi.fn();
+    const { rerender } = render(
+      <FirstFrameSelection
+        legacyCharacterSelected
+        onSelectionChange={onSelectionChange}
+        projectId="project-1"
+        referenceSelection={null}
+        sourceFrameSelectionId="source-selection-1"
+      />,
+    );
+
+    await screen.findByAltText("首帧候选 1");
+    fireEvent.click(screen.getByRole("radio", { name: /首帧候选 1/ }));
+    fireEvent.click(screen.getByRole("button", { name: "确认用于 H3 的首帧" }));
+    await waitFor(() => expect(confirmFirstFrame).toHaveBeenCalledOnce());
+
+    rerender(
+      <FirstFrameSelection
+        legacyCharacterSelected
+        onSelectionChange={onSelectionChange}
+        projectId="project-1"
+        referenceSelection={null}
+        sourceFrameSelectionId="source-selection-2"
       />,
     );
     await act(async () => {

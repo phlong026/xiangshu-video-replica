@@ -24,14 +24,14 @@ export function FirstFrameSelection({
   projectId,
   readOnly = false,
   referenceSelection,
-  sourceFrameConfirmed,
+  sourceFrameSelectionId,
 }: {
   legacyCharacterSelected?: boolean;
   onSelectionChange?: (selection: AnalysisVersion | null) => void;
   projectId: string;
   readOnly?: boolean;
   referenceSelection: CharacterReferenceSelection | null;
-  sourceFrameConfirmed: boolean;
+  sourceFrameSelectionId: string | null;
 }) {
   const [version, setVersion] = useState<AnalysisVersion | null>(null);
   const [latestVersionId, setLatestVersionId] = useState("");
@@ -48,7 +48,7 @@ export function FirstFrameSelection({
   const loadRequestId = useRef(0);
   const referenceSelectionId = referenceSelection?.id ?? "";
   const canGenerate =
-    sourceFrameConfirmed &&
+    Boolean(sourceFrameSelectionId) &&
     Boolean(referenceSelection || legacyCharacterSelected);
 
   const load = useCallback(
@@ -97,11 +97,13 @@ export function FirstFrameSelection({
           setStatus(
             latestState.stale || selection.stale
               ? "上游输入已更新，请重新生成人物置换首帧。"
-              : referenceSelectionId
-                ? "人物参考图已确认，可以生成人物置换首帧。"
-                : legacyCharacterSelected
-                  ? "历史兼容人物已恢复，可以继续生成首帧。"
-                  : "请先确认人物参考图；已有首帧历史仍可查看。",
+              : !sourceFrameSelectionId
+                ? "请先确认当前源画面；已有首帧历史仍可查看。"
+                : referenceSelectionId
+                  ? "人物参考图已确认，可以生成人物置换首帧。"
+                  : legacyCharacterSelected
+                    ? "历史兼容人物已恢复，可以继续生成首帧。"
+                    : "请先确认人物参考图；已有首帧历史仍可查看。",
           );
           return;
         }
@@ -164,6 +166,7 @@ export function FirstFrameSelection({
       projectId,
       readOnly,
       referenceSelectionId,
+      sourceFrameSelectionId,
     ],
   );
 
@@ -183,7 +186,7 @@ export function FirstFrameSelection({
       return;
     }
     if (!canGenerate) {
-      setError("请先确认当前人物参考图，再生成新的置换首帧。");
+      setError("请先确认当前源画面和人物参考图，再生成新的置换首帧。");
       return;
     }
     if (!Number.isInteger(quantity) || quantity < 1 || quantity > 3) {
