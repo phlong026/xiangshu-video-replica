@@ -633,6 +633,7 @@ export function GenerationComposer({
                 onChange={(event) => setPromptText(event.target.value)}
                 readOnly={
                   readOnly ||
+                  busyAction === "prompt" ||
                   promptStatus === "LOCKED" ||
                   promptStatus === "USED"
                 }

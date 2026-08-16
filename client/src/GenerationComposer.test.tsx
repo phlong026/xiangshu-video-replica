@@ -371,6 +371,61 @@ describe("GenerationComposer", () => {
     ).toBeInTheDocument();
   });
 
+  it("freezes prompt editing while a revision is saving", async () => {
+    vi.mocked(api.getLatestScriptVersion).mockResolvedValue({
+      version: {
+        ...baseVersion,
+        id: "script-1",
+        payload: {
+          source: "original",
+          full_text: props.originalScript,
+          shot_card_version_id: "shot-card-1",
+          shot_mappings: [],
+        },
+      },
+      stale: false,
+      stale_reasons: [],
+    });
+    vi.mocked(api.getLatestGenerationPrompt).mockResolvedValue({
+      version: promptVersion(),
+      stale: false,
+      stale_reasons: [],
+    });
+    let resolveRevision:
+      | ((version: ReturnType<typeof promptVersion>) => void)
+      | undefined;
+    vi.mocked(api.reviseGenerationPrompt).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveRevision = resolve;
+        }),
+    );
+
+    render(<GenerationComposer {...props} />);
+    const prompt = await screen.findByLabelText("H3 Prompt 内容");
+    fireEvent.change(prompt, { target: { value: "等待保存的修订" } });
+    fireEvent.click(screen.getByRole("button", { name: "另存 Prompt 新版本" }));
+
+    expect(prompt).toHaveAttribute("readonly");
+    expect(screen.getByRole("button", { name: "正在保存" })).toBeDisabled();
+
+    await act(async () => {
+      resolveRevision?.({
+        ...promptVersion(),
+        id: "prompt-2",
+        version_number: 2,
+        payload: {
+          ...promptVersion().payload,
+          prompt_text: "等待保存的修订",
+        },
+      });
+      await Promise.resolve();
+    });
+
+    expect(prompt).not.toHaveAttribute("readonly");
+    expect(prompt).toHaveValue("等待保存的修订");
+  });
+
   it("keeps one idempotency key across duplicate clicks and an offline retry", async () => {
     vi.mocked(api.getLatestScriptVersion).mockResolvedValue({
       version: {
