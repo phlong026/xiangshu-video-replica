@@ -83,6 +83,9 @@ export function AnalysisWorkspace({
     null,
   );
   const reloadTokenRef = useRef(0);
+  const characterSelectionVersionIdRef = useRef<string | null>(null);
+  const sourceFrameSelectionIdRef = useRef<string | null>(null);
+  const characterReferenceSelectionIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (
@@ -174,31 +177,55 @@ export function AnalysisWorkspace({
     setSourceFrameSelection(null);
     setCharacterReferenceSelection(null);
     setFirstFrameSelection(null);
+    characterSelectionVersionIdRef.current = null;
+    sourceFrameSelectionIdRef.current = null;
+    characterReferenceSelectionIdRef.current = null;
   }, [project.id]);
 
   const handleCharacterSelectionChange = useCallback(
     (selection: ProjectMainCharacter | null) => {
+      const nextVersionId = selection?.version_id ?? null;
+      const bindingChanged =
+        nextVersionId !== characterSelectionVersionIdRef.current;
+      characterSelectionVersionIdRef.current = nextVersionId;
       setCharacterSelection(selection);
-      setSourceFrameSelection(null);
-      setCharacterReferenceSelection(null);
-      setFirstFrameSelection(null);
+      if (bindingChanged) {
+        sourceFrameSelectionIdRef.current = null;
+        characterReferenceSelectionIdRef.current = null;
+        setSourceFrameSelection(null);
+        setCharacterReferenceSelection(null);
+        setFirstFrameSelection(null);
+      }
     },
     [],
   );
 
   const handleSourceFrameSelectionChange = useCallback(
     (selection: AnalysisVersion | null) => {
+      const nextSelectionId = selection?.id ?? null;
+      const bindingChanged =
+        nextSelectionId !== sourceFrameSelectionIdRef.current;
+      sourceFrameSelectionIdRef.current = nextSelectionId;
       setSourceFrameSelection(selection);
-      setCharacterReferenceSelection(null);
-      setFirstFrameSelection(null);
+      if (bindingChanged) {
+        characterReferenceSelectionIdRef.current = null;
+        setCharacterReferenceSelection(null);
+        setFirstFrameSelection(null);
+      }
     },
     [],
   );
 
   const handleCharacterReferenceSelectionChange = useCallback(
     (selection: CharacterReferenceSelectionValue | null) => {
+      const nextSelectionId = selection?.id ?? null;
+      const bindingChanged =
+        nextSelectionId !== characterReferenceSelectionIdRef.current;
+      characterReferenceSelectionIdRef.current = nextSelectionId;
       setCharacterReferenceSelection(selection);
-      setFirstFrameSelection(null);
+      if (bindingChanged) {
+        setFirstFrameSelection(null);
+      }
     },
     [],
   );
@@ -402,13 +429,14 @@ export function AnalysisWorkspace({
                   sourceFrameSelection={sourceFrameSelection}
                 />
               ) : null}
-              {characterSelection && sourceFrameSelection ? (
+              {characterSelection ? (
                 <FirstFrameSelection
                   legacyCharacterSelected={legacyCharacterSelected}
                   onSelectionChange={handleFirstFrameSelectionChange}
                   projectId={project.id}
                   readOnly={readOnly}
                   referenceSelection={characterReferenceSelection}
+                  sourceFrameConfirmed={Boolean(sourceFrameSelection)}
                 />
               ) : null}
               <div className="shot-card-list">

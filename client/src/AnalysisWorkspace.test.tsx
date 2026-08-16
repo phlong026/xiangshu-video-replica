@@ -21,6 +21,13 @@ const characterSelection = {
   character_snapshot: { name: "林夏" },
 };
 
+const changedCharacterSelection = {
+  ...characterSelection,
+  character_version_id: "character-version-2",
+  version_id: "main-character-2",
+  version_number: 2,
+};
+
 const legacyCharacterSelection = {
   project_id: "project-1",
   character_id: "legacy-character-1",
@@ -75,6 +82,12 @@ vi.mock("./CharacterSelection", () => ({
         完成角色选择
       </button>
       <button
+        onClick={() => onVersionChange?.(changedCharacterSelection)}
+        type="button"
+      >
+        切换角色版本
+      </button>
+      <button
         onClick={() => onVersionChange?.(legacyCharacterSelection)}
         type="button"
       >
@@ -86,9 +99,17 @@ vi.mock("./CharacterSelection", () => ({
 
 vi.mock("./SourceFrameSelection", () => ({
   SourceFrameSelection: ({ onSelectionChange }: apiMockProps) => (
-    <button onClick={() => onSelectionChange?.(sourceSelection)} type="button">
-      完成源画面
-    </button>
+    <>
+      <button
+        onClick={() => onSelectionChange?.(sourceSelection)}
+        type="button"
+      >
+        完成源画面
+      </button>
+      <button onClick={() => onSelectionChange?.(null)} type="button">
+        标记源画面失效
+      </button>
+    </>
   ),
 }));
 
@@ -110,6 +131,7 @@ vi.mock("./FirstFrameSelection", () => ({
     referenceSelection: currentReferenceSelection,
   }: apiMockProps) => (
     <>
+      <span>首帧历史可查看</span>
       {legacyCharacterSelected && !currentReferenceSelection ? (
         <span>历史兼容首帧可用</span>
       ) : null}
@@ -148,7 +170,7 @@ describe("AnalysisWorkspace workflow gates", () => {
     vi.mocked(api.getLatestProjectShotCards).mockResolvedValue(null);
   });
 
-  it("opens each downstream gate only after the previous confirmation and rolls back", async () => {
+  it("preserves downstream gates for idempotent confirmations and rolls back on a changed character", async () => {
     render(
       <AnalysisWorkspace
         onAnalysisReady={vi.fn()}
@@ -193,13 +215,59 @@ describe("AnalysisWorkspace workflow gates", () => {
       "step",
     );
 
+    fireEvent.click(screen.getByRole("button", { name: "完成人物参考" }));
+    expect(screen.getByTitle("确认口播稿")).toHaveAttribute(
+      "aria-current",
+      "step",
+    );
+    expect(screen.getByText("首帧历史可查看")).toBeInTheDocument();
+
     fireEvent.click(screen.getByRole("button", { name: "完成角色选择" }));
+    expect(screen.getByTitle("确认口播稿")).toHaveAttribute(
+      "aria-current",
+      "step",
+    );
+    expect(screen.getByText("首帧历史可查看")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "切换角色版本" }));
     expect(screen.getByTitle("选择起始帧")).toHaveAttribute(
       "aria-current",
       "step",
     );
     expect(screen.queryByText("完成人物参考")).toBeNull();
-    expect(screen.queryByText("完成置换首帧")).toBeNull();
+    expect(screen.getByText("首帧历史可查看")).toBeInTheDocument();
+  });
+
+  it("keeps first-frame history visible while the current source selection is stale", async () => {
+    render(
+      <AnalysisWorkspace
+        onAnalysisReady={vi.fn()}
+        onClose={vi.fn()}
+        project={{
+          id: "project-1",
+          owner_user_id: "employee_1",
+          name: "历史查看测试",
+          status: "REFERENCE_READY",
+          reference_asset_id: "reference-video-1",
+          reference_upload_status: "READY",
+          analysis_status: "READY",
+        }}
+      />,
+    );
+
+    expect(await screen.findByText("拆解完成")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "完成角色选择" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成源画面" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成人物参考" }));
+    expect(screen.getByText("首帧历史可查看")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "标记源画面失效" }));
+
+    expect(screen.getByTitle("选择起始帧")).toHaveAttribute(
+      "aria-current",
+      "step",
+    );
+    expect(screen.getByText("首帧历史可查看")).toBeInTheDocument();
   });
 
   it("keeps legacy first-frame history and generation reachable without a seven-view selection", async () => {

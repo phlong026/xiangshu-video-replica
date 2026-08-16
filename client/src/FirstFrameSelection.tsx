@@ -24,12 +24,14 @@ export function FirstFrameSelection({
   projectId,
   readOnly = false,
   referenceSelection,
+  sourceFrameConfirmed,
 }: {
   legacyCharacterSelected?: boolean;
   onSelectionChange?: (selection: AnalysisVersion | null) => void;
   projectId: string;
   readOnly?: boolean;
   referenceSelection: CharacterReferenceSelection | null;
+  sourceFrameConfirmed: boolean;
 }) {
   const [version, setVersion] = useState<AnalysisVersion | null>(null);
   const [latestVersionId, setLatestVersionId] = useState("");
@@ -45,7 +47,9 @@ export function FirstFrameSelection({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const loadRequestId = useRef(0);
   const referenceSelectionId = referenceSelection?.id ?? "";
-  const canGenerate = Boolean(referenceSelection || legacyCharacterSelected);
+  const canGenerate =
+    sourceFrameConfirmed &&
+    Boolean(referenceSelection || legacyCharacterSelected);
 
   const load = useCallback(
     async (preferredVersion?: AnalysisVersion) => {

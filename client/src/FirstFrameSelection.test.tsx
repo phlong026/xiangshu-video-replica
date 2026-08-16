@@ -105,6 +105,7 @@ describe("FirstFrameSelection", () => {
       <FirstFrameSelection
         projectId="project-1"
         referenceSelection={referenceSelection}
+        sourceFrameConfirmed
       />,
     );
 
@@ -138,6 +139,7 @@ describe("FirstFrameSelection", () => {
       <FirstFrameSelection
         projectId="project-1"
         referenceSelection={referenceSelection}
+        sourceFrameConfirmed
       />,
     );
     await screen.findByText("人物置换首帧");
@@ -170,6 +172,7 @@ describe("FirstFrameSelection", () => {
         legacyCharacterSelected
         projectId="project-1"
         referenceSelection={null}
+        sourceFrameConfirmed
       />,
     );
     await screen.findByRole("button", { name: "版本 #2" });
@@ -188,6 +191,24 @@ describe("FirstFrameSelection", () => {
     );
   });
 
+  it("keeps legacy history visible but disables generation without a current source", async () => {
+    render(
+      <FirstFrameSelection
+        legacyCharacterSelected
+        projectId="project-1"
+        referenceSelection={null}
+        sourceFrameConfirmed={false}
+      />,
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "版本 #2" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "重新生成候选首帧" }),
+    ).toBeDisabled();
+  });
+
   it("clearly marks local fake output instead of presenting it as a provider result", async () => {
     vi.mocked(getLatestProjectFirstFrames).mockResolvedValue({
       stale: false,
@@ -200,6 +221,7 @@ describe("FirstFrameSelection", () => {
       <FirstFrameSelection
         projectId="project-1"
         referenceSelection={referenceSelection}
+        sourceFrameConfirmed
       />,
     );
 
@@ -225,6 +247,7 @@ describe("FirstFrameSelection", () => {
       <FirstFrameSelection
         projectId="project-1"
         referenceSelection={referenceSelection}
+        sourceFrameConfirmed
       />,
     );
 
@@ -242,6 +265,7 @@ describe("FirstFrameSelection", () => {
         projectId="project-1"
         readOnly
         referenceSelection={referenceSelection}
+        sourceFrameConfirmed
       />,
     );
 
@@ -261,6 +285,7 @@ describe("FirstFrameSelection", () => {
       <FirstFrameSelection
         projectId="project-1"
         referenceSelection={referenceSelection}
+        sourceFrameConfirmed
       />,
     );
 
@@ -308,6 +333,7 @@ describe("FirstFrameSelection", () => {
         onSelectionChange={onSelectionChange}
         projectId="project-1"
         referenceSelection={referenceSelection}
+        sourceFrameConfirmed
       />,
     );
 
@@ -347,6 +373,7 @@ describe("FirstFrameSelection", () => {
         onSelectionChange={onSelectionChange}
         projectId="project-1"
         referenceSelection={referenceSelection}
+        sourceFrameConfirmed
       />,
     );
 
@@ -363,6 +390,7 @@ describe("FirstFrameSelection", () => {
           ...referenceSelection,
           id: "reference-selection-2",
         }}
+        sourceFrameConfirmed
       />,
     );
     await act(async () => {
