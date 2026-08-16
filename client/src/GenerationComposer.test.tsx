@@ -43,6 +43,7 @@ const props = {
   firstFrameAssetId: "first-frame-1",
   firstFrameSelectionVersionId: "first-frame-selection-1",
   onBatchCreated: vi.fn(),
+  onBusyChange: vi.fn(),
   onWorkflowStepChange: vi.fn(),
   originalScript: "原稿第一句。原稿第二句。",
   projectId: "project-1",
@@ -566,11 +567,15 @@ describe("GenerationComposer", () => {
     fireEvent.click(button);
     fireEvent.click(button);
     expect(api.createGenerationBatch).toHaveBeenCalledOnce();
+    await waitFor(() =>
+      expect(props.onBusyChange).toHaveBeenLastCalledWith(true),
+    );
 
     firstRequest.reject?.(
       new Error("创建视频生成批次失败：网络连接失败，请检查本地服务"),
     );
     expect(await screen.findByText(/网络连接失败/)).toBeInTheDocument();
+    expect(props.onBusyChange).toHaveBeenLastCalledWith(false);
     fireEvent.click(screen.getByRole("button", { name: "创建 1 个生成任务" }));
     await waitFor(() =>
       expect(api.createGenerationBatch).toHaveBeenCalledTimes(2),

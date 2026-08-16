@@ -105,6 +105,7 @@ export function AnalysisWorkspace({
   const [saveMessage, setSaveMessage] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
+  const [isGenerationBusy, setIsGenerationBusy] = useState(false);
   const [isAnalysisMissing, setIsAnalysisMissing] = useState(false);
   const [isStartingAnalysis, setIsStartingAnalysis] = useState(false);
   const [characterSelection, setCharacterSelection] =
@@ -227,6 +228,7 @@ export function AnalysisWorkspace({
     setFirstFrameSelection(null);
     setGenerationStep(7);
     setShotCardsDirty(false);
+    setIsGenerationBusy(false);
     savedShotsRef.current = [];
     characterSelectionVersionIdRef.current = null;
     sourceFrameSelectionIdRef.current = null;
@@ -303,7 +305,9 @@ export function AnalysisWorkspace({
           ? 5
           : !firstFrameSelection
             ? 6
-            : generationStep;
+            : shotCardsDirty
+              ? 7
+              : generationStep;
 
   function reloadWorkspace() {
     reloadTokenRef.current += 1;
@@ -333,7 +337,7 @@ export function AnalysisWorkspace({
   }
 
   function updateShot(index: number, key: keyof ShotCard, value: string) {
-    if (readOnly || isSaving) {
+    if (readOnly || isSaving || isGenerationBusy) {
       return;
     }
     const nextShots = shots.map((shot, shotIndex) => {
@@ -350,14 +354,11 @@ export function AnalysisWorkspace({
     setShots(nextShots);
     setSaveMessage("");
     setShotCardsDirty(isDirty);
-    if (isDirty) {
-      setGenerationStep(7);
-    }
   }
 
   async function handleSave(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (readOnly) {
+    if (readOnly || isGenerationBusy) {
       return;
     }
     if (!analysisId) {
@@ -379,6 +380,7 @@ export function AnalysisWorkspace({
       const savedVersion = await saveShotCards(analysisId, shots);
       savedShotsRef.current = copyShotCards(shots);
       setShotCardVersionId(savedVersion.id);
+      setGenerationStep(7);
       setShotCardsDirty(false);
       setSaveMessage(`镜头卡片已保存为版本 #${savedVersion.version_number}。`);
     } catch (requestError) {
@@ -515,7 +517,7 @@ export function AnalysisWorkspace({
                         onChange={(value) =>
                           updateShot(index, "start_time", value)
                         }
-                        readOnly={readOnly || isSaving}
+                        readOnly={readOnly || isSaving || isGenerationBusy}
                         type="number"
                         value={String(shot.start_time)}
                       />
@@ -524,7 +526,7 @@ export function AnalysisWorkspace({
                         onChange={(value) =>
                           updateShot(index, "end_time", value)
                         }
-                        readOnly={readOnly || isSaving}
+                        readOnly={readOnly || isSaving || isGenerationBusy}
                         type="number"
                         value={String(shot.end_time)}
                       />
@@ -535,7 +537,7 @@ export function AnalysisWorkspace({
                           key={key}
                           label={`${shot.shot_id} ${label}`}
                           onChange={(value) => updateShot(index, key, value)}
-                          readOnly={readOnly || isSaving}
+                          readOnly={readOnly || isSaving || isGenerationBusy}
                           value={shot[key]}
                         />
                       ))}
@@ -547,35 +549,48 @@ export function AnalysisWorkspace({
                 <p className="setup-success">{saveMessage}</p>
               ) : null}
               {readOnly ? null : (
-                <button disabled={isSaving || !analysisId} type="submit">
+                <button
+                  disabled={isSaving || isGenerationBusy || !analysisId}
+                  type="submit"
+                >
                   {isSaving ? "正在保存" : "保存镜头卡片"}
                 </button>
               )}
-              {firstFramePayload && shotCardVersionId && !shotCardsDirty ? (
-                <GenerationComposer
-                  analysisVersionId={analysisId}
-                  characterVersionId={
-                    characterSelection?.character_version_id ?? null
-                  }
-                  currentUserId={currentUserId}
-                  durationSeconds={durationSeconds}
-                  firstFrameAssetId={firstFramePayload.first_frame_asset_id}
-                  firstFrameSelectionVersionId={firstFrameSelection?.id ?? ""}
-                  onBatchCreated={onBatchCreated}
-                  onWorkflowStepChange={setGenerationStep}
-                  originalScript={originalScript}
-                  projectId={project.id}
-                  readOnly={readOnly}
-                  referenceSelectionId={characterReferenceSelection?.id ?? null}
-                  shotCardVersionId={shotCardVersionId}
-                />
+              {firstFramePayload && shotCardVersionId ? (
+                <>
+                  {isSaving || shotCardsDirty ? (
+                    <p className="workflow-gate-note">
+                      {isSaving
+                        ? "镜头卡片正在保存，请完成后再继续生成。"
+                        : "镜头卡片已编辑，请保存后再继续生成。"}
+                    </p>
+                  ) : null}
+                  <GenerationComposer
+                    analysisVersionId={analysisId}
+                    characterVersionId={
+                      characterSelection?.character_version_id ?? null
+                    }
+                    currentUserId={currentUserId}
+                    durationSeconds={durationSeconds}
+                    firstFrameAssetId={firstFramePayload.first_frame_asset_id}
+                    firstFrameSelectionVersionId={firstFrameSelection?.id ?? ""}
+                    onBatchCreated={onBatchCreated}
+                    onBusyChange={setIsGenerationBusy}
+                    onWorkflowStepChange={setGenerationStep}
+                    originalScript={originalScript}
+                    projectId={project.id}
+                    readOnly={
+                      readOnly || isSaving || shotCardsDirty || isGenerationBusy
+                    }
+                    referenceSelectionId={
+                      characterReferenceSelection?.id ?? null
+                    }
+                    shotCardVersionId={shotCardVersionId}
+                  />
+                </>
               ) : firstFramePayload ? (
                 <p className="workflow-gate-note">
-                  {isSaving
-                    ? "镜头卡片正在保存，请完成后再继续生成。"
-                    : shotCardsDirty
-                      ? "镜头卡片已编辑，请保存后再继续生成。"
-                      : "请先保存当前镜头卡片，再确认口播稿并编译 Prompt。"}
+                  请先保存当前镜头卡片，再确认口播稿并编译 Prompt。
                 </p>
               ) : null}
             </div>

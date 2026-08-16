@@ -169,6 +169,7 @@ vi.mock("./GenerationComposer", () => ({
   GenerationComposer: ({
     firstFrameAssetId,
     onBatchCreated,
+    onBusyChange,
     onWorkflowStepChange,
     originalScript,
     readOnly,
@@ -185,6 +186,12 @@ vi.mock("./GenerationComposer", () => ({
       />
       <button onClick={() => onWorkflowStepChange?.(9)} type="button">
         模拟锁定 Prompt
+      </button>
+      <button onClick={() => onBusyChange?.(true)} type="button">
+        模拟生成处理中
+      </button>
+      <button onClick={() => onBusyChange?.(false)} type="button">
+        模拟生成完成
       </button>
       <button
         disabled={readOnly}
@@ -223,6 +230,7 @@ type apiMockProps = {
 type generationComposerMockProps = {
   firstFrameAssetId?: string;
   onBatchCreated?: (value: unknown) => void;
+  onBusyChange?: (isBusy: boolean) => void;
   onWorkflowStepChange?: (step: number) => void;
   originalScript?: string;
   readOnly?: boolean;
@@ -442,7 +450,7 @@ describe("AnalysisWorkspace workflow gates", () => {
     );
   });
 
-  it("closes generation when the visible shot cards have unsaved edits", async () => {
+  it("blocks generation without losing drafts while shot edits are reverted", async () => {
     vi.mocked(api.getLatestProjectAnalysis).mockResolvedValue({
       id: "analysis-1",
       project_id: "project-1",
@@ -501,14 +509,38 @@ describe("AnalysisWorkspace workflow gates", () => {
     expect(
       screen.getByText("生成输入：shot-card-2/first-frame-1/原始口播稿"),
     ).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("生成草稿"), {
+      target: { value: "未保存的生成草稿" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "模拟锁定 Prompt" }));
+    expect(screen.getByTitle("设置数量并生成")).toHaveAttribute(
+      "aria-current",
+      "step",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "模拟生成处理中" }));
+    expect(screen.getByLabelText("S01 场景")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "保存镜头卡片" })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("S01 场景"), {
+      target: { value: "处理中不应写入" },
+    });
+    expect(screen.getByLabelText("S01 场景")).toHaveValue("咖啡馆");
+    fireEvent.click(screen.getByRole("button", { name: "模拟生成完成" }));
+    expect(screen.getByLabelText("S01 场景")).toBeEnabled();
 
     fireEvent.change(screen.getByLabelText("S01 场景"), {
       target: { value: "未保存的新场景" },
     });
 
     expect(
-      screen.queryByText("生成输入：shot-card-2/first-frame-1/原始口播稿"),
-    ).not.toBeInTheDocument();
+      screen.getByText("生成输入：shot-card-2/first-frame-1/原始口播稿"),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("生成草稿")).toHaveValue("未保存的生成草稿");
+    expect(screen.getByLabelText("生成草稿")).toHaveAttribute("readonly");
+    expect(screen.getByRole("button", { name: "模拟创建批次" })).toBeDisabled();
+    expect(screen.getByTitle("确认口播稿")).toHaveAttribute(
+      "aria-current",
+      "step",
+    );
     expect(
       screen.getByText("镜头卡片已编辑，请保存后再继续生成。"),
     ).toBeInTheDocument();
@@ -520,6 +552,12 @@ describe("AnalysisWorkspace workflow gates", () => {
     expect(
       screen.getByText("生成输入：shot-card-2/first-frame-1/原始口播稿"),
     ).toBeInTheDocument();
+    expect(screen.getByLabelText("生成草稿")).toHaveValue("未保存的生成草稿");
+    expect(screen.getByLabelText("生成草稿")).not.toHaveAttribute("readonly");
+    expect(screen.getByTitle("设置数量并生成")).toHaveAttribute(
+      "aria-current",
+      "step",
+    );
     fireEvent.click(screen.getByRole("button", { name: "保存镜头卡片" }));
     expect(api.saveShotCards).not.toHaveBeenCalled();
     expect(

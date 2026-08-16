@@ -25,6 +25,7 @@ type GenerationComposerProps = {
   firstFrameAssetId: string;
   firstFrameSelectionVersionId: string;
   onBatchCreated: (batch: GenerationBatch) => void;
+  onBusyChange: (isBusy: boolean) => void;
   onWorkflowStepChange: (step: number) => void;
   originalScript: string;
   projectId: string;
@@ -51,6 +52,7 @@ export function GenerationComposer({
   firstFrameAssetId,
   firstFrameSelectionVersionId,
   onBatchCreated,
+  onBusyChange,
   onWorkflowStepChange,
   originalScript,
   projectId,
@@ -88,6 +90,17 @@ export function GenerationComposer({
   const actionGenerationRef = useRef(0);
   const isCreatingBatchRef = useRef(false);
   const idempotencyRecordRef = useRef<IdempotencyRecord | null>(null);
+
+  useEffect(() => {
+    onBusyChange(Boolean(busyAction));
+  }, [busyAction, onBusyChange]);
+
+  useEffect(
+    () => () => {
+      onBusyChange(false);
+    },
+    [onBusyChange],
+  );
 
   useEffect(() => {
     actionGenerationRef.current += 1;
