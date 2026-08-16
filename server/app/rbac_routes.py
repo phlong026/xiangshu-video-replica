@@ -22,7 +22,6 @@ from app.auth import (
 from app.media import storage_key_from_uri
 from app.media_routes import LOCAL_API_BASE_URL
 from app.permissions import (
-    project_id_for_task,
     require_asset_access,
     require_not_auditor,
     require_project_access,
@@ -67,10 +66,6 @@ class ProjectResponse(BaseModel):
     reference_asset_id: str | None
     reference_upload_status: str
     analysis_status: str
-
-
-class AcceptedResponse(BaseModel):
-    status: str
 
 
 class AssetResponse(BaseModel):
@@ -533,37 +528,6 @@ def create_download_url(
             detail={"code": "STORAGE_PROVIDER_UNAVAILABLE"},
         ) from exc
     return DownloadUrlResponse(url=intent.url)
-
-
-@router.post("/generation-tasks/{task_id}/retry", response_model=AcceptedResponse)
-def retry_generation_task(
-    task_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
-) -> AcceptedResponse:
-    require_not_auditor(
-        conn,
-        actor=actor,
-        action="generation_task.retry",
-        entity_type="generation_task",
-        entity_id=task_id,
-    )
-    project_id = project_id_for_task(conn, task_id)
-    require_project_access(
-        conn,
-        actor=actor,
-        project_id=project_id,
-        action="generation_task.retry",
-    )
-    write_audit(
-        conn,
-        actor=actor,
-        action="generation_task.retry",
-        entity_type="generation_task",
-        entity_id=task_id,
-        metadata={"project_id": project_id},
-    )
-    return AcceptedResponse(status="accepted")
 
 
 @router.get("/audit-logs", response_model=list[AuditLogResponse])

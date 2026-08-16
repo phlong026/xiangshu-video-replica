@@ -5,6 +5,7 @@ import hmac
 import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from mimetypes import guess_type
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 from urllib.parse import quote, urlencode
@@ -394,7 +395,7 @@ class LocalStorageAdapter(_BaseStorageAdapter):
             bucket=self.bucket,
             key=object_key,
             content=path.read_bytes(),
-            content_type="application/octet-stream",
+            content_type=guess_type(path.name)[0] or "application/octet-stream",
         )
 
     def _signed_url(self, method: str, key: str, expires_at: datetime) -> str:

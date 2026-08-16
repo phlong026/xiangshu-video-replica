@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import ipaddress
 import json
@@ -11,7 +13,7 @@ import sqlite3
 import subprocess
 import tempfile
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from math import floor
@@ -27,6 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.analysis import get_version, insert_version
 from app.auth import CurrentUser
 from app.permissions import (
+    insert_audit,
     require_asset_access,
     require_not_auditor,
     require_project_access,
@@ -77,10 +80,17 @@ SUPPORTED_RESOLUTIONS = {"768P", "2K"}
 # A real H3 request polls for up to five minutes. Leave headroom so another
 # worker never mistakes an active request for an abandoned lease.
 GENERATION_LEASE_SECONDS = 600
+# Reconciliation performs one provider query plus optional download/archive;
+# fifteen minutes exceeds those bounded calls while still recovering crashes.
+RECONCILIATION_RESERVATION_SECONDS = 900
 FIRST_FRAME_URL_EXPIRES_IN = timedelta(minutes=15)
 # Cap archive retries so a permanently expired provider URL does not keep the
 # paid task spinning in ARCHIVE_FAILED forever.
 MAX_ARCHIVE_RETRIES = 5
+SAFE_PRE_PROVIDER_FAILURE_CODES = {
+    "FIRST_FRAME_URL_SIGN_FAILED",
+    "METASO_SETTINGS_UNAVAILABLE",
+}
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +133,36 @@ class GenerationBatchRequest(BaseModel):
     fake_audio_quality: Literal["ok", "missing"] = "ok"
 
 
+class PaidRegenerationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    idempotency_key: str = Field(min_length=1, max_length=128)
+    payment_confirmed: Literal[True]
+    payment_confirmation_version: Literal["V1"]
+    estimated_cost_snapshot: float | None = Field(default=None, ge=0)
+    generation_reason: str = Field(min_length=1, max_length=500)
+
+
+class GenerationTaskRetryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    idempotency_key: str = Field(min_length=1, max_length=128)
+    retry_reason: str = Field(min_length=1, max_length=500)
+
+
+class ConfirmNotChargedRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    idempotency_key: str = Field(min_length=1, max_length=128)
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class ReconcileGenerationTaskRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    idempotency_key: str = Field(min_length=1, max_length=128)
+
+
 class H3CreateResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -153,6 +193,13 @@ class H3ProviderFailed(RuntimeError):
 
 class H3ProviderSettingsUnavailable(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class ReconcileReservation:
+    id: str
+    actor: CurrentUser
+    idempotency_key: str
 
 
 class H3Provider:
@@ -392,7 +439,7 @@ class GenerationRuntimeLimits(BaseModel):
     estimated_cost_per_task: float | None = None
 
 
-class TaskResult(BaseModel):
+class TaskSummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str
@@ -401,6 +448,29 @@ class TaskResult(BaseModel):
     quality_status: str
     quality_issue_codes: list[str]
     result_asset_id: str | None
+    stage: str
+    provider: str
+    model: str
+    provider_task_id_tail: str | None
+    attempt: int
+    archive_retry_count: int
+    estimated_cost: float | None
+    actual_cost: float | None
+    error_code: str | None
+    error_message_redacted: str | None
+    submitted_at: str | None
+    started_at: str | None
+    completed_at: str | None
+    duration_seconds: float | None
+    retry_of_task_id: str | None
+    superseded_by_task_id: str | None
+    superseded_at: str | None
+    retry_reason: str | None
+    retry_requested_at: str | None
+    available_actions: list[Literal["RETRY", "RECONCILE", "CONFIRM_NOT_CHARGED", "REGENERATE"]]
+
+
+class TaskResult(TaskSummary):
     prompt_snapshot: dict[str, Any] | None
 
 
@@ -411,6 +481,7 @@ class BatchProgress(BaseModel):
     terminal_count: int
     progress_percent: int
     counts: dict[str, int]
+    historical_counts: dict[str, int] = Field(default_factory=dict)
 
 
 class BatchResult(BaseModel):
@@ -422,6 +493,9 @@ class BatchResult(BaseModel):
     status: str
     quantity: int
     stale: bool
+    source_batch_id: str | None = None
+    source_task_id: str | None = None
+    generation_reason: str | None = None
     progress: BatchProgress
     tasks: list[TaskResult]
 
@@ -430,6 +504,46 @@ class BatchResult(BaseModel):
         if self.quantity != self.progress.total_count:
             raise ValueError("quantity must match progress total_count")
         return self
+
+
+class GenerationBatchListItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    project_id: str
+    project_name: str
+    created_by_user_id: str
+    created_by_display_name: str
+    prompt_version_id: str
+    status: str
+    quantity: int
+    created_at: str
+    updated_at: str
+    source_batch_id: str | None = None
+    source_task_id: str | None = None
+    generation_reason: str | None = None
+    progress: BatchProgress
+    total_estimated_cost: float | None
+    total_actual_cost: float | None
+    needs_attention_count: int
+    has_results: bool
+    tasks: list[TaskSummary]
+
+
+class GenerationBatchListPage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[GenerationBatchListItem]
+    next_cursor: str | None
+
+
+BatchStatusFilter = Literal[
+    "PENDING",
+    "QUEUED",
+    "NEEDS_ATTENTION",
+    "SUCCEEDED",
+    "COMPLETED_WITH_FAILURES",
+]
 
 
 def latest_version(
@@ -1252,6 +1366,486 @@ def create_generation_batch(
     return get_generation_batch(conn, batch_id=batch_id, actor=actor)
 
 
+def regenerate_generation_batch(
+    conn: sqlite3.Connection,
+    *,
+    batch_id: str,
+    actor: CurrentUser,
+    request: PaidRegenerationRequest,
+) -> BatchResult:
+    source_context = conn.execute(
+        "SELECT project_id FROM generation_batches WHERE id = ?",
+        (batch_id,),
+    ).fetchone()
+    if source_context is None:
+        raise generation_error(404, "BATCH_NOT_FOUND", "Generation batch does not exist.")
+    project_id = str(source_context["project_id"])
+    require_not_auditor(
+        conn,
+        actor=actor,
+        action="generation_batch.regenerate",
+        entity_type="generation_batch",
+        entity_id=batch_id,
+    )
+    require_project_access(
+        conn,
+        actor=actor,
+        project_id=project_id,
+        action="generation_batch.regenerate",
+    )
+
+    new_batch_id = ""
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        source_batch = conn.execute(
+            """
+            SELECT id, project_id, request_snapshot_json
+            FROM generation_batches
+            WHERE id = ?
+            """,
+            (batch_id,),
+        ).fetchone()
+        if source_batch is None:
+            raise generation_error(404, "BATCH_NOT_FOUND", "Generation batch does not exist.")
+        source_tasks = conn.execute(
+            """
+            SELECT id, generation_mode, provider, model, prompt_version_id,
+                   prompt_snapshot_json
+            FROM generation_tasks
+            WHERE batch_id = ?
+            ORDER BY created_at, id
+            """,
+            (batch_id,),
+        ).fetchall()
+        if not source_tasks:
+            raise generation_error(
+                409,
+                "SOURCE_BATCH_EMPTY",
+                "A batch without frozen tasks cannot be regenerated.",
+            )
+
+        source_task_ids = [str(row["id"]) for row in source_tasks]
+        prompt_snapshots = [
+            required_snapshot_text(row["prompt_snapshot_json"]) for row in source_tasks
+        ]
+        request_snapshot = required_snapshot_text(source_batch["request_snapshot_json"])
+        request_hash = paid_regeneration_request_hash(
+            request,
+            operation_kind="MANUAL_BATCH_REGENERATE",
+            source_batch_id=batch_id,
+            source_task_ids=source_task_ids,
+            request_snapshot=request_snapshot,
+            prompt_snapshots=prompt_snapshots,
+        )
+        existing = _find_idempotent_batch(
+            conn,
+            actor_id=actor.id,
+            project_id=project_id,
+            key=request.idempotency_key,
+        )
+        if existing is not None:
+            conn.rollback()
+            require_matching_idempotent_batch(existing, request_hash=request_hash)
+            return get_generation_batch(conn, batch_id=str(existing["id"]), actor=actor)
+
+        runtime = read_runtime_limits(conn)
+        if len(source_tasks) > runtime["max_generation_count_per_batch"]:
+            raise generation_error(
+                422,
+                "QUANTITY_EXCEEDS_LIMIT",
+                "quantity must be less than or equal to "
+                f"{runtime['max_generation_count_per_batch']}",
+            )
+        for provider_name in {str(row["provider"]) for row in source_tasks}:
+            require_regeneration_provider_ready(conn, provider_name=provider_name)
+
+        new_batch_id = str(uuid4())
+        conn.execute(
+            """
+            INSERT INTO generation_batches (
+                id, project_id, created_by_user_id, idempotency_key,
+                request_hash, request_snapshot_json, status,
+                source_batch_id, source_task_id, generation_reason
+            )
+            VALUES (?, ?, ?, ?, ?, ?, 'QUEUED', ?, NULL, ?)
+            """,
+            (
+                new_batch_id,
+                project_id,
+                actor.id,
+                request.idempotency_key,
+                request_hash,
+                request_snapshot,
+                batch_id,
+                request.generation_reason,
+            ),
+        )
+        estimated_cost = paid_cost_per_task(
+            request.estimated_cost_snapshot,
+            quantity=len(source_tasks),
+        )
+        for source_task, prompt_snapshot in zip(source_tasks, prompt_snapshots, strict=True):
+            replacement_task_id = str(uuid4())
+            conn.execute(
+                """
+                INSERT INTO generation_tasks (
+                    id, batch_id, generation_mode, provider, model,
+                    status, archive_status, quality_status,
+                    prompt_version_id, prompt_snapshot_json, next_poll_at,
+                    estimated_cost, retry_of_task_id, retry_reason,
+                    retry_requested_by_user_id, retry_requested_at
+                )
+                VALUES (?, ?, ?, ?, ?, 'PENDING', 'PENDING', 'PENDING',
+                        ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                (
+                    replacement_task_id,
+                    new_batch_id,
+                    str(source_task["generation_mode"]),
+                    str(source_task["provider"]),
+                    str(source_task["model"]),
+                    source_task["prompt_version_id"],
+                    prompt_snapshot,
+                    estimated_cost,
+                    str(source_task["id"]),
+                    request.generation_reason,
+                    actor.id,
+                ),
+            )
+        insert_audit(
+            conn,
+            actor=actor,
+            action="generation_batch.regenerate",
+            entity_type="generation_batch",
+            entity_id=new_batch_id,
+            metadata={
+                "project_id": project_id,
+                "source_batch_id": batch_id,
+                "source_task_ids": source_task_ids,
+                "quantity": len(source_tasks),
+                "generation_reason": request.generation_reason,
+                "payment_confirmation_version": request.payment_confirmation_version,
+                "estimated_cost_snapshot": request.estimated_cost_snapshot,
+                "idempotency_key_hash": content_hash(request.idempotency_key),
+            },
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return get_generation_batch(conn, batch_id=new_batch_id, actor=actor)
+
+
+def regenerate_generation_task(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    actor: CurrentUser,
+    request: PaidRegenerationRequest,
+) -> BatchResult:
+    source_context = conn.execute(
+        """
+        SELECT generation_batches.project_id
+        FROM generation_tasks
+        JOIN generation_batches ON generation_batches.id = generation_tasks.batch_id
+        WHERE generation_tasks.id = ?
+        """,
+        (task_id,),
+    ).fetchone()
+    if source_context is None:
+        raise generation_error(404, "TASK_NOT_FOUND", "Generation task does not exist.")
+    project_id = str(source_context["project_id"])
+    require_not_auditor(
+        conn,
+        actor=actor,
+        action="generation_task.regenerate",
+        entity_type="generation_task",
+        entity_id=task_id,
+    )
+    require_project_access(
+        conn,
+        actor=actor,
+        project_id=project_id,
+        action="generation_task.regenerate",
+    )
+
+    new_batch_id = ""
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        source = conn.execute(
+            """
+            SELECT
+                task.id,
+                task.batch_id,
+                task.generation_mode,
+                task.provider,
+                task.model,
+                task.provider_task_id,
+                task.provider_result_url,
+                task.status,
+                task.archive_status,
+                task.quality_status,
+                task.quality_issue_codes,
+                task.submitted_at,
+                task.prompt_version_id,
+                task.prompt_snapshot_json,
+                task.superseded_by_task_id,
+                batch.project_id,
+                batch.request_snapshot_json
+            FROM generation_tasks AS task
+            JOIN generation_batches AS batch ON batch.id = task.batch_id
+            WHERE task.id = ?
+            """,
+            (task_id,),
+        ).fetchone()
+        if source is None:
+            raise generation_error(404, "TASK_NOT_FOUND", "Generation task does not exist.")
+
+        request_snapshot = required_snapshot_text(source["request_snapshot_json"])
+        prompt_snapshot = required_snapshot_text(source["prompt_snapshot_json"])
+        source_batch_id = str(source["batch_id"])
+        request_hash = paid_regeneration_request_hash(
+            request,
+            operation_kind="TASK_PAID_REGENERATE",
+            source_batch_id=source_batch_id,
+            source_task_ids=[task_id],
+            request_snapshot=request_snapshot,
+            prompt_snapshots=[prompt_snapshot],
+        )
+        existing = _find_idempotent_batch(
+            conn,
+            actor_id=actor.id,
+            project_id=project_id,
+            key=request.idempotency_key,
+        )
+        if existing is not None:
+            conn.rollback()
+            require_matching_idempotent_batch(existing, request_hash=request_hash)
+            return get_generation_batch(conn, batch_id=str(existing["id"]), actor=actor)
+
+        if source["superseded_by_task_id"] is not None:
+            raise generation_error(
+                409,
+                "SOURCE_TASK_ALREADY_SUPERSEDED",
+                "This source task already has a paid replacement.",
+            )
+        require_task_paid_regeneration_state(source)
+        require_regeneration_provider_ready(conn, provider_name=str(source["provider"]))
+
+        new_batch_id = str(uuid4())
+        replacement_task_id = str(uuid4())
+        conn.execute(
+            """
+            INSERT INTO generation_batches (
+                id, project_id, created_by_user_id, idempotency_key,
+                request_hash, request_snapshot_json, status,
+                source_batch_id, source_task_id, generation_reason
+            )
+            VALUES (?, ?, ?, ?, ?, ?, 'QUEUED', ?, ?, ?)
+            """,
+            (
+                new_batch_id,
+                project_id,
+                actor.id,
+                request.idempotency_key,
+                request_hash,
+                request_snapshot,
+                source_batch_id,
+                task_id,
+                request.generation_reason,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO generation_tasks (
+                id, batch_id, generation_mode, provider, model,
+                status, archive_status, quality_status,
+                prompt_version_id, prompt_snapshot_json, next_poll_at,
+                estimated_cost, retry_of_task_id, retry_reason,
+                retry_requested_by_user_id, retry_requested_at
+            )
+            VALUES (?, ?, ?, ?, ?, 'PENDING', 'PENDING', 'PENDING',
+                    ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            (
+                replacement_task_id,
+                new_batch_id,
+                str(source["generation_mode"]),
+                str(source["provider"]),
+                str(source["model"]),
+                source["prompt_version_id"],
+                prompt_snapshot,
+                request.estimated_cost_snapshot,
+                task_id,
+                request.generation_reason,
+                actor.id,
+            ),
+        )
+        cursor = conn.execute(
+            """
+            UPDATE generation_tasks
+            SET superseded_by_task_id = ?, superseded_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND superseded_by_task_id IS NULL
+            """,
+            (replacement_task_id, task_id),
+        )
+        if cursor.rowcount != 1:
+            raise generation_error(
+                409,
+                "SOURCE_TASK_ALREADY_SUPERSEDED",
+                "This source task already has a paid replacement.",
+            )
+        _refresh_batch_status_in_transaction(conn, batch_id=source_batch_id)
+        insert_audit(
+            conn,
+            actor=actor,
+            action="generation_task.regenerate",
+            entity_type="generation_task",
+            entity_id=replacement_task_id,
+            metadata={
+                "project_id": project_id,
+                "source_batch_id": source_batch_id,
+                "source_task_id": task_id,
+                "replacement_batch_id": new_batch_id,
+                "generation_reason": request.generation_reason,
+                "payment_confirmation_version": request.payment_confirmation_version,
+                "estimated_cost_snapshot": request.estimated_cost_snapshot,
+                "idempotency_key_hash": content_hash(request.idempotency_key),
+            },
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return get_generation_batch(conn, batch_id=new_batch_id, actor=actor)
+
+
+def required_snapshot_text(value: Any) -> str:
+    if value is None:
+        raise generation_error(
+            409,
+            "SOURCE_SNAPSHOT_UNAVAILABLE",
+            "The frozen generation snapshot is unavailable.",
+        )
+    text = str(value)
+    try:
+        json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise generation_error(
+            409,
+            "SOURCE_SNAPSHOT_INVALID",
+            "The frozen generation snapshot is invalid.",
+        ) from exc
+    return text
+
+
+def paid_regeneration_request_hash(
+    request: PaidRegenerationRequest,
+    *,
+    operation_kind: Literal["MANUAL_BATCH_REGENERATE", "TASK_PAID_REGENERATE"],
+    source_batch_id: str,
+    source_task_ids: Sequence[str],
+    request_snapshot: str,
+    prompt_snapshots: Sequence[str],
+) -> str:
+    payload = {
+        "operation_kind": operation_kind,
+        "source_batch_id": source_batch_id,
+        "source_task_ids": list(source_task_ids),
+        "generation_reason": request.generation_reason,
+        "request_snapshot_hash": canonical_snapshot_hash(request_snapshot),
+        "prompt_snapshot_hashes": [
+            canonical_snapshot_hash(snapshot) for snapshot in prompt_snapshots
+        ],
+        "quantity": len(source_task_ids),
+        "payment_confirmed": request.payment_confirmed,
+        "payment_confirmation_version": request.payment_confirmation_version,
+        "estimated_cost_snapshot": request.estimated_cost_snapshot,
+    }
+    return content_hash(json.dumps(payload, ensure_ascii=True, sort_keys=True))
+
+
+def canonical_snapshot_hash(snapshot: str) -> str:
+    parsed = json.loads(snapshot)
+    return content_hash(json.dumps(parsed, ensure_ascii=True, sort_keys=True))
+
+
+def require_matching_idempotent_batch(row: sqlite3.Row, *, request_hash: str) -> None:
+    if str(row["request_hash"]) != request_hash:
+        raise generation_error(
+            409,
+            "IDEMPOTENCY_CONFLICT",
+            "This idempotency key was already used for a different request.",
+        )
+
+
+def require_regeneration_provider_ready(
+    conn: sqlite3.Connection,
+    *,
+    provider_name: str,
+) -> None:
+    if provider_name != "metaso":
+        return
+    try:
+        metaso_h3_provider_from_settings(conn)
+    except H3ProviderSettingsUnavailable as exc:
+        raise generation_error(
+            503,
+            "METASO_SETTINGS_UNAVAILABLE",
+            "Save a readable METASO API Key before queuing a real H3 task.",
+        ) from exc
+    storage_row = conn.execute(
+        "SELECT active_storage_provider FROM runtime_settings WHERE id = 1"
+    ).fetchone()
+    if storage_row is not None and storage_row["active_storage_provider"] == "local":
+        raise generation_error(
+            422,
+            "METASO_REQUIRES_CLOUD_STORAGE",
+            "METASO H3 requires an HTTPS first-frame URL; switch storage to "
+            "COS/OSS before generating.",
+        )
+
+
+def require_task_paid_regeneration_state(row: sqlite3.Row) -> None:
+    if str(row["archive_status"]) == "ARCHIVE_FAILED":
+        raise generation_error(
+            409,
+            "ARCHIVE_RETRY_ONLY",
+            "Archive failures must recover the existing paid result without a new Provider call.",
+        )
+    if str(row["status"]) == "SUBMISSION_UNCERTAIN":
+        raise generation_error(
+            409,
+            "MUST_RECONCILE_SUBMISSION",
+            "An uncertain submission must be reconciled before any paid regeneration.",
+        )
+    quality_issue_codes = parse_json_list(row["quality_issue_codes"])
+    if (
+        str(row["quality_status"]) == "AUDIO_QUALITY_FAILED"
+        or "AUDIO_QUALITY_FAILED" in quality_issue_codes
+    ):
+        return
+    if str(row["status"]) == "FAILED" and (
+        row["provider_task_id"] is not None
+        or row["provider_result_url"] is not None
+        or row["submitted_at"] is not None
+    ):
+        return
+    raise generation_error(
+        409,
+        "PAID_REGENERATION_NOT_ALLOWED",
+        "Only audio-quality failures or failed submitted tasks can be regenerated "
+        "with a new paid call.",
+    )
+
+
+def paid_cost_per_task(total: float | None, *, quantity: int) -> float | None:
+    if total is None:
+        return None
+    return round(total / quantity, 6)
+
+
 def require_confirmed_first_frame(
     conn: sqlite3.Connection,
     *,
@@ -1534,13 +2128,28 @@ def _store_and_finalize_archive(
     created_by_user_id: str,
     content: bytes,
     storage: StorageAdapter,
+    reconcile_reservation: ReconcileReservation | None = None,
 ) -> TaskResult:
     """Archive already-downloaded H3 result bytes and mark the task terminal."""
-    object_key = f"generation-results/{task_id}.mp4"
+    object_key = (
+        f"generation-results/{task_id}/{reconcile_reservation.id}.mp4"
+        if reconcile_reservation is not None
+        else f"generation-results/{task_id}.mp4"
+    )
     stored = storage.put_object(object_key, content, content_type="video/mp4")
     result_asset_id = str(uuid4())
+    task_state_guard = (
+        "AND status = 'SUBMISSION_UNCERTAIN' AND result_asset_id IS NULL"
+        if reconcile_reservation is not None
+        else ""
+    )
     try:
         with conn:
+            if reconcile_reservation is not None:
+                _renew_reconcile_reservation_in_transaction(
+                    conn,
+                    reservation_id=reconcile_reservation.id,
+                )
             conn.execute(
                 """
                 INSERT INTO assets (
@@ -1565,8 +2174,8 @@ def _store_and_finalize_archive(
                     created_by_user_id,
                 ),
             )
-            conn.execute(
-                """
+            task_update = conn.execute(
+                f"""
                 UPDATE generation_tasks
                 SET
                     status = 'SUCCEEDED',
@@ -1580,10 +2189,23 @@ def _store_and_finalize_archive(
                     completed_at = CURRENT_TIMESTAMP,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
+                {task_state_guard}
                 """,
                 (result_asset_id, task_id),
             )
-            refresh_batch_status(conn, batch_id=batch_id)
+            if reconcile_reservation is not None and task_update.rowcount != 1:
+                raise _reconcile_reservation_lost()
+            _refresh_batch_status_in_transaction(conn, batch_id=batch_id)
+            result = get_task_result(conn, task_id)
+            if reconcile_reservation is not None:
+                _complete_reconcile_operation_in_transaction(
+                    conn,
+                    reservation=reconcile_reservation,
+                    task_id=task_id,
+                    batch_id=batch_id,
+                    project_id=project_id,
+                    result=result,
+                )
     except Exception:
         # The object was written outside the DB transaction; remove it if the
         # asset/task rows could not be committed, so no orphan object is left.
@@ -1594,7 +2216,7 @@ def _store_and_finalize_archive(
                 "archive cleanup failed for task %s: %s", task_id, type(cleanup_exc).__name__
             )
         raise
-    return get_task_result(conn, task_id)
+    return result
 
 
 def _retry_archive(
@@ -1644,6 +2266,728 @@ def _retry_archive(
         return get_task_result(conn, task_id)
 
 
+def generation_task_operation_hash(
+    *,
+    action: str,
+    task_id: str,
+    payload: Mapping[str, Any],
+) -> str:
+    return content_hash(
+        json.dumps(
+            {"action": action, "task_id": task_id, "payload": dict(payload)},
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+
+
+def _idempotent_task_operation(
+    conn: sqlite3.Connection,
+    *,
+    actor_id: str,
+    task_id: str,
+    action: str,
+    idempotency_key: str,
+    request_hash: str,
+) -> sqlite3.Row | None:
+    row = conn.execute(
+        """
+        SELECT request_hash, result_status
+        FROM generation_task_operations
+        WHERE actor_user_id = ? AND task_id = ? AND action = ? AND idempotency_key = ?
+        """,
+        (actor_id, task_id, action, idempotency_key),
+    ).fetchone()
+    if row is not None and str(row["request_hash"]) != request_hash:
+        raise generation_error(
+            409,
+            "IDEMPOTENCY_CONFLICT",
+            "This idempotency key was already used for a different task operation.",
+        )
+    return cast(sqlite3.Row | None, row)
+
+
+def _record_completed_task_operation(
+    conn: sqlite3.Connection,
+    *,
+    actor: CurrentUser,
+    task_id: str,
+    action: str,
+    idempotency_key: str,
+    request_hash: str,
+    response: Mapping[str, Any],
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO generation_task_operations (
+            id, task_id, actor_user_id, action, idempotency_key,
+            request_hash, result_task_id, result_status, response_snapshot_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'COMPLETED', ?)
+        """,
+        (
+            str(uuid4()),
+            task_id,
+            actor.id,
+            action,
+            idempotency_key,
+            request_hash,
+            task_id,
+            json.dumps(dict(response), ensure_ascii=True, sort_keys=True),
+        ),
+    )
+
+
+def _release_stale_reconcile_reservation(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    batch_id: str,
+    project_id: str,
+    actor: CurrentUser,
+) -> None:
+    row = conn.execute(
+        """
+        SELECT id, idempotency_key
+        FROM generation_task_operations
+        WHERE task_id = ? AND action = 'RECONCILE' AND result_status = 'PENDING'
+          AND datetime(updated_at) <= datetime('now', ?)
+        """,
+        (task_id, f"-{RECONCILIATION_RESERVATION_SECONDS} seconds"),
+    ).fetchone()
+    if row is None:
+        return
+    conn.execute(
+        """
+        DELETE FROM generation_task_operations
+        WHERE id = ? AND result_status = 'PENDING'
+        """,
+        (str(row["id"]),),
+    )
+    insert_audit(
+        conn,
+        actor=actor,
+        action="generation_task.reconcile_stale_reservation_released",
+        entity_type="generation_task",
+        entity_id=task_id,
+        metadata={
+            "batch_id": batch_id,
+            "project_id": project_id,
+            "idempotency_key_hash": content_hash(str(row["idempotency_key"])),
+            "reservation_timeout_seconds": RECONCILIATION_RESERVATION_SECONDS,
+        },
+    )
+
+
+def _renew_reconcile_reservation(
+    conn: sqlite3.Connection,
+    *,
+    reservation: ReconcileReservation | None,
+) -> None:
+    if reservation is None:
+        return
+    with conn:
+        _renew_reconcile_reservation_in_transaction(conn, reservation_id=reservation.id)
+
+
+def _renew_reconcile_reservation_in_transaction(
+    conn: sqlite3.Connection,
+    *,
+    reservation_id: str,
+) -> None:
+    cursor = conn.execute(
+        """
+        UPDATE generation_task_operations
+        SET updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND action = 'RECONCILE' AND result_status = 'PENDING'
+        """,
+        (reservation_id,),
+    )
+    if cursor.rowcount != 1:
+        raise _reconcile_reservation_lost()
+
+
+def _reconcile_reservation_lost() -> HTTPException:
+    return generation_error(
+        409,
+        "RECONCILE_RESERVATION_LOST",
+        "The reconciliation reservation expired and was taken over; retry the request.",
+    )
+
+
+def _complete_reconcile_operation_in_transaction(
+    conn: sqlite3.Connection,
+    *,
+    reservation: ReconcileReservation,
+    task_id: str,
+    batch_id: str,
+    project_id: str,
+    result: TaskResult,
+) -> None:
+    cursor = conn.execute(
+        """
+        UPDATE generation_task_operations
+        SET
+            result_status = 'COMPLETED',
+            response_snapshot_json = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND actor_user_id = ? AND task_id = ?
+          AND action = 'RECONCILE' AND idempotency_key = ? AND result_status = 'PENDING'
+        """,
+        (
+            json.dumps(
+                {
+                    "status": result.status,
+                    "archive_status": result.archive_status,
+                    "result_asset_id": result.result_asset_id,
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+            ),
+            reservation.id,
+            reservation.actor.id,
+            task_id,
+            reservation.idempotency_key,
+        ),
+    )
+    if cursor.rowcount != 1:
+        raise _reconcile_reservation_lost()
+    insert_audit(
+        conn,
+        actor=reservation.actor,
+        action=(
+            "generation_task.reconcile_archived"
+            if result.archive_status == "ARCHIVED"
+            else "generation_task.reconcile_terminal_failed"
+        ),
+        entity_type="generation_task",
+        entity_id=task_id,
+        metadata={
+            "batch_id": batch_id,
+            "project_id": project_id,
+            "status": result.status,
+            "archive_status": result.archive_status,
+        },
+    )
+
+
+def retry_generation_task(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    actor: CurrentUser,
+    request: GenerationTaskRetryRequest,
+) -> TaskResult:
+    action = "RETRY"
+    request_hash = generation_task_operation_hash(
+        action=action,
+        task_id=task_id,
+        payload={"retry_reason": request.retry_reason},
+    )
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        existing = _idempotent_task_operation(
+            conn,
+            actor_id=actor.id,
+            task_id=task_id,
+            action=action,
+            idempotency_key=request.idempotency_key,
+            request_hash=request_hash,
+        )
+        if existing is not None:
+            conn.commit()
+            return get_task_result(conn, task_id)
+
+        row = conn.execute(
+            """
+            SELECT
+                task.batch_id,
+                batch.project_id,
+                task.status,
+                task.archive_status,
+                task.quality_status,
+                task.provider_task_id,
+                task.provider_result_url,
+                task.result_asset_id,
+                task.archive_retry_count,
+                task.error_code,
+                task.submitted_at,
+                task.superseded_by_task_id
+            FROM generation_tasks AS task
+            JOIN generation_batches AS batch ON batch.id = task.batch_id
+            WHERE task.id = ?
+            """,
+            (task_id,),
+        ).fetchone()
+        if row is None:
+            raise generation_error(404, "TASK_NOT_FOUND", "Generation task does not exist.")
+
+        status = str(row["status"])
+        archive_status = str(row["archive_status"])
+        quality_status = str(row["quality_status"])
+        provider_task_id = optional_text(row["provider_task_id"])
+        provider_result_url = optional_text(row["provider_result_url"])
+        error_code = optional_text(row["error_code"])
+
+        if row["superseded_by_task_id"] is not None:
+            raise generation_error(
+                409,
+                "TASK_SUPERSEDED",
+                "This historical task has already been replaced and cannot be retried.",
+            )
+
+        if archive_status == "ARCHIVE_FAILED":
+            if (
+                provider_result_url is None
+                or int(row["archive_retry_count"]) >= MAX_ARCHIVE_RETRIES
+            ):
+                raise generation_error(
+                    409,
+                    "ARCHIVE_RESULT_UNAVAILABLE",
+                    "The paid result can no longer be recovered from the provider URL.",
+                )
+            retry_path = "ARCHIVE_ONLY"
+            audit_action = "generation_task.archive_retry_queued"
+            conn.execute(
+                """
+                UPDATE generation_tasks
+                SET
+                    status = 'SUCCEEDED',
+                    locked_by = NULL,
+                    locked_until = NULL,
+                    next_poll_at = CURRENT_TIMESTAMP,
+                    retry_reason = ?,
+                    retry_requested_by_user_id = ?,
+                    retry_requested_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (request.retry_reason, actor.id, task_id),
+            )
+        elif quality_status == "AUDIO_QUALITY_FAILED":
+            raise generation_error(
+                409,
+                "REQUIRES_PAID_REGENERATION",
+                "Audio quality failures require an explicit paid video regeneration.",
+            )
+        elif status == "SUBMISSION_UNCERTAIN":
+            if provider_task_id is not None:
+                raise generation_error(
+                    409,
+                    "MUST_RECONCILE_SUBMISSION",
+                    "This task has a provider task id and must be reconciled.",
+                )
+            raise generation_error(
+                409,
+                "ADMIN_BILLING_CONFIRMATION_REQUIRED",
+                "An admin must confirm that the provider did not charge before requeueing.",
+            )
+        elif status == "FAILED":
+            if (
+                provider_task_id is not None
+                or provider_result_url is not None
+                or row["submitted_at"] is not None
+                or error_code not in SAFE_PRE_PROVIDER_FAILURE_CODES
+            ):
+                raise generation_error(
+                    409,
+                    "REQUIRES_PAID_REGENERATION",
+                    "This task may already have reached the provider and cannot be "
+                    "retried in place.",
+                )
+            retry_path = "PRE_PROVIDER"
+            audit_action = "generation_task.retry_queued"
+            conn.execute(
+                """
+                UPDATE generation_tasks
+                SET
+                    status = 'PENDING',
+                    archive_status = 'PENDING',
+                    quality_status = 'PENDING',
+                    quality_issue_codes = '[]',
+                    error_code = NULL,
+                    error_message_redacted = NULL,
+                    locked_by = NULL,
+                    locked_until = NULL,
+                    next_poll_at = CURRENT_TIMESTAMP,
+                    submitted_at = NULL,
+                    started_at = NULL,
+                    completed_at = NULL,
+                    retry_reason = ?,
+                    retry_requested_by_user_id = ?,
+                    retry_requested_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (request.retry_reason, actor.id, task_id),
+            )
+        else:
+            raise generation_error(
+                409,
+                "TASK_RETRY_NOT_ALLOWED",
+                "The task is not in a safely retryable state.",
+            )
+
+        _record_completed_task_operation(
+            conn,
+            actor=actor,
+            task_id=task_id,
+            action=action,
+            idempotency_key=request.idempotency_key,
+            request_hash=request_hash,
+            response={"retry_path": retry_path},
+        )
+        insert_audit(
+            conn,
+            actor=actor,
+            action=audit_action,
+            entity_type="generation_task",
+            entity_id=task_id,
+            metadata={
+                "batch_id": str(row["batch_id"]),
+                "project_id": str(row["project_id"]),
+                "previous_status": status,
+                "previous_archive_status": archive_status,
+                "retry_path": retry_path,
+                "retry_reason": request.retry_reason,
+                "idempotency_key_hash": content_hash(request.idempotency_key),
+            },
+        )
+        _refresh_batch_status_in_transaction(conn, batch_id=str(row["batch_id"]))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return get_task_result(conn, task_id)
+
+
+def confirm_generation_task_not_charged(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    actor: CurrentUser,
+    request: ConfirmNotChargedRequest,
+) -> TaskResult:
+    action = "CONFIRM_NOT_CHARGED"
+    request_hash = generation_task_operation_hash(
+        action=action,
+        task_id=task_id,
+        payload={"reason": request.reason},
+    )
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        existing = _idempotent_task_operation(
+            conn,
+            actor_id=actor.id,
+            task_id=task_id,
+            action=action,
+            idempotency_key=request.idempotency_key,
+            request_hash=request_hash,
+        )
+        if existing is not None:
+            conn.commit()
+            return get_task_result(conn, task_id)
+
+        row = conn.execute(
+            """
+            SELECT
+                task.batch_id,
+                batch.project_id,
+                task.status,
+                task.provider_task_id,
+                task.provider_result_url,
+                task.result_asset_id,
+                task.superseded_by_task_id
+            FROM generation_tasks AS task
+            JOIN generation_batches AS batch ON batch.id = task.batch_id
+            WHERE task.id = ?
+            """,
+            (task_id,),
+        ).fetchone()
+        if row is None:
+            raise generation_error(404, "TASK_NOT_FOUND", "Generation task does not exist.")
+        if row["superseded_by_task_id"] is not None:
+            raise generation_error(
+                409,
+                "TASK_SUPERSEDED",
+                "This historical task has already been replaced.",
+            )
+        if str(row["status"]) != "SUBMISSION_UNCERTAIN":
+            raise generation_error(
+                409,
+                "TASK_NOT_UNCERTAIN",
+                "Only an uncertain submission can be confirmed as unbilled.",
+            )
+        if any(
+            optional_text(row[column]) is not None
+            for column in ("provider_task_id", "provider_result_url", "result_asset_id")
+        ):
+            raise generation_error(
+                409,
+                "SUBMISSION_MAY_HAVE_BEEN_CHARGED",
+                "Provider evidence exists; reconcile or use paid regeneration instead.",
+            )
+
+        conn.execute(
+            """
+            UPDATE generation_tasks
+            SET
+                status = 'PENDING',
+                error_code = NULL,
+                error_message_redacted = NULL,
+                locked_by = NULL,
+                locked_until = NULL,
+                next_poll_at = CURRENT_TIMESTAMP,
+                submitted_at = NULL,
+                started_at = NULL,
+                completed_at = NULL,
+                retry_reason = ?,
+                retry_requested_by_user_id = ?,
+                retry_requested_at = CURRENT_TIMESTAMP,
+                billing_confirmation_status = 'CONFIRMED_NOT_CHARGED',
+                billing_confirmed_by_user_id = ?,
+                billing_confirmed_at = CURRENT_TIMESTAMP,
+                billing_confirmation_reason = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (request.reason, actor.id, actor.id, request.reason, task_id),
+        )
+        _record_completed_task_operation(
+            conn,
+            actor=actor,
+            task_id=task_id,
+            action=action,
+            idempotency_key=request.idempotency_key,
+            request_hash=request_hash,
+            response={"billing_confirmation_status": "CONFIRMED_NOT_CHARGED"},
+        )
+        insert_audit(
+            conn,
+            actor=actor,
+            action="generation_task.billing_confirmed_not_charged",
+            entity_type="generation_task",
+            entity_id=task_id,
+            metadata={
+                "batch_id": str(row["batch_id"]),
+                "project_id": str(row["project_id"]),
+                "reason": request.reason,
+                "idempotency_key_hash": content_hash(request.idempotency_key),
+            },
+        )
+        _refresh_batch_status_in_transaction(conn, batch_id=str(row["batch_id"]))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return get_task_result(conn, task_id)
+
+
+def reconcile_generation_task(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    batch_id: str,
+    project_id: str,
+    created_by_user_id: str,
+    actor: CurrentUser,
+    request: ReconcileGenerationTaskRequest,
+    storage_factory: Callable[[], StorageAdapter],
+    provider_factory: Callable[[], H3Provider],
+) -> TaskResult:
+    action = "RECONCILE"
+    operation_id: str | None = None
+    request_hash = generation_task_operation_hash(
+        action=action,
+        task_id=task_id,
+        payload={},
+    )
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            """
+            SELECT
+                status,
+                archive_status,
+                result_asset_id,
+                provider_task_id,
+                superseded_by_task_id
+            FROM generation_tasks
+            WHERE id = ?
+            """,
+            (task_id,),
+        ).fetchone()
+        if row is None:
+            raise generation_error(404, "TASK_NOT_FOUND", "Generation task does not exist.")
+        if row["superseded_by_task_id"] is not None:
+            raise generation_error(
+                409,
+                "TASK_SUPERSEDED",
+                "This historical task has already been replaced.",
+            )
+        if str(row["status"]) == "SUBMISSION_UNCERTAIN":
+            _release_stale_reconcile_reservation(
+                conn,
+                task_id=task_id,
+                batch_id=batch_id,
+                project_id=project_id,
+                actor=actor,
+            )
+        existing = _idempotent_task_operation(
+            conn,
+            actor_id=actor.id,
+            task_id=task_id,
+            action=action,
+            idempotency_key=request.idempotency_key,
+            request_hash=request_hash,
+        )
+        if existing is not None:
+            if str(existing["result_status"]) == "PENDING" and str(row["status"]) == (
+                "SUBMISSION_UNCERTAIN"
+            ):
+                raise generation_error(
+                    409,
+                    "RECONCILE_IN_PROGRESS",
+                    "A reconciliation request is already in progress for this task.",
+                )
+            if str(existing["result_status"]) == "PENDING":
+                conn.execute(
+                    """
+                    UPDATE generation_task_operations
+                    SET
+                        result_status = 'COMPLETED',
+                        response_snapshot_json = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE actor_user_id = ? AND task_id = ? AND action = ?
+                      AND idempotency_key = ?
+                    """,
+                    (
+                        json.dumps(
+                            {
+                                "status": str(row["status"]),
+                                "archive_status": str(row["archive_status"]),
+                                "result_asset_id": optional_text(row["result_asset_id"]),
+                            },
+                            ensure_ascii=True,
+                            sort_keys=True,
+                        ),
+                        actor.id,
+                        task_id,
+                        action,
+                        request.idempotency_key,
+                    ),
+                )
+                insert_audit(
+                    conn,
+                    actor=actor,
+                    action=(
+                        "generation_task.reconcile_archived"
+                        if str(row["archive_status"]) == "ARCHIVED"
+                        else "generation_task.reconcile_terminal_failed"
+                    ),
+                    entity_type="generation_task",
+                    entity_id=task_id,
+                    metadata={
+                        "batch_id": batch_id,
+                        "project_id": project_id,
+                        "status": str(row["status"]),
+                        "archive_status": str(row["archive_status"]),
+                        "recovered_pending_operation": True,
+                    },
+                )
+            conn.commit()
+            return get_task_result(conn, task_id)
+        if str(row["status"]) != "SUBMISSION_UNCERTAIN":
+            raise generation_error(
+                409,
+                "TASK_NOT_UNCERTAIN",
+                "Only SUBMISSION_UNCERTAIN tasks can be reconciled.",
+            )
+        if optional_text(row["provider_task_id"]) is None:
+            raise generation_error(
+                409,
+                "SUBMISSION_REQUIRES_MANUAL_CONFIRMATION",
+                "There is no provider task id; an admin must confirm no charge occurred.",
+            )
+        operation_id = str(uuid4())
+        conn.execute(
+            """
+            INSERT INTO generation_task_operations (
+                id, task_id, actor_user_id, action, idempotency_key,
+                request_hash, result_task_id, result_status
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING')
+            """,
+            (
+                operation_id,
+                task_id,
+                actor.id,
+                action,
+                request.idempotency_key,
+                request_hash,
+                task_id,
+            ),
+        )
+        insert_audit(
+            conn,
+            actor=actor,
+            action="generation_task.reconcile_requested",
+            entity_type="generation_task",
+            entity_id=task_id,
+            metadata={
+                "batch_id": batch_id,
+                "project_id": project_id,
+                "idempotency_key_hash": content_hash(request.idempotency_key),
+                "provider_task_id_tail": redacted_provider_task_tail(
+                    optional_text(row["provider_task_id"])
+                ),
+            },
+        )
+        conn.commit()
+    except sqlite3.IntegrityError as exc:
+        conn.rollback()
+        raise generation_error(
+            409,
+            "RECONCILE_IN_PROGRESS",
+            "A reconciliation request is already in progress for this task.",
+        ) from exc
+    except Exception:
+        conn.rollback()
+        raise
+
+    if operation_id is None:
+        raise RuntimeError("reconciliation reservation was not created")
+    reservation = ReconcileReservation(
+        id=operation_id,
+        actor=actor,
+        idempotency_key=request.idempotency_key,
+    )
+    try:
+        provider = provider_factory()
+        result = reconcile_submission_uncertain_task(
+            conn,
+            task_id=task_id,
+            batch_id=batch_id,
+            project_id=project_id,
+            created_by_user_id=created_by_user_id,
+            storage_factory=storage_factory,
+            provider=provider,
+            reconcile_reservation=reservation,
+        )
+    except Exception:
+        with conn:
+            conn.execute(
+                """
+                DELETE FROM generation_task_operations
+                WHERE id = ? AND result_status = 'PENDING'
+                """,
+                (operation_id,),
+            )
+        raise
+    return result
+
+
 def reconcile_submission_uncertain_task(
     conn: sqlite3.Connection,
     *,
@@ -1651,8 +2995,9 @@ def reconcile_submission_uncertain_task(
     batch_id: str,
     project_id: str,
     created_by_user_id: str,
-    storage: StorageAdapter,
+    storage_factory: Callable[[], StorageAdapter],
     provider: H3Provider,
+    reconcile_reservation: ReconcileReservation | None = None,
 ) -> TaskResult:
     """Reconcile a SUBMISSION_UNCERTAIN task against the provider.
 
@@ -1679,12 +3024,14 @@ def reconcile_submission_uncertain_task(
             "The submission result is unknown and there is no provider task id; "
             "confirm the charge did not occur before deciding to resubmit.",
         )
+    _renew_reconcile_reservation(conn, reservation=reconcile_reservation)
     try:
         item = provider._query_task(str(provider_task_id))
     except H3ProviderFailed as exc:
         raise generation_error(
             502, "PROVIDER_QUERY_FAILED", "Provider query failed during reconciliation."
         ) from exc
+    _renew_reconcile_reservation(conn, reservation=reconcile_reservation)
     status = item.get("status")
     if status == "succeeded":
         result_url = _metaso_content_url(item, provider_task_id=str(provider_task_id))
@@ -1694,6 +3041,8 @@ def reconcile_submission_uncertain_task(
             raise generation_error(
                 503, "RESULT_DOWNLOAD_FAILED", "Result download failed; retry reconciliation."
             ) from exc
+        _renew_reconcile_reservation(conn, reservation=reconcile_reservation)
+        storage = storage_factory()
         return _store_and_finalize_archive(
             conn,
             task_id=task_id,
@@ -1702,11 +3051,17 @@ def reconcile_submission_uncertain_task(
             created_by_user_id=created_by_user_id,
             content=content,
             storage=storage,
+            reconcile_reservation=reconcile_reservation,
         )
     if status in {"failed", "cancelled"}:
         with conn:
-            conn.execute(
-                """
+            if reconcile_reservation is not None:
+                _renew_reconcile_reservation_in_transaction(
+                    conn,
+                    reservation_id=reconcile_reservation.id,
+                )
+            task_update = conn.execute(
+                f"""
                 UPDATE generation_tasks
                 SET
                     status = 'FAILED',
@@ -1716,11 +3071,24 @@ def reconcile_submission_uncertain_task(
                     locked_until = NULL,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
+                {"AND status = 'SUBMISSION_UNCERTAIN'" if reconcile_reservation is not None else ""}
                 """,
                 (str(status), task_id),
             )
-            refresh_batch_status(conn, batch_id=batch_id)
-        return get_task_result(conn, task_id)
+            if reconcile_reservation is not None and task_update.rowcount != 1:
+                raise _reconcile_reservation_lost()
+            _refresh_batch_status_in_transaction(conn, batch_id=batch_id)
+            result = get_task_result(conn, task_id)
+            if reconcile_reservation is not None:
+                _complete_reconcile_operation_in_transaction(
+                    conn,
+                    reservation=reconcile_reservation,
+                    task_id=task_id,
+                    batch_id=batch_id,
+                    project_id=project_id,
+                    result=result,
+                )
+        return result
     raise generation_error(
         409, "PROVIDER_STILL_PROCESSING", "Provider reports the task is still running."
     )
@@ -1799,10 +3167,15 @@ def acquire_generation_task_lease(
             """
             UPDATE generation_tasks
             SET
+                attempt = attempt + CASE WHEN status IN ('PENDING', 'QUEUED') THEN 1 ELSE 0 END,
                 status = 'SUBMITTING',
                 locked_by = ?,
                 locked_until = ?,
-                submitted_at = COALESCE(submitted_at, CURRENT_TIMESTAMP),
+                submitted_at = CASE
+                    WHEN status IN ('PENDING', 'QUEUED')
+                    THEN COALESCE(submitted_at, CURRENT_TIMESTAMP)
+                    ELSE submitted_at
+                END,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = (
                 SELECT id
@@ -1878,6 +3251,10 @@ def mark_task_submission_uncertain(
     provider_task_id: str | None = None,
 ) -> None:
     with conn:
+        row = conn.execute(
+            "SELECT batch_id FROM generation_tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
         conn.execute(
             """
             UPDATE generation_tasks
@@ -1893,6 +3270,8 @@ def mark_task_submission_uncertain(
             """,
             (provider_task_id, message, task_id),
         )
+        if row is not None:
+            _refresh_batch_status_in_transaction(conn, batch_id=str(row["batch_id"]))
 
 
 def mark_task_provider_settings_unavailable(
@@ -1909,6 +3288,7 @@ def mark_task_provider_settings_unavailable(
                 status = 'FAILED',
                 error_code = 'METASO_SETTINGS_UNAVAILABLE',
                 error_message_redacted = 'METASO settings are unavailable to the worker.',
+                submitted_at = NULL,
                 locked_by = NULL,
                 locked_until = NULL,
                 updated_at = CURRENT_TIMESTAMP
@@ -2028,6 +3408,15 @@ def mark_expired_active_leases_needing_attention(conn: sqlite3.Connection) -> No
 
 
 def refresh_batch_status(conn: sqlite3.Connection, *, batch_id: str) -> None:
+    with conn:
+        _refresh_batch_status_in_transaction(conn, batch_id=batch_id)
+
+
+def _refresh_batch_status_in_transaction(
+    conn: sqlite3.Connection,
+    *,
+    batch_id: str,
+) -> None:
     rows = conn.execute(
         """
         SELECT
@@ -2037,6 +3426,24 @@ def refresh_batch_status(conn: sqlite3.Connection, *, batch_id: str) -> None:
             quality_status,
             quality_issue_codes,
             result_asset_id,
+            provider,
+            model,
+            provider_task_id,
+            provider_result_url,
+            attempt,
+            archive_retry_count,
+            estimated_cost,
+            actual_cost,
+            error_code,
+            error_message_redacted,
+            submitted_at,
+            started_at,
+            completed_at,
+            retry_of_task_id,
+            superseded_by_task_id,
+            superseded_at,
+            retry_reason,
+            retry_requested_at,
             prompt_snapshot_json
         FROM generation_tasks
         WHERE batch_id = ?
@@ -2044,15 +3451,14 @@ def refresh_batch_status(conn: sqlite3.Connection, *, batch_id: str) -> None:
         (batch_id,),
     ).fetchall()
     progress = calculate_progress([task_result(row) for row in rows])
-    with conn:
-        conn.execute(
-            """
-            UPDATE generation_batches
-            SET status = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-            """,
-            (batch_status("QUEUED", progress), batch_id),
-        )
+    conn.execute(
+        """
+        UPDATE generation_batches
+        SET status = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (batch_status("QUEUED", progress), batch_id),
+    )
 
 
 def get_task_result(conn: sqlite3.Connection, task_id: str) -> TaskResult:
@@ -2065,6 +3471,24 @@ def get_task_result(conn: sqlite3.Connection, task_id: str) -> TaskResult:
             quality_status,
             quality_issue_codes,
             result_asset_id,
+            provider,
+            model,
+            provider_task_id,
+            provider_result_url,
+            attempt,
+            archive_retry_count,
+            estimated_cost,
+            actual_cost,
+            error_code,
+            error_message_redacted,
+            submitted_at,
+            started_at,
+            completed_at,
+            retry_of_task_id,
+            superseded_by_task_id,
+            superseded_at,
+            retry_reason,
+            retry_requested_at,
             prompt_snapshot_json
         FROM generation_tasks
         WHERE id = ?
@@ -2076,6 +3500,253 @@ def get_task_result(conn: sqlite3.Connection, task_id: str) -> TaskResult:
     return task_result(row)
 
 
+def list_generation_batches(
+    conn: sqlite3.Connection,
+    *,
+    actor: CurrentUser,
+    project_id: str | None = None,
+    created_by_user_id: str | None = None,
+    status: BatchStatusFilter | None = None,
+    needs_attention: bool | None = None,
+    limit: int = 20,
+    cursor: str | None = None,
+) -> GenerationBatchListPage:
+    if limit < 1 or limit > 100:
+        raise generation_error(422, "LIST_LIMIT_INVALID", "limit must be between 1 and 100.")
+    if project_id is not None:
+        require_project_access(
+            conn,
+            actor=actor,
+            project_id=project_id,
+            action="generation_batch.list",
+        )
+
+    filters_hash = batch_list_filters_hash(
+        actor=actor,
+        project_id=project_id,
+        created_by_user_id=created_by_user_id,
+        status=status,
+        needs_attention=needs_attention,
+    )
+    cursor_position = (
+        None if cursor is None else decode_batch_list_cursor(cursor, filters_hash=filters_hash)
+    )
+
+    clauses = ["1 = 1"]
+    parameters: list[object] = []
+    if project_id is not None:
+        clauses.append("batch.project_id = ?")
+        parameters.append(project_id)
+    elif actor.role == "employee":
+        clauses.append("project.owner_user_id = ?")
+        parameters.append(actor.id)
+    if created_by_user_id is not None:
+        clauses.append("batch.created_by_user_id = ?")
+        parameters.append(created_by_user_id)
+    if status is not None:
+        clauses.append("batch.status = ?")
+        parameters.append(status)
+    if needs_attention is not None:
+        exists_prefix = "" if needs_attention else "NOT "
+        clauses.append(
+            f"""
+            {exists_prefix}EXISTS (
+                SELECT 1
+                FROM generation_tasks AS attention_task
+                WHERE attention_task.batch_id = batch.id
+                  AND attention_task.superseded_by_task_id IS NULL
+                  AND (
+                    attention_task.status = 'SUBMISSION_UNCERTAIN'
+                    OR attention_task.archive_status = 'ARCHIVE_FAILED'
+                    OR attention_task.quality_status = 'AUDIO_QUALITY_FAILED'
+                    OR instr(
+                        COALESCE(attention_task.quality_issue_codes, ''),
+                        '"AUDIO_QUALITY_FAILED"'
+                    ) > 0
+                  )
+            )
+            """
+        )
+    if cursor_position is not None:
+        cursor_created_at, cursor_batch_id = cursor_position
+        clauses.append("(batch.created_at < ? OR (batch.created_at = ? AND batch.id < ?))")
+        parameters.extend([cursor_created_at, cursor_created_at, cursor_batch_id])
+    parameters.append(limit + 1)
+
+    rows = conn.execute(
+        f"""
+        SELECT
+            batch.id,
+            batch.project_id,
+            project.name AS project_name,
+            batch.created_by_user_id,
+            creator.display_name AS created_by_display_name,
+            batch.request_snapshot_json,
+            batch.status,
+            batch.created_at,
+            batch.updated_at,
+            batch.source_batch_id,
+            batch.source_task_id,
+            batch.generation_reason
+        FROM generation_batches AS batch
+        JOIN projects AS project ON project.id = batch.project_id
+        JOIN users AS creator ON creator.id = batch.created_by_user_id
+        WHERE {" AND ".join(clauses)}
+        ORDER BY batch.created_at DESC, batch.id DESC
+        LIMIT ?
+        """,
+        tuple(parameters),
+    ).fetchall()
+    page_rows = rows[:limit]
+    if not page_rows:
+        return GenerationBatchListPage(items=[], next_cursor=None)
+
+    batch_ids = [str(row["id"]) for row in page_rows]
+    placeholders = ", ".join("?" for _ in batch_ids)
+    task_rows = conn.execute(
+        f"""
+        SELECT
+            task.batch_id,
+            task.id,
+            task.status,
+            task.archive_status,
+            task.quality_status,
+            task.quality_issue_codes,
+            task.result_asset_id,
+            task.provider,
+            task.model,
+            task.provider_task_id,
+            task.provider_result_url,
+            task.attempt,
+            task.archive_retry_count,
+            task.estimated_cost,
+            task.actual_cost,
+            task.error_code,
+            task.error_message_redacted,
+            task.submitted_at,
+            task.started_at,
+            task.completed_at,
+            task.retry_of_task_id,
+            task.superseded_by_task_id,
+            task.superseded_at,
+            task.retry_reason,
+            task.retry_requested_at
+        FROM generation_tasks AS task
+        WHERE task.batch_id IN ({placeholders})
+        ORDER BY task.created_at, task.id
+        """,
+        tuple(batch_ids),
+    ).fetchall()
+    tasks_by_batch: dict[str, list[TaskSummary]] = {batch_id: [] for batch_id in batch_ids}
+    for row in task_rows:
+        tasks_by_batch[str(row["batch_id"])].append(task_summary(row))
+
+    items: list[GenerationBatchListItem] = []
+    for row in page_rows:
+        batch_id = str(row["id"])
+        tasks = tasks_by_batch[batch_id]
+        progress = calculate_progress(tasks)
+        items.append(
+            GenerationBatchListItem(
+                id=batch_id,
+                project_id=str(row["project_id"]),
+                project_name=str(row["project_name"]),
+                created_by_user_id=str(row["created_by_user_id"]),
+                created_by_display_name=str(row["created_by_display_name"]),
+                prompt_version_id=request_prompt_version_id(row["request_snapshot_json"]),
+                status=batch_status(str(row["status"]), progress),
+                quantity=len(tasks),
+                created_at=str(row["created_at"]),
+                updated_at=str(row["updated_at"]),
+                source_batch_id=optional_text(row["source_batch_id"]),
+                source_task_id=optional_text(row["source_task_id"]),
+                generation_reason=optional_text(row["generation_reason"]),
+                progress=progress,
+                total_estimated_cost=optional_cost_total([task.estimated_cost for task in tasks]),
+                total_actual_cost=optional_cost_total([task.actual_cost for task in tasks]),
+                needs_attention_count=progress.counts["needs_attention"],
+                has_results=any(task.result_asset_id is not None for task in tasks),
+                tasks=tasks,
+            )
+        )
+
+    next_cursor = None
+    if len(rows) > limit:
+        last_row = page_rows[-1]
+        next_cursor = encode_batch_list_cursor(
+            created_at=str(last_row["created_at"]),
+            batch_id=str(last_row["id"]),
+            filters_hash=filters_hash,
+        )
+    return GenerationBatchListPage(items=items, next_cursor=next_cursor)
+
+
+def batch_list_filters_hash(
+    *,
+    actor: CurrentUser,
+    project_id: str | None,
+    created_by_user_id: str | None,
+    status: BatchStatusFilter | None,
+    needs_attention: bool | None,
+) -> str:
+    payload = {
+        "actor_id": actor.id,
+        "actor_role": actor.role,
+        "project_id": project_id,
+        "created_by_user_id": created_by_user_id,
+        "status": status,
+        "needs_attention": needs_attention,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def encode_batch_list_cursor(*, created_at: str, batch_id: str, filters_hash: str) -> str:
+    payload = json.dumps(
+        {
+            "v": 1,
+            "created_at": created_at,
+            "id": batch_id,
+            "filters_hash": filters_hash,
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return base64.urlsafe_b64encode(payload).decode().rstrip("=")
+
+
+def decode_batch_list_cursor(value: str, *, filters_hash: str) -> tuple[str, str]:
+    try:
+        padding = "=" * (-len(value) % 4)
+        decoded = base64.b64decode(value + padding, altchars=b"-_", validate=True)
+        payload = json.loads(decoded.decode())
+    except (ValueError, binascii.Error, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise generation_error(400, "INVALID_CURSOR", "The batch cursor is invalid.") from exc
+    if not isinstance(payload, dict):
+        raise generation_error(400, "INVALID_CURSOR", "The batch cursor is invalid.")
+    created_at = payload.get("created_at")
+    batch_id = payload.get("id")
+    encoded_filters_hash = payload.get("filters_hash")
+    if (
+        payload.get("v") != 1
+        or not isinstance(created_at, str)
+        or not created_at
+        or not isinstance(batch_id, str)
+        or not batch_id
+        or not isinstance(encoded_filters_hash, str)
+    ):
+        raise generation_error(400, "INVALID_CURSOR", "The batch cursor is invalid.")
+    if encoded_filters_hash != filters_hash:
+        raise generation_error(
+            400,
+            "CURSOR_FILTER_MISMATCH",
+            "The batch cursor does not match the current filters.",
+        )
+    return created_at, batch_id
+
+
 def get_generation_batch(
     conn: sqlite3.Connection,
     *,
@@ -2084,7 +3755,8 @@ def get_generation_batch(
 ) -> BatchResult:
     batch = conn.execute(
         """
-        SELECT id, project_id, request_snapshot_json, status
+        SELECT id, project_id, request_snapshot_json, status,
+               source_batch_id, source_task_id, generation_reason
         FROM generation_batches
         WHERE id = ?
         """,
@@ -2107,6 +3779,24 @@ def get_generation_batch(
             quality_status,
             quality_issue_codes,
             result_asset_id,
+            provider,
+            model,
+            provider_task_id,
+            provider_result_url,
+            attempt,
+            archive_retry_count,
+            estimated_cost,
+            actual_cost,
+            error_code,
+            error_message_redacted,
+            submitted_at,
+            started_at,
+            completed_at,
+            retry_of_task_id,
+            superseded_by_task_id,
+            superseded_at,
+            retry_reason,
+            retry_requested_at,
             prompt_snapshot_json
         FROM generation_tasks
         WHERE batch_id = ?
@@ -2144,6 +3834,9 @@ def get_generation_batch(
         status=status,
         quantity=len(tasks),
         stale=stale,
+        source_batch_id=optional_text(batch["source_batch_id"]),
+        source_task_id=optional_text(batch["source_task_id"]),
+        generation_reason=optional_text(batch["generation_reason"]),
         progress=progress,
         tasks=tasks,
     )
@@ -2478,7 +4171,7 @@ def generation_runtime_limits(conn: sqlite3.Connection) -> GenerationRuntimeLimi
     )
 
 
-def calculate_progress(tasks: list[TaskResult]) -> BatchProgress:
+def calculate_progress(tasks: Sequence[TaskSummary]) -> BatchProgress:
     counts = {
         "pending": 0,
         "submitting": 0,
@@ -2490,11 +4183,28 @@ def calculate_progress(tasks: list[TaskResult]) -> BatchProgress:
         "cancelled": 0,
         "needs_attention": 0,
     }
+    historical_counts = {
+        "archive_failed": 0,
+        "audio_quality_failed": 0,
+        "failed": 0,
+        "superseded": 0,
+    }
     terminal_count = 0
     for task in tasks:
         status = task.status
         archive_status = task.archive_status
         needs_attention = False
+        if status == "FAILED":
+            historical_counts["failed"] += 1
+        if archive_status == "ARCHIVE_FAILED":
+            historical_counts["archive_failed"] += 1
+        if (
+            task.quality_status == "AUDIO_QUALITY_FAILED"
+            or "AUDIO_QUALITY_FAILED" in task.quality_issue_codes
+        ):
+            historical_counts["audio_quality_failed"] += 1
+        if task.superseded_by_task_id is not None:
+            historical_counts["superseded"] += 1
         if status == "SUCCEEDED":
             if archive_status == "ARCHIVED":
                 counts["succeeded"] += 1
@@ -2522,9 +4232,12 @@ def calculate_progress(tasks: list[TaskResult]) -> BatchProgress:
             counts["pending"] += 1
         if status == "SUBMISSION_UNCERTAIN" or archive_status == "ARCHIVE_FAILED":
             needs_attention = True
-        if "AUDIO_QUALITY_FAILED" in task.quality_issue_codes:
+        if (
+            task.quality_status == "AUDIO_QUALITY_FAILED"
+            or "AUDIO_QUALITY_FAILED" in task.quality_issue_codes
+        ):
             needs_attention = True
-        if needs_attention:
+        if needs_attention and task.superseded_by_task_id is None:
             counts["needs_attention"] += 1
 
     total_count = len(tasks)
@@ -2534,6 +4247,7 @@ def calculate_progress(tasks: list[TaskResult]) -> BatchProgress:
         terminal_count=terminal_count,
         progress_percent=progress_percent,
         counts=counts,
+        historical_counts=historical_counts,
     )
 
 
@@ -2543,7 +4257,12 @@ def batch_status(stored_status: str, progress: BatchProgress) -> str:
         # surface as NEEDS_ATTENTION instead of being masked by SUCCEEDED.
         if progress.counts["needs_attention"]:
             return "NEEDS_ATTENTION"
-        if progress.counts["failed"] or progress.counts["cancelled"]:
+        if (
+            progress.counts["failed"]
+            or progress.counts["cancelled"]
+            or progress.historical_counts.get("archive_failed", 0)
+            or progress.historical_counts.get("audio_quality_failed", 0)
+        ):
             return "COMPLETED_WITH_FAILURES"
         return "SUCCEEDED"
     if progress.counts["needs_attention"]:
@@ -2552,21 +4271,157 @@ def batch_status(stored_status: str, progress: BatchProgress) -> str:
 
 
 def task_result(row: sqlite3.Row) -> TaskResult:
-    quality_issue_codes = parse_json_list(row["quality_issue_codes"])
+    summary = task_summary(row)
     prompt_snapshot = (
         None
         if row["prompt_snapshot_json"] is None
         else json.loads(str(row["prompt_snapshot_json"]))
     )
     return TaskResult(
+        **summary.model_dump(),
+        prompt_snapshot=prompt_snapshot,
+    )
+
+
+def task_summary(row: sqlite3.Row) -> TaskSummary:
+    quality_issue_codes = parse_json_list(row["quality_issue_codes"])
+    provider_task_id = optional_text(row["provider_task_id"])
+    submitted_at = optional_text(row["submitted_at"])
+    started_at = optional_text(row["started_at"])
+    completed_at = optional_text(row["completed_at"])
+    return TaskSummary(
         id=str(row["id"]),
         status=str(row["status"]),
         archive_status=str(row["archive_status"]),
         quality_status=str(row["quality_status"]),
         quality_issue_codes=quality_issue_codes,
-        result_asset_id=None if row["result_asset_id"] is None else str(row["result_asset_id"]),
-        prompt_snapshot=prompt_snapshot,
+        result_asset_id=optional_text(row["result_asset_id"]),
+        stage=generation_task_stage(
+            status=str(row["status"]),
+            archive_status=str(row["archive_status"]),
+            quality_status=str(row["quality_status"]),
+            quality_issue_codes=quality_issue_codes,
+        ),
+        provider=str(row["provider"]),
+        model=str(row["model"]),
+        provider_task_id_tail=redacted_provider_task_tail(provider_task_id),
+        attempt=int(row["attempt"]),
+        archive_retry_count=int(row["archive_retry_count"]),
+        estimated_cost=optional_float(row["estimated_cost"]),
+        actual_cost=optional_float(row["actual_cost"]),
+        error_code=optional_text(row["error_code"]),
+        error_message_redacted=optional_text(row["error_message_redacted"]),
+        submitted_at=submitted_at,
+        started_at=started_at,
+        completed_at=completed_at,
+        duration_seconds=completed_duration_seconds(
+            started_at=started_at or submitted_at,
+            completed_at=completed_at,
+        ),
+        retry_of_task_id=optional_text(row["retry_of_task_id"]),
+        superseded_by_task_id=optional_text(row["superseded_by_task_id"]),
+        superseded_at=optional_text(row["superseded_at"]),
+        retry_reason=optional_text(row["retry_reason"]),
+        retry_requested_at=optional_text(row["retry_requested_at"]),
+        available_actions=generation_task_available_actions(row),
     )
+
+
+def generation_task_available_actions(
+    row: sqlite3.Row,
+) -> list[Literal["RETRY", "RECONCILE", "CONFIRM_NOT_CHARGED", "REGENERATE"]]:
+    status = str(row["status"])
+    archive_status = str(row["archive_status"])
+    quality_status = str(row["quality_status"])
+    provider_task_id = optional_text(row["provider_task_id"])
+    provider_result_url = optional_text(row["provider_result_url"])
+    error_code = optional_text(row["error_code"])
+
+    if row["superseded_by_task_id"] is not None:
+        return []
+
+    if archive_status == "ARCHIVE_FAILED":
+        if (
+            provider_result_url is not None
+            and int(row["archive_retry_count"]) < MAX_ARCHIVE_RETRIES
+        ):
+            return ["RETRY"]
+        return []
+    if status == "SUBMISSION_UNCERTAIN":
+        return ["RECONCILE"] if provider_task_id is not None else ["CONFIRM_NOT_CHARGED"]
+    if quality_status == "AUDIO_QUALITY_FAILED":
+        return ["REGENERATE"]
+    if status == "FAILED":
+        if (
+            provider_task_id is None
+            and provider_result_url is None
+            and row["submitted_at"] is None
+            and error_code in SAFE_PRE_PROVIDER_FAILURE_CODES
+        ):
+            return ["RETRY"]
+        if provider_task_id is not None or provider_result_url is not None or row["submitted_at"]:
+            return ["REGENERATE"]
+        return []
+    return []
+
+
+def generation_task_stage(
+    *,
+    status: str,
+    archive_status: str,
+    quality_status: str,
+    quality_issue_codes: Sequence[str],
+) -> str:
+    if status == "SUBMISSION_UNCERTAIN":
+        return "SUBMISSION_UNCERTAIN"
+    if archive_status == "ARCHIVE_FAILED":
+        return "ARCHIVE_FAILED"
+    if quality_status == "AUDIO_QUALITY_FAILED" or "AUDIO_QUALITY_FAILED" in quality_issue_codes:
+        return "QUALITY_FAILED"
+    if status == "SUCCEEDED" and archive_status == "ARCHIVED":
+        return "COMPLETED"
+    return status
+
+
+def redacted_provider_task_tail(value: str | None) -> str | None:
+    if value is None or len(value) <= 8:
+        return None
+    return value[-8:]
+
+
+def completed_duration_seconds(*, started_at: str | None, completed_at: str | None) -> float | None:
+    if started_at is None or completed_at is None:
+        return None
+    try:
+        started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        completed = datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
+        return round(max(0.0, (completed - started).total_seconds()), 3)
+    except (TypeError, ValueError):
+        return None
+
+
+def request_prompt_version_id(value: Any) -> str:
+    try:
+        payload = json.loads(str(value))
+    except json.JSONDecodeError:
+        return "unknown"
+    if not isinstance(payload, dict):
+        return "unknown"
+    prompt_version_id = payload.get("prompt_version_id")
+    return prompt_version_id if isinstance(prompt_version_id, str) else "unknown"
+
+
+def optional_cost_total(values: Sequence[float | None]) -> float | None:
+    present = [value for value in values if value is not None]
+    return None if not present else round(sum(present), 6)
+
+
+def optional_text(value: Any) -> str | None:
+    return None if value is None else str(value)
+
+
+def optional_float(value: Any) -> float | None:
+    return None if value is None else float(value)
 
 
 def parse_json_list(value: Any) -> list[str]:

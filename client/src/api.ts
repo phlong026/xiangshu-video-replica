@@ -44,6 +44,36 @@ export type GenerationBatch = Omit<
   components["schemas"]["BatchResult"],
   "tasks"
 > & { tasks: GenerationTask[] };
+export type GenerationTaskSummary = components["schemas"]["TaskSummary"];
+export type GenerationTaskRetryInput =
+  components["schemas"]["GenerationTaskRetryRequest"];
+export type ConfirmNotChargedInput =
+  components["schemas"]["ConfirmNotChargedRequest"];
+export type ReconcileGenerationTaskInput =
+  components["schemas"]["ReconcileGenerationTaskRequest"];
+export type PaidRegenerationInput =
+  components["schemas"]["PaidRegenerationRequest"];
+export type GenerationBatchListItem = Omit<
+  components["schemas"]["GenerationBatchListItem"],
+  "tasks"
+> & { tasks: GenerationTaskSummary[] };
+export type GenerationBatchListPage = Omit<
+  components["schemas"]["GenerationBatchListPage"],
+  "items"
+> & { items: GenerationBatchListItem[] };
+export type GenerationBatchListFilters = {
+  projectId?: string;
+  createdByUserId?: string;
+  status?:
+    | "PENDING"
+    | "QUEUED"
+    | "NEEDS_ATTENTION"
+    | "SUCCEEDED"
+    | "COMPLETED_WITH_FAILURES";
+  needsAttention?: boolean;
+  limit?: number;
+  cursor?: string;
+};
 
 export type ProviderName = "metaso" | "apilio" | "cos" | "oss";
 
@@ -429,13 +459,76 @@ export async function getGenerationBatch(
   );
 }
 
+export async function regenerateGenerationBatch(
+  batchId: string,
+  input: PaidRegenerationInput,
+): Promise<GenerationBatch> {
+  return requestGenerationJson<GenerationBatch>(
+    `/api/generation-batches/${encodeURIComponent(batchId)}/regenerate`,
+    "整批重新生成失败",
+    { method: "POST", body: JSON.stringify(input) },
+  );
+}
+
+export async function listGenerationBatches(
+  filters: GenerationBatchListFilters = {},
+): Promise<GenerationBatchListPage> {
+  const query = new URLSearchParams();
+  if (filters.projectId) {
+    query.set("project_id", filters.projectId);
+  }
+  if (filters.createdByUserId) {
+    query.set("created_by_user_id", filters.createdByUserId);
+  }
+  if (filters.status) {
+    query.set("status", filters.status);
+  }
+  if (filters.needsAttention !== undefined) {
+    query.set("needs_attention", String(filters.needsAttention));
+  }
+  if (filters.limit !== undefined) {
+    query.set("limit", String(filters.limit));
+  }
+  if (filters.cursor) {
+    query.set("cursor", filters.cursor);
+  }
+  const suffix = query.size ? `?${query.toString()}` : "";
+  return requestApiJson<GenerationBatchListPage>(
+    `/api/generation-batches${suffix}`,
+    "任务记录列表暂不可用",
+  );
+}
+
 export async function retryGenerationTask(
   taskId: string,
-): Promise<components["schemas"]["AcceptedResponse"]> {
-  return requestGenerationJson<components["schemas"]["AcceptedResponse"]>(
+  input: GenerationTaskRetryInput,
+): Promise<GenerationTask> {
+  return requestGenerationJson<GenerationTask>(
     `/api/generation-tasks/${encodeURIComponent(taskId)}/retry`,
     "重试生成任务失败",
-    { method: "POST" },
+    { method: "POST", body: JSON.stringify(input) },
+  );
+}
+
+export async function regenerateGenerationTask(
+  taskId: string,
+  input: PaidRegenerationInput,
+): Promise<GenerationBatch> {
+  return requestGenerationJson<GenerationBatch>(
+    `/api/generation-tasks/${encodeURIComponent(taskId)}/regenerate`,
+    "重新生成视频任务失败",
+    { method: "POST", body: JSON.stringify(input) },
+  );
+}
+
+export async function confirmGenerationTaskNotCharged(
+  taskId: string,
+  input: ConfirmNotChargedInput,
+): Promise<GenerationTask> {
+  return requestGenerationJson<GenerationTask>(
+    `/api/generation-tasks/${encodeURIComponent(taskId)}/confirm-not-charged`,
+    "确认任务未计费失败",
+    { method: "POST", body: JSON.stringify(input) },
   );
 }
 
@@ -452,11 +545,12 @@ export async function getGenerationResultDownloadUrl(
 
 export async function reconcileUncertainTask(
   taskId: string,
+  input: ReconcileGenerationTaskInput,
 ): Promise<GenerationTask> {
   return requestApiJson<GenerationTask>(
     `/api/generation-tasks/${encodeURIComponent(taskId)}/reconcile`,
     "任务对账失败",
-    { method: "POST" },
+    { method: "POST", body: JSON.stringify(input) },
     CLOUD_OP_TIMEOUT_MS,
   );
 }

@@ -6,17 +6,24 @@ from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import pytest
+from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 from test_generation import auth_headers, create_locked_prompt, seed_data
 
 from app.auth import get_database
 from app.db import connect_database, initialize_database
-from app.generation import FakeH3Provider, H3CreateResult, run_next_generation_task
+from app.generation import (
+    FakeH3Provider,
+    H3CreateResult,
+    H3ProviderFailed,
+    run_next_generation_task,
+)
 from app.generation_routes import get_h3_provider
 from app.main import app
-from app.storage import DownloadIntent, FakeStorageAdapter
+from app.storage import DownloadIntent, FakeStorageAdapter, LocalStorageAdapter
 
 
 class RecordingFakeProvider(FakeH3Provider):
@@ -51,6 +58,25 @@ class RecordingDownloadStorage(FakeStorageAdapter):
             key=key,
             expires_at=datetime.now(UTC) + expires_in,
         )
+
+
+class MixedOutcomeFakeProvider(FakeH3Provider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.outcomes = iter(("ok", "provider_failed", "missing_audio"))
+        self.requests: list[dict[str, Any]] = []
+
+    def create_image_to_video(self, request: dict[str, Any]) -> H3CreateResult:
+        self.requests.append(request)
+        outcome = next(self.outcomes)
+        if outcome == "provider_failed":
+            raise H3ProviderFailed(
+                "Fake provider terminal failure",
+                provider_task_id="fake-h3-terminal-failure",
+                terminal=True,
+            )
+        quality = "missing" if outcome == "missing_audio" else "ok"
+        return FakeH3Provider(audio_quality=quality).create_image_to_video(request)
 
 
 @pytest.fixture()
@@ -105,6 +131,12 @@ def test_fake_provider_e2e_from_locked_prompt_to_worker_progress(
             "failed": 0,
             "cancelled": 0,
             "needs_attention": 0,
+        },
+        "historical_counts": {
+            "archive_failed": 0,
+            "audio_quality_failed": 0,
+            "failed": 0,
+            "superseded": 0,
         },
     }
     assert [task["status"] for task in first_batch["tasks"]] == ["PENDING", "PENDING"]
@@ -223,12 +255,125 @@ def test_generation_flow_never_creates_independent_audio_tasks(
     assert all("audio" not in str(row["prompt_snapshot_json"]).lower() for row in rows)
 
 
-def create_batch(client: TestClient, *, prompt_id: str, idempotency_key: str) -> dict[str, Any]:
+def test_three_task_mixed_batch_surfaces_partial_failure_and_downloads_successful_mp4(
+    client: TestClient,
+    db_path: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage_root = tmp_path / "local-storage"
+    monkeypatch.setenv("VIDEO_REPLICA_STORAGE_ROOT", str(storage_root))
+    monkeypatch.setenv("VIDEO_REPLICA_SETTINGS_KEY", Fernet.generate_key().decode())
+    prompt_id = create_locked_prompt(client)
+    batch = create_batch(
+        client,
+        prompt_id=prompt_id,
+        idempotency_key="three-task-mixed",
+        quantity=3,
+    )
+    provider = MixedOutcomeFakeProvider()
+
+    with connect_database(db_path) as conn:
+        conn.execute("UPDATE runtime_settings SET active_storage_provider = 'local' WHERE id = 1")
+        conn.commit()
+        output_storage = LocalStorageAdapter(root=storage_root)
+        first_frame_storage = FakeStorageAdapter(
+            provider="fake",
+            bucket="generation-results",
+        )
+        terminal_counts: list[int] = []
+        for _ in range(3):
+            assert run_next_generation_task(
+                conn,
+                worker_id="worker-mixed",
+                provider=provider,
+                storage=output_storage,
+                first_frame_storage=first_frame_storage,
+            )
+            progress = client.get(
+                f"/api/generation-batches/{batch['id']}",
+                headers=auth_headers("employee_1"),
+            )
+            assert progress.status_code == 200
+            terminal_counts.append(progress.json()["progress"]["terminal_count"])
+        assert (
+            run_next_generation_task(
+                conn,
+                worker_id="worker-mixed",
+                provider=provider,
+                storage=output_storage,
+                first_frame_storage=first_frame_storage,
+            )
+            is None
+        )
+    assert terminal_counts == [1, 2, 3]
+
+    response = client.get(
+        f"/api/generation-batches/{batch['id']}",
+        headers=auth_headers("employee_1"),
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "NEEDS_ATTENTION"
+    assert payload["progress"] == {
+        "total_count": 3,
+        "terminal_count": 3,
+        "progress_percent": 100,
+        "counts": {
+            "pending": 0,
+            "submitting": 0,
+            "queued": 0,
+            "running": 0,
+            "archiving": 0,
+            "succeeded": 2,
+            "failed": 1,
+            "cancelled": 0,
+            "needs_attention": 1,
+        },
+        "historical_counts": {
+            "archive_failed": 0,
+            "audio_quality_failed": 1,
+            "failed": 1,
+            "superseded": 0,
+        },
+    }
+    assert len(provider.requests) == 3
+    assert {task["quality_status"] for task in payload["tasks"]} == {
+        "AUDIO_OK",
+        "AUDIO_QUALITY_FAILED",
+        "PENDING",
+    }
+    assert {task["status"] for task in payload["tasks"]} == {"SUCCEEDED", "FAILED"}
+
+    successful_task = next(
+        task
+        for task in payload["tasks"]
+        if task["status"] == "SUCCEEDED" and task["quality_status"] == "AUDIO_OK"
+    )
+    download_url = client.post(
+        f"/api/assets/{successful_task['result_asset_id']}/download-url",
+        headers=auth_headers("employee_1"),
+    )
+    assert download_url.status_code == 200
+    parsed = urlsplit(download_url.json()["url"])
+    downloaded = client.get(f"{parsed.path}?{parsed.query}")
+    assert downloaded.status_code == 200, downloaded.text
+    assert downloaded.headers["content-type"] == "video/mp4"
+    assert downloaded.content.startswith(b"fake mp4 content for fake-h3-")
+
+
+def create_batch(
+    client: TestClient,
+    *,
+    prompt_id: str,
+    idempotency_key: str,
+    quantity: int = 2,
+) -> dict[str, Any]:
     response = client.post(
         "/api/projects/project_owned/generation-batches",
         headers=auth_headers("employee_1"),
         json={
-            "quantity": 2,
+            "quantity": quantity,
             "prompt_version_id": prompt_id,
             "first_frame_asset_id": "first_frame_owned",
             "output_duration_seconds": 10,

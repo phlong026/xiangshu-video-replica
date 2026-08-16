@@ -35,7 +35,7 @@ def test_initialize_database_applies_sqlite_pragmas_and_migrations(tmp_path: Pat
     assert journal_mode == "wal"
     assert foreign_keys == 1
     assert busy_timeout >= 5000
-    assert alembic_versions == ["016_character_reference_snapshot"]
+    assert alembic_versions == ["017_generation_task_retry_lineage"]
     assert "schema_migrations" not in tables
     assert {
         "users",
@@ -55,6 +55,7 @@ def test_initialize_database_applies_sqlite_pragmas_and_migrations(tmp_path: Pat
         "character_asset_reviews",
         "character_generation_tasks",
         "character_reference_selections",
+        "generation_task_operations",
     }.issubset(tables)
 
 
@@ -74,7 +75,7 @@ def test_alembic_upgrades_empty_database_to_head(tmp_path: Path) -> None:
             for row in conn.execute("PRAGMA foreign_key_list(generation_tasks)").fetchall()
         }
 
-    assert version == "016_character_reference_snapshot"
+    assert version == "017_generation_task_retry_lineage"
     assert {
         "locked_by",
         "locked_until",
@@ -85,6 +86,63 @@ def test_alembic_upgrades_empty_database_to_head(tmp_path: Path) -> None:
     }.issubset(task_columns)
     assert "idx_generation_tasks_prompt_version" in task_indexes
     assert ("prompt_version_id", "versions", "id") in task_foreign_keys
+
+
+def test_retry_lineage_revision_is_reversible(tmp_path: Path) -> None:
+    db_path = tmp_path / "retry-lineage.db"
+
+    with initialize_database(db_path) as conn:
+        batch_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(generation_batches)").fetchall()
+        }
+        task_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(generation_tasks)").fetchall()
+        }
+        task_indexes = {
+            row[1] for row in conn.execute("PRAGMA index_list(generation_tasks)").fetchall()
+        }
+
+    assert {"source_batch_id", "source_task_id", "generation_reason"}.issubset(batch_columns)
+    assert {
+        "retry_of_task_id",
+        "superseded_by_task_id",
+        "superseded_at",
+        "retry_reason",
+        "retry_requested_by_user_id",
+        "retry_requested_at",
+        "billing_confirmation_status",
+        "billing_confirmed_by_user_id",
+        "billing_confirmed_at",
+        "billing_confirmation_reason",
+    }.issubset(task_columns)
+    assert "idx_generation_tasks_active_attention" in task_indexes
+
+    command.downgrade(alembic_config(db_path), "016_character_reference_snapshot")
+
+    with connect_database(db_path) as conn:
+        version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+        batch_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(generation_batches)").fetchall()
+        }
+        task_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(generation_tasks)").fetchall()
+        }
+        operation_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            ("generation_task_operations",),
+        ).fetchone()
+
+    assert version == "016_character_reference_snapshot"
+    assert "source_batch_id" not in batch_columns
+    assert "retry_of_task_id" not in task_columns
+    assert operation_table is None
+
+    command.upgrade(alembic_config(db_path), "head")
+
+    with connect_database(db_path) as conn:
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == (
+            "017_generation_task_retry_lineage"
+        )
 
 
 def test_alembic_revision_can_downgrade_to_base(tmp_path: Path) -> None:

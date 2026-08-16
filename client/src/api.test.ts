@@ -19,8 +19,11 @@ import {
   getLatestProjectFirstFrames,
   getLatestScriptVersion,
   getSettings,
+  listGenerationBatches,
   listProjectCharacterVersions,
   lockGenerationPrompt,
+  regenerateGenerationBatch,
+  regenerateGenerationTask,
   retryGenerationTask,
   reviseGenerationPrompt,
   SESSION_EXPIRED_EVENT,
@@ -134,7 +137,10 @@ describe("generation workflow API", () => {
       provider: "fake_h3",
       fake_audio_quality: "ok",
     });
-    await retryGenerationTask("task 1");
+    await retryGenerationTask("task 1", {
+      idempotency_key: "retry-key-1",
+      retry_reason: "重新归档",
+    });
     await getGenerationResultDownloadUrl("asset 1");
 
     expect(fetchMock).toHaveBeenNthCalledWith(
@@ -167,12 +173,53 @@ describe("generation workflow API", () => {
     expect(fetchMock).toHaveBeenNthCalledWith(
       9,
       "http://127.0.0.1:8000/api/generation-tasks/task%201/retry",
-      expect.objectContaining({ method: "POST" }),
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          idempotency_key: "retry-key-1",
+          retry_reason: "重新归档",
+        }),
+      }),
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       10,
       "http://127.0.0.1:8000/api/assets/asset%201/download-url",
       expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("posts explicit paid regeneration contracts for batches and tasks", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: "replacement-batch" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const input = {
+      idempotency_key: "paid-regeneration-key",
+      payment_confirmed: true as const,
+      payment_confirmation_version: "V1" as const,
+      estimated_cost_snapshot: 2.5,
+      generation_reason: "人工确认重新生成",
+    };
+
+    await regenerateGenerationBatch("batch 1", input);
+    await regenerateGenerationTask("task 1", input);
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "http://127.0.0.1:8000/api/generation-batches/batch%201/regenerate",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify(input),
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "http://127.0.0.1:8000/api/generation-tasks/task%201/regenerate",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify(input),
+      }),
     );
   });
 
@@ -499,6 +546,46 @@ describe("getGenerationBatch", () => {
     await expect(getGenerationBatch("missing")).rejects.toThrow(
       "任务批次暂不可用（404）",
     );
+  });
+});
+
+describe("listGenerationBatches", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("loads a filtered cursor page without sending a request body", async () => {
+    const page = {
+      items: [],
+      next_cursor: "next-cursor",
+    };
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => page,
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      listGenerationBatches({
+        projectId: "project 1",
+        createdByUserId: "admin 1",
+        status: "NEEDS_ATTENTION",
+        needsAttention: true,
+        limit: 10,
+        cursor: "cursor/value",
+      }),
+    ).resolves.toEqual(page);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:8000/api/generation-batches?project_id=project+1&created_by_user_id=admin+1&status=NEEDS_ATTENTION&needs_attention=true&limit=10&cursor=cursor%2Fvalue",
+      expect.objectContaining({
+        headers: expect.any(Headers),
+        signal: expect.any(AbortSignal),
+      }),
+    );
+    const request = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(request.method).toBeUndefined();
+    expect(request.body).toBeUndefined();
   });
 });
 
