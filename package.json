@@ -7,7 +7,8 @@
   ],
   "scripts": {
     "build": "npm run build --workspace client",
-    "check": "bash scripts/verify_no_secrets.sh && npm run check --workspace client && npm run check:tauri && uv --cache-dir .uv-cache run --project server --locked ruff check server && uv --cache-dir .uv-cache run --project server --locked ruff format --check server && uv --cache-dir .uv-cache run --project server --locked python -m mypy --config-file server/pyproject.toml server/app && uv --cache-dir .uv-cache run --project server --locked python -m pytest --rootdir server server/tests",
+    "check": "bash scripts/verify_no_secrets.sh && npm run check --workspace client && npm run check:e2e && npm run check:tauri && uv --cache-dir .uv-cache run --project server --locked ruff check server && uv --cache-dir .uv-cache run --project server --locked ruff format --check server && uv --cache-dir .uv-cache run --project server --locked python -m mypy --config-file server/pyproject.toml server/app && uv --cache-dir .uv-cache run --project server --locked python -m pytest --rootdir server server/tests",
+    "check:e2e": "biome check e2e",
     "check:security": "bash scripts/verify_no_secrets.sh",
     "check:tauri": "cargo fmt --manifest-path client/src-tauri/Cargo.toml --check && cargo check --manifest-path client/src-tauri/Cargo.toml --locked",
     "dev:client": "npm run dev --workspace client",
@@ -19,12 +20,14 @@
     "tauri:build": "npm run tauri --workspace client -- build",
     "tauri:dev": "npm run tauri --workspace client -- dev",
     "test": "npm run test --workspace client && uv --cache-dir .uv-cache run --project server --locked python -m pytest --rootdir server server/tests",
-    "test:e2e": "npm run test --workspace client -- e2e_contract.test.tsx && uv --cache-dir .uv-cache run --project server --locked python -m pytest --rootdir server server/tests/test_e2e_fake_provider.py"
+    "test:e2e": "npm run test --workspace client -- e2e_contract.test.tsx && uv --cache-dir .uv-cache run --project server --locked python -m pytest --rootdir server server/tests/test_e2e_fake_provider.py",
+    "test:gate1": "uv --cache-dir .uv-cache run --project server --locked python -m app.gate1_e2e"
   },
   "engines": {
     "node": ">=24"
   },
   "devDependencies": {
+    "@playwright/test": "1.62.1",
     "jsdom": "29.1.1"
   }
 }

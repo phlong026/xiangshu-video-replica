@@ -8,6 +8,7 @@
 - Rust stable（Windows 使用 MSVC toolchain）
 - Python 3.12+
 - uv 0.11+
+- Gate 1 本地纵向验收另需系统 Chrome 与 ffmpeg
 
 Windows 还需按照 Tauri 2 官方要求安装 Microsoft C++ Build Tools 和 WebView2。
 
@@ -63,6 +64,14 @@ npm run tauri:build
 ```
 
 `npm run check` 会依次运行前端格式检查、类型检查和测试，Tauri/Rust 格式与编译检查，以及服务端 Ruff、Mypy 和 Pytest。
+
+### Gate 1 桌面 FakeProvider 纵向验收
+
+```powershell
+npm run test:gate1
+```
+
+该命令从全新 Alembic 数据库启动隔离的 FastAPI 与 Vite，使用系统 Chrome 执行 Playwright，并在退出时清理本次 API/Vite 进程组。运行日志、临时媒体、截图、trace、录屏、下载产物和 SHA256 清单写入 `output/playwright/gate1/<run-id>/`，该目录不进入版本控制。它只证明 macOS 本地 FakeProvider 桌面链路，不替代 Windows WebView2、真实 Provider、云存储或生产灰度验收。
 
 Windows x64 内测安装包使用 Tauri NSIS：
 

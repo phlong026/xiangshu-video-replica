@@ -1,0 +1,208 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import subprocess
+import sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from threading import Thread
+
+import pytest
+
+import app.gate1_e2e as gate1_e2e
+from app.gate1_e2e import (
+    ManagedProcesses,
+    generate_test_media,
+    prepare_gate1_run,
+    verify_evidence_manifest,
+    wait_for_http,
+    write_evidence_manifest,
+)
+
+
+class _HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:  # noqa: N802
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"ok")
+
+    def log_message(self, format: str, *args: object) -> None:
+        del format, args
+
+
+def test_prepare_gate1_run_creates_isolated_evidence_directories(tmp_path: Path) -> None:
+    paths = prepare_gate1_run(tmp_path, run_id="gate1-test-run")
+
+    assert paths.run_dir == tmp_path / "gate1-test-run"
+    assert paths.runtime_dir.is_dir()
+    assert paths.media_dir.is_dir()
+    assert paths.logs_dir.is_dir()
+    assert paths.screenshots_dir.is_dir()
+    assert paths.downloads_dir.is_dir()
+    assert paths.browser_dir.is_dir()
+
+    with pytest.raises(FileExistsError):
+        prepare_gate1_run(tmp_path, run_id="gate1-test-run")
+
+    with pytest.raises(ValueError, match="run_id"):
+        prepare_gate1_run(tmp_path, run_id="../outside")
+
+
+def test_write_evidence_manifest_hashes_evidence_but_excludes_runtime(tmp_path: Path) -> None:
+    paths = prepare_gate1_run(tmp_path, run_id="manifest-run")
+    api_log = paths.logs_dir / "api.log"
+    screenshot = paths.screenshots_dir / "workspace.png"
+    database = paths.runtime_dir / "gate1.sqlite3"
+    api_log.write_text("api ready\n", encoding="utf-8")
+    screenshot.write_bytes(b"fake-png")
+    database.write_bytes(b"private-runtime-state")
+
+    manifest_path = write_evidence_manifest(paths, status="failed", commit_sha="abc123")
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["schema_version"] == 1
+    assert manifest["run_id"] == "manifest-run"
+    assert manifest["status"] == "failed"
+    assert manifest["commit_sha"] == "abc123"
+    assert manifest["files"] == [
+        {
+            "path": "logs/api.log",
+            "sha256": hashlib.sha256(b"api ready\n").hexdigest(),
+            "size_bytes": len(b"api ready\n"),
+        },
+        {
+            "path": "screenshots/workspace.png",
+            "sha256": hashlib.sha256(b"fake-png").hexdigest(),
+            "size_bytes": len(b"fake-png"),
+        },
+    ]
+    verify_evidence_manifest(manifest_path)
+
+    api_log.write_text("tampered\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="hash mismatch"):
+        verify_evidence_manifest(manifest_path)
+
+
+def test_managed_processes_stop_children_when_body_fails(tmp_path: Path) -> None:
+    process = None
+
+    with pytest.raises(RuntimeError, match="forced failure"):
+        with ManagedProcesses() as processes:
+            process = processes.start(
+                name="sleeper",
+                command=[sys.executable, "-c", "import time; time.sleep(60)"],
+                cwd=tmp_path,
+                env={},
+                log_path=tmp_path / "sleeper.log",
+            )
+            assert process.poll() is None
+            raise RuntimeError("forced failure")
+
+    assert process is not None
+    assert process.poll() is not None
+
+
+def test_managed_processes_continue_cleanup_after_one_stop_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    processes = ManagedProcesses()
+    first = processes.start(
+        name="first",
+        command=[sys.executable, "-c", "import time; time.sleep(60)"],
+        cwd=tmp_path,
+        env={},
+        log_path=tmp_path / "first.log",
+    )
+    second = processes.start(
+        name="second",
+        command=[sys.executable, "-c", "import time; time.sleep(60)"],
+        cwd=tmp_path,
+        env={},
+        log_path=tmp_path / "second.log",
+    )
+    original_stop = gate1_e2e._stop_process_tree
+    calls = 0
+
+    def flaky_stop(process: subprocess.Popen[bytes]) -> None:
+        nonlocal calls
+        calls += 1
+        original_stop(process)
+        if calls == 1:
+            raise RuntimeError("first cleanup failed")
+
+    monkeypatch.setattr(gate1_e2e, "_stop_process_tree", flaky_stop)
+
+    with pytest.raises(RuntimeError, match="first cleanup failed"):
+        processes.close()
+
+    assert calls == 2
+    assert first.poll() is not None
+    assert second.poll() is not None
+
+
+def test_wait_for_http_accepts_a_ready_service() -> None:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _HealthHandler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        wait_for_http(
+            f"http://127.0.0.1:{server.server_port}/health",
+            timeout_seconds=1,
+            poll_interval_seconds=0.01,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+
+def test_generate_test_media_uses_deterministic_ffmpeg_outputs(
+    tmp_path: Path,
+) -> None:
+    paths = prepare_gate1_run(tmp_path, run_id="media-run")
+    commands: list[list[str]] = []
+
+    def fake_runner(command: list[str]) -> None:
+        commands.append(command)
+        Path(command[-1]).write_bytes(b"generated")
+
+    media = generate_test_media(paths, ffmpeg_binary="ffmpeg-test", runner=fake_runner)
+
+    assert media == {
+        "authorization_image": paths.media_dir / "authorization.png",
+        "source_image": paths.media_dir / "source.png",
+        "reference_video": paths.media_dir / "reference.mp4",
+    }
+    assert len(commands) == 3
+    assert all(command[0] == "ffmpeg-test" for command in commands)
+    assert "testsrc2=size=720x1280:rate=24" in commands[-1]
+    assert "sine=frequency=440:sample_rate=48000" in commands[-1]
+
+
+def test_run_gate1_records_git_metadata_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_git_commit(repository_root: Path) -> str:
+        del repository_root
+        raise RuntimeError("git metadata unavailable")
+
+    monkeypatch.setattr(gate1_e2e, "_git_commit", fail_git_commit)
+
+    exit_code = gate1_e2e.run_gate1(
+        repository_root=tmp_path,
+        output_root=tmp_path / "output",
+        run_id="git-failure",
+    )
+
+    run_dir = tmp_path / "output" / "git-failure"
+    manifest = json.loads((run_dir / "sha256-manifest.json").read_text(encoding="utf-8"))
+    assert exit_code == 1
+    assert manifest["status"] == "failed"
+    assert manifest["commit_sha"] == "unknown"
+    assert "git metadata unavailable" in (run_dir / "logs" / "harness-error.log").read_text(
+        encoding="utf-8"
+    )

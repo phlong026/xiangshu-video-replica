@@ -1,0 +1,35 @@
+import path from "node:path";
+import { expect, test } from "@playwright/test";
+
+import { observePage, requiredRunDir } from "./evidence.mjs";
+import { runWorkerOnce } from "./worker.mjs";
+
+test("@smoke starts the isolated desktop shell with clean browser evidence", async ({
+  page,
+}) => {
+  const runDir = requiredRunDir();
+  const evidence = observePage(page);
+
+  try {
+    await page.goto("/");
+    await expect(
+      page.getByRole("heading", { name: "短视频复刻工作台" }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "进入工作台" }).click();
+    await expect(
+      page.getByRole("navigation", { name: "主导航" }),
+    ).toBeVisible();
+    await expect(page.getByRole("status")).toHaveText("本地服务已连接");
+    await runWorkerOnce({ label: "smoke-empty-queue" });
+    await page.screenshot({
+      path: path.join(runDir, "screenshots", "1280x720-smoke.png"),
+      fullPage: true,
+    });
+    expect(process.env.GATE1_FORCE_SMOKE_FAILURE).not.toBe("1");
+  } finally {
+    await evidence.save(runDir, "smoke");
+  }
+
+  expect(evidence.consoleErrors).toEqual([]);
+  expect(evidence.networkFailures).toEqual([]);
+});

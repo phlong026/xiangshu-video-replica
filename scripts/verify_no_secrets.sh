@@ -11,6 +11,7 @@ scan_paths=(
   "server/pyproject.toml"
   "packaging_tools"
   "scripts"
+  "e2e"
   "docs"
 )
 
