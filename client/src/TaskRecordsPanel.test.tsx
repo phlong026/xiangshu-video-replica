@@ -17,6 +17,8 @@ vi.mock("./api", async () => {
     getGenerationBatch: vi.fn(),
     getGenerationResultDownloadUrl: vi.fn(),
     listGenerationBatches: vi.fn(),
+    regenerateGenerationBatch: vi.fn(),
+    regenerateGenerationTask: vi.fn(),
     retryGenerationTask: vi.fn(),
     confirmGenerationTaskNotCharged: vi.fn(),
     reconcileUncertainTask: vi.fn(),
@@ -143,6 +145,12 @@ describe("TaskRecordsPanel", () => {
     );
     vi.mocked(api.reconcileUncertainTask).mockImplementation(async (_taskId) =>
       task(),
+    );
+    vi.mocked(api.regenerateGenerationBatch).mockImplementation(
+      async (_batchId) => batch({ id: "batch-regenerated" }),
+    );
+    vi.mocked(api.regenerateGenerationTask).mockImplementation(
+      async (_taskId) => batch({ id: "batch-task-regenerated", quantity: 1 }),
     );
   });
 
@@ -294,7 +302,205 @@ describe("TaskRecordsPanel", () => {
     expect(
       screen.queryByRole("button", { name: /安全重试|重试归档|确认未计费/ }),
     ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /付费重新生成|整批付费再次生成/ }),
+    ).not.toBeInTheDocument();
     expect(api.getGenerationResultDownloadUrl).not.toHaveBeenCalled();
+  });
+
+  it("requires an explicit reason and payment confirmation before regenerating a frozen batch", async () => {
+    vi.mocked(api.getGenerationBatch).mockImplementation(async (batchId) =>
+      batchId === "batch-regenerated"
+        ? batch({
+            id: "batch-regenerated",
+            source_batch_id: "batch-1",
+            generation_reason: "再生成一批备选",
+          })
+        : batch(),
+    );
+    vi.mocked(api.regenerateGenerationBatch).mockResolvedValue(
+      batch({
+        id: "batch-regenerated",
+        source_batch_id: "batch-1",
+        generation_reason: "再生成一批备选",
+      }),
+    );
+
+    render(
+      <TaskRecordsPanel
+        handoffBatch={null}
+        onHandoffConsumed={vi.fn()}
+        userRole="employee"
+      />,
+    );
+
+    const regenerate = await screen.findByRole("button", {
+      name: "整批付费再次生成",
+    });
+    expect(regenerate).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("整批重生成原因"), {
+      target: { value: "再生成一批备选" },
+    });
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: "确认新建 2 个付费任务" }),
+    );
+    fireEvent.click(regenerate);
+
+    await waitFor(() =>
+      expect(api.regenerateGenerationBatch).toHaveBeenCalledWith("batch-1", {
+        idempotency_key: expect.any(String),
+        payment_confirmed: true,
+        payment_confirmation_version: "V1",
+        estimated_cost_snapshot: 2.5,
+        generation_reason: "再生成一批备选",
+      }),
+    );
+    expect(await screen.findByText("来源批次 batch-1")).toBeInTheDocument();
+  });
+
+  it("reuses the same paid task idempotency key after a failed response", async () => {
+    vi.mocked(api.getGenerationBatch).mockResolvedValue(
+      batch({
+        quantity: 1,
+        progress: {
+          total_count: 1,
+          terminal_count: 1,
+          progress_percent: 100,
+          counts: {
+            pending: 0,
+            submitting: 0,
+            queued: 0,
+            running: 0,
+            archiving: 0,
+            succeeded: 1,
+            failed: 0,
+            cancelled: 0,
+            needs_attention: 1,
+          },
+        },
+        tasks: [
+          task({
+            id: "task-paid-regenerate",
+            quality_status: "AUDIO_QUALITY_FAILED",
+            quality_issue_codes: ["AUDIO_QUALITY_FAILED"],
+            available_actions: ["REGENERATE"],
+          }),
+        ],
+      }),
+    );
+    vi.mocked(api.regenerateGenerationTask)
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce(
+        batch({
+          id: "batch-task-regenerated",
+          quantity: 1,
+          source_batch_id: "batch-1",
+          source_task_id: "task-paid-regenerate",
+        }),
+      );
+
+    render(
+      <TaskRecordsPanel
+        handoffBatch={null}
+        onHandoffConsumed={vi.fn()}
+        userRole="employee"
+      />,
+    );
+
+    const regenerate = await screen.findByRole("button", {
+      name: "付费重新生成 task-paid-regenerate",
+    });
+    fireEvent.change(
+      screen.getByLabelText("重新生成原因 task-paid-regenerate"),
+      { target: { value: "音频质检失败后重新生成" } },
+    );
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: "确认为任务 task-paid-regenerate 新增一次付费生成",
+      }),
+    );
+    fireEvent.click(regenerate);
+    expect(
+      await screen.findByText("付费重新生成失败，已保留本次请求供重试。"),
+    ).toBeInTheDocument();
+    fireEvent.click(regenerate);
+
+    await waitFor(() =>
+      expect(api.regenerateGenerationTask).toHaveBeenCalledTimes(2),
+    );
+    const firstRequest = vi.mocked(api.regenerateGenerationTask).mock
+      .calls[0][1];
+    const replayRequest = vi.mocked(api.regenerateGenerationTask).mock
+      .calls[1][1];
+    expect(replayRequest.idempotency_key).toBe(firstRequest.idempotency_key);
+    expect(firstRequest).toEqual({
+      idempotency_key: expect.any(String),
+      payment_confirmed: true,
+      payment_confirmation_version: "V1",
+      estimated_cost_snapshot: 1.25,
+      generation_reason: "音频质检失败后重新生成",
+    });
+  });
+
+  it("keeps superseded quality failures visible as history without active attention", async () => {
+    vi.mocked(api.getGenerationBatch).mockResolvedValue(
+      batch({
+        status: "COMPLETED_WITH_FAILURES",
+        quantity: 1,
+        progress: {
+          total_count: 1,
+          terminal_count: 1,
+          progress_percent: 100,
+          counts: {
+            pending: 0,
+            submitting: 0,
+            queued: 0,
+            running: 0,
+            archiving: 0,
+            succeeded: 1,
+            failed: 0,
+            cancelled: 0,
+            needs_attention: 0,
+          },
+          historical_counts: {
+            archive_failed: 0,
+            audio_quality_failed: 1,
+            failed: 0,
+            superseded: 1,
+          },
+        },
+        tasks: [
+          task({
+            id: "historical-audio-failure",
+            quality_status: "AUDIO_QUALITY_FAILED",
+            quality_issue_codes: ["AUDIO_QUALITY_FAILED"],
+            superseded_by_task_id: "task-replacement",
+            superseded_at: "2026-08-16 11:00:00",
+            available_actions: [],
+          }),
+        ],
+      }),
+    );
+
+    render(
+      <TaskRecordsPanel
+        handoffBatch={null}
+        onHandoffConsumed={vi.fn()}
+        userRole="employee"
+      />,
+    );
+
+    expect(
+      await screen.findByText(/历史事实：失败 0 · 归档失败 0 · 音频质检失败 1/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/已由任务 task-replacement 替代/),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", {
+        name: "付费重新生成 historical-audio-failure",
+      }),
+    ).not.toBeInTheDocument();
   });
 
   it("does not describe pending quality checks as passed", async () => {

@@ -157,6 +157,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/generation-batches/{batch_id}/regenerate": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Regenerate Batch */
+    post: operations["regenerate_batch_api_generation_batches__batch_id__regenerate_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/generation/runtime-limits": {
     parameters: {
       query?: never;
@@ -185,6 +202,23 @@ export interface paths {
     put?: never;
     /** Retry Task */
     post: operations["retry_task_api_generation_tasks__task_id__retry_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/generation-tasks/{task_id}/regenerate": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Regenerate Task */
+    post: operations["regenerate_task_api_generation_tasks__task_id__regenerate_post"];
     delete?: never;
     options?: never;
     head?: never;
@@ -1254,6 +1288,10 @@ export interface components {
       counts: {
         [key: string]: number;
       };
+      /** Historical Counts */
+      historical_counts?: {
+        [key: string]: number;
+      };
     };
     /** BatchResult */
     BatchResult: {
@@ -1269,6 +1307,12 @@ export interface components {
       quantity: number;
       /** Stale */
       stale: boolean;
+      /** Source Batch Id */
+      source_batch_id?: string | null;
+      /** Source Task Id */
+      source_task_id?: string | null;
+      /** Generation Reason */
+      generation_reason?: string | null;
       progress: components["schemas"]["BatchProgress"];
       /** Tasks */
       tasks: components["schemas"]["TaskResult"][];
@@ -1875,6 +1919,12 @@ export interface components {
       created_at: string;
       /** Updated At */
       updated_at: string;
+      /** Source Batch Id */
+      source_batch_id?: string | null;
+      /** Source Task Id */
+      source_task_id?: string | null;
+      /** Generation Reason */
+      generation_reason?: string | null;
       progress: components["schemas"]["BatchProgress"];
       /** Total Estimated Cost */
       total_estimated_cost: number | null;
@@ -1968,6 +2018,27 @@ export interface components {
       content_type: string;
       /** Size Bytes */
       size_bytes: number;
+    };
+    /** PaidRegenerationRequest */
+    PaidRegenerationRequest: {
+      /** Idempotency Key */
+      idempotency_key: string;
+      /**
+       * Payment Confirmed
+       * @constant
+       * @enum {boolean}
+       */
+      payment_confirmed: true;
+      /**
+       * Payment Confirmation Version
+       * @constant
+       * @enum {string}
+       */
+      payment_confirmation_version: "V1";
+      /** Estimated Cost Snapshot */
+      estimated_cost_snapshot?: number | null;
+      /** Generation Reason */
+      generation_reason: string;
     };
     /** PersonIdentity */
     PersonIdentity: {
@@ -2842,6 +2913,45 @@ export interface operations {
       };
     };
   };
+  regenerate_batch_api_generation_batches__batch_id__regenerate_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        batch_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: {
+      content: {
+        "application/json":
+          | components["schemas"]["PaidRegenerationRequest"]
+          | null;
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["BatchResult"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   read_generation_runtime_limits_api_generation_runtime_limits_get: {
     parameters: {
       query?: never;
@@ -2899,6 +3009,45 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["TaskResult"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  regenerate_task_api_generation_tasks__task_id__regenerate_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        task_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: {
+      content: {
+        "application/json":
+          | components["schemas"]["PaidRegenerationRequest"]
+          | null;
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["BatchResult"];
         };
       };
       /** @description Validation Error */

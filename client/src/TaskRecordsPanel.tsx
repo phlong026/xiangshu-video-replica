@@ -15,6 +15,8 @@ import {
   getGenerationResultDownloadUrl,
   listGenerationBatches,
   reconcileUncertainTask,
+  regenerateGenerationBatch,
+  regenerateGenerationTask,
   retryGenerationTask,
   type UserRole,
 } from "./api";
@@ -66,6 +68,11 @@ export function TaskRecordsPanel({
   const [taskActionReasons, setTaskActionReasons] = useState<
     Record<string, string>
   >({});
+  const [batchRegenerationReason, setBatchRegenerationReason] = useState("");
+  const [batchPaymentConfirmed, setBatchPaymentConfirmed] = useState(false);
+  const [taskPaymentConfirmations, setTaskPaymentConfirmations] = useState<
+    Record<string, boolean>
+  >({});
   const taskOperationKeysRef = useRef<Record<string, string>>({});
   const canOperate = userRole !== "auditor";
 
@@ -77,6 +84,10 @@ export function TaskRecordsPanel({
       setBatch(knownBatch ?? null);
       setBatchError("");
       setRetryDelaySeconds(null);
+      setBatchRegenerationReason("");
+      setBatchPaymentConfirmed(false);
+      setTaskActionReasons({});
+      setTaskPaymentConfirmations({});
       storeBatchId(batchId);
     },
     [],
@@ -316,6 +327,89 @@ export function TaskRecordsPanel({
     }
   }
 
+  async function handleRegenerateBatch() {
+    const reason = batchRegenerationReason.trim();
+    if (
+      !canOperate ||
+      !batch ||
+      !activeBatchId ||
+      !reason ||
+      !batchPaymentConfirmed
+    ) {
+      return;
+    }
+    const batchIdAtStart = activeBatchId;
+    const estimatedCost = estimatedBatchCost(batch);
+    const actionKey = `${batch.id}:paid-regenerate:${reason}:${estimatedCost ?? "unknown"}`;
+    const operationKey = operationIdempotencyKey(
+      taskOperationKeysRef.current,
+      actionKey,
+    );
+    setActiveTaskAction(actionKey);
+    try {
+      const replacement = await regenerateGenerationBatch(batch.id, {
+        idempotency_key: operationKey,
+        payment_confirmed: true,
+        payment_confirmation_version: "V1",
+        estimated_cost_snapshot: estimatedCost,
+        generation_reason: reason,
+      });
+      if (activeBatchIdRef.current !== batchIdAtStart) {
+        return;
+      }
+      delete taskOperationKeysRef.current[actionKey];
+      selectBatch(replacement.id, replacement);
+      void loadHistory();
+    } catch {
+      if (activeBatchIdRef.current === batchIdAtStart) {
+        setBatchError("整批付费再次生成失败，已保留本次请求供重试。");
+      }
+    } finally {
+      setActiveTaskAction((current) => (current === actionKey ? "" : current));
+    }
+  }
+
+  async function handleRegenerateTask(task: GenerationTask) {
+    const reason = taskActionReasons[task.id]?.trim();
+    if (
+      !canOperate ||
+      !activeBatchId ||
+      !reason ||
+      !taskPaymentConfirmations[task.id]
+    ) {
+      return;
+    }
+    const batchIdAtStart = activeBatchId;
+    const estimatedCost = task.estimated_cost ?? null;
+    const actionKey = `${task.id}:paid-regenerate:${reason}:${estimatedCost ?? "unknown"}`;
+    const operationKey = operationIdempotencyKey(
+      taskOperationKeysRef.current,
+      actionKey,
+    );
+    setActiveTaskAction(actionKey);
+    try {
+      const replacement = await regenerateGenerationTask(task.id, {
+        idempotency_key: operationKey,
+        payment_confirmed: true,
+        payment_confirmation_version: "V1",
+        estimated_cost_snapshot: estimatedCost,
+        generation_reason: reason,
+      });
+      if (activeBatchIdRef.current !== batchIdAtStart) {
+        return;
+      }
+      delete taskOperationKeysRef.current[actionKey];
+      selectBatch(replacement.id, replacement);
+      void loadHistory();
+    } catch {
+      if (activeBatchIdRef.current === batchIdAtStart) {
+        setBatchError("付费重新生成失败，已保留本次请求供重试。");
+      }
+    } finally {
+      setActiveTaskAction((current) => (current === actionKey ? "" : current));
+    }
+  }
+
   async function handlePreview(task: GenerationTask) {
     if (!canOperate || !task.result_asset_id) {
       return;
@@ -464,21 +558,34 @@ export function TaskRecordsPanel({
               activeResultAction={activeResultAction}
               activeTaskAction={activeTaskAction}
               batch={batch}
+              batchPaymentConfirmed={batchPaymentConfirmed}
+              batchRegenerationReason={batchRegenerationReason}
               canOperate={canOperate}
               onConfirmNotCharged={handleConfirmNotCharged}
               onDownload={handleDownload}
               onPreview={handlePreview}
               onReconcile={handleReconcile}
+              onRegenerateBatch={handleRegenerateBatch}
+              onRegenerateTask={handleRegenerateTask}
               onRetry={handleRetry}
+              onBatchPaymentConfirmationChange={setBatchPaymentConfirmed}
+              onBatchRegenerationReasonChange={setBatchRegenerationReason}
               onTaskActionReasonChange={(taskId, reason) =>
                 setTaskActionReasons((current) => ({
                   ...current,
                   [taskId]: reason,
                 }))
               }
+              onTaskPaymentConfirmationChange={(taskId, confirmed) =>
+                setTaskPaymentConfirmations((current) => ({
+                  ...current,
+                  [taskId]: confirmed,
+                }))
+              }
               previewUrls={previewUrls}
               resultErrors={resultErrors}
               taskActionReasons={taskActionReasons}
+              taskPaymentConfirmations={taskPaymentConfirmations}
               userRole={userRole}
             />
           ) : (
@@ -535,34 +642,57 @@ function BatchPanel({
   activeResultAction,
   activeTaskAction,
   batch,
+  batchPaymentConfirmed,
+  batchRegenerationReason,
   canOperate,
+  onBatchPaymentConfirmationChange,
+  onBatchRegenerationReasonChange,
   onConfirmNotCharged,
   onDownload,
   onPreview,
   onReconcile,
+  onRegenerateBatch,
+  onRegenerateTask,
   onRetry,
   onTaskActionReasonChange,
+  onTaskPaymentConfirmationChange,
   previewUrls,
   resultErrors,
   taskActionReasons,
+  taskPaymentConfirmations,
   userRole,
 }: {
   activeResultAction: string;
   activeTaskAction: string;
   batch: GenerationBatch;
+  batchPaymentConfirmed: boolean;
+  batchRegenerationReason: string;
   canOperate: boolean;
+  onBatchPaymentConfirmationChange: (confirmed: boolean) => void;
+  onBatchRegenerationReasonChange: (reason: string) => void;
   onConfirmNotCharged: (task: GenerationTask) => void;
   onDownload: (task: GenerationTask) => void;
   onPreview: (task: GenerationTask) => void;
   onReconcile: (taskId: string) => void;
+  onRegenerateBatch: () => void;
+  onRegenerateTask: (task: GenerationTask) => void;
   onRetry: (task: GenerationTask) => void;
   onTaskActionReasonChange: (taskId: string, reason: string) => void;
+  onTaskPaymentConfirmationChange: (taskId: string, confirmed: boolean) => void;
   previewUrls: Record<string, string>;
   resultErrors: Record<string, string>;
   taskActionReasons: Record<string, string>;
+  taskPaymentConfirmations: Record<string, boolean>;
   userRole: UserRole;
 }) {
   const counts = batch.progress.counts;
+  const historicalCounts = batch.progress.historical_counts ?? {};
+  const hasHistoricalFailures =
+    (historicalCounts.failed ?? 0) > 0 ||
+    (historicalCounts.archive_failed ?? 0) > 0 ||
+    (historicalCounts.audio_quality_failed ?? 0) > 0;
+  const batchActionBusy = Boolean(activeTaskAction);
+  const batchReason = batchRegenerationReason.trim();
   return (
     <div className="batch-panel">
       <div className="progress-header">
@@ -598,6 +728,26 @@ function BatchPanel({
           </span>
         ))}
       </div>
+      {batch.source_batch_id ? (
+        <div className="batch-lineage" role="status">
+          <strong>冻结输入重生成</strong>
+          <span>来源批次 {batch.source_batch_id}</span>
+          {batch.source_task_id ? (
+            <span>来源任务 {batch.source_task_id}</span>
+          ) : null}
+          {batch.generation_reason ? (
+            <span>{batch.generation_reason}</span>
+          ) : null}
+        </div>
+      ) : null}
+      {hasHistoricalFailures ? (
+        <p className="historical-failure-summary">
+          历史事实：失败 {historicalCounts.failed ?? 0} · 归档失败{" "}
+          {historicalCounts.archive_failed ?? 0} · 音频质检失败{" "}
+          {historicalCounts.audio_quality_failed ?? 0} · 已替代{" "}
+          {historicalCounts.superseded ?? 0}
+        </p>
+      ) : null}
       {batch.stale ? (
         <p className="stale-banner" role="status">
           该批次的上游版本已更新；结果仍可查看，但不能作为当前版本的交付依据。
@@ -605,6 +755,54 @@ function BatchPanel({
       ) : null}
       {counts.needs_attention ? (
         <p className="attention-banner">需要处理 {counts.needs_attention}</p>
+      ) : null}
+      {canOperate ? (
+        <section
+          className="paid-regeneration-controls"
+          aria-label="整批付费再次生成"
+        >
+          <div>
+            <strong>整批再次生成</strong>
+            <p>
+              仅复用本批次的冻结请求与 Prompt，将新建 {batch.quantity}{" "}
+              个付费任务。 金额快照：{formatCost(estimatedBatchCost(batch))}
+            </p>
+          </div>
+          <label>
+            <span>整批重生成原因</span>
+            <input
+              aria-label="整批重生成原因"
+              disabled={batchActionBusy}
+              maxLength={500}
+              onChange={(event) =>
+                onBatchRegenerationReasonChange(event.target.value)
+              }
+              placeholder="说明为什么需要再生成整批视频"
+              value={batchRegenerationReason}
+            />
+          </label>
+          <label className="paid-confirmation-check">
+            <input
+              aria-label={`确认新建 ${batch.quantity} 个付费任务`}
+              checked={batchPaymentConfirmed}
+              disabled={batchActionBusy}
+              onChange={(event) =>
+                onBatchPaymentConfirmationChange(event.target.checked)
+              }
+              type="checkbox"
+            />
+            <span>
+              我已确认本次会新增 {batch.quantity} 次 Provider 付费调用
+            </span>
+          </label>
+          <button
+            disabled={!batchReason || !batchPaymentConfirmed || batchActionBusy}
+            onClick={onRegenerateBatch}
+            type="button"
+          >
+            整批付费再次生成
+          </button>
+        </section>
       ) : null}
       <ul className="task-list">
         {batch.tasks.map((task) => (
@@ -617,12 +815,15 @@ function BatchPanel({
             onDownload={onDownload}
             onPreview={onPreview}
             onReconcile={onReconcile}
+            onRegenerate={onRegenerateTask}
             onRetry={onRetry}
             onTaskActionReasonChange={onTaskActionReasonChange}
+            onTaskPaymentConfirmationChange={onTaskPaymentConfirmationChange}
             previewUrl={previewUrls[task.id]}
             resultError={resultErrors[task.id]}
             task={task}
             taskActionReason={taskActionReasons[task.id] ?? ""}
+            taskPaymentConfirmed={taskPaymentConfirmations[task.id] ?? false}
             userRole={userRole}
           />
         ))}
@@ -639,12 +840,15 @@ function TaskItem({
   onDownload,
   onPreview,
   onReconcile,
+  onRegenerate,
   onRetry,
   onTaskActionReasonChange,
+  onTaskPaymentConfirmationChange,
   previewUrl,
   resultError,
   task,
   taskActionReason,
+  taskPaymentConfirmed,
   userRole,
 }: {
   activeResultAction: string;
@@ -654,12 +858,15 @@ function TaskItem({
   onDownload: (task: GenerationTask) => void;
   onPreview: (task: GenerationTask) => void;
   onReconcile: (taskId: string) => void;
+  onRegenerate: (task: GenerationTask) => void;
   onRetry: (task: GenerationTask) => void;
   onTaskActionReasonChange: (taskId: string, reason: string) => void;
+  onTaskPaymentConfirmationChange: (taskId: string, confirmed: boolean) => void;
   previewUrl?: string;
   resultError?: string;
   task: GenerationTask;
   taskActionReason: string;
+  taskPaymentConfirmed: boolean;
   userRole: UserRole;
 }) {
   const attentionNeeded = taskNeedsAttention(task);
@@ -677,6 +884,7 @@ function TaskItem({
   );
   const canConfirmNotCharged =
     userRole === "admin" && requiresAdminConfirmation;
+  const canRegenerate = canOperate && availableActions.includes("REGENERATE");
   const actionReason = taskActionReason.trim();
   const taskActionBusy = Boolean(activeTaskAction);
 
@@ -704,6 +912,12 @@ function TaskItem({
         </div>
       </div>
 
+      {task.superseded_by_task_id ? (
+        <p className="task-resolution-note">
+          已由任务 {task.superseded_by_task_id}{" "}
+          替代；本记录仅保留历史失败与质检事实。
+        </p>
+      ) : null}
       {canRetry || canConfirmNotCharged ? (
         <div className="task-resolution-controls">
           <label>
@@ -748,8 +962,49 @@ function TaskItem({
           需管理员核对账单并确认未计费后才能重提。
         </p>
       ) : null}
-      {canOperate && availableActions.includes("REGENERATE") ? (
-        <p className="task-resolution-note">该任务只能走显式付费重新生成。</p>
+      {canRegenerate ? (
+        <div className="task-paid-regeneration">
+          <div>
+            <strong>付费重新生成视频</strong>
+            <p>
+              只复用该任务的冻结 Prompt，新建一次 Provider 调用；
+              原失败或质检记录保留。金额快照：{formatCost(task.estimated_cost)}
+            </p>
+          </div>
+          <label>
+            <span>重新生成原因</span>
+            <input
+              aria-label={`重新生成原因 ${task.id}`}
+              disabled={taskActionBusy}
+              maxLength={500}
+              onChange={(event) =>
+                onTaskActionReasonChange(task.id, event.target.value)
+              }
+              placeholder="填写本次新增付费生成的原因"
+              value={taskActionReason}
+            />
+          </label>
+          <label className="paid-confirmation-check">
+            <input
+              aria-label={`确认为任务 ${task.id} 新增一次付费生成`}
+              checked={taskPaymentConfirmed}
+              disabled={taskActionBusy}
+              onChange={(event) =>
+                onTaskPaymentConfirmationChange(task.id, event.target.checked)
+              }
+              type="checkbox"
+            />
+            <span>我已确认本次将产生一次新的 Provider 付费调用</span>
+          </label>
+          <button
+            aria-label={`付费重新生成 ${task.id}`}
+            disabled={!actionReason || !taskPaymentConfirmed || taskActionBusy}
+            onClick={() => onRegenerate(task)}
+            type="button"
+          >
+            付费重新生成
+          </button>
+        </div>
       ) : null}
 
       <div className="task-metadata-grid">
@@ -911,6 +1166,9 @@ function statusCountItems(counts: Record<string, number>) {
 }
 
 function taskNeedsAttention(task: GenerationTask) {
+  if (task.superseded_by_task_id) {
+    return false;
+  }
   return (
     task.status === "SUBMISSION_UNCERTAIN" ||
     task.archive_status === "ARCHIVE_FAILED" ||
@@ -959,6 +1217,23 @@ function qualityLabel(status: string) {
 
 function formatDuration(value: number | null | undefined) {
   return value === null || value === undefined ? "—" : `${value.toFixed(1)} 秒`;
+}
+
+function estimatedBatchCost(batch: GenerationBatch): number | null {
+  if (
+    batch.tasks.length === 0 ||
+    batch.tasks.some(
+      (task) =>
+        task.estimated_cost === null || task.estimated_cost === undefined,
+    )
+  ) {
+    return null;
+  }
+  return Number(
+    batch.tasks
+      .reduce((total, task) => total + (task.estimated_cost ?? 0), 0)
+      .toFixed(6),
+  );
 }
 
 function formatCost(value: number | null | undefined) {

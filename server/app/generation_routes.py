@@ -17,6 +17,7 @@ from app.generation import (
     GenerationTaskRetryRequest,
     H3Provider,
     H3ProviderSettingsUnavailable,
+    PaidRegenerationRequest,
     PromptCompileRequest,
     PromptRevisionRequest,
     ReconcileGenerationTaskRequest,
@@ -34,6 +35,8 @@ from app.generation import (
     list_generation_batches,
     lock_prompt_version,
     reconcile_generation_task,
+    regenerate_generation_batch,
+    regenerate_generation_task,
     retry_generation_task,
     revise_prompt_version,
     version_result,
@@ -190,6 +193,48 @@ def read_generation_batch(
     return get_generation_batch(conn, batch_id=batch_id, actor=actor)
 
 
+@router.post(
+    "/generation-batches/{batch_id}/regenerate",
+    response_model=BatchResult,
+)
+def regenerate_batch(
+    batch_id: str,
+    conn: Database,
+    actor: AuthenticatedUser,
+    request: PaidRegenerationRequest | None = None,
+) -> BatchResult:
+    row = conn.execute(
+        "SELECT project_id FROM generation_batches WHERE id = ?",
+        (batch_id,),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail={"code": "BATCH_NOT_FOUND"})
+    require_not_auditor(
+        conn,
+        actor=actor,
+        action="generation_batch.regenerate",
+        entity_type="generation_batch",
+        entity_id=batch_id,
+    )
+    require_project_access(
+        conn,
+        actor=actor,
+        project_id=str(row["project_id"]),
+        action="generation_batch.regenerate",
+    )
+    if request is None:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "PAID_REGENERATION_REQUEST_REQUIRED"},
+        )
+    return regenerate_generation_batch(
+        conn,
+        batch_id=batch_id,
+        actor=actor,
+        request=request,
+    )
+
+
 @router.get("/generation/runtime-limits", response_model=GenerationRuntimeLimits)
 def read_generation_runtime_limits(
     conn: Database,
@@ -241,6 +286,43 @@ def retry_task(
     if request is None:
         raise HTTPException(status_code=422, detail={"code": "RETRY_REQUEST_REQUIRED"})
     return retry_generation_task(conn, task_id=task_id, actor=actor, request=request)
+
+
+@router.post(
+    "/generation-tasks/{task_id}/regenerate",
+    response_model=BatchResult,
+)
+def regenerate_task(
+    task_id: str,
+    conn: Database,
+    actor: AuthenticatedUser,
+    request: PaidRegenerationRequest | None = None,
+) -> BatchResult:
+    row = _generation_task_context(conn, task_id)
+    require_not_auditor(
+        conn,
+        actor=actor,
+        action="generation_task.regenerate",
+        entity_type="generation_task",
+        entity_id=task_id,
+    )
+    require_project_access(
+        conn,
+        actor=actor,
+        project_id=str(row["project_id"]),
+        action="generation_task.regenerate",
+    )
+    if request is None:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "PAID_REGENERATION_REQUEST_REQUIRED"},
+        )
+    return regenerate_generation_task(
+        conn,
+        task_id=task_id,
+        actor=actor,
+        request=request,
+    )
 
 
 @router.post(

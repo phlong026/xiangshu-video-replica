@@ -1835,6 +1835,80 @@ button.history-version--active {
   font-size: 13px;
 }
 
+.batch-lineage,
+.paid-regeneration-controls,
+.task-paid-regeneration {
+  display: grid;
+  gap: 10px;
+  border: 1px solid #4d3b62;
+  border-radius: 10px;
+  padding: 13px;
+  background: #171220;
+}
+
+.batch-lineage {
+  margin-top: 14px;
+}
+
+.batch-lineage span {
+  color: #aaa2ba;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.historical-failure-summary {
+  margin: 14px 0 0;
+  border-left: 3px solid #a56a72;
+  padding: 8px 10px;
+  color: #ffb4be;
+  background: #24151b;
+  font-size: 13px;
+}
+
+.paid-regeneration-controls {
+  margin-top: 14px;
+  border-color: #6a4b24;
+  background: #241a12;
+}
+
+.paid-regeneration-controls p,
+.task-paid-regeneration p {
+  margin: 5px 0 0;
+  color: #c7b7d5;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.paid-regeneration-controls > label:not(.paid-confirmation-check),
+.task-paid-regeneration > label:not(.paid-confirmation-check) {
+  display: grid;
+  gap: 7px;
+}
+
+.paid-regeneration-controls label > span,
+.task-paid-regeneration label > span {
+  margin: 0;
+  color: #f0d7a9;
+  font-weight: 700;
+}
+
+.paid-confirmation-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+}
+
+.paid-confirmation-check input {
+  flex: 0 0 auto;
+  width: 16px;
+  margin-top: 2px;
+}
+
+.paid-confirmation-check span {
+  font-size: 13px;
+  line-height: 1.45;
+}
+
 .quality-summary {
   border: 1px solid #28563d;
   border-radius: 10px;
@@ -2696,7 +2770,9 @@ button.regenerate-button {
     grid-template-columns: 1fr;
   }
 
-  .task-resolution-controls button {
+  .task-resolution-controls button,
+  .paid-regeneration-controls > button,
+  .task-paid-regeneration > button {
     width: 100%;
   }
 

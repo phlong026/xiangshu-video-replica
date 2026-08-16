@@ -130,6 +130,16 @@ class GenerationBatchRequest(BaseModel):
     fake_audio_quality: Literal["ok", "missing"] = "ok"
 
 
+class PaidRegenerationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    idempotency_key: str = Field(min_length=1, max_length=128)
+    payment_confirmed: Literal[True]
+    payment_confirmation_version: Literal["V1"]
+    estimated_cost_snapshot: float | None = Field(default=None, ge=0)
+    generation_reason: str = Field(min_length=1, max_length=500)
+
+
 class GenerationTaskRetryRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -461,6 +471,7 @@ class BatchProgress(BaseModel):
     terminal_count: int
     progress_percent: int
     counts: dict[str, int]
+    historical_counts: dict[str, int] = Field(default_factory=dict)
 
 
 class BatchResult(BaseModel):
@@ -472,6 +483,9 @@ class BatchResult(BaseModel):
     status: str
     quantity: int
     stale: bool
+    source_batch_id: str | None = None
+    source_task_id: str | None = None
+    generation_reason: str | None = None
     progress: BatchProgress
     tasks: list[TaskResult]
 
@@ -495,6 +509,9 @@ class GenerationBatchListItem(BaseModel):
     quantity: int
     created_at: str
     updated_at: str
+    source_batch_id: str | None = None
+    source_task_id: str | None = None
+    generation_reason: str | None = None
     progress: BatchProgress
     total_estimated_cost: float | None
     total_actual_cost: float | None
@@ -1337,6 +1354,486 @@ def create_generation_batch(
         metadata={"project_id": project_id, "quantity": request.quantity},
     )
     return get_generation_batch(conn, batch_id=batch_id, actor=actor)
+
+
+def regenerate_generation_batch(
+    conn: sqlite3.Connection,
+    *,
+    batch_id: str,
+    actor: CurrentUser,
+    request: PaidRegenerationRequest,
+) -> BatchResult:
+    source_context = conn.execute(
+        "SELECT project_id FROM generation_batches WHERE id = ?",
+        (batch_id,),
+    ).fetchone()
+    if source_context is None:
+        raise generation_error(404, "BATCH_NOT_FOUND", "Generation batch does not exist.")
+    project_id = str(source_context["project_id"])
+    require_not_auditor(
+        conn,
+        actor=actor,
+        action="generation_batch.regenerate",
+        entity_type="generation_batch",
+        entity_id=batch_id,
+    )
+    require_project_access(
+        conn,
+        actor=actor,
+        project_id=project_id,
+        action="generation_batch.regenerate",
+    )
+
+    new_batch_id = ""
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        source_batch = conn.execute(
+            """
+            SELECT id, project_id, request_snapshot_json
+            FROM generation_batches
+            WHERE id = ?
+            """,
+            (batch_id,),
+        ).fetchone()
+        if source_batch is None:
+            raise generation_error(404, "BATCH_NOT_FOUND", "Generation batch does not exist.")
+        source_tasks = conn.execute(
+            """
+            SELECT id, generation_mode, provider, model, prompt_version_id,
+                   prompt_snapshot_json
+            FROM generation_tasks
+            WHERE batch_id = ?
+            ORDER BY created_at, id
+            """,
+            (batch_id,),
+        ).fetchall()
+        if not source_tasks:
+            raise generation_error(
+                409,
+                "SOURCE_BATCH_EMPTY",
+                "A batch without frozen tasks cannot be regenerated.",
+            )
+
+        source_task_ids = [str(row["id"]) for row in source_tasks]
+        prompt_snapshots = [
+            required_snapshot_text(row["prompt_snapshot_json"]) for row in source_tasks
+        ]
+        request_snapshot = required_snapshot_text(source_batch["request_snapshot_json"])
+        request_hash = paid_regeneration_request_hash(
+            request,
+            operation_kind="MANUAL_BATCH_REGENERATE",
+            source_batch_id=batch_id,
+            source_task_ids=source_task_ids,
+            request_snapshot=request_snapshot,
+            prompt_snapshots=prompt_snapshots,
+        )
+        existing = _find_idempotent_batch(
+            conn,
+            actor_id=actor.id,
+            project_id=project_id,
+            key=request.idempotency_key,
+        )
+        if existing is not None:
+            conn.rollback()
+            require_matching_idempotent_batch(existing, request_hash=request_hash)
+            return get_generation_batch(conn, batch_id=str(existing["id"]), actor=actor)
+
+        runtime = read_runtime_limits(conn)
+        if len(source_tasks) > runtime["max_generation_count_per_batch"]:
+            raise generation_error(
+                422,
+                "QUANTITY_EXCEEDS_LIMIT",
+                "quantity must be less than or equal to "
+                f"{runtime['max_generation_count_per_batch']}",
+            )
+        for provider_name in {str(row["provider"]) for row in source_tasks}:
+            require_regeneration_provider_ready(conn, provider_name=provider_name)
+
+        new_batch_id = str(uuid4())
+        conn.execute(
+            """
+            INSERT INTO generation_batches (
+                id, project_id, created_by_user_id, idempotency_key,
+                request_hash, request_snapshot_json, status,
+                source_batch_id, source_task_id, generation_reason
+            )
+            VALUES (?, ?, ?, ?, ?, ?, 'QUEUED', ?, NULL, ?)
+            """,
+            (
+                new_batch_id,
+                project_id,
+                actor.id,
+                request.idempotency_key,
+                request_hash,
+                request_snapshot,
+                batch_id,
+                request.generation_reason,
+            ),
+        )
+        estimated_cost = paid_cost_per_task(
+            request.estimated_cost_snapshot,
+            quantity=len(source_tasks),
+        )
+        for source_task, prompt_snapshot in zip(source_tasks, prompt_snapshots, strict=True):
+            replacement_task_id = str(uuid4())
+            conn.execute(
+                """
+                INSERT INTO generation_tasks (
+                    id, batch_id, generation_mode, provider, model,
+                    status, archive_status, quality_status,
+                    prompt_version_id, prompt_snapshot_json, next_poll_at,
+                    estimated_cost, retry_of_task_id, retry_reason,
+                    retry_requested_by_user_id, retry_requested_at
+                )
+                VALUES (?, ?, ?, ?, ?, 'PENDING', 'PENDING', 'PENDING',
+                        ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                (
+                    replacement_task_id,
+                    new_batch_id,
+                    str(source_task["generation_mode"]),
+                    str(source_task["provider"]),
+                    str(source_task["model"]),
+                    source_task["prompt_version_id"],
+                    prompt_snapshot,
+                    estimated_cost,
+                    str(source_task["id"]),
+                    request.generation_reason,
+                    actor.id,
+                ),
+            )
+        insert_audit(
+            conn,
+            actor=actor,
+            action="generation_batch.regenerate",
+            entity_type="generation_batch",
+            entity_id=new_batch_id,
+            metadata={
+                "project_id": project_id,
+                "source_batch_id": batch_id,
+                "source_task_ids": source_task_ids,
+                "quantity": len(source_tasks),
+                "generation_reason": request.generation_reason,
+                "payment_confirmation_version": request.payment_confirmation_version,
+                "estimated_cost_snapshot": request.estimated_cost_snapshot,
+                "idempotency_key_hash": content_hash(request.idempotency_key),
+            },
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return get_generation_batch(conn, batch_id=new_batch_id, actor=actor)
+
+
+def regenerate_generation_task(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    actor: CurrentUser,
+    request: PaidRegenerationRequest,
+) -> BatchResult:
+    source_context = conn.execute(
+        """
+        SELECT generation_batches.project_id
+        FROM generation_tasks
+        JOIN generation_batches ON generation_batches.id = generation_tasks.batch_id
+        WHERE generation_tasks.id = ?
+        """,
+        (task_id,),
+    ).fetchone()
+    if source_context is None:
+        raise generation_error(404, "TASK_NOT_FOUND", "Generation task does not exist.")
+    project_id = str(source_context["project_id"])
+    require_not_auditor(
+        conn,
+        actor=actor,
+        action="generation_task.regenerate",
+        entity_type="generation_task",
+        entity_id=task_id,
+    )
+    require_project_access(
+        conn,
+        actor=actor,
+        project_id=project_id,
+        action="generation_task.regenerate",
+    )
+
+    new_batch_id = ""
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        source = conn.execute(
+            """
+            SELECT
+                task.id,
+                task.batch_id,
+                task.generation_mode,
+                task.provider,
+                task.model,
+                task.provider_task_id,
+                task.provider_result_url,
+                task.status,
+                task.archive_status,
+                task.quality_status,
+                task.quality_issue_codes,
+                task.submitted_at,
+                task.prompt_version_id,
+                task.prompt_snapshot_json,
+                task.superseded_by_task_id,
+                batch.project_id,
+                batch.request_snapshot_json
+            FROM generation_tasks AS task
+            JOIN generation_batches AS batch ON batch.id = task.batch_id
+            WHERE task.id = ?
+            """,
+            (task_id,),
+        ).fetchone()
+        if source is None:
+            raise generation_error(404, "TASK_NOT_FOUND", "Generation task does not exist.")
+
+        request_snapshot = required_snapshot_text(source["request_snapshot_json"])
+        prompt_snapshot = required_snapshot_text(source["prompt_snapshot_json"])
+        source_batch_id = str(source["batch_id"])
+        request_hash = paid_regeneration_request_hash(
+            request,
+            operation_kind="TASK_PAID_REGENERATE",
+            source_batch_id=source_batch_id,
+            source_task_ids=[task_id],
+            request_snapshot=request_snapshot,
+            prompt_snapshots=[prompt_snapshot],
+        )
+        existing = _find_idempotent_batch(
+            conn,
+            actor_id=actor.id,
+            project_id=project_id,
+            key=request.idempotency_key,
+        )
+        if existing is not None:
+            conn.rollback()
+            require_matching_idempotent_batch(existing, request_hash=request_hash)
+            return get_generation_batch(conn, batch_id=str(existing["id"]), actor=actor)
+
+        if source["superseded_by_task_id"] is not None:
+            raise generation_error(
+                409,
+                "SOURCE_TASK_ALREADY_SUPERSEDED",
+                "This source task already has a paid replacement.",
+            )
+        require_task_paid_regeneration_state(source)
+        require_regeneration_provider_ready(conn, provider_name=str(source["provider"]))
+
+        new_batch_id = str(uuid4())
+        replacement_task_id = str(uuid4())
+        conn.execute(
+            """
+            INSERT INTO generation_batches (
+                id, project_id, created_by_user_id, idempotency_key,
+                request_hash, request_snapshot_json, status,
+                source_batch_id, source_task_id, generation_reason
+            )
+            VALUES (?, ?, ?, ?, ?, ?, 'QUEUED', ?, ?, ?)
+            """,
+            (
+                new_batch_id,
+                project_id,
+                actor.id,
+                request.idempotency_key,
+                request_hash,
+                request_snapshot,
+                source_batch_id,
+                task_id,
+                request.generation_reason,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO generation_tasks (
+                id, batch_id, generation_mode, provider, model,
+                status, archive_status, quality_status,
+                prompt_version_id, prompt_snapshot_json, next_poll_at,
+                estimated_cost, retry_of_task_id, retry_reason,
+                retry_requested_by_user_id, retry_requested_at
+            )
+            VALUES (?, ?, ?, ?, ?, 'PENDING', 'PENDING', 'PENDING',
+                    ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            (
+                replacement_task_id,
+                new_batch_id,
+                str(source["generation_mode"]),
+                str(source["provider"]),
+                str(source["model"]),
+                source["prompt_version_id"],
+                prompt_snapshot,
+                request.estimated_cost_snapshot,
+                task_id,
+                request.generation_reason,
+                actor.id,
+            ),
+        )
+        cursor = conn.execute(
+            """
+            UPDATE generation_tasks
+            SET superseded_by_task_id = ?, superseded_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND superseded_by_task_id IS NULL
+            """,
+            (replacement_task_id, task_id),
+        )
+        if cursor.rowcount != 1:
+            raise generation_error(
+                409,
+                "SOURCE_TASK_ALREADY_SUPERSEDED",
+                "This source task already has a paid replacement.",
+            )
+        _refresh_batch_status_in_transaction(conn, batch_id=source_batch_id)
+        insert_audit(
+            conn,
+            actor=actor,
+            action="generation_task.regenerate",
+            entity_type="generation_task",
+            entity_id=replacement_task_id,
+            metadata={
+                "project_id": project_id,
+                "source_batch_id": source_batch_id,
+                "source_task_id": task_id,
+                "replacement_batch_id": new_batch_id,
+                "generation_reason": request.generation_reason,
+                "payment_confirmation_version": request.payment_confirmation_version,
+                "estimated_cost_snapshot": request.estimated_cost_snapshot,
+                "idempotency_key_hash": content_hash(request.idempotency_key),
+            },
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return get_generation_batch(conn, batch_id=new_batch_id, actor=actor)
+
+
+def required_snapshot_text(value: Any) -> str:
+    if value is None:
+        raise generation_error(
+            409,
+            "SOURCE_SNAPSHOT_UNAVAILABLE",
+            "The frozen generation snapshot is unavailable.",
+        )
+    text = str(value)
+    try:
+        json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise generation_error(
+            409,
+            "SOURCE_SNAPSHOT_INVALID",
+            "The frozen generation snapshot is invalid.",
+        ) from exc
+    return text
+
+
+def paid_regeneration_request_hash(
+    request: PaidRegenerationRequest,
+    *,
+    operation_kind: Literal["MANUAL_BATCH_REGENERATE", "TASK_PAID_REGENERATE"],
+    source_batch_id: str,
+    source_task_ids: Sequence[str],
+    request_snapshot: str,
+    prompt_snapshots: Sequence[str],
+) -> str:
+    payload = {
+        "operation_kind": operation_kind,
+        "source_batch_id": source_batch_id,
+        "source_task_ids": list(source_task_ids),
+        "generation_reason": request.generation_reason,
+        "request_snapshot_hash": canonical_snapshot_hash(request_snapshot),
+        "prompt_snapshot_hashes": [
+            canonical_snapshot_hash(snapshot) for snapshot in prompt_snapshots
+        ],
+        "quantity": len(source_task_ids),
+        "payment_confirmed": request.payment_confirmed,
+        "payment_confirmation_version": request.payment_confirmation_version,
+        "estimated_cost_snapshot": request.estimated_cost_snapshot,
+    }
+    return content_hash(json.dumps(payload, ensure_ascii=True, sort_keys=True))
+
+
+def canonical_snapshot_hash(snapshot: str) -> str:
+    parsed = json.loads(snapshot)
+    return content_hash(json.dumps(parsed, ensure_ascii=True, sort_keys=True))
+
+
+def require_matching_idempotent_batch(row: sqlite3.Row, *, request_hash: str) -> None:
+    if str(row["request_hash"]) != request_hash:
+        raise generation_error(
+            409,
+            "IDEMPOTENCY_CONFLICT",
+            "This idempotency key was already used for a different request.",
+        )
+
+
+def require_regeneration_provider_ready(
+    conn: sqlite3.Connection,
+    *,
+    provider_name: str,
+) -> None:
+    if provider_name != "metaso":
+        return
+    try:
+        metaso_h3_provider_from_settings(conn)
+    except H3ProviderSettingsUnavailable as exc:
+        raise generation_error(
+            503,
+            "METASO_SETTINGS_UNAVAILABLE",
+            "Save a readable METASO API Key before queuing a real H3 task.",
+        ) from exc
+    storage_row = conn.execute(
+        "SELECT active_storage_provider FROM runtime_settings WHERE id = 1"
+    ).fetchone()
+    if storage_row is not None and storage_row["active_storage_provider"] == "local":
+        raise generation_error(
+            422,
+            "METASO_REQUIRES_CLOUD_STORAGE",
+            "METASO H3 requires an HTTPS first-frame URL; switch storage to "
+            "COS/OSS before generating.",
+        )
+
+
+def require_task_paid_regeneration_state(row: sqlite3.Row) -> None:
+    if str(row["archive_status"]) == "ARCHIVE_FAILED":
+        raise generation_error(
+            409,
+            "ARCHIVE_RETRY_ONLY",
+            "Archive failures must recover the existing paid result without a new Provider call.",
+        )
+    if str(row["status"]) == "SUBMISSION_UNCERTAIN":
+        raise generation_error(
+            409,
+            "MUST_RECONCILE_SUBMISSION",
+            "An uncertain submission must be reconciled before any paid regeneration.",
+        )
+    quality_issue_codes = parse_json_list(row["quality_issue_codes"])
+    if (
+        str(row["quality_status"]) == "AUDIO_QUALITY_FAILED"
+        or "AUDIO_QUALITY_FAILED" in quality_issue_codes
+    ):
+        return
+    if str(row["status"]) == "FAILED" and (
+        row["provider_task_id"] is not None
+        or row["provider_result_url"] is not None
+        or row["submitted_at"] is not None
+    ):
+        return
+    raise generation_error(
+        409,
+        "PAID_REGENERATION_NOT_ALLOWED",
+        "Only audio-quality failures or failed submitted tasks can be regenerated "
+        "with a new paid call.",
+    )
+
+
+def paid_cost_per_task(total: float | None, *, quantity: int) -> float | None:
+    if total is None:
+        return None
+    return round(total / quantity, 6)
 
 
 def require_confirmed_first_frame(
@@ -2913,7 +3410,10 @@ def list_generation_batches(
             batch.request_snapshot_json,
             batch.status,
             batch.created_at,
-            batch.updated_at
+            batch.updated_at,
+            batch.source_batch_id,
+            batch.source_task_id,
+            batch.generation_reason
         FROM generation_batches AS batch
         JOIN projects AS project ON project.id = batch.project_id
         JOIN users AS creator ON creator.id = batch.created_by_user_id
@@ -2984,6 +3484,9 @@ def list_generation_batches(
                 quantity=len(tasks),
                 created_at=str(row["created_at"]),
                 updated_at=str(row["updated_at"]),
+                source_batch_id=optional_text(row["source_batch_id"]),
+                source_task_id=optional_text(row["source_task_id"]),
+                generation_reason=optional_text(row["generation_reason"]),
                 progress=progress,
                 total_estimated_cost=optional_cost_total([task.estimated_cost for task in tasks]),
                 total_actual_cost=optional_cost_total([task.actual_cost for task in tasks]),
@@ -3078,7 +3581,8 @@ def get_generation_batch(
 ) -> BatchResult:
     batch = conn.execute(
         """
-        SELECT id, project_id, request_snapshot_json, status
+        SELECT id, project_id, request_snapshot_json, status,
+               source_batch_id, source_task_id, generation_reason
         FROM generation_batches
         WHERE id = ?
         """,
@@ -3156,6 +3660,9 @@ def get_generation_batch(
         status=status,
         quantity=len(tasks),
         stale=stale,
+        source_batch_id=optional_text(batch["source_batch_id"]),
+        source_task_id=optional_text(batch["source_task_id"]),
+        generation_reason=optional_text(batch["generation_reason"]),
         progress=progress,
         tasks=tasks,
     )
@@ -3502,11 +4009,28 @@ def calculate_progress(tasks: Sequence[TaskSummary]) -> BatchProgress:
         "cancelled": 0,
         "needs_attention": 0,
     }
+    historical_counts = {
+        "archive_failed": 0,
+        "audio_quality_failed": 0,
+        "failed": 0,
+        "superseded": 0,
+    }
     terminal_count = 0
     for task in tasks:
         status = task.status
         archive_status = task.archive_status
         needs_attention = False
+        if status == "FAILED":
+            historical_counts["failed"] += 1
+        if archive_status == "ARCHIVE_FAILED":
+            historical_counts["archive_failed"] += 1
+        if (
+            task.quality_status == "AUDIO_QUALITY_FAILED"
+            or "AUDIO_QUALITY_FAILED" in task.quality_issue_codes
+        ):
+            historical_counts["audio_quality_failed"] += 1
+        if task.superseded_by_task_id is not None:
+            historical_counts["superseded"] += 1
         if status == "SUCCEEDED":
             if archive_status == "ARCHIVED":
                 counts["succeeded"] += 1
@@ -3549,6 +4073,7 @@ def calculate_progress(tasks: Sequence[TaskSummary]) -> BatchProgress:
         terminal_count=terminal_count,
         progress_percent=progress_percent,
         counts=counts,
+        historical_counts=historical_counts,
     )
 
 
@@ -3558,7 +4083,12 @@ def batch_status(stored_status: str, progress: BatchProgress) -> str:
         # surface as NEEDS_ATTENTION instead of being masked by SUCCEEDED.
         if progress.counts["needs_attention"]:
             return "NEEDS_ATTENTION"
-        if progress.counts["failed"] or progress.counts["cancelled"]:
+        if (
+            progress.counts["failed"]
+            or progress.counts["cancelled"]
+            or progress.historical_counts.get("archive_failed", 0)
+            or progress.historical_counts.get("audio_quality_failed", 0)
+        ):
             return "COMPLETED_WITH_FAILURES"
         return "SUCCEEDED"
     if progress.counts["needs_attention"]:
@@ -3655,7 +4185,9 @@ def generation_task_available_actions(
             and error_code in SAFE_PRE_PROVIDER_FAILURE_CODES
         ):
             return ["RETRY"]
-        return ["REGENERATE"]
+        if provider_task_id is not None or provider_result_url is not None or row["submitted_at"]:
+            return ["REGENERATE"]
+        return []
     return []
 
 

@@ -51,6 +51,8 @@ export type ConfirmNotChargedInput =
   components["schemas"]["ConfirmNotChargedRequest"];
 export type ReconcileGenerationTaskInput =
   components["schemas"]["ReconcileGenerationTaskRequest"];
+export type PaidRegenerationInput =
+  components["schemas"]["PaidRegenerationRequest"];
 export type GenerationBatchListItem = Omit<
   components["schemas"]["GenerationBatchListItem"],
   "tasks"
@@ -457,6 +459,17 @@ export async function getGenerationBatch(
   );
 }
 
+export async function regenerateGenerationBatch(
+  batchId: string,
+  input: PaidRegenerationInput,
+): Promise<GenerationBatch> {
+  return requestGenerationJson<GenerationBatch>(
+    `/api/generation-batches/${encodeURIComponent(batchId)}/regenerate`,
+    "整批重新生成失败",
+    { method: "POST", body: JSON.stringify(input) },
+  );
+}
+
 export async function listGenerationBatches(
   filters: GenerationBatchListFilters = {},
 ): Promise<GenerationBatchListPage> {
@@ -493,6 +506,17 @@ export async function retryGenerationTask(
   return requestGenerationJson<GenerationTask>(
     `/api/generation-tasks/${encodeURIComponent(taskId)}/retry`,
     "重试生成任务失败",
+    { method: "POST", body: JSON.stringify(input) },
+  );
+}
+
+export async function regenerateGenerationTask(
+  taskId: string,
+  input: PaidRegenerationInput,
+): Promise<GenerationBatch> {
+  return requestGenerationJson<GenerationBatch>(
+    `/api/generation-tasks/${encodeURIComponent(taskId)}/regenerate`,
+    "重新生成视频任务失败",
     { method: "POST", body: JSON.stringify(input) },
   );
 }

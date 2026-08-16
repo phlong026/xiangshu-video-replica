@@ -106,6 +106,12 @@ def test_fake_provider_e2e_from_locked_prompt_to_worker_progress(
             "cancelled": 0,
             "needs_attention": 0,
         },
+        "historical_counts": {
+            "archive_failed": 0,
+            "audio_quality_failed": 0,
+            "failed": 0,
+            "superseded": 0,
+        },
     }
     assert [task["status"] for task in first_batch["tasks"]] == ["PENDING", "PENDING"]
     assert {task["prompt_snapshot"]["status"] for task in first_batch["tasks"]} == {"LOCKED"}

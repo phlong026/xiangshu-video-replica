@@ -22,6 +22,8 @@ import {
   listGenerationBatches,
   listProjectCharacterVersions,
   lockGenerationPrompt,
+  regenerateGenerationBatch,
+  regenerateGenerationTask,
   retryGenerationTask,
   reviseGenerationPrompt,
   SESSION_EXPIRED_EVENT,
@@ -183,6 +185,41 @@ describe("generation workflow API", () => {
       10,
       "http://127.0.0.1:8000/api/assets/asset%201/download-url",
       expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("posts explicit paid regeneration contracts for batches and tasks", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: "replacement-batch" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const input = {
+      idempotency_key: "paid-regeneration-key",
+      payment_confirmed: true as const,
+      payment_confirmation_version: "V1" as const,
+      estimated_cost_snapshot: 2.5,
+      generation_reason: "人工确认重新生成",
+    };
+
+    await regenerateGenerationBatch("batch 1", input);
+    await regenerateGenerationTask("task 1", input);
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "http://127.0.0.1:8000/api/generation-batches/batch%201/regenerate",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify(input),
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "http://127.0.0.1:8000/api/generation-tasks/task%201/regenerate",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify(input),
+      }),
     );
   });
 
