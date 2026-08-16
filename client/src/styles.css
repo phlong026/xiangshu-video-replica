@@ -1161,6 +1161,183 @@ button.history-version--active {
   margin-top: 12px;
 }
 
+.generation-composer {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+  border: 1px solid rgba(142, 108, 255, 0.42);
+  border-radius: 10px;
+  padding: 20px;
+  background: rgba(13, 12, 24, 0.9);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.04);
+}
+
+.generation-composer h3 {
+  margin: 7px 0;
+}
+
+.generation-composer .section-heading p {
+  margin: 0;
+  color: #aaa2ba;
+}
+
+.generation-source-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 14px;
+  border: 1px solid #343044;
+  border-radius: 8px;
+  padding: 14px;
+  color: #aaa2ba;
+  background: rgba(22, 19, 31, 0.82);
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.generation-source-grid legend,
+.prompt-diff legend {
+  padding: 0 6px;
+  color: #bca7ff;
+  font-family: inherit;
+  font-weight: 800;
+}
+
+.generation-block {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  margin: 0;
+  border: 1px solid #3c3448;
+  border-radius: 8px;
+  padding: 16px;
+  background: #17131f;
+}
+
+.generation-block legend {
+  padding: 0 6px;
+  color: #bca7ff;
+  font-weight: 800;
+}
+
+.generation-block > button {
+  justify-self: end;
+}
+
+.generation-choice-row,
+.generation-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.generation-choice-row label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #d9d1e8;
+  font-weight: 700;
+}
+
+.generation-choice-row input {
+  width: auto;
+  accent-color: var(--accent-strong);
+}
+
+.generation-field,
+.generation-parameter-grid label {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  color: #d9d1e8;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.generation-field textarea {
+  width: 100%;
+  min-height: 132px;
+  resize: vertical;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  padding: 13px 14px;
+  color: var(--text);
+  background: #0d0d17;
+  line-height: 1.65;
+}
+
+.generation-field textarea[readonly] {
+  color: #aaa2ba;
+  background: #12101a;
+}
+
+.generation-parameter-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.shot-mapping-list {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 12px 12px 12px 30px;
+  color: #c8c1d5;
+  background: rgba(13, 13, 23, 0.7);
+}
+
+.prompt-diff {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  min-width: 0;
+  margin: 0;
+  border: 0;
+  padding: 0;
+}
+
+.prompt-diff > div {
+  min-width: 0;
+  border: 1px solid #343044;
+  border-radius: 8px;
+  padding: 12px;
+  background: rgba(13, 13, 23, 0.72);
+}
+
+.prompt-diff pre {
+  max-height: 220px;
+  margin: 8px 0 0;
+  overflow: auto;
+  color: #b8b1c5;
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.generation-quantity-field {
+  width: min(100%, 220px);
+}
+
+.paid-task-warning {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid rgba(221, 177, 77, 0.35);
+  border-radius: 8px;
+  padding: 13px 14px;
+  color: #ebd39b;
+  background: rgba(90, 62, 16, 0.2);
+}
+
+.paid-task-warning span {
+  color: #bcae90;
+  font-size: 13px;
+}
+
 .settings-page {
   display: grid;
   gap: 22px;
@@ -1431,6 +1608,14 @@ button.history-version--active {
   padding: 12px;
   color: #ffcf8a;
   background: #241a12;
+}
+
+.stale-banner {
+  border: 1px solid #654a85;
+  border-radius: 8px;
+  padding: 12px;
+  color: #d8bcff;
+  background: #21172d;
 }
 
 .task-list {
@@ -2197,8 +2382,22 @@ button.regenerate-button {
   .diagnostic-panel,
   .shot-time-grid,
   .shot-field-grid,
+  .generation-source-grid,
+  .generation-parameter-grid,
+  .prompt-diff,
   .source-frame-timestamps {
     grid-template-columns: 1fr;
+  }
+
+  .generation-actions,
+  .paid-task-warning {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .generation-actions > button,
+  .generation-block > button {
+    width: 100%;
   }
 
   .source-frame-timestamps small {

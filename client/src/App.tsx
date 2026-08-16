@@ -169,7 +169,7 @@ export function App() {
       return;
     }
 
-    const restoredBatchId = window.localStorage.getItem(BATCH_STORAGE_KEY);
+    const restoredBatchId = readStoredBatchId();
     if (restoredBatchId) {
       setBatchIdInput(restoredBatchId);
       setActiveBatchId(restoredBatchId);
@@ -228,7 +228,7 @@ export function App() {
         setRetryDelaySeconds(null);
         retryCount = 0;
         nextRetryDelayMs = POLL_INTERVAL_MS;
-        window.localStorage.setItem(BATCH_STORAGE_KEY, activeBatchId);
+        storeBatchId(activeBatchId);
 
         if (!isTerminalBatch(nextBatch)) {
           timeoutId = window.setTimeout(loadBatch, POLL_INTERVAL_MS);
@@ -242,7 +242,7 @@ export function App() {
           // Hard error: the batch no longer exists. Stop polling and clear it.
           setBatchError("该任务记录不存在，已停止自动刷新。");
           setRetryDelaySeconds(null);
-          window.localStorage.removeItem(BATCH_STORAGE_KEY);
+          clearStoredBatchId();
           setActiveBatchId("");
           setBatch(null);
           return;
@@ -532,6 +532,16 @@ export function App() {
     setActiveAnalysisProject(project);
   }
 
+  function openCreatedBatch(nextBatch: GenerationBatch) {
+    setBatch(nextBatch);
+    setBatchError("");
+    setRetryDelaySeconds(null);
+    setBatchIdInput(nextBatch.id);
+    setActiveBatchId(nextBatch.id);
+    storeBatchId(nextBatch.id);
+    navigateTo("tasks");
+  }
+
   function markAnalysisReady(projectId: string) {
     setSetupError("");
     setProjects((current) =>
@@ -581,6 +591,7 @@ export function App() {
               <AnalysisWorkspace
                 onClose={() => setActiveAnalysisProject(null)}
                 onAnalysisReady={markAnalysisReady}
+                onBatchCreated={openCreatedBatch}
                 project={activeAnalysisProject}
                 readOnly={!canWrite}
               />
@@ -1187,6 +1198,11 @@ function BatchPanel({
           </span>
         ))}
       </div>
+      {batch.stale ? (
+        <p className="stale-banner" role="status">
+          该批次的上游版本已更新；结果仍可查看，但不能作为当前版本的交付依据。
+        </p>
+      ) : null}
       {counts.needs_attention ? (
         <p className="attention-banner">需要处理 {counts.needs_attention}</p>
       ) : null}
@@ -1345,6 +1361,30 @@ function pageTitle(page: WorkspacePage): string {
     settings: "设置",
     tasks: "任务记录",
   }[page];
+}
+
+function readStoredBatchId(): string | null {
+  try {
+    return window.localStorage.getItem(BATCH_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function storeBatchId(batchId: string): void {
+  try {
+    window.localStorage.setItem(BATCH_STORAGE_KEY, batchId);
+  } catch {
+    // The active batch remains available in memory when browser storage is blocked.
+  }
+}
+
+function clearStoredBatchId(): void {
+  try {
+    window.localStorage.removeItem(BATCH_STORAGE_KEY);
+  } catch {
+    // A blocked storage backend must not interrupt task navigation or polling.
+  }
 }
 
 function formatRole(role: CurrentUser["role"]) {

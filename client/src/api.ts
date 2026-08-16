@@ -19,30 +19,31 @@ export type CurrentUser = {
   role: UserRole;
 };
 
-export type GenerationTask = {
-  id: string;
-  status: string;
-  archive_status: string;
-  quality_status: string;
-  quality_issue_codes: string[];
-  result_asset_id: string | null;
-  prompt_snapshot: Record<string, unknown> | null;
-};
-
-export type BatchProgress = {
-  total_count: number;
-  terminal_count: number;
-  progress_percent: number;
-  counts: Record<string, number>;
-};
-
-export type GenerationBatch = {
-  id: string;
-  status: string;
-  quantity: number;
-  progress: BatchProgress;
-  tasks: GenerationTask[];
-};
+export type GenerationVersion = Omit<
+  components["schemas"]["VersionResult"],
+  "payload"
+> & { payload: Record<string, unknown> };
+export type GenerationVersionState = Omit<
+  components["schemas"]["VersionState"],
+  "version"
+> & { version: GenerationVersion | null };
+export type ScriptVersionInput = components["schemas"]["ScriptRequest"];
+export type PromptCompileInput = components["schemas"]["PromptCompileRequest"];
+export type PromptRevisionInput =
+  components["schemas"]["PromptRevisionRequest"];
+export type GenerationBatchInput =
+  components["schemas"]["GenerationBatchRequest"];
+export type GenerationRuntimeLimits =
+  components["schemas"]["GenerationRuntimeLimits"];
+export type GenerationTask = Omit<
+  components["schemas"]["TaskResult"],
+  "prompt_snapshot"
+> & { prompt_snapshot: Record<string, unknown> | null };
+export type BatchProgress = components["schemas"]["BatchProgress"];
+export type GenerationBatch = Omit<
+  components["schemas"]["BatchResult"],
+  "tasks"
+> & { tasks: GenerationTask[] };
 
 export type ProviderName = "metaso" | "apilio" | "cos" | "oss";
 
@@ -145,6 +146,7 @@ export type ShotCard = {
 export type AnalysisPayload = {
   summary: string;
   duration_seconds: number;
+  original_script: string;
   shots: ShotCard[];
 };
 
@@ -338,12 +340,113 @@ export async function getCurrentUser(): Promise<CurrentUser> {
   return user;
 }
 
+export async function createScriptVersion(
+  projectId: string,
+  input: ScriptVersionInput,
+): Promise<GenerationVersion> {
+  return requestGenerationJson<GenerationVersion>(
+    `/api/projects/${encodeURIComponent(projectId)}/scripts`,
+    "保存口播稿失败",
+    { method: "POST", body: JSON.stringify(input) },
+  );
+}
+
+export async function getLatestScriptVersion(
+  projectId: string,
+): Promise<GenerationVersionState> {
+  return requestGenerationJson<GenerationVersionState>(
+    `/api/projects/${encodeURIComponent(projectId)}/scripts/latest`,
+    "读取口播稿失败",
+  );
+}
+
+export async function compileGenerationPrompt(
+  projectId: string,
+  input: PromptCompileInput,
+): Promise<GenerationVersion> {
+  return requestGenerationJson<GenerationVersion>(
+    `/api/projects/${encodeURIComponent(projectId)}/prompts/compile`,
+    "编译 H3 Prompt 失败",
+    { method: "POST", body: JSON.stringify(input) },
+  );
+}
+
+export async function reviseGenerationPrompt(
+  projectId: string,
+  input: PromptRevisionInput,
+): Promise<GenerationVersion> {
+  return requestGenerationJson<GenerationVersion>(
+    `/api/projects/${encodeURIComponent(projectId)}/prompts/revise`,
+    "保存 H3 Prompt 失败",
+    { method: "POST", body: JSON.stringify(input) },
+  );
+}
+
+export async function getLatestGenerationPrompt(
+  projectId: string,
+): Promise<GenerationVersionState> {
+  return requestGenerationJson<GenerationVersionState>(
+    `/api/projects/${encodeURIComponent(projectId)}/prompts/latest`,
+    "读取 H3 Prompt 失败",
+  );
+}
+
+export async function lockGenerationPrompt(
+  projectId: string,
+  promptVersionId: string,
+): Promise<GenerationVersion> {
+  return requestGenerationJson<GenerationVersion>(
+    `/api/projects/${encodeURIComponent(projectId)}/prompts/${encodeURIComponent(promptVersionId)}/lock`,
+    "锁定 H3 Prompt 失败",
+    { method: "POST" },
+  );
+}
+
+export async function getGenerationRuntimeLimits(): Promise<GenerationRuntimeLimits> {
+  return requestGenerationJson<GenerationRuntimeLimits>(
+    "/api/generation/runtime-limits",
+    "读取生成数量上限失败",
+  );
+}
+
+export async function createGenerationBatch(
+  projectId: string,
+  input: GenerationBatchInput,
+): Promise<GenerationBatch> {
+  return requestGenerationJson<GenerationBatch>(
+    `/api/projects/${encodeURIComponent(projectId)}/generation-batches`,
+    "创建视频生成批次失败",
+    { method: "POST", body: JSON.stringify(input) },
+  );
+}
+
 export async function getGenerationBatch(
   batchId: string,
 ): Promise<GenerationBatch> {
   return requestApiJson<GenerationBatch>(
     `/api/generation-batches/${encodeURIComponent(batchId)}`,
     "任务批次暂不可用",
+  );
+}
+
+export async function retryGenerationTask(
+  taskId: string,
+): Promise<components["schemas"]["AcceptedResponse"]> {
+  return requestGenerationJson<components["schemas"]["AcceptedResponse"]>(
+    `/api/generation-tasks/${encodeURIComponent(taskId)}/retry`,
+    "重试生成任务失败",
+    { method: "POST" },
+  );
+}
+
+export async function getGenerationResultDownloadUrl(
+  assetId: string,
+): Promise<DownloadUrl> {
+  return requestGenerationJson<DownloadUrl>(
+    `/api/assets/${encodeURIComponent(assetId)}/download-url`,
+    "获取生成结果下载地址失败",
+    { method: "POST" },
+    CLOUD_OP_TIMEOUT_MS,
   );
 }
 
@@ -1081,6 +1184,13 @@ export function readAnalysisPayload(
   return {
     summary: analysis.summary,
     duration_seconds: analysis.duration_seconds,
+    original_script:
+      typeof analysis.original_script === "string"
+        ? analysis.original_script
+        : analysis.shots
+            .map((shot) => shot.spoken_text)
+            .filter(Boolean)
+            .join(""),
     shots: analysis.shots,
   };
 }
@@ -1247,6 +1357,49 @@ async function requestApiJson<T>(
     throw error;
   }
   return (await response.json()) as T;
+}
+
+async function requestGenerationJson<T>(
+  path: string,
+  errorPrefix: string,
+  init: RequestInit = {},
+  timeoutMs: number = REQUEST_TIMEOUT_MS,
+): Promise<T> {
+  try {
+    return await requestApiJson<T>(path, errorPrefix, init, timeoutMs);
+  } catch (error) {
+    throw generationRequestError(error, errorPrefix);
+  }
+}
+
+function generationRequestError(error: unknown, errorPrefix: string): Error {
+  const status = (error as { status?: number }).status;
+  const statusMessage =
+    status === 401
+      ? "登录已失效，请重新进入工作台"
+      : status === 403
+        ? "当前账号无权执行此操作"
+        : status === 409
+          ? "上游内容已变化，请重新确认后再试"
+          : status === 422
+            ? "生成参数无效，请检查后重试"
+            : status === 429
+              ? "请求过于频繁，请稍后重试"
+              : status !== undefined && status >= 500
+                ? "生成服务暂不可用，请稍后重试"
+                : null;
+  if (statusMessage) {
+    const mapped = new Error(statusMessage) as Error & { status?: number };
+    mapped.status = status;
+    return mapped;
+  }
+  if (error instanceof Error && error.message === "请求超时，请重试") {
+    return new Error(`${errorPrefix}：请求超时，请重试`);
+  }
+  if (error instanceof TypeError) {
+    return new Error(`${errorPrefix}：网络连接失败，请检查本地服务`);
+  }
+  return error instanceof Error ? error : new Error(errorPrefix);
 }
 
 async function responseErrorMessage(

@@ -21,6 +21,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/projects/{project_id}/scripts/latest": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Latest Project Script */
+    get: operations["read_latest_project_script_api_projects__project_id__scripts_latest_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/projects/{project_id}/prompts/compile": {
     parameters: {
       query?: never;
@@ -32,6 +49,40 @@ export interface paths {
     put?: never;
     /** Compile Project Prompt */
     post: operations["compile_project_prompt_api_projects__project_id__prompts_compile_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/projects/{project_id}/prompts/revise": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Revise Project Prompt */
+    post: operations["revise_project_prompt_api_projects__project_id__prompts_revise_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/projects/{project_id}/prompts/latest": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Latest Project Prompt */
+    get: operations["read_latest_project_prompt_api_projects__project_id__prompts_latest_get"];
+    put?: never;
+    post?: never;
     delete?: never;
     options?: never;
     head?: never;
@@ -81,6 +132,23 @@ export interface paths {
     };
     /** Read Generation Batch */
     get: operations["read_generation_batch_api_generation_batches__batch_id__get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/generation/runtime-limits": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Generation Runtime Limits */
+    get: operations["read_generation_runtime_limits_api_generation_runtime_limits_get"];
     put?: never;
     post?: never;
     delete?: never;
@@ -1162,10 +1230,16 @@ export interface components {
     BatchResult: {
       /** Id */
       id: string;
+      /** Project Id */
+      project_id: string;
+      /** Prompt Version Id */
+      prompt_version_id: string;
       /** Status */
       status: string;
       /** Quantity */
       quantity: number;
+      /** Stale */
+      stale: boolean;
       progress: components["schemas"]["BatchProgress"];
       /** Tasks */
       tasks: components["schemas"]["TaskResult"][];
@@ -1774,6 +1848,18 @@ export interface components {
        */
       fake_audio_quality: "ok" | "missing";
     };
+    /** GenerationRuntimeLimits */
+    GenerationRuntimeLimits: {
+      /**
+       * Min Quantity
+       * @default 1
+       */
+      min_quantity: number;
+      /** Max Quantity */
+      max_quantity: number;
+      /** Estimated Cost Per Task */
+      estimated_cost_per_task?: number | null;
+    };
     /** HTTPValidationError */
     HTTPValidationError: {
       /** Detail */
@@ -1977,6 +2063,13 @@ export interface components {
        * @enum {string}
        */
       resolution: "768P" | "2K";
+    };
+    /** PromptRevisionRequest */
+    PromptRevisionRequest: {
+      /** Base Prompt Version Id */
+      base_prompt_version_id: string;
+      /** Prompt Text */
+      prompt_text: string;
     };
     /** ProviderSettingsRequest */
     ProviderSettingsRequest: {
@@ -2185,6 +2278,14 @@ export interface components {
       /** Created At */
       created_at: string;
     };
+    /** VersionState */
+    VersionState: {
+      version: components["schemas"]["VersionResult"] | null;
+      /** Stale */
+      stale: boolean;
+      /** Stale Reasons */
+      stale_reasons: string[];
+    };
     /** VideoMetadata */
     VideoMetadata: {
       /** Duration Seconds */
@@ -2255,6 +2356,39 @@ export interface operations {
       };
     };
   };
+  read_latest_project_script_api_projects__project_id__scripts_latest_get: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        project_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["VersionState"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   compile_project_prompt_api_projects__project_id__prompts_compile_post: {
     parameters: {
       query?: never;
@@ -2279,6 +2413,76 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["VersionResult"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  revise_project_prompt_api_projects__project_id__prompts_revise_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        project_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["PromptRevisionRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["VersionResult"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_latest_project_prompt_api_projects__project_id__prompts_latest_get: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        project_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["VersionState"];
         };
       };
       /** @description Validation Error */
@@ -2385,6 +2589,37 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["BatchResult"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_generation_runtime_limits_api_generation_runtime_limits_get: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["GenerationRuntimeLimits"];
         };
       };
       /** @description Validation Error */

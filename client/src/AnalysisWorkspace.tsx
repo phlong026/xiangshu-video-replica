@@ -10,12 +10,14 @@ import {
   type AnalysisProvider,
   type AnalysisVersion,
   type CharacterReferenceSelection as CharacterReferenceSelectionValue,
+  type GenerationBatch,
   getLatestProjectAnalysis,
   getLatestProjectShotCards,
   type Project,
   type ProjectMainCharacter,
   readAnalysisPayload,
   readAnalysisProvider,
+  readFirstFrameSelectionPayload,
   readShotCardPayload,
   type ShotCard,
   saveShotCards,
@@ -24,6 +26,7 @@ import {
 import { CharacterReferenceSelection } from "./CharacterReferenceSelection";
 import { CharacterSelection } from "./CharacterSelection";
 import { FirstFrameSelection } from "./FirstFrameSelection";
+import { GenerationComposer } from "./GenerationComposer";
 import { ProjectWorkflowSteps } from "./ProjectWorkflowSteps";
 import { SourceFrameSelection } from "./SourceFrameSelection";
 
@@ -49,11 +52,13 @@ const SHOT_TEXT_FIELDS: Array<{
 
 export function AnalysisWorkspace({
   onAnalysisReady,
+  onBatchCreated,
   onClose,
   project,
   readOnly = false,
 }: {
   onAnalysisReady: (projectId: string) => void;
+  onBatchCreated: (batch: GenerationBatch) => void;
   onClose: () => void;
   project: Project;
   readOnly?: boolean;
@@ -62,8 +67,10 @@ export function AnalysisWorkspace({
   const [analysisProvider, setAnalysisProvider] =
     useState<AnalysisProvider | null>(null);
   const [analysisSummary, setAnalysisSummary] = useState("");
+  const [originalScript, setOriginalScript] = useState("");
   const [durationSeconds, setDurationSeconds] = useState(0);
   const [shots, setShots] = useState<ShotCard[]>([]);
+  const [shotCardVersionId, setShotCardVersionId] = useState("");
   const [error, setError] = useState("");
   const [saveMessage, setSaveMessage] = useState("");
   const [isLoading, setIsLoading] = useState(true);
@@ -78,6 +85,7 @@ export function AnalysisWorkspace({
     useState<CharacterReferenceSelectionValue | null>(null);
   const [firstFrameSelection, setFirstFrameSelection] =
     useState<AnalysisVersion | null>(null);
+  const [generationStep, setGenerationStep] = useState(7);
   const [reloadToken, setReloadToken] = useState(0);
   const [forceLoadProjectId, setForceLoadProjectId] = useState<string | null>(
     null,
@@ -108,6 +116,7 @@ export function AnalysisWorkspace({
     setSaveMessage("");
     setAnalysisProvider(null);
     setIsAnalysisMissing(false);
+    setShotCardVersionId("");
 
     async function loadWorkspace() {
       try {
@@ -124,6 +133,7 @@ export function AnalysisWorkspace({
         setIsAnalysisMissing(false);
         setAnalysisProvider(readAnalysisProvider(version));
         setAnalysisSummary(payload.summary);
+        setOriginalScript(payload.original_script);
         setDurationSeconds(payload.duration_seconds);
         setShots(payload.shots);
         const savedShotCardVersion = await getLatestProjectShotCards(
@@ -135,6 +145,7 @@ export function AnalysisWorkspace({
         const savedShotCards = readShotCardPayload(savedShotCardVersion);
         if (savedShotCards?.source_analysis_version_id === version.id) {
           setShots(savedShotCards.shots);
+          setShotCardVersionId(savedShotCardVersion.id);
         }
       } catch (requestError) {
         if (isActive) {
@@ -177,6 +188,7 @@ export function AnalysisWorkspace({
     setSourceFrameSelection(null);
     setCharacterReferenceSelection(null);
     setFirstFrameSelection(null);
+    setGenerationStep(7);
     characterSelectionVersionIdRef.current = null;
     sourceFrameSelectionIdRef.current = null;
     characterReferenceSelectionIdRef.current = null;
@@ -238,6 +250,9 @@ export function AnalysisWorkspace({
   );
 
   const legacyCharacterSelected = Boolean(characterSelection?.character_id);
+  const firstFramePayload = firstFrameSelection
+    ? readFirstFrameSelectionPayload(firstFrameSelection)
+    : null;
 
   const workflowStep = !analysisId
     ? 2
@@ -249,7 +264,7 @@ export function AnalysisWorkspace({
           ? 5
           : !firstFrameSelection
             ? 6
-            : 7;
+            : generationStep;
 
   function reloadWorkspace() {
     reloadTokenRef.current += 1;
@@ -314,6 +329,7 @@ export function AnalysisWorkspace({
     setSaveMessage("");
     try {
       const savedVersion = await saveShotCards(analysisId, shots);
+      setShotCardVersionId(savedVersion.id);
       setSaveMessage(`镜头卡片已保存为版本 #${savedVersion.version_number}。`);
     } catch (requestError) {
       setError(
@@ -485,6 +501,28 @@ export function AnalysisWorkspace({
                   {isSaving ? "正在保存" : "保存镜头卡片"}
                 </button>
               )}
+              {firstFramePayload && shotCardVersionId ? (
+                <GenerationComposer
+                  analysisVersionId={analysisId}
+                  characterVersionId={
+                    characterSelection?.character_version_id ?? null
+                  }
+                  durationSeconds={durationSeconds}
+                  firstFrameAssetId={firstFramePayload.first_frame_asset_id}
+                  firstFrameSelectionVersionId={firstFrameSelection?.id ?? ""}
+                  onBatchCreated={onBatchCreated}
+                  onWorkflowStepChange={setGenerationStep}
+                  originalScript={originalScript}
+                  projectId={project.id}
+                  readOnly={readOnly}
+                  referenceSelectionId={characterReferenceSelection?.id ?? null}
+                  shotCardVersionId={shotCardVersionId}
+                />
+              ) : firstFramePayload ? (
+                <p className="workflow-gate-note">
+                  请先保存当前镜头卡片，再确认口播稿并编译 Prompt。
+                </p>
+              ) : null}
             </div>
             <aside className="analysis-sidebar" aria-label="当前人物设定">
               <CharacterSelection

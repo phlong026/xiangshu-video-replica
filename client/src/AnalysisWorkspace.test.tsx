@@ -70,6 +70,11 @@ const firstFrameSelection = {
   ...sourceSelection,
   id: "first-frame-selection-1",
   kind: "first_frame_selection",
+  asset_id: "first-frame-1",
+  payload: {
+    first_frame_candidates_version_id: "first-frame-candidates-1",
+    first_frame_asset_id: "first-frame-1",
+  },
 };
 
 vi.mock("./CharacterSelection", () => ({
@@ -145,11 +150,60 @@ vi.mock("./FirstFrameSelection", () => ({
   ),
 }));
 
+vi.mock("./GenerationComposer", () => ({
+  GenerationComposer: ({
+    firstFrameAssetId,
+    onBatchCreated,
+    onWorkflowStepChange,
+    originalScript,
+    shotCardVersionId,
+  }: generationComposerMockProps) => (
+    <div>
+      <span>
+        生成输入：{shotCardVersionId}/{firstFrameAssetId}/{originalScript}
+      </span>
+      <button onClick={() => onWorkflowStepChange?.(9)} type="button">
+        模拟锁定 Prompt
+      </button>
+      <button
+        onClick={() =>
+          onBatchCreated?.({
+            id: "batch-1",
+            project_id: "project-1",
+            prompt_version_id: "prompt-1",
+            status: "QUEUED",
+            quantity: 1,
+            stale: false,
+            progress: {
+              total_count: 1,
+              terminal_count: 0,
+              progress_percent: 0,
+              counts: {},
+            },
+            tasks: [],
+          })
+        }
+        type="button"
+      >
+        模拟创建批次
+      </button>
+    </div>
+  ),
+}));
+
 type apiMockProps = {
   legacyCharacterSelected?: boolean;
   onSelectionChange?: (value: unknown) => void;
   onVersionChange?: (value: unknown) => void;
   referenceSelection?: unknown;
+};
+
+type generationComposerMockProps = {
+  firstFrameAssetId?: string;
+  onBatchCreated?: (value: unknown) => void;
+  onWorkflowStepChange?: (step: number) => void;
+  originalScript?: string;
+  shotCardVersionId?: string;
 };
 
 describe("AnalysisWorkspace workflow gates", () => {
@@ -162,7 +216,12 @@ describe("AnalysisWorkspace workflow gates", () => {
       kind: "analysis",
       version_number: 1,
       payload: {
-        analysis: { summary: "拆解完成", duration_seconds: 8, shots: [] },
+        analysis: {
+          summary: "拆解完成",
+          duration_seconds: 8,
+          original_script: "原始口播稿",
+          shots: [],
+        },
       },
       created_by_user_id: "employee_1",
       created_at: "2030-01-01T00:00:00Z",
@@ -174,6 +233,7 @@ describe("AnalysisWorkspace workflow gates", () => {
     render(
       <AnalysisWorkspace
         onAnalysisReady={vi.fn()}
+        onBatchCreated={vi.fn()}
         onClose={vi.fn()}
         project={{
           id: "project-1",
@@ -242,6 +302,7 @@ describe("AnalysisWorkspace workflow gates", () => {
     render(
       <AnalysisWorkspace
         onAnalysisReady={vi.fn()}
+        onBatchCreated={vi.fn()}
         onClose={vi.fn()}
         project={{
           id: "project-1",
@@ -274,6 +335,7 @@ describe("AnalysisWorkspace workflow gates", () => {
     render(
       <AnalysisWorkspace
         onAnalysisReady={vi.fn()}
+        onBatchCreated={vi.fn()}
         onClose={vi.fn()}
         project={{
           id: "project-1",
@@ -296,6 +358,60 @@ describe("AnalysisWorkspace workflow gates", () => {
     expect(screen.getByTitle("确认置换首帧")).toHaveAttribute(
       "aria-current",
       "step",
+    );
+  });
+
+  it("opens generation only with a saved shot card and forwards the created batch", async () => {
+    const onBatchCreated = vi.fn();
+    vi.mocked(api.getLatestProjectShotCards).mockResolvedValue({
+      id: "shot-card-2",
+      project_id: "project-1",
+      asset_id: null,
+      kind: "shot_card",
+      version_number: 2,
+      payload: {
+        source_analysis_version_id: "analysis-1",
+        duration_seconds: 8,
+        shots: [],
+      },
+      created_by_user_id: "employee_1",
+      created_at: "2030-01-01T00:00:00Z",
+    });
+
+    render(
+      <AnalysisWorkspace
+        onAnalysisReady={vi.fn()}
+        onBatchCreated={onBatchCreated}
+        onClose={vi.fn()}
+        project={{
+          id: "project-1",
+          owner_user_id: "employee_1",
+          name: "生成闭环测试",
+          status: "REFERENCE_READY",
+          reference_asset_id: "reference-video-1",
+          reference_upload_status: "READY",
+          analysis_status: "READY",
+        }}
+      />,
+    );
+
+    expect(await screen.findByText("拆解完成")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "完成角色选择" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成源画面" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成人物参考" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成置换首帧" }));
+
+    expect(
+      screen.getByText("生成输入：shot-card-2/first-frame-1/原始口播稿"),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "模拟锁定 Prompt" }));
+    expect(screen.getByTitle("设置数量并生成")).toHaveAttribute(
+      "aria-current",
+      "step",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "模拟创建批次" }));
+    expect(onBatchCreated).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "batch-1" }),
     );
   });
 });
