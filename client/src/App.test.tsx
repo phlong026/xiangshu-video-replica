@@ -1612,6 +1612,10 @@ describe("App", () => {
     expect(
       screen.getByText("尚未保存：将切换为阿里云 OSS"),
     ).toBeInTheDocument();
+    await act(async () => Promise.resolve());
+    expect(
+      screen.getByText("尚未保存：将切换为阿里云 OSS"),
+    ).toBeInTheDocument();
     expect(
       screen.getByText(
         /可能产生云存储请求费用；该操作不会提交 H3、视频或图片生成任务/,

@@ -1,4 +1,4 @@
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 
 import {
   type DiagnosticProviderResult,
@@ -314,10 +314,17 @@ function RuntimeForm({
 }) {
   const [values, setValues] = useState(runtime);
   const [status, setStatus] = useState("");
+  const previousRuntimeRef = useRef(runtime);
   const isStorageChangePending =
     values.active_storage_provider !== runtime.active_storage_provider;
 
-  useEffect(() => setValues(runtime), [runtime]);
+  useEffect(() => {
+    if (previousRuntimeRef.current === runtime) {
+      return;
+    }
+    previousRuntimeRef.current = runtime;
+    setValues(runtime);
+  }, [runtime]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
