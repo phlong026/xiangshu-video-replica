@@ -412,6 +412,7 @@ def run_gate1(
     playwright_arguments: list[str] | None = None,
 ) -> int:
     paths = prepare_gate1_run(output_root, run_id=run_id)
+    normalized_playwright_arguments = list(playwright_arguments or [])
     commit_sha = "unknown"
     status = "failed"
     exit_code = 1
@@ -455,7 +456,12 @@ def run_gate1(
                 os.environ["VIDEO_REPLICA_SETTINGS_KEY"] = previous_key
 
         media = generate_test_media(paths)
-        _write_run_metadata(paths, commit_sha=commit_sha, media=media)
+        _write_run_metadata(
+            paths,
+            commit_sha=commit_sha,
+            media=media,
+            playwright_arguments=normalized_playwright_arguments,
+        )
 
         with ManagedProcesses() as processes:
             api_restart_request_path = paths.runtime_dir / "api-restart-request.json"
@@ -541,7 +547,7 @@ def run_gate1(
                     "test",
                     "--config",
                     "e2e/gate1/playwright.config.mjs",
-                    *(playwright_arguments or []),
+                    *normalized_playwright_arguments,
                 ]
                 playwright_process = processes.start(
                     name="playwright",
@@ -551,7 +557,14 @@ def run_gate1(
                     log_path=paths.logs_dir / "playwright.log",
                 )
                 exit_code = playwright_process.wait()
-                status = "passed" if exit_code == 0 else "failed"
+                if exit_code == 0:
+                    completed_commit_sha = _git_commit(repository_root)
+                    if completed_commit_sha != commit_sha:
+                        raise RuntimeError("Gate 1 Git commit changed while the suite was running")
+                status = _gate_status(
+                    exit_code,
+                    playwright_arguments=normalized_playwright_arguments,
+                )
             finally:
                 api_controller.close()
     except BaseException:
@@ -626,6 +639,17 @@ def _require_command(command: str) -> None:
 
 
 def _git_commit(repository_root: Path) -> str:
+    status = subprocess.run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        cwd=repository_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    if status.stdout.strip():
+        raise RuntimeError(
+            "Gate 1 requires a clean Git worktree; commit or stash source changes first"
+        )
     completed = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=repository_root,
@@ -641,6 +665,7 @@ def _write_run_metadata(
     *,
     commit_sha: str,
     media: Mapping[str, Path],
+    playwright_arguments: list[str],
 ) -> None:
     metadata = {
         "schema_version": 1,
@@ -649,6 +674,8 @@ def _write_run_metadata(
         "started_at": datetime.now(UTC).isoformat(),
         "runtime": "React/Vite + FastAPI + one-shot Worker + SQLite + LocalStorageAdapter",
         "gate_scope": "macOS desktop FakeProvider E2E; not Windows WebView2 acceptance",
+        "formal_run": not playwright_arguments,
+        "playwright_arguments": playwright_arguments,
         "media": {name: path.relative_to(paths.run_dir).as_posix() for name, path in media.items()},
     }
     (paths.run_dir / "run.json").write_text(
@@ -668,6 +695,12 @@ def _default_run_id() -> str:
 
 def normalize_playwright_arguments(arguments: list[str]) -> list[str]:
     return arguments[1:] if arguments[:1] == ["--"] else arguments
+
+
+def _gate_status(exit_code: int, *, playwright_arguments: list[str]) -> str:
+    if exit_code != 0:
+        return "failed"
+    return "passed" if not playwright_arguments else "diagnostic_passed"
 
 
 def main() -> None:

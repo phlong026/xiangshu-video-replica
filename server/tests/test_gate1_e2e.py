@@ -288,6 +288,68 @@ def test_run_gate1_records_git_metadata_failure(
     )
 
 
+@pytest.mark.parametrize("change_kind", ["tracked", "untracked"])
+def test_git_commit_rejects_a_dirty_worktree(tmp_path: Path, change_kind: str) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    tracked_file = tmp_path / "tracked.txt"
+    tracked_file.write_text("committed\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Gate 1 Test",
+            "-c",
+            "user.email=gate1@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "initial",
+        ],
+        cwd=tmp_path,
+        check=True,
+    )
+    expected_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert gate1_e2e._git_commit(tmp_path) == expected_commit
+
+    if change_kind == "tracked":
+        tracked_file.write_text("modified\n", encoding="utf-8")
+    else:
+        (tmp_path / "untracked.txt").write_text("uncommitted\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="clean Git worktree"):
+        gate1_e2e._git_commit(tmp_path)
+
+
+def test_gate_status_reserves_passed_for_the_unfiltered_suite() -> None:
+    assert gate1_e2e._gate_status(0, playwright_arguments=[]) == "passed"
+    assert (
+        gate1_e2e._gate_status(0, playwright_arguments=["--grep", "@smoke"]) == "diagnostic_passed"
+    )
+    assert gate1_e2e._gate_status(1, playwright_arguments=[]) == "failed"
+
+
+def test_run_metadata_records_whether_the_suite_is_filtered(tmp_path: Path) -> None:
+    paths = prepare_gate1_run(tmp_path, run_id="filtered-run")
+
+    gate1_e2e._write_run_metadata(
+        paths,
+        commit_sha="abc123",
+        media={},
+        playwright_arguments=["--grep", "@smoke"],
+    )
+
+    metadata = json.loads((paths.run_dir / "run.json").read_text(encoding="utf-8"))
+    assert metadata["formal_run"] is False
+    assert metadata["playwright_arguments"] == ["--grep", "@smoke"]
+
+
 def test_playwright_argument_separator_is_not_forwarded() -> None:
     assert gate1_e2e.normalize_playwright_arguments(["--", "--grep", "@positive"]) == [
         "--grep",

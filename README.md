@@ -71,7 +71,7 @@ npm run tauri:build
 npm run test:gate1
 ```
 
-该命令从全新 Alembic 数据库启动隔离的 FastAPI 与 Vite，使用系统 Chrome 执行 Playwright，并在退出时清理本次 API/Vite 进程组。运行日志、临时媒体、截图、trace、录屏、下载产物和 SHA256 清单写入 `output/playwright/gate1/<run-id>/`，该目录不进入版本控制。它只证明 macOS 本地 FakeProvider 桌面链路，不替代 Windows WebView2、真实 Provider、云存储或生产灰度验收。
+该命令要求开始和结束时均处于同一提交的干净 Git 工作树，从全新 Alembic 数据库启动隔离的 FastAPI 与 Vite，使用系统 Chrome 执行 Playwright，并在退出时清理本次 API/Vite 进程组。运行日志、临时媒体、截图、trace、录屏、下载产物和 SHA256 清单写入 `output/playwright/gate1/<run-id>/`，该目录不进入版本控制。只有不附加 Playwright 过滤参数的完整套件会在 manifest 中标记为 `passed`；`--grep` 等局部调试运行会记录参数并标记为 `diagnostic_passed`，不能作为正式 Gate 1 证据。它只证明 macOS 本地 FakeProvider 桌面链路，不替代 Windows WebView2、真实 Provider、云存储或生产灰度验收。
 
 Windows x64 内测安装包使用 Tauri NSIS：
 
