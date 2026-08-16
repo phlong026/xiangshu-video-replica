@@ -210,10 +210,7 @@ export function AnalysisWorkspace({
     [],
   );
 
-  const legacyCharacterSelected = Boolean(
-    characterSelection?.character_id &&
-      !characterSelection.character_version_id,
-  );
+  const legacyCharacterSelected = Boolean(characterSelection?.character_id);
 
   const workflowStep = !analysisId
     ? 2
@@ -394,7 +391,8 @@ export function AnalysisWorkspace({
                   请先在右侧选择角色版本，再确认源画面。
                 </p>
               )}
-              {characterSelection?.character_version_id &&
+              {!legacyCharacterSelected &&
+              characterSelection?.character_version_id &&
               sourceFrameSelection ? (
                 <CharacterReferenceSelection
                   characterSelection={characterSelection}

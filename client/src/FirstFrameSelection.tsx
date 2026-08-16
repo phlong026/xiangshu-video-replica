@@ -53,6 +53,7 @@ export function FirstFrameSelection({
       loadRequestId.current = requestId;
       const isCurrentRequest = () => requestId === loadRequestId.current;
       setIsLoading(true);
+      setIsSubmitting(false);
       setError("");
       try {
         const [latestState, selection, versions] = await Promise.all([
@@ -185,6 +186,7 @@ export function FirstFrameSelection({
       setError("候选数量必须是 1–3 的整数。");
       return;
     }
+    const requestId = loadRequestId.current;
     setIsSubmitting(true);
     setError("");
     setStatus("");
@@ -201,16 +203,24 @@ export function FirstFrameSelection({
         quantity,
         ...binding,
       });
+      if (requestId !== loadRequestId.current) {
+        return;
+      }
       setStatus("候选首帧已更新，请查看后手动确认一张。");
       await load(generated);
     } catch (requestError) {
+      if (requestId !== loadRequestId.current) {
+        return;
+      }
       setError(
         requestError instanceof Error
           ? requestError.message
           : "生成人物置换首帧失败。",
       );
     } finally {
-      setIsSubmitting(false);
+      if (requestId === loadRequestId.current) {
+        setIsSubmitting(false);
+      }
     }
   }
 
@@ -222,10 +232,14 @@ export function FirstFrameSelection({
       setError("请先加载并查看最新候选首帧预览，再进行确认。");
       return;
     }
+    const requestId = loadRequestId.current;
     setIsSubmitting(true);
     setError("");
     try {
       const selection = await confirmFirstFrame(projectId, selectedAssetId);
+      if (requestId !== loadRequestId.current) {
+        return;
+      }
       const selectedIndex = payload?.candidates.findIndex(
         (candidate) => candidate.asset_id === selectedAssetId,
       );
@@ -234,11 +248,16 @@ export function FirstFrameSelection({
       );
       onSelectionChange?.(selection);
     } catch (requestError) {
+      if (requestId !== loadRequestId.current) {
+        return;
+      }
       setError(
         requestError instanceof Error ? requestError.message : "确认首帧失败。",
       );
     } finally {
-      setIsSubmitting(false);
+      if (requestId === loadRequestId.current) {
+        setIsSubmitting(false);
+      }
     }
   }
 

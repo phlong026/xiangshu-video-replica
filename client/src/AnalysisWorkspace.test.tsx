@@ -24,7 +24,7 @@ const characterSelection = {
 const legacyCharacterSelection = {
   project_id: "project-1",
   character_id: "legacy-character-1",
-  character_version_id: null,
+  character_version_id: "legacy-character-version-1",
   version_id: "main-character-legacy-1",
   version_number: 1,
   character_snapshot: {

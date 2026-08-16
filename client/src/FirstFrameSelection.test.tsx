@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -314,5 +320,56 @@ describe("FirstFrameSelection", () => {
       await screen.findByText("正在查看历史版本；仅最新候选可确认用于 H3。"),
     ).toBeInTheDocument();
     expect(onSelectionChange).toHaveBeenLastCalledWith(confirmedSelection);
+  });
+
+  it("ignores a confirmation response after the reference input changes", async () => {
+    const confirmedSelection = {
+      ...candidatesVersion,
+      id: "first-frame-selection-1",
+      kind: "first_frame_selection",
+      payload: {
+        first_frame_candidates_version_id: candidatesVersion.id,
+        first_frame_asset_id: "first-1",
+      },
+    };
+    let resolveConfirmation:
+      | ((selection: typeof confirmedSelection) => void)
+      | undefined;
+    const pendingConfirmation = new Promise<typeof confirmedSelection>(
+      (resolve) => {
+        resolveConfirmation = resolve;
+      },
+    );
+    vi.mocked(confirmFirstFrame).mockReturnValue(pendingConfirmation);
+    const onSelectionChange = vi.fn();
+    const { rerender } = render(
+      <FirstFrameSelection
+        onSelectionChange={onSelectionChange}
+        projectId="project-1"
+        referenceSelection={referenceSelection}
+      />,
+    );
+
+    await screen.findByAltText("首帧候选 1");
+    fireEvent.click(screen.getByRole("radio", { name: /首帧候选 1/ }));
+    fireEvent.click(screen.getByRole("button", { name: "确认用于 H3 的首帧" }));
+    await waitFor(() => expect(confirmFirstFrame).toHaveBeenCalledOnce());
+
+    rerender(
+      <FirstFrameSelection
+        onSelectionChange={onSelectionChange}
+        projectId="project-1"
+        referenceSelection={{
+          ...referenceSelection,
+          id: "reference-selection-2",
+        }}
+      />,
+    );
+    await act(async () => {
+      resolveConfirmation?.(confirmedSelection);
+      await pendingConfirmation;
+    });
+
+    expect(onSelectionChange).not.toHaveBeenCalledWith(confirmedSelection);
   });
 });
