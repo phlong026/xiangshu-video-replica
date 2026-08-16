@@ -123,6 +123,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/generation-batches": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List Generation Batch Records */
+    get: operations["list_generation_batch_records_api_generation_batches_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/generation-batches/{batch_id}": {
     parameters: {
       query?: never;
@@ -1817,6 +1834,47 @@ export interface components {
       /** Character Reference Selection Id */
       character_reference_selection_id?: string | null;
     };
+    /** GenerationBatchListItem */
+    GenerationBatchListItem: {
+      /** Id */
+      id: string;
+      /** Project Id */
+      project_id: string;
+      /** Project Name */
+      project_name: string;
+      /** Created By User Id */
+      created_by_user_id: string;
+      /** Created By Display Name */
+      created_by_display_name: string;
+      /** Prompt Version Id */
+      prompt_version_id: string;
+      /** Status */
+      status: string;
+      /** Quantity */
+      quantity: number;
+      /** Created At */
+      created_at: string;
+      /** Updated At */
+      updated_at: string;
+      progress: components["schemas"]["BatchProgress"];
+      /** Total Estimated Cost */
+      total_estimated_cost: number | null;
+      /** Total Actual Cost */
+      total_actual_cost: number | null;
+      /** Needs Attention Count */
+      needs_attention_count: number;
+      /** Has Results */
+      has_results: boolean;
+      /** Tasks */
+      tasks: components["schemas"]["TaskSummary"][];
+    };
+    /** GenerationBatchListPage */
+    GenerationBatchListPage: {
+      /** Items */
+      items: components["schemas"]["GenerationBatchListItem"][];
+      /** Next Cursor */
+      next_cursor: string | null;
+    };
     /** GenerationBatchRequest */
     GenerationBatchRequest: {
       /** Quantity */
@@ -2201,8 +2259,79 @@ export interface components {
       quality_issue_codes: string[];
       /** Result Asset Id */
       result_asset_id: string | null;
+      /** Stage */
+      stage: string;
+      /** Provider */
+      provider: string;
+      /** Model */
+      model: string;
+      /** Provider Task Id Tail */
+      provider_task_id_tail: string | null;
+      /** Attempt */
+      attempt: number;
+      /** Archive Retry Count */
+      archive_retry_count: number;
+      /** Estimated Cost */
+      estimated_cost: number | null;
+      /** Actual Cost */
+      actual_cost: number | null;
+      /** Error Code */
+      error_code: string | null;
+      /** Error Message Redacted */
+      error_message_redacted: string | null;
+      /** Submitted At */
+      submitted_at: string | null;
+      /** Started At */
+      started_at: string | null;
+      /** Completed At */
+      completed_at: string | null;
+      /** Duration Seconds */
+      duration_seconds: number | null;
       /** Prompt Snapshot */
       prompt_snapshot: Record<string, never> | null;
+    };
+    /** TaskSummary */
+    TaskSummary: {
+      /** Id */
+      id: string;
+      /** Status */
+      status: string;
+      /** Archive Status */
+      archive_status: string;
+      /** Quality Status */
+      quality_status: string;
+      /** Quality Issue Codes */
+      quality_issue_codes: string[];
+      /** Result Asset Id */
+      result_asset_id: string | null;
+      /** Stage */
+      stage: string;
+      /** Provider */
+      provider: string;
+      /** Model */
+      model: string;
+      /** Provider Task Id Tail */
+      provider_task_id_tail: string | null;
+      /** Attempt */
+      attempt: number;
+      /** Archive Retry Count */
+      archive_retry_count: number;
+      /** Estimated Cost */
+      estimated_cost: number | null;
+      /** Actual Cost */
+      actual_cost: number | null;
+      /** Error Code */
+      error_code: string | null;
+      /** Error Message Redacted */
+      error_message_redacted: string | null;
+      /** Submitted At */
+      submitted_at: string | null;
+      /** Started At */
+      started_at: string | null;
+      /** Completed At */
+      completed_at: string | null;
+      /** Duration Seconds */
+      duration_seconds: number | null;
     };
     /** UpdateShotCardsRequest */
     UpdateShotCardsRequest: {
@@ -2556,6 +2685,52 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["BatchResult"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  list_generation_batch_records_api_generation_batches_get: {
+    parameters: {
+      query?: {
+        project_id?: string | null;
+        created_by_user_id?: string | null;
+        status?:
+          | (
+              | "PENDING"
+              | "QUEUED"
+              | "NEEDS_ATTENTION"
+              | "SUCCEEDED"
+              | "COMPLETED_WITH_FAILURES"
+            )
+          | null;
+        needs_attention?: boolean | null;
+        limit?: number;
+        cursor?: string | null;
+      };
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["GenerationBatchListPage"];
         };
       };
       /** @description Validation Error */

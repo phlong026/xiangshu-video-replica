@@ -438,6 +438,75 @@ def insert_next_shot_card_version(
         conn.commit()
 
 
+def insert_generation_history(
+    conn: sqlite3.Connection,
+    *,
+    batch_id: str,
+    project_id: str = "project_owned",
+    created_by_user_id: str = "employee_1",
+    batch_status: str = "QUEUED",
+    task_status: str = "PENDING",
+    archive_status: str = "PENDING",
+    quality_status: str = "PENDING",
+    quality_issue_codes: list[str] | None = None,
+    provider_task_id: str | None = None,
+    result_asset_id: str | None = None,
+    created_at: str = "2026-08-16 10:00:00",
+    submitted_at: str | None = None,
+    started_at: str | None = None,
+    completed_at: str | None = None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO generation_batches (
+            id, project_id, created_by_user_id, idempotency_key,
+            request_hash, request_snapshot_json, status, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            batch_id,
+            project_id,
+            created_by_user_id,
+            f"key-{batch_id}",
+            f"hash-{batch_id}",
+            json.dumps({"prompt_version_id": f"prompt-{batch_id}"}, sort_keys=True),
+            batch_status,
+            created_at,
+            created_at,
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO generation_tasks (
+            id, batch_id, generation_mode, provider, model, provider_task_id,
+            status, attempt, archive_status, archive_retry_count,
+            quality_status, quality_issue_codes, error_code,
+            error_message_redacted, result_asset_id, estimated_cost, actual_cost,
+            submitted_at, started_at, completed_at, created_at, updated_at
+        )
+        VALUES (?, ?, 'I2V', 'fake_h3', 'MiniMax-H3', ?, ?, 2, ?, 1, ?, ?,
+                'SAFE_ERROR', 'A redacted failure summary.', ?, 1.25, 1.5,
+                ?, ?, ?, ?, ?)
+        """,
+        (
+            f"{batch_id}-task",
+            batch_id,
+            provider_task_id,
+            task_status,
+            archive_status,
+            quality_status,
+            json.dumps(quality_issue_codes or []),
+            result_asset_id,
+            submitted_at,
+            started_at,
+            completed_at,
+            created_at,
+            created_at,
+        ),
+    )
+
+
 def test_script_maps_spoken_text_to_shots_without_deleting_user_text(client: TestClient) -> None:
     blank = client.post(
         "/api/projects/project_owned/scripts",
@@ -1233,6 +1302,247 @@ def test_generation_batch_create_route_is_unique_and_returns_batch_result(
     assert payload["status"] == "QUEUED"
     assert payload["progress"]["total_count"] == 1
     assert len(payload["tasks"]) == 1
+
+
+def test_generation_batch_list_paginates_and_returns_safe_task_summaries(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    with connect_database(db_path) as conn:
+        insert_generation_history(conn, batch_id="batch-history-01")
+        insert_generation_history(
+            conn,
+            batch_id="batch-history-02",
+            provider_task_id="pt-123",
+        )
+        insert_generation_history(
+            conn,
+            batch_id="batch-history-03",
+            batch_status="NEEDS_ATTENTION",
+            task_status="SUCCEEDED",
+            archive_status="ARCHIVE_FAILED",
+            quality_status="AUDIO_QUALITY_FAILED",
+            quality_issue_codes=["AUDIO_QUALITY_FAILED"],
+            provider_task_id="provider-sensitive-1234567890",
+            result_asset_id="first_frame_owned",
+            submitted_at="2026-08-16 09:59:55",
+            started_at="2026-08-16 10:00:00",
+            completed_at="2026-08-16 10:00:05",
+        )
+        insert_generation_history(
+            conn,
+            batch_id="batch-other-01",
+            project_id="project_other",
+            created_by_user_id="employee_2",
+        )
+        conn.commit()
+
+    first_page = client.get(
+        "/api/generation-batches?limit=2",
+        headers=auth_headers("employee_1"),
+    )
+
+    assert first_page.status_code == 200
+    payload = first_page.json()
+    assert [item["id"] for item in payload["items"]] == [
+        "batch-history-03",
+        "batch-history-02",
+    ]
+    assert payload["next_cursor"]
+    rich_batch = payload["items"][0]
+    assert rich_batch["project_name"] == "Owned Project"
+    assert rich_batch["created_by_display_name"] == "Employee One"
+    assert rich_batch["prompt_version_id"] == "prompt-batch-history-03"
+    assert rich_batch["needs_attention_count"] == 1
+    assert rich_batch["has_results"] is True
+    assert rich_batch["total_estimated_cost"] == 1.25
+    assert rich_batch["total_actual_cost"] == 1.5
+    task = rich_batch["tasks"][0]
+    assert task["stage"] == "ARCHIVE_FAILED"
+    assert task["provider_task_id_tail"] == "34567890"
+    assert task["attempt"] == 2
+    assert task["archive_retry_count"] == 1
+    assert task["duration_seconds"] == 5.0
+    assert task["quality_status"] == "AUDIO_QUALITY_FAILED"
+    assert task["quality_issue_codes"] == ["AUDIO_QUALITY_FAILED"]
+    assert task["error_message_redacted"] == "A redacted failure summary."
+    assert "provider_task_id" not in task
+    assert "provider_result_url" not in task
+    assert "prompt_snapshot" not in task
+    assert "download_url" not in task
+    assert payload["items"][1]["tasks"][0]["provider_task_id_tail"] is None
+
+    second_page = client.get(
+        "/api/generation-batches",
+        params={"limit": 2, "cursor": payload["next_cursor"]},
+        headers=auth_headers("employee_1"),
+    )
+
+    assert second_page.status_code == 200
+    assert [item["id"] for item in second_page.json()["items"]] == ["batch-history-01"]
+    assert second_page.json()["next_cursor"] is None
+
+    mismatched_cursor = client.get(
+        "/api/generation-batches",
+        params={
+            "limit": 2,
+            "cursor": payload["next_cursor"],
+            "needs_attention": "true",
+        },
+        headers=auth_headers("employee_1"),
+    )
+    invalid_cursor = client.get(
+        "/api/generation-batches?cursor=not-a-cursor",
+        headers=auth_headers("employee_1"),
+    )
+
+    assert mismatched_cursor.status_code == 400
+    assert mismatched_cursor.json()["detail"]["code"] == "CURSOR_FILTER_MISMATCH"
+    assert invalid_cursor.status_code == 400
+    assert invalid_cursor.json()["detail"]["code"] == "INVALID_CURSOR"
+
+
+def test_generation_batch_list_filters_and_enforces_project_scope(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    with connect_database(db_path) as conn:
+        insert_generation_history(
+            conn,
+            batch_id="batch-owned-normal",
+            created_by_user_id="admin_1",
+        )
+        insert_generation_history(
+            conn,
+            batch_id="batch-owned-uncertain",
+            batch_status="NEEDS_ATTENTION",
+            task_status="SUBMISSION_UNCERTAIN",
+        )
+        insert_generation_history(
+            conn,
+            batch_id="batch-owned-quality-status-only",
+            batch_status="NEEDS_ATTENTION",
+            task_status="SUCCEEDED",
+            archive_status="ARCHIVED",
+            quality_status="AUDIO_QUALITY_FAILED",
+        )
+        insert_generation_history(
+            conn,
+            batch_id="batch-other-normal",
+            project_id="project_other",
+            created_by_user_id="employee_2",
+        )
+        conn.commit()
+
+    employee = client.get(
+        "/api/generation-batches",
+        headers=auth_headers("employee_1"),
+    )
+    forbidden_project = client.get(
+        "/api/generation-batches?project_id=project_other",
+        headers=auth_headers("employee_1"),
+    )
+    attention = client.get(
+        "/api/generation-batches?needs_attention=true",
+        headers=auth_headers("employee_1"),
+    )
+    normal = client.get(
+        "/api/generation-batches?needs_attention=false",
+        headers=auth_headers("employee_1"),
+    )
+    by_creator = client.get(
+        "/api/generation-batches?created_by_user_id=admin_1",
+        headers=auth_headers("employee_1"),
+    )
+    by_status = client.get(
+        "/api/generation-batches?status=NEEDS_ATTENTION",
+        headers=auth_headers("employee_1"),
+    )
+    admin = client.get("/api/generation-batches", headers=auth_headers("admin_1"))
+    auditor = client.get("/api/generation-batches", headers=auth_headers("auditor_1"))
+
+    assert employee.status_code == 200
+    assert {item["project_id"] for item in employee.json()["items"]} == {"project_owned"}
+    assert {item["id"] for item in employee.json()["items"]} == {
+        "batch-owned-normal",
+        "batch-owned-quality-status-only",
+        "batch-owned-uncertain",
+    }
+    assert forbidden_project.status_code == 403
+    assert forbidden_project.json()["detail"]["code"] == "PROJECT_FORBIDDEN"
+    assert [item["id"] for item in attention.json()["items"]] == [
+        "batch-owned-uncertain",
+        "batch-owned-quality-status-only",
+    ]
+    quality_status_only = next(
+        item
+        for item in attention.json()["items"]
+        if item["id"] == "batch-owned-quality-status-only"
+    )
+    assert quality_status_only["needs_attention_count"] == 1
+    assert quality_status_only["tasks"][0]["stage"] == "QUALITY_FAILED"
+    assert [item["id"] for item in normal.json()["items"]] == ["batch-owned-normal"]
+    assert [item["id"] for item in by_creator.json()["items"]] == ["batch-owned-normal"]
+    assert [item["id"] for item in by_status.json()["items"]] == [
+        "batch-owned-uncertain",
+        "batch-owned-quality-status-only",
+    ]
+    assert {item["project_id"] for item in admin.json()["items"]} == {
+        "project_owned",
+        "project_other",
+    }
+    assert {item["project_id"] for item in auditor.json()["items"]} == {
+        "project_owned",
+        "project_other",
+    }
+
+
+def test_generation_batch_list_fetches_all_page_tasks_in_one_query(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    with connect_database(db_path) as conn:
+        for index in range(25):
+            insert_generation_history(
+                conn,
+                batch_id=f"batch-query-{index:02d}",
+                created_at=f"2026-08-16 10:{index:02d}:00",
+            )
+        conn.commit()
+
+    statements: list[str] = []
+    original_override = app.dependency_overrides[get_database]
+
+    def traced_database_override() -> Iterator[sqlite3.Connection]:
+        conn = connect_database(db_path)
+        conn.set_trace_callback(statements.append)
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    app.dependency_overrides[get_database] = traced_database_override
+    try:
+        response = client.get(
+            "/api/generation-batches?limit=20",
+            headers=auth_headers("employee_1"),
+        )
+    finally:
+        app.dependency_overrides[get_database] = original_override
+
+    assert response.status_code == 200
+    assert len(response.json()["items"]) == 20
+    normalized = [" ".join(statement.upper().split()) for statement in statements]
+    batch_queries = [
+        statement for statement in normalized if "FROM GENERATION_BATCHES AS BATCH" in statement
+    ]
+    page_task_queries = [
+        statement
+        for statement in normalized
+        if "FROM GENERATION_TASKS AS TASK" in statement and "TASK.BATCH_ID IN (" in statement
+    ]
+    assert len(batch_queries) == 1
+    assert len(page_task_queries) == 1
 
 
 def expanded_api_routes() -> list[APIRoute]:

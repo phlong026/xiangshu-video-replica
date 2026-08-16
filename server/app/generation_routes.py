@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.auth import AuthenticatedUser, Database
 from app.generation import (
     BatchResult,
+    BatchStatusFilter,
     FakeH3Provider,
+    GenerationBatchListPage,
     GenerationBatchRequest,
     GenerationRuntimeLimits,
     H3Provider,
@@ -22,6 +24,7 @@ from app.generation import (
     generation_runtime_limits,
     get_generation_batch,
     h3_provider_for_task,
+    list_generation_batches,
     lock_prompt_version,
     reconcile_submission_uncertain_task,
     revise_prompt_version,
@@ -144,6 +147,29 @@ def create_project_generation_batch(
         actor=actor,
         request=request,
         provider_client=provider,
+    )
+
+
+@router.get("/generation-batches", response_model=GenerationBatchListPage)
+def list_generation_batch_records(
+    conn: Database,
+    actor: AuthenticatedUser,
+    project_id: str | None = Query(default=None, min_length=1, max_length=128),
+    created_by_user_id: str | None = Query(default=None, min_length=1, max_length=128),
+    status: BatchStatusFilter | None = Query(default=None),
+    needs_attention: bool | None = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=100),
+    cursor: str | None = Query(default=None, min_length=1, max_length=512),
+) -> GenerationBatchListPage:
+    return list_generation_batches(
+        conn,
+        actor=actor,
+        project_id=project_id,
+        created_by_user_id=created_by_user_id,
+        status=status,
+        needs_attention=needs_attention,
+        limit=limit,
+        cursor=cursor,
     )
 
 

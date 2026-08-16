@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import ipaddress
 import json
@@ -11,7 +13,7 @@ import sqlite3
 import subprocess
 import tempfile
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from math import floor
@@ -392,7 +394,7 @@ class GenerationRuntimeLimits(BaseModel):
     estimated_cost_per_task: float | None = None
 
 
-class TaskResult(BaseModel):
+class TaskSummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str
@@ -401,6 +403,23 @@ class TaskResult(BaseModel):
     quality_status: str
     quality_issue_codes: list[str]
     result_asset_id: str | None
+    stage: str
+    provider: str
+    model: str
+    provider_task_id_tail: str | None
+    attempt: int
+    archive_retry_count: int
+    estimated_cost: float | None
+    actual_cost: float | None
+    error_code: str | None
+    error_message_redacted: str | None
+    submitted_at: str | None
+    started_at: str | None
+    completed_at: str | None
+    duration_seconds: float | None
+
+
+class TaskResult(TaskSummary):
     prompt_snapshot: dict[str, Any] | None
 
 
@@ -430,6 +449,43 @@ class BatchResult(BaseModel):
         if self.quantity != self.progress.total_count:
             raise ValueError("quantity must match progress total_count")
         return self
+
+
+class GenerationBatchListItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    project_id: str
+    project_name: str
+    created_by_user_id: str
+    created_by_display_name: str
+    prompt_version_id: str
+    status: str
+    quantity: int
+    created_at: str
+    updated_at: str
+    progress: BatchProgress
+    total_estimated_cost: float | None
+    total_actual_cost: float | None
+    needs_attention_count: int
+    has_results: bool
+    tasks: list[TaskSummary]
+
+
+class GenerationBatchListPage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[GenerationBatchListItem]
+    next_cursor: str | None
+
+
+BatchStatusFilter = Literal[
+    "PENDING",
+    "QUEUED",
+    "NEEDS_ATTENTION",
+    "SUCCEEDED",
+    "COMPLETED_WITH_FAILURES",
+]
 
 
 def latest_version(
@@ -2037,6 +2093,18 @@ def refresh_batch_status(conn: sqlite3.Connection, *, batch_id: str) -> None:
             quality_status,
             quality_issue_codes,
             result_asset_id,
+            provider,
+            model,
+            provider_task_id,
+            attempt,
+            archive_retry_count,
+            estimated_cost,
+            actual_cost,
+            error_code,
+            error_message_redacted,
+            submitted_at,
+            started_at,
+            completed_at,
             prompt_snapshot_json
         FROM generation_tasks
         WHERE batch_id = ?
@@ -2065,6 +2133,18 @@ def get_task_result(conn: sqlite3.Connection, task_id: str) -> TaskResult:
             quality_status,
             quality_issue_codes,
             result_asset_id,
+            provider,
+            model,
+            provider_task_id,
+            attempt,
+            archive_retry_count,
+            estimated_cost,
+            actual_cost,
+            error_code,
+            error_message_redacted,
+            submitted_at,
+            started_at,
+            completed_at,
             prompt_snapshot_json
         FROM generation_tasks
         WHERE id = ?
@@ -2074,6 +2154,240 @@ def get_task_result(conn: sqlite3.Connection, task_id: str) -> TaskResult:
     if row is None:
         raise LookupError("task not found")
     return task_result(row)
+
+
+def list_generation_batches(
+    conn: sqlite3.Connection,
+    *,
+    actor: CurrentUser,
+    project_id: str | None = None,
+    created_by_user_id: str | None = None,
+    status: BatchStatusFilter | None = None,
+    needs_attention: bool | None = None,
+    limit: int = 20,
+    cursor: str | None = None,
+) -> GenerationBatchListPage:
+    if limit < 1 or limit > 100:
+        raise generation_error(422, "LIST_LIMIT_INVALID", "limit must be between 1 and 100.")
+    if project_id is not None:
+        require_project_access(
+            conn,
+            actor=actor,
+            project_id=project_id,
+            action="generation_batch.list",
+        )
+
+    filters_hash = batch_list_filters_hash(
+        actor=actor,
+        project_id=project_id,
+        created_by_user_id=created_by_user_id,
+        status=status,
+        needs_attention=needs_attention,
+    )
+    cursor_position = (
+        None if cursor is None else decode_batch_list_cursor(cursor, filters_hash=filters_hash)
+    )
+
+    clauses = ["1 = 1"]
+    parameters: list[object] = []
+    if project_id is not None:
+        clauses.append("batch.project_id = ?")
+        parameters.append(project_id)
+    elif actor.role == "employee":
+        clauses.append("project.owner_user_id = ?")
+        parameters.append(actor.id)
+    if created_by_user_id is not None:
+        clauses.append("batch.created_by_user_id = ?")
+        parameters.append(created_by_user_id)
+    if status is not None:
+        clauses.append("batch.status = ?")
+        parameters.append(status)
+    if needs_attention is not None:
+        exists_prefix = "" if needs_attention else "NOT "
+        clauses.append(
+            f"""
+            {exists_prefix}EXISTS (
+                SELECT 1
+                FROM generation_tasks AS attention_task
+                WHERE attention_task.batch_id = batch.id
+                  AND (
+                    attention_task.status = 'SUBMISSION_UNCERTAIN'
+                    OR attention_task.archive_status = 'ARCHIVE_FAILED'
+                    OR attention_task.quality_status = 'AUDIO_QUALITY_FAILED'
+                    OR instr(
+                        COALESCE(attention_task.quality_issue_codes, ''),
+                        '"AUDIO_QUALITY_FAILED"'
+                    ) > 0
+                  )
+            )
+            """
+        )
+    if cursor_position is not None:
+        cursor_created_at, cursor_batch_id = cursor_position
+        clauses.append("(batch.created_at < ? OR (batch.created_at = ? AND batch.id < ?))")
+        parameters.extend([cursor_created_at, cursor_created_at, cursor_batch_id])
+    parameters.append(limit + 1)
+
+    rows = conn.execute(
+        f"""
+        SELECT
+            batch.id,
+            batch.project_id,
+            project.name AS project_name,
+            batch.created_by_user_id,
+            creator.display_name AS created_by_display_name,
+            batch.request_snapshot_json,
+            batch.status,
+            batch.created_at,
+            batch.updated_at
+        FROM generation_batches AS batch
+        JOIN projects AS project ON project.id = batch.project_id
+        JOIN users AS creator ON creator.id = batch.created_by_user_id
+        WHERE {" AND ".join(clauses)}
+        ORDER BY batch.created_at DESC, batch.id DESC
+        LIMIT ?
+        """,
+        tuple(parameters),
+    ).fetchall()
+    page_rows = rows[:limit]
+    if not page_rows:
+        return GenerationBatchListPage(items=[], next_cursor=None)
+
+    batch_ids = [str(row["id"]) for row in page_rows]
+    placeholders = ", ".join("?" for _ in batch_ids)
+    task_rows = conn.execute(
+        f"""
+        SELECT
+            task.batch_id,
+            task.id,
+            task.status,
+            task.archive_status,
+            task.quality_status,
+            task.quality_issue_codes,
+            task.result_asset_id,
+            task.provider,
+            task.model,
+            task.provider_task_id,
+            task.attempt,
+            task.archive_retry_count,
+            task.estimated_cost,
+            task.actual_cost,
+            task.error_code,
+            task.error_message_redacted,
+            task.submitted_at,
+            task.started_at,
+            task.completed_at
+        FROM generation_tasks AS task
+        WHERE task.batch_id IN ({placeholders})
+        ORDER BY task.created_at, task.id
+        """,
+        tuple(batch_ids),
+    ).fetchall()
+    tasks_by_batch: dict[str, list[TaskSummary]] = {batch_id: [] for batch_id in batch_ids}
+    for row in task_rows:
+        tasks_by_batch[str(row["batch_id"])].append(task_summary(row))
+
+    items: list[GenerationBatchListItem] = []
+    for row in page_rows:
+        batch_id = str(row["id"])
+        tasks = tasks_by_batch[batch_id]
+        progress = calculate_progress(tasks)
+        items.append(
+            GenerationBatchListItem(
+                id=batch_id,
+                project_id=str(row["project_id"]),
+                project_name=str(row["project_name"]),
+                created_by_user_id=str(row["created_by_user_id"]),
+                created_by_display_name=str(row["created_by_display_name"]),
+                prompt_version_id=request_prompt_version_id(row["request_snapshot_json"]),
+                status=batch_status(str(row["status"]), progress),
+                quantity=len(tasks),
+                created_at=str(row["created_at"]),
+                updated_at=str(row["updated_at"]),
+                progress=progress,
+                total_estimated_cost=optional_cost_total([task.estimated_cost for task in tasks]),
+                total_actual_cost=optional_cost_total([task.actual_cost for task in tasks]),
+                needs_attention_count=progress.counts["needs_attention"],
+                has_results=any(task.result_asset_id is not None for task in tasks),
+                tasks=tasks,
+            )
+        )
+
+    next_cursor = None
+    if len(rows) > limit:
+        last_row = page_rows[-1]
+        next_cursor = encode_batch_list_cursor(
+            created_at=str(last_row["created_at"]),
+            batch_id=str(last_row["id"]),
+            filters_hash=filters_hash,
+        )
+    return GenerationBatchListPage(items=items, next_cursor=next_cursor)
+
+
+def batch_list_filters_hash(
+    *,
+    actor: CurrentUser,
+    project_id: str | None,
+    created_by_user_id: str | None,
+    status: BatchStatusFilter | None,
+    needs_attention: bool | None,
+) -> str:
+    payload = {
+        "actor_id": actor.id,
+        "actor_role": actor.role,
+        "project_id": project_id,
+        "created_by_user_id": created_by_user_id,
+        "status": status,
+        "needs_attention": needs_attention,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def encode_batch_list_cursor(*, created_at: str, batch_id: str, filters_hash: str) -> str:
+    payload = json.dumps(
+        {
+            "v": 1,
+            "created_at": created_at,
+            "id": batch_id,
+            "filters_hash": filters_hash,
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return base64.urlsafe_b64encode(payload).decode().rstrip("=")
+
+
+def decode_batch_list_cursor(value: str, *, filters_hash: str) -> tuple[str, str]:
+    try:
+        padding = "=" * (-len(value) % 4)
+        decoded = base64.b64decode(value + padding, altchars=b"-_", validate=True)
+        payload = json.loads(decoded.decode())
+    except (ValueError, binascii.Error, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise generation_error(400, "INVALID_CURSOR", "The batch cursor is invalid.") from exc
+    if not isinstance(payload, dict):
+        raise generation_error(400, "INVALID_CURSOR", "The batch cursor is invalid.")
+    created_at = payload.get("created_at")
+    batch_id = payload.get("id")
+    encoded_filters_hash = payload.get("filters_hash")
+    if (
+        payload.get("v") != 1
+        or not isinstance(created_at, str)
+        or not created_at
+        or not isinstance(batch_id, str)
+        or not batch_id
+        or not isinstance(encoded_filters_hash, str)
+    ):
+        raise generation_error(400, "INVALID_CURSOR", "The batch cursor is invalid.")
+    if encoded_filters_hash != filters_hash:
+        raise generation_error(
+            400,
+            "CURSOR_FILTER_MISMATCH",
+            "The batch cursor does not match the current filters.",
+        )
+    return created_at, batch_id
 
 
 def get_generation_batch(
@@ -2107,6 +2421,18 @@ def get_generation_batch(
             quality_status,
             quality_issue_codes,
             result_asset_id,
+            provider,
+            model,
+            provider_task_id,
+            attempt,
+            archive_retry_count,
+            estimated_cost,
+            actual_cost,
+            error_code,
+            error_message_redacted,
+            submitted_at,
+            started_at,
+            completed_at,
             prompt_snapshot_json
         FROM generation_tasks
         WHERE batch_id = ?
@@ -2478,7 +2804,7 @@ def generation_runtime_limits(conn: sqlite3.Connection) -> GenerationRuntimeLimi
     )
 
 
-def calculate_progress(tasks: list[TaskResult]) -> BatchProgress:
+def calculate_progress(tasks: Sequence[TaskSummary]) -> BatchProgress:
     counts = {
         "pending": 0,
         "submitting": 0,
@@ -2522,7 +2848,10 @@ def calculate_progress(tasks: list[TaskResult]) -> BatchProgress:
             counts["pending"] += 1
         if status == "SUBMISSION_UNCERTAIN" or archive_status == "ARCHIVE_FAILED":
             needs_attention = True
-        if "AUDIO_QUALITY_FAILED" in task.quality_issue_codes:
+        if (
+            task.quality_status == "AUDIO_QUALITY_FAILED"
+            or "AUDIO_QUALITY_FAILED" in task.quality_issue_codes
+        ):
             needs_attention = True
         if needs_attention:
             counts["needs_attention"] += 1
@@ -2552,21 +2881,113 @@ def batch_status(stored_status: str, progress: BatchProgress) -> str:
 
 
 def task_result(row: sqlite3.Row) -> TaskResult:
-    quality_issue_codes = parse_json_list(row["quality_issue_codes"])
+    summary = task_summary(row)
     prompt_snapshot = (
         None
         if row["prompt_snapshot_json"] is None
         else json.loads(str(row["prompt_snapshot_json"]))
     )
     return TaskResult(
+        **summary.model_dump(),
+        prompt_snapshot=prompt_snapshot,
+    )
+
+
+def task_summary(row: sqlite3.Row) -> TaskSummary:
+    quality_issue_codes = parse_json_list(row["quality_issue_codes"])
+    provider_task_id = optional_text(row["provider_task_id"])
+    submitted_at = optional_text(row["submitted_at"])
+    started_at = optional_text(row["started_at"])
+    completed_at = optional_text(row["completed_at"])
+    return TaskSummary(
         id=str(row["id"]),
         status=str(row["status"]),
         archive_status=str(row["archive_status"]),
         quality_status=str(row["quality_status"]),
         quality_issue_codes=quality_issue_codes,
-        result_asset_id=None if row["result_asset_id"] is None else str(row["result_asset_id"]),
-        prompt_snapshot=prompt_snapshot,
+        result_asset_id=optional_text(row["result_asset_id"]),
+        stage=generation_task_stage(
+            status=str(row["status"]),
+            archive_status=str(row["archive_status"]),
+            quality_status=str(row["quality_status"]),
+            quality_issue_codes=quality_issue_codes,
+        ),
+        provider=str(row["provider"]),
+        model=str(row["model"]),
+        provider_task_id_tail=redacted_provider_task_tail(provider_task_id),
+        attempt=int(row["attempt"]),
+        archive_retry_count=int(row["archive_retry_count"]),
+        estimated_cost=optional_float(row["estimated_cost"]),
+        actual_cost=optional_float(row["actual_cost"]),
+        error_code=optional_text(row["error_code"]),
+        error_message_redacted=optional_text(row["error_message_redacted"]),
+        submitted_at=submitted_at,
+        started_at=started_at,
+        completed_at=completed_at,
+        duration_seconds=completed_duration_seconds(
+            started_at=started_at or submitted_at,
+            completed_at=completed_at,
+        ),
     )
+
+
+def generation_task_stage(
+    *,
+    status: str,
+    archive_status: str,
+    quality_status: str,
+    quality_issue_codes: Sequence[str],
+) -> str:
+    if status == "SUBMISSION_UNCERTAIN":
+        return "SUBMISSION_UNCERTAIN"
+    if archive_status == "ARCHIVE_FAILED":
+        return "ARCHIVE_FAILED"
+    if quality_status == "AUDIO_QUALITY_FAILED" or "AUDIO_QUALITY_FAILED" in quality_issue_codes:
+        return "QUALITY_FAILED"
+    if status == "SUCCEEDED" and archive_status == "ARCHIVED":
+        return "COMPLETED"
+    return status
+
+
+def redacted_provider_task_tail(value: str | None) -> str | None:
+    if value is None or len(value) <= 8:
+        return None
+    return value[-8:]
+
+
+def completed_duration_seconds(*, started_at: str | None, completed_at: str | None) -> float | None:
+    if started_at is None or completed_at is None:
+        return None
+    try:
+        started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        completed = datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
+        return round(max(0.0, (completed - started).total_seconds()), 3)
+    except (TypeError, ValueError):
+        return None
+
+
+def request_prompt_version_id(value: Any) -> str:
+    try:
+        payload = json.loads(str(value))
+    except json.JSONDecodeError:
+        return "unknown"
+    if not isinstance(payload, dict):
+        return "unknown"
+    prompt_version_id = payload.get("prompt_version_id")
+    return prompt_version_id if isinstance(prompt_version_id, str) else "unknown"
+
+
+def optional_cost_total(values: Sequence[float | None]) -> float | None:
+    present = [value for value in values if value is not None]
+    return None if not present else round(sum(present), 6)
+
+
+def optional_text(value: Any) -> str | None:
+    return None if value is None else str(value)
+
+
+def optional_float(value: Any) -> float | None:
+    return None if value is None else float(value)
 
 
 def parse_json_list(value: Any) -> list[str]:
