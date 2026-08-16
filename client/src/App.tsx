@@ -1,6 +1,7 @@
 import {
   type ChangeEvent,
   type FormEvent,
+  useCallback,
   useEffect,
   useRef,
   useState,
@@ -82,12 +83,29 @@ export function App() {
   const [deletingProjectId, setDeletingProjectId] = useState("");
   const [activeAnalysisProject, setActiveAnalysisProject] =
     useState<Project | null>(null);
+  const [isAnalysisWorkspaceBusy, setIsAnalysisWorkspaceBusy] = useState(false);
+  const activeAnalysisBusyRef = useRef(false);
+  const activeAnalysisSessionRef = useRef(0);
   const canWrite = currentUser?.role !== "auditor";
+
+  const handleAnalysisWorkspaceBusyChange = useCallback(
+    (session: number, busy: boolean) => {
+      if (session !== activeAnalysisSessionRef.current) {
+        return;
+      }
+      activeAnalysisBusyRef.current = busy;
+      setIsAnalysisWorkspaceBusy(busy);
+    },
+    [],
+  );
 
   useEffect(() => {
     function handleSessionExpired() {
       setCurrentUser(null);
       setPage("login");
+      activeAnalysisSessionRef.current += 1;
+      activeAnalysisBusyRef.current = false;
+      setIsAnalysisWorkspaceBusy(false);
       setActiveAnalysisProject(null);
       setPendingProject(null);
       setSessionMessage("登录已失效，请重新进入工作台。");
@@ -118,8 +136,15 @@ export function App() {
     }
     const authenticatedUser = currentUser;
     function syncDeepLink() {
+      if (activeAnalysisBusyRef.current) {
+        ensureWorkspaceHash("projects");
+        return;
+      }
       const nextPage = workspacePageFromHash(authenticatedUser);
       ensureWorkspaceHash(nextPage);
+      activeAnalysisSessionRef.current += 1;
+      activeAnalysisBusyRef.current = false;
+      setIsAnalysisWorkspaceBusy(false);
       setActiveAnalysisProject(null);
       setPage(nextPage);
     }
@@ -511,6 +536,7 @@ export function App() {
 
   const workspacePage = page as WorkspacePage;
   const currentRole = currentUser.role;
+  const analysisWorkspaceSession = activeAnalysisSessionRef.current;
   const workspaceTitle =
     activeAnalysisProject?.name ?? pageTitle(workspacePage);
   const breadcrumb = activeAnalysisProject
@@ -521,15 +547,35 @@ export function App() {
     if (!workspacePageAllowed(nextPage, currentRole)) {
       return;
     }
+    if (activeAnalysisProject && activeAnalysisBusyRef.current) {
+      return;
+    }
+    transitionToPage(nextPage);
+  }
+
+  function transitionToPage(nextPage: WorkspacePage) {
     window.history.pushState(null, "", `#${nextPage}`);
+    activeAnalysisSessionRef.current += 1;
+    activeAnalysisBusyRef.current = false;
+    setIsAnalysisWorkspaceBusy(false);
     setActiveAnalysisProject(null);
     setPage(nextPage);
   }
 
   function openAnalysis(project: Project) {
     window.history.pushState(null, "", "#projects");
+    activeAnalysisSessionRef.current += 1;
+    activeAnalysisBusyRef.current = false;
+    setIsAnalysisWorkspaceBusy(false);
     setPage("projects");
     setActiveAnalysisProject(project);
+  }
+
+  function closeAnalysis() {
+    activeAnalysisSessionRef.current += 1;
+    activeAnalysisBusyRef.current = false;
+    setIsAnalysisWorkspaceBusy(false);
+    setActiveAnalysisProject(null);
   }
 
   function openCreatedBatch(nextBatch: GenerationBatch) {
@@ -539,7 +585,7 @@ export function App() {
     setBatchIdInput(nextBatch.id);
     setActiveBatchId(nextBatch.id);
     storeBatchId(nextBatch.id);
-    navigateTo("tasks");
+    transitionToPage("tasks");
   }
 
   function markAnalysisReady(projectId: string) {
@@ -563,6 +609,7 @@ export function App() {
       <AppSidebar
         activePage={page}
         currentUser={currentUser}
+        navigationDisabled={isAnalysisWorkspaceBusy}
         onNavigate={navigateTo}
       />
       <section className="workspace-stage">
@@ -590,9 +637,15 @@ export function App() {
               ) : null}
               <AnalysisWorkspace
                 currentUserId={currentUser.id}
-                onClose={() => setActiveAnalysisProject(null)}
+                onClose={closeAnalysis}
                 onAnalysisReady={markAnalysisReady}
                 onBatchCreated={openCreatedBatch}
+                onWorkspaceBusyChange={(busy) =>
+                  handleAnalysisWorkspaceBusyChange(
+                    analysisWorkspaceSession,
+                    busy,
+                  )
+                }
                 project={activeAnalysisProject}
                 readOnly={!canWrite}
               />
@@ -679,10 +732,12 @@ export function App() {
 function AppSidebar({
   activePage,
   currentUser,
+  navigationDisabled,
   onNavigate,
 }: {
   activePage: Page;
   currentUser: CurrentUser;
+  navigationDisabled: boolean;
   onNavigate: (page: WorkspacePage) => void;
 }) {
   const items: Array<{
@@ -732,6 +787,7 @@ function AppSidebar({
                 ? "nav-button nav-button--active"
                 : "nav-button"
             }
+            disabled={navigationDisabled}
             key={item.page}
             onClick={() => onNavigate(item.page)}
             type="button"

@@ -77,11 +77,18 @@ const SHOT_TEXT_FIELDS: Array<{
   { key: "transition", label: "转场" },
 ];
 
+type UpstreamBusySource =
+  | "character"
+  | "source-frame"
+  | "reference"
+  | "first-frame";
+
 export function AnalysisWorkspace({
   currentUserId,
   onAnalysisReady,
   onBatchCreated,
   onClose,
+  onWorkspaceBusyChange,
   project,
   readOnly = false,
 }: {
@@ -89,6 +96,7 @@ export function AnalysisWorkspace({
   onAnalysisReady: (projectId: string) => void;
   onBatchCreated: (batch: GenerationBatch) => void;
   onClose: () => void;
+  onWorkspaceBusyChange?: (isBusy: boolean) => void;
   project: Project;
   readOnly?: boolean;
 }) {
@@ -106,6 +114,7 @@ export function AnalysisWorkspace({
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [isGenerationBusy, setIsGenerationBusy] = useState(false);
+  const [isUpstreamBusy, setIsUpstreamBusy] = useState(false);
   const [isAnalysisMissing, setIsAnalysisMissing] = useState(false);
   const [isStartingAnalysis, setIsStartingAnalysis] = useState(false);
   const [characterSelection, setCharacterSelection] =
@@ -123,6 +132,8 @@ export function AnalysisWorkspace({
   );
   const reloadTokenRef = useRef(0);
   const isGenerationBusyRef = useRef(false);
+  const isWorkspaceBusyRef = useRef(false);
+  const upstreamBusyCountsRef = useRef(new Map<UpstreamBusySource, number>());
   const characterSelectionVersionIdRef = useRef<string | null>(null);
   const sourceFrameSelectionIdRef = useRef<string | null>(null);
   const characterReferenceSelectionIdRef = useRef<string | null>(null);
@@ -230,7 +241,10 @@ export function AnalysisWorkspace({
     setGenerationStep(7);
     setShotCardsDirty(false);
     isGenerationBusyRef.current = false;
+    isWorkspaceBusyRef.current = false;
+    upstreamBusyCountsRef.current.clear();
     setIsGenerationBusy(false);
+    setIsUpstreamBusy(false);
     savedShotsRef.current = [];
     characterSelectionVersionIdRef.current = null;
     sourceFrameSelectionIdRef.current = null;
@@ -309,13 +323,57 @@ export function AnalysisWorkspace({
     ? readFirstFrameSelectionPayload(firstFrameSelection)
     : null;
 
-  const handleGenerationBusyChange = useCallback((busy: boolean) => {
-    isGenerationBusyRef.current = busy;
-    setIsGenerationBusy(busy);
-  }, []);
+  const handleGenerationBusyChange = useCallback(
+    (busy: boolean) => {
+      isGenerationBusyRef.current = busy;
+      const workspaceBusy = busy || upstreamBusyCountsRef.current.size > 0;
+      isWorkspaceBusyRef.current = workspaceBusy;
+      onWorkspaceBusyChange?.(workspaceBusy);
+      setIsGenerationBusy(busy);
+    },
+    [onWorkspaceBusyChange],
+  );
+
+  const handleUpstreamBusyChange = useCallback(
+    (source: UpstreamBusySource, busy: boolean) => {
+      const currentCount = upstreamBusyCountsRef.current.get(source) ?? 0;
+      if (busy) {
+        upstreamBusyCountsRef.current.set(source, currentCount + 1);
+      } else if (currentCount > 1) {
+        upstreamBusyCountsRef.current.set(source, currentCount - 1);
+      } else {
+        upstreamBusyCountsRef.current.delete(source);
+      }
+      const upstreamBusy = upstreamBusyCountsRef.current.size > 0;
+      const workspaceBusy = isGenerationBusyRef.current || upstreamBusy;
+      isWorkspaceBusyRef.current = workspaceBusy;
+      onWorkspaceBusyChange?.(workspaceBusy);
+      setIsUpstreamBusy(upstreamBusy);
+    },
+    [onWorkspaceBusyChange],
+  );
+
+  const handleCharacterBusyChange = useCallback(
+    (busy: boolean) => handleUpstreamBusyChange("character", busy),
+    [handleUpstreamBusyChange],
+  );
+  const handleSourceFrameBusyChange = useCallback(
+    (busy: boolean) => handleUpstreamBusyChange("source-frame", busy),
+    [handleUpstreamBusyChange],
+  );
+  const handleReferenceBusyChange = useCallback(
+    (busy: boolean) => handleUpstreamBusyChange("reference", busy),
+    [handleUpstreamBusyChange],
+  );
+  const handleFirstFrameBusyChange = useCallback(
+    (busy: boolean) => handleUpstreamBusyChange("first-frame", busy),
+    [handleUpstreamBusyChange],
+  );
+
+  const isWorkspaceBusy = isGenerationBusy || isUpstreamBusy;
 
   function handleClose() {
-    if (isGenerationBusyRef.current) {
+    if (isWorkspaceBusyRef.current) {
       return;
     }
     onClose();
@@ -363,7 +421,7 @@ export function AnalysisWorkspace({
   }
 
   function updateShot(index: number, key: keyof ShotCard, value: string) {
-    if (readOnly || isSaving || isGenerationBusyRef.current) {
+    if (readOnly || isSaving || isWorkspaceBusyRef.current) {
       return;
     }
     const nextShots = shots.map((shot, shotIndex) => {
@@ -384,7 +442,7 @@ export function AnalysisWorkspace({
 
   async function handleSave(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (readOnly || isSaving || isGenerationBusyRef.current) {
+    if (readOnly || isSaving || isWorkspaceBusyRef.current) {
       return;
     }
     if (!analysisId) {
@@ -432,7 +490,7 @@ export function AnalysisWorkspace({
         </div>
         <button
           className="secondary-button"
-          disabled={isGenerationBusy}
+          disabled={isWorkspaceBusy}
           onClick={handleClose}
           type="button"
         >
@@ -504,13 +562,14 @@ export function AnalysisWorkspace({
             </p>
           ) : null}
           <fieldset
-            aria-busy={isGenerationBusy}
+            aria-busy={isWorkspaceBusy}
             className="analysis-workspace-grid"
-            disabled={isGenerationBusy}
+            disabled={isWorkspaceBusy}
           >
             <div className="analysis-primary">
               {characterSelection ? (
                 <SourceFrameSelection
+                  onBusyChange={handleSourceFrameBusyChange}
                   onSelectionChange={handleSourceFrameSelectionChange}
                   projectId={project.id}
                   referenceAssetId={project.reference_asset_id}
@@ -526,6 +585,7 @@ export function AnalysisWorkspace({
               sourceFrameSelection ? (
                 <CharacterReferenceSelection
                   characterSelection={characterSelection}
+                  onBusyChange={handleReferenceBusyChange}
                   onSelectionChange={handleCharacterReferenceSelectionChange}
                   projectId={project.id}
                   readOnly={readOnly}
@@ -535,6 +595,7 @@ export function AnalysisWorkspace({
               {characterSelection ? (
                 <FirstFrameSelection
                   legacyCharacterSelected={legacyCharacterSelected}
+                  onBusyChange={handleFirstFrameBusyChange}
                   onSelectionChange={handleFirstFrameSelectionChange}
                   projectId={project.id}
                   readOnly={readOnly}
@@ -552,7 +613,7 @@ export function AnalysisWorkspace({
                         onChange={(value) =>
                           updateShot(index, "start_time", value)
                         }
-                        readOnly={readOnly || isSaving || isGenerationBusy}
+                        readOnly={readOnly || isSaving || isWorkspaceBusy}
                         type="number"
                         value={String(shot.start_time)}
                       />
@@ -561,7 +622,7 @@ export function AnalysisWorkspace({
                         onChange={(value) =>
                           updateShot(index, "end_time", value)
                         }
-                        readOnly={readOnly || isSaving || isGenerationBusy}
+                        readOnly={readOnly || isSaving || isWorkspaceBusy}
                         type="number"
                         value={String(shot.end_time)}
                       />
@@ -572,7 +633,7 @@ export function AnalysisWorkspace({
                           key={key}
                           label={`${shot.shot_id} ${label}`}
                           onChange={(value) => updateShot(index, key, value)}
-                          readOnly={readOnly || isSaving || isGenerationBusy}
+                          readOnly={readOnly || isSaving || isWorkspaceBusy}
                           value={shot[key]}
                         />
                       ))}
@@ -585,7 +646,7 @@ export function AnalysisWorkspace({
               ) : null}
               {readOnly ? null : (
                 <button
-                  disabled={isSaving || isGenerationBusy || !analysisId}
+                  disabled={isSaving || isWorkspaceBusy || !analysisId}
                   type="submit"
                 >
                   {isSaving ? "正在保存" : "保存镜头卡片"}
@@ -615,7 +676,7 @@ export function AnalysisWorkspace({
                     originalScript={originalScript}
                     projectId={project.id}
                     readOnly={
-                      readOnly || isSaving || shotCardsDirty || isGenerationBusy
+                      readOnly || isSaving || shotCardsDirty || isWorkspaceBusy
                     }
                     referenceSelectionId={
                       characterReferenceSelection?.id ?? null
@@ -631,6 +692,7 @@ export function AnalysisWorkspace({
             </div>
             <aside className="analysis-sidebar" aria-label="当前人物设定">
               <CharacterSelection
+                onBusyChange={handleCharacterBusyChange}
                 onVersionChange={handleCharacterSelectionChange}
                 projectId={project.id}
                 readOnly={readOnly}

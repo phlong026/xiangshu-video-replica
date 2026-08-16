@@ -93,7 +93,11 @@ const editableShot: api.ShotCard = {
 };
 
 vi.mock("./CharacterSelection", () => ({
-  CharacterSelection: ({ onVersionChange, readOnly }: apiMockProps) => (
+  CharacterSelection: ({
+    onBusyChange,
+    onVersionChange,
+    readOnly,
+  }: apiMockProps) => (
     <>
       <button
         disabled={readOnly}
@@ -116,12 +120,22 @@ vi.mock("./CharacterSelection", () => ({
       >
         恢复历史兼容人物
       </button>
+      <button onClick={() => onBusyChange?.(true)} type="button">
+        模拟角色保存中
+      </button>
+      <button onClick={() => onBusyChange?.(false)} type="button">
+        模拟角色保存完成
+      </button>
     </>
   ),
 }));
 
 vi.mock("./SourceFrameSelection", () => ({
-  SourceFrameSelection: ({ onSelectionChange, readOnly }: apiMockProps) => (
+  SourceFrameSelection: ({
+    onBusyChange,
+    onSelectionChange,
+    readOnly,
+  }: apiMockProps) => (
     <>
       <button
         disabled={readOnly}
@@ -137,28 +151,44 @@ vi.mock("./SourceFrameSelection", () => ({
       >
         标记源画面失效
       </button>
+      <button onClick={() => onBusyChange?.(true)} type="button">
+        模拟源画面保存中
+      </button>
+      <button onClick={() => onBusyChange?.(false)} type="button">
+        模拟源画面保存完成
+      </button>
     </>
   ),
 }));
 
 vi.mock("./CharacterReferenceSelection", () => ({
   CharacterReferenceSelection: ({
+    onBusyChange,
     onSelectionChange,
     readOnly,
   }: apiMockProps) => (
-    <button
-      disabled={readOnly}
-      onClick={() => onSelectionChange?.(referenceSelection)}
-      type="button"
-    >
-      完成人物参考
-    </button>
+    <>
+      <button
+        disabled={readOnly}
+        onClick={() => onSelectionChange?.(referenceSelection)}
+        type="button"
+      >
+        完成人物参考
+      </button>
+      <button onClick={() => onBusyChange?.(true)} type="button">
+        模拟人物参考保存中
+      </button>
+      <button onClick={() => onBusyChange?.(false)} type="button">
+        模拟人物参考保存完成
+      </button>
+    </>
   ),
 }));
 
 vi.mock("./FirstFrameSelection", () => ({
   FirstFrameSelection: ({
     legacyCharacterSelected,
+    onBusyChange,
     onSelectionChange,
     readOnly,
     referenceSelection: currentReferenceSelection,
@@ -174,6 +204,12 @@ vi.mock("./FirstFrameSelection", () => ({
         type="button"
       >
         完成置换首帧
+      </button>
+      <button onClick={() => onBusyChange?.(true)} type="button">
+        模拟首帧保存中
+      </button>
+      <button onClick={() => onBusyChange?.(false)} type="button">
+        模拟首帧保存完成
       </button>
     </>
   ),
@@ -236,6 +272,7 @@ vi.mock("./GenerationComposer", () => ({
 
 type apiMockProps = {
   legacyCharacterSelected?: boolean;
+  onBusyChange?: (isBusy: boolean) => void;
   onSelectionChange?: (value: unknown) => void;
   onVersionChange?: (value: unknown) => void;
   readOnly?: boolean;
@@ -422,6 +459,7 @@ describe("AnalysisWorkspace workflow gates", () => {
 
   it("opens generation only with a saved shot card and forwards the created batch", async () => {
     const onBatchCreated = vi.fn();
+    const onWorkspaceBusyChange = vi.fn();
     vi.mocked(api.getLatestProjectShotCards).mockResolvedValue({
       id: "shot-card-2",
       project_id: "project-1",
@@ -443,6 +481,7 @@ describe("AnalysisWorkspace workflow gates", () => {
         onAnalysisReady={vi.fn()}
         onBatchCreated={onBatchCreated}
         onClose={vi.fn()}
+        onWorkspaceBusyChange={onWorkspaceBusyChange}
         project={{
           id: "project-1",
           owner_user_id: "employee_1",
@@ -469,6 +508,31 @@ describe("AnalysisWorkspace workflow gates", () => {
       "aria-current",
       "step",
     );
+    for (const [startLabel, finishLabel] of [
+      ["模拟角色保存中", "模拟角色保存完成"],
+      ["模拟源画面保存中", "模拟源画面保存完成"],
+      ["模拟人物参考保存中", "模拟人物参考保存完成"],
+      ["模拟首帧保存中", "模拟首帧保存完成"],
+    ]) {
+      fireEvent.click(screen.getByRole("button", { name: startLabel }));
+      expect(onWorkspaceBusyChange).toHaveBeenLastCalledWith(true);
+      expect(
+        screen.getByRole("button", { name: "模拟创建批次" }),
+      ).toBeDisabled();
+      fireEvent.click(screen.getByRole("button", { name: "模拟创建批次" }));
+      expect(onBatchCreated).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole("button", { name: finishLabel }));
+      expect(onWorkspaceBusyChange).toHaveBeenLastCalledWith(false);
+      expect(
+        screen.getByRole("button", { name: "模拟创建批次" }),
+      ).toBeEnabled();
+    }
+    fireEvent.click(screen.getByRole("button", { name: "模拟角色保存中" }));
+    fireEvent.click(screen.getByRole("button", { name: "模拟角色保存中" }));
+    fireEvent.click(screen.getByRole("button", { name: "模拟角色保存完成" }));
+    expect(screen.getByRole("button", { name: "模拟创建批次" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "模拟角色保存完成" }));
+    expect(screen.getByRole("button", { name: "模拟创建批次" })).toBeEnabled();
     fireEvent.click(screen.getByRole("button", { name: "模拟创建批次" }));
     expect(onBatchCreated).toHaveBeenCalledWith(
       expect.objectContaining({ id: "batch-1" }),

@@ -20,6 +20,7 @@ const DEFAULT_PROMPT =
 
 export function FirstFrameSelection({
   legacyCharacterSelected = false,
+  onBusyChange,
   onSelectionChange,
   projectId,
   readOnly = false,
@@ -27,6 +28,7 @@ export function FirstFrameSelection({
   sourceFrameSelectionId,
 }: {
   legacyCharacterSelected?: boolean;
+  onBusyChange?: (isBusy: boolean) => void;
   onSelectionChange?: (selection: AnalysisVersion | null) => void;
   projectId: string;
   readOnly?: boolean;
@@ -194,6 +196,7 @@ export function FirstFrameSelection({
       return;
     }
     const requestId = loadRequestId.current;
+    onBusyChange?.(true);
     setIsSubmitting(true);
     setError("");
     setStatus("");
@@ -228,6 +231,7 @@ export function FirstFrameSelection({
       if (requestId === loadRequestId.current) {
         setIsSubmitting(false);
       }
+      onBusyChange?.(false);
     }
   }
 
@@ -240,6 +244,7 @@ export function FirstFrameSelection({
       return;
     }
     const requestId = loadRequestId.current;
+    onBusyChange?.(true);
     setIsSubmitting(true);
     setError("");
     try {
@@ -265,6 +270,7 @@ export function FirstFrameSelection({
       if (requestId === loadRequestId.current) {
         setIsSubmitting(false);
       }
+      onBusyChange?.(false);
     }
   }
 

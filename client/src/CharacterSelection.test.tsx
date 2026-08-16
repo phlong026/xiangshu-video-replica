@@ -159,6 +159,30 @@ describe("CharacterSelection", () => {
     expect(onSelectionChange).toHaveBeenLastCalledWith(true);
   });
 
+  it("reports selection writes as busy until the server mutation settles", async () => {
+    let resolveSelection:
+      | ((value: api.ProjectMainCharacter) => void)
+      | undefined;
+    vi.mocked(api.chooseProjectMainCharacterVersion).mockReturnValue(
+      new Promise((resolve) => {
+        resolveSelection = resolve;
+      }),
+    );
+    const onBusyChange = vi.fn();
+    render(
+      <CharacterSelection onBusyChange={onBusyChange} projectId="project-1" />,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "选择角色版本" }),
+    );
+    fireEvent.click(await screen.findByLabelText(/林夏.*乡墅项目管理专家.*V3/));
+    fireEvent.click(screen.getByRole("button", { name: "确认角色版本" }));
+
+    await waitFor(() => expect(onBusyChange).toHaveBeenLastCalledWith(true));
+    resolveSelection?.(selected);
+    await waitFor(() => expect(onBusyChange).toHaveBeenLastCalledWith(false));
+  });
+
   it("lets auditors inspect options without rendering a write action", async () => {
     render(<CharacterSelection projectId="project-1" readOnly />);
 

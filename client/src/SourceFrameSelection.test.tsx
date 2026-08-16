@@ -217,8 +217,10 @@ describe("SourceFrameSelection", () => {
             });
         }),
     );
+    const onBusyChange = vi.fn();
     render(
       <SourceFrameSelection
+        onBusyChange={onBusyChange}
         projectId="project-1"
         referenceAssetId="reference-1"
       />,
@@ -241,10 +243,12 @@ describe("SourceFrameSelection", () => {
     fireEvent.click(screen.getByRole("button", { name: "确认源画面" }));
 
     await waitFor(() => expect(confirmSourceFrame).toHaveBeenCalledOnce());
+    expect(onBusyChange).toHaveBeenLastCalledWith(true);
     expect(screen.getByRole("radio", { name: /候选 1/ })).toBeDisabled();
     expect(screen.getByRole("radio", { name: /候选 2/ })).toBeDisabled();
 
     resolveConfirmation?.();
+    await waitFor(() => expect(onBusyChange).toHaveBeenLastCalledWith(false));
   });
 
   it("ignores a confirmation response after the project input changes", async () => {

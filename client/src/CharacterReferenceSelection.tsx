@@ -24,12 +24,14 @@ const VIEW_LABELS: Record<ProjectCharacterAssetOption["view_type"], string> = {
 
 export function CharacterReferenceSelection({
   characterSelection,
+  onBusyChange,
   onSelectionChange,
   projectId,
   readOnly = false,
   sourceFrameSelection,
 }: {
   characterSelection: ProjectMainCharacter;
+  onBusyChange?: (isBusy: boolean) => void;
   onSelectionChange?: (
     selection: CharacterReferenceSelectionValue | null,
   ) => void;
@@ -180,6 +182,7 @@ export function CharacterReferenceSelection({
       return;
     }
     const requestId = loadRequestId.current;
+    onBusyChange?.(true);
     setIsSubmitting(true);
     setError("");
     try {
@@ -207,6 +210,7 @@ export function CharacterReferenceSelection({
       if (requestId === loadRequestId.current) {
         setIsSubmitting(false);
       }
+      onBusyChange?.(false);
     }
   }
 

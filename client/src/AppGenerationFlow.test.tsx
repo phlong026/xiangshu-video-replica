@@ -77,12 +77,22 @@ async function openProjectGenerationFlow() {
 vi.mock("./AnalysisWorkspace", () => ({
   AnalysisWorkspace: ({
     onBatchCreated,
+    onWorkspaceBusyChange,
   }: {
     onBatchCreated: (value: unknown) => void;
+    onWorkspaceBusyChange?: (isBusy: boolean) => void;
   }) => (
-    <button onClick={() => onBatchCreated(batch)} type="button">
-      模拟从项目创建批次
-    </button>
+    <div>
+      <button onClick={() => onBatchCreated(batch)} type="button">
+        模拟从项目创建批次
+      </button>
+      <button onClick={() => onWorkspaceBusyChange?.(true)} type="button">
+        模拟上游写入开始
+      </button>
+      <button onClick={() => onWorkspaceBusyChange?.(false)} type="button">
+        模拟上游写入完成
+      </button>
+    </div>
   ),
 }));
 
@@ -142,5 +152,68 @@ describe("App generation handoff", () => {
       ),
     );
     storageWrite.mockRestore();
+  });
+
+  it("blocks sidebar and browser navigation while the analysis workspace is busy", async () => {
+    window.localStorage.clear();
+    window.location.hash = "";
+    vi.stubGlobal("fetch", createAppFetchMock());
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+    await act(async () => Promise.resolve());
+    fireEvent.click(await screen.findByRole("button", { name: "继续编辑" }));
+    fireEvent.click(screen.getByRole("button", { name: "模拟上游写入开始" }));
+
+    expect(screen.getByRole("button", { name: "任务记录" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "任务记录" }));
+    expect(
+      screen.getByRole("button", { name: "模拟上游写入完成" }),
+    ).toBeInTheDocument();
+    expect(window.location.hash).toBe("#projects");
+
+    await act(async () => {
+      window.history.replaceState(null, "", "#tasks");
+      window.dispatchEvent(new HashChangeEvent("hashchange"));
+    });
+    expect(window.location.hash).toBe("#projects");
+    expect(
+      screen.getByRole("button", { name: "模拟上游写入完成" }),
+    ).toBeInTheDocument();
+
+    await act(async () => {
+      window.history.replaceState(null, "", "#characters");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+    expect(window.location.hash).toBe("#projects");
+    expect(
+      screen.getByRole("button", { name: "模拟上游写入完成" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "模拟上游写入完成" }));
+    expect(screen.getByRole("button", { name: "任务记录" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "任务记录" }));
+    expect(
+      await screen.findByRole("heading", { level: 2, name: "任务记录" }),
+    ).toBeInTheDocument();
+  });
+
+  it("allows the completed paid batch handoff to leave a busy analysis workspace", async () => {
+    window.localStorage.clear();
+    window.location.hash = "";
+    vi.stubGlobal("fetch", createAppFetchMock());
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+    await act(async () => Promise.resolve());
+    fireEvent.click(await screen.findByRole("button", { name: "继续编辑" }));
+    fireEvent.click(screen.getByRole("button", { name: "模拟上游写入开始" }));
+    fireEvent.click(screen.getByRole("button", { name: "模拟从项目创建批次" }));
+
+    expect(
+      await screen.findByRole("heading", { level: 2, name: "任务记录" }),
+    ).toBeInTheDocument();
+    expect(window.location.hash).toBe("#tasks");
+    expect(screen.getByText(batch.id)).toBeInTheDocument();
   });
 });

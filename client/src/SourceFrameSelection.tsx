@@ -13,11 +13,13 @@ import {
 } from "./api";
 
 export function SourceFrameSelection({
+  onBusyChange,
   onSelectionChange,
   projectId,
   readOnly = false,
   referenceAssetId,
 }: {
+  onBusyChange?: (isBusy: boolean) => void;
   onSelectionChange?: (selection: AnalysisVersion | null) => void;
   projectId: string;
   readOnly?: boolean;
@@ -198,6 +200,7 @@ export function SourceFrameSelection({
     }
     const requestId = loadRequestId.current + 1;
     loadRequestId.current = requestId;
+    onBusyChange?.(true);
     setIsSubmitting(true);
     setError("");
     setStatus("");
@@ -224,6 +227,7 @@ export function SourceFrameSelection({
       if (requestId === loadRequestId.current) {
         setIsSubmitting(false);
       }
+      onBusyChange?.(false);
     }
   }
 
@@ -246,6 +250,7 @@ export function SourceFrameSelection({
       return;
     }
     const requestId = loadRequestId.current;
+    onBusyChange?.(true);
     setIsSubmitting(true);
     setError("");
     try {
@@ -275,6 +280,7 @@ export function SourceFrameSelection({
       if (requestId === loadRequestId.current) {
         setIsSubmitting(false);
       }
+      onBusyChange?.(false);
     }
   }
 
