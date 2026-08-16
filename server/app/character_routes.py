@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, Query, Response, status
+from fastapi import APIRouter, HTTPException, Query, Response, status
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.auth import AuthenticatedUser, Database
@@ -87,22 +87,30 @@ class ProjectMainCharacterResponse(BaseModel):
 
 @router.get(
     "/projects/{project_id}/main-character",
-    response_model=ProjectMainCharacterResponse,
+    response_model=ProjectMainCharacterResponse | None,
 )
 def read_project_main_character_route(
     project_id: str,
     conn: Database,
     actor: AuthenticatedUser,
-) -> ProjectMainCharacterResponse:
+) -> ProjectMainCharacterResponse | None:
     require_project_access(
         conn,
         actor=actor,
         project_id=project_id,
         action="project.main_character.read",
     )
-    return ProjectMainCharacterResponse.model_validate(
-        get_project_main_character(conn, project_id=project_id),
-    )
+    try:
+        character = get_project_main_character(conn, project_id=project_id)
+    except HTTPException as exc:
+        if (
+            exc.status_code == 404
+            and isinstance(exc.detail, dict)
+            and exc.detail.get("code") == "MAIN_CHARACTER_NOT_FOUND"
+        ):
+            return None
+        raise
+    return ProjectMainCharacterResponse.model_validate(character)
 
 
 @router.get("/characters", response_model=list[CharacterResponse])

@@ -6,6 +6,7 @@ import hashlib
 import ipaddress
 import json
 import logging
+import os
 import re
 import shutil
 import socket
@@ -17,6 +18,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from math import floor
+from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse
@@ -83,6 +85,8 @@ GENERATION_LEASE_SECONDS = 600
 # Reconciliation performs one provider query plus optional download/archive;
 # fifteen minutes exceeds those bounded calls while still recovering crashes.
 RECONCILIATION_RESERVATION_SECONDS = 900
+FAKE_H3_OUTCOME_ENV = "VIDEO_REPLICA_FAKE_H3_OUTCOME"
+FAKE_H3_RESULT_PATH_ENV = "VIDEO_REPLICA_FAKE_H3_RESULT_PATH"
 FIRST_FRAME_URL_EXPIRES_IN = timedelta(minutes=15)
 # Cap archive retries so a permanently expired provider URL does not keep the
 # paid task spinning in ARCHIVE_FAILED forever.
@@ -383,7 +387,16 @@ def metaso_h3_provider_from_settings(conn: sqlite3.Connection) -> MetasoH3Provid
 
 def h3_provider_for_task(conn: sqlite3.Connection, provider_name: str) -> H3Provider:
     if provider_name == "fake_h3":
-        return FakeH3Provider()
+        outcome = os.environ.get(FAKE_H3_OUTCOME_ENV, "ok").strip()
+        if outcome not in {"ok", "provider_failed", "submission_uncertain"}:
+            raise H3ProviderSettingsUnavailable(f"{FAKE_H3_OUTCOME_ENV} has an unsupported value")
+        return FakeH3Provider(
+            outcome=cast(
+                Literal["ok", "provider_failed", "submission_uncertain"],
+                outcome,
+            ),
+            result_content=_fake_h3_result_content(),
+        )
     if provider_name == "metaso":
         return metaso_h3_provider_from_settings(conn)
     raise H3ProviderSettingsUnavailable("generation task has an unsupported provider")
@@ -392,22 +405,52 @@ def h3_provider_for_task(conn: sqlite3.Connection, provider_name: str) -> H3Prov
 @dataclass(frozen=True)
 class FakeH3Provider(H3Provider):
     audio_quality: Literal["ok", "missing"] = "ok"
+    outcome: Literal["ok", "provider_failed", "submission_uncertain"] = "ok"
+    result_content: bytes | None = None
 
     def create_image_to_video(self, request: dict[str, Any]) -> H3CreateResult:
         validate_h3_request(request)
+        if self.outcome == "provider_failed":
+            raise H3ProviderFailed(
+                "Fake H3 provider terminal failure",
+                provider_task_id=f"fake-h3-failed-{uuid4()}",
+                terminal=True,
+            )
+        if self.outcome == "submission_uncertain":
+            raise SubmissionUncertain("Fake H3 submission result is unknown")
         provider_task_id = f"fake-h3-{uuid4()}"
         audio_ok = self.audio_quality == "ok"
+        result_content = self.result_content
+        if result_content is None:
+            result_content = f"fake mp4 content for {provider_task_id}".encode()
         return H3CreateResult(
             provider_task_id=provider_task_id,
             status="SUCCEEDED",
             result_url=f"fake://h3-results/{provider_task_id}.mp4",
-            result_content=f"fake mp4 content for {provider_task_id}".encode(),
+            result_content=result_content,
             audio_quality_status="AUDIO_OK" if audio_ok else "AUDIO_QUALITY_FAILED",
             quality_issue_codes=[] if audio_ok else ["AUDIO_QUALITY_FAILED"],
         )
 
     def download_result(self, url: str) -> bytes:
+        if self.result_content is not None:
+            return self.result_content
         return f"fake mp4 content re-downloaded from {url}".encode()
+
+
+def _fake_h3_result_content() -> bytes | None:
+    fixture_path = os.environ.get(FAKE_H3_RESULT_PATH_ENV, "").strip()
+    if not fixture_path:
+        return None
+    try:
+        content = Path(fixture_path).read_bytes()
+    except OSError as exc:
+        logger.error("fake H3 result fixture cannot be read: %s", type(exc).__name__)
+        raise H3ProviderSettingsUnavailable(f"{FAKE_H3_RESULT_PATH_ENV} cannot be read") from exc
+    if not content:
+        logger.error("fake H3 result fixture is empty")
+        raise H3ProviderSettingsUnavailable(f"{FAKE_H3_RESULT_PATH_ENV} is empty")
+    return content
 
 
 class VersionResult(BaseModel):

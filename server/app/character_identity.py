@@ -120,6 +120,30 @@ class SourceImageInspector(Protocol):
     ) -> SourceImageInspection: ...
 
 
+class FakeSourceImageInspector:
+    """Deterministic local-only inspector for an explicitly isolated Gate 1 run."""
+
+    def inspect(
+        self,
+        content: bytes,
+        *,
+        content_type: str,
+    ) -> SourceImageInspection:
+        if not content or content_type not in ALLOWED_SOURCE_TYPES:
+            raise SourceImageInspectorFailed("fake source image input is invalid")
+        return SourceImageInspection(
+            person_count=1,
+            face_count=1,
+            face_visible=True,
+            sharpness_score=0.95,
+            occlusion_detected=False,
+            watermark_detected=False,
+            notes=["Gate 1 内置模拟检查"],
+            provider="fake-source-inspector",
+            model="fake-source-inspector-v1",
+        )
+
+
 class SourceImageInspectorFailed(RuntimeError):
     pass
 

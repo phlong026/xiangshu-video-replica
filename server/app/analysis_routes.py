@@ -318,12 +318,12 @@ def read_latest_project_analysis(
     return version_response(row)
 
 
-@router.get("/projects/{project_id}/shot-cards/latest", response_model=VersionResponse)
+@router.get("/projects/{project_id}/shot-cards/latest", response_model=VersionResponse | None)
 def read_latest_project_shot_card(
     project_id: str,
     conn: Database,
     actor: AuthenticatedUser,
-) -> VersionResponse:
+) -> VersionResponse | None:
     require_project_access(conn, actor=actor, project_id=project_id, action="shot_card.read")
     row = conn.execute(
         """
@@ -337,10 +337,7 @@ def read_latest_project_shot_card(
         (project_id, SHOT_CARD_KIND),
     ).fetchone()
     if row is None:
-        raise HTTPException(
-            status_code=404,
-            detail={"code": "SHOT_CARD_NOT_FOUND", "message": "Project has no shot card version."},
-        )
+        return None
     return version_response(row)
 
 

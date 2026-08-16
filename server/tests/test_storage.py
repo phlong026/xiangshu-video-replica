@@ -128,6 +128,20 @@ def test_fake_adapter_supports_provider_switch_without_business_flow_changes() -
     assert oss_object.uri.startswith("oss://")
 
 
+def test_local_storage_maps_filesystem_write_failure_to_backend_unavailable(
+    tmp_path: Path,
+) -> None:
+    adapter = LocalStorageAdapter(root=tmp_path)
+    (tmp_path / "generation-results").write_bytes(b"blocks the destination directory")
+
+    with pytest.raises(StorageBackendUnavailable):
+        adapter.put_object(
+            "generation-results/task-1.mp4",
+            b"fake mp4",
+            content_type="video/mp4",
+        )
+
+
 @pytest.mark.parametrize(
     ("provider", "endpoint", "region", "client"),
     [

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.auth import AuthenticatedUser, Database
@@ -61,15 +61,24 @@ def select_character_references(
 
 @router.get(
     "/projects/{project_id}/character-reference-selection/latest",
-    response_model=CharacterReferenceSelection,
+    response_model=CharacterReferenceSelection | None,
 )
 def read_latest_character_reference_selection(
     project_id: str,
     conn: Database,
     actor: AuthenticatedUser,
-) -> CharacterReferenceSelection:
-    return get_latest_character_reference_selection(
-        conn,
-        actor=actor,
-        project_id=project_id,
-    )
+) -> CharacterReferenceSelection | None:
+    try:
+        return get_latest_character_reference_selection(
+            conn,
+            actor=actor,
+            project_id=project_id,
+        )
+    except HTTPException as exc:
+        if (
+            exc.status_code == 404
+            and isinstance(exc.detail, dict)
+            and exc.detail.get("code") == "CHARACTER_REFERENCE_SELECTION_NOT_FOUND"
+        ):
+            return None
+        raise

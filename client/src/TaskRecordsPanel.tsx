@@ -8,16 +8,18 @@ import {
 
 import {
   confirmGenerationTaskNotCharged,
+  createGenerationResultPreviewUrl,
+  downloadGenerationResult,
   type GenerationBatch,
   type GenerationBatchListItem,
   type GenerationTask,
   getGenerationBatch,
-  getGenerationResultDownloadUrl,
   listGenerationBatches,
   reconcileUncertainTask,
   regenerateGenerationBatch,
   regenerateGenerationTask,
   retryGenerationTask,
+  revokeGenerationResultPreviewUrl,
   type UserRole,
 } from "./api";
 
@@ -64,6 +66,8 @@ export function TaskRecordsPanel({
   const [isHistoryLoading, setIsHistoryLoading] = useState(false);
   const historyRequestRef = useRef(0);
   const [previewUrls, setPreviewUrls] = useState<Record<string, string>>({});
+  const previewUrlsRef = useRef<Record<string, string>>({});
+  const isMountedRef = useRef(true);
   const [resultErrors, setResultErrors] = useState<Record<string, string>>({});
   const [activeResultAction, setActiveResultAction] = useState("");
   const [activeTaskAction, setActiveTaskAction] = useState("");
@@ -78,8 +82,17 @@ export function TaskRecordsPanel({
   const taskOperationKeysRef = useRef<Record<string, string>>({});
   const canOperate = userRole !== "auditor";
 
+  const releasePreviewUrls = useCallback(() => {
+    for (const url of Object.values(previewUrlsRef.current)) {
+      revokeGenerationResultPreviewUrl(url);
+    }
+    previewUrlsRef.current = {};
+    setPreviewUrls({});
+  }, []);
+
   const selectBatch = useCallback(
     (batchId: string, knownBatch?: GenerationBatch) => {
+      releasePreviewUrls();
       activeBatchIdRef.current = batchId;
       setActiveBatchId(batchId);
       setBatchIdInput(batchId);
@@ -93,8 +106,19 @@ export function TaskRecordsPanel({
       requeuedTaskIdsRef.current.clear();
       storeBatchId(batchId);
     },
-    [],
+    [releasePreviewUrls],
   );
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      for (const url of Object.values(previewUrlsRef.current)) {
+        revokeGenerationResultPreviewUrl(url);
+      }
+      previewUrlsRef.current = {};
+    };
+  }, []);
 
   const loadHistory = useCallback(
     async (cursor?: string, append = false) => {
@@ -430,24 +454,47 @@ export function TaskRecordsPanel({
   }
 
   async function handlePreview(task: GenerationTask) {
-    if (!canOperate || !task.result_asset_id) {
+    if (!canOperate || !task.result_asset_id || !activeBatchId) {
       return;
     }
+    const batchIdAtStart = activeBatchId;
     const actionKey = `${task.id}:preview`;
     setActiveResultAction(actionKey);
     setResultErrors((current) => ({ ...current, [task.id]: "" }));
     try {
-      const result = await getGenerationResultDownloadUrl(task.result_asset_id);
-      setPreviewUrls((current) => ({ ...current, [task.id]: result.url }));
-    } catch {
-      setResultErrors((current) => ({
-        ...current,
-        [task.id]: "预览链接获取失败，请重试。",
-      }));
-    } finally {
-      setActiveResultAction((current) =>
-        current === actionKey ? "" : current,
+      const previewUrl = await createGenerationResultPreviewUrl(
+        task.result_asset_id,
       );
+      if (
+        !isMountedRef.current ||
+        activeBatchIdRef.current !== batchIdAtStart
+      ) {
+        revokeGenerationResultPreviewUrl(previewUrl);
+        return;
+      }
+      const previousUrl = previewUrlsRef.current[task.id];
+      if (previousUrl) {
+        revokeGenerationResultPreviewUrl(previousUrl);
+      }
+      const nextPreviewUrls = {
+        ...previewUrlsRef.current,
+        [task.id]: previewUrl,
+      };
+      previewUrlsRef.current = nextPreviewUrls;
+      setPreviewUrls(nextPreviewUrls);
+    } catch {
+      if (isMountedRef.current && activeBatchIdRef.current === batchIdAtStart) {
+        setResultErrors((current) => ({
+          ...current,
+          [task.id]: "预览链接获取失败，请重试。",
+        }));
+      }
+    } finally {
+      if (isMountedRef.current) {
+        setActiveResultAction((current) =>
+          current === actionKey ? "" : current,
+        );
+      }
     }
   }
 
@@ -459,18 +506,11 @@ export function TaskRecordsPanel({
     setActiveResultAction(actionKey);
     setResultErrors((current) => ({ ...current, [task.id]: "" }));
     try {
-      const result = await getGenerationResultDownloadUrl(task.result_asset_id);
-      const anchor = document.createElement("a");
-      anchor.href = result.url;
-      anchor.download = `${task.id}.mp4`;
-      anchor.rel = "noopener noreferrer";
-      document.body.append(anchor);
-      anchor.click();
-      anchor.remove();
+      await downloadGenerationResult(task.result_asset_id, `${task.id}.mp4`);
     } catch {
       setResultErrors((current) => ({
         ...current,
-        [task.id]: "下载链接获取失败，请重试。",
+        [task.id]: "下载失败，请重试。",
       }));
     } finally {
       setActiveResultAction((current) =>
@@ -1106,7 +1146,7 @@ function TaskItem({
               aria-label={`结果预览 ${task.id}`}
               className="task-result-video"
               controls
-              preload="metadata"
+              preload="auto"
               src={previewUrl}
             />
           ) : (

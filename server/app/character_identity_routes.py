@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from typing import Annotated, Literal
 from urllib.parse import quote
@@ -14,6 +15,7 @@ from app.character_identity import (
     ApilioSourceImageInspector,
     CompletedSourceImage,
     CreatedIdentityUploadIntent,
+    FakeSourceImageInspector,
     SourceImageInspector,
     archive_character_version,
     complete_authorization_upload,
@@ -115,6 +117,8 @@ def get_character_storage(conn: Database) -> StorageAdapter:
 
 
 def get_source_image_inspector(conn: Database) -> SourceImageInspector:
+    if os.environ.get("VIDEO_REPLICA_FAKE_SOURCE_IMAGE_INSPECTOR") == "1":
+        return FakeSourceImageInspector()
     has_saved_config = (
         conn.execute("SELECT 1 FROM provider_settings WHERE provider = 'apilio'").fetchone()
         is not None
