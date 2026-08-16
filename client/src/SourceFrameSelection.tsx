@@ -52,6 +52,7 @@ export function SourceFrameSelection({
     loadRequestId.current = requestId;
     const isCurrentRequest = () => requestId === loadRequestId.current;
     setIsLoading(true);
+    setIsSubmitting(false);
     setError("");
     try {
       const [version, selection] = await Promise.all([
@@ -195,25 +196,34 @@ export function SourceFrameSelection({
       setError("请输入 1–3 个首 3 秒内且不重复的时间点，例如 0.5, 1.5, 2.5。");
       return;
     }
+    const requestId = loadRequestId.current + 1;
+    loadRequestId.current = requestId;
     setIsSubmitting(true);
-    loadRequestId.current += 1;
     setError("");
     setStatus("");
     try {
       await extractSourceFrames(projectId, referenceAssetId, timestamps);
+      if (requestId !== loadRequestId.current) {
+        return;
+      }
       setSelectedAssetId("");
       resetFeatures();
       onSelectionChange?.(null);
       setStatus("候选源画面已更新，请选择并确认一张。");
       await loadCandidates();
     } catch (requestError) {
+      if (requestId !== loadRequestId.current) {
+        return;
+      }
       setError(
         requestError instanceof Error
           ? requestError.message
           : "提取候选源画面失败。",
       );
     } finally {
-      setIsSubmitting(false);
+      if (requestId === loadRequestId.current) {
+        setIsSubmitting(false);
+      }
     }
   }
 
@@ -235,6 +245,7 @@ export function SourceFrameSelection({
       setError("请先加载并查看候选源画面预览，再进行确认。");
       return;
     }
+    const requestId = loadRequestId.current;
     setIsSubmitting(true);
     setError("");
     try {
@@ -243,19 +254,27 @@ export function SourceFrameSelection({
         selectedAssetId,
         characterFeatures,
       );
+      if (requestId !== loadRequestId.current) {
+        return;
+      }
       const selectedIndex = candidates.findIndex(
         (candidate) => candidate.asset_id === selectedAssetId,
       );
       setStatus(`已确认候选源画面 ${selectedIndex + 1}。`);
       onSelectionChange?.(selection);
     } catch (requestError) {
+      if (requestId !== loadRequestId.current) {
+        return;
+      }
       setError(
         requestError instanceof Error
           ? requestError.message
           : "确认源画面失败。",
       );
     } finally {
-      setIsSubmitting(false);
+      if (requestId === loadRequestId.current) {
+        setIsSubmitting(false);
+      }
     }
   }
 
