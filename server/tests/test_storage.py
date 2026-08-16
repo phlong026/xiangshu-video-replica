@@ -358,7 +358,9 @@ def test_local_adapter_stores_objects_under_root_and_rejects_path_escape(tmp_pat
 
     assert (tmp_path / "projects" / "p1" / "source" / "reference.mp4").read_bytes() == b"video"
     assert adapter.get_object("projects/p1/source/reference.mp4") == b"video"
-    assert adapter.head_object("projects/p1/source/reference.mp4") is not None
+    stored = adapter.head_object("projects/p1/source/reference.mp4")
+    assert stored is not None
+    assert stored.content_type == "video/mp4"
 
     with pytest.raises(ValueError, match="unsafe object key"):
         adapter.put_object("../escape.mp4", b"bad", content_type="video/mp4")
