@@ -20,7 +20,7 @@ from app.first_frames import (
 )
 from app.media_routes import get_media_storage
 from app.permissions import require_project_access
-from app.settings import SettingsDecryptError, SettingsKeyMissing, SettingsRepository
+from app.settings import SettingsRepository, SettingsUnavailableError
 from app.source_frames import latest_version
 from app.storage import StorageAdapter
 
@@ -72,7 +72,7 @@ def get_image_provider(conn: Database) -> ImageProvider:
     )
     try:
         config = SettingsRepository(conn).load_provider_config("apilio")
-    except (SettingsDecryptError, SettingsKeyMissing) as exc:
+    except SettingsUnavailableError as exc:
         if has_saved_apilio_config:
             raise HTTPException(
                 status_code=503,

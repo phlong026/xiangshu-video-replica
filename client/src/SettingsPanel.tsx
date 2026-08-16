@@ -54,19 +54,9 @@ const PROVIDER_FORMS: Record<
       { name: "region", label: "Region", placeholder: "例如 ap-shanghai" },
     ],
   },
-  oss: {
-    title: "阿里云 OSS",
-    description: "备用对象存储。只在运行设置中切换为当前存储后用于新素材。",
-    fields: [
-      { name: "access_key_id", label: "AccessKey ID", secret: true },
-      { name: "secret_access_key", label: "AccessKey Secret", secret: true },
-      { name: "bucket", label: "Bucket" },
-      { name: "endpoint", label: "Endpoint", placeholder: "https://oss-…" },
-    ],
-  },
 };
 
-const PROVIDER_ORDER: ProviderName[] = ["metaso", "apilio", "cos", "oss"];
+const PROVIDER_ORDER: ProviderName[] = ["metaso", "apilio", "cos"];
 
 export function SettingsPanel() {
   const [settings, setSettings] = useState<SettingsSnapshot | null>(null);
@@ -87,10 +77,12 @@ export function SettingsPanel() {
           setLoadError("");
         }
       })
-      .catch(() => {
+      .catch((error: unknown) => {
         if (isMounted) {
           setLoadError(
-            "无法读取设置。请确认本地服务已启动且当前身份具有管理员权限。",
+            error instanceof Error
+              ? error.message
+              : "无法读取设置。请确认本地服务已启动且当前身份具有管理员权限。",
           );
         }
       });
@@ -193,7 +185,7 @@ export function SettingsPanel() {
           <span className="eyebrow">TEST MODE</span>
           <h3 id="diagnostic-title">测试设置</h3>
           <p>
-            逐项检查已保存的服务参数并生成脱敏日志。已配置的 COS/OSS
+            逐项检查已保存的服务参数并生成脱敏日志。已配置的 COS
             会创建并删除一个小测试对象，可能产生云存储请求费用；该操作不会提交
             H3、视频或图片生成任务。H3
             与模型服务的检测只确认配置，不发起计费调用。
@@ -367,12 +359,12 @@ function RuntimeForm({
           onChange={(event) =>
             setValues((current) => ({
               ...current,
-              active_storage_provider: event.target.value as "cos" | "oss",
+              active_storage_provider: event.target.value as "cos" | "local",
             }))
           }
         >
           <option value="cos">腾讯云 COS</option>
-          <option value="oss">阿里云 OSS</option>
+          <option value="local">本地存储（仅开发）</option>
         </select>
       </label>
       <label>
@@ -435,17 +427,19 @@ function DiagnosticResult({
         {report.status === "ok" ? "设置检查通过" : "检测到需要处理的配置项"}
       </strong>
       <ul>
-        {report.providers.map((provider) => (
-          <li key={provider.provider}>
-            <span>{PROVIDER_FORMS[provider.provider].title}</span>
-            <span
-              className={`diagnostic-status diagnostic-status--${provider.status}`}
-            >
-              {diagnosticStatusLabel(provider.status)}
-            </span>
-            <p>{provider.message}</p>
-          </li>
-        ))}
+        {report.providers
+          .filter((provider) => PROVIDER_ORDER.includes(provider.provider))
+          .map((provider) => (
+            <li key={provider.provider}>
+              <span>{PROVIDER_FORMS[provider.provider].title}</span>
+              <span
+                className={`diagnostic-status diagnostic-status--${provider.status}`}
+              >
+                {diagnosticStatusLabel(provider.status)}
+              </span>
+              <p>{provider.message}</p>
+            </li>
+          ))}
       </ul>
       <button
         type="button"
@@ -496,5 +490,5 @@ function diagnosticStatusLabel(status: DiagnosticProviderResult["status"]) {
 function storageProviderLabel(
   provider: RuntimeSettings["active_storage_provider"],
 ) {
-  return provider === "cos" ? "腾讯云 COS" : "阿里云 OSS";
+  return provider === "cos" ? "腾讯云 COS" : "本地存储";
 }

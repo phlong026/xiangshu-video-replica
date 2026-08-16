@@ -2254,7 +2254,7 @@ export interface components {
       /** Max Concurrent H3 Tasks */
       max_concurrent_h3_tasks: number;
       /** Active Storage Provider */
-      active_storage_provider?: ("cos" | "oss" | "local") | null;
+      active_storage_provider?: ("cos" | "local") | null;
     };
     /** ScriptRequest */
     ScriptRequest: {

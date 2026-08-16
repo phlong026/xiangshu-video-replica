@@ -5,6 +5,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from app.auth import get_database
@@ -31,6 +32,7 @@ def client(db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> It
             conn.close()
 
     storage_root = tmp_path / "private-storage"
+    monkeypatch.setenv("VIDEO_REPLICA_SETTINGS_KEY", Fernet.generate_key().decode("ascii"))
     monkeypatch.setenv("VIDEO_REPLICA_STORAGE_ROOT", str(storage_root))
     storage = LocalStorageAdapter(root=storage_root, bucket="private-bucket")
     storage.put_object("outputs/asset_owned.mp4", b"video", content_type="video/mp4")

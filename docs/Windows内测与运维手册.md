@@ -62,6 +62,8 @@ client/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/
 $env:VIDEO_REPLICA_HOME = "$env:LOCALAPPDATA\VideoReplicaWorkbench"
 $env:VIDEO_REPLICA_DB_PATH = "$env:VIDEO_REPLICA_HOME\data\app.db"
 $env:VIDEO_REPLICA_DESKTOP_USER_ID = "内部用户ID"
+# 可选：仅安全部署系统注入；留空则由当前 Windows 用户 DPAPI 持久化
+# $env:VIDEO_REPLICA_SETTINGS_KEY = "<由 Secret 系统注入的稳定 Fernet 主密钥>"
 ```
 
 `VIDEO_REPLICA_DESKTOP_USER_ID` 必须对应 `users` 表中 `is_active = 1` 的内部用户。桌面端以 `/api/auth/me` 返回结果作为身份真源；发布环境不设置 `VIDEO_REPLICA_ALLOW_DEV_IDENTITY_HEADER`，也不使用 `VITE_DEV_USER_ID`。服务端配置桌面身份后会忽略客户端伪造的 `X-Dev-User-Id`。
@@ -73,15 +75,18 @@ $env:VIDEO_REPLICA_DESKTOP_USER_ID = "内部用户ID"
   data\app.db
   backups\
   logs\
+  secrets\settings-key.dpapi
   storage-cache\
 ```
 
 约束：
 
 - SQLite 只放本机磁盘。
-- 禁止放在 COS、OSS、NAS、网盘同步目录或网络共享目录。
+- 禁止放在 COS、NAS、网盘同步目录或网络共享目录。
 - 开启 WAL、foreign_keys、busy_timeout 由服务端连接层负责。
 - 桌面端不直接读写 SQLite，只访问 `http://127.0.0.1:8000` 的业务 API。
+- `settings-key.dpapi` 只能由创建它的 Windows 用户通过 DPAPI 解密；升级和修复安装不得删除 `secrets\` 目录。
+- API/Worker 启动前会先运行 `python -m app.bootstrap`，自动迁移数据库并验证已保存配置可解密。
 
 ### 3.3 备份目录
 
@@ -134,11 +139,12 @@ $env:VIDEO_REPLICA_LOG_DIR = "$env:VIDEO_REPLICA_HOME\logs"
 
 ### 3.5 设置页诊断日志
 
-内测管理员在桌面端“设置”页填写 H3、Apilio、COS、OSS 参数后，点击“测试设置”。系统会对已保存的配置逐项执行诊断，并生成可下载的 `settings-diagnostic-<id>.json`。已配置的 COS/OSS 会创建并立即删除一个小测试对象，因此可能产生云厂商请求费用；不会发起 H3、视频或图片生成任务。
+内测管理员在桌面端“设置”页填写 H3、Apilio 和 COS 参数后，点击“测试设置”。系统会对已保存的配置逐项执行诊断，并生成可下载的 `settings-diagnostic-<id>.json`。已配置的 COS 会创建并立即删除一个小测试对象，因此可能产生云厂商请求费用；不会发起 H3、视频或图片生成任务。
 
 - 密钥输入框不会回显原值；留空保存不会覆盖已保存密钥。
 - 日志只记录 Provider、已配置字段名、测试类型、适配器能力、耗时、HTTP 状态、错误码、失败阶段和清理失败标记，不记录 API Key、Secret、Authorization、Provider 原始错误文本或完整签名 URL。
-- `通过` 表示当前适配器的连接测试通过；COS/OSS 的 `通过` 已完成真实写入、元数据读取、读取和删除校验。`仅配置校验` 表示参数已保存，但该服务未发起外部调用；`未配置` 和 `失败` 均应先下载日志再调整参数或本地服务。出现清理失败时，日志会提示可能残留测试对象。
+- `通过` 表示当前适配器的连接测试通过；COS 的 `通过` 已完成真实写入、元数据读取、读取和删除校验。`仅配置校验` 表示参数已保存，但该服务未发起外部调用；`未配置` 和 `失败` 均应先下载日志再调整参数或本地服务。出现清理失败时，日志会提示可能残留测试对象。
+- 设置中的 API Key 和云凭证加密保存在本机 SQLite。默认主密钥由当前 Windows 用户 DPAPI 保护并跨重启复用；如由部署系统显式注入 `VIDEO_REPLICA_SETTINGS_KEY`，启动引导仅在该值成功解密当前数据库后将其导入 DPAPI 存储。密钥不可用时系统必须停止启动或返回“配置仍在”错误，不得覆盖旧配置。
 - “测试设置”不会自动创建 H3 付费视频任务。真实生成只能通过项目页中明确的生成操作发起。
 
 ## 4. 安装验证
@@ -165,6 +171,7 @@ $env:VIDEO_REPLICA_LOG_DIR = "$env:VIDEO_REPLICA_HOME\logs"
 2. 执行手动备份。
 3. 记录数据库 SHA256、表数量、关键业务计数。
 4. 记录 1 个未完成批次和 1 个已完成批次的 ID。
+5. 查询 `assets.storage_uri` 是否还有 `oss://` 对象；若有，先迁移对象和 URI，不得删除 OSS 凭证后强行升级。
 
 升级：
 

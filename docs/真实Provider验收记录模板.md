@@ -32,7 +32,6 @@
 | Apilio | Nano Banana Pro 2K 首帧生成 | 待填写 | SOURCE_PENDING | 待填写 |
 | METASO | MiniMax H3 图生视频 | 待填写 | SOURCE_PENDING | 待填写 |
 | Tencent COS | 私有桶、签名 URL、归档 | 待填写 | SOURCE_PENDING | 待填写 |
-| Ali OSS | 可切换存储 | 待填写 | SOURCE_PENDING | 待填写 |
 
 ## 3. 单次验收记录
 
@@ -144,14 +143,14 @@ P0 必须使用已授权真人 Golden Sample 比较可用候选模型，并选�
 
 ## 7. 存储专项
 
-| 检查项 | COS | OSS |
-| --- | --- | --- |
-| 私有桶 | 待填写 | 待填写 |
-| 短期签名 GET URL | 待填写 | 待填写 |
-| 签名 URL 到期后可重建 | 待填写 | 待填写 |
-| 上传、head、copy、delete 可用 | 待填写 | 待填写 |
-| 供应商临时 URL 可归档回企业存储 | 待填写 | 待填写 |
-| 最小权限密钥 | 待填写 | 待填写 |
+| 检查项 | COS |
+| --- | --- |
+| 私有桶 | 待填写 |
+| 短期签名 GET URL | 待填写 |
+| 签名 URL 到期后可重建 | 待填写 |
+| 上传、head、copy、delete 可用 | 待填写 |
+| 供应商临时 URL 可归档回企业存储 | 待填写 |
+| 最小权限密钥 | 待填写 |
 
 ## 8. 成本与失败率汇总
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 import subprocess
 import sys
@@ -8,6 +9,7 @@ from pathlib import Path
 
 import pytest
 from alembic import command
+from cryptography.fernet import Fernet
 
 from app.backup import backup_database, restore_database, run_daily_backup
 from app.db import alembic_config, connect_database, initialize_database
@@ -35,7 +37,7 @@ def test_initialize_database_applies_sqlite_pragmas_and_migrations(tmp_path: Pat
     assert journal_mode == "wal"
     assert foreign_keys == 1
     assert busy_timeout >= 5000
-    assert alembic_versions == ["017_generation_task_retry_lineage"]
+    assert alembic_versions == ["018_remove_oss_storage"]
     assert "schema_migrations" not in tables
     assert {
         "users",
@@ -75,7 +77,7 @@ def test_alembic_upgrades_empty_database_to_head(tmp_path: Path) -> None:
             for row in conn.execute("PRAGMA foreign_key_list(generation_tasks)").fetchall()
         }
 
-    assert version == "017_generation_task_retry_lineage"
+    assert version == "018_remove_oss_storage"
     assert {
         "locked_by",
         "locked_until",
@@ -141,7 +143,173 @@ def test_retry_lineage_revision_is_reversible(tmp_path: Path) -> None:
 
     with connect_database(db_path) as conn:
         assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == (
+            "018_remove_oss_storage"
+        )
+
+
+@pytest.mark.parametrize(
+    ("has_cos_config", "expected_provider"),
+    [(True, "cos"), (False, "local")],
+)
+def test_remove_oss_migration_purges_settings_and_selects_safe_fallback(
+    tmp_path: Path,
+    has_cos_config: bool,
+    expected_provider: str,
+) -> None:
+    db_path = tmp_path / f"remove-oss-{expected_provider}.db"
+    command.upgrade(alembic_config(db_path), "017_generation_task_retry_lineage")
+
+    with connect_database(db_path) as conn:
+        conn.execute(
+            "INSERT INTO users (id, username, display_name, role) "
+            "VALUES ('admin', 'admin', 'Admin', 'admin')"
+        )
+        conn.execute(
+            "INSERT INTO provider_settings (provider, encrypted_config, updated_by_user_id) "
+            "VALUES ('oss', 'encrypted-oss', 'admin')"
+        )
+        if has_cos_config:
+            conn.execute(
+                "INSERT INTO provider_settings (provider, encrypted_config, updated_by_user_id) "
+                "VALUES ('cos', 'encrypted-cos', 'admin')"
+            )
+        conn.execute(
+            "UPDATE runtime_settings SET active_storage_provider = 'oss', "
+            "updated_by_user_id = 'admin' WHERE id = 1"
+        )
+        conn.commit()
+
+    command.upgrade(alembic_config(db_path), "head")
+
+    with connect_database(db_path) as conn:
+        version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+        providers = {
+            row[0] for row in conn.execute("SELECT provider FROM provider_settings").fetchall()
+        }
+        active_provider = conn.execute(
+            "SELECT active_storage_provider FROM runtime_settings WHERE id = 1"
+        ).fetchone()[0]
+
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO provider_settings (provider, encrypted_config) "
+                "VALUES ('oss', 'removed')"
+            )
+
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("UPDATE runtime_settings SET active_storage_provider = 'oss' WHERE id = 1")
+
+    assert version == "018_remove_oss_storage"
+    assert "oss" not in providers
+    assert active_provider == expected_provider
+
+    command.downgrade(alembic_config(db_path), "017_generation_task_retry_lineage")
+
+    with connect_database(db_path) as conn:
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == (
             "017_generation_task_retry_lineage"
+        )
+
+
+def test_remove_oss_migration_refuses_to_orphan_legacy_assets(tmp_path: Path) -> None:
+    db_path = tmp_path / "remove-oss-with-assets.db"
+    command.upgrade(alembic_config(db_path), "017_generation_task_retry_lineage")
+
+    with connect_database(db_path) as conn:
+        conn.execute(
+            "INSERT INTO users (id, username, display_name, role) "
+            "VALUES ('admin', 'admin', 'Admin', 'admin')"
+        )
+        conn.execute(
+            "INSERT INTO projects (id, owner_user_id, name) "
+            "VALUES ('project-1', 'admin', 'Legacy OSS project')"
+        )
+        conn.execute(
+            "INSERT INTO assets ("
+            "id, project_id, kind, storage_uri, sha256, size_bytes, content_type, "
+            "created_by_user_id"
+            ") VALUES ("
+            "'asset-1', 'project-1', 'video', 'oss://legacy-bucket/video.mp4', "
+            "'legacy-sha256', 1, 'video/mp4', 'admin'"
+            ")"
+        )
+        conn.execute(
+            "INSERT INTO provider_settings (provider, encrypted_config, updated_by_user_id) "
+            "VALUES ('oss', 'encrypted-oss', 'admin')"
+        )
+        conn.execute(
+            "UPDATE runtime_settings SET active_storage_provider = 'oss', "
+            "updated_by_user_id = 'admin' WHERE id = 1"
+        )
+        conn.commit()
+
+    with pytest.raises(RuntimeError, match="OSS-backed assets must be migrated"):
+        command.upgrade(alembic_config(db_path), "head")
+
+    with connect_database(db_path) as conn:
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == (
+            "017_generation_task_retry_lineage"
+        )
+        assert (
+            conn.execute(
+                "SELECT encrypted_config FROM provider_settings WHERE provider = 'oss'"
+            ).fetchone()[0]
+            == "encrypted-oss"
+        )
+        assert (
+            conn.execute(
+                "SELECT active_storage_provider FROM runtime_settings WHERE id = 1"
+            ).fetchone()[0]
+            == "oss"
+        )
+        assert (
+            conn.execute("SELECT storage_uri FROM assets WHERE id = 'asset-1'").fetchone()[0]
+            == "oss://legacy-bucket/video.mp4"
+        )
+
+
+def test_runtime_bootstrap_upgrades_an_existing_database_before_startup(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "bootstrap-upgrade.db"
+    command.upgrade(alembic_config(db_path), "017_generation_task_retry_lineage")
+    with connect_database(db_path) as conn:
+        conn.execute(
+            "INSERT INTO provider_settings (provider, encrypted_config) "
+            "VALUES ('oss', 'legacy-encrypted-value')"
+        )
+        conn.execute("UPDATE runtime_settings SET active_storage_provider = 'oss' WHERE id = 1")
+        conn.commit()
+
+    result = subprocess.run(
+        [sys.executable, "-m", "app.bootstrap"],
+        cwd=Path(__file__).resolve().parents[1],
+        env={
+            **os.environ,
+            "VIDEO_REPLICA_DB_PATH": str(db_path),
+            "VIDEO_REPLICA_SETTINGS_KEY": Fernet.generate_key().decode("ascii"),
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    with connect_database(db_path) as conn:
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == (
+            "018_remove_oss_storage"
+        )
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM provider_settings WHERE provider = 'oss'"
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            conn.execute(
+                "SELECT active_storage_provider FROM runtime_settings WHERE id = 1"
+            ).fetchone()[0]
+            == "local"
         )
 
 
