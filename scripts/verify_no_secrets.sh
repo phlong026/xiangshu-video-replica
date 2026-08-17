@@ -16,7 +16,10 @@ scan_paths=(
 )
 
 patterns=(
-  'sk-[A-Za-z0-9_-]{20,}'
+  # sk- 前必须是行首或非词字符（ERE 无后行断言，用捕获组锚定）：
+  # 避免 task-warning--toolbar 一类 CSS 类名里的 “ta**sk-**warning…” 子串
+  # 误报；真实密钥前必是引号/空白/行首，不会嵌在标识符中间。
+  '(^|[^A-Za-z0-9_-])sk-[A-Za-z0-9_-]{20,}'
   'AKIA[0-9A-Z]{16}'
   '-----BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----'
   '(api[_-]?key|secret[_-]?access[_-]?key|authorization|bearer|token|password)[[:space:]]*[:=][[:space:]]*["'\''][^"'\'']{8,}["'\'']'
