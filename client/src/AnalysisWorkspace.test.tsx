@@ -4,6 +4,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AnalysisWorkspace } from "./AnalysisWorkspace";
@@ -348,52 +349,54 @@ describe("AnalysisWorkspace workflow gates", () => {
     );
 
     expect(await screen.findByText("拆解完成")).toBeInTheDocument();
-    expect(screen.getByTitle("画面与人物")).toHaveAttribute(
-      "aria-current",
-      "step",
-    );
+    expect(
+      within(screen.getByRole("tab", { name: /人物设定/ })).getByText(
+        "缺失 4 项",
+      ),
+    ).toBeInTheDocument();
     expect(screen.queryByText("完成源画面")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "完成角色选择" }));
-    expect(screen.getByTitle("画面与人物")).toHaveAttribute(
-      "aria-current",
-      "step",
-    );
+    expect(
+      within(screen.getByRole("tab", { name: /人物设定/ })).getByText(
+        "缺失 3 项",
+      ),
+    ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "完成源画面" }));
-    expect(screen.getByTitle("画面与人物")).toHaveAttribute(
-      "aria-current",
-      "step",
-    );
+    expect(
+      within(screen.getByRole("tab", { name: /人物设定/ })).getByText(
+        "缺失 2 项",
+      ),
+    ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "完成人物参考" }));
-    expect(screen.getByTitle("画面与人物")).toHaveAttribute(
-      "aria-current",
-      "step",
-    );
+    expect(
+      within(screen.getByRole("tab", { name: /人物设定/ })).getByText(
+        "缺失 1 项",
+      ),
+    ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "完成置换首帧" }));
-    expect(screen.getByTitle("口播与生成")).toHaveAttribute(
-      "aria-current",
-      "step",
-    );
+    expect(
+      within(screen.getByRole("tab", { name: /人物设定/ })).getByText("✓"),
+    ).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "完成人物参考" }));
-    expect(screen.getByTitle("口播与生成")).toHaveAttribute(
-      "aria-current",
-      "step",
-    );
+    expect(
+      within(screen.getByRole("tab", { name: /人物设定/ })).getByText("✓"),
+    ).toBeInTheDocument();
     expect(screen.getByText("首帧历史可查看")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "完成角色选择" }));
-    expect(screen.getByTitle("口播与生成")).toHaveAttribute(
-      "aria-current",
-      "step",
-    );
+    expect(
+      within(screen.getByRole("tab", { name: /人物设定/ })).getByText("✓"),
+    ).toBeInTheDocument();
     expect(screen.getByText("首帧历史可查看")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "切换角色版本" }));
-    expect(screen.getByTitle("画面与人物")).toHaveAttribute(
-      "aria-current",
-      "step",
-    );
+    expect(
+      within(screen.getByRole("tab", { name: /人物设定/ })).getByText(
+        "缺失 3 项",
+      ),
+    ).toBeInTheDocument();
     expect(screen.queryByText("完成人物参考")).toBeNull();
     expect(screen.getByText("首帧历史可查看")).toBeInTheDocument();
   });
@@ -425,10 +428,11 @@ describe("AnalysisWorkspace workflow gates", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "标记源画面失效" }));
 
-    expect(screen.getByTitle("画面与人物")).toHaveAttribute(
-      "aria-current",
-      "step",
-    );
+    expect(
+      within(screen.getByRole("tab", { name: /人物设定/ })).getByText(
+        "缺失 3 项",
+      ),
+    ).toBeInTheDocument();
     expect(screen.getByText("首帧历史可查看")).toBeInTheDocument();
   });
 
@@ -457,10 +461,11 @@ describe("AnalysisWorkspace workflow gates", () => {
 
     expect(screen.queryByText("完成人物参考")).toBeNull();
     expect(screen.getByText("历史兼容首帧可用")).toBeInTheDocument();
-    expect(screen.getByTitle("画面与人物")).toHaveAttribute(
-      "aria-current",
-      "step",
-    );
+    expect(
+      within(screen.getByRole("tab", { name: /人物设定/ })).getByText(
+        "缺失 1 项",
+      ),
+    ).toBeInTheDocument();
   });
 
   it("opens generation only with a saved shot card and forwards the created batch", async () => {
@@ -510,10 +515,9 @@ describe("AnalysisWorkspace workflow gates", () => {
       screen.getByText("生成输入：shot-card-2/first-frame-1/原始口播稿"),
     ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "模拟锁定 Prompt" }));
-    expect(screen.getByTitle("口播与生成")).toHaveAttribute(
-      "aria-current",
-      "step",
-    );
+    expect(
+      within(screen.getByRole("tab", { name: /人物设定/ })).getByText("✓"),
+    ).toBeInTheDocument();
     for (const [startLabel, finishLabel] of [
       ["模拟角色保存中", "模拟角色保存完成"],
       ["模拟源画面保存中", "模拟源画面保存完成"],
@@ -721,10 +725,9 @@ describe("AnalysisWorkspace workflow gates", () => {
       target: { value: "未保存的生成草稿" },
     });
     fireEvent.click(screen.getByRole("button", { name: "模拟锁定 Prompt" }));
-    expect(screen.getByTitle("口播与生成")).toHaveAttribute(
-      "aria-current",
-      "step",
-    );
+    expect(
+      within(screen.getByRole("tab", { name: /人物设定/ })).getByText("✓"),
+    ).toBeInTheDocument();
     const sceneInput = screen.getByLabelText("S01 场景");
     const form = sceneInput.closest("form");
     if (!form) {

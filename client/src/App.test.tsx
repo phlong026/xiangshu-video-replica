@@ -899,10 +899,11 @@ describe("App", () => {
     expect(
       await screen.findByText("已选择角色“小夏 · 乡墅项目管理专家 V3”。"),
     ).toBeInTheDocument();
-    expect(screen.getByTitle("画面与人物")).toHaveAttribute(
-      "aria-current",
-      "step",
-    );
+    expect(
+      within(screen.getByRole("tab", { name: /人物设定/ })).getByText(
+        "缺失 3 项",
+      ),
+    ).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith(
       "http://127.0.0.1:8000/api/projects/project-ready/main-character",
       expect.objectContaining({
