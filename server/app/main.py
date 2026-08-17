@@ -21,6 +21,7 @@ from app.media_routes import router as media_router
 from app.rbac_routes import router as rbac_router
 from app.settings import SettingsUnavailableError
 from app.settings_routes import router as settings_router
+from app.simple_character_routes import router as character_simple_router
 from app.source_frame_routes import router as source_frame_router
 
 # Non-loopback hosts that are still accepted: TestClient uses "testclient",
@@ -115,6 +116,7 @@ app.include_router(character_generation_router)
 app.include_router(character_reference_router)
 app.include_router(source_frame_router)
 app.include_router(first_frame_router)
+app.include_router(character_simple_router)
 
 
 @app.get("/health", response_model=HealthResponse)

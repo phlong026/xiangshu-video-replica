@@ -7,7 +7,9 @@ import {
   type ProjectCharacterAssetOption,
   type ProjectCharacterVersionOption,
   type ProjectMainCharacter,
+  type SimpleCharacterResult,
 } from "./api";
+import { SimpleCharacterUpload } from "./SimpleCharacterUpload";
 
 const VIEW_LABELS: Record<ProjectCharacterAssetOption["view_type"], string> = {
   FRONT_FACE: "正脸近景",
@@ -40,6 +42,7 @@ export function CharacterSelection({
   const [isRestoring, setIsRestoring] = useState(true);
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [isUploadOpen, setIsUploadOpen] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
 
@@ -102,6 +105,22 @@ export function CharacterSelection({
     } finally {
       setIsLoading(false);
     }
+  }
+
+  async function refreshVersions() {
+    try {
+      const availableVersions = await listProjectCharacterVersions(projectId);
+      setVersions(availableVersions);
+    } catch {
+      // Keep the previously loaded list; the next openSelection will retry.
+    }
+  }
+
+  async function handleSimpleCharacterCreated(result: SimpleCharacterResult) {
+    await refreshVersions();
+    setSelectedVersionId(result.character_version_id);
+    setIsUploadOpen(false);
+    setMessage("新人物已发布并自动选中，确认后保存即可作为项目角色版本。");
   }
 
   async function saveSelection() {
@@ -176,6 +195,17 @@ export function CharacterSelection({
       {isOpen ? (
         <div className="character-selection-panel">
           <div className="panel-header">
+            <div>
+              {!readOnly ? (
+                <button
+                  className="secondary-button"
+                  onClick={() => setIsUploadOpen((open) => !open)}
+                  type="button"
+                >
+                  {isUploadOpen ? "收起一键上传" : "一键上传人物"}
+                </button>
+              ) : null}
+            </div>
             <button
               type="button"
               className="secondary-button"
@@ -184,6 +214,12 @@ export function CharacterSelection({
               关闭
             </button>
           </div>
+          {!readOnly && isUploadOpen ? (
+            <SimpleCharacterUpload
+              onCreated={handleSimpleCharacterCreated}
+              projectId={projectId}
+            />
+          ) : null}
           {isLoading ? (
             <p className="status-note">正在读取可用角色版本</p>
           ) : null}

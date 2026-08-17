@@ -1009,6 +1009,33 @@ export async function listProjectCharacterVersions(
   );
 }
 
+export interface SimpleCharacterResult {
+  identity_id: string;
+  persona_id: string;
+  character_version_id: string;
+  publication_hash: string;
+}
+
+export async function uploadSimpleCharacter(
+  projectId: string,
+  file: File,
+  displayName: string,
+  personaName = "",
+): Promise<SimpleCharacterResult> {
+  const form = new FormData();
+  form.append("file", file);
+  form.append("display_name", displayName);
+  if (personaName.trim()) {
+    form.append("persona_name", personaName.trim());
+  }
+  return requestApiJson<SimpleCharacterResult>(
+    `/api/simple-characters/${encodeURIComponent(projectId)}/generate`,
+    "一键创建人物失败",
+    { method: "POST", body: form },
+    CLOUD_OP_TIMEOUT_MS,
+  );
+}
+
 export async function getProjectMainCharacter(
   projectId: string,
 ): Promise<ProjectMainCharacter | null> {
@@ -1681,7 +1708,7 @@ async function requestApi(
   const headers = new Headers(init.headers);
   const devUserId = getDevelopmentUserId();
 
-  if (init.body) {
+  if (init.body && !(init.body instanceof FormData)) {
     headers.set("Content-Type", "application/json");
   }
   if (devUserId) {
