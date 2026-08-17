@@ -220,11 +220,8 @@ export function CharacterReferenceSelection({
       aria-labelledby="character-reference-title"
     >
       <div>
-        <span className="eyebrow">CHARACTER REFERENCES</span>
         <h3 id="character-reference-title">人物参考图</h3>
-        <p>
-          系统只负责按源画面朝向和景别推荐；请查看七视图后，手动确认 1–4 张。
-        </p>
+        <p>按源画面朝向与景别推荐，确认 1–4 张。</p>
       </div>
       {isLoading ? <p className="status-note">正在读取人物参考图推荐</p> : null}
       {error ? <p className="settings-error">{error}</p> : null}

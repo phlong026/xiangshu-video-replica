@@ -523,11 +523,7 @@ export function TaskRecordsPanel({
     <section className="task-records" aria-labelledby="task-records-title">
       <div className="section-heading">
         <div>
-          <span className="eyebrow">TASK RECORDS</span>
           <h2 id="task-records-title">任务记录</h2>
-          <p className="section-description">
-            按项目查看批次、生成结果与需处理事项。
-          </p>
         </div>
         {activeBatchId ? (
           <span className="batch-id">{activeBatchId}</span>
@@ -538,7 +534,6 @@ export function TaskRecordsPanel({
         <aside className="batch-history-panel" aria-label="批次历史">
           <div className="batch-history-heading">
             <div>
-              <span className="eyebrow">BATCH HISTORY</span>
               <h3>项目批次</h3>
             </div>
             <button

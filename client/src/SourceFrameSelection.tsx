@@ -290,11 +290,8 @@ export function SourceFrameSelection({
       aria-labelledby="source-frame-title"
     >
       <div>
-        <span className="eyebrow">SOURCE FRAME</span>
         <h3 id="source-frame-title">候选源画面</h3>
-        <p>
-          技术画质参考只用于排序；请以人物可见性和替换效果为准，手动确认一张。
-        </p>
+        <p>画质分仅用于排序，以人物可见性为准。</p>
       </div>
       <fieldset className="source-frame-features">
         <legend>人物替换特征（需人工确认）</legend>

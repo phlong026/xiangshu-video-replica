@@ -280,12 +280,11 @@ export function FirstFrameSelection({
       aria-labelledby="first-frame-title"
     >
       <div>
-        <span className="eyebrow">FIRST FRAME</span>
         <h3 id="first-frame-title">人物置换首帧</h3>
         <p>
           {legacyCharacterSelected
-            ? "当前项目使用历史兼容人物；已有首帧历史可追溯，新生成沿用冻结的旧人物快照。"
-            : "以已确认的源画面和角色库参考图生成。确认后才允许它进入后续 H3 提示词。"}
+            ? "历史兼容人物 · 沿用冻结的人物快照。"
+            : "由已确认的源画面与角色参考生成。"}
         </p>
       </div>
       <div className="first-frame-controls">

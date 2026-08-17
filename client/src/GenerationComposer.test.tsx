@@ -146,7 +146,7 @@ describe("GenerationComposer", () => {
 
     render(<GenerationComposer {...props} />);
 
-    expect(await screen.findByText("口播稿与 H3 Prompt")).toBeInTheDocument();
+    expect(await screen.findByText("口播稿与 Prompt")).toBeInTheDocument();
     expect(screen.getByText("分析版本：analysis-1")).toBeInTheDocument();
     expect(
       screen.getByText("人物版本：character-version-1"),
@@ -291,7 +291,7 @@ describe("GenerationComposer", () => {
 
     expect(createButton).toBeDisabled();
     expect(
-      screen.getByText("生成参数已变化，请重新编译 Prompt。"),
+      screen.getByText("生成参数已变化，请重新编译 Prompt"),
     ).toBeInTheDocument();
   });
 
@@ -327,7 +327,7 @@ describe("GenerationComposer", () => {
       await screen.findByRole("button", { name: "创建 1 个生成任务" }),
     ).toBeEnabled();
     expect(
-      screen.queryByText("生成参数已变化，请重新编译 Prompt。"),
+      screen.queryByText("生成参数已变化，请重新编译 Prompt"),
     ).not.toBeInTheDocument();
   });
 
@@ -369,7 +369,7 @@ describe("GenerationComposer", () => {
     expect(compileButton).toBeDisabled();
     expect(createButton).toBeDisabled();
     expect(
-      screen.getByText("口播稿有未保存修改，请先保存。"),
+      screen.getByText("口播稿有未保存修改，请先保存"),
     ).toBeInTheDocument();
   });
 

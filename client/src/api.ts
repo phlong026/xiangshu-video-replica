@@ -1439,6 +1439,23 @@ export async function runSettingsDiagnostic(): Promise<SettingsDiagnosticReport>
   );
 }
 
+export async function testProviderConnection(
+  provider: ProviderName,
+): Promise<ProviderTestResult> {
+  return requestAdminJson<ProviderTestResult>(
+    `/api/admin/settings/providers/${provider}/connection-test`,
+    "连接测试失败",
+    { method: "POST" },
+    CLOUD_OP_TIMEOUT_MS,
+  );
+}
+
+export type ProviderTestResult = {
+  status: string;
+  provider: string;
+  test_kind: string;
+};
+
 export async function downloadDiagnosticReport(
   downloadUrl: string,
   reportId: string,

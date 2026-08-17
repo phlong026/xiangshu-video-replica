@@ -1,14 +1,7 @@
-const PROJECT_WORKFLOW_STEPS = [
-  "上传参考视频",
-  "拆解视频",
-  "选择角色版本",
-  "选择起始帧",
-  "确认人物参考",
-  "确认置换首帧",
-  "确认口播稿",
-  "锁定 Prompt",
-  "设置数量并生成",
-  "预览与下载",
+const PROJECT_WORKFLOW_STAGES = [
+  "上传与拆解",
+  "画面与人物",
+  "口播与生成",
 ] as const;
 
 export function ProjectWorkflowSteps({
@@ -18,14 +11,14 @@ export function ProjectWorkflowSteps({
   completedThrough?: number;
   currentStep: number;
 }) {
-  const completedStep = completedThrough ?? currentStep - 1;
+  const completedStage = completedThrough ?? currentStep - 1;
 
   return (
     <ol className="workflow-steps" aria-label="复刻项目流程">
-      {PROJECT_WORKFLOW_STEPS.map((label, index) => {
-        const step = index + 1;
-        const isComplete = step <= completedStep;
-        const isCurrent = step === currentStep;
+      {PROJECT_WORKFLOW_STAGES.map((label, index) => {
+        const stage = index + 1;
+        const isComplete = stage <= completedStage;
+        const isCurrent = stage === currentStep;
         return (
           <li
             className={
@@ -37,7 +30,7 @@ export function ProjectWorkflowSteps({
             }
             key={label}
           >
-            <span aria-hidden="true">{isComplete ? "✓" : step}</span>
+            <span aria-hidden="true">{isComplete ? "✓" : `0${stage}`}</span>
             <strong aria-current={isCurrent ? "step" : undefined} title={label}>
               {label}
             </strong>

@@ -268,7 +268,7 @@ export function App() {
         ),
       );
       setSetupMessage(
-        `“${project.name}”已完成上传和预检（${completed.metadata.duration_seconds.toFixed(1)} 秒），已自动进入视频拆解。`,
+        `“${project.name}”预检通过（${completed.metadata.duration_seconds.toFixed(1)} 秒），拆解中。`,
       );
       setUploadStage("analyzing");
       await startVideoAnalysis(project.id, completed.asset_id);
@@ -382,9 +382,9 @@ export function App() {
     return (
       <main className="centered-shell">
         <section className="login-card" aria-labelledby="app-title">
-          <span className="eyebrow">INTERNAL PREVIEW</span>
-          <h1 id="app-title">短视频复刻工作台</h1>
-          <p>面向内部员工的 P0 工程骨架</p>
+          <span className="eyebrow">JINGXU STUDIO</span>
+          <h1 id="app-title">镜序 Studio</h1>
+          <p>短视频复刻工作台</p>
           {sessionMessage ? (
             <p className="settings-error" role="alert">
               {sessionMessage}
@@ -396,7 +396,7 @@ export function App() {
             </p>
           ) : null}
           <button type="button" disabled={isLoginLoading} onClick={handleLogin}>
-            {isLoginLoading ? "正在验证身份" : "进入工作台"}
+            {isLoginLoading ? "正在验证身份" : "进入"}
           </button>
         </section>
       </main>
@@ -574,9 +574,6 @@ function AppSidebar({
     page: WorkspacePage;
   }> = [
     { icon: "projects", label: "项目", page: "projects" },
-    ...(currentUser.role === "auditor"
-      ? []
-      : [{ icon: "new" as const, label: "新建复刻", page: "new" as const }]),
     { icon: "characters", label: "人物库", page: "characters" },
     { icon: "tasks", label: "任务记录", page: "tasks" },
     ...(currentUser.role === "admin"
@@ -602,8 +599,8 @@ function AppSidebar({
           </svg>
         </span>
         <span>
-          <strong>短视频复刻</strong>
-          <small className="app-brand__subtitle">内部创作工作台</small>
+          <strong>镜序 Studio</strong>
+          <small className="app-brand__subtitle">AI 视频复刻</small>
         </span>
       </div>
       <nav className="sidebar-nav" aria-label="主导航">
@@ -726,15 +723,10 @@ function ProjectSetupPanel({
     <section className="project-setup" aria-labelledby={titleId}>
       <div className="section-heading">
         <div>
-          <span className="eyebrow">
-            {isCreateMode ? "START HERE" : "PROJECTS"}
-          </span>
-          <h2 id={titleId}>{isCreateMode ? "新建复刻项目" : "项目列表"}</h2>
-          <p>
-            {isCreateMode
-              ? "上传 4 至 15 秒的参考视频，系统会先完成格式与时长预检。"
-              : "查看项目状态，并继续上传或进入视频拆解。"}
-          </p>
+          <h2 id={titleId}>{isCreateMode ? "新建项目" : "项目"}</h2>
+          {isCreateMode ? (
+            <p>参考视频：MP4 / MOV，4–15 秒，不超过 50MB。</p>
+          ) : null}
         </div>
         {!isCreateMode ? (
           <span className="project-count">{projects.length} 个项目</span>
@@ -743,7 +735,7 @@ function ProjectSetupPanel({
       {isCreateMode ? <ProjectWorkflowSteps currentStep={1} /> : null}
       {setupError ? <p className="settings-error">{setupError}</p> : null}
       {setupMessage ? <p className="setup-success">{setupMessage}</p> : null}
-      {isCreateMode && canWrite ? (
+      {canWrite ? (
         <form className="project-setup-form" onSubmit={onSubmit}>
           <label htmlFor="project-name">项目名称</label>
           <input
@@ -769,9 +761,7 @@ function ProjectSetupPanel({
             </p>
           ) : null}
           {pendingProject ? (
-            <p className="status-note">
-              正在为“{pendingProject.name}”重新上传参考视频。
-            </p>
+            <p className="status-note">重新上传 · {pendingProject.name}</p>
           ) : null}
           {pendingProject && !isUploading ? (
             <button
@@ -807,18 +797,12 @@ function ProjectSetupPanel({
             }
             type="submit"
           >
-            {isUploading
-              ? "正在上传"
-              : pendingProject
-                ? "重新上传"
-                : "创建并上传"}
+            {isUploading ? "正在上传" : pendingProject ? "重新上传" : "开始"}
           </button>
         </form>
       ) : null}
       {!isCreateMode && !canWrite ? (
-        <p className="status-note">
-          当前为只读身份，可查看项目和任务记录，不能创建、上传、编辑、删除或重试。
-        </p>
+        <p className="status-note">只读身份：仅可查看。</p>
       ) : null}
       {!isCreateMode && projectsError ? (
         <p className="settings-error">{projectsError}</p>
@@ -880,9 +864,7 @@ function ProjectSetupPanel({
       !isLoading &&
       !projectsError &&
       !projects.length ? (
-        <p className="status-note">
-          还没有项目，请从“新建复刻”创建第一个项目。
-        </p>
+        <p className="status-note">还没有项目。在上方开始第一个复刻。</p>
       ) : null}
     </section>
   );
@@ -902,12 +884,12 @@ function UploadProgress({
     creating_project: {
       step: 1,
       title: "正在创建项目",
-      message: "正在保存本次复刻任务。",
+      message: "请稍候",
     },
     creating_upload: {
       step: 2,
       title: "正在准备上传",
-      message: "正在获取安全上传地址。",
+      message: "获取上传地址",
     },
     uploading: {
       step: 3,
@@ -918,12 +900,12 @@ function UploadProgress({
     verifying: {
       step: 4,
       title: "正在验证参考视频",
-      message: "正在检查文件、格式和视频时长。",
+      message: "校验格式与时长",
     },
     analyzing: {
       step: 5,
       title: "正在启动视频拆解",
-      message: "视频已通过预检，正在创建拆解任务。",
+      message: "预检通过，启动拆解",
     },
   };
   const detail = details[stage];
@@ -977,9 +959,9 @@ function formatReferenceStatus(
   status: Project["reference_upload_status"],
 ): string {
   const labels: Record<Project["reference_upload_status"], string> = {
-    NOT_STARTED: "未上传参考视频",
+    NOT_STARTED: "未上传",
     UPLOAD_PENDING: "上传未完成",
-    READY: "参考视频已就绪",
+    READY: "已就绪",
   };
   return labels[status] ?? status;
 }
@@ -988,11 +970,11 @@ function formatAnalysisStatus(
   status: Project["analysis_status"] | undefined,
 ): string {
   const labels: Record<Project["analysis_status"], string> = {
-    NOT_READY: "等待参考视频",
-    PENDING: "视频拆解待开始",
-    READY: "视频拆解已完成",
+    NOT_READY: "待上传",
+    PENDING: "待拆解",
+    READY: "已拆解",
   };
-  return status ? labels[status] : "拆解状态待确认";
+  return status ? labels[status] : "状态确认中";
 }
 
 function ServiceBadge({ state }: { state: ServiceState }) {
@@ -1043,8 +1025,8 @@ function ensureWorkspaceHash(page: WorkspacePage) {
 function pageTitle(page: WorkspacePage): string {
   return {
     characters: "人物库",
-    new: "新建复刻",
-    projects: "项目工作台",
+    new: "新建项目",
+    projects: "项目",
     settings: "设置",
     tasks: "任务记录",
   }[page];
