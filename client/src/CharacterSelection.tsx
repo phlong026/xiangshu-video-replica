@@ -147,10 +147,9 @@ export function CharacterSelection({
     <section className="character-selection" aria-labelledby="character-title">
       <div className="section-heading">
         <div>
-          <span className="eyebrow">CHARACTER VERSION</span>
           <h3 id="character-title">角色版本</h3>
           {isRestoring ? (
-            <p>正在恢复项目角色版本。</p>
+            <p>恢复角色版本中…</p>
           ) : currentSummary ? (
             <div className="current-character-summary">
               <strong>当前角色：{currentSummary.identityName}</strong>

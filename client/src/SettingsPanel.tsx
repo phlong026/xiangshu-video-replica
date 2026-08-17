@@ -8,7 +8,9 @@ import {
   type ProviderSettings,
   type RuntimeSettings,
   runSettingsDiagnostic,
-  type SettingsDiagnosticReport,
+  testProviderConnection,
+  type ProviderTestResult,
+  SettingsDiagnosticReport,
   type SettingsSnapshot,
   updateProviderSettings,
   updateRuntimeSettings,
@@ -47,11 +49,11 @@ const PROVIDER_FORMS: Record<
     title: "腾讯云 COS",
     description:
       "默认对象存储。保持私有 Bucket，由系统签发临时上传和读取地址。",
+    // region 固定为 ap-shanghai，不在界面中显示
     fields: [
       { name: "access_key_id", label: "SecretId", secret: true },
       { name: "secret_access_key", label: "SecretKey", secret: true },
       { name: "bucket", label: "Bucket" },
-      { name: "region", label: "Region", placeholder: "例如 ap-shanghai" },
     ],
   },
 };
@@ -96,7 +98,10 @@ export function SettingsPanel() {
     provider: ProviderName,
     config: Record<string, string>,
   ) {
-    const updated = await updateProviderSettings(provider, config);
+    // 对于 COS，自动设置固定的 region
+    const finalConfig =
+      provider === "cos" ? { ...config, region: "ap-shanghai" } : config;
+    const updated = await updateProviderSettings(provider, finalConfig);
     setSettings((current) =>
       current
         ? {
@@ -114,19 +119,7 @@ export function SettingsPanel() {
     );
   }
 
-  async function testSettings() {
-    setIsTesting(true);
-    setDiagnosticError("");
-    try {
-      setDiagnostic(await runSettingsDiagnostic());
-    } catch {
-      setDiagnosticError(
-        "测试设置失败。请下载本地服务日志或检查网络、权限与配置后重试。",
-      );
-    } finally {
-      setIsTesting(false);
-    }
-  }
+
 
   async function downloadDiagnostic() {
     if (!diagnostic) {
@@ -172,41 +165,48 @@ export function SettingsPanel() {
           <ProviderForm
             key={provider}
             provider={provider}
-            settings={settings.providers[provider]}
+            settings={settings?.providers[provider]!}
             onSave={saveProvider}
           />
         ))}
       </div>
 
-      <RuntimeForm runtime={settings.runtime} onSave={saveRuntime} />
+      <RuntimeForm runtime={settings!.runtime} onSave={saveRuntime} />
 
-      <section className="diagnostic-panel" aria-labelledby="diagnostic-title">
+      {diagnosticError ? (
+        <p className="settings-error" role="alert">
+          {diagnosticError}
+        </p>
+      ) : null}
+
+      {/* 保留全局诊断功能用于下载完整日志 */}
+      <section
+        className="diagnostic-panel"
+        aria-labelledby="diagnostic-title"
+      >
         <div>
           <span className="eyebrow">TEST MODE</span>
-          <h3 id="diagnostic-title">测试设置</h3>
+          <h3 id="diagnostic-title">完整诊断日志</h3>
           <p>
-            逐项检查已保存的服务参数并生成脱敏日志。已配置的 COS
-            会创建并删除一个小测试对象，可能产生云存储请求费用；该操作不会提交
-            H3、视频或图片生成任务。H3
-            与模型服务的检测只确认配置，不发起计费调用。
+            下载包含所有服务商的完整配置诊断报告，用于问题排查与审计。
           </p>
         </div>
-        <button type="button" onClick={testSettings} disabled={isTesting}>
-          {isTesting ? "正在测试" : "测试设置"}
+        <button
+          type="button"
+          onClick={() => downloadDiagnostic(diagnostic!)}
+          disabled={!diagnostic || isDownloading}
+        >
+          {isDownloading ? "正在下载" : "下载诊断日志"}
         </button>
-
-        {diagnostic ? (
-          <DiagnosticResult
-            report={diagnostic}
-            isDownloading={isDownloading}
-            onDownload={downloadDiagnostic}
-          />
-        ) : null}
-        {diagnosticError ? (
-          <p className="settings-error" role="alert">
-            {diagnosticError}
-          </p>
-        ) : null}
+        {diagnostic && diagnosticError
+          ? null
+          : diagnostic && (
+              <DiagnosticResult
+                report={diagnostic}
+                isDownloading={isDownloading}
+                onDownload={downloadDiagnostic}
+              />
+            )}
       </section>
     </section>
   );
@@ -225,11 +225,12 @@ function ProviderForm({
   ) => Promise<void>;
 }) {
   const form = PROVIDER_FORMS[provider];
-  const [values, setValues] = useState<Record<string, string>>(() =>
-    initialValues(form.fields, settings.config),
+  const [values, setValues] = useState<Record<string, string>>(()
+    => initialValues(form.fields, settings.config),
   );
   const [status, setStatus] = useState("");
   const [isSaving, setIsSaving] = useState(false);
+  const [isTesting, setIsTesting] = useState(false);
 
   useEffect(() => {
     setValues(initialValues(form.fields, settings.config));
@@ -237,16 +238,31 @@ function ProviderForm({
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (isSaving) return;
     setIsSaving(true);
     setStatus("");
     try {
       await onSave(provider, values);
       setValues((current) => clearSecretFields(current, form.fields));
       setStatus("已保存");
+      setTimeout(() => setStatus(""), 2000);
     } catch {
       setStatus("保存失败，请检查必填项与管理员权限。");
     } finally {
       setIsSaving(false);
+    }
+  }
+
+  async function handleTest() {
+    if (isTesting) return;
+    setIsTesting(true);
+    setStatus("");
+    try {
+      await onTest();
+    } catch {
+      // Error handled by onTest callback
+    } finally {
+      setIsTesting(false);
     }
   }
 
@@ -290,6 +306,9 @@ function ProviderForm({
       <div className="form-actions">
         <button type="submit" disabled={isSaving}>
           {isSaving ? "正在保存" : "保存"}
+        </button>
+        <button type="button" onClick={handleTest} disabled={isTesting || !settings.configured}>
+          {isTesting ? "测试中..." : "测试连接"}
         </button>
         {status ? <span role="status">{status}</span> : null}
       </div>

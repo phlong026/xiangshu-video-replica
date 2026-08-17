@@ -125,7 +125,7 @@ export function AnalysisWorkspace({
     useState<CharacterReferenceSelectionValue | null>(null);
   const [firstFrameSelection, setFirstFrameSelection] =
     useState<AnalysisVersion | null>(null);
-  const [generationStep, setGenerationStep] = useState(7);
+  const [, setGenerationStep] = useState(7);
   const [reloadToken, setReloadToken] = useState(0);
   const [forceLoadProjectId, setForceLoadProjectId] = useState<string | null>(
     null,
@@ -138,6 +138,7 @@ export function AnalysisWorkspace({
   const sourceFrameSelectionIdRef = useRef<string | null>(null);
   const characterReferenceSelectionIdRef = useRef<string | null>(null);
   const savedShotsRef = useRef<ShotCard[]>([]);
+  const isSavingRef = useRef(false);
 
   useEffect(() => {
     if (
@@ -172,7 +173,7 @@ export function AnalysisWorkspace({
         }
         const payload = readAnalysisPayload(version);
         if (!payload) {
-          setError("视频拆解数据格式无效，请重新执行拆解。");
+          setError("拆解数据无效，请重新拆解。");
           return;
         }
         setAnalysisId(version.id);
@@ -380,18 +381,13 @@ export function AnalysisWorkspace({
   }
 
   const workflowStep = !analysisId
-    ? 2
-    : !characterSelection
-      ? 3
-      : !sourceFrameSelection
-        ? 4
-        : !legacyCharacterSelected && !characterReferenceSelection
-          ? 5
-          : !firstFrameSelection
-            ? 6
-            : shotCardsDirty
-              ? 7
-              : generationStep;
+    ? 1
+    : !characterSelection ||
+        !sourceFrameSelection ||
+        (!legacyCharacterSelected && !characterReferenceSelection) ||
+        !firstFrameSelection
+      ? 2
+      : 3;
 
   function reloadWorkspace() {
     reloadTokenRef.current += 1;
@@ -440,23 +436,18 @@ export function AnalysisWorkspace({
     setShotCardsDirty(isDirty);
   }
 
-  async function handleSave(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (readOnly || isSaving || isWorkspaceBusyRef.current) {
-      return;
+  async function persistShotCards(): Promise<boolean> {
+    if (readOnly || isSavingRef.current || isWorkspaceBusyRef.current) {
+      return false;
     }
     if (!analysisId) {
-      return;
-    }
-    if (shotCardVersionId && !shotCardsDirty) {
-      setError("");
-      setSaveMessage("镜头卡片没有改动，无需重复保存。");
-      return;
+      return false;
     }
     if (shots.some((shot) => shot.end_time < shot.start_time)) {
       setError("镜头时间无效：结束时间不能早于开始时间。");
-      return;
+      return false;
     }
+    isSavingRef.current = true;
     setIsSaving(true);
     setError("");
     setSaveMessage("");
@@ -466,27 +457,45 @@ export function AnalysisWorkspace({
       setShotCardVersionId(savedVersion.id);
       setGenerationStep(7);
       setShotCardsDirty(false);
-      setSaveMessage(`镜头卡片已保存为版本 #${savedVersion.version_number}。`);
+      setSaveMessage(`已自动保存 · 版本 #${savedVersion.version_number}`);
+      return true;
     } catch (requestError) {
       setError(
         requestError instanceof Error
           ? requestError.message
           : "保存镜头卡片失败。",
       );
+      return false;
     } finally {
+      isSavingRef.current = false;
       setIsSaving(false);
     }
+  }
+
+  useEffect(() => {
+    if (readOnly || !analysisId || !shotCardsDirty) {
+      return;
+    }
+    if (shots.some((shot) => shot.end_time < shot.start_time)) {
+      setError("镜头时间无效：结束时间不能早于开始时间。");
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void persistShotCards();
+    }, 800);
+    return () => window.clearTimeout(timer);
+  }, [analysisId, readOnly, shotCardsDirty, shots]);
+
+  async function handleSave(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    await persistShotCards();
   }
 
   return (
     <section className="analysis-workspace" aria-labelledby="analysis-title">
       <div className="section-heading">
         <div>
-          <span className="eyebrow">VIDEO ANALYSIS</span>
-          <h2 id="analysis-title">镜头卡片</h2>
-          <p>
-            “{project.name}”的自动拆解结果。保存后会创建独立的人工修订版本。
-          </p>
+          <h2 id="analysis-title">复刻工作台</h2>
         </div>
         <button
           className="secondary-button"
@@ -494,7 +503,7 @@ export function AnalysisWorkspace({
           onClick={handleClose}
           type="button"
         >
-          返回项目
+          返回
         </button>
       </div>
       <ProjectWorkflowSteps currentStep={workflowStep} />
@@ -506,26 +515,22 @@ export function AnalysisWorkspace({
           onClick={reloadWorkspace}
           type="button"
         >
-          重新加载视频拆解
+          重新加载
         </button>
       ) : null}
       {!isLoading && isAnalysisMissing ? (
         <div className="analysis-missing-state">
-          <strong>视频拆解待开始</strong>
-          <p>
-            参考视频已经就绪。系统会先确认是否已有拆解结果，再安全地启动本步骤。
-          </p>
+          <strong>待拆解</strong>
+          <p>参考视频已就绪。</p>
           {readOnly ? (
             <>
-              <span className="status-note">
-                当前身份只能查看，不能启动拆解。
-              </span>
+              <span className="status-note">只读身份无法启动拆解。</span>
               <button
                 className="secondary-button"
                 onClick={reloadWorkspace}
                 type="button"
               >
-                重新检查视频拆解
+                重新检查
               </button>
             </>
           ) : (
@@ -534,7 +539,7 @@ export function AnalysisWorkspace({
               onClick={handleStartAnalysis}
               type="button"
             >
-              {isStartingAnalysis ? "正在开始拆解" : "开始视频拆解"}
+              {isStartingAnalysis ? "正在拆解" : "开始拆解"}
             </button>
           )}
         </div>
@@ -552,14 +557,11 @@ export function AnalysisWorkspace({
           </div>
           {analysisProvider === "fake_gemini" ? (
             <p className="status-note">
-              当前显示的是内置模拟结果。请在设置中保存 Gemini 视频分析 API
-              Key，并配置可用的 COS 存储后重新拆解。
+              演示数据 · 在设置中配置 Gemini 后可重新拆解
             </p>
           ) : null}
           {readOnly ? (
-            <p className="status-note">
-              当前为只读身份，可查看拆解、候选记录和历史版本；不会请求素材下载链接，也不能保存、选择或生成。
-            </p>
+            <p className="status-note">只读身份：仅可查看。</p>
           ) : null}
           <fieldset
             aria-busy={isWorkspaceBusy}
@@ -567,137 +569,156 @@ export function AnalysisWorkspace({
             disabled={isWorkspaceBusy}
           >
             <div className="analysis-primary">
-              {characterSelection ? (
-                <SourceFrameSelection
-                  onBusyChange={handleSourceFrameBusyChange}
-                  onSelectionChange={handleSourceFrameSelectionChange}
-                  projectId={project.id}
-                  referenceAssetId={project.reference_asset_id}
-                  readOnly={readOnly}
-                />
-              ) : (
-                <p className="workflow-gate-note">
-                  请先在右侧选择角色版本，再确认源画面。
-                </p>
-              )}
-              {!legacyCharacterSelected &&
-              characterSelection?.character_version_id &&
-              sourceFrameSelection ? (
-                <CharacterReferenceSelection
-                  characterSelection={characterSelection}
-                  onBusyChange={handleReferenceBusyChange}
-                  onSelectionChange={handleCharacterReferenceSelectionChange}
-                  projectId={project.id}
-                  readOnly={readOnly}
-                  sourceFrameSelection={sourceFrameSelection}
-                />
-              ) : null}
-              {characterSelection ? (
-                <FirstFrameSelection
-                  legacyCharacterSelected={legacyCharacterSelected}
-                  onBusyChange={handleFirstFrameBusyChange}
-                  onSelectionChange={handleFirstFrameSelectionChange}
-                  projectId={project.id}
-                  readOnly={readOnly}
-                  referenceSelection={characterReferenceSelection}
-                  sourceFrameSelectionId={sourceFrameSelection?.id ?? null}
-                />
-              ) : null}
-              <div className="shot-card-list">
-                {shots.map((shot, index) => (
-                  <fieldset className="shot-card" key={shot.shot_id}>
-                    <legend>镜头 {index + 1}</legend>
-                    <div className="shot-time-grid">
-                      <ShotInput
-                        label={`${shot.shot_id} 开始时间`}
-                        onChange={(value) =>
-                          updateShot(index, "start_time", value)
-                        }
-                        readOnly={readOnly || isSaving || isWorkspaceBusy}
-                        type="number"
-                        value={String(shot.start_time)}
+              <section className="stage-block" aria-label="画面与人物">
+                <header className="stage-block__head">
+                  <span className="stage-block__index">01</span>
+                  <h3>画面与人物</h3>
+                </header>
+                <div className="stage-people-grid">
+                  <div className="stage-people-main">
+                    {characterSelection ? (
+                      <SourceFrameSelection
+                        onBusyChange={handleSourceFrameBusyChange}
+                        onSelectionChange={handleSourceFrameSelectionChange}
+                        projectId={project.id}
+                        referenceAssetId={project.reference_asset_id}
+                        readOnly={readOnly}
                       />
-                      <ShotInput
-                        label={`${shot.shot_id} 结束时间`}
-                        onChange={(value) =>
-                          updateShot(index, "end_time", value)
-                        }
-                        readOnly={readOnly || isSaving || isWorkspaceBusy}
-                        type="number"
-                        value={String(shot.end_time)}
+                    ) : (
+                      <p className="workflow-gate-note">先选择角色版本</p>
+                    )}
+                    {!legacyCharacterSelected &&
+                    characterSelection?.character_version_id &&
+                    sourceFrameSelection ? (
+                      <CharacterReferenceSelection
+                        characterSelection={characterSelection}
+                        onBusyChange={handleReferenceBusyChange}
+                        onSelectionChange={handleCharacterReferenceSelectionChange}
+                        projectId={project.id}
+                        readOnly={readOnly}
+                        sourceFrameSelection={sourceFrameSelection}
                       />
-                    </div>
-                    <div className="shot-field-grid">
-                      {SHOT_TEXT_FIELDS.map(({ key, label }) => (
-                        <ShotInput
-                          key={key}
-                          label={`${shot.shot_id} ${label}`}
-                          onChange={(value) => updateShot(index, key, value)}
-                          readOnly={readOnly || isSaving || isWorkspaceBusy}
-                          value={shot[key]}
-                        />
-                      ))}
-                    </div>
-                  </fieldset>
-                ))}
-              </div>
-              {saveMessage ? (
-                <p className="setup-success">{saveMessage}</p>
-              ) : null}
-              {readOnly ? null : (
-                <button
-                  disabled={isSaving || isWorkspaceBusy || !analysisId}
-                  type="submit"
-                >
-                  {isSaving ? "正在保存" : "保存镜头卡片"}
-                </button>
-              )}
-              {firstFramePayload && shotCardVersionId ? (
-                <>
-                  {isSaving || shotCardsDirty ? (
-                    <p className="workflow-gate-note">
+                    ) : null}
+                    {characterSelection ? (
+                      <FirstFrameSelection
+                        legacyCharacterSelected={legacyCharacterSelected}
+                        onBusyChange={handleFirstFrameBusyChange}
+                        onSelectionChange={handleFirstFrameSelectionChange}
+                        projectId={project.id}
+                        readOnly={readOnly}
+                        referenceSelection={characterReferenceSelection}
+                        sourceFrameSelectionId={sourceFrameSelection?.id ?? null}
+                      />
+                    ) : null}
+                  </div>
+                  <div className="analysis-sidebar" aria-label="当前人物设定">
+                    <CharacterSelection
+                      onBusyChange={handleCharacterBusyChange}
+                      onVersionChange={handleCharacterSelectionChange}
+                      projectId={project.id}
+                      readOnly={readOnly}
+                    />
+                  </div>
+                </div>
+              </section>
+              <section className="stage-block" aria-label="镜头与口播">
+                <header className="stage-block__head">
+                  <span className="stage-block__index">02</span>
+                  <h3>镜头与口播</h3>
+                  {readOnly ? null : (
+                    <span className="stage-block__status" role="status">
                       {isSaving
-                        ? "镜头卡片正在保存，请完成后再继续生成。"
-                        : "镜头卡片已编辑，请保存后再继续生成。"}
-                    </p>
-                  ) : null}
-                  <GenerationComposer
-                    analysisVersionId={analysisId}
-                    characterVersionId={
-                      characterSelection?.character_version_id ?? null
-                    }
-                    currentUserId={currentUserId}
-                    durationSeconds={durationSeconds}
-                    firstFrameAssetId={firstFramePayload.first_frame_asset_id}
-                    firstFrameSelectionVersionId={firstFrameSelection?.id ?? ""}
-                    onBatchCreated={onBatchCreated}
-                    onBusyChange={handleGenerationBusyChange}
-                    onWorkflowStepChange={setGenerationStep}
-                    originalScript={originalScript}
-                    projectId={project.id}
-                    readOnly={
-                      readOnly || isSaving || shotCardsDirty || isWorkspaceBusy
-                    }
-                    referenceSelectionId={
-                      characterReferenceSelection?.id ?? null
-                    }
-                    shotCardVersionId={shotCardVersionId}
-                  />
-                </>
-              ) : firstFramePayload ? (
-                <p className="workflow-gate-note">
-                  请先保存当前镜头卡片，再确认口播稿并编译 Prompt。
-                </p>
-              ) : null}
+                        ? "保存中…"
+                        : shotCardsDirty
+                          ? "编辑后自动保存"
+                          : saveMessage ||
+                            (shotCardVersionId ? "已是最新" : "")}
+                    </span>
+                  )}
+                </header>
+                <div className="shot-card-list">
+                  {shots.map((shot, index) => (
+                    <fieldset className="shot-card" key={shot.shot_id}>
+                      <legend>镜头 {index + 1}</legend>
+                      <div className="shot-time-grid">
+                        <ShotInput
+                          label={`${shot.shot_id} 开始时间`}
+                          onChange={(value) =>
+                            updateShot(index, "start_time", value)
+                          }
+                          readOnly={readOnly || isSaving || isWorkspaceBusy}
+                          type="number"
+                          value={String(shot.start_time)}
+                        />
+                        <ShotInput
+                          label={`${shot.shot_id} 结束时间`}
+                          onChange={(value) =>
+                            updateShot(index, "end_time", value)
+                          }
+                          readOnly={readOnly || isSaving || isWorkspaceBusy}
+                          type="number"
+                          value={String(shot.end_time)}
+                        />
+                      </div>
+                      <div className="shot-field-grid">
+                        {SHOT_TEXT_FIELDS.map(({ key, label }) => (
+                          <ShotInput
+                            key={key}
+                            label={`${shot.shot_id} ${label}`}
+                            onChange={(value) => updateShot(index, key, value)}
+                            readOnly={readOnly || isSaving || isWorkspaceBusy}
+                            value={shot[key]}
+                          />
+                        ))}
+                      </div>
+                    </fieldset>
+                  ))}
+                </div>
+              </section>
+              <section className="stage-block" aria-label="生成">
+                <header className="stage-block__head">
+                  <span className="stage-block__index">03</span>
+                  <h3>生成</h3>
+                </header>
+                {firstFramePayload && shotCardVersionId ? (
+                  <>
+                    {isSaving || shotCardsDirty ? (
+                      <p className="workflow-gate-note">
+                        {isSaving ? "镜头保存中…" : "镜头编辑自动保存中…"}
+                      </p>
+                    ) : null}
+                    <GenerationComposer
+                      analysisVersionId={analysisId}
+                      characterVersionId={
+                        characterSelection?.character_version_id ?? null
+                      }
+                      currentUserId={currentUserId}
+                      durationSeconds={durationSeconds}
+                      firstFrameAssetId={firstFramePayload.first_frame_asset_id}
+                      firstFrameSelectionVersionId={firstFrameSelection?.id ?? ""}
+                      onBatchCreated={onBatchCreated}
+                      onBusyChange={handleGenerationBusyChange}
+                      onWorkflowStepChange={setGenerationStep}
+                      originalScript={originalScript}
+                      projectId={project.id}
+                      readOnly={
+                        readOnly || isSaving || shotCardsDirty || isWorkspaceBusy
+                      }
+                      referenceSelectionId={
+                        characterReferenceSelection?.id ?? null
+                      }
+                      shotCardVersionId={shotCardVersionId}
+                    />
+                  </>
+                ) : firstFramePayload ? (
+                  <p className="workflow-gate-note">
+                    镜头卡片自动保存后可继续。
+                  </p>
+                ) : (
+                  <p className="workflow-gate-note">确认置换首帧后可继续。</p>
+                )}
+              </section>
             </div>
-            <aside className="analysis-sidebar" aria-label="当前人物设定">
-              <CharacterSelection
-                onBusyChange={handleCharacterBusyChange}
-                onVersionChange={handleCharacterSelectionChange}
-                projectId={project.id}
-                readOnly={readOnly}
-              />
-            </aside>
           </fieldset>
         </form>
       ) : null}
@@ -708,7 +729,7 @@ export function AnalysisWorkspace({
 function providerLabel(provider: AnalysisProvider) {
   return provider === "apilio_gemini"
     ? "Gemini 3.1 Pro（Apilio）"
-    : "内置模拟拆解（尚未调用 Gemini）";
+    : "演示拆解";
 }
 
 function ShotInput({

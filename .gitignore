@@ -15,6 +15,7 @@ coverage/
 client/vite.config.js
 client/vite.config.d.ts
 output/playwright/
+output/diag/
 
 # Python
 .venv/

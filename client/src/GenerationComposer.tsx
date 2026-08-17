@@ -539,9 +539,7 @@ export function GenerationComposer({
     >
       <div className="section-heading">
         <div>
-          <span className="eyebrow">SCRIPT · PROMPT · H3</span>
-          <h3 id="generation-composer-title">口播稿与 H3 Prompt</h3>
-          <p>每次保存都会创建新版本；锁定后才能创建付费视频任务。</p>
+          <h3 id="generation-composer-title">口播稿与 Prompt</h3>
         </div>
       </div>
 
@@ -569,16 +567,16 @@ export function GenerationComposer({
       </fieldset>
 
       {scriptStale ? (
-        <p className="attention-banner">镜头卡已变化，请重新保存口播稿。</p>
+        <p className="attention-banner">镜头卡已变化，请重新保存口播稿</p>
       ) : null}
       {scriptDirty ? (
-        <p className="attention-banner">口播稿有未保存修改，请先保存。</p>
+        <p className="attention-banner">口播稿有未保存修改，请先保存</p>
       ) : null}
       {promptStale ? (
-        <p className="attention-banner">上游输入已变化，请重新编译 Prompt。</p>
+        <p className="attention-banner">上游输入已变化，请重新编译 Prompt</p>
       ) : null}
       {promptVersion && !promptParametersMatch ? (
-        <p className="attention-banner">生成参数已变化，请重新编译 Prompt。</p>
+        <p className="attention-banner">生成参数已变化，请重新编译 Prompt</p>
       ) : null}
       {error ? <p className="settings-error">{error}</p> : null}
       {message ? <p className="setup-success">{message}</p> : null}

@@ -1,0 +1,502 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>镜序 Studio · 设计方向样机</title>
+<style>
+/* ============ 预览外壳（中性，不参与方向评审） ============ */
+:root{
+  --shell-bg:#141416; --shell-panel:#1c1c1f; --shell-line:#2b2b30;
+  --shell-text:#e8e7e4; --shell-muted:#8e8c88; --shell-accent:#d8d5cf;
+  --dial-v:6; --dial-m:4; --dial-d:7;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--shell-bg);color:var(--shell-text);
+  font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans SC",sans-serif;
+  font-size:14px;line-height:1.6;}
+button,input,textarea{font:inherit}
+
+.shell-topbar{position:sticky;top:0;z-index:40;display:flex;align-items:center;gap:16px;
+  padding:14px 28px;border-bottom:1px solid var(--shell-line);
+  background:rgba(20,20,22,.92);backdrop-filter:blur(12px)}
+.shell-topbar strong{font-size:15px;letter-spacing:.02em}
+.shell-topbar .hint{color:var(--shell-muted);font-size:12px}
+.shell-topbar .kbd{display:inline-block;border:1px solid var(--shell-line);border-radius:4px;
+  padding:0 5px;font-size:11px;color:var(--shell-accent);font-variant-numeric:tabular-nums}
+
+.dials{display:flex;gap:20px;margin-left:auto;flex-wrap:wrap}
+.dial{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--shell-muted)}
+.dial input[type=range]{width:96px;accent-color:#d8d5cf}
+.dial output{min-width:26px;color:var(--shell-text);font-variant-numeric:tabular-nums;text-align:right}
+
+.disclaimer{padding:10px 28px 0;color:var(--shell-muted);font-size:12px}
+
+/* ============ 四方向 2×2 网格 ============ */
+.board{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:22px;padding:18px 28px 8px}
+@media (max-width:860px){.board{grid-template-columns:1fr}}
+
+.direction-card{border:1px solid var(--shell-line);border-radius:16px;overflow:hidden;
+  background:var(--shell-panel);display:flex;flex-direction:column;
+  transition:border-color .18s ease,transform .18s ease}
+.direction-card:hover{border-color:#4a4a52}
+.direction-card.is-selected{border-color:#e8b04b;box-shadow:0 0 0 1px #e8b04b inset}
+
+.stage{position:relative;height:330px;display:flex;align-items:stretch;justify-content:center;overflow:hidden}
+.stage-inner{width:100%;height:100%}
+
+.card-meta{display:flex;flex-direction:column;gap:6px;padding:14px 18px 16px;border-top:1px solid var(--shell-line)}
+.card-meta .name-row{display:flex;align-items:center;gap:10px;min-width:240px}
+.card-meta h3{margin:0;font-size:16px;letter-spacing:.01em}
+.card-meta .tag{font-size:11px;color:var(--shell-muted);border:1px solid var(--shell-line);
+  border-radius:999px;padding:1px 8px;white-space:nowrap}
+.card-meta .rec{font-size:11px;color:#171207;background:#e8b04b;border-radius:999px;
+  padding:1px 9px;font-weight:600;white-space:nowrap}
+.card-meta p{margin:0;color:var(--shell-muted);font-size:12.5px;min-width:240px;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.pick-row{display:flex;margin-top:6px}
+.qmdp-pick-button{width:100%;border:1px solid var(--shell-line);border-radius:10px;
+  padding:9px 14px;background:#232327;color:var(--shell-text);font-size:13px;font-weight:600;
+  cursor:pointer;transition:background-color .15s ease,border-color .15s ease}
+.qmdp-pick-button:hover{background:#2d2d33;border-color:#4a4a52}
+
+/* ============ 方向说明区（与样机分离） ============ */
+.details{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:22px;padding:10px 28px 30px}
+@media (max-width:860px){.details{grid-template-columns:1fr}}
+.detail-block{border:1px solid var(--shell-line);border-radius:14px;padding:18px 20px;background:var(--shell-panel)}
+.detail-block h4{margin:0 0 10px;font-size:14px}
+.detail-block dl{margin:0;display:grid;grid-template-columns:64px 1fr;gap:6px 12px;font-size:12.5px}
+.detail-block dt{color:var(--shell-muted)}
+.detail-block dd{margin:0}
+.swatches{display:flex;gap:6px;align-items:center}
+.sw{width:18px;height:18px;border-radius:5px;border:1px solid rgba(255,255,255,.14)}
+.rec-why{grid-column:1/-1;border:1px solid #6b5323;border-radius:14px;padding:18px 20px;
+  background:linear-gradient(160deg,#1e1a12,#191816)}
+.rec-why h4{margin:0 0 8px;color:#e8b04b;font-size:14px}
+.rec-why p{margin:0;color:#c9c4ba;font-size:13px}
+
+/* ============ 方向 A · 暗房剪辑台（暖黑 + 琥珀） ============ */
+.dir-a{--a-bg:#0b0b0e;--a-panel:#141419;--a-panel2:#1a1a20;--a-line:#26262e;
+  --a-text:#f1eee8;--a-muted:#8f8c86;--a-accent:#e0a83f;--a-accent-ink:#1a1206;--a-mint:#7fc7a4;
+  background:var(--a-bg);color:var(--a-text);display:grid;grid-template-columns:52px minmax(0,1fr) 150px;min-width:0}
+.dir-a .rail{border-right:1px solid var(--a-line);display:flex;flex-direction:column;align-items:center;gap:10px;padding:14px 0}
+.dir-a .rail .dot{width:22px;height:22px;border-radius:7px;border:1px solid var(--a-line)}
+.dir-a .rail .dot.on{background:var(--a-accent);border-color:var(--a-accent)}
+.dir-a .main{display:flex;flex-direction:column;min-width:0}
+.dir-a .topline{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--a-line)}
+.dir-a .topline b{font-size:12px;letter-spacing:.04em}
+.dir-a .topline .tc{font-family:"SF Mono",ui-monospace,Menlo,monospace;font-size:11px;color:var(--a-muted);font-variant-numeric:tabular-nums}
+.dir-a .canvas{flex:1;display:grid;place-items:center;padding:14px}
+.dir-a .frame{width:100%;aspect-ratio:16/9;max-height:100%;border-radius:8px;position:relative;overflow:hidden;
+  background:linear-gradient(150deg,#2a2318,#191510 60%,#101014);border:1px solid #2f2c24}
+.dir-a .frame::after{content:"";position:absolute;inset:auto 0 0 0;height:34px;
+  background:linear-gradient(transparent,rgba(0,0,0,.55))}
+.dir-a .frame .bar{position:absolute;left:12px;bottom:9px;display:flex;gap:8px;align-items:center;z-index:1}
+.dir-a .play{width:20px;height:20px;border-radius:50%;background:var(--a-accent);
+  display:grid;place-items:center;color:var(--a-accent-ink);font-size:9px}
+.dir-a .tline{height:3px;width:96px;border-radius:2px;background:#3a362c;overflow:hidden}
+.dir-a .tline i{display:block;width:42%;height:100%;background:var(--a-accent)}
+.dir-a .timecode{font-family:"SF Mono",ui-monospace,Menlo,monospace;font-size:10px;color:#cab98f;font-variant-numeric:tabular-nums}
+.dir-a .tl-strip{display:flex;gap:4px;padding:8px 14px 12px}
+.dir-a .clip{height:14px;border-radius:4px;background:var(--a-panel2);border:1px solid var(--a-line)}
+.dir-a .clip.hot{border-color:var(--a-accent);background:#241d10}
+.dir-a .insp{border-left:1px solid var(--a-line);padding:12px 10px;display:flex;flex-direction:column;gap:8px}
+.dir-a .insp .lb{font-size:10px;color:var(--a-muted);letter-spacing:.08em}
+.dir-a .chip{border:1px solid var(--a-line);border-radius:7px;padding:6px 8px;font-size:10.5px;background:var(--a-panel);
+  display:flex;align-items:center;gap:6px}
+.dir-a .chip i{width:14px;height:14px;border-radius:4px;background:#2c2a24;flex:0 0 auto}
+.dir-a .chip.on{border-color:var(--a-accent);background:#221b0e}
+.dir-a .cta{margin-top:auto;border:0;border-radius:7px;padding:8px;background:var(--a-accent);
+  color:var(--a-accent-ink);font-size:11px;font-weight:700;cursor:default;text-align:center}
+
+/* ============ 方向 B · 光影蓝图（冷黑 + 青绿 · 高密度工程） ============ */
+.dir-b{--b-bg:#0e1114;--b-panel:#12161b;--b-line:#242b33;--b-text:#e7ecf1;--b-muted:#7d8894;
+  --b-accent:#3fb5a6;--b-row:#161b21;
+  background:var(--b-bg);color:var(--b-text);display:flex;flex-direction:column;min-width:0;
+  font-variant-numeric:tabular-nums}
+.dir-b .topbar{display:flex;align-items:center;gap:10px;padding:8px 14px;border-bottom:1px solid var(--b-line)}
+.dir-b .logo{font-family:"SF Mono",ui-monospace,Menlo,monospace;font-size:11px;font-weight:700;
+  border:1px solid var(--b-line);border-radius:6px;padding:2px 7px;letter-spacing:.06em}
+.dir-b .tab{font-size:11px;color:var(--b-muted);padding:3px 8px;border-radius:6px}
+.dir-b .tab.on{color:var(--b-text);background:var(--b-panel);border:1px solid var(--b-line)}
+.dir-b .link{margin-left:auto;font-size:10.5px;color:var(--b-accent)}
+.dir-b .body{flex:1;display:grid;grid-template-columns:128px minmax(0,1fr) 158px;min-height:0}
+.dir-b .col{border-right:1px solid var(--b-line);padding:10px 8px;overflow:hidden}
+.dir-b .col:last-child{border-right:0}
+.dir-b .h{font-size:9.5px;color:var(--b-muted);letter-spacing:.12em;margin-bottom:8px}
+.dir-b .meta-row{display:flex;justify-content:space-between;font-family:"SF Mono",ui-monospace,Menlo,monospace;
+  font-size:10px;color:var(--b-muted);padding:4px 2px;border-bottom:1px solid #1a2026}
+.dir-b .meta-row b{color:var(--b-text);font-weight:500}
+.dir-b .frames{display:grid;grid-template-columns:1fr 1fr;gap:6px;padding:10px}
+.dir-b .f{aspect-ratio:16/10;border:1px solid var(--b-line);border-radius:5px;position:relative;
+  background:linear-gradient(160deg,#1a222a,#12171d)}
+.dir-b .f.sel{border-color:var(--b-accent);box-shadow:0 0 0 1px var(--b-accent) inset}
+.dir-b .f span{position:absolute;left:5px;bottom:4px;font-family:"SF Mono",ui-monospace,Menlo,monospace;
+  font-size:8.5px;color:var(--b-muted)}
+.dir-b .shots{padding:10px 8px;display:flex;flex-direction:column;gap:5px}
+.dir-b .shot{display:grid;grid-template-columns:26px 1fr 40px;gap:6px;align-items:center;
+  font-size:10px;background:var(--b-row);border:1px solid var(--b-line);border-radius:5px;padding:5px 7px}
+.dir-b .shot .id{font-family:"SF Mono",ui-monospace,Menlo,monospace;color:var(--b-accent);font-size:9.5px}
+.dir-b .shot .dur{font-family:"SF Mono",ui-monospace,Menlo,monospace;color:var(--b-muted);font-size:9.5px;text-align:right}
+.dir-b .statusbar{display:flex;gap:14px;align-items:center;padding:6px 14px;border-top:1px solid var(--b-line);
+  font-family:"SF Mono",ui-monospace,Menlo,monospace;font-size:9.5px;color:var(--b-muted)}
+.dir-b .statusbar .ok{color:var(--b-accent)}
+
+/* ============ 方向 C · 画廊白盒（亮色暖纸 + 衬线展示） ============ */
+.dir-c{--c-bg:#f4f1ea;--c-panel:#fffdf8;--c-line:#e3dccc;--c-text:#211d16;--c-muted:#8a8170;
+  --c-accent:#a4552f;--c-accent-ink:#fff8f2;
+  background:var(--c-bg);color:var(--c-text);display:flex;flex-direction:column;min-width:0;padding:18px 22px}
+.dir-c .masthead{display:flex;align-items:baseline;gap:12px;margin-bottom:12px}
+.dir-c .masthead .brand{font-family:"Songti SC","STSong","Noto Serif SC",serif;font-size:22px;font-weight:700;letter-spacing:.06em}
+.dir-c .masthead small{color:var(--c-muted);font-size:10.5px;letter-spacing:.18em}
+.dir-c .crumb{margin-left:auto;font-size:10.5px;color:var(--c-muted)}
+.dir-c .hero{position:relative;border-radius:14px;overflow:hidden;flex:1;min-height:0;
+  background:linear-gradient(155deg,#d9c9ae,#8d7c63 55%,#4a4335);
+  box-shadow:0 18px 40px rgba(64,52,32,.28);border:1px solid #d8cfba}
+.dir-c .hero .cap{position:absolute;left:16px;bottom:14px;color:#f7f2e8;font-size:11px;
+  font-family:"Songti SC","STSong","Noto Serif SC",serif;letter-spacing:.1em}
+.dir-c .hero .chip{position:absolute;right:12px;top:12px;background:rgba(255,253,248,.9);
+  border-radius:999px;padding:3px 10px;font-size:10px;color:#4a4335}
+.dir-c .filmstrip{display:flex;gap:8px;margin-top:12px}
+.dir-c .thumb{flex:1;aspect-ratio:16/10;border-radius:8px;border:1px solid var(--c-line);
+  background:linear-gradient(150deg,#cbbba0,#8d7c63)}
+.dir-c .thumb.on{outline:2px solid var(--c-accent);outline-offset:2px}
+.dir-c .actions{display:flex;gap:10px;margin-top:12px;align-items:center}
+.dir-c .btn-p{border:0;border-radius:9px;padding:8px 16px;background:var(--c-accent);color:var(--c-accent-ink);
+  font-size:11.5px;font-weight:600;cursor:default}
+.dir-c .btn-s{border:1px solid var(--c-line);border-radius:9px;padding:8px 14px;background:var(--c-panel);
+  font-size:11.5px;color:var(--c-text);cursor:default}
+.dir-c .note{margin-left:auto;font-size:10.5px;color:var(--c-muted)}
+
+/* ============ 方向 D · 放映机（纯黑电影舞台） ============ */
+.dir-d{--d-bg:#050506;--d-line:#1a1a1e;--d-text:#eae6de;--d-muted:#74716a;--d-accent:#f0a94e;
+  background:radial-gradient(120% 90% at 50% -20%,#171310 0%,var(--d-bg) 55%);
+  color:var(--d-text);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;min-width:0;padding:18px}
+.dir-d .screen{width:100%;max-width:460px;aspect-ratio:21/9;border-radius:4px;position:relative;overflow:hidden;
+  background:linear-gradient(160deg,#33291a,#171310 65%,#0a0908);border:1px solid #221d15;
+  box-shadow:0 24px 60px rgba(0,0,0,.7),0 0 0 1px rgba(240,169,78,.05) inset}
+.dir-d .screen::before{content:"";position:absolute;inset:0;opacity:.5;
+  background:repeating-linear-gradient(0deg,rgba(255,255,255,.022) 0 1px,transparent 1px 3px)}
+.dir-d .screen::after{content:"";position:absolute;inset:0;
+  background:radial-gradient(90% 130% at 50% 45%,transparent 55%,rgba(0,0,0,.6))}
+.dir-d .mark{position:absolute;right:10px;top:8px;font-family:"Avenir Next Condensed","Arial Narrow",sans-serif;
+  font-size:9px;letter-spacing:.28em;color:rgba(234,230,222,.5);z-index:1}
+.dir-d .ctrl{display:flex;align-items:center;gap:14px;padding:8px 18px;border:1px solid var(--d-line);
+  border-radius:999px;background:rgba(12,12,13,.85)}
+.dir-d .ctrl .pbtn{width:26px;height:26px;border-radius:50%;background:var(--d-accent);color:#201505;
+  display:grid;place-items:center;font-size:10px}
+.dir-d .ctrl .tc{font-family:"Avenir Next Condensed","Arial Narrow",sans-serif;font-size:12px;
+  letter-spacing:.22em;color:var(--d-muted);font-variant-numeric:tabular-nums}
+.dir-d .ctrl .tc b{color:var(--d-text);font-weight:500}
+.dir-d .steps{display:flex;gap:18px;font-size:10px;letter-spacing:.14em;color:var(--d-muted)}
+.dir-d .steps .on{color:var(--d-accent)}
+
+/* ============ 确认弹层 & Toast ============ */
+.overlay{position:fixed;inset:0;z-index:80;display:none;place-items:center;background:rgba(10,10,11,.66);backdrop-filter:blur(4px)}
+.overlay.open{display:grid}
+.overlay-card{width:min(440px,92vw);border:1px solid #3a3a42;border-radius:16px;background:#1d1d21;
+  padding:22px 24px;box-shadow:0 30px 80px rgba(0,0,0,.5)}
+.overlay-card h3{margin:0 0 4px;font-size:17px}
+.overlay-card .sub{color:var(--shell-muted);font-size:12.5px;margin-bottom:14px}
+.overlay-card .dial-readout{display:flex;gap:16px;font-size:12px;color:var(--shell-muted);margin-bottom:14px;flex-wrap:wrap}
+.overlay-card .dial-readout b{color:var(--shell-text);font-variant-numeric:tabular-nums}
+.overlay-card label{display:block;font-size:12px;color:var(--shell-muted);margin-bottom:6px}
+.overlay-card textarea{width:100%;min-height:64px;resize:vertical;border:1px solid #3a3a42;border-radius:9px;
+  background:#141417;color:var(--shell-text);padding:10px 12px;font-size:13px}
+.overlay-actions{display:flex;gap:10px;margin-top:16px}
+.overlay-actions button{flex:1;border-radius:10px;padding:10px;font-size:13.5px;font-weight:600;cursor:pointer}
+#confirm-pick{border:0;background:#e8b04b;color:#1a1206}
+#cancel-pick{border:1px solid #3a3a42;background:transparent;color:var(--shell-text)}
+.toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);z-index:90;
+  background:#232327;border:1px solid #3f3f47;border-radius:10px;padding:10px 18px;font-size:13px;
+  opacity:0;pointer-events:none;transition:opacity .2s ease}
+.toast.show{opacity:1}
+</style>
+</head>
+<body>
+
+<header class="shell-topbar">
+  <strong>镜序 Studio · 设计方向样机</strong>
+  <span class="hint">按 <span class="kbd">1</span>–<span class="kbd">4</span> 或点击按钮选择方向</span>
+  <div class="dials" aria-label="设计拨盘">
+    <label class="dial">视觉冒险度 <input id="dial-v" type="range" min="1" max="10" value="6"><output id="dial-v-out">6</output></label>
+    <label class="dial">动效强度 <input id="dial-m" type="range" min="1" max="10" value="4"><output id="dial-m-out">4</output></label>
+    <label class="dial">信息密度 <input id="dial-d" type="range" min="1" max="10" value="7"><output id="dial-d-out">7</output></label>
+  </div>
+</header>
+
+<p class="disclaimer">这是设计方向样机，用于选择视觉与交互气质，不是最终 App / 最终页面；选定方向后才进入正式实现。</p>
+
+<main class="board">
+
+  <!-- A -->
+  <article class="direction-card" data-id="A">
+    <div class="stage"><div class="stage-inner dir-a">
+      <div class="rail">
+        <span class="dot on"></span><span class="dot"></span><span class="dot"></span><span class="dot"></span>
+      </div>
+      <div class="main">
+        <div class="topline"><b>夏日咖啡口播 · 复刻</b><span class="tc">00:07.2 / 00:12.0</span></div>
+        <div class="canvas">
+          <div class="frame">
+            <div class="bar"><span class="play">▶</span><span class="tline"><i></i></span><span class="timecode">SHOT 04</span></div>
+          </div>
+        </div>
+        <div class="tl-strip">
+          <span class="clip" style="flex:2"></span><span class="clip" style="flex:3"></span>
+          <span class="clip hot" style="flex:2.4"></span><span class="clip" style="flex:2"></span><span class="clip" style="flex:2.6"></span>
+        </div>
+      </div>
+      <div class="insp">
+        <span class="lb">画面与人物</span>
+        <span class="chip on"><i></i>林晚 · V3</span>
+        <span class="chip"><i></i>源画面 · 候选 2</span>
+        <span class="chip"><i></i>置换首帧 · 1</span>
+        <span class="cta">生成 4 支</span>
+      </div>
+    </div></div>
+    <div class="card-meta">
+      <div class="name-row"><h3>A · 暗房剪辑台</h3><span class="tag">暖黑 · 琥珀金</span><span class="rec">推荐</span></div>
+      <p>Runway 式碳黑画布，视频是唯一主角；全局只允许琥珀金一个重音色，数字与时间码用等宽体。</p>
+      <div class="pick-row"><button type="button" class="qmdp-pick-button" data-id="A">选择 A · 暗房剪辑台</button></div>
+    </div>
+  </article>
+
+  <!-- B -->
+  <article class="direction-card" data-id="B">
+    <div class="stage"><div class="stage-inner dir-b">
+      <div class="topbar">
+        <span class="logo">镜序</span>
+        <span class="tab on">工作台</span><span class="tab">人物库</span><span class="tab">任务</span>
+        <span class="link">本地服务 · 已连接</span>
+      </div>
+      <div class="body">
+        <div class="col">
+          <div class="h">PROJECT</div>
+          <div class="meta-row"><span>时长</span><b>12.4s</b></div>
+          <div class="meta-row"><span>镜头</span><b>06</b></div>
+          <div class="meta-row"><span>角色</span><b>林晚 V3</b></div>
+          <div class="meta-row"><span>拆解</span><b>Gemini</b></div>
+          <div class="meta-row"><span>版本</span><b>#4</b></div>
+        </div>
+        <div class="frames">
+          <div class="f"><span>F·01</span></div><div class="f sel"><span>F·02</span></div>
+          <div class="f"><span>F·03</span></div><div class="f"><span>F·04</span></div>
+        </div>
+        <div class="shots">
+          <div class="h" style="padding:0 2px">SHOT CARDS</div>
+          <div class="shot"><span class="id">S01</span><span>全景 · 推镜</span><span class="dur">2.1s</span></div>
+          <div class="shot"><span class="id">S02</span><span>中景 · 固定</span><span class="dur">1.8s</span></div>
+          <div class="shot"><span class="id">S03</span><span>特写 · 跟拍</span><span class="dur">2.4s</span></div>
+          <div class="shot"><span class="id">S04</span><span>全景 · 拉镜</span><span class="dur">1.6s</span></div>
+        </div>
+      </div>
+      <div class="statusbar"><span class="ok">● 已自动保存</span><span>V#4</span><span>00:07.2</span></div>
+    </div></div>
+    <div class="card-meta">
+      <div class="name-row"><h3>B · 光影蓝图</h3><span class="tag">冷黑 · 青绿信号</span></div>
+      <p>Linear 式高密度工程台：顶部导航、发丝线分栏、等宽体数据流，适合批量项目的重度操作。</p>
+      <div class="pick-row"><button type="button" class="qmdp-pick-button" data-id="B">选择 B · 光影蓝图</button></div>
+    </div>
+  </article>
+
+  <!-- C -->
+  <article class="direction-card" data-id="C">
+    <div class="stage"><div class="stage-inner dir-c">
+      <div class="masthead">
+        <span class="brand">镜序</span><small>STUDIO</small>
+        <span class="crumb">项目 / 夏日咖啡口播</span>
+      </div>
+      <div class="hero">
+        <span class="chip">置换首帧 · 候选 1</span>
+        <span class="cap">镜头四 · 咖啡馆晨光</span>
+      </div>
+      <div class="filmstrip">
+        <span class="thumb"></span><span class="thumb on"></span><span class="thumb"></span><span class="thumb"></span>
+      </div>
+      <div class="actions">
+        <span class="btn-p">生成 4 支</span><span class="btn-s">调整口播稿</span>
+        <span class="note">已自动保存 · 版本 4</span>
+      </div>
+    </div></div>
+    <div class="card-meta">
+      <div class="name-row"><h3>C · 画廊白盒</h3><span class="tag">暖纸亮色 · 衬线展示</span></div>
+      <p>Stripe 式亮色高端：暖纸底、宋体标题、柔和投影。气质最亲和，但与剪辑工具的暗房直觉相悖。</p>
+      <div class="pick-row"><button type="button" class="qmdp-pick-button" data-id="C">选择 C · 画廊白盒</button></div>
+    </div>
+  </article>
+
+  <!-- D -->
+  <article class="direction-card" data-id="D">
+    <div class="stage"><div class="stage-inner dir-d">
+      <div class="screen"><span class="mark">JINGXU · REEL 04</span></div>
+      <div class="ctrl">
+        <span class="pbtn">▶</span>
+        <span class="tc"><b>00:07.2</b> — 00:12.0</span>
+      </div>
+      <div class="steps"><span class="on">定帧</span><span>口播</span><span>生成</span></div>
+    </div></div>
+    <div class="card-meta">
+      <div class="name-row"><h3>D · 放映机</h3><span class="tag">纯黑舞台 · 胶片颗粒</span></div>
+      <p>电影感最浓：21:9 银幕、胶片噪点、悬浮控制舱。沉浸满分，但信息密度低，重度操作会吃力。</p>
+      <div class="pick-row"><button type="button" class="qmdp-pick-button" data-id="D">选择 D · 放映机</button></div>
+    </div>
+  </article>
+
+</main>
+
+<section class="details">
+  <div class="rec-why">
+    <h4>为什么推荐 A · 暗房剪辑台</h4>
+    <p>它同时满足三个约束：① 视频创作工具的用户习惯暗色环境以准确判断画面（暗房直觉）；② 暖黑 + 单一琥珀重音色彻底摆脱「AI 模板紫」，又不像纯黑方案那样牺牲面板层级；③ 左轨 / 画布 / 右检三段式与信息密度 7 的拨盘一致，镜头卡片、候选图等高密度内容放得下。B 是 A 的高密度变体，可作为次选混搭对象。</p>
+  </div>
+  <div class="detail-block">
+    <h4>A · 暗房剪辑台 — 设计细节</h4>
+    <dl>
+      <dt>色板</dt><dd><span class="swatches"><span class="sw" style="background:#0b0b0e"></span><span class="sw" style="background:#141419"></span><span class="sw" style="background:#f1eee8"></span><span class="sw" style="background:#e0a83f"></span><span class="sw" style="background:#7fc7a4"></span></span></dd>
+      <dt>字体</dt><dd>中文系统栈 + SF Mono（时间码 / 版本号）</dd>
+      <dt>圆角</dt><dd>控件 7px · 面板 10px · 浮层 14px</dd>
+      <dt>记忆点</dt><dd>琥珀金播放钮 + 时间轴胶片条；生成进度用暖金细线而非紫色光晕</dd>
+      <dt>动效</dt><dd>候选图淡入 160ms、选中态琥珀描边过渡，全部 ease-out</dd>
+    </dl>
+  </div>
+  <div class="detail-block">
+    <h4>B · 光影蓝图 — 设计细节</h4>
+    <dl>
+      <dt>色板</dt><dd><span class="swatches"><span class="sw" style="background:#0e1114"></span><span class="sw" style="background:#12161b"></span><span class="sw" style="background:#e7ecf1"></span><span class="sw" style="background:#3fb5a6"></span></span></dd>
+      <dt>字体</dt><dd>全等宽数字 + 窄字距英文标签，工程终端气质</dd>
+      <dt>布局</dt><dd>顶栏导航 + 三栏数据流（替代左侧边栏），发丝线分隔</dd>
+      <dt>记忆点</dt><dd>底部状态栏：自动保存 / 版本号 / 时间码三灯常亮</dd>
+      <dt>适用</dt><dd>未来项目数上百、需要密集管理时的演进方向</dd>
+    </dl>
+  </div>
+  <div class="detail-block">
+    <h4>C · 画廊白盒 — 设计细节</h4>
+    <dl>
+      <dt>色板</dt><dd><span class="swatches"><span class="sw" style="background:#f4f1ea"></span><span class="sw" style="background:#fffdf8"></span><span class="sw" style="background:#211d16"></span><span class="sw" style="background:#a4552f"></span></span></dd>
+      <dt>字体</dt><dd>宋体展示标题（镜序字标）+ 无衬线正文</dd>
+      <dt>布局</dt><dd>左对齐编辑式：字标 → 大幅主画面 → 胶片条 → 动作行</dd>
+      <dt>记忆点</dt><dd>衬线字标与暖纸底的品牌质感</dd>
+      <dt>代价</dt><dd>亮色下判断画面色彩不如暗房准确；视频工具少见此气质</dd>
+    </dl>
+  </div>
+  <div class="detail-block">
+    <h4>D · 放映机 — 设计细节</h4>
+    <dl>
+      <dt>色板</dt><dd><span class="swatches"><span class="sw" style="background:#050506"></span><span class="sw" style="background:#1a1a1e"></span><span class="sw" style="background:#eae6de"></span><span class="sw" style="background:#f0a94e"></span></span></dd>
+      <dt>字体</dt><dd>窄体展示字（Avenir Next Condensed）大字距时间码</dd>
+      <dt>布局</dt><dd>居中 21:9 银幕 + 悬浮控制舱，界面铬几乎为零</dd>
+      <dt>记忆点</dt><dd>胶片颗粒噪点与暗角，真正的「放映厅」体验</dd>
+      <dt>代价</dt><dd>镜头卡片等密集表单无处安放，需额外抽屉层，操作步骤反增</dd>
+    </dl>
+  </div>
+</section>
+
+<!-- 确认弹层 -->
+<div class="overlay" id="overlay">
+  <div class="overlay-card" role="dialog" aria-modal="true" aria-labelledby="ov-title">
+    <h3 id="ov-title">选择方向 · —</h3>
+    <p class="sub" id="ov-sub">确认后将记录方向、拨盘值与您的调整建议。</p>
+    <div class="dial-readout">
+      <span>视觉冒险度 <b id="ov-v">6</b>/10</span>
+      <span>动效强度 <b id="ov-m">4</b>/10</span>
+      <span>信息密度 <b id="ov-d">7</b>/10</span>
+    </div>
+    <label for="ov-notes">调整建议（可选，例如「要 A 的布局 + B 的数据密度」）</label>
+    <textarea id="ov-notes" placeholder="写点什么…"></textarea>
+    <div class="overlay-actions">
+      <button type="button" id="cancel-pick">再看看</button>
+      <button type="button" id="confirm-pick">确认选择</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status"></div>
+
+<script>
+(function(){
+  var DIRS = {
+    A:{label:"A",name:"暗房剪辑台",notes:"暖黑 + 琥珀金，Runway 式三段编辑台"},
+    B:{label:"B",name:"光影蓝图",notes:"冷黑 + 青绿，Linear 式高密度工程台"},
+    C:{label:"C",name:"画廊白盒",notes:"暖纸亮色 + 衬线展示，Stripe 式高端"},
+    D:{label:"D",name:"放映机",notes:"纯黑电影舞台 + 胶片颗粒"}
+  };
+  var currentId = null;
+  var overlay = document.getElementById("overlay");
+  var toast = document.getElementById("toast");
+  var dialV = document.getElementById("dial-v");
+  var dialM = document.getElementById("dial-m");
+  var dialD = document.getElementById("dial-d");
+
+  function dialValues(){ return {variance:+dialV.value,motion:+dialM.value,density:+dialD.value}; }
+  function bindDial(el,out){ el.addEventListener("input",function(){ out.textContent = el.value; }); }
+  bindDial(dialV,document.getElementById("dial-v-out"));
+  bindDial(dialM,document.getElementById("dial-m-out"));
+  bindDial(dialD,document.getElementById("dial-d-out"));
+
+  function openOverlay(id){
+    var dir = DIRS[id]; if(!dir) return;
+    currentId = id;
+    document.getElementById("ov-title").textContent = "选择方向 " + dir.label + " · " + dir.name;
+    var dv = dialValues();
+    document.getElementById("ov-v").textContent = dv.variance;
+    document.getElementById("ov-m").textContent = dv.motion;
+    document.getElementById("ov-d").textContent = dv.density;
+    document.getElementById("ov-notes").value = "";
+    overlay.classList.add("open");
+    document.getElementById("ov-notes").focus();
+  }
+  function closeOverlay(){ overlay.classList.remove("open"); currentId = null; }
+
+  function showToast(msg){
+    toast.textContent = msg; toast.classList.add("show");
+    setTimeout(function(){ toast.classList.remove("show"); }, 2600);
+  }
+
+  function markSelected(id){
+    document.querySelectorAll(".direction-card").forEach(function(c){
+      c.classList.toggle("is-selected", c.getAttribute("data-id") === id);
+    });
+  }
+
+  function submitPick(){
+    var dir = DIRS[currentId]; if(!dir) return;
+    var payload = {
+      id: dir.label, label: dir.label, name: dir.name,
+      notes: dir.notes,
+      adjustments: document.getElementById("ov-notes").value.trim(),
+      dials: dialValues(),
+      selected_at: new Date().toISOString()
+    };
+    fetch("/api/select",{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify(payload)
+    }).then(function(res){
+      if(!res.ok) throw new Error("HTTP " + res.status);
+      markSelected(dir.label);
+      showToast("已记录选择：" + dir.label + " · " + dir.name);
+    }).catch(function(){
+      markSelected(dir.label);
+      showToast("本地服务未回传，请在对话中告知：选择 " + dir.label + " · " + dir.name);
+    });
+    closeOverlay();
+  }
+
+  document.querySelectorAll(".qmdp-pick-button").forEach(function(btn){
+    btn.addEventListener("click", function(){ openOverlay(btn.getAttribute("data-id")); });
+  });
+  document.getElementById("cancel-pick").addEventListener("click", closeOverlay);
+  document.getElementById("confirm-pick").addEventListener("click", submitPick);
+  overlay.addEventListener("click", function(e){ if(e.target === overlay) closeOverlay(); });
+  document.addEventListener("keydown", function(e){
+    if(e.key === "Escape") closeOverlay();
+    if(overlay.classList.contains("open")) return;
+    if(["1","2","3","4"].indexOf(e.key) >= 0){
+      openOverlay(["A","B","C","D"][+e.key - 1]);
+    }
+  });
+})();
+</script>
+</body>
+</html>

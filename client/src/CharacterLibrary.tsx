@@ -538,7 +538,6 @@ export function CharacterLibrary({ userRole }: { userRole: UserRole }) {
       <div className="character-library-toolbar">
         <div>
           <h2>人物身份与角色版本</h2>
-          <p>真人授权、人设、版本、七视角资产与人工审核使用同一条证据链。</p>
         </div>
         {isAdmin ? (
           <button type="button" onClick={() => setIdentityWizardIdentity(null)}>
