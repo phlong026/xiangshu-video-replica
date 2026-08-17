@@ -986,6 +986,33 @@ export function AnalysisWorkspace({
           </button>
         </div>
       </div>
+      {/* P0-04-02：N>1 时在主按钮确认前展示付费提醒（文案与
+          GenerationLauncher 逐条一致），单击主按钮即显式付费确认；
+          N=1 为默认数量免打扰，费用在标签页③ GenerationLauncher 恒可见
+          （产品决策）。容器常驻 + aria-live，避免动态挂载的 live region
+          不被读屏播报。 */}
+      <div
+        aria-live="polite"
+        className={
+          generationDrafts.quantity !== null && generationDrafts.quantity > 1
+            ? "paid-task-warning paid-task-warning--toolbar"
+            : "paid-task-warning--toolbar paid-task-warning--toolbar--empty"
+        }
+      >
+        {generationDrafts.quantity !== null && generationDrafts.quantity > 1 ? (
+          <>
+            <strong>将创建 {generationDrafts.quantity} 个付费生成任务</strong>
+            <span>
+              {generationDrafts.limits.estimated_cost_per_task == null
+                ? "预计费用暂不可用"
+                : `预计费用：¥${(
+                    generationDrafts.limits.estimated_cost_per_task *
+                      generationDrafts.quantity
+                  ).toFixed(2)}`}
+            </span>
+          </>
+        ) : null}
+      </div>
       {isMissingModalOpen ? (
         <div
           aria-label="缺失项清单"

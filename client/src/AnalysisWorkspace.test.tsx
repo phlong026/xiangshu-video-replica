@@ -12,6 +12,10 @@ import {
   shotCardFeatureSuggestion,
 } from "./AnalysisWorkspace";
 import * as api from "./api";
+import {
+  __resetSessionIdempotencyRecordsForTests,
+  type GenerationDrafts,
+} from "./useGenerationDrafts";
 
 vi.mock("./api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./api")>();
@@ -242,7 +246,10 @@ vi.mock("./FirstFrameSelection", () => ({
 vi.mock("./GenerationComposer", () => ({
   // P0-02-03：组件薄化为 drafts 注入后，mock 只保留真实 props；
   // 生成 busy 改由真实“保存口播稿”挂起驱动（drafts.busyAction）。
+  // P0-04-02：新增 drafts 探针（数量设置/恢复记录状态），供主按钮
+  // 付费确认与断网恢复动线断言（真实 UI 在 GenerationLauncher 内）。
   GenerationComposer: ({
+    drafts,
     firstFrameAssetId,
     onBatchCreated,
     readOnly,
@@ -252,6 +259,21 @@ vi.mock("./GenerationComposer", () => ({
       <span>
         生成输入：{shotCardVersionId}/{firstFrameAssetId}
       </span>
+      <span>恢复记录：{drafts?.recoveryRecord ? "存在" : "无"}</span>
+      <button
+        disabled={readOnly}
+        onClick={() => drafts?.setQuantityInput("3")}
+        type="button"
+      >
+        设置数量 3
+      </button>
+      <button
+        disabled={readOnly}
+        onClick={() => drafts?.setQuantityInput("9")}
+        type="button"
+      >
+        设置数量 9（越界）
+      </button>
       <textarea
         aria-label="生成草稿"
         defaultValue="草稿初始值"
@@ -300,6 +322,7 @@ type apiMockProps = {
 };
 
 type generationComposerMockProps = {
+  drafts?: GenerationDrafts;
   firstFrameAssetId?: string;
   onBatchCreated?: (value: unknown) => void;
   readOnly?: boolean;
@@ -2201,5 +2224,215 @@ describe("AnalysisWorkspace workflow gates", () => {
         "缺失 1 项",
       ),
     ).toBeInTheDocument();
+  });
+
+  // P0-04-02：就绪基线 fixture（LOCKED Prompt 复用 + 可用费用预估），
+  // 供付费确认与断网恢复动线共用（建批 mock 由各用例自行设置）。
+  async function setupReadyWorkspace() {
+    window.localStorage.clear();
+    vi.mocked(api.getGenerationRuntimeLimits).mockResolvedValue({
+      min_quantity: 1,
+      max_quantity: 4,
+      estimated_cost_per_task: 2.5,
+    });
+    vi.mocked(api.getLatestProjectShotCards).mockResolvedValue({
+      id: "shot-card-2",
+      project_id: "project-1",
+      asset_id: null,
+      kind: "shot_card",
+      version_number: 2,
+      payload: {
+        source_analysis_version_id: "analysis-1",
+        duration_seconds: 8,
+        shots: [editableShot],
+      },
+      created_by_user_id: "employee_1",
+      created_at: "2030-01-01T00:00:00Z",
+    });
+    vi.mocked(api.getLatestScriptVersion).mockResolvedValue({
+      version: {
+        ...savedScriptVersion,
+        payload: {
+          ...savedScriptVersion.payload,
+          shot_card_version_id: "shot-card-2",
+        },
+      },
+      stale: false,
+      stale_reasons: [],
+    });
+    vi.mocked(api.getLatestGenerationPrompt).mockResolvedValue({
+      version: {
+        id: "prompt-locked-1",
+        project_id: "project-1",
+        asset_id: null,
+        kind: "h3_prompt",
+        version_number: 5,
+        payload: {
+          status: "LOCKED",
+          prompt_text: "锁定的 Prompt",
+          shot_card_version_id: "shot-card-2",
+          first_frame_asset_id: "first-frame-1",
+          first_frame_selection_version_id: "first-frame-selection-1",
+          character_version_id: "character-version-1",
+          character_reference_selection_id: "reference-selection-1",
+          output_duration_seconds: 8,
+          resolution: "768P",
+        },
+        created_by_user_id: "employee_1",
+        created_at: "2030-01-01T00:00:00Z",
+      },
+      stale: false,
+      stale_reasons: [],
+    });
+  }
+
+  function renderReadyWorkspace(
+    onBatchCreated: (batch: api.GenerationBatch) => void,
+  ) {
+    return render(
+      <AnalysisWorkspace
+        currentUserId="employee_1"
+        onAnalysisReady={vi.fn()}
+        onBatchCreated={onBatchCreated}
+        onClose={vi.fn()}
+        project={{
+          id: "project-1",
+          owner_user_id: "employee_1",
+          name: "付费与恢复动线测试",
+          status: "REFERENCE_READY",
+          reference_asset_id: "reference-video-1",
+          reference_upload_status: "READY",
+          analysis_status: "READY",
+        }}
+      />,
+    );
+  }
+
+  async function completePeopleReadiness() {
+    expect(await screen.findByText("拆解完成")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "完成角色选择" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成源画面" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成人物参考" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成置换首帧" }));
+    await waitFor(() =>
+      expect(screen.getByText("就绪 3/3")).toBeInTheDocument(),
+    );
+  }
+
+  it("主操作栏：N>1 时主按钮旁展示付费提醒与预计费用，单击即显式付费确认（P0-04-02）", async () => {
+    await setupReadyWorkspace();
+    vi.mocked(api.createGenerationBatch).mockResolvedValue({
+      id: "batch-99",
+      project_id: "project-1",
+      prompt_version_id: "prompt-locked-1",
+      status: "QUEUED",
+      quantity: 3,
+      stale: false,
+      progress: {
+        total_count: 3,
+        terminal_count: 0,
+        progress_percent: 0,
+        counts: {},
+      },
+      tasks: [],
+    });
+    const onBatchCreated = vi.fn();
+    renderReadyWorkspace(onBatchCreated);
+    await completePeopleReadiness();
+
+    // N=1（默认）不展示付费提醒。
+    expect(screen.queryByText(/将创建 \d+ 个付费生成任务/)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "设置数量 3" }));
+    // 提醒文案与 GenerationLauncher 逐条一致，在主按钮确认前可见。
+    expect(
+      await screen.findByText("将创建 3 个付费生成任务"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("预计费用：¥7.50")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "开始生成" }));
+    await waitFor(() => expect(onBatchCreated).toHaveBeenCalledTimes(1));
+    expect(api.createGenerationBatch).toHaveBeenCalledWith(
+      "project-1",
+      expect.objectContaining({ quantity: 3 }),
+    );
+  });
+
+  it("主操作栏：数量越界时流水线停在守卫并提示调整，不发起任何请求（P0-04-02）", async () => {
+    await setupReadyWorkspace();
+    const onBatchCreated = vi.fn();
+    renderReadyWorkspace(onBatchCreated);
+    await completePeopleReadiness();
+
+    fireEvent.click(screen.getByRole("button", { name: "设置数量 9（越界）" }));
+    fireEvent.click(screen.getByRole("button", { name: "开始生成" }));
+
+    expect(
+      await screen.findByText("生成数量必须在 1–4 之间"),
+    ).toBeInTheDocument();
+    expect(api.createGenerationBatch).not.toHaveBeenCalled();
+    expect(onBatchCreated).not.toHaveBeenCalled();
+  });
+
+  it("主操作栏：建批 5xx 后恢复记录保留，重开页面可恢复并一键重试成功（P0-04-02）", async () => {
+    await setupReadyWorkspace();
+    vi.mocked(api.createGenerationBatch)
+      .mockRejectedValueOnce({ status: 503, code: "SERVICE_UNAVAILABLE" })
+      .mockResolvedValueOnce({
+        id: "batch-100",
+        project_id: "project-1",
+        prompt_version_id: "prompt-locked-1",
+        status: "QUEUED",
+        quantity: 1,
+        stale: false,
+        progress: {
+          total_count: 1,
+          terminal_count: 0,
+          progress_percent: 0,
+          counts: {},
+        },
+        tasks: [],
+      });
+    const onBatchCreated = vi.fn();
+    const { unmount } = renderReadyWorkspace(onBatchCreated);
+    await completePeopleReadiness();
+
+    fireEvent.click(screen.getByRole("button", { name: "开始生成" }));
+
+    // 断网/5xx：非确定性失败保留恢复记录（幂等键/完整请求指纹）。
+    expect(
+      await screen.findByText("创建视频生成批次失败。"),
+    ).toBeInTheDocument();
+    expect(await screen.findByText("恢复记录：存在")).toBeInTheDocument();
+    expect(
+      JSON.parse(
+        window.localStorage.getItem(
+          "generation.idempotency/employee_1/project-1",
+        ) ?? "null",
+      ),
+    ).toMatchObject({
+      key: expect.any(String),
+      request: { prompt_version_id: "prompt-locked-1", quantity: 1 },
+    });
+
+    // 重开页面：模拟刷新清空模块级会话 Map（真实刷新会重载模块），
+    // 恢复记录须走 localStorage 读取→校验→还原，一键重试复用同一幂等键后成功。
+    unmount();
+    __resetSessionIdempotencyRecordsForTests();
+    const onBatchCreatedAfterReopen = vi.fn();
+    renderReadyWorkspace(onBatchCreatedAfterReopen);
+    await completePeopleReadiness();
+    expect(await screen.findByText("恢复记录：存在")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "开始生成" }));
+    await waitFor(() =>
+      expect(onBatchCreatedAfterReopen).toHaveBeenCalledTimes(1),
+    );
+    const firstRequest = vi.mocked(api.createGenerationBatch).mock.calls[0][1];
+    const retryRequest = vi.mocked(api.createGenerationBatch).mock.calls[1][1];
+    expect(retryRequest.idempotency_key).toBe(firstRequest.idempotency_key);
+    expect(onBatchCreatedAfterReopen).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "batch-100" }),
+    );
   });
 });

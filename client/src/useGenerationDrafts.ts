@@ -920,6 +920,13 @@ function clearIdempotencyRecord(storageKey: string, record: IdempotencyRecord) {
   }
 }
 
+// 测试专用：清空模块级会话幂等记录，使「重开页面」场景真实模拟刷新
+// （模块重载、内存 Map 归零），迫使恢复链走 localStorage 读取→校验→
+// 还原路径。运行时代码不应调用。
+export function __resetSessionIdempotencyRecordsForTests() {
+  sessionIdempotencyRecords.clear();
+}
+
 function isDefinitiveBatchRejection(error: unknown): boolean {
   const { status, code } = error as { status?: number; code?: string };
   if (status === 400) {

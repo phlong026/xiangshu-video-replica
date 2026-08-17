@@ -1654,6 +1654,32 @@ button.history-version--active {
   font-size: 13px;
 }
 
+/* P0-04-02：工具栏主按钮旁的付费提醒（确认前可见），纵向紧凑变体。 */
+.paid-task-warning--toolbar {
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 2px;
+  margin: 10px 0 0;
+  padding: 8px 14px;
+  font-size: 13px;
+}
+.paid-task-warning--toolbar strong {
+  font-size: 13px;
+}
+.paid-task-warning--toolbar span {
+  font-size: 12px;
+}
+/* P0-04-02：常驻 live region 的空态（N≤1）零视觉占位，容器保留在
+布局树中以保证读屏播报内容切换。 */
+.paid-task-warning--toolbar--empty {
+  border: none;
+  margin: 0;
+  max-height: 0;
+  overflow: hidden;
+  padding: 0;
+}
+
 .settings-page {
   display: grid;
   gap: 22px;
