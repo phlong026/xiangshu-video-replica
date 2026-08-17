@@ -3,6 +3,8 @@
 > 适用范围：Gate 2 真实 Provider 验收
 > 当前状态：记录模板；不代表任何 Provider 已通过
 > 填写要求：只记录脱敏证据，不保存完整密钥、Authorization、完整签名 URL 或供应商临时下载 URL
+>
+> **2026-08-17 首批真实记录已填入**：Apilio Gemini 视频拆解、Tencent COS 存储（见 §2、§3.4、§5、§7、§8）。其余 Provider 仍为 SOURCE_PENDING。
 
 ## 1. 验收结论
 
@@ -27,11 +29,11 @@
 | Provider | 模型/能力 | 账号/环境 | 结论 | 证据位置 |
 | --- | --- | --- | --- | --- |
 | 待选 CharacterImageProvider | 单张真人源图生成 7 类多视角人物资产 | 待填写 | SOURCE_PENDING | 待填写 |
-| Apilio | Gemini 3.1 Pro Preview 视频拆解 | 待填写 | SOURCE_PENDING | 待填写 |
+| Apilio | Gemini 3.1 Pro Preview 视频拆解 | 桌面端本地密钥存储（`analysis_api_key`，51 位，`sk-GX…`） | PROVIDER_VERIFIED | §3.4 记录 apilio-20260817-01~03 |
 | Apilio | GPT Image 2 首帧生成 | 待填写 | SOURCE_PENDING | 待填写 |
 | Apilio | Nano Banana Pro 2K 首帧生成 | 待填写 | SOURCE_PENDING | 待填写 |
 | METASO | MiniMax H3 图生视频 | 待填写 | SOURCE_PENDING | 待填写 |
-| Tencent COS | 私有桶、签名 URL、归档 | 待填写 | SOURCE_PENDING | 待填写 |
+| Tencent COS | 私有桶、签名 URL、归档 | 桶 `zhongshu-lead-platform-1462847756` / ap-shanghai | PROVIDER_VERIFIED（上传+外网读；归档/copy 未测） | §3.4 记录 cos-20260817-01 |
 
 ## 3. 单次验收记录
 
@@ -94,6 +96,25 @@
 | 失败映射为产品错误码 | 待填写 |
 | 可由批次 ID 追溯 | 待填写 |
 
+### 3.4 实际记录（2026-08-17，Apilio Gemini 视频拆解 + Tencent COS）
+
+环境：本机 dev（127.0.0.1:8901 验收实例，DB 为 task16 环境的 sqlite 在线备份副本，真实付费凭据）；操作者 hlong026（Claude Code 代跑）；项目 `Apilio真实验收-0817`（`1dbdef69…`）；素材为既有真实竖屏视频 `media (1).mp4`（576×1024，15.033333s，3,659,591B，SHA256 `8abfda4b…e8978`）。
+
+| 记录 ID | 调用 | 结果 | 耗时 | 结论 |
+| --- | --- | --- | ---: | --- |
+| apilio-20260817-01 | chat/completions 纯文本探测（鉴权+模型名） | 200，模型回显 `gemini-3.1-pro-preview`，146 tokens | ≈2s | 通过 |
+| apilio-20260817-02 | 服务端完整拆解（第 1 次，15.03s 视频） | 503 `ANALYSIS_PROVIDER_UNREACHABLE` / failure_phase=network / retryable=true；服务端日志 `TimeoutError`（旧 90s 超时被真实流量击穿） | 91s | 失败→定位为超时缺陷，当日修复（90→240s） |
+| apilio-20260817-03 | 服务端完整拆解（重试） | 200；**7 个分镜**落库（versions v1），duration_seconds=15.033333 | 71s | 通过 |
+| cos-20260817-01 | COS 连接测试（真实桶 put/head/delete） | status=ok | <5s | 通过 |
+
+要点与证据：
+
+- **video-as-image_url + `response_format: json_object` 真实可用**：假设成立，模型正常返回结构化 JSON 分镜。
+- 分镜内容与素材一致（女博主口播 → 手指指向钢筋 → 钢筋纹理特写…），时长 15.033333s 走完整链路——修复前该时长会在自动拆解被请求校验 422 拒绝。
+- COS 预签名 GET URL **外网可读**（GET 206 + 真实 MP4 字节）；注意 **HEAD 方法不在签名范围内会返回 403，属预期**，不要用 `curl -I` 验证此类 URL。
+- 单次完整拆解实测 71–91s：超时上限已按实测调整（服务端 90→240s，桌面端 120→300s，见 commit）。
+- 系统核对：`audit_logs` 54 条有记录、服务日志与 `audit_logs` 全列扫描**均未出现完整 Key**（`sk-`/`AKID` 前缀计数为 0）；`external_call_logs` 为 **0 条——拆解路径未接入外部调用日志表，列为待改进项**。
+
 ## 4. METASO H3 专项
 
 H3 必须完成“创建 -> 查询 -> 成功 URL -> 下载 -> 企业存储归档”最小闭环。
@@ -116,12 +137,12 @@ H3 必须完成“创建 -> 查询 -> 成功 URL -> 下载 -> 企业存储归档
 
 | 检查项 | Gemini 3.1 Pro Preview | GPT Image 2 | Nano Banana Pro 2K |
 | --- | --- | --- | --- |
-| 模型别名已确认 | 待填写 | 待填写 | 待填写 |
-| 鉴权通过 | 待填写 | 待填写 | 待填写 |
-| 素材传输方式已确认 | 待填写 | 待填写 | 待填写 |
-| 成功样本已脱敏保存 | 待填写 | 待填写 | 待填写 |
-| 错误响应已映射 | 待填写 | 待填写 | 待填写 |
-| 费用已记录 | 待填写 | 待填写 | 待填写 |
+| 模型别名已确认 | ✅ 2026-08-17 实测，响应回显一致 | 待填写 | 待填写 |
+| 鉴权通过 | ✅ Bearer `sk-GX…`，200 | 待填写 | 待填写 |
+| 素材传输方式已确认 | ✅ video-as-image_url（COS 签名 GET URL） | 待填写 | 待填写 |
+| 成功样本已脱敏保存 | ✅ 7 分镜存验收库 versions 表，摘录见 §3.4 | 待填写 | 待填写 |
+| 错误响应已映射 | ✅ TimeoutError→503 UNREACHABLE（retryable=true）实测 | 待填写 | 待填写 |
+| 费用已记录 | 待核对（3 次调用，以令牌组账单为准） | 待填写 | 待填写 |
 
 ## 6. CharacterImageProvider 专项
 
@@ -145,19 +166,19 @@ P0 必须使用已授权真人 Golden Sample 比较可用候选模型，并选�
 
 | 检查项 | COS |
 | --- | --- |
-| 私有桶 | 待填写 |
-| 短期签名 GET URL | 待填写 |
-| 签名 URL 到期后可重建 | 待填写 |
-| 上传、head、copy、delete 可用 | 待填写 |
-| 供应商临时 URL 可归档回企业存储 | 待填写 |
-| 最小权限密钥 | 待填写 |
+| 私有桶 | ✅ 真实桶连接测试（put/head/delete）通过 |
+| 短期签名 GET URL | ✅ 外网 GET 206；HEAD 不在签名方法内会 403（预期行为） |
+| 签名 URL 到期后可重建 | ✅ POST download-url 重新签发实测可用 |
+| 上传、head、copy、delete 可用 | 部分：put/head/delete ✅（连接测试 + 真实上传 3.6MB）；copy 归档未测 |
+| 供应商临时 URL 可归档回企业存储 | 未测 |
+| 最小权限密钥 | 未核对（当前同一 AK/SK 全权限，建议后续收敛） |
 
 ## 8. 成本与失败率汇总
 
 | Provider | 调用次数 | 成功 | 失败 | 需处理 | 总费用 | 单次均摊 | 主要失败原因 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
 | CharacterImageProvider | 0 | 0 | 0 | 0 | 0 | 0 | 待填写 |
-| Apilio Gemini | 0 | 0 | 0 | 0 | 0 | 0 | 待填写 |
+| Apilio Gemini | 3 | 2 | 1 | 0 | 待核对（以令牌组账单为准） | — | 旧 90s 超时被真实耗时（71–91s）击穿；已修复为 240s |
 | Apilio GPT Image 2 | 0 | 0 | 0 | 0 | 0 | 0 | 待填写 |
 | Apilio Nano Banana | 0 | 0 | 0 | 0 | 0 | 0 | 待填写 |
 | METASO H3 | 0 | 0 | 0 | 0 | 0 | 0 | 待填写 |
