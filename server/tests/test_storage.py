@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from qcloud_cos import CosConfig, CosS3Client
 
 from app.storage import (
     ArchiveSource,
@@ -164,6 +165,39 @@ def test_cloud_adapter_signs_and_operates_on_one_private_object() -> None:
             "SignHost": True,
         },
     )
+
+
+def test_cloud_upload_intent_headers_isolated_from_sdk_auth_mutation() -> None:
+    # 真实 qcloud_cos 客户端会把签名原地注入调用方传入的 Headers 字典。
+    # 预签名 URL 已携带签名，intent 不得把 SDK 注入的 Authorization 下发给客户端，
+    # 否则浏览器上传会额外要求 COS 桶 CORS 放行 authorization 请求头。
+    real_client = CosS3Client(
+        CosConfig(
+            Region="ap-shanghai",
+            SecretId="test-id",
+            SecretKey="test-key",
+            Scheme="https",
+        )
+    )
+    adapter = CloudStorageAdapter(
+        CloudStorageConfig(
+            provider="cos",
+            bucket="private-bucket-1250000000",
+            access_key_id="test-id",
+            secret_access_key="test-key",
+            region="ap-shanghai",
+        ),
+        client=real_client,
+    )
+
+    upload = adapter.create_upload_intent(
+        key="projects/p1/source/reference.mp4",
+        content_type="video/mp4",
+        expires_in=timedelta(minutes=10),
+    )
+
+    assert upload.url.startswith("https://private-bucket-1250000000.cos.ap-shanghai.myqcloud.com/")
+    assert upload.headers == {"Content-Type": "video/mp4"}
 
 
 def test_cos_head_maps_deleted_object_no_such_resource_to_none() -> None:

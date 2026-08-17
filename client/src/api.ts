@@ -5,8 +5,9 @@ const REQUEST_TIMEOUT_MS = 5_000;
 // Cloud/storage operations (diagnostics, presigned URLs, archive prechecks)
 // may legitimately take much longer than a normal API round-trip.
 const CLOUD_OP_TIMEOUT_MS = 60_000;
-// The server-side video provider permits a 90s response window.
-const ANALYSIS_TIMEOUT_MS = 120_000;
+// Must exceed the server's per-call provider timeout (240s, analysis.py) plus
+// overhead; the real Gemini shot-card call measured 71–91s on a 15s video.
+const ANALYSIS_TIMEOUT_MS = 300_000;
 export const SESSION_EXPIRED_EVENT = "video-replica:session-expired";
 
 type HealthResponse = components["schemas"]["HealthResponse"];
@@ -700,7 +701,14 @@ function uploadStorageObject(
       }
       reject(new Error(`${errorPrefix}失败（${request.status}）`));
     };
-    request.onerror = () => reject(new Error(`${errorPrefix}失败（网络错误）`));
+    request.onerror = () =>
+      reject(
+        new Error(
+          isLocalApiUploadUrl(intent.url)
+            ? `${errorPrefix}失败（无法连接本地服务，请确认服务已启动）`
+            : `${errorPrefix}失败（无法连接对象存储；请检查网络，以及云存储桶是否已配置跨域 CORS 规则）`,
+        ),
+      );
     request.ontimeout = () =>
       reject(new Error(`${errorPrefix}失败（请求超时）`));
     request.onabort = () => reject(new Error("上传已取消"));
@@ -923,28 +931,27 @@ export async function completeVideoUpload(
   );
 }
 
+// The reference duration is never sent from here: the server already stores the
+// ffprobe measurement taken during upload, and echoing it back only risks a
+// request-validation rejection when the two contracts drift apart.
 export async function startVideoAnalysis(
   projectId: string,
   assetId: string,
-  durationSeconds?: number,
 ): Promise<AnalysisVersion> {
-  const payload =
-    durationSeconds === undefined
-      ? { asset_id: assetId }
-      : {
-          asset_id: assetId,
-          duration_seconds: durationSeconds,
-          reuse_existing: true,
-        };
-  return requestApiJson<AnalysisVersion>(
-    `/api/projects/${encodeURIComponent(projectId)}/analysis`,
-    "启动视频拆解失败",
-    {
-      method: "POST",
-      body: JSON.stringify(payload),
-    },
-    ANALYSIS_TIMEOUT_MS,
-  );
+  const errorPrefix = "启动视频拆解失败";
+  try {
+    return await requestApiJson<AnalysisVersion>(
+      `/api/projects/${encodeURIComponent(projectId)}/analysis`,
+      errorPrefix,
+      {
+        method: "POST",
+        body: JSON.stringify({ asset_id: assetId, reuse_existing: true }),
+      },
+      ANALYSIS_TIMEOUT_MS,
+    );
+  } catch (error) {
+    throw analysisRequestError(error, errorPrefix);
+  }
 }
 
 export async function getLatestProjectAnalysis(
@@ -1509,6 +1516,7 @@ async function requestApiJson<T>(
     const error = new Error(details.message) as RequestError;
     error.status = response.status;
     error.code = details.code;
+    error.retryable = details.retryable;
     throw error;
   }
   return (await response.json()) as T;
@@ -1558,6 +1566,39 @@ function generationRequestError(error: unknown, errorPrefix: string): Error {
   return error instanceof Error ? error : new Error(errorPrefix);
 }
 
+// The server already returns a readable Chinese reason for every provider failure;
+// this only fills the gaps where it cannot (request validation, auth, transport),
+// so the desktop never shows a bare HTTP status for a failed analysis.
+function analysisRequestError(error: unknown, errorPrefix: string): Error {
+  const { status, code, retryable } = error as RequestError;
+  const fallback =
+    status === 422
+      ? "参考视频不满足拆解要求，请确认时长在 4–15 秒之间后重试"
+      : status === 401
+        ? "登录已失效，请重新进入工作台"
+        : status === 403
+          ? "当前账号无权启动视频拆解"
+          : null;
+  // A missing code means the server answered with something other than our error
+  // envelope (FastAPI request validation, a proxy, an auth redirect).
+  if (fallback && code === undefined && error instanceof Error) {
+    const mapped = new Error(
+      `${errorPrefix}：${fallback}（${status}）`,
+    ) as RequestError;
+    mapped.status = status;
+    mapped.code = code;
+    mapped.retryable = retryable;
+    return mapped;
+  }
+  if (error instanceof Error && error.message === "请求超时，请重试") {
+    return new Error(`${errorPrefix}：请求超时，请重试`);
+  }
+  if (error instanceof TypeError) {
+    return new Error(`${errorPrefix}：网络连接失败，请检查本地服务`);
+  }
+  return error instanceof Error ? error : new Error(errorPrefix);
+}
+
 async function responseErrorMessage(
   response: Response,
   errorPrefix: string,
@@ -1565,23 +1606,38 @@ async function responseErrorMessage(
   return (await responseErrorDetails(response, errorPrefix)).message;
 }
 
-type RequestError = Error & { status?: number; code?: string };
+type RequestError = Error & {
+  status?: number;
+  code?: string;
+  retryable?: boolean;
+};
 
 async function responseErrorDetails(
   response: Response,
   errorPrefix: string,
-): Promise<{ message: string; code?: string }> {
+): Promise<{ message: string; code?: string; retryable?: boolean }> {
   try {
     const payload: unknown = await response.json();
     if (isRecord(payload) && isRecord(payload.detail)) {
       const message = payload.detail.message;
-      const code = payload.detail.code;
-      if (typeof message === "string" && message.trim()) {
-        return {
-          message: `${errorPrefix}：${message}（${response.status}）`,
-          code: typeof code === "string" ? code : undefined,
-        };
-      }
+      const code =
+        typeof payload.detail.code === "string"
+          ? payload.detail.code
+          : undefined;
+      const retryable =
+        typeof payload.detail.retryable === "boolean"
+          ? payload.detail.retryable
+          : undefined;
+      // The code must survive even when the server omits a message, otherwise
+      // callers cannot tell a retryable failure from a permanent one.
+      return {
+        message:
+          typeof message === "string" && message.trim()
+            ? `${errorPrefix}：${message}（${response.status}）`
+            : `${errorPrefix}（${response.status}）`,
+        code,
+        retryable,
+      };
     }
   } catch {
     // A missing or non-JSON error body must not hide the HTTP status.
