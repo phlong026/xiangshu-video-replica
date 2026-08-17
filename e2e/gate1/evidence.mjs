@@ -1,13 +1,27 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+// P0-05-02：浏览器原生 warning 前缀过滤（评审 m1）。
+const NATIVE_BROWSER_WARNING_PATTERN =
+  /^\[(Deprecation|Violation|Intervention)\]/;
+
 export function observePage(page) {
   const consoleErrors = [];
+  const consoleWarnings = [];
   const networkFailures = [];
 
   page.on("console", (message) => {
     if (message.type() === "error") {
       consoleErrors.push({ kind: "console", text: message.text() });
+    }
+    // P0-05-02：控制台 0 error/0 warning 门禁（V1.4 清单）。
+    // 过滤浏览器原生实现类消息（[Deprecation]/[Violation]/[Intervention]
+    // 前缀）：它们随 Chrome 版本漂移，与应用质量无关（评审 m1）。
+    if (
+      message.type() === "warning" &&
+      !NATIVE_BROWSER_WARNING_PATTERN.test(message.text())
+    ) {
+      consoleWarnings.push({ kind: "console", text: message.text() });
     }
   });
   page.on("pageerror", (error) => {
@@ -34,6 +48,7 @@ export function observePage(page) {
 
   return {
     consoleErrors,
+    consoleWarnings,
     networkFailures,
     async save(runDir, name) {
       const logsDir = path.join(runDir, "logs");
@@ -42,6 +57,10 @@ export function observePage(page) {
         writeJson(
           path.join(logsDir, `${name}-console-errors.json`),
           consoleErrors,
+        ),
+        writeJson(
+          path.join(logsDir, `${name}-console-warnings.json`),
+          consoleWarnings,
         ),
         writeJson(
           path.join(logsDir, `${name}-network-failures.json`),

@@ -376,6 +376,24 @@ describe("SourceFrameSelection", () => {
     expect(await screen.findByAltText("候选源画面 1")).toBeInTheDocument();
   });
 
+  it("keeps the auto-extraction notice visible after candidates reload", async () => {
+    // P0-05-02 评审 M1：自动提取成功后递归 loadCandidates 走无确认分支，
+    // 提示须保留至人工确认，不被空文案覆盖（先等候选重载完成再断言，
+    // 避免只测到递归 await 窗口内的瞬态显示）。
+    vi.mocked(getLatestProjectSourceFrames).mockResolvedValueOnce(null);
+    render(
+      <SourceFrameSelection
+        projectId="project-1"
+        referenceAssetId="reference-1"
+      />,
+    );
+
+    expect(await screen.findByAltText("候选源画面 1")).toBeInTheDocument();
+    expect(
+      screen.getByText("已自动提取候选源画面，请核对后确认。"),
+    ).toBeInTheDocument();
+  });
+
   it("does not auto-extract for a read-only auditor", async () => {
     vi.mocked(getLatestProjectSourceFrames).mockResolvedValueOnce(null);
     render(

@@ -1283,6 +1283,70 @@ describe("AnalysisWorkspace workflow gates", () => {
     ).toBeInTheDocument();
   });
 
+  it("标签页①：口播稿保存成功反馈在口播稿区可见，无需依赖生成面板（P0-05-02）", async () => {
+    // 一键动线在标签页①保存口播稿后立即断言成功反馈；首帧未确认时
+    // 标签页③生成面板不挂载，反馈必须在口播稿区渲染（评审 C1）。
+    vi.mocked(api.getLatestProjectShotCards).mockResolvedValue({
+      id: "shot-card-2",
+      project_id: "project-1",
+      asset_id: null,
+      kind: "shot_card",
+      version_number: 2,
+      payload: {
+        source_analysis_version_id: "analysis-1",
+        duration_seconds: 8,
+        shots: [],
+      },
+      created_by_user_id: "employee_1",
+      created_at: "2030-01-01T00:00:00Z",
+    });
+    vi.mocked(api.createScriptVersion).mockResolvedValue({
+      id: "script-2",
+      project_id: "project-1",
+      asset_id: null,
+      kind: "script",
+      version_number: 2,
+      payload: {
+        source: "original",
+        full_text: "原始口播稿",
+        shot_card_version_id: "shot-card-2",
+        shot_mappings: [],
+      },
+      created_by_user_id: "employee_1",
+      created_at: "2030-01-01T00:00:00Z",
+    });
+
+    render(
+      <AnalysisWorkspace
+        currentUserId="employee_1"
+        onAnalysisReady={vi.fn()}
+        onBatchCreated={vi.fn()}
+        onClose={vi.fn()}
+        project={{
+          id: "project-1",
+          owner_user_id: "employee_1",
+          name: "保存反馈可见测试",
+          status: "REFERENCE_READY",
+          reference_asset_id: "reference-video-1",
+          reference_upload_status: "READY",
+          analysis_status: "READY",
+        }}
+      />,
+    );
+
+    expect(await screen.findByText("拆解完成")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByLabelText("口播稿内容")).toHaveValue("原始口播稿"),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "保存口播稿" }));
+    // 成功反馈出现在标签页①口播稿区（内容配置面板），不在隐藏面板。
+    expect(
+      await within(
+        screen.getByRole("tabpanel", { name: /内容配置/ }),
+      ).findByText(/口播稿已保存为版本 #/),
+    ).toBeInTheDocument();
+  });
+
   it("标签页②：无角色时四区块同屏可见（骨架态）", async () => {
     render(
       <AnalysisWorkspace

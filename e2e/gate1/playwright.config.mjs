@@ -24,7 +24,7 @@ export default defineConfig({
     channel: "chrome",
     headless: true,
     navigationTimeout: 30_000,
-    viewport: { width: 1280, height: 720 },
+    viewport: { width: 1584, height: 1024 },
     acceptDownloads: true,
     trace: "on",
     video: "on",

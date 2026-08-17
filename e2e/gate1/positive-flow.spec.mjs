@@ -33,12 +33,12 @@ test("@positive creates a character, restarts, and restores three completed vide
       path: path.join(
         runDir,
         "screenshots",
-        "1280x720-published-character.png",
+        "1584x1024-published-character.png",
       ),
       fullPage: true,
     });
 
-    await createProjectBatch(page);
+    await createProjectBatchViaOneClick(page);
     const progress = page.getByRole("progressbar", { name: "批次进度" });
     await expect(progress).toHaveAttribute("aria-valuenow", "0");
 
@@ -56,7 +56,7 @@ test("@positive creates a character, restarts, and restores three completed vide
 
     await previewAndDownloadResults(page, runDir);
     await page.screenshot({
-      path: path.join(runDir, "screenshots", "1280x720-positive-results.png"),
+      path: path.join(runDir, "screenshots", "1584x1024-positive-results.png"),
       fullPage: true,
     });
 
@@ -66,7 +66,7 @@ test("@positive creates a character, restarts, and restores three completed vide
       acceptDownloads: true,
       baseURL: requiredEnvironmentPath("GATE1_WEB_URL"),
       recordVideo: { dir: path.join(runDir, "browser", "recovery-video") },
-      viewport: { width: 1280, height: 720 },
+      viewport: { width: 1584, height: 1024 },
     });
     const recoveryPage = await recoveryContext.newPage();
     evidenceRuns.push({
@@ -84,6 +84,7 @@ test("@positive creates a character, restarts, and restores three completed vide
 
   for (const { evidence } of evidenceRuns) {
     expect(evidence.consoleErrors).toEqual([]);
+    expect(evidence.consoleWarnings).toEqual([]);
     expect(evidence.networkFailures).toEqual([]);
   }
 });
@@ -173,7 +174,12 @@ async function createAndPublishCharacter(page) {
   ).toBeVisible();
 }
 
-async function createProjectBatch(page) {
+// P0-05-02：V1.4 单屏闭环一键动线——打开项目 → 预填确认（源画面特征/
+// 人物参考/首帧/口播稿均为预填后一次确认）→ 一键生成（编译→锁定→建批
+// 合并为一次点击，契约红线 4）→ N=3 预览下载。
+// 角色版本自动预选（P0-03-01）暂缓合入，本动线仍手动选择角色版本；
+// fake 分析 original_script 为空，原稿预填为空稿，仍需切自定义稿保存。
+async function createProjectBatchViaOneClick(page) {
   const mediaDir = requiredEnvironmentPath("GATE1_MEDIA_DIR");
   await page.getByRole("button", { name: "新建复刻" }).click();
   await page.getByLabel("项目名称").fill("Gate 1 夏日咖啡馆口播");
@@ -186,6 +192,24 @@ async function createProjectBatch(page) {
   });
   await expect(page.getByText("FakeGemini video analysis")).toBeVisible();
 
+  // 标签页①（默认激活）：S01 原口播触发 800ms 防抖自动保存（P0-02-03），
+  // 首个镜头卡版本无需手动保存按钮。
+  await page
+    .getByLabel("S01 原口播")
+    .fill("夏日咖啡馆的好项目，要从真实需求出发。");
+  await expect(page.getByText(/已自动保存 · 版本 #/)).toBeVisible();
+
+  await page.getByRole("radio", { name: "自定义稿" }).check();
+  await page
+    .getByLabel("口播稿内容")
+    .fill("夏日咖啡馆的好项目，要从真实需求出发。");
+  await page.getByRole("button", { name: "保存口播稿" }).click();
+  await expect(page.getByText(/口播稿已保存为版本 #/)).toBeVisible();
+
+  // 标签页②：预填确认（源画面/参考/首帧）；角色版本待 P0-03-01 合入
+  // 后压缩为自动预选，当前仍手动选择。
+  await page.getByRole("tab", { name: "人物设定" }).click();
+
   await page.getByRole("button", { name: "选择角色版本" }).click();
   await page
     .getByRole("radio", { name: /Gate 1 林夏.*乡墅项目管理专家.*V1/ })
@@ -195,57 +219,47 @@ async function createProjectBatch(page) {
     page.getByText("已选择角色“Gate 1 林夏 · 乡墅项目管理专家 V1”。"),
   ).toBeVisible();
 
-  await page.getByRole("button", { name: "重新提取候选" }).click();
-  await expect(page.getByAltText("候选源画面 1")).toBeVisible({
-    timeout: 20_000,
-  });
-  await page.getByLabel("人物朝向").selectOption("FRONT");
-  await page.getByLabel("人物景别").selectOption("HALF_BODY");
-  await page.getByLabel("面部可见性").selectOption("VISIBLE");
-  await page.getByLabel("身体完整度").selectOption("UPPER_BODY");
-  await page.getByRole("radio", { name: /候选 1/ }).check();
+  // 源画面：角色就绪后自动提取候选（P0-03-02，本地截帧无费用），候选与
+  // 特征按镜头卡建议预填（S01 近景 → CLOSE_UP/FACE_ONLY），确认即可。
+  await expect(
+    page.getByText("已自动提取候选源画面，请核对后确认。"),
+  ).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByAltText("候选源画面 1")).toBeVisible();
+  await expect(page.getByLabel("人物朝向")).toHaveValue("FRONT");
+  await expect(page.getByLabel("人物景别")).toHaveValue("CLOSE_UP");
+  await expect(page.getByLabel("面部可见性")).toHaveValue("VISIBLE");
+  await expect(page.getByLabel("身体完整度")).toHaveValue("FACE_ONLY");
+  await expect(page.getByRole("radio", { name: /候选 1/ })).toBeChecked();
   await page.getByRole("button", { name: "确认源画面" }).click();
   await expect(page.getByText("已确认候选源画面 1。")).toBeVisible();
 
+  // 人物参考：推荐自动加载并默认勾选（P0-03-03），一键确认落库（红线 1）。
   const confirmReferences = page.getByRole("button", { name: "确认人物参考" });
   await expect(confirmReferences).toBeEnabled({ timeout: 15_000 });
   await confirmReferences.click();
   await expect(page.getByText("当前人物参考图已确认。")).toBeVisible();
 
+  // 首帧：生成仍为显式付费触发（红线 3），生成后自动预选第一张（P0-03-04）。
   await page.getByLabel("候选数量").fill("1");
   await page.getByRole("button", { name: "重新生成候选首帧" }).click();
   await expect(page.getByAltText("首帧候选 1")).toBeVisible({
     timeout: 15_000,
   });
-  await page.getByRole("radio", { name: /首帧候选 1/ }).check();
+  await expect(page.getByRole("radio", { name: /首帧候选 1/ })).toBeChecked();
   await page.getByRole("button", { name: "确认用于 H3 的首帧" }).click();
   await expect(page.getByText(/已确认首帧候选 1/)).toBeVisible();
 
-  await page
-    .getByLabel("S01 原口播")
-    .fill("夏日咖啡馆的好项目，要从真实需求出发。");
-  await page.getByRole("button", { name: "保存镜头卡片" }).click();
-  await expect(page.getByText(/镜头卡片已保存为版本 #/)).toBeVisible();
-
-  await page.getByRole("radio", { name: "自定义稿" }).check();
-  await page
-    .getByLabel("口播稿内容")
-    .fill("夏日咖啡馆的好项目，要从真实需求出发。");
-  await page.getByRole("button", { name: "保存口播稿" }).click();
-  await expect(page.getByText(/口播稿已保存为版本 #/)).toBeVisible();
-  await page.getByRole("button", { name: "编译 H3 Prompt" }).click();
-  await expect(page.getByText(/H3 Prompt 已编译为版本 #/)).toBeVisible();
-  const prompt = page.getByLabel("H3 Prompt 内容");
-  await prompt.fill(
-    `${await prompt.inputValue()}\nGate 1 人工修订：保持自然眼神与稳定运镜。`,
-  );
-  await page.getByRole("button", { name: "另存 Prompt 新版本" }).click();
-  await expect(page.getByText(/Prompt 已另存为版本 #/)).toBeVisible();
-  await page.getByRole("button", { name: "锁定 Prompt" }).click();
-  await expect(page.getByText(/Prompt 版本 #.*已锁定/)).toBeVisible();
-
+  // 标签页③：数量 3 → 工具栏付费提醒在确认前可见（P0-04-02）。
+  await page.getByRole("tab", { name: "生成设置" }).click();
   await page.getByLabel("生成数量").fill("3");
-  await page.getByRole("button", { name: "创建 3 个生成任务" }).click();
+  const toolbarWarning = page.locator(".paid-task-warning--toolbar");
+  await expect(
+    toolbarWarning.getByText("将创建 3 个付费生成任务"),
+  ).toBeVisible();
+
+  // 主按钮一键生成：编译→锁定→建批合并为一次点击（红线 4），
+  // 成功后自动交接任务记录页（无需粘贴 Batch ID）。
+  await page.getByRole("button", { name: "开始生成" }).click();
   await expect(
     page.getByRole("heading", { level: 1, name: "任务记录" }),
   ).toBeVisible();
@@ -331,7 +345,7 @@ async function verifyRestoredWorkspace(page, runDir) {
   const content = await readFile(targetPath);
   expect(content.subarray(4, 8).toString("ascii")).toBe("ftyp");
   await page.screenshot({
-    path: path.join(runDir, "screenshots", "1280x720-recovered-results.png"),
+    path: path.join(runDir, "screenshots", "1584x1024-recovered-results.png"),
     fullPage: true,
   });
 }
@@ -494,7 +508,7 @@ async function verifyFailureRecoveryPaths(page, runDir) {
     "utf8",
   );
   await page.screenshot({
-    path: path.join(runDir, "screenshots", "1280x720-failure-recovery.png"),
+    path: path.join(runDir, "screenshots", "1584x1024-failure-recovery.png"),
     fullPage: true,
   });
   await verifyCompactViewport(page, runDir);

@@ -739,10 +739,16 @@ export function AnalysisWorkspace({
                 <p className="status-note">正在读取口播稿</p>
               ) : (
                 <>
-                  {/* 草稿错误需在口播稿区可见：镜头卡未保存时标签页③不挂载，
-                      saveScript 的守卫反馈不能只依赖生成面板渲染（评审 Major 2）。 */}
+                  {/* 草稿反馈需在口播稿区可见：首帧未确认时标签页③不挂载，
+                      saveScript 的守卫反馈不能只依赖生成面板渲染（P0-02-03
+                      评审 Major 2）；成功反馈同理（P0-05-02 评审 C1）——生成
+                      面板挂载后反馈回归③渲染，保持全文唯一副本。 */}
                   {generationDrafts.error ? (
                     <p className="settings-error">{generationDrafts.error}</p>
+                  ) : null}
+                  {generationDrafts.message &&
+                  !(firstFramePayload && shotCardVersionId) ? (
+                    <p className="setup-success">{generationDrafts.message}</p>
                   ) : null}
                   <ScriptEditor
                     busyAction={generationDrafts.busyAction}

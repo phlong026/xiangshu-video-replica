@@ -22,7 +22,7 @@ test("@smoke starts the isolated desktop shell with clean browser evidence", asy
     await expect(page.getByRole("status")).toHaveText("本地服务已连接");
     await runWorkerOnce({ label: "smoke-empty-queue" });
     await page.screenshot({
-      path: path.join(runDir, "screenshots", "1280x720-smoke.png"),
+      path: path.join(runDir, "screenshots", "1584x1024-smoke.png"),
       fullPage: true,
     });
     expect(process.env.GATE1_FORCE_SMOKE_FAILURE).not.toBe("1");
@@ -31,5 +31,6 @@ test("@smoke starts the isolated desktop shell with clean browser evidence", asy
   }
 
   expect(evidence.consoleErrors).toEqual([]);
+  expect(evidence.consoleWarnings).toEqual([]);
   expect(evidence.networkFailures).toEqual([]);
 });

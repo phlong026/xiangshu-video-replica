@@ -53,6 +53,10 @@ export function SourceFrameSelection({
   const onBusyChangeRef = useRef(onBusyChange);
   onBusyChangeRef.current = onBusyChange;
   const autoExtractProjectRef = useRef<string | null>(null);
+  // 自动提取提示跨递归 loadCandidates 存活：提取成功后递归重载会走进
+  // 无确认分支重置文案，若不标记保留，提示存活窗口短于 E2E 轮询粒度
+  // （P0-05-02 评审 M1）。
+  const autoExtractNotifiedRef = useRef(false);
 
   const resetFeatures = useCallback(() => {
     setOrientation("");
@@ -118,6 +122,7 @@ export function SourceFrameSelection({
             if (!isCurrentRequest()) {
               return;
             }
+            autoExtractNotifiedRef.current = true;
             setStatus("已自动提取候选源画面，请核对后确认。");
             await loadCandidates();
           } catch (requestError) {
@@ -176,7 +181,14 @@ export function SourceFrameSelection({
         setSelectedAssetId(preferredCandidateAssetId(payload.candidates));
         resetFeatures();
         applyFeatureSuggestion();
-        setStatus("");
+        if (autoExtractNotifiedRef.current) {
+          // 自动提取后的候选重载：保留提取提示直至人工确认/修改，
+          // 避免被本分支空文案覆盖（P0-05-02 评审 M1）。
+          autoExtractNotifiedRef.current = false;
+          setStatus("已自动提取候选源画面，请核对后确认。");
+        } else {
+          setStatus("");
+        }
         onSelectionChange?.(null);
       }
       if (readOnly) {
@@ -277,6 +289,9 @@ export function SourceFrameSelection({
     setIsSubmitting(true);
     setError("");
     setStatus("");
+    // 手动提取开启新状态，作废自动提取提示标记，避免异常分支残留的
+    // 标记把本次手动提取误标为自动提取（P0-05-02 评审 Minor）。
+    autoExtractNotifiedRef.current = false;
     try {
       await extractSourceFrames(projectId, referenceAssetId, timestamps);
       if (requestId !== loadRequestId.current) {
