@@ -586,7 +586,10 @@ describe("App", () => {
       "http://127.0.0.1:8000/api/projects/project-ready/analysis",
       expect.objectContaining({
         method: "POST",
-        body: JSON.stringify({ asset_id: "asset-ready" }),
+        body: JSON.stringify({
+          asset_id: "asset-ready",
+          reuse_existing: true,
+        }),
       }),
     );
     expect(
@@ -944,7 +947,9 @@ describe("App", () => {
     );
   });
 
-  it("uploads a valid reference video, completes precheck, and starts analysis", async () => {
+  // 15.05s clears the upload precheck (15s + 0.1s rounding tolerance) but used to be
+  // rejected by the analysis request schema, so the automatic start returned a bare 422.
+  it("uploads a 15.05s reference video, completes precheck, and starts analysis without echoing the duration", async () => {
     class SuccessfulUploadRequest {
       onerror: (() => void) | null = null;
       onload: (() => void) | null = null;
@@ -1013,7 +1018,7 @@ describe("App", () => {
             sha256: "hash",
             size_bytes: 10,
             content_type: "video/mp4",
-            metadata: { duration_seconds: 8 },
+            metadata: { duration_seconds: 15.05 },
           }),
         });
       }
@@ -1042,12 +1047,12 @@ describe("App", () => {
           payload: {
             analysis: {
               summary: "咖啡口播拆解完成",
-              duration_seconds: 8,
+              duration_seconds: 15.05,
               shots: [
                 {
                   shot_id: "S01",
                   start_time: 0,
-                  end_time: 8,
+                  end_time: 15.05,
                   shot_type: "近景",
                   composition: "人物居中",
                   camera_motion: "固定",
@@ -1082,7 +1087,9 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "创建并上传" }));
 
     expect(
-      await screen.findByText(/已完成上传和预检（8.0 秒），已自动进入视频拆解/),
+      await screen.findByText(
+        /已完成上传和预检（15.1 秒），已自动进入视频拆解/,
+      ),
     ).toBeInTheDocument();
     expect(
       await screen.findByRole("heading", { name: "镜头卡片" }),
@@ -1098,7 +1105,6 @@ describe("App", () => {
         method: "POST",
         body: JSON.stringify({
           asset_id: "asset-1",
-          duration_seconds: 8,
           reuse_existing: true,
         }),
       }),
@@ -1526,6 +1532,198 @@ describe("App", () => {
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "重新上传" })).toBeEnabled();
     expect(screen.getByLabelText("项目名称")).toBeDisabled();
+  });
+
+  it("attributes a network-level cloud upload failure to object storage connectivity", async () => {
+    class NetworkFailureRequest {
+      onerror: (() => void) | null = null;
+      onload: (() => void) | null = null;
+      ontimeout: (() => void) | null = null;
+      status = 0;
+      timeout = 0;
+      upload: { onprogress: ((event: ProgressEvent) => void) | null } = {
+        onprogress: null,
+      };
+
+      open() {}
+      setRequestHeader() {}
+      send() {
+        this.onerror?.();
+      }
+    }
+
+    let projectCollectionCalls = 0;
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/health")) {
+        return Promise.resolve({ ok: true, json: async () => healthResponse });
+      }
+      if (url.endsWith("/api/projects")) {
+        projectCollectionCalls += 1;
+        const projectResponse =
+          projectCollectionCalls === 1
+            ? []
+            : {
+                id: "project-1",
+                owner_user_id: "employee_1",
+                name: "云存储不可达",
+                status: "ACTIVE",
+              };
+        return Promise.resolve({
+          ok: true,
+          json: async () => projectResponse,
+        });
+      }
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({
+          asset_id: "asset-1",
+          project_id: "project-1",
+          storage_key: "projects/project-1/reference.mp4",
+          method: "PUT",
+          url: "https://bucket-1250000000.cos.ap-shanghai.myqcloud.com/projects/project-1/reference.mp4?q-signature=abc",
+          headers: { "content-type": "video/mp4" },
+          expires_at: "2030-01-01T00:00:00Z",
+        }),
+      });
+    });
+    vi.stubGlobal("fetch", withAuth(fetchMock));
+    vi.stubGlobal("XMLHttpRequest", NetworkFailureRequest);
+
+    render(<App />);
+    await enterWorkspace();
+    openNewReplica();
+    fireEvent.change(screen.getByLabelText("项目名称"), {
+      target: { value: "云存储不可达" },
+    });
+    fireEvent.change(screen.getByLabelText("参考视频"), {
+      target: {
+        files: [new File(["video"], "reference.mp4", { type: "video/mp4" })],
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "创建并上传" }));
+
+    expect(
+      await screen.findByText(/上传参考视频失败（无法连接对象存储/),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/上传参考视频失败（网络错误）/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("attributes a network-level local upload failure to the local service", async () => {
+    class NetworkFailureRequest {
+      onerror: (() => void) | null = null;
+      onload: (() => void) | null = null;
+      ontimeout: (() => void) | null = null;
+      status = 0;
+      timeout = 0;
+      upload: { onprogress: ((event: ProgressEvent) => void) | null } = {
+        onprogress: null,
+      };
+
+      open() {}
+      setRequestHeader() {}
+      send() {
+        this.onerror?.();
+      }
+    }
+
+    let projectCollectionCalls = 0;
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/health")) {
+        return Promise.resolve({ ok: true, json: async () => healthResponse });
+      }
+      if (url.endsWith("/api/projects")) {
+        projectCollectionCalls += 1;
+        const projectResponse =
+          projectCollectionCalls === 1
+            ? []
+            : {
+                id: "project-1",
+                owner_user_id: "employee_1",
+                name: "本地服务不可达",
+                status: "ACTIVE",
+              };
+        return Promise.resolve({
+          ok: true,
+          json: async () => projectResponse,
+        });
+      }
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({
+          asset_id: "asset-1",
+          project_id: "project-1",
+          storage_key: "projects/project-1/reference.mp4",
+          method: "PUT",
+          url: "http://127.0.0.1:8000/api/assets/local-objects/projects/project-1/uploads/asset-1/reference.mp4",
+          headers: { "content-type": "video/mp4" },
+          expires_at: "2030-01-01T00:00:00Z",
+        }),
+      });
+    });
+    vi.stubGlobal("fetch", withAuth(fetchMock));
+    vi.stubGlobal("XMLHttpRequest", NetworkFailureRequest);
+
+    render(<App />);
+    await enterWorkspace();
+    openNewReplica();
+    fireEvent.change(screen.getByLabelText("项目名称"), {
+      target: { value: "本地服务不可达" },
+    });
+    fireEvent.change(screen.getByLabelText("参考视频"), {
+      target: {
+        files: [new File(["video"], "reference.mp4", { type: "video/mp4" })],
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "创建并上传" }));
+
+    expect(
+      await screen.findByText(
+        /上传参考视频失败（无法连接本地服务，请确认服务已启动）/,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("warns about bucket CORS rules when the storage provider switches to COS", async () => {
+    const settingsResponse = {
+      providers: {
+        metaso: { provider: "metaso", configured: false, config: {} },
+        apilio: { provider: "apilio", configured: false, config: {} },
+        cos: { provider: "cos", configured: false, config: {} },
+      },
+      runtime: {
+        max_generation_count_per_batch: 4,
+        max_concurrent_h3_tasks: 2,
+        active_storage_provider: "local",
+      },
+    };
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/health")) {
+        return Promise.resolve({ ok: true, json: async () => healthResponse });
+      }
+      if (url.endsWith("/api/admin/settings")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => settingsResponse,
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    vi.stubGlobal("fetch", withAuth(fetchMock, adminUser));
+
+    render(<App />);
+    await enterWorkspace();
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+
+    expect(await screen.findByText("当前已保存：本地存储")).toBeInTheDocument();
+    expect(screen.queryByText(/存储桶跨域访问 CORS/)).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("当前对象存储"), {
+      target: { value: "cos" },
+    });
+
+    expect(screen.getByText(/存储桶跨域访问 CORS/)).toBeInTheDocument();
   });
 
   it("lets an admin configure providers, run a non-generative diagnostic, and download its log", async () => {

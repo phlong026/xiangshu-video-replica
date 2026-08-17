@@ -271,11 +271,7 @@ export function App() {
         `“${project.name}”已完成上传和预检（${completed.metadata.duration_seconds.toFixed(1)} 秒），已自动进入视频拆解。`,
       );
       setUploadStage("analyzing");
-      await startVideoAnalysis(
-        project.id,
-        completed.asset_id,
-        completed.metadata.duration_seconds,
-      );
+      await startVideoAnalysis(project.id, completed.asset_id);
       const analyzedProject: Project = {
         ...uploadedProject,
         analysis_status: "READY",

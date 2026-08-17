@@ -712,7 +712,7 @@ describe("startVideoAnalysis", () => {
     vi.unstubAllGlobals();
   });
 
-  it("uses the provider-sized timeout and marks automatic starts as recoverable", async () => {
+  it("uses the provider-sized timeout and lets the server own the reference duration", async () => {
     const timeoutSpy = vi.spyOn(window, "setTimeout");
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
@@ -720,7 +720,7 @@ describe("startVideoAnalysis", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    await startVideoAnalysis("project-1", "asset-1", 8);
+    await startVideoAnalysis("project-1", "asset-1");
 
     expect(timeoutSpy).toHaveBeenCalledWith(expect.any(Function), 120_000);
     expect(fetchMock).toHaveBeenCalledWith(
@@ -728,10 +728,68 @@ describe("startVideoAnalysis", () => {
       expect.objectContaining({
         body: JSON.stringify({
           asset_id: "asset-1",
-          duration_seconds: 8,
           reuse_existing: true,
         }),
       }),
+    );
+  });
+
+  it("tells a temporary network failure apart from an unusable model response", async () => {
+    const unreachable = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 503,
+      json: async () => ({
+        detail: {
+          code: "ANALYSIS_PROVIDER_UNREACHABLE",
+          message: "无法连接视频拆解服务，请检查网络后重试。",
+          failure_phase: "network",
+          retryable: true,
+        },
+      }),
+    });
+    vi.stubGlobal("fetch", unreachable);
+
+    await expect(startVideoAnalysis("project-1", "asset-1")).rejects.toThrow(
+      /网络/,
+    );
+
+    const invalidResponse = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 502,
+      json: async () => ({
+        detail: {
+          code: "ANALYSIS_PROVIDER_FAILED",
+          message: "视频拆解服务返回了无法解析的结果，请重试或更换参考视频。",
+          failure_phase: "response",
+          retryable: false,
+        },
+      }),
+    });
+    vi.stubGlobal("fetch", invalidResponse);
+
+    await expect(startVideoAnalysis("project-1", "asset-1")).rejects.toThrow(
+      /无法解析的结果/,
+    );
+  });
+
+  it("explains a request rejected by server-side validation instead of showing a bare status", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 422,
+      json: async () => ({
+        detail: [
+          {
+            type: "less_than_equal",
+            loc: ["body", "duration_seconds"],
+            msg: "Input should be less than or equal to 15.1",
+          },
+        ],
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(startVideoAnalysis("project-1", "asset-1")).rejects.toThrow(
+      /参考视频不满足拆解要求/,
     );
   });
 });
