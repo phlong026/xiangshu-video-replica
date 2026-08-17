@@ -29,6 +29,7 @@ import { FirstFrameSelection } from "./FirstFrameSelection";
 import { GenerationComposer } from "./GenerationComposer";
 import { ProjectWorkflowSteps } from "./ProjectWorkflowSteps";
 import { SourceFrameSelection } from "./SourceFrameSelection";
+import { useWorkspaceReadiness } from "./useWorkspaceReadiness";
 
 function toNonNegativeTime(value: string): number {
   const parsed = Number(value);
@@ -323,6 +324,41 @@ export function AnalysisWorkspace({
   const firstFramePayload = firstFrameSelection
     ? readFirstFrameSelectionPayload(firstFrameSelection)
     : null;
+
+  // P0-01 就绪聚合：当前仅接入工作区可得状态；口播稿与 Prompt 状态在
+  // GenerationComposer 内部，待 P0-02 拆分 ScriptEditor/GenerationLauncher
+  // 后接入完整输入，届时由 readiness 驱动标签页就绪徽章（契约 §1.2）。
+  const readiness = useWorkspaceReadiness({
+    shotCard: {
+      versionId: shotCardVersionId || null,
+      dirty: shotCardsDirty,
+      saving: isSaving,
+    },
+    script: { versionId: null, dirty: false, stale: false },
+    character: {
+      versionId: characterSelection?.character_version_id ?? null,
+      legacyCharacterId: characterSelection?.character_id ?? null,
+    },
+    sourceFrame: { selectionId: sourceFrameSelection?.id ?? null },
+    characterReference: {
+      selectionId: characterReferenceSelection?.id ?? null,
+    },
+    firstFrame: {
+      selectionId: firstFrameSelection?.id ?? null,
+      assetId: firstFramePayload?.first_frame_asset_id ?? null,
+    },
+    prompt: {
+      versionId: null,
+      status: null,
+      stale: false,
+      outputDurationSeconds: null,
+      resolution: null,
+      quantity: null,
+      limits: null,
+      lockedSnapshot: null,
+    },
+  });
+  void readiness;
 
   const handleGenerationBusyChange = useCallback(
     (busy: boolean) => {

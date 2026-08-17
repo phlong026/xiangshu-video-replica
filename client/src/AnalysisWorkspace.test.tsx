@@ -545,6 +545,119 @@ describe("AnalysisWorkspace workflow gates", () => {
     );
   });
 
+  it("keeps workspace busy while multiple upstream sources overlap (P0-01-02 行为锁定)", async () => {
+    const onWorkspaceBusyChange = vi.fn();
+    vi.mocked(api.getLatestProjectShotCards).mockResolvedValue({
+      id: "shot-card-2",
+      project_id: "project-1",
+      asset_id: null,
+      kind: "shot_card",
+      version_number: 2,
+      payload: {
+        source_analysis_version_id: "analysis-1",
+        duration_seconds: 8,
+        shots: [],
+      },
+      created_by_user_id: "employee_1",
+      created_at: "2030-01-01T00:00:00Z",
+    });
+
+    render(
+      <AnalysisWorkspace
+        currentUserId="employee_1"
+        onAnalysisReady={vi.fn()}
+        onBatchCreated={vi.fn()}
+        onClose={vi.fn()}
+        onWorkspaceBusyChange={onWorkspaceBusyChange}
+        project={{
+          id: "project-1",
+          owner_user_id: "employee_1",
+          name: "多源 busy 聚合测试",
+          status: "REFERENCE_READY",
+          reference_asset_id: "reference-video-1",
+          reference_upload_status: "READY",
+          analysis_status: "READY",
+        }}
+      />,
+    );
+
+    await screen.findByText("拆解完成");
+    // 首帧区块需要角色已选才渲染，先建立选择链。
+    fireEvent.click(screen.getByRole("button", { name: "完成角色选择" }));
+    // 两个不同上游源同时 busy：整体必须保持 busy。
+    fireEvent.click(screen.getByRole("button", { name: "模拟角色保存中" }));
+    expect(onWorkspaceBusyChange).toHaveBeenLastCalledWith(true);
+    fireEvent.click(screen.getByRole("button", { name: "模拟首帧保存中" }));
+    expect(onWorkspaceBusyChange).toHaveBeenLastCalledWith(true);
+
+    // 解除其中一个源：另一个仍 busy，导航仍被阻断。
+    fireEvent.click(screen.getByRole("button", { name: "模拟角色保存完成" }));
+    expect(onWorkspaceBusyChange).toHaveBeenLastCalledWith(true);
+    expect(screen.getByRole("button", { name: "返回" })).toBeDisabled();
+
+    // 解除最后一个源：整体才恢复空闲。
+    fireEvent.click(screen.getByRole("button", { name: "模拟首帧保存完成" }));
+    expect(onWorkspaceBusyChange).toHaveBeenLastCalledWith(false);
+    expect(screen.getByRole("button", { name: "返回" })).toBeEnabled();
+  });
+
+  it("blocks upstream selection changes while generation is busy (P0-01-02 行为锁定)", async () => {
+    vi.mocked(api.getLatestProjectShotCards).mockResolvedValue({
+      id: "shot-card-2",
+      project_id: "project-1",
+      asset_id: null,
+      kind: "shot_card",
+      version_number: 2,
+      payload: {
+        source_analysis_version_id: "analysis-1",
+        duration_seconds: 8,
+        shots: [],
+      },
+      created_by_user_id: "employee_1",
+      created_at: "2030-01-01T00:00:00Z",
+    });
+
+    render(
+      <AnalysisWorkspace
+        currentUserId="employee_1"
+        onAnalysisReady={vi.fn()}
+        onBatchCreated={vi.fn()}
+        onClose={vi.fn()}
+        onWorkspaceBusyChange={vi.fn()}
+        project={{
+          id: "project-1",
+          owner_user_id: "employee_1",
+          name: "生成 busy 阻断测试",
+          status: "REFERENCE_READY",
+          reference_asset_id: "reference-video-1",
+          reference_upload_status: "READY",
+          analysis_status: "READY",
+        }}
+      />,
+    );
+
+    expect(await screen.findByText("拆解完成")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "完成角色选择" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成源画面" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成人物参考" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成置换首帧" }));
+
+    const generationInput = () =>
+      screen.getByText("生成输入：shot-card-2/first-frame-1/原始口播稿");
+
+    // 生成处理中：切换角色的请求必须被拒绝，下游选择保持不变。
+    fireEvent.click(screen.getByRole("button", { name: "模拟生成处理中" }));
+    fireEvent.click(screen.getByRole("button", { name: "切换角色版本" }));
+    expect(generationInput()).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "标记源画面失效" }));
+    expect(generationInput()).toBeInTheDocument();
+
+    // 生成完成后，同一操作立即生效（切换角色会清空下游，生成区退回门禁提示）。
+    fireEvent.click(screen.getByRole("button", { name: "模拟生成完成" }));
+    fireEvent.click(screen.getByRole("button", { name: "切换角色版本" }));
+    expect(screen.getByText("确认置换首帧后可继续。")).toBeInTheDocument();
+  });
+
   it("blocks generation without losing drafts while shot edits are reverted", async () => {
     vi.mocked(api.getLatestProjectAnalysis).mockResolvedValue({
       id: "analysis-1",
