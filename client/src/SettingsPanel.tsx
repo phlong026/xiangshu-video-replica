@@ -1,17 +1,13 @@
 import { type FormEvent, useEffect, useRef, useState } from "react";
 
 import {
-  type DiagnosticProviderResult,
-  downloadDiagnosticReport,
   getSettings,
   type ProviderName,
   type ProviderSettings,
-  type RuntimeSettings,
-  runSettingsDiagnostic,
-  testProviderConnection,
   type ProviderTestResult,
-  SettingsDiagnosticReport,
+  type RuntimeSettings,
   type SettingsSnapshot,
+  testProviderConnection,
   updateProviderSettings,
   updateRuntimeSettings,
 } from "./api";
@@ -23,38 +19,41 @@ type ProviderField = {
   placeholder?: string;
 };
 
-const PROVIDER_FORMS: Record<
-  ProviderName,
-  { title: string; description: string; fields: ProviderField[] }
-> = {
+type ProviderFormSpec = {
+  title: string;
+  note?: string;
+  fields: ProviderField[];
+  wide?: boolean;
+};
+
+// COS 区域固定为上海，界面不再显示 Region 输入框。
+const COS_REGION = "ap-shanghai";
+
+const PROVIDER_FORMS: Record<ProviderName, ProviderFormSpec> = {
   metaso: {
-    title: "H3 视频生成",
-    description: "用于 MiniMax H3 图生视频任务。默认接口地址由应用维护。",
-    fields: [{ name: "api_key", label: "H3 API Key", secret: true }],
+    title: "视频生成",
+    fields: [{ name: "api_key", label: "API Key", secret: true }],
   },
   apilio: {
-    title: "模型服务（Apilio）",
-    description:
-      "默认 Key 用于图像模型；如 Gemini 使用独立令牌，可单独填写视频分析 Key。",
+    title: "模型服务",
     fields: [
       { name: "api_key", label: "图像模型 API Key", secret: true },
       {
         name: "analysis_api_key",
-        label: "Gemini 视频分析 API Key（可选）",
+        label: "视频分析 API Key（可选）",
         secret: true,
       },
     ],
   },
   cos: {
-    title: "腾讯云 COS",
-    description:
-      "默认对象存储。保持私有 Bucket，由系统签发临时上传和读取地址。",
-    // region 固定为 ap-shanghai，不在界面中显示
+    title: "腾讯云存储",
+    note: "区域固定为上海 · 测试连接会创建并删除一个临时对象",
     fields: [
       { name: "access_key_id", label: "SecretId", secret: true },
       { name: "secret_access_key", label: "SecretKey", secret: true },
       { name: "bucket", label: "Bucket" },
     ],
+    wide: true,
   },
 };
 
@@ -63,12 +62,6 @@ const PROVIDER_ORDER: ProviderName[] = ["metaso", "apilio", "cos"];
 export function SettingsPanel() {
   const [settings, setSettings] = useState<SettingsSnapshot | null>(null);
   const [loadError, setLoadError] = useState("");
-  const [diagnostic, setDiagnostic] = useState<SettingsDiagnosticReport | null>(
-    null,
-  );
-  const [diagnosticError, setDiagnosticError] = useState("");
-  const [isTesting, setIsTesting] = useState(false);
-  const [isDownloading, setIsDownloading] = useState(false);
 
   useEffect(() => {
     let isMounted = true;
@@ -98,9 +91,8 @@ export function SettingsPanel() {
     provider: ProviderName,
     config: Record<string, string>,
   ) {
-    // 对于 COS，自动设置固定的 region
     const finalConfig =
-      provider === "cos" ? { ...config, region: "ap-shanghai" } : config;
+      provider === "cos" ? { ...config, region: COS_REGION } : config;
     const updated = await updateProviderSettings(provider, finalConfig);
     setSettings((current) =>
       current
@@ -119,25 +111,6 @@ export function SettingsPanel() {
     );
   }
 
-
-
-  async function downloadDiagnostic() {
-    if (!diagnostic) {
-      return;
-    }
-    setIsDownloading(true);
-    setDiagnosticError("");
-    try {
-      await downloadDiagnosticReport(diagnostic.download_url, diagnostic.id);
-    } catch (error) {
-      setDiagnosticError(
-        error instanceof Error ? error.message : "下载诊断日志失败。",
-      );
-    } finally {
-      setIsDownloading(false);
-    }
-  }
-
   if (loadError) {
     return (
       <section className="settings-error" role="alert">
@@ -153,11 +126,7 @@ export function SettingsPanel() {
   return (
     <section className="settings-page" aria-labelledby="settings-title">
       <div className="section-heading">
-        <div>
-          <span className="eyebrow">SERVICE SETTINGS</span>
-          <h2 id="settings-title">服务设置</h2>
-        </div>
-        <span className="settings-hint">密钥加密保存，页面不会回显原值</span>
+        <h2 id="settings-title">服务设置</h2>
       </div>
 
       <div className="provider-grid">
@@ -165,49 +134,13 @@ export function SettingsPanel() {
           <ProviderForm
             key={provider}
             provider={provider}
-            settings={settings?.providers[provider]!}
+            settings={settings.providers[provider]}
             onSave={saveProvider}
           />
         ))}
       </div>
 
-      <RuntimeForm runtime={settings!.runtime} onSave={saveRuntime} />
-
-      {diagnosticError ? (
-        <p className="settings-error" role="alert">
-          {diagnosticError}
-        </p>
-      ) : null}
-
-      {/* 保留全局诊断功能用于下载完整日志 */}
-      <section
-        className="diagnostic-panel"
-        aria-labelledby="diagnostic-title"
-      >
-        <div>
-          <span className="eyebrow">TEST MODE</span>
-          <h3 id="diagnostic-title">完整诊断日志</h3>
-          <p>
-            下载包含所有服务商的完整配置诊断报告，用于问题排查与审计。
-          </p>
-        </div>
-        <button
-          type="button"
-          onClick={() => downloadDiagnostic(diagnostic!)}
-          disabled={!diagnostic || isDownloading}
-        >
-          {isDownloading ? "正在下载" : "下载诊断日志"}
-        </button>
-        {diagnostic && diagnosticError
-          ? null
-          : diagnostic && (
-              <DiagnosticResult
-                report={diagnostic}
-                isDownloading={isDownloading}
-                onDownload={downloadDiagnostic}
-              />
-            )}
-      </section>
+      <RuntimeForm runtime={settings.runtime} onSave={saveRuntime} />
     </section>
   );
 }
@@ -225,10 +158,14 @@ function ProviderForm({
   ) => Promise<void>;
 }) {
   const form = PROVIDER_FORMS[provider];
-  const [values, setValues] = useState<Record<string, string>>(()
-    => initialValues(form.fields, settings.config),
+  const [values, setValues] = useState<Record<string, string>>(() =>
+    initialValues(form.fields, settings.config),
+  );
+  const [visibleFields, setVisibleFields] = useState<Record<string, boolean>>(
+    {},
   );
   const [status, setStatus] = useState("");
+  const [statusTone, setStatusTone] = useState<"ok" | "error">("ok");
   const [isSaving, setIsSaving] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
 
@@ -236,41 +173,63 @@ function ProviderForm({
     setValues(initialValues(form.fields, settings.config));
   }, [form.fields, settings.config]);
 
+  function toggleSecretVisibility(name: string) {
+    setVisibleFields((current) => ({ ...current, [name]: !current[name] }));
+  }
+
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (isSaving) return;
+    if (isSaving) {
+      return;
+    }
     setIsSaving(true);
     setStatus("");
     try {
       await onSave(provider, values);
       setValues((current) => clearSecretFields(current, form.fields));
+      setVisibleFields({});
       setStatus("已保存");
-      setTimeout(() => setStatus(""), 2000);
+      setStatusTone("ok");
     } catch {
       setStatus("保存失败，请检查必填项与管理员权限。");
+      setStatusTone("error");
     } finally {
       setIsSaving(false);
     }
   }
 
   async function handleTest() {
-    if (isTesting) return;
+    if (isTesting) {
+      return;
+    }
     setIsTesting(true);
     setStatus("");
     try {
-      await onTest();
-    } catch {
-      // Error handled by onTest callback
+      const result = await testProviderConnection(provider);
+      setStatus(testResultLabel(result));
+      setStatusTone(result.status === "not_configured" ? "error" : "ok");
+    } catch (error) {
+      setStatus(
+        error instanceof Error
+          ? error.message
+          : "测试失败，请检查网络与管理员权限后重试。",
+      );
+      setStatusTone("error");
     } finally {
       setIsTesting(false);
     }
   }
 
   return (
-    <form className="provider-card" onSubmit={submit}>
+    <form
+      className={
+        form.wide ? "provider-card provider-card--wide" : "provider-card"
+      }
+      onSubmit={submit}
+    >
       <div>
         <h3>{form.title}</h3>
-        <p>{form.description}</p>
+        {form.note ? <p>{form.note}</p> : null}
       </div>
       <span
         className={
@@ -282,35 +241,67 @@ function ProviderForm({
         {settings.configured ? "已配置" : "未配置"}
       </span>
       <div className="field-stack">
-        {form.fields.map((field) => (
-          <label key={field.name}>
-            {field.label}
-            <input
-              type={field.secret ? "password" : "text"}
-              value={values[field.name] ?? ""}
-              placeholder={
-                field.secret && settings.configured
-                  ? "已保存，留空不修改"
-                  : field.placeholder
-              }
-              onChange={(event) =>
-                setValues((current) => ({
-                  ...current,
-                  [field.name]: event.target.value,
-                }))
-              }
-            />
-          </label>
-        ))}
+        {form.fields.map((field) => {
+          const isVisible = Boolean(visibleFields[field.name]);
+          return (
+            <label key={field.name}>
+              {field.label}
+              <span className={field.secret ? "secret-field" : undefined}>
+                <input
+                  type={field.secret && !isVisible ? "password" : "text"}
+                  value={values[field.name] ?? ""}
+                  placeholder={
+                    field.secret && settings.configured
+                      ? "已保存，留空不修改"
+                      : field.placeholder
+                  }
+                  onChange={(event) =>
+                    setValues((current) => ({
+                      ...current,
+                      [field.name]: event.target.value,
+                    }))
+                  }
+                />
+                {field.secret ? (
+                  <button
+                    type="button"
+                    className="secret-toggle"
+                    aria-label={
+                      isVisible ? `隐藏${field.label}` : `显示${field.label}`
+                    }
+                    aria-pressed={isVisible}
+                    onClick={() => toggleSecretVisibility(field.name)}
+                  >
+                    <SecretToggleIcon visible={isVisible} />
+                  </button>
+                ) : null}
+              </span>
+            </label>
+          );
+        })}
       </div>
       <div className="form-actions">
-        <button type="submit" disabled={isSaving}>
+        <button type="submit" disabled={isSaving || isTesting}>
           {isSaving ? "正在保存" : "保存"}
         </button>
-        <button type="button" onClick={handleTest} disabled={isTesting || !settings.configured}>
-          {isTesting ? "测试中..." : "测试连接"}
+        <button
+          type="button"
+          className="secondary-button"
+          onClick={handleTest}
+          disabled={isSaving || isTesting}
+        >
+          {isTesting ? "正在测试" : "测试连接"}
         </button>
-        {status ? <span role="status">{status}</span> : null}
+        {status ? (
+          <span
+            role="status"
+            className={
+              statusTone === "error" ? "form-status--error" : undefined
+            }
+          >
+            {status}
+          </span>
+        ) : null}
       </div>
     </form>
   );
@@ -350,15 +341,15 @@ function RuntimeForm({
       Number.isInteger(values.max_concurrent_h3_tasks) &&
       values.max_concurrent_h3_tasks >= 1;
     if (!limitsValid) {
-      setStatus("单次数量上限与最大并发数必须为 ≥1 的整数");
+      setStatus("数量上限与并发数必须为 ≥1 的整数");
       return;
     }
     setIsSaving(true);
     try {
       await onSave(values);
-      setStatus("运行设置已保存");
+      setStatus("已保存");
     } catch {
-      setStatus("运行设置保存失败");
+      setStatus("保存失败");
     } finally {
       setIsSaving(false);
     }
@@ -366,119 +357,103 @@ function RuntimeForm({
 
   return (
     <form className="runtime-form" onSubmit={submit}>
-      <div>
-        <span className="eyebrow">RUNTIME</span>
-        <h3>运行设置</h3>
+      <h3>运行设置</h3>
+      <div className="runtime-fields">
+        <label>
+          存储方式
+          <select
+            disabled={isSaving}
+            value={values.active_storage_provider}
+            onChange={(event) =>
+              setValues((current) => ({
+                ...current,
+                active_storage_provider: event.target.value as "cos" | "local",
+              }))
+            }
+          >
+            <option value="cos">腾讯云存储</option>
+            <option value="local">本地存储（仅开发）</option>
+          </select>
+        </label>
+        <label>
+          单次生成数量上限
+          <input
+            disabled={isSaving}
+            type="number"
+            min="1"
+            value={values.max_generation_count_per_batch}
+            onChange={(event) =>
+              setValues((current) => ({
+                ...current,
+                max_generation_count_per_batch: Number(event.target.value),
+              }))
+            }
+          />
+        </label>
+        <label>
+          视频生成并发数
+          <input
+            disabled={isSaving}
+            type="number"
+            min="1"
+            value={values.max_concurrent_h3_tasks}
+            onChange={(event) =>
+              setValues((current) => ({
+                ...current,
+                max_concurrent_h3_tasks: Number(event.target.value),
+              }))
+            }
+          />
+        </label>
       </div>
-      <label>
-        当前对象存储
-        <select
-          disabled={isSaving}
-          value={values.active_storage_provider}
-          onChange={(event) =>
-            setValues((current) => ({
-              ...current,
-              active_storage_provider: event.target.value as "cos" | "local",
-            }))
-          }
-        >
-          <option value="cos">腾讯云 COS</option>
-          <option value="local">本地存储（仅开发）</option>
-        </select>
-      </label>
       {values.active_storage_provider === "cos" ? (
         <p className="storage-provider-hint">
-          桌面端会直接向 COS
-          预签名地址上传文件。请先在腾讯云控制台的存储桶跨域访问 CORS
-          设置中，放行桌面端来源（http://127.0.0.1:5173、http://tauri.localhost
-          等）的 PUT/GET/HEAD 方法与 content-type
-          请求头，否则上传会以网络错误失败。
+          请先在存储桶的跨域访问 CORS 设置中放行本应用的 PUT/GET/HEAD
+          请求，否则上传会失败。
         </p>
       ) : null}
-      <label>
-        单次生成数量上限
-        <input
-          disabled={isSaving}
-          type="number"
-          min="1"
-          value={values.max_generation_count_per_batch}
-          onChange={(event) =>
-            setValues((current) => ({
-              ...current,
-              max_generation_count_per_batch: Number(event.target.value),
-            }))
-          }
-        />
-      </label>
-      <label>
-        H3 最大并发数
-        <input
-          disabled={isSaving}
-          type="number"
-          min="1"
-          value={values.max_concurrent_h3_tasks}
-          onChange={(event) =>
-            setValues((current) => ({
-              ...current,
-              max_concurrent_h3_tasks: Number(event.target.value),
-            }))
-          }
-        />
-      </label>
       <div className="form-actions">
         <button disabled={isSaving} type="submit">
-          {isSaving ? "正在保存运行设置" : "保存运行设置"}
+          {isSaving ? "正在保存" : "保存"}
         </button>
-        <span>
-          {isStorageChangePending
-            ? `尚未保存：将切换为${storageProviderLabel(values.active_storage_provider)}`
-            : `当前已保存：${storageProviderLabel(runtime.active_storage_provider)}`}
-        </span>
+        {isStorageChangePending ? (
+          <span className="runtime-pending">存储方式修改尚未保存</span>
+        ) : null}
         {status ? <span role="status">{status}</span> : null}
       </div>
     </form>
   );
 }
 
-function DiagnosticResult({
-  report,
-  isDownloading,
-  onDownload,
-}: {
-  report: SettingsDiagnosticReport;
-  isDownloading: boolean;
-  onDownload: () => Promise<void>;
-}) {
+function SecretToggleIcon({ visible }: { visible: boolean }) {
   return (
-    <div className="diagnostic-result">
-      <strong>
-        {report.status === "ok" ? "设置检查通过" : "检测到需要处理的配置项"}
-      </strong>
-      <ul>
-        {report.providers
-          .filter((provider) => PROVIDER_ORDER.includes(provider.provider))
-          .map((provider) => (
-            <li key={provider.provider}>
-              <span>{PROVIDER_FORMS[provider.provider].title}</span>
-              <span
-                className={`diagnostic-status diagnostic-status--${provider.status}`}
-              >
-                {diagnosticStatusLabel(provider.status)}
-              </span>
-              <p>{provider.message}</p>
-            </li>
-          ))}
-      </ul>
-      <button
-        type="button"
-        className="secondary-button"
-        onClick={onDownload}
-        disabled={isDownloading}
-      >
-        {isDownloading ? "正在下载" : "下载诊断日志"}
-      </button>
-    </div>
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      {visible ? (
+        <>
+          <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94" />
+          <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19" />
+          <path d="M14.12 14.12a3 3 0 1 1-4.24-4.24" />
+          <line x1="1" y1="1" x2="23" y2="23" />
+        </>
+      ) : (
+        <>
+          <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+          <circle cx="12" cy="12" r="3" />
+        </>
+      )}
+    </svg>
   );
+}
+
+function testResultLabel(result: ProviderTestResult) {
+  switch (result.status) {
+    case "ok":
+      return "连接测试通过";
+    case "configured_only":
+      return "参数已保存；测试不会发起外部调用";
+    default:
+      return "尚未保存该服务的必要参数";
+  }
 }
 
 function initialValues(
@@ -504,19 +479,4 @@ function clearSecretFields(
     }
   }
   return next;
-}
-
-function diagnosticStatusLabel(status: DiagnosticProviderResult["status"]) {
-  return {
-    ok: "通过",
-    not_configured: "未配置",
-    configured_only: "已配置（不调用）",
-    error: "失败",
-  }[status];
-}
-
-function storageProviderLabel(
-  provider: RuntimeSettings["active_storage_provider"],
-) {
-  return provider === "cos" ? "腾讯云 COS" : "本地存储";
 }

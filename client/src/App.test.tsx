@@ -42,17 +42,13 @@ function withAuth(handler: FetchMock, user = employeeUser) {
 }
 
 async function enterWorkspace() {
-  fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+  fireEvent.click(screen.getByRole("button", { name: "进入" }));
   await act(async () => {
     await Promise.resolve();
   });
   expect(
-    screen.getByRole("heading", { name: "项目工作台" }),
+    screen.getByRole("heading", { level: 1, name: "项目" }),
   ).toBeInTheDocument();
-}
-
-function openNewReplica() {
-  fireEvent.click(screen.getByRole("button", { name: "新建复刻" }));
 }
 
 function openTaskRecords() {
@@ -135,11 +131,9 @@ describe("App", () => {
     render(<App />);
 
     expect(
-      screen.getByRole("heading", { name: "短视频复刻工作台" }),
+      screen.getByRole("heading", { name: "镜序 Studio" }),
     ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "进入工作台" }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "进入" })).toBeInTheDocument();
   });
 
   it("navigates from login to the project page and loads local API health", async () => {
@@ -153,7 +147,7 @@ describe("App", () => {
     await enterWorkspace();
 
     expect(
-      screen.getByRole("heading", { name: "项目工作台" }),
+      screen.getByRole("heading", { level: 1, name: "项目" }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("navigation", { name: "主导航" }),
@@ -161,7 +155,6 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "项目" })).toHaveClass(
       "nav-button--active",
     );
-    expect(screen.getByRole("button", { name: "新建复刻" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "人物库" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "任务记录" })).toBeEnabled();
     expect(screen.queryByRole("button", { name: "设置" })).toBeNull();
@@ -175,7 +168,7 @@ describe("App", () => {
     });
   });
 
-  it("restores an allowed deep link and renders one shared five-entry shell", async () => {
+  it("restores an allowed deep link and renders one shared four-entry shell", async () => {
     window.location.hash = "#characters";
     const fetchMock = vi.fn((url: string) => {
       if (url.endsWith("/health")) {
@@ -186,12 +179,12 @@ describe("App", () => {
     vi.stubGlobal("fetch", withAuth(fetchMock, adminUser));
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+    fireEvent.click(screen.getByRole("button", { name: "进入" }));
 
     expect(
       await screen.findByRole("heading", { name: "人物库" }),
     ).toBeInTheDocument();
-    for (const label of ["项目", "新建复刻", "人物库", "任务记录", "设置"]) {
+    for (const label of ["项目", "人物库", "任务记录", "设置"]) {
       expect(screen.getByRole("button", { name: label })).toBeEnabled();
     }
     expect(screen.getByRole("button", { name: "人物库" })).toHaveClass(
@@ -211,12 +204,12 @@ describe("App", () => {
     vi.stubGlobal("fetch", withAuth(fetchMock, auditorUser));
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+    fireEvent.click(screen.getByRole("button", { name: "进入" }));
 
     expect(
-      await screen.findByRole("heading", { name: "项目工作台" }),
+      await screen.findByRole("heading", { level: 1, name: "项目" }),
     ).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "新建复刻" })).toBeNull();
+    expect(screen.queryByLabelText("项目名称")).toBeNull();
     expect(screen.queryByRole("button", { name: "设置" })).toBeNull();
     expect(screen.getByRole("button", { name: "人物库" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "任务记录" })).toBeEnabled();
@@ -237,7 +230,7 @@ describe("App", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+    fireEvent.click(screen.getByRole("button", { name: "进入" }));
 
     expect(
       await screen.findByText("身份验证失败：missing identity（401）"),
@@ -250,7 +243,7 @@ describe("App", () => {
     );
   });
 
-  it("separates the employee project list from reference-video creation", async () => {
+  it("shows the employee project list with an inline creation form", async () => {
     const fetchMock = vi.fn((url: string) => {
       if (url.endsWith("/health")) {
         return Promise.resolve({ ok: true, json: async () => healthResponse });
@@ -263,29 +256,21 @@ describe("App", () => {
     await enterWorkspace();
 
     expect(
-      await screen.findByRole("heading", { name: "项目列表" }),
+      await screen.findByText("还没有项目。在上方开始第一个复刻。"),
     ).toBeInTheDocument();
-    expect(screen.queryByLabelText("项目名称")).toBeNull();
     expect(
-      screen.queryByText(
-        "当前为只读身份，可查看项目和任务记录，不能创建、上传、编辑、删除或重试。",
-      ),
-    ).toBeNull();
-
-    openNewReplica();
-
-    expect(
-      await screen.findByRole("heading", { name: "新建复刻项目" }),
+      screen.getByRole("heading", { level: 2, name: "项目" }),
     ).toBeInTheDocument();
     expect(screen.getByLabelText("项目名称")).toBeInTheDocument();
     expect(screen.getByLabelText("参考视频")).toHaveAttribute(
       "accept",
       ".mp4,.mov,video/mp4,video/quicktime",
     );
-    expect(screen.getByRole("button", { name: "创建并上传" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "开始" })).toBeDisabled();
+    expect(screen.queryByText("只读身份：仅可查看。")).toBeNull();
   });
 
-  it("shows the shared ten-step project flow when creating a replica", async () => {
+  it("shows the shared three-stage project flow when creating a replica", async () => {
     const fetchMock = vi.fn((url: string) => {
       if (url.endsWith("/health")) {
         return Promise.resolve({ ok: true, json: async () => healthResponse });
@@ -293,14 +278,14 @@ describe("App", () => {
       return Promise.resolve({ ok: true, json: async () => [] });
     });
     vi.stubGlobal("fetch", withAuth(fetchMock));
+    window.location.hash = "#new";
 
     render(<App />);
-    await enterWorkspace();
-    openNewReplica();
+    fireEvent.click(screen.getByRole("button", { name: "进入" }));
 
-    const flow = screen.getByRole("list", { name: "复刻项目流程" });
-    expect(within(flow).getAllByRole("listitem")).toHaveLength(10);
-    expect(within(flow).getByText("上传参考视频")).toHaveAttribute(
+    const flow = await screen.findByRole("list", { name: "复刻项目流程" });
+    expect(within(flow).getAllByRole("listitem")).toHaveLength(3);
+    expect(within(flow).getByText("上传与拆解")).toHaveAttribute(
       "aria-current",
       "step",
     );
@@ -389,33 +374,22 @@ describe("App", () => {
     await enterWorkspace();
 
     expect(screen.getAllByText("审计员")).toHaveLength(2);
-    expect(
-      screen.getByText(
-        "当前为只读身份，可查看项目和任务记录，不能创建、上传、编辑、删除或重试。",
-      ),
-    ).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "创建并上传" })).toBeNull();
+    expect(screen.getByText("只读身份：仅可查看。")).toBeInTheDocument();
+    expect(screen.queryByLabelText("项目名称")).toBeNull();
     expect(screen.queryByRole("button", { name: "继续编辑" })).toBeNull();
     expect(screen.queryByRole("button", { name: "删除项目" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "继续编辑" })).toBeNull();
     expect(
       screen.getByRole("button", { name: "查看项目" }),
     ).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "查看项目" }));
-    expect(
-      await screen.findByText(
-        "当前为只读身份，可查看拆解、候选记录和历史版本；不会请求素材下载链接，也不能保存、选择或生成。",
-      ),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("只读身份：仅可查看。")).toBeInTheDocument();
     expect(screen.getByLabelText("S01 动作")).toBeDisabled();
     expect(screen.queryByRole("button", { name: "保存镜头卡片" })).toBeNull();
     expect(
       screen.getByRole("button", { name: "查看角色版本" }),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText("请先在右侧选择角色版本，再确认源画面。"),
-    ).toBeInTheDocument();
+    expect(screen.getByText("先选择角色版本")).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "重新生成候选首帧" }),
     ).toBeNull();
@@ -438,13 +412,13 @@ describe("App", () => {
     vi.stubGlobal("fetch", withAuth(fetchMock));
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+    fireEvent.click(screen.getByRole("button", { name: "进入" }));
 
     expect(
       await screen.findByText("登录已失效，请重新进入工作台。"),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("heading", { name: "短视频复刻工作台" }),
+      screen.getByRole("heading", { name: "镜序 Studio" }),
     ).toBeInTheDocument();
     expect(screen.queryByText("林夏")).toBeNull();
   });
@@ -476,13 +450,11 @@ describe("App", () => {
 
     expect(window.location.hash).toBe("#new");
     expect(
-      screen.getByRole("heading", { name: "新建复刻项目" }),
+      screen.getByRole("heading", { level: 2, name: "新建项目" }),
     ).toBeInTheDocument();
     expect(screen.getByLabelText("项目名称")).toHaveValue("待续传项目");
     expect(screen.getByLabelText("项目名称")).toBeDisabled();
-    expect(
-      screen.getByText("正在为“待续传项目”重新上传参考视频。"),
-    ).toBeInTheDocument();
+    expect(screen.getByText("重新上传 · 待续传项目")).toBeInTheDocument();
   });
 
   it("resumes a ready project at video analysis without creating another project", async () => {
@@ -575,11 +547,9 @@ describe("App", () => {
     fireEvent.click(await screen.findByRole("button", { name: "继续编辑" }));
 
     expect(
-      await screen.findByRole("button", { name: "开始视频拆解" }),
+      await screen.findByRole("button", { name: "开始拆解" }),
     ).toBeInTheDocument();
-    fireEvent.click(
-      await screen.findByRole("button", { name: "开始视频拆解" }),
-    );
+    fireEvent.click(await screen.findByRole("button", { name: "开始拆解" }));
 
     expect(await screen.findByText("恢复后的拆解结果")).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith(
@@ -599,8 +569,8 @@ describe("App", () => {
       ),
     ).toHaveLength(0);
 
-    fireEvent.click(screen.getByRole("button", { name: "返回项目" }));
-    expect(await screen.findByText("视频拆解已完成")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "返回" }));
+    expect(await screen.findByText("已拆解")).toBeInTheDocument();
   });
 
   it("lets an employee delete an unfinished project after confirmation", async () => {
@@ -747,25 +717,20 @@ describe("App", () => {
       screen.getByRole("heading", { name: "咖啡复刻" }),
     ).toBeInTheDocument();
     expect(
-      await screen.findByRole("heading", { name: "镜头卡片" }),
+      await screen.findByRole("heading", { name: "镜头与口播" }),
     ).toBeInTheDocument();
     expect(await screen.findByText("咖啡口播拆解")).toBeInTheDocument();
+    expect(screen.getByText("拆解来源：演示拆解")).toBeInTheDocument();
     expect(
-      screen.getByText("拆解来源：内置模拟拆解（尚未调用 Gemini）"),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(
-        "当前显示的是内置模拟结果。请在设置中保存 Gemini 视频分析 API Key，并配置可用的 COS 存储后重新拆解。",
-      ),
+      screen.getByText("演示数据 · 在设置中配置 Gemini 后可重新拆解"),
     ).toBeInTheDocument();
     expect(screen.getByLabelText("S01 动作")).toHaveValue("已保存的动作");
     fireEvent.change(screen.getByLabelText("S01 动作"), {
       target: { value: "端起咖啡杯" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "保存镜头卡片" }));
 
     expect(
-      await screen.findByText("镜头卡片已保存为版本 #1。"),
+      await screen.findByText("已自动保存 · 版本 #1", {}, { timeout: 3_000 }),
     ).toBeInTheDocument();
     const saveCall = fetchMock.mock.calls.find(
       ([url]) => url === "http://127.0.0.1:8000/api/analysis/analysis-1/shots",
@@ -934,7 +899,7 @@ describe("App", () => {
     expect(
       await screen.findByText("已选择角色“小夏 · 乡墅项目管理专家 V3”。"),
     ).toBeInTheDocument();
-    expect(screen.getByTitle("选择起始帧")).toHaveAttribute(
+    expect(screen.getByTitle("画面与人物")).toHaveAttribute(
       "aria-current",
       "step",
     );
@@ -1075,7 +1040,6 @@ describe("App", () => {
 
     render(<App />);
     await enterWorkspace();
-    openNewReplica();
     fireEvent.change(screen.getByLabelText("项目名称"), {
       target: { value: "咖啡口播" },
     });
@@ -1084,15 +1048,13 @@ describe("App", () => {
         files: [new File(["video"], "reference.mp4", { type: "video/mp4" })],
       },
     });
-    fireEvent.click(screen.getByRole("button", { name: "创建并上传" }));
+    fireEvent.click(screen.getByRole("button", { name: "开始" }));
 
     expect(
-      await screen.findByText(
-        /已完成上传和预检（15.1 秒），已自动进入视频拆解/,
-      ),
+      await screen.findByText(/预检通过（15.1 秒），拆解中/),
     ).toBeInTheDocument();
     expect(
-      await screen.findByRole("heading", { name: "镜头卡片" }),
+      await screen.findByRole("heading", { name: "镜头与口播" }),
     ).toBeInTheDocument();
     expect(await screen.findByText("咖啡口播拆解完成")).toBeInTheDocument();
     expect(
@@ -1246,7 +1208,6 @@ describe("App", () => {
 
     render(<App />);
     await enterWorkspace();
-    openNewReplica();
     fireEvent.change(screen.getByLabelText("项目名称"), {
       target: { value: "失败后恢复" },
     });
@@ -1255,12 +1216,10 @@ describe("App", () => {
         files: [new File(["video"], "reference.mp4", { type: "video/mp4" })],
       },
     });
-    fireEvent.click(screen.getByRole("button", { name: "创建并上传" }));
+    fireEvent.click(screen.getByRole("button", { name: "开始" }));
 
     expect(await screen.findByText(/模型暂时不可用/)).toBeInTheDocument();
-    fireEvent.click(
-      await screen.findByRole("button", { name: "开始视频拆解" }),
-    );
+    fireEvent.click(await screen.findByRole("button", { name: "开始拆解" }));
 
     expect(await screen.findByText("恢复成功")).toBeInTheDocument();
     expect(screen.queryByText(/模型暂时不可用/)).toBeNull();
@@ -1271,7 +1230,6 @@ describe("App", () => {
 
     render(<App />);
     await enterWorkspace();
-    openNewReplica();
     fireEvent.change(screen.getByLabelText("项目名称"), {
       target: { value: "错误文件" },
     });
@@ -1282,7 +1240,7 @@ describe("App", () => {
     expect(
       screen.getByText("只支持 MP4 或 MOV 格式的视频。"),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "创建并上传" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "开始" })).toBeDisabled();
   });
 
   it("keeps the upload stage visible while the file transfer is still pending", async () => {
@@ -1351,7 +1309,6 @@ describe("App", () => {
 
     render(<App />);
     await enterWorkspace();
-    openNewReplica();
     fireEvent.change(screen.getByLabelText("项目名称"), {
       target: { value: "上传中项目" },
     });
@@ -1360,7 +1317,7 @@ describe("App", () => {
         files: [new File(["video"], "reference.mp4", { type: "video/mp4" })],
       },
     });
-    fireEvent.click(screen.getByRole("button", { name: "创建并上传" }));
+    fireEvent.click(screen.getByRole("button", { name: "开始" }));
 
     expect(
       await screen.findByText("步骤 3/5 · 正在上传参考视频"),
@@ -1441,7 +1398,6 @@ describe("App", () => {
 
     render(<App />);
     await enterWorkspace();
-    openNewReplica();
     fireEvent.change(screen.getByLabelText("项目名称"), {
       target: { value: "关闭窗口测试" },
     });
@@ -1450,7 +1406,7 @@ describe("App", () => {
         files: [new File(["video"], "reference.mp4", { type: "video/mp4" })],
       },
     });
-    fireEvent.click(screen.getByRole("button", { name: "创建并上传" }));
+    fireEvent.click(screen.getByRole("button", { name: "开始" }));
     await screen.findByText("步骤 3/5 · 正在上传参考视频");
 
     act(() => window.dispatchEvent(new Event("pagehide")));
@@ -1516,7 +1472,6 @@ describe("App", () => {
 
     render(<App />);
     await enterWorkspace();
-    openNewReplica();
     fireEvent.change(screen.getByLabelText("项目名称"), {
       target: { value: "失败重试" },
     });
@@ -1525,7 +1480,7 @@ describe("App", () => {
         files: [new File(["video"], "reference.mp4", { type: "video/mp4" })],
       },
     });
-    fireEvent.click(screen.getByRole("button", { name: "创建并上传" }));
+    fireEvent.click(screen.getByRole("button", { name: "开始" }));
 
     expect(
       await screen.findByText(/上传参考视频失败（500）/),
@@ -1591,7 +1546,6 @@ describe("App", () => {
 
     render(<App />);
     await enterWorkspace();
-    openNewReplica();
     fireEvent.change(screen.getByLabelText("项目名称"), {
       target: { value: "云存储不可达" },
     });
@@ -1600,7 +1554,7 @@ describe("App", () => {
         files: [new File(["video"], "reference.mp4", { type: "video/mp4" })],
       },
     });
-    fireEvent.click(screen.getByRole("button", { name: "创建并上传" }));
+    fireEvent.click(screen.getByRole("button", { name: "开始" }));
 
     expect(
       await screen.findByText(/上传参考视频失败（无法连接对象存储/),
@@ -1667,7 +1621,6 @@ describe("App", () => {
 
     render(<App />);
     await enterWorkspace();
-    openNewReplica();
     fireEvent.change(screen.getByLabelText("项目名称"), {
       target: { value: "本地服务不可达" },
     });
@@ -1676,7 +1629,7 @@ describe("App", () => {
         files: [new File(["video"], "reference.mp4", { type: "video/mp4" })],
       },
     });
-    fireEvent.click(screen.getByRole("button", { name: "创建并上传" }));
+    fireEvent.click(screen.getByRole("button", { name: "开始" }));
 
     expect(
       await screen.findByText(
@@ -1716,17 +1669,19 @@ describe("App", () => {
     await enterWorkspace();
     fireEvent.click(screen.getByRole("button", { name: "设置" }));
 
-    expect(await screen.findByText("当前已保存：本地存储")).toBeInTheDocument();
-    expect(screen.queryByText(/存储桶跨域访问 CORS/)).not.toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "运行设置" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/跨域访问 CORS/)).not.toBeInTheDocument();
 
-    fireEvent.change(screen.getByLabelText("当前对象存储"), {
+    fireEvent.change(screen.getByLabelText("存储方式"), {
       target: { value: "cos" },
     });
 
-    expect(screen.getByText(/存储桶跨域访问 CORS/)).toBeInTheDocument();
+    expect(screen.getByText(/跨域访问 CORS/)).toBeInTheDocument();
   });
 
-  it("lets an admin configure providers, run a non-generative diagnostic, and download its log", async () => {
+  it("lets an admin configure providers and run per-provider connection tests", async () => {
     const settingsResponse = {
       providers: {
         metaso: {
@@ -1742,36 +1697,6 @@ describe("App", () => {
         max_concurrent_h3_tasks: 2,
         active_storage_provider: "local",
       },
-    };
-    const diagnosticResponse = {
-      id: "diagnostic-1",
-      status: "attention",
-      providers: [
-        {
-          provider: "metaso",
-          status: "configured_only",
-          configured_fields: ["api_key"],
-          adapter_capability: "configuration_only",
-          test_kind: "connection",
-          http_status: null,
-          error_code: null,
-          latency_ms: 1,
-          message: "参数已保存；真实服务适配器尚未启用，因此未发起外部调用。",
-        },
-        {
-          provider: "oss",
-          status: "error",
-          configured_fields: ["bucket"],
-          adapter_capability: "connection_test",
-          test_kind: "connection",
-          http_status: 503,
-          error_code: "LEGACY_PROVIDER",
-          latency_ms: 0,
-          message: "旧版诊断结果不应在新界面中渲染。",
-        },
-      ],
-      download_url:
-        "/api/admin/settings/diagnostic-reports/diagnostic-1/download",
     };
     let resolveRuntimeSave: ((response: unknown) => void) | undefined;
     const runtimeSaveResponse = new Promise<unknown>((resolve) => {
@@ -1793,30 +1718,22 @@ describe("App", () => {
       ) {
         return runtimeSaveResponse;
       }
-      if (url.endsWith("/diagnostic-test") && options?.method === "POST") {
+      if (
+        url.endsWith("/api/admin/settings/providers/metaso/connection-test") &&
+        options?.method === "POST"
+      ) {
         return Promise.resolve({
           ok: true,
-          json: async () => diagnosticResponse,
-        });
-      }
-      if (url.endsWith("/diagnostic-reports/diagnostic-1/download")) {
-        return Promise.resolve({
-          ok: true,
-          blob: async () => new Blob(["{}"]),
+          json: async () => ({
+            status: "configured_only",
+            provider: "metaso",
+            test_kind: "connection",
+          }),
         });
       }
       return Promise.resolve({ ok: true, json: async () => ({}) });
     });
     vi.stubGlobal("fetch", withAuth(fetchMock, adminUser));
-    const createObjectUrl = vi.fn(() => "blob:diagnostic-1");
-    const revokeObjectUrl = vi.fn();
-    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(
-      () => undefined,
-    );
-    vi.stubGlobal("URL", {
-      createObjectURL: createObjectUrl,
-      revokeObjectURL: revokeObjectUrl,
-    });
 
     render(<App />);
     await enterWorkspace();
@@ -1825,31 +1742,29 @@ describe("App", () => {
     expect(
       await screen.findByRole("heading", { name: "服务设置" }),
     ).toBeInTheDocument();
-    expect(screen.getByLabelText("H3 API Key")).toHaveValue("");
-    expect(screen.getByLabelText("H3 API Key")).toHaveAttribute(
-      "placeholder",
-      "已保存，留空不修改",
-    );
-    expect(screen.getByText("模型服务（Apilio）")).toBeInTheDocument();
-    expect(screen.getByText("当前已保存：本地存储")).toBeInTheDocument();
+    const apiKeyInput = screen.getByLabelText("API Key");
+    expect(apiKeyInput).toHaveValue("");
+    expect(apiKeyInput).toHaveAttribute("placeholder", "已保存，留空不修改");
+    expect(apiKeyInput).toHaveAttribute("type", "password");
+    fireEvent.click(screen.getByRole("button", { name: "显示API Key" }));
+    expect(apiKeyInput).toHaveAttribute("type", "text");
+    fireEvent.click(screen.getByRole("button", { name: "隐藏API Key" }));
+    expect(apiKeyInput).toHaveAttribute("type", "password");
+    expect(screen.getByText("模型服务")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Region")).not.toBeInTheDocument();
+    expect(screen.getByText(/区域固定为上海/)).toBeInTheDocument();
     expect(screen.queryByText("阿里云 OSS")).not.toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText("当前对象存储"), {
+    fireEvent.change(screen.getByLabelText("存储方式"), {
       target: { value: "cos" },
     });
-    expect(
-      screen.getByText("尚未保存：将切换为腾讯云 COS"),
-    ).toBeInTheDocument();
+    expect(screen.getByText("存储方式修改尚未保存")).toBeInTheDocument();
     await act(async () => Promise.resolve());
-    expect(
-      screen.getByText("尚未保存：将切换为腾讯云 COS"),
-    ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "保存运行设置" }));
-    expect(screen.getByLabelText("当前对象存储")).toBeDisabled();
+    expect(screen.getByText("存储方式修改尚未保存")).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole("button", { name: "保存" })[3]);
+    expect(screen.getByLabelText("存储方式")).toBeDisabled();
     expect(screen.getByLabelText("单次生成数量上限")).toBeDisabled();
-    expect(screen.getByLabelText("H3 最大并发数")).toBeDisabled();
-    expect(
-      screen.getByRole("button", { name: "正在保存运行设置" }),
-    ).toBeDisabled();
+    expect(screen.getByLabelText("视频生成并发数")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "正在保存" })).toBeDisabled();
     await act(async () => {
       resolveRuntimeSave?.({
         ok: true,
@@ -1860,38 +1775,27 @@ describe("App", () => {
       });
       await Promise.resolve();
     });
-    expect(await screen.findByText("运行设置已保存")).toBeInTheDocument();
-    expect(screen.getByLabelText("当前对象存储")).toBeEnabled();
+    expect(await screen.findByText("已保存")).toBeInTheDocument();
+    expect(screen.getByLabelText("存储方式")).toBeEnabled();
     expect(
-      screen.getByText(
-        /可能产生云存储请求费用；该操作不会提交 H3、视频或图片生成任务/,
-      ),
+      screen.getByText(/测试连接会创建并删除一个临时对象/),
     ).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "测试设置" }));
-    expect(await screen.findByText("已配置（不调用）")).toBeInTheDocument();
+    const testButtons = screen.getAllByRole("button", { name: "测试连接" });
+    expect(testButtons).toHaveLength(3);
+    fireEvent.click(testButtons[0]);
+    expect(
+      await screen.findByText("参数已保存；测试不会发起外部调用"),
+    ).toBeInTheDocument();
     expect(
       screen.queryByText("旧版诊断结果不应在新界面中渲染。"),
     ).not.toBeInTheDocument();
-
     expect(
-      await screen.findByText("检测到需要处理的配置项"),
-    ).toBeInTheDocument();
+      screen.queryByRole("button", { name: "测试设置" }),
+    ).not.toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "下载诊断日志" }),
-    ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "下载诊断日志" }));
-    await waitFor(() =>
-      expect(fetchMock).toHaveBeenCalledWith(
-        "http://127.0.0.1:8000/api/admin/settings/diagnostic-reports/diagnostic-1/download",
-        expect.objectContaining({ method: "GET" }),
-      ),
-    );
-    expect(createObjectUrl).toHaveBeenCalledOnce();
-    await waitFor(
-      () => expect(revokeObjectUrl).toHaveBeenCalledWith("blob:diagnostic-1"),
-      { timeout: 2_000 },
-    );
+      screen.queryByRole("button", { name: "下载诊断日志" }),
+    ).not.toBeInTheDocument();
   });
 
   it("tells an admin that saved settings remain when the local key is unavailable", async () => {

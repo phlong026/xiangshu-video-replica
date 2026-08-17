@@ -1444,7 +1444,7 @@ export async function testProviderConnection(
 ): Promise<ProviderTestResult> {
   return requestAdminJson<ProviderTestResult>(
     `/api/admin/settings/providers/${provider}/connection-test`,
-    `${PROVIDER_FORMS[provider]?.title || provider} 连接测试失败`,
+    "连接测试失败",
     { method: "POST" },
     CLOUD_OP_TIMEOUT_MS,
   );

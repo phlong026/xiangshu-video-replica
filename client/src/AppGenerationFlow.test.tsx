@@ -68,7 +68,7 @@ function createAppFetchMock() {
 }
 
 async function openProjectGenerationFlow() {
-  fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+  fireEvent.click(screen.getByRole("button", { name: "进入" }));
   await act(async () => Promise.resolve());
   fireEvent.click(await screen.findByRole("button", { name: "继续编辑" }));
   fireEvent.click(screen.getByRole("button", { name: "模拟从项目创建批次" }));
@@ -160,7 +160,7 @@ describe("App generation handoff", () => {
     vi.stubGlobal("fetch", createAppFetchMock());
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+    fireEvent.click(screen.getByRole("button", { name: "进入" }));
     await act(async () => Promise.resolve());
     fireEvent.click(await screen.findByRole("button", { name: "继续编辑" }));
     fireEvent.click(screen.getByRole("button", { name: "模拟上游写入开始" }));
@@ -204,7 +204,7 @@ describe("App generation handoff", () => {
     vi.stubGlobal("fetch", createAppFetchMock());
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+    fireEvent.click(screen.getByRole("button", { name: "进入" }));
     await act(async () => Promise.resolve());
     fireEvent.click(await screen.findByRole("button", { name: "继续编辑" }));
     fireEvent.click(screen.getByRole("button", { name: "模拟上游写入开始" }));

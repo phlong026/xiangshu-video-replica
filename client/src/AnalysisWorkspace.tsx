@@ -436,7 +436,7 @@ export function AnalysisWorkspace({
     setShotCardsDirty(isDirty);
   }
 
-  async function persistShotCards(): Promise<boolean> {
+  const persistShotCards = useCallback(async (): Promise<boolean> => {
     if (readOnly || isSavingRef.current || isWorkspaceBusyRef.current) {
       return false;
     }
@@ -470,7 +470,7 @@ export function AnalysisWorkspace({
       isSavingRef.current = false;
       setIsSaving(false);
     }
-  }
+  }, [analysisId, readOnly, shots]);
 
   useEffect(() => {
     if (readOnly || !analysisId || !shotCardsDirty) {
@@ -484,7 +484,7 @@ export function AnalysisWorkspace({
       void persistShotCards();
     }, 800);
     return () => window.clearTimeout(timer);
-  }, [analysisId, readOnly, shotCardsDirty, shots]);
+  }, [analysisId, persistShotCards, readOnly, shotCardsDirty, shots]);
 
   async function handleSave(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -593,7 +593,9 @@ export function AnalysisWorkspace({
                       <CharacterReferenceSelection
                         characterSelection={characterSelection}
                         onBusyChange={handleReferenceBusyChange}
-                        onSelectionChange={handleCharacterReferenceSelectionChange}
+                        onSelectionChange={
+                          handleCharacterReferenceSelectionChange
+                        }
                         projectId={project.id}
                         readOnly={readOnly}
                         sourceFrameSelection={sourceFrameSelection}
@@ -607,18 +609,20 @@ export function AnalysisWorkspace({
                         projectId={project.id}
                         readOnly={readOnly}
                         referenceSelection={characterReferenceSelection}
-                        sourceFrameSelectionId={sourceFrameSelection?.id ?? null}
+                        sourceFrameSelectionId={
+                          sourceFrameSelection?.id ?? null
+                        }
                       />
                     ) : null}
                   </div>
-                  <div className="analysis-sidebar" aria-label="当前人物设定">
+                  <aside className="analysis-sidebar" aria-label="当前人物设定">
                     <CharacterSelection
                       onBusyChange={handleCharacterBusyChange}
                       onVersionChange={handleCharacterSelectionChange}
                       projectId={project.id}
                       readOnly={readOnly}
                     />
-                  </div>
+                  </aside>
                 </div>
               </section>
               <section className="stage-block" aria-label="镜头与口播">
@@ -695,14 +699,19 @@ export function AnalysisWorkspace({
                       currentUserId={currentUserId}
                       durationSeconds={durationSeconds}
                       firstFrameAssetId={firstFramePayload.first_frame_asset_id}
-                      firstFrameSelectionVersionId={firstFrameSelection?.id ?? ""}
+                      firstFrameSelectionVersionId={
+                        firstFrameSelection?.id ?? ""
+                      }
                       onBatchCreated={onBatchCreated}
                       onBusyChange={handleGenerationBusyChange}
                       onWorkflowStepChange={setGenerationStep}
                       originalScript={originalScript}
                       projectId={project.id}
                       readOnly={
-                        readOnly || isSaving || shotCardsDirty || isWorkspaceBusy
+                        readOnly ||
+                        isSaving ||
+                        shotCardsDirty ||
+                        isWorkspaceBusy
                       }
                       referenceSelectionId={
                         characterReferenceSelection?.id ?? null
@@ -727,9 +736,7 @@ export function AnalysisWorkspace({
 }
 
 function providerLabel(provider: AnalysisProvider) {
-  return provider === "apilio_gemini"
-    ? "Gemini 3.1 Pro（Apilio）"
-    : "演示拆解";
+  return provider === "apilio_gemini" ? "Gemini 3.1 Pro（Apilio）" : "演示拆解";
 }
 
 function ShotInput({

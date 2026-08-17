@@ -797,11 +797,7 @@ function ProjectSetupPanel({
             }
             type="submit"
           >
-            {isUploading
-              ? "正在上传"
-              : pendingProject
-                ? "重新上传"
-                : "开始"}
+            {isUploading ? "正在上传" : pendingProject ? "重新上传" : "开始"}
           </button>
         </form>
       ) : null}
