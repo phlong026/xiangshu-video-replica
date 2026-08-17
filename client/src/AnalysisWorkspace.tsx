@@ -2,6 +2,7 @@ import {
   type FormEvent,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -20,6 +21,7 @@ import {
   readFirstFrameSelectionPayload,
   readShotCardPayload,
   type ShotCard,
+  type SourceFrameCharacterFeatures,
   saveShotCards,
   startVideoAnalysis,
 } from "./api";
@@ -341,6 +343,13 @@ export function AnalysisWorkspace({
   const isWorkspaceBusy = isGenerationBusy || isUpstreamBusy;
   const draftsReadOnly =
     readOnly || isSaving || shotCardsDirty || isWorkspaceBusy;
+
+  // P0-03-02：源画面特征预填建议（镜头卡首镜头映射；未确认时一次性预填，
+  // 用户改过的字段不被覆盖，确认仍为人工动作）。
+  const sourceFrameFeatureSuggestion = useMemo(() => {
+    const firstShot = shots[0];
+    return firstShot ? shotCardFeatureSuggestion(firstShot) : null;
+  }, [shots]);
 
   // P0-02-03：口播稿/生成草稿状态提升至工作区，标签页①的口播稿编辑与
   // 标签页③的生成面板共享单一状态源（契约 §2）。Prompt 就绪输入待
@@ -782,6 +791,7 @@ export function AnalysisWorkspace({
                 </header>
                 {characterSelection ? (
                   <SourceFrameSelection
+                    featureSuggestion={sourceFrameFeatureSuggestion}
                     onBusyChange={handleSourceFrameBusyChange}
                     onSelectionChange={handleSourceFrameSelectionChange}
                     projectId={project.id}
@@ -1078,6 +1088,37 @@ export function AnalysisWorkspace({
 
 function providerLabel(provider: AnalysisProvider) {
   return provider === "apilio_gemini" ? "Gemini 3.1 Pro（Apilio）" : "演示拆解";
+}
+
+// P0-03-02：镜头卡首镜头 → 源画面人物特征预填建议（shot_type 中文映射
+// 景别/身体完整度，朝向与可见性取口播人物常规默认）。仅作预填建议，
+// 字段可改，确认仍为人工动作（任务 12 红线：不从默认值猜测落库）。
+export function shotCardFeatureSuggestion(
+  shot: ShotCard,
+): SourceFrameCharacterFeatures {
+  const text = shot.shot_type;
+  if (text.includes("近景") || text.includes("特写")) {
+    return {
+      orientation: "FRONT",
+      shot_size: "CLOSE_UP",
+      face_visible: true,
+      body_completeness: "FACE_ONLY",
+    };
+  }
+  if (text.includes("全景") || text.includes("远景") || text.includes("全身")) {
+    return {
+      orientation: "FRONT",
+      shot_size: "FULL_BODY",
+      face_visible: true,
+      body_completeness: "FULL_BODY",
+    };
+  }
+  return {
+    orientation: "FRONT",
+    shot_size: "HALF_BODY",
+    face_visible: true,
+    body_completeness: "UPPER_BODY",
+  };
 }
 
 // P0-02-05：缺失项跳转后的目标区块高亮类名拼接。

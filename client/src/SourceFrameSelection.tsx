@@ -13,12 +13,14 @@ import {
 } from "./api";
 
 export function SourceFrameSelection({
+  featureSuggestion = null,
   onBusyChange,
   onSelectionChange,
   projectId,
   readOnly = false,
   referenceAssetId,
 }: {
+  featureSuggestion?: SourceFrameCharacterFeatures | null;
   onBusyChange?: (isBusy: boolean) => void;
   onSelectionChange?: (selection: AnalysisVersion | null) => void;
   projectId: string;
@@ -41,12 +43,37 @@ export function SourceFrameSelection({
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const loadRequestId = useRef(0);
+  // P0-03-02：特征建议取最新值（latest-ref），避免建议变化触发候选重载；
+  // 自动提取按项目去重，每项目仅自动一次，失败不自动重试（手动态仍可重提）。
+  // onBusyChange 同样走 latest-ref：宿主链路（App 内联回调 + busy 翻转
+  // 重渲染）会使其身份每次渲染变化，进依赖数组会导致无关重载清空用户
+  // 已填特征、并吞掉自动提取失败错误（评审 M-1）。
+  const featureSuggestionRef = useRef(featureSuggestion);
+  featureSuggestionRef.current = featureSuggestion;
+  const onBusyChangeRef = useRef(onBusyChange);
+  onBusyChangeRef.current = onBusyChange;
+  const autoExtractProjectRef = useRef<string | null>(null);
 
   const resetFeatures = useCallback(() => {
     setOrientation("");
     setShotSize("");
     setFaceVisibility("");
     setBodyCompleteness("");
+  }, []);
+
+  // 预填只填空字段：仅在候选加载后一次性应用，用户改过的值不会被覆盖
+  // （任务 12 红线：确认仍为人工动作，建议值不落库）。
+  const applyFeatureSuggestion = useCallback(() => {
+    const suggestion = featureSuggestionRef.current;
+    if (!suggestion) {
+      return;
+    }
+    setOrientation((prev) => prev || suggestion.orientation);
+    setShotSize((prev) => prev || suggestion.shot_size);
+    setFaceVisibility(
+      (prev) => prev || (suggestion.face_visible ? "VISIBLE" : "HIDDEN"),
+    );
+    setBodyCompleteness((prev) => prev || suggestion.body_completeness);
   }, []);
 
   const loadCandidates = useCallback(async () => {
@@ -72,6 +99,42 @@ export function SourceFrameSelection({
         resetFeatures();
         onSelectionChange?.(null);
         setStatus(selection.stale ? "候选已更新，请重新确认源画面。" : "");
+        // P0-03-02：角色就绪且无候选时自动提取默认时间点（本地截帧无费用），
+        // 提取仅产生候选，确认仍为人工动作；readOnly 不触发（契约红线 6）。
+        if (
+          !readOnly &&
+          referenceAssetId &&
+          autoExtractProjectRef.current !== projectId
+        ) {
+          autoExtractProjectRef.current = projectId;
+          onBusyChangeRef.current?.(true);
+          setIsSubmitting(true);
+          try {
+            await extractSourceFrames(
+              projectId,
+              referenceAssetId,
+              [0.5, 1.5, 2.5],
+            );
+            if (!isCurrentRequest()) {
+              return;
+            }
+            setStatus("已自动提取候选源画面，请核对后确认。");
+            await loadCandidates();
+          } catch (requestError) {
+            if (isCurrentRequest()) {
+              setError(
+                requestError instanceof Error
+                  ? requestError.message
+                  : "自动提取候选源画面失败。",
+              );
+            }
+          } finally {
+            if (isCurrentRequest()) {
+              setIsSubmitting(false);
+            }
+            onBusyChangeRef.current?.(false);
+          }
+        }
         return;
       }
       const payload = readSourceFrameCandidates(version);
@@ -100,16 +163,19 @@ export function SourceFrameSelection({
       } else if (typeof confirmedAssetId === "string") {
         setSelectedAssetId(confirmedAssetId);
         resetFeatures();
+        applyFeatureSuggestion();
         setStatus("已保存的源画面缺少人物特征，请重新确认源画面。");
         onSelectionChange?.(null);
       } else if (selection.stale) {
-        setSelectedAssetId("");
+        setSelectedAssetId(preferredCandidateAssetId(payload.candidates));
         resetFeatures();
+        applyFeatureSuggestion();
         setStatus("候选已更新，请重新确认源画面。");
         onSelectionChange?.(null);
       } else {
-        setSelectedAssetId("");
+        setSelectedAssetId(preferredCandidateAssetId(payload.candidates));
         resetFeatures();
+        applyFeatureSuggestion();
         setStatus("");
         onSelectionChange?.(null);
       }
@@ -151,7 +217,14 @@ export function SourceFrameSelection({
         setIsLoading(false);
       }
     }
-  }, [onSelectionChange, projectId, readOnly, resetFeatures]);
+  }, [
+    applyFeatureSuggestion,
+    onSelectionChange,
+    projectId,
+    readOnly,
+    referenceAssetId,
+    resetFeatures,
+  ]);
 
   function invalidateConfirmation() {
     setStatus("源画面或人物特征已修改，请重新确认。");
@@ -475,6 +548,16 @@ export function SourceFrameSelection({
       )}
     </section>
   );
+}
+
+// P0-03-02：未确认时预选评分最高的候选（无评分时取第一张）。
+function preferredCandidateAssetId(candidates: SourceFrameCandidate[]): string {
+  if (candidates.length === 0) {
+    return "";
+  }
+  return candidates.reduce((best, candidate) =>
+    (candidate.score ?? -1) > (best.score ?? -1) ? candidate : best,
+  ).asset_id;
 }
 
 function readCharacterFeatures(

@@ -7,7 +7,10 @@ import {
   within,
 } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { AnalysisWorkspace } from "./AnalysisWorkspace";
+import {
+  AnalysisWorkspace,
+  shotCardFeatureSuggestion,
+} from "./AnalysisWorkspace";
 import * as api from "./api";
 
 vi.mock("./api", async (importOriginal) => {
@@ -147,11 +150,17 @@ vi.mock("./CharacterSelection", () => ({
 
 vi.mock("./SourceFrameSelection", () => ({
   SourceFrameSelection: ({
+    featureSuggestion,
     onBusyChange,
     onSelectionChange,
     readOnly,
   }: apiMockProps) => (
     <>
+      <span data-testid="sf-feature-suggestion">
+        {featureSuggestion
+          ? `${featureSuggestion.shot_size}/${featureSuggestion.body_completeness}`
+          : "none"}
+      </span>
       <button
         disabled={readOnly}
         onClick={() => onSelectionChange?.(sourceSelection)}
@@ -276,6 +285,12 @@ vi.mock("./GenerationComposer", () => ({
 }));
 
 type apiMockProps = {
+  featureSuggestion?: {
+    body_completeness: string;
+    face_visible: boolean;
+    orientation: string;
+    shot_size: string;
+  } | null;
   legacyCharacterSelected?: boolean;
   onBusyChange?: (isBusy: boolean) => void;
   onSelectionChange?: (value: unknown) => void;
@@ -1261,6 +1276,86 @@ describe("AnalysisWorkspace workflow gates", () => {
     expect(screen.queryByText("完成人物参考")).toBeNull();
     expect(screen.getByRole("button", { name: "完成源画面" })).toBeEnabled();
     expect(screen.getByText("首帧历史可查看")).toBeInTheDocument();
+  });
+
+  it("标签页②：源画面特征建议随镜头卡首镜头映射预填（P0-03-02）", async () => {
+    // 默认拆解 fixture 的 shots 为空，注入带 shot_type 的首镜头验证映射。
+    vi.mocked(api.getLatestProjectAnalysis).mockResolvedValue({
+      id: "analysis-1",
+      project_id: "project-1",
+      asset_id: "reference-video-1",
+      kind: "analysis",
+      version_number: 1,
+      payload: {
+        analysis: {
+          summary: "拆解完成",
+          duration_seconds: 8,
+          original_script: "原始口播稿",
+          shots: [editableShot],
+        },
+      },
+      created_by_user_id: "employee_1",
+      created_at: "2030-01-01T00:00:00Z",
+    });
+    render(
+      <AnalysisWorkspace
+        currentUserId="employee_1"
+        onAnalysisReady={vi.fn()}
+        onBatchCreated={vi.fn()}
+        onClose={vi.fn()}
+        project={{
+          id: "project-1",
+          owner_user_id: "employee_1",
+          name: "特征预填测试",
+          status: "REFERENCE_READY",
+          reference_asset_id: "reference-video-1",
+          reference_upload_status: "READY",
+          analysis_status: "READY",
+        }}
+      />,
+    );
+
+    expect(await screen.findByText("拆解完成")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "完成角色选择" }));
+    // 默认拆解首镜头 shot_type="中景" → 半身/上半身建议（预填仅建议，
+    // 确认仍为人工动作）。
+    expect(
+      await screen.findByTestId("sf-feature-suggestion"),
+    ).toHaveTextContent("HALF_BODY/UPPER_BODY");
+  });
+
+  it("标签页②：镜头卡 shot_type → 源画面特征建议映射三分支（P0-03-02）", () => {
+    // 近景/特写 → 特写组合；全景/远景/全身 → 全身组合；
+    // 其余（如中景）→ 半身默认。预填仅为建议值，用户可改可撤回。
+    const expectSuggestion = (shotType: string, expected: object) => {
+      expect(
+        shotCardFeatureSuggestion({ ...editableShot, shot_type: shotType }),
+      ).toEqual(expected);
+    };
+    const closeUp = {
+      orientation: "FRONT",
+      shot_size: "CLOSE_UP",
+      face_visible: true,
+      body_completeness: "FACE_ONLY",
+    };
+    const fullBody = {
+      orientation: "FRONT",
+      shot_size: "FULL_BODY",
+      face_visible: true,
+      body_completeness: "FULL_BODY",
+    };
+    const halfBody = {
+      orientation: "FRONT",
+      shot_size: "HALF_BODY",
+      face_visible: true,
+      body_completeness: "UPPER_BODY",
+    };
+    expectSuggestion("近景", closeUp);
+    expectSuggestion("特写", closeUp);
+    expectSuggestion("全景", fullBody);
+    expectSuggestion("远景", fullBody);
+    expectSuggestion("全身", fullBody);
+    expectSuggestion("中景", halfBody);
   });
 
   it("主操作栏：未就绪点「开始生成」弹出缺失项模态（覆盖 7 类缺失）", async () => {
