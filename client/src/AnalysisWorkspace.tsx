@@ -655,8 +655,27 @@ export function AnalysisWorkspace({
               <span className="stage-block__index">01</span>
               <h3>画面与人物</h3>
             </header>
-            <div className="stage-people-grid">
-              <div className="stage-people-main">
+            {/* P0-02-04：四区块纵向流水线（角色 → 源画面 → 人物参考 → 首帧），
+                未就绪区块用骨架 + 引导替代门禁（契约 §2.2：子组件内部不改，
+                仅改布局与外围包装；stale 级联清空逻辑保持不变）。 */}
+            <div className="stage-pipeline">
+              <section aria-label="角色版本" className="stage-pipeline__item">
+                <header className="stage-pipeline__head">
+                  <span className="stage-pipeline__step">1</span>
+                  <h4>角色版本</h4>
+                </header>
+                <CharacterSelection
+                  onBusyChange={handleCharacterBusyChange}
+                  onVersionChange={handleCharacterSelectionChange}
+                  projectId={project.id}
+                  readOnly={readOnly}
+                />
+              </section>
+              <section aria-label="源画面选择" className="stage-pipeline__item">
+                <header className="stage-pipeline__head">
+                  <span className="stage-pipeline__step">2</span>
+                  <h4>源画面选择</h4>
+                </header>
                 {characterSelection ? (
                   <SourceFrameSelection
                     onBusyChange={handleSourceFrameBusyChange}
@@ -666,11 +685,20 @@ export function AnalysisWorkspace({
                     readOnly={readOnly}
                   />
                 ) : (
-                  <p className="workflow-gate-note">先选择角色版本</p>
+                  <PipelineSkeleton note="先在上方选择角色版本" />
                 )}
-                {!legacyCharacterSelected &&
-                characterSelection?.character_version_id &&
-                sourceFrameSelection ? (
+              </section>
+              <section aria-label="人物参考" className="stage-pipeline__item">
+                <header className="stage-pipeline__head">
+                  <span className="stage-pipeline__step">3</span>
+                  <h4>人物参考</h4>
+                </header>
+                {legacyCharacterSelected ? (
+                  <p className="pipeline-note">
+                    历史兼容角色无需人物参考，可直接进行首帧。
+                  </p>
+                ) : characterSelection?.character_version_id &&
+                  sourceFrameSelection ? (
                   <CharacterReferenceSelection
                     characterSelection={characterSelection}
                     onBusyChange={handleReferenceBusyChange}
@@ -679,7 +707,21 @@ export function AnalysisWorkspace({
                     readOnly={readOnly}
                     sourceFrameSelection={sourceFrameSelection}
                   />
-                ) : null}
+                ) : (
+                  <PipelineSkeleton
+                    note={
+                      characterSelection
+                        ? "先在上方完成源画面选择"
+                        : "先在上方选择角色版本"
+                    }
+                  />
+                )}
+              </section>
+              <section aria-label="置换首帧" className="stage-pipeline__item">
+                <header className="stage-pipeline__head">
+                  <span className="stage-pipeline__step">4</span>
+                  <h4>置换首帧</h4>
+                </header>
                 {characterSelection ? (
                   <FirstFrameSelection
                     legacyCharacterSelected={legacyCharacterSelected}
@@ -690,16 +732,10 @@ export function AnalysisWorkspace({
                     referenceSelection={characterReferenceSelection}
                     sourceFrameSelectionId={sourceFrameSelection?.id ?? null}
                   />
-                ) : null}
-              </div>
-              <aside className="analysis-sidebar" aria-label="当前人物设定">
-                <CharacterSelection
-                  onBusyChange={handleCharacterBusyChange}
-                  onVersionChange={handleCharacterSelectionChange}
-                  projectId={project.id}
-                  readOnly={readOnly}
-                />
-              </aside>
+                ) : (
+                  <PipelineSkeleton note="先在上方选择角色版本" />
+                )}
+              </section>
             </div>
           </section>
         </div>
@@ -867,6 +903,20 @@ export function AnalysisWorkspace({
 
 function providerLabel(provider: AnalysisProvider) {
   return provider === "apilio_gemini" ? "Gemini 3.1 Pro（Apilio）" : "演示拆解";
+}
+
+// P0-02-04：未就绪区块的骨架占位——上游选择未完成时以引导文案替代门禁。
+function PipelineSkeleton({ note }: { note: string }) {
+  return (
+    <div className="pipeline-skeleton">
+      <div aria-hidden="true" className="pipeline-skeleton__bars">
+        <span />
+        <span />
+        <span />
+      </div>
+      <p className="pipeline-skeleton__note">{note}</p>
+    </div>
+  );
 }
 
 function ShotInput({

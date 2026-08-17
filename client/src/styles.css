@@ -799,10 +799,6 @@ button.workspace-tab--active {
   min-width: 0;
 }
 
-.analysis-sidebar {
-  min-width: 0;
-}
-
 .stage-block {
   display: grid;
   gap: 14px;
@@ -841,23 +837,101 @@ button.workspace-tab--active {
   font-variant-numeric: tabular-nums;
 }
 
-.stage-people-grid {
+/* P0-02-04：标签页②四区块纵向流水线（角色 → 源画面 → 人物参考 → 首帧）。 */
+.stage-pipeline {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(240px, 300px);
-  align-items: start;
   gap: 16px;
 }
 
-.stage-people-main {
+.stage-pipeline__item {
   display: grid;
-  gap: 16px;
+  gap: 12px;
   min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 16px 18px;
+  background: rgba(15, 15, 26, 0.6);
 }
 
-@media (max-width: 960px) {
-  .stage-people-grid {
-    grid-template-columns: minmax(0, 1fr);
+.stage-pipeline__head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.stage-pipeline__step {
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+}
+
+.stage-pipeline__head h4 {
+  margin: 0;
+  font-size: 13.5px;
+  letter-spacing: -0.01em;
+}
+
+.pipeline-skeleton {
+  display: grid;
+  gap: 12px;
+  border: 1px dashed #4b405c;
+  border-radius: 8px;
+  padding: 16px;
+  background: rgba(14, 14, 24, 0.5);
+}
+
+.pipeline-skeleton__bars {
+  display: grid;
+  gap: 8px;
+}
+
+.pipeline-skeleton__bars span {
+  display: block;
+  height: 10px;
+  border-radius: 5px;
+  background: linear-gradient(90deg, #1d1d28 25%, #2a2a3a 50%, #1d1d28 75%);
+  background-size: 200% 100%;
+  animation: pipeline-skeleton-pulse 1.4s ease infinite;
+}
+
+.pipeline-skeleton__bars span:nth-child(2) {
+  width: 86%;
+}
+
+.pipeline-skeleton__bars span:nth-child(3) {
+  width: 64%;
+}
+
+.pipeline-skeleton__note {
+  margin: 0;
+  color: #aaa297;
+  font-size: 12.5px;
+}
+
+@keyframes pipeline-skeleton-pulse {
+  from {
+    background-position: 200% 0;
   }
+
+  to {
+    background-position: -200% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pipeline-skeleton__bars span {
+    animation: none;
+  }
+}
+
+.pipeline-note {
+  margin: 0;
+  border: 1px dashed #4b405c;
+  border-radius: 8px;
+  padding: 16px;
+  color: #aaa297;
+  background: rgba(14, 14, 24, 0.5);
 }
 
 .autosave-status {
@@ -2763,11 +2837,6 @@ button.regenerate-button {
 
   .analysis-workspace-grid {
     grid-template-columns: 1fr;
-  }
-
-  .analysis-sidebar {
-    position: static;
-    grid-row: 1;
   }
 
   .character-selection {

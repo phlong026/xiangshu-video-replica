@@ -1159,4 +1159,105 @@ describe("AnalysisWorkspace workflow gates", () => {
       ),
     ).toBeInTheDocument();
   });
+
+  it("标签页②：无角色时四区块同屏可见（骨架态）", async () => {
+    render(
+      <AnalysisWorkspace
+        currentUserId="employee_1"
+        onAnalysisReady={vi.fn()}
+        onBatchCreated={vi.fn()}
+        onClose={vi.fn()}
+        project={{
+          id: "project-1",
+          owner_user_id: "employee_1",
+          name: "人物流水线测试",
+          status: "REFERENCE_READY",
+          reference_asset_id: "reference-video-1",
+          reference_upload_status: "READY",
+          analysis_status: "READY",
+        }}
+      />,
+    );
+
+    expect(await screen.findByText("拆解完成")).toBeInTheDocument();
+    // 纵向流水线四区块常驻同屏（角色 → 源画面 → 人物参考 → 首帧）。
+    expect(
+      screen.getByRole("region", { name: "角色版本" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("region", { name: "源画面选择" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("region", { name: "人物参考" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("region", { name: "置换首帧" }),
+    ).toBeInTheDocument();
+    // 角色区块可直接操作；下游三区为骨架 + 引导，不再是门禁文案。
+    expect(screen.getByRole("button", { name: "完成角色选择" })).toBeEnabled();
+    expect(screen.getAllByText("先在上方选择角色版本")).toHaveLength(3);
+    expect(screen.queryByText("先选择角色版本")).toBeNull();
+  });
+
+  it("标签页②：选角色后源画面可交互、人物参考仍骨架", async () => {
+    render(
+      <AnalysisWorkspace
+        currentUserId="employee_1"
+        onAnalysisReady={vi.fn()}
+        onBatchCreated={vi.fn()}
+        onClose={vi.fn()}
+        project={{
+          id: "project-1",
+          owner_user_id: "employee_1",
+          name: "流水线解锁测试",
+          status: "REFERENCE_READY",
+          reference_asset_id: "reference-video-1",
+          reference_upload_status: "READY",
+          analysis_status: "READY",
+        }}
+      />,
+    );
+
+    expect(await screen.findByText("拆解完成")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "完成角色选择" }));
+
+    // 源画面解锁可交互；人物参考等源画面；首帧区块挂载（历史可查看）。
+    expect(screen.getByRole("button", { name: "完成源画面" })).toBeEnabled();
+    expect(screen.getByText("先在上方完成源画面选择")).toBeInTheDocument();
+    expect(screen.getByText("首帧历史可查看")).toBeInTheDocument();
+  });
+
+  it("标签页②：切换角色后人物参考回退骨架、旧首帧历史仍可查看", async () => {
+    render(
+      <AnalysisWorkspace
+        currentUserId="employee_1"
+        onAnalysisReady={vi.fn()}
+        onBatchCreated={vi.fn()}
+        onClose={vi.fn()}
+        project={{
+          id: "project-1",
+          owner_user_id: "employee_1",
+          name: "stale 级联测试",
+          status: "REFERENCE_READY",
+          reference_asset_id: "reference-video-1",
+          reference_upload_status: "READY",
+          analysis_status: "READY",
+        }}
+      />,
+    );
+
+    expect(await screen.findByText("拆解完成")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "完成角色选择" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成源画面" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成人物参考" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成置换首帧" }));
+    fireEvent.click(screen.getByRole("button", { name: "切换角色版本" }));
+
+    // 下游 stale 级联（任务 12 决议）：人物参考回骨架，源画面可重新选择，
+    // 首帧区块保留且旧首帧历史仍可查看。
+    expect(screen.getByText("先在上方完成源画面选择")).toBeInTheDocument();
+    expect(screen.queryByText("完成人物参考")).toBeNull();
+    expect(screen.getByRole("button", { name: "完成源画面" })).toBeEnabled();
+    expect(screen.getByText("首帧历史可查看")).toBeInTheDocument();
+  });
 });

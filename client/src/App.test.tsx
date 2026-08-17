@@ -389,7 +389,8 @@ describe("App", () => {
     expect(
       screen.getByRole("button", { name: "查看角色版本" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("先选择角色版本")).toBeInTheDocument();
+    // P0-02-04：门禁改骨架引导，无角色时下游三区均为引导态。
+    expect(screen.getAllByText("先在上方选择角色版本")).toHaveLength(3);
     expect(
       screen.queryByRole("button", { name: "重新生成候选首帧" }),
     ).toBeNull();
