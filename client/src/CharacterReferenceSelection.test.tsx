@@ -275,4 +275,88 @@ describe("CharacterReferenceSelection", () => {
 
     expect(onSelectionChange).not.toHaveBeenCalledWith(savedSelection);
   });
+
+  // P0-03-03：推荐默认勾选 + 一键确认。默认勾选恰为服务端任务 08 确定性
+  // 规则给出的推荐对（身体视图 + FRONT_FACE 身份图），其余候选不勾选；
+  // 单击一次「确认人物参考」即以推荐集原样落库。
+  it("confirms the recommended pair (body view + FRONT_FACE) in a single click (P0-03-03)", async () => {
+    const onSelectionChange = vi.fn();
+    render(
+      <CharacterReferenceSelection
+        characterSelection={characterSelection}
+        onSelectionChange={onSelectionChange}
+        projectId="project-1"
+        sourceFrameSelection={sourceFrameSelection}
+      />,
+    );
+
+    expect(
+      await screen.findByRole("checkbox", { name: /左侧面/ }),
+    ).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: /正脸近景/ })).toBeChecked();
+    for (const label of [
+      /正面半身/,
+      /正面全身/,
+      /左 45°/,
+      /右 45°/,
+      /右侧面/,
+    ]) {
+      expect(screen.getByRole("checkbox", { name: label })).not.toBeChecked();
+    }
+    // 红线：预览与默认勾选不落库、不写审计，确认仍为人工动作。
+    expect(api.selectCharacterReferences).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "确认人物参考" }));
+    await waitFor(() =>
+      expect(api.selectCharacterReferences).toHaveBeenCalledWith("project-1", {
+        selected_asset_ids: ["asset-LEFT_SIDE", "asset-FRONT_FACE"],
+        source_frame_selection_version_id: "source-selection-1",
+        character_version_id: "character-version-3",
+      }),
+    );
+    expect(
+      await screen.findByText("当前人物参考图已确认。"),
+    ).toBeInTheDocument();
+    expect(onSelectionChange).toHaveBeenLastCalledWith(savedSelection);
+  });
+
+  // P0-03-03：用户仍可改选 1–4 张后确认。勾选第三张视图后确认以改选集落库，
+  // 改选时选择回调归 null 并提示重新确认。
+  it("still allows reselecting a different set before confirming (P0-03-03)", async () => {
+    const onSelectionChange = vi.fn();
+    render(
+      <CharacterReferenceSelection
+        characterSelection={characterSelection}
+        onSelectionChange={onSelectionChange}
+        projectId="project-1"
+        sourceFrameSelection={sourceFrameSelection}
+      />,
+    );
+
+    const extra = await screen.findByRole("checkbox", { name: /右 45°/ });
+    await waitFor(() => expect(extra).toBeEnabled());
+    // 挂载时 load() 已回调过一次 null，捕获增量才能独立锁定
+    // 「改选后通知父级选择失效」的行为（评审 Minor：避免空转断言）。
+    const callsBeforeToggle = onSelectionChange.mock.calls.length;
+    fireEvent.click(extra);
+    expect(onSelectionChange.mock.calls.length).toBe(callsBeforeToggle + 1);
+    expect(onSelectionChange).toHaveBeenLastCalledWith(null);
+    expect(
+      screen.getByText("参考图选择已修改，请重新确认。"),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "确认人物参考" }));
+    await waitFor(() =>
+      expect(api.selectCharacterReferences).toHaveBeenCalledWith("project-1", {
+        selected_asset_ids: [
+          "asset-LEFT_SIDE",
+          "asset-FRONT_FACE",
+          "asset-RIGHT_45",
+        ],
+        source_frame_selection_version_id: "source-selection-1",
+        character_version_id: "character-version-3",
+      }),
+    );
+    expect(onSelectionChange).toHaveBeenLastCalledWith(savedSelection);
+  });
 });
