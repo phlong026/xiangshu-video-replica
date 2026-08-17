@@ -5,8 +5,9 @@ const REQUEST_TIMEOUT_MS = 5_000;
 // Cloud/storage operations (diagnostics, presigned URLs, archive prechecks)
 // may legitimately take much longer than a normal API round-trip.
 const CLOUD_OP_TIMEOUT_MS = 60_000;
-// The server-side video provider permits a 90s response window.
-const ANALYSIS_TIMEOUT_MS = 120_000;
+// Must exceed the server's per-call provider timeout (240s, analysis.py) plus
+// overhead; the real Gemini shot-card call measured 71–91s on a 15s video.
+const ANALYSIS_TIMEOUT_MS = 300_000;
 export const SESSION_EXPIRED_EVENT = "video-replica:session-expired";
 
 type HealthResponse = components["schemas"]["HealthResponse"];

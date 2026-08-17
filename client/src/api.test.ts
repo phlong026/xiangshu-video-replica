@@ -722,7 +722,7 @@ describe("startVideoAnalysis", () => {
 
     await startVideoAnalysis("project-1", "asset-1");
 
-    expect(timeoutSpy).toHaveBeenCalledWith(expect.any(Function), 120_000);
+    expect(timeoutSpy).toHaveBeenCalledWith(expect.any(Function), 300_000);
     expect(fetchMock).toHaveBeenCalledWith(
       "http://127.0.0.1:8000/api/projects/project-1/analysis",
       expect.objectContaining({

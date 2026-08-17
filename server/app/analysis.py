@@ -115,7 +115,10 @@ class ApilioChatTransport(Protocol):
 
 
 class UrllibApilioChatTransport:
-    def __init__(self, *, timeout_seconds: float = 90.0) -> None:
+    # Measured on a real 15s reference video: 71–91s per call for the full
+    # shot-card prompt. 90s cut real traffic in half; 240s leaves headroom for
+    # slower days while the desktop timeout (300s) still bounds the wait.
+    def __init__(self, *, timeout_seconds: float = 240.0) -> None:
         self.timeout_seconds = timeout_seconds
 
     def post(
