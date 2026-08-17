@@ -1177,6 +1177,89 @@ describe("AnalysisWorkspace workflow gates", () => {
     ).toBeInTheDocument();
   });
 
+  it("标签页①：无已保存口播稿时默认选中原稿并预填原文，一次点击保存转就绪（P0-03-05）", async () => {
+    // 默认 fixture 即无口播稿版本（getLatestScriptVersion → null）；
+    // 镜头卡已有版本，避免保存口播稿被镜头卡守卫拦截。
+    vi.mocked(api.getLatestProjectShotCards).mockResolvedValue({
+      id: "shot-card-2",
+      project_id: "project-1",
+      asset_id: null,
+      kind: "shot_card",
+      version_number: 2,
+      payload: {
+        source_analysis_version_id: "analysis-1",
+        duration_seconds: 8,
+        shots: [],
+      },
+      created_by_user_id: "employee_1",
+      created_at: "2030-01-01T00:00:00Z",
+    });
+    vi.mocked(api.createScriptVersion).mockResolvedValue({
+      id: "script-2",
+      project_id: "project-1",
+      asset_id: null,
+      kind: "script",
+      version_number: 2,
+      payload: {
+        source: "original",
+        full_text: "原始口播稿",
+        shot_card_version_id: "shot-card-2",
+        shot_mappings: [],
+      },
+      created_by_user_id: "employee_1",
+      created_at: "2030-01-01T00:00:00Z",
+    });
+
+    render(
+      <AnalysisWorkspace
+        currentUserId="employee_1"
+        onAnalysisReady={vi.fn()}
+        onBatchCreated={vi.fn()}
+        onClose={vi.fn()}
+        project={{
+          id: "project-1",
+          owner_user_id: "employee_1",
+          name: "原稿预填测试",
+          status: "REFERENCE_READY",
+          reference_asset_id: "reference-video-1",
+          reference_upload_status: "READY",
+          analysis_status: "READY",
+        }}
+      />,
+    );
+
+    expect(await screen.findByText("拆解完成")).toBeInTheDocument();
+    // 无已保存口播稿：徽章缺失仅剩口播稿一项（镜头卡已有版本）。
+    await waitFor(() =>
+      expect(
+        within(screen.getByRole("tab", { name: /内容配置/ })).getByText(
+          "缺失 1 项",
+        ),
+      ).toBeInTheDocument(),
+    );
+    // 默认选中“原稿”，文本预填拆解原文，引导一次点击保存。
+    await waitFor(() =>
+      expect(screen.getByLabelText("口播稿内容")).toHaveValue("原始口播稿"),
+    );
+    expect(screen.getByRole("radio", { name: "原稿" })).toBeChecked();
+    expect(screen.getByRole("button", { name: "保存口播稿" })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "保存口播稿" }));
+    await waitFor(() =>
+      expect(api.createScriptVersion).toHaveBeenCalledWith("project-1", {
+        source: "original",
+        text: "原始口播稿",
+        shot_card_version_id: "shot-card-2",
+      }),
+    );
+    // 保存成功且与镜头卡版本匹配 → 内容徽章转就绪。
+    expect(
+      await waitFor(() =>
+        within(screen.getByRole("tab", { name: /内容配置/ })).getByText("✓"),
+      ),
+    ).toBeInTheDocument();
+  });
+
   it("标签页②：无角色时四区块同屏可见（骨架态）", async () => {
     render(
       <AnalysisWorkspace
