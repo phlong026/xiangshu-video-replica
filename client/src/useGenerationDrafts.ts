@@ -270,16 +270,6 @@ export function useGenerationDrafts({
       !recoveryRecordConflicts &&
       !busyAction,
   );
-  const workflowStep =
-    scriptVersion && !scriptStale && !scriptDirty
-      ? promptVersion &&
-        !promptStale &&
-        promptStatus === "LOCKED" &&
-        promptParametersMatch
-        ? 9
-        : 8
-      : 7;
-
   const shotMappings = useMemo(
     () => readShotMappings(scriptVersion),
     [scriptVersion],
@@ -438,10 +428,7 @@ export function useGenerationDrafts({
     }
   }
 
-  async function createBatch(
-    onBatchCreated: (batch: GenerationBatch) => void,
-    onWorkflowStepChange: (step: number) => void,
-  ) {
+  async function createBatch(onBatchCreated: (batch: GenerationBatch) => void) {
     if (
       !promptVersion ||
       !batchRequest ||
@@ -466,12 +453,11 @@ export function useGenerationDrafts({
     }
     idempotencyRecordRef.current = idempotencyRecord;
     setRecoveryRecord(idempotencyRecord);
-    await submitBatch(idempotencyRecord, onBatchCreated, onWorkflowStepChange);
+    await submitBatch(idempotencyRecord, onBatchCreated);
   }
 
   async function recoverBatch(
     onBatchCreated: (batch: GenerationBatch) => void,
-    onWorkflowStepChange: (step: number) => void,
   ) {
     if (
       !recoveryRecord ||
@@ -482,13 +468,12 @@ export function useGenerationDrafts({
       return;
     }
     idempotencyRecordRef.current = recoveryRecord;
-    await submitBatch(recoveryRecord, onBatchCreated, onWorkflowStepChange);
+    await submitBatch(recoveryRecord, onBatchCreated);
   }
 
   async function submitBatch(
     idempotencyRecord: IdempotencyRecord,
     onBatchCreated: (batch: GenerationBatch) => void,
-    onWorkflowStepChange: (step: number) => void,
   ) {
     const actionGeneration = actionGenerationRef.current + 1;
     actionGenerationRef.current = actionGeneration;
@@ -515,7 +500,6 @@ export function useGenerationDrafts({
       clearIdempotencyRecord(storageKey, idempotencyRecord);
       idempotencyRecordRef.current = null;
       setRecoveryRecord(null);
-      onWorkflowStepChange(10);
       onBatchCreated(batch);
     } catch (requestError) {
       const definitiveRejection = isDefinitiveBatchRejection(requestError);
@@ -570,7 +554,6 @@ export function useGenerationDrafts({
     promptParametersMatch,
     recoveryRecord,
     recoveryRecordConflicts,
-    workflowStep,
     // 加载与反馈
     isLoading,
     error,
@@ -604,7 +587,7 @@ export function readPayloadString(
   return typeof value === "string" ? value : null;
 }
 
-function readPayloadNumber(
+export function readPayloadNumber(
   version: GenerationVersion | null,
   key: string,
 ): number | null {

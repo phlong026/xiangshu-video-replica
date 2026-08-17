@@ -9,7 +9,6 @@ type GenerationComposerProps = {
   firstFrameAssetId: string;
   firstFrameSelectionVersionId: string;
   onBatchCreated: (batch: GenerationBatch) => void;
-  onWorkflowStepChange?: (step: number) => void;
   readOnly?: boolean;
   referenceSelectionId: string | null;
   shotCardVersionId: string;
@@ -24,7 +23,6 @@ export function GenerationComposer({
   firstFrameAssetId,
   firstFrameSelectionVersionId,
   onBatchCreated,
-  onWorkflowStepChange,
   readOnly = false,
   referenceSelectionId,
   shotCardVersionId,
@@ -60,16 +58,12 @@ export function GenerationComposer({
         firstFrameSelectionVersionId={firstFrameSelectionVersionId}
         limits={drafts.limits}
         onCompilePrompt={drafts.compilePrompt}
-        onCreateBatch={() =>
-          drafts.createBatch(onBatchCreated, onWorkflowStepChange ?? noStep)
-        }
+        onCreateBatch={() => drafts.createBatch(onBatchCreated)}
         onDurationChange={drafts.setOutputDuration}
         onLockPrompt={drafts.lockPrompt}
         onPromptTextChange={drafts.setPromptText}
         onQuantityChange={drafts.setQuantityInput}
-        onRecoverBatch={() =>
-          drafts.recoverBatch(onBatchCreated, onWorkflowStepChange ?? noStep)
-        }
+        onRecoverBatch={() => drafts.recoverBatch(onBatchCreated)}
         onResolutionChange={drafts.setResolution}
         onSavePromptRevision={drafts.savePromptRevision}
         outputDuration={drafts.outputDuration}
@@ -93,5 +87,3 @@ export function GenerationComposer({
     </section>
   );
 }
-
-function noStep() {}

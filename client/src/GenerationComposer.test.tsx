@@ -47,7 +47,6 @@ const props = {
   firstFrameSelectionVersionId: "first-frame-selection-1",
   onBatchCreated: vi.fn(),
   onBusyChange: vi.fn(),
-  onWorkflowStepChange: vi.fn(),
   originalScript: "原稿第一句。原稿第二句。",
   projectId: "project-1",
   readOnly: false,
@@ -116,7 +115,6 @@ function WorkspaceHost({
         firstFrameAssetId={firstFrameAssetId}
         firstFrameSelectionVersionId={props.firstFrameSelectionVersionId}
         onBatchCreated={props.onBatchCreated}
-        onWorkflowStepChange={props.onWorkflowStepChange}
         readOnly={props.readOnly}
         referenceSelectionId={props.referenceSelectionId}
         shotCardVersionId={props.shotCardVersionId}

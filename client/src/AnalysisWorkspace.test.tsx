@@ -672,7 +672,7 @@ describe("AnalysisWorkspace workflow gates", () => {
     fireEvent.click(screen.getByRole("button", { name: "标记源画面失效" }));
     expect(generationInput()).toBeInTheDocument();
 
-    // 生成动作完成后，同一操作立即生效（切换角色会清空下游，生成区退回门禁提示）。
+    // 生成动作完成后，同一操作立即生效（切换角色会清空下游，生成区退回骨架引导）。
     resolveScriptSave?.(savedScriptVersion);
     await waitFor(() =>
       expect(
@@ -680,7 +680,9 @@ describe("AnalysisWorkspace workflow gates", () => {
       ).toBeEnabled(),
     );
     fireEvent.click(screen.getByRole("button", { name: "切换角色版本" }));
-    expect(screen.getByText("确认置换首帧后可继续。")).toBeInTheDocument();
+    expect(
+      screen.getByText("先在「人物设定」标签页确认置换首帧。"),
+    ).toBeInTheDocument();
   });
 
   it("blocks generation without losing drafts while shot edits are reverted", async () => {
@@ -1259,5 +1261,191 @@ describe("AnalysisWorkspace workflow gates", () => {
     expect(screen.queryByText("完成人物参考")).toBeNull();
     expect(screen.getByRole("button", { name: "完成源画面" })).toBeEnabled();
     expect(screen.getByText("首帧历史可查看")).toBeInTheDocument();
+  });
+
+  it("主操作栏：未就绪点「开始生成」弹出缺失项模态（覆盖 7 类缺失）", async () => {
+    render(
+      <AnalysisWorkspace
+        currentUserId="employee_1"
+        onAnalysisReady={vi.fn()}
+        onBatchCreated={vi.fn()}
+        onClose={vi.fn()}
+        project={{
+          id: "project-1",
+          owner_user_id: "employee_1",
+          name: "缺失项模态测试",
+          status: "REFERENCE_READY",
+          reference_asset_id: "reference-video-1",
+          reference_upload_status: "READY",
+          analysis_status: "READY",
+        }}
+      />,
+    );
+
+    expect(await screen.findByText("拆解完成")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "开始生成" }));
+
+    // 模态列出全部 7 类缺失，每项附「前往处理」。
+    expect(
+      screen.getByRole("dialog", { name: "缺失项清单" }),
+    ).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "前往处理" })).toHaveLength(7);
+    for (const label of [
+      "镜头卡片尚未保存",
+      "口播稿尚未保存",
+      "未选择角色版本",
+      "未选择源画面",
+      "未确认人物参考",
+      "未确认首帧",
+      "Prompt 未锁定或参数不一致",
+    ]) {
+      expect(screen.getByText(label)).toBeInTheDocument();
+    }
+
+    // Esc 可关闭（评审 Minor：模态最小键盘支持）。
+    fireEvent.keyDown(screen.getByRole("dialog", { name: "缺失项清单" }), {
+      key: "Escape",
+    });
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    // 重新打开后「关闭」按钮同样可关闭。
+    fireEvent.click(screen.getByRole("button", { name: "开始生成" }));
+    expect(
+      screen.getByRole("dialog", { name: "缺失项清单" }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "关闭" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("主操作栏：「前往处理」跳转对应标签页并高亮目标区块", async () => {
+    render(
+      <AnalysisWorkspace
+        currentUserId="employee_1"
+        onAnalysisReady={vi.fn()}
+        onBatchCreated={vi.fn()}
+        onClose={vi.fn()}
+        project={{
+          id: "project-1",
+          owner_user_id: "employee_1",
+          name: "跳转高亮测试",
+          status: "REFERENCE_READY",
+          reference_asset_id: "reference-video-1",
+          reference_upload_status: "READY",
+          analysis_status: "READY",
+        }}
+      />,
+    );
+
+    expect(await screen.findByText("拆解完成")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "开始生成" }));
+
+    const characterRow = screen
+      .getByText("未选择角色版本")
+      .closest("li") as HTMLElement;
+    fireEvent.click(
+      within(characterRow).getByRole("button", { name: "前往处理" }),
+    );
+
+    // 模态关闭、目标标签页激活、目标区块高亮。
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(
+      screen
+        .getByRole("tab", { name: /人物设定/ })
+        .getAttribute("aria-selected"),
+    ).toBe("true");
+    expect(
+      screen.getByRole("region", { name: "角色版本" }).className,
+    ).toContain("workspace-highlight");
+  });
+
+  it("主操作栏：全部就绪点「开始生成」提示流水线待接入（P0-02-05 行为锁定）", async () => {
+    vi.mocked(api.getLatestProjectShotCards).mockResolvedValue({
+      id: "shot-card-2",
+      project_id: "project-1",
+      asset_id: null,
+      kind: "shot_card",
+      version_number: 2,
+      payload: {
+        source_analysis_version_id: "analysis-1",
+        duration_seconds: 8,
+        shots: [editableShot],
+      },
+      created_by_user_id: "employee_1",
+      created_at: "2030-01-01T00:00:00Z",
+    });
+    vi.mocked(api.getLatestScriptVersion).mockResolvedValue({
+      version: {
+        ...savedScriptVersion,
+        payload: {
+          ...savedScriptVersion.payload,
+          shot_card_version_id: "shot-card-2",
+        },
+      },
+      stale: false,
+      stale_reasons: [],
+    });
+    vi.mocked(api.getLatestGenerationPrompt).mockResolvedValue({
+      version: {
+        id: "prompt-locked-1",
+        project_id: "project-1",
+        asset_id: null,
+        kind: "h3_prompt",
+        version_number: 5,
+        payload: {
+          status: "LOCKED",
+          prompt_text: "锁定的 Prompt",
+          shot_card_version_id: "shot-card-2",
+          first_frame_asset_id: "first-frame-1",
+          first_frame_selection_version_id: "first-frame-selection-1",
+          character_version_id: "character-version-1",
+          character_reference_selection_id: "reference-selection-1",
+          output_duration_seconds: 8,
+          resolution: "768P",
+        },
+        created_by_user_id: "employee_1",
+        created_at: "2030-01-01T00:00:00Z",
+      },
+      stale: false,
+      stale_reasons: [],
+    });
+
+    render(
+      <AnalysisWorkspace
+        currentUserId="employee_1"
+        onAnalysisReady={vi.fn()}
+        onBatchCreated={vi.fn()}
+        onClose={vi.fn()}
+        project={{
+          id: "project-1",
+          owner_user_id: "employee_1",
+          name: "就绪提示测试",
+          status: "REFERENCE_READY",
+          reference_asset_id: "reference-video-1",
+          reference_upload_status: "READY",
+          analysis_status: "READY",
+        }}
+      />,
+    );
+
+    expect(await screen.findByText("拆解完成")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "完成角色选择" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成源画面" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成人物参考" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成置换首帧" }));
+
+    // 三段全部就绪（prompt 就绪输入接线后 launch 徽章转 ✓）。
+    expect(
+      await waitFor(() =>
+        within(screen.getByRole("tab", { name: /生成设置/ })).getByText("✓"),
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText("就绪 3/3")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "开始生成" }));
+    // 流水线在 P0-04 接入；当前提示待接入且不弹模态。
+    expect(
+      await screen.findByText(/生成流水线将在 P0-04 接入/),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 });

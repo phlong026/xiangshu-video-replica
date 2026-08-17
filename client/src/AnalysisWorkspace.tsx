@@ -29,8 +29,16 @@ import { FirstFrameSelection } from "./FirstFrameSelection";
 import { GenerationComposer } from "./GenerationComposer";
 import { ScriptEditor } from "./ScriptEditor";
 import { SourceFrameSelection } from "./SourceFrameSelection";
-import { useGenerationDrafts } from "./useGenerationDrafts";
-import { useWorkspaceReadiness } from "./useWorkspaceReadiness";
+import {
+  readPayloadNumber,
+  readPayloadString,
+  useGenerationDrafts,
+} from "./useGenerationDrafts";
+import {
+  type ReadinessKey,
+  type ReadinessMissingItem,
+  useWorkspaceReadiness,
+} from "./useWorkspaceReadiness";
 import {
   type WorkspaceTab,
   type WorkspaceTabKey,
@@ -374,16 +382,88 @@ export function AnalysisWorkspace({
       assetId: firstFramePayload?.first_frame_asset_id ?? null,
     },
     prompt: {
-      versionId: null,
-      status: null,
-      stale: false,
-      outputDurationSeconds: null,
-      resolution: null,
-      quantity: null,
-      limits: null,
-      lockedSnapshot: null,
+      versionId: generationDrafts.promptVersion?.id ?? null,
+      status:
+        generationDrafts.promptStatus === "LOCKED" ||
+        generationDrafts.promptStatus === "SAVED" ||
+        generationDrafts.promptStatus === "USED"
+          ? generationDrafts.promptStatus
+          : null,
+      stale: generationDrafts.promptStale,
+      outputDurationSeconds: generationDrafts.duration,
+      resolution: generationDrafts.resolution,
+      quantity: generationDrafts.quantity,
+      limits: {
+        minQuantity: generationDrafts.limits.min_quantity,
+        maxQuantity: generationDrafts.limits.max_quantity,
+      },
+      lockedSnapshot:
+        generationDrafts.promptStatus === "LOCKED"
+          ? {
+              outputDurationSeconds: readPayloadNumber(
+                generationDrafts.promptVersion,
+                "output_duration_seconds",
+              ),
+              resolution: readPayloadString(
+                generationDrafts.promptVersion,
+                "resolution",
+              ),
+              quantity: readPayloadNumber(
+                generationDrafts.promptVersion,
+                "quantity",
+              ),
+            }
+          : null,
     },
   });
+
+  // P0-02-05：主操作栏「开始生成」——未就绪弹缺失项模态，就绪时提示待接入
+  // 流水线（完整编译→锁定→创建在 P0-04 接入）；跳转后目标区块短暂高亮。
+  const [isMissingModalOpen, setMissingModalOpen] = useState(false);
+  const [pipelineNotice, setPipelineNotice] = useState("");
+  const [highlightKey, setHighlightKey] = useState<ReadinessKey | null>(null);
+
+  useEffect(() => {
+    if (!highlightKey) {
+      return;
+    }
+    const timer = window.setTimeout(() => setHighlightKey(null), 3500);
+    return () => window.clearTimeout(timer);
+  }, [highlightKey]);
+
+  // 就绪状态失效后提示不再成立，及时清空避免与当前状态矛盾
+  // （评审 Minor：口播稿/时长编辑或上游 stale 级联会使 valid 翻转）。
+  useEffect(() => {
+    if (!readiness.valid) {
+      setPipelineNotice("");
+    }
+  }, [readiness.valid]);
+
+  // 模态打开时把焦点移入关闭按钮，保证键盘用户立即落在对话框内
+  // （评审 Minor：aria-modal 需配套焦点管理，完整 trap 随 P0-04 加固）。
+  const missingModalCloseRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (isMissingModalOpen) {
+      missingModalCloseRef.current?.focus();
+    }
+  }, [isMissingModalOpen]);
+
+  function handleStartGeneration() {
+    if (readiness.valid) {
+      setPipelineNotice(
+        "生成流水线将在 P0-04 接入，当前请先在下方生成面板操作。",
+      );
+      return;
+    }
+    setPipelineNotice("");
+    setMissingModalOpen(true);
+  }
+
+  function handleGoFixMissing(item: ReadinessMissingItem) {
+    setActiveTab(item.tab);
+    setHighlightKey(item.key);
+    setMissingModalOpen(false);
+  }
   const contentMissingCount = readiness.missing.filter(
     (item) => item.tab === "content",
   ).length;
@@ -579,7 +659,12 @@ export function AnalysisWorkspace({
               <span className="stage-block__index">02</span>
               <h3>镜头与口播</h3>
             </header>
-            <div className="shot-card-list">
+            <div
+              className={highlighted(
+                "shot-card-list",
+                highlightKey === "shotCardVersion",
+              )}
+            >
               {shots.map((shot, index) => (
                 <fieldset className="shot-card" key={shot.shot_id}>
                   <legend>镜头 {index + 1}</legend>
@@ -615,29 +700,36 @@ export function AnalysisWorkspace({
                 </fieldset>
               ))}
             </div>
-            {generationDrafts.isLoading ? (
-              <p className="status-note">正在读取口播稿</p>
-            ) : (
-              <>
-                {/* 草稿错误需在口播稿区可见：镜头卡未保存时标签页③不挂载，
-                    saveScript 的守卫反馈不能只依赖生成面板渲染（评审 Major 2）。 */}
-                {generationDrafts.error ? (
-                  <p className="settings-error">{generationDrafts.error}</p>
-                ) : null}
-                <ScriptEditor
-                  busyAction={generationDrafts.busyAction}
-                  onChooseSource={generationDrafts.chooseScriptSource}
-                  onSaveScript={generationDrafts.saveScript}
-                  onScriptTextChange={generationDrafts.setScriptText}
-                  readOnly={draftsReadOnly}
-                  scriptDirty={generationDrafts.scriptDirty}
-                  scriptSource={generationDrafts.scriptSource}
-                  scriptStale={generationDrafts.scriptStale}
-                  scriptText={generationDrafts.scriptText}
-                  shotMappings={generationDrafts.shotMappings}
-                />
-              </>
-            )}
+            <div
+              className={highlighted(
+                "script-editor-slot",
+                highlightKey === "scriptVersion",
+              )}
+            >
+              {generationDrafts.isLoading ? (
+                <p className="status-note">正在读取口播稿</p>
+              ) : (
+                <>
+                  {/* 草稿错误需在口播稿区可见：镜头卡未保存时标签页③不挂载，
+                      saveScript 的守卫反馈不能只依赖生成面板渲染（评审 Major 2）。 */}
+                  {generationDrafts.error ? (
+                    <p className="settings-error">{generationDrafts.error}</p>
+                  ) : null}
+                  <ScriptEditor
+                    busyAction={generationDrafts.busyAction}
+                    onChooseSource={generationDrafts.chooseScriptSource}
+                    onSaveScript={generationDrafts.saveScript}
+                    onScriptTextChange={generationDrafts.setScriptText}
+                    readOnly={draftsReadOnly}
+                    scriptDirty={generationDrafts.scriptDirty}
+                    scriptSource={generationDrafts.scriptSource}
+                    scriptStale={generationDrafts.scriptStale}
+                    scriptText={generationDrafts.scriptText}
+                    shotMappings={generationDrafts.shotMappings}
+                  />
+                </>
+              )}
+            </div>
           </section>
         </div>
       ),
@@ -659,7 +751,13 @@ export function AnalysisWorkspace({
                 未就绪区块用骨架 + 引导替代门禁（契约 §2.2：子组件内部不改，
                 仅改布局与外围包装；stale 级联清空逻辑保持不变）。 */}
             <div className="stage-pipeline">
-              <section aria-label="角色版本" className="stage-pipeline__item">
+              <section
+                aria-label="角色版本"
+                className={highlighted(
+                  "stage-pipeline__item",
+                  highlightKey === "characterVersion",
+                )}
+              >
                 <header className="stage-pipeline__head">
                   <span className="stage-pipeline__step">1</span>
                   <h4>角色版本</h4>
@@ -671,7 +769,13 @@ export function AnalysisWorkspace({
                   readOnly={readOnly}
                 />
               </section>
-              <section aria-label="源画面选择" className="stage-pipeline__item">
+              <section
+                aria-label="源画面选择"
+                className={highlighted(
+                  "stage-pipeline__item",
+                  highlightKey === "sourceFrame",
+                )}
+              >
                 <header className="stage-pipeline__head">
                   <span className="stage-pipeline__step">2</span>
                   <h4>源画面选择</h4>
@@ -688,7 +792,13 @@ export function AnalysisWorkspace({
                   <PipelineSkeleton note="先在上方选择角色版本" />
                 )}
               </section>
-              <section aria-label="人物参考" className="stage-pipeline__item">
+              <section
+                aria-label="人物参考"
+                className={highlighted(
+                  "stage-pipeline__item",
+                  highlightKey === "characterReference",
+                )}
+              >
                 <header className="stage-pipeline__head">
                   <span className="stage-pipeline__step">3</span>
                   <h4>人物参考</h4>
@@ -717,7 +827,13 @@ export function AnalysisWorkspace({
                   />
                 )}
               </section>
-              <section aria-label="置换首帧" className="stage-pipeline__item">
+              <section
+                aria-label="置换首帧"
+                className={highlighted(
+                  "stage-pipeline__item",
+                  highlightKey === "firstFrame",
+                )}
+              >
                 <header className="stage-pipeline__head">
                   <span className="stage-pipeline__step">4</span>
                   <h4>置换首帧</h4>
@@ -749,7 +865,13 @@ export function AnalysisWorkspace({
         : { kind: "missing", count: launchMissingCount },
       content: (
         <div className="analysis-primary">
-          <section className="stage-block" aria-label="生成">
+          <section
+            aria-label="生成"
+            className={highlighted(
+              "stage-block",
+              highlightKey === "promptLocked",
+            )}
+          >
             <header className="stage-block__head">
               <span className="stage-block__index">03</span>
               <h3>生成</h3>
@@ -775,10 +897,14 @@ export function AnalysisWorkspace({
                   shotCardVersionId={shotCardVersionId}
                 />
               </>
-            ) : firstFramePayload ? (
-              <p className="workflow-gate-note">镜头卡片自动保存后可继续。</p>
             ) : (
-              <p className="workflow-gate-note">确认置换首帧后可继续。</p>
+              <PipelineSkeleton
+                note={
+                  firstFramePayload
+                    ? "先在「内容配置」标签页保存镜头卡片。"
+                    : "先在「人物设定」标签页确认置换首帧。"
+                }
+              />
             )}
           </section>
         </div>
@@ -821,11 +947,60 @@ export function AnalysisWorkspace({
           >
             返回
           </button>
-          <button disabled type="button">
+          <button
+            disabled={readOnly || isWorkspaceBusy}
+            onClick={handleStartGeneration}
+            type="button"
+          >
             开始生成
           </button>
         </div>
       </div>
+      {pipelineNotice ? (
+        <p className="status-note" role="status">
+          {pipelineNotice}
+        </p>
+      ) : null}
+      {isMissingModalOpen ? (
+        <div
+          aria-label="缺失项清单"
+          aria-modal="true"
+          className="missing-modal"
+          onKeyDown={(event) => {
+            if (event.key === "Escape") {
+              setMissingModalOpen(false);
+            }
+          }}
+          role="dialog"
+        >
+          <div className="missing-modal__panel">
+            <h3>开始生成前需补齐以下项</h3>
+            <ul className="missing-modal__list">
+              {readiness.missing.map((item) => (
+                <li className="missing-modal__item" key={item.key}>
+                  <span>{item.label}</span>
+                  <button
+                    onClick={() => handleGoFixMissing(item)}
+                    type="button"
+                  >
+                    前往处理
+                  </button>
+                </li>
+              ))}
+            </ul>
+            <div className="missing-modal__actions">
+              <button
+                className="secondary-button"
+                onClick={() => setMissingModalOpen(false)}
+                ref={missingModalCloseRef}
+                type="button"
+              >
+                关闭
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
       {isLoading ? <p className="status-note">正在读取视频拆解</p> : null}
       {error ? <p className="settings-error">{error}</p> : null}
       {!isLoading && error && !isAnalysisMissing ? (
@@ -903,6 +1078,11 @@ export function AnalysisWorkspace({
 
 function providerLabel(provider: AnalysisProvider) {
   return provider === "apilio_gemini" ? "Gemini 3.1 Pro（Apilio）" : "演示拆解";
+}
+
+// P0-02-05：缺失项跳转后的目标区块高亮类名拼接。
+function highlighted(base: string, active: boolean) {
+  return active ? `${base} workspace-highlight` : base;
 }
 
 // P0-02-04：未就绪区块的骨架占位——上游选择未完成时以引导文案替代门禁。
