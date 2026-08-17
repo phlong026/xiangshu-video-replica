@@ -108,6 +108,13 @@ function WorkspaceHost({
           shotMappings={drafts.shotMappings}
         />
       )}
+      {/* P0-04-01：真实工作区由主按钮触发，这里用探针直接调用同一 Hook 动作。 */}
+      <button
+        onClick={() => drafts.runGenerationPipeline(props.onBatchCreated)}
+        type="button"
+      >
+        触发一键流水线
+      </button>
       <GenerationComposer
         analysisVersionId={props.analysisVersionId}
         characterVersionId={props.characterVersionId}
@@ -164,6 +171,52 @@ describe("GenerationComposer", () => {
       max_quantity: 4,
       estimated_cost_per_task: null,
     });
+  });
+
+  it("一键流水线：Prompt 存在未保存修订时提示先保存且不发起任何请求（P0-04-01）", async () => {
+    window.localStorage.clear();
+    vi.mocked(api.getLatestScriptVersion).mockResolvedValue({
+      version: {
+        ...baseVersion,
+        payload: {
+          source: "original",
+          full_text: "原稿第一句。原稿第二句。",
+          shot_card_version_id: "shot-card-1",
+          shot_mappings: [],
+        },
+      },
+      stale: false,
+      stale_reasons: [],
+    });
+    vi.mocked(api.getLatestGenerationPrompt).mockResolvedValue({
+      version: promptVersion("SAVED"),
+      stale: false,
+      stale_reasons: [],
+    });
+
+    render(<WorkspaceHost />);
+
+    // 等 drafts 重载完成后锚定已保存文本，再制造人工修订中的脏 Prompt。
+    const promptField = await waitFor(() => {
+      const field = screen.getByLabelText("H3 Prompt 内容");
+      expect(field).toHaveValue("编译后的 Prompt");
+      return field;
+    });
+    fireEvent.change(promptField, {
+      target: { value: "人工修订中的草稿" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "触发一键流水线" }));
+
+    // 红线：不自动接受未保存草稿，也不编译/锁定/建批。
+    expect(
+      await screen.findByText(
+        "Prompt 存在未保存修订，请先在「生成设置」中保存后再开始生成。",
+      ),
+    ).toBeInTheDocument();
+    expect(api.compileGenerationPrompt).not.toHaveBeenCalled();
+    expect(api.lockGenerationPrompt).not.toHaveBeenCalled();
+    expect(api.createGenerationBatch).not.toHaveBeenCalled();
+    expect(props.onBatchCreated).not.toHaveBeenCalled();
   });
 
   it("runs custom script, prompt revision, lock and max-quantity batch creation", async () => {

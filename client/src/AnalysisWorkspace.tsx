@@ -426,10 +426,10 @@ export function AnalysisWorkspace({
     },
   });
 
-  // P0-02-05：主操作栏「开始生成」——未就绪弹缺失项模态，就绪时提示待接入
-  // 流水线（完整编译→锁定→创建在 P0-04 接入）；跳转后目标区块短暂高亮。
+  // P0-02-05/P0-04-01：主操作栏「开始生成」——可自动补齐项（脏口播稿、
+  // Prompt 未锁定）由一键流水线接手，其余缺失仍弹缺失项模态引导逐项
+  // 处理；跳转后目标区块短暂高亮。
   const [isMissingModalOpen, setMissingModalOpen] = useState(false);
-  const [pipelineNotice, setPipelineNotice] = useState("");
   const [highlightKey, setHighlightKey] = useState<ReadinessKey | null>(null);
 
   useEffect(() => {
@@ -440,14 +440,6 @@ export function AnalysisWorkspace({
     return () => window.clearTimeout(timer);
   }, [highlightKey]);
 
-  // 就绪状态失效后提示不再成立，及时清空避免与当前状态矛盾
-  // （评审 Minor：口播稿/时长编辑或上游 stale 级联会使 valid 翻转）。
-  useEffect(() => {
-    if (!readiness.valid) {
-      setPipelineNotice("");
-    }
-  }, [readiness.valid]);
-
   // 模态打开时把焦点移入关闭按钮，保证键盘用户立即落在对话框内
   // （评审 Minor：aria-modal 需配套焦点管理，完整 trap 随 P0-04 加固）。
   const missingModalCloseRef = useRef<HTMLButtonElement>(null);
@@ -457,14 +449,42 @@ export function AnalysisWorkspace({
     }
   }, [isMissingModalOpen]);
 
+  // P0-04-01：流水线可自动补齐的缺失项——脏口播稿（有已保存版本且非
+  // stale，保存后即可续跑）与 Prompt 未锁定/参数不一致（流水线内编译+
+  // 锁定）；其余缺失（无口播稿版本、上游未确认等）仍需人工处理。
+  const pipelineFixableKeys = useMemo(() => {
+    const keys = new Set<ReadinessKey>(["promptLocked"]);
+    const scriptBlocked = readiness.missing.some(
+      (item) => item.key === "scriptVersion",
+    );
+    if (
+      scriptBlocked &&
+      generationDrafts.scriptVersion &&
+      generationDrafts.scriptDirty &&
+      !generationDrafts.scriptStale
+    ) {
+      keys.add("scriptVersion");
+    }
+    return keys;
+  }, [readiness.missing, generationDrafts]);
+
+  function startGenerationPipeline() {
+    // 流水线反馈（错误/恢复记录）集中在标签页③的生成面板，点击后自动
+    // 跳转并高亮，避免与标签页①的草稿错误双渲染。
+    setActiveTab("launch");
+    setHighlightKey("promptLocked");
+    setMissingModalOpen(false);
+    void generationDrafts.runGenerationPipeline(onBatchCreated);
+  }
+
   function handleStartGeneration() {
-    if (readiness.valid) {
-      setPipelineNotice(
-        "生成流水线将在 P0-04 接入，当前请先在下方生成面板操作。",
-      );
+    const blocked = readiness.missing.filter(
+      (item) => !pipelineFixableKeys.has(item.key),
+    );
+    if (blocked.length === 0) {
+      startGenerationPipeline();
       return;
     }
-    setPipelineNotice("");
     setMissingModalOpen(true);
   }
 
@@ -958,7 +978,7 @@ export function AnalysisWorkspace({
             返回
           </button>
           <button
-            disabled={readOnly || isWorkspaceBusy}
+            disabled={readOnly || isWorkspaceBusy || generationDrafts.isLoading}
             onClick={handleStartGeneration}
             type="button"
           >
@@ -966,11 +986,6 @@ export function AnalysisWorkspace({
           </button>
         </div>
       </div>
-      {pipelineNotice ? (
-        <p className="status-note" role="status">
-          {pipelineNotice}
-        </p>
-      ) : null}
       {isMissingModalOpen ? (
         <div
           aria-label="缺失项清单"

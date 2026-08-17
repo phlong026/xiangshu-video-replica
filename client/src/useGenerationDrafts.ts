@@ -437,10 +437,19 @@ export function useGenerationDrafts({
     ) {
       return;
     }
+    await resolveAndSubmitBatch(batchRequest, onBatchCreated);
+  }
+
+  // P0-04-01：手动建批与主按钮流水线共用的幂等提交入口（同一恢复记录、
+  // 同一指纹冲突语义，保证两条路径不双轨）。
+  async function resolveAndSubmitBatch(
+    request: Omit<GenerationBatchInput, "idempotency_key">,
+    onBatchCreated: (batch: GenerationBatch) => void,
+  ) {
     const storageKey = idempotencyStorageKey(currentUserId, projectId);
     const idempotencyRecord = restoreOrCreateIdempotencyRecord(
       storageKey,
-      batchRequest,
+      request,
       idempotencyRecordRef.current,
     );
     if (!idempotencyRecord) {
@@ -469,6 +478,152 @@ export function useGenerationDrafts({
     }
     idempotencyRecordRef.current = recoveryRecord;
     await submitBatch(recoveryRecord, onBatchCreated);
+  }
+
+  // P0-04-01：主按钮一键流水线——保存脏口播稿 →（需要时）编译 →（需要时）
+  // 锁定 → 幂等建批。不复用单步 UI 动作（各自的 busyAction 守卫会互相
+  // 短路），直连 API 并用本地变量链接力四步；失败停在对应步并给出可重试
+  // 的中文错误，已完成的步骤保留成果（不产生半成品锁定/建批）。
+  async function runGenerationPipeline(
+    onBatchCreated: (batch: GenerationBatch) => void,
+  ) {
+    if (readOnly || busyAction || isCreatingBatchRef.current || isLoading) {
+      return;
+    }
+    if (promptDirty) {
+      setError("Prompt 存在未保存修订，请先在「生成设置」中保存后再开始生成。");
+      return;
+    }
+    if (!firstFrameAssetId) {
+      setError("尚未确认首帧，无法开始生成。请先在「画面与人物」确认首帧。");
+      return;
+    }
+    if (!durationValid) {
+      setError("输出时长需为 4-15 的整数，请先在「生成设置」中调整。");
+      return;
+    }
+    if (quantity === null) {
+      setError(
+        quantityError || "生成数量不在允许范围内，请先在「生成设置」中调整。",
+      );
+      return;
+    }
+
+    const actionGeneration = actionGenerationRef.current + 1;
+    actionGenerationRef.current = actionGeneration;
+    const isCurrent = () => actionGeneration === actionGenerationRef.current;
+    let step = "准备";
+    setError("");
+    setMessage("");
+    try {
+      let pipelineScript = scriptVersion;
+      let savedScriptThisRun = false;
+      if (scriptDirty) {
+        const text = scriptText.trim();
+        if (!text) {
+          setError("口播稿内容为空，请先补写后再开始生成。");
+          return;
+        }
+        step = "保存口播稿";
+        setBusyAction("script");
+        const saved = await createScriptVersion(projectId, {
+          source: scriptSource,
+          text,
+          shot_card_version_id: shotCardVersionId,
+        });
+        if (!isCurrent()) {
+          return;
+        }
+        pipelineScript = saved;
+        savedScriptThisRun = true;
+        setScriptVersion(saved);
+        setScriptStale(false);
+        // 与手动 saveScript 对齐：新口播稿落库后旧 Prompt 即刻 stale
+        // （服务端 SCRIPT_SUPERSEDED），编译失败时不能谎报就绪。
+        if (promptVersion) {
+          setPromptStale(true);
+        }
+      }
+
+      let pipelinePrompt = promptVersion;
+      // USED（已用于建批）时必须重编译产出新版本——锁定接口对 USED
+      // 幂等返回，直接建批必被 409 PROMPT_ALREADY_USED 拒绝且重试死循环。
+      const needsCompile =
+        !pipelinePrompt ||
+        readPayloadString(pipelinePrompt, "status") === "USED" ||
+        promptStale ||
+        savedScriptThisRun ||
+        !promptParametersMatch;
+      if (needsCompile) {
+        if (!pipelineScript) {
+          setError("口播稿尚未保存，无法编译 Prompt。");
+          return;
+        }
+        step = "编译 Prompt";
+        setBusyAction("compile");
+        const compiled = await compileGenerationPrompt(projectId, {
+          script_version_id: pipelineScript.id,
+          shot_card_version_id: shotCardVersionId,
+          first_frame_asset_id: firstFrameAssetId,
+          output_duration_seconds: duration,
+          resolution,
+        });
+        if (!isCurrent()) {
+          return;
+        }
+        pipelinePrompt = compiled;
+        const compiledText = readPayloadString(compiled, "prompt_text") ?? "";
+        setPromptVersion(compiled);
+        setPromptText(compiledText);
+        setSavedPromptText(compiledText);
+        setPromptStale(false);
+      }
+
+      // 正常情况下走到这里 prompt 必非空（未编译 ⇒ 原本存在且参数匹配），
+      // 显式守卫仅为收窄类型并防御编译返回空值的异常。
+      if (!pipelinePrompt) {
+        setError("Prompt 缺失或编译结果为空，无法继续一键生成。可重试。");
+        return;
+      }
+
+      if (readPayloadString(pipelinePrompt, "status") !== "LOCKED") {
+        step = "锁定 Prompt";
+        setBusyAction("lock");
+        const locked = await lockGenerationPrompt(projectId, pipelinePrompt.id);
+        if (!isCurrent()) {
+          return;
+        }
+        pipelinePrompt = locked;
+        setPromptVersion(locked);
+      }
+
+      step = "创建批次";
+      setBusyAction("batch");
+      await resolveAndSubmitBatch(
+        {
+          quantity,
+          prompt_version_id: pipelinePrompt.id,
+          first_frame_asset_id: firstFrameAssetId,
+          output_duration_seconds: duration,
+          resolution,
+          provider,
+          fake_audio_quality: "ok",
+        },
+        onBatchCreated,
+      );
+    } catch (requestError) {
+      if (isCurrent()) {
+        setError(
+          errorMessage(requestError, `${step}失败，一键生成已停止，可重试。`),
+        );
+      }
+    } finally {
+      // 建批步的 busy/错误由 submitBatch 自管理（它推进 actionGeneration），
+      // 此处仅恢复前三步的中断状态。
+      if (isCurrent()) {
+        setBusyAction(null);
+      }
+    }
   }
 
   async function submitBatch(
@@ -572,6 +727,7 @@ export function useGenerationDrafts({
     setResolution,
     createBatch,
     recoverBatch,
+    runGenerationPipeline,
   };
 }
 
