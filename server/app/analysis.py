@@ -19,6 +19,13 @@ SCHEMA_VERSION = "b2.analysis.v1"
 APILIO_DEFAULT_BASE_URL = "https://api.apilio.ai"
 APILIO_GEMINI_MODEL = "gemini-3.1-pro-preview"
 
+# Failure phases let the desktop tell "the network hiccuped, retry" apart from
+# "the model answered with something we cannot use".
+REQUEST_FAILURE_PHASE = "request"
+NETWORK_FAILURE_PHASE = "network"
+HTTP_FAILURE_PHASE = "http"
+RESPONSE_FAILURE_PHASE = "response"
+
 logger = logging.getLogger(__name__)
 
 
@@ -87,9 +94,18 @@ class VideoAnalysisProvider(Protocol):
 
 
 class AnalysisProviderFailed(RuntimeError):
-    def __init__(self, message: str, *, http_status: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        http_status: int | None = None,
+        failure_phase: str = RESPONSE_FAILURE_PHASE,
+        retryable: bool = False,
+    ) -> None:
         super().__init__(message)
         self.http_status = http_status
+        self.failure_phase = failure_phase
+        self.retryable = retryable
 
 
 class ApilioChatTransport(Protocol):
@@ -112,11 +128,21 @@ class UrllibApilioChatTransport:
         except HTTPError as exc:
             logger.warning("Apilio video analysis request failed with HTTP status %s", exc.code)
             raise AnalysisProviderFailed(
-                f"Apilio returned HTTP {exc.code}", http_status=exc.code
+                f"Apilio returned HTTP {exc.code}",
+                http_status=exc.code,
+                failure_phase=HTTP_FAILURE_PHASE,
+                retryable=exc.code == 429 or exc.code >= 500,
             ) from exc
         except (TimeoutError, URLError, OSError) as exc:
-            logger.warning("Apilio video analysis request failed: %s", type(exc).__name__)
-            raise AnalysisProviderFailed("Apilio video analysis request failed") from exc
+            # Only the exception class name is carried forward: the original reason can
+            # embed the signed video URL or the request headers.
+            reason = type(exc).__name__
+            logger.warning("Apilio video analysis request failed: %s", reason)
+            raise AnalysisProviderFailed(
+                f"Apilio video analysis request failed ({reason})",
+                failure_phase=NETWORK_FAILURE_PHASE,
+                retryable=True,
+            ) from exc
 
 
 class ApilioGemini:
@@ -139,7 +165,10 @@ class ApilioGemini:
 
     def analyze(self, *, video_uri: str, duration_seconds: float) -> ProviderResponse:
         if not is_https_video_url(video_uri):
-            raise AnalysisProviderFailed("Gemini analysis requires an HTTPS signed video URL")
+            raise AnalysisProviderFailed(
+                "Gemini analysis requires an HTTPS signed video URL",
+                failure_phase=REQUEST_FAILURE_PHASE,
+            )
         payload = {
             "model": self.model,
             "temperature": 0,

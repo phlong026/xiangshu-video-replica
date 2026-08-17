@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from app.analysis import (
     ANALYSIS_KIND,
     APILIO_DEFAULT_BASE_URL,
+    NETWORK_FAILURE_PHASE,
     SHOT_CARD_KIND,
     AnalysisProviderFailed,
     ApilioGemini,
@@ -25,7 +26,11 @@ from app.analysis import (
     validate_shot_cards,
 )
 from app.auth import AuthenticatedUser, Database
-from app.media import is_reference_video_asset
+from app.media import (
+    DURATION_ROUNDING_TOLERANCE_SECONDS,
+    MAX_DURATION_SECONDS,
+    is_reference_video_asset,
+)
 from app.media_routes import get_media_storage
 from app.permissions import (
     require_asset_access,
@@ -42,6 +47,10 @@ from app.storage import (
 )
 
 router = APIRouter(prefix="/api", tags=["analysis"])
+
+# Must track the upload precheck: a video that passed upload at 15.05s has to stay
+# analysable instead of being rejected as an invalid request.
+MAX_ANALYSIS_DURATION_SECONDS = MAX_DURATION_SECONDS + DURATION_ROUNDING_TOLERANCE_SECONDS
 
 
 def get_video_analysis_provider(conn: Database) -> VideoAnalysisProvider:
@@ -105,8 +114,9 @@ class CreateAnalysisRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     asset_id: str = Field(min_length=1)
-    # Reference videos are capped at 15s; keep the analysis time axis bounded.
-    duration_seconds: float | None = Field(default=None, gt=0, le=15)
+    # Reference videos are capped at 15s plus the upload rounding tolerance;
+    # keep the analysis time axis bounded by the same contract.
+    duration_seconds: float | None = Field(default=None, gt=0, le=MAX_ANALYSIS_DURATION_SECONDS)
     reuse_existing: bool = False
 
 
@@ -237,15 +247,7 @@ def create_project_analysis(
             provider=provider,
         )
     except AnalysisProviderFailed as exc:
-        code = (
-            "ANALYSIS_PROVIDER_RATE_LIMITED"
-            if exc.http_status == 429
-            else "ANALYSIS_PROVIDER_FAILED"
-        )
-        raise HTTPException(
-            status_code=429 if exc.http_status == 429 else 502,
-            detail={"code": code},
-        ) from exc
+        raise analysis_provider_error(exc) from exc
     if should_reuse:
         row, created = create_or_recover_analysis_version(
             conn,
@@ -389,6 +391,31 @@ def update_analysis_shots(
         metadata={"source_analysis_version_id": analysis_id},
     )
     return version_response(shot_card)
+
+
+def analysis_provider_error(failure: AnalysisProviderFailed) -> HTTPException:
+    """Translate a provider failure into an actionable, secret-free desktop error."""
+    if failure.http_status == 429:
+        status_code = 429
+        code = "ANALYSIS_PROVIDER_RATE_LIMITED"
+        message = "视频拆解服务当前限流，请稍后重试。"
+    elif failure.failure_phase == NETWORK_FAILURE_PHASE:
+        status_code = 503
+        code = "ANALYSIS_PROVIDER_UNREACHABLE"
+        message = "无法连接视频拆解服务，请检查网络后重试。"
+    else:
+        status_code = 502
+        code = "ANALYSIS_PROVIDER_FAILED"
+        message = "视频拆解服务返回了无法解析的结果，请重试或更换参考视频。"
+    return HTTPException(
+        status_code=status_code,
+        detail={
+            "code": code,
+            "message": message,
+            "failure_phase": failure.failure_phase,
+            "retryable": failure.retryable,
+        },
+    )
 
 
 def load_analysis_version(conn: sqlite3.Connection, analysis_id: str) -> sqlite3.Row:

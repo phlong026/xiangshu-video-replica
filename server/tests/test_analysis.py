@@ -5,6 +5,7 @@ import sqlite3
 import threading
 from collections.abc import Iterator
 from pathlib import Path
+from urllib.error import HTTPError, URLError
 
 import pytest
 from cryptography.fernet import Fernet
@@ -14,10 +15,14 @@ from pydantic import ValidationError
 
 from app.analysis import (
     APILIO_DEFAULT_BASE_URL,
+    HTTP_FAILURE_PHASE,
+    NETWORK_FAILURE_PHASE,
+    RESPONSE_FAILURE_PHASE,
     AnalysisProviderFailed,
     ApilioGemini,
     FakeGemini,
     ProviderResponse,
+    UrllibApilioChatTransport,
     analyze_video,
     parse_analysis_response,
 )
@@ -606,3 +611,190 @@ def test_manual_shot_card_version_is_not_overwritten_by_new_analysis(
     ]
     shot_card_payload = json.loads(rows[2]["payload_json"])
     assert shot_card_payload["shots"][0]["action"] == "人工修订后的动作"
+
+
+def test_analysis_accepts_a_duration_within_the_upload_rounding_tolerance(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    """Uploads tolerate 15.1s, so analysis must not reject 15.01–15.10s as invalid input."""
+    with connect_database(db_path) as conn:
+        conn.execute(
+            "UPDATE assets SET metadata_json = ? WHERE id = ?",
+            (json.dumps({"duration_seconds": 15.05}), "asset_owned"),
+        )
+        conn.commit()
+
+    response = client.post(
+        "/api/projects/project_owned/analysis",
+        json={"asset_id": "asset_owned", "duration_seconds": 15.05, "reuse_existing": True},
+        headers=auth_headers("employee_1"),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["payload"]["analysis"]["duration_seconds"] == 15.05
+
+
+def test_urllib_transport_marks_a_network_failure_as_retryable_without_leaking_the_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def raise_url_error(*_args: object, **_kwargs: object) -> object:
+        raise URLError("failed to reach https://storage.example/video.mp4?signature=secret")
+
+    monkeypatch.setattr("app.analysis.urlopen", raise_url_error)
+    transport = UrllibApilioChatTransport()
+
+    with pytest.raises(AnalysisProviderFailed) as exc_info:
+        transport.post(
+            "https://api.apilio.ai/v1/chat/completions",
+            headers={"Authorization": "Bearer analysis-secret"},
+            body=b"{}",
+        )
+
+    failure = exc_info.value
+    assert failure.failure_phase == NETWORK_FAILURE_PHASE
+    assert failure.retryable is True
+    assert "URLError" in str(failure)
+    assert "signature=secret" not in str(failure)
+    assert "analysis-secret" not in str(failure)
+
+
+def test_urllib_transport_marks_upstream_server_errors_as_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def raise_http_error(*_args: object, **_kwargs: object) -> object:
+        raise HTTPError("https://api.apilio.ai", 503, "unavailable", {}, None)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("app.analysis.urlopen", raise_http_error)
+    transport = UrllibApilioChatTransport()
+
+    with pytest.raises(AnalysisProviderFailed) as exc_info:
+        transport.post("https://api.apilio.ai", headers={}, body=b"{}")
+
+    assert exc_info.value.failure_phase == HTTP_FAILURE_PHASE
+    assert exc_info.value.retryable is True
+    assert exc_info.value.http_status == 503
+
+
+def test_urllib_transport_marks_client_errors_as_non_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def raise_http_error(*_args: object, **_kwargs: object) -> object:
+        raise HTTPError("https://api.apilio.ai", 401, "unauthorized", {}, None)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("app.analysis.urlopen", raise_http_error)
+    transport = UrllibApilioChatTransport()
+
+    with pytest.raises(AnalysisProviderFailed) as exc_info:
+        transport.post("https://api.apilio.ai", headers={}, body=b"{}")
+
+    assert exc_info.value.failure_phase == HTTP_FAILURE_PHASE
+    assert exc_info.value.retryable is False
+
+
+def test_apilio_gemini_marks_an_unreadable_response_as_a_response_failure() -> None:
+    provider = ApilioGemini(
+        api_key="analysis-secret",
+        transport=RecordedApilioTransport(b'{"choices":[]}'),
+    )
+
+    with pytest.raises(AnalysisProviderFailed) as exc_info:
+        provider.analyze(video_uri="https://storage.example/video.mp4", duration_seconds=10)
+
+    assert exc_info.value.failure_phase == RESPONSE_FAILURE_PHASE
+    assert exc_info.value.retryable is False
+
+
+class FailingProvider:
+    requires_https_video_url = False
+
+    def __init__(self, failure: AnalysisProviderFailed) -> None:
+        self.failure = failure
+
+    def analyze(self, *, video_uri: str, duration_seconds: float) -> ProviderResponse:
+        raise self.failure
+
+    def repair_json(self, *, invalid_json: str, error: str) -> ProviderResponse:
+        raise self.failure
+
+
+def start_analysis_with_failure(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: AnalysisProviderFailed,
+) -> object:
+    monkeypatch.setattr(
+        "app.analysis_routes.get_video_analysis_provider",
+        lambda _conn: FailingProvider(failure),
+    )
+    return client.post(
+        "/api/projects/project_owned/analysis",
+        json={"asset_id": "asset_owned", "duration_seconds": 10},
+        headers=auth_headers("employee_1"),
+    )
+
+
+def test_analysis_maps_a_network_failure_to_a_retryable_unreachable_error(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = start_analysis_with_failure(
+        client,
+        monkeypatch,
+        AnalysisProviderFailed(
+            "Apilio video analysis request failed (URLError)",
+            failure_phase=NETWORK_FAILURE_PHASE,
+            retryable=True,
+        ),
+    )
+
+    assert response.status_code == 503
+    detail = response.json()["detail"]
+    assert detail["code"] == "ANALYSIS_PROVIDER_UNREACHABLE"
+    assert detail["retryable"] is True
+    assert detail["failure_phase"] == NETWORK_FAILURE_PHASE
+    assert detail["message"].strip()
+    assert "URLError" not in response.text
+
+
+def test_analysis_maps_an_invalid_provider_response_to_a_non_retryable_error(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = start_analysis_with_failure(
+        client,
+        monkeypatch,
+        AnalysisProviderFailed(
+            "Provider returned invalid JSON even after a repair attempt",
+            failure_phase=RESPONSE_FAILURE_PHASE,
+            retryable=False,
+        ),
+    )
+
+    assert response.status_code == 502
+    detail = response.json()["detail"]
+    assert detail["code"] == "ANALYSIS_PROVIDER_FAILED"
+    assert detail["retryable"] is False
+    assert detail["message"].strip()
+
+
+def test_analysis_maps_upstream_rate_limiting_to_a_retryable_error(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = start_analysis_with_failure(
+        client,
+        monkeypatch,
+        AnalysisProviderFailed(
+            "Apilio returned HTTP 429",
+            http_status=429,
+            failure_phase=HTTP_FAILURE_PHASE,
+            retryable=True,
+        ),
+    )
+
+    assert response.status_code == 429
+    detail = response.json()["detail"]
+    assert detail["code"] == "ANALYSIS_PROVIDER_RATE_LIMITED"
+    assert detail["retryable"] is True
+    assert detail["message"].strip()
