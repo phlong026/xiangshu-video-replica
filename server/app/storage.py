@@ -473,7 +473,9 @@ class CloudStorageAdapter(_BaseStorageAdapter):
                 Key=object_key,
                 Method="PUT",
                 Expired=_seconds(expires_in),
-                Headers=headers,
+                # qcloud_cos 会在签名时把 Authorization 原地写入传入的 Headers
+                # 字典；传副本避免签名泄漏到下发给客户端的上传头里。
+                Headers=dict(headers),
                 SignHost=True,
             )
         except Exception as exc:

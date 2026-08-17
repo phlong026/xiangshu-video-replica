@@ -367,6 +367,15 @@ function RuntimeForm({
           <option value="local">本地存储（仅开发）</option>
         </select>
       </label>
+      {values.active_storage_provider === "cos" ? (
+        <p className="storage-provider-hint">
+          桌面端会直接向 COS
+          预签名地址上传文件。请先在腾讯云控制台的存储桶跨域访问 CORS
+          设置中，放行桌面端来源（http://127.0.0.1:5173、http://tauri.localhost
+          等）的 PUT/GET/HEAD 方法与 content-type
+          请求头，否则上传会以网络错误失败。
+        </p>
+      ) : null}
       <label>
         单次生成数量上限
         <input
