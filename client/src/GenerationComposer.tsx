@@ -1,73 +1,34 @@
-import { useEffect } from "react";
-
 import type { GenerationBatch } from "./api";
 import { GenerationLauncher } from "./GenerationLauncher";
-import { ScriptEditor } from "./ScriptEditor";
-import { useGenerationDrafts } from "./useGenerationDrafts";
+import type { GenerationDrafts } from "./useGenerationDrafts";
 
 type GenerationComposerProps = {
   analysisVersionId: string;
   characterVersionId: string | null;
-  currentUserId: string;
-  durationSeconds: number;
+  drafts: GenerationDrafts;
   firstFrameAssetId: string;
   firstFrameSelectionVersionId: string;
   onBatchCreated: (batch: GenerationBatch) => void;
-  onBusyChange: (isBusy: boolean) => void;
-  onWorkflowStepChange: (step: number) => void;
-  originalScript: string;
-  projectId: string;
+  onWorkflowStepChange?: (step: number) => void;
   readOnly?: boolean;
   referenceSelectionId: string | null;
   shotCardVersionId: string;
 };
 
+// P0-02-03：口播稿编辑（ScriptEditor）迁至标签页①，本组件瘦身为
+// 标签页③的生成面板，消费工作区提升的 useGenerationDrafts 单一状态源。
 export function GenerationComposer({
   analysisVersionId,
   characterVersionId,
-  currentUserId,
-  durationSeconds,
+  drafts,
   firstFrameAssetId,
   firstFrameSelectionVersionId,
   onBatchCreated,
-  onBusyChange,
   onWorkflowStepChange,
-  originalScript,
-  projectId,
   readOnly = false,
   referenceSelectionId,
   shotCardVersionId,
 }: GenerationComposerProps) {
-  const drafts = useGenerationDrafts({
-    characterVersionId,
-    currentUserId,
-    durationSeconds,
-    firstFrameAssetId,
-    firstFrameSelectionVersionId,
-    originalScript,
-    projectId,
-    readOnly,
-    referenceSelectionId,
-    shotCardVersionId,
-  });
-
-  const { busyAction, workflowStep } = drafts;
-
-  useEffect(() => {
-    onBusyChange(Boolean(busyAction));
-  }, [busyAction, onBusyChange]);
-
-  useEffect(
-    () => () => {
-      onBusyChange(false);
-    },
-    [onBusyChange],
-  );
-
-  useEffect(() => {
-    onWorkflowStepChange(workflowStep);
-  }, [onWorkflowStepChange, workflowStep]);
-
   if (drafts.isLoading) {
     return <p className="status-note">正在读取口播稿与 Prompt</p>;
   }
@@ -88,22 +49,9 @@ export function GenerationComposer({
         <p className="setup-success">{drafts.message}</p>
       ) : null}
 
-      <ScriptEditor
-        busyAction={busyAction}
-        onChooseSource={drafts.chooseScriptSource}
-        onSaveScript={drafts.saveScript}
-        onScriptTextChange={drafts.setScriptText}
-        readOnly={readOnly}
-        scriptDirty={drafts.scriptDirty}
-        scriptSource={drafts.scriptSource}
-        scriptStale={drafts.scriptStale}
-        scriptText={drafts.scriptText}
-        shotMappings={drafts.shotMappings}
-      />
-
       <GenerationLauncher
         analysisVersionId={analysisVersionId}
-        busyAction={busyAction}
+        busyAction={drafts.busyAction}
         canCompile={drafts.canCompile}
         canCreateBatch={drafts.canCreateBatch}
         characterVersionId={characterVersionId}
@@ -113,14 +61,14 @@ export function GenerationComposer({
         limits={drafts.limits}
         onCompilePrompt={drafts.compilePrompt}
         onCreateBatch={() =>
-          drafts.createBatch(onBatchCreated, onWorkflowStepChange)
+          drafts.createBatch(onBatchCreated, onWorkflowStepChange ?? noStep)
         }
         onDurationChange={drafts.setOutputDuration}
         onLockPrompt={drafts.lockPrompt}
         onPromptTextChange={drafts.setPromptText}
         onQuantityChange={drafts.setQuantityInput}
         onRecoverBatch={() =>
-          drafts.recoverBatch(onBatchCreated, onWorkflowStepChange)
+          drafts.recoverBatch(onBatchCreated, onWorkflowStepChange ?? noStep)
         }
         onResolutionChange={drafts.setResolution}
         onSavePromptRevision={drafts.savePromptRevision}
@@ -145,3 +93,5 @@ export function GenerationComposer({
     </section>
   );
 }
+
+function noStep() {}

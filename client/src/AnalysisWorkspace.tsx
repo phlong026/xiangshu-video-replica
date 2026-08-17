@@ -27,7 +27,9 @@ import { CharacterReferenceSelection } from "./CharacterReferenceSelection";
 import { CharacterSelection } from "./CharacterSelection";
 import { FirstFrameSelection } from "./FirstFrameSelection";
 import { GenerationComposer } from "./GenerationComposer";
+import { ScriptEditor } from "./ScriptEditor";
 import { SourceFrameSelection } from "./SourceFrameSelection";
+import { useGenerationDrafts } from "./useGenerationDrafts";
 import { useWorkspaceReadiness } from "./useWorkspaceReadiness";
 import {
   type WorkspaceTab,
@@ -131,7 +133,6 @@ export function AnalysisWorkspace({
   const [firstFrameSelection, setFirstFrameSelection] =
     useState<AnalysisVersion | null>(null);
   const [activeTab, setActiveTab] = useState<WorkspaceTabKey>("content");
-  const [, setGenerationStep] = useState(7);
   const [reloadToken, setReloadToken] = useState(0);
   const [forceLoadProjectId, setForceLoadProjectId] = useState<string | null>(
     null,
@@ -245,7 +246,6 @@ export function AnalysisWorkspace({
     setSourceFrameSelection(null);
     setCharacterReferenceSelection(null);
     setFirstFrameSelection(null);
-    setGenerationStep(7);
     setShotCardsDirty(false);
     isGenerationBusyRef.current = false;
     isWorkspaceBusyRef.current = false;
@@ -330,15 +330,37 @@ export function AnalysisWorkspace({
     ? readFirstFrameSelectionPayload(firstFrameSelection)
     : null;
 
-  // P0-01 就绪聚合：当前仅接入工作区可得状态；口播稿与 Prompt 状态在
-  // GenerationComposer 内部，待 P0-02-03/05 接入完整输入（契约 §1.2）。
+  const isWorkspaceBusy = isGenerationBusy || isUpstreamBusy;
+  const draftsReadOnly =
+    readOnly || isSaving || shotCardsDirty || isWorkspaceBusy;
+
+  // P0-02-03：口播稿/生成草稿状态提升至工作区，标签页①的口播稿编辑与
+  // 标签页③的生成面板共享单一状态源（契约 §2）。Prompt 就绪输入待
+  // P0-02-05 接入（契约 §1.2）。
+  const generationDrafts = useGenerationDrafts({
+    characterVersionId: characterSelection?.character_version_id ?? null,
+    currentUserId,
+    durationSeconds,
+    firstFrameAssetId: firstFramePayload?.first_frame_asset_id ?? null,
+    firstFrameSelectionVersionId: firstFrameSelection?.id ?? "",
+    originalScript,
+    projectId: project.id,
+    readOnly: draftsReadOnly,
+    referenceSelectionId: characterReferenceSelection?.id ?? null,
+    shotCardVersionId,
+  });
+
   const readiness = useWorkspaceReadiness({
     shotCard: {
       versionId: shotCardVersionId || null,
       dirty: shotCardsDirty,
       saving: isSaving,
     },
-    script: { versionId: null, dirty: false, stale: false },
+    script: {
+      versionId: generationDrafts.scriptVersion?.id ?? null,
+      dirty: generationDrafts.scriptDirty,
+      stale: generationDrafts.scriptStale,
+    },
     character: {
       versionId: characterSelection?.character_version_id ?? null,
       legacyCharacterId: characterSelection?.character_id ?? null,
@@ -388,6 +410,19 @@ export function AnalysisWorkspace({
     [onWorkspaceBusyChange],
   );
 
+  // P0-02-03：草稿动作的忙态由提升后的工作区统一上报（原
+  // GenerationComposer 的 busy effect 迁移至此）。
+  useEffect(() => {
+    handleGenerationBusyChange(Boolean(generationDrafts.busyAction));
+  }, [generationDrafts.busyAction, handleGenerationBusyChange]);
+
+  useEffect(
+    () => () => {
+      handleGenerationBusyChange(false);
+    },
+    [handleGenerationBusyChange],
+  );
+
   const handleUpstreamBusyChange = useCallback(
     (source: UpstreamBusySource, busy: boolean) => {
       const currentCount = upstreamBusyCountsRef.current.get(source) ?? 0;
@@ -423,8 +458,6 @@ export function AnalysisWorkspace({
     (busy: boolean) => handleUpstreamBusyChange("first-frame", busy),
     [handleUpstreamBusyChange],
   );
-
-  const isWorkspaceBusy = isGenerationBusy || isUpstreamBusy;
 
   function handleClose() {
     if (isWorkspaceBusyRef.current) {
@@ -499,7 +532,6 @@ export function AnalysisWorkspace({
       const savedVersion = await saveShotCards(analysisId, shots);
       savedShotsRef.current = copyShotCards(shots);
       setShotCardVersionId(savedVersion.id);
-      setGenerationStep(7);
       setShotCardsDirty(false);
       setSaveMessage(`已自动保存 · 版本 #${savedVersion.version_number}`);
       return true;
@@ -583,6 +615,29 @@ export function AnalysisWorkspace({
                 </fieldset>
               ))}
             </div>
+            {generationDrafts.isLoading ? (
+              <p className="status-note">正在读取口播稿</p>
+            ) : (
+              <>
+                {/* 草稿错误需在口播稿区可见：镜头卡未保存时标签页③不挂载，
+                    saveScript 的守卫反馈不能只依赖生成面板渲染（评审 Major 2）。 */}
+                {generationDrafts.error ? (
+                  <p className="settings-error">{generationDrafts.error}</p>
+                ) : null}
+                <ScriptEditor
+                  busyAction={generationDrafts.busyAction}
+                  onChooseSource={generationDrafts.chooseScriptSource}
+                  onSaveScript={generationDrafts.saveScript}
+                  onScriptTextChange={generationDrafts.setScriptText}
+                  readOnly={draftsReadOnly}
+                  scriptDirty={generationDrafts.scriptDirty}
+                  scriptSource={generationDrafts.scriptSource}
+                  scriptStale={generationDrafts.scriptStale}
+                  scriptText={generationDrafts.scriptText}
+                  shotMappings={generationDrafts.shotMappings}
+                />
+              </>
+            )}
           </section>
         </div>
       ),
@@ -675,18 +730,11 @@ export function AnalysisWorkspace({
                   characterVersionId={
                     characterSelection?.character_version_id ?? null
                   }
-                  currentUserId={currentUserId}
-                  durationSeconds={durationSeconds}
+                  drafts={generationDrafts}
                   firstFrameAssetId={firstFramePayload.first_frame_asset_id}
                   firstFrameSelectionVersionId={firstFrameSelection?.id ?? ""}
                   onBatchCreated={onBatchCreated}
-                  onBusyChange={handleGenerationBusyChange}
-                  onWorkflowStepChange={setGenerationStep}
-                  originalScript={originalScript}
-                  projectId={project.id}
-                  readOnly={
-                    readOnly || isSaving || shotCardsDirty || isWorkspaceBusy
-                  }
+                  readOnly={draftsReadOnly}
                   referenceSelectionId={characterReferenceSelection?.id ?? null}
                   shotCardVersionId={shotCardVersionId}
                 />

@@ -14,8 +14,16 @@ vi.mock("./api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./api")>();
   return {
     ...actual,
+    compileGenerationPrompt: vi.fn(),
+    createGenerationBatch: vi.fn(),
+    createScriptVersion: vi.fn(),
+    getGenerationRuntimeLimits: vi.fn(),
+    getLatestGenerationPrompt: vi.fn(),
     getLatestProjectAnalysis: vi.fn(),
     getLatestProjectShotCards: vi.fn(),
+    getLatestScriptVersion: vi.fn(),
+    lockGenerationPrompt: vi.fn(),
+    reviseGenerationPrompt: vi.fn(),
     saveShotCards: vi.fn(),
   };
 });
@@ -223,33 +231,23 @@ vi.mock("./FirstFrameSelection", () => ({
 }));
 
 vi.mock("./GenerationComposer", () => ({
+  // P0-02-03：组件薄化为 drafts 注入后，mock 只保留真实 props；
+  // 生成 busy 改由真实“保存口播稿”挂起驱动（drafts.busyAction）。
   GenerationComposer: ({
     firstFrameAssetId,
     onBatchCreated,
-    onBusyChange,
-    onWorkflowStepChange,
-    originalScript,
     readOnly,
     shotCardVersionId,
   }: generationComposerMockProps) => (
     <div>
       <span>
-        生成输入：{shotCardVersionId}/{firstFrameAssetId}/{originalScript}
+        生成输入：{shotCardVersionId}/{firstFrameAssetId}
       </span>
       <textarea
         aria-label="生成草稿"
         defaultValue="草稿初始值"
         readOnly={readOnly}
       />
-      <button onClick={() => onWorkflowStepChange?.(9)} type="button">
-        模拟锁定 Prompt
-      </button>
-      <button onClick={() => onBusyChange?.(true)} type="button">
-        模拟生成处理中
-      </button>
-      <button onClick={() => onBusyChange?.(false)} type="button">
-        模拟生成完成
-      </button>
       <button
         disabled={readOnly}
         onClick={() =>
@@ -289,9 +287,6 @@ type apiMockProps = {
 type generationComposerMockProps = {
   firstFrameAssetId?: string;
   onBatchCreated?: (value: unknown) => void;
-  onBusyChange?: (isBusy: boolean) => void;
-  onWorkflowStepChange?: (step: number) => void;
-  originalScript?: string;
   readOnly?: boolean;
   shotCardVersionId?: string;
 };
@@ -327,6 +322,21 @@ describe("AnalysisWorkspace workflow gates", () => {
       created_at: "2030-01-01T00:00:00Z",
     });
     vi.mocked(api.getLatestProjectShotCards).mockResolvedValue(null);
+    vi.mocked(api.getLatestScriptVersion).mockResolvedValue({
+      version: null,
+      stale: false,
+      stale_reasons: [],
+    });
+    vi.mocked(api.getLatestGenerationPrompt).mockResolvedValue({
+      version: null,
+      stale: false,
+      stale_reasons: [],
+    });
+    vi.mocked(api.getGenerationRuntimeLimits).mockResolvedValue({
+      min_quantity: 1,
+      max_quantity: 4,
+      estimated_cost_per_task: null,
+    });
   });
 
   it("preserves downstream gates for idempotent confirmations and rolls back on a changed character", async () => {
@@ -512,9 +522,8 @@ describe("AnalysisWorkspace workflow gates", () => {
     fireEvent.click(screen.getByRole("button", { name: "完成置换首帧" }));
 
     expect(
-      screen.getByText("生成输入：shot-card-2/first-frame-1/原始口播稿"),
+      screen.getByText("生成输入：shot-card-2/first-frame-1"),
     ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "模拟锁定 Prompt" }));
     expect(
       within(screen.getByRole("tab", { name: /人物设定/ })).getByText("✓"),
     ).toBeInTheDocument();
@@ -620,6 +629,13 @@ describe("AnalysisWorkspace workflow gates", () => {
       created_by_user_id: "employee_1",
       created_at: "2030-01-01T00:00:00Z",
     });
+    let resolveScriptSave: ((version: api.AnalysisVersion) => void) | undefined;
+    vi.mocked(api.createScriptVersion).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveScriptSave = resolve;
+        }),
+    );
 
     render(
       <AnalysisWorkspace
@@ -647,17 +663,22 @@ describe("AnalysisWorkspace workflow gates", () => {
     fireEvent.click(screen.getByRole("button", { name: "完成置换首帧" }));
 
     const generationInput = () =>
-      screen.getByText("生成输入：shot-card-2/first-frame-1/原始口播稿");
+      screen.getByText("生成输入：shot-card-2/first-frame-1");
 
-    // 生成处理中：切换角色的请求必须被拒绝，下游选择保持不变。
-    fireEvent.click(screen.getByRole("button", { name: "模拟生成处理中" }));
+    // 生成动作处理中（口播稿保存挂起）：切换角色的请求必须被拒绝，下游选择保持不变。
+    fireEvent.click(await screen.findByRole("button", { name: "保存口播稿" }));
     fireEvent.click(screen.getByRole("button", { name: "切换角色版本" }));
     expect(generationInput()).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "标记源画面失效" }));
     expect(generationInput()).toBeInTheDocument();
 
-    // 生成完成后，同一操作立即生效（切换角色会清空下游，生成区退回门禁提示）。
-    fireEvent.click(screen.getByRole("button", { name: "模拟生成完成" }));
+    // 生成动作完成后，同一操作立即生效（切换角色会清空下游，生成区退回门禁提示）。
+    resolveScriptSave?.(savedScriptVersion);
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "切换角色版本" }),
+      ).toBeEnabled(),
+    );
     fireEvent.click(screen.getByRole("button", { name: "切换角色版本" }));
     expect(screen.getByText("确认置换首帧后可继续。")).toBeInTheDocument();
   });
@@ -694,6 +715,13 @@ describe("AnalysisWorkspace workflow gates", () => {
       created_by_user_id: "employee_1",
       created_at: "2030-01-01T00:00:00Z",
     });
+    let resolveScriptSave: ((version: api.AnalysisVersion) => void) | undefined;
+    vi.mocked(api.createScriptVersion).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveScriptSave = resolve;
+        }),
+    );
 
     render(
       <AnalysisWorkspace
@@ -719,12 +747,11 @@ describe("AnalysisWorkspace workflow gates", () => {
     fireEvent.click(screen.getByRole("button", { name: "完成人物参考" }));
     fireEvent.click(screen.getByRole("button", { name: "完成置换首帧" }));
     expect(
-      screen.getByText("生成输入：shot-card-2/first-frame-1/原始口播稿"),
+      screen.getByText("生成输入：shot-card-2/first-frame-1"),
     ).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("生成草稿"), {
       target: { value: "未保存的生成草稿" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "模拟锁定 Prompt" }));
     expect(
       within(screen.getByRole("tab", { name: /人物设定/ })).getByText("✓"),
     ).toBeInTheDocument();
@@ -740,7 +767,7 @@ describe("AnalysisWorkspace workflow gates", () => {
       onSubmit: (event: { preventDefault: () => void }) => void;
     }>(form).onSubmit;
 
-    fireEvent.click(screen.getByRole("button", { name: "模拟生成处理中" }));
+    fireEvent.click(await screen.findByRole("button", { name: "保存口播稿" }));
     act(() => {
       staleSceneHandler({ target: { value: "旧闭包不应写入" } });
       staleSubmitHandler({ preventDefault: vi.fn() });
@@ -757,21 +784,23 @@ describe("AnalysisWorkspace workflow gates", () => {
     expect(screen.getByRole("button", { name: "完成置换首帧" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "切换角色版本" }));
     expect(
-      screen.getByText("生成输入：shot-card-2/first-frame-1/原始口播稿"),
+      screen.getByText("生成输入：shot-card-2/first-frame-1"),
     ).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("S01 场景"), {
       target: { value: "处理中不应写入" },
     });
     expect(screen.getByLabelText("S01 场景")).toHaveValue("咖啡馆");
-    fireEvent.click(screen.getByRole("button", { name: "模拟生成完成" }));
-    expect(screen.getByLabelText("S01 场景")).toBeEnabled();
+    resolveScriptSave?.(savedScriptVersion);
+    await waitFor(() =>
+      expect(screen.getByLabelText("S01 场景")).toBeEnabled(),
+    );
 
     fireEvent.change(screen.getByLabelText("S01 场景"), {
       target: { value: "未保存的新场景" },
     });
 
     expect(
-      screen.getByText("生成输入：shot-card-2/first-frame-1/原始口播稿"),
+      screen.getByText("生成输入：shot-card-2/first-frame-1"),
     ).toBeInTheDocument();
     expect(screen.getByLabelText("生成草稿")).toHaveValue("未保存的生成草稿");
     expect(screen.getByLabelText("生成草稿")).toHaveAttribute("readonly");
@@ -783,7 +812,7 @@ describe("AnalysisWorkspace workflow gates", () => {
     });
 
     expect(
-      screen.getByText("生成输入：shot-card-2/first-frame-1/原始口播稿"),
+      screen.getByText("生成输入：shot-card-2/first-frame-1"),
     ).toBeInTheDocument();
     expect(screen.getByLabelText("生成草稿")).toHaveValue("未保存的生成草稿");
     expect(screen.getByLabelText("生成草稿")).not.toHaveAttribute("readonly");
@@ -846,7 +875,7 @@ describe("AnalysisWorkspace workflow gates", () => {
     fireEvent.click(screen.getByRole("button", { name: "完成人物参考" }));
     fireEvent.click(screen.getByRole("button", { name: "完成置换首帧" }));
     expect(
-      screen.getByText("生成输入：shot-card-2/first-frame-1/原始口播稿"),
+      screen.getByText("生成输入：shot-card-2/first-frame-1"),
     ).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("生成草稿"), {
       target: { value: "未保存的生成草稿" },
@@ -854,7 +883,7 @@ describe("AnalysisWorkspace workflow gates", () => {
 
     expect(api.saveShotCards).not.toHaveBeenCalled();
     expect(
-      screen.getByText("生成输入：shot-card-2/first-frame-1/原始口播稿"),
+      screen.getByText("生成输入：shot-card-2/first-frame-1"),
     ).toBeInTheDocument();
     expect(screen.getByLabelText("生成草稿")).toHaveValue("未保存的生成草稿");
     expect(screen.getByRole("button", { name: "模拟创建批次" })).toBeEnabled();
@@ -949,5 +978,185 @@ describe("AnalysisWorkspace workflow gates", () => {
     });
     expect(await screen.findByText(/已自动保存 · 版本 #3/)).toBeInTheDocument();
     expect(screen.getByLabelText("S01 场景")).toBeEnabled();
+  });
+
+  const savedScriptVersion = {
+    id: "script-2",
+    project_id: "project-1",
+    asset_id: null,
+    kind: "script",
+    version_number: 2,
+    payload: {
+      source: "original",
+      full_text: "原始口播稿",
+      shot_card_version_id: "shot-card-3",
+      shot_mappings: [],
+    },
+    created_by_user_id: "employee_1",
+    created_at: "2030-01-01T00:00:00Z",
+  };
+
+  it("标签页①：镜头卡自动保存后内容徽章转就绪（口播稿有匹配版本）", async () => {
+    vi.mocked(api.getLatestProjectAnalysis).mockResolvedValue({
+      id: "analysis-1",
+      project_id: "project-1",
+      asset_id: "reference-video-1",
+      kind: "analysis",
+      version_number: 1,
+      payload: {
+        analysis: {
+          summary: "拆解完成",
+          duration_seconds: 8,
+          original_script: "原始口播稿",
+          shots: [editableShot],
+        },
+      },
+      created_by_user_id: "employee_1",
+      created_at: "2030-01-01T00:00:00Z",
+    });
+    vi.mocked(api.getLatestScriptVersion).mockResolvedValue({
+      version: savedScriptVersion,
+      stale: false,
+      stale_reasons: [],
+    });
+    vi.mocked(api.saveShotCards).mockResolvedValue({
+      id: "shot-card-3",
+      project_id: "project-1",
+      asset_id: null,
+      kind: "shot_card",
+      version_number: 3,
+      payload: {
+        source_analysis_version_id: "analysis-1",
+        duration_seconds: 8,
+        shots: [editableShot],
+      },
+      created_by_user_id: "employee_1",
+      created_at: "2030-01-01T00:00:01Z",
+    });
+
+    render(
+      <AnalysisWorkspace
+        currentUserId="employee_1"
+        onAnalysisReady={vi.fn()}
+        onBatchCreated={vi.fn()}
+        onClose={vi.fn()}
+        project={{
+          id: "project-1",
+          owner_user_id: "employee_1",
+          name: "内容就绪测试",
+          status: "REFERENCE_READY",
+          reference_asset_id: "reference-video-1",
+          reference_upload_status: "READY",
+          analysis_status: "READY",
+        }}
+      />,
+    );
+
+    expect(await screen.findByText("拆解完成")).toBeInTheDocument();
+    // 初始：镜头卡未保存且口播稿与空镜头版本不匹配 → 缺失 2 项
+    expect(
+      within(screen.getByRole("tab", { name: /内容配置/ })).getByText(
+        "缺失 2 项",
+      ),
+    ).toBeInTheDocument();
+
+    // 镜头卡未保存时保存口播稿被守卫拦截，反馈必须出现在标签页①
+    // （此状态下标签页③不挂载，评审 Major 2）。
+    fireEvent.click(await screen.findByRole("button", { name: "保存口播稿" }));
+    expect(
+      screen.getByText("镜头卡片自动保存后才能保存口播稿。"),
+    ).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("S01 场景"), {
+      target: { value: "未保存的新场景" },
+    });
+
+    await waitFor(() => expect(api.saveShotCards).toHaveBeenCalledOnce(), {
+      timeout: 3_000,
+    });
+    expect(
+      await waitFor(() =>
+        within(screen.getByRole("tab", { name: /内容配置/ })).getByText("✓"),
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("标签页①：口播稿脏稿时内容徽章显示缺失", async () => {
+    vi.mocked(api.getLatestProjectAnalysis).mockResolvedValue({
+      id: "analysis-1",
+      project_id: "project-1",
+      asset_id: "reference-video-1",
+      kind: "analysis",
+      version_number: 1,
+      payload: {
+        analysis: {
+          summary: "拆解完成",
+          duration_seconds: 8,
+          original_script: "原始口播稿",
+          shots: [editableShot],
+        },
+      },
+      created_by_user_id: "employee_1",
+      created_at: "2030-01-01T00:00:00Z",
+    });
+    vi.mocked(api.getLatestProjectShotCards).mockResolvedValue({
+      id: "shot-card-2",
+      project_id: "project-1",
+      asset_id: null,
+      kind: "shot_card",
+      version_number: 2,
+      payload: {
+        source_analysis_version_id: "analysis-1",
+        duration_seconds: 8,
+        shots: [editableShot],
+      },
+      created_by_user_id: "employee_1",
+      created_at: "2030-01-01T00:00:00Z",
+    });
+    vi.mocked(api.getLatestScriptVersion).mockResolvedValue({
+      version: {
+        ...savedScriptVersion,
+        payload: {
+          ...savedScriptVersion.payload,
+          shot_card_version_id: "shot-card-2",
+        },
+      },
+      stale: false,
+      stale_reasons: [],
+    });
+
+    render(
+      <AnalysisWorkspace
+        currentUserId="employee_1"
+        onAnalysisReady={vi.fn()}
+        onBatchCreated={vi.fn()}
+        onClose={vi.fn()}
+        project={{
+          id: "project-1",
+          owner_user_id: "employee_1",
+          name: "脏稿徽章测试",
+          status: "REFERENCE_READY",
+          reference_asset_id: "reference-video-1",
+          reference_upload_status: "READY",
+          analysis_status: "READY",
+        }}
+      />,
+    );
+
+    expect(await screen.findByText("拆解完成")).toBeInTheDocument();
+    // 镜头卡已保存 + 口播稿已保存且匹配 → 内容就绪
+    expect(
+      await waitFor(() =>
+        within(screen.getByRole("tab", { name: /内容配置/ })).getByText("✓"),
+      ),
+    ).toBeInTheDocument();
+
+    // 标签页①内编辑口播稿：切自定义后即脏稿 → 徽章转缺失
+    fireEvent.click(screen.getByLabelText("自定义稿"));
+    expect(
+      within(screen.getByRole("tab", { name: /内容配置/ })).getByText(
+        "缺失 1 项",
+      ),
+    ).toBeInTheDocument();
   });
 });

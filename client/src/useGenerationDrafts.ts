@@ -45,7 +45,9 @@ type UseGenerationDraftsInput = {
   characterVersionId: string | null;
   currentUserId: string;
   durationSeconds: number;
-  firstFrameAssetId: string;
+  // P0-02-03：口播稿区常驻标签页①，无首帧时 Hook 仍需运行（prompt 相关
+  // 逻辑容忍 null：无首帧时 prompt 必然 stale、不可编译/建批）。
+  firstFrameAssetId: string | null;
   firstFrameSelectionVersionId: string;
   originalScript: string;
   projectId: string;
@@ -157,9 +159,14 @@ export function useGenerationDrafts({
           restoredPrompt,
           "output_duration_seconds",
         );
-        if (restoredDuration !== null) {
-          setOutputDuration(String(restoredDuration));
-        }
+        // 无已保存时长时跟随参考时长（P0-02-03 提升后 Hook 在工作区挂载，
+        // durationSeconds 需等拆解加载完成，不能只用 useState 初始值）。
+        setOutputDuration(
+          String(
+            restoredDuration ??
+              Math.min(15, Math.max(4, Math.round(durationSeconds))),
+          ),
+        );
         const restoredResolution = readPayloadString(
           restoredPrompt,
           "resolution",
@@ -184,10 +191,11 @@ export function useGenerationDrafts({
       actionGenerationRef.current += 1;
       isCreatingBatchRef.current = false;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- 依赖列表与拆分前 GenerationComposer 保持一致
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 依赖即草稿状态源；durationSeconds 仅用于成片时长默认值回退
   }, [
     characterVersionId,
     currentUserId,
+    durationSeconds,
     firstFrameAssetId,
     firstFrameSelectionVersionId,
     originalScript,
@@ -215,7 +223,7 @@ export function useGenerationDrafts({
     ? "fake_h3"
     : "metaso";
   const batchRequest: Omit<GenerationBatchInput, "idempotency_key"> | null =
-    promptVersion && quantity !== null && durationValid
+    promptVersion && quantity !== null && durationValid && firstFrameAssetId
       ? {
           quantity,
           prompt_version_id: promptVersion.id,
@@ -291,6 +299,10 @@ export function useGenerationDrafts({
     if (!text || readOnly || busyAction) {
       return;
     }
+    if (!shotCardVersionId) {
+      setError("镜头卡片自动保存后才能保存口播稿。");
+      return;
+    }
     const actionGeneration = actionGenerationRef.current + 1;
     actionGenerationRef.current = actionGeneration;
     setBusyAction("script");
@@ -323,7 +335,7 @@ export function useGenerationDrafts({
   }
 
   async function compilePrompt() {
-    if (!scriptVersion || !canCompile) {
+    if (!scriptVersion || !canCompile || !firstFrameAssetId) {
       return;
     }
     const actionGeneration = actionGenerationRef.current + 1;
@@ -580,6 +592,10 @@ export function useGenerationDrafts({
   };
 }
 
+// P0-02-03：状态提升后由 AnalysisWorkspace 持有，注入标签页①的
+// ScriptEditor 与标签页③的 GenerationComposer，保证单一状态源。
+export type GenerationDrafts = ReturnType<typeof useGenerationDrafts>;
+
 export function readPayloadString(
   version: GenerationVersion | null,
   key: string,
@@ -637,7 +653,7 @@ function promptMatchesCurrentInputs(
   prompt: GenerationVersion,
   current: {
     characterVersionId: string | null;
-    firstFrameAssetId: string;
+    firstFrameAssetId: string | null;
     firstFrameSelectionVersionId: string;
     referenceSelectionId: string | null;
     shotCardVersionId: string;
