@@ -185,8 +185,10 @@ async function createProjectBatchViaOneClick(page) {
   // 品牌改版后项目页常驻创建表单（原「新建复刻」弹层已移除）：
   // 人物库返回后切项目页，直接填表单提交（按钮文案「开始」）。
   await page.getByRole("button", { name: "项目", exact: true }).click();
+  // 品牌改版后项目页同时存在 h1「项目」（工作台标题）与
+  // h2「项目」（#project-list-title），断言需加 level 消歧。
   await expect(
-    page.getByRole("heading", { name: "项目", exact: true }),
+    page.getByRole("heading", { name: "项目", exact: true, level: 2 }),
   ).toBeVisible();
   await page.getByLabel("项目名称").fill("Gate 1 夏日咖啡馆口播");
   await page
@@ -301,7 +303,11 @@ async function previewAndDownloadResults(page, runDir) {
 
 async function verifyRestoredWorkspace(page, runDir) {
   await enterWorkspace(page);
-  await expect(page.getByRole("heading", { name: "项目列表" })).toBeVisible();
+  // 品牌改版后列表标题 h2 为「项目」（#project-list-title），
+  // 原文本「项目列表」已不存在；与工作台 h1 同名，需 level 消歧。
+  await expect(
+    page.getByRole("heading", { name: "项目", exact: true, level: 2 }),
+  ).toBeVisible();
   await expect(page.getByText("Gate 1 夏日咖啡馆口播")).toBeVisible();
 
   await page.getByRole("button", { name: "人物库" }).click();
