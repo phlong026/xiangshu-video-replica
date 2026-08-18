@@ -4,7 +4,7 @@ import json
 import sqlite3
 import time
 from datetime import timedelta
-from typing import Annotated
+from typing import Annotated, cast
 from urllib.parse import quote
 from uuid import uuid4
 
@@ -499,8 +499,10 @@ def project_detail_row(
     conn: sqlite3.Connection,
     project_id: str,
 ) -> sqlite3.Row | None:
-    return conn.execute(
-        """
+    return cast(
+        "sqlite3.Row | None",
+        conn.execute(
+            """
         SELECT
             projects.id,
             projects.owner_user_id,
@@ -543,8 +545,9 @@ def project_detail_row(
         )
         WHERE projects.id = ?
         """,
-        (project_id,),
-    ).fetchone()
+            (project_id,),
+        ).fetchone(),
+    )
 
 
 @router.get("/assets/{asset_id}", response_model=AssetResponse)

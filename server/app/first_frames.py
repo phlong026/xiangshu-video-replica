@@ -822,10 +822,10 @@ def resolve_first_frame_character_inputs(
         raise first_frame_error(
             409, "MAIN_CHARACTER_SNAPSHOT_INVALID", "Select the character again."
         )
-    reference_asset_ids = character_snapshot.get("reference_asset_ids")
+    snapshot_reference_ids = character_snapshot.get("reference_asset_ids")
     character_name = character_snapshot.get("name")
-    if not isinstance(reference_asset_ids, list) or not all(
-        isinstance(asset_id, str) for asset_id in reference_asset_ids
+    if not isinstance(snapshot_reference_ids, list) or not all(
+        isinstance(asset_id, str) for asset_id in snapshot_reference_ids
     ):
         raise first_frame_error(
             409, "MAIN_CHARACTER_SNAPSHOT_INVALID", "Select the character again."
@@ -834,7 +834,7 @@ def resolve_first_frame_character_inputs(
         raise first_frame_error(
             409, "MAIN_CHARACTER_SNAPSHOT_INVALID", "Select the character again."
         )
-    if not reference_asset_ids:
+    if not snapshot_reference_ids:
         raise first_frame_error(
             422,
             "CHARACTER_REFERENCE_REQUIRED",
@@ -848,7 +848,7 @@ def resolve_first_frame_character_inputs(
     return FirstFrameCharacterInputs(
         main_character_version_id=str(main_character["version_id"]),
         character_snapshot=character_snapshot,
-        reference_asset_ids=cast(list[str], reference_asset_ids),
+        reference_asset_ids=cast(list[str], snapshot_reference_ids),
         character_name=character_name,
         authorized_project_ids=cast(list[str], authorized_project_ids),
     )
