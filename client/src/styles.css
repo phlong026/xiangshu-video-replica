@@ -2386,6 +2386,10 @@ button.history-version--active {
   color: #ffcf8a;
 }
 
+.status-note--error {
+  color: #ff9aa8;
+}
+
 .batch-panel {
   margin-top: 22px;
 }
@@ -2578,6 +2582,18 @@ button.history-version--active {
   background: #21182f;
 }
 
+/* 卡片容器为 div：主体 button 负责打开批次，hover 操作区放重命名/删除。 */
+.batch-history-card__main {
+  display: grid;
+  gap: 7px;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
 .batch-history-card__title strong {
   overflow: hidden;
   color: #f4efff;
@@ -2585,7 +2601,7 @@ button.history-version--active {
   white-space: nowrap;
 }
 
-.batch-history-card > span:not(.batch-history-card__title) {
+.batch-history-card__main > span:not(.batch-history-card__title) {
   font-size: 12px;
 }
 
@@ -2595,6 +2611,52 @@ button.history-version--active {
   color: #a49db0;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 操作区默认淡出，hover 卡片或键盘聚焦时出现。 */
+.batch-history-card__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.batch-history-card:hover .batch-history-card__actions,
+.batch-history-card__actions:focus-within {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .batch-history-card__actions {
+    opacity: 1;
+  }
+}
+
+.batch-history-card__actions button {
+  padding: 6px 11px;
+  font-size: 12px;
+}
+
+/* 批次卡行内重命名：与项目列表改名一致的编辑条。 */
+.batch-history-edit {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #8f63d8;
+  border-radius: 10px;
+  padding: 10px;
+  background: #21182f;
+}
+
+.batch-history-edit input {
+  flex: 1;
+  min-width: 0;
+}
+
+.batch-history-edit button {
+  padding: 7px 13px;
+  font-size: 13px;
 }
 
 .load-more-button {

@@ -185,10 +185,28 @@ export interface paths {
     get: operations["read_generation_batch_api_generation_batches__batch_id__get"];
     put?: never;
     post?: never;
-    delete?: never;
+    /** Delete Generation Batch Record */
+    delete: operations["delete_generation_batch_record_api_generation_batches__batch_id__delete"];
     options?: never;
     head?: never;
     patch?: never;
+    trace?: never;
+  };
+  "/api/generation-batches/{batch_id}/name": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    /** Rename Generation Batch Record */
+    patch: operations["rename_generation_batch_record_api_generation_batches__batch_id__name_patch"];
     trace?: never;
   };
   "/api/generation-batches/{batch_id}/regenerate": {
@@ -326,6 +344,23 @@ export interface paths {
     options?: never;
     head?: never;
     patch?: never;
+    trace?: never;
+  };
+  "/api/projects/{project_id}/name": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    /** Rename Project */
+    patch: operations["rename_project_api_projects__project_id__name_patch"];
     trace?: never;
   };
   "/api/projects/{project_id}": {
@@ -1305,6 +1340,26 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/simple-characters/library": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Read Simple Library
+     * @description List characters with their contact sheet and seven-view asset ids.
+     */
+    get: operations["read_simple_library_api_simple_characters_library_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/simple-characters/identities/{identity_id}/name": {
     parameters: {
       query?: never;
@@ -1325,6 +1380,51 @@ export interface paths {
     patch: operations["rename_identity_api_simple_characters_identities__identity_id__name_patch"];
     trace?: never;
   };
+  "/api/simple-characters/identities/{identity_id}/regenerate-contact-sheet": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Regenerate Contact Sheet
+     * @description Re-run the five-view contact sheet from the original source photo.
+     *
+     *     Reuses the identity's stored authorization photo with the same
+     *     identity-preserve prompt, publishes the result as the next character
+     *     version, and keeps the previous published version untouched so projects
+     *     already bound to it continue to work.
+     */
+    post: operations["regenerate_contact_sheet_api_simple_characters_identities__identity_id__regenerate_contact_sheet_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/simple-characters/identities/{identity_id}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    /**
+     * Delete Identity
+     * @description Delete a character identity with all derived assets (owner or admin).
+     */
+    delete: operations["delete_identity_api_simple_characters_identities__identity_id__delete"];
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/simple-characters/{project_id}/generate": {
     parameters: {
       query?: never;
@@ -1339,9 +1439,10 @@ export interface paths {
      * @description Upload one authorization image and publish a seven-view character.
      *
      *     The image is stored as both the authorization proof and the source asset,
-     *     the seven standard views are generated locally, auto-approved, and the
-     *     resulting character version is published so it immediately appears in the
-     *     project's available character version list.
+     *     a single seven-view contact sheet plus the seven standard views are
+     *     generated, auto-approved, and the resulting character version is
+     *     published so it immediately appears in the project's available character
+     *     version list.
      */
     post: operations["generate_simple_character_api_simple_characters__project_id__generate_post"];
     delete?: never;
@@ -1434,6 +1535,8 @@ export interface components {
       quantity: number;
       /** Stale */
       stale: boolean;
+      /** Display Name */
+      display_name?: string | null;
       /** Source Batch Id */
       source_batch_id?: string | null;
       /** Source Task Id */
@@ -2058,7 +2161,7 @@ export interface components {
     GenerateFirstFramesRequest: {
       /**
        * Model
-       * @default nano-banana-pro-2k
+       * @default gpt-image-2
        * @enum {string}
        */
       model: "gpt-image-2" | "nano-banana-pro-2k";
@@ -2096,6 +2199,8 @@ export interface components {
       created_at: string;
       /** Updated At */
       updated_at: string;
+      /** Display Name */
+      display_name?: string | null;
       /** Source Batch Id */
       source_batch_id?: string | null;
       /** Source Task Id */
@@ -2120,6 +2225,11 @@ export interface components {
       items: components["schemas"]["GenerationBatchListItem"][];
       /** Next Cursor */
       next_cursor: string | null;
+    };
+    /** GenerationBatchRenameRequest */
+    GenerationBatchRenameRequest: {
+      /** Display Name */
+      display_name: string;
     };
     /** GenerationBatchRequest */
     GenerationBatchRequest: {
@@ -2460,6 +2570,11 @@ export interface components {
       /** Idempotency Key */
       idempotency_key: string;
     };
+    /** RenameProjectRequest */
+    RenameProjectRequest: {
+      /** Name */
+      name: string;
+    };
     /** RuntimeSettingsRequest */
     RuntimeSettingsRequest: {
       /** Max Generation Count Per Batch */
@@ -2526,6 +2641,25 @@ export interface components {
       /** Download Url */
       download_url: string;
     };
+    /** SimpleCharacterRegenerationResponse */
+    SimpleCharacterRegenerationResponse: {
+      /** Identity Id */
+      identity_id: string;
+      /** Persona Id */
+      persona_id: string;
+      /** Character Version Id */
+      character_version_id: string;
+      /** Previous Version Id */
+      previous_version_id: string;
+      /** Version Number */
+      version_number: number;
+      /** Publication Hash */
+      publication_hash: string;
+      /** Contact Sheet Asset Id */
+      contact_sheet_asset_id: string;
+      /** Views */
+      views: components["schemas"]["SimpleCharacterViewResponse"][];
+    };
     /** SimpleCharacterResponse */
     SimpleCharacterResponse: {
       /** Identity Id */
@@ -2536,6 +2670,42 @@ export interface components {
       character_version_id: string;
       /** Publication Hash */
       publication_hash: string;
+      /** Contact Sheet Asset Id */
+      contact_sheet_asset_id: string;
+      /** Views */
+      views: components["schemas"]["SimpleCharacterViewResponse"][];
+    };
+    /** SimpleCharacterViewResponse */
+    SimpleCharacterViewResponse: {
+      /**
+       * View Type
+       * @enum {string}
+       */
+      view_type:
+        | "FRONT_FACE"
+        | "FRONT_HALF"
+        | "FRONT_FULL"
+        | "LEFT_45"
+        | "RIGHT_45"
+        | "LEFT_SIDE"
+        | "RIGHT_SIDE";
+      /** Asset Id */
+      asset_id: string;
+    };
+    /** SimpleLibraryEntryResponse */
+    SimpleLibraryEntryResponse: {
+      /** Identity Id */
+      identity_id: string;
+      /** Display Name */
+      display_name: string;
+      /** Owner User Id */
+      owner_user_id: string | null;
+      /** Status */
+      status: string;
+      /** Contact Sheet Asset Id */
+      contact_sheet_asset_id: string | null;
+      /** Views */
+      views: components["schemas"]["SimpleCharacterViewResponse"][];
     };
     /** SimpleUploadIntentResponse */
     SimpleUploadIntentResponse: {
@@ -3254,6 +3424,74 @@ export interface operations {
       };
     };
   };
+  delete_generation_batch_record_api_generation_batches__batch_id__delete: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        batch_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      204: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  rename_generation_batch_record_api_generation_batches__batch_id__name_patch: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        batch_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["GenerationBatchRenameRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["BatchResult"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   regenerate_batch_api_generation_batches__batch_id__regenerate_post: {
     parameters: {
       query?: never;
@@ -3559,6 +3797,43 @@ export interface operations {
     responses: {
       /** @description Successful Response */
       201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ProjectResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  rename_project_api_projects__project_id__name_patch: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        project_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["RenameProjectRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
         headers: {
           [name: string]: unknown;
         };
@@ -5880,6 +6155,37 @@ export interface operations {
       };
     };
   };
+  read_simple_library_api_simple_characters_library_get: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["SimpleLibraryEntryResponse"][];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   rename_identity_api_simple_characters_identities__identity_id__name_patch: {
     parameters: {
       query?: never;
@@ -5903,8 +6209,72 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          "application/json": unknown;
+          "application/json": components["schemas"]["PersonIdentity"];
         };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  regenerate_contact_sheet_api_simple_characters_identities__identity_id__regenerate_contact_sheet_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        identity_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["SimpleCharacterRegenerationResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  delete_identity_api_simple_characters_identities__identity_id__delete: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        identity_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      204: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
       };
       /** @description Validation Error */
       422: {

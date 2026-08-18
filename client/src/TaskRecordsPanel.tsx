@@ -9,6 +9,7 @@ import {
 import {
   confirmGenerationTaskNotCharged,
   createGenerationResultPreviewUrl,
+  deleteGenerationBatch,
   downloadGenerationResult,
   type GenerationBatch,
   type GenerationBatchListItem,
@@ -18,6 +19,7 @@ import {
   reconcileUncertainTask,
   regenerateGenerationBatch,
   regenerateGenerationTask,
+  renameGenerationBatch,
   retryGenerationTask,
   type UserRole,
 } from "./api";
@@ -68,6 +70,12 @@ export function TaskRecordsPanel({
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [historyError, setHistoryError] = useState("");
   const [isHistoryLoading, setIsHistoryLoading] = useState(false);
+  // 批次卡重命名/删除与列表加载共用侧栏，操作消息单独一条通道。
+  const [editingBatchId, setEditingBatchId] = useState("");
+  const [editingBatchName, setEditingBatchName] = useState("");
+  const [renamingBatchId, setRenamingBatchId] = useState("");
+  const [deletingBatchId, setDeletingBatchId] = useState("");
+  const [batchActionError, setBatchActionError] = useState("");
   const historyRequestRef = useRef(0);
   // 在线播放：预签名 URL 由服务端管理过期，本地只缓存 task → url 映射。
   const [previewUrls, setPreviewUrls] = useState<Record<string, string>>({});
@@ -246,6 +254,98 @@ export function TaskRecordsPanel({
     const nextBatchId = batchIdInput.trim();
     if (nextBatchId) {
       selectBatch(nextBatchId);
+    }
+  }
+
+  function batchDisplayName(item: GenerationBatchListItem): string {
+    return item.display_name ?? item.project_name;
+  }
+
+  function startBatchRename(item: GenerationBatchListItem) {
+    setEditingBatchId(item.id);
+    setEditingBatchName(batchDisplayName(item));
+    setBatchActionError("");
+  }
+
+  function cancelBatchRename() {
+    setEditingBatchId("");
+    setEditingBatchName("");
+    setRenamingBatchId("");
+  }
+
+  async function saveBatchRename(item: GenerationBatchListItem) {
+    const displayName = editingBatchName.trim();
+    if (!displayName) {
+      setBatchActionError("批次名称不能为空。");
+      return;
+    }
+    if (displayName === batchDisplayName(item)) {
+      cancelBatchRename();
+      return;
+    }
+    setRenamingBatchId(item.id);
+    setBatchActionError("");
+    try {
+      const updated = await renameGenerationBatch(item.id, displayName);
+      setBatchHistory((current) =>
+        current.map((entry) =>
+          entry.id === updated.id
+            ? { ...entry, display_name: updated.display_name ?? null }
+            : entry,
+        ),
+      );
+      if (activeBatchIdRef.current === updated.id) {
+        setBatch((current) =>
+          current && current.id === updated.id
+            ? { ...current, display_name: updated.display_name }
+            : current,
+        );
+      }
+      cancelBatchRename();
+    } catch (error) {
+      setBatchActionError(
+        error instanceof Error ? error.message : "修改批次名称失败，请重试。",
+      );
+    } finally {
+      setRenamingBatchId("");
+    }
+  }
+
+  // 删除是物理删除（批次+任务+云端产物），付费记录删除后不可恢复，
+  // confirm 文案必须明示；有进行中任务时服务端会以 409 拒绝。
+  async function handleDeleteBatch(item: GenerationBatchListItem) {
+    const displayName = batchDisplayName(item);
+    const confirmed = window.confirm(
+      `删除批次「${displayName}」将同时删除其全部任务记录与云端结果文件，已产生的付费记录删除后不可恢复。确定删除？`,
+    );
+    if (!confirmed) {
+      return;
+    }
+    setDeletingBatchId(item.id);
+    setBatchActionError("");
+    try {
+      await deleteGenerationBatch(item.id);
+      const remaining = batchHistory.filter((entry) => entry.id !== item.id);
+      setBatchHistory(remaining);
+      if (activeBatchIdRef.current === item.id) {
+        if (remaining[0]) {
+          selectBatch(remaining[0].id);
+        } else {
+          releasePreviewUrls();
+          activeBatchIdRef.current = "";
+          setActiveBatchId("");
+          setBatchIdInput("");
+          setBatch(null);
+          setBatchError("");
+          clearStoredBatchId();
+        }
+      }
+    } catch (error) {
+      setBatchActionError(
+        error instanceof Error ? error.message : "删除批次失败，请重试。",
+      );
+    } finally {
+      setDeletingBatchId("");
     }
   }
 
@@ -534,44 +634,107 @@ export function TaskRecordsPanel({
               {historyError}
             </p>
           ) : null}
+          {batchActionError ? (
+            <p className="status-note status-note--error" role="status">
+              {batchActionError}
+            </p>
+          ) : null}
           {isHistoryLoading && batchHistory.length === 0 ? (
             <p className="muted">正在加载项目任务记录…</p>
           ) : null}
           <ul className="batch-history-list">
-            {batchHistory.map((item) => (
-              <li key={item.id}>
-                <button
-                  aria-label={`打开批次 ${item.id}`}
-                  aria-pressed={item.id === activeBatchId}
-                  className={
-                    item.id === activeBatchId
-                      ? "batch-history-card batch-history-card--active"
-                      : "batch-history-card"
-                  }
-                  onClick={() => selectBatch(item.id)}
-                  type="button"
-                >
-                  <span className="batch-history-card__title">
-                    <strong>{item.project_name}</strong>
-                    <span
-                      className={`batch-status batch-status--${item.status.toLowerCase()}`}
+            {batchHistory.map((item) => {
+              const displayName = batchDisplayName(item);
+              const isEditing = editingBatchId === item.id;
+              const isRenaming = renamingBatchId === item.id;
+              const isDeleting = deletingBatchId === item.id;
+              return (
+                <li key={item.id}>
+                  {isEditing ? (
+                    <div className="batch-history-edit">
+                      <input
+                        aria-label="修改批次名称"
+                        onChange={(event) =>
+                          setEditingBatchName(event.target.value)
+                        }
+                        type="text"
+                        value={editingBatchName}
+                      />
+                      <button
+                        disabled={isRenaming}
+                        onClick={() => void saveBatchRename(item)}
+                        type="button"
+                      >
+                        {isRenaming ? "正在保存…" : "保存"}
+                      </button>
+                      <button
+                        className="secondary-button"
+                        disabled={isRenaming}
+                        onClick={cancelBatchRename}
+                        type="button"
+                      >
+                        取消
+                      </button>
+                    </div>
+                  ) : (
+                    <div
+                      className={
+                        item.id === activeBatchId
+                          ? "batch-history-card batch-history-card--active"
+                          : "batch-history-card"
+                      }
                     >
-                      {formatStatus(item.status)}
-                    </span>
-                  </span>
-                  <span className="batch-history-card__meta">
-                    {item.created_by_display_name} ·{" "}
-                    {item.progress.progress_percent}% · {item.quantity} 个任务 ·{" "}
-                    {formatTimestamp(item.created_at)}
-                  </span>
-                  {item.needs_attention_count ? (
-                    <span className="attention-tag">
-                      需处理 {item.needs_attention_count}
-                    </span>
-                  ) : null}
-                </button>
-              </li>
-            ))}
+                      <button
+                        aria-label={`打开批次 ${item.id}`}
+                        aria-pressed={item.id === activeBatchId}
+                        className="batch-history-card__main"
+                        onClick={() => selectBatch(item.id)}
+                        type="button"
+                      >
+                        <span className="batch-history-card__title">
+                          <strong>{displayName}</strong>
+                          <span
+                            className={`batch-status batch-status--${item.status.toLowerCase()}`}
+                          >
+                            {formatStatus(item.status)}
+                          </span>
+                        </span>
+                        <span className="batch-history-card__meta">
+                          {item.created_by_display_name} ·{" "}
+                          {item.progress.progress_percent}% · {item.quantity}{" "}
+                          个任务 · {formatTimestamp(item.created_at)}
+                        </span>
+                        {item.needs_attention_count ? (
+                          <span className="attention-tag">
+                            需处理 {item.needs_attention_count}
+                          </span>
+                        ) : null}
+                      </button>
+                      {canOperate ? (
+                        <div className="batch-history-card__actions">
+                          <button
+                            className="secondary-button"
+                            onClick={() => startBatchRename(item)}
+                            type="button"
+                          >
+                            重命名
+                          </button>
+                          <button
+                            aria-label={`删除批次 ${displayName}`}
+                            className="secondary-button batch-delete-button"
+                            disabled={isDeleting}
+                            onClick={() => void handleDeleteBatch(item)}
+                            type="button"
+                          >
+                            {isDeleting ? "正在删除…" : "删除"}
+                          </button>
+                        </div>
+                      ) : null}
+                    </div>
+                  )}
+                </li>
+              );
+            })}
           </ul>
           {nextCursor ? (
             <button
