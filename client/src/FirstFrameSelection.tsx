@@ -191,6 +191,7 @@ export function FirstFrameSelection({
       projectId,
       readOnly,
       referenceSelectionId,
+      simplified,
       sourceFrameSelectionId,
     ],
   );

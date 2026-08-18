@@ -323,12 +323,12 @@ input:focus {
   top: 0;
   max-width: 1420px;
   margin: 0 auto;
-  padding: 28px 0 22px;
+  padding: 20px 0 16px;
   background: linear-gradient(180deg, #0b0b0e 75%, rgba(9, 9, 19, 0));
 }
 
 .workspace-breadcrumb {
-  margin: 0 0 14px;
+  margin: 0 0 8px;
   color: #8d8b9b;
   font-size: 13px;
 }
@@ -336,17 +336,33 @@ input:focus {
 .workspace-title-row {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 16px;
+}
+
+.workspace-title-group {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 12px;
+  min-width: 0;
 }
 
 .workspace-title-row h1 {
   margin: 0;
   color: #f6f4fb;
-  font-size: clamp(28px, 3vw, 38px);
-  font-weight: 720;
-  letter-spacing: -0.045em;
-  line-height: 1.1;
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.25;
   text-wrap: balance;
+}
+
+.workspace-subtitle {
+  margin: 0;
+  color: #8d8b9b;
+  font-size: 13px;
+  line-height: 1.5;
 }
 
 .workspace-body {
@@ -388,6 +404,20 @@ input:focus {
 .projects-page {
   display: grid;
   gap: 18px;
+}
+
+.projects-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.list-caption {
+  color: #8d8798;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
 }
 
 .projects-upload-zone {
@@ -576,6 +606,12 @@ input:focus {
 .flow-header h2 {
   margin: 0 0 4px;
   font-size: 18px;
+}
+
+.flow-header__note {
+  margin: 0;
+  color: #8d8798;
+  font-size: 13px;
 }
 
 .flow-header p {
@@ -2354,26 +2390,6 @@ button.history-version--active {
 }
 
 /* 运维详情第二段：异常与来源信息集中在一个面板内，不再平铺四条横幅。 */
-.batch-attention-panel {
-  display: grid;
-  gap: 10px;
-  margin-top: 14px;
-  border: 1px solid #2c2c34;
-  border-radius: 10px;
-  padding: 13px;
-  background: #101014;
-}
-
-.batch-attention-panel .batch-lineage {
-  margin-top: 0;
-}
-
-.batch-attention-panel .historical-failure-summary,
-.batch-attention-panel .stale-banner,
-.batch-attention-panel .attention-banner {
-  margin: 0;
-}
-
 .attention-banner {
   border: 1px solid #6a4b24;
   border-radius: 8px;
@@ -2644,6 +2660,28 @@ button.history-version--active {
   font-size: 13px;
 }
 
+/* 运维详情第二段面板：以上方各横幅/来源条为子元素做收纳，复合选择器
+   需声明在对应基础规则之后（noDescendingSpecificity）。 */
+.batch-attention-panel {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+  border: 1px solid #2c2c34;
+  border-radius: 10px;
+  padding: 13px;
+  background: #101014;
+}
+
+.batch-attention-panel .batch-lineage {
+  margin-top: 0;
+}
+
+.batch-attention-panel .historical-failure-summary,
+.batch-attention-panel .stale-banner,
+.batch-attention-panel .attention-banner {
+  margin: 0;
+}
+
 .paid-regeneration-controls {
   margin-top: 14px;
   border-color: #6a4b24;
@@ -2747,13 +2785,23 @@ button.history-version--active {
 /* —— 生成结果舞台（客户视角） —————————————————————— */
 
 .task-view-switch {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.task-view-switch__tabs {
   display: inline-flex;
   gap: 4px;
-  margin-bottom: 16px;
   border: 1px solid var(--line);
   border-radius: 999px;
   padding: 4px;
   background: var(--panel);
+}
+
+.task-view-switch .batch-id {
+  margin-left: auto;
 }
 
 .task-view-switch__button {

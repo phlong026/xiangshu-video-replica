@@ -194,11 +194,11 @@ export function App() {
   const workspacePage = page as WorkspacePage;
   const currentRole = currentUser.role;
   const analysisWorkspaceSession = activeAnalysisSessionRef.current;
-  const workspaceTitle =
-    activeAnalysisProject?.name ?? pageTitle(workspacePage);
-  const breadcrumb = activeAnalysisProject
-    ? `项目 / ${activeAnalysisProject.name}`
-    : `工作台 / ${pageTitle(workspacePage)}`;
+  // 嵌套上下文（拆解工作区 / 生成流程详情）：页头显示"项目 / 项目名"，
+  // 标题即项目名；一级页面只有 H1 + 副标题，不再渲染面包屑（侧边栏
+  // 选中态已回答"我在哪"，避免标题三层堆叠）。
+  const nestedProject = activeAnalysisProject ?? activeDetailProject;
+  const workspaceTitle = nestedProject?.name ?? pageTitle(workspacePage);
 
   function navigateTo(nextPage: WorkspacePage) {
     if (!workspacePageAllowed(nextPage, currentRole)) {
@@ -279,12 +279,19 @@ export function App() {
       />
       <section className="workspace-stage">
         <header className="workspace-header">
-          <div>
-            <p className="workspace-breadcrumb">{breadcrumb}</p>
-            <div className="workspace-title-row">
+          {nestedProject ? (
+            <p className="workspace-breadcrumb">{`项目 / ${nestedProject.name}`}</p>
+          ) : null}
+          <div className="workspace-title-row">
+            <div className="workspace-title-group">
               <h1>{workspaceTitle}</h1>
-              <ServiceBadge state={serviceState} />
+              {nestedProject ? null : (
+                <p className="workspace-subtitle">
+                  {pageSubtitle(workspacePage)}
+                </p>
+              )}
             </div>
+            <ServiceBadge state={serviceState} />
           </div>
         </header>
         <div className="workspace-body">
@@ -505,6 +512,16 @@ function pageTitle(page: WorkspacePage): string {
     projects: "项目",
     settings: "设置",
     tasks: "任务记录",
+  }[page];
+}
+
+// 一级页面的引导副标题：随页头一次性说明该页做什么，页面内部不再重复标题。
+function pageSubtitle(page: WorkspacePage): string {
+  return {
+    characters: "上传一张图片一键生成五视角拼合图，供项目选用。",
+    projects: "上传参考视频，拆解提示词，配首帧生成新视频。",
+    settings: "管理各服务连接凭据与运行参数。",
+    tasks: "查看生成批次，播放结果并处理异常任务。",
   }[page];
 }
 

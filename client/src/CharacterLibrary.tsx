@@ -264,12 +264,6 @@ export function CharacterLibrary({
 
   return (
     <section aria-label="人物库" className="character-library-simple">
-      <div className="character-library-simple__head">
-        <h2>人物库</h2>
-        <p className="status-note">
-          上传一张图片即可一键生成单张五视角拼合图；生成后可预览、下载，并在项目中选用。
-        </p>
-      </div>
       {canManage ? (
         <SimpleCharacterUpload
           onCreated={(result, displayName) =>

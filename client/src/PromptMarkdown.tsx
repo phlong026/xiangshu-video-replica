@@ -151,11 +151,13 @@ export function PromptMarkdown({
         <div className="prompt-md__preview">
           {blocks.map((block, index) =>
             block.kind === "shot" ? (
+              // biome-ignore lint/suspicious/noArrayIndexKey: 每次渲染由文本重新解析的纯展示列表，无重排/增删，顺序即内容。
               <p className="prompt-md__shot" key={index}>
                 <span className="prompt-md__timecode">{block.range}</span>
                 <span>{block.text}</span>
               </p>
             ) : (
+              // biome-ignore lint/suspicious/noArrayIndexKey: 每次渲染由文本重新解析的纯展示列表，无重排/增删，顺序即内容。
               <p className="prompt-md__paragraph" key={index}>
                 {block.text}
               </p>

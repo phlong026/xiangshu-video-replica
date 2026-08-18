@@ -268,7 +268,7 @@ describe("App", () => {
       await screen.findByText("还没有项目。上传第一个参考视频即可开始复刻。"),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("heading", { level: 2, name: "项目" }),
+      screen.getByRole("heading", { level: 1, name: "项目" }),
     ).toBeInTheDocument();
     expect(screen.getByLabelText("选择一个或多个参考视频")).toHaveAttribute(
       "accept",
@@ -1791,7 +1791,7 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "设置" }));
 
     expect(
-      await screen.findByRole("heading", { name: "服务设置" }),
+      await screen.findByRole("heading", { name: "视频生成" }),
     ).toBeInTheDocument();
     const apiKeyInput = screen.getAllByLabelText("API Key")[0];
     expect(apiKeyInput).toHaveValue("");

@@ -513,16 +513,7 @@ export function TaskRecordsPanel({
   }
 
   return (
-    <section className="task-records" aria-labelledby="task-records-title">
-      <div className="section-heading">
-        <div>
-          <h2 id="task-records-title">任务记录</h2>
-        </div>
-        {activeBatchId ? (
-          <span className="batch-id">{activeBatchId}</span>
-        ) : null}
-      </div>
-
+    <section className="task-records" aria-label="任务记录">
       <div className="task-records-layout">
         <aside className="batch-history-panel" aria-label="批次历史">
           <div className="batch-history-heading">
@@ -603,30 +594,37 @@ export function TaskRecordsPanel({
           {batch ? (
             <>
               <section aria-label="任务视图切换" className="task-view-switch">
-                <button
-                  aria-pressed={viewMode === "stage"}
-                  className={
-                    viewMode === "stage"
-                      ? "task-view-switch__button task-view-switch__button--active"
-                      : "task-view-switch__button"
-                  }
-                  onClick={() => setViewMode("stage")}
-                  type="button"
-                >
-                  生成结果
-                </button>
-                <button
-                  aria-pressed={viewMode === "ops"}
-                  className={
-                    viewMode === "ops"
-                      ? "task-view-switch__button task-view-switch__button--active"
-                      : "task-view-switch__button"
-                  }
-                  onClick={() => setViewMode("ops")}
-                  type="button"
-                >
-                  运维详情
-                </button>
+                <div className="task-view-switch__tabs">
+                  <button
+                    aria-pressed={viewMode === "stage"}
+                    className={
+                      viewMode === "stage"
+                        ? "task-view-switch__button task-view-switch__button--active"
+                        : "task-view-switch__button"
+                    }
+                    onClick={() => setViewMode("stage")}
+                    type="button"
+                  >
+                    生成结果
+                  </button>
+                  <button
+                    aria-pressed={viewMode === "ops"}
+                    className={
+                      viewMode === "ops"
+                        ? "task-view-switch__button task-view-switch__button--active"
+                        : "task-view-switch__button"
+                    }
+                    onClick={() => setViewMode("ops")}
+                    type="button"
+                  >
+                    运维详情
+                  </button>
+                </div>
+                {activeBatchId ? (
+                  <span className="batch-id" title={activeBatchId}>
+                    {activeBatchId}
+                  </span>
+                ) : null}
               </section>
               {viewMode === "stage" ? (
                 <VideoResultStage

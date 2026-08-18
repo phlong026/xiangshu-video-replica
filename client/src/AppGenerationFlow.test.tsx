@@ -123,7 +123,7 @@ describe("App generation handoff", () => {
     await openProjectGenerationFlow();
 
     expect(
-      await screen.findByRole("heading", { level: 2, name: "任务记录" }),
+      await screen.findByRole("heading", { level: 1, name: "任务记录" }),
     ).toBeInTheDocument();
     expect(screen.getByText(batch.id)).toBeInTheDocument();
     expect(window.location.hash).toBe("#tasks");
@@ -151,7 +151,7 @@ describe("App generation handoff", () => {
     await openProjectGenerationFlow();
 
     expect(
-      await screen.findByRole("heading", { level: 2, name: "任务记录" }),
+      await screen.findByRole("heading", { level: 1, name: "任务记录" }),
     ).toBeInTheDocument();
     expect(screen.getByText(batch.id)).toBeInTheDocument();
     expect(window.location.hash).toBe("#tasks");
@@ -207,7 +207,7 @@ describe("App generation handoff", () => {
     expect(screen.getByRole("button", { name: "任务记录" })).toBeEnabled();
     fireEvent.click(screen.getByRole("button", { name: "任务记录" }));
     expect(
-      await screen.findByRole("heading", { level: 2, name: "任务记录" }),
+      await screen.findByRole("heading", { level: 1, name: "任务记录" }),
     ).toBeInTheDocument();
   });
 
@@ -227,7 +227,7 @@ describe("App generation handoff", () => {
     fireEvent.click(screen.getByRole("button", { name: "模拟一键生成完成" }));
 
     expect(
-      await screen.findByRole("heading", { level: 2, name: "任务记录" }),
+      await screen.findByRole("heading", { level: 1, name: "任务记录" }),
     ).toBeInTheDocument();
     expect(window.location.hash).toBe("#tasks");
     expect(screen.getByText(batch.id)).toBeInTheDocument();

@@ -193,6 +193,7 @@ export function ProjectDetailFlow({
   // 人物参考全自动匹配：角色与源画面确认后服务端自动创建推荐集
   // （selected 省略 → 推荐集），无人工确认。每个「角色版本 × 源画面版本」
   // 组合只自动尝试一次，失败可手动重试。
+  // biome-ignore lint/correctness/useExhaustiveDependencies(referenceRetryCount): 重试按钮递增该计数器以触发本 effect 重新匹配。
   useEffect(() => {
     if (
       readOnly ||
@@ -412,7 +413,7 @@ export function ProjectDetailFlow({
       // 用户在第一段编辑另存过提示词时，把编辑文本套用到本次编译结果的
       // 之上（revise 基于最新编译版本），提交的仍是用户确认过的全文。
       let promptVersionId = compiled.id;
-      if (revisedPromptText && revisedPromptText.trim()) {
+      if (revisedPromptText?.trim()) {
         const revised = await reviseGenerationPrompt(project.id, {
           base_prompt_version_id: compiled.id,
           prompt_text: revisedPromptText,
@@ -496,7 +497,10 @@ export function ProjectDetailFlow({
     <section aria-label={`生成流程 ${project.name}`} className="flow-page">
       <header className="flow-header">
         <div>
-          <h2>生成流程 · {project.name}</h2>
+          <h2>生成流程</h2>
+          <p className="flow-header__note">
+            解析 → 源画面人物 → 首帧文案 → 提交生成
+          </p>
         </div>
         <button
           className="secondary-button"

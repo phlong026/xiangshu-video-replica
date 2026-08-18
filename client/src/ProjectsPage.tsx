@@ -313,15 +313,7 @@ export function ProjectsPage({
   }
 
   return (
-    <section className="projects-page" aria-labelledby="projects-title">
-      <div className="section-heading">
-        <div>
-          <h2 id="projects-title">项目</h2>
-          <p>上传参考视频，拆解提示词，配首帧生成新视频。</p>
-        </div>
-        <span className="project-count">{projects.length} 个项目</span>
-      </div>
-
+    <section className="projects-page" aria-label="项目">
       {canWrite ? (
         <div className="projects-upload-zone">
           <input
@@ -453,69 +445,78 @@ export function ProjectsPage({
       ) : null}
 
       {!isProjectsLoading && !projectsError && projects.length ? (
-        <ul className="projects-list">
-          {projects.map((project) => {
-            const isAnalyzed = project.analysis_status === "READY";
-            return (
-              <li className="projects-list__item" key={project.id}>
-                <div className="projects-list__row">
-                  <button
-                    aria-label={`打开项目 ${project.name}`}
-                    className="projects-list__main"
-                    onClick={() => onOpenAnalysis(project)}
-                    type="button"
-                  >
-                    <strong>{project.name}</strong>
-                    <span className="projects-list__meta">
-                      {renderStatusBadge(project)}
-                    </span>
-                  </button>
-                  <div className="projects-list__actions">
-                    {isAnalyzed && canWrite ? (
-                      <button
-                        className="projects-generate-button"
-                        onClick={() => onOpenDetail(project)}
-                        type="button"
-                      >
-                        生成视频
-                      </button>
-                    ) : null}
-                    {isAnalyzed ? (
-                      <button
-                        className="secondary-button"
-                        onClick={() => onOpenDetail(project)}
-                        type="button"
-                      >
-                        查看流程
-                      </button>
-                    ) : null}
-                    {project.reference_upload_status !== "READY" && canWrite ? (
-                      <button
-                        className="secondary-button"
-                        disabled={isUploading || Boolean(deletingProjectId)}
-                        onClick={() => requestRebind(project)}
-                        type="button"
-                      >
-                        重新上传
-                      </button>
-                    ) : null}
-                    {canWrite ? (
-                      <button
-                        aria-label={`删除项目 ${project.name}`}
-                        className="secondary-button project-delete-button"
-                        disabled={isUploading || Boolean(deletingProjectId)}
-                        onClick={() => void handleDeleteProject(project)}
-                        type="button"
-                      >
-                        {deletingProjectId === project.id ? "正在删除" : "删除"}
-                      </button>
-                    ) : null}
+        <>
+          <div className="projects-list-header">
+            <span className="list-caption">项目列表</span>
+            <span className="project-count">{projects.length} 个项目</span>
+          </div>
+          <ul className="projects-list">
+            {projects.map((project) => {
+              const isAnalyzed = project.analysis_status === "READY";
+              return (
+                <li className="projects-list__item" key={project.id}>
+                  <div className="projects-list__row">
+                    <button
+                      aria-label={`打开项目 ${project.name}`}
+                      className="projects-list__main"
+                      onClick={() => onOpenAnalysis(project)}
+                      type="button"
+                    >
+                      <strong>{project.name}</strong>
+                      <span className="projects-list__meta">
+                        {renderStatusBadge(project)}
+                      </span>
+                    </button>
+                    <div className="projects-list__actions">
+                      {isAnalyzed && canWrite ? (
+                        <button
+                          className="projects-generate-button"
+                          onClick={() => onOpenDetail(project)}
+                          type="button"
+                        >
+                          生成视频
+                        </button>
+                      ) : null}
+                      {isAnalyzed ? (
+                        <button
+                          className="secondary-button"
+                          onClick={() => onOpenDetail(project)}
+                          type="button"
+                        >
+                          查看流程
+                        </button>
+                      ) : null}
+                      {project.reference_upload_status !== "READY" &&
+                      canWrite ? (
+                        <button
+                          className="secondary-button"
+                          disabled={isUploading || Boolean(deletingProjectId)}
+                          onClick={() => requestRebind(project)}
+                          type="button"
+                        >
+                          重新上传
+                        </button>
+                      ) : null}
+                      {canWrite ? (
+                        <button
+                          aria-label={`删除项目 ${project.name}`}
+                          className="secondary-button project-delete-button"
+                          disabled={isUploading || Boolean(deletingProjectId)}
+                          onClick={() => void handleDeleteProject(project)}
+                          type="button"
+                        >
+                          {deletingProjectId === project.id
+                            ? "正在删除"
+                            : "删除"}
+                        </button>
+                      ) : null}
+                    </div>
                   </div>
-                </div>
-              </li>
-            );
-          })}
-        </ul>
+                </li>
+              );
+            })}
+          </ul>
+        </>
       ) : null}
 
       {!isProjectsLoading && !projectsError && !projects.length ? (
