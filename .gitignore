@@ -40,3 +40,6 @@ data/
 *.db
 *.db-shm
 *.db-wal
+
+# ChatGPT 项目同步工具生成的镜像副本
+AGENTS_副本.md
