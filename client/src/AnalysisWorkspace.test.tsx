@@ -1121,6 +1121,133 @@ describe("AnalysisWorkspace workflow gates", () => {
     ).toBeInTheDocument();
   });
 
+  it("标签页①：旧镜头卡补标运动后展开结构化编辑并自动保存 motion", async () => {
+    vi.mocked(api.getLatestProjectAnalysis).mockResolvedValue({
+      id: "analysis-1",
+      project_id: "project-1",
+      asset_id: "reference-video-1",
+      kind: "analysis",
+      version_number: 1,
+      payload: {
+        analysis: {
+          summary: "拆解完成",
+          duration_seconds: 8,
+          original_script: "原始口播稿",
+          shots: [editableShot],
+        },
+      },
+      created_by_user_id: "employee_1",
+      created_at: "2030-01-01T00:00:00Z",
+    });
+    vi.mocked(api.getLatestProjectShotCards).mockResolvedValue({
+      id: "shot-card-2",
+      project_id: "project-1",
+      asset_id: null,
+      kind: "shot_card",
+      version_number: 2,
+      payload: {
+        source_analysis_version_id: "analysis-1",
+        duration_seconds: 8,
+        shots: [editableShot],
+      },
+      created_by_user_id: "employee_1",
+      created_at: "2030-01-01T00:00:00Z",
+    });
+    vi.mocked(api.getLatestScriptVersion).mockResolvedValue({
+      version: {
+        ...savedScriptVersion,
+        payload: {
+          ...savedScriptVersion.payload,
+          shot_card_version_id: "shot-card-2",
+        },
+      },
+      stale: false,
+      stale_reasons: [],
+    });
+    const savedMotion: api.ShotMotion = {
+      subject_motion_state: "WALKING",
+      subject_direction: "toward_camera",
+      subject_displacement: "向镜头走近两三步",
+      hand_action: "边走边自然摆臂",
+      camera_motion: "HANDHELD_TRACKING",
+      relative_motion: "人与镜头同向移动，机位缓慢后退",
+    };
+    vi.mocked(api.saveShotCards).mockResolvedValue({
+      id: "shot-card-3",
+      project_id: "project-1",
+      asset_id: null,
+      kind: "shot_card",
+      version_number: 3,
+      payload: {
+        source_analysis_version_id: "analysis-1",
+        duration_seconds: 8,
+        shots: [{ ...editableShot, motion: savedMotion }],
+      },
+      created_by_user_id: "employee_1",
+      created_at: "2030-01-01T00:00:01Z",
+    });
+
+    render(
+      <AnalysisWorkspace
+        currentUserId="employee_1"
+        onAnalysisReady={vi.fn()}
+        onBatchCreated={vi.fn()}
+        onClose={vi.fn()}
+        project={{
+          id: "project-1",
+          owner_user_id: "employee_1",
+          name: "运动补标测试",
+          status: "REFERENCE_READY",
+          reference_asset_id: "reference-video-1",
+          reference_upload_status: "READY",
+          analysis_status: "READY",
+        }}
+      />,
+    );
+
+    expect(await screen.findByText("拆解完成")).toBeInTheDocument();
+
+    // 旧拆解结果未标注运动：只渲染“未标注”状态下拉，细节控件不出现。
+    const stateSelect = screen.getByLabelText("S01 人物运动");
+    expect(stateSelect).toHaveValue("");
+    expect(screen.queryByLabelText("S01 运镜方式")).not.toBeInTheDocument();
+
+    // 选中“行走”后创建完整 motion 骨架并触发自动保存。
+    fireEvent.change(stateSelect, { target: { value: "WALKING" } });
+
+    await waitFor(() => expect(api.saveShotCards).toHaveBeenCalledOnce(), {
+      timeout: 3_000,
+    });
+    const firstSavedShots = vi.mocked(api.saveShotCards).mock.calls[0]?.[1] as
+      | api.ShotCard[]
+      | undefined;
+    expect(firstSavedShots?.[0]?.motion).toEqual({
+      subject_motion_state: "WALKING",
+      subject_direction: "none",
+      subject_displacement: "无位移",
+      hand_action: "未描述",
+      camera_motion: "STATIC",
+      relative_motion: "未描述",
+    });
+
+    // 展开后的运镜下拉可继续修改并再次自动保存。
+    const cameraSelect = await screen.findByLabelText("S01 运镜方式");
+    await waitFor(() => expect(cameraSelect).toBeEnabled());
+    fireEvent.change(cameraSelect, {
+      target: { value: "HANDHELD_TRACKING" },
+    });
+
+    await waitFor(() => expect(api.saveShotCards).toHaveBeenCalledTimes(2), {
+      timeout: 3_000,
+    });
+    const secondSavedShots = vi.mocked(api.saveShotCards).mock.calls[1]?.[1] as
+      | api.ShotCard[]
+      | undefined;
+    expect(secondSavedShots?.[0]?.motion?.camera_motion).toBe(
+      "HANDHELD_TRACKING",
+    );
+  });
+
   it("标签页①：口播稿脏稿时内容徽章显示缺失", async () => {
     vi.mocked(api.getLatestProjectAnalysis).mockResolvedValue({
       id: "analysis-1",

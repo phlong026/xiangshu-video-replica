@@ -49,20 +49,25 @@ from app.storage import (
 SCRIPT_KIND = "script"
 H3_PROMPT_KIND = "h3_prompt"
 GENERATION_SCHEMA_VERSION = "c.generation.v1"
-H3_PROMPT_TEMPLATE_VERSION = "h3.prompt.v2"
+H3_PROMPT_TEMPLATE_VERSION = "h3.prompt.v3"
 H3_PROMPT_TEMPLATE_SPEC = (
     (
         "intro",
-        "生成一条 {duration_seconds} 秒、{resolution}、写实短视频，从提供的首帧自然开始。",
+        "生成一条 {duration_seconds} 秒、{resolution}、写实短视频，从提供的首帧自然开始；"
+        "人物严格按各镜头的动作与运镜描述真实运动，不得僵立原地。",
     ),
     ("continuity", "保持首帧人物身份、服装、发型、场景和光线连续。"),
     (
         "shot",
         "[{start:.1f}-{end:.1f}s] {shot_type}，{composition}，{camera_motion}；"
-        "{subject}{action}，场景：{scene}，转场：{transition}。口播意图：{spoken}",
+        "主体：{subject}；人物动作：{motion_clause}；场景：{scene}，转场：{transition}。"
+        "口播意图：{spoken}",
     ),
     ("script", "口播意图：{full_text}"),
-    ("outro", "环境音与音乐保持自然；不要增加无关人物，不要身份突变、肢体异常或画面闪烁。"),
+    (
+        "outro",
+        "环境音与音乐保持自然；不要增加无关人物，不要身份突变、肢体异常或画面闪烁。",
+    ),
 )
 H3_PROMPT_TEMPLATES = dict(H3_PROMPT_TEMPLATE_SPEC)
 H3_PROMPT_TEMPLATE_HASH = hashlib.sha256(
@@ -72,6 +77,37 @@ H3_PROMPT_TEMPLATE_HASH = hashlib.sha256(
         separators=(",", ":"),
     ).encode()
 ).hexdigest()
+
+# 拆解结果 motion 枚举到中文运动指令的确定性映射：渲染逻辑在代码里，
+# 不依赖分析模型把“行走”写成好句子——只要状态枚举正确，Prompt 必然
+# 携带正向运动指令。
+SUBJECT_MOTION_STATE_CLAUSES = {
+    "STATIC": "人物保持站位，动作限于口播与手势，双脚位置不变",
+    "WALKING": "人物持续行走，每一步脚掌落地、重心自然转移、双臂随步态摆动，不得僵立原地",
+    "RUNNING": "人物持续跑动，步幅与摆臂真实连贯，不得僵立原地",
+    "TURNING": "人物原地转身，躯干与视线自然转动，双脚位置基本不变",
+    "GESTURING_ONLY": "人物站位固定，仅上半身与手部做手势和口播",
+    "OBJECT_MOTION": "画面主体为物体运动，无人物位移",
+    "NO_PERSON": "本镜头无人物出镜",
+}
+SUBJECT_DIRECTION_LABELS = {
+    "toward_camera": "向镜头方向",
+    "away_from_camera": "背离镜头方向",
+    "left": "向画面左侧",
+    "right": "向画面右侧",
+    "lateral": "横向移动",
+    "in_place": "原地",
+    "none": "无位移方向",
+}
+MOTION_CAMERA_MOTION_LABELS = {
+    "STATIC": "固定机位",
+    "PUSH_IN": "镜头缓慢推近",
+    "PULL_BACK": "镜头缓慢拉远",
+    "HANDHELD_TRACKING": "手持平稳跟拍",
+    "PAN": "镜头横摇",
+    "TILT": "镜头纵摇",
+    "FOLLOW": "镜头跟随主体",
+}
 PROMPT_STATUSES = {"SAVED", "LOCKED", "USED"}
 TERMINAL_STATUSES = {"FAILED", "CANCELLED"}
 H3_MODEL = "MiniMax-H3"
@@ -4234,6 +4270,53 @@ def map_script_to_shots(text: str, shots: list[dict[str, Any]]) -> list[dict[str
     return mappings
 
 
+def render_shot_motion_clause(shot: Mapping[str, Any]) -> str:
+    """把镜头的 motion 枚举确定性渲染成中文运动指令。
+
+    旧版拆解结果没有 motion 时回退到 action 文本（行为不劣化）；
+    motion 存在时由代码而不是模型措辞决定运动指令的强度。
+    """
+    motion = shot.get("motion")
+    if not isinstance(motion, Mapping):
+        return str(shot.get("action", ""))
+
+    state = str(motion.get("subject_motion_state", ""))
+    state_clause = SUBJECT_MOTION_STATE_CLAUSES.get(state, "")
+    direction = SUBJECT_DIRECTION_LABELS.get(
+        str(motion.get("subject_direction", "")), ""
+    )
+    displacement = str(motion.get("subject_displacement") or "")
+    hand_action = str(motion.get("hand_action") or "")
+    relative_motion = str(motion.get("relative_motion") or "")
+
+    parts: list[str] = []
+    action = str(shot.get("action") or "")
+    if action:
+        parts.append(action)
+    if state_clause:
+        if direction and direction not in ("无位移方向",):
+            parts.append(f"{state_clause}（{direction}）")
+        else:
+            parts.append(state_clause)
+    if displacement and displacement not in ("无位移", "无人物出镜"):
+        parts.append(f"位移：{displacement}")
+    if hand_action and hand_action not in ("无人物出镜",):
+        parts.append(f"手部：{hand_action}")
+    if relative_motion:
+        parts.append(f"相对运动：{relative_motion}")
+    return "；".join(parts) if parts else str(shot.get("action", ""))
+
+
+def shot_camera_motion_text(shot: Mapping[str, Any]) -> str:
+    """运镜描述：motion 枚举标签优先，旧数据用自由文本。"""
+    motion = shot.get("motion")
+    if isinstance(motion, Mapping):
+        label = MOTION_CAMERA_MOTION_LABELS.get(str(motion.get("camera_motion", "")))
+        if label:
+            return label
+    return str(shot.get("camera_motion", ""))
+
+
 def compile_prompt_text(
     *,
     script_payload: dict[str, Any],
@@ -4266,9 +4349,9 @@ def compile_prompt_text(
                 end=end,
                 shot_type=shot["shot_type"],
                 composition=shot["composition"],
-                camera_motion=shot["camera_motion"],
+                camera_motion=shot_camera_motion_text(shot),
                 subject=shot["subject"],
-                action=shot["action"],
+                motion_clause=render_shot_motion_clause(shot),
                 scene=shot["scene"],
                 transition=shot["transition"],
                 spoken=spoken,

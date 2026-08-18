@@ -150,6 +150,14 @@ def valid_analysis_payload() -> dict[str, object]:
                 "scene": "室内",
                 "spoken_text": "你好",
                 "transition": "硬切",
+                "motion": {
+                    "subject_motion_state": "GESTURING_ONLY",
+                    "subject_direction": "in_place",
+                    "subject_displacement": "无位移",
+                    "hand_action": "双手做自然讲解手势",
+                    "camera_motion": "PUSH_IN",
+                    "relative_motion": "镜头缓慢推近，人物站位不变",
+                },
             },
             {
                 "shot_id": "S02",
@@ -163,6 +171,14 @@ def valid_analysis_payload() -> dict[str, object]:
                 "scene": "桌面",
                 "spoken_text": "再见",
                 "transition": "淡出",
+                "motion": {
+                    "subject_motion_state": "OBJECT_MOTION",
+                    "subject_direction": "none",
+                    "subject_displacement": "无位移",
+                    "hand_action": "无人物出镜",
+                    "camera_motion": "STATIC",
+                    "relative_motion": "固定机位拍摄产品",
+                },
             },
         ],
     }
@@ -185,6 +201,37 @@ def test_fake_gemini_analysis_repairs_invalid_json_once() -> None:
     assert result.provider_response_ref["stored_as"] == "versions.payload_json"
     assert result.provider_response_ref["raw"]["text"] == '{"summary":'
     assert "video_uri" not in result.provider_response_ref["raw"]
+
+
+def test_analysis_rejects_shots_without_motion_and_repairs_once() -> None:
+    """缺 motion 的拆解结果必须触发 repair；修复后仍缺则整体失败。"""
+    payload_without_motion = valid_analysis_payload()
+    for shot in payload_without_motion["shots"]:
+        del shot["motion"]
+
+    provider = FakeGemini(
+        analysis_json=json.dumps(payload_without_motion),
+        repair_json=json.dumps(valid_analysis_payload()),
+    )
+    result = analyze_video(
+        video_uri="local://owned.mp4",
+        video_duration_seconds=10,
+        provider=provider,
+    )
+
+    assert provider.repair_calls == 1
+    assert all(shot.motion is not None for shot in result.analysis.shots)
+
+    provider_still_missing = FakeGemini(
+        analysis_json=json.dumps(payload_without_motion),
+        repair_json=json.dumps(payload_without_motion),
+    )
+    with pytest.raises(AnalysisProviderFailed, match="even after a repair attempt"):
+        analyze_video(
+            video_uri="local://owned.mp4",
+            video_duration_seconds=10,
+            provider=provider_still_missing,
+        )
 
 
 class RecordedApilioTransport:

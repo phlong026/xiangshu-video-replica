@@ -21,6 +21,7 @@ import {
   readFirstFrameSelectionPayload,
   readShotCardPayload,
   type ShotCard,
+  type ShotMotion,
   type SourceFrameCharacterFeatures,
   saveShotCards,
   startVideoAnalysis,
@@ -53,7 +54,32 @@ function toNonNegativeTime(value: string): number {
 }
 
 function copyShotCards(shots: ShotCard[]): ShotCard[] {
-  return shots.map((shot) => ({ ...shot }));
+  // motion 是嵌套对象，浅拷贝会让相邻行共享同一引用：编辑一行会“串改”
+  // 其他行的运动描述，脏检测也会误判，这里单独深拷一份。
+  return shots.map((shot) => ({
+    ...shot,
+    motion: shot.motion ? { ...shot.motion } : shot.motion,
+  }));
+}
+
+function motionEqual(
+  left: ShotMotion | null | undefined,
+  right: ShotMotion | null | undefined,
+): boolean {
+  if (left == null && right == null) {
+    return true;
+  }
+  if (left == null || right == null) {
+    return false;
+  }
+  return (
+    left.subject_motion_state === right.subject_motion_state &&
+    left.subject_direction === right.subject_direction &&
+    left.subject_displacement === right.subject_displacement &&
+    left.hand_action === right.hand_action &&
+    left.camera_motion === right.camera_motion &&
+    left.relative_motion === right.relative_motion
+  );
 }
 
 function shotCardsEqual(left: ShotCard[], right: ShotCard[]): boolean {
@@ -73,14 +99,65 @@ function shotCardsEqual(left: ShotCard[], right: ShotCard[]): boolean {
         shot.action === other.action &&
         shot.scene === other.scene &&
         shot.spoken_text === other.spoken_text &&
-        shot.transition === other.transition
+        shot.transition === other.transition &&
+        motionEqual(shot.motion, other.motion)
       );
     })
   );
 }
 
+// 运动枚举的中文选项：与后端 analysis.py / generation.py 的枚举一一对应。
+const SUBJECT_MOTION_STATE_OPTIONS: Array<{
+  value: ShotMotion["subject_motion_state"];
+  label: string;
+}> = [
+  { value: "STATIC", label: "静止" },
+  { value: "WALKING", label: "行走" },
+  { value: "RUNNING", label: "跑动" },
+  { value: "TURNING", label: "转身" },
+  { value: "GESTURING_ONLY", label: "仅手势" },
+  { value: "OBJECT_MOTION", label: "物体运动" },
+  { value: "NO_PERSON", label: "无人物" },
+];
+
+const SUBJECT_DIRECTION_OPTIONS: Array<{
+  value: ShotMotion["subject_direction"];
+  label: string;
+}> = [
+  { value: "toward_camera", label: "向镜头" },
+  { value: "away_from_camera", label: "背离镜头" },
+  { value: "left", label: "向画面左" },
+  { value: "right", label: "向画面右" },
+  { value: "lateral", label: "横向移动" },
+  { value: "in_place", label: "原地" },
+  { value: "none", label: "无" },
+];
+
+const MOTION_CAMERA_OPTIONS: Array<{
+  value: ShotMotion["camera_motion"];
+  label: string;
+}> = [
+  { value: "STATIC", label: "固定机位" },
+  { value: "PUSH_IN", label: "推近" },
+  { value: "PULL_BACK", label: "拉远" },
+  { value: "HANDHELD_TRACKING", label: "手持跟拍" },
+  { value: "PAN", label: "横摇" },
+  { value: "TILT", label: "纵摇" },
+  { value: "FOLLOW", label: "跟随主体" },
+];
+
+// 旧拆解结果补标运动时的默认骨架：后端仅要求非空，细节由用户按源视频补充。
+const DEFAULT_SHOT_MOTION: ShotMotion = {
+  subject_motion_state: "STATIC",
+  subject_direction: "none",
+  subject_displacement: "无位移",
+  hand_action: "未描述",
+  camera_motion: "STATIC",
+  relative_motion: "未描述",
+};
+
 const SHOT_TEXT_FIELDS: Array<{
-  key: Exclude<keyof ShotCard, "start_time" | "end_time">;
+  key: Exclude<keyof ShotCard, "start_time" | "end_time" | "motion">;
   label: string;
 }> = [
   { key: "shot_id", label: "镜头编号" },
@@ -602,7 +679,11 @@ export function AnalysisWorkspace({
     }
   }
 
-  function updateShot(index: number, key: keyof ShotCard, value: string) {
+  function updateShot(
+    index: number,
+    key: Exclude<keyof ShotCard, "motion">,
+    value: string,
+  ) {
     if (readOnly || isSaving || isWorkspaceBusyRef.current) {
       return;
     }
@@ -615,6 +696,28 @@ export function AnalysisWorkspace({
           ? toNonNegativeTime(value)
           : value;
       return { ...shot, [key]: nextValue } as ShotCard;
+    });
+    const isDirty = !shotCardsEqual(nextShots, savedShotsRef.current);
+    setShots(nextShots);
+    setSaveMessage("");
+    setShotCardsDirty(isDirty);
+  }
+
+  function updateShotMotion(index: number, patch: Partial<ShotMotion>) {
+    if (readOnly || isSaving || isWorkspaceBusyRef.current) {
+      return;
+    }
+    const nextShots = shots.map((shot, shotIndex) => {
+      if (shotIndex !== index) {
+        return shot;
+      }
+      // 旧数据未标注运动：只有在“人物运动”下拉选了状态后才创建 motion，
+      // 避免误把空结构写入镜头卡。
+      if (shot.motion == null && patch.subject_motion_state === undefined) {
+        return shot;
+      }
+      const base = shot.motion ?? DEFAULT_SHOT_MOTION;
+      return { ...shot, motion: { ...base, ...patch } };
     });
     const isDirty = !shotCardsEqual(nextShots, savedShotsRef.current);
     setShots(nextShots);
@@ -705,11 +808,25 @@ export function AnalysisWorkspace({
                     <th scope="col">结束(秒)</th>
                     {SHOT_TEXT_FIELDS.filter(
                       (field) => field.key !== "shot_id",
-                    ).map((field) => (
-                      <th key={field.key} scope="col">
-                        {field.label}
-                      </th>
-                    ))}
+                    ).flatMap((field) => {
+                      const headers = [
+                        <th key={field.key} scope="col">
+                          {field.label}
+                        </th>,
+                      ];
+                      {
+                        /* 运动列紧跟“动作”：结构化的人物运动/机位运动/相对运动
+                          三分描述，是生成画面“动起来”的源头。 */
+                      }
+                      if (field.key === "action") {
+                        headers.push(
+                          <th key="motion" scope="col">
+                            运动
+                          </th>,
+                        );
+                      }
+                      return headers;
+                    })}
                   </tr>
                 </thead>
                 <tbody>
@@ -749,23 +866,44 @@ export function AnalysisWorkspace({
                       </td>
                       {SHOT_TEXT_FIELDS.filter(
                         (field) => field.key !== "shot_id",
-                      ).map(({ key, label }) => (
-                        <td
-                          key={key}
-                          className={
-                            key === "spoken_text"
-                              ? "shot-table__spoken"
-                              : undefined
-                          }
-                        >
-                          <ShotCellInput
-                            ariaLabel={`${shot.shot_id} ${label}`}
-                            onChange={(value) => updateShot(index, key, value)}
-                            readOnly={readOnly || isSaving || isWorkspaceBusy}
-                            value={shot[key]}
-                          />
-                        </td>
-                      ))}
+                      ).flatMap(({ key, label }) => {
+                        const cells = [
+                          <td
+                            key={key}
+                            className={
+                              key === "spoken_text"
+                                ? "shot-table__spoken"
+                                : undefined
+                            }
+                          >
+                            <ShotCellInput
+                              ariaLabel={`${shot.shot_id} ${label}`}
+                              onChange={(value) =>
+                                updateShot(index, key, value)
+                              }
+                              readOnly={readOnly || isSaving || isWorkspaceBusy}
+                              value={shot[key]}
+                            />
+                          </td>,
+                        ];
+                        if (key === "action") {
+                          cells.push(
+                            <td key="motion" className="shot-table__motion">
+                              <ShotMotionCell
+                                ariaPrefix={shot.shot_id}
+                                motion={shot.motion ?? null}
+                                onChange={(patch) =>
+                                  updateShotMotion(index, patch)
+                                }
+                                readOnly={
+                                  readOnly || isSaving || isWorkspaceBusy
+                                }
+                              />
+                            </td>,
+                          );
+                        }
+                        return cells;
+                      })}
                     </tr>
                   ))}
                 </tbody>
@@ -1247,5 +1385,119 @@ function ShotCellInput({
       type={type}
       value={value}
     />
+  );
+}
+
+// 结构化运动编辑单元格：人物运动状态下拉、位移方向、运镜方式三个枚举
+// 加位移/手部/相对运动三个文本。旧拆解结果未标注时只显示状态下拉，
+// 选中任一状态后展开完整表单。
+function ShotMotionCell({
+  ariaPrefix,
+  motion,
+  onChange,
+  readOnly = false,
+}: {
+  ariaPrefix: string;
+  motion: ShotMotion | null;
+  onChange: (patch: Partial<ShotMotion>) => void;
+  readOnly?: boolean;
+}) {
+  if (motion == null) {
+    return (
+      <select
+        aria-label={`${ariaPrefix} 人物运动`}
+        className="shot-table-select"
+        disabled={readOnly}
+        onChange={(event) => {
+          const next = event.target.value as ShotMotion["subject_motion_state"];
+          if (next) {
+            onChange({ subject_motion_state: next });
+          }
+        }}
+        value=""
+      >
+        <option value="">未标注</option>
+        {SUBJECT_MOTION_STATE_OPTIONS.map((option) => (
+          <option key={option.value} value={option.value}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+    );
+  }
+  return (
+    <div className="shot-motion-cell">
+      <select
+        aria-label={`${ariaPrefix} 人物运动`}
+        className="shot-table-select"
+        disabled={readOnly}
+        onChange={(event) =>
+          onChange({
+            subject_motion_state: event.target
+              .value as ShotMotion["subject_motion_state"],
+          })
+        }
+        value={motion.subject_motion_state}
+      >
+        {SUBJECT_MOTION_STATE_OPTIONS.map((option) => (
+          <option key={option.value} value={option.value}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+      <select
+        aria-label={`${ariaPrefix} 位移方向`}
+        className="shot-table-select"
+        disabled={readOnly}
+        onChange={(event) =>
+          onChange({
+            subject_direction: event.target
+              .value as ShotMotion["subject_direction"],
+          })
+        }
+        value={motion.subject_direction}
+      >
+        {SUBJECT_DIRECTION_OPTIONS.map((option) => (
+          <option key={option.value} value={option.value}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+      <select
+        aria-label={`${ariaPrefix} 运镜方式`}
+        className="shot-table-select"
+        disabled={readOnly}
+        onChange={(event) =>
+          onChange({
+            camera_motion: event.target.value as ShotMotion["camera_motion"],
+          })
+        }
+        value={motion.camera_motion}
+      >
+        {MOTION_CAMERA_OPTIONS.map((option) => (
+          <option key={option.value} value={option.value}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+      <ShotCellInput
+        ariaLabel={`${ariaPrefix} 位移幅度`}
+        onChange={(value) => onChange({ subject_displacement: value })}
+        readOnly={readOnly}
+        value={motion.subject_displacement}
+      />
+      <ShotCellInput
+        ariaLabel={`${ariaPrefix} 手部动作`}
+        onChange={(value) => onChange({ hand_action: value })}
+        readOnly={readOnly}
+        value={motion.hand_action}
+      />
+      <ShotCellInput
+        ariaLabel={`${ariaPrefix} 相对运动`}
+        onChange={(value) => onChange({ relative_motion: value })}
+        readOnly={readOnly}
+        value={motion.relative_motion}
+      />
+    </div>
   );
 }

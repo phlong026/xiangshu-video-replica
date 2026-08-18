@@ -161,6 +161,36 @@ export type AnalysisVersion = {
 
 export type AnalysisProvider = "apilio_gemini" | "fake_gemini";
 
+export type ShotMotion = {
+  subject_motion_state:
+    | "STATIC"
+    | "WALKING"
+    | "RUNNING"
+    | "TURNING"
+    | "GESTURING_ONLY"
+    | "OBJECT_MOTION"
+    | "NO_PERSON";
+  subject_direction:
+    | "toward_camera"
+    | "away_from_camera"
+    | "left"
+    | "right"
+    | "lateral"
+    | "in_place"
+    | "none";
+  subject_displacement: string;
+  hand_action: string;
+  camera_motion:
+    | "STATIC"
+    | "PUSH_IN"
+    | "PULL_BACK"
+    | "HANDHELD_TRACKING"
+    | "PAN"
+    | "TILT"
+    | "FOLLOW";
+  relative_motion: string;
+};
+
 export type ShotCard = {
   shot_id: string;
   start_time: number;
@@ -173,6 +203,7 @@ export type ShotCard = {
   scene: string;
   spoken_text: string;
   transition: string;
+  motion?: ShotMotion | null;
 };
 
 export type AnalysisPayload = {
@@ -1996,8 +2027,27 @@ function isAnalysisVersion(value: unknown): value is AnalysisVersion {
   );
 }
 
+function isShotMotion(value: unknown): value is ShotMotion {
+  return (
+    isRecord(value) &&
+    typeof value.subject_motion_state === "string" &&
+    typeof value.subject_direction === "string" &&
+    typeof value.subject_displacement === "string" &&
+    typeof value.hand_action === "string" &&
+    typeof value.camera_motion === "string" &&
+    typeof value.relative_motion === "string"
+  );
+}
+
 function isShotCard(value: unknown): value is ShotCard {
   if (!isRecord(value)) {
+    return false;
+  }
+  if (
+    value.motion !== undefined &&
+    value.motion !== null &&
+    !isShotMotion(value.motion)
+  ) {
     return false;
   }
   return (

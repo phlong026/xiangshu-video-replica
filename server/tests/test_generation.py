@@ -27,6 +27,7 @@ from app.generation import (
     MetasoH3Provider,
     SubmissionUncertain,
     build_h3_request,
+    compile_prompt_text,
     generation_task_operation_hash,
     h3_provider_for_task,
     mark_expired_active_leases_needing_attention,
@@ -183,6 +184,14 @@ def seed_data(conn: sqlite3.Connection) -> None:
                             "scene": "室内",
                             "spoken_text": "原始第一句",
                             "transition": "硬切",
+                            "motion": {
+                                "subject_motion_state": "GESTURING_ONLY",
+                                "subject_direction": "in_place",
+                                "subject_displacement": "无位移",
+                                "hand_action": "双手做自然讲解手势",
+                                "camera_motion": "STATIC",
+                                "relative_motion": "固定机位，人物站位不变",
+                            },
                         },
                         {
                             "shot_id": "S02",
@@ -196,6 +205,14 @@ def seed_data(conn: sqlite3.Connection) -> None:
                             "scene": "室内",
                             "spoken_text": "原始第二句",
                             "transition": "硬切",
+                            "motion": {
+                                "subject_motion_state": "GESTURING_ONLY",
+                                "subject_direction": "in_place",
+                                "subject_displacement": "无位移",
+                                "hand_action": "双手做自然讲解手势",
+                                "camera_motion": "PUSH_IN",
+                                "relative_motion": "镜头缓慢推近，人物站位不变",
+                            },
                         },
                     ],
                 },
@@ -1596,7 +1613,7 @@ def test_prompt_revision_freezes_sources_and_batch_reports_staleness(
     assert compiled.status_code == 200
     compiled_payload = compiled.json()["payload"]
     assert compiled_payload["status"] == "SAVED"
-    assert compiled_payload["template_version"] == "h3.prompt.v2"
+    assert compiled_payload["template_version"] == "h3.prompt.v3"
     assert len(compiled_payload["template_hash"]) == 64
     assert compiled_payload["source_analysis_version_id"] is None
     assert compiled_payload["script_version_id"] == script["id"]
@@ -1745,7 +1762,7 @@ def test_prompt_compiler_rescales_shot_timeline_to_output_duration(
 
     assert compiled.status_code == 200
     payload = compiled.json()["payload"]
-    assert payload["template_version"] == "h3.prompt.v2"
+    assert payload["template_version"] == "h3.prompt.v3"
     assert payload["source_duration_seconds"] == 10
     assert payload["timeline_scale_factor"] == 0.4
     assert "生成一条 4 秒" in payload["prompt_text"]
@@ -1754,10 +1771,89 @@ def test_prompt_compiler_rescales_shot_timeline_to_output_duration(
     assert "[5.0-10.0s]" not in payload["prompt_text"]
 
 
+def test_compile_prompt_text_renders_structured_motion_as_movement_instructions() -> None:
+    """WALKING 镜头必须编译出正向运动指令，不能被“保持连续”稀释掉。"""
+    prompt_text = compile_prompt_text(
+        script_payload={"full_text": "边走边说。", "shot_mappings": []},
+        shot_payload={
+            "shots": [
+                {
+                    "shot_id": "S01",
+                    "start_time": 0,
+                    "end_time": 5,
+                    "shot_type": "中景",
+                    "composition": "人物居中",
+                    "camera_motion": "手持跟拍",
+                    "subject": "主讲人",
+                    "action": "边向镜头走近边口播",
+                    "scene": "工地",
+                    "spoken_text": "边走边说。",
+                    "transition": "硬切",
+                    "motion": {
+                        "subject_motion_state": "WALKING",
+                        "subject_direction": "toward_camera",
+                        "subject_displacement": "向镜头走近两三步",
+                        "hand_action": "双臂随步态交替自然摆动",
+                        "camera_motion": "HANDHELD_TRACKING",
+                        "relative_motion": "人物逐渐靠近镜头，画面占比增大",
+                    },
+                }
+            ]
+        },
+        source_duration_seconds=5,
+        duration_seconds=5,
+        resolution="768P",
+    )
+
+    assert "主体：主讲人" in prompt_text
+    assert "人物动作：边向镜头走近边口播" in prompt_text
+    assert "人物持续行走" in prompt_text
+    assert "不得僵立原地" in prompt_text
+    assert "向镜头方向" in prompt_text
+    assert "位移：向镜头走近两三步" in prompt_text
+    assert "手部：双臂随步态交替自然摆动" in prompt_text
+    assert "相对运动：人物逐渐靠近镜头，画面占比增大" in prompt_text
+    # motion.camera_motion 枚举优先于自由文本“手持跟拍”。
+    assert "手持平稳跟拍" in prompt_text
+    assert "人物严格按各镜头的动作与运镜描述真实运动" in prompt_text
+
+
+def test_compile_prompt_text_falls_back_to_action_text_for_legacy_shots() -> None:
+    """旧版拆解结果没有 motion：回退到 action 文本，运镜用自由文本。"""
+    prompt_text = compile_prompt_text(
+        script_payload={"full_text": "你好。", "shot_mappings": []},
+        shot_payload={
+            "shots": [
+                {
+                    "shot_id": "S01",
+                    "start_time": 0,
+                    "end_time": 5,
+                    "shot_type": "近景",
+                    "composition": "人物居中",
+                    "camera_motion": "固定",
+                    "subject": "主讲人",
+                    "action": "看镜头口播",
+                    "scene": "室内",
+                    "spoken_text": "你好。",
+                    "transition": "硬切",
+                }
+            ]
+        },
+        source_duration_seconds=5,
+        duration_seconds=5,
+        resolution="768P",
+    )
+
+    assert "主体：主讲人" in prompt_text
+    assert "人物动作：看镜头口播" in prompt_text
+    # 自由文本运镜原样保留，不误用枚举标签。
+    assert "固定；主体：主讲人" in prompt_text
+
+
 @pytest.mark.parametrize(
     ("template_attribute", "next_value"),
     [
-        ("H3_PROMPT_TEMPLATE_VERSION", "h3.prompt.v3"),
+        ("H3_PROMPT_TEMPLATE_VERSION", "h3.prompt.v4"),
         ("H3_PROMPT_TEMPLATE_HASH", "new-template-hash"),
     ],
 )
