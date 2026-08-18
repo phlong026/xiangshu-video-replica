@@ -30,7 +30,7 @@ router = APIRouter(prefix="/api", tags=["first-frames"])
 class GenerateFirstFramesRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    model: Literal["gpt-image-2", "nano-banana-pro-2k"] = "nano-banana-pro-2k"
+    model: Literal["gpt-image-2", "nano-banana-pro-2k"] = "gpt-image-2"
     prompt: str | None = Field(default=None, max_length=4000)
     quantity: int = Field(default=1, ge=1, le=3)
     character_version_id: str | None = Field(default=None, min_length=1)

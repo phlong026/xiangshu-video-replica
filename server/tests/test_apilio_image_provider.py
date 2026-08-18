@@ -75,7 +75,7 @@ def test_gpt_image_edit_uses_apilio_multipart_contract_and_downloads_url_respons
         b'filename="front.png"'
     )
     assert request.body.index(b'filename="front.png"') < request.body.index(b'filename="side.webp"')
-    assert b'name="response_format"\r\n\r\nurl' in request.body
+    assert b'name="response_format"\r\n\r\nb64_json' in request.body
     assert b'name="size"\r\n\r\nauto' in request.body
 
 

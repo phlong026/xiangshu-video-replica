@@ -1019,6 +1019,23 @@ def compile_prompt_version(
     return row
 
 
+def unwrap_analysis_payload(payload: Any) -> dict[str, Any]:
+    """兼容 shot_card 与 analysis 两种版本格式。
+
+    shot_card 版本顶层即 shots/duration_seconds；拆解自动落库的 analysis
+    版本是 {"schema_version", "analysis": {...}, "source_asset", ...} 包装
+    结构，镜头与原稿在内层——回退用 analysis 编译时必须先解包。
+    """
+    if not isinstance(payload, dict):
+        return {}
+    if isinstance(payload.get("shots"), list):
+        return payload
+    inner = payload.get("analysis")
+    if isinstance(inner, dict):
+        return inner
+    return payload
+
+
 def preview_prompt_text(
     conn: sqlite3.Connection,
     *,
@@ -1048,7 +1065,7 @@ def preview_prompt_text(
             "ANALYSIS_NOT_READY",
             "Analyze the reference video before previewing the prompt.",
         )
-    shot_payload = json.loads(str(shot_row["payload_json"]))
+    shot_payload = unwrap_analysis_payload(json.loads(str(shot_row["payload_json"])))
     shots = shot_payload.get("shots")
     if not isinstance(shots, list) or not shots:
         raise generation_error(
@@ -1063,7 +1080,11 @@ def preview_prompt_text(
         script_payload = json.loads(str(script["payload_json"]))
         script_source = "script_version"
     else:
-        analysis_payload = json.loads(str(analysis["payload_json"])) if analysis is not None else {}
+        analysis_payload = (
+            unwrap_analysis_payload(json.loads(str(analysis["payload_json"])))
+            if analysis is not None
+            else {}
+        )
         original_script = str(analysis_payload.get("original_script") or "")
         spoken_texts = [str(shot.get("spoken_text") or "") for shot in shots]
         script_payload = {

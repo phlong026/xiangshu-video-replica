@@ -1899,6 +1899,80 @@ def test_prompt_preview_falls_back_to_the_original_script_from_the_analysis(
     assert "原始第二句" in body["prompt_text"]
 
 
+def test_prompt_preview_compiles_from_the_wrapped_analysis_payload(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    # 项目页新上传自动拆解的项目只有 analysis 版本（拆解落库为
+    # {"analysis": {...}} 包装结构、无 shot_card），行内提示词预览必须能
+    # 直接解包编译，而不是误报 SHOT_CARD_TIMELINE_INVALID。
+    wrapped_analysis = {
+        "schema_version": 1,
+        "analysis": {
+            "duration_seconds": 12,
+            "original_script": "包装原稿第一句。包装原稿第二句。",
+            "shots": [
+                {
+                    "shot_id": "S01",
+                    "start_time": 0,
+                    "end_time": 6,
+                    "shot_type": "近景",
+                    "composition": "人物居中",
+                    "camera_motion": "固定",
+                    "subject": "主讲人",
+                    "action": "看镜头口播",
+                    "scene": "室内",
+                    "spoken_text": "包装原稿第一句。",
+                    "transition": "硬切",
+                },
+                {
+                    "shot_id": "S02",
+                    "start_time": 6,
+                    "end_time": 12,
+                    "shot_type": "中景",
+                    "composition": "三分法",
+                    "camera_motion": "固定",
+                    "subject": "主讲人",
+                    "action": "继续讲解",
+                    "scene": "室内",
+                    "spoken_text": "包装原稿第二句。",
+                    "transition": "硬切",
+                },
+            ],
+        },
+        "source_asset": {"id": "reference_owned", "storage_uri": "fake://reference.mp4"},
+        "provider_response_ref": "resp_wrapped",
+    }
+    with connect_database(db_path) as conn:
+        conn.execute(
+            "DELETE FROM versions WHERE project_id = ? AND kind IN (?, ?)",
+            ("project_owned", "shot_card", "script"),
+        )
+        conn.execute(
+            """
+            INSERT INTO versions (
+                id, project_id, asset_id, kind, version_number, payload_json, created_by_user_id
+            ) VALUES ('analysis_wrapped', 'project_owned', NULL, 'analysis', 3, ?, 'employee_1')
+            """,
+            (json.dumps(wrapped_analysis, ensure_ascii=True, sort_keys=True),),
+        )
+        conn.commit()
+
+    response = client.post(
+        "/api/projects/project_owned/prompts/preview",
+        headers=auth_headers("employee_1"),
+        json={},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["script_source"] == "analysis_original"
+    assert body["shot_card_version_id"] is None
+    assert body["output_duration_seconds"] == 12
+    assert "包装原稿第一句" in body["prompt_text"]
+    assert "包装原稿第二句" in body["prompt_text"]
+
+
 def test_prompt_preview_requires_project_shots(client: TestClient) -> None:
     response = client.post(
         "/api/projects/project_other/prompts/preview",
