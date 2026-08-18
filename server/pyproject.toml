@@ -8,6 +8,7 @@ dependencies = [
     "cos-python-sdk-v5==1.9.44",
     "cryptography==50.0.0",
     "fastapi==0.141.1",
+    "python-multipart==0.0.20",
     "uvicorn==0.52.2",
 ]
 
