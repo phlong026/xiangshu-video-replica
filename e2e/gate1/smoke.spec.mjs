@@ -13,9 +13,9 @@ test("@smoke starts the isolated desktop shell with clean browser evidence", asy
   try {
     await page.goto("/");
     await expect(
-      page.getByRole("heading", { name: "短视频复刻工作台" }),
+      page.getByRole("heading", { name: "镜序 Studio" }),
     ).toBeVisible();
-    await page.getByRole("button", { name: "进入工作台" }).click();
+    await page.getByRole("button", { name: "进入" }).click();
     await expect(
       page.getByRole("navigation", { name: "主导航" }),
     ).toBeVisible();
