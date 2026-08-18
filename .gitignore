@@ -14,9 +14,8 @@ coverage/
 *.tsbuildinfo
 client/vite.config.js
 client/vite.config.d.ts
-output/playwright/
-output/diag/
-output/*.png
+# 运行时验证产物（截图 / Playwright / 诊断输出）
+output/
 
 # Python
 .venv/
