@@ -2256,9 +2256,9 @@ button.history-version--active {
   border: 1px solid #2c2c34;
   border-radius: 999px;
   padding: 8px 12px;
-  color: #d8d4cc;
+  color: #8d8798;
   background: #0e0e12;
-  font-size: 13px;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2345,6 +2345,33 @@ button.history-version--active {
   color: #d8d4cc;
   background: #0e0e12;
   font-size: 13px;
+}
+
+.count-grid__empty {
+  grid-column: 1 / -1;
+  color: #8d8798;
+  font-size: 12px;
+}
+
+/* 运维详情第二段：异常与来源信息集中在一个面板内，不再平铺四条横幅。 */
+.batch-attention-panel {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+  border: 1px solid #2c2c34;
+  border-radius: 10px;
+  padding: 13px;
+  background: #101014;
+}
+
+.batch-attention-panel .batch-lineage {
+  margin-top: 0;
+}
+
+.batch-attention-panel .historical-failure-summary,
+.batch-attention-panel .stale-banner,
+.batch-attention-panel .attention-banner {
+  margin: 0;
 }
 
 .attention-banner {
@@ -2482,6 +2509,14 @@ button.history-version--active {
   font-size: 12px;
 }
 
+/* 批次历史卡片两行化：第一行项目名+状态，第二行元信息单行合并。 */
+.batch-history-card__meta {
+  overflow: hidden;
+  color: #a49db0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .load-more-button {
   width: 100%;
   margin-top: 12px;
@@ -2533,6 +2568,7 @@ button.history-version--active {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
+  opacity: 0.82;
 }
 
 .task-metadata-grid span {
@@ -2541,6 +2577,8 @@ button.history-version--active {
   border-radius: 8px;
   padding: 9px 10px;
   background: #141419;
+  color: #a49db0;
+  font-size: 12px;
 }
 
 .task-resolution-controls {
@@ -2923,6 +2961,36 @@ button.history-version--active {
 .video-stage-slow-note {
   margin: 0;
   color: #ffcf8a;
+  font-size: 12px;
+}
+
+.video-stage-stuck-note {
+  margin: 10px auto 0;
+  max-width: 420px;
+  border: 1px solid #6a4b24;
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: rgba(255, 207, 138, 0.08);
+  color: #ffcf8a;
+  font-size: 12px;
+  text-align: left;
+}
+
+.video-stage-stuck-note p {
+  margin: 0 0 6px;
+}
+
+.video-stage-provider-note {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 2;
+  margin: 0;
+  border-bottom: 1px solid #3d3d46;
+  padding: 8px 12px;
+  background: rgba(122, 122, 138, 0.12);
+  color: #b9b3c9;
   font-size: 12px;
 }
 

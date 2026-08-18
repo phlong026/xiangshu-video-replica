@@ -1908,6 +1908,10 @@ describe("App", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "查询任务记录" }));
 
+    // 任务页默认落在生成结果舞台（客户视角）；本用例断言运维视角的
+    // 批次/任务事实，先切换到运维详情。
+    fireEvent.click(await screen.findByRole("button", { name: "运维详情" }));
+
     expect(await screen.findByText("50%")).toBeInTheDocument();
     expect(screen.getByText("已完成 1 / 2")).toBeInTheDocument();
     expect(screen.getAllByText("需要处理 1")).toHaveLength(2);
@@ -1941,6 +1945,9 @@ describe("App", () => {
       target: { value: "batch-1" },
     });
     fireEvent.click(screen.getByRole("button", { name: "查询任务记录" }));
+
+    // 历史批次横幅在运维详情视图中渲染。
+    fireEvent.click(await screen.findByRole("button", { name: "运维详情" }));
 
     expect(
       await screen.findByText(
@@ -2011,6 +2018,9 @@ describe("App", () => {
     await act(async () => {
       await Promise.resolve();
     });
+    // 任务页默认落在生成结果舞台；本用例断言运维视角的轮询事实，
+    // fake timers 下用同步查询（批次已在 microtask 刷新后渲染）。
+    fireEvent.click(screen.getByRole("button", { name: "运维详情" }));
     expect(screen.getByText("0%")).toBeInTheDocument();
 
     await act(async () => {
@@ -2116,6 +2126,7 @@ describe("App", () => {
     await act(async () => {
       await Promise.resolve();
     });
+    fireEvent.click(screen.getByRole("button", { name: "运维详情" }));
     expect(screen.getByText("0%")).toBeInTheDocument();
 
     await act(async () => {

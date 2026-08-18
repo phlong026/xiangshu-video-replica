@@ -568,11 +568,11 @@ export function TaskRecordsPanel({
                       {formatStatus(item.status)}
                     </span>
                   </span>
-                  <span>{item.created_by_display_name}</span>
-                  <span>
-                    {item.progress.progress_percent}% · {item.quantity} 个任务
+                  <span className="batch-history-card__meta">
+                    {item.created_by_display_name} ·{" "}
+                    {item.progress.progress_percent}% · {item.quantity} 个任务 ·{" "}
+                    {formatTimestamp(item.created_at)}
                   </span>
-                  <span>{formatTimestamp(item.created_at)}</span>
                   {item.needs_attention_count ? (
                     <span className="attention-tag">
                       需处理 {item.needs_attention_count}
@@ -785,6 +785,14 @@ function BatchPanel({
     (historicalCounts.audio_quality_failed ?? 0) > 0;
   const batchActionBusy = Boolean(activeTaskAction);
   const batchReason = batchRegenerationReason.trim();
+  // 状态摘要只保留非零项：全零时说明批次尚未产生状态变化，不再铺满 8 个空格子。
+  const countItems = statusCountItems(counts).filter(([, value]) => value > 0);
+  // 异常与来源信息合并进“需要关注”面板，形成摘要之后的第二段，避免四条横幅平铺。
+  const hasAttentionItems =
+    Boolean(batch.source_batch_id) ||
+    hasHistoricalFailures ||
+    Boolean(batch.stale) ||
+    counts.needs_attention > 0;
   return (
     <div className="batch-panel">
       <div className="progress-header">
@@ -814,39 +822,49 @@ function BatchPanel({
         <span style={{ width: `${batch.progress.progress_percent}%` }} />
       </div>
       <div className="count-grid">
-        {statusCountItems(counts).map(([label, value]) => (
-          <span key={label}>
-            {label} {value}
-          </span>
-        ))}
+        {countItems.length > 0 ? (
+          countItems.map(([label, value]) => (
+            <span key={label}>
+              {label} {value}
+            </span>
+          ))
+        ) : (
+          <span className="count-grid__empty">暂无任务状态变化</span>
+        )}
       </div>
-      {batch.source_batch_id ? (
-        <div className="batch-lineage" role="status">
-          <strong>冻结输入重生成</strong>
-          <span>来源批次 {batch.source_batch_id}</span>
-          {batch.source_task_id ? (
-            <span>来源任务 {batch.source_task_id}</span>
+      {hasAttentionItems ? (
+        <section aria-label="需要关注" className="batch-attention-panel">
+          {batch.source_batch_id ? (
+            <div className="batch-lineage" role="status">
+              <strong>冻结输入重生成</strong>
+              <span>来源批次 {batch.source_batch_id}</span>
+              {batch.source_task_id ? (
+                <span>来源任务 {batch.source_task_id}</span>
+              ) : null}
+              {batch.generation_reason ? (
+                <span>{batch.generation_reason}</span>
+              ) : null}
+            </div>
           ) : null}
-          {batch.generation_reason ? (
-            <span>{batch.generation_reason}</span>
+          {hasHistoricalFailures ? (
+            <p className="historical-failure-summary">
+              历史事实：失败 {historicalCounts.failed ?? 0} · 归档失败{" "}
+              {historicalCounts.archive_failed ?? 0} · 音频质检失败{" "}
+              {historicalCounts.audio_quality_failed ?? 0} · 已替代{" "}
+              {historicalCounts.superseded ?? 0}
+            </p>
           ) : null}
-        </div>
-      ) : null}
-      {hasHistoricalFailures ? (
-        <p className="historical-failure-summary">
-          历史事实：失败 {historicalCounts.failed ?? 0} · 归档失败{" "}
-          {historicalCounts.archive_failed ?? 0} · 音频质检失败{" "}
-          {historicalCounts.audio_quality_failed ?? 0} · 已替代{" "}
-          {historicalCounts.superseded ?? 0}
-        </p>
-      ) : null}
-      {batch.stale ? (
-        <p className="stale-banner" role="status">
-          该批次的上游版本已更新；结果仍可查看，但不能作为当前版本的交付依据。
-        </p>
-      ) : null}
-      {counts.needs_attention ? (
-        <p className="attention-banner">需要处理 {counts.needs_attention}</p>
+          {batch.stale ? (
+            <p className="stale-banner" role="status">
+              该批次的上游版本已更新；结果仍可查看，但不能作为当前版本的交付依据。
+            </p>
+          ) : null}
+          {counts.needs_attention ? (
+            <p className="attention-banner">
+              需要处理 {counts.needs_attention}
+            </p>
+          ) : null}
+        </section>
       ) : null}
       {canOperate ? (
         <section

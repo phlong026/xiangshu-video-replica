@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties } from "react";
+import { type CSSProperties, useEffect, useRef, useState } from "react";
 
 import type { GenerationBatch, GenerationTask } from "./api";
 
@@ -13,6 +13,9 @@ const ESTIMATED_RENDER_SECONDS = 240;
 const SLOW_RENDER_WARNING_FACTOR = 1.5;
 const REASSURANCE_ROTATE_SECONDS = 15;
 const TICK_MS = 1_000;
+// 任务停留在渲染前阶段（已提交/排队中/提交中）超过该阈值即视为排队异常：
+// 大概率没有被本地生成进程领取（进程未运行或连错数据库）。
+const QUEUE_STUCK_SECONDS = 180;
 
 const STEP_LABELS = ["已提交", "排队中", "渲染中", "云端归档", "完成"] as const;
 
@@ -127,6 +130,9 @@ export function VideoResultStage({
   const [regenerateReason, setRegenerateReason] = useState("");
   const [regenerateDetail, setRegenerateDetail] = useState("");
   const [regenerateConfirmed, setRegenerateConfirmed] = useState(false);
+  // 无 submitted_at 的任务（尚未被 worker 提交）以首次观测时间为排队计时
+  // 基准，避免 PENDING 任务永远显示“已用时 0 秒”。
+  const firstSeenRef = useRef<Record<string, number>>({});
 
   if (!activeTask) {
     return null;
@@ -144,6 +150,16 @@ export function VideoResultStage({
     outcome === "in_progress" &&
     stage === "RUNNING" &&
     elapsed > ESTIMATED_RENDER_SECONDS * SLOW_RENDER_WARNING_FACTOR;
+  const preRenderStage =
+    stage === "PENDING" || stage === "SUBMITTING" || stage === "QUEUED";
+  const queueWait =
+    outcome === "in_progress"
+      ? queueWaitSeconds(activeTask, nowMs, firstSeenRef.current)
+      : 0;
+  const queueStuck =
+    outcome === "in_progress" &&
+    preRenderStage &&
+    queueWait > QUEUE_STUCK_SECONDS;
   const reassuranceIndex =
     Math.floor(elapsed / REASSURANCE_ROTATE_SECONDS) % REASSURANCE_FACTS.length;
 
@@ -177,6 +193,11 @@ export function VideoResultStage({
       </header>
 
       <div className="video-stage-player">
+        {activeTask.provider === "fake_h3" ? (
+          <p className="video-stage-provider-note" role="status">
+            该任务使用本地模拟通道，不会触发真实 MiniMax H3 生成。
+          </p>
+        ) : null}
         {outcome === "quality_failed" && activeTask.result_asset_id ? (
           <p className="video-stage-quality-banner" role="status">
             音频质检未通过：该结果仅供对比查看，建议再次生成。
@@ -186,8 +207,15 @@ export function VideoResultStage({
           <StageProgressView
             elapsed={elapsed}
             factIndex={reassuranceIndex}
+            onOpenOpsDetail={onOpenOpsDetail}
             percent={percent}
-            phaseMessage={PHASE_MESSAGES[stage] ?? "正在生成…"}
+            phaseMessage={
+              queueStuck
+                ? "任务仍在排队，尚未被渲染进程领取…"
+                : (PHASE_MESSAGES[stage] ?? "正在生成…")
+            }
+            queueStuck={queueStuck}
+            queueWait={queueWait}
             remaining={remaining}
             showSlowWarning={showSlowWarning}
             stepIndex={stepIndex}
@@ -366,16 +394,22 @@ export function VideoResultStage({
 function StageProgressView({
   elapsed,
   factIndex,
+  onOpenOpsDetail,
   percent,
   phaseMessage,
+  queueStuck,
+  queueWait,
   remaining,
   showSlowWarning,
   stepIndex,
 }: {
   elapsed: number;
   factIndex: number;
+  onOpenOpsDetail: () => void;
   percent: number;
   phaseMessage: string;
+  queueStuck: boolean;
+  queueWait: number;
   remaining: number;
   showSlowWarning: boolean;
   stepIndex: number;
@@ -389,7 +423,9 @@ function StageProgressView({
         aria-valuenow={Math.round(percent)}
         className="video-stage-progress-ring"
         role="progressbar"
-        style={{ "--stage-percent": `${Math.round(percent)}%` } as CSSProperties}
+        style={
+          { "--stage-percent": `${Math.round(percent)}%` } as CSSProperties
+        }
       >
         <span className="video-stage-progress-ring__value">
           {Math.round(percent)}%
@@ -416,9 +452,27 @@ function StageProgressView({
         {phaseMessage}
       </p>
       <p className="video-stage-timing">
-        已用时 {formatClock(elapsed)}
-        {remaining > 0 ? ` · 预计还需约 ${formatClock(remaining)}` : ""}
+        {queueStuck
+          ? `排队等待 ${formatClock(queueWait)}`
+          : `已用时 ${formatClock(elapsed)}`}
+        {!queueStuck && remaining > 0
+          ? ` · 预计还需约 ${formatClock(remaining)}`
+          : ""}
       </p>
+      {queueStuck ? (
+        <div className="video-stage-stuck-note" role="status">
+          <p>
+            任务长时间停留在排队阶段，未被渲染进程领取。请检查本地任务处理进程是否运行、数据库配置是否一致。
+          </p>
+          <button
+            className="link-button"
+            onClick={onOpenOpsDetail}
+            type="button"
+          >
+            查看运维详情
+          </button>
+        </div>
+      ) : null}
       <p className="video-stage-fact" key={factIndex}>
         {REASSURANCE_FACTS[factIndex]}
       </p>
@@ -482,6 +536,14 @@ function StageInfoBar({ task }: { task: GenerationTask }) {
         <div>
           <dt>质检</dt>
           <dd>{quality}</dd>
+        </div>
+        <div>
+          <dt>生成通道</dt>
+          <dd>
+            {task.provider === "fake_h3"
+              ? "本地模拟（不调用 MiniMax）"
+              : "真实 MiniMax H3"}
+          </dd>
         </div>
         <div>
           <dt>费用</dt>
@@ -663,6 +725,20 @@ function elapsedSeconds(task: GenerationTask, nowMs: number): number {
     parseServerTime(task.submitted_at) ??
     nowMs;
   return Math.max(0, Math.round((nowMs - start) / 1000));
+}
+
+function queueWaitSeconds(
+  task: GenerationTask,
+  nowMs: number,
+  firstSeen: Record<string, number>,
+): number {
+  const serverStart =
+    parseServerTime(task.submitted_at) ?? parseServerTime(task.started_at);
+  if (serverStart === null && firstSeen[task.id] === undefined) {
+    firstSeen[task.id] = nowMs;
+  }
+  const baseline = serverStart ?? firstSeen[task.id] ?? nowMs;
+  return Math.max(0, Math.round((nowMs - baseline) / 1000));
 }
 
 function parseServerTime(value: string | null | undefined): number | null {
