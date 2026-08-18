@@ -9,10 +9,16 @@ project's available character version list.
 from __future__ import annotations
 
 import hashlib
+import json
+import logging
 import sqlite3
+import struct
 import uuid
+import zlib
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import cast
 
 from fastapi import HTTPException
 
@@ -35,16 +41,92 @@ from app.character_identity import (
     persona_snapshot,
     read_identity_row,
     required_text,
+    validate_key_segment,
 )
-from app.character_image_generation import deterministic_png
+from app.character_image_generation import deterministic_png, png_chunk
+from app.first_frames import FirstFrameModel, ImageInput, ImageProvider, ImageProviderFailed
+from app.media import storage_key_from_uri
 from app.permissions import require_project_access, write_audit
-from app.storage import StorageAdapter
+from app.storage import StorageAdapter, StorageBackendUnavailable
+
+logger = logging.getLogger(__name__)
 
 SIMPLE_UPLOAD_MAX_BYTES = 10 * 1024 * 1024
 SIMPLE_UPLOAD_ALLOWED_TYPES = {"image/png": ".png", "image/jpeg": ".jpg"}
 SIMPLE_AUTHORIZATION_SCOPE = ["internal-short-video"]
 SIMPLE_PERSONA_USAGE_SCOPE = ["internal-short-video"]
 SIMPLE_GENERATION_MODE = "simple_upload"
+
+# Single-sheet five-view generation: the uploaded photo is the identity
+# reference and the provider renders one wide landscape contact sheet with
+# five views of the SAME person (identity-preserve prompt).
+SIMPLE_CONTACT_SHEET_MODEL: FirstFrameModel = "gpt-image-2"
+SIMPLE_CONTACT_SHEET_EXTENSIONS = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}
+SIMPLE_CONTACT_SHEET_PROMPT = """\
+Use case: identity-preserve
+Asset type: production-ready photorealistic character reference board for
+future image creation
+
+Input image role: the attached photo is the primary and only authoritative
+identity reference. Preserve this person's recognizable face, visible age,
+hairstyle, headwear, jewelry, makeup level, and clothing exactly as shown.
+
+Primary request: re-create the same person from the attached photo in a clean
+five-panel multi-view layout. One wide landscape contact sheet with five
+clean panels:
+1) left tall panel: full-body straight front view;
+2) second tall panel: full-body three-quarter view facing slightly to
+   camera-left;
+3) third tall panel: full-body left profile view;
+4) upper-right panel: close-up straight-front head-and-shoulders portrait;
+5) lower-right panel: close-up three-quarter head-and-shoulders portrait
+   matching the full-body three-quarter angle.
+The first three panels occupy roughly 72% of the width as equal tall vertical
+columns. The rightmost roughly 28% is split into two equal stacked portrait
+panels. Use thin clean white dividers and a narrow white outer border.
+
+Identity and styling invariants: the exact same person in every panel;
+preserve the facial proportions and recognizable appearance from the attached
+photo, including eye shape, nose, lips, skin tone, hairstyle and hair length,
+headwear, visible jewelry, makeup level, and clothing. Keep face, eye shape,
+hair, accessories, body build, and clothing identical across all five panels.
+Neutral relaxed expression with a very subtle friendly softness; eyes level
+when visible.
+
+Conservative full-body continuation: where the attached photo does not show
+the lower body, extend the visible outfit simply and neutrally with plain
+trousers and plain low-profile closed shoes. No belt, bag, visible brand,
+pattern, or extra accessories. Keep body proportions realistic and
+consistent. Arms relaxed naturally at the sides; feet parallel in the front
+view.
+
+Scene/backdrop: uniform seamless light-gray studio backdrop with a subtle
+neutral center glow, exactly consistent across all panels.
+Style/medium: high-fidelity natural studio photography, realistic skin,
+hair, fabric, jewelry, hands, and shoes; minimal retouching; no illustration,
+no 3D render, no fashion-campaign drama.
+Composition/framing: full bodies completely visible from head to soles with
+generous safe margins in the three full-body panels; the two right panels
+crop at upper chest; identical camera height and focal length within
+corresponding panel types; no overlap between panels.
+Lighting/mood: soft even studio illumination, neutral white balance, mild
+floor grounding shadow only in full-body panels, consistent exposure
+everywhere.
+Constraints: exactly five panels and exactly five appearances of the same
+person; layout fidelity is critical; identity fidelity to the attached photo
+is the highest subject priority; no text, labels, arrows, captions, logos,
+watermark, props, furniture, room background, or extra people.
+Avoid: face drift; different people; altered eye size; changed hairstyle;
+missing or changed accessories; different clothing; glamour makeup;
+exaggerated beauty filter; cropped head or shoes; malformed hands; extra
+limbs; duplicated jewelry; busy background.
+"""
+
+
+@dataclass(frozen=True)
+class SimpleCharacterView:
+    view_type: RequiredCharacterViewType
+    asset_id: str
 
 
 @dataclass(frozen=True)
@@ -53,6 +135,20 @@ class SimpleCharacterCreationResult:
     persona_id: str
     character_version_id: str
     publication_hash: str
+    contact_sheet_asset_id: str
+    views: tuple[SimpleCharacterView, ...]
+
+
+@dataclass(frozen=True)
+class SimpleLibraryEntry:
+    """One character in the simplified library with its published seven views."""
+
+    identity_id: str
+    display_name: str
+    owner_user_id: str | None
+    status: str
+    contact_sheet_asset_id: str | None
+    views: tuple[SimpleCharacterView, ...]
 
 
 def create_simple_character(
@@ -65,11 +161,14 @@ def create_simple_character(
     source_content_type: str,
     display_name: str,
     persona_name: str,
+    image_provider: ImageProvider | None = None,
 ) -> SimpleCharacterCreationResult:
     """Create and publish a character from a single uploaded image.
 
     The uploaded image acts as both the authorization proof and the source
-    asset (self-authorization), the seven views are produced by the local
+    asset (self-authorization). A single five-view contact sheet is rendered
+    from the photo (image provider when configured, local placeholder as a
+    fallback), the seven per-view assets are produced by the local
     deterministic generator, every view is auto-approved, and the version is
     published in the same transaction.
 
@@ -90,6 +189,17 @@ def create_simple_character(
     identity_id = str(uuid.uuid4())
     persona_id = str(uuid.uuid4())
     version_id = str(uuid.uuid4())
+
+    # Provider-backed generation can take tens of seconds, so render the
+    # contact sheet BEFORE opening the write transaction to avoid holding
+    # the SQLite lock for the whole image generation.
+    normalized_content_type = source_content_type.split(";", 1)[0].strip().lower()
+    contact_content, contact_content_type, contact_source = _generate_contact_sheet_content(
+        image_provider,
+        source_content=source_content,
+        source_content_type=normalized_content_type,
+        version_id=version_id,
+    )
 
     # Track every object written during the transaction so a rollback can
     # remove orphaned storage objects, mirroring the publication flow.
@@ -154,7 +264,18 @@ def create_simple_character(
             now_iso=now_iso,
             attempted_keys=attempted_keys,
         )
-        publication_hash = _publish_views(
+        contact_sheet_asset_id = _store_contact_sheet_asset(
+            conn,
+            storage=storage,
+            actor=actor,
+            identity_id=identity_id,
+            version_id=version_id,
+            content=contact_content,
+            content_type=contact_content_type,
+            generation_source=contact_source,
+            attempted_keys=attempted_keys,
+        )
+        publication_hash, assets_by_view = _publish_views(
             conn,
             storage=storage,
             actor=actor,
@@ -162,6 +283,7 @@ def create_simple_character(
             persona_id=persona_id,
             persona_snapshot_json=persona_snapshot_json,
             views=views,
+            contact_sheet_asset_id=contact_sheet_asset_id,
             now_iso=now_iso,
             attempted_keys=attempted_keys,
         )
@@ -176,6 +298,7 @@ def create_simple_character(
                 "identity_id": identity_id,
                 "persona_id": persona_id,
                 "publication_hash": publication_hash,
+                "contact_sheet_asset_id": contact_sheet_asset_id,
                 **({"project_id": project_id} if project_id else {}),
             },
         )
@@ -198,7 +321,110 @@ def create_simple_character(
         persona_id=persona_id,
         character_version_id=version_id,
         publication_hash=publication_hash,
+        contact_sheet_asset_id=contact_sheet_asset_id,
+        views=tuple(
+            SimpleCharacterView(
+                view_type=view_type,
+                asset_id=str(assets_by_view[view_type]["approved_asset_id"]),
+            )
+            for view_type in REQUIRED_CHARACTER_VIEW_TYPES
+            if view_type in assets_by_view
+        ),
     )
+
+
+def list_simple_library(
+    conn: sqlite3.Connection,
+    *,
+    actor: CurrentUser,
+) -> list[SimpleLibraryEntry]:
+    """List characters with the published seven-view assets for previews.
+
+    Every authenticated role can read the library (mirroring the existing
+    identity list), and for each identity only the latest published version's
+    approved selection is returned so the preview always matches what video
+    generation would actually consume.
+    """
+    del actor  # visibility intentionally matches GET /api/person-identities
+    rows = conn.execute(
+        """
+        SELECT identity.id AS identity_id,
+               identity.display_name AS display_name,
+               identity.owner_user_id AS owner_user_id,
+               identity.status AS identity_status,
+               version.id AS version_id,
+               version.published_at AS published_at,
+               version.publication_snapshot_json AS snapshot_json,
+               view.view_type AS view_type,
+               view.asset_id AS asset_id
+        FROM person_identities AS identity
+        LEFT JOIN character_personas AS persona ON persona.identity_id = identity.id
+        LEFT JOIN character_versions AS version
+          ON version.persona_id = persona.id
+         AND version.status = 'PUBLISHED'
+        LEFT JOIN character_assets AS view
+          ON view.character_version_id = version.id
+         AND view.review_status = 'APPROVED'
+         AND view.is_published_selection = 1
+        ORDER BY identity.created_at DESC, identity.id,
+                 version.published_at DESC, view.view_type
+        """
+    ).fetchall()
+
+    entries: list[SimpleLibraryEntry] = []
+    for identity_id, identity_rows in _group_by_identity(rows).items():
+        usable = [row for row in identity_rows if row["version_id"] is not None]
+        latest = usable[0] if usable else None
+        views = tuple(
+            SimpleCharacterView(
+                view_type=cast(RequiredCharacterViewType, str(row["view_type"])),
+                asset_id=str(row["asset_id"]),
+            )
+            for row in identity_rows
+            if latest is not None
+            and row["version_id"] == latest["version_id"]
+            and row["asset_id"] is not None
+        )
+        entries.append(
+            SimpleLibraryEntry(
+                identity_id=identity_id,
+                display_name=str(identity_rows[0]["display_name"]),
+                owner_user_id=(
+                    None
+                    if identity_rows[0]["owner_user_id"] is None
+                    else str(identity_rows[0]["owner_user_id"])
+                ),
+                status=str(identity_rows[0]["identity_status"]),
+                contact_sheet_asset_id=_snapshot_contact_sheet_asset_id(latest),
+                views=views,
+            )
+        )
+    return entries
+
+
+def _snapshot_contact_sheet_asset_id(row: sqlite3.Row | None) -> str | None:
+    """Read ``contact_sheet_asset_id`` from a publication snapshot.
+
+    Versions published before the contact sheet feature have no such field,
+    so ``None`` (and the seven-grid fallback in the UI) is a valid result.
+    """
+    if row is None or row["snapshot_json"] is None:
+        return None
+    try:
+        snapshot = json.loads(str(row["snapshot_json"]))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(snapshot, dict):
+        return None
+    value = snapshot.get("contact_sheet_asset_id")
+    return value if isinstance(value, str) and value else None
+
+
+def _group_by_identity(rows: list[sqlite3.Row]) -> dict[str, list[sqlite3.Row]]:
+    grouped: dict[str, list[sqlite3.Row]] = {}
+    for row in rows:
+        grouped.setdefault(str(row["identity_id"]), []).append(row)
+    return grouped
 
 
 def rename_simple_character_identity(
@@ -246,6 +472,418 @@ def rename_simple_character_identity(
         metadata={"display_name": clean_name},
     )
     return get_person_identity(conn, actor=actor, identity_id=identity_id)
+
+
+@dataclass(frozen=True)
+class SimpleCharacterRegenerationResult:
+    identity_id: str
+    persona_id: str
+    character_version_id: str
+    previous_version_id: str
+    version_number: int
+    publication_hash: str
+    contact_sheet_asset_id: str
+    views: tuple[SimpleCharacterView, ...]
+
+
+def regenerate_simple_character_contact_sheet(
+    conn: sqlite3.Connection,
+    *,
+    actor: CurrentUser,
+    identity_id: str,
+    storage: StorageAdapter,
+    image_provider: ImageProvider | None = None,
+) -> SimpleCharacterRegenerationResult:
+    """Re-run the single-photo five-view generation and publish a new version.
+
+    The character library's “重新生成多视图” action: read the identity's
+    original source photo, re-render the contact sheet with the same
+    identity-preserve prompt, and publish it as the next version under the
+    same persona. The previously published version is left untouched so
+    projects already bound to it keep working (their reference selections
+    stay valid), while the library preview switches to the new version
+    immediately because it always shows the latest published version.
+    """
+    identity = read_identity_row(conn, identity_id)
+    if actor.role != "admin" and str(identity["owner_user_id"]) != actor.id:
+        raise character_error(
+            403,
+            "IDENTITY_REGENERATE_FORBIDDEN",
+            "只有创建者或管理员可以重新生成多视图。",
+        )
+    if str(identity["status"]) == "ARCHIVED":
+        raise character_error(409, "IDENTITY_ARCHIVED", "已归档人物身份不能重新生成。")
+
+    source_asset_id = identity["source_asset_id"]
+    source_asset = (
+        conn.execute(
+            "SELECT storage_uri, content_type FROM assets WHERE id = ?",
+            (str(source_asset_id),),
+        ).fetchone()
+        if source_asset_id
+        else None
+    )
+    if source_asset is None:
+        raise character_error(
+            409,
+            "SIMPLE_CHARACTER_SOURCE_MISSING",
+            "人物缺少原始授权照片，无法重新生成多视图。",
+        )
+
+    persona = conn.execute(
+        """
+        SELECT id FROM character_personas WHERE identity_id = ?
+        ORDER BY created_at DESC, id LIMIT 1
+        """,
+        (identity_id,),
+    ).fetchone()
+    if persona is None:
+        raise character_error(
+            409,
+            "SIMPLE_CHARACTER_VERSION_MISSING",
+            "人物没有可用的角色版本，请重新创建。",
+        )
+    persona_id = str(persona["id"])
+    baseline = conn.execute(
+        """
+        SELECT id, persona_snapshot_json FROM character_versions
+        WHERE persona_id = ?
+        ORDER BY version_number DESC LIMIT 1
+        """,
+        (persona_id,),
+    ).fetchone()
+    if baseline is None:
+        raise character_error(
+            409,
+            "SIMPLE_CHARACTER_VERSION_MISSING",
+            "人物没有可用的角色版本，请重新创建。",
+        )
+    persona_snapshot_json = str(baseline["persona_snapshot_json"])
+    previous_version_id = str(baseline["id"])
+
+    # Read the photo and render the new sheet before opening the write
+    # transaction (same policy as create_simple_character) so provider calls
+    # never hold the SQLite lock.
+    try:
+        source_content = storage.get_object(
+            storage_key_from_uri(str(source_asset["storage_uri"]))
+        )
+    except (StorageBackendUnavailable, OSError, ValueError, KeyError) as exc:
+        raise character_error(
+            503,
+            "SIMPLE_CHARACTER_SOURCE_UNAVAILABLE",
+            "原始授权照片读取失败，请稍后重试。",
+        ) from exc
+    source_content_type = (
+        str(source_asset["content_type"] or "image/png").split(";", 1)[0].strip().lower()
+    )
+
+    version_id = str(uuid.uuid4())
+    now_iso = _utc_now_iso()
+    contact_content, contact_content_type, contact_source = _generate_contact_sheet_content(
+        image_provider,
+        source_content=source_content,
+        source_content_type=source_content_type,
+        version_id=version_id,
+    )
+
+    attempted_keys: list[str] = []
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        next_version_number = _next_version_number(conn, persona_id=persona_id)
+        _insert_version(
+            conn,
+            actor=actor,
+            version_id=version_id,
+            persona_id=persona_id,
+            persona_snapshot_json=persona_snapshot_json,
+            now_iso=now_iso,
+            version_number=next_version_number,
+        )
+        views = _generate_and_approve_views(
+            conn,
+            storage=storage,
+            actor=actor,
+            version_id=version_id,
+            persona_id=persona_id,
+            now_iso=now_iso,
+            attempted_keys=attempted_keys,
+        )
+        contact_sheet_asset_id = _store_contact_sheet_asset(
+            conn,
+            storage=storage,
+            actor=actor,
+            identity_id=identity_id,
+            version_id=version_id,
+            content=contact_content,
+            content_type=contact_content_type,
+            generation_source=contact_source,
+            attempted_keys=attempted_keys,
+        )
+        publication_hash, assets_by_view = _publish_views(
+            conn,
+            storage=storage,
+            actor=actor,
+            version_id=version_id,
+            persona_id=persona_id,
+            persona_snapshot_json=persona_snapshot_json,
+            views=views,
+            contact_sheet_asset_id=contact_sheet_asset_id,
+            now_iso=now_iso,
+            attempted_keys=attempted_keys,
+        )
+
+        write_audit(
+            conn,
+            actor=actor,
+            action="simple_character.regenerate",
+            entity_type="character_version",
+            entity_id=version_id,
+            metadata={
+                "identity_id": identity_id,
+                "persona_id": persona_id,
+                "previous_version_id": previous_version_id,
+                "version_number": next_version_number,
+                "publication_hash": publication_hash,
+                "contact_sheet_asset_id": contact_sheet_asset_id,
+            },
+        )
+        conn.commit()
+    except HTTPException:
+        conn.rollback()
+        cleanup_publication_objects(storage, attempted_keys)
+        raise
+    except Exception as exc:  # pragma: no cover - defensive guard
+        conn.rollback()
+        cleanup_publication_objects(storage, attempted_keys)
+        raise character_error(
+            500,
+            "SIMPLE_CHARACTER_REGENERATION_FAILED",
+            "重新生成多视图失败，请稍后重试。",
+        ) from exc
+
+    return SimpleCharacterRegenerationResult(
+        identity_id=identity_id,
+        persona_id=persona_id,
+        character_version_id=version_id,
+        previous_version_id=previous_version_id,
+        version_number=next_version_number,
+        publication_hash=publication_hash,
+        contact_sheet_asset_id=contact_sheet_asset_id,
+        views=tuple(
+            SimpleCharacterView(
+                view_type=view_type,
+                asset_id=str(assets_by_view[view_type]["approved_asset_id"]),
+            )
+            for view_type in REQUIRED_CHARACTER_VIEW_TYPES
+            if view_type in assets_by_view
+        ),
+    )
+
+
+def _next_version_number(conn: sqlite3.Connection, *, persona_id: str) -> int:
+    row = conn.execute(
+        "SELECT MAX(version_number) FROM character_versions WHERE persona_id = ?",
+        (persona_id,),
+    ).fetchone()
+    current = int(row[0]) if row is not None and row[0] is not None else 0
+    return current + 1
+
+
+StorageResolver = Callable[[sqlite3.Connection, str], StorageAdapter]
+
+
+def delete_simple_character_identity(
+    conn: sqlite3.Connection,
+    *,
+    actor: CurrentUser,
+    identity_id: str,
+    storage_for_uri: StorageResolver,
+) -> None:
+    """Delete an identity together with every derived character record.
+
+    Mirrors project deletion: in-flight character generation tasks and project
+    character selections block the delete (409), storage object cleanup is
+    best-effort so an unavailable backend never blocks the operator, and the
+    outcome is recorded in the audit log.
+    """
+    row = read_identity_row(conn, identity_id)
+    if actor.role != "admin" and str(row["owner_user_id"]) != actor.id:
+        raise character_error(
+            403,
+            "IDENTITY_DELETE_FORBIDDEN",
+            "只有创建者或管理员可以删除人物。",
+        )
+
+    # Paid provider calls may still be in flight for this character; deleting
+    # the versions underneath them would lose their write-back.
+    active_task = conn.execute(
+        """
+        SELECT 1
+        FROM character_generation_tasks AS task
+        JOIN character_versions AS version ON version.id = task.character_version_id
+        JOIN character_personas AS persona ON persona.id = version.persona_id
+        WHERE persona.identity_id = ?
+          AND task.status IN ('PENDING', 'RUNNING')
+        LIMIT 1
+        """,
+        (identity_id,),
+    ).fetchone()
+    if active_task:
+        raise character_error(
+            409,
+            "IDENTITY_DELETE_HAS_ACTIVE_TASKS",
+            "人物存在进行中的生成任务，请等待任务结束后再删除。",
+        )
+
+    # Project character selections reference versions with ON DELETE RESTRICT;
+    # removing a character a project still relies on must stay explicit.
+    used_project = conn.execute(
+        """
+        SELECT selection.project_id
+        FROM character_reference_selections AS selection
+        JOIN character_versions AS version ON version.id = selection.character_version_id
+        JOIN character_personas AS persona ON persona.id = version.persona_id
+        WHERE persona.identity_id = ?
+        LIMIT 1
+        """,
+        (identity_id,),
+    ).fetchone()
+    if used_project:
+        raise character_error(
+            409,
+            "IDENTITY_IN_USE",
+            "人物已被项目选用，请先在项目中移除该角色后再删除。",
+        )
+
+    asset_ids = _identity_asset_ids(conn, identity_id)
+    placeholders = ",".join("?" for _ in asset_ids)
+    asset_rows = (
+        conn.execute(
+            f"SELECT id, storage_uri FROM assets WHERE id IN ({placeholders})",  # noqa: S608
+            tuple(asset_ids),
+        ).fetchall()
+        if asset_ids
+        else []
+    )
+
+    # Best-effort object cleanup before removing the rows, mirroring project
+    # deletion: an unavailable backend (e.g. cloud credentials removed) must
+    # not block the delete; failures are counted into the audit log.
+    storage_cleanup_failed_count = 0
+    for asset in asset_rows:
+        uri = str(asset["storage_uri"])
+        try:
+            storage = storage_for_uri(conn, uri)
+            storage.delete_object(storage_key_from_uri(uri), actor_id=actor.id)
+        except (HTTPException, StorageBackendUnavailable, OSError, ValueError):
+            storage_cleanup_failed_count += 1
+
+    version_ids_sql = """
+        SELECT version.id
+        FROM character_versions AS version
+        JOIN character_personas AS persona ON persona.id = version.persona_id
+        WHERE persona.identity_id = ?
+    """
+    with conn:
+        conn.execute(
+            "DELETE FROM character_generation_tasks WHERE character_version_id IN "
+            f"({version_ids_sql})",  # noqa: S608
+            (identity_id,),
+        )
+        conn.execute(
+            """
+            DELETE FROM character_asset_reviews
+            WHERE character_asset_id IN (
+                SELECT view.id FROM character_assets AS view
+                WHERE view.character_version_id IN (
+                    SELECT version.id FROM character_versions AS version
+                    JOIN character_personas AS persona ON persona.id = version.persona_id
+                    WHERE persona.identity_id = ?
+                )
+            )
+            """,
+            (identity_id,),
+        )
+        conn.execute(
+            f"DELETE FROM character_assets WHERE character_version_id IN ({version_ids_sql})",  # noqa: S608
+            (identity_id,),
+        )
+        conn.execute(
+            "DELETE FROM character_versions WHERE persona_id IN "
+            "(SELECT id FROM character_personas WHERE identity_id = ?)",
+            (identity_id,),
+        )
+        conn.execute(
+            "DELETE FROM character_personas WHERE identity_id = ?",
+            (identity_id,),
+        )
+        conn.execute("DELETE FROM person_identities WHERE id = ?", (identity_id,))
+        if asset_ids:
+            conn.execute(
+                f"DELETE FROM assets WHERE id IN ({placeholders})",
+                tuple(asset_ids),
+            )
+
+    write_audit(
+        conn,
+        actor=actor,
+        action="simple_character.delete",
+        entity_type="person_identity",
+        entity_id=identity_id,
+        metadata={
+            "deleted_asset_count": len(asset_rows),
+            "storage_cleanup_failed_count": storage_cleanup_failed_count,
+        },
+    )
+
+
+def _identity_asset_ids(conn: sqlite3.Connection, identity_id: str) -> set[str]:
+    """Collect every asset owned by an identity.
+
+    Covers the authorization/source upload, the per-view candidates of every
+    version, and each version's contact sheet (snapshots predating the contact
+    sheet feature simply contribute nothing).
+    """
+    identity = conn.execute(
+        """
+        SELECT authorization_asset_id, source_asset_id
+        FROM person_identities WHERE id = ?
+        """,
+        (identity_id,),
+    ).fetchone()
+    asset_ids: set[str] = set()
+    if identity is not None:
+        for column in ("authorization_asset_id", "source_asset_id"):
+            value = identity[column]
+            if value is not None:
+                asset_ids.add(str(value))
+
+    for view_asset_id in conn.execute(
+        """
+        SELECT view.asset_id
+        FROM character_assets AS view
+        JOIN character_versions AS version ON version.id = view.character_version_id
+        JOIN character_personas AS persona ON persona.id = version.persona_id
+        WHERE persona.identity_id = ? AND view.asset_id IS NOT NULL
+        """,
+        (identity_id,),
+    ).fetchall():
+        asset_ids.add(str(view_asset_id[0]))
+
+    for snapshot_row in conn.execute(
+        """
+        SELECT version.publication_snapshot_json AS snapshot_json
+        FROM character_versions AS version
+        JOIN character_personas AS persona ON persona.id = version.persona_id
+        WHERE persona.identity_id = ?
+        """,
+        (identity_id,),
+    ).fetchall():
+        contact_id = _snapshot_contact_sheet_asset_id(snapshot_row)
+        if contact_id is not None:
+            asset_ids.add(contact_id)
+    return asset_ids
 
 
 def _validate_source(content: bytes, content_type: str, display_name: str) -> None:
@@ -385,6 +1023,7 @@ def _insert_version(
     persona_id: str,
     persona_snapshot_json: str,
     now_iso: str,
+    version_number: int = 1,
 ) -> None:
     conn.execute(
         """
@@ -393,12 +1032,13 @@ def _insert_version(
             persona_snapshot_json, provider, model, generation_params_json,
             template_version, template_hash, required_view_types_json,
             created_by, created_at, generation_mode
-        ) VALUES (?, ?, 1, 'REVIEWING', ?, 'local_simple_upload',
+        ) VALUES (?, ?, ?, 'REVIEWING', ?, 'local_simple_upload',
                   'deterministic-v1', '{}', ?, ?, ?, ?, ?, 'simple_upload')
         """,
         (
             version_id,
             persona_id,
+            version_number,
             persona_snapshot_json,
             CHARACTER_TEMPLATE_VERSION,
             CHARACTER_TEMPLATE_HASH,
@@ -515,9 +1155,10 @@ def _publish_views(
     persona_id: str,
     persona_snapshot_json: str,
     views: list[_ApprovedView],
+    contact_sheet_asset_id: str,
     now_iso: str,
     attempted_keys: list[str],
-) -> str:
+) -> tuple[str, dict[str, dict[str, object]]]:
     assets_by_view: dict[str, dict[str, object]] = {}
     for view in views:
         approved_asset_id = str(uuid.uuid4())
@@ -588,6 +1229,7 @@ def _publish_views(
     snapshot: dict[str, object] = {
         "assets_by_view": assets_by_view,
         "character_version_id": version_id,
+        "contact_sheet_asset_id": contact_sheet_asset_id,
         "persona_snapshot_hash": hashlib.sha256(persona_snapshot_json.encode()).hexdigest(),
         "published_at": now_iso,
         "required_view_types": list(REQUIRED_CHARACTER_VIEW_TYPES),
@@ -612,8 +1254,202 @@ def _publish_views(
             "SIMPLE_CHARACTER_VERSION_NOT_REVIEWING",
             "角色版本状态异常，无法发布。",
         )
-    return publication_hash
+    return publication_hash, assets_by_view
 
 
 def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _generate_contact_sheet_content(
+    provider: ImageProvider | None,
+    *,
+    source_content: bytes,
+    source_content_type: str,
+    version_id: str,
+) -> tuple[bytes, str, str]:
+    """Render the single five-view contact sheet image.
+
+    Returns ``(content, content_type, generation_source)``. Whenever no
+    provider is configured, the provider call fails, or its output is not a
+    usable raster image, a locally composed placeholder is used instead so
+    uploads never block on image generation.
+    """
+    if provider is not None:
+        extension = SIMPLE_CONTACT_SHEET_EXTENSIONS.get(source_content_type, ".png")
+        try:
+            generated = provider.edit(
+                model=SIMPLE_CONTACT_SHEET_MODEL,
+                prompt=SIMPLE_CONTACT_SHEET_PROMPT,
+                source_image=ImageInput(
+                    content=source_content,
+                    content_type=source_content_type,
+                    filename=f"character-source{extension}",
+                ),
+                character_reference_images=[],
+                output_count=1,
+            )
+        except ImageProviderFailed as exc:
+            logger.warning("Contact sheet provider failed, using placeholder: %s", exc)
+        else:
+            if generated:
+                image = generated[0]
+                content_type = image.content_type.split(";", 1)[0].strip().lower()
+                if image.content and content_type in SIMPLE_CONTACT_SHEET_EXTENSIONS:
+                    return image.content, content_type, "image_provider"
+            logger.warning("Contact sheet provider returned no usable image, using placeholder")
+    return (
+        contact_sheet_placeholder_png(f"contact-sheet:{version_id}".encode()),
+        "image/png",
+        "local_placeholder",
+    )
+
+
+def _contact_sheet_asset_key(
+    *, owner_user_id: str, identity_id: str, asset_id: str, extension: str
+) -> str:
+    for value in (owner_user_id, identity_id, asset_id):
+        validate_key_segment(value)
+    if extension not in {".png", ".jpg", ".webp"}:
+        raise ValueError("unsupported contact sheet extension")
+    return f"users/{owner_user_id}/identities/{identity_id}/contact-sheets/{asset_id}{extension}"
+
+
+def _store_contact_sheet_asset(
+    conn: sqlite3.Connection,
+    *,
+    storage: StorageAdapter,
+    actor: CurrentUser,
+    identity_id: str,
+    version_id: str,
+    content: bytes,
+    content_type: str,
+    generation_source: str,
+    attempted_keys: list[str],
+) -> str:
+    """Persist the five-view contact sheet as its own downloadable asset."""
+    asset_id = str(uuid.uuid4())
+    key = _contact_sheet_asset_key(
+        owner_user_id=actor.id,
+        identity_id=identity_id,
+        asset_id=asset_id,
+        extension=SIMPLE_CONTACT_SHEET_EXTENSIONS[content_type],
+    )
+    stored = storage.put_object(key, content, content_type=content_type)
+    attempted_keys.append(stored.key)
+    conn.execute(
+        """
+        INSERT INTO assets (
+            id, project_id, kind, storage_uri, sha256, size_bytes,
+            content_type, created_by_user_id, metadata_json
+        ) VALUES (?, NULL, 'character_contact_sheet', ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            asset_id,
+            stored.uri,
+            stored.sha256,
+            stored.size,
+            stored.content_type,
+            actor.id,
+            encode_json(
+                {
+                    "identity_id": identity_id,
+                    "character_version_id": version_id,
+                    "generation_mode": SIMPLE_GENERATION_MODE,
+                    "generation_source": generation_source,
+                    "object_key": stored.key,
+                    "purpose": "five_view_contact_sheet",
+                }
+            ),
+        ),
+    )
+    return asset_id
+
+
+CONTACT_SHEET_PLACEHOLDER_WIDTH = 2240
+CONTACT_SHEET_PLACEHOLDER_HEIGHT = 1400
+
+
+def contact_sheet_placeholder_png(
+    seed: bytes,
+    *,
+    width: int = CONTACT_SHEET_PLACEHOLDER_WIDTH,
+    height: int = CONTACT_SHEET_PLACEHOLDER_HEIGHT,
+) -> bytes:
+    """Locally composed five-panel placeholder mirroring the sheet layout.
+
+    Three equal tall columns on the left plus two stacked portrait panels on
+    the right, separated by thin near-white dividers, so even the fallback
+    visually reads as one multi-view contact sheet.
+    """
+    divider = b"\xe8\xe8\xe8"
+    panels = _contact_sheet_panels(width, height, seed)
+    scanlines: list[bytes] = []
+    for y in range(height):
+        row = bytearray(b"\x00")
+        cursor = 0
+        for x0, y0, panel_width, panel_height, color in panels:
+            if y0 <= y < y0 + panel_height:
+                if x0 > cursor:
+                    row += divider * (x0 - cursor)
+                    cursor = x0
+                row += color * panel_width
+                cursor = x0 + panel_width
+        if cursor < width:
+            row += divider * (width - cursor)
+        scanlines.append(bytes(row))
+    pixels = zlib.compress(b"".join(scanlines))
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + png_chunk(b"IHDR", header)
+        + png_chunk(b"IDAT", pixels)
+        + png_chunk(b"IEND", b"")
+    )
+
+
+def _contact_sheet_panels(
+    width: int, height: int, seed: bytes
+) -> list[tuple[int, int, int, int, bytes]]:
+    border = max(8, width // 140)
+    gap = border
+    inner_width = width - 2 * border
+    inner_height = height - 2 * border
+    left_width = round(inner_width * 0.72)
+    right_width = inner_width - left_width - gap
+
+    columns = 3
+    base_column_width, remainder = divmod(left_width - (columns - 1) * gap, columns)
+    panels: list[tuple[int, int, int, int, bytes]] = []
+    x = border
+    for index in range(columns):
+        column_width = base_column_width + (1 if index < remainder else 0)
+        panels.append((x, border, column_width, inner_height, _panel_color(seed, index)))
+        x += column_width + gap
+
+    base_row_height, row_remainder = divmod(inner_height - gap, 2)
+    right_x = border + left_width + gap
+    panels.append(
+        (
+            right_x,
+            border,
+            right_width,
+            base_row_height + row_remainder,
+            _panel_color(seed, columns),
+        )
+    )
+    panels.append(
+        (
+            right_x,
+            border + base_row_height + row_remainder + gap,
+            right_width,
+            base_row_height,
+            _panel_color(seed, columns + 1),
+        )
+    )
+    return panels
+
+
+def _panel_color(seed: bytes, index: int) -> bytes:
+    digest = hashlib.sha256(seed + bytes((index,))).digest()
+    return bytes((80 + digest[0] % 120, 80 + digest[1] % 120, 80 + digest[2] % 120))
