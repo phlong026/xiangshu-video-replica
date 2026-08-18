@@ -63,7 +63,10 @@ def rewrite_script_with_deepseek(
     if not text:
         raise HTTPException(
             status_code=422,
-            detail={"code": "SCRIPT_REWRITE_TEXT_REQUIRED", "message": "口播稿内容为空，无法改写。"},
+            detail={
+                "code": "SCRIPT_REWRITE_TEXT_REQUIRED",
+                "message": "口播稿内容为空，无法改写。",
+            },
         )
 
     try:
@@ -71,7 +74,10 @@ def rewrite_script_with_deepseek(
     except SettingsUnavailableError as exc:
         raise HTTPException(
             status_code=503,
-            detail={"code": "DEEPSEEK_SETTINGS_UNAVAILABLE", "message": "本地配置暂不可用，请稍后重试。"},
+            detail={
+                "code": "DEEPSEEK_SETTINGS_UNAVAILABLE",
+                "message": "本地配置暂不可用，请稍后重试。",
+            },
         ) from exc
 
     api_key = config.get("api_key", "")
@@ -80,7 +86,10 @@ def rewrite_script_with_deepseek(
             status_code=503,
             detail={
                 "code": "DEEPSEEK_NOT_CONFIGURED",
-                "message": "尚未配置 AI 改写服务。请管理员在「设置 → AI 改写」中保存 DeepSeek API Key。",
+                "message": (
+                    "尚未配置 AI 改写服务。请管理员在"
+                    + "「设置 → AI 改写」中保存 DeepSeek API Key。"
+                ),
             },
         )
 

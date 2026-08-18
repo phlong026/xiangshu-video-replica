@@ -698,9 +698,7 @@ def test_admin_can_generate_and_download_a_redacted_settings_diagnostic_log(
         "cos",
         "deepseek",
     }
-    deepseek = next(
-        item for item in report["providers"] if item["provider"] == "deepseek"
-    )
+    deepseek = next(item for item in report["providers"] if item["provider"] == "deepseek")
     assert deepseek["status"] == "not_configured"
     metaso = next(item for item in report["providers"] if item["provider"] == "metaso")
     assert metaso["status"] == "ok"

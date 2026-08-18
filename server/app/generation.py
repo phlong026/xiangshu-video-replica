@@ -1057,14 +1057,13 @@ def preview_prompt_text(
             "The latest shot data has no shots to compile.",
         )
 
+    script_source: Literal["script_version", "analysis_original"]
     script = latest_version(conn, project_id=project_id, kind=SCRIPT_KIND)
     if script is not None:
         script_payload = json.loads(str(script["payload_json"]))
         script_source = "script_version"
     else:
-        analysis_payload = (
-            json.loads(str(analysis["payload_json"])) if analysis is not None else {}
-        )
+        analysis_payload = json.loads(str(analysis["payload_json"])) if analysis is not None else {}
         original_script = str(analysis_payload.get("original_script") or "")
         spoken_texts = [str(shot.get("spoken_text") or "") for shot in shots]
         script_payload = {

@@ -21,12 +21,11 @@ from app.character_asset_review import (
     CHARACTER_PUBLICATION_SCHEMA_VERSION,
     cleanup_publication_objects,
 )
-from app.character_contracts import RequiredCharacterViewType
+from app.character_contracts import PersonIdentity, RequiredCharacterViewType
 from app.character_identity import (
     CHARACTER_TEMPLATE_HASH,
     CHARACTER_TEMPLATE_VERSION,
     REQUIRED_CHARACTER_VIEW_TYPES,
-    PersonIdentity,
     approved_character_asset_key,
     character_error,
     encode_json,

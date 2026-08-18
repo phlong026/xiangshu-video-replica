@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, ConfigDict
 
 from app.auth import AuthenticatedUser, Database
+from app.character_contracts import PersonIdentity
 from app.character_identity import character_error
 from app.character_identity_routes import get_character_storage
 from app.permissions import require_not_auditor, require_project_access
@@ -105,7 +106,7 @@ def rename_identity(
     request: IdentityRenameRequest,
     conn: Database,
     actor: AuthenticatedUser,
-):
+) -> PersonIdentity:
     """Rename a character identity (owner or admin only)."""
     return rename_simple_character_identity(
         conn,
