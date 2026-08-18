@@ -89,7 +89,7 @@ describe("Fake provider E2E contract", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "进入" }));
+    // 启动即自动验证身份进入工作台，无需点击“进入”。
     fireEvent.click(await screen.findByRole("button", { name: "任务记录" }));
     fireEvent.change(await screen.findByLabelText("Batch ID"), {
       target: { value: " batch-fake-e2e " },

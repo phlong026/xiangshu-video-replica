@@ -55,9 +55,14 @@ const PROVIDER_FORMS: Record<ProviderName, ProviderFormSpec> = {
     ],
     wide: true,
   },
+  deepseek: {
+    title: "AI 改写",
+    note: "二创口播稿改写 · 默认 DeepSeek，只需 API Key",
+    fields: [{ name: "api_key", label: "API Key", secret: true }],
+  },
 };
 
-const PROVIDER_ORDER: ProviderName[] = ["metaso", "apilio", "cos"];
+const PROVIDER_ORDER: ProviderName[] = ["metaso", "apilio", "cos", "deepseek"];
 
 export function SettingsPanel() {
   const [settings, setSettings] = useState<SettingsSnapshot | null>(null);

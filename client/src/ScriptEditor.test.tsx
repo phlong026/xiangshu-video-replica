@@ -10,12 +10,14 @@ function renderEditor(overrides: Record<string, unknown> = {}) {
   const callbacks = {
     onChooseSource: vi.fn(),
     onScriptTextChange: vi.fn(),
+    onRewriteScript: vi.fn(),
     onSaveScript: vi.fn(),
   };
   const props = {
     busyAction: null as GenerationBusyAction,
     onChooseSource: callbacks.onChooseSource,
     onScriptTextChange: callbacks.onScriptTextChange,
+    onRewriteScript: callbacks.onRewriteScript,
     onSaveScript: callbacks.onSaveScript,
     readOnly: false,
     scriptDirty: false,
@@ -88,6 +90,23 @@ describe("ScriptEditor 口播稿编辑（受控组件）", () => {
     renderEditor({ scriptSource: "custom", scriptText: "" });
 
     expect(screen.getByRole("button", { name: "保存口播稿" })).toBeDisabled();
+  });
+
+  it("点击 AI 改写触发 onRewriteScript", () => {
+    const { callbacks } = renderEditor({
+      scriptSource: "custom",
+      scriptText: "草稿",
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "AI 改写" }));
+    expect(callbacks.onRewriteScript).toHaveBeenCalledTimes(1);
+  });
+
+  it("busyAction=rewrite 时 AI 改写按钮显示正在改写并禁用", () => {
+    renderEditor({ busyAction: "rewrite" });
+
+    const button = screen.getByRole("button", { name: "正在改写…" });
+    expect(button).toBeDisabled();
   });
 
   it("点击保存触发 onSaveScript", () => {

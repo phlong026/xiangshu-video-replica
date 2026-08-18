@@ -9,12 +9,14 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, ConfigDict
 
 from app.auth import AuthenticatedUser, Database
+from app.character_contracts import PersonIdentity
 from app.character_identity import character_error
 from app.character_identity_routes import get_character_storage
 from app.permissions import require_not_auditor, require_project_access
 from app.simple_character import (
     SIMPLE_UPLOAD_MAX_BYTES,
     create_simple_character,
+    rename_simple_character_identity,
 )
 from app.storage import StorageAdapter
 
@@ -41,6 +43,12 @@ class SimpleCharacterResponse(BaseModel):
     publication_hash: str
 
 
+class IdentityRenameRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str
+
+
 @router.post("/upload-intent", response_model=SimpleUploadIntentResponse)
 def create_simple_upload_intent(
     actor: AuthenticatedUser,
@@ -56,6 +64,55 @@ def create_simple_upload_intent(
         method="POST (multipart/form-data)",
         max_size_bytes=SIMPLE_UPLOAD_MAX_BYTES,
         allowed_content_types=["image/png", "image/jpeg"],
+    )
+
+
+@router.post("/generate", response_model=SimpleCharacterResponse, status_code=201)
+async def generate_global_simple_character(
+    conn: Database,
+    actor: AuthenticatedUser,
+    storage: Annotated[StorageAdapter, Depends(get_character_storage)],
+    file: Annotated[UploadFile, File()],
+    display_name: Annotated[str, Form()],
+    persona_name: Annotated[str, Form()] = "",
+) -> SimpleCharacterResponse:
+    """Global one-click character creation (人物库精简流程，无项目上下文).
+
+    Mirrors the project-scoped endpoint but skips ``require_project_access``:
+    the character library page has no project context, and the creator's
+    identity ownership is recorded for later renames.
+    """
+    require_not_auditor(
+        conn,
+        actor=actor,
+        action="simple_character.create",
+        entity_type="character_version",
+        entity_id="collection",
+    )
+    return await _run_simple_character_creation(
+        conn=conn,
+        actor=actor,
+        storage=storage,
+        file=file,
+        display_name=display_name,
+        persona_name=persona_name,
+        project_id=None,
+    )
+
+
+@router.patch("/identities/{identity_id}/name")
+def rename_identity(
+    identity_id: str,
+    request: IdentityRenameRequest,
+    conn: Database,
+    actor: AuthenticatedUser,
+) -> PersonIdentity:
+    """Rename a character identity (owner or admin only)."""
+    return rename_simple_character_identity(
+        conn,
+        actor=actor,
+        identity_id=identity_id,
+        display_name=request.display_name,
     )
 
 
@@ -93,6 +150,28 @@ async def generate_simple_character(
         project_id=project_id,
         action="simple_character.create",
     )
+    return await _run_simple_character_creation(
+        conn=conn,
+        actor=actor,
+        storage=storage,
+        file=file,
+        display_name=display_name,
+        persona_name=persona_name,
+        project_id=project_id,
+    )
+
+
+async def _run_simple_character_creation(
+    *,
+    conn: Database,
+    actor: AuthenticatedUser,
+    storage: StorageAdapter,
+    file: UploadFile,
+    display_name: str,
+    persona_name: str,
+    project_id: str | None,
+) -> SimpleCharacterResponse:
+    """Shared body of the global and project-scoped generate endpoints."""
     # Reject oversized uploads before reading the body into memory.
     if file.size is not None and file.size > SIMPLE_UPLOAD_MAX_BYTES:
         raise character_error(

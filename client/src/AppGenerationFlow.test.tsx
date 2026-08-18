@@ -68,9 +68,14 @@ function createAppFetchMock() {
 }
 
 async function openProjectGenerationFlow() {
-  fireEvent.click(screen.getByRole("button", { name: "进入" }));
+  // 启动即自动验证身份进入工作台，无需点击“进入”；从项目列表
+  // 行内入口进入被 mock 的工作区。
   await act(async () => Promise.resolve());
-  fireEvent.click(await screen.findByRole("button", { name: "继续编辑" }));
+  fireEvent.click(
+    await screen.findByRole("button", {
+      name: "打开项目 夏日咖啡馆口播复刻",
+    }),
+  );
   fireEvent.click(screen.getByRole("button", { name: "模拟一键生成完成" }));
 }
 
@@ -165,9 +170,12 @@ describe("App generation handoff", () => {
     vi.stubGlobal("fetch", createAppFetchMock());
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "进入" }));
     await act(async () => Promise.resolve());
-    fireEvent.click(await screen.findByRole("button", { name: "继续编辑" }));
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "打开项目 夏日咖啡馆口播复刻",
+      }),
+    );
     fireEvent.click(screen.getByRole("button", { name: "模拟上游写入开始" }));
 
     expect(screen.getByRole("button", { name: "任务记录" })).toBeDisabled();
@@ -209,9 +217,12 @@ describe("App generation handoff", () => {
     vi.stubGlobal("fetch", createAppFetchMock());
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "进入" }));
     await act(async () => Promise.resolve());
-    fireEvent.click(await screen.findByRole("button", { name: "继续编辑" }));
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "打开项目 夏日咖啡馆口播复刻",
+      }),
+    );
     fireEvent.click(screen.getByRole("button", { name: "模拟上游写入开始" }));
     fireEvent.click(screen.getByRole("button", { name: "模拟一键生成完成" }));
 

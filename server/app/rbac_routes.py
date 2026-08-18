@@ -337,7 +337,7 @@ def create_project(
 
 
 @router.delete("/projects/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_unfinished_project(
+def delete_project(
     project_id: str,
     conn: Database,
     actor: AuthenticatedUser,
@@ -351,6 +351,30 @@ def delete_unfinished_project(
     )
     require_project_access(conn, actor=actor, project_id=project_id, action="project.delete")
 
+    # Paid provider calls may still be in flight for leased tasks; deleting the
+    # project underneath them would lose their write-back, so require the
+    # operator to wait until they settle (succeed, fail, or supersede).
+    has_active_tasks = conn.execute(
+        """
+        SELECT 1
+        FROM generation_tasks
+        JOIN generation_batches ON generation_batches.id = generation_tasks.batch_id
+        WHERE generation_batches.project_id = ?
+          AND generation_tasks.status IN
+              ('PENDING', 'SUBMITTING', 'QUEUED', 'RUNNING', 'ARCHIVING')
+        LIMIT 1
+        """,
+        (project_id,),
+    ).fetchone()
+    if has_active_tasks:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "PROJECT_DELETE_HAS_ACTIVE_TASKS",
+                "message": "项目存在进行中的生成任务，请等待任务结束或失败后再删除。",
+            },
+        )
+
     assets = conn.execute(
         """
         SELECT id, storage_uri, sha256, size_bytes
@@ -359,44 +383,33 @@ def delete_unfinished_project(
         """,
         (project_id,),
     ).fetchall()
-    has_completed_reference = any(
-        str(asset["sha256"]) or int(asset["size_bytes"]) > 0 for asset in assets
+    versions_count = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM versions WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()[0]
     )
-    has_project_work = conn.execute(
-        """
-        SELECT 1
-        FROM versions
-        WHERE project_id = ?
-        UNION ALL
-        SELECT 1
-        FROM generation_batches
-        WHERE project_id = ?
-        LIMIT 1
-        """,
-        (project_id, project_id),
-    ).fetchone()
-    if has_completed_reference or has_project_work:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "code": "PROJECT_DELETE_REQUIRES_UNFINISHED",
-                "message": "Only unfinished projects without completed work can be deleted.",
-            },
-        )
 
-    try:
-        for asset in assets:
+    # Best-effort object cleanup: the operator is discarding the whole project,
+    # so an unavailable backend (e.g. cloud credentials removed) must not block
+    # the delete. Failures are counted and surfaced through the audit log.
+    storage_cleanup_failed_count = 0
+    for asset in assets:
+        try:
             storage = storage_for_asset(conn, str(asset["storage_uri"]))
             storage.delete_object(
                 storage_key_from_uri(str(asset["storage_uri"])), actor_id=actor.id
             )
-    except StorageBackendUnavailable as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={"code": "STORAGE_PROVIDER_UNAVAILABLE"},
-        ) from exc
+        except (HTTPException, StorageBackendUnavailable, OSError, ValueError):
+            storage_cleanup_failed_count += 1
 
     with conn:
+        # character_reference_selections references versions with ON DELETE
+        # RESTRICT, so it must be cleared before the cascade removes versions.
+        conn.execute(
+            "DELETE FROM character_reference_selections WHERE project_id = ?",
+            (project_id,),
+        )
         conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
     write_audit(
         conn,
@@ -404,7 +417,11 @@ def delete_unfinished_project(
         action="project.delete",
         entity_type="project",
         entity_id=project_id,
-        metadata={"deleted_pending_asset_count": len(assets)},
+        metadata={
+            "deleted_asset_count": len(assets),
+            "deleted_versions_count": versions_count,
+            "storage_cleanup_failed_count": storage_cleanup_failed_count,
+        },
     )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

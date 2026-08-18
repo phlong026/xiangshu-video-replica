@@ -138,7 +138,7 @@ def test_characters_migration_creates_library_tables(db_path: Path) -> None:
             ).fetchall()
         }
 
-    assert version == "019_character_simple_upload"
+    assert version == "020_deepseek_provider"
     assert {
         "characters",
         "project_main_characters",

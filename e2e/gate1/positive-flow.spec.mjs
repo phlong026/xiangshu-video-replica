@@ -91,7 +91,7 @@ test("@positive creates a character, restarts, and restores three completed vide
 
 async function enterWorkspace(page) {
   await page.goto("/");
-  await page.getByRole("button", { name: "进入" }).click();
+  // 启动即自动验证身份并直接进入工作台，无需点击“进入”。
   await expect(page.getByRole("status")).toHaveText("本地服务已连接");
 }
 

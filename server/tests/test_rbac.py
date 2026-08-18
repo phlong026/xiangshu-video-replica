@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
+from typing import NoReturn
 
 import pytest
 from cryptography.fernet import Fernet
@@ -11,7 +13,7 @@ from fastapi.testclient import TestClient
 from app.auth import get_database
 from app.db import connect_database, initialize_database
 from app.main import app
-from app.storage import LocalStorageAdapter
+from app.storage import LocalStorageAdapter, StorageBackendUnavailable
 
 
 @pytest.fixture()
@@ -356,11 +358,97 @@ def test_owner_can_delete_an_unfinished_project_and_its_pending_upload(
     assert "project.delete" in audit_actions(db_path)
 
 
-def test_project_delete_rejects_a_project_with_completed_work(client: TestClient) -> None:
+def test_project_delete_removes_a_project_with_completed_work(
+    client: TestClient,
+    db_path: Path,
+    tmp_path: Path,
+) -> None:
+    response = client.delete("/api/projects/project_owned", headers=auth_headers("employee_1"))
+
+    assert response.status_code == 204
+    storage = LocalStorageAdapter(root=tmp_path / "private-storage", bucket="private-bucket")
+    assert storage.head_object("outputs/asset_owned.mp4") is None
+    with connect_database(db_path) as conn:
+        remaining = {
+            table: conn.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE project_id = ?",  # noqa: S608
+                ("project_owned",),
+            ).fetchone()[0]
+            for table in ("assets", "versions", "generation_batches")
+        }
+        remaining["projects"] = conn.execute(
+            "SELECT COUNT(*) FROM projects WHERE id = ?", ("project_owned",)
+        ).fetchone()[0]
+        remaining_tasks = conn.execute(
+            """
+            SELECT COUNT(*) FROM generation_tasks
+            WHERE batch_id IN (
+                SELECT id FROM generation_batches WHERE project_id = ?
+            )
+            """,
+            ("project_owned",),
+        ).fetchone()[0]
+        audit = conn.execute(
+            "SELECT metadata_json FROM audit_logs WHERE action = 'project.delete'"
+        ).fetchone()
+    assert remaining == {"projects": 0, "assets": 0, "versions": 0, "generation_batches": 0}
+    assert remaining_tasks == 0
+    assert audit is not None
+    assert json.loads(str(audit["metadata_json"])) == {
+        "deleted_asset_count": 1,
+        "deleted_versions_count": 0,
+        "storage_cleanup_failed_count": 0,
+    }
+
+
+def test_project_delete_blocked_while_generation_tasks_are_active(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    with connect_database(db_path) as conn:
+        conn.execute(
+            "UPDATE generation_tasks SET status = 'RUNNING' WHERE id = ?",
+            ("task_owned",),
+        )
+        conn.commit()
+
     response = client.delete("/api/projects/project_owned", headers=auth_headers("employee_1"))
 
     assert response.status_code == 409
-    assert response.json()["detail"]["code"] == "PROJECT_DELETE_REQUIRES_UNFINISHED"
+    assert response.json()["detail"]["code"] == "PROJECT_DELETE_HAS_ACTIVE_TASKS"
+    with connect_database(db_path) as conn:
+        project = conn.execute(
+            "SELECT id FROM projects WHERE id = ?", ("project_owned",)
+        ).fetchone()
+    assert project is not None
+
+
+def test_project_delete_tolerates_storage_cleanup_failure(
+    client: TestClient,
+    db_path: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unavailable(_conn: sqlite3.Connection, _storage_uri: str) -> NoReturn:
+        raise StorageBackendUnavailable("cloud credentials removed")
+
+    monkeypatch.setattr("app.rbac_routes.storage_for_asset", unavailable)
+
+    response = client.delete("/api/projects/project_owned", headers=auth_headers("employee_1"))
+
+    assert response.status_code == 204
+    storage = LocalStorageAdapter(root=tmp_path / "private-storage", bucket="private-bucket")
+    assert storage.head_object("outputs/asset_owned.mp4") is not None
+    with connect_database(db_path) as conn:
+        project = conn.execute(
+            "SELECT id FROM projects WHERE id = ?", ("project_owned",)
+        ).fetchone()
+        audit = conn.execute(
+            "SELECT metadata_json FROM audit_logs WHERE action = 'project.delete'"
+        ).fetchone()
+    assert project is None
+    assert audit is not None
+    assert json.loads(str(audit["metadata_json"]))["storage_cleanup_failed_count"] == 1
 
 
 def test_auditor_cannot_create_projects_and_admin_can_list_all_projects(

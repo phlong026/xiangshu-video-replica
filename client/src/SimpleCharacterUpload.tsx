@@ -7,17 +7,16 @@ const ALLOWED_TYPES = ["image/png", "image/jpeg"];
 
 export function SimpleCharacterUpload({
   onCreated,
-  projectId,
+  projectId = null,
 }: {
   onCreated: (result: SimpleCharacterResult) => void;
-  projectId: string;
+  projectId?: string | null;
 }) {
   const [busy, setBusy] = useState(false);
   const [displayName, setDisplayName] = useState("");
   const [error, setError] = useState("");
   const [fileName, setFileName] = useState("");
   const [message, setMessage] = useState("");
-  const [personaName, setPersonaName] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   function pickFile(file: File | undefined) {
@@ -51,15 +50,9 @@ export function SimpleCharacterUpload({
     setError("");
     setMessage("");
     try {
-      const result = await uploadSimpleCharacter(
-        projectId,
-        file,
-        name,
-        personaName,
-      );
-      setMessage(`人物“${name}”已生成并发布，可在下方列表中选择。`);
+      const result = await uploadSimpleCharacter(projectId, file, name);
+      setMessage(`人物“${name}”七视角已生成并发布，可在项目中选择该角色。`);
       setDisplayName("");
-      setPersonaName("");
       setFileName("");
       if (fileInputRef.current) {
         fileInputRef.current.value = "";
@@ -79,7 +72,7 @@ export function SimpleCharacterUpload({
   return (
     <section className="simple-character-upload" aria-label="一键上传人物">
       <p className="status-note">
-        上传一张已获授权的人物图片，系统会自动生成七个标准视角并直接发布为可选角色版本。
+        上传一张已获授权的人物图片，系统会自动生成七个标准视角并直接发布为可选角色。
       </p>
       <div className="simple-character-upload-form">
         <label>
@@ -89,15 +82,6 @@ export function SimpleCharacterUpload({
             placeholder="例如：荣哥"
             type="text"
             value={displayName}
-          />
-        </label>
-        <label>
-          角色名（可选）
-          <input
-            onChange={(event) => setPersonaName(event.target.value)}
-            placeholder="默认与人物名称相同"
-            type="text"
-            value={personaName}
           />
         </label>
         <label>
