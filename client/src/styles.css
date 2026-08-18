@@ -2810,9 +2810,9 @@ button.history-version--active {
 .task-result-preview {
   display: grid;
   place-items: center;
-  width: min(100%, 360px);
+  width: min(100%, 440px);
   aspect-ratio: 9 / 16;
-  max-height: 520px;
+  max-height: 620px;
   border: 1px solid #26262e;
   border-radius: 10px;
   padding: 18px;
@@ -2906,6 +2906,84 @@ button.history-version--active {
   width: 100%;
   height: 100%;
   object-fit: contain;
+}
+
+/* 舞台自绘播放器：常驻深色控制条 + 中央大播放按钮（默认有声，
+   不自动播放，显示首帧等待点击） */
+.stage-video-player {
+  position: relative;
+  display: grid;
+  width: 100%;
+  height: 100%;
+}
+
+.stage-video-player .video-stage-video {
+  cursor: pointer;
+}
+
+.stage-video-player__bigplay {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  display: grid;
+  place-items: center;
+  width: 76px;
+  height: 76px;
+  border: 2px solid rgb(224 168 63 / 0.9);
+  border-radius: 50%;
+  padding: 0;
+  color: var(--accent-strong);
+  background: rgb(10 8 6 / 0.72);
+  font-size: 26px;
+  transform: translate(-50%, -50%);
+  cursor: pointer;
+}
+
+.stage-video-player__bigplay:hover {
+  background: rgb(26 18 6 / 0.88);
+}
+
+.stage-video-player__controls {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  background: linear-gradient(transparent, rgb(5 4 8 / 0.88));
+}
+
+.stage-video-player__controls button {
+  flex: none;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  padding: 4px 12px;
+  color: var(--text);
+  background: rgb(20 20 25 / 0.85);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.stage-video-player__time {
+  flex: none;
+  color: var(--text);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.stage-video-player__seek {
+  flex: 1;
+  min-width: 72px;
+  accent-color: var(--accent);
+}
+
+.stage-video-player__volume {
+  flex: none;
+  width: 72px;
+  accent-color: var(--accent);
 }
 
 .video-stage-player-note {

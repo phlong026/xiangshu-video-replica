@@ -221,16 +221,9 @@ export function VideoResultStage({
             stepIndex={stepIndex}
           />
         ) : previewUrl ? (
-          <video
-            aria-label={`结果预览 ${activeTask.id}`}
-            autoPlay
-            className="video-stage-video"
-            controls
-            loop
-            muted
-            playsInline
-            preload="auto"
+          <StageVideoPlayer
             src={previewUrl}
+            taskLabel={`结果预览 ${activeTask.id}`}
           />
         ) : activeTask.result_asset_id && !canOperate ? (
           <p className="video-stage-player-note">
@@ -389,6 +382,172 @@ export function VideoResultStage({
       ) : null}
     </section>
   );
+}
+
+// 舞台视频播放器：不自动播放、默认有声；自绘常驻深色控制条（播放/
+// 暂停、进度与时间、音量开关与音量、全屏），点画面本身也可切换播放。
+// 用自绘控制条替代原生 controls：原生条在 9:16 深色舞台里样式突兀，
+// 且 autoPlay+muted 的旧组合让用户误以为「没有声音」。
+function StageVideoPlayer({
+  src,
+  taskLabel,
+}: {
+  src: string;
+  taskLabel: string;
+}) {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [isMuted, setIsMuted] = useState(false);
+  const [volume, setVolume] = useState(1);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+
+  function togglePlay() {
+    const video = videoRef.current;
+    if (!video) {
+      return;
+    }
+    if (video.paused) {
+      void video.play();
+    } else {
+      video.pause();
+    }
+  }
+
+  function toggleMute() {
+    const video = videoRef.current;
+    if (!video) {
+      return;
+    }
+    video.muted = !video.muted;
+    setIsMuted(video.muted);
+  }
+
+  function handleVolumeChange(nextVolume: number) {
+    const video = videoRef.current;
+    if (!video) {
+      return;
+    }
+    video.volume = nextVolume;
+    video.muted = nextVolume === 0;
+    setVolume(nextVolume);
+    setIsMuted(nextVolume === 0);
+  }
+
+  function handleSeek(nextTime: number) {
+    const video = videoRef.current;
+    if (!video) {
+      return;
+    }
+    video.currentTime = nextTime;
+    setCurrentTime(nextTime);
+  }
+
+  async function toggleFullscreen() {
+    const container = containerRef.current;
+    if (!container) {
+      return;
+    }
+    try {
+      if (document.fullscreenElement === container) {
+        await document.exitFullscreen();
+      } else {
+        await container.requestFullscreen();
+      }
+    } catch {
+      // 嵌入环境拒绝全屏时静默降级为原地播放。
+    }
+  }
+
+  return (
+    <div className="stage-video-player" ref={containerRef}>
+      {/* biome-ignore lint/a11y/useMediaCaption: Generated Provider videos do not include a separate caption asset. */}
+      <video
+        aria-label={taskLabel}
+        className="video-stage-video"
+        onClick={togglePlay}
+        onLoadedMetadata={(event) => {
+          setDuration(event.currentTarget.duration || 0);
+        }}
+        onPause={() => setIsPlaying(false)}
+        onPlay={() => setIsPlaying(true)}
+        onTimeUpdate={(event) => {
+          setCurrentTime(event.currentTarget.currentTime);
+        }}
+        onVolumeChange={(event) => {
+          setIsMuted(event.currentTarget.muted);
+          setVolume(event.currentTarget.volume);
+        }}
+        playsInline
+        preload="auto"
+        ref={videoRef}
+        src={src}
+      />
+      {!isPlaying ? (
+        <button
+          aria-label={`播放 ${taskLabel}`}
+          className="stage-video-player__bigplay"
+          onClick={togglePlay}
+          type="button"
+        >
+          <span aria-hidden="true">▶</span>
+        </button>
+      ) : null}
+      <div className="stage-video-player__controls">
+        <button
+          aria-label={isPlaying ? "暂停" : "播放"}
+          onClick={togglePlay}
+          type="button"
+        >
+          {isPlaying ? "暂停" : "播放"}
+        </button>
+        <span className="stage-video-player__time">
+          {formatVideoTime(currentTime)} / {formatVideoTime(duration)}
+        </span>
+        <input
+          aria-label="播放进度"
+          className="stage-video-player__seek"
+          max={duration || 0}
+          min={0}
+          onChange={(event) => handleSeek(Number(event.target.value))}
+          step={0.1}
+          type="range"
+          value={Math.min(currentTime, duration || 0)}
+        />
+        <button
+          aria-label={isMuted ? "取消静音" : "静音"}
+          onClick={toggleMute}
+          type="button"
+        >
+          {isMuted ? "已静音" : "有声"}
+        </button>
+        <input
+          aria-label="音量"
+          className="stage-video-player__volume"
+          max={1}
+          min={0}
+          onChange={(event) => handleVolumeChange(Number(event.target.value))}
+          step={0.05}
+          type="range"
+          value={isMuted ? 0 : volume}
+        />
+        <button onClick={() => void toggleFullscreen()} type="button">
+          全屏
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function formatVideoTime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) {
+    return "0:00";
+  }
+  const total = Math.floor(seconds);
+  const minutes = Math.floor(total / 60);
+  const rest = total % 60;
+  return `${minutes}:${rest.toString().padStart(2, "0")}`;
 }
 
 function StageProgressView({

@@ -205,6 +205,29 @@ describe("VideoResultStage", () => {
     expect(onRequestPreview).not.toHaveBeenCalled();
   });
 
+  it("waits for a click with sound on: no autoplay, custom controls", () => {
+    renderStage({
+      previewUrls: { "task-ok": "https://stage-preview/asset-ok" },
+    });
+
+    const video = screen.getByLabelText("结果预览 task-ok");
+    // 不自动播放、不静音：有声播放由用户点击开启。
+    expect(video).not.toHaveAttribute("autoplay");
+    expect(video).not.toHaveAttribute("muted");
+    expect(video).not.toHaveAttribute("loop");
+    expect(video).not.toHaveAttribute("controls");
+    // 首帧等待点击：中央大播放按钮 + 常驻控制条。
+    expect(
+      screen.getByRole("button", { name: "播放 结果预览 task-ok" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "播放" })).toBeInTheDocument();
+    expect(screen.getByLabelText("播放进度")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "静音" })).toBeInTheDocument();
+    expect(screen.getByLabelText("音量")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "全屏" })).toBeInTheDocument();
+    expect(screen.getByText("0:00 / 0:00")).toBeInTheDocument();
+  });
+
   it("requests a streaming url automatically for archived results", () => {
     const onRequestPreview = vi.fn();
     renderStage({ onRequestPreview });
