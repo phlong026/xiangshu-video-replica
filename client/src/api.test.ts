@@ -94,40 +94,35 @@ describe("generation workflow API", () => {
     expect(revokeObjectUrl).toHaveBeenCalledWith("blob:generation-result");
   });
 
-  it("loads a signed preview into a local blob URL", async () => {
-    const resultBlob = new Blob(["video"], { type: "video/mp4" });
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ url: "https://signed.example/preview.mp4" }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        blob: async () => resultBlob,
-      });
-    const createObjectUrl = vi.fn(() => "blob:generation-preview");
-    vi.stubGlobal("fetch", fetchMock);
-    vi.stubGlobal("URL", {
-      createObjectURL: createObjectUrl,
-      revokeObjectURL: vi.fn(),
+  it("returns the signed streaming url directly for in-player preview", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ url: "https://signed.example/preview.mp4" }),
     });
+    vi.stubGlobal("fetch", fetchMock);
 
     await expect(createGenerationResultPreviewUrl("asset 1")).resolves.toBe(
-      "blob:generation-preview",
+      "https://signed.example/preview.mp4",
     );
 
-    expect(fetchMock).toHaveBeenNthCalledWith(
-      1,
+    // 预签名 URL 直连 video src：只签发地址，不再二次拉取 blob。
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock).toHaveBeenCalledWith(
       "http://127.0.0.1:8000/api/assets/asset%201/download-url",
       expect.objectContaining({ method: "POST" }),
     );
-    expect(fetchMock).toHaveBeenNthCalledWith(
-      2,
-      "https://signed.example/preview.mp4",
-      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+  });
+
+  it("rejects a preview response without a signed url", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({}),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(createGenerationResultPreviewUrl("asset 1")).rejects.toThrow(
+      "预览链接获取失败，请重试。",
     );
-    expect(createObjectUrl).toHaveBeenCalledWith(resultBlob);
   });
 
   it("covers script, prompt, runtime, batch, retry and result download routes", async () => {

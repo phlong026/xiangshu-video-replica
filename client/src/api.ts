@@ -602,11 +602,15 @@ export async function getGenerationResultDownloadUrl(
 }
 
 // 在线播放：直接复用后端签发的预签名 URL 作为 video src（COS 与本地
-// 存储均支持 Range 渐进播放，无需整包下载 blob，首帧秒出）。
+// 存储均支持 Range 渐进播放，无需整包下载 blob，首帧秒出）。url 缺失
+// 视为契约异常直接抛错，由调用方落入失败分支，避免上层自动签发循环。
 export async function createGenerationResultPreviewUrl(
   assetId: string,
 ): Promise<string> {
   const { url } = await getGenerationResultDownloadUrl(assetId);
+  if (!url) {
+    throw new Error("预览链接获取失败，请重试。");
+  }
   return url;
 }
 
