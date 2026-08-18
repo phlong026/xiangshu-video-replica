@@ -228,9 +228,7 @@ def character_identity_is_current(row: sqlite3.Row) -> bool:
     )
 
 
-def _identity_from_asset_metadata(
-    conn: sqlite3.Connection, row: sqlite3.Row
-) -> sqlite3.Row | None:
+def _identity_from_asset_metadata(conn: sqlite3.Connection, row: sqlite3.Row) -> sqlite3.Row | None:
     """Resolve the identity named in an asset's metadata, if any."""
     try:
         metadata = json.loads(str(row["metadata_json"] or ""))

@@ -263,6 +263,8 @@ def create_simple_character(
             persona_id=persona_id,
             now_iso=now_iso,
             attempted_keys=attempted_keys,
+            contact_content=contact_content,
+            contact_content_type=contact_content_type,
         )
         contact_sheet_asset_id = _store_contact_sheet_asset(
             conn,
@@ -565,9 +567,7 @@ def regenerate_simple_character_contact_sheet(
     # transaction (same policy as create_simple_character) so provider calls
     # never hold the SQLite lock.
     try:
-        source_content = storage.get_object(
-            storage_key_from_uri(str(source_asset["storage_uri"]))
-        )
+        source_content = storage.get_object(storage_key_from_uri(str(source_asset["storage_uri"])))
     except (StorageBackendUnavailable, OSError, ValueError, KeyError) as exc:
         raise character_error(
             503,
@@ -608,6 +608,8 @@ def regenerate_simple_character_contact_sheet(
             persona_id=persona_id,
             now_iso=now_iso,
             attempted_keys=attempted_keys,
+            contact_content=contact_content,
+            contact_content_type=contact_content_type,
         )
         contact_sheet_asset_id = _store_contact_sheet_asset(
             conn,
@@ -1060,6 +1062,331 @@ class _ApprovedView:
     sha256: str
 
 
+# Per-view images are cropped out of the real contact sheet so the published
+# views show the actual person instead of a locally generated solid rectangle.
+# Layout recovery is divider-strip based: real sheets follow the prompt's
+# "three tall columns + two stacked close-ups separated by thin white
+# dividers" layout, and the white strips are detected per column/row.
+CONTACT_SHEET_WHITE_THRESHOLD = 240
+CONTACT_SHEET_FRONT_HALF_HEIGHT_RATIO = 0.62
+CONTACT_SHEET_MIN_PANEL_SIZE = 16
+
+
+@dataclass(frozen=True)
+class _ContactSheetPanels:
+    """Pixel rects (x0, y0, x1, y1; half-open) of the sheet's key panels."""
+
+    front_full: tuple[int, int, int, int]
+    left_45: tuple[int, int, int, int]
+    left_side: tuple[int, int, int, int]
+    front_face: tuple[int, int, int, int]
+
+
+def crop_contact_sheet_views(
+    contact_content: bytes, contact_content_type: str
+) -> dict[str, bytes] | None:
+    """Crop the seven standard views out of the five-panel contact sheet.
+
+    Returns ``{view_type: png_bytes}`` or ``None`` when the sheet cannot be
+    decoded (non-PNG provider output, other bit depths, interlacing) so the
+    caller can fall back to the deterministic placeholder. Sheets without
+    detectable dividers use the nominal layout geometry instead, so a
+    slightly off-layout sheet still yields real cropped views.
+    """
+    if contact_content_type.split(";", 1)[0].strip().lower() != "image/png":
+        return None
+    decoded = _decode_png_rgb(contact_content)
+    if decoded is None:
+        return None
+    width, height, rows = decoded
+    panels = _contact_sheet_panels_from_pixels(width, height, rows)
+    if panels is None:
+        return None
+
+    x0, y0, x1, y1 = panels.front_full
+    half_bottom = y0 + round((y1 - y0) * CONTACT_SHEET_FRONT_HALF_HEIGHT_RATIO)
+    # RIGHT_* views mirror the LEFT_* panels: the sheet has no dedicated
+    # right-side renderings, and a horizontal flip of one view of the same
+    # person is the standard way to derive the opposite-side reference.
+    crops: dict[str, bytes] = {
+        "FRONT_FULL": _encode_rgb_panel_png(rows, panels.front_full),
+        "FRONT_HALF": _encode_rgb_panel_png(rows, (x0, y0, x1, half_bottom)),
+        "FRONT_FACE": _encode_rgb_panel_png(rows, panels.front_face),
+        "LEFT_45": _encode_rgb_panel_png(rows, panels.left_45),
+        "RIGHT_45": _encode_rgb_panel_png(rows, panels.left_45, mirror=True),
+        "LEFT_SIDE": _encode_rgb_panel_png(rows, panels.left_side),
+        "RIGHT_SIDE": _encode_rgb_panel_png(rows, panels.left_side, mirror=True),
+    }
+    return crops
+
+
+def _decode_png_rgb(data: bytes) -> tuple[int, int, list[bytes]] | None:
+    """Decode a non-interlaced 8-bit RGB/RGBA PNG into per-row RGB bytes."""
+    if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return None
+    width = height = bit_depth = color_type = interlace = 0
+    compressed = bytearray()
+    pos = 8
+    while pos + 8 <= len(data):
+        (length,) = struct.unpack(">I", data[pos : pos + 4])
+        chunk_type = data[pos + 4 : pos + 8]
+        body = data[pos + 8 : pos + 8 + length]
+        pos += 12 + length
+        if chunk_type == b"IHDR" and length >= 13:
+            width, height, bit_depth, color_type = struct.unpack(">IIBB", body[:10])
+            interlace = body[12]
+        elif chunk_type == b"IDAT":
+            compressed += body
+        elif chunk_type == b"IEND":
+            break
+    if width <= 0 or height <= 0 or bit_depth != 8 or interlace != 0:
+        return None
+    if color_type == 2:
+        channels = 3
+    elif color_type == 6:
+        channels = 4
+    else:
+        return None
+    try:
+        raw = zlib.decompress(bytes(compressed))
+    except zlib.error:
+        return None
+    stride = width * channels
+    if len(raw) < height * (stride + 1):
+        return None
+    rows: list[bytes] = []
+    previous = bytes(stride)
+    for y in range(height):
+        offset = y * (stride + 1)
+        filter_type = raw[offset]
+        row = bytearray(raw[offset + 1 : offset + 1 + stride])
+        if filter_type == 1:  # Sub
+            for i in range(channels, stride):
+                row[i] = (row[i] + row[i - channels]) & 0xFF
+        elif filter_type == 2:  # Up
+            for i in range(stride):
+                row[i] = (row[i] + previous[i]) & 0xFF
+        elif filter_type == 3:  # Average
+            for i in range(stride):
+                left = row[i - channels] if i >= channels else 0
+                row[i] = (row[i] + ((left + previous[i]) >> 1)) & 0xFF
+        elif filter_type == 4:  # Paeth
+            for i in range(stride):
+                a = row[i - channels] if i >= channels else 0
+                b = previous[i]
+                c = previous[i - channels] if i >= channels else 0
+                p = a + b - c
+                pa = abs(p - a)
+                pb = abs(p - b)
+                pc = abs(p - c)
+                if pa <= pb and pa <= pc:
+                    predictor = a
+                elif pb <= pc:
+                    predictor = b
+                else:
+                    predictor = c
+                row[i] = (row[i] + predictor) & 0xFF
+        elif filter_type != 0:  # Unknown filter byte: refuse instead of guessing.
+            return None
+        current = bytes(row)
+        if channels == 4:
+            rgb = bytearray(width * 3)
+            rgb[0::3] = current[0::4]
+            rgb[1::3] = current[1::4]
+            rgb[2::3] = current[2::4]
+            rows.append(bytes(rgb))
+        else:
+            rows.append(current)
+        previous = current
+    return width, height, rows
+
+
+def _contact_sheet_panels_from_pixels(
+    width: int, height: int, rows: list[bytes]
+) -> _ContactSheetPanels | None:
+    if width < 3 * CONTACT_SHEET_MIN_PANEL_SIZE or height < 2 * CONTACT_SHEET_MIN_PANEL_SIZE:
+        return None
+    column_runs = _white_runs([_column_is_divider_white(x, height, rows) for x in range(width)])
+    left_edge = 0
+    right_edge = width
+    internal_columns: list[tuple[int, int]] = []
+    for start, end in column_runs:
+        if end - start + 1 > max(80, width // 12):
+            # A run this wide is a white background area, not a thin divider.
+            continue
+        if start < width * 0.05:
+            left_edge = end + 1
+        elif end > width * 0.95:
+            right_edge = start
+        else:
+            internal_columns.append((start, end))
+    if len(internal_columns) == 3:
+        panels = _panels_from_dividers(width, height, rows, left_edge, right_edge, internal_columns)
+    else:
+        panels = _nominal_contact_sheet_panels(width, height)
+    for rect in (panels.front_full, panels.left_45, panels.left_side, panels.front_face):
+        if (
+            rect[2] - rect[0] < CONTACT_SHEET_MIN_PANEL_SIZE
+            or rect[3] - rect[1] < CONTACT_SHEET_MIN_PANEL_SIZE
+        ):
+            return None
+    return panels
+
+
+def _panels_from_dividers(
+    width: int,
+    height: int,
+    rows: list[bytes],
+    left_edge: int,
+    right_edge: int,
+    internal_columns: list[tuple[int, int]],
+) -> _ContactSheetPanels:
+    """Build panel rects from three detected vertical divider strips."""
+    top_edge = 0
+    bottom_edge = height
+    for start, end in _white_runs([_row_is_divider_white(y, width, rows) for y in range(height)]):
+        if end - start + 1 > max(80, height // 12):
+            continue
+        if start < height * 0.05:
+            top_edge = end + 1
+        elif end > height * 0.95:
+            bottom_edge = start
+    (col1_start, col1_end), (col2_start, col2_end), (col3_start, col3_end) = internal_columns
+    right_x0 = col3_end + 1
+    # The stacked close-ups' horizontal divider only spans the right zone, so
+    # restrict row scanning to it (the image's outer 10% is also skipped to
+    # ignore edge darkening that real sheets carry at their borders).
+    scan_x0 = right_x0 + max(1, (right_edge - right_x0) // 10)
+    scan_x1 = right_edge - max(1, (right_edge - right_x0) // 10)
+    divider: tuple[int, int] | None = None
+    for start, end in _white_runs(
+        [_range_row_is_white(y, scan_x0, scan_x1, rows) for y in range(height)]
+    ):
+        centered = top_edge + (bottom_edge - top_edge) * 0.2
+        lower = top_edge + (bottom_edge - top_edge) * 0.8
+        if end - start + 1 <= max(80, height // 12) and start >= centered and end <= lower:
+            divider = (start, end)
+            break
+    if divider is None:
+        # No horizontal divider between the close-ups: split the right zone
+        # at its midpoint as the best geometric guess.
+        middle = (top_edge + bottom_edge) // 2
+        divider = (middle, middle)
+    return _ContactSheetPanels(
+        front_full=(left_edge, top_edge, col1_start, bottom_edge),
+        left_45=(col1_end + 1, top_edge, col2_start, bottom_edge),
+        left_side=(col2_end + 1, top_edge, col3_start, bottom_edge),
+        front_face=(right_x0, top_edge, right_edge, divider[0]),
+    )
+
+
+def _nominal_contact_sheet_panels(width: int, height: int) -> _ContactSheetPanels:
+    """Fallback layout geometry when no dividers can be detected."""
+    border = max(4, round(width * 0.005))
+    gap = max(4, round(width * 0.004))
+    inner_width = width - 2 * border
+    left_zone = round(inner_width * 0.705)
+    column = (left_zone - 2 * gap) / 3
+    right_x0 = border + left_zone + gap
+    middle = height // 2
+    half_gap = max(2, gap // 2)
+    return _ContactSheetPanels(
+        front_full=(border, border, round(border + column), height - border),
+        left_45=(
+            round(border + column + gap),
+            border,
+            round(border + 2 * column + gap),
+            height - border,
+        ),
+        left_side=(
+            round(border + 2 * column + 2 * gap),
+            border,
+            round(border + 3 * column + 2 * gap),
+            height - border,
+        ),
+        front_face=(right_x0, border, width - border, middle - half_gap),
+    )
+
+
+def _column_is_divider_white(x: int, height: int, rows: list[bytes]) -> bool:
+    sampled = 0
+    white = 0
+    for y in range(height // 10, height - height // 10, 4):
+        index = x * 3
+        sampled += 1
+        if _pixel_is_white(rows[y], index):
+            white += 1
+    return sampled > 0 and white / sampled >= 0.99
+
+
+def _row_is_divider_white(y: int, width: int, rows: list[bytes]) -> bool:
+    sampled = 0
+    white = 0
+    for x in range(width // 10, width - width // 10, 4):
+        sampled += 1
+        if _pixel_is_white(rows[y], x * 3):
+            white += 1
+    return sampled > 0 and white / sampled >= 0.99
+
+
+def _range_row_is_white(y: int, x_begin: int, x_end: int, rows: list[bytes]) -> bool:
+    sampled = 0
+    white = 0
+    for x in range(x_begin, x_end, 2):
+        sampled += 1
+        if _pixel_is_white(rows[y], x * 3):
+            white += 1
+    return sampled > 0 and white / sampled >= 0.98
+
+
+def _pixel_is_white(row: bytes, index: int) -> bool:
+    return (
+        row[index] >= CONTACT_SHEET_WHITE_THRESHOLD
+        and row[index + 1] >= CONTACT_SHEET_WHITE_THRESHOLD
+        and row[index + 2] >= CONTACT_SHEET_WHITE_THRESHOLD
+    )
+
+
+def _white_runs(flags: list[bool]) -> list[tuple[int, int]]:
+    runs: list[tuple[int, int]] = []
+    for index, flag in enumerate(flags):
+        if not flag:
+            continue
+        if runs and index == runs[-1][1] + 1:
+            runs[-1] = (runs[-1][0], index)
+        else:
+            runs.append((index, index))
+    return runs
+
+
+def _encode_rgb_panel_png(
+    rows: list[bytes], rect: tuple[int, int, int, int], *, mirror: bool = False
+) -> bytes:
+    """Encode one panel rect as a standalone 8-bit RGB PNG (filter 0)."""
+    x0, y0, x1, y1 = rect
+    scanlines = bytearray()
+    for y in range(y0, y1):
+        row = rows[y][x0 * 3 : x1 * 3]
+        if mirror:
+            reversed_row = row[::-1]
+            flipped = bytearray(len(reversed_row))
+            # Byte-reversing swaps both the pixel order and the channel order;
+            # re-interleave the channel planes to restore RGB per pixel.
+            flipped[0::3] = reversed_row[2::3]
+            flipped[1::3] = reversed_row[1::3]
+            flipped[2::3] = reversed_row[0::3]
+            row = bytes(flipped)
+        scanlines += b"\x00"
+        scanlines += row
+    header = struct.pack(">IIBBBBB", x1 - x0, y1 - y0, 8, 2, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + png_chunk(b"IHDR", header)
+        + png_chunk(b"IDAT", zlib.compress(bytes(scanlines), 6))
+        + png_chunk(b"IEND", b"")
+    )
+
+
 def _generate_and_approve_views(
     conn: sqlite3.Connection,
     *,
@@ -1069,13 +1396,27 @@ def _generate_and_approve_views(
     persona_id: str,
     now_iso: str,
     attempted_keys: list[str],
+    contact_content: bytes,
+    contact_content_type: str,
 ) -> list[_ApprovedView]:
+    """Store one approved per-view asset for each required view type.
+
+    Views are cropped from the real contact sheet whenever its pixels can be
+    decoded, so every published view shows the actual person. Undecodable
+    sheets (provider returned a non-PNG or unsupported PNG) keep the
+    deterministic placeholder fallback so the flow never blocks on cropping.
+    """
+    cropped_views = crop_contact_sheet_views(contact_content, contact_content_type)
     views: list[_ApprovedView] = []
     for view_type in REQUIRED_CHARACTER_VIEW_TYPES:
         character_asset_id = str(uuid.uuid4())
         generated_asset_id = str(uuid.uuid4())
         review_id = str(uuid.uuid4())
-        content = deterministic_png(f"{version_id}:{view_type}".encode(), width=1024, height=1536)
+        content = cropped_views.get(view_type) if cropped_views else None
+        if content is None:
+            content = deterministic_png(
+                f"{version_id}:{view_type}".encode(), width=1024, height=1536
+            )
         generated_key = generated_character_asset_key(
             owner_user_id=actor.id,
             persona_id=persona_id,
@@ -1104,6 +1445,9 @@ def _generate_and_approve_views(
                         "character_version_id": version_id,
                         "generation_mode": SIMPLE_GENERATION_MODE,
                         "view_type": view_type,
+                        "view_content_source": (
+                            "contact_sheet_crop" if cropped_views else "local_placeholder"
+                        ),
                     }
                 ),
             ),

@@ -207,6 +207,12 @@ class GenerationTaskRetryRequest(BaseModel):
     retry_reason: str = Field(min_length=1, max_length=500)
 
 
+class GenerationBatchRenameRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str = Field(min_length=1, max_length=120)
+
+
 class ConfirmNotChargedRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -312,9 +318,7 @@ class UrllibMetasoHttpTransport:
                 detail = exc.read()[:1000].decode("utf-8", "replace")
             except OSError:
                 pass
-            logger.warning(
-                "METASO H3 request failed with HTTP status %s: %s", exc.code, detail
-            )
+            logger.warning("METASO H3 request failed with HTTP status %s: %s", exc.code, detail)
             raise H3ProviderFailed(f"METASO returned HTTP {exc.code}") from exc
         except (TimeoutError, URLError, OSError) as exc:
             logger.warning("METASO H3 request failed: %s", type(exc).__name__)
@@ -607,6 +611,7 @@ class BatchResult(BaseModel):
     status: str
     quantity: int
     stale: bool
+    display_name: str | None = None
     source_batch_id: str | None = None
     source_task_id: str | None = None
     generation_reason: str | None = None
@@ -633,6 +638,7 @@ class GenerationBatchListItem(BaseModel):
     quantity: int
     created_at: str
     updated_at: str
+    display_name: str | None = None
     source_batch_id: str | None = None
     source_task_id: str | None = None
     generation_reason: str | None = None
@@ -3811,6 +3817,7 @@ def list_generation_batches(
             batch.status,
             batch.created_at,
             batch.updated_at,
+            batch.display_name,
             batch.source_batch_id,
             batch.source_task_id,
             batch.generation_reason
@@ -3884,6 +3891,7 @@ def list_generation_batches(
                 quantity=len(tasks),
                 created_at=str(row["created_at"]),
                 updated_at=str(row["updated_at"]),
+                display_name=optional_text(row["display_name"]),
                 source_batch_id=optional_text(row["source_batch_id"]),
                 source_task_id=optional_text(row["source_task_id"]),
                 generation_reason=optional_text(row["generation_reason"]),
@@ -3981,7 +3989,7 @@ def get_generation_batch(
 ) -> BatchResult:
     batch = conn.execute(
         """
-        SELECT id, project_id, request_snapshot_json, status,
+        SELECT id, project_id, request_snapshot_json, status, display_name,
                source_batch_id, source_task_id, generation_reason
         FROM generation_batches
         WHERE id = ?
@@ -4060,12 +4068,71 @@ def get_generation_batch(
         status=status,
         quantity=len(tasks),
         stale=stale,
+        display_name=optional_text(batch["display_name"]),
         source_batch_id=optional_text(batch["source_batch_id"]),
         source_task_id=optional_text(batch["source_task_id"]),
         generation_reason=optional_text(batch["generation_reason"]),
         progress=progress,
         tasks=tasks,
     )
+
+
+def rename_generation_batch(
+    conn: sqlite3.Connection,
+    *,
+    actor: CurrentUser,
+    batch_id: str,
+    display_name: str,
+) -> BatchResult:
+    """Rename a generation batch (creator or admin only).
+
+    只有创建者或管理员可以改批次显示名；重命名不改变批次的任何生成
+    状态与任务数据，审计日志记录前后名称以便对账。
+    """
+    batch = conn.execute(
+        """
+        SELECT id, project_id, created_by_user_id, display_name
+        FROM generation_batches
+        WHERE id = ?
+        """,
+        (batch_id,),
+    ).fetchone()
+    if batch is None:
+        raise generation_error(404, "BATCH_NOT_FOUND", "Generation batch does not exist.")
+    if actor.role != "admin" and str(batch["created_by_user_id"]) != actor.id:
+        raise generation_error(
+            403,
+            "GENERATION_BATCH_FORBIDDEN",
+            "只有批次创建者或管理员可以修改批次名称。",
+        )
+    clean_name = display_name.strip()
+    if not clean_name:
+        raise generation_error(
+            422,
+            "GENERATION_BATCH_NAME_REQUIRED",
+            "批次名称不能为空。",
+        )
+    with conn:
+        conn.execute(
+            """
+            UPDATE generation_batches
+            SET display_name = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (clean_name, batch_id),
+        )
+    write_audit(
+        conn,
+        actor=actor,
+        action="generation_batch.rename",
+        entity_type="generation_batch",
+        entity_id=batch_id,
+        metadata={
+            "from_name": (None if batch["display_name"] is None else str(batch["display_name"])),
+            "to_name": clean_name,
+        },
+    )
+    return get_generation_batch(conn, batch_id=batch_id, actor=actor)
 
 
 def build_h3_request(
@@ -4282,9 +4349,7 @@ def render_shot_motion_clause(shot: Mapping[str, Any]) -> str:
 
     state = str(motion.get("subject_motion_state", ""))
     state_clause = SUBJECT_MOTION_STATE_CLAUSES.get(state, "")
-    direction = SUBJECT_DIRECTION_LABELS.get(
-        str(motion.get("subject_direction", "")), ""
-    )
+    direction = SUBJECT_DIRECTION_LABELS.get(str(motion.get("subject_direction", "")), "")
     displacement = str(motion.get("subject_displacement") or "")
     hand_action = str(motion.get("hand_action") or "")
     relative_motion = str(motion.get("relative_motion") or "")

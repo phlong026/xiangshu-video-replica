@@ -400,8 +400,7 @@ def _require_motion_on_every_shot(analysis: VideoAnalysis) -> None:
         raise ValueError(
             "every shot must include a motion object with "
             "subject_motion_state/subject_direction/subject_displacement/"
-            "hand_action/camera_motion/relative_motion; missing on shots: "
-            + ", ".join(missing)
+            "hand_action/camera_motion/relative_motion; missing on shots: " + ", ".join(missing)
         )
 
 

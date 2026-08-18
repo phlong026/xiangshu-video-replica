@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import struct
+import zlib
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,14 +17,19 @@ import app.simple_character_routes as simple_character_routes
 from app.auth import get_database
 from app.character_identity import REQUIRED_CHARACTER_VIEW_TYPES
 from app.character_identity_routes import get_character_storage
-from app.character_image_generation import deterministic_png
+from app.character_image_generation import deterministic_png, png_chunk
 from app.db import connect_database, initialize_database
 from app.first_frame_routes import get_image_provider
 from app.first_frames import GeneratedImage, ImageProviderFailed
 from app.main import app
 from app.media import storage_key_from_uri
 from app.media_routes import get_media_storage
-from app.simple_character import SIMPLE_CONTACT_SHEET_MODEL, contact_sheet_placeholder_png
+from app.simple_character import (
+    SIMPLE_CONTACT_SHEET_MODEL,
+    _decode_png_rgb,
+    contact_sheet_placeholder_png,
+    crop_contact_sheet_views,
+)
 from app.storage import FakeStorageAdapter
 
 
@@ -63,6 +70,7 @@ class StubContactSheetProvider:
 
     provider_name: str = "stub"
     calls: list[dict[str, object]] = field(default_factory=list)
+    sheet_content: bytes = b"contact-sheet-image"
 
     def edit(
         self,
@@ -82,7 +90,7 @@ class StubContactSheetProvider:
                 "output_count": output_count,
             }
         )
-        return [GeneratedImage(content=b"contact-sheet-image", content_type="image/png")]
+        return [GeneratedImage(content=self.sheet_content, content_type="image/png")]
 
 
 class FailingContactSheetProvider(StubContactSheetProvider):
@@ -777,10 +785,7 @@ def test_owner_regenerates_contact_sheet_as_next_version(
 
 def test_regenerate_contact_sheet_requires_owner_or_admin(client: TestClient) -> None:
     created = generate_global(client).json()
-    url = (
-        f"/api/simple-characters/identities/{created['identity_id']}"
-        "/regenerate-contact-sheet"
-    )
+    url = f"/api/simple-characters/identities/{created['identity_id']}/regenerate-contact-sheet"
 
     forbidden = client.post(url, headers=headers("employee_2"))
     assert forbidden.status_code == 403
@@ -799,3 +804,222 @@ def test_regenerate_contact_sheet_requires_owner_or_admin(client: TestClient) ->
     admin_ok = client.post(url, headers=headers("admin_1"))
     assert admin_ok.status_code == 201, admin_ok.text
     assert admin_ok.json()["version_number"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Contact-sheet view cropping
+
+
+def build_five_panel_sheet_png(width: int = 300, height: int = 200) -> bytes:
+    """Build a divider-accurate five-panel sheet (three columns + stacked pair).
+
+    The layout mirrors the provider prompt: white outer border, thin white
+    dividers, three equal tall columns on ~70% of the width, and two stacked
+    close-ups on the right. Distinct panel colours make crop assertions easy.
+    """
+    border, gap = 6, 4
+    left_zone = round((width - 2 * border - gap) * 0.705)
+    column = (left_zone - 2 * gap) / 3
+    c1 = round(border + column)
+    c2 = round(border + column + gap)
+    c3 = round(border + 2 * column + gap)
+    c4 = round(border + 2 * column + 2 * gap)
+    c5 = border + left_zone
+    right_x0 = border + left_zone + gap
+    middle = height // 2
+    colors = {
+        "front_full": (200, 10, 10),
+        "left_45": (10, 200, 10),
+        "left_45_dark": (10, 100, 10),
+        "left_side": (10, 10, 200),
+        "left_side_dark": (10, 10, 100),
+        "front_face": (200, 200, 10),
+        "lower_right": (200, 10, 200),
+    }
+    white = (255, 255, 255)
+
+    def pixel(x: int, y: int) -> tuple[int, int, int]:
+        if x < border or x >= width - border or y < border or y >= height - border:
+            return white
+        if x < c1:
+            return colors["front_full"]
+        if x < c2:
+            return white
+        if x < c3:
+            # Two hues inside the LEFT_45 column so mirror assertions can
+            # tell the mirrored ordering apart from the original.
+            mid = (c2 + c3) // 2
+            return colors["left_45"] if x < mid else colors["left_45_dark"]
+        if x < c4:
+            return white
+        if x < c5:
+            mid = (c4 + c5) // 2
+            return colors["left_side"] if x < mid else colors["left_side_dark"]
+        if x < right_x0:
+            return white
+        if y < middle - 2:
+            return colors["front_face"]
+        if y < middle + 2:
+            return white
+        return colors["lower_right"]
+
+    scanlines = bytearray()
+    for y in range(height):
+        scanlines += b"\x00"
+        for x in range(width):
+            scanlines += bytes(pixel(x, y))
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + png_chunk(b"IHDR", header)
+        + png_chunk(b"IDAT", zlib.compress(bytes(scanlines)))
+        + png_chunk(b"IEND", b"")
+    )
+
+
+def build_solid_sheet_png(width: int = 300, height: int = 200) -> bytes:
+    """A divider-free solid sheet that forces the nominal-layout fallback."""
+    color = (60, 120, 180)
+    scanlines = bytearray()
+    for _ in range(height):
+        scanlines += b"\x00" + bytes(color) * width
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + png_chunk(b"IHDR", header)
+        + png_chunk(b"IDAT", zlib.compress(bytes(scanlines)))
+        + png_chunk(b"IEND", b"")
+    )
+
+
+def _mirror_pixels(row: bytes) -> bytes:
+    """Reverse the pixel order of an RGB row, keeping channel order."""
+    return b"".join(row[i : i + 3] for i in range(len(row) - 3, -1, -3))
+
+
+def test_crop_contact_sheet_views_extracts_panels_from_dividers() -> None:
+    views = crop_contact_sheet_views(build_five_panel_sheet_png(), "image/png")
+    assert views is not None
+    assert set(views) == set(REQUIRED_CHARACTER_VIEW_TYPES)
+    for content in views.values():
+        assert content.startswith(b"\x89PNG\r\n\x1a\n")
+
+    decoded = {name: _decode_png_rgb(content) for name, content in views.items()}
+    # FRONT_FULL is the first tall column: 64px wide, full inner height.
+    width, height, rows = decoded["FRONT_FULL"]
+    assert (width, height) == (64, 188)
+    assert rows[0][:3] == bytes((200, 10, 10))
+    # FRONT_FACE is the upper-right close-up: 84px wide, upper inner half.
+    width, height, rows = decoded["FRONT_FACE"]
+    assert (width, height) == (84, 92)
+    assert rows[height // 2][:3] == bytes((200, 200, 10))
+    # LEFT_45 keeps the middle column's bright-half colour on its left edge.
+    _, _, rows = decoded["LEFT_45"]
+    assert rows[0][:3] == bytes((10, 200, 10))
+    assert rows[0][-3:] == bytes((10, 100, 10))
+    # RIGHT_* views are pixel-exact horizontal mirrors of the LEFT_* panels.
+    assert decoded["RIGHT_45"][2][0] == _mirror_pixels(decoded["LEFT_45"][2][0])
+    assert decoded["RIGHT_SIDE"][2][-1] == _mirror_pixels(decoded["LEFT_SIDE"][2][-1])
+    assert decoded["RIGHT_45"][2][0][:3] == bytes((10, 100, 10))
+    assert decoded["RIGHT_45"][2][0][-3:] == bytes((10, 200, 10))
+    # FRONT_HALF is the upper portion of the front-full column.
+    width, height, rows = decoded["FRONT_HALF"]
+    assert width == 64
+    assert height == round(188 * 0.62)
+    assert rows[0][:3] == bytes((200, 10, 10))
+
+
+def test_crop_contact_sheet_views_falls_back_to_nominal_layout() -> None:
+    views = crop_contact_sheet_views(build_solid_sheet_png(), "image/png")
+    assert views is not None
+    assert set(views) == set(REQUIRED_CHARACTER_VIEW_TYPES)
+    decoded = {name: _decode_png_rgb(content) for name, content in views.items()}
+    # Nominal geometry: border 4, gap 4, left zone ~70.5% split into thirds.
+    width, height, rows = decoded["FRONT_FULL"]
+    assert (width, height) == (66, 192)
+    assert rows[0][:3] == bytes((60, 120, 180))
+    width, height, _ = decoded["FRONT_FACE"]
+    assert (width, height) == (82, 94)
+
+
+def test_crop_contact_sheet_views_returns_none_for_undecodable_sheets() -> None:
+    # The default provider stub payload is not a PNG at all.
+    assert crop_contact_sheet_views(b"contact-sheet-image", "image/png") is None
+    # Non-PNG provider output (JPEG/WebP) cannot be cropped without Pillow.
+    assert crop_contact_sheet_views(build_five_panel_sheet_png(), "image/jpeg") is None
+    # Truncated PNG data fails decoding instead of producing garbage views.
+    assert crop_contact_sheet_views(build_five_panel_sheet_png()[:200], "image/png") is None
+
+
+def test_generate_crops_views_from_provider_sheet(
+    client: TestClient,
+    db_path: Path,
+    storage: FakeStorageAdapter,
+    contact_sheet_provider: StubContactSheetProvider,
+) -> None:
+    """With a real PNG sheet from the provider, published views must be crops."""
+    sheet = build_five_panel_sheet_png()
+    contact_sheet_provider.sheet_content = sheet
+    response = generate_global(client)
+    assert response.status_code == 201, response.text
+    payload = response.json()
+
+    expected = crop_contact_sheet_views(sheet, "image/png")
+    assert expected is not None
+
+    with connect_database(db_path) as conn:
+        approved = conn.execute(
+            """
+            SELECT a.storage_uri, a.metadata_json
+            FROM character_assets AS view
+            JOIN assets AS a ON a.id = view.asset_id
+            WHERE view.character_version_id = ?
+              AND view.is_published_selection = 1
+            """,
+            (payload["character_version_id"],),
+        ).fetchall()
+        assert len(approved) == len(REQUIRED_CHARACTER_VIEW_TYPES)
+        for row in approved:
+            metadata = json.loads(str(row["metadata_json"]))
+            view_type = str(metadata["view_type"])
+            content = storage.get_object(storage_key_from_uri(str(row["storage_uri"])))
+            assert content == expected[view_type]
+
+        generated = conn.execute(
+            """
+            SELECT a.metadata_json FROM assets AS a
+            WHERE a.kind = 'character_generated_image'
+              AND json_extract(a.metadata_json, '$.character_version_id') = ?
+            """,
+            (payload["character_version_id"],),
+        ).fetchall()
+        assert len(generated) == len(REQUIRED_CHARACTER_VIEW_TYPES)
+        assert all(
+            json.loads(str(row[0]))["view_content_source"] == "contact_sheet_crop"
+            for row in generated
+        )
+
+
+def test_generate_falls_back_to_placeholder_views_for_stub_payload(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    """Undecodable provider output keeps the deterministic placeholder views."""
+    response = generate_global(client)
+    assert response.status_code == 201, response.text
+    payload = response.json()
+
+    with connect_database(db_path) as conn:
+        generated = conn.execute(
+            """
+            SELECT a.metadata_json FROM assets AS a
+            WHERE a.kind = 'character_generated_image'
+              AND json_extract(a.metadata_json, '$.character_version_id') = ?
+            """,
+            (payload["character_version_id"],),
+        ).fetchall()
+        assert len(generated) == len(REQUIRED_CHARACTER_VIEW_TYPES)
+        assert all(
+            json.loads(str(row[0]))["view_content_source"] == "local_placeholder"
+            for row in generated
+        )

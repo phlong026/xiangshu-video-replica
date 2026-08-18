@@ -4455,3 +4455,179 @@ def test_reconcile_route_guards_and_rejects_non_uncertain_task(
     )
     assert normal.status_code == 409
     assert normal.json()["detail"]["code"] == "TASK_NOT_UNCERTAIN"
+
+
+def _insert_result_asset(
+    conn: sqlite3.Connection,
+    asset_id: str,
+    project_id: str = "project_owned",
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO assets (
+            id, project_id, kind, storage_uri, sha256, size_bytes,
+            content_type, created_by_user_id
+        )
+        VALUES (?, ?, 'video', ?, ?, 12, 'video/mp4', 'employee_1')
+        """,
+        (asset_id, project_id, f"fake://generation-results/{asset_id}.mp4", f"sha-{asset_id}"),
+    )
+
+
+def test_generation_batch_rename_by_creator_or_admin_only(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    with connect_database(db_path) as conn:
+        insert_generation_history(conn, batch_id="batch-rename")
+        conn.commit()
+
+    renamed = client.patch(
+        "/api/generation-batches/batch-rename/name",
+        headers=auth_headers("employee_1"),
+        json={"display_name": "乡墅爆款第 2 期"},
+    )
+    other_creator = client.patch(
+        "/api/generation-batches/batch-rename/name",
+        headers=auth_headers("employee_2"),
+        json={"display_name": "不应生效"},
+    )
+    auditor = client.patch(
+        "/api/generation-batches/batch-rename/name",
+        headers=auth_headers("auditor_1"),
+        json={"display_name": "不应生效"},
+    )
+    admin = client.patch(
+        "/api/generation-batches/batch-rename/name",
+        headers=auth_headers("admin_1"),
+        json={"display_name": "管理员改名"},
+    )
+    blank = client.patch(
+        "/api/generation-batches/batch-rename/name",
+        headers=auth_headers("employee_1"),
+        json={"display_name": "   "},
+    )
+    overlong = client.patch(
+        "/api/generation-batches/batch-rename/name",
+        headers=auth_headers("employee_1"),
+        json={"display_name": "超" * 121},
+    )
+
+    assert renamed.status_code == 200
+    assert renamed.json()["display_name"] == "乡墅爆款第 2 期"
+    assert other_creator.status_code == 403
+    assert other_creator.json()["detail"]["code"] == "GENERATION_BATCH_FORBIDDEN"
+    assert auditor.status_code == 403
+    assert admin.status_code == 200
+    assert admin.json()["display_name"] == "管理员改名"
+    assert blank.status_code == 422
+    assert blank.json()["detail"]["code"] == "GENERATION_BATCH_NAME_REQUIRED"
+    assert overlong.status_code == 422
+
+    detail = client.get("/api/generation-batches/batch-rename", headers=auth_headers("employee_1"))
+    listed = client.get("/api/generation-batches", headers=auth_headers("employee_1"))
+    with connect_database(db_path) as conn:
+        audits = conn.execute(
+            """
+            SELECT metadata_json FROM audit_logs
+            WHERE action = 'generation_batch.rename'
+            ORDER BY created_at, id
+            """
+        ).fetchall()
+
+    assert detail.status_code == 200
+    assert detail.json()["display_name"] == "管理员改名"
+    assert listed.status_code == 200
+    assert listed.json()["items"][0]["display_name"] == "管理员改名"
+    # 同秒写入的两条审计按 uuid 主键排序顺序不稳定，断言用集合比较。
+    recorded = [json.loads(str(row["metadata_json"])) for row in audits]
+    assert sorted(recorded, key=lambda item: str(item["from_name"])) == [
+        {"from_name": None, "to_name": "乡墅爆款第 2 期"},
+        {"from_name": "乡墅爆款第 2 期", "to_name": "管理员改名"},
+    ]
+
+
+def test_generation_batch_delete_removes_tasks_and_result_assets(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    with connect_database(db_path) as conn:
+        _insert_result_asset(conn, "asset-del")
+        insert_generation_history(
+            conn,
+            batch_id="batch-del",
+            task_status="FAILED",
+            result_asset_id="asset-del",
+        )
+        conn.commit()
+
+    response = client.delete(
+        "/api/generation-batches/batch-del", headers=auth_headers("employee_1")
+    )
+
+    assert response.status_code == 204
+    with connect_database(db_path) as conn:
+        batch = conn.execute(
+            "SELECT id FROM generation_batches WHERE id = ?", ("batch-del",)
+        ).fetchone()
+        task = conn.execute(
+            "SELECT id FROM generation_tasks WHERE batch_id = ?", ("batch-del",)
+        ).fetchone()
+        asset = conn.execute("SELECT id FROM assets WHERE id = ?", ("asset-del",)).fetchone()
+        audit = conn.execute(
+            "SELECT metadata_json FROM audit_logs WHERE action = 'generation_batch.delete'"
+        ).fetchone()
+    assert batch is None
+    assert task is None
+    assert asset is None
+    assert audit is not None
+    metadata = json.loads(str(audit["metadata_json"]))
+    assert metadata == {
+        "project_id": "project_owned",
+        "deleted_task_count": 1,
+        "deleted_asset_count": 1,
+        # fake:// 存储后端不可用，尽力清理失败但删除不被阻塞。
+        "storage_cleanup_failed_count": 1,
+    }
+
+
+def test_generation_batch_delete_blocked_while_tasks_active(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    with connect_database(db_path) as conn:
+        insert_generation_history(conn, batch_id="batch-active")
+        conn.commit()
+
+    response = client.delete(
+        "/api/generation-batches/batch-active", headers=auth_headers("employee_1")
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "BATCH_DELETE_HAS_ACTIVE_TASKS"
+
+
+def test_generation_batch_delete_forbidden_for_non_creator_and_auditor(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    with connect_database(db_path) as conn:
+        insert_generation_history(
+            conn,
+            batch_id="batch-guard",
+            task_status="FAILED",
+        )
+        conn.commit()
+
+    other = client.delete("/api/generation-batches/batch-guard", headers=auth_headers("employee_2"))
+    auditor = client.delete(
+        "/api/generation-batches/batch-guard", headers=auth_headers("auditor_1")
+    )
+    missing = client.delete("/api/generation-batches/not-exist", headers=auth_headers("employee_1"))
+    admin = client.delete("/api/generation-batches/batch-guard", headers=auth_headers("admin_1"))
+
+    assert other.status_code == 403
+    assert other.json()["detail"]["code"] == "GENERATION_BATCH_FORBIDDEN"
+    assert auditor.status_code == 403
+    assert missing.status_code == 404
+    assert admin.status_code == 204

@@ -792,12 +792,8 @@ def test_identity_assets_are_evidence_only_for_auditor_and_private_from_employee
 ) -> None:
     # 员工下载走 local provider 签名：需要存储根目录与 settings 加密 key
     # （与线上配置一致）。
-    monkeypatch.setenv(
-        "VIDEO_REPLICA_SETTINGS_KEY", Fernet.generate_key().decode("ascii")
-    )
-    monkeypatch.setenv(
-        "VIDEO_REPLICA_STORAGE_ROOT", str(tmp_path / "local-storage")
-    )
+    monkeypatch.setenv("VIDEO_REPLICA_SETTINGS_KEY", Fernet.generate_key().decode("ascii"))
+    monkeypatch.setenv("VIDEO_REPLICA_STORAGE_ROOT", str(tmp_path / "local-storage"))
     identity = activate_identity(client, storage)
     source_asset_id = str(identity["source_asset_id"])
 
