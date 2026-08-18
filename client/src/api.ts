@@ -559,6 +559,27 @@ export async function regenerateGenerationBatch(
   );
 }
 
+export async function renameGenerationBatch(
+  batchId: string,
+  displayName: string,
+): Promise<GenerationBatch> {
+  return requestApiJson<GenerationBatch>(
+    `/api/generation-batches/${encodeURIComponent(batchId)}/name`,
+    "修改批次名称失败",
+    { method: "PATCH", body: JSON.stringify({ display_name: displayName }) },
+  );
+}
+
+export async function deleteGenerationBatch(batchId: string): Promise<void> {
+  const response = await requestApi(
+    `/api/generation-batches/${encodeURIComponent(batchId)}`,
+    { method: "DELETE" },
+  );
+  if (!response.ok) {
+    throw new Error(await responseErrorMessage(response, "删除批次失败"));
+  }
+}
+
 export async function listGenerationBatches(
   filters: GenerationBatchListFilters = {},
 ): Promise<GenerationBatchListPage> {

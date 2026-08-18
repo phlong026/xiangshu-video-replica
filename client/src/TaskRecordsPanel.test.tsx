@@ -20,6 +20,8 @@ vi.mock("./api", async () => {
     listGenerationBatches: vi.fn(),
     regenerateGenerationBatch: vi.fn(),
     regenerateGenerationTask: vi.fn(),
+    renameGenerationBatch: vi.fn(),
+    deleteGenerationBatch: vi.fn(),
     retryGenerationTask: vi.fn(),
     confirmGenerationTaskNotCharged: vi.fn(),
     reconcileUncertainTask: vi.fn(),
@@ -159,6 +161,10 @@ describe("TaskRecordsPanel", () => {
     vi.mocked(api.regenerateGenerationTask).mockImplementation(
       async (_taskId) => batch({ id: "batch-task-regenerated", quantity: 1 }),
     );
+    vi.mocked(api.renameGenerationBatch).mockImplementation(
+      async (_batchId, displayName) => batch({ display_name: displayName }),
+    );
+    vi.mocked(api.deleteGenerationBatch).mockResolvedValue();
   });
 
   afterEach(() => {
@@ -303,6 +309,101 @@ describe("TaskRecordsPanel", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("renames a batch inline from the history list", async () => {
+    render(
+      <TaskRecordsPanel
+        handoffBatch={null}
+        onHandoffConsumed={vi.fn()}
+        userRole="employee"
+      />,
+    );
+
+    expect(await screen.findByText("夏日咖啡馆口播复刻")).toBeInTheDocument();
+
+    // 取消编辑不触发请求，回到正常卡片。
+    fireEvent.click(screen.getByRole("button", { name: "重命名" }));
+    expect(screen.getByLabelText("修改批次名称")).toHaveValue(
+      "夏日咖啡馆口播复刻",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    expect(screen.queryByLabelText("修改批次名称")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "重命名" }));
+    fireEvent.change(screen.getByLabelText("修改批次名称"), {
+      target: { value: "爆款 v2 批次" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() =>
+      expect(api.renameGenerationBatch).toHaveBeenCalledWith(
+        "batch-1",
+        "爆款 v2 批次",
+      ),
+    );
+    // 列表卡优先显示 display_name，改名后立刻生效。
+    expect(await screen.findByText("爆款 v2 批次")).toBeInTheDocument();
+    expect(screen.queryByText("夏日咖啡馆口播复刻")).toBeNull();
+  });
+
+  it("deletes a batch after explicit confirmation and switches selection", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm");
+    vi.mocked(api.listGenerationBatches).mockResolvedValue({
+      items: [
+        listItem(),
+        listItem({
+          id: "batch-2",
+          project_id: "project-2",
+          project_name: "庭院改造复刻",
+          needs_attention_count: 0,
+        }),
+      ],
+      next_cursor: null,
+    });
+
+    render(
+      <TaskRecordsPanel
+        handoffBatch={null}
+        onHandoffConsumed={vi.fn()}
+        userRole="employee"
+      />,
+    );
+
+    expect(await screen.findByText("夏日咖啡馆口播复刻")).toBeInTheDocument();
+
+    const deleteButton = screen.getByRole("button", {
+      name: "删除批次 夏日咖啡馆口播复刻",
+    });
+
+    // confirm 文案明示付费记录删除不可恢复；拒绝时不发请求。
+    confirmSpy.mockReturnValueOnce(false);
+    fireEvent.click(deleteButton);
+    expect(confirmSpy).toHaveBeenCalledWith(
+      expect.stringContaining("不可恢复"),
+    );
+    expect(api.deleteGenerationBatch).not.toHaveBeenCalled();
+
+    confirmSpy.mockReturnValueOnce(true);
+    fireEvent.click(deleteButton);
+
+    await waitFor(() =>
+      expect(api.deleteGenerationBatch).toHaveBeenCalledWith("batch-1"),
+    );
+    await waitFor(() =>
+      expect(screen.queryByText("夏日咖啡馆口播复刻")).toBeNull(),
+    );
+    // 删除的是当前选中批次：自动切换到剩余首个批次。
+    await waitFor(() =>
+      expect(api.getGenerationBatch).toHaveBeenCalledWith("batch-2"),
+    );
+    expect(screen.getByText("庭院改造复刻")).toBeInTheDocument();
+    // 等待新批次的舞台自动签发走完，避免异步链泄漏进下一个用例。
+    await waitFor(() =>
+      expect(api.createGenerationResultPreviewUrl).toHaveBeenCalledWith(
+        "asset-ok",
+      ),
+    );
+  });
+
   it("keeps result metadata readable for auditors without preview, download, or reconcile actions", async () => {
     vi.mocked(api.getGenerationBatch).mockResolvedValue(
       batch({
@@ -341,6 +442,13 @@ describe("TaskRecordsPanel", () => {
     ).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: /付费重新生成|整批付费再次生成/ }),
+    ).not.toBeInTheDocument();
+    // 审计身份同样看不到批次卡的重命名/删除操作。
+    expect(
+      screen.queryByRole("button", { name: "重命名" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "删除批次 夏日咖啡馆口播复刻" }),
     ).not.toBeInTheDocument();
     expect(api.createGenerationResultPreviewUrl).not.toHaveBeenCalled();
   });
