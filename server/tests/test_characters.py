@@ -138,7 +138,7 @@ def test_characters_migration_creates_library_tables(db_path: Path) -> None:
             ).fetchall()
         }
 
-    assert version == "018_remove_oss_storage"
+    assert version == "019_character_simple_upload"
     assert {
         "characters",
         "project_main_characters",

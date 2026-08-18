@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   chooseProjectMainCharacterVersion,
@@ -7,7 +7,9 @@ import {
   type ProjectCharacterAssetOption,
   type ProjectCharacterVersionOption,
   type ProjectMainCharacter,
+  type SimpleCharacterResult,
 } from "./api";
+import { SimpleCharacterUpload } from "./SimpleCharacterUpload";
 
 const VIEW_LABELS: Record<ProjectCharacterAssetOption["view_type"], string> = {
   FRONT_FACE: "正脸近景",
@@ -40,8 +42,26 @@ export function CharacterSelection({
   const [isRestoring, setIsRestoring] = useState(true);
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [isUploadOpen, setIsUploadOpen] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const [autoSelected, setAutoSelected] = useState(false);
+  const [guidance, setGuidance] = useState("");
+  const [restoredEmpty, setRestoredEmpty] = useState(false);
+  const [isAutoSelecting, setIsAutoSelecting] = useState(false);
+  const autoSelectProjectRef = useRef<string | null>(null);
+  // 回调走 ref 转发：生产接线中 busy 上报会让父级重渲染并产生新的
+  // 回调引用，若进入自动选择 effect 的依赖面会触发 cleanup 中止
+  // in-flight 落库（评审 Critical 1），ref 保持依赖面纯净。
+  const onBusyChangeRef = useRef(onBusyChange);
+  const onSelectionChangeRef = useRef(onSelectionChange);
+  const onVersionChangeRef = useRef(onVersionChange);
+
+  useEffect(() => {
+    onBusyChangeRef.current = onBusyChange;
+    onSelectionChangeRef.current = onSelectionChange;
+    onVersionChangeRef.current = onVersionChange;
+  });
 
   useEffect(() => {
     let active = true;
@@ -50,6 +70,9 @@ export function CharacterSelection({
     setSelectedVersionId("");
     setError("");
     setMessage("");
+    setAutoSelected(false);
+    setGuidance("");
+    setRestoredEmpty(false);
     getProjectMainCharacter(projectId)
       .then((selection) => {
         if (!active) {
@@ -60,6 +83,9 @@ export function CharacterSelection({
           : null;
         setCurrentSelection(restoredSelection);
         setSelectedVersionId(restoredSelection?.character_version_id ?? "");
+        // 仅「restore 成功且无快照」才允许自动预选：restore 失败时快照
+        // 状态未知，自动改绑可能覆盖用户既有选择（评审 Major 2）。
+        setRestoredEmpty(restoredSelection === null);
         onSelectionChange?.(restoredSelection !== null);
         onVersionChange?.(restoredSelection);
       })
@@ -85,6 +111,66 @@ export function CharacterSelection({
     };
   }, [onSelectionChange, onVersionChange, projectId]);
 
+  // P0-03-01：项目无角色快照进入时，自动预选最近发布的可用版本并落库
+  //（choose 服务端原子复用快照，重复选择幂等）；仅每个项目自动一次，
+  // 只读身份、restore 失败、空列表与写入失败都静默转手动态选择。
+  useEffect(() => {
+    if (
+      isRestoring ||
+      !restoredEmpty ||
+      readOnly ||
+      currentSelection ||
+      autoSelectProjectRef.current === projectId
+    ) {
+      return;
+    }
+    autoSelectProjectRef.current = projectId;
+    let active = true;
+    void (async () => {
+      setIsAutoSelecting(true);
+      onBusyChangeRef.current?.(true);
+      try {
+        const availableVersions = await listProjectCharacterVersions(projectId);
+        if (!active) {
+          return;
+        }
+        if (!availableVersions.length) {
+          setGuidance(
+            "暂无可选角色版本，请先在人物库发布角色，或使用一键上传人物。",
+          );
+          return;
+        }
+        const latestVersion = availableVersions.reduce((latest, current) =>
+          Date.parse(current.published_at) > Date.parse(latest.published_at)
+            ? current
+            : latest,
+        );
+        const selection = await chooseProjectMainCharacterVersion(
+          projectId,
+          latestVersion.character_version_id,
+        );
+        if (!active) {
+          return;
+        }
+        setCurrentSelection(selection);
+        setSelectedVersionId(selection.character_version_id ?? "");
+        setAutoSelected(true);
+        onSelectionChangeRef.current?.(true);
+        onVersionChangeRef.current?.(selection);
+      } catch {
+        if (active) {
+          setGuidance("未自动选择角色版本，请手动选择角色版本。");
+        }
+      } finally {
+        setIsAutoSelecting(false);
+        onBusyChangeRef.current?.(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [currentSelection, isRestoring, projectId, readOnly, restoredEmpty]);
+
   async function openSelection() {
     setIsOpen(true);
     setIsLoading(true);
@@ -104,8 +190,26 @@ export function CharacterSelection({
     }
   }
 
+  async function refreshVersions() {
+    try {
+      const availableVersions = await listProjectCharacterVersions(projectId);
+      setVersions(availableVersions);
+    } catch {
+      // Keep the previously loaded list; the next openSelection will retry.
+    }
+  }
+
+  async function handleSimpleCharacterCreated(result: SimpleCharacterResult) {
+    await refreshVersions();
+    setSelectedVersionId(result.character_version_id);
+    setIsUploadOpen(false);
+    setMessage("新人物已发布并自动选中，确认后保存即可作为项目角色版本。");
+  }
+
   async function saveSelection() {
-    if (readOnly || !selectedVersionId) {
+    // 自动预选写入在途时跳过手动保存，避免双 PUT 竞态改写落库结果
+    //（评审 Minor 4）；窗口极短，按钮同步禁用防采。
+    if (readOnly || !selectedVersionId || isAutoSelecting) {
       return;
     }
     onBusyChange?.(true);
@@ -118,6 +222,7 @@ export function CharacterSelection({
         selectedVersionId,
       );
       setCurrentSelection(selection);
+      setAutoSelected(false);
       onSelectionChange?.(true);
       onVersionChange?.(selection);
       const summary = selectionSummary(selection);
@@ -173,9 +278,36 @@ export function CharacterSelection({
           {readOnly ? "查看角色版本" : "选择角色版本"}
         </button>
       </div>
+      {autoSelected && currentSummary ? (
+        <div className="auto-selection-notice" role="status">
+          <span>
+            已自动选择角色版本 {currentSummary.identityName} · V
+            {currentSummary.versionNumber}
+          </span>
+          <button onClick={openSelection} type="button">
+            更换
+          </button>
+        </div>
+      ) : null}
+      {guidance ? (
+        <p className="status-note" role="status">
+          {guidance}
+        </p>
+      ) : null}
       {isOpen ? (
         <div className="character-selection-panel">
           <div className="panel-header">
+            <div>
+              {!readOnly ? (
+                <button
+                  className="secondary-button"
+                  onClick={() => setIsUploadOpen((open) => !open)}
+                  type="button"
+                >
+                  {isUploadOpen ? "收起一键上传" : "一键上传人物"}
+                </button>
+              ) : null}
+            </div>
             <button
               type="button"
               className="secondary-button"
@@ -184,6 +316,12 @@ export function CharacterSelection({
               关闭
             </button>
           </div>
+          {!readOnly && isUploadOpen ? (
+            <SimpleCharacterUpload
+              onCreated={handleSimpleCharacterCreated}
+              projectId={projectId}
+            />
+          ) : null}
           {isLoading ? (
             <p className="status-note">正在读取可用角色版本</p>
           ) : null}
@@ -266,6 +404,7 @@ export function CharacterSelection({
               disabled={
                 isLoading ||
                 isSaving ||
+                isAutoSelecting ||
                 !selectedVersionId ||
                 selectedOption?.assets.length !== 7
               }

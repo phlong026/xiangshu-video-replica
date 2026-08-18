@@ -354,4 +354,222 @@ describe("SourceFrameSelection", () => {
 
     expect(getLatestProjectSourceFrames).toHaveBeenCalledTimes(loadCount);
   });
+
+  // P0-03-02：候选自动提取与特征预填（红灯先行）。
+
+  it("auto-extracts default candidates when the project has none", async () => {
+    vi.mocked(getLatestProjectSourceFrames).mockResolvedValueOnce(null);
+    render(
+      <SourceFrameSelection
+        projectId="project-1"
+        referenceAssetId="reference-1"
+      />,
+    );
+
+    await waitFor(() =>
+      expect(extractSourceFrames).toHaveBeenCalledWith(
+        "project-1",
+        "reference-1",
+        [0.5, 1.5, 2.5],
+      ),
+    );
+    expect(await screen.findByAltText("候选源画面 1")).toBeInTheDocument();
+  });
+
+  it("keeps the auto-extraction notice visible after candidates reload", async () => {
+    // P0-05-02 评审 M1：自动提取成功后递归 loadCandidates 走无确认分支，
+    // 提示须保留至人工确认，不被空文案覆盖（先等候选重载完成再断言，
+    // 避免只测到递归 await 窗口内的瞬态显示）。
+    vi.mocked(getLatestProjectSourceFrames).mockResolvedValueOnce(null);
+    render(
+      <SourceFrameSelection
+        projectId="project-1"
+        referenceAssetId="reference-1"
+      />,
+    );
+
+    expect(await screen.findByAltText("候选源画面 1")).toBeInTheDocument();
+    expect(
+      screen.getByText("已自动提取候选源画面，请核对后确认。"),
+    ).toBeInTheDocument();
+  });
+
+  it("does not auto-extract for a read-only auditor", async () => {
+    vi.mocked(getLatestProjectSourceFrames).mockResolvedValueOnce(null);
+    render(
+      <SourceFrameSelection
+        projectId="project-1"
+        readOnly
+        referenceAssetId="reference-1"
+      />,
+    );
+
+    expect(await screen.findByText("尚未提取候选源画面。")).toBeInTheDocument();
+    expect(extractSourceFrames).not.toHaveBeenCalled();
+  });
+
+  it("auto-extracts again after switching to another project without candidates", async () => {
+    vi.mocked(getLatestProjectSourceFrames).mockResolvedValueOnce(null);
+    const { rerender } = render(
+      <SourceFrameSelection
+        projectId="project-1"
+        referenceAssetId="reference-1"
+      />,
+    );
+    await waitFor(() => expect(extractSourceFrames).toHaveBeenCalledOnce());
+
+    vi.mocked(getLatestProjectSourceFrames).mockResolvedValueOnce(null);
+    rerender(
+      <SourceFrameSelection
+        projectId="project-2"
+        referenceAssetId="reference-2"
+      />,
+    );
+    await waitFor(() =>
+      expect(extractSourceFrames).toHaveBeenCalledWith(
+        "project-2",
+        "reference-2",
+        [0.5, 1.5, 2.5],
+      ),
+    );
+  });
+
+  it("preselects the highest-scored candidate after loading", async () => {
+    render(
+      <SourceFrameSelection
+        projectId="project-1"
+        referenceAssetId="reference-1"
+      />,
+    );
+
+    await screen.findByAltText("候选源画面 1");
+    expect(screen.getByRole("radio", { name: /候选 1/ })).toBeChecked();
+    expect(screen.getByRole("radio", { name: /候选 2/ })).not.toBeChecked();
+  });
+
+  it("prefills feature suggestions once and keeps user edits", async () => {
+    const { rerender } = render(
+      <SourceFrameSelection
+        featureSuggestion={{
+          body_completeness: "FACE_ONLY",
+          face_visible: true,
+          orientation: "FRONT",
+          shot_size: "CLOSE_UP",
+        }}
+        projectId="project-1"
+        referenceAssetId="reference-1"
+      />,
+    );
+
+    await screen.findByAltText("候选源画面 1");
+    expect(screen.getByLabelText("人物朝向")).toHaveValue("FRONT");
+    expect(screen.getByLabelText("人物景别")).toHaveValue("CLOSE_UP");
+    expect(screen.getByLabelText("面部可见性")).toHaveValue("VISIBLE");
+    expect(screen.getByLabelText("身体完整度")).toHaveValue("FACE_ONLY");
+
+    // 用户修改后，新的建议值（镜头卡自动保存）不得覆盖用户输入。
+    fireEvent.change(screen.getByLabelText("人物朝向"), {
+      target: { value: "LEFT_45" },
+    });
+    rerender(
+      <SourceFrameSelection
+        featureSuggestion={{
+          body_completeness: "FULL_BODY",
+          face_visible: false,
+          orientation: "RIGHT_SIDE",
+          shot_size: "FULL_BODY",
+        }}
+        projectId="project-1"
+        referenceAssetId="reference-1"
+      />,
+    );
+    expect(screen.getByLabelText("人物朝向")).toHaveValue("LEFT_45");
+    expect(screen.getByLabelText("人物景别")).toHaveValue("CLOSE_UP");
+    expect(screen.getByLabelText("面部可见性")).toHaveValue("VISIBLE");
+    expect(screen.getByLabelText("身体完整度")).toHaveValue("FACE_ONLY");
+  });
+
+  it("keeps user edits across parent re-renders with a changing busy callback", async () => {
+    // 评审 M-1 回归锁定：宿主链路（App 内联回调 + busy 翻转重渲染）会
+    // 让 onBusyChange 身份每次渲染变化，不得因此重载候选或清空用户已填特征。
+    const { rerender } = render(
+      <SourceFrameSelection
+        featureSuggestion={{
+          body_completeness: "UPPER_BODY",
+          face_visible: true,
+          orientation: "FRONT",
+          shot_size: "HALF_BODY",
+        }}
+        onBusyChange={vi.fn()}
+        projectId="project-1"
+        referenceAssetId="reference-1"
+      />,
+    );
+
+    await screen.findByAltText("候选源画面 1");
+    const initialLoadCount = vi.mocked(getLatestProjectSourceFrames).mock.calls
+      .length;
+    fireEvent.change(screen.getByLabelText("人物朝向"), {
+      target: { value: "LEFT_45" },
+    });
+
+    rerender(
+      <SourceFrameSelection
+        featureSuggestion={{
+          body_completeness: "UPPER_BODY",
+          face_visible: true,
+          orientation: "FRONT",
+          shot_size: "HALF_BODY",
+        }}
+        onBusyChange={vi.fn()}
+        projectId="project-1"
+        referenceAssetId="reference-1"
+      />,
+    );
+
+    expect(screen.getByLabelText("人物朝向")).toHaveValue("LEFT_45");
+    expect(getLatestProjectSourceFrames).toHaveBeenCalledTimes(
+      initialLoadCount,
+    );
+  });
+
+  it("keeps confirmed features over incoming suggestions", async () => {
+    vi.mocked(getLatestProjectSourceFrameSelection).mockResolvedValue({
+      stale: false,
+      version: {
+        ...candidatesVersion,
+        id: "source-selection-1",
+        kind: "source_frame_selection",
+        payload: {
+          source_frame_asset_id: "source-2",
+          character_features: {
+            orientation: "LEFT_45",
+            shot_size: "HALF_BODY",
+            face_visible: false,
+            body_completeness: "UPPER_BODY",
+          },
+        },
+      },
+    });
+    render(
+      <SourceFrameSelection
+        featureSuggestion={{
+          body_completeness: "FULL_BODY",
+          face_visible: true,
+          orientation: "FRONT",
+          shot_size: "FULL_BODY",
+        }}
+        projectId="project-1"
+        referenceAssetId="reference-1"
+      />,
+    );
+
+    expect(
+      await screen.findByText("当前候选源画面已确认。"),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("人物朝向")).toHaveValue("LEFT_45");
+    expect(screen.getByLabelText("人物景别")).toHaveValue("HALF_BODY");
+    expect(screen.getByLabelText("面部可见性")).toHaveValue("HIDDEN");
+    expect(screen.getByLabelText("身体完整度")).toHaveValue("UPPER_BODY");
+  });
 });

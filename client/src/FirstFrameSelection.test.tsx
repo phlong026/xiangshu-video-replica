@@ -457,4 +457,119 @@ describe("FirstFrameSelection", () => {
 
     expect(onSelectionChange).not.toHaveBeenCalledWith(confirmedSelection);
   });
+
+  // P0-03-04：首帧候选生成完成后自动预选第一张，确认压缩为一次点击；
+  // 不改候选生成的人工触发与付费语义（红线 3：仅显式点击才生成）。
+  it("auto-selects the first candidate after regeneration for one-click confirmation (P0-03-04)", async () => {
+    render(
+      <FirstFrameSelection
+        projectId="project-1"
+        referenceSelection={referenceSelection}
+        sourceFrameSelectionId="source-selection-1"
+      />,
+    );
+    await screen.findByText("人物置换首帧");
+
+    // 红线 3：进入页面给不自动触发生成；预存候选仅展示不预选。
+    expect(generateFirstFrames).not.toHaveBeenCalled();
+    expect(screen.getByRole("radio", { name: /首帧候选 1/ })).not.toBeChecked();
+
+    fireEvent.click(screen.getByRole("button", { name: "重新生成候选首帧" }));
+    await waitFor(() => expect(generateFirstFrames).toHaveBeenCalledOnce());
+
+    expect(
+      await screen.findByText("已自动预选第一张候选，请查看后单击确认。"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /首帧候选 1/ })).toBeChecked();
+    expect(screen.getByRole("radio", { name: /首帧候选 2/ })).not.toBeChecked();
+
+    const confirmButton = screen.getByRole("button", {
+      name: "确认用于 H3 的首帧",
+    });
+    await waitFor(() => expect(confirmButton).toBeEnabled());
+    fireEvent.click(confirmButton);
+    await waitFor(() =>
+      expect(confirmFirstFrame).toHaveBeenCalledWith("project-1", "first-1"),
+    );
+  });
+
+  // P0-03-04：旧确认与新生成候选不一致时同样预选第一张，重新确认保持单击。
+  it("auto-selects the first candidate after regenerating over a stale confirmation (P0-03-04)", async () => {
+    vi.mocked(getLatestProjectFirstFrameSelection).mockResolvedValue({
+      version: {
+        ...candidatesVersion,
+        id: "first-frame-selection-1",
+        kind: "first_frame_selection",
+        payload: {
+          first_frame_candidates_version_id: "first-frame-candidates-1",
+          first_frame_asset_id: "first-1",
+        },
+      },
+      stale: false,
+    });
+    render(
+      <FirstFrameSelection
+        projectId="project-1"
+        referenceSelection={referenceSelection}
+        sourceFrameSelectionId="source-selection-1"
+      />,
+    );
+    expect(
+      await screen.findByText(
+        "已确认首帧与当前候选不一致，请重新确认最新候选。",
+      ),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "重新生成候选首帧" }));
+    await waitFor(() => expect(generateFirstFrames).toHaveBeenCalledOnce());
+
+    expect(
+      await screen.findByText(
+        "已确认首帧与当前候选不一致，请重新确认最新候选。",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /首帧候选 1/ })).toBeChecked();
+
+    const confirmButton = screen.getByRole("button", {
+      name: "确认用于 H3 的首帧",
+    });
+    await waitFor(() => expect(confirmButton).toBeEnabled());
+    fireEvent.click(confirmButton);
+    await waitFor(() =>
+      expect(confirmFirstFrame).toHaveBeenCalledWith("project-1", "first-1"),
+    );
+  });
+
+  // P0-03-04：历史版本仅查看，不自动预选，确认保持禁用（历史与 stale 语义不变）。
+  it("does not auto-select candidates when browsing a history version (P0-03-04)", async () => {
+    const olderVersion = {
+      ...candidatesVersion,
+      id: "first-frame-candidates-1",
+      version_number: 1,
+    };
+    vi.mocked(getProjectFirstFrameHistory).mockResolvedValue([
+      candidatesVersion,
+      olderVersion,
+    ]);
+    render(
+      <FirstFrameSelection
+        projectId="project-1"
+        referenceSelection={referenceSelection}
+        sourceFrameSelectionId="source-selection-1"
+      />,
+    );
+    await screen.findByText("人物置换首帧");
+    expect(screen.getByRole("radio", { name: /首帧候选 1/ })).not.toBeChecked();
+
+    fireEvent.click(screen.getByRole("button", { name: "版本 #1" }));
+    expect(
+      await screen.findByText("正在查看历史版本；仅最新候选可确认用于 H3。"),
+    ).toBeInTheDocument();
+    for (const radio of screen.getAllByRole("radio")) {
+      expect(radio).not.toBeChecked();
+    }
+    expect(
+      screen.getByRole("button", { name: "确认用于 H3 的首帧" }),
+    ).toBeDisabled();
+  });
 });

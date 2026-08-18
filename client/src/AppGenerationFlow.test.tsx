@@ -71,9 +71,14 @@ async function openProjectGenerationFlow() {
   fireEvent.click(screen.getByRole("button", { name: "进入" }));
   await act(async () => Promise.resolve());
   fireEvent.click(await screen.findByRole("button", { name: "继续编辑" }));
-  fireEvent.click(screen.getByRole("button", { name: "模拟从项目创建批次" }));
+  fireEvent.click(screen.getByRole("button", { name: "模拟一键生成完成" }));
 }
 
+// V1.4 一键动线交接契约：工作区内部「开始生成 → 四步流水线 →
+// onBatchCreated」由 AnalysisWorkspace.test.tsx（P0-04 用例）覆盖；
+// 本套件验证 App 层交接段——onBatchCreated 后自动打开任务记录
+// （无需粘贴 Batch ID）与 busy 阻断导航，两层接力证明
+// 「从点击到任务记录页用户操作仅 1 次」。
 vi.mock("./AnalysisWorkspace", () => ({
   AnalysisWorkspace: ({
     onBatchCreated,
@@ -84,7 +89,7 @@ vi.mock("./AnalysisWorkspace", () => ({
   }) => (
     <div>
       <button onClick={() => onBatchCreated(batch)} type="button">
-        模拟从项目创建批次
+        模拟一键生成完成
       </button>
       <button onClick={() => onWorkspaceBusyChange?.(true)} type="button">
         模拟上游写入开始
@@ -208,7 +213,7 @@ describe("App generation handoff", () => {
     await act(async () => Promise.resolve());
     fireEvent.click(await screen.findByRole("button", { name: "继续编辑" }));
     fireEvent.click(screen.getByRole("button", { name: "模拟上游写入开始" }));
-    fireEvent.click(screen.getByRole("button", { name: "模拟从项目创建批次" }));
+    fireEvent.click(screen.getByRole("button", { name: "模拟一键生成完成" }));
 
     expect(
       await screen.findByRole("heading", { level: 2, name: "任务记录" }),

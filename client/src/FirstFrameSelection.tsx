@@ -54,7 +54,12 @@ export function FirstFrameSelection({
     Boolean(referenceSelection || legacyCharacterSelected);
 
   const load = useCallback(
-    async (preferredVersion?: AnalysisVersion) => {
+    async (
+      preferredVersion?: AnalysisVersion,
+      // P0-03-04：仅生成完成后的重载自动预选第一张候选（确认压缩为一次
+      // 点击）；进入页面/切历史版本仍保持人工选择，stale 语义不变。
+      autoSelectFirstCandidate = false,
+    ) => {
       const requestId = loadRequestId.current + 1;
       loadRequestId.current = requestId;
       const isCurrentRequest = () => requestId === loadRequestId.current;
@@ -116,6 +121,16 @@ export function FirstFrameSelection({
         }
         setModel(payload.model);
         setPrompt(payload.prompt);
+        // P0-03-04：预选仅是建议，确认仍为人工动作；候选生成的付费语义
+        // 不变（仍由用户显式点击触发）。
+        const canAutoSelect =
+          autoSelectFirstCandidate &&
+          !(latestState.stale || selection.stale) &&
+          displayVersion.id === latest?.id &&
+          !currentSelection;
+        if (canAutoSelect) {
+          setSelectedAssetId(payload.candidates[0]?.asset_id ?? "");
+        }
         if (latestState.stale || selection.stale) {
           setStatus("上游输入已更新，请重新生成人物置换首帧。");
         } else if (displayVersion.id !== latest?.id) {
@@ -125,6 +140,8 @@ export function FirstFrameSelection({
           setStatus("当前候选首帧已确认，将作为后续 H3 提示词的唯一首帧输入。");
         } else if (selection.version) {
           setStatus("已确认首帧与当前候选不一致，请重新确认最新候选。");
+        } else if (canAutoSelect) {
+          setStatus("已自动预选第一张候选，请查看后单击确认。");
         } else {
           setStatus("");
         }
@@ -216,8 +233,10 @@ export function FirstFrameSelection({
       if (requestId !== loadRequestId.current) {
         return;
       }
-      setStatus("候选首帧已更新，请查看后手动确认一张。");
-      await load(generated);
+      // 过程性中性文案：成功路径由 load 内 canAutoSelect 分支覆盖为预选
+      // 提示；若候选数据无效早退，不会残留与事实矛盾的预选文案（评审 Minor）。
+      setStatus("候选首帧已更新，正在读取候选…");
+      await load(generated, true);
     } catch (requestError) {
       if (requestId !== loadRequestId.current) {
         return;

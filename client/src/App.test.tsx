@@ -389,7 +389,8 @@ describe("App", () => {
     expect(
       screen.getByRole("button", { name: "查看角色版本" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("先选择角色版本")).toBeInTheDocument();
+    // P0-02-04：门禁改骨架引导，无角色时下游三区均为引导态。
+    expect(screen.getAllByText("先在上方选择角色版本")).toHaveLength(3);
     expect(
       screen.queryByRole("button", { name: "重新生成候选首帧" }),
     ).toBeNull();
@@ -899,10 +900,11 @@ describe("App", () => {
     expect(
       await screen.findByText("已选择角色“小夏 · 乡墅项目管理专家 V3”。"),
     ).toBeInTheDocument();
-    expect(screen.getByTitle("画面与人物")).toHaveAttribute(
-      "aria-current",
-      "step",
-    );
+    expect(
+      within(screen.getByRole("tab", { name: /人物设定/ })).getByText(
+        "缺失 3 项",
+      ),
+    ).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith(
       "http://127.0.0.1:8000/api/projects/project-ready/main-character",
       expect.objectContaining({

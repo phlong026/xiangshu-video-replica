@@ -3,6 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
 
+// P0-05-01 核查结论：本套件只覆盖任务记录页「粘贴 Batch ID 查询」的
+// Fake provider 契约，不经过工作区动线，无步骤门禁断言需要迁移；
+// 新动线断言（就绪徽章/主按钮/缺失模态/一键流水线）由
+// AnalysisWorkspace.test.tsx 覆盖，本文件保持基线不动。
+
 const healthResponse = { status: "ok", service: "video-replica-api" };
 
 const completedFakeBatch = {
