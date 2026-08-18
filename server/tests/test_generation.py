@@ -319,7 +319,7 @@ def test_metaso_h3_provider_creates_polls_filters_and_downloads_result(
                 "role": "first_frame",
             },
         ],
-        "resolution": "768",
+        "resolution": "768P",
         "duration": 5,
         "ratio": "adaptive",
     }

@@ -271,7 +271,14 @@ class UrllibMetasoHttpTransport:
             with urlopen(request, timeout=self.timeout_seconds) as response:  # noqa: S310
                 return cast(bytes, response.read())
         except HTTPError as exc:
-            logger.warning("METASO H3 request failed with HTTP status %s", exc.code)
+            detail = ""
+            try:
+                detail = exc.read()[:1000].decode("utf-8", "replace")
+            except OSError:
+                pass
+            logger.warning(
+                "METASO H3 request failed with HTTP status %s: %s", exc.code, detail
+            )
             raise H3ProviderFailed(f"METASO returned HTTP {exc.code}") from exc
         except (TimeoutError, URLError, OSError) as exc:
             logger.warning("METASO H3 request failed: %s", type(exc).__name__)
@@ -293,6 +300,7 @@ class MetasoH3Provider(H3Provider):
             [bytes], tuple[Literal["AUDIO_OK", "AUDIO_QUALITY_FAILED"], list[str]]
         ]
         | None = None,
+        task_created_observer: Callable[[str], None] | None = None,
     ) -> None:
         self.api_key = api_key
         self.transport = transport or UrllibMetasoHttpTransport()
@@ -300,6 +308,7 @@ class MetasoH3Provider(H3Provider):
         self.max_poll_attempts = max_poll_attempts
         self.sleeper = sleeper
         self.audio_quality_checker = audio_quality_checker or h3_audio_quality
+        self.task_created_observer = task_created_observer
 
     def create_image_to_video(self, request: dict[str, Any]) -> H3CreateResult:
         validate_h3_request(request)
@@ -322,6 +331,10 @@ class MetasoH3Provider(H3Provider):
             provider_task_id = _metaso_task_id(response)
         except H3ProviderFailed as exc:
             raise SubmissionUncertain("METASO submission result is unknown") from exc
+        if self.task_created_observer is not None:
+            # Persist the paid provider task id before polling so a timeout or
+            # crash can never lose a result that reconciliation could recover.
+            self.task_created_observer(provider_task_id)
         return self._poll_for_result(provider_task_id)
 
     def _poll_for_result(self, provider_task_id: str) -> H3CreateResult:
@@ -399,7 +412,12 @@ def metaso_h3_provider_from_settings(conn: sqlite3.Connection) -> MetasoH3Provid
     api_key = config.get("api_key")
     if not api_key:
         raise H3ProviderSettingsUnavailable("METASO API key is not configured")
-    return MetasoH3Provider(api_key=api_key)
+    return MetasoH3Provider(
+        api_key=api_key,
+        # Real H3 rendering routinely exceeds five minutes; poll up to ~1.5h.
+        poll_interval_seconds=5.0,
+        max_poll_attempts=1080,
+    )
 
 
 def h3_provider_for_task(conn: sqlite3.Connection, provider_name: str) -> H3Provider:
@@ -2114,6 +2132,19 @@ def run_next_generation_task(
                 batch_id=str(lease["batch_id"]),
             )
             return get_task_result(conn, task_id)
+    if isinstance(provider, MetasoH3Provider) and provider.task_created_observer is None:
+
+        def _record_created_provider_task(created_provider_task_id: str) -> None:
+            # Persist the paid provider task id the moment it exists so a later
+            # timeout/crash can be reconciled instead of losing the result.
+            mark_task_submission_uncertain(
+                conn,
+                task_id=task_id,
+                message="METASO task was created; the result is still being awaited.",
+                provider_task_id=created_provider_task_id,
+            )
+
+        provider.task_created_observer = _record_created_provider_task
     if lease.get("archive_status") == "ARCHIVE_FAILED" and lease.get("provider_result_url"):
         return _retry_archive(
             conn,
@@ -4063,16 +4094,19 @@ def _metaso_task_id(content: bytes) -> str:
 
 
 def _metaso_create_request(request: dict[str, Any]) -> dict[str, Any]:
-    """Translate UI labels to the parameter value proven by the METASO endpoint."""
-    provider_request = dict(request)
-    if provider_request.get("resolution") == "768P":
-        provider_request["resolution"] = "768"
-    return provider_request
+    """METASO accepts the UI resolution labels as-is (768P / 2K)."""
+    return dict(request)
 
 
 def _require_public_https_host(hostname: str) -> None:
     """Reject result URLs that resolve to private/loopback/link-local addresses
     so a compromised METASO response cannot drive server-side SSRF."""
+    provider_host = urlparse(METASO_BASE_URL).hostname or ""
+    if hostname == provider_host or hostname.endswith(f".{provider_host}"):
+        # Provider-owned hosts are trusted by contract; desktop machines often
+        # route them through local proxies whose synthetic addresses would
+        # otherwise fail the public-address check below.
+        return
     try:
         addresses = socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM)
     except socket.gaierror as exc:
