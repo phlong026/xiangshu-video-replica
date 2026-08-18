@@ -5,6 +5,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
+import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import * as api from "./api";
@@ -266,5 +267,92 @@ describe("CharacterSelection", () => {
     expect(api.chooseProjectMainCharacterVersion).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: "更换" })).toBeNull();
     expect(screen.queryByText(/失败。/)).toBeNull();
+  });
+
+  // P0-03-01 评审 Critical 1：生产接线中 onBusyChange 是内联回调，
+  // busy 上报会触发父级重渲染并产生新引用；自动选择不得因此中止。
+  // 用 pending list 复现真实网络时序：重渲染必须插进 list 在途窗口。
+  it("completes auto-selection even when the busy callback identity changes mid-flight", async () => {
+    let resolveList:
+      | ((value: api.ProjectCharacterVersionOption[]) => void)
+      | undefined;
+    vi.mocked(api.listProjectCharacterVersions).mockReturnValue(
+      new Promise((resolve) => {
+        resolveList = resolve;
+      }),
+    );
+    function Host() {
+      const [, setTick] = useState(0);
+      // 内联回调：Host 每次渲染都是新引用，模拟 App 接线的重渲染反馈。
+      const handleBusyChange = () => setTick((tick) => tick + 1);
+      return (
+        <CharacterSelection
+          onBusyChange={handleBusyChange}
+          projectId="project-1"
+        />
+      );
+    }
+
+    render(<Host />);
+
+    // 自动选择开始：busy 上报触发 Host 重渲染（新回调引用），list 仍在途。
+    await waitFor(() =>
+      expect(api.listProjectCharacterVersions).toHaveBeenCalledTimes(1),
+    );
+    resolveList?.([option]);
+
+    await waitFor(() =>
+      expect(api.chooseProjectMainCharacterVersion).toHaveBeenCalledWith(
+        "project-1",
+        option.character_version_id,
+      ),
+    );
+    expect(
+      await screen.findByText("已自动选择角色版本 林夏 · V3"),
+    ).toBeInTheDocument();
+  });
+
+  // P0-03-01 评审 Major 2：restore 失败时快照状态未知，
+  // 不得自动改绑，交回用户手动选择。
+  it("does not auto-select when restoring the selection fails", async () => {
+    vi.mocked(api.getProjectMainCharacter).mockRejectedValue(
+      new Error("网络不可用"),
+    );
+
+    render(<CharacterSelection projectId="project-1" />);
+
+    // restore 结束但无选择（引导文案出现）：快照状态未知，不得自动改绑。
+    expect(
+      await screen.findByText(
+        "选择一个已发布且授权有效的角色版本，用于后续人物参考匹配。",
+      ),
+    ).toBeInTheDocument();
+    expect(api.listProjectCharacterVersions).not.toHaveBeenCalled();
+    expect(api.chooseProjectMainCharacterVersion).not.toHaveBeenCalled();
+    expect(screen.queryByText(/已自动选择角色版本/)).toBeNull();
+  });
+
+  it("skips auto-selection for read-only visitors", async () => {
+    render(<CharacterSelection projectId="project-1" readOnly />);
+
+    expect(
+      await screen.findByRole("button", { name: "查看角色版本" }),
+    ).toBeInTheDocument();
+    expect(api.listProjectCharacterVersions).not.toHaveBeenCalled();
+    expect(api.chooseProjectMainCharacterVersion).not.toHaveBeenCalled();
+    expect(screen.queryByText(/已自动选择角色版本/)).toBeNull();
+  });
+
+  it("falls back to manual selection guidance when the auto-selection write fails", async () => {
+    vi.mocked(api.chooseProjectMainCharacterVersion).mockRejectedValue(
+      new Error("写入失败"),
+    );
+
+    render(<CharacterSelection projectId="project-1" />);
+
+    expect(
+      await screen.findByText("未自动选择角色版本，请手动选择角色版本。"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/已自动选择角色版本/)).toBeNull();
   });
 });
