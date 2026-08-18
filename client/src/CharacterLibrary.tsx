@@ -35,8 +35,24 @@ function entryAssetIds(entry: SimpleLibraryEntry): string[] {
   ];
 }
 
+// 卡片封面取正脸近景（辨识度最高）；没有正脸时退回首张视角图，
+// 视角全缺（理论上不该出现）才用拼合图裁切兜底。拼合全图在灯箱看。
+function coverAsset(
+  entry: SimpleLibraryEntry,
+): { assetId: string; label: string } | null {
+  const view =
+    entry.views.find((item) => item.view_type === "FRONT_FACE") ??
+    (entry.views.length ? entry.views[0] : null);
+  if (view) {
+    return { assetId: view.asset_id, label: VIEW_LABELS[view.view_type] };
+  }
+  return entry.contact_sheet_asset_id
+    ? { assetId: entry.contact_sheet_asset_id, label: "五视角拼合图" }
+    : null;
+}
+
 // 人物库 = 「上传 → 五视角拼合图预览 → 下载」的主动线：上方一键上传，
-// 下方按人物展示单张五视角拼合大图；旧人物（无拼合图）降级为七格预览。
+// 下方 4 列人物卡（正脸近景封面）；点封面开灯箱看拼合大图并下载。
 export function CharacterLibrary({
   userRole,
   userId,
@@ -56,6 +72,7 @@ export function CharacterLibrary({
   const [busyRenameId, setBusyRenameId] = useState("");
   const [busyDeleteId, setBusyDeleteId] = useState("");
   const [busyRegenerateId, setBusyRegenerateId] = useState("");
+  const [lightboxId, setLightboxId] = useState("");
 
   const loadPreviewUrls = useCallback(async (assetIds: string[]) => {
     const results = await Promise.allSettled(
@@ -262,6 +279,9 @@ export function CharacterLibrary({
     }
   }
 
+  const lightboxEntry =
+    entries.find((entry) => entry.identity_id === lightboxId) ?? null;
+
   return (
     <section aria-label="人物库" className="character-library-simple">
       {canManage ? (
@@ -297,12 +317,31 @@ export function CharacterLibrary({
           {entries.map((entry) => {
             const isEditing = editingId === entry.identity_id;
             const isRenaming = busyRenameId === entry.identity_id;
-            const isDownloadingAll = busyDownloadKey === entry.identity_id;
+            const cover = coverAsset(entry);
+            const coverUrl = cover ? previewUrls[cover.assetId] : undefined;
             return (
               <li className="character-preview-card" key={entry.identity_id}>
-                <div className="character-preview-card__head">
+                <button
+                  aria-label={`查看人物 ${entry.display_name} 大图`}
+                  className="character-preview-card__cover"
+                  onClick={() => setLightboxId(entry.identity_id)}
+                  type="button"
+                >
+                  {coverUrl && cover ? (
+                    <img
+                      alt={`${entry.display_name} ${cover.label}`}
+                      loading="lazy"
+                      src={coverUrl}
+                    />
+                  ) : (
+                    <span className="source-frame-placeholder">
+                      预览加载中…
+                    </span>
+                  )}
+                </button>
+                <div className="character-preview-card__body">
                   {isEditing ? (
-                    <>
+                    <div className="character-preview-card__edit">
                       <input
                         aria-label="修改人物名称"
                         onChange={(event) => setEditingName(event.target.value)}
@@ -324,152 +363,231 @@ export function CharacterLibrary({
                       >
                         取消
                       </button>
-                    </>
+                    </div>
                   ) : (
                     <>
-                      <span className="character-preview-card__name">
-                        {entry.display_name}
-                      </span>
-                      {entry.status === "ARCHIVED" ? (
-                        <span className="status-badge">已归档</span>
-                      ) : null}
-                      {canRename(entry) ? (
-                        <button
-                          className="secondary-button"
-                          onClick={() => startRename(entry)}
-                          type="button"
-                        >
-                          改名
-                        </button>
-                      ) : null}
-                      {canRename(entry) ? (
-                        <button
-                          aria-label={`重新生成人物 ${entry.display_name} 的多视图`}
-                          className="secondary-button"
-                          disabled={busyRegenerateId !== ""}
-                          onClick={() => void handleRegenerate(entry)}
-                          type="button"
-                        >
-                          {busyRegenerateId === entry.identity_id
-                            ? "正在重新生成…"
-                            : "重新生成多视图"}
-                        </button>
-                      ) : null}
-                      {canDelete(entry) ? (
-                        <button
-                          aria-label={`删除人物 ${entry.display_name}`}
-                          className="secondary-button"
-                          disabled={busyDeleteId !== ""}
-                          onClick={() => void handleDelete(entry)}
-                          type="button"
-                        >
-                          {busyDeleteId === entry.identity_id
-                            ? "正在删除…"
-                            : "删除"}
-                        </button>
-                      ) : null}
-                      {canManage &&
-                      !entry.contact_sheet_asset_id &&
-                      entry.views.length ? (
-                        <button
-                          className="secondary-button"
-                          disabled={Boolean(busyDownloadKey)}
-                          onClick={() => void handleDownloadAll(entry)}
-                          type="button"
-                        >
-                          {isDownloadingAll
-                            ? "正在下载全部…"
-                            : `下载全部（${entry.views.length} 张）`}
-                        </button>
-                      ) : null}
+                      <div className="character-preview-card__title">
+                        <span className="character-preview-card__name">
+                          {entry.display_name}
+                        </span>
+                        {entry.status === "ARCHIVED" ? (
+                          <span className="status-badge">已归档</span>
+                        ) : null}
+                      </div>
+                      <div className="character-preview-card__actions">
+                        {canRename(entry) ? (
+                          <button
+                            className="secondary-button"
+                            onClick={() => startRename(entry)}
+                            type="button"
+                          >
+                            改名
+                          </button>
+                        ) : null}
+                        {canRename(entry) ? (
+                          <button
+                            aria-label={`重新生成人物 ${entry.display_name} 的多视图`}
+                            className="secondary-button"
+                            disabled={busyRegenerateId !== ""}
+                            onClick={() => void handleRegenerate(entry)}
+                            type="button"
+                          >
+                            {busyRegenerateId === entry.identity_id
+                              ? "正在重新生成…"
+                              : "重新生成多视图"}
+                          </button>
+                        ) : null}
+                        {canDelete(entry) ? (
+                          <button
+                            aria-label={`删除人物 ${entry.display_name}`}
+                            className="secondary-button"
+                            disabled={busyDeleteId !== ""}
+                            onClick={() => void handleDelete(entry)}
+                            type="button"
+                          >
+                            {busyDeleteId === entry.identity_id
+                              ? "正在删除…"
+                              : "删除"}
+                          </button>
+                        ) : null}
+                      </div>
                     </>
                   )}
                 </div>
-                {entry.contact_sheet_asset_id ? (
-                  <div className="character-contact-sheet">
-                    {previewUrls[entry.contact_sheet_asset_id] ? (
-                      <img
-                        alt={`${entry.display_name} 五视角拼合图`}
-                        loading="lazy"
-                        src={previewUrls[entry.contact_sheet_asset_id]}
-                      />
-                    ) : (
-                      <span className="source-frame-placeholder">
-                        拼合图加载中…
-                      </span>
-                    )}
-                    <div className="character-contact-sheet__bar">
-                      <span className="character-contact-sheet__label">
-                        五视角拼合图
-                      </span>
-                      {canManage ? (
-                        <button
-                          className="secondary-button"
-                          disabled={
-                            Boolean(busyDownloadKey) ||
-                            !previewUrls[entry.contact_sheet_asset_id]
-                          }
-                          onClick={() => void handleDownloadSheet(entry)}
-                          type="button"
-                        >
-                          {busyDownloadKey === entry.contact_sheet_asset_id
-                            ? "下载中…"
-                            : "下载拼合图"}
-                        </button>
-                      ) : null}
-                    </div>
-                  </div>
-                ) : entry.views.length ? (
-                  <div className="character-preview-grid">
-                    {entry.views.map((view) => {
-                      const previewUrl = previewUrls[view.asset_id];
-                      const isDownloadingView =
-                        busyDownloadKey === view.asset_id;
-                      return (
-                        <figure
-                          className="character-preview-item"
-                          key={view.asset_id}
-                        >
-                          {previewUrl ? (
-                            <img
-                              alt={`${entry.display_name} ${VIEW_LABELS[view.view_type]}`}
-                              loading="lazy"
-                              src={previewUrl}
-                            />
-                          ) : (
-                            <span className="source-frame-placeholder">
-                              预览加载中…
-                            </span>
-                          )}
-                          <figcaption>
-                            <span>{VIEW_LABELS[view.view_type]}</span>
-                            {canManage ? (
-                              <button
-                                className="secondary-button"
-                                disabled={
-                                  Boolean(busyDownloadKey) || !previewUrl
-                                }
-                                onClick={() =>
-                                  void handleDownloadView(entry, view)
-                                }
-                                type="button"
-                              >
-                                {isDownloadingView ? "下载中…" : "下载"}
-                              </button>
-                            ) : null}
-                          </figcaption>
-                        </figure>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <p className="status-note">该人物暂无已发布的视角图。</p>
-                )}
               </li>
             );
           })}
         </ul>
       )}
+      {lightboxEntry ? (
+        <CharacterLightbox
+          busyDownloadKey={busyDownloadKey}
+          canManage={canManage}
+          entry={lightboxEntry}
+          onClose={() => setLightboxId("")}
+          onDownloadSheet={handleDownloadSheet}
+          onDownloadView={handleDownloadView}
+          onDownloadAll={handleDownloadAll}
+          previewUrls={previewUrls}
+        />
+      ) : null}
     </section>
+  );
+}
+
+// 人物灯箱：点卡片封面放大查看——有拼合图看拼合全图，无则退回视角
+// 网格；下载拼合图/单视角/全部集中在这里，卡片操作行只留管理动作。
+// 关闭方式：Esc、点遮罩、右上「关闭」。
+function CharacterLightbox({
+  busyDownloadKey,
+  canManage,
+  entry,
+  onClose,
+  onDownloadSheet,
+  onDownloadView,
+  onDownloadAll,
+  previewUrls,
+}: {
+  busyDownloadKey: string;
+  canManage: boolean;
+  entry: SimpleLibraryEntry;
+  onClose: () => void;
+  onDownloadSheet: (entry: SimpleLibraryEntry) => Promise<void>;
+  onDownloadView: (
+    entry: SimpleLibraryEntry,
+    view: SimpleCharacterView,
+  ) => Promise<void>;
+  onDownloadAll: (entry: SimpleLibraryEntry) => Promise<void>;
+  previewUrls: Record<string, string>;
+}) {
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
+  const sheetUrl = entry.contact_sheet_asset_id
+    ? previewUrls[entry.contact_sheet_asset_id]
+    : undefined;
+  const isDownloadingAll = busyDownloadKey === entry.identity_id;
+
+  return (
+    // biome-ignore lint/a11y/noStaticElementInteractions: 点遮罩关闭是鼠标增强；键盘用户由下方 Esc 监听兜底。
+    // biome-ignore lint/a11y/useKeyWithClickEvents: 键盘关闭走全局 Esc 监听（见上方 useEffect）。
+    <div
+      className="character-lightbox"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) {
+          onClose();
+        }
+      }}
+    >
+      <div
+        aria-label={`人物预览 ${entry.display_name}`}
+        aria-modal="true"
+        className="character-lightbox__dialog"
+        role="dialog"
+      >
+        <div className="character-lightbox__head">
+          <h3 className="character-lightbox__title">{entry.display_name}</h3>
+          <button
+            aria-label="关闭人物预览"
+            className="secondary-button"
+            onClick={onClose}
+            type="button"
+          >
+            关闭
+          </button>
+        </div>
+        {entry.contact_sheet_asset_id ? (
+          <div className="character-contact-sheet">
+            {sheetUrl ? (
+              <img alt={`${entry.display_name} 五视角拼合图`} src={sheetUrl} />
+            ) : (
+              <span className="source-frame-placeholder">拼合图加载中…</span>
+            )}
+            {canManage ? (
+              <div className="character-contact-sheet__bar">
+                <span className="character-contact-sheet__label">
+                  五视角拼合图
+                </span>
+                <button
+                  className="secondary-button"
+                  disabled={Boolean(busyDownloadKey) || !sheetUrl}
+                  onClick={() => void onDownloadSheet(entry)}
+                  type="button"
+                >
+                  {busyDownloadKey === entry.contact_sheet_asset_id
+                    ? "下载中…"
+                    : "下载拼合图"}
+                </button>
+              </div>
+            ) : null}
+          </div>
+        ) : entry.views.length ? (
+          <div className="character-lightbox__views">
+            <div className="character-contact-sheet__bar">
+              <span className="character-contact-sheet__label">
+                视角图（{entry.views.length} 张）
+              </span>
+              {canManage ? (
+                <button
+                  className="secondary-button"
+                  disabled={Boolean(busyDownloadKey)}
+                  onClick={() => void onDownloadAll(entry)}
+                  type="button"
+                >
+                  {isDownloadingAll
+                    ? "正在下载全部…"
+                    : `下载全部（${entry.views.length} 张）`}
+                </button>
+              ) : null}
+            </div>
+            <div className="character-preview-grid">
+              {entry.views.map((view) => {
+                const previewUrl = previewUrls[view.asset_id];
+                const isDownloadingView = busyDownloadKey === view.asset_id;
+                return (
+                  <figure
+                    className="character-preview-item"
+                    key={view.asset_id}
+                  >
+                    {previewUrl ? (
+                      <img
+                        alt={`${entry.display_name} ${VIEW_LABELS[view.view_type]}`}
+                        src={previewUrl}
+                      />
+                    ) : (
+                      <span className="source-frame-placeholder">
+                        预览加载中…
+                      </span>
+                    )}
+                    <figcaption>
+                      <span>{VIEW_LABELS[view.view_type]}</span>
+                      {canManage ? (
+                        <button
+                          className="secondary-button"
+                          disabled={Boolean(busyDownloadKey) || !previewUrl}
+                          onClick={() => void onDownloadView(entry, view)}
+                          type="button"
+                        >
+                          {isDownloadingView ? "下载中…" : "下载"}
+                        </button>
+                      ) : null}
+                    </figcaption>
+                  </figure>
+                );
+              })}
+            </div>
+          </div>
+        ) : (
+          <p className="status-note">该人物暂无已发布的视角图。</p>
+        )}
+      </div>
+    </div>
   );
 }

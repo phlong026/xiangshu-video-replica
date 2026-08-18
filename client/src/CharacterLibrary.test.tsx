@@ -70,7 +70,7 @@ describe("CharacterLibrary", () => {
     vi.restoreAllMocks();
   });
 
-  it("renders characters with five-view contact sheets", async () => {
+  it("renders front-face covers and moves detail views into the lightbox", async () => {
     vi.mocked(api.listSimpleCharacterLibrary).mockResolvedValue([
       entry,
       foreignEntry,
@@ -78,15 +78,67 @@ describe("CharacterLibrary", () => {
 
     render(<CharacterLibrary userRole="employee" userId="employee_1" />);
 
-    expect(await screen.findByText("林夏")).toBeInTheDocument();
-    expect(screen.getByText("荣哥")).toBeInTheDocument();
+    // 卡片封面一律用正脸近景，下载与拼合详情收进灯箱。
     expect(await screen.findByAltText("林夏 正脸近景")).toBeInTheDocument();
+    expect(screen.getByAltText("荣哥 正脸近景")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "下载拼合图" })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "下载全部（7 张）" }),
+    ).toBeNull();
+
+    // 旧人物（无拼合图）灯箱=视角网格 + 下载全部。
+    fireEvent.click(screen.getByRole("button", { name: "查看人物 林夏 大图" }));
+    expect(
+      await screen.findByRole("dialog", { name: "人物预览 林夏" }),
+    ).toBeInTheDocument();
     expect(screen.getByAltText("林夏 右侧面")).toBeInTheDocument();
-    // Legacy entries without a contact sheet keep the seven-grid fallback.
-    expect(screen.getAllByText("下载全部（7 张）")).toHaveLength(1);
-    // New entries show the single five-view contact sheet instead.
+    expect(
+      screen.getByRole("button", { name: "下载全部（7 张）" }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "关闭人物预览" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    // 新人物灯箱=五视角拼合大图。
+    fireEvent.click(screen.getByRole("button", { name: "查看人物 荣哥 大图" }));
     expect(await screen.findByAltText("荣哥 五视角拼合图")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "下载拼合图" }));
+    expect(
+      screen.getByRole("button", { name: "下载拼合图" }),
+    ).toBeInTheDocument();
+  });
+
+  it("closes the lightbox via Esc, the backdrop, and the close button", async () => {
+    vi.mocked(api.listSimpleCharacterLibrary).mockResolvedValue([entry]);
+
+    const { container } = render(
+      <CharacterLibrary userRole="employee" userId="employee_1" />,
+    );
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "查看人物 林夏 大图" }),
+    );
+    expect(
+      await screen.findByRole("dialog", { name: "人物预览 林夏" }),
+    ).toBeInTheDocument();
+
+    // Esc 关闭。
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    // 点遮罩关闭；点对话框本体不关闭。
+    fireEvent.click(screen.getByRole("button", { name: "查看人物 林夏 大图" }));
+    fireEvent.click(screen.getByRole("dialog", { name: "人物预览 林夏" }));
+    expect(
+      screen.getByRole("dialog", { name: "人物预览 林夏" }),
+    ).toBeInTheDocument();
+    const backdrop = container.querySelector(".character-lightbox");
+    expect(backdrop).not.toBeNull();
+    fireEvent.click(backdrop as HTMLElement);
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    // 右上「关闭」按钮。
+    fireEvent.click(screen.getByRole("button", { name: "查看人物 林夏 大图" }));
+    fireEvent.click(screen.getByRole("button", { name: "关闭人物预览" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
   it("creates a character and shows its contact sheet immediately", async () => {
@@ -125,7 +177,7 @@ describe("CharacterLibrary", () => {
         "林夏",
       ),
     );
-    expect(await screen.findByAltText("林夏 五视角拼合图")).toBeInTheDocument();
+    expect(await screen.findByAltText("林夏 正脸近景")).toBeInTheDocument();
     expect(screen.getByText(/五视角拼合图已生成/)).toBeInTheDocument();
   });
 
@@ -134,6 +186,9 @@ describe("CharacterLibrary", () => {
 
     render(<CharacterLibrary userRole="employee" userId="employee_2" />);
 
+    fireEvent.click(
+      await screen.findByRole("button", { name: "查看人物 荣哥 大图" }),
+    );
     fireEvent.click(await screen.findByRole("button", { name: "下载拼合图" }));
 
     await waitFor(() =>
@@ -149,6 +204,9 @@ describe("CharacterLibrary", () => {
 
     render(<CharacterLibrary userRole="employee" userId="employee_1" />);
 
+    fireEvent.click(
+      await screen.findByRole("button", { name: "查看人物 林夏 大图" }),
+    );
     const downloadButtons = await screen.findAllByRole("button", {
       name: "下载",
     });
@@ -288,6 +346,17 @@ describe("CharacterLibrary", () => {
     expect(screen.queryByRole("button", { name: "下载拼合图" })).toBeNull();
     expect(screen.queryAllByRole("button", { name: "下载" })).toHaveLength(0);
     expect(screen.getByText(/审计身份只读/)).toBeInTheDocument();
+
+    // 审计可开灯箱看图，但灯箱内同样没有下载按钮。
+    fireEvent.click(screen.getByRole("button", { name: "查看人物 林夏 大图" }));
+    expect(
+      await screen.findByRole("dialog", { name: "人物预览 林夏" }),
+    ).toBeInTheDocument();
+    expect(screen.getByAltText("林夏 右侧面")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "下载全部（7 张）" }),
+    ).toBeNull();
+    expect(screen.queryAllByRole("button", { name: "下载" })).toHaveLength(0);
   });
 
   it("shows a recoverable error and stays editable when renaming fails", async () => {

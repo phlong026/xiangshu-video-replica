@@ -1862,6 +1862,44 @@ button.history-version--active {
   min-width: 220px;
 }
 
+/* 运动列：结构化描述竖排铺开，枚举下拉与文本输入共用单元格内边距。 */
+.shot-table__motion {
+  min-width: 190px;
+}
+
+.shot-motion-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+}
+
+.shot-table-select {
+  width: 100%;
+  border: 1px solid rgba(44, 44, 52, 0.8);
+  border-radius: 6px;
+  padding: 6px 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  line-height: 1.5;
+}
+
+.shot-table-select:focus {
+  outline: 2px solid rgba(224, 168, 63, 0.25);
+  outline-offset: -2px;
+}
+
+.shot-table-select:disabled {
+  opacity: 0.75;
+}
+
+.shot-table__motion > .shot-table-select {
+  display: block;
+  margin: 10px 12px;
+  width: calc(100% - 24px);
+}
+
 .shot-table-input {
   border: none;
   border-radius: 0;
@@ -1889,6 +1927,12 @@ button.history-version--active {
 .shot-table__time .shot-table-input::-webkit-inner-spin-button {
   -webkit-appearance: none;
   margin: 0;
+}
+
+.shot-motion-cell .shot-table-input {
+  padding: 6px 8px;
+  border: 1px solid rgba(44, 44, 52, 0.8);
+  border-radius: 6px;
 }
 
 .generation-composer {
@@ -4102,38 +4146,42 @@ button.regenerate-button {
   }
 }
 
-/* 精简人物库：一键上传 + 五视角拼合图预览/下载 */
+/* 精简人物库：一键上传横条 + 4 列人物卡（正脸封面）+ 灯箱看拼合图 */
 .character-library-simple {
   display: grid;
   gap: 22px;
-  max-width: 1100px;
-}
-
-.character-library-simple__head h2 {
-  margin: 0;
+  max-width: 1400px;
 }
 
 .simple-character-upload {
   display: grid;
-  gap: 12px;
+  gap: 10px;
   border: 1px dashed #3d3d49;
-  border-radius: 12px;
-  padding: 22px;
+  border-radius: 10px;
+  padding: 14px 18px;
   background: #11111a;
+}
+
+.simple-character-upload__intro {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
 }
 
 .simple-character-upload__title {
   margin: 0;
   color: var(--text);
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 800;
 }
 
 .simple-character-upload__note {
   margin: 0;
   color: #aaa297;
-  font-size: 13px;
-  line-height: 1.55;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .simple-character-upload-form {
@@ -4172,13 +4220,14 @@ button.regenerate-button {
 
 .character-preview-list {
   display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 16px;
   margin: 0;
   padding: 0;
   list-style: none;
 }
 
-/* 单张五视角拼合图预览：宽幅大图 + 底部操作条 */
+/* 单张五视角拼合图（灯箱内）：宽幅大图 + 底部操作条 */
 .character-contact-sheet {
   display: grid;
   gap: 10px;
@@ -4209,34 +4258,140 @@ button.regenerate-button {
   min-width: 130px;
 }
 
+/* 人物卡：正脸近景封面 + 名称条 + hover 操作行 */
 .character-preview-card {
   display: grid;
-  gap: 12px;
+  overflow: hidden;
   border: 1px solid #2c2c34;
   border-radius: 12px;
-  padding: 16px;
   background: #141419;
 }
 
-.character-preview-card__head {
+.character-preview-card__cover {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: #090912;
+  cursor: zoom-in;
+}
+
+.character-preview-card__cover img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 2 / 3;
+  object-fit: cover;
+}
+
+.character-preview-card__cover .source-frame-placeholder {
   display: flex;
   align-items: center;
-  gap: 10px;
+  justify-content: center;
+  width: 100%;
+  aspect-ratio: 2 / 3;
+  color: #8d8798;
+  font-size: 12px;
+}
+
+.character-preview-card__body {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+}
+
+.character-preview-card__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
 }
 
 .character-preview-card__name {
   flex: 1;
+  overflow: hidden;
   color: var(--text);
   font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.character-preview-card__head input {
+.character-preview-card__edit {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.character-preview-card__edit input {
   flex: 1;
+  min-width: 0;
 }
 
-.character-preview-card__head .secondary-button {
-  padding: 6px 12px;
+.character-preview-card__edit button {
+  padding: 6px 10px;
   font-size: 12px;
+}
+
+.character-preview-card__actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  opacity: 0.55;
+  transition: opacity 0.15s ease;
+}
+
+.character-preview-card:hover .character-preview-card__actions,
+.character-preview-card:focus-within .character-preview-card__actions {
+  opacity: 1;
+}
+
+.character-preview-card__actions .secondary-button {
+  padding: 4px 10px;
+  font-size: 11px;
+}
+
+/* 人物灯箱：遮罩居中，Esc/点遮罩/关闭按钮均可退出 */
+.character-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+  background: rgba(5, 5, 10, 0.78);
+}
+
+.character-lightbox__dialog {
+  display: grid;
+  gap: 14px;
+  overflow-y: auto;
+  max-width: min(1080px, 100%);
+  max-height: 100%;
+  border: 1px solid #2c2c34;
+  border-radius: 14px;
+  padding: 20px;
+  background: #101018;
+  box-shadow: 0 24px 80px rgb(0 0 0 / 0.55);
+}
+
+.character-lightbox__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.character-lightbox__title {
+  margin: 0;
+  color: var(--text);
+  font-size: 18px;
+  font-weight: 800;
+}
+
+.character-lightbox__views {
+  display: grid;
+  gap: 12px;
 }
 
 .character-preview-grid {
@@ -4278,9 +4433,31 @@ button.regenerate-button {
   font-size: 11px;
 }
 
+/* 人物卡列数随窗口宽度收敛：4 → 3 → 2，窄窗保持可读 */
+@media (max-width: 1200px) {
+  .character-preview-list {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 900px) {
+  .character-preview-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 @media (max-width: 720px) {
   .simple-character-upload-form {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .simple-character-upload__intro {
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .character-lightbox {
+    padding: 16px;
   }
 }
 

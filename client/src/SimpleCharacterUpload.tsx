@@ -71,14 +71,14 @@ export function SimpleCharacterUpload({
 
   return (
     <section className="simple-character-upload" aria-label="一键上传人物">
-      <p className="simple-character-upload__title">
-        上传人物图片，生成五视角拼合图
-      </p>
-      <p className="simple-character-upload__note">
-        上传一张已获授权的人物图片（PNG / JPEG，不超过 10MB），系统会生成
-        一张包含五个视角的拼合图，并发布为可选角色。AI 绘制约需 1~3
-        分钟，请耐心等待。
-      </p>
+      <div className="simple-character-upload__intro">
+        <p className="simple-character-upload__title">
+          上传人物图片，生成五视角拼合图
+        </p>
+        <p className="simple-character-upload__note">
+          授权图片 PNG / JPEG，不超过 10MB · AI 绘制约 1~3 分钟
+        </p>
+      </div>
       <div className="simple-character-upload-form">
         <label>
           人物名称
