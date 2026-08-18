@@ -25,6 +25,7 @@ export function FirstFrameSelection({
   projectId,
   readOnly = false,
   referenceSelection,
+  simplified = false,
   sourceFrameSelectionId,
 }: {
   legacyCharacterSelected?: boolean;
@@ -33,6 +34,9 @@ export function FirstFrameSelection({
   projectId: string;
   readOnly?: boolean;
   referenceSelection: CharacterReferenceSelection | null;
+  // 详情页简化模式：模型固定 gpt-image-2（Nano 仅保留为后端备选）、
+  // 隐藏编辑提示词，生成参数全部走内置默认值。
+  simplified?: boolean;
   sourceFrameSelectionId: string | null;
 }) {
   const [version, setVersion] = useState<AnalysisVersion | null>(null);
@@ -40,7 +44,7 @@ export function FirstFrameSelection({
   const [history, setHistory] = useState<AnalysisVersion[]>([]);
   const [previewUrls, setPreviewUrls] = useState<Record<string, string>>({});
   const [selectedAssetId, setSelectedAssetId] = useState("");
-  const [model, setModel] = useState<FirstFrameModel>("nano-banana-pro-2k");
+  const [model, setModel] = useState<FirstFrameModel>("gpt-image-2");
   const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
   const [quantity, setQuantity] = useState(1);
   const [status, setStatus] = useState("");
@@ -120,7 +124,9 @@ export function FirstFrameSelection({
           return;
         }
         setModel(payload.model);
-        setPrompt(payload.prompt);
+        if (!simplified) {
+          setPrompt(payload.prompt);
+        }
         // P0-03-04：预选仅是建议，确认仍为人工动作；候选生成的付费语义
         // 不变（仍由用户显式点击触发）。
         const canAutoSelect =
@@ -225,8 +231,8 @@ export function FirstFrameSelection({
           }
         : {};
       const generated = await generateFirstFrames(projectId, {
-        model,
-        prompt,
+        model: simplified ? "gpt-image-2" : model,
+        prompt: simplified ? DEFAULT_PROMPT : prompt,
         quantity,
         ...binding,
       });
@@ -300,52 +306,56 @@ export function FirstFrameSelection({
     >
       <div>
         <h3 id="first-frame-title">人物置换首帧</h3>
-        <p>
-          {legacyCharacterSelected
-            ? "历史兼容人物 · 沿用冻结的人物快照。"
-            : "由已确认的源画面与角色参考生成。"}
-        </p>
+        {!simplified ? (
+          <p>
+            {legacyCharacterSelected
+              ? "历史兼容人物 · 沿用冻结的人物快照。"
+              : "由已确认的源画面与角色参考生成。"}
+          </p>
+        ) : null}
       </div>
-      <div className="first-frame-controls">
-        <label>
-          首帧模型
-          <select
-            aria-label="首帧模型"
+      {!simplified ? (
+        <div className="first-frame-controls">
+          <label>
+            首帧模型
+            <select
+              aria-label="首帧模型"
+              disabled={readOnly || isSubmitting || !canGenerate}
+              onChange={(event) =>
+                setModel(event.target.value as FirstFrameModel)
+              }
+              value={model}
+            >
+              <option value="gpt-image-2">GPT Image 2（默认）</option>
+              <option value="nano-banana-pro-2k">Nano Banana Pro 2K</option>
+            </select>
+          </label>
+          <label>
+            候选数量
+            <input
+              aria-label="候选数量"
+              disabled={readOnly || isSubmitting || !canGenerate}
+              max="3"
+              min="1"
+              onChange={(event) => setQuantity(Number(event.target.value))}
+              type="number"
+              value={quantity}
+            />
+          </label>
+        </div>
+      ) : null}
+      {!simplified ? (
+        <label className="first-frame-prompt">
+          首帧编辑提示词
+          <textarea
+            aria-label="首帧编辑提示词"
             disabled={readOnly || isSubmitting || !canGenerate}
-            onChange={(event) =>
-              setModel(event.target.value as FirstFrameModel)
-            }
-            value={model}
-          >
-            <option value="nano-banana-pro-2k">
-              Nano Banana Pro 2K（默认）
-            </option>
-            <option value="gpt-image-2">GPT Image 2</option>
-          </select>
-        </label>
-        <label>
-          候选数量
-          <input
-            aria-label="候选数量"
-            disabled={readOnly || isSubmitting || !canGenerate}
-            max="3"
-            min="1"
-            onChange={(event) => setQuantity(Number(event.target.value))}
-            type="number"
-            value={quantity}
+            onChange={(event) => setPrompt(event.target.value)}
+            rows={5}
+            value={prompt}
           />
         </label>
-      </div>
-      <label className="first-frame-prompt">
-        首帧编辑提示词
-        <textarea
-          aria-label="首帧编辑提示词"
-          disabled={readOnly || isSubmitting || !canGenerate}
-          onChange={(event) => setPrompt(event.target.value)}
-          rows={5}
-          value={prompt}
-        />
-      </label>
+      ) : null}
       <div className="source-frame-actions">
         <button
           disabled={readOnly || isSubmitting || !canGenerate}
@@ -374,10 +384,12 @@ export function FirstFrameSelection({
       {status ? <p className="setup-success">{status}</p> : null}
       {payload ? (
         <>
-          <p className="file-note">
-            当前模型：{modelLabel(payload.model)} ·{" "}
-            {payload.provider === "apilio" ? "Apilio" : payload.provider}
-          </p>
+          {!simplified ? (
+            <p className="file-note">
+              当前模型：{modelLabel(payload.model)} ·{" "}
+              {payload.provider === "apilio" ? "Apilio" : payload.provider}
+            </p>
+          ) : null}
           {payload.provider === "fake" ? (
             <p className="settings-error">
               模拟输出：尚未调用 Apilio 真实模型。
@@ -390,7 +402,9 @@ export function FirstFrameSelection({
             <legend>
               {readOnly
                 ? "候选记录（素材预览需要下载权限）"
-                : "查看候选效果，选择一张作为已确认首帧"}
+                : simplified
+                  ? "选择一张"
+                  : "查看候选效果，选择一张作为已确认首帧"}
             </legend>
             {payload.candidates.map((candidate, index) => (
               <FirstFrameOption

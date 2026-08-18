@@ -11,15 +11,11 @@ import {
   createProject,
   createVideoUploadIntent,
   deleteProject,
-  type GenerationBatch,
   listProjects,
   type Project,
-  type PromptPreviewResult,
-  previewGenerationPrompt,
   startVideoAnalysis,
   uploadReferenceVideo,
 } from "./api";
-import { QuickGenerateDialog } from "./QuickGenerateDialog";
 
 const PROJECT_POLL_INTERVAL_MS = 5_000;
 
@@ -41,8 +37,8 @@ type UploadItem = {
 
 type ProjectsPageProps = {
   canWrite: boolean;
-  onBatchCreated: (batch: GenerationBatch) => void;
   onOpenAnalysis: (project: Project) => void;
+  onOpenDetail: (project: Project) => void;
 };
 
 const UPLOAD_STAGE_LABELS: Record<UploadStage, string> = {
@@ -73,14 +69,14 @@ function rejectUploadEntries(files: File[]): UploadItem[] {
     }));
 }
 
-// 项目页 = 「上传 → 拆解 → 提示词 + 首帧 → 生成」的主动线：
+// 项目页 = 「上传 → 拆解 → 生成流程」的主动线：
 // 顶部上传区支持一次选择多个视频（每个视频一个项目，串行上传并自动
-// 拆解）；列表行展示拆解状态、可展开查看系统编译的提示词；已拆解的
-// 项目可就地打开快速生成弹层完成付费生成，或进入工作区做高级编辑。
+// 拆解）；列表行展示拆解状态；已拆解的项目进入生成流程详情页
+//（四段滚动完成付费生成），或进入工作区做高级编辑。
 export function ProjectsPage({
   canWrite,
-  onBatchCreated,
   onOpenAnalysis,
+  onOpenDetail,
 }: ProjectsPageProps) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectsError, setProjectsError] = useState("");
@@ -89,12 +85,6 @@ export function ProjectsPage({
   const [deletingProjectId, setDeletingProjectId] = useState("");
   const [deleteMessage, setDeleteMessage] = useState("");
   const [deleteError, setDeleteError] = useState("");
-  const [expandedProjectId, setExpandedProjectId] = useState("");
-  const [promptPreviews, setPromptPreviews] = useState<
-    Record<string, PromptPreviewResult | "loading" | "error">
-  >({});
-  const [quickGenerateProject, setQuickGenerateProject] =
-    useState<Project | null>(null);
   const [rebindProject, setRebindProject] = useState<Project | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const rebindFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -305,28 +295,6 @@ export function ProjectsPage({
     }
   }
 
-  const loadPromptPreview = useCallback(async (project: Project) => {
-    setPromptPreviews((current) => ({ ...current, [project.id]: "loading" }));
-    try {
-      const preview = await previewGenerationPrompt(project.id);
-      setPromptPreviews((current) => ({ ...current, [project.id]: preview }));
-    } catch {
-      setPromptPreviews((current) => ({ ...current, [project.id]: "error" }));
-    }
-  }, []);
-
-  function togglePromptPreview(project: Project) {
-    if (expandedProjectId === project.id) {
-      setExpandedProjectId("");
-      return;
-    }
-    setExpandedProjectId(project.id);
-    const state = promptPreviews[project.id];
-    if (!state || state === "error") {
-      void loadPromptPreview(project);
-    }
-  }
-
   function renderStatusBadge(project: Project) {
     if (project.reference_upload_status !== "READY") {
       return (
@@ -488,13 +456,6 @@ export function ProjectsPage({
         <ul className="projects-list">
           {projects.map((project) => {
             const isAnalyzed = project.analysis_status === "READY";
-            const previewState = promptPreviews[project.id];
-            const preview =
-              previewState &&
-              previewState !== "loading" &&
-              previewState !== "error"
-                ? previewState
-                : null;
             return (
               <li className="projects-list__item" key={project.id}>
                 <div className="projects-list__row">
@@ -513,7 +474,7 @@ export function ProjectsPage({
                     {isAnalyzed && canWrite ? (
                       <button
                         className="projects-generate-button"
-                        onClick={() => setQuickGenerateProject(project)}
+                        onClick={() => onOpenDetail(project)}
                         type="button"
                       >
                         生成视频
@@ -522,12 +483,10 @@ export function ProjectsPage({
                     {isAnalyzed ? (
                       <button
                         className="secondary-button"
-                        onClick={() => togglePromptPreview(project)}
+                        onClick={() => onOpenDetail(project)}
                         type="button"
                       >
-                        {expandedProjectId === project.id
-                          ? "收起提示词"
-                          : "提示词"}
+                        查看流程
                       </button>
                     ) : null}
                     {project.reference_upload_status !== "READY" && canWrite ? (
@@ -553,32 +512,6 @@ export function ProjectsPage({
                     ) : null}
                   </div>
                 </div>
-                {expandedProjectId === project.id ? (
-                  <div className="projects-prompt-preview">
-                    {previewState === "loading" ? (
-                      <p className="status-note">正在编译提示词…</p>
-                    ) : null}
-                    {previewState === "error" ? (
-                      <p className="settings-error">
-                        提示词预览暂不可用，请稍后重试。
-                      </p>
-                    ) : null}
-                    {preview ? (
-                      <>
-                        <pre className="quickgen-prompt-text">
-                          {preview.prompt_text}
-                        </pre>
-                        <p className="status-note">
-                          成片 {preview.output_duration_seconds} 秒 ·{" "}
-                          {preview.resolution} ·
-                          {preview.script_source === "script_version"
-                            ? " 口播来源：已保存口播稿"
-                            : " 口播来源：拆解原稿"}
-                        </p>
-                      </>
-                    ) : null}
-                  </div>
-                ) : null}
               </li>
             );
           })}
@@ -589,15 +522,6 @@ export function ProjectsPage({
         <p className="status-note">
           还没有项目。上传第一个参考视频即可开始复刻。
         </p>
-      ) : null}
-
-      {quickGenerateProject ? (
-        <QuickGenerateDialog
-          onBatchCreated={onBatchCreated}
-          onClose={() => setQuickGenerateProject(null)}
-          project={quickGenerateProject}
-          readOnly={!canWrite}
-        />
       ) : null}
     </section>
   );

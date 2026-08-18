@@ -9,7 +9,7 @@ export function SimpleCharacterUpload({
   onCreated,
   projectId = null,
 }: {
-  onCreated: (result: SimpleCharacterResult) => void;
+  onCreated: (result: SimpleCharacterResult, displayName: string) => void;
   projectId?: string | null;
 }) {
   const [busy, setBusy] = useState(false);
@@ -51,13 +51,13 @@ export function SimpleCharacterUpload({
     setMessage("");
     try {
       const result = await uploadSimpleCharacter(projectId, file, name);
-      setMessage(`人物“${name}”七视角已生成并发布，可在项目中选择该角色。`);
+      setMessage(`人物“${name}”五视角拼合图已生成，可在下方预览与下载。`);
       setDisplayName("");
       setFileName("");
       if (fileInputRef.current) {
         fileInputRef.current.value = "";
       }
-      onCreated(result);
+      onCreated(result, name);
     } catch (requestError) {
       setError(
         requestError instanceof Error
@@ -71,8 +71,13 @@ export function SimpleCharacterUpload({
 
   return (
     <section className="simple-character-upload" aria-label="一键上传人物">
-      <p className="status-note">
-        上传一张已获授权的人物图片，系统会自动生成七个标准视角并直接发布为可选角色。
+      <p className="simple-character-upload__title">
+        上传人物图片，生成五视角拼合图
+      </p>
+      <p className="simple-character-upload__note">
+        上传一张已获授权的人物图片（PNG / JPEG，不超过 10MB），系统会生成
+        一张包含五个视角的拼合图，并发布为可选角色。AI 绘制约需 1~3
+        分钟，请耐心等待。
       </p>
       <div className="simple-character-upload-form">
         <label>
@@ -84,18 +89,34 @@ export function SimpleCharacterUpload({
             value={displayName}
           />
         </label>
-        <label>
-          授权图片
+        <div className="simple-character-upload__picker">
           <input
             accept={ALLOWED_TYPES.join(",")}
+            aria-label="授权图片"
+            hidden
             onChange={(event) => pickFile(event.target.files?.[0])}
             ref={fileInputRef}
             type="file"
           />
-        </label>
-        {fileName ? <p className="status-note">已选择：{fileName}</p> : null}
-        <button disabled={busy} onClick={submit} type="button">
-          {busy ? "正在生成七视角" : "一键生成人物"}
+          <button
+            className="secondary-button"
+            disabled={busy}
+            onClick={() => fileInputRef.current?.click()}
+            type="button"
+          >
+            选择图片
+          </button>
+          <span className="simple-character-upload__file">
+            {fileName || "未选择图片"}
+          </span>
+        </div>
+        <button
+          className="simple-character-upload__submit"
+          disabled={busy}
+          onClick={submit}
+          type="button"
+        >
+          {busy ? "正在生成拼合图（约 1~3 分钟）…" : "一键生成五视角拼合图"}
         </button>
       </div>
       {error ? (

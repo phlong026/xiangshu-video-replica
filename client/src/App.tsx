@@ -9,6 +9,7 @@ import {
   SESSION_EXPIRED_EVENT,
 } from "./api";
 import { CharacterLibrary } from "./CharacterLibrary";
+import { ProjectDetailFlow } from "./ProjectDetailFlow";
 import { ProjectsPage } from "./ProjectsPage";
 import { SettingsPanel } from "./SettingsPanel";
 import { TaskRecordsPanel } from "./TaskRecordsPanel";
@@ -30,6 +31,8 @@ export function App() {
   const [pendingBatchHandoff, setPendingBatchHandoff] =
     useState<GenerationBatch | null>(null);
   const [activeAnalysisProject, setActiveAnalysisProject] =
+    useState<Project | null>(null);
+  const [activeDetailProject, setActiveDetailProject] =
     useState<Project | null>(null);
   const [isAnalysisWorkspaceBusy, setIsAnalysisWorkspaceBusy] = useState(false);
   const activeAnalysisBusyRef = useRef(false);
@@ -87,6 +90,7 @@ export function App() {
       activeAnalysisBusyRef.current = false;
       setIsAnalysisWorkspaceBusy(false);
       setActiveAnalysisProject(null);
+      setActiveDetailProject(null);
       setPendingBatchHandoff(null);
       setSessionMessage("登录已失效，请重新进入工作台。");
       setLoginError("");
@@ -114,6 +118,7 @@ export function App() {
       activeAnalysisBusyRef.current = false;
       setIsAnalysisWorkspaceBusy(false);
       setActiveAnalysisProject(null);
+      setActiveDetailProject(null);
       setPage(nextPage);
     }
     window.addEventListener("hashchange", syncDeepLink);
@@ -211,6 +216,7 @@ export function App() {
     activeAnalysisBusyRef.current = false;
     setIsAnalysisWorkspaceBusy(false);
     setActiveAnalysisProject(null);
+    setActiveDetailProject(null);
     setPage(nextPage);
   }
 
@@ -220,6 +226,7 @@ export function App() {
     activeAnalysisBusyRef.current = false;
     setIsAnalysisWorkspaceBusy(false);
     setPage("projects");
+    setActiveDetailProject(null);
     setActiveAnalysisProject(project);
   }
 
@@ -228,6 +235,25 @@ export function App() {
     activeAnalysisBusyRef.current = false;
     setIsAnalysisWorkspaceBusy(false);
     setActiveAnalysisProject(null);
+  }
+
+  // 生成流程详情页与工作区共用同一 busy 拦截链路：流程进行中禁止
+  // 导航切换，批次创建后同样交接给任务记录页。
+  function openDetail(project: Project) {
+    window.history.pushState(null, "", "#projects");
+    activeAnalysisSessionRef.current += 1;
+    activeAnalysisBusyRef.current = false;
+    setIsAnalysisWorkspaceBusy(false);
+    setPage("projects");
+    setActiveAnalysisProject(null);
+    setActiveDetailProject(project);
+  }
+
+  function closeDetail() {
+    activeAnalysisSessionRef.current += 1;
+    activeAnalysisBusyRef.current = false;
+    setIsAnalysisWorkspaceBusy(false);
+    setActiveDetailProject(null);
   }
 
   function openCreatedBatch(nextBatch: GenerationBatch) {
@@ -269,7 +295,23 @@ export function App() {
               userRole={currentUser.role}
             />
           ) : null}
-          {page === "projects" && activeAnalysisProject ? (
+          {page === "projects" && activeDetailProject ? (
+            <ProjectDetailFlow
+              onBack={closeDetail}
+              onBatchCreated={openCreatedBatch}
+              onBusyChange={(busy) =>
+                handleAnalysisWorkspaceBusyChange(
+                  analysisWorkspaceSession,
+                  busy,
+                )
+              }
+              project={activeDetailProject}
+              readOnly={!canWrite}
+            />
+          ) : null}
+          {page === "projects" &&
+          !activeDetailProject &&
+          activeAnalysisProject ? (
             <AnalysisWorkspace
               currentUserId={currentUser.id}
               onClose={closeAnalysis}
@@ -285,11 +327,13 @@ export function App() {
               readOnly={!canWrite}
             />
           ) : null}
-          {page === "projects" && !activeAnalysisProject ? (
+          {page === "projects" &&
+          !activeDetailProject &&
+          !activeAnalysisProject ? (
             <ProjectsPage
               canWrite={canWrite}
-              onBatchCreated={openCreatedBatch}
               onOpenAnalysis={openAnalysis}
+              onOpenDetail={openDetail}
             />
           ) : null}
           {page === "tasks" ? (

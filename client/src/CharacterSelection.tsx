@@ -27,12 +27,16 @@ export function CharacterSelection({
   onVersionChange,
   projectId,
   readOnly = false,
+  variant = "full",
 }: {
   onBusyChange?: (isBusy: boolean) => void;
   onSelectionChange?: (hasSelection: boolean) => void;
   onVersionChange?: (selection: ProjectMainCharacter | null) => void;
   projectId: string;
   readOnly?: boolean;
+  // inline：详情页第二段区头的内联下拉形态（选择即落库，仅完整七类
+  // 资产的版本可选）；full：旧工作台的面板形态（radio 列表 + 确认）。
+  variant?: "full" | "inline";
 }) {
   const [versions, setVersions] = useState<ProjectCharacterVersionOption[]>([]);
   const [currentSelection, setCurrentSelection] =
@@ -171,6 +175,29 @@ export function CharacterSelection({
     };
   }, [currentSelection, isRestoring, projectId, readOnly, restoredEmpty]);
 
+  // inline 下拉需要常驻版本列表：restore 完成后即拉取，失败只降级为
+  // 空列表提示，不阻断主流程。
+  useEffect(() => {
+    if (variant !== "inline" || isRestoring) {
+      return;
+    }
+    let active = true;
+    listProjectCharacterVersions(projectId)
+      .then((availableVersions) => {
+        if (active) {
+          setVersions(availableVersions);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setGuidance("读取可用角色版本失败，请稍后重试。");
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [isRestoring, projectId, variant]);
+
   async function openSelection() {
     setIsOpen(true);
     setIsLoading(true);
@@ -243,10 +270,98 @@ export function CharacterSelection({
     }
   }
 
+  // inline 形态：下拉选择即落库（服务端原子幂等），失败回退显示原选择。
+  async function handleInlineChange(versionId: string) {
+    if (readOnly || !versionId || isAutoSelecting) {
+      return;
+    }
+    onBusyChangeRef.current?.(true);
+    setIsSaving(true);
+    setError("");
+    setGuidance("");
+    try {
+      const selection = await chooseProjectMainCharacterVersion(
+        projectId,
+        versionId,
+      );
+      setCurrentSelection(selection);
+      setSelectedVersionId(selection.character_version_id ?? "");
+      setAutoSelected(false);
+      onSelectionChangeRef.current?.(true);
+      onVersionChangeRef.current?.(selection);
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : "选择角色版本失败。",
+      );
+      setSelectedVersionId(currentSelection?.character_version_id ?? "");
+    } finally {
+      setIsSaving(false);
+      onBusyChangeRef.current?.(false);
+    }
+  }
+
   const currentSummary = selectionSummary(currentSelection);
   const selectedOption = versions.find(
     (version) => version.character_version_id === selectedVersionId,
   );
+
+  // 详情页第二段区头形态：一行「角色：<下拉>」，选择即生效。
+  if (variant === "inline") {
+    const inlineVersions = versions.filter(
+      (version) => version.assets.length === 7,
+    );
+    const hasCurrentOption = inlineVersions.some(
+      (version) => version.character_version_id === selectedVersionId,
+    );
+    return (
+      <section className="flow-character-row" aria-label="角色">
+        <label>
+          角色
+          <select
+            aria-label="角色版本"
+            disabled={readOnly || isRestoring || isSaving || isAutoSelecting}
+            onChange={(event) => void handleInlineChange(event.target.value)}
+            value={selectedVersionId}
+          >
+            {isRestoring || (!hasCurrentOption && !inlineVersions.length) ? (
+              <option value="">
+                {isRestoring ? "恢复中…" : "暂无可选角色"}
+              </option>
+            ) : null}
+            {selectedVersionId && !hasCurrentOption ? (
+              <option value={selectedVersionId}>
+                {currentSummary
+                  ? `${currentSummary.identityName} · V${currentSummary.versionNumber}`
+                  : "当前角色"}
+              </option>
+            ) : null}
+            {inlineVersions.map((version) => (
+              <option
+                key={version.character_version_id}
+                value={version.character_version_id}
+              >
+                {version.identity_name} ·{" "}
+                {stringValue(version.persona_snapshot_json.name, "未命名人设")}{" "}
+                V{version.version_number}
+              </option>
+            ))}
+          </select>
+        </label>
+        {error ? (
+          <span className="settings-error" role="alert">
+            {error}
+          </span>
+        ) : null}
+        {!error && guidance ? (
+          <span className="status-note" role="status">
+            {guidance}
+          </span>
+        ) : null}
+      </section>
+    );
+  }
 
   return (
     <section className="character-selection" aria-labelledby="character-title">

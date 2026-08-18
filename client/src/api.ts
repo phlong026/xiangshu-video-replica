@@ -5,8 +5,9 @@ const REQUEST_TIMEOUT_MS = 5_000;
 // Cloud/storage operations (diagnostics, presigned URLs, archive prechecks)
 // may legitimately take much longer than a normal API round-trip.
 const CLOUD_OP_TIMEOUT_MS = 60_000;
-// Must exceed the server's per-call provider timeout (240s, analysis.py) plus
-// overhead; the real Gemini shot-card call measured 71–91s on a 15s video.
+// Must exceed the server's per-call provider timeout (240s: analysis.py,
+// first_frames.py image edits) plus overhead; the real Gemini shot-card call
+// measured 71–91s on a 15s video, gpt-image contact sheets 1–3 minutes.
 const ANALYSIS_TIMEOUT_MS = 300_000;
 export const SESSION_EXPIRED_EVENT = "video-replica:session-expired";
 
@@ -430,11 +431,33 @@ export async function previewGenerationPrompt(
   projectId: string,
   input: PromptPreviewInput = {},
 ): Promise<PromptPreviewResult> {
-  return requestGenerationJson<PromptPreviewResult>(
-    `/api/projects/${encodeURIComponent(projectId)}/prompts/preview`,
-    "生成提示词预览失败",
-    { method: "POST", body: JSON.stringify(input) },
-  );
+  try {
+    return await requestGenerationJson<PromptPreviewResult>(
+      `/api/projects/${encodeURIComponent(projectId)}/prompts/preview`,
+      "生成提示词预览失败",
+      { method: "POST", body: JSON.stringify(input) },
+    );
+  } catch (error) {
+    throw previewRequestError(error);
+  }
+}
+
+// 生成系的通用 409 文案（"上游内容已变化"）描述的是版本级联过期；预览端点的
+// 两种 409 都指向拆解数据缺失，换成可行动的原因，避免误导用户。
+function previewRequestError(error: unknown): Error {
+  const { status, code } = error as RequestError;
+  if (
+    status === 409 &&
+    (code === "ANALYSIS_NOT_READY" || code === "SHOT_CARD_TIMELINE_INVALID")
+  ) {
+    const mapped = new Error(
+      "拆解结果缺少镜头数据，请重新上传视频拆解",
+    ) as RequestError;
+    mapped.status = status;
+    mapped.code = code;
+    return mapped;
+  }
+  return error instanceof Error ? error : new Error("生成提示词预览失败");
 }
 
 export async function getLatestGenerationPrompt(
@@ -574,15 +597,13 @@ export async function getGenerationResultDownloadUrl(
   );
 }
 
+// 在线播放：直接复用后端签发的预签名 URL 作为 video src（COS 与本地
+// 存储均支持 Range 渐进播放，无需整包下载 blob，首帧秒出）。
 export async function createGenerationResultPreviewUrl(
   assetId: string,
 ): Promise<string> {
-  const blob = await fetchGenerationResultBlob(assetId, "加载生成结果预览失败");
-  return URL.createObjectURL(blob);
-}
-
-export function revokeGenerationResultPreviewUrl(url: string): void {
-  URL.revokeObjectURL(url);
+  const { url } = await getGenerationResultDownloadUrl(assetId);
+  return url;
 }
 
 export async function downloadGenerationResult(
@@ -1060,11 +1081,36 @@ export async function rewriteProjectScript(
   );
 }
 
+export type CharacterViewType =
+  | "FRONT_FACE"
+  | "FRONT_HALF"
+  | "FRONT_FULL"
+  | "LEFT_45"
+  | "RIGHT_45"
+  | "LEFT_SIDE"
+  | "RIGHT_SIDE";
+
+export interface SimpleCharacterView {
+  view_type: CharacterViewType;
+  asset_id: string;
+}
+
 export interface SimpleCharacterResult {
   identity_id: string;
   persona_id: string;
   character_version_id: string;
   publication_hash: string;
+  contact_sheet_asset_id: string;
+  views: SimpleCharacterView[];
+}
+
+export interface SimpleLibraryEntry {
+  identity_id: string;
+  display_name: string;
+  owner_user_id: string | null;
+  status: string;
+  contact_sheet_asset_id: string | null;
+  views: SimpleCharacterView[];
 }
 
 export async function uploadSimpleCharacter(
@@ -1086,7 +1132,9 @@ export async function uploadSimpleCharacter(
     endpoint,
     "一键创建人物失败",
     { method: "POST", body: form },
-    CLOUD_OP_TIMEOUT_MS,
+    // AI contact-sheet generation is a synchronous gpt-image edit that can
+    // take 1–3 minutes; use the provider-sized budget, not the 60s cloud one.
+    ANALYSIS_TIMEOUT_MS,
   );
 }
 
@@ -1099,6 +1147,69 @@ export async function renamePersonIdentity(
     "修改人物名称失败",
     { method: "PATCH", body: JSON.stringify({ display_name: displayName }) },
   );
+}
+
+export async function deleteSimpleCharacterIdentity(
+  identityId: string,
+): Promise<void> {
+  const response = await requestApi(
+    `/api/simple-characters/identities/${encodeURIComponent(identityId)}`,
+    { method: "DELETE" },
+  );
+  if (!response.ok) {
+    throw new Error(
+      await responseErrorMessage(response, "删除人物失败，请稍后重试。"),
+    );
+  }
+}
+
+export interface SimpleCharacterRegenerationResult {
+  identity_id: string;
+  persona_id: string;
+  character_version_id: string;
+  previous_version_id: string;
+  version_number: number;
+  publication_hash: string;
+  contact_sheet_asset_id: string;
+  views: SimpleCharacterView[];
+}
+
+// Re-run the identity-preserve contact sheet from the stored source photo.
+// The provider call can take 1–3 minutes, so reuse the analysis-sized budget.
+export async function regenerateContactSheet(
+  identityId: string,
+): Promise<SimpleCharacterRegenerationResult> {
+  return requestApiJson<SimpleCharacterRegenerationResult>(
+    `/api/simple-characters/identities/${encodeURIComponent(
+      identityId,
+    )}/regenerate-contact-sheet`,
+    "重新生成多视图失败",
+    { method: "POST" },
+    ANALYSIS_TIMEOUT_MS,
+  );
+}
+
+export async function listSimpleCharacterLibrary(): Promise<
+  SimpleLibraryEntry[]
+> {
+  return requestApiJson<SimpleLibraryEntry[]>(
+    "/api/simple-characters/library",
+    "读取人物库失败",
+  );
+}
+
+export async function downloadCharacterAsset(
+  assetId: string,
+  filename: string,
+): Promise<void> {
+  const download = await getAssetDownloadUrl(assetId);
+  // The download URL is absolute and pre-signed, so fetch it directly instead
+  // of going through requestApi (which would concatenate the API base again).
+  const response = await fetch(download.url);
+  if (!response.ok) {
+    throw new Error(`下载人物视角图失败（${response.status}）`);
+  }
+  downloadBlob(await response.blob(), filename);
 }
 
 export async function getProjectMainCharacter(
@@ -1319,10 +1430,13 @@ export async function generateFirstFrames(
   projectId: string,
   input: GenerateFirstFramesInput,
 ): Promise<AnalysisVersion> {
+  // Image edits sit at 1–3 minutes (first_frames.py keeps a 240s per-call
+  // budget), so reuse the analysis-sized budget instead of the 5s default.
   return requestApiJson<AnalysisVersion>(
     `/api/projects/${encodeURIComponent(projectId)}/first-frames/generate`,
     "生成人物置换首帧失败",
     { method: "POST", body: JSON.stringify(input) },
+    ANALYSIS_TIMEOUT_MS,
   );
 }
 

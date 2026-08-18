@@ -21,7 +21,6 @@ vi.mock("./api", async () => {
     regenerateGenerationBatch: vi.fn(),
     regenerateGenerationTask: vi.fn(),
     retryGenerationTask: vi.fn(),
-    revokeGenerationResultPreviewUrl: vi.fn(),
     confirmGenerationTaskNotCharged: vi.fn(),
     reconcileUncertainTask: vi.fn(),
   };
@@ -127,6 +126,11 @@ function listItem(
   };
 }
 
+// 任务页默认落点是生成结果舞台；运维能力的既有用例统一先切到运维视图。
+async function switchToOpsView() {
+  fireEvent.click(await screen.findByRole("button", { name: "运维详情" }));
+}
+
 describe("TaskRecordsPanel", () => {
   beforeEach(() => {
     window.localStorage.clear();
@@ -135,9 +139,10 @@ describe("TaskRecordsPanel", () => {
       next_cursor: null,
     });
     vi.mocked(api.getGenerationBatch).mockResolvedValue(batch());
-    vi.mocked(api.createGenerationResultPreviewUrl)
-      .mockResolvedValueOnce("blob:preview-1")
-      .mockResolvedValueOnce("blob:preview-2");
+    // 预签名 URL 直连播放：无限模式避免舞台自动签发耗尽 mock 后循环。
+    vi.mocked(api.createGenerationResultPreviewUrl).mockImplementation(
+      async (assetId) => `https://stage-preview/${assetId}`,
+    );
     vi.mocked(api.downloadGenerationResult).mockResolvedValue();
     vi.mocked(api.retryGenerationTask).mockImplementation(async (_taskId) =>
       task(),
@@ -163,7 +168,13 @@ describe("TaskRecordsPanel", () => {
     window.localStorage.clear();
   });
 
-  it("opens the newest project batch and renders quality, preview, and fresh download actions", async () => {
+  it("opens the newest batch on the result stage with automatic streaming preview", async () => {
+    let previewCount = 0;
+    vi.mocked(api.createGenerationResultPreviewUrl).mockReset();
+    vi.mocked(api.createGenerationResultPreviewUrl).mockImplementation(
+      async () => `https://stage-preview-${++previewCount}`,
+    );
+
     render(
       <TaskRecordsPanel
         handoffBatch={null}
@@ -177,33 +188,35 @@ describe("TaskRecordsPanel", () => {
     await waitFor(() =>
       expect(api.getGenerationBatch).toHaveBeenCalledWith("batch-1"),
     );
+
+    // 默认落点是生成结果舞台：完成态任务自动签发在线播放地址并直接播放。
+    const video = await screen.findByLabelText("结果预览 task-ok");
+    expect(video).toHaveAttribute("src", "https://stage-preview-1");
+    expect(video).toHaveAttribute("preload", "auto");
     expect(screen.getByText("音频质检通过")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "查看结果 2：task-audio-failed" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("MiniMax-H3")).toBeInTheDocument();
+    expect(screen.getByText("¥1.50")).toBeInTheDocument();
+    expect(screen.getByText("技术详情").closest("details")).not.toHaveAttribute(
+      "open",
+    );
+
+    // 切换运维详情后保留原有质检事实、刷新预览与下载能力。
+    fireEvent.click(screen.getByRole("button", { name: "运维详情" }));
+    expect(
+      await screen.findByRole("button", { name: "刷新预览 task-ok" }),
+    ).toBeInTheDocument();
     expect(screen.getByText("音频质检失败")).toBeInTheDocument();
     expect(
       screen.getByText("该结果不能作为合格交付，后续只能重新生成视频。"),
     ).toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: /音频修复/ }),
-    ).not.toBeInTheDocument();
-    expect(screen.getAllByText("Provider 尾号 34567890")).toHaveLength(2);
-    expect(
-      screen.getByRole("region", { name: "结果播放器 task-ok" }),
-    ).toHaveTextContent("点击加载预览");
-    expect(
-      screen
-        .getByText("兼容查询：通过 Batch ID 查找历史记录")
-        .closest("details"),
-    ).not.toHaveAttribute("open");
-
-    fireEvent.click(screen.getByRole("button", { name: "加载预览 task-ok" }));
-    const video = await screen.findByLabelText("结果预览 task-ok");
-    expect(video).toHaveAttribute("src", "blob:preview-1");
-    expect(video).toHaveAttribute("preload", "auto");
-
     fireEvent.click(screen.getByRole("button", { name: "刷新预览 task-ok" }));
-    await waitFor(() => expect(video).toHaveAttribute("src", "blob:preview-2"));
-    expect(api.revokeGenerationResultPreviewUrl).toHaveBeenCalledWith(
-      "blob:preview-1",
+    // 舞台卸载后旧 video 节点不再更新，改在运维视图内重新查询。
+    const refreshedVideo = await screen.findByLabelText("结果预览 task-ok");
+    await waitFor(() =>
+      expect(refreshedVideo).toHaveAttribute("src", "https://stage-preview-2"),
     );
     fireEvent.click(screen.getByRole("button", { name: "下载 MP4 task-ok" }));
 
@@ -215,7 +228,7 @@ describe("TaskRecordsPanel", () => {
     );
   });
 
-  it("releases a preview URL that finishes after the panel unmounts", async () => {
+  it("tolerates a streaming preview response that finishes after the panel unmounts", async () => {
     let resolvePreview: (url: string) => void = () => undefined;
     const pendingPreview = new Promise<string>((resolve) => {
       resolvePreview = resolve;
@@ -232,24 +245,18 @@ describe("TaskRecordsPanel", () => {
         userRole="employee"
       />,
     );
-    fireEvent.click(
-      await screen.findByRole("button", { name: "加载预览 task-ok" }),
-    );
     await waitFor(() =>
       expect(api.createGenerationResultPreviewUrl).toHaveBeenCalledWith(
         "asset-ok",
       ),
     );
 
+    // 预签名 URL 由服务端管理过期，卸载后晚到的响应只是被丢弃。
     unmount();
     await act(async () => {
-      resolvePreview("blob:late-preview");
+      resolvePreview("https://late-stage-preview");
       await pendingPreview;
     });
-
-    expect(api.revokeGenerationResultPreviewUrl).toHaveBeenCalledWith(
-      "blob:late-preview",
-    );
   });
 
   it("appends cursor pages without duplicating an existing batch", async () => {
@@ -363,6 +370,7 @@ describe("TaskRecordsPanel", () => {
         userRole="employee"
       />,
     );
+    await switchToOpsView();
 
     const regenerate = await screen.findByRole("button", {
       name: "整批付费再次生成",
@@ -436,6 +444,7 @@ describe("TaskRecordsPanel", () => {
         userRole="employee"
       />,
     );
+    await switchToOpsView();
 
     const regenerate = await screen.findByRole("button", {
       name: "付费重新生成 task-paid-regenerate",
@@ -519,6 +528,7 @@ describe("TaskRecordsPanel", () => {
         userRole="employee"
       />,
     );
+    await switchToOpsView();
 
     expect(
       await screen.findByText(/历史事实：失败 0 · 归档失败 0 · 音频质检失败 1/),
@@ -555,6 +565,7 @@ describe("TaskRecordsPanel", () => {
         userRole="employee"
       />,
     );
+    await switchToOpsView();
 
     expect(await screen.findByText("质检待完成")).toBeInTheDocument();
     expect(
@@ -615,6 +626,7 @@ describe("TaskRecordsPanel", () => {
         userRole="employee"
       />,
     );
+    await switchToOpsView();
 
     fireEvent.click(await screen.findByRole("button", { name: "对账 task-a" }));
     fireEvent.click(screen.getByRole("button", { name: "打开批次 batch-2" }));
@@ -729,6 +741,7 @@ describe("TaskRecordsPanel", () => {
         userRole="employee"
       />,
     );
+    await switchToOpsView();
 
     const retry = await screen.findByRole("button", {
       name: "安全重试 task-retry-poll",
@@ -842,6 +855,7 @@ describe("TaskRecordsPanel", () => {
         userRole="admin"
       />,
     );
+    await switchToOpsView();
 
     const confirm = await screen.findByRole("button", {
       name: "确认未计费 task-confirm-poll",
@@ -910,6 +924,7 @@ describe("TaskRecordsPanel", () => {
         userRole="admin"
       />,
     );
+    await switchToOpsView();
 
     const retryButton = await screen.findByRole("button", {
       name: "重试归档 task-archive",
