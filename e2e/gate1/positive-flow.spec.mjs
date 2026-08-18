@@ -182,12 +182,17 @@ async function createAndPublishCharacter(page) {
 // 仍需切自定义稿保存。用户确认类动作 = 4（源画面/参考/首帧对/生成）。
 async function createProjectBatchViaOneClick(page) {
   const mediaDir = requiredEnvironmentPath("GATE1_MEDIA_DIR");
-  await page.getByRole("button", { name: "新建复刻" }).click();
+  // 品牌改版后项目页常驻创建表单（原「新建复刻」弹层已移除）：
+  // 人物库返回后切项目页，直接填表单提交（按钮文案「开始」）。
+  await page.getByRole("button", { name: "项目", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "项目", exact: true }),
+  ).toBeVisible();
   await page.getByLabel("项目名称").fill("Gate 1 夏日咖啡馆口播");
   await page
     .getByLabel("参考视频")
     .setInputFiles(path.join(mediaDir, "reference.mp4"));
-  await page.getByRole("button", { name: "创建并上传" }).click();
+  await page.getByRole("button", { name: "开始", exact: true }).click();
   await expect(page.getByRole("heading", { name: "镜头卡片" })).toBeVisible({
     timeout: 30_000,
   });
