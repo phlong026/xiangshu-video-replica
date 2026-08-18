@@ -197,9 +197,7 @@ async function createProjectBatchViaOneClick(page) {
   await page.getByRole("button", { name: "开始", exact: true }).click();
   // 三标签页改版后工作台主标题为 h2「复刻工作台」（原「镜头卡片」
   // heading 已随内容配置标签页结构移除）。
-  await expect(
-    page.getByRole("heading", { name: "复刻工作台" }),
-  ).toBeVisible({
+  await expect(page.getByRole("heading", { name: "复刻工作台" })).toBeVisible({
     timeout: 30_000,
   });
   await expect(page.getByText("FakeGemini video analysis")).toBeVisible();
