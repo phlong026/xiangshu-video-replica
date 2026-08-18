@@ -5,7 +5,7 @@ import logging
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -15,9 +15,40 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 ANALYSIS_KIND = "analysis"
 SHOT_CARD_KIND = "shot_card"
-SCHEMA_VERSION = "b2.analysis.v1"
+SCHEMA_VERSION = "b3.analysis.v1"
 APILIO_DEFAULT_BASE_URL = "https://api.apilio.ai"
 APILIO_GEMINI_MODEL = "gemini-3.1-pro-preview"
+
+# 结构化运动枚举：拆解结果必须对“人物是否在动、机位是否在动”显式表态，
+# 下游（H3 Prompt 编译）据此确定性渲染运动指令，避免“边走边说”被
+# 概括成“站着说话”后生成的人物僵立原地。
+SUBJECT_MOTION_STATES = (
+    "STATIC",
+    "WALKING",
+    "RUNNING",
+    "TURNING",
+    "GESTURING_ONLY",
+    "OBJECT_MOTION",
+    "NO_PERSON",
+)
+SUBJECT_DIRECTIONS = (
+    "toward_camera",
+    "away_from_camera",
+    "left",
+    "right",
+    "lateral",
+    "in_place",
+    "none",
+)
+MOTION_CAMERA_MODES = (
+    "STATIC",
+    "PUSH_IN",
+    "PULL_BACK",
+    "HANDHELD_TRACKING",
+    "PAN",
+    "TILT",
+    "FOLLOW",
+)
 
 # Failure phases let the desktop tell "the network hiccuped, retry" apart from
 # "the model answered with something we cannot use".
@@ -27,6 +58,43 @@ HTTP_FAILURE_PHASE = "http"
 RESPONSE_FAILURE_PHASE = "response"
 
 logger = logging.getLogger(__name__)
+
+
+class ShotMotion(BaseModel):
+    """镜头运动的结构化描述：人物运动 / 机位运动 / 相对运动三分。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    subject_motion_state: Literal[
+        "STATIC",
+        "WALKING",
+        "RUNNING",
+        "TURNING",
+        "GESTURING_ONLY",
+        "OBJECT_MOTION",
+        "NO_PERSON",
+    ]
+    subject_direction: Literal[
+        "toward_camera",
+        "away_from_camera",
+        "left",
+        "right",
+        "lateral",
+        "in_place",
+        "none",
+    ]
+    subject_displacement: str = Field(min_length=1)
+    hand_action: str = Field(min_length=1)
+    camera_motion: Literal[
+        "STATIC",
+        "PUSH_IN",
+        "PULL_BACK",
+        "HANDHELD_TRACKING",
+        "PAN",
+        "TILT",
+        "FOLLOW",
+    ]
+    relative_motion: str = Field(min_length=1)
 
 
 class ShotCard(BaseModel):
@@ -43,6 +111,9 @@ class ShotCard(BaseModel):
     scene: str = Field(min_length=1)
     spoken_text: str
     transition: str = Field(min_length=1)
+    # 旧版本拆解结果与手动保存的镜头卡没有 motion；缺失时 H3 Prompt
+    # 编译回退到 action 文本拼接（行为不劣化），新生成的分析必须携带。
+    motion: ShotMotion | None = None
 
     @model_validator(mode="after")
     def validate_time_range(self) -> ShotCard:
@@ -198,9 +269,9 @@ class ApilioGemini:
                 {
                     "role": "user",
                     "content": (
-                        "Repair the following video-analysis JSON. Return only valid JSON that "
-                        "matches the requested schema. Validation error: "
-                        f"{error}. Invalid JSON: {invalid_json}"
+                        "修复下面的视频拆解 JSON，只返回符合要求结构的合法 JSON，不要解释。"
+                        f"校验错误：{error}。"
+                        f"待修复的 JSON：{invalid_json}"
                     ),
                 }
             ],
@@ -312,7 +383,25 @@ def parse_analysis_response(text: str, *, duration_seconds: float) -> VideoAnaly
     if not isinstance(payload, dict):
         raise ValueError("analysis response must be a JSON object")
     payload["duration_seconds"] = duration_seconds
-    return VideoAnalysis.model_validate(payload)
+    analysis = VideoAnalysis.model_validate(payload)
+    _require_motion_on_every_shot(analysis)
+    return analysis
+
+
+def _require_motion_on_every_shot(analysis: VideoAnalysis) -> None:
+    """新分析必须逐镜头携带结构化运动描述。
+
+    缺失时抛 ValueError 走 repair_json 链路；修复后仍缺则整个分析失败
+    （fail-closed）：运动信息一旦静默丢失，生成的视频就会人物僵立原地。
+    手动保存的镜头卡不走这里，旧数据兼容性不受影响。
+    """
+    missing = [shot.shot_id for shot in analysis.shots if shot.motion is None]
+    if missing:
+        raise ValueError(
+            "every shot must include a motion object with "
+            "subject_motion_state/subject_direction/subject_displacement/"
+            "hand_action/camera_motion/relative_motion; missing on shots: " + ", ".join(missing)
+        )
 
 
 def is_https_video_url(value: str) -> bool:
@@ -322,13 +411,36 @@ def is_https_video_url(value: str) -> bool:
 
 def analysis_instruction(duration_seconds: float) -> str:
     return (
-        "Analyze this short reference video and return valid JSON only. "
-        "Use this exact schema: summary, aspect_ratio, resolution, fps, theme, visual_style, "
-        "pace, camera_language, original_script, shots. Each shot must include shot_id, "
-        "start_time, end_time, shot_type, composition, camera_motion, subject, action, scene, "
-        "spoken_text, transition. Cover the full timeline without overlap. "
-        f"The verified duration is {duration_seconds:.3f} seconds; "
-        "do not invent a different duration."
+        "分析这条参考短视频，只返回合法 JSON 对象，不要 markdown 代码块。\n"
+        "JSON 结构：summary, aspect_ratio, resolution, fps, theme, visual_style, "
+        "pace, camera_language, original_script, shots。\n"
+        "shots 内每个镜头必须包含 shot_id, start_time, end_time, shot_type, "
+        "composition, camera_motion, subject, action, scene, spoken_text, "
+        "transition, motion。镜头时间覆盖全片且互不重叠。\n"
+        f"已验证的视频总时长为 {duration_seconds:.3f} 秒，不得虚构其他时长。\n"
+        "除 shot_id 和枚举值外，所有文本字段一律用中文填写。\n"
+        "\n"
+        "motion 是结构化运动描述，每个镜头都必须完整填写以下六个字段：\n"
+        "- subject_motion_state（人物运动状态，枚举）：STATIC 静止 / WALKING 行走 / "
+        "RUNNING 跑动 / TURNING 转身 / GESTURING_ONLY 仅手势站位不动 / "
+        "OBJECT_MOTION 仅物体运动 / NO_PERSON 无人物；\n"
+        "- subject_direction（人物位移方向，枚举）：toward_camera 向镜头 / "
+        "away_from_camera 背离镜头 / left 向画面左 / right 向画面右 / lateral 横向 / "
+        "in_place 原地 / none 无；\n"
+        "- subject_displacement（位移幅度，中文）：如“向镜头走近两三步”“无位移”；\n"
+        "- hand_action（左右手动作，中文）：如“双臂随步态交替自然摆动，不指点不握拳”；\n"
+        "- camera_motion（机位运动，枚举）：STATIC 固定 / PUSH_IN 推近 / PULL_BACK 拉远 / "
+        "HANDHELD_TRACKING 手持跟拍 / PAN 横摇 / TILT 纵摇 / FOLLOW 跟随；机位在动时"
+        "禁止填 STATIC；\n"
+        "- relative_motion（人物与摄影机相对运动，中文）：如“人物逐渐靠近镜头，画面占比增大”。\n"
+        "\n"
+        "关键规则：\n"
+        "1. 人物在镜头内移动（行走、跑动、转身）时，subject_motion_state 必须选对应"
+        "运动状态，action 必须写明运动方向与幅度；不得把移动中的人物概括成“说话”或"
+        "“站立”，也不得把运动镜头写成固定机位。\n"
+        "2. 人物确实静止时选 STATIC，不得凭空增加运动。\n"
+        "3. 无人物出镜的镜头 subject_motion_state 选 NO_PERSON 或 OBJECT_MOTION，"
+        "文本字段写“无人物出镜”。"
     )
 
 
@@ -573,7 +685,7 @@ def _provider_response_ref(
 def _default_analysis_payload(duration_seconds: float) -> dict[str, Any]:
     midpoint = duration_seconds / 2
     return {
-        "summary": "FakeGemini video analysis",
+        "summary": "FakeGemini 演示拆解（未配置真实分析服务）",
         "duration_seconds": duration_seconds,
         "aspect_ratio": "9:16",
         "resolution": "1080x1920",
@@ -588,27 +700,43 @@ def _default_analysis_payload(duration_seconds: float) -> dict[str, Any]:
                 "shot_id": "S01",
                 "start_time": 0,
                 "end_time": midpoint,
-                "shot_type": "近景",
+                "shot_type": "中景",
                 "composition": "人物居中",
-                "camera_motion": "固定",
+                "camera_motion": "手持跟拍",
                 "subject": "主讲人",
-                "action": "看向镜头讲话",
+                "action": "边向镜头走近边口播",
                 "scene": "室内",
                 "spoken_text": "",
                 "transition": "硬切",
+                "motion": {
+                    "subject_motion_state": "WALKING",
+                    "subject_direction": "toward_camera",
+                    "subject_displacement": "向镜头走近两三步",
+                    "hand_action": "双臂随步态交替自然摆动，不指点不握拳",
+                    "camera_motion": "HANDHELD_TRACKING",
+                    "relative_motion": "人物逐渐靠近镜头，画面占比增大",
+                },
             },
             {
                 "shot_id": "S02",
                 "start_time": midpoint,
                 "end_time": duration_seconds,
-                "shot_type": "中景",
+                "shot_type": "近景",
                 "composition": "三分法",
-                "camera_motion": "轻微推进",
+                "camera_motion": "缓慢推近",
                 "subject": "主讲人",
-                "action": "继续口播",
+                "action": "站位固定，边做讲解手势边口播",
                 "scene": "室内",
                 "spoken_text": "",
                 "transition": "硬切",
+                "motion": {
+                    "subject_motion_state": "GESTURING_ONLY",
+                    "subject_direction": "in_place",
+                    "subject_displacement": "无位移",
+                    "hand_action": "双手在胸前做自然讲解手势",
+                    "camera_motion": "PUSH_IN",
+                    "relative_motion": "镜头缓慢推近，人物站位不变",
+                },
             },
         ],
     }

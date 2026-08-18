@@ -49,20 +49,25 @@ from app.storage import (
 SCRIPT_KIND = "script"
 H3_PROMPT_KIND = "h3_prompt"
 GENERATION_SCHEMA_VERSION = "c.generation.v1"
-H3_PROMPT_TEMPLATE_VERSION = "h3.prompt.v2"
+H3_PROMPT_TEMPLATE_VERSION = "h3.prompt.v3"
 H3_PROMPT_TEMPLATE_SPEC = (
     (
         "intro",
-        "生成一条 {duration_seconds} 秒、{resolution}、写实短视频，从提供的首帧自然开始。",
+        "生成一条 {duration_seconds} 秒、{resolution}、写实短视频，从提供的首帧自然开始；"
+        "人物严格按各镜头的动作与运镜描述真实运动，不得僵立原地。",
     ),
     ("continuity", "保持首帧人物身份、服装、发型、场景和光线连续。"),
     (
         "shot",
         "[{start:.1f}-{end:.1f}s] {shot_type}，{composition}，{camera_motion}；"
-        "{subject}{action}，场景：{scene}，转场：{transition}。口播意图：{spoken}",
+        "主体：{subject}；人物动作：{motion_clause}；场景：{scene}，转场：{transition}。"
+        "口播意图：{spoken}",
     ),
     ("script", "口播意图：{full_text}"),
-    ("outro", "环境音与音乐保持自然；不要增加无关人物，不要身份突变、肢体异常或画面闪烁。"),
+    (
+        "outro",
+        "环境音与音乐保持自然；不要增加无关人物，不要身份突变、肢体异常或画面闪烁。",
+    ),
 )
 H3_PROMPT_TEMPLATES = dict(H3_PROMPT_TEMPLATE_SPEC)
 H3_PROMPT_TEMPLATE_HASH = hashlib.sha256(
@@ -72,6 +77,37 @@ H3_PROMPT_TEMPLATE_HASH = hashlib.sha256(
         separators=(",", ":"),
     ).encode()
 ).hexdigest()
+
+# 拆解结果 motion 枚举到中文运动指令的确定性映射：渲染逻辑在代码里，
+# 不依赖分析模型把“行走”写成好句子——只要状态枚举正确，Prompt 必然
+# 携带正向运动指令。
+SUBJECT_MOTION_STATE_CLAUSES = {
+    "STATIC": "人物保持站位，动作限于口播与手势，双脚位置不变",
+    "WALKING": "人物持续行走，每一步脚掌落地、重心自然转移、双臂随步态摆动，不得僵立原地",
+    "RUNNING": "人物持续跑动，步幅与摆臂真实连贯，不得僵立原地",
+    "TURNING": "人物原地转身，躯干与视线自然转动，双脚位置基本不变",
+    "GESTURING_ONLY": "人物站位固定，仅上半身与手部做手势和口播",
+    "OBJECT_MOTION": "画面主体为物体运动，无人物位移",
+    "NO_PERSON": "本镜头无人物出镜",
+}
+SUBJECT_DIRECTION_LABELS = {
+    "toward_camera": "向镜头方向",
+    "away_from_camera": "背离镜头方向",
+    "left": "向画面左侧",
+    "right": "向画面右侧",
+    "lateral": "横向移动",
+    "in_place": "原地",
+    "none": "无位移方向",
+}
+MOTION_CAMERA_MOTION_LABELS = {
+    "STATIC": "固定机位",
+    "PUSH_IN": "镜头缓慢推近",
+    "PULL_BACK": "镜头缓慢拉远",
+    "HANDHELD_TRACKING": "手持平稳跟拍",
+    "PAN": "镜头横摇",
+    "TILT": "镜头纵摇",
+    "FOLLOW": "镜头跟随主体",
+}
 PROMPT_STATUSES = {"SAVED", "LOCKED", "USED"}
 TERMINAL_STATUSES = {"FAILED", "CANCELLED"}
 H3_MODEL = "MiniMax-H3"
@@ -169,6 +205,12 @@ class GenerationTaskRetryRequest(BaseModel):
 
     idempotency_key: str = Field(min_length=1, max_length=128)
     retry_reason: str = Field(min_length=1, max_length=500)
+
+
+class GenerationBatchRenameRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str = Field(min_length=1, max_length=120)
 
 
 class ConfirmNotChargedRequest(BaseModel):
@@ -271,7 +313,12 @@ class UrllibMetasoHttpTransport:
             with urlopen(request, timeout=self.timeout_seconds) as response:  # noqa: S310
                 return cast(bytes, response.read())
         except HTTPError as exc:
-            logger.warning("METASO H3 request failed with HTTP status %s", exc.code)
+            detail = ""
+            try:
+                detail = exc.read()[:1000].decode("utf-8", "replace")
+            except OSError:
+                pass
+            logger.warning("METASO H3 request failed with HTTP status %s: %s", exc.code, detail)
             raise H3ProviderFailed(f"METASO returned HTTP {exc.code}") from exc
         except (TimeoutError, URLError, OSError) as exc:
             logger.warning("METASO H3 request failed: %s", type(exc).__name__)
@@ -293,6 +340,7 @@ class MetasoH3Provider(H3Provider):
             [bytes], tuple[Literal["AUDIO_OK", "AUDIO_QUALITY_FAILED"], list[str]]
         ]
         | None = None,
+        task_created_observer: Callable[[str], None] | None = None,
     ) -> None:
         self.api_key = api_key
         self.transport = transport or UrllibMetasoHttpTransport()
@@ -300,6 +348,7 @@ class MetasoH3Provider(H3Provider):
         self.max_poll_attempts = max_poll_attempts
         self.sleeper = sleeper
         self.audio_quality_checker = audio_quality_checker or h3_audio_quality
+        self.task_created_observer = task_created_observer
 
     def create_image_to_video(self, request: dict[str, Any]) -> H3CreateResult:
         validate_h3_request(request)
@@ -322,6 +371,10 @@ class MetasoH3Provider(H3Provider):
             provider_task_id = _metaso_task_id(response)
         except H3ProviderFailed as exc:
             raise SubmissionUncertain("METASO submission result is unknown") from exc
+        if self.task_created_observer is not None:
+            # Persist the paid provider task id before polling so a timeout or
+            # crash can never lose a result that reconciliation could recover.
+            self.task_created_observer(provider_task_id)
         return self._poll_for_result(provider_task_id)
 
     def _poll_for_result(self, provider_task_id: str) -> H3CreateResult:
@@ -399,7 +452,12 @@ def metaso_h3_provider_from_settings(conn: sqlite3.Connection) -> MetasoH3Provid
     api_key = config.get("api_key")
     if not api_key:
         raise H3ProviderSettingsUnavailable("METASO API key is not configured")
-    return MetasoH3Provider(api_key=api_key)
+    return MetasoH3Provider(
+        api_key=api_key,
+        # Real H3 rendering routinely exceeds five minutes; poll up to ~1.5h.
+        poll_interval_seconds=5.0,
+        max_poll_attempts=1080,
+    )
 
 
 def h3_provider_for_task(conn: sqlite3.Connection, provider_name: str) -> H3Provider:
@@ -553,6 +611,7 @@ class BatchResult(BaseModel):
     status: str
     quantity: int
     stale: bool
+    display_name: str | None = None
     source_batch_id: str | None = None
     source_task_id: str | None = None
     generation_reason: str | None = None
@@ -579,6 +638,7 @@ class GenerationBatchListItem(BaseModel):
     quantity: int
     created_at: str
     updated_at: str
+    display_name: str | None = None
     source_batch_id: str | None = None
     source_task_id: str | None = None
     generation_reason: str | None = None
@@ -1019,6 +1079,23 @@ def compile_prompt_version(
     return row
 
 
+def unwrap_analysis_payload(payload: Any) -> dict[str, Any]:
+    """兼容 shot_card 与 analysis 两种版本格式。
+
+    shot_card 版本顶层即 shots/duration_seconds；拆解自动落库的 analysis
+    版本是 {"schema_version", "analysis": {...}, "source_asset", ...} 包装
+    结构，镜头与原稿在内层——回退用 analysis 编译时必须先解包。
+    """
+    if not isinstance(payload, dict):
+        return {}
+    if isinstance(payload.get("shots"), list):
+        return payload
+    inner = payload.get("analysis")
+    if isinstance(inner, dict):
+        return inner
+    return payload
+
+
 def preview_prompt_text(
     conn: sqlite3.Connection,
     *,
@@ -1048,7 +1125,7 @@ def preview_prompt_text(
             "ANALYSIS_NOT_READY",
             "Analyze the reference video before previewing the prompt.",
         )
-    shot_payload = json.loads(str(shot_row["payload_json"]))
+    shot_payload = unwrap_analysis_payload(json.loads(str(shot_row["payload_json"])))
     shots = shot_payload.get("shots")
     if not isinstance(shots, list) or not shots:
         raise generation_error(
@@ -1063,7 +1140,11 @@ def preview_prompt_text(
         script_payload = json.loads(str(script["payload_json"]))
         script_source = "script_version"
     else:
-        analysis_payload = json.loads(str(analysis["payload_json"])) if analysis is not None else {}
+        analysis_payload = (
+            unwrap_analysis_payload(json.loads(str(analysis["payload_json"])))
+            if analysis is not None
+            else {}
+        )
         original_script = str(analysis_payload.get("original_script") or "")
         spoken_texts = [str(shot.get("spoken_text") or "") for shot in shots]
         script_payload = {
@@ -2093,6 +2174,19 @@ def run_next_generation_task(
                 batch_id=str(lease["batch_id"]),
             )
             return get_task_result(conn, task_id)
+    if isinstance(provider, MetasoH3Provider) and provider.task_created_observer is None:
+
+        def _record_created_provider_task(created_provider_task_id: str) -> None:
+            # Persist the paid provider task id the moment it exists so a later
+            # timeout/crash can be reconciled instead of losing the result.
+            mark_task_submission_uncertain(
+                conn,
+                task_id=task_id,
+                message="METASO task was created; the result is still being awaited.",
+                provider_task_id=created_provider_task_id,
+            )
+
+        provider.task_created_observer = _record_created_provider_task
     if lease.get("archive_status") == "ARCHIVE_FAILED" and lease.get("provider_result_url"):
         return _retry_archive(
             conn,
@@ -3723,6 +3817,7 @@ def list_generation_batches(
             batch.status,
             batch.created_at,
             batch.updated_at,
+            batch.display_name,
             batch.source_batch_id,
             batch.source_task_id,
             batch.generation_reason
@@ -3796,6 +3891,7 @@ def list_generation_batches(
                 quantity=len(tasks),
                 created_at=str(row["created_at"]),
                 updated_at=str(row["updated_at"]),
+                display_name=optional_text(row["display_name"]),
                 source_batch_id=optional_text(row["source_batch_id"]),
                 source_task_id=optional_text(row["source_task_id"]),
                 generation_reason=optional_text(row["generation_reason"]),
@@ -3893,7 +3989,7 @@ def get_generation_batch(
 ) -> BatchResult:
     batch = conn.execute(
         """
-        SELECT id, project_id, request_snapshot_json, status,
+        SELECT id, project_id, request_snapshot_json, status, display_name,
                source_batch_id, source_task_id, generation_reason
         FROM generation_batches
         WHERE id = ?
@@ -3972,12 +4068,71 @@ def get_generation_batch(
         status=status,
         quantity=len(tasks),
         stale=stale,
+        display_name=optional_text(batch["display_name"]),
         source_batch_id=optional_text(batch["source_batch_id"]),
         source_task_id=optional_text(batch["source_task_id"]),
         generation_reason=optional_text(batch["generation_reason"]),
         progress=progress,
         tasks=tasks,
     )
+
+
+def rename_generation_batch(
+    conn: sqlite3.Connection,
+    *,
+    actor: CurrentUser,
+    batch_id: str,
+    display_name: str,
+) -> BatchResult:
+    """Rename a generation batch (creator or admin only).
+
+    只有创建者或管理员可以改批次显示名；重命名不改变批次的任何生成
+    状态与任务数据，审计日志记录前后名称以便对账。
+    """
+    batch = conn.execute(
+        """
+        SELECT id, project_id, created_by_user_id, display_name
+        FROM generation_batches
+        WHERE id = ?
+        """,
+        (batch_id,),
+    ).fetchone()
+    if batch is None:
+        raise generation_error(404, "BATCH_NOT_FOUND", "Generation batch does not exist.")
+    if actor.role != "admin" and str(batch["created_by_user_id"]) != actor.id:
+        raise generation_error(
+            403,
+            "GENERATION_BATCH_FORBIDDEN",
+            "只有批次创建者或管理员可以修改批次名称。",
+        )
+    clean_name = display_name.strip()
+    if not clean_name:
+        raise generation_error(
+            422,
+            "GENERATION_BATCH_NAME_REQUIRED",
+            "批次名称不能为空。",
+        )
+    with conn:
+        conn.execute(
+            """
+            UPDATE generation_batches
+            SET display_name = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (clean_name, batch_id),
+        )
+    write_audit(
+        conn,
+        actor=actor,
+        action="generation_batch.rename",
+        entity_type="generation_batch",
+        entity_id=batch_id,
+        metadata={
+            "from_name": (None if batch["display_name"] is None else str(batch["display_name"])),
+            "to_name": clean_name,
+        },
+    )
+    return get_generation_batch(conn, batch_id=batch_id, actor=actor)
 
 
 def build_h3_request(
@@ -4042,16 +4197,19 @@ def _metaso_task_id(content: bytes) -> str:
 
 
 def _metaso_create_request(request: dict[str, Any]) -> dict[str, Any]:
-    """Translate UI labels to the parameter value proven by the METASO endpoint."""
-    provider_request = dict(request)
-    if provider_request.get("resolution") == "768P":
-        provider_request["resolution"] = "768"
-    return provider_request
+    """METASO accepts the UI resolution labels as-is (768P / 2K)."""
+    return dict(request)
 
 
 def _require_public_https_host(hostname: str) -> None:
     """Reject result URLs that resolve to private/loopback/link-local addresses
     so a compromised METASO response cannot drive server-side SSRF."""
+    provider_host = urlparse(METASO_BASE_URL).hostname or ""
+    if hostname == provider_host or hostname.endswith(f".{provider_host}"):
+        # Provider-owned hosts are trusted by contract; desktop machines often
+        # route them through local proxies whose synthetic addresses would
+        # otherwise fail the public-address check below.
+        return
     try:
         addresses = socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM)
     except socket.gaierror as exc:
@@ -4179,6 +4337,51 @@ def map_script_to_shots(text: str, shots: list[dict[str, Any]]) -> list[dict[str
     return mappings
 
 
+def render_shot_motion_clause(shot: Mapping[str, Any]) -> str:
+    """把镜头的 motion 枚举确定性渲染成中文运动指令。
+
+    旧版拆解结果没有 motion 时回退到 action 文本（行为不劣化）；
+    motion 存在时由代码而不是模型措辞决定运动指令的强度。
+    """
+    motion = shot.get("motion")
+    if not isinstance(motion, Mapping):
+        return str(shot.get("action", ""))
+
+    state = str(motion.get("subject_motion_state", ""))
+    state_clause = SUBJECT_MOTION_STATE_CLAUSES.get(state, "")
+    direction = SUBJECT_DIRECTION_LABELS.get(str(motion.get("subject_direction", "")), "")
+    displacement = str(motion.get("subject_displacement") or "")
+    hand_action = str(motion.get("hand_action") or "")
+    relative_motion = str(motion.get("relative_motion") or "")
+
+    parts: list[str] = []
+    action = str(shot.get("action") or "")
+    if action:
+        parts.append(action)
+    if state_clause:
+        if direction and direction not in ("无位移方向",):
+            parts.append(f"{state_clause}（{direction}）")
+        else:
+            parts.append(state_clause)
+    if displacement and displacement not in ("无位移", "无人物出镜"):
+        parts.append(f"位移：{displacement}")
+    if hand_action and hand_action not in ("无人物出镜",):
+        parts.append(f"手部：{hand_action}")
+    if relative_motion:
+        parts.append(f"相对运动：{relative_motion}")
+    return "；".join(parts) if parts else str(shot.get("action", ""))
+
+
+def shot_camera_motion_text(shot: Mapping[str, Any]) -> str:
+    """运镜描述：motion 枚举标签优先，旧数据用自由文本。"""
+    motion = shot.get("motion")
+    if isinstance(motion, Mapping):
+        label = MOTION_CAMERA_MOTION_LABELS.get(str(motion.get("camera_motion", "")))
+        if label:
+            return label
+    return str(shot.get("camera_motion", ""))
+
+
 def compile_prompt_text(
     *,
     script_payload: dict[str, Any],
@@ -4211,9 +4414,9 @@ def compile_prompt_text(
                 end=end,
                 shot_type=shot["shot_type"],
                 composition=shot["composition"],
-                camera_motion=shot["camera_motion"],
+                camera_motion=shot_camera_motion_text(shot),
                 subject=shot["subject"],
-                action=shot["action"],
+                motion_clause=render_shot_motion_clause(shot),
                 scene=shot["scene"],
                 transition=shot["transition"],
                 spoken=spoken,

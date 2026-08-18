@@ -11,15 +11,12 @@ import {
   createProject,
   createVideoUploadIntent,
   deleteProject,
-  type GenerationBatch,
   listProjects,
   type Project,
-  type PromptPreviewResult,
-  previewGenerationPrompt,
+  renameProject,
   startVideoAnalysis,
   uploadReferenceVideo,
 } from "./api";
-import { QuickGenerateDialog } from "./QuickGenerateDialog";
 
 const PROJECT_POLL_INTERVAL_MS = 5_000;
 
@@ -41,8 +38,8 @@ type UploadItem = {
 
 type ProjectsPageProps = {
   canWrite: boolean;
-  onBatchCreated: (batch: GenerationBatch) => void;
   onOpenAnalysis: (project: Project) => void;
+  onOpenDetail: (project: Project) => void;
 };
 
 const UPLOAD_STAGE_LABELS: Record<UploadStage, string> = {
@@ -73,28 +70,26 @@ function rejectUploadEntries(files: File[]): UploadItem[] {
     }));
 }
 
-// 项目页 = 「上传 → 拆解 → 提示词 + 首帧 → 生成」的主动线：
+// 项目页 = 「上传 → 拆解 → 生成流程」的主动线：
 // 顶部上传区支持一次选择多个视频（每个视频一个项目，串行上传并自动
-// 拆解）；列表行展示拆解状态、可展开查看系统编译的提示词；已拆解的
-// 项目可就地打开快速生成弹层完成付费生成，或进入工作区做高级编辑。
+// 拆解）；列表行展示拆解状态；已拆解的项目进入生成流程详情页
+//（四段滚动完成付费生成），或进入工作区做高级编辑。
 export function ProjectsPage({
   canWrite,
-  onBatchCreated,
   onOpenAnalysis,
+  onOpenDetail,
 }: ProjectsPageProps) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectsError, setProjectsError] = useState("");
   const [isProjectsLoading, setIsProjectsLoading] = useState(false);
   const [uploads, setUploads] = useState<UploadItem[]>([]);
   const [deletingProjectId, setDeletingProjectId] = useState("");
-  const [deleteMessage, setDeleteMessage] = useState("");
-  const [deleteError, setDeleteError] = useState("");
-  const [expandedProjectId, setExpandedProjectId] = useState("");
-  const [promptPreviews, setPromptPreviews] = useState<
-    Record<string, PromptPreviewResult | "loading" | "error">
-  >({});
-  const [quickGenerateProject, setQuickGenerateProject] =
-    useState<Project | null>(null);
+  // 项目操作（删除/重命名）共用一对消息通道，避免页面顶部堆多个提示位。
+  const [projectActionError, setProjectActionError] = useState("");
+  const [projectActionMessage, setProjectActionMessage] = useState("");
+  const [editingProjectId, setEditingProjectId] = useState("");
+  const [editingProjectName, setEditingProjectName] = useState("");
+  const [renamingProjectId, setRenamingProjectId] = useState("");
   const [rebindProject, setRebindProject] = useState<Project | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const rebindFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -288,16 +283,16 @@ export function ProjectsPage({
       return;
     }
     setDeletingProjectId(project.id);
-    setDeleteError("");
-    setDeleteMessage("");
+    setProjectActionError("");
+    setProjectActionMessage("");
     try {
       await deleteProject(project.id);
       setProjects((current) =>
         current.filter((item) => item.id !== project.id),
       );
-      setDeleteMessage(`项目“${project.name}”已删除。`);
+      setProjectActionMessage(`项目“${project.name}”已删除。`);
     } catch (error) {
-      setDeleteError(
+      setProjectActionError(
         error instanceof Error ? error.message : "删除项目失败，请稍后重试。",
       );
     } finally {
@@ -305,25 +300,46 @@ export function ProjectsPage({
     }
   }
 
-  const loadPromptPreview = useCallback(async (project: Project) => {
-    setPromptPreviews((current) => ({ ...current, [project.id]: "loading" }));
-    try {
-      const preview = await previewGenerationPrompt(project.id);
-      setPromptPreviews((current) => ({ ...current, [project.id]: preview }));
-    } catch {
-      setPromptPreviews((current) => ({ ...current, [project.id]: "error" }));
-    }
-  }, []);
+  function startRename(project: Project) {
+    setEditingProjectId(project.id);
+    setEditingProjectName(project.name);
+    setProjectActionError("");
+    setProjectActionMessage("");
+  }
 
-  function togglePromptPreview(project: Project) {
-    if (expandedProjectId === project.id) {
-      setExpandedProjectId("");
+  function cancelRename() {
+    setEditingProjectId("");
+    setEditingProjectName("");
+    setRenamingProjectId("");
+  }
+
+  async function saveRename(project: Project) {
+    const name = editingProjectName.trim();
+    if (!name) {
+      setProjectActionError("项目名称不能为空。");
       return;
     }
-    setExpandedProjectId(project.id);
-    const state = promptPreviews[project.id];
-    if (!state || state === "error") {
-      void loadPromptPreview(project);
+    if (name === project.name) {
+      cancelRename();
+      return;
+    }
+    setRenamingProjectId(project.id);
+    setProjectActionError("");
+    try {
+      const updated = await renameProject(project.id, name);
+      setProjects((current) =>
+        current.map((item) =>
+          item.id === updated.id ? { ...item, name: updated.name } : item,
+        ),
+      );
+      setProjectActionMessage(`项目名称已更新为“${updated.name}”。`);
+      cancelRename();
+    } catch (error) {
+      setProjectActionError(
+        error instanceof Error ? error.message : "修改项目名称失败，请重试。",
+      );
+    } finally {
+      setRenamingProjectId("");
     }
   }
 
@@ -345,15 +361,7 @@ export function ProjectsPage({
   }
 
   return (
-    <section className="projects-page" aria-labelledby="projects-title">
-      <div className="section-heading">
-        <div>
-          <h2 id="projects-title">项目</h2>
-          <p>上传参考视频，拆解提示词，配首帧生成新视频。</p>
-        </div>
-        <span className="project-count">{projects.length} 个项目</span>
-      </div>
-
+    <section className="projects-page" aria-label="项目">
       {canWrite ? (
         <div className="projects-upload-zone">
           <input
@@ -392,14 +400,14 @@ export function ProjectsPage({
         <p className="status-note">只读身份：仅可查看项目。</p>
       )}
 
-      {deleteError ? (
+      {projectActionError ? (
         <p className="settings-error" role="alert">
-          {deleteError}
+          {projectActionError}
         </p>
       ) : null}
-      {deleteMessage ? (
+      {projectActionMessage ? (
         <p className="setup-success" role="status">
-          {deleteMessage}
+          {projectActionMessage}
         </p>
       ) : null}
 
@@ -485,119 +493,129 @@ export function ProjectsPage({
       ) : null}
 
       {!isProjectsLoading && !projectsError && projects.length ? (
-        <ul className="projects-list">
-          {projects.map((project) => {
-            const isAnalyzed = project.analysis_status === "READY";
-            const previewState = promptPreviews[project.id];
-            const preview =
-              previewState &&
-              previewState !== "loading" &&
-              previewState !== "error"
-                ? previewState
-                : null;
-            return (
-              <li className="projects-list__item" key={project.id}>
-                <div className="projects-list__row">
-                  <button
-                    aria-label={`打开项目 ${project.name}`}
-                    className="projects-list__main"
-                    onClick={() => onOpenAnalysis(project)}
-                    type="button"
-                  >
-                    <strong>{project.name}</strong>
-                    <span className="projects-list__meta">
-                      {renderStatusBadge(project)}
-                    </span>
-                  </button>
-                  <div className="projects-list__actions">
-                    {isAnalyzed && canWrite ? (
-                      <button
-                        className="projects-generate-button"
-                        onClick={() => setQuickGenerateProject(project)}
-                        type="button"
-                      >
-                        生成视频
-                      </button>
-                    ) : null}
-                    {isAnalyzed ? (
-                      <button
-                        className="secondary-button"
-                        onClick={() => togglePromptPreview(project)}
-                        type="button"
-                      >
-                        {expandedProjectId === project.id
-                          ? "收起提示词"
-                          : "提示词"}
-                      </button>
-                    ) : null}
-                    {project.reference_upload_status !== "READY" && canWrite ? (
-                      <button
-                        className="secondary-button"
-                        disabled={isUploading || Boolean(deletingProjectId)}
-                        onClick={() => requestRebind(project)}
-                        type="button"
-                      >
-                        重新上传
-                      </button>
-                    ) : null}
-                    {canWrite ? (
-                      <button
-                        aria-label={`删除项目 ${project.name}`}
-                        className="secondary-button project-delete-button"
-                        disabled={isUploading || Boolean(deletingProjectId)}
-                        onClick={() => void handleDeleteProject(project)}
-                        type="button"
-                      >
-                        {deletingProjectId === project.id ? "正在删除" : "删除"}
-                      </button>
-                    ) : null}
-                  </div>
-                </div>
-                {expandedProjectId === project.id ? (
-                  <div className="projects-prompt-preview">
-                    {previewState === "loading" ? (
-                      <p className="status-note">正在编译提示词…</p>
-                    ) : null}
-                    {previewState === "error" ? (
-                      <p className="settings-error">
-                        提示词预览暂不可用，请稍后重试。
-                      </p>
-                    ) : null}
-                    {preview ? (
+        <>
+          <div className="projects-list-header">
+            <span className="list-caption">项目列表</span>
+            <span className="project-count">{projects.length} 个项目</span>
+          </div>
+          <ul className="projects-list">
+            {projects.map((project) => {
+              const isAnalyzed = project.analysis_status === "READY";
+              const isEditing = editingProjectId === project.id;
+              const isRenaming = renamingProjectId === project.id;
+              return (
+                <li className="projects-list__item" key={project.id}>
+                  <div className="projects-list__row">
+                    {isEditing ? (
+                      <div className="projects-list__edit">
+                        <input
+                          aria-label="修改项目名称"
+                          onChange={(event) =>
+                            setEditingProjectName(event.target.value)
+                          }
+                          type="text"
+                          value={editingProjectName}
+                        />
+                        <button
+                          disabled={isRenaming}
+                          onClick={() => void saveRename(project)}
+                          type="button"
+                        >
+                          {isRenaming ? "正在保存…" : "保存名称"}
+                        </button>
+                        <button
+                          className="secondary-button"
+                          disabled={isRenaming}
+                          onClick={cancelRename}
+                          type="button"
+                        >
+                          取消
+                        </button>
+                      </div>
+                    ) : (
                       <>
-                        <pre className="quickgen-prompt-text">
-                          {preview.prompt_text}
-                        </pre>
-                        <p className="status-note">
-                          成片 {preview.output_duration_seconds} 秒 ·{" "}
-                          {preview.resolution} ·
-                          {preview.script_source === "script_version"
-                            ? " 口播来源：已保存口播稿"
-                            : " 口播来源：拆解原稿"}
-                        </p>
+                        <button
+                          aria-label={`打开项目 ${project.name}`}
+                          className="projects-list__main"
+                          onClick={() => onOpenAnalysis(project)}
+                          type="button"
+                        >
+                          <strong>{project.name}</strong>
+                          <span className="projects-list__meta">
+                            {renderStatusBadge(project)}
+                          </span>
+                        </button>
+                        <div className="projects-list__actions">
+                          {isAnalyzed && canWrite ? (
+                            <button
+                              className="projects-generate-button"
+                              onClick={() => onOpenDetail(project)}
+                              type="button"
+                            >
+                              生成视频
+                            </button>
+                          ) : null}
+                          {isAnalyzed ? (
+                            <button
+                              className="secondary-button"
+                              onClick={() => onOpenDetail(project)}
+                              type="button"
+                            >
+                              查看流程
+                            </button>
+                          ) : null}
+                          {project.reference_upload_status !== "READY" &&
+                          canWrite ? (
+                            <button
+                              className="secondary-button"
+                              disabled={
+                                isUploading || Boolean(deletingProjectId)
+                              }
+                              onClick={() => requestRebind(project)}
+                              type="button"
+                            >
+                              重新上传
+                            </button>
+                          ) : null}
+                          {canWrite ? (
+                            <button
+                              className="secondary-button"
+                              onClick={() => startRename(project)}
+                              type="button"
+                            >
+                              重命名
+                            </button>
+                          ) : null}
+                          {canWrite ? (
+                            <button
+                              aria-label={`删除项目 ${project.name}`}
+                              className="secondary-button project-delete-button"
+                              disabled={
+                                isUploading || Boolean(deletingProjectId)
+                              }
+                              onClick={() => void handleDeleteProject(project)}
+                              type="button"
+                            >
+                              {deletingProjectId === project.id
+                                ? "正在删除"
+                                : "删除"}
+                            </button>
+                          ) : null}
+                        </div>
                       </>
-                    ) : null}
+                    )}
                   </div>
-                ) : null}
-              </li>
-            );
-          })}
-        </ul>
+                </li>
+              );
+            })}
+          </ul>
+        </>
       ) : null}
 
       {!isProjectsLoading && !projectsError && !projects.length ? (
         <p className="status-note">
           还没有项目。上传第一个参考视频即可开始复刻。
         </p>
-      ) : null}
-
-      {quickGenerateProject ? (
-        <QuickGenerateDialog
-          onBatchCreated={onBatchCreated}
-          onClose={() => setQuickGenerateProject(null)}
-          project={quickGenerateProject}
-          readOnly={!canWrite}
-        />
       ) : null}
     </section>
   );

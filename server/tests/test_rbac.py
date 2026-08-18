@@ -451,6 +451,82 @@ def test_project_delete_tolerates_storage_cleanup_failure(
     assert json.loads(str(audit["metadata_json"]))["storage_cleanup_failed_count"] == 1
 
 
+def test_project_owner_can_rename_their_project(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    response = client.patch(
+        "/api/projects/project_owned/name",
+        headers=auth_headers("employee_1"),
+        json={"name": "乡墅爆款第一期"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == "project_owned"
+    assert body["name"] == "乡墅爆款第一期"
+    with connect_database(db_path) as conn:
+        stored = conn.execute(
+            "SELECT name FROM projects WHERE id = ?", ("project_owned",)
+        ).fetchone()
+        audit = conn.execute(
+            "SELECT metadata_json FROM audit_logs WHERE action = 'project.rename'"
+        ).fetchone()
+    assert stored is not None
+    assert str(stored["name"]) == "乡墅爆款第一期"
+    assert audit is not None
+    metadata = json.loads(str(audit["metadata_json"]))
+    assert metadata == {"from_name": "Owned Project", "to_name": "乡墅爆款第一期"}
+
+
+def test_admin_can_rename_any_project(client: TestClient) -> None:
+    response = client.patch(
+        "/api/projects/project_owned/name",
+        headers=auth_headers("admin_1"),
+        json={"name": "Admin Renamed"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["name"] == "Admin Renamed"
+
+
+def test_project_rename_rejects_blank_and_overlong_names(client: TestClient) -> None:
+    blank = client.patch(
+        "/api/projects/project_owned/name",
+        headers=auth_headers("employee_1"),
+        json={"name": "   "},
+    )
+    overlong = client.patch(
+        "/api/projects/project_owned/name",
+        headers=auth_headers("employee_1"),
+        json={"name": "超" * 121},
+    )
+
+    assert blank.status_code == 422
+    assert blank.json()["detail"]["code"] == "PROJECT_NAME_REQUIRED"
+    assert overlong.status_code == 422
+
+
+def test_project_rename_forbidden_for_other_owner_and_auditor(
+    client: TestClient,
+) -> None:
+    other_owner = client.patch(
+        "/api/projects/project_other/name",
+        headers=auth_headers("employee_1"),
+        json={"name": "不应改名"},
+    )
+    auditor = client.patch(
+        "/api/projects/project_owned/name",
+        headers=auth_headers("auditor_1"),
+        json={"name": "不应改名"},
+    )
+
+    assert other_owner.status_code == 403
+    assert other_owner.json()["detail"]["code"] == "PROJECT_FORBIDDEN"
+    assert auditor.status_code == 403
+    assert auditor.json()["detail"]["code"] == "ROLE_FORBIDDEN"
+
+
 def test_auditor_cannot_create_projects_and_admin_can_list_all_projects(
     client: TestClient,
 ) -> None:

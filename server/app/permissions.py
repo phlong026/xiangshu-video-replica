@@ -147,7 +147,8 @@ def require_asset_access(
 ) -> sqlite3.Row:
     row = conn.execute(
         """
-        SELECT id, project_id, kind, storage_uri, sha256, size_bytes, content_type
+        SELECT id, project_id, kind, storage_uri, sha256, size_bytes, content_type,
+               metadata_json
         FROM assets
         WHERE id = ?
         """,
@@ -165,6 +166,21 @@ def require_asset_access(
 
     if actor.role in {"admin", "auditor"}:
         return cast(sqlite3.Row, row)
+
+    # Contact sheets live outside character_assets, so grant access through the
+    # published character version referenced in their asset metadata.
+    if str(row["kind"]) == "character_contact_sheet":
+        sheet_identity = _published_contact_sheet_identity(conn, row)
+        if sheet_identity is not None and character_identity_is_current(sheet_identity):
+            return cast(sqlite3.Row, row)
+
+    # Simple-upload source photos also live outside character_assets; grant
+    # access through the identity recorded in their metadata so first-frame
+    # generation can use the uploaded photo as the authoritative face input.
+    if str(row["kind"]) == "character_source_image":
+        source_identity = _identity_from_asset_metadata(conn, row)
+        if source_identity is not None and character_identity_is_current(source_identity):
+            return cast(sqlite3.Row, row)
 
     published_character = conn.execute(
         """
@@ -210,6 +226,60 @@ def character_identity_is_current(row: sqlite3.Row) -> bool:
         authorization_expires_at=row["authorization_expires_at"],
         source_quality_status=row["source_quality_status"],
     )
+
+
+def _identity_from_asset_metadata(conn: sqlite3.Connection, row: sqlite3.Row) -> sqlite3.Row | None:
+    """Resolve the identity named in an asset's metadata, if any."""
+    try:
+        metadata = json.loads(str(row["metadata_json"] or ""))
+    except json.JSONDecodeError:
+        return None
+    identity_id = metadata.get("identity_id") if isinstance(metadata, dict) else None
+    if not isinstance(identity_id, str) or not identity_id:
+        return None
+    identity: sqlite3.Row | None = conn.execute(
+        """
+        SELECT
+            authorization_status,
+            authorization_expires_at,
+            source_quality_status,
+            status AS identity_status
+        FROM person_identities
+        WHERE id = ?
+        """,
+        (identity_id,),
+    ).fetchone()
+    return identity
+
+
+def _published_contact_sheet_identity(
+    conn: sqlite3.Connection, row: sqlite3.Row
+) -> sqlite3.Row | None:
+    """Resolve the identity behind a contact sheet whose version is published."""
+    try:
+        metadata = json.loads(str(row["metadata_json"] or ""))
+    except json.JSONDecodeError:
+        return None
+    version_id = metadata.get("character_version_id") if isinstance(metadata, dict) else None
+    if not isinstance(version_id, str) or not version_id:
+        return None
+    identity: sqlite3.Row | None = conn.execute(
+        """
+        SELECT
+            identity.authorization_status,
+            identity.authorization_expires_at,
+            identity.source_quality_status,
+            identity.status AS identity_status
+        FROM character_versions AS version
+        JOIN character_personas AS persona ON persona.id = version.persona_id
+        JOIN person_identities AS identity ON identity.id = persona.identity_id
+        WHERE version.id = ?
+          AND version.status = 'PUBLISHED'
+        LIMIT 1
+        """,
+        (version_id,),
+    ).fetchone()
+    return identity
 
 
 def project_id_for_task(conn: sqlite3.Connection, task_id: str) -> str:

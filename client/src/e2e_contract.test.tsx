@@ -96,6 +96,10 @@ describe("Fake provider E2E contract", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "查询任务记录" }));
 
+    // 任务页默认落在生成结果舞台（客户视角）；本契约断言的是运维视角的
+    // 批次/任务事实，先切换到运维详情。
+    fireEvent.click(await screen.findByRole("button", { name: "运维详情" }));
+
     expect(await screen.findByText("100%")).toBeInTheDocument();
     expect(screen.getByText("已完成 2 / 2")).toBeInTheDocument();
     expect(screen.getByText("task-fake-1")).toBeInTheDocument();

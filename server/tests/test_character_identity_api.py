@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+from cryptography.fernet import Fernet
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
@@ -786,7 +787,13 @@ def test_role_gate_runs_before_source_inspector_configuration(
 def test_identity_assets_are_evidence_only_for_auditor_and_private_from_employee(
     client: TestClient,
     storage: FakeStorageAdapter,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
+    # 员工下载走 local provider 签名：需要存储根目录与 settings 加密 key
+    # （与线上配置一致）。
+    monkeypatch.setenv("VIDEO_REPLICA_SETTINGS_KEY", Fernet.generate_key().decode("ascii"))
+    monkeypatch.setenv("VIDEO_REPLICA_STORAGE_ROOT", str(tmp_path / "local-storage"))
     identity = activate_identity(client, storage)
     source_asset_id = str(identity["source_asset_id"])
 
@@ -802,12 +809,19 @@ def test_identity_assets_are_evidence_only_for_auditor_and_private_from_employee
         f"/api/assets/{source_asset_id}",
         headers=headers("employee_1"),
     )
+    employee_download = client.post(
+        f"/api/assets/{source_asset_id}/download-url",
+        headers=headers("employee_1"),
+    )
 
     assert auditor_metadata.status_code == 200
     assert auditor_metadata.json()["project_id"] is None
     assert auditor_download.status_code == 403
-    assert employee_metadata.status_code == 403
-    assert employee_metadata.json()["detail"]["code"] == "ASSET_FORBIDDEN"
+    # 首帧三图输入改造：原始照片（character_source_image）与 contact sheet
+    # 一样经 identity current 校验后对员工放行，作为首帧生成的最权威
+    # 人脸参考；审计员仍只读（元数据可见、下载 URL 拒绝）。
+    assert employee_metadata.status_code == 200
+    assert employee_download.status_code == 200
 
 
 def test_invalid_source_format_and_expired_authorization_fail_closed(

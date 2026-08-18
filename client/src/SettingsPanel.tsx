@@ -129,11 +129,7 @@ export function SettingsPanel() {
   }
 
   return (
-    <section className="settings-page" aria-labelledby="settings-title">
-      <div className="section-heading">
-        <h2 id="settings-title">服务设置</h2>
-      </div>
-
+    <section className="settings-page" aria-label="服务设置">
       <div className="provider-grid">
         {PROVIDER_ORDER.map((provider) => (
           <ProviderForm

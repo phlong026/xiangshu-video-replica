@@ -646,7 +646,7 @@ def test_selection_rejects_an_input_binding_that_changed_before_persistence(
     assert selection_count == 0
 
 
-def test_selection_rejects_missing_features_stale_source_and_unavailable_character(
+def test_selection_falls_back_to_default_features_and_rejects_stale_source(
     client: TestClient,
     db_path: Path,
 ) -> None:
@@ -667,8 +667,16 @@ def test_selection_rejects_missing_features_stale_source_and_unavailable_charact
         headers=headers("employee_1"),
         json=reference_selection_payload(seeded),
     )
-    assert missing_features.status_code == 409
-    assert missing_features.json()["detail"]["code"] == "SOURCE_FRAME_FEATURES_REQUIRED"
+    assert missing_features.status_code == 201
+    body = missing_features.json()
+    # Auto-matching fallback features (FRONT + HALF_BODY) drive the recommendation.
+    expected = [
+        seeded.approved_asset_by_view["FRONT_HALF"],
+        seeded.approved_asset_by_view["FRONT_FACE"],
+    ]
+    assert body["recommended_asset_ids_json"] == expected
+    assert body["selected_asset_ids_json"] == expected
+    assert body["recommendation_reason_json"]["body_view_type"] == "FRONT_HALF"
 
     with connect_database(db_path) as conn:
         payload["character_features"] = features

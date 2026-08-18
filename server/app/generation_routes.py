@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from typing import cast
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
 from app.auth import AuthenticatedUser, Database
 from app.generation import (
@@ -12,6 +12,7 @@ from app.generation import (
     ConfirmNotChargedRequest,
     FakeH3Provider,
     GenerationBatchListPage,
+    GenerationBatchRenameRequest,
     GenerationBatchRequest,
     GenerationRuntimeLimits,
     GenerationTaskRetryRequest,
@@ -40,18 +41,27 @@ from app.generation import (
     reconcile_generation_task,
     regenerate_generation_batch,
     regenerate_generation_task,
+    rename_generation_batch,
     retry_generation_task,
     revise_prompt_version,
     version_result,
     version_state,
 )
+from app.media import storage_key_from_uri
 from app.media_routes import get_media_storage
-from app.permissions import require_not_auditor, require_project_access, require_role
+from app.permissions import (
+    require_not_auditor,
+    require_project_access,
+    require_role,
+    write_audit,
+)
+from app.rbac_routes import storage_for_asset
 from app.script_rewrite import (
     ScriptRewriteRequest,
     ScriptRewriteResult,
     rewrite_script_with_deepseek,
 )
+from app.storage import StorageBackendUnavailable
 
 router = APIRouter(prefix="/api", tags=["generation"])
 
@@ -244,6 +254,123 @@ def read_generation_batch(
     actor: AuthenticatedUser,
 ) -> BatchResult:
     return get_generation_batch(conn, batch_id=batch_id, actor=actor)
+
+
+@router.patch("/generation-batches/{batch_id}/name", response_model=BatchResult)
+def rename_generation_batch_record(
+    batch_id: str,
+    request: GenerationBatchRenameRequest,
+    conn: Database,
+    actor: AuthenticatedUser,
+) -> BatchResult:
+    return rename_generation_batch(
+        conn,
+        actor=actor,
+        batch_id=batch_id,
+        display_name=request.display_name,
+    )
+
+
+@router.delete(
+    "/generation-batches/{batch_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_generation_batch_record(
+    batch_id: str,
+    conn: Database,
+    actor: AuthenticatedUser,
+) -> Response:
+    batch = conn.execute(
+        "SELECT id, project_id, created_by_user_id FROM generation_batches WHERE id = ?",
+        (batch_id,),
+    ).fetchone()
+    if batch is None:
+        raise HTTPException(status_code=404, detail={"code": "BATCH_NOT_FOUND"})
+    if actor.role != "admin" and str(batch["created_by_user_id"]) != actor.id:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "GENERATION_BATCH_FORBIDDEN",
+                "message": "只有批次创建者或管理员可以删除批次。",
+            },
+        )
+
+    # 付费 provider 调用仍在途时禁止删除（与项目删除同一约束），否则
+    # 任务的云端回写会丢失，费用对账失去依据。
+    has_active_tasks = conn.execute(
+        """
+        SELECT 1
+        FROM generation_tasks
+        WHERE batch_id = ?
+          AND status IN ('PENDING', 'SUBMITTING', 'QUEUED', 'RUNNING', 'ARCHIVING')
+        LIMIT 1
+        """,
+        (batch_id,),
+    ).fetchone()
+    if has_active_tasks:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "BATCH_DELETE_HAS_ACTIVE_TASKS",
+                "message": "批次存在进行中的生成任务，请等待任务结束或失败后再删除。",
+            },
+        )
+
+    result_assets = conn.execute(
+        """
+        SELECT assets.id, assets.storage_uri
+        FROM assets
+        JOIN generation_tasks ON generation_tasks.result_asset_id = assets.id
+        WHERE generation_tasks.batch_id = ?
+        """,
+        (batch_id,),
+    ).fetchall()
+    task_count = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM generation_tasks WHERE batch_id = ?",
+            (batch_id,),
+        ).fetchone()[0]
+    )
+
+    # 尽力清理云端产物：后端不可用（如云凭证已移除）不阻塞删除，失败
+    # 数进审计日志；审计日志本身始终保留，付费记录仍可对账。
+    storage_cleanup_failed_count = 0
+    for asset in result_assets:
+        try:
+            storage = storage_for_asset(conn, str(asset["storage_uri"]))
+            storage.delete_object(
+                storage_key_from_uri(str(asset["storage_uri"])), actor_id=actor.id
+            )
+        except (HTTPException, StorageBackendUnavailable, OSError, ValueError):
+            storage_cleanup_failed_count += 1
+
+    with conn:
+        # 结果资产行必须先于批次删除（任务级联删除后子查询会失效）。
+        conn.execute(
+            """
+            DELETE FROM assets
+            WHERE id IN (
+                SELECT result_asset_id FROM generation_tasks
+                WHERE batch_id = ? AND result_asset_id IS NOT NULL
+            )
+            """,
+            (batch_id,),
+        )
+        conn.execute("DELETE FROM generation_batches WHERE id = ?", (batch_id,))
+    write_audit(
+        conn,
+        actor=actor,
+        action="generation_batch.delete",
+        entity_type="generation_batch",
+        entity_id=batch_id,
+        metadata={
+            "project_id": str(batch["project_id"]),
+            "deleted_task_count": task_count,
+            "deleted_asset_count": len(result_assets),
+            "storage_cleanup_failed_count": storage_cleanup_failed_count,
+        },
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post(

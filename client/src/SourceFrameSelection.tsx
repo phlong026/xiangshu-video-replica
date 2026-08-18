@@ -19,6 +19,7 @@ export function SourceFrameSelection({
   projectId,
   readOnly = false,
   referenceAssetId,
+  simplified = false,
 }: {
   featureSuggestion?: SourceFrameCharacterFeatures | null;
   onBusyChange?: (isBusy: boolean) => void;
@@ -26,6 +27,9 @@ export function SourceFrameSelection({
   projectId: string;
   readOnly?: boolean;
   referenceAssetId: string | null;
+  // 详情页简化模式：隐藏人物替换特征表单（特征走默认值或已确认版本
+  // 回填值，确认后直接替换），并精简说明文案。
+  simplified?: boolean;
 }) {
   const [candidates, setCandidates] = useState<SourceFrameCandidate[]>([]);
   const [previewUrls, setPreviewUrls] = useState<Record<string, string>>({});
@@ -379,94 +383,95 @@ export function SourceFrameSelection({
     >
       <div>
         <h3 id="source-frame-title">候选源画面</h3>
-        <p>画质分仅用于排序，以人物可见性为准。</p>
+        {!simplified ? <p>画质分仅用于排序，以人物可见性为准。</p> : null}
       </div>
-      <fieldset className="source-frame-features">
-        <legend>人物替换特征（需人工确认）</legend>
-        <label>
-          人物朝向
-          <select
-            aria-label="人物朝向"
-            disabled={readOnly || isSubmitting}
-            onChange={(event) => {
-              setOrientation(event.target.value);
-              invalidateConfirmation();
-            }}
-            value={orientation}
-          >
-            <option value="">请选择</option>
-            <option value="FRONT">正面</option>
-            <option value="LEFT_45">左 45°</option>
-            <option value="RIGHT_45">右 45°</option>
-            <option value="LEFT_SIDE">左侧面</option>
-            <option value="RIGHT_SIDE">右侧面</option>
-          </select>
-        </label>
-        <label>
-          人物景别
-          <select
-            aria-label="人物景别"
-            disabled={readOnly || isSubmitting}
-            onChange={(event) => {
-              setShotSize(event.target.value);
-              invalidateConfirmation();
-            }}
-            value={shotSize}
-          >
-            <option value="">请选择</option>
-            <option value="CLOSE_UP">近景</option>
-            <option value="HALF_BODY">半身</option>
-            <option value="FULL_BODY">全身</option>
-          </select>
-        </label>
-        <label>
-          面部可见性
-          <select
-            aria-label="面部可见性"
-            disabled={readOnly || isSubmitting}
-            onChange={(event) => {
-              setFaceVisibility(event.target.value);
-              invalidateConfirmation();
-            }}
-            value={faceVisibility}
-          >
-            <option value="">请选择</option>
-            <option value="VISIBLE">清晰可见</option>
-            <option value="HIDDEN">不可见或遮挡</option>
-          </select>
-        </label>
-        <label>
-          身体完整度
-          <select
-            aria-label="身体完整度"
-            disabled={readOnly || isSubmitting}
-            onChange={(event) => {
-              setBodyCompleteness(event.target.value);
-              invalidateConfirmation();
-            }}
-            value={bodyCompleteness}
-          >
-            <option value="">请选择</option>
-            <option value="FACE_ONLY">仅面部</option>
-            <option value="UPPER_BODY">上半身</option>
-            <option value="FULL_BODY">全身</option>
-            <option value="PARTIAL">局部可见</option>
-          </select>
-        </label>
-      </fieldset>
+      {!simplified ? (
+        <fieldset className="source-frame-features">
+          <legend>人物替换特征（需人工确认）</legend>
+          <label>
+            人物朝向
+            <select
+              aria-label="人物朝向"
+              disabled={readOnly || isSubmitting}
+              onChange={(event) => {
+                setOrientation(event.target.value);
+                invalidateConfirmation();
+              }}
+              value={orientation}
+            >
+              <option value="">请选择</option>
+              <option value="FRONT">正面</option>
+              <option value="LEFT_45">左 45°</option>
+              <option value="RIGHT_45">右 45°</option>
+              <option value="LEFT_SIDE">左侧面</option>
+              <option value="RIGHT_SIDE">右侧面</option>
+            </select>
+          </label>
+          <label>
+            人物景别
+            <select
+              aria-label="人物景别"
+              disabled={readOnly || isSubmitting}
+              onChange={(event) => {
+                setShotSize(event.target.value);
+                invalidateConfirmation();
+              }}
+              value={shotSize}
+            >
+              <option value="">请选择</option>
+              <option value="CLOSE_UP">近景</option>
+              <option value="HALF_BODY">半身</option>
+              <option value="FULL_BODY">全身</option>
+            </select>
+          </label>
+          <label>
+            面部可见性
+            <select
+              aria-label="面部可见性"
+              disabled={readOnly || isSubmitting}
+              onChange={(event) => {
+                setFaceVisibility(event.target.value);
+                invalidateConfirmation();
+              }}
+              value={faceVisibility}
+            >
+              <option value="">请选择</option>
+              <option value="VISIBLE">清晰可见</option>
+              <option value="HIDDEN">不可见或遮挡</option>
+            </select>
+          </label>
+          <label>
+            身体完整度
+            <select
+              aria-label="身体完整度"
+              disabled={readOnly || isSubmitting}
+              onChange={(event) => {
+                setBodyCompleteness(event.target.value);
+                invalidateConfirmation();
+              }}
+              value={bodyCompleteness}
+            >
+              <option value="">请选择</option>
+              <option value="FACE_ONLY">仅面部</option>
+              <option value="UPPER_BODY">上半身</option>
+              <option value="FULL_BODY">全身</option>
+              <option value="PARTIAL">局部可见</option>
+            </select>
+          </label>
+        </fieldset>
+      ) : null}
       <div className="source-frame-toolbar">
         <label className="source-frame-timestamps">
           重新取帧时间点（秒）
           <input
-            aria-describedby="source-frame-time-hint"
             aria-label="重新取帧时间点（秒）"
             disabled={readOnly || isSubmitting}
             onChange={(event) => setTimestampsText(event.target.value)}
             value={timestampsText}
           />
-          <small id="source-frame-time-hint">
-            支持 1–3 个首 3 秒内的时间点，以逗号分隔。
-          </small>
+          {!simplified ? (
+            <small>支持 1–3 个首 3 秒内的时间点，以逗号分隔。</small>
+          ) : null}
         </label>
         <button
           className="secondary-button"
@@ -490,7 +495,9 @@ export function SourceFrameSelection({
         <legend>
           {readOnly
             ? "候选记录（素材预览需要下载权限）"
-            : "选择一张用于后续人物置换和首帧生成"}
+            : simplified
+              ? "选择一张"
+              : "选择一张用于后续人物置换和首帧生成"}
         </legend>
         {candidates.map((candidate, index) => (
           <label

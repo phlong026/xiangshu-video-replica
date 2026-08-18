@@ -27,6 +27,7 @@ from app.generation import (
     MetasoH3Provider,
     SubmissionUncertain,
     build_h3_request,
+    compile_prompt_text,
     generation_task_operation_hash,
     h3_provider_for_task,
     mark_expired_active_leases_needing_attention,
@@ -183,6 +184,14 @@ def seed_data(conn: sqlite3.Connection) -> None:
                             "scene": "室内",
                             "spoken_text": "原始第一句",
                             "transition": "硬切",
+                            "motion": {
+                                "subject_motion_state": "GESTURING_ONLY",
+                                "subject_direction": "in_place",
+                                "subject_displacement": "无位移",
+                                "hand_action": "双手做自然讲解手势",
+                                "camera_motion": "STATIC",
+                                "relative_motion": "固定机位，人物站位不变",
+                            },
                         },
                         {
                             "shot_id": "S02",
@@ -196,6 +205,14 @@ def seed_data(conn: sqlite3.Connection) -> None:
                             "scene": "室内",
                             "spoken_text": "原始第二句",
                             "transition": "硬切",
+                            "motion": {
+                                "subject_motion_state": "GESTURING_ONLY",
+                                "subject_direction": "in_place",
+                                "subject_displacement": "无位移",
+                                "hand_action": "双手做自然讲解手势",
+                                "camera_motion": "PUSH_IN",
+                                "relative_motion": "镜头缓慢推近，人物站位不变",
+                            },
                         },
                     ],
                 },
@@ -319,7 +336,7 @@ def test_metaso_h3_provider_creates_polls_filters_and_downloads_result(
                 "role": "first_frame",
             },
         ],
-        "resolution": "768",
+        "resolution": "768P",
         "duration": 5,
         "ratio": "adaptive",
     }
@@ -1596,7 +1613,7 @@ def test_prompt_revision_freezes_sources_and_batch_reports_staleness(
     assert compiled.status_code == 200
     compiled_payload = compiled.json()["payload"]
     assert compiled_payload["status"] == "SAVED"
-    assert compiled_payload["template_version"] == "h3.prompt.v2"
+    assert compiled_payload["template_version"] == "h3.prompt.v3"
     assert len(compiled_payload["template_hash"]) == 64
     assert compiled_payload["source_analysis_version_id"] is None
     assert compiled_payload["script_version_id"] == script["id"]
@@ -1745,7 +1762,7 @@ def test_prompt_compiler_rescales_shot_timeline_to_output_duration(
 
     assert compiled.status_code == 200
     payload = compiled.json()["payload"]
-    assert payload["template_version"] == "h3.prompt.v2"
+    assert payload["template_version"] == "h3.prompt.v3"
     assert payload["source_duration_seconds"] == 10
     assert payload["timeline_scale_factor"] == 0.4
     assert "生成一条 4 秒" in payload["prompt_text"]
@@ -1754,10 +1771,89 @@ def test_prompt_compiler_rescales_shot_timeline_to_output_duration(
     assert "[5.0-10.0s]" not in payload["prompt_text"]
 
 
+def test_compile_prompt_text_renders_structured_motion_as_movement_instructions() -> None:
+    """WALKING 镜头必须编译出正向运动指令，不能被“保持连续”稀释掉。"""
+    prompt_text = compile_prompt_text(
+        script_payload={"full_text": "边走边说。", "shot_mappings": []},
+        shot_payload={
+            "shots": [
+                {
+                    "shot_id": "S01",
+                    "start_time": 0,
+                    "end_time": 5,
+                    "shot_type": "中景",
+                    "composition": "人物居中",
+                    "camera_motion": "手持跟拍",
+                    "subject": "主讲人",
+                    "action": "边向镜头走近边口播",
+                    "scene": "工地",
+                    "spoken_text": "边走边说。",
+                    "transition": "硬切",
+                    "motion": {
+                        "subject_motion_state": "WALKING",
+                        "subject_direction": "toward_camera",
+                        "subject_displacement": "向镜头走近两三步",
+                        "hand_action": "双臂随步态交替自然摆动",
+                        "camera_motion": "HANDHELD_TRACKING",
+                        "relative_motion": "人物逐渐靠近镜头，画面占比增大",
+                    },
+                }
+            ]
+        },
+        source_duration_seconds=5,
+        duration_seconds=5,
+        resolution="768P",
+    )
+
+    assert "主体：主讲人" in prompt_text
+    assert "人物动作：边向镜头走近边口播" in prompt_text
+    assert "人物持续行走" in prompt_text
+    assert "不得僵立原地" in prompt_text
+    assert "向镜头方向" in prompt_text
+    assert "位移：向镜头走近两三步" in prompt_text
+    assert "手部：双臂随步态交替自然摆动" in prompt_text
+    assert "相对运动：人物逐渐靠近镜头，画面占比增大" in prompt_text
+    # motion.camera_motion 枚举优先于自由文本“手持跟拍”。
+    assert "手持平稳跟拍" in prompt_text
+    assert "人物严格按各镜头的动作与运镜描述真实运动" in prompt_text
+
+
+def test_compile_prompt_text_falls_back_to_action_text_for_legacy_shots() -> None:
+    """旧版拆解结果没有 motion：回退到 action 文本，运镜用自由文本。"""
+    prompt_text = compile_prompt_text(
+        script_payload={"full_text": "你好。", "shot_mappings": []},
+        shot_payload={
+            "shots": [
+                {
+                    "shot_id": "S01",
+                    "start_time": 0,
+                    "end_time": 5,
+                    "shot_type": "近景",
+                    "composition": "人物居中",
+                    "camera_motion": "固定",
+                    "subject": "主讲人",
+                    "action": "看镜头口播",
+                    "scene": "室内",
+                    "spoken_text": "你好。",
+                    "transition": "硬切",
+                }
+            ]
+        },
+        source_duration_seconds=5,
+        duration_seconds=5,
+        resolution="768P",
+    )
+
+    assert "主体：主讲人" in prompt_text
+    assert "人物动作：看镜头口播" in prompt_text
+    # 自由文本运镜原样保留，不误用枚举标签。
+    assert "固定；主体：主讲人" in prompt_text
+
+
 @pytest.mark.parametrize(
     ("template_attribute", "next_value"),
     [
-        ("H3_PROMPT_TEMPLATE_VERSION", "h3.prompt.v3"),
+        ("H3_PROMPT_TEMPLATE_VERSION", "h3.prompt.v4"),
         ("H3_PROMPT_TEMPLATE_HASH", "new-template-hash"),
     ],
 )
@@ -1897,6 +1993,80 @@ def test_prompt_preview_falls_back_to_the_original_script_from_the_analysis(
     assert "生成一条 4 秒" in body["prompt_text"]
     assert "原始第一句" in body["prompt_text"]
     assert "原始第二句" in body["prompt_text"]
+
+
+def test_prompt_preview_compiles_from_the_wrapped_analysis_payload(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    # 项目页新上传自动拆解的项目只有 analysis 版本（拆解落库为
+    # {"analysis": {...}} 包装结构、无 shot_card），行内提示词预览必须能
+    # 直接解包编译，而不是误报 SHOT_CARD_TIMELINE_INVALID。
+    wrapped_analysis = {
+        "schema_version": 1,
+        "analysis": {
+            "duration_seconds": 12,
+            "original_script": "包装原稿第一句。包装原稿第二句。",
+            "shots": [
+                {
+                    "shot_id": "S01",
+                    "start_time": 0,
+                    "end_time": 6,
+                    "shot_type": "近景",
+                    "composition": "人物居中",
+                    "camera_motion": "固定",
+                    "subject": "主讲人",
+                    "action": "看镜头口播",
+                    "scene": "室内",
+                    "spoken_text": "包装原稿第一句。",
+                    "transition": "硬切",
+                },
+                {
+                    "shot_id": "S02",
+                    "start_time": 6,
+                    "end_time": 12,
+                    "shot_type": "中景",
+                    "composition": "三分法",
+                    "camera_motion": "固定",
+                    "subject": "主讲人",
+                    "action": "继续讲解",
+                    "scene": "室内",
+                    "spoken_text": "包装原稿第二句。",
+                    "transition": "硬切",
+                },
+            ],
+        },
+        "source_asset": {"id": "reference_owned", "storage_uri": "fake://reference.mp4"},
+        "provider_response_ref": "resp_wrapped",
+    }
+    with connect_database(db_path) as conn:
+        conn.execute(
+            "DELETE FROM versions WHERE project_id = ? AND kind IN (?, ?)",
+            ("project_owned", "shot_card", "script"),
+        )
+        conn.execute(
+            """
+            INSERT INTO versions (
+                id, project_id, asset_id, kind, version_number, payload_json, created_by_user_id
+            ) VALUES ('analysis_wrapped', 'project_owned', NULL, 'analysis', 3, ?, 'employee_1')
+            """,
+            (json.dumps(wrapped_analysis, ensure_ascii=True, sort_keys=True),),
+        )
+        conn.commit()
+
+    response = client.post(
+        "/api/projects/project_owned/prompts/preview",
+        headers=auth_headers("employee_1"),
+        json={},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["script_source"] == "analysis_original"
+    assert body["shot_card_version_id"] is None
+    assert body["output_duration_seconds"] == 12
+    assert "包装原稿第一句" in body["prompt_text"]
+    assert "包装原稿第二句" in body["prompt_text"]
 
 
 def test_prompt_preview_requires_project_shots(client: TestClient) -> None:
@@ -4285,3 +4455,179 @@ def test_reconcile_route_guards_and_rejects_non_uncertain_task(
     )
     assert normal.status_code == 409
     assert normal.json()["detail"]["code"] == "TASK_NOT_UNCERTAIN"
+
+
+def _insert_result_asset(
+    conn: sqlite3.Connection,
+    asset_id: str,
+    project_id: str = "project_owned",
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO assets (
+            id, project_id, kind, storage_uri, sha256, size_bytes,
+            content_type, created_by_user_id
+        )
+        VALUES (?, ?, 'video', ?, ?, 12, 'video/mp4', 'employee_1')
+        """,
+        (asset_id, project_id, f"fake://generation-results/{asset_id}.mp4", f"sha-{asset_id}"),
+    )
+
+
+def test_generation_batch_rename_by_creator_or_admin_only(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    with connect_database(db_path) as conn:
+        insert_generation_history(conn, batch_id="batch-rename")
+        conn.commit()
+
+    renamed = client.patch(
+        "/api/generation-batches/batch-rename/name",
+        headers=auth_headers("employee_1"),
+        json={"display_name": "乡墅爆款第 2 期"},
+    )
+    other_creator = client.patch(
+        "/api/generation-batches/batch-rename/name",
+        headers=auth_headers("employee_2"),
+        json={"display_name": "不应生效"},
+    )
+    auditor = client.patch(
+        "/api/generation-batches/batch-rename/name",
+        headers=auth_headers("auditor_1"),
+        json={"display_name": "不应生效"},
+    )
+    admin = client.patch(
+        "/api/generation-batches/batch-rename/name",
+        headers=auth_headers("admin_1"),
+        json={"display_name": "管理员改名"},
+    )
+    blank = client.patch(
+        "/api/generation-batches/batch-rename/name",
+        headers=auth_headers("employee_1"),
+        json={"display_name": "   "},
+    )
+    overlong = client.patch(
+        "/api/generation-batches/batch-rename/name",
+        headers=auth_headers("employee_1"),
+        json={"display_name": "超" * 121},
+    )
+
+    assert renamed.status_code == 200
+    assert renamed.json()["display_name"] == "乡墅爆款第 2 期"
+    assert other_creator.status_code == 403
+    assert other_creator.json()["detail"]["code"] == "GENERATION_BATCH_FORBIDDEN"
+    assert auditor.status_code == 403
+    assert admin.status_code == 200
+    assert admin.json()["display_name"] == "管理员改名"
+    assert blank.status_code == 422
+    assert blank.json()["detail"]["code"] == "GENERATION_BATCH_NAME_REQUIRED"
+    assert overlong.status_code == 422
+
+    detail = client.get("/api/generation-batches/batch-rename", headers=auth_headers("employee_1"))
+    listed = client.get("/api/generation-batches", headers=auth_headers("employee_1"))
+    with connect_database(db_path) as conn:
+        audits = conn.execute(
+            """
+            SELECT metadata_json FROM audit_logs
+            WHERE action = 'generation_batch.rename'
+            ORDER BY created_at, id
+            """
+        ).fetchall()
+
+    assert detail.status_code == 200
+    assert detail.json()["display_name"] == "管理员改名"
+    assert listed.status_code == 200
+    assert listed.json()["items"][0]["display_name"] == "管理员改名"
+    # 同秒写入的两条审计按 uuid 主键排序顺序不稳定，断言用集合比较。
+    recorded = [json.loads(str(row["metadata_json"])) for row in audits]
+    assert sorted(recorded, key=lambda item: str(item["from_name"])) == [
+        {"from_name": None, "to_name": "乡墅爆款第 2 期"},
+        {"from_name": "乡墅爆款第 2 期", "to_name": "管理员改名"},
+    ]
+
+
+def test_generation_batch_delete_removes_tasks_and_result_assets(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    with connect_database(db_path) as conn:
+        _insert_result_asset(conn, "asset-del")
+        insert_generation_history(
+            conn,
+            batch_id="batch-del",
+            task_status="FAILED",
+            result_asset_id="asset-del",
+        )
+        conn.commit()
+
+    response = client.delete(
+        "/api/generation-batches/batch-del", headers=auth_headers("employee_1")
+    )
+
+    assert response.status_code == 204
+    with connect_database(db_path) as conn:
+        batch = conn.execute(
+            "SELECT id FROM generation_batches WHERE id = ?", ("batch-del",)
+        ).fetchone()
+        task = conn.execute(
+            "SELECT id FROM generation_tasks WHERE batch_id = ?", ("batch-del",)
+        ).fetchone()
+        asset = conn.execute("SELECT id FROM assets WHERE id = ?", ("asset-del",)).fetchone()
+        audit = conn.execute(
+            "SELECT metadata_json FROM audit_logs WHERE action = 'generation_batch.delete'"
+        ).fetchone()
+    assert batch is None
+    assert task is None
+    assert asset is None
+    assert audit is not None
+    metadata = json.loads(str(audit["metadata_json"]))
+    assert metadata == {
+        "project_id": "project_owned",
+        "deleted_task_count": 1,
+        "deleted_asset_count": 1,
+        # fake:// 存储后端不可用，尽力清理失败但删除不被阻塞。
+        "storage_cleanup_failed_count": 1,
+    }
+
+
+def test_generation_batch_delete_blocked_while_tasks_active(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    with connect_database(db_path) as conn:
+        insert_generation_history(conn, batch_id="batch-active")
+        conn.commit()
+
+    response = client.delete(
+        "/api/generation-batches/batch-active", headers=auth_headers("employee_1")
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "BATCH_DELETE_HAS_ACTIVE_TASKS"
+
+
+def test_generation_batch_delete_forbidden_for_non_creator_and_auditor(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    with connect_database(db_path) as conn:
+        insert_generation_history(
+            conn,
+            batch_id="batch-guard",
+            task_status="FAILED",
+        )
+        conn.commit()
+
+    other = client.delete("/api/generation-batches/batch-guard", headers=auth_headers("employee_2"))
+    auditor = client.delete(
+        "/api/generation-batches/batch-guard", headers=auth_headers("auditor_1")
+    )
+    missing = client.delete("/api/generation-batches/not-exist", headers=auth_headers("employee_1"))
+    admin = client.delete("/api/generation-batches/batch-guard", headers=auth_headers("admin_1"))
+
+    assert other.status_code == 403
+    assert other.json()["detail"]["code"] == "GENERATION_BATCH_FORBIDDEN"
+    assert auditor.status_code == 403
+    assert missing.status_code == 404
+    assert admin.status_code == 204

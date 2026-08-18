@@ -9,6 +9,7 @@ import {
   SESSION_EXPIRED_EVENT,
 } from "./api";
 import { CharacterLibrary } from "./CharacterLibrary";
+import { ProjectDetailFlow } from "./ProjectDetailFlow";
 import { ProjectsPage } from "./ProjectsPage";
 import { SettingsPanel } from "./SettingsPanel";
 import { TaskRecordsPanel } from "./TaskRecordsPanel";
@@ -30,6 +31,8 @@ export function App() {
   const [pendingBatchHandoff, setPendingBatchHandoff] =
     useState<GenerationBatch | null>(null);
   const [activeAnalysisProject, setActiveAnalysisProject] =
+    useState<Project | null>(null);
+  const [activeDetailProject, setActiveDetailProject] =
     useState<Project | null>(null);
   const [isAnalysisWorkspaceBusy, setIsAnalysisWorkspaceBusy] = useState(false);
   const activeAnalysisBusyRef = useRef(false);
@@ -87,6 +90,7 @@ export function App() {
       activeAnalysisBusyRef.current = false;
       setIsAnalysisWorkspaceBusy(false);
       setActiveAnalysisProject(null);
+      setActiveDetailProject(null);
       setPendingBatchHandoff(null);
       setSessionMessage("登录已失效，请重新进入工作台。");
       setLoginError("");
@@ -114,6 +118,7 @@ export function App() {
       activeAnalysisBusyRef.current = false;
       setIsAnalysisWorkspaceBusy(false);
       setActiveAnalysisProject(null);
+      setActiveDetailProject(null);
       setPage(nextPage);
     }
     window.addEventListener("hashchange", syncDeepLink);
@@ -189,11 +194,11 @@ export function App() {
   const workspacePage = page as WorkspacePage;
   const currentRole = currentUser.role;
   const analysisWorkspaceSession = activeAnalysisSessionRef.current;
-  const workspaceTitle =
-    activeAnalysisProject?.name ?? pageTitle(workspacePage);
-  const breadcrumb = activeAnalysisProject
-    ? `项目 / ${activeAnalysisProject.name}`
-    : `工作台 / ${pageTitle(workspacePage)}`;
+  // 嵌套上下文（拆解工作区 / 生成流程详情）：页头显示"项目 / 项目名"，
+  // 标题即项目名；一级页面只有 H1 + 副标题，不再渲染面包屑（侧边栏
+  // 选中态已回答"我在哪"，避免标题三层堆叠）。
+  const nestedProject = activeAnalysisProject ?? activeDetailProject;
+  const workspaceTitle = nestedProject?.name ?? pageTitle(workspacePage);
 
   function navigateTo(nextPage: WorkspacePage) {
     if (!workspacePageAllowed(nextPage, currentRole)) {
@@ -211,6 +216,7 @@ export function App() {
     activeAnalysisBusyRef.current = false;
     setIsAnalysisWorkspaceBusy(false);
     setActiveAnalysisProject(null);
+    setActiveDetailProject(null);
     setPage(nextPage);
   }
 
@@ -220,6 +226,7 @@ export function App() {
     activeAnalysisBusyRef.current = false;
     setIsAnalysisWorkspaceBusy(false);
     setPage("projects");
+    setActiveDetailProject(null);
     setActiveAnalysisProject(project);
   }
 
@@ -228,6 +235,25 @@ export function App() {
     activeAnalysisBusyRef.current = false;
     setIsAnalysisWorkspaceBusy(false);
     setActiveAnalysisProject(null);
+  }
+
+  // 生成流程详情页与工作区共用同一 busy 拦截链路：流程进行中禁止
+  // 导航切换，批次创建后同样交接给任务记录页。
+  function openDetail(project: Project) {
+    window.history.pushState(null, "", "#projects");
+    activeAnalysisSessionRef.current += 1;
+    activeAnalysisBusyRef.current = false;
+    setIsAnalysisWorkspaceBusy(false);
+    setPage("projects");
+    setActiveAnalysisProject(null);
+    setActiveDetailProject(project);
+  }
+
+  function closeDetail() {
+    activeAnalysisSessionRef.current += 1;
+    activeAnalysisBusyRef.current = false;
+    setIsAnalysisWorkspaceBusy(false);
+    setActiveDetailProject(null);
   }
 
   function openCreatedBatch(nextBatch: GenerationBatch) {
@@ -253,12 +279,19 @@ export function App() {
       />
       <section className="workspace-stage">
         <header className="workspace-header">
-          <div>
-            <p className="workspace-breadcrumb">{breadcrumb}</p>
-            <div className="workspace-title-row">
+          {nestedProject ? (
+            <p className="workspace-breadcrumb">{`项目 / ${nestedProject.name}`}</p>
+          ) : null}
+          <div className="workspace-title-row">
+            <div className="workspace-title-group">
               <h1>{workspaceTitle}</h1>
-              <ServiceBadge state={serviceState} />
+              {nestedProject ? null : (
+                <p className="workspace-subtitle">
+                  {pageSubtitle(workspacePage)}
+                </p>
+              )}
             </div>
+            <ServiceBadge state={serviceState} />
           </div>
         </header>
         <div className="workspace-body">
@@ -269,7 +302,23 @@ export function App() {
               userRole={currentUser.role}
             />
           ) : null}
-          {page === "projects" && activeAnalysisProject ? (
+          {page === "projects" && activeDetailProject ? (
+            <ProjectDetailFlow
+              onBack={closeDetail}
+              onBatchCreated={openCreatedBatch}
+              onBusyChange={(busy) =>
+                handleAnalysisWorkspaceBusyChange(
+                  analysisWorkspaceSession,
+                  busy,
+                )
+              }
+              project={activeDetailProject}
+              readOnly={!canWrite}
+            />
+          ) : null}
+          {page === "projects" &&
+          !activeDetailProject &&
+          activeAnalysisProject ? (
             <AnalysisWorkspace
               currentUserId={currentUser.id}
               onClose={closeAnalysis}
@@ -285,11 +334,13 @@ export function App() {
               readOnly={!canWrite}
             />
           ) : null}
-          {page === "projects" && !activeAnalysisProject ? (
+          {page === "projects" &&
+          !activeDetailProject &&
+          !activeAnalysisProject ? (
             <ProjectsPage
               canWrite={canWrite}
-              onBatchCreated={openCreatedBatch}
               onOpenAnalysis={openAnalysis}
+              onOpenDetail={openDetail}
             />
           ) : null}
           {page === "tasks" ? (
@@ -461,6 +512,16 @@ function pageTitle(page: WorkspacePage): string {
     projects: "项目",
     settings: "设置",
     tasks: "任务记录",
+  }[page];
+}
+
+// 一级页面的引导副标题：随页头一次性说明该页做什么，页面内部不再重复标题。
+function pageSubtitle(page: WorkspacePage): string {
+  return {
+    characters: "上传一张图片一键生成五视角拼合图，供项目选用。",
+    projects: "上传参考视频，拆解提示词，配首帧生成新视频。",
+    settings: "管理各服务连接凭据与运行参数。",
+    tasks: "查看生成批次，播放结果并处理异常任务。",
   }[page];
 }
 

@@ -52,6 +52,17 @@ class SourceFrameFeatures:
     body_completeness: BodyCompleteness
 
 
+# Auto-matching fallback: the project-detail flow never asks the user to label
+# the source frame, so a selection without stored features resolves to these
+# conservative defaults (front-facing half-body frame with the face visible).
+DEFAULT_SOURCE_FRAME_FEATURES = SourceFrameFeatures(
+    orientation="FRONT",
+    shot_size="HALF_BODY",
+    face_visible=True,
+    body_completeness="UPPER_BODY",
+)
+
+
 @dataclass(frozen=True)
 class PublishedReferenceAsset:
     character_asset_id: str
@@ -410,9 +421,17 @@ def current_source_selection(
 
 
 def parse_source_frame_features(selection: dict[str, object]) -> SourceFrameFeatures:
+    """Parse the confirmed source frame's character features.
+
+    Missing or partially invalid features fall back to
+    ``DEFAULT_SOURCE_FRAME_FEATURES`` instead of blocking auto-matching: the
+    project-detail flow selects the frame automatically and never collects a
+    feature form, while legacy selections predating the form simply keep
+    working with the conservative defaults.
+    """
     raw = selection.get("character_features")
     if not isinstance(raw, dict):
-        raise source_features_required()
+        return DEFAULT_SOURCE_FRAME_FEATURES
     orientation = raw.get("orientation")
     shot_size = raw.get("shot_size")
     face_visible = raw.get("face_visible")
@@ -423,20 +442,12 @@ def parse_source_frame_features(selection: dict[str, object]) -> SourceFrameFeat
         or not isinstance(face_visible, bool)
         or body_completeness not in VALID_BODY_COMPLETENESS
     ):
-        raise source_features_required()
+        return DEFAULT_SOURCE_FRAME_FEATURES
     return SourceFrameFeatures(
         orientation=cast(SourceOrientation, orientation),
         shot_size=cast(SourceShotSize, shot_size),
         face_visible=face_visible,
         body_completeness=cast(BodyCompleteness, body_completeness),
-    )
-
-
-def source_features_required() -> HTTPException:
-    return reference_error(
-        409,
-        "SOURCE_FRAME_FEATURES_REQUIRED",
-        "源画面缺少人物朝向、景别和可见性特征，请重新确认。",
     )
 
 

@@ -19,9 +19,9 @@ import {
   regenerateGenerationBatch,
   regenerateGenerationTask,
   retryGenerationTask,
-  revokeGenerationResultPreviewUrl,
   type UserRole,
 } from "./api";
+import { VideoResultStage } from "./VideoResultStage";
 
 const BATCH_STORAGE_KEY = "generation.batchId";
 const POLL_INTERVAL_MS = 2_000;
@@ -41,6 +41,8 @@ type TaskRecordsPanelProps = {
   userRole: UserRole;
 };
 
+type TaskViewMode = "stage" | "ops";
+
 export function TaskRecordsPanel({
   handoffBatch,
   onHandoffConsumed,
@@ -55,6 +57,8 @@ export function TaskRecordsPanel({
   const [batch, setBatch] = useState<GenerationBatch | null>(handoffBatch);
   const [batchError, setBatchError] = useState("");
   const [isBatchLoading, setIsBatchLoading] = useState(false);
+  // 任务页双视角：舞台（客户视角，默认）与运维详情（对账/重试/账单确认）。
+  const [viewMode, setViewMode] = useState<TaskViewMode>("stage");
   const [retryDelaySeconds, setRetryDelaySeconds] = useState<number | null>(
     null,
   );
@@ -65,8 +69,8 @@ export function TaskRecordsPanel({
   const [historyError, setHistoryError] = useState("");
   const [isHistoryLoading, setIsHistoryLoading] = useState(false);
   const historyRequestRef = useRef(0);
+  // 在线播放：预签名 URL 由服务端管理过期，本地只缓存 task → url 映射。
   const [previewUrls, setPreviewUrls] = useState<Record<string, string>>({});
-  const previewUrlsRef = useRef<Record<string, string>>({});
   const isMountedRef = useRef(true);
   const [resultErrors, setResultErrors] = useState<Record<string, string>>({});
   const [activeResultAction, setActiveResultAction] = useState("");
@@ -82,11 +86,8 @@ export function TaskRecordsPanel({
   const taskOperationKeysRef = useRef<Record<string, string>>({});
   const canOperate = userRole !== "auditor";
 
+  // 切换/清空批次时只需丢弃本地 URL 缓存；切回后会重新自动签发。
   const releasePreviewUrls = useCallback(() => {
-    for (const url of Object.values(previewUrlsRef.current)) {
-      revokeGenerationResultPreviewUrl(url);
-    }
-    previewUrlsRef.current = {};
     setPreviewUrls({});
   }, []);
 
@@ -113,10 +114,6 @@ export function TaskRecordsPanel({
     isMountedRef.current = true;
     return () => {
       isMountedRef.current = false;
-      for (const url of Object.values(previewUrlsRef.current)) {
-        revokeGenerationResultPreviewUrl(url);
-      }
-      previewUrlsRef.current = {};
     };
   }, []);
 
@@ -412,19 +409,16 @@ export function TaskRecordsPanel({
     }
   }
 
-  async function handleRegenerateTask(task: GenerationTask) {
-    const reason = taskActionReasons[task.id]?.trim();
-    if (
-      !canOperate ||
-      !activeBatchId ||
-      !reason ||
-      !taskPaymentConfirmations[task.id]
-    ) {
+  // 付费再次生成（单任务）：舞台轻量确认卡与运维详情表单共用此路径，
+  // reason 由调用方 UI 组装（付费确认门控在各自按钮上）。
+  async function handleRegenerateTask(task: GenerationTask, reason: string) {
+    const trimmedReason = reason.trim();
+    if (!canOperate || !activeBatchId || !trimmedReason) {
       return;
     }
     const batchIdAtStart = activeBatchId;
     const estimatedCost = task.estimated_cost ?? null;
-    const actionKey = `${task.id}:paid-regenerate:${reason}:${estimatedCost ?? "unknown"}`;
+    const actionKey = `${task.id}:paid-regenerate:${trimmedReason}:${estimatedCost ?? "unknown"}`;
     const operationKey = operationIdempotencyKey(
       taskOperationKeysRef.current,
       actionKey,
@@ -436,7 +430,7 @@ export function TaskRecordsPanel({
         payment_confirmed: true,
         payment_confirmation_version: "V1",
         estimated_cost_snapshot: estimatedCost,
-        generation_reason: reason,
+        generation_reason: trimmedReason,
       });
       if (activeBatchIdRef.current !== batchIdAtStart) {
         return;
@@ -453,50 +447,49 @@ export function TaskRecordsPanel({
     }
   }
 
-  async function handlePreview(task: GenerationTask) {
-    if (!canOperate || !task.result_asset_id || !activeBatchId) {
-      return;
-    }
-    const batchIdAtStart = activeBatchId;
-    const actionKey = `${task.id}:preview`;
-    setActiveResultAction(actionKey);
-    setResultErrors((current) => ({ ...current, [task.id]: "" }));
-    try {
-      const previewUrl = await createGenerationResultPreviewUrl(
-        task.result_asset_id,
-      );
-      if (
-        !isMountedRef.current ||
-        activeBatchIdRef.current !== batchIdAtStart
-      ) {
-        revokeGenerationResultPreviewUrl(previewUrl);
+  // 在线播放：直接签发预签名 URL（无需 blob/revoke），供舞台自动加载
+  // 与运维详情手动加载共用。useCallback 保持引用稳定，避免舞台的自动
+  // 签发 effect 反复触发。
+  const handlePreview = useCallback(
+    async (task: GenerationTask) => {
+      if (!canOperate || !task.result_asset_id) {
         return;
       }
-      const previousUrl = previewUrlsRef.current[task.id];
-      if (previousUrl) {
-        revokeGenerationResultPreviewUrl(previousUrl);
-      }
-      const nextPreviewUrls = {
-        ...previewUrlsRef.current,
-        [task.id]: previewUrl,
-      };
-      previewUrlsRef.current = nextPreviewUrls;
-      setPreviewUrls(nextPreviewUrls);
-    } catch {
-      if (isMountedRef.current && activeBatchIdRef.current === batchIdAtStart) {
-        setResultErrors((current) => ({
-          ...current,
-          [task.id]: "预览链接获取失败，请重试。",
-        }));
-      }
-    } finally {
-      if (isMountedRef.current) {
-        setActiveResultAction((current) =>
-          current === actionKey ? "" : current,
+      const batchIdAtStart = activeBatchIdRef.current;
+      const actionKey = `${task.id}:preview`;
+      setActiveResultAction(actionKey);
+      setResultErrors((current) => ({ ...current, [task.id]: "" }));
+      try {
+        const previewUrl = await createGenerationResultPreviewUrl(
+          task.result_asset_id,
         );
+        if (
+          !isMountedRef.current ||
+          activeBatchIdRef.current !== batchIdAtStart
+        ) {
+          return;
+        }
+        setPreviewUrls((current) => ({ ...current, [task.id]: previewUrl }));
+      } catch {
+        if (
+          isMountedRef.current &&
+          activeBatchIdRef.current === batchIdAtStart
+        ) {
+          setResultErrors((current) => ({
+            ...current,
+            [task.id]: "预览链接获取失败，请重试。",
+          }));
+        }
+      } finally {
+        if (isMountedRef.current) {
+          setActiveResultAction((current) =>
+            current === actionKey ? "" : current,
+          );
+        }
       }
-    }
-  }
+    },
+    [canOperate],
+  );
 
   async function handleDownload(task: GenerationTask) {
     if (!canOperate || !task.result_asset_id) {
@@ -520,16 +513,7 @@ export function TaskRecordsPanel({
   }
 
   return (
-    <section className="task-records" aria-labelledby="task-records-title">
-      <div className="section-heading">
-        <div>
-          <h2 id="task-records-title">任务记录</h2>
-        </div>
-        {activeBatchId ? (
-          <span className="batch-id">{activeBatchId}</span>
-        ) : null}
-      </div>
-
+    <section className="task-records" aria-label="任务记录">
       <div className="task-records-layout">
         <aside className="batch-history-panel" aria-label="批次历史">
           <div className="batch-history-heading">
@@ -575,11 +559,11 @@ export function TaskRecordsPanel({
                       {formatStatus(item.status)}
                     </span>
                   </span>
-                  <span>{item.created_by_display_name}</span>
-                  <span>
-                    {item.progress.progress_percent}% · {item.quantity} 个任务
+                  <span className="batch-history-card__meta">
+                    {item.created_by_display_name} ·{" "}
+                    {item.progress.progress_percent}% · {item.quantity} 个任务 ·{" "}
+                    {formatTimestamp(item.created_at)}
                   </span>
-                  <span>{formatTimestamp(item.created_at)}</span>
                   {item.needs_attention_count ? (
                     <span className="attention-tag">
                       需处理 {item.needs_attention_count}
@@ -608,40 +592,92 @@ export function TaskRecordsPanel({
             retryDelaySeconds={retryDelaySeconds}
           />
           {batch ? (
-            <BatchPanel
-              activeResultAction={activeResultAction}
-              activeTaskAction={activeTaskAction}
-              batch={batch}
-              batchPaymentConfirmed={batchPaymentConfirmed}
-              batchRegenerationReason={batchRegenerationReason}
-              canOperate={canOperate}
-              onConfirmNotCharged={handleConfirmNotCharged}
-              onDownload={handleDownload}
-              onPreview={handlePreview}
-              onReconcile={handleReconcile}
-              onRegenerateBatch={handleRegenerateBatch}
-              onRegenerateTask={handleRegenerateTask}
-              onRetry={handleRetry}
-              onBatchPaymentConfirmationChange={setBatchPaymentConfirmed}
-              onBatchRegenerationReasonChange={setBatchRegenerationReason}
-              onTaskActionReasonChange={(taskId, reason) =>
-                setTaskActionReasons((current) => ({
-                  ...current,
-                  [taskId]: reason,
-                }))
-              }
-              onTaskPaymentConfirmationChange={(taskId, confirmed) =>
-                setTaskPaymentConfirmations((current) => ({
-                  ...current,
-                  [taskId]: confirmed,
-                }))
-              }
-              previewUrls={previewUrls}
-              resultErrors={resultErrors}
-              taskActionReasons={taskActionReasons}
-              taskPaymentConfirmations={taskPaymentConfirmations}
-              userRole={userRole}
-            />
+            <>
+              <section aria-label="任务视图切换" className="task-view-switch">
+                <div className="task-view-switch__tabs">
+                  <button
+                    aria-pressed={viewMode === "stage"}
+                    className={
+                      viewMode === "stage"
+                        ? "task-view-switch__button task-view-switch__button--active"
+                        : "task-view-switch__button"
+                    }
+                    onClick={() => setViewMode("stage")}
+                    type="button"
+                  >
+                    生成结果
+                  </button>
+                  <button
+                    aria-pressed={viewMode === "ops"}
+                    className={
+                      viewMode === "ops"
+                        ? "task-view-switch__button task-view-switch__button--active"
+                        : "task-view-switch__button"
+                    }
+                    onClick={() => setViewMode("ops")}
+                    type="button"
+                  >
+                    运维详情
+                  </button>
+                </div>
+                {activeBatchId ? (
+                  <span className="batch-id" title={activeBatchId}>
+                    {activeBatchId}
+                  </span>
+                ) : null}
+              </section>
+              {viewMode === "stage" ? (
+                <VideoResultStage
+                  activeResultAction={activeResultAction}
+                  activeTaskAction={activeTaskAction}
+                  batch={batch}
+                  canOperate={canOperate}
+                  onDownload={handleDownload}
+                  onOpenOpsDetail={() => setViewMode("ops")}
+                  onRegenerate={handleRegenerateTask}
+                  onRequestPreview={handlePreview}
+                  previewUrls={previewUrls}
+                  resultErrors={resultErrors}
+                />
+              ) : (
+                <BatchPanel
+                  activeResultAction={activeResultAction}
+                  activeTaskAction={activeTaskAction}
+                  batch={batch}
+                  batchPaymentConfirmed={batchPaymentConfirmed}
+                  batchRegenerationReason={batchRegenerationReason}
+                  canOperate={canOperate}
+                  onConfirmNotCharged={handleConfirmNotCharged}
+                  onDownload={handleDownload}
+                  onPreview={handlePreview}
+                  onReconcile={handleReconcile}
+                  onRegenerateBatch={handleRegenerateBatch}
+                  onRegenerateTask={(task) =>
+                    handleRegenerateTask(task, taskActionReasons[task.id] ?? "")
+                  }
+                  onRetry={handleRetry}
+                  onBatchPaymentConfirmationChange={setBatchPaymentConfirmed}
+                  onBatchRegenerationReasonChange={setBatchRegenerationReason}
+                  onTaskActionReasonChange={(taskId, reason) =>
+                    setTaskActionReasons((current) => ({
+                      ...current,
+                      [taskId]: reason,
+                    }))
+                  }
+                  onTaskPaymentConfirmationChange={(taskId, confirmed) =>
+                    setTaskPaymentConfirmations((current) => ({
+                      ...current,
+                      [taskId]: confirmed,
+                    }))
+                  }
+                  previewUrls={previewUrls}
+                  resultErrors={resultErrors}
+                  taskActionReasons={taskActionReasons}
+                  taskPaymentConfirmations={taskPaymentConfirmations}
+                  userRole={userRole}
+                />
+              )}
+            </>
           ) : (
             <EmptyBatchState hasHistory={batchHistory.length > 0} />
           )}
@@ -747,6 +783,14 @@ function BatchPanel({
     (historicalCounts.audio_quality_failed ?? 0) > 0;
   const batchActionBusy = Boolean(activeTaskAction);
   const batchReason = batchRegenerationReason.trim();
+  // 状态摘要只保留非零项：全零时说明批次尚未产生状态变化，不再铺满 8 个空格子。
+  const countItems = statusCountItems(counts).filter(([, value]) => value > 0);
+  // 异常与来源信息合并进“需要关注”面板，形成摘要之后的第二段，避免四条横幅平铺。
+  const hasAttentionItems =
+    Boolean(batch.source_batch_id) ||
+    hasHistoricalFailures ||
+    Boolean(batch.stale) ||
+    counts.needs_attention > 0;
   return (
     <div className="batch-panel">
       <div className="progress-header">
@@ -776,39 +820,49 @@ function BatchPanel({
         <span style={{ width: `${batch.progress.progress_percent}%` }} />
       </div>
       <div className="count-grid">
-        {statusCountItems(counts).map(([label, value]) => (
-          <span key={label}>
-            {label} {value}
-          </span>
-        ))}
+        {countItems.length > 0 ? (
+          countItems.map(([label, value]) => (
+            <span key={label}>
+              {label} {value}
+            </span>
+          ))
+        ) : (
+          <span className="count-grid__empty">暂无任务状态变化</span>
+        )}
       </div>
-      {batch.source_batch_id ? (
-        <div className="batch-lineage" role="status">
-          <strong>冻结输入重生成</strong>
-          <span>来源批次 {batch.source_batch_id}</span>
-          {batch.source_task_id ? (
-            <span>来源任务 {batch.source_task_id}</span>
+      {hasAttentionItems ? (
+        <section aria-label="需要关注" className="batch-attention-panel">
+          {batch.source_batch_id ? (
+            <div className="batch-lineage" role="status">
+              <strong>冻结输入重生成</strong>
+              <span>来源批次 {batch.source_batch_id}</span>
+              {batch.source_task_id ? (
+                <span>来源任务 {batch.source_task_id}</span>
+              ) : null}
+              {batch.generation_reason ? (
+                <span>{batch.generation_reason}</span>
+              ) : null}
+            </div>
           ) : null}
-          {batch.generation_reason ? (
-            <span>{batch.generation_reason}</span>
+          {hasHistoricalFailures ? (
+            <p className="historical-failure-summary">
+              历史事实：失败 {historicalCounts.failed ?? 0} · 归档失败{" "}
+              {historicalCounts.archive_failed ?? 0} · 音频质检失败{" "}
+              {historicalCounts.audio_quality_failed ?? 0} · 已替代{" "}
+              {historicalCounts.superseded ?? 0}
+            </p>
           ) : null}
-        </div>
-      ) : null}
-      {hasHistoricalFailures ? (
-        <p className="historical-failure-summary">
-          历史事实：失败 {historicalCounts.failed ?? 0} · 归档失败{" "}
-          {historicalCounts.archive_failed ?? 0} · 音频质检失败{" "}
-          {historicalCounts.audio_quality_failed ?? 0} · 已替代{" "}
-          {historicalCounts.superseded ?? 0}
-        </p>
-      ) : null}
-      {batch.stale ? (
-        <p className="stale-banner" role="status">
-          该批次的上游版本已更新；结果仍可查看，但不能作为当前版本的交付依据。
-        </p>
-      ) : null}
-      {counts.needs_attention ? (
-        <p className="attention-banner">需要处理 {counts.needs_attention}</p>
+          {batch.stale ? (
+            <p className="stale-banner" role="status">
+              该批次的上游版本已更新；结果仍可查看，但不能作为当前版本的交付依据。
+            </p>
+          ) : null}
+          {counts.needs_attention ? (
+            <p className="attention-banner">
+              需要处理 {counts.needs_attention}
+            </p>
+          ) : null}
+        </section>
       ) : null}
       {canOperate ? (
         <section

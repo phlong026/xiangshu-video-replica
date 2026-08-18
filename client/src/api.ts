@@ -5,8 +5,9 @@ const REQUEST_TIMEOUT_MS = 5_000;
 // Cloud/storage operations (diagnostics, presigned URLs, archive prechecks)
 // may legitimately take much longer than a normal API round-trip.
 const CLOUD_OP_TIMEOUT_MS = 60_000;
-// Must exceed the server's per-call provider timeout (240s, analysis.py) plus
-// overhead; the real Gemini shot-card call measured 71–91s on a 15s video.
+// Must exceed the server's per-call provider timeout (240s: analysis.py,
+// first_frames.py image edits) plus overhead; the real Gemini shot-card call
+// measured 71–91s on a 15s video, gpt-image contact sheets 1–3 minutes.
 const ANALYSIS_TIMEOUT_MS = 300_000;
 export const SESSION_EXPIRED_EVENT = "video-replica:session-expired";
 
@@ -160,6 +161,36 @@ export type AnalysisVersion = {
 
 export type AnalysisProvider = "apilio_gemini" | "fake_gemini";
 
+export type ShotMotion = {
+  subject_motion_state:
+    | "STATIC"
+    | "WALKING"
+    | "RUNNING"
+    | "TURNING"
+    | "GESTURING_ONLY"
+    | "OBJECT_MOTION"
+    | "NO_PERSON";
+  subject_direction:
+    | "toward_camera"
+    | "away_from_camera"
+    | "left"
+    | "right"
+    | "lateral"
+    | "in_place"
+    | "none";
+  subject_displacement: string;
+  hand_action: string;
+  camera_motion:
+    | "STATIC"
+    | "PUSH_IN"
+    | "PULL_BACK"
+    | "HANDHELD_TRACKING"
+    | "PAN"
+    | "TILT"
+    | "FOLLOW";
+  relative_motion: string;
+};
+
 export type ShotCard = {
   shot_id: string;
   start_time: number;
@@ -172,6 +203,7 @@ export type ShotCard = {
   scene: string;
   spoken_text: string;
   transition: string;
+  motion?: ShotMotion | null;
 };
 
 export type AnalysisPayload = {
@@ -430,11 +462,33 @@ export async function previewGenerationPrompt(
   projectId: string,
   input: PromptPreviewInput = {},
 ): Promise<PromptPreviewResult> {
-  return requestGenerationJson<PromptPreviewResult>(
-    `/api/projects/${encodeURIComponent(projectId)}/prompts/preview`,
-    "生成提示词预览失败",
-    { method: "POST", body: JSON.stringify(input) },
-  );
+  try {
+    return await requestGenerationJson<PromptPreviewResult>(
+      `/api/projects/${encodeURIComponent(projectId)}/prompts/preview`,
+      "生成提示词预览失败",
+      { method: "POST", body: JSON.stringify(input) },
+    );
+  } catch (error) {
+    throw previewRequestError(error);
+  }
+}
+
+// 生成系的通用 409 文案（"上游内容已变化"）描述的是版本级联过期；预览端点的
+// 两种 409 都指向拆解数据缺失，换成可行动的原因，避免误导用户。
+function previewRequestError(error: unknown): Error {
+  const { status, code } = error as RequestError;
+  if (
+    status === 409 &&
+    (code === "ANALYSIS_NOT_READY" || code === "SHOT_CARD_TIMELINE_INVALID")
+  ) {
+    const mapped = new Error(
+      "拆解结果缺少镜头数据，请重新上传视频拆解",
+    ) as RequestError;
+    mapped.status = status;
+    mapped.code = code;
+    return mapped;
+  }
+  return error instanceof Error ? error : new Error("生成提示词预览失败");
 }
 
 export async function getLatestGenerationPrompt(
@@ -464,10 +518,14 @@ export async function getGenerationRuntimeLimits(): Promise<GenerationRuntimeLim
   );
 }
 
-// 批次 Provider 与工作区正式管线保持同一语义：DEV 走本地模拟，
-// 生产构建走真实 Metaso H3，避免发布包静默创建模拟任务。
+// 批次 Provider 由 VITE_GENERATION_PROVIDER 显式驱动：未设置时默认走真实
+// Metaso H3，避免开发环境静默创建模拟任务、让用户误以为真实生成已触发。
+// 需要本地模拟管线（不产生付费调用）时，显式设置
+// VITE_GENERATION_PROVIDER=fake_h3。
 export function defaultBatchProvider(): GenerationBatchInput["provider"] {
-  return import.meta.env.DEV ? "fake_h3" : "metaso";
+  return import.meta.env.VITE_GENERATION_PROVIDER === "fake_h3"
+    ? "fake_h3"
+    : "metaso";
 }
 
 export async function createGenerationBatch(
@@ -574,15 +632,17 @@ export async function getGenerationResultDownloadUrl(
   );
 }
 
+// 在线播放：直接复用后端签发的预签名 URL 作为 video src（COS 与本地
+// 存储均支持 Range 渐进播放，无需整包下载 blob，首帧秒出）。url 缺失
+// 视为契约异常直接抛错，由调用方落入失败分支，避免上层自动签发循环。
 export async function createGenerationResultPreviewUrl(
   assetId: string,
 ): Promise<string> {
-  const blob = await fetchGenerationResultBlob(assetId, "加载生成结果预览失败");
-  return URL.createObjectURL(blob);
-}
-
-export function revokeGenerationResultPreviewUrl(url: string): void {
-  URL.revokeObjectURL(url);
+  const { url } = await getGenerationResultDownloadUrl(assetId);
+  if (!url) {
+    throw new Error("预览链接获取失败，请重试。");
+  }
+  return url;
 }
 
 export async function downloadGenerationResult(
@@ -648,6 +708,17 @@ export async function deleteProject(projectId: string): Promise<void> {
   if (!response.ok) {
     throw new Error(await responseErrorMessage(response, "删除项目失败"));
   }
+}
+
+export async function renameProject(
+  projectId: string,
+  name: string,
+): Promise<Project> {
+  return requestApiJson<Project>(
+    `/api/projects/${encodeURIComponent(projectId)}/name`,
+    "修改项目名称失败",
+    { method: "PATCH", body: JSON.stringify({ name }) },
+  );
 }
 
 export async function createVideoUploadIntent(
@@ -1060,11 +1131,36 @@ export async function rewriteProjectScript(
   );
 }
 
+export type CharacterViewType =
+  | "FRONT_FACE"
+  | "FRONT_HALF"
+  | "FRONT_FULL"
+  | "LEFT_45"
+  | "RIGHT_45"
+  | "LEFT_SIDE"
+  | "RIGHT_SIDE";
+
+export interface SimpleCharacterView {
+  view_type: CharacterViewType;
+  asset_id: string;
+}
+
 export interface SimpleCharacterResult {
   identity_id: string;
   persona_id: string;
   character_version_id: string;
   publication_hash: string;
+  contact_sheet_asset_id: string;
+  views: SimpleCharacterView[];
+}
+
+export interface SimpleLibraryEntry {
+  identity_id: string;
+  display_name: string;
+  owner_user_id: string | null;
+  status: string;
+  contact_sheet_asset_id: string | null;
+  views: SimpleCharacterView[];
 }
 
 export async function uploadSimpleCharacter(
@@ -1086,7 +1182,9 @@ export async function uploadSimpleCharacter(
     endpoint,
     "一键创建人物失败",
     { method: "POST", body: form },
-    CLOUD_OP_TIMEOUT_MS,
+    // AI contact-sheet generation is a synchronous gpt-image edit that can
+    // take 1–3 minutes; use the provider-sized budget, not the 60s cloud one.
+    ANALYSIS_TIMEOUT_MS,
   );
 }
 
@@ -1099,6 +1197,69 @@ export async function renamePersonIdentity(
     "修改人物名称失败",
     { method: "PATCH", body: JSON.stringify({ display_name: displayName }) },
   );
+}
+
+export async function deleteSimpleCharacterIdentity(
+  identityId: string,
+): Promise<void> {
+  const response = await requestApi(
+    `/api/simple-characters/identities/${encodeURIComponent(identityId)}`,
+    { method: "DELETE" },
+  );
+  if (!response.ok) {
+    throw new Error(
+      await responseErrorMessage(response, "删除人物失败，请稍后重试。"),
+    );
+  }
+}
+
+export interface SimpleCharacterRegenerationResult {
+  identity_id: string;
+  persona_id: string;
+  character_version_id: string;
+  previous_version_id: string;
+  version_number: number;
+  publication_hash: string;
+  contact_sheet_asset_id: string;
+  views: SimpleCharacterView[];
+}
+
+// Re-run the identity-preserve contact sheet from the stored source photo.
+// The provider call can take 1–3 minutes, so reuse the analysis-sized budget.
+export async function regenerateContactSheet(
+  identityId: string,
+): Promise<SimpleCharacterRegenerationResult> {
+  return requestApiJson<SimpleCharacterRegenerationResult>(
+    `/api/simple-characters/identities/${encodeURIComponent(
+      identityId,
+    )}/regenerate-contact-sheet`,
+    "重新生成多视图失败",
+    { method: "POST" },
+    ANALYSIS_TIMEOUT_MS,
+  );
+}
+
+export async function listSimpleCharacterLibrary(): Promise<
+  SimpleLibraryEntry[]
+> {
+  return requestApiJson<SimpleLibraryEntry[]>(
+    "/api/simple-characters/library",
+    "读取人物库失败",
+  );
+}
+
+export async function downloadCharacterAsset(
+  assetId: string,
+  filename: string,
+): Promise<void> {
+  const download = await getAssetDownloadUrl(assetId);
+  // The download URL is absolute and pre-signed, so fetch it directly instead
+  // of going through requestApi (which would concatenate the API base again).
+  const response = await fetch(download.url);
+  if (!response.ok) {
+    throw new Error(`下载人物视角图失败（${response.status}）`);
+  }
+  downloadBlob(await response.blob(), filename);
 }
 
 export async function getProjectMainCharacter(
@@ -1319,10 +1480,13 @@ export async function generateFirstFrames(
   projectId: string,
   input: GenerateFirstFramesInput,
 ): Promise<AnalysisVersion> {
+  // Image edits sit at 1–3 minutes (first_frames.py keeps a 240s per-call
+  // budget), so reuse the analysis-sized budget instead of the 5s default.
   return requestApiJson<AnalysisVersion>(
     `/api/projects/${encodeURIComponent(projectId)}/first-frames/generate`,
     "生成人物置换首帧失败",
     { method: "POST", body: JSON.stringify(input) },
+    ANALYSIS_TIMEOUT_MS,
   );
 }
 
@@ -1874,8 +2038,27 @@ function isAnalysisVersion(value: unknown): value is AnalysisVersion {
   );
 }
 
+function isShotMotion(value: unknown): value is ShotMotion {
+  return (
+    isRecord(value) &&
+    typeof value.subject_motion_state === "string" &&
+    typeof value.subject_direction === "string" &&
+    typeof value.subject_displacement === "string" &&
+    typeof value.hand_action === "string" &&
+    typeof value.camera_motion === "string" &&
+    typeof value.relative_motion === "string"
+  );
+}
+
 function isShotCard(value: unknown): value is ShotCard {
   if (!isRecord(value)) {
+    return false;
+  }
+  if (
+    value.motion !== undefined &&
+    value.motion !== null &&
+    !isShotMotion(value.motion)
+  ) {
     return false;
   }
   return (

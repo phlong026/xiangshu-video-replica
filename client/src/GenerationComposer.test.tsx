@@ -335,7 +335,7 @@ describe("GenerationComposer", () => {
         quantity: 4,
         prompt_version_id: "prompt-2",
         first_frame_asset_id: "first-frame-1",
-        provider: "fake_h3",
+        provider: "metaso",
       }),
     );
     expect(props.onBatchCreated).toHaveBeenCalledWith(batch);

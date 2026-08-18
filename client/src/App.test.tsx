@@ -268,7 +268,7 @@ describe("App", () => {
       await screen.findByText("还没有项目。上传第一个参考视频即可开始复刻。"),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("heading", { level: 2, name: "项目" }),
+      screen.getByRole("heading", { level: 1, name: "项目" }),
     ).toBeInTheDocument();
     expect(screen.getByLabelText("选择一个或多个参考视频")).toHaveAttribute(
       "accept",
@@ -662,6 +662,116 @@ describe("App", () => {
       await screen.findByText("项目“等待删除”已删除。"),
     ).toBeInTheDocument();
     expect(screen.queryByText("等待删除")).toBeNull();
+  });
+
+  it("lets an employee rename a project inline", async () => {
+    const fetchMock = vi.fn((url: string, options?: RequestInit) => {
+      if (url.endsWith("/health")) {
+        return Promise.resolve({ ok: true, json: async () => healthResponse });
+      }
+      if (
+        url.endsWith("/api/projects/project-pending/name") &&
+        options?.method === "PATCH"
+      ) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            id: "project-pending",
+            owner_user_id: "employee_1",
+            name: "乡墅爆款第一期",
+            status: "ACTIVE",
+            reference_asset_id: "asset-pending",
+            reference_upload_status: "UPLOAD_PENDING",
+          }),
+        });
+      }
+      if (url.endsWith("/api/projects")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => [
+            {
+              id: "project-pending",
+              owner_user_id: "employee_1",
+              name: "等待改名",
+              status: "ACTIVE",
+              reference_asset_id: "asset-pending",
+              reference_upload_status: "UPLOAD_PENDING",
+            },
+          ],
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    vi.stubGlobal("fetch", withAuth(fetchMock));
+
+    render(<App />);
+    await enterWorkspace();
+    fireEvent.click(await screen.findByRole("button", { name: "重命名" }));
+
+    const input = screen.getByLabelText("修改项目名称");
+    expect(input).toHaveValue("等待改名");
+    fireEvent.change(input, { target: { value: "乡墅爆款第一期" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存名称" }));
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:8000/api/projects/project-pending/name",
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({ name: "乡墅爆款第一期" }),
+      }),
+    );
+    expect(
+      await screen.findByText("项目名称已更新为“乡墅爆款第一期”。"),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText("修改项目名称")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "打开项目 乡墅爆款第一期" }),
+    ).toBeInTheDocument();
+  });
+
+  it("cancels renaming a project without calling the API", async () => {
+    const fetchMock = vi.fn((url: string, _options?: RequestInit) => {
+      if (url.endsWith("/health")) {
+        return Promise.resolve({ ok: true, json: async () => healthResponse });
+      }
+      if (url.endsWith("/api/projects")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => [
+            {
+              id: "project-pending",
+              owner_user_id: "employee_1",
+              name: "等待改名",
+              status: "ACTIVE",
+              reference_asset_id: "asset-pending",
+              reference_upload_status: "UPLOAD_PENDING",
+            },
+          ],
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    vi.stubGlobal("fetch", withAuth(fetchMock));
+
+    render(<App />);
+    await enterWorkspace();
+    fireEvent.click(await screen.findByRole("button", { name: "重命名" }));
+
+    fireEvent.change(screen.getByLabelText("修改项目名称"), {
+      target: { value: "不应生效" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+
+    expect(screen.queryByLabelText("修改项目名称")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "打开项目 等待改名" }),
+    ).toBeInTheDocument();
+    expect(
+      fetchMock.mock.calls.filter(
+        ([url, options]) =>
+          url.endsWith("/name") && options?.method === "PATCH",
+      ),
+    ).toHaveLength(0);
   });
 
   it("lets an employee edit and save the latest analysis shot cards", async () => {
@@ -1791,7 +1901,7 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "设置" }));
 
     expect(
-      await screen.findByRole("heading", { name: "服务设置" }),
+      await screen.findByRole("heading", { name: "视频生成" }),
     ).toBeInTheDocument();
     const apiKeyInput = screen.getAllByLabelText("API Key")[0];
     expect(apiKeyInput).toHaveValue("");
@@ -1908,6 +2018,10 @@ describe("App", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "查询任务记录" }));
 
+    // 任务页默认落在生成结果舞台（客户视角）；本用例断言运维视角的
+    // 批次/任务事实，先切换到运维详情。
+    fireEvent.click(await screen.findByRole("button", { name: "运维详情" }));
+
     expect(await screen.findByText("50%")).toBeInTheDocument();
     expect(screen.getByText("已完成 1 / 2")).toBeInTheDocument();
     expect(screen.getAllByText("需要处理 1")).toHaveLength(2);
@@ -1941,6 +2055,9 @@ describe("App", () => {
       target: { value: "batch-1" },
     });
     fireEvent.click(screen.getByRole("button", { name: "查询任务记录" }));
+
+    // 历史批次横幅在运维详情视图中渲染。
+    fireEvent.click(await screen.findByRole("button", { name: "运维详情" }));
 
     expect(
       await screen.findByText(
@@ -2011,6 +2128,9 @@ describe("App", () => {
     await act(async () => {
       await Promise.resolve();
     });
+    // 任务页默认落在生成结果舞台；本用例断言运维视角的轮询事实，
+    // fake timers 下用同步查询（批次已在 microtask 刷新后渲染）。
+    fireEvent.click(screen.getByRole("button", { name: "运维详情" }));
     expect(screen.getByText("0%")).toBeInTheDocument();
 
     await act(async () => {
@@ -2116,6 +2236,7 @@ describe("App", () => {
     await act(async () => {
       await Promise.resolve();
     });
+    fireEvent.click(screen.getByRole("button", { name: "运维详情" }));
     expect(screen.getByText("0%")).toBeInTheDocument();
 
     await act(async () => {

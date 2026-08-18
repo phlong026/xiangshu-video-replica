@@ -8,7 +8,7 @@ import logging
 import socket
 import sqlite3
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, Protocol, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
@@ -82,6 +82,9 @@ class FirstFrameCharacterInputs:
     authorized_project_ids: list[str]
     character_reference_selection_id: str | None = None
     character_version_id: str | None = None
+    # Mirrors reference_asset_ids for audit trails: "contact_sheet" /
+    # "source_photo" for simple-upload characters, "legacy_view" otherwise.
+    reference_asset_roles: list[str] = field(default_factory=list)
 
 
 class ImageProvider(Protocol):
@@ -136,7 +139,11 @@ class ApilioTransport(Protocol):
 class UrllibApilioTransport:
     """Small stdlib transport so provider secrets never enter the client process."""
 
-    def __init__(self, *, timeout_seconds: float = 45.0) -> None:
+    # gpt-image edit calls are synchronous and regularly need 1-3 minutes
+    # (five-view contact sheets sit at the high end). Keep the same 240s
+    # per-call budget as the analysis provider so slow generations succeed
+    # instead of falling back to the local placeholder.
+    def __init__(self, *, timeout_seconds: float = 240.0) -> None:
         self.timeout_seconds = timeout_seconds
 
     def post(
@@ -288,7 +295,10 @@ def build_apilio_edit_multipart(
     add_image(source_image)
     for image in character_reference_images:
         add_image(image)
-    add_field("response_format", "url")
+    # Inline base64 output avoids the download round-trip entirely: CDN
+    # domains used by Apilio resolve through carrier scheduling that can mix
+    # in non-global addresses, which the SSRF download guard must reject.
+    add_field("response_format", "b64_json")
     add_field("n", str(output_count))
     if model == "gpt-image-2":
         add_field("size", "auto")
@@ -471,7 +481,11 @@ def generate_first_frame_candidates(
         for asset_id in character_inputs.reference_asset_ids
     ]
     reference_images = [read_asset_image(storage, asset) for asset in reference_assets]
-    effective_prompt = normalize_prompt(prompt, character_name=character_inputs.character_name)
+    effective_prompt = normalize_prompt(
+        prompt,
+        character_name=character_inputs.character_name,
+        reference_roles=character_inputs.reference_asset_roles,
+    )
 
     generated = edit_once_with_retry(
         provider,
@@ -559,6 +573,7 @@ def generate_first_frame_candidates(
                 "main_character_version_id": character_inputs.main_character_version_id,
                 "character_snapshot": character_inputs.character_snapshot,
                 "character_reference_asset_ids": character_inputs.reference_asset_ids,
+                "character_reference_asset_roles": character_inputs.reference_asset_roles,
                 "provider": provider.provider_name,
                 "model": model,
                 "prompt": effective_prompt,
@@ -693,6 +708,52 @@ def current_source_frame_selection(
     return cast(dict[str, object], payload | {"id": str(selection["id"])})
 
 
+def effective_reference_asset_ids(
+    conn: sqlite3.Connection,
+    *,
+    character_version_id: str,
+    legacy_selected: list[str],
+) -> tuple[list[str], list[str]]:
+    """Resolve the reference images actually sent to the image provider.
+
+    Simple-upload characters publish a five-view contact sheet; when one is
+    present it replaces the per-view placeholder assets as the identity
+    input: the contact sheet supplies multi-angle identity while the
+    identity's original uploaded photo is the authoritative face. Legacy
+    characters without a contact sheet keep their selected per-view images.
+    Returns ``(asset_ids, roles)`` with roles mirroring asset_ids.
+    """
+    row = conn.execute(
+        """
+        SELECT version.publication_snapshot_json AS snapshot_json,
+               identity.source_asset_id AS source_asset_id
+        FROM character_versions AS version
+        JOIN character_personas AS persona ON persona.id = version.persona_id
+        JOIN person_identities AS identity ON identity.id = persona.identity_id
+        WHERE version.id = ?
+        """,
+        (character_version_id,),
+    ).fetchone()
+    if row is None:
+        return legacy_selected, ["legacy_view"] * len(legacy_selected)
+    try:
+        snapshot = json.loads(str(row["snapshot_json"] or ""))
+    except json.JSONDecodeError:
+        snapshot = None
+    contact_sheet_asset_id = (
+        snapshot.get("contact_sheet_asset_id") if isinstance(snapshot, dict) else None
+    )
+    source_asset_id = row["source_asset_id"]
+    if (
+        isinstance(contact_sheet_asset_id, str)
+        and contact_sheet_asset_id
+        and isinstance(source_asset_id, str)
+        and source_asset_id
+    ):
+        return [contact_sheet_asset_id, source_asset_id], ["contact_sheet", "source_photo"]
+    return legacy_selected, ["legacy_view"] * len(legacy_selected)
+
+
 def resolve_first_frame_character_inputs(
     conn: sqlite3.Connection,
     *,
@@ -729,14 +790,20 @@ def resolve_first_frame_character_inputs(
         main_character_version_id = snapshot.get("main_character_version_id")
         if not isinstance(main_character_version_id, str):
             raise stale_first_frame_inputs()
+        reference_asset_ids, reference_asset_roles = effective_reference_asset_ids(
+            conn,
+            character_version_id=reference_selection.character_version_id,
+            legacy_selected=reference_selection.selected_asset_ids_json,
+        )
         return FirstFrameCharacterInputs(
             main_character_version_id=main_character_version_id,
             character_snapshot=snapshot,
-            reference_asset_ids=reference_selection.selected_asset_ids_json,
+            reference_asset_ids=reference_asset_ids,
             character_name=character_name,
             authorized_project_ids=[],
             character_reference_selection_id=reference_selection.id,
             character_version_id=reference_selection.character_version_id,
+            reference_asset_roles=reference_asset_roles,
         )
 
     if expected_character_version_id is not None or expected_reference_selection_id is not None:
@@ -755,10 +822,10 @@ def resolve_first_frame_character_inputs(
         raise first_frame_error(
             409, "MAIN_CHARACTER_SNAPSHOT_INVALID", "Select the character again."
         )
-    reference_asset_ids = character_snapshot.get("reference_asset_ids")
+    snapshot_reference_ids = character_snapshot.get("reference_asset_ids")
     character_name = character_snapshot.get("name")
-    if not isinstance(reference_asset_ids, list) or not all(
-        isinstance(asset_id, str) for asset_id in reference_asset_ids
+    if not isinstance(snapshot_reference_ids, list) or not all(
+        isinstance(asset_id, str) for asset_id in snapshot_reference_ids
     ):
         raise first_frame_error(
             409, "MAIN_CHARACTER_SNAPSHOT_INVALID", "Select the character again."
@@ -767,7 +834,7 @@ def resolve_first_frame_character_inputs(
         raise first_frame_error(
             409, "MAIN_CHARACTER_SNAPSHOT_INVALID", "Select the character again."
         )
-    if not reference_asset_ids:
+    if not snapshot_reference_ids:
         raise first_frame_error(
             422,
             "CHARACTER_REFERENCE_REQUIRED",
@@ -781,7 +848,7 @@ def resolve_first_frame_character_inputs(
     return FirstFrameCharacterInputs(
         main_character_version_id=str(main_character["version_id"]),
         character_snapshot=character_snapshot,
-        reference_asset_ids=cast(list[str], reference_asset_ids),
+        reference_asset_ids=cast(list[str], snapshot_reference_ids),
         character_name=character_name,
         authorized_project_ids=cast(list[str], authorized_project_ids),
     )
@@ -1008,10 +1075,26 @@ def edit_once_with_retry(
     raise AssertionError("image provider retry loop must return or raise")
 
 
-def normalize_prompt(prompt: str | None, *, character_name: str) -> str:
+def normalize_prompt(
+    prompt: str | None,
+    *,
+    character_name: str,
+    reference_roles: list[str] | None = None,
+) -> str:
     clean = (prompt or "").strip()
     if clean:
         return clean
+    if reference_roles and "contact_sheet" in reference_roles:
+        return (
+            f"把原视频中的人物身份替换为角色库人物“{character_name}”，严格保留原画面一切要素。\n"
+            "第 1 张输入图是原视频源帧，是构图、机位、人物姿态、动作、场景、道具、"
+            "光线与色调的唯一模板，不得改动。\n"
+            "第 2 张输入图是该角色的五视图参考板，仅用于确定人物的长相、发型、服饰与身材比例；"
+            "参考板中的白色分格线、边框与多面板布局只属于参考板本身，严禁以任何形式出现在结果图中。\n"
+            "第 3 张输入图是该角色的原始照片，是面部特征最权威的依据，以它为准还原面部细节。\n"
+            "保持自然皮肤质感、正确肢体结构与真实透视；不得增加或删除画面主体；"
+            "不得出现文字、水印或边框。"
+        )
     return (
         "保留原图的镜头位置、人物姿态、动作、场景、构图、道具、光线与色调，"
         f"只将原人物身份替换为角色库人物“{character_name}”；"
