@@ -37,6 +37,7 @@ client/src-tauri/icons/ios/
 .env
 .env.*
 !.env.example
+账号信息.md
 data/
 *.db
 *.db-shm
