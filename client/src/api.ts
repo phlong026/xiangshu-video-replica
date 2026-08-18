@@ -710,6 +710,17 @@ export async function deleteProject(projectId: string): Promise<void> {
   }
 }
 
+export async function renameProject(
+  projectId: string,
+  name: string,
+): Promise<Project> {
+  return requestApiJson<Project>(
+    `/api/projects/${encodeURIComponent(projectId)}/name`,
+    "修改项目名称失败",
+    { method: "PATCH", body: JSON.stringify({ name }) },
+  );
+}
+
 export async function createVideoUploadIntent(
   projectId: string,
   file: File,

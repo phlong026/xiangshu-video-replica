@@ -590,6 +590,26 @@ input:focus {
   font-size: 13px;
 }
 
+/* 行内重命名：与人物库改名一致的编辑条，占满整行并替换操作按钮。 */
+.projects-list__edit {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px 16px 10px 16px;
+}
+
+.projects-list__edit input {
+  flex: 1;
+  min-width: 0;
+}
+
+.projects-list__edit button {
+  padding: 7px 13px;
+  font-size: 13px;
+}
+
 /* 生成流程详情页：四段自上而下滚动（解析提示词 → 源画面与人物 → 首帧与文案 → 提交生成） */
 .flow-page {
   display: grid;

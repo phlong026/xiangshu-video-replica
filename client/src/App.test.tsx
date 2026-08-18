@@ -664,6 +664,116 @@ describe("App", () => {
     expect(screen.queryByText("等待删除")).toBeNull();
   });
 
+  it("lets an employee rename a project inline", async () => {
+    const fetchMock = vi.fn((url: string, options?: RequestInit) => {
+      if (url.endsWith("/health")) {
+        return Promise.resolve({ ok: true, json: async () => healthResponse });
+      }
+      if (
+        url.endsWith("/api/projects/project-pending/name") &&
+        options?.method === "PATCH"
+      ) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            id: "project-pending",
+            owner_user_id: "employee_1",
+            name: "乡墅爆款第一期",
+            status: "ACTIVE",
+            reference_asset_id: "asset-pending",
+            reference_upload_status: "UPLOAD_PENDING",
+          }),
+        });
+      }
+      if (url.endsWith("/api/projects")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => [
+            {
+              id: "project-pending",
+              owner_user_id: "employee_1",
+              name: "等待改名",
+              status: "ACTIVE",
+              reference_asset_id: "asset-pending",
+              reference_upload_status: "UPLOAD_PENDING",
+            },
+          ],
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    vi.stubGlobal("fetch", withAuth(fetchMock));
+
+    render(<App />);
+    await enterWorkspace();
+    fireEvent.click(await screen.findByRole("button", { name: "重命名" }));
+
+    const input = screen.getByLabelText("修改项目名称");
+    expect(input).toHaveValue("等待改名");
+    fireEvent.change(input, { target: { value: "乡墅爆款第一期" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存名称" }));
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:8000/api/projects/project-pending/name",
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({ name: "乡墅爆款第一期" }),
+      }),
+    );
+    expect(
+      await screen.findByText("项目名称已更新为“乡墅爆款第一期”。"),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText("修改项目名称")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "打开项目 乡墅爆款第一期" }),
+    ).toBeInTheDocument();
+  });
+
+  it("cancels renaming a project without calling the API", async () => {
+    const fetchMock = vi.fn((url: string, _options?: RequestInit) => {
+      if (url.endsWith("/health")) {
+        return Promise.resolve({ ok: true, json: async () => healthResponse });
+      }
+      if (url.endsWith("/api/projects")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => [
+            {
+              id: "project-pending",
+              owner_user_id: "employee_1",
+              name: "等待改名",
+              status: "ACTIVE",
+              reference_asset_id: "asset-pending",
+              reference_upload_status: "UPLOAD_PENDING",
+            },
+          ],
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    vi.stubGlobal("fetch", withAuth(fetchMock));
+
+    render(<App />);
+    await enterWorkspace();
+    fireEvent.click(await screen.findByRole("button", { name: "重命名" }));
+
+    fireEvent.change(screen.getByLabelText("修改项目名称"), {
+      target: { value: "不应生效" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+
+    expect(screen.queryByLabelText("修改项目名称")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "打开项目 等待改名" }),
+    ).toBeInTheDocument();
+    expect(
+      fetchMock.mock.calls.filter(
+        ([url, options]) =>
+          url.endsWith("/name") && options?.method === "PATCH",
+      ),
+    ).toHaveLength(0);
+  });
+
   it("lets an employee edit and save the latest analysis shot cards", async () => {
     const analysis = {
       id: "analysis-1",

@@ -13,6 +13,7 @@ import {
   deleteProject,
   listProjects,
   type Project,
+  renameProject,
   startVideoAnalysis,
   uploadReferenceVideo,
 } from "./api";
@@ -83,8 +84,12 @@ export function ProjectsPage({
   const [isProjectsLoading, setIsProjectsLoading] = useState(false);
   const [uploads, setUploads] = useState<UploadItem[]>([]);
   const [deletingProjectId, setDeletingProjectId] = useState("");
-  const [deleteMessage, setDeleteMessage] = useState("");
-  const [deleteError, setDeleteError] = useState("");
+  // 项目操作（删除/重命名）共用一对消息通道，避免页面顶部堆多个提示位。
+  const [projectActionError, setProjectActionError] = useState("");
+  const [projectActionMessage, setProjectActionMessage] = useState("");
+  const [editingProjectId, setEditingProjectId] = useState("");
+  const [editingProjectName, setEditingProjectName] = useState("");
+  const [renamingProjectId, setRenamingProjectId] = useState("");
   const [rebindProject, setRebindProject] = useState<Project | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const rebindFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -278,20 +283,63 @@ export function ProjectsPage({
       return;
     }
     setDeletingProjectId(project.id);
-    setDeleteError("");
-    setDeleteMessage("");
+    setProjectActionError("");
+    setProjectActionMessage("");
     try {
       await deleteProject(project.id);
       setProjects((current) =>
         current.filter((item) => item.id !== project.id),
       );
-      setDeleteMessage(`项目“${project.name}”已删除。`);
+      setProjectActionMessage(`项目“${project.name}”已删除。`);
     } catch (error) {
-      setDeleteError(
+      setProjectActionError(
         error instanceof Error ? error.message : "删除项目失败，请稍后重试。",
       );
     } finally {
       setDeletingProjectId("");
+    }
+  }
+
+  function startRename(project: Project) {
+    setEditingProjectId(project.id);
+    setEditingProjectName(project.name);
+    setProjectActionError("");
+    setProjectActionMessage("");
+  }
+
+  function cancelRename() {
+    setEditingProjectId("");
+    setEditingProjectName("");
+    setRenamingProjectId("");
+  }
+
+  async function saveRename(project: Project) {
+    const name = editingProjectName.trim();
+    if (!name) {
+      setProjectActionError("项目名称不能为空。");
+      return;
+    }
+    if (name === project.name) {
+      cancelRename();
+      return;
+    }
+    setRenamingProjectId(project.id);
+    setProjectActionError("");
+    try {
+      const updated = await renameProject(project.id, name);
+      setProjects((current) =>
+        current.map((item) =>
+          item.id === updated.id ? { ...item, name: updated.name } : item,
+        ),
+      );
+      setProjectActionMessage(`项目名称已更新为“${updated.name}”。`);
+      cancelRename();
+    } catch (error) {
+      setProjectActionError(
+        error instanceof Error ? error.message : "修改项目名称失败，请重试。",
+      );
+    } finally {
+      setRenamingProjectId("");
     }
   }
 
@@ -352,14 +400,14 @@ export function ProjectsPage({
         <p className="status-note">只读身份：仅可查看项目。</p>
       )}
 
-      {deleteError ? (
+      {projectActionError ? (
         <p className="settings-error" role="alert">
-          {deleteError}
+          {projectActionError}
         </p>
       ) : null}
-      {deleteMessage ? (
+      {projectActionMessage ? (
         <p className="setup-success" role="status">
-          {deleteMessage}
+          {projectActionMessage}
         </p>
       ) : null}
 
@@ -453,64 +501,109 @@ export function ProjectsPage({
           <ul className="projects-list">
             {projects.map((project) => {
               const isAnalyzed = project.analysis_status === "READY";
+              const isEditing = editingProjectId === project.id;
+              const isRenaming = renamingProjectId === project.id;
               return (
                 <li className="projects-list__item" key={project.id}>
                   <div className="projects-list__row">
-                    <button
-                      aria-label={`打开项目 ${project.name}`}
-                      className="projects-list__main"
-                      onClick={() => onOpenAnalysis(project)}
-                      type="button"
-                    >
-                      <strong>{project.name}</strong>
-                      <span className="projects-list__meta">
-                        {renderStatusBadge(project)}
-                      </span>
-                    </button>
-                    <div className="projects-list__actions">
-                      {isAnalyzed && canWrite ? (
+                    {isEditing ? (
+                      <div className="projects-list__edit">
+                        <input
+                          aria-label="修改项目名称"
+                          onChange={(event) =>
+                            setEditingProjectName(event.target.value)
+                          }
+                          type="text"
+                          value={editingProjectName}
+                        />
                         <button
-                          className="projects-generate-button"
-                          onClick={() => onOpenDetail(project)}
+                          disabled={isRenaming}
+                          onClick={() => void saveRename(project)}
                           type="button"
                         >
-                          生成视频
+                          {isRenaming ? "正在保存…" : "保存名称"}
                         </button>
-                      ) : null}
-                      {isAnalyzed ? (
                         <button
                           className="secondary-button"
-                          onClick={() => onOpenDetail(project)}
+                          disabled={isRenaming}
+                          onClick={cancelRename}
                           type="button"
                         >
-                          查看流程
+                          取消
                         </button>
-                      ) : null}
-                      {project.reference_upload_status !== "READY" &&
-                      canWrite ? (
+                      </div>
+                    ) : (
+                      <>
                         <button
-                          className="secondary-button"
-                          disabled={isUploading || Boolean(deletingProjectId)}
-                          onClick={() => requestRebind(project)}
+                          aria-label={`打开项目 ${project.name}`}
+                          className="projects-list__main"
+                          onClick={() => onOpenAnalysis(project)}
                           type="button"
                         >
-                          重新上传
+                          <strong>{project.name}</strong>
+                          <span className="projects-list__meta">
+                            {renderStatusBadge(project)}
+                          </span>
                         </button>
-                      ) : null}
-                      {canWrite ? (
-                        <button
-                          aria-label={`删除项目 ${project.name}`}
-                          className="secondary-button project-delete-button"
-                          disabled={isUploading || Boolean(deletingProjectId)}
-                          onClick={() => void handleDeleteProject(project)}
-                          type="button"
-                        >
-                          {deletingProjectId === project.id
-                            ? "正在删除"
-                            : "删除"}
-                        </button>
-                      ) : null}
-                    </div>
+                        <div className="projects-list__actions">
+                          {isAnalyzed && canWrite ? (
+                            <button
+                              className="projects-generate-button"
+                              onClick={() => onOpenDetail(project)}
+                              type="button"
+                            >
+                              生成视频
+                            </button>
+                          ) : null}
+                          {isAnalyzed ? (
+                            <button
+                              className="secondary-button"
+                              onClick={() => onOpenDetail(project)}
+                              type="button"
+                            >
+                              查看流程
+                            </button>
+                          ) : null}
+                          {project.reference_upload_status !== "READY" &&
+                          canWrite ? (
+                            <button
+                              className="secondary-button"
+                              disabled={
+                                isUploading || Boolean(deletingProjectId)
+                              }
+                              onClick={() => requestRebind(project)}
+                              type="button"
+                            >
+                              重新上传
+                            </button>
+                          ) : null}
+                          {canWrite ? (
+                            <button
+                              className="secondary-button"
+                              onClick={() => startRename(project)}
+                              type="button"
+                            >
+                              重命名
+                            </button>
+                          ) : null}
+                          {canWrite ? (
+                            <button
+                              aria-label={`删除项目 ${project.name}`}
+                              className="secondary-button project-delete-button"
+                              disabled={
+                                isUploading || Boolean(deletingProjectId)
+                              }
+                              onClick={() => void handleDeleteProject(project)}
+                              type="button"
+                            >
+                              {deletingProjectId === project.id
+                                ? "正在删除"
+                                : "删除"}
+                            </button>
+                          ) : null}
+                        </div>
+                      </>
+                    )}
                   </div>
                 </li>
               );

@@ -57,6 +57,12 @@ class CreateProjectRequest(BaseModel):
     name: str = Field(min_length=1, max_length=120)
 
 
+class RenameProjectRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=120)
+
+
 class ProjectResponse(BaseModel):
     id: str
     owner_user_id: str
@@ -336,6 +342,56 @@ def create_project(
     )
 
 
+@router.patch("/projects/{project_id}/name", response_model=ProjectResponse)
+def rename_project(
+    project_id: str,
+    payload: RenameProjectRequest,
+    conn: Database,
+    actor: AuthenticatedUser,
+) -> ProjectResponse:
+    require_not_auditor(
+        conn,
+        actor=actor,
+        action="project.rename",
+        entity_type="project",
+        entity_id=project_id,
+    )
+    current_row = require_project_access(
+        conn,
+        actor=actor,
+        project_id=project_id,
+        action="project.rename",
+    )
+
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"code": "PROJECT_NAME_REQUIRED", "message": "Project name is required."},
+        )
+    with conn:
+        conn.execute(
+            """
+            UPDATE projects
+            SET name = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (name, project_id),
+        )
+    write_audit(
+        conn,
+        actor=actor,
+        action="project.rename",
+        entity_type="project",
+        entity_id=project_id,
+        metadata={"from_name": str(current_row["name"]), "to_name": name},
+    )
+    row = project_detail_row(conn, project_id)
+    if row is None:
+        raise RuntimeError("project disappeared after rename")
+    return project_response(row)
+
+
 @router.delete("/projects/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_project(
     project_id: str,
@@ -433,7 +489,17 @@ def read_project(
     actor: AuthenticatedUser,
 ) -> ProjectResponse:
     require_project_access(conn, actor=actor, project_id=project_id, action="project.read")
-    row = conn.execute(
+    row = project_detail_row(conn, project_id)
+    if row is None:
+        raise RuntimeError("project disappeared after access check")
+    return project_response(row)
+
+
+def project_detail_row(
+    conn: sqlite3.Connection,
+    project_id: str,
+) -> sqlite3.Row | None:
+    return conn.execute(
         """
         SELECT
             projects.id,
@@ -479,9 +545,6 @@ def read_project(
         """,
         (project_id,),
     ).fetchone()
-    if row is None:
-        raise RuntimeError("project disappeared after access check")
-    return project_response(row)
 
 
 @router.get("/assets/{asset_id}", response_model=AssetResponse)
