@@ -174,11 +174,12 @@ async function createAndPublishCharacter(page) {
   ).toBeVisible();
 }
 
-// P0-05-02：V1.4 单屏闭环一键动线——打开项目 → 预填确认（源画面特征/
-// 人物参考/首帧/口播稿均为预填后一次确认）→ 一键生成（编译→锁定→建批
-// 合并为一次点击，契约红线 4）→ N=3 预览下载。
-// 角色版本自动预选（P0-03-01）暂缓合入，本动线仍手动选择角色版本；
-// fake 分析 original_script 为空，原稿预填为空稿，仍需切自定义稿保存。
+// P0-05-02：V1.4 单屏闭环一键动线——打开项目 → 预填确认（角色自动预选/
+// 源画面特征/人物参考/首帧/口播稿均为预填后一次确认）→ 一键生成
+//（编译→锁定→建批合并为一次点击，契约红线 4）→ N=3 预览下载。
+// 角色版本自动预选已合入（P0-03-01）：无快照进入自动落库最近发布
+// 版本，零点击；fake 分析 original_script 为空，原稿预填为空稿，
+// 仍需切自定义稿保存。用户确认类动作 = 4（源画面/参考/首帧对/生成）。
 async function createProjectBatchViaOneClick(page) {
   const mediaDir = requiredEnvironmentPath("GATE1_MEDIA_DIR");
   await page.getByRole("button", { name: "新建复刻" }).click();
@@ -206,18 +207,14 @@ async function createProjectBatchViaOneClick(page) {
   await page.getByRole("button", { name: "保存口播稿" }).click();
   await expect(page.getByText(/口播稿已保存为版本 #/)).toBeVisible();
 
-  // 标签页②：预填确认（源画面/参考/首帧）；角色版本待 P0-03-01 合入
-  // 后压缩为自动预选，当前仍手动选择。
+  // 标签页②：角色版本自动预选并落库（P0-03-01）——无快照进入自动选择
+  // 最近发布版本，零点击；源画面/参考/首帧均为预填后一次确认。
   await page.getByRole("tab", { name: "人物设定" }).click();
 
-  await page.getByRole("button", { name: "选择角色版本" }).click();
-  await page
-    .getByRole("radio", { name: /Gate 1 林夏.*乡墅项目管理专家.*V1/ })
-    .check();
-  await page.getByRole("button", { name: "确认角色版本" }).click();
   await expect(
-    page.getByText("已选择角色“Gate 1 林夏 · 乡墅项目管理专家 V1”。"),
-  ).toBeVisible();
+    page.getByText("已自动选择角色版本 Gate 1 林夏 · V1"),
+  ).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText("当前角色：Gate 1 林夏")).toBeVisible();
 
   // 源画面：角色就绪后自动提取候选（P0-03-02，本地截帧无费用），候选与
   // 特征按镜头卡建议预填（S01 近景 → CLOSE_UP/FACE_ONLY），确认即可。
