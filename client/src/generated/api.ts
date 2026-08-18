@@ -21,6 +21,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/projects/{project_id}/script-rewrite": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Rewrite Project Script */
+    post: operations["rewrite_project_script_api_projects__project_id__script_rewrite_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/projects/{project_id}/scripts/latest": {
     parameters: {
       query?: never;
@@ -49,6 +66,23 @@ export interface paths {
     put?: never;
     /** Compile Project Prompt */
     post: operations["compile_project_prompt_api_projects__project_id__prompts_compile_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/projects/{project_id}/prompts/preview": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Preview Project Prompt */
+    post: operations["preview_project_prompt_api_projects__project_id__prompts_preview_post"];
     delete?: never;
     options?: never;
     head?: never;
@@ -305,8 +339,8 @@ export interface paths {
     get: operations["read_project_api_projects__project_id__get"];
     put?: never;
     post?: never;
-    /** Delete Unfinished Project */
-    delete: operations["delete_unfinished_project_api_projects__project_id__delete"];
+    /** Delete Project */
+    delete: operations["delete_project_api_projects__project_id__delete"];
     options?: never;
     head?: never;
     patch?: never;
@@ -1223,6 +1257,99 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/simple-characters/upload-intent": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Create Simple Upload Intent
+     * @description Describe how the client should upload a simple character source image.
+     *
+     *     The simple flow uploads the image directly with the generate endpoint as
+     *     multipart form data, so the intent only echoes the target endpoint and
+     *     limits instead of issuing a presigned URL.
+     */
+    post: operations["create_simple_upload_intent_api_simple_characters_upload_intent_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/simple-characters/generate": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Generate Global Simple Character
+     * @description Global one-click character creation (人物库精简流程，无项目上下文).
+     *
+     *     Mirrors the project-scoped endpoint but skips ``require_project_access``:
+     *     the character library page has no project context, and the creator's
+     *     identity ownership is recorded for later renames.
+     */
+    post: operations["generate_global_simple_character_api_simple_characters_generate_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/simple-characters/identities/{identity_id}/name": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    /**
+     * Rename Identity
+     * @description Rename a character identity (owner or admin only).
+     */
+    patch: operations["rename_identity_api_simple_characters_identities__identity_id__name_patch"];
+    trace?: never;
+  };
+  "/api/simple-characters/{project_id}/generate": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Generate Simple Character
+     * @description Upload one authorization image and publish a seven-view character.
+     *
+     *     The image is stored as both the authorization proof and the source asset,
+     *     the seven standard views are generated locally, auto-approved, and the
+     *     resulting character version is published so it immediately appears in the
+     *     project's available character version list.
+     */
+    post: operations["generate_simple_character_api_simple_characters__project_id__generate_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/health": {
     parameters: {
       query?: never;
@@ -1316,6 +1443,30 @@ export interface components {
       progress: components["schemas"]["BatchProgress"];
       /** Tasks */
       tasks: components["schemas"]["TaskResult"][];
+    };
+    /** Body_generate_global_simple_character_api_simple_characters_generate_post */
+    Body_generate_global_simple_character_api_simple_characters_generate_post: {
+      /** File */
+      file: string;
+      /** Display Name */
+      display_name: string;
+      /**
+       * Persona Name
+       * @default
+       */
+      persona_name: string;
+    };
+    /** Body_generate_simple_character_api_simple_characters__project_id__generate_post */
+    Body_generate_simple_character_api_simple_characters__project_id__generate_post: {
+      /** File */
+      file: string;
+      /** Display Name */
+      display_name: string;
+      /**
+       * Persona Name
+       * @default
+       */
+      persona_name: string;
     };
     /** CharacterAsset */
     CharacterAsset: {
@@ -2035,6 +2186,11 @@ export interface components {
       /** Service */
       service: string;
     };
+    /** IdentityRenameRequest */
+    IdentityRenameRequest: {
+      /** Display Name */
+      display_name: string;
+    };
     /** IdentityUploadIntentRequest */
     IdentityUploadIntentRequest: {
       /** Filename */
@@ -2246,6 +2402,36 @@ export interface components {
        */
       resolution: "768P" | "2K";
     };
+    /** PromptPreviewRequest */
+    PromptPreviewRequest: {
+      /** Output Duration Seconds */
+      output_duration_seconds?: number | null;
+      /**
+       * Resolution
+       * @default 768P
+       * @enum {string}
+       */
+      resolution: "768P" | "2K";
+    };
+    /** PromptPreviewResult */
+    PromptPreviewResult: {
+      /** Prompt Text */
+      prompt_text: string;
+      /** Output Duration Seconds */
+      output_duration_seconds: number;
+      /**
+       * Resolution
+       * @enum {string}
+       */
+      resolution: "768P" | "2K";
+      /**
+       * Script Source
+       * @enum {string}
+       */
+      script_source: "script_version" | "analysis_original";
+      /** Shot Card Version Id */
+      shot_card_version_id: string | null;
+    };
     /** PromptRevisionRequest */
     PromptRevisionRequest: {
       /** Base Prompt Version Id */
@@ -2295,6 +2481,26 @@ export interface components {
       /** Shot Card Version Id */
       shot_card_version_id: string;
     };
+    /**
+     * ScriptRewriteRequest
+     * @description ``POST /script-rewrite`` 请求体：待改写的原口播稿全文。
+     */
+    ScriptRewriteRequest: {
+      /** Text */
+      text: string;
+    };
+    /**
+     * ScriptRewriteResult
+     * @description 改写结果：新口播稿全文与实际使用的服务标识。
+     */
+    ScriptRewriteResult: {
+      /** Rewritten Text */
+      rewritten_text: string;
+      /** Provider */
+      provider: string;
+      /** Model */
+      model: string;
+    };
     /** SelectCharacterReferencesRequest */
     SelectCharacterReferencesRequest: {
       /** Source Frame Selection Version Id */
@@ -2319,6 +2525,28 @@ export interface components {
       providers: components["schemas"]["DiagnosticProviderResult"][];
       /** Download Url */
       download_url: string;
+    };
+    /** SimpleCharacterResponse */
+    SimpleCharacterResponse: {
+      /** Identity Id */
+      identity_id: string;
+      /** Persona Id */
+      persona_id: string;
+      /** Character Version Id */
+      character_version_id: string;
+      /** Publication Hash */
+      publication_hash: string;
+    };
+    /** SimpleUploadIntentResponse */
+    SimpleUploadIntentResponse: {
+      /** Generate Url */
+      generate_url: string;
+      /** Method */
+      method: string;
+      /** Max Size Bytes */
+      max_size_bytes: number;
+      /** Allowed Content Types */
+      allowed_content_types: string[];
     };
     /** SourceFrameCharacterFeatures */
     SourceFrameCharacterFeatures: {
@@ -2660,6 +2888,43 @@ export interface operations {
       };
     };
   };
+  rewrite_project_script_api_projects__project_id__script_rewrite_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        project_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ScriptRewriteRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ScriptRewriteResult"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   read_latest_project_script_api_projects__project_id__scripts_latest_get: {
     parameters: {
       query?: never;
@@ -2717,6 +2982,43 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["VersionResult"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  preview_project_prompt_api_projects__project_id__prompts_preview_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        project_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["PromptPreviewRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["PromptPreviewResult"];
         };
       };
       /** @description Validation Error */
@@ -3308,7 +3610,7 @@ export interface operations {
       };
     };
   };
-  delete_unfinished_project_api_projects__project_id__delete: {
+  delete_project_api_projects__project_id__delete: {
     parameters: {
       query?: never;
       header?: {
@@ -5499,6 +5801,146 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["VersionResponse"] | null;
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  create_simple_upload_intent_api_simple_characters_upload_intent_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["SimpleUploadIntentResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  generate_global_simple_character_api_simple_characters_generate_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "multipart/form-data": components["schemas"]["Body_generate_global_simple_character_api_simple_characters_generate_post"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["SimpleCharacterResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  rename_identity_api_simple_characters_identities__identity_id__name_patch: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        identity_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["IdentityRenameRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": unknown;
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  generate_simple_character_api_simple_characters__project_id__generate_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+      };
+      path: {
+        project_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "multipart/form-data": components["schemas"]["Body_generate_simple_character_api_simple_characters__project_id__generate_post"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["SimpleCharacterResponse"];
         };
       };
       /** @description Validation Error */

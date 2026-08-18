@@ -374,8 +374,11 @@ def test_project_delete_removes_a_project_with_completed_work(
                 f"SELECT COUNT(*) FROM {table} WHERE project_id = ?",  # noqa: S608
                 ("project_owned",),
             ).fetchone()[0]
-            for table in ("projects", "assets", "versions", "generation_batches")
+            for table in ("assets", "versions", "generation_batches")
         }
+        remaining["projects"] = conn.execute(
+            "SELECT COUNT(*) FROM projects WHERE id = ?", ("project_owned",)
+        ).fetchone()[0]
         remaining_tasks = conn.execute(
             """
             SELECT COUNT(*) FROM generation_tasks
