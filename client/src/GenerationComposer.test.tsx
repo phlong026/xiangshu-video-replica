@@ -98,6 +98,7 @@ function WorkspaceHost({
         <ScriptEditor
           busyAction={drafts.busyAction}
           onChooseSource={drafts.chooseScriptSource}
+          onRewriteScript={drafts.rewriteScriptWithAi}
           onSaveScript={drafts.saveScript}
           onScriptTextChange={drafts.setScriptText}
           readOnly={props.readOnly}

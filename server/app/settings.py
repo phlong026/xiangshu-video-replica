@@ -10,7 +10,7 @@ from cryptography.fernet import Fernet, InvalidToken
 
 from app.local_settings_key import LocalSettingsKeyStoreError, load_or_create_local_settings_key
 
-ProviderName = Literal["apilio", "metaso", "cos"]
+ProviderName = Literal["apilio", "metaso", "cos", "deepseek"]
 
 SETTINGS_KEY_ENV = "VIDEO_REPLICA_SETTINGS_KEY"
 LOCAL_KEYSTORE_DISABLED_ENV = "VIDEO_REPLICA_DISABLE_LOCAL_KEYSTORE"
@@ -27,6 +27,9 @@ REQUIRED_PROVIDER_FIELDS: dict[ProviderName, tuple[str, ...]] = {
     "apilio": (),
     "metaso": ("api_key",),
     "cos": ("access_key_id", "secret_access_key", "bucket", "region"),
+    # 二创口播稿改写默认走 DeepSeek；除 API Key 外的参数（base_url/model）
+    # 由服务端固定，界面无需暴露。
+    "deepseek": ("api_key",),
 }
 DEFAULT_RUNTIME_SETTINGS: dict[str, int | str] = {
     "max_generation_count_per_batch": 4,

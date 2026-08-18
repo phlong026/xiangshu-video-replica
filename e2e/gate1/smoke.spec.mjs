@@ -12,10 +12,7 @@ test("@smoke starts the isolated desktop shell with clean browser evidence", asy
 
   try {
     await page.goto("/");
-    await expect(
-      page.getByRole("heading", { name: "镜序 Studio" }),
-    ).toBeVisible();
-    await page.getByRole("button", { name: "进入" }).click();
+    // 启动即自动验证身份并直接进入工作台，无需点击“进入”。
     await expect(
       page.getByRole("navigation", { name: "主导航" }),
     ).toBeVisible();

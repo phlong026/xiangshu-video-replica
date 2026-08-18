@@ -26,12 +26,16 @@ from app.character_identity import (
     CHARACTER_TEMPLATE_HASH,
     CHARACTER_TEMPLATE_VERSION,
     REQUIRED_CHARACTER_VIEW_TYPES,
+    PersonIdentity,
     approved_character_asset_key,
     character_error,
     encode_json,
     generated_character_asset_key,
+    get_person_identity,
     identity_asset_key,
     persona_snapshot,
+    read_identity_row,
+    required_text,
 )
 from app.character_image_generation import deterministic_png
 from app.permissions import require_project_access, write_audit
@@ -56,7 +60,7 @@ def create_simple_character(
     conn: sqlite3.Connection,
     *,
     actor: CurrentUser,
-    project_id: str,
+    project_id: str | None,
     storage: StorageAdapter,
     source_content: bytes,
     source_content_type: str,
@@ -69,13 +73,18 @@ def create_simple_character(
     asset (self-authorization), the seven views are produced by the local
     deterministic generator, every view is auto-approved, and the version is
     published in the same transaction.
+
+    ``project_id`` is only an access-control/audit hint: the global character
+    library page passes ``None`` (no project context), while the in-project
+    flow passes the owning project so employee access can be verified.
     """
-    require_project_access(
-        conn,
-        actor=actor,
-        project_id=project_id,
-        action="simple_character.create",
-    )
+    if project_id is not None:
+        require_project_access(
+            conn,
+            actor=actor,
+            project_id=project_id,
+            action="simple_character.create",
+        )
     _validate_source(source_content, source_content_type, display_name)
 
     now_iso = _utc_now_iso()
@@ -167,8 +176,8 @@ def create_simple_character(
             metadata={
                 "identity_id": identity_id,
                 "persona_id": persona_id,
-                "project_id": project_id,
                 "publication_hash": publication_hash,
+                **({"project_id": project_id} if project_id else {}),
             },
         )
         conn.commit()
@@ -191,6 +200,53 @@ def create_simple_character(
         character_version_id=version_id,
         publication_hash=publication_hash,
     )
+
+
+def rename_simple_character_identity(
+    conn: sqlite3.Connection,
+    *,
+    actor: CurrentUser,
+    identity_id: str,
+    display_name: str,
+) -> PersonIdentity:
+    """Rename an identity from the simplified character library page.
+
+    Unlike the admin-only ``update_person_identity``, this endpoint only
+    touches ``display_name`` and allows the identity owner (or an admin);
+    renames must never widen access to authorization or source assets.
+    """
+    row = read_identity_row(conn, identity_id)
+    if actor.role != "admin" and str(row["owner_user_id"]) != actor.id:
+        raise character_error(
+            403,
+            "IDENTITY_RENAME_FORBIDDEN",
+            "只有创建者或管理员可以修改人物名称。",
+        )
+    if str(row["status"]) == "ARCHIVED":
+        raise character_error(409, "IDENTITY_ARCHIVED", "已归档人物身份不能修改。")
+    clean_name = required_text(
+        display_name,
+        "IDENTITY_NAME_REQUIRED",
+        "人物显示名不能为空。",
+    )
+    with conn:
+        conn.execute(
+            """
+            UPDATE person_identities
+            SET display_name = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (clean_name, identity_id),
+        )
+    write_audit(
+        conn,
+        actor=actor,
+        action="person_identity.rename",
+        entity_type="person_identity",
+        entity_id=identity_id,
+        metadata={"display_name": clean_name},
+    )
+    return get_person_identity(conn, actor=actor, identity_id=identity_id)
 
 
 def _validate_source(content: bytes, content_type: str, display_name: str) -> None:

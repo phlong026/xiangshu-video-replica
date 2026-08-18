@@ -117,7 +117,7 @@ def test_settings_migration_creates_tables_and_defaults(tmp_path: Path, settings
             """
         ).fetchone()
 
-    assert version == "019_character_simple_upload"
+    assert version == "020_deepseek_provider"
     assert {"provider_settings", "runtime_settings"}.issubset(tables)
     assert dict(runtime) == {
         "max_generation_count_per_batch": 4,
@@ -696,7 +696,12 @@ def test_admin_can_generate_and_download_a_redacted_settings_diagnostic_log(
         "apilio",
         "metaso",
         "cos",
+        "deepseek",
     }
+    deepseek = next(
+        item for item in report["providers"] if item["provider"] == "deepseek"
+    )
+    assert deepseek["status"] == "not_configured"
     metaso = next(item for item in report["providers"] if item["provider"] == "metaso")
     assert metaso["status"] == "ok"
     assert metaso["configured_fields"] == ["api_key"]
@@ -738,6 +743,11 @@ def test_configuration_only_model_checks_do_not_mark_a_complete_report_as_attent
             }
         },
     )
+    client.put(
+        "/api/admin/settings/providers/deepseek",
+        headers=admin_headers(),
+        json={"config": {"api_key": "deepseek-secret-token"}},
+    )
     storage = FakeStorageAdapter(provider="cos", bucket="video-private")
     client.app.dependency_overrides[get_provider_tester] = lambda: StorageProviderTester(
         storage_factory=lambda _: storage
@@ -752,6 +762,7 @@ def test_configuration_only_model_checks_do_not_mark_a_complete_report_as_attent
         "metaso": "configured_only",
         "apilio": "configured_only",
         "cos": "ok",
+        "deepseek": "configured_only",
     }
 
 

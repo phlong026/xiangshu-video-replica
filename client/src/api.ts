@@ -76,7 +76,7 @@ export type GenerationBatchListFilters = {
   cursor?: string;
 };
 
-export type ProviderName = "metaso" | "apilio" | "cos";
+export type ProviderName = "metaso" | "apilio" | "cos" | "deepseek";
 
 export type ProviderSettings = {
   provider: ProviderName;
@@ -413,6 +413,30 @@ export async function reviseGenerationPrompt(
   );
 }
 
+export type PromptPreviewInput = {
+  output_duration_seconds?: number;
+  resolution?: "768P" | "2K";
+};
+
+export type PromptPreviewResult = {
+  prompt_text: string;
+  output_duration_seconds: number;
+  resolution: "768P" | "2K";
+  script_source: "script_version" | "analysis_original";
+  shot_card_version_id: string | null;
+};
+
+export async function previewGenerationPrompt(
+  projectId: string,
+  input: PromptPreviewInput = {},
+): Promise<PromptPreviewResult> {
+  return requestGenerationJson<PromptPreviewResult>(
+    `/api/projects/${encodeURIComponent(projectId)}/prompts/preview`,
+    "生成提示词预览失败",
+    { method: "POST", body: JSON.stringify(input) },
+  );
+}
+
 export async function getLatestGenerationPrompt(
   projectId: string,
 ): Promise<GenerationVersionState> {
@@ -438,6 +462,12 @@ export async function getGenerationRuntimeLimits(): Promise<GenerationRuntimeLim
     "/api/generation/runtime-limits",
     "读取生成数量上限失败",
   );
+}
+
+// 批次 Provider 与工作区正式管线保持同一语义：DEV 走本地模拟，
+// 生产构建走真实 Metaso H3，避免发布包静默创建模拟任务。
+export function defaultBatchProvider(): GenerationBatchInput["provider"] {
+  return import.meta.env.DEV ? "fake_h3" : "metaso";
 }
 
 export async function createGenerationBatch(
@@ -1009,6 +1039,27 @@ export async function listProjectCharacterVersions(
   );
 }
 
+export type ScriptRewriteResult = {
+  rewritten_text: string;
+  provider: string;
+  model: string;
+};
+
+// The server caps the DeepSeek call at 120s; leave headroom for transport.
+const SCRIPT_REWRITE_TIMEOUT_MS = 130_000;
+
+export async function rewriteProjectScript(
+  projectId: string,
+  text: string,
+): Promise<ScriptRewriteResult> {
+  return requestApiJson<ScriptRewriteResult>(
+    `/api/projects/${encodeURIComponent(projectId)}/script-rewrite`,
+    "AI 改写失败",
+    { method: "POST", body: JSON.stringify({ text }) },
+    SCRIPT_REWRITE_TIMEOUT_MS,
+  );
+}
+
 export interface SimpleCharacterResult {
   identity_id: string;
   persona_id: string;
@@ -1017,7 +1068,7 @@ export interface SimpleCharacterResult {
 }
 
 export async function uploadSimpleCharacter(
-  projectId: string,
+  projectId: string | null,
   file: File,
   displayName: string,
   personaName = "",
@@ -1028,11 +1079,25 @@ export async function uploadSimpleCharacter(
   if (personaName.trim()) {
     form.append("persona_name", personaName.trim());
   }
+  const endpoint = projectId
+    ? `/api/simple-characters/${encodeURIComponent(projectId)}/generate`
+    : "/api/simple-characters/generate";
   return requestApiJson<SimpleCharacterResult>(
-    `/api/simple-characters/${encodeURIComponent(projectId)}/generate`,
+    endpoint,
     "一键创建人物失败",
     { method: "POST", body: form },
     CLOUD_OP_TIMEOUT_MS,
+  );
+}
+
+export async function renamePersonIdentity(
+  identityId: string,
+  displayName: string,
+): Promise<PersonIdentity> {
+  return requestApiJson<PersonIdentity>(
+    `/api/simple-characters/identities/${encodeURIComponent(identityId)}/name`,
+    "修改人物名称失败",
+    { method: "PATCH", body: JSON.stringify({ display_name: displayName }) },
   );
 }
 

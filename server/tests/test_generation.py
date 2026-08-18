@@ -1842,6 +1842,74 @@ def test_prompt_compile_rejects_a_superseded_script(client: TestClient) -> None:
     assert response.json()["detail"]["code"] == "SCRIPT_STALE"
 
 
+def test_prompt_preview_compiles_the_latest_script_and_shot_card_without_persisting(
+    client: TestClient,
+) -> None:
+    script = client.post(
+        "/api/projects/project_owned/scripts",
+        headers=auth_headers("employee_1"),
+        json={
+            "source": "custom",
+            "text": "预览用的口播稿。",
+            "shot_card_version_id": "shot_card_v1",
+        },
+    )
+    assert script.status_code == 200
+
+    response = client.post(
+        "/api/projects/project_owned/prompts/preview",
+        headers=auth_headers("employee_1"),
+        json={},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["script_source"] == "script_version"
+    assert body["shot_card_version_id"] == "shot_card_v1"
+    assert body["output_duration_seconds"] == 10
+    assert body["resolution"] == "768P"
+    assert "生成一条 10 秒" in body["prompt_text"]
+    assert "预览用的口播稿。" in body["prompt_text"]
+
+    prompt_state = client.get(
+        "/api/projects/project_owned/prompts/latest",
+        headers=auth_headers("employee_1"),
+    )
+    assert prompt_state.status_code == 200
+    assert prompt_state.json()["version"] is None
+
+
+def test_prompt_preview_falls_back_to_the_original_script_from_the_analysis(
+    client: TestClient,
+) -> None:
+    response = client.post(
+        "/api/projects/project_owned/prompts/preview",
+        headers=auth_headers("employee_1"),
+        json={"output_duration_seconds": 4, "resolution": "2K"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["script_source"] == "analysis_original"
+    assert body["shot_card_version_id"] == "shot_card_v1"
+    assert body["output_duration_seconds"] == 4
+    assert body["resolution"] == "2K"
+    assert "生成一条 4 秒" in body["prompt_text"]
+    assert "原始第一句" in body["prompt_text"]
+    assert "原始第二句" in body["prompt_text"]
+
+
+def test_prompt_preview_requires_project_shots(client: TestClient) -> None:
+    response = client.post(
+        "/api/projects/project_other/prompts/preview",
+        headers=auth_headers("employee_2"),
+        json={},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "ANALYSIS_NOT_READY"
+
+
 def test_prompt_compile_requires_the_currently_confirmed_first_frame(
     client: TestClient,
     db_path: Path,

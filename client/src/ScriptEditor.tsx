@@ -3,6 +3,7 @@ import type { GenerationBusyAction, ScriptSource } from "./useGenerationDrafts";
 type ScriptEditorProps = {
   busyAction: GenerationBusyAction;
   onChooseSource: (source: ScriptSource) => void;
+  onRewriteScript: () => void;
   onSaveScript: () => void;
   onScriptTextChange: (text: string) => void;
   readOnly: boolean;
@@ -16,6 +17,7 @@ type ScriptEditorProps = {
 export function ScriptEditor({
   busyAction,
   onChooseSource,
+  onRewriteScript,
   onSaveScript,
   onScriptTextChange,
   readOnly,
@@ -71,13 +73,22 @@ export function ScriptEditor({
             value={scriptText}
           />
         </label>
-        <button
-          disabled={readOnly || busy || !scriptText.trim()}
-          onClick={onSaveScript}
-          type="button"
-        >
-          {busyAction === "script" ? "正在保存" : "保存口播稿"}
-        </button>
+        <div className="script-actions-row">
+          <button
+            disabled={readOnly || busy || !scriptText.trim()}
+            onClick={onRewriteScript}
+            type="button"
+          >
+            {busyAction === "rewrite" ? "正在改写…" : "AI 改写"}
+          </button>
+          <button
+            disabled={readOnly || busy || !scriptText.trim()}
+            onClick={onSaveScript}
+            type="button"
+          >
+            {busyAction === "script" ? "正在保存" : "保存口播稿"}
+          </button>
+        </div>
         {shotMappings.length > 0 ? (
           <ul className="shot-mapping-list" aria-label="口播镜头映射">
             {shotMappings.map((mapping) => (

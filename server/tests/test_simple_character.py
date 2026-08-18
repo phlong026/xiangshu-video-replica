@@ -231,3 +231,89 @@ def test_generated_character_appears_in_available_versions(
     option = matching[0]
     assert len(option["assets"]) == len(REQUIRED_CHARACTER_VIEW_TYPES)
     assert {asset["view_type"] for asset in option["assets"]} == set(REQUIRED_CHARACTER_VIEW_TYPES)
+
+
+def generate_global(client: TestClient, *, user_id: str = "employee_1"):
+    return client.post(
+        "/api/simple-characters/generate",
+        headers=headers(user_id),
+        files=upload_files(),
+        data={"display_name": "荣哥", "persona_name": "乡墅项目管理专家"},
+    )
+
+
+def test_global_generate_creates_identity_without_project_context(
+    client: TestClient, db_path: Path
+) -> None:
+    response = generate_global(client)
+    assert response.status_code == 201, response.text
+    payload = response.json()
+    assert payload["publication_hash"]
+
+    # The identity is owned by the creator so it can be renamed later.
+    with connect_database(db_path) as conn:
+        row = conn.execute(
+            "SELECT owner_user_id, display_name, status FROM person_identities WHERE id = ?",
+            (payload["identity_id"],),
+        ).fetchone()
+        assert row is not None
+        assert row["owner_user_id"] == "employee_1"
+        assert row["display_name"] == "荣哥"
+        assert row["status"] == "ACTIVE"
+
+
+def test_global_generate_still_rejects_auditors(client: TestClient) -> None:
+    response = generate_global(client, user_id="auditor_1")
+    assert response.status_code == 403
+
+
+def test_owner_can_rename_identity(client: TestClient) -> None:
+    created = generate_global(client).json()
+
+    response = client.patch(
+        f"/api/simple-characters/identities/{created['identity_id']}/name",
+        headers=headers("employee_1"),
+        json={"display_name": "新名字"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["display_name"] == "新名字"
+
+
+def test_admin_can_rename_any_identity(client: TestClient) -> None:
+    created = generate_global(client).json()
+
+    response = client.patch(
+        f"/api/simple-characters/identities/{created['identity_id']}/name",
+        headers=headers("admin_1"),
+        json={"display_name": "管理员改名"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["display_name"] == "管理员改名"
+
+
+def test_other_employee_cannot_rename_identity(client: TestClient) -> None:
+    created = generate_global(client).json()
+
+    response = client.patch(
+        f"/api/simple-characters/identities/{created['identity_id']}/name",
+        headers=headers("employee_2"),
+        json={"display_name": "越权改名"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "IDENTITY_RENAME_FORBIDDEN"
+
+
+def test_rename_rejects_empty_name(client: TestClient) -> None:
+    created = generate_global(client).json()
+
+    response = client.patch(
+        f"/api/simple-characters/identities/{created['identity_id']}/name",
+        headers=headers("employee_1"),
+        json={"display_name": "   "},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "IDENTITY_NAME_REQUIRED"

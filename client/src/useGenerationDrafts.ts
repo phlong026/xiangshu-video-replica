@@ -4,6 +4,7 @@ import {
   compileGenerationPrompt,
   createGenerationBatch,
   createScriptVersion,
+  defaultBatchProvider,
   type GenerationBatch,
   type GenerationBatchInput,
   type GenerationRuntimeLimits,
@@ -13,12 +14,14 @@ import {
   getLatestScriptVersion,
   lockGenerationPrompt,
   reviseGenerationPrompt,
+  rewriteProjectScript,
 } from "./api";
 
 export type ScriptSource = "original" | "custom";
 
 export type GenerationBusyAction =
   | "script"
+  | "rewrite"
   | "compile"
   | "prompt"
   | "lock"
@@ -219,9 +222,7 @@ export function useGenerationDrafts({
   const duration = Number(outputDuration);
   const durationValid =
     Number.isInteger(duration) && duration >= 4 && duration <= 15;
-  const provider: GenerationBatchInput["provider"] = import.meta.env.DEV
-    ? "fake_h3"
-    : "metaso";
+  const provider = defaultBatchProvider();
   const batchRequest: Omit<GenerationBatchInput, "idempotency_key"> | null =
     promptVersion && quantity !== null && durationValid && firstFrameAssetId
       ? {
@@ -282,6 +283,37 @@ export function useGenerationDrafts({
     }
     setMessage("");
     setError("");
+  }
+
+  // 需求：AI 改写（DeepSeek 二创口播稿）——把当前口播稿交给后台改写，
+  // 结果作为自定义稿回填编辑框，需用户确认后手动保存，不自动落库。
+  async function rewriteScriptWithAi() {
+    const text = scriptText.trim();
+    if (!text || readOnly || busyAction) {
+      return;
+    }
+    const actionGeneration = actionGenerationRef.current + 1;
+    actionGenerationRef.current = actionGeneration;
+    setBusyAction("rewrite");
+    setError("");
+    setMessage("");
+    try {
+      const result = await rewriteProjectScript(projectId, text);
+      if (actionGeneration !== actionGenerationRef.current) {
+        return;
+      }
+      setScriptSource("custom");
+      setScriptText(result.rewritten_text);
+      setMessage("AI 改写完成，请确认后点击「保存口播稿」存为二创稿。");
+    } catch (requestError) {
+      if (actionGeneration === actionGenerationRef.current) {
+        setError(errorMessage(requestError, "AI 改写失败。"));
+      }
+    } finally {
+      if (actionGeneration === actionGenerationRef.current) {
+        setBusyAction(null);
+      }
+    }
   }
 
   async function saveScript() {
@@ -717,6 +749,7 @@ export function useGenerationDrafts({
     // 动作
     chooseScriptSource,
     setScriptText,
+    rewriteScriptWithAi,
     saveScript,
     compilePrompt,
     setPromptText,

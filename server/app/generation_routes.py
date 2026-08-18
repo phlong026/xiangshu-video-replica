@@ -19,6 +19,8 @@ from app.generation import (
     H3ProviderSettingsUnavailable,
     PaidRegenerationRequest,
     PromptCompileRequest,
+    PromptPreviewRequest,
+    PromptPreviewResult,
     PromptRevisionRequest,
     ReconcileGenerationTaskRequest,
     ScriptRequest,
@@ -34,6 +36,7 @@ from app.generation import (
     h3_provider_for_task,
     list_generation_batches,
     lock_prompt_version,
+    preview_prompt_text,
     reconcile_generation_task,
     regenerate_generation_batch,
     regenerate_generation_task,
@@ -44,6 +47,11 @@ from app.generation import (
 )
 from app.media_routes import get_media_storage
 from app.permissions import require_not_auditor, require_project_access, require_role
+from app.script_rewrite import (
+    ScriptRewriteRequest,
+    ScriptRewriteResult,
+    rewrite_script_with_deepseek,
+)
 
 router = APIRouter(prefix="/api", tags=["generation"])
 
@@ -61,6 +69,36 @@ def create_project_script(
 ) -> VersionResult:
     row = create_script_version(conn, project_id=project_id, actor=actor, request=request)
     return version_result(row)
+
+
+@router.post(
+    "/projects/{project_id}/script-rewrite",
+    response_model=ScriptRewriteResult,
+)
+def rewrite_project_script(
+    project_id: str,
+    request: ScriptRewriteRequest,
+    conn: Database,
+    actor: AuthenticatedUser,
+) -> ScriptRewriteResult:
+    require_not_auditor(
+        conn,
+        actor=actor,
+        action="project.script_rewrite",
+        entity_type="project",
+        entity_id=project_id,
+    )
+    require_project_access(
+        conn,
+        actor=actor,
+        project_id=project_id,
+        action="project.script_rewrite",
+    )
+    return rewrite_script_with_deepseek(
+        conn,
+        actor=actor,
+        source_text=request.text,
+    )
 
 
 @router.get("/projects/{project_id}/scripts/latest", response_model=VersionState)
@@ -86,6 +124,21 @@ def compile_project_prompt(
 ) -> VersionResult:
     row = compile_prompt_version(conn, project_id=project_id, actor=actor, request=request)
     return version_result(row)
+
+
+@router.post("/projects/{project_id}/prompts/preview", response_model=PromptPreviewResult)
+def preview_project_prompt(
+    project_id: str,
+    request: PromptPreviewRequest,
+    conn: Database,
+    actor: AuthenticatedUser,
+) -> PromptPreviewResult:
+    return preview_prompt_text(
+        conn,
+        project_id=project_id,
+        actor=actor,
+        request=request,
+    )
 
 
 @router.post("/projects/{project_id}/prompts/revise", response_model=VersionResult)

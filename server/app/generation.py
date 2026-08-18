@@ -117,6 +117,23 @@ class PromptCompileRequest(BaseModel):
     resolution: Literal["768P", "2K"] = "768P"
 
 
+class PromptPreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    output_duration_seconds: int | None = Field(default=None, ge=4, le=15)
+    resolution: Literal["768P", "2K"] = "768P"
+
+
+class PromptPreviewResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    prompt_text: str
+    output_duration_seconds: int
+    resolution: Literal["768P", "2K"]
+    script_source: Literal["script_version", "analysis_original"]
+    shot_card_version_id: str | None
+
+
 class PromptRevisionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1000,6 +1017,86 @@ def compile_prompt_version(
         metadata={"project_id": project_id},
     )
     return row
+
+
+def preview_prompt_text(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    actor: CurrentUser,
+    request: PromptPreviewRequest,
+) -> PromptPreviewResult:
+    """无副作用地预览当前项目会编译出的 H3 Prompt 文本。
+
+    镜头来源优先取最新镜头卡版本，共用的分析版本兜底；口播来源优先取最新
+    口播稿版本（原样复用其 shot_mappings，与正式编译文本保持一致），否则用
+    分析产出的原稿逐镜头映射。不落库、不写审计；正式编译仍要求首帧与
+    最新版本链（fail-closed 语义不受影响）。
+    """
+    require_project_access(
+        conn,
+        actor=actor,
+        project_id=project_id,
+        action="prompt.preview",
+    )
+    shot_card = latest_version(conn, project_id=project_id, kind="shot_card")
+    analysis = latest_version(conn, project_id=project_id, kind="analysis")
+    shot_row = shot_card if shot_card is not None else analysis
+    if shot_row is None:
+        raise generation_error(
+            409,
+            "ANALYSIS_NOT_READY",
+            "Analyze the reference video before previewing the prompt.",
+        )
+    shot_payload = json.loads(str(shot_row["payload_json"]))
+    shots = shot_payload.get("shots")
+    if not isinstance(shots, list) or not shots:
+        raise generation_error(
+            409,
+            "SHOT_CARD_TIMELINE_INVALID",
+            "The latest shot data has no shots to compile.",
+        )
+
+    script = latest_version(conn, project_id=project_id, kind=SCRIPT_KIND)
+    if script is not None:
+        script_payload = json.loads(str(script["payload_json"]))
+        script_source = "script_version"
+    else:
+        analysis_payload = (
+            json.loads(str(analysis["payload_json"])) if analysis is not None else {}
+        )
+        original_script = str(analysis_payload.get("original_script") or "")
+        spoken_texts = [str(shot.get("spoken_text") or "") for shot in shots]
+        script_payload = {
+            "full_text": original_script or "".join(spoken_texts),
+            "shot_mappings": [
+                {
+                    "shot_id": str(shot.get("shot_id") or ""),
+                    "text": str(shot.get("spoken_text") or ""),
+                }
+                for shot in shots
+            ],
+        }
+        script_source = "analysis_original"
+
+    source_duration_seconds = shot_timeline_duration(shot_payload)
+    duration_seconds = request.output_duration_seconds
+    if duration_seconds is None:
+        duration_seconds = max(4, min(15, round(source_duration_seconds)))
+    prompt_text = compile_prompt_text(
+        script_payload=script_payload,
+        shot_payload=shot_payload,
+        source_duration_seconds=source_duration_seconds,
+        duration_seconds=duration_seconds,
+        resolution=request.resolution,
+    )
+    return PromptPreviewResult(
+        prompt_text=prompt_text,
+        output_duration_seconds=duration_seconds,
+        resolution=request.resolution,
+        script_source=script_source,
+        shot_card_version_id=(str(shot_card["id"]) if shot_card is not None else None),
+    )
 
 
 def revise_prompt_version(

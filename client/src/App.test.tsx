@@ -42,7 +42,8 @@ function withAuth(handler: FetchMock, user = employeeUser) {
 }
 
 async function enterWorkspace() {
-  fireEvent.click(screen.getByRole("button", { name: "进入" }));
+  // 启动即自动验证身份并直接进入工作台首页，无需点击“进入”；
+  // 用 microtask 刷新而非 findBy*，以兼容 fake timers 用例。
   await act(async () => {
     await Promise.resolve();
   });
@@ -125,21 +126,32 @@ describe("App", () => {
     window.location.hash = "";
   });
 
-  it("starts on the internal login screen", () => {
-    vi.stubGlobal("fetch", withAuth(vi.fn()));
+  it("enters the workspace automatically on startup without clicking", async () => {
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/health")) {
+        return Promise.resolve({ ok: true, json: async () => healthResponse });
+      }
+      return Promise.resolve({ ok: true, json: async () => [] });
+    });
+    vi.stubGlobal("fetch", withAuth(fetchMock));
 
     render(<App />);
 
     expect(
-      screen.getByRole("heading", { name: "镜序 Studio" }),
+      await screen.findByRole("heading", { level: 1, name: "项目" }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "进入" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("navigation", { name: "主导航" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("林夏")).toBeInTheDocument();
   });
 
   it("navigates from login to the project page and loads local API health", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ status: "ok", service: "video-replica-api" }),
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/health")) {
+        return Promise.resolve({ ok: true, json: async () => healthResponse });
+      }
+      return Promise.resolve({ ok: true, json: async () => [] });
     });
     vi.stubGlobal("fetch", withAuth(fetchMock));
 
@@ -179,10 +191,9 @@ describe("App", () => {
     vi.stubGlobal("fetch", withAuth(fetchMock, adminUser));
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "进入" }));
 
     expect(
-      await screen.findByRole("heading", { name: "人物库" }),
+      await screen.findByRole("heading", { level: 1, name: "人物库" }),
     ).toBeInTheDocument();
     for (const label of ["项目", "人物库", "任务记录", "设置"]) {
       expect(screen.getByRole("button", { name: label })).toBeEnabled();
@@ -204,7 +215,6 @@ describe("App", () => {
     vi.stubGlobal("fetch", withAuth(fetchMock, auditorUser));
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "进入" }));
 
     expect(
       await screen.findByRole("heading", { level: 1, name: "项目" }),
@@ -230,7 +240,6 @@ describe("App", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "进入" }));
 
     expect(
       await screen.findByText("身份验证失败：missing identity（401）"),
@@ -243,7 +252,7 @@ describe("App", () => {
     );
   });
 
-  it("shows the employee project list with an inline creation form", async () => {
+  it("shows the employee project list with the quick-upload zone", async () => {
     const fetchMock = vi.fn((url: string) => {
       if (url.endsWith("/health")) {
         return Promise.resolve({ ok: true, json: async () => healthResponse });
@@ -256,39 +265,17 @@ describe("App", () => {
     await enterWorkspace();
 
     expect(
-      await screen.findByText("还没有项目。在上方开始第一个复刻。"),
+      await screen.findByText("还没有项目。上传第一个参考视频即可开始复刻。"),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("heading", { level: 2, name: "项目" }),
     ).toBeInTheDocument();
-    expect(screen.getByLabelText("项目名称")).toBeInTheDocument();
-    expect(screen.getByLabelText("参考视频")).toHaveAttribute(
+    expect(screen.getByLabelText("选择一个或多个参考视频")).toHaveAttribute(
       "accept",
       ".mp4,.mov,video/mp4,video/quicktime",
     );
-    expect(screen.getByRole("button", { name: "开始" })).toBeDisabled();
-    expect(screen.queryByText("只读身份：仅可查看。")).toBeNull();
-  });
-
-  it("shows the shared three-stage project flow when creating a replica", async () => {
-    const fetchMock = vi.fn((url: string) => {
-      if (url.endsWith("/health")) {
-        return Promise.resolve({ ok: true, json: async () => healthResponse });
-      }
-      return Promise.resolve({ ok: true, json: async () => [] });
-    });
-    vi.stubGlobal("fetch", withAuth(fetchMock));
-    window.location.hash = "#new";
-
-    render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "进入" }));
-
-    const flow = await screen.findByRole("list", { name: "复刻项目流程" });
-    expect(within(flow).getAllByRole("listitem")).toHaveLength(3);
-    expect(within(flow).getByText("上传与拆解")).toHaveAttribute(
-      "aria-current",
-      "step",
-    );
+    expect(screen.getByRole("button", { name: "选择视频" })).toBeEnabled();
+    expect(screen.queryByText("只读身份：仅可查看项目。")).toBeNull();
   });
 
   it("shows an auditor a read-only project list without write actions", async () => {
@@ -374,15 +361,17 @@ describe("App", () => {
     await enterWorkspace();
 
     expect(screen.getAllByText("审计员")).toHaveLength(2);
-    expect(screen.getByText("只读身份：仅可查看。")).toBeInTheDocument();
-    expect(screen.queryByLabelText("项目名称")).toBeNull();
+    expect(screen.getByText("只读身份：仅可查看项目。")).toBeInTheDocument();
+    expect(screen.queryByLabelText("选择一个或多个参考视频")).toBeNull();
     expect(screen.queryByRole("button", { name: "继续编辑" })).toBeNull();
     expect(screen.queryByRole("button", { name: "删除项目" })).toBeNull();
     expect(
-      screen.getByRole("button", { name: "查看项目" }),
+      screen.getByRole("button", { name: "打开项目 已归档项目" }),
     ).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "查看项目" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "打开项目 已归档项目" }),
+    );
     expect(await screen.findByText("只读身份：仅可查看。")).toBeInTheDocument();
     expect(screen.getByLabelText("S01 动作")).toBeDisabled();
     expect(screen.queryByRole("button", { name: "保存镜头卡片" })).toBeNull();
@@ -413,7 +402,6 @@ describe("App", () => {
     vi.stubGlobal("fetch", withAuth(fetchMock));
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "进入" }));
 
     expect(
       await screen.findByText("登录已失效，请重新进入工作台。"),
@@ -424,38 +412,91 @@ describe("App", () => {
     expect(screen.queryByText("林夏")).toBeNull();
   });
 
-  it("lets an employee resume a pending upload from an existing project", async () => {
-    const fetchMock = vi.fn((url: string) => {
+  it("lets an employee rebind a pending upload from an existing project", async () => {
+    class PendingUploadRequest {
+      onabort: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      onload: (() => void) | null = null;
+      ontimeout: (() => void) | null = null;
+      status = 0;
+      timeout = 0;
+      upload: { onprogress: ((event: ProgressEvent) => void) | null } = {
+        onprogress: null,
+      };
+
+      open() {}
+      setRequestHeader() {}
+      send() {}
+    }
+
+    const fetchMock = vi.fn((url: string, _options?: RequestInit) => {
       if (url.endsWith("/health")) {
         return Promise.resolve({ ok: true, json: async () => healthResponse });
       }
-      return Promise.resolve({
-        ok: true,
-        json: async () => [
-          {
-            id: "project-pending",
-            owner_user_id: "employee_1",
-            name: "待续传项目",
-            status: "ACTIVE",
-            reference_asset_id: "asset-pending",
-            reference_upload_status: "UPLOAD_PENDING",
-          },
-        ],
-      });
+      if (url.endsWith("/upload-intent")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            asset_id: "asset-pending",
+            project_id: "project-pending",
+            storage_key: "projects/project-pending/reference.mp4",
+            method: "PUT",
+            url: "https://storage.example/upload",
+            headers: { "content-type": "video/mp4" },
+            expires_at: "2030-01-01T00:00:00Z",
+          }),
+        });
+      }
+      if (url.endsWith("/api/projects")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => [
+            {
+              id: "project-pending",
+              owner_user_id: "employee_1",
+              name: "待续传项目",
+              status: "ACTIVE",
+              reference_asset_id: "asset-pending",
+              reference_upload_status: "UPLOAD_PENDING",
+            },
+          ],
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => [] });
     });
     vi.stubGlobal("fetch", withAuth(fetchMock));
+    vi.stubGlobal("XMLHttpRequest", PendingUploadRequest);
 
     render(<App />);
     await enterWorkspace();
-    fireEvent.click(await screen.findByRole("button", { name: "继续编辑" }));
+    fireEvent.click(await screen.findByRole("button", { name: "重新上传" }));
+    fireEvent.change(screen.getByLabelText("重新上传参考视频"), {
+      target: {
+        files: [new File(["video"], "retry.mp4", { type: "video/mp4" })],
+      },
+    });
 
-    expect(window.location.hash).toBe("#new");
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "http://127.0.0.1:8000/api/assets/upload-intent",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({
+            project_id: "project-pending",
+            filename: "retry.mp4",
+            content_type: "video/mp4",
+            size_bytes: 5,
+          }),
+        }),
+      ),
+    );
+    // 续传复用现有项目，不再新建。
     expect(
-      screen.getByRole("heading", { level: 2, name: "新建项目" }),
-    ).toBeInTheDocument();
-    expect(screen.getByLabelText("项目名称")).toHaveValue("待续传项目");
-    expect(screen.getByLabelText("项目名称")).toBeDisabled();
-    expect(screen.getByText("重新上传 · 待续传项目")).toBeInTheDocument();
+      fetchMock.mock.calls.filter(
+        ([url, options]) =>
+          url.endsWith("/api/projects") && options?.method === "POST",
+      ),
+    ).toHaveLength(0);
   });
 
   it("resumes a ready project at video analysis without creating another project", async () => {
@@ -505,7 +546,7 @@ describe("App", () => {
               status: "REFERENCE_READY",
               reference_asset_id: "asset-ready",
               reference_upload_status: "READY",
-              analysis_status: "PENDING",
+              analysis_status: analysisReady ? "READY" : "PENDING",
             },
           ],
         });
@@ -545,7 +586,9 @@ describe("App", () => {
 
     render(<App />);
     await enterWorkspace();
-    fireEvent.click(await screen.findByRole("button", { name: "继续编辑" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "打开项目 待拆解项目" }),
+    );
 
     expect(
       await screen.findByRole("button", { name: "开始拆解" }),
@@ -607,7 +650,9 @@ describe("App", () => {
 
     render(<App />);
     await enterWorkspace();
-    fireEvent.click(await screen.findByRole("button", { name: "删除项目" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "删除项目 等待删除" }),
+    );
 
     expect(fetchMock).toHaveBeenCalledWith(
       "http://127.0.0.1:8000/api/projects/project-pending",
@@ -712,7 +757,9 @@ describe("App", () => {
 
     render(<App />);
     await enterWorkspace();
-    fireEvent.click(await screen.findByRole("button", { name: "继续编辑" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "打开项目 咖啡复刻" }),
+    );
 
     expect(
       screen.getByRole("heading", { name: "咖啡复刻" }),
@@ -721,7 +768,6 @@ describe("App", () => {
       await screen.findByRole("heading", { name: "镜头与口播" }),
     ).toBeInTheDocument();
     expect(await screen.findByText("咖啡口播拆解")).toBeInTheDocument();
-    expect(screen.getByText("拆解来源：演示拆解")).toBeInTheDocument();
     expect(
       screen.getByText("演示数据 · 在设置中配置 Gemini 后可重新拆解"),
     ).toBeInTheDocument();
@@ -880,7 +926,9 @@ describe("App", () => {
 
     render(<App />);
     await enterWorkspace();
-    fireEvent.click(await screen.findByRole("button", { name: "继续编辑" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "打开项目 人物复刻" }),
+    );
     const chooseVersionButton = await screen.findByRole("button", {
       name: "选择角色版本",
     });
@@ -939,25 +987,31 @@ describe("App", () => {
       }
     }
 
-    let projectCollectionCalls = 0;
-    const fetchMock = vi.fn((url: string) => {
+    let projectCreated = false;
+    const fetchMock = vi.fn((url: string, options?: RequestInit) => {
       if (url.endsWith("/health")) {
         return Promise.resolve({ ok: true, json: async () => healthResponse });
       }
       if (url.endsWith("/api/projects") && !url.includes("analysis")) {
-        projectCollectionCalls += 1;
-        const projectResponse =
-          projectCollectionCalls === 1
-            ? []
-            : {
-                id: "project-1",
-                owner_user_id: "employee_1",
-                name: "咖啡口播",
-                status: "ACTIVE",
-              };
+        const projectRecord = {
+          id: "project-1",
+          owner_user_id: "employee_1",
+          name: "咖啡口播",
+          status: "ACTIVE",
+          reference_asset_id: "asset-1",
+          reference_upload_status: "READY",
+          analysis_status: "PENDING",
+        };
+        if (options?.method === "POST") {
+          projectCreated = true;
+          return Promise.resolve({
+            ok: true,
+            json: async () => projectRecord,
+          });
+        }
         return Promise.resolve({
           ok: true,
-          json: async () => projectResponse,
+          json: async () => (projectCreated ? [projectRecord] : []),
         });
       }
       if (url.endsWith("/upload-intent")) {
@@ -1042,27 +1096,16 @@ describe("App", () => {
 
     render(<App />);
     await enterWorkspace();
-    fireEvent.change(screen.getByLabelText("项目名称"), {
-      target: { value: "咖啡口播" },
-    });
-    fireEvent.change(screen.getByLabelText("参考视频"), {
+    fireEvent.change(screen.getByLabelText("选择一个或多个参考视频"), {
       target: {
         files: [new File(["video"], "reference.mp4", { type: "video/mp4" })],
       },
     });
-    fireEvent.click(screen.getByRole("button", { name: "开始" }));
 
+    expect(await screen.findByText("已提交拆解")).toBeInTheDocument();
     expect(
-      await screen.findByText(/预检通过（15.1 秒），拆解中/),
+      await screen.findByRole("button", { name: "打开项目 咖啡口播" }),
     ).toBeInTheDocument();
-    expect(
-      await screen.findByRole("heading", { name: "镜头与口播" }),
-    ).toBeInTheDocument();
-    expect(await screen.findByText("咖啡口播拆解完成")).toBeInTheDocument();
-    expect(
-      screen.queryByRole("progressbar", { name: "参考视频上传进度" }),
-    ).toBeNull();
-    expect(screen.queryByRole("button", { name: "继续上传" })).toBeNull();
     expect(fetchMock).toHaveBeenCalledWith(
       "http://127.0.0.1:8000/api/projects/project-1/analysis",
       expect.objectContaining({
@@ -1075,7 +1118,7 @@ describe("App", () => {
     );
   });
 
-  it("clears the automatic-analysis error after recovery succeeds", async () => {
+  it("surfaces the automatic-analysis failure on the upload entry", async () => {
     class SuccessfulUploadRequest {
       onerror: (() => void) | null = null;
       onload: (() => void) | null = null;
@@ -1210,39 +1253,40 @@ describe("App", () => {
 
     render(<App />);
     await enterWorkspace();
-    fireEvent.change(screen.getByLabelText("项目名称"), {
-      target: { value: "失败后恢复" },
-    });
-    fireEvent.change(screen.getByLabelText("参考视频"), {
+    fireEvent.change(screen.getByLabelText("选择一个或多个参考视频"), {
       target: {
         files: [new File(["video"], "reference.mp4", { type: "video/mp4" })],
       },
     });
-    fireEvent.click(screen.getByRole("button", { name: "开始" }));
 
     expect(await screen.findByText(/模型暂时不可用/)).toBeInTheDocument();
-    fireEvent.click(await screen.findByRole("button", { name: "开始拆解" }));
-
-    expect(await screen.findByText("恢复成功")).toBeInTheDocument();
-    expect(screen.queryByText(/模型暂时不可用/)).toBeNull();
+    expect(screen.getByRole("button", { name: "知道了" })).toBeInTheDocument();
   });
 
   it("rejects unsupported reference videos before creating a project", async () => {
-    vi.stubGlobal("fetch", withAuth(vi.fn()));
+    const fetchMock = vi.fn((url: string, _options?: RequestInit) => {
+      if (url.endsWith("/health")) {
+        return Promise.resolve({ ok: true, json: async () => healthResponse });
+      }
+      return Promise.resolve({ ok: true, json: async () => [] });
+    });
+    vi.stubGlobal("fetch", withAuth(fetchMock));
 
     render(<App />);
     await enterWorkspace();
-    fireEvent.change(screen.getByLabelText("项目名称"), {
-      target: { value: "错误文件" },
-    });
-    fireEvent.change(screen.getByLabelText("参考视频"), {
+    fireEvent.change(screen.getByLabelText("选择一个或多个参考视频"), {
       target: { files: [new File(["text"], "reference.txt")] },
     });
 
     expect(
-      screen.getByText("只支持 MP4 或 MOV 格式的视频。"),
+      await screen.findByText("只支持 MP4 或 MOV 格式的视频。"),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "开始" })).toBeDisabled();
+    expect(
+      fetchMock.mock.calls.filter(
+        ([url, options]) =>
+          url.endsWith("/api/projects") && options?.method === "POST",
+      ),
+    ).toHaveLength(0);
   });
 
   it("keeps the upload stage visible while the file transfer is still pending", async () => {
@@ -1311,22 +1355,16 @@ describe("App", () => {
 
     render(<App />);
     await enterWorkspace();
-    fireEvent.change(screen.getByLabelText("项目名称"), {
-      target: { value: "上传中项目" },
-    });
-    fireEvent.change(screen.getByLabelText("参考视频"), {
+    fireEvent.change(screen.getByLabelText("选择一个或多个参考视频"), {
       target: {
         files: [new File(["video"], "reference.mp4", { type: "video/mp4" })],
       },
     });
-    fireEvent.click(screen.getByRole("button", { name: "开始" }));
 
+    expect(await screen.findByText(/正在上传视频/)).toBeInTheDocument();
     expect(
-      await screen.findByText("步骤 3/5 · 正在上传参考视频"),
+      screen.getByRole("progressbar", { name: "上传进度" }),
     ).toBeInTheDocument();
-    expect(
-      screen.getByRole("progressbar", { name: "参考视频上传进度" }),
-    ).toHaveAttribute("aria-valuetext", "正在上传参考视频，等待传输进度");
     fireEvent.click(screen.getByRole("button", { name: "取消上传" }));
     expect(await screen.findByText(/上传已取消/)).toBeInTheDocument();
   });
@@ -1400,16 +1438,12 @@ describe("App", () => {
 
     render(<App />);
     await enterWorkspace();
-    fireEvent.change(screen.getByLabelText("项目名称"), {
-      target: { value: "关闭窗口测试" },
-    });
-    fireEvent.change(screen.getByLabelText("参考视频"), {
+    fireEvent.change(screen.getByLabelText("选择一个或多个参考视频"), {
       target: {
         files: [new File(["video"], "reference.mp4", { type: "video/mp4" })],
       },
     });
-    fireEvent.click(screen.getByRole("button", { name: "开始" }));
-    await screen.findByText("步骤 3/5 · 正在上传参考视频");
+    await screen.findByText(/正在上传视频/);
 
     act(() => window.dispatchEvent(new Event("pagehide")));
 
@@ -1435,25 +1469,31 @@ describe("App", () => {
       }
     }
 
-    let projectCollectionCalls = 0;
-    const fetchMock = vi.fn((url: string) => {
+    let projectCreated = false;
+    const fetchMock = vi.fn((url: string, options?: RequestInit) => {
       if (url.endsWith("/health")) {
         return Promise.resolve({ ok: true, json: async () => healthResponse });
       }
       if (url.endsWith("/api/projects")) {
-        projectCollectionCalls += 1;
-        const projectResponse =
-          projectCollectionCalls === 1
-            ? []
-            : {
-                id: "project-1",
-                owner_user_id: "employee_1",
-                name: "失败重试",
-                status: "ACTIVE",
-              };
+        const projectRecord = {
+          id: "project-1",
+          owner_user_id: "employee_1",
+          name: "失败重试",
+          status: "ACTIVE",
+          reference_asset_id: null,
+          reference_upload_status: "UPLOAD_PENDING",
+          analysis_status: "NOT_READY",
+        };
+        if (options?.method === "POST") {
+          projectCreated = true;
+          return Promise.resolve({
+            ok: true,
+            json: async () => projectRecord,
+          });
+        }
         return Promise.resolve({
           ok: true,
-          json: async () => projectResponse,
+          json: async () => (projectCreated ? [projectRecord] : []),
         });
       }
       return Promise.resolve({
@@ -1474,21 +1514,18 @@ describe("App", () => {
 
     render(<App />);
     await enterWorkspace();
-    fireEvent.change(screen.getByLabelText("项目名称"), {
-      target: { value: "失败重试" },
-    });
-    fireEvent.change(screen.getByLabelText("参考视频"), {
+    fireEvent.change(screen.getByLabelText("选择一个或多个参考视频"), {
       target: {
         files: [new File(["video"], "reference.mp4", { type: "video/mp4" })],
       },
     });
-    fireEvent.click(screen.getByRole("button", { name: "开始" }));
 
     expect(
       await screen.findByText(/上传参考视频失败（500）/),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "重新上传" })).toBeEnabled();
-    expect(screen.getByLabelText("项目名称")).toBeDisabled();
+    expect(
+      await screen.findByRole("button", { name: "重新上传" }),
+    ).toBeEnabled();
   });
 
   it("attributes a network-level cloud upload failure to object storage connectivity", async () => {
@@ -1509,25 +1546,31 @@ describe("App", () => {
       }
     }
 
-    let projectCollectionCalls = 0;
-    const fetchMock = vi.fn((url: string) => {
+    let projectCreated = false;
+    const fetchMock = vi.fn((url: string, options?: RequestInit) => {
       if (url.endsWith("/health")) {
         return Promise.resolve({ ok: true, json: async () => healthResponse });
       }
       if (url.endsWith("/api/projects")) {
-        projectCollectionCalls += 1;
-        const projectResponse =
-          projectCollectionCalls === 1
-            ? []
-            : {
-                id: "project-1",
-                owner_user_id: "employee_1",
-                name: "云存储不可达",
-                status: "ACTIVE",
-              };
+        const projectRecord = {
+          id: "project-1",
+          owner_user_id: "employee_1",
+          name: "云存储不可达",
+          status: "ACTIVE",
+          reference_asset_id: null,
+          reference_upload_status: "UPLOAD_PENDING",
+          analysis_status: "NOT_READY",
+        };
+        if (options?.method === "POST") {
+          projectCreated = true;
+          return Promise.resolve({
+            ok: true,
+            json: async () => projectRecord,
+          });
+        }
         return Promise.resolve({
           ok: true,
-          json: async () => projectResponse,
+          json: async () => (projectCreated ? [projectRecord] : []),
         });
       }
       return Promise.resolve({
@@ -1548,15 +1591,11 @@ describe("App", () => {
 
     render(<App />);
     await enterWorkspace();
-    fireEvent.change(screen.getByLabelText("项目名称"), {
-      target: { value: "云存储不可达" },
-    });
-    fireEvent.change(screen.getByLabelText("参考视频"), {
+    fireEvent.change(screen.getByLabelText("选择一个或多个参考视频"), {
       target: {
         files: [new File(["video"], "reference.mp4", { type: "video/mp4" })],
       },
     });
-    fireEvent.click(screen.getByRole("button", { name: "开始" }));
 
     expect(
       await screen.findByText(/上传参考视频失败（无法连接对象存储/),
@@ -1584,25 +1623,31 @@ describe("App", () => {
       }
     }
 
-    let projectCollectionCalls = 0;
-    const fetchMock = vi.fn((url: string) => {
+    let projectCreated = false;
+    const fetchMock = vi.fn((url: string, options?: RequestInit) => {
       if (url.endsWith("/health")) {
         return Promise.resolve({ ok: true, json: async () => healthResponse });
       }
       if (url.endsWith("/api/projects")) {
-        projectCollectionCalls += 1;
-        const projectResponse =
-          projectCollectionCalls === 1
-            ? []
-            : {
-                id: "project-1",
-                owner_user_id: "employee_1",
-                name: "本地服务不可达",
-                status: "ACTIVE",
-              };
+        const projectRecord = {
+          id: "project-1",
+          owner_user_id: "employee_1",
+          name: "本地服务不可达",
+          status: "ACTIVE",
+          reference_asset_id: null,
+          reference_upload_status: "UPLOAD_PENDING",
+          analysis_status: "NOT_READY",
+        };
+        if (options?.method === "POST") {
+          projectCreated = true;
+          return Promise.resolve({
+            ok: true,
+            json: async () => projectRecord,
+          });
+        }
         return Promise.resolve({
           ok: true,
-          json: async () => projectResponse,
+          json: async () => (projectCreated ? [projectRecord] : []),
         });
       }
       return Promise.resolve({
@@ -1623,15 +1668,11 @@ describe("App", () => {
 
     render(<App />);
     await enterWorkspace();
-    fireEvent.change(screen.getByLabelText("项目名称"), {
-      target: { value: "本地服务不可达" },
-    });
-    fireEvent.change(screen.getByLabelText("参考视频"), {
+    fireEvent.change(screen.getByLabelText("选择一个或多个参考视频"), {
       target: {
         files: [new File(["video"], "reference.mp4", { type: "video/mp4" })],
       },
     });
-    fireEvent.click(screen.getByRole("button", { name: "开始" }));
 
     expect(
       await screen.findByText(
@@ -1646,6 +1687,7 @@ describe("App", () => {
         metaso: { provider: "metaso", configured: false, config: {} },
         apilio: { provider: "apilio", configured: false, config: {} },
         cos: { provider: "cos", configured: false, config: {} },
+        deepseek: { provider: "deepseek", configured: false, config: {} },
       },
       runtime: {
         max_generation_count_per_batch: 4,
@@ -1662,6 +1704,9 @@ describe("App", () => {
           ok: true,
           json: async () => settingsResponse,
         });
+      }
+      if (url.endsWith("/api/projects")) {
+        return Promise.resolve({ ok: true, json: async () => [] });
       }
       return Promise.resolve({ ok: true, json: async () => ({}) });
     });
@@ -1693,6 +1738,7 @@ describe("App", () => {
         },
         apilio: { provider: "apilio", configured: false, config: {} },
         cos: { provider: "cos", configured: false, config: {} },
+        deepseek: { provider: "deepseek", configured: false, config: {} },
       },
       runtime: {
         max_generation_count_per_batch: 4,
@@ -1733,6 +1779,9 @@ describe("App", () => {
           }),
         });
       }
+      if (url.endsWith("/api/projects")) {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
       return Promise.resolve({ ok: true, json: async () => ({}) });
     });
     vi.stubGlobal("fetch", withAuth(fetchMock, adminUser));
@@ -1744,13 +1793,13 @@ describe("App", () => {
     expect(
       await screen.findByRole("heading", { name: "服务设置" }),
     ).toBeInTheDocument();
-    const apiKeyInput = screen.getByLabelText("API Key");
+    const apiKeyInput = screen.getAllByLabelText("API Key")[0];
     expect(apiKeyInput).toHaveValue("");
     expect(apiKeyInput).toHaveAttribute("placeholder", "已保存，留空不修改");
     expect(apiKeyInput).toHaveAttribute("type", "password");
-    fireEvent.click(screen.getByRole("button", { name: "显示API Key" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "显示API Key" })[0]);
     expect(apiKeyInput).toHaveAttribute("type", "text");
-    fireEvent.click(screen.getByRole("button", { name: "隐藏API Key" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "隐藏API Key" })[0]);
     expect(apiKeyInput).toHaveAttribute("type", "password");
     expect(screen.getByText("模型服务")).toBeInTheDocument();
     expect(screen.queryByLabelText("Region")).not.toBeInTheDocument();
@@ -1762,7 +1811,7 @@ describe("App", () => {
     expect(screen.getByText("存储方式修改尚未保存")).toBeInTheDocument();
     await act(async () => Promise.resolve());
     expect(screen.getByText("存储方式修改尚未保存")).toBeInTheDocument();
-    fireEvent.click(screen.getAllByRole("button", { name: "保存" })[3]);
+    fireEvent.click(screen.getAllByRole("button", { name: "保存" })[4]);
     expect(screen.getByLabelText("存储方式")).toBeDisabled();
     expect(screen.getByLabelText("单次生成数量上限")).toBeDisabled();
     expect(screen.getByLabelText("视频生成并发数")).toBeDisabled();
@@ -1784,7 +1833,7 @@ describe("App", () => {
     ).toBeInTheDocument();
 
     const testButtons = screen.getAllByRole("button", { name: "测试连接" });
-    expect(testButtons).toHaveLength(3);
+    expect(testButtons).toHaveLength(4);
     fireEvent.click(testButtons[0]);
     expect(
       await screen.findByText("参数已保存；测试不会发起外部调用"),
@@ -1819,6 +1868,9 @@ describe("App", () => {
           }),
         });
       }
+      if (url.endsWith("/api/projects")) {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
       return Promise.resolve({ ok: true, json: async () => ({}) });
     });
     vi.stubGlobal("fetch", withAuth(fetchMock, adminUser));
@@ -1837,6 +1889,9 @@ describe("App", () => {
           ok: true,
           json: async () => healthResponse,
         });
+      }
+      if (url.endsWith("/api/projects")) {
+        return Promise.resolve({ ok: true, json: async () => [] });
       }
       return Promise.resolve({
         ok: true,
@@ -1868,6 +1923,9 @@ describe("App", () => {
     const fetchMock = vi.fn((url: string) => {
       if (url.endsWith("/health")) {
         return Promise.resolve({ ok: true, json: async () => healthResponse });
+      }
+      if (url.endsWith("/api/projects")) {
+        return Promise.resolve({ ok: true, json: async () => [] });
       }
       return Promise.resolve({
         ok: true,
@@ -2131,6 +2189,9 @@ describe("App", () => {
           ok: true,
           json: async () => healthResponse,
         });
+      }
+      if (url.endsWith("/api/projects")) {
+        return Promise.resolve({ ok: true, json: async () => [] });
       }
       return Promise.resolve({
         ok: true,

@@ -328,7 +328,7 @@ def run_settings_diagnostic(
     repo = SettingsRepository(conn)
     results: list[DiagnosticProviderResult] = []
 
-    for provider in ("metaso", "apilio", "cos"):
+    for provider in ("metaso", "apilio", "cos", "deepseek"):
         config = repo.load_provider_config(provider)
         configured_fields = sorted(config)
         if not config:
@@ -518,6 +518,13 @@ def configured_only_message(provider: str) -> str:
             (
                 "模型服务参数已保存。视频拆解和首帧任务会按需调用；",
                 "测试设置不会发起计费模型请求。",
+            )
+        )
+    if provider == "deepseek":
+        return "".join(
+            (
+                "AI 改写服务参数已保存。点击工作台「AI 改写」按钮时会实际调用；",
+                "测试设置不会发起计费请求。",
             )
         )
     return "参数已保存；本次测试未发起外部调用。"

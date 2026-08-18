@@ -690,44 +690,86 @@ export function AnalysisWorkspace({
             </header>
             <div
               className={highlighted(
-                "shot-card-list",
+                "shot-table-wrap",
                 highlightKey === "shotCardVersion",
               )}
             >
-              {shots.map((shot, index) => (
-                <fieldset className="shot-card" key={shot.shot_id}>
-                  <legend>镜头 {index + 1}</legend>
-                  <div className="shot-time-grid">
-                    <ShotInput
-                      label={`${shot.shot_id} 开始时间`}
-                      onChange={(value) =>
-                        updateShot(index, "start_time", value)
-                      }
-                      readOnly={readOnly || isSaving || isWorkspaceBusy}
-                      type="number"
-                      value={String(shot.start_time)}
-                    />
-                    <ShotInput
-                      label={`${shot.shot_id} 结束时间`}
-                      onChange={(value) => updateShot(index, "end_time", value)}
-                      readOnly={readOnly || isSaving || isWorkspaceBusy}
-                      type="number"
-                      value={String(shot.end_time)}
-                    />
-                  </div>
-                  <div className="shot-field-grid">
-                    {SHOT_TEXT_FIELDS.map(({ key, label }) => (
-                      <ShotInput
-                        key={key}
-                        label={`${shot.shot_id} ${label}`}
-                        onChange={(value) => updateShot(index, key, value)}
-                        readOnly={readOnly || isSaving || isWorkspaceBusy}
-                        value={shot[key]}
-                      />
+              {/* 需求：镜头与口播改为中文表格呈现（每行一个镜头）。
+                  单元格内保留编辑与自动保存；aria-label 与旧卡片一致，
+                  兼容既有测试与无障碍读屏。 */}
+              <table className="shot-table">
+                <thead>
+                  <tr>
+                    <th scope="col">镜头</th>
+                    <th scope="col">开始(秒)</th>
+                    <th scope="col">结束(秒)</th>
+                    {SHOT_TEXT_FIELDS.filter(
+                      (field) => field.key !== "shot_id",
+                    ).map((field) => (
+                      <th key={field.key} scope="col">
+                        {field.label}
+                      </th>
                     ))}
-                  </div>
-                </fieldset>
-              ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {shots.map((shot, index) => (
+                    <tr key={shot.shot_id}>
+                      <td className="shot-table__id">
+                        <ShotCellInput
+                          ariaLabel={`${shot.shot_id} 镜头编号`}
+                          onChange={(value) =>
+                            updateShot(index, "shot_id", value)
+                          }
+                          readOnly={readOnly || isSaving || isWorkspaceBusy}
+                          value={shot.shot_id}
+                        />
+                      </td>
+                      <td className="shot-table__time">
+                        <ShotCellInput
+                          ariaLabel={`${shot.shot_id} 开始时间`}
+                          onChange={(value) =>
+                            updateShot(index, "start_time", value)
+                          }
+                          readOnly={readOnly || isSaving || isWorkspaceBusy}
+                          type="number"
+                          value={String(shot.start_time)}
+                        />
+                      </td>
+                      <td className="shot-table__time">
+                        <ShotCellInput
+                          ariaLabel={`${shot.shot_id} 结束时间`}
+                          onChange={(value) =>
+                            updateShot(index, "end_time", value)
+                          }
+                          readOnly={readOnly || isSaving || isWorkspaceBusy}
+                          type="number"
+                          value={String(shot.end_time)}
+                        />
+                      </td>
+                      {SHOT_TEXT_FIELDS.filter(
+                        (field) => field.key !== "shot_id",
+                      ).map(({ key, label }) => (
+                        <td
+                          key={key}
+                          className={
+                            key === "spoken_text"
+                              ? "shot-table__spoken"
+                              : undefined
+                          }
+                        >
+                          <ShotCellInput
+                            ariaLabel={`${shot.shot_id} ${label}`}
+                            onChange={(value) => updateShot(index, key, value)}
+                            readOnly={readOnly || isSaving || isWorkspaceBusy}
+                            value={shot[key]}
+                          />
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
             <div
               className={highlighted(
@@ -753,6 +795,7 @@ export function AnalysisWorkspace({
                   <ScriptEditor
                     busyAction={generationDrafts.busyAction}
                     onChooseSource={generationDrafts.chooseScriptSource}
+                    onRewriteScript={generationDrafts.rewriteScriptWithAi}
                     onSaveScript={generationDrafts.saveScript}
                     onScriptTextChange={generationDrafts.setScriptText}
                     readOnly={draftsReadOnly}
@@ -1100,12 +1143,6 @@ export function AnalysisWorkspace({
         <form className="analysis-form" onSubmit={handleSave}>
           <div className="analysis-summary">
             <strong>{analysisSummary}</strong>
-            <div className="analysis-meta">
-              <span>参考时长：{durationSeconds.toFixed(1)} 秒</span>
-              {analysisProvider ? (
-                <span>拆解来源：{providerLabel(analysisProvider)}</span>
-              ) : null}
-            </div>
           </div>
           {analysisProvider === "fake_gemini" ? (
             <p className="status-note">
@@ -1132,10 +1169,6 @@ export function AnalysisWorkspace({
       ) : null}
     </section>
   );
-}
-
-function providerLabel(provider: AnalysisProvider) {
-  return provider === "apilio_gemini" ? "Gemini 3.1 Pro（Apilio）" : "演示拆解";
 }
 
 // P0-03-02：镜头卡首镜头 → 源画面人物特征预填建议（shot_type 中文映射
@@ -1188,30 +1221,31 @@ function PipelineSkeleton({ note }: { note: string }) {
   );
 }
 
-function ShotInput({
-  label,
+// 表格单元格内的镜头字段输入：列名由表头统一提供，控件本身只用
+// aria-label 标识（与旧卡片的可见 label 文字保持一致）。
+function ShotCellInput({
+  ariaLabel,
   onChange,
   readOnly = false,
   type = "text",
   value,
 }: {
-  label: string;
+  ariaLabel: string;
   onChange: (value: string) => void;
   readOnly?: boolean;
   type?: "number" | "text";
   value: string;
 }) {
   return (
-    <label>
-      {label}
-      <input
-        disabled={readOnly}
-        min={type === "number" ? 0 : undefined}
-        onChange={(event) => onChange(event.target.value)}
-        step={type === "number" ? "0.1" : undefined}
-        type={type}
-        value={value}
-      />
-    </label>
+    <input
+      aria-label={ariaLabel}
+      className="shot-table-input"
+      disabled={readOnly}
+      min={type === "number" ? 0 : undefined}
+      onChange={(event) => onChange(event.target.value)}
+      step={type === "number" ? "0.1" : undefined}
+      type={type}
+      value={value}
+    />
   );
 }
