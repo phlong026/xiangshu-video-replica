@@ -196,4 +196,75 @@ describe("CharacterSelection", () => {
       screen.getByText("只读身份不能更改项目角色版本。"),
     ).toBeInTheDocument();
   });
+
+  // P0-03-01：角色版本自动预选（红灯先行）。
+
+  it("auto-selects the latest published version and persists it when no selection exists", async () => {
+    const olderOption: api.ProjectCharacterVersionOption = {
+      ...option,
+      character_version_id: "character-version-2",
+      version_number: 2,
+      published_at: "2029-01-01T00:00:00Z",
+    };
+    // 乱序返回，验证按 published_at 取最新而非列表首位。
+    vi.mocked(api.listProjectCharacterVersions).mockResolvedValue([
+      olderOption,
+      option,
+    ]);
+    const onSelectionChange = vi.fn();
+    const onVersionChange = vi.fn();
+
+    render(
+      <CharacterSelection
+        onSelectionChange={onSelectionChange}
+        onVersionChange={onVersionChange}
+        projectId="project-1"
+      />,
+    );
+
+    // 自动预选落库：最近发布版本，重复选择服务端原子复用快照（任务 11 语义）。
+    await waitFor(() =>
+      expect(api.chooseProjectMainCharacterVersion).toHaveBeenCalledWith(
+        "project-1",
+        option.character_version_id,
+      ),
+    );
+    expect(api.chooseProjectMainCharacterVersion).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText("当前角色：林夏")).toBeInTheDocument();
+    expect(onSelectionChange).toHaveBeenLastCalledWith(true);
+    expect(onVersionChange).toHaveBeenLastCalledWith(selected);
+
+    // 可撤回提示条：点击「更换」进入角色卡片改选。
+    expect(
+      await screen.findByText("已自动选择角色版本 林夏 · V3"),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "更换" }));
+    expect(
+      await screen.findByText("选择一个不可变角色版本"),
+    ).toBeInTheDocument();
+  });
+
+  it("does not auto-select when a selection already exists", async () => {
+    vi.mocked(api.getProjectMainCharacter).mockResolvedValue(selected);
+
+    render(<CharacterSelection projectId="project-1" />);
+
+    expect(await screen.findByText("当前角色：林夏")).toBeInTheDocument();
+    expect(api.listProjectCharacterVersions).not.toHaveBeenCalled();
+    expect(api.chooseProjectMainCharacterVersion).not.toHaveBeenCalled();
+    expect(screen.queryByText(/已自动选择角色版本/)).toBeNull();
+  });
+
+  it("shows guidance instead of an error when no versions are available", async () => {
+    vi.mocked(api.listProjectCharacterVersions).mockResolvedValue([]);
+
+    render(<CharacterSelection projectId="project-1" />);
+
+    expect(
+      await screen.findByText(/暂无可选角色版本，请先在人物库发布角色/),
+    ).toBeInTheDocument();
+    expect(api.chooseProjectMainCharacterVersion).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "更换" })).toBeNull();
+    expect(screen.queryByText(/失败。/)).toBeNull();
+  });
 });

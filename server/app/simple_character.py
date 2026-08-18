@@ -21,6 +21,7 @@ from app.character_asset_review import (
     CHARACTER_PUBLICATION_SCHEMA_VERSION,
     cleanup_publication_objects,
 )
+from app.character_contracts import RequiredCharacterViewType
 from app.character_identity import (
     CHARACTER_TEMPLATE_HASH,
     CHARACTER_TEMPLATE_VERSION,
@@ -355,7 +356,7 @@ def _insert_version(
 
 @dataclass(frozen=True)
 class _ApprovedView:
-    view_type: str
+    view_type: RequiredCharacterViewType
     character_asset_id: str
     generated_asset_id: str
     review_id: str
@@ -379,9 +380,7 @@ def _generate_and_approve_views(
         character_asset_id = str(uuid.uuid4())
         generated_asset_id = str(uuid.uuid4())
         review_id = str(uuid.uuid4())
-        content = deterministic_png(
-            f"{version_id}:{view_type}".encode(), width=1024, height=1536
-        )
+        content = deterministic_png(f"{version_id}:{view_type}".encode(), width=1024, height=1536)
         generated_key = generated_character_asset_key(
             owner_user_id=actor.id,
             persona_id=persona_id,
