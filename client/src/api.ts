@@ -487,10 +487,14 @@ export async function getGenerationRuntimeLimits(): Promise<GenerationRuntimeLim
   );
 }
 
-// 批次 Provider 与工作区正式管线保持同一语义：DEV 走本地模拟，
-// 生产构建走真实 Metaso H3，避免发布包静默创建模拟任务。
+// 批次 Provider 由 VITE_GENERATION_PROVIDER 显式驱动：未设置时默认走真实
+// Metaso H3，避免开发环境静默创建模拟任务、让用户误以为真实生成已触发。
+// 需要本地模拟管线（不产生付费调用）时，显式设置
+// VITE_GENERATION_PROVIDER=fake_h3。
 export function defaultBatchProvider(): GenerationBatchInput["provider"] {
-  return import.meta.env.DEV ? "fake_h3" : "metaso";
+  return import.meta.env.VITE_GENERATION_PROVIDER === "fake_h3"
+    ? "fake_h3"
+    : "metaso";
 }
 
 export async function createGenerationBatch(
