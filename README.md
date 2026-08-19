@@ -63,6 +63,12 @@ Set-Location server
 
 部署必须设置不含路径和查询参数的 HTTPS `PUBLIC_BASE_URL`，以及经程序白名单校验的 `ZPAY_GATEWAY_URL`（当前支持官方公开文档的 `https://zpayz.cn/submit.php` 和用户 Demo 的 `https://z-pay.cn/submit.php`）。ZPay `pid`/`key`/`enabled_channels` 使用现有 SettingsRepository 加密保存；可视化配置入口在内部 P0 管理页任务中提供，不得通过 SQL 写入明文密钥。签名契约以 [ZPay 官方开发文档](https://api.z-pay.cn/doc.html) 为准。
 
+### ZPay 回调与手动查单
+
+`GET /api/payments/zpay/notify` 是唯一自动入账入口；它验签并核对商户、订单、金额、渠道和成功状态，在一个短 SQLite 事务内完成订单、`CHARGE` 流水和钱包更新。`return_url` 只显示确认提示，不会改余额。部署时由同机反向代理单独公开 notify/return 路径，FastAPI 端口仍只监听回环地址。
+
+管理端手动同步使用 `POST /api/control/recharge-orders/{order_no}/sync`。API 只保存 `CONTROL_PROXY_TOKEN_DIGEST`（原始高熵令牌的 SHA-256）和 `CONTROL_ADMIN_USER_ID`；反向代理必须移除外部传入的 `X-Control-Proxy-Token`，完成管理认证后再注入原始令牌。业务 Bearer Token 不能代替控制代理令牌。
+
 ### 本地存储（无 COS 凭据的开发机）
 
 开发机没有 COS 凭据时，可将运行设置切换为本地文件系统存储，走完完整上传/归档流程：

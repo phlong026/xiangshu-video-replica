@@ -18,6 +18,7 @@ from app.character_routes import router as character_router
 from app.first_frame_routes import router as first_frame_router
 from app.generation_routes import router as generation_router
 from app.media_routes import router as media_router
+from app.payment_routes import router as payment_router
 from app.rbac_routes import router as rbac_router
 from app.recharge_routes import router as recharge_router
 from app.settings import SettingsUnavailableError
@@ -108,6 +109,7 @@ app.add_middleware(
 )
 app.include_router(generation_router)
 app.include_router(rbac_router)
+app.include_router(payment_router)
 app.include_router(recharge_router)
 app.include_router(settings_router)
 app.include_router(media_router)

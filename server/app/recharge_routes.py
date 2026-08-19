@@ -15,6 +15,7 @@ from app.zpay import (
     generate_merchant_order_no,
     merchant_config_from_settings,
 )
+from app.zpay_payments import read_recharge_order, serialize_recharge_order
 
 router = APIRouter(prefix="/api", tags=["recharge"])
 MAX_ORDER_NUMBER_ATTEMPTS = 3
@@ -34,6 +35,18 @@ class RechargeOrderResponse(BaseModel):
     gateway_url: str
     method: Literal["POST"]
     form_fields: dict[str, str]
+
+
+class RechargeOrderStatusResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    order_no: str
+    status: Literal["PENDING", "PAID", "FAILED", "CLOSED"]
+    amount_fen: int
+    credits: int
+    channel: str
+    created_at: str
+    paid_at: str | None
 
 
 @router.post(
@@ -115,6 +128,24 @@ def create_recharge_order(
         status_code=503,
         detail={"code": "ORDER_NUMBER_UNAVAILABLE", "message": "Unable to allocate order number."},
     )
+
+
+@router.get("/recharge-orders/{order_no}", response_model=RechargeOrderStatusResponse)
+def read_recharge_order_status(
+    order_no: str,
+    conn: Database,
+    actor: AuthenticatedUser,
+) -> RechargeOrderStatusResponse:
+    order = read_recharge_order(conn, merchant_order_no=order_no)
+    if order is None or str(order["user_id"]) != actor.id:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "RECHARGE_ORDER_NOT_FOUND",
+                "message": "Recharge order does not exist.",
+            },
+        )
+    return RechargeOrderStatusResponse(**serialize_recharge_order(order))
 
 
 def validate_recharge_amount(amount_fen: int, billing: dict[str, int]) -> None:
