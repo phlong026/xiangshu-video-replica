@@ -10,7 +10,7 @@ from cryptography.fernet import Fernet
 from app.db import alembic_config, connect_database, initialize_database
 from app.settings import SettingsRepository
 
-HEAD_REVISION = "022_internal_billing"
+HEAD_REVISION = "023_zpay_provider"
 
 
 def seed_subjects(conn: sqlite3.Connection) -> None:
