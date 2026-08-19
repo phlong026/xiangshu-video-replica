@@ -828,7 +828,6 @@ def test_first_frame_generation_rechecks_binding_inside_final_write_transaction(
     assert selection.status_code == 201
     racing_storage = SourceSelectionChangingStorage(storage, db_path)
     app.dependency_overrides[get_media_storage] = lambda: racing_storage
-
     generated = client.post(
         "/api/projects/project-owned/first-frames/generate",
         headers=headers("employee_1"),
