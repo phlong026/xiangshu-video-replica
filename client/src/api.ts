@@ -10,6 +10,7 @@ const CLOUD_OP_TIMEOUT_MS = 60_000;
 // measured 71–91s on a 15s video, gpt-image contact sheets 1–3 minutes.
 const ANALYSIS_TIMEOUT_MS = 300_000;
 export const SESSION_EXPIRED_EVENT = "video-replica:session-expired";
+let internalAccessToken: string | null = null;
 
 type HealthResponse = components["schemas"]["HealthResponse"];
 export type UserRole = "employee" | "admin" | "auditor";
@@ -19,6 +20,135 @@ export type CurrentUser = {
   username: string;
   display_name: string;
   role: UserRole;
+};
+
+export type WalletSnapshot = {
+  available_credits: number;
+  reserved_credits: number;
+  internal_unit_price_fen: number;
+  min_recharge_fen: number;
+  recharge_step_fen: number;
+};
+
+export type WalletTransaction = {
+  id: string;
+  user_id: string;
+  type: "CHARGE" | "RESERVE" | "SETTLE" | "RELEASE";
+  available_delta: number;
+  reserved_delta: number;
+  recharge_order_id: string | null;
+  task_id: string | null;
+  billing_round: number | null;
+  created_at: string;
+};
+
+export type WalletTransactionPage = {
+  items: WalletTransaction[];
+  total: number;
+  limit: number;
+  offset: number;
+};
+
+export type RechargeOrderStatus = "PENDING" | "PAID" | "FAILED" | "CLOSED";
+
+export type RechargeOrder = {
+  order_no: string;
+  status: RechargeOrderStatus;
+  amount_fen: number;
+  credits: number;
+  channel: string;
+  created_at: string;
+  paid_at: string | null;
+};
+
+export type RechargeOrderPage = {
+  items: RechargeOrder[];
+  total: number;
+  limit: number;
+  offset: number;
+};
+
+export type CreatedRechargeOrder = {
+  order_no: string;
+  status: "PENDING";
+  amount_fen: number;
+  credits: number;
+  gateway_url: string;
+  method: "POST";
+  form_fields: Record<string, string>;
+};
+
+export type ControlAccount = {
+  id: string;
+  username: string;
+  display_name: string;
+  role: UserRole;
+  is_active: boolean;
+  available_credits: number;
+  reserved_credits: number;
+  active_token_count: number;
+};
+
+export type ControlAccountPage = {
+  items: ControlAccount[];
+  total: number;
+  limit: number;
+  offset: number;
+};
+
+export type ControlRechargeOrder = RechargeOrder & {
+  id: string;
+  user_id: string;
+  username: string;
+  display_name: string;
+  provider_trade_no: string | null;
+};
+
+export type ControlRechargeOrderPage = {
+  items: ControlRechargeOrder[];
+  total: number;
+  limit: number;
+  offset: number;
+};
+
+export type ControlWalletTransaction = WalletTransaction & {
+  username: string;
+};
+
+export type ControlWalletTransactionPage = {
+  items: ControlWalletTransaction[];
+  total: number;
+  limit: number;
+  offset: number;
+};
+
+export type BillingSettings = {
+  internal_base_unit_price_fen: number;
+  charged_unit_price_fen: number;
+  min_recharge_fen: number;
+  recharge_step_fen: number;
+};
+
+export type ControlSettings = {
+  billing: BillingSettings;
+  zpay: {
+    provider: "zpay";
+    configured: boolean;
+    config: Record<string, string>;
+  };
+  deployment: {
+    gateway_url: string;
+    notify_url: string;
+    return_url: string;
+  };
+};
+
+export type ControlReconciliation = {
+  wallet_count: number;
+  wallet_mismatch_count: number;
+  paid_order_without_charge_count: number;
+  charge_without_paid_order_count: number;
+  pending_order_count: number;
 };
 
 export type GenerationVersion = Omit<
@@ -401,6 +531,183 @@ export async function getCurrentUser(): Promise<CurrentUser> {
     throw new Error("身份验证失败：本地服务返回的用户信息无效");
   }
   return user;
+}
+
+export function setInternalAccessToken(token: string | null): void {
+  const normalized = token?.trim() ?? "";
+  internalAccessToken = normalized || null;
+}
+
+export async function getWallet(): Promise<WalletSnapshot> {
+  return requestApiJson<WalletSnapshot>("/api/wallet", "读取钱包失败");
+}
+
+export async function listWalletTransactions({
+  limit = 20,
+  offset = 0,
+}: {
+  limit?: number;
+  offset?: number;
+} = {}): Promise<WalletTransactionPage> {
+  return requestApiJson<WalletTransactionPage>(
+    `/api/wallet/transactions?${new URLSearchParams({
+      limit: String(limit),
+      offset: String(offset),
+    })}`,
+    "读取条数流水失败",
+  );
+}
+
+export async function createRechargeOrder(
+  amountFen: number,
+): Promise<CreatedRechargeOrder> {
+  return requestApiJson<CreatedRechargeOrder>(
+    "/api/recharge-orders",
+    "创建充值订单失败",
+    { method: "POST", body: JSON.stringify({ amount_fen: amountFen }) },
+  );
+}
+
+export async function listRechargeOrders({
+  limit = 20,
+  offset = 0,
+}: {
+  limit?: number;
+  offset?: number;
+} = {}): Promise<RechargeOrderPage> {
+  return requestApiJson<RechargeOrderPage>(
+    `/api/recharge-orders?${new URLSearchParams({
+      limit: String(limit),
+      offset: String(offset),
+    })}`,
+    "读取充值订单失败",
+  );
+}
+
+export async function getRechargeOrder(
+  orderNo: string,
+): Promise<RechargeOrder> {
+  return requestApiJson<RechargeOrder>(
+    `/api/recharge-orders/${encodeURIComponent(orderNo)}`,
+    "读取充值状态失败",
+  );
+}
+
+export async function getControlAccounts({
+  limit = 50,
+  offset = 0,
+}: {
+  limit?: number;
+  offset?: number;
+} = {}): Promise<ControlAccountPage> {
+  return requestControlJson<ControlAccountPage>(
+    `/api/control/accounts?${new URLSearchParams({
+      limit: String(limit),
+      offset: String(offset),
+    })}`,
+    "读取内部账号失败",
+  );
+}
+
+export async function getControlRechargeOrders({
+  status,
+  limit = 50,
+  offset = 0,
+}: {
+  status?: RechargeOrderStatus;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<ControlRechargeOrderPage> {
+  const query = new URLSearchParams({
+    limit: String(limit),
+    offset: String(offset),
+  });
+  if (status) {
+    query.set("status", status);
+  }
+  return requestControlJson<ControlRechargeOrderPage>(
+    `/api/control/recharge-orders?${query}`,
+    "读取充值订单失败",
+  );
+}
+
+export async function getControlWalletTransactions({
+  limit = 50,
+  offset = 0,
+}: {
+  limit?: number;
+  offset?: number;
+} = {}): Promise<ControlWalletTransactionPage> {
+  return requestControlJson<ControlWalletTransactionPage>(
+    `/api/control/wallet-transactions?${new URLSearchParams({
+      limit: String(limit),
+      offset: String(offset),
+    })}`,
+    "读取账务流水失败",
+  );
+}
+
+export async function getControlReconciliation(): Promise<ControlReconciliation> {
+  return requestControlJson<ControlReconciliation>(
+    "/api/control/billing-reconciliation",
+    "读取对账结果失败",
+  );
+}
+
+export async function getControlSettings(): Promise<ControlSettings> {
+  return requestControlJson<ControlSettings>(
+    "/api/control/settings",
+    "读取管理设置失败",
+  );
+}
+
+export async function updateControlZPaySettings(input: {
+  pid: string;
+  key: string;
+  enabled_channels: Array<"alipay" | "wxpay">;
+}): Promise<ControlSettings["zpay"]> {
+  return requestControlJson<ControlSettings["zpay"]>(
+    "/api/control/settings/zpay",
+    "保存 ZPay 设置失败",
+    { method: "PATCH", body: JSON.stringify(input) },
+  );
+}
+
+export async function updateControlBillingSettings(input: {
+  internal_base_unit_price_fen: number;
+  min_recharge_fen: number;
+  recharge_step_fen: number;
+}): Promise<BillingSettings> {
+  return requestControlJson<BillingSettings>(
+    "/api/control/settings/billing",
+    "保存内部价格失败",
+    { method: "PATCH", body: JSON.stringify(input) },
+  );
+}
+
+export async function syncControlRechargeOrder(
+  orderNo: string,
+): Promise<RechargeOrder> {
+  return requestControlJson<RechargeOrder>(
+    `/api/control/recharge-orders/${encodeURIComponent(orderNo)}/sync`,
+    "同步充值订单失败",
+    { method: "POST" },
+    CLOUD_OP_TIMEOUT_MS,
+  );
+}
+
+export async function downloadControlRechargeOrdersCsv(): Promise<void> {
+  await downloadControlCsv(
+    "/api/control/recharge-orders.csv",
+    "recharge-orders.csv",
+  );
+}
+
+export async function downloadControlWalletTransactionsCsv(): Promise<void> {
+  await downloadControlCsv(
+    "/api/control/wallet-transactions.csv",
+    "wallet-transactions.csv",
+  );
 }
 
 export async function createScriptVersion(
@@ -1763,6 +2070,22 @@ export async function downloadDiagnosticReport(
   downloadBlob(await response.blob(), `settings-diagnostic-${reportId}.json`);
 }
 
+async function downloadControlCsv(
+  path: string,
+  filename: string,
+): Promise<void> {
+  const response = await requestControl(
+    path,
+    { method: "GET" },
+    CLOUD_OP_TIMEOUT_MS,
+  );
+  if (!response.ok) {
+    throw new Error(`下载管理导出失败（${response.status}）`);
+  }
+
+  downloadBlob(await response.blob(), filename);
+}
+
 function downloadBlob(blob: Blob, filename: string): void {
   const blobUrl = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
@@ -1806,6 +2129,23 @@ async function requestAdminJson<T>(
   timeoutMs: number = REQUEST_TIMEOUT_MS,
 ): Promise<T> {
   const response = await requestAdmin(path, init, timeoutMs);
+  if (!response.ok) {
+    const details = await responseErrorDetails(response, errorPrefix);
+    const error = new Error(details.message) as RequestError;
+    error.status = response.status;
+    error.code = details.code;
+    throw error;
+  }
+  return (await response.json()) as T;
+}
+
+async function requestControlJson<T>(
+  path: string,
+  errorPrefix: string,
+  init: RequestInit = {},
+  timeoutMs: number = REQUEST_TIMEOUT_MS,
+): Promise<T> {
+  const response = await requestControl(path, init, timeoutMs);
   if (!response.ok) {
     const details = await responseErrorDetails(response, errorPrefix);
     const error = new Error(details.message) as RequestError;
@@ -1965,6 +2305,34 @@ async function requestAdmin(
   return requestApi(path, init, timeoutMs);
 }
 
+async function requestControl(
+  path: string,
+  init: RequestInit,
+  timeoutMs: number = REQUEST_TIMEOUT_MS,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? DEFAULT_API_BASE_URL;
+  const headers = new Headers(init.headers);
+  if (init.body && !(init.body instanceof FormData)) {
+    headers.set("Content-Type", "application/json");
+  }
+  try {
+    return await fetch(`${apiBaseUrl}${path}`, {
+      ...init,
+      headers,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("请求超时，请重试");
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
 async function requestApi(
   path: string,
   init: RequestInit,
@@ -1979,7 +2347,9 @@ async function requestApi(
   if (init.body && !(init.body instanceof FormData)) {
     headers.set("Content-Type", "application/json");
   }
-  if (devUserId) {
+  if (internalAccessToken) {
+    headers.set("Authorization", `Bearer ${internalAccessToken}`);
+  } else if (devUserId) {
     headers.set("X-Dev-User-Id", devUserId);
   }
 

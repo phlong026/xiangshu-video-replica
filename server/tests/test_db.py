@@ -11,7 +11,7 @@ import pytest
 from alembic import command
 from cryptography.fernet import Fernet
 
-from app.backup import backup_database, restore_database, run_daily_backup
+from app.backup import backup_database, check_database, restore_database, run_daily_backup
 from app.db import alembic_config, connect_database, initialize_database
 from app.repositories import GenerationTaskRepository
 
@@ -496,6 +496,23 @@ def test_backup_restore_preserves_tasks_versions_and_audit_counts(tmp_path: Path
         }
 
     assert counts == {"generation_tasks": 1, "versions": 1, "audit_logs": 1}
+
+
+def test_database_integrity_check_and_cli_reject_corruption(tmp_path: Path) -> None:
+    db_path = tmp_path / "app.db"
+    broken_path = tmp_path / "broken.db"
+    with initialize_database(db_path):
+        pass
+    broken_path.write_text("not a sqlite database", encoding="utf-8")
+
+    assert check_database(db_path) == db_path.resolve()
+    subprocess.run(
+        [sys.executable, "-m", "app.backup", "check", str(db_path)],
+        check=True,
+        cwd=Path(__file__).resolve().parents[1],
+    )
+    with pytest.raises(sqlite3.DatabaseError):
+        check_database(broken_path)
 
 
 def test_backup_refuses_missing_source_without_creating_empty_database(tmp_path: Path) -> None:

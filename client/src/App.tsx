@@ -7,15 +7,22 @@ import {
   getHealth,
   type Project,
   SESSION_EXPIRED_EVENT,
+  setInternalAccessToken,
 } from "./api";
 import { CharacterLibrary } from "./CharacterLibrary";
 import { ProjectDetailFlow } from "./ProjectDetailFlow";
 import { ProjectsPage } from "./ProjectsPage";
 import { SettingsPanel } from "./SettingsPanel";
 import { TaskRecordsPanel } from "./TaskRecordsPanel";
+import { WalletPanel } from "./WalletPanel";
 import "./styles.css";
 
-type WorkspacePage = "characters" | "projects" | "settings" | "tasks";
+type WorkspacePage =
+  | "characters"
+  | "projects"
+  | "settings"
+  | "tasks"
+  | "wallet";
 type Page = "login" | WorkspacePage;
 type ServiceState = "checking" | "connected" | "disconnected";
 
@@ -25,6 +32,7 @@ export function App() {
   const [page, setPage] = useState<Page>("login");
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [loginError, setLoginError] = useState("");
+  const [accessToken, setAccessToken] = useState("");
   const [sessionMessage, setSessionMessage] = useState("");
   const [isLoginLoading, setIsLoginLoading] = useState(false);
   const [serviceState, setServiceState] = useState<ServiceState>("checking");
@@ -57,6 +65,7 @@ export function App() {
     setIsLoginLoading(true);
     setLoginError("");
     setSessionMessage("");
+    setInternalAccessToken(accessToken.trim() || null);
     try {
       const user = await getCurrentUser();
       const nextPage = workspacePageFromHash(user);
@@ -69,7 +78,7 @@ export function App() {
     } finally {
       setIsLoginLoading(false);
     }
-  }, []);
+  }, [accessToken]);
 
   // 启动即自动验证身份并直接进入工作台首页，无需手动点击“进入”；
   // 仅当验证失败（如本地服务未就绪）时停留在登录卡片，可点击重试。
@@ -84,6 +93,8 @@ export function App() {
 
   useEffect(() => {
     function handleSessionExpired() {
+      setInternalAccessToken(null);
+      setAccessToken("");
       setCurrentUser(null);
       setPage("login");
       activeAnalysisSessionRef.current += 1;
@@ -179,6 +190,16 @@ export function App() {
               {loginError}
             </p>
           ) : null}
+          <label className="login-token-field">
+            内部访问令牌（云端模式）
+            <input
+              autoComplete="off"
+              onChange={(event) => setAccessToken(event.target.value)}
+              placeholder="本地桌面模式可留空"
+              type="password"
+              value={accessToken}
+            />
+          </label>
           <button type="button" disabled={isLoginLoading} onClick={handleLogin}>
             {isLoginLoading ? "正在验证身份" : "进入"}
           </button>
@@ -350,6 +371,7 @@ export function App() {
               userRole={currentUser.role}
             />
           ) : null}
+          {page === "wallet" ? <WalletPanel /> : null}
         </div>
       </section>
     </main>
@@ -368,13 +390,14 @@ function AppSidebar({
   onNavigate: (page: WorkspacePage) => void;
 }) {
   const items: Array<{
-    icon: "characters" | "projects" | "settings" | "tasks";
+    icon: "characters" | "projects" | "settings" | "tasks" | "wallet";
     label: string;
     page: WorkspacePage;
   }> = [
     { icon: "projects", label: "项目", page: "projects" },
     { icon: "characters", label: "人物库", page: "characters" },
     { icon: "tasks", label: "任务记录", page: "tasks" },
+    { icon: "wallet", label: "余额与充值", page: "wallet" },
     ...(currentUser.role === "admin"
       ? [
           {
@@ -439,7 +462,7 @@ function AppSidebar({
 function SidebarIcon({
   name,
 }: {
-  name: "characters" | "projects" | "settings" | "tasks" | "user";
+  name: "characters" | "projects" | "settings" | "tasks" | "user" | "wallet";
 }) {
   if (name === "projects" || name === "tasks") {
     return (
@@ -453,6 +476,14 @@ function SidebarIcon({
       <svg aria-hidden="true" className="sidebar-icon" viewBox="0 0 24 24">
         <circle cx="12" cy="8" r="3.5" />
         <path d="M5 20c.5-4 2.8-6 7-6s6.5 2 7 6" />
+      </svg>
+    );
+  }
+  if (name === "wallet") {
+    return (
+      <svg aria-hidden="true" className="sidebar-icon" viewBox="0 0 24 24">
+        <path d="M3.5 6.5h17v12h-17v-12Zm0 3h17" />
+        <circle cx="16.5" cy="14" r="1" />
       </svg>
     );
   }
@@ -495,9 +526,9 @@ function workspacePageAllowed(
   role: CurrentUser["role"],
 ): boolean {
   if (
-    !(["characters", "projects", "settings", "tasks"] as string[]).includes(
-      page,
-    )
+    !(
+      ["characters", "projects", "settings", "tasks", "wallet"] as string[]
+    ).includes(page)
   ) {
     return false;
   }
@@ -519,6 +550,7 @@ function pageTitle(page: WorkspacePage): string {
     projects: "项目",
     settings: "设置",
     tasks: "任务记录",
+    wallet: "余额与充值",
   }[page];
 }
 
@@ -529,6 +561,7 @@ function pageSubtitle(page: WorkspacePage): string {
     projects: "上传参考视频，拆解提示词，配首帧生成新视频。",
     settings: "管理各服务连接凭据与运行参数。",
     tasks: "查看生成批次，播放结果并处理异常任务。",
+    wallet: "查看内部计费条数、充值记录与支付状态。",
   }[page];
 }
 

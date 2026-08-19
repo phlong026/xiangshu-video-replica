@@ -15,6 +15,7 @@ from app.character_generation_routes import router as character_generation_route
 from app.character_identity_routes import router as character_identity_router
 from app.character_reference_routes import router as character_reference_router
 from app.character_routes import router as character_router
+from app.control_routes import router as control_router
 from app.first_frame_routes import router as first_frame_router
 from app.generation_routes import router as generation_router
 from app.media_routes import router as media_router
@@ -111,6 +112,7 @@ app.add_middleware(
 app.include_router(generation_router)
 app.include_router(rbac_router)
 app.include_router(payment_router)
+app.include_router(control_router)
 app.include_router(recharge_router)
 app.include_router(wallet_router)
 app.include_router(settings_router)

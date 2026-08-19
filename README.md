@@ -69,6 +69,18 @@ Set-Location server
 
 管理端手动同步使用 `POST /api/control/recharge-orders/{order_no}/sync`。API 只保存 `CONTROL_PROXY_TOKEN_DIGEST`（原始高熵令牌的 SHA-256）和 `CONTROL_ADMIN_USER_ID`；反向代理必须移除外部传入的 `X-Control-Proxy-Token`，完成管理认证后再注入原始令牌。业务 Bearer Token 不能代替控制代理令牌。
 
+### 内部用户端与管理页
+
+业务工作台新增“余额与充值”：显示 10 元/条的当前内部价、可用/冻结条数、最近充值订单和追加式钱包流水；支持 100/200/500/1000 元快捷充值，以及不低于 100 元、按 10 元递增的自定义整数金额。待确认订单号只保存在浏览器本地，页面返回后每 2 秒查询一次本地订单；`PAID` 后刷新钱包，前端状态本身不触发入账。
+
+云端内部账号第一次打开业务工作台时，在登录页输入 CLI 签发的 Bearer Token。Token 只保存在当前页面内存，不写入 `localStorage`；页面刷新后需要重新输入。桌面开发模式可以留空，仍按既有服务端身份模式验证。
+
+同一份 React/Vite 构建在 `/admin` 渲染独立内部管理页，只提供账号与钱包只读列表、充值订单与查单、只读对账/CSV、ZPay 配置和内部价格设置。密钥只展示掩码，新密钥留空表示保留旧值；网关、异步回调和同步返回地址来自部署环境，只读不可提交。管理页没有手工改余额、补单或令牌签发入口。
+
+生产构建必须把 `VITE_API_BASE_URL` 设为与页面同源的 HTTPS 地址。参考 `deploy/nginx/internal-p0.conf.example` 保护 `/admin` 和 `/api/control/*`：IP/VPN 白名单与 Basic Auth 必须同时通过，浏览器永远接触不到控制代理原始令牌。FastAPI 继续只监听 `127.0.0.1`；若 Nginx 前面还有负载均衡或 CDN，必须先按可信代理范围正确恢复客户端地址，否则不要直接复用样例中的 IP 白名单。
+
+Linux 单机部署的环境模板、systemd 单元、SQLite 检查/备份/恢复和验收命令统一见 `docs/内部运营P0单机部署与验收记录.md`。部署文件只覆盖一个 API、一个 Worker、一个本机 SQLite 文件和同机静态页；它们不代表真实 ZPay、COS 或 Provider 已验收。
+
 ### 内部钱包与按条计费
 
 `GET /api/wallet` 返回当前内部用户的可用条数和冻结条数；`GET /api/wallet/transactions` 用 `limit`、`offset` 分页返回当前用户自己的追加式流水。创建一条生成任务会在同一个 SQLite 事务内写入 `RESERVE`，并把 1 条从可用余额移到冻结余额；余额不足返回 `402 INSUFFICIENT_CREDITS`，批次、任务、Prompt 状态和钱包不会部分提交。

@@ -517,7 +517,92 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
-  "/api/recharge-orders": {
+  "/api/control/accounts": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List Accounts */
+    get: operations["list_accounts_api_control_accounts_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/recharge-orders": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List Recharge Orders */
+    get: operations["list_recharge_orders_api_control_recharge_orders_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/wallet-transactions": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List Wallet Transactions */
+    get: operations["list_wallet_transactions_api_control_wallet_transactions_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/billing-reconciliation": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Reconciliation */
+    get: operations["read_reconciliation_api_control_billing_reconciliation_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/settings": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Control Settings */
+    get: operations["read_control_settings_api_control_settings_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/settings/zpay": {
     parameters: {
       query?: never;
       header?: never;
@@ -525,6 +610,75 @@ export interface paths {
       cookie?: never;
     };
     get?: never;
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    /** Update Zpay Settings */
+    patch: operations["update_zpay_settings_api_control_settings_zpay_patch"];
+    trace?: never;
+  };
+  "/api/control/settings/billing": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    /** Update Control Billing Settings */
+    patch: operations["update_control_billing_settings_api_control_settings_billing_patch"];
+    trace?: never;
+  };
+  "/api/control/recharge-orders.csv": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Export Recharge Orders Csv */
+    get: operations["export_recharge_orders_csv_api_control_recharge_orders_csv_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/wallet-transactions.csv": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Export Wallet Transactions Csv */
+    get: operations["export_wallet_transactions_csv_api_control_wallet_transactions_csv_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/recharge-orders": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List Recharge Orders */
+    get: operations["list_recharge_orders_api_recharge_orders_get"];
     put?: never;
     /** Create Recharge Order */
     post: operations["create_recharge_order_api_recharge_orders_post"];
@@ -1642,6 +1796,39 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
   schemas: {
+    /** AccountWallet */
+    AccountWallet: {
+      /** Id */
+      id: string;
+      /** Username */
+      username: string;
+      /** Display Name */
+      display_name: string;
+      /**
+       * Role
+       * @enum {string}
+       */
+      role: "employee" | "admin" | "auditor";
+      /** Is Active */
+      is_active: boolean;
+      /** Available Credits */
+      available_credits: number;
+      /** Reserved Credits */
+      reserved_credits: number;
+      /** Active Token Count */
+      active_token_count: number;
+    };
+    /** AccountWalletPage */
+    AccountWalletPage: {
+      /** Items */
+      items: components["schemas"]["AccountWallet"][];
+      /** Total */
+      total: number;
+      /** Limit */
+      limit: number;
+      /** Offset */
+      offset: number;
+    };
     /** AssetResponse */
     AssetResponse: {
       /** Id */
@@ -1719,6 +1906,26 @@ export interface components {
     };
     /** BillingSettingsRequest */
     BillingSettingsRequest: {
+      /** Internal Base Unit Price Fen */
+      internal_base_unit_price_fen: number;
+      /** Min Recharge Fen */
+      min_recharge_fen: number;
+      /** Recharge Step Fen */
+      recharge_step_fen: number;
+    };
+    /** BillingSettingsSnapshot */
+    BillingSettingsSnapshot: {
+      /** Internal Base Unit Price Fen */
+      internal_base_unit_price_fen: number;
+      /** Charged Unit Price Fen */
+      charged_unit_price_fen: number;
+      /** Min Recharge Fen */
+      min_recharge_fen: number;
+      /** Recharge Step Fen */
+      recharge_step_fen: number;
+    };
+    /** BillingSettingsUpdate */
+    BillingSettingsUpdate: {
       /** Internal Base Unit Price Fen */
       internal_base_unit_price_fen: number;
       /** Min Recharge Fen */
@@ -2252,6 +2459,90 @@ export interface components {
         | components["schemas"]["SourceFrameCharacterFeatures"]
         | null;
     };
+    /** ControlRechargeOrder */
+    ControlRechargeOrder: {
+      /** Id */
+      id: string;
+      /** User Id */
+      user_id: string;
+      /** Username */
+      username: string;
+      /** Display Name */
+      display_name: string;
+      /** Order No */
+      order_no: string;
+      /**
+       * Status
+       * @enum {string}
+       */
+      status: "PENDING" | "PAID" | "FAILED" | "CLOSED";
+      /** Amount Fen */
+      amount_fen: number;
+      /** Credits */
+      credits: number;
+      /** Channel */
+      channel: string;
+      /** Provider Trade No */
+      provider_trade_no: string | null;
+      /** Created At */
+      created_at: string;
+      /** Paid At */
+      paid_at: string | null;
+    };
+    /** ControlRechargeOrderPage */
+    ControlRechargeOrderPage: {
+      /** Items */
+      items: components["schemas"]["ControlRechargeOrder"][];
+      /** Total */
+      total: number;
+      /** Limit */
+      limit: number;
+      /** Offset */
+      offset: number;
+    };
+    /** ControlSettingsSnapshot */
+    ControlSettingsSnapshot: {
+      billing: components["schemas"]["BillingSettingsSnapshot"];
+      zpay: components["schemas"]["MaskedZPaySettings"];
+      deployment: components["schemas"]["DeploymentSettings"];
+    };
+    /** ControlWalletTransaction */
+    ControlWalletTransaction: {
+      /** Id */
+      id: string;
+      /** User Id */
+      user_id: string;
+      /** Username */
+      username: string;
+      /**
+       * Type
+       * @enum {string}
+       */
+      type: "CHARGE" | "RESERVE" | "SETTLE" | "RELEASE";
+      /** Available Delta */
+      available_delta: number;
+      /** Reserved Delta */
+      reserved_delta: number;
+      /** Recharge Order Id */
+      recharge_order_id: string | null;
+      /** Task Id */
+      task_id: string | null;
+      /** Billing Round */
+      billing_round: number | null;
+      /** Created At */
+      created_at: string;
+    };
+    /** ControlWalletTransactionPage */
+    ControlWalletTransactionPage: {
+      /** Items */
+      items: components["schemas"]["ControlWalletTransaction"][];
+      /** Total */
+      total: number;
+      /** Limit */
+      limit: number;
+      /** Offset */
+      offset: number;
+    };
     /** CreateAnalysisRequest */
     CreateAnalysisRequest: {
       /** Asset Id */
@@ -2297,6 +2588,15 @@ export interface components {
       };
       /** Expires At */
       expires_at: string;
+    };
+    /** DeploymentSettings */
+    DeploymentSettings: {
+      /** Gateway Url */
+      gateway_url: string;
+      /** Notify Url */
+      notify_url: string;
+      /** Return Url */
+      return_url: string;
     };
     /** DiagnosticProviderResult */
     DiagnosticProviderResult: {
@@ -2493,6 +2793,20 @@ export interface components {
       content_type: string;
       /** Size Bytes */
       size_bytes: number;
+    };
+    /** MaskedZPaySettings */
+    MaskedZPaySettings: {
+      /**
+       * Provider
+       * @constant
+       */
+      provider: "zpay";
+      /** Configured */
+      configured: boolean;
+      /** Config */
+      config: {
+        [key: string]: string;
+      };
     };
     /** PaidRegenerationRequest */
     PaidRegenerationRequest: {
@@ -2739,6 +3053,17 @@ export interface components {
       /** Test Kind */
       test_kind: string;
     };
+    /** RechargeOrderPage */
+    RechargeOrderPage: {
+      /** Items */
+      items: components["schemas"]["RechargeOrderStatusResponse"][];
+      /** Total */
+      total: number;
+      /** Limit */
+      limit: number;
+      /** Offset */
+      offset: number;
+    };
     /** RechargeOrderResponse */
     RechargeOrderResponse: {
       /** Order No */
@@ -2788,6 +3113,19 @@ export interface components {
     ReconcileGenerationTaskRequest: {
       /** Idempotency Key */
       idempotency_key: string;
+    };
+    /** ReconciliationSummary */
+    ReconciliationSummary: {
+      /** Wallet Count */
+      wallet_count: number;
+      /** Wallet Mismatch Count */
+      wallet_mismatch_count: number;
+      /** Paid Order Without Charge Count */
+      paid_order_without_charge_count: number;
+      /** Charge Without Paid Order Count */
+      charge_without_paid_order_count: number;
+      /** Pending Order Count */
+      pending_order_count: number;
     };
     /** RenameProjectRequest */
     RenameProjectRequest: {
@@ -3239,6 +3577,12 @@ export interface components {
       available_credits: number;
       /** Reserved Credits */
       reserved_credits: number;
+      /** Internal Unit Price Fen */
+      internal_unit_price_fen: number;
+      /** Min Recharge Fen */
+      min_recharge_fen: number;
+      /** Recharge Step Fen */
+      recharge_step_fen: number;
     };
     /** WalletTransactionPage */
     WalletTransactionPage: {
@@ -3274,6 +3618,15 @@ export interface components {
       billing_round: number | null;
       /** Created At */
       created_at: string;
+    };
+    /** ZPaySettingsUpdate */
+    ZPaySettingsUpdate: {
+      /** Pid */
+      pid: string;
+      /** Key */
+      key?: string | null;
+      /** Enabled Channels */
+      enabled_channels: ("alipay" | "wxpay")[];
     };
   };
   responses: never;
@@ -4429,6 +4782,349 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["RechargeOrderStatusResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  list_accounts_api_control_accounts_get: {
+    parameters: {
+      query?: {
+        limit?: number;
+        offset?: number;
+      };
+      header?: {
+        "X-Control-Proxy-Token"?: string | null;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["AccountWalletPage"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  list_recharge_orders_api_control_recharge_orders_get: {
+    parameters: {
+      query?: {
+        status?: ("PENDING" | "PAID" | "FAILED" | "CLOSED") | null;
+        user_id?: string | null;
+        limit?: number;
+        offset?: number;
+      };
+      header?: {
+        "X-Control-Proxy-Token"?: string | null;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ControlRechargeOrderPage"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  list_wallet_transactions_api_control_wallet_transactions_get: {
+    parameters: {
+      query?: {
+        user_id?: string | null;
+        type?: ("CHARGE" | "RESERVE" | "SETTLE" | "RELEASE") | null;
+        limit?: number;
+        offset?: number;
+      };
+      header?: {
+        "X-Control-Proxy-Token"?: string | null;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ControlWalletTransactionPage"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_reconciliation_api_control_billing_reconciliation_get: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Control-Proxy-Token"?: string | null;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ReconciliationSummary"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_control_settings_api_control_settings_get: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Control-Proxy-Token"?: string | null;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ControlSettingsSnapshot"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  update_zpay_settings_api_control_settings_zpay_patch: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Control-Proxy-Token"?: string | null;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ZPaySettingsUpdate"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["MaskedZPaySettings"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  update_control_billing_settings_api_control_settings_billing_patch: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Control-Proxy-Token"?: string | null;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["BillingSettingsUpdate"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["BillingSettingsSnapshot"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  export_recharge_orders_csv_api_control_recharge_orders_csv_get: {
+    parameters: {
+      query?: {
+        status?: ("PENDING" | "PAID" | "FAILED" | "CLOSED") | null;
+        user_id?: string | null;
+        limit?: number;
+      };
+      header?: {
+        "X-Control-Proxy-Token"?: string | null;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": unknown;
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  export_wallet_transactions_csv_api_control_wallet_transactions_csv_get: {
+    parameters: {
+      query?: {
+        user_id?: string | null;
+        type?: ("CHARGE" | "RESERVE" | "SETTLE" | "RELEASE") | null;
+        limit?: number;
+      };
+      header?: {
+        "X-Control-Proxy-Token"?: string | null;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": unknown;
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  list_recharge_orders_api_recharge_orders_get: {
+    parameters: {
+      query?: {
+        limit?: number;
+        offset?: number;
+      };
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["RechargeOrderPage"];
         };
       };
       /** @description Validation Error */
