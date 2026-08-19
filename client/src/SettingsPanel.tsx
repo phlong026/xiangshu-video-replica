@@ -23,7 +23,6 @@ type ProviderFormSpec = {
   title: string;
   note?: string;
   fields: ProviderField[];
-  wide?: boolean;
 };
 
 // COS 区域固定为上海，界面不再显示 Region 输入框。
@@ -53,7 +52,6 @@ const PROVIDER_FORMS: Record<ProviderName, ProviderFormSpec> = {
       { name: "secret_access_key", label: "SecretKey", secret: true },
       { name: "bucket", label: "Bucket" },
     ],
-    wide: true,
   },
   deepseek: {
     title: "AI 改写",
@@ -222,12 +220,7 @@ function ProviderForm({
   }
 
   return (
-    <form
-      className={
-        form.wide ? "provider-card provider-card--wide" : "provider-card"
-      }
-      onSubmit={submit}
-    >
+    <form className="provider-card" data-provider={provider} onSubmit={submit}>
       <div>
         <h3>{form.title}</h3>
         {form.note ? <p>{form.note}</p> : null}
