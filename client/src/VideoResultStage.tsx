@@ -17,21 +17,21 @@ const TICK_MS = 1_000;
 // 大概率没有被本地生成进程领取（进程未运行或连错数据库）。
 const QUEUE_STUCK_SECONDS = 180;
 
-const STEP_LABELS = ["已提交", "排队中", "渲染中", "云端归档", "完成"] as const;
+const STEP_LABELS = ["已提交", "排队中", "渲染中", "保存成片", "完成"] as const;
 
 const PHASE_MESSAGES: Record<string, string> = {
   PENDING: "正在准备你的生成任务…",
   SUBMITTING: "正在把首帧与 Prompt 提交给渲染引擎…",
   QUEUED: "已进入渲染队列，即将开始生成…",
   RUNNING: "AI 正在基于你的首帧渲染画面、动作与口型…",
-  ARCHIVING: "渲染完成，正在上传云端存储…",
-  SUCCEEDED: "已归档，正在自动进行音频质检…",
+  ARCHIVING: "渲染完成，正在把成片保存到本机…",
+  SUCCEEDED: "已生成，正在自动进行音频质检…",
 };
 
 const REASSURANCE_FACTS = [
   "渲染在云端进行，离开此页面不会中断任务，回来时进度仍在。",
   "768P 成片通常需要 2–4 分钟，2K 略久，请放心等待。",
-  "生成结果会自动保存在云端，可随时回来播放或下载。",
+  "生成结果会自动保存到本机，可随时回来播放或下载。",
   "同一批次的多个结果会并行处理，完成一个就能先看一个。",
 ] as const;
 
@@ -50,11 +50,19 @@ type VideoResultStageProps = {
   canOperate: boolean;
   onDownload: (task: GenerationTask) => void;
   onOpenOpsDetail: () => void;
+  onPreviewSourceError: (task: GenerationTask) => void;
   onRegenerate: (task: GenerationTask, reason: string) => void;
   onRequestPreview: (task: GenerationTask) => void;
   previewUrls: Record<string, string>;
   resultErrors: Record<string, string>;
 };
+
+// Provider 直连播放链接：只接受 HTTPS（fake:// 等本地模拟通道不可播）。
+export function playableProviderUrl(task: GenerationTask): string | null {
+  return task.provider_result_url?.startsWith("https://")
+    ? task.provider_result_url
+    : null;
+}
 
 export function VideoResultStage({
   activeResultAction,
@@ -63,6 +71,7 @@ export function VideoResultStage({
   canOperate,
   onDownload,
   onOpenOpsDetail,
+  onPreviewSourceError,
   onRegenerate,
   onRequestPreview,
   previewUrls,
@@ -99,27 +108,28 @@ export function VideoResultStage({
   const previewBusy = activeTask
     ? activeResultAction === `${activeTask.id}:preview`
     : false;
+  const hasPreviewSource = activeTask
+    ? Boolean(activeTask.result_asset_id) ||
+      Boolean(playableProviderUrl(activeTask))
+    : false;
 
-  // 完成态自动签发在线播放地址：以视频为主角的视图不应要求手动点
-  // 「加载预览」。失败后停止自动重试（resultErrors 门控），改由手动
-  // 重试，避免循环拉取。审计只读不签发。
+  // 完成态自动加载在线播放地址：以视频为主角的视图不应要求手动点
+  // 「加载预览」。优先直连 Provider 返回的链接，其次签发本地归档副
+  // 本。失败后停止自动重试（resultErrors 门控），改由手动重试，避免
+  // 循环拉取。审计只读不签发。
   const activePreviewError = activeTask ? resultErrors[activeTask.id] : "";
   useEffect(() => {
     if (!activeTask || !canOperate) {
       return;
     }
-    if (
-      !activeTask.result_asset_id ||
-      previewUrl ||
-      previewBusy ||
-      activePreviewError
-    ) {
+    if (!hasPreviewSource || previewUrl || previewBusy || activePreviewError) {
       return;
     }
     onRequestPreview(activeTask);
   }, [
     activeTask,
     canOperate,
+    hasPreviewSource,
     previewUrl,
     previewBusy,
     activePreviewError,
@@ -222,14 +232,15 @@ export function VideoResultStage({
           />
         ) : previewUrl ? (
           <StageVideoPlayer
+            onSourceError={() => onPreviewSourceError(activeTask)}
             src={previewUrl}
             taskLabel={`结果预览 ${activeTask.id}`}
           />
-        ) : activeTask.result_asset_id && !canOperate ? (
+        ) : !canOperate && hasPreviewSource ? (
           <p className="video-stage-player-note">
             审计只读，不可预览或下载结果
           </p>
-        ) : activeTask.result_asset_id ? (
+        ) : hasPreviewSource ? (
           <p className="video-stage-player-note" role="status">
             {previewBusy ? "正在打开在线播放…" : "正在准备播放地址…"}
           </p>
@@ -239,7 +250,7 @@ export function VideoResultStage({
         {resultError ? (
           <p className="task-error-summary" role="status">
             {resultError}{" "}
-            {canOperate && activeTask.result_asset_id && !previewUrl ? (
+            {canOperate && hasPreviewSource && !previewUrl ? (
               <button
                 className="link-button"
                 onClick={() => onRequestPreview(activeTask)}
@@ -389,9 +400,11 @@ export function VideoResultStage({
 // 用自绘控制条替代原生 controls：原生条在 9:16 深色舞台里样式突兀，
 // 且 autoPlay+muted 的旧组合让用户误以为「没有声音」。
 function StageVideoPlayer({
+  onSourceError,
   src,
   taskLabel,
 }: {
+  onSourceError: () => void;
   src: string;
   taskLabel: string;
 }) {
@@ -467,6 +480,7 @@ function StageVideoPlayer({
         aria-label={taskLabel}
         className="video-stage-video"
         onClick={togglePlay}
+        onError={onSourceError}
         onLoadedMetadata={(event) => {
           setDuration(event.currentTarget.duration || 0);
         }}

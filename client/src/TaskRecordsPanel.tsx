@@ -24,6 +24,7 @@ import {
   type UserRole,
 } from "./api";
 import {
+  playableProviderUrl,
   readSnapshotNumber,
   readSnapshotString,
   VideoResultStage,
@@ -551,12 +552,27 @@ export function TaskRecordsPanel({
     }
   }
 
-  // 在线播放：直接签发预签名 URL（无需 blob/revoke），供舞台自动加载
-  // 与运维详情手动加载共用。useCallback 保持引用稳定，避免舞台的自动
-  // 签发 effect 反复触发。
+  // 在线播放：优先直连 Provider 返回的成片链接（metaso 临时签名 URL，
+  // 零服务端往返、生成完即可播）；无直连链接或已确认失效（过期）时，
+  // 签发本地归档副本的预签名 URL。useCallback 保持引用稳定，避免舞台
+  // 的自动签发 effect 反复触发。
+  const providerUrlFailedRef = useRef<Record<string, boolean>>({});
   const handlePreview = useCallback(
     async (task: GenerationTask) => {
-      if (!canOperate || !task.result_asset_id) {
+      if (!canOperate) {
+        return;
+      }
+      if (!providerUrlFailedRef.current[task.id]) {
+        const directUrl = playableProviderUrl(task);
+        if (directUrl) {
+          setPreviewUrls((current) => ({
+            ...current,
+            [task.id]: directUrl,
+          }));
+          return;
+        }
+      }
+      if (!task.result_asset_id) {
         return;
       }
       const batchIdAtStart = activeBatchIdRef.current;
@@ -594,6 +610,24 @@ export function TaskRecordsPanel({
     },
     [canOperate],
   );
+
+  // 直连链接播放失败（典型为签名过期）：标记后清除该预览，让自动
+  // effect 立即回退签发本地归档副本；归档链接本身的播放失败不改写
+  // 状态，交由既有错误提示与手动重试兜底。
+  const handlePreviewSourceError = useCallback((task: GenerationTask) => {
+    if (playableProviderUrl(task) === null) {
+      return;
+    }
+    providerUrlFailedRef.current[task.id] = true;
+    setPreviewUrls((current) => {
+      if (current[task.id] !== playableProviderUrl(task)) {
+        return current;
+      }
+      const next = { ...current };
+      delete next[task.id];
+      return next;
+    });
+  }, []);
 
   async function handleDownload(task: GenerationTask) {
     if (!canOperate || !task.result_asset_id) {
@@ -801,6 +835,7 @@ export function TaskRecordsPanel({
                   canOperate={canOperate}
                   onDownload={handleDownload}
                   onOpenOpsDetail={() => setViewMode("ops")}
+                  onPreviewSourceError={handlePreviewSourceError}
                   onRegenerate={handleRegenerateTask}
                   onRequestPreview={handlePreview}
                   previewUrls={previewUrls}
@@ -817,6 +852,7 @@ export function TaskRecordsPanel({
                   onConfirmNotCharged={handleConfirmNotCharged}
                   onDownload={handleDownload}
                   onPreview={handlePreview}
+                  onPreviewSourceError={handlePreviewSourceError}
                   onReconcile={handleReconcile}
                   onRegenerateBatch={handleRegenerateBatch}
                   onRegenerateTask={(task) =>
@@ -907,6 +943,7 @@ function BatchPanel({
   onConfirmNotCharged,
   onDownload,
   onPreview,
+  onPreviewSourceError,
   onReconcile,
   onRegenerateBatch,
   onRegenerateTask,
@@ -930,6 +967,7 @@ function BatchPanel({
   onConfirmNotCharged: (task: GenerationTask) => void;
   onDownload: (task: GenerationTask) => void;
   onPreview: (task: GenerationTask) => void;
+  onPreviewSourceError: (task: GenerationTask) => void;
   onReconcile: (taskId: string) => void;
   onRegenerateBatch: () => void;
   onRegenerateTask: (task: GenerationTask) => void;
@@ -1086,6 +1124,7 @@ function BatchPanel({
             onConfirmNotCharged={onConfirmNotCharged}
             onDownload={onDownload}
             onPreview={onPreview}
+            onPreviewSourceError={onPreviewSourceError}
             onReconcile={onReconcile}
             onRegenerate={onRegenerateTask}
             onRetry={onRetry}
@@ -1111,6 +1150,7 @@ function TaskItem({
   onConfirmNotCharged,
   onDownload,
   onPreview,
+  onPreviewSourceError,
   onReconcile,
   onRegenerate,
   onRetry,
@@ -1129,6 +1169,7 @@ function TaskItem({
   onConfirmNotCharged: (task: GenerationTask) => void;
   onDownload: (task: GenerationTask) => void;
   onPreview: (task: GenerationTask) => void;
+  onPreviewSourceError: (task: GenerationTask) => void;
   onReconcile: (taskId: string) => void;
   onRegenerate: (task: GenerationTask) => void;
   onRetry: (task: GenerationTask) => void;
@@ -1251,6 +1292,7 @@ function TaskItem({
                   aria-label={`结果预览 ${task.id}`}
                   className="task-result-video"
                   controls
+                  onError={() => onPreviewSourceError(task)}
                   preload="auto"
                   src={previewUrl}
                 />

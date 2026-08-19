@@ -234,6 +234,78 @@ describe("TaskRecordsPanel", () => {
     );
   });
 
+  it("plays the provider result URL directly without signing an archive preview", async () => {
+    vi.mocked(api.getGenerationBatch).mockResolvedValue(
+      batch({
+        tasks: [
+          task({
+            provider: "metaso",
+            provider_result_url: "https://provider.example/signed-result.mp4",
+          }),
+          task({ id: "task-audio-failed" }),
+        ],
+      }),
+    );
+
+    render(
+      <TaskRecordsPanel
+        handoffBatch={null}
+        onHandoffConsumed={vi.fn()}
+        userRole="employee"
+      />,
+    );
+
+    // Provider 直连优先：video src 直接用 metaso 返回的链接，全程不签发
+    // 本地归档预览。
+    const video = await screen.findByLabelText("结果预览 task-ok");
+    expect(video).toHaveAttribute(
+      "src",
+      "https://provider.example/signed-result.mp4",
+    );
+    expect(api.createGenerationResultPreviewUrl).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the archived copy preview when the provider URL fails to play", async () => {
+    vi.mocked(api.getGenerationBatch).mockResolvedValue(
+      batch({
+        tasks: [
+          task({
+            provider: "metaso",
+            provider_result_url: "https://provider.example/expired-result.mp4",
+          }),
+          task({ id: "task-audio-failed" }),
+        ],
+      }),
+    );
+
+    render(
+      <TaskRecordsPanel
+        handoffBatch={null}
+        onHandoffConsumed={vi.fn()}
+        userRole="employee"
+      />,
+    );
+
+    const video = await screen.findByLabelText("结果预览 task-ok");
+    expect(video).toHaveAttribute(
+      "src",
+      "https://provider.example/expired-result.mp4",
+    );
+
+    // 直连链接过期（播放报错）：清除直连预览并回退签发本地归档副本。
+    fireEvent.error(video);
+    const fallbackVideo = await screen.findByLabelText("结果预览 task-ok");
+    await waitFor(() =>
+      expect(fallbackVideo).toHaveAttribute(
+        "src",
+        "https://stage-preview/asset-ok",
+      ),
+    );
+    expect(api.createGenerationResultPreviewUrl).toHaveBeenCalledWith(
+      "asset-ok",
+    );
+  });
+
   it("tolerates a streaming preview response that finishes after the panel unmounts", async () => {
     let resolvePreview: (url: string) => void = () => undefined;
     const pendingPreview = new Promise<string>((resolve) => {

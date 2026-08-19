@@ -2539,6 +2539,64 @@ def test_generation_batch_list_paginates_and_returns_safe_task_summaries(
     assert invalid_cursor.json()["detail"]["code"] == "INVALID_CURSOR"
 
 
+def test_batch_detail_exposes_https_provider_result_url_for_direct_playback(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    """成片直连播放契约：任务详情返回 Provider 的 HTTPS 链接，非 HTTPS
+    （如 fake://）不外露；列表摘要依旧不携带该链接。"""
+    with connect_database(db_path) as conn:
+        insert_generation_history(
+            conn,
+            batch_id="batch-direct-play-01",
+            batch_status="SUCCEEDED",
+            task_status="SUCCEEDED",
+            archive_status="ARCHIVED",
+            quality_status="AUDIO_OK",
+            error_code=None,
+            provider_result_url="https://provider.example/signed-result.mp4",
+            result_asset_id="first_frame_owned",
+            submitted_at="2026-08-16 10:00:00",
+            started_at="2026-08-16 10:00:00",
+            completed_at="2026-08-16 10:04:00",
+        )
+        insert_generation_history(
+            conn,
+            batch_id="batch-direct-play-02",
+            batch_status="SUCCEEDED",
+            task_status="SUCCEEDED",
+            archive_status="ARCHIVED",
+            quality_status="AUDIO_OK",
+            error_code=None,
+            provider_result_url="fake://h3-results/task.mp4",
+            result_asset_id="first_frame_owned",
+        )
+        conn.commit()
+
+    detail = client.get(
+        "/api/generation-batches/batch-direct-play-01",
+        headers=auth_headers("employee_1"),
+    )
+    assert detail.status_code == 200
+    task = detail.json()["tasks"][0]
+    assert task["provider_result_url"] == "https://provider.example/signed-result.mp4"
+
+    fake_detail = client.get(
+        "/api/generation-batches/batch-direct-play-02",
+        headers=auth_headers("employee_1"),
+    )
+    assert fake_detail.status_code == 200
+    assert fake_detail.json()["tasks"][0]["provider_result_url"] is None
+
+    summary = client.get(
+        "/api/generation-batches",
+        headers=auth_headers("employee_1"),
+    )
+    assert summary.status_code == 200
+    listed = next(item for item in summary.json()["items"] if item["id"] == "batch-direct-play-01")
+    assert "provider_result_url" not in listed["tasks"][0]
+
+
 def test_generation_batch_list_filters_and_enforces_project_scope(
     client: TestClient,
     db_path: Path,
@@ -3507,7 +3565,10 @@ def test_worker_archive_retry_recovers_after_initial_failure(
     assert result is not None
     assert row2["status"] == "SUCCEEDED"
     assert row2["archive_status"] == "ARCHIVED"
-    assert row2["provider_result_url"] is None
+    # 归档成功后仍保留 Provider 直连链接：客户端优先在线播放该链接，
+    # 过期后才回退到刚归档好的本地副本。
+    assert row2["provider_result_url"] is not None
+    assert result.provider_result_url is None  # fake:// 链接不外露给客户端
     assert row2["result_asset_id"] is not None
 
 
