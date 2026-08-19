@@ -432,6 +432,125 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/payments/zpay/notify": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Zpay Notify */
+    get: operations["zpay_notify_api_payments_zpay_notify_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/payments/zpay/return": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Zpay Return */
+    get: operations["zpay_return_api_payments_zpay_return_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/recharge-orders/{order_no}/sync": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Sync Recharge Order With Zpay */
+    post: operations["sync_recharge_order_with_zpay_api_control_recharge_orders__order_no__sync_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/recharge-orders": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Create Recharge Order */
+    post: operations["create_recharge_order_api_recharge_orders_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/recharge-orders/{order_no}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Recharge Order Status */
+    get: operations["read_recharge_order_status_api_recharge_orders__order_no__get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/wallet": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Wallet */
+    get: operations["read_wallet_api_wallet_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/wallet/transactions": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List Wallet Transactions */
+    get: operations["list_wallet_transactions_api_wallet_transactions_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/admin/settings": {
     parameters: {
       query?: never;
@@ -481,6 +600,23 @@ export interface paths {
     head?: never;
     /** Update Runtime Settings */
     patch: operations["update_runtime_settings_api_admin_settings_runtime_patch"];
+    trace?: never;
+  };
+  "/api/admin/settings/billing": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    /** Update Billing Settings */
+    patch: operations["update_billing_settings_api_admin_settings_billing_patch"];
     trace?: never;
   };
   "/api/admin/settings/providers/{provider}/connection-test": {
@@ -1547,6 +1683,15 @@ export interface components {
       /** Tasks */
       tasks: components["schemas"]["TaskResult"][];
     };
+    /** BillingSettingsRequest */
+    BillingSettingsRequest: {
+      /** Internal Base Unit Price Fen */
+      internal_base_unit_price_fen: number;
+      /** Min Recharge Fen */
+      min_recharge_fen: number;
+      /** Recharge Step Fen */
+      recharge_step_fen: number;
+    };
     /** Body_generate_global_simple_character_api_simple_characters_generate_post */
     Body_generate_global_simple_character_api_simple_characters_generate_post: {
       /** File */
@@ -2090,6 +2235,11 @@ export interface components {
       /** Name */
       name: string;
     };
+    /** CreateRechargeOrderRequest */
+    CreateRechargeOrderRequest: {
+      /** Amount Fen */
+      amount_fen: number;
+    };
     /** CreatedIdentityUploadIntent */
     CreatedIdentityUploadIntent: {
       /** Asset Id */
@@ -2314,16 +2464,6 @@ export interface components {
     PaidRegenerationRequest: {
       /** Idempotency Key */
       idempotency_key: string;
-      /**
-       * Payment Confirmed
-       * @constant
-       */
-      payment_confirmed: true;
-      /**
-       * Payment Confirmation Version
-       * @constant
-       */
-      payment_confirmation_version: "V1";
       /** Estimated Cost Snapshot */
       estimated_cost_snapshot?: number | null;
       /** Generation Reason */
@@ -2564,6 +2704,51 @@ export interface components {
       provider: string;
       /** Test Kind */
       test_kind: string;
+    };
+    /** RechargeOrderResponse */
+    RechargeOrderResponse: {
+      /** Order No */
+      order_no: string;
+      /**
+       * Status
+       * @constant
+       */
+      status: "PENDING";
+      /** Amount Fen */
+      amount_fen: number;
+      /** Credits */
+      credits: number;
+      /** Gateway Url */
+      gateway_url: string;
+      /**
+       * Method
+       * @constant
+       */
+      method: "POST";
+      /** Form Fields */
+      form_fields: {
+        [key: string]: string;
+      };
+    };
+    /** RechargeOrderStatusResponse */
+    RechargeOrderStatusResponse: {
+      /** Order No */
+      order_no: string;
+      /**
+       * Status
+       * @enum {string}
+       */
+      status: "PENDING" | "PAID" | "FAILED" | "CLOSED";
+      /** Amount Fen */
+      amount_fen: number;
+      /** Credits */
+      credits: number;
+      /** Channel */
+      channel: string;
+      /** Created At */
+      created_at: string;
+      /** Paid At */
+      paid_at: string | null;
     };
     /** ReconcileGenerationTaskRequest */
     ReconcileGenerationTaskRequest: {
@@ -3014,6 +3199,48 @@ export interface components {
       /** Duration Seconds */
       duration_seconds: number;
     };
+    /** WalletResponse */
+    WalletResponse: {
+      /** Available Credits */
+      available_credits: number;
+      /** Reserved Credits */
+      reserved_credits: number;
+    };
+    /** WalletTransactionPage */
+    WalletTransactionPage: {
+      /** Items */
+      items: components["schemas"]["WalletTransactionResponse"][];
+      /** Total */
+      total: number;
+      /** Limit */
+      limit: number;
+      /** Offset */
+      offset: number;
+    };
+    /** WalletTransactionResponse */
+    WalletTransactionResponse: {
+      /** Id */
+      id: string;
+      /** User Id */
+      user_id: string;
+      /**
+       * Type
+       * @enum {string}
+       */
+      type: "CHARGE" | "RESERVE" | "SETTLE" | "RELEASE";
+      /** Available Delta */
+      available_delta: number;
+      /** Reserved Delta */
+      reserved_delta: number;
+      /** Recharge Order Id */
+      recharge_order_id: string | null;
+      /** Task Id */
+      task_id: string | null;
+      /** Billing Round */
+      billing_round: number | null;
+      /** Created At */
+      created_at: string;
+    };
   };
   responses: never;
   parameters: never;
@@ -3028,6 +3255,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         project_id: string;
@@ -3065,6 +3293,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         project_id: string;
@@ -3102,6 +3331,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         project_id: string;
@@ -3135,6 +3365,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         project_id: string;
@@ -3172,6 +3403,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         project_id: string;
@@ -3209,6 +3441,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         project_id: string;
@@ -3246,6 +3479,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         project_id: string;
@@ -3279,6 +3513,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         project_id: string;
@@ -3313,6 +3548,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         project_id: string;
@@ -3367,6 +3603,7 @@ export interface operations {
       };
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path?: never;
       cookie?: never;
@@ -3398,6 +3635,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         batch_id: string;
@@ -3431,6 +3669,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         batch_id: string;
@@ -3462,6 +3701,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         batch_id: string;
@@ -3499,6 +3739,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         batch_id: string;
@@ -3538,6 +3779,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path?: never;
       cookie?: never;
@@ -3569,6 +3811,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         task_id: string;
@@ -3608,6 +3851,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         task_id: string;
@@ -3647,6 +3891,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         task_id: string;
@@ -3686,6 +3931,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         task_id: string;
@@ -3725,6 +3971,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path?: never;
       cookie?: never;
@@ -3756,6 +4003,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path?: never;
       cookie?: never;
@@ -3787,6 +4035,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path?: never;
       cookie?: never;
@@ -3822,6 +4071,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         project_id: string;
@@ -3859,6 +4109,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         project_id: string;
@@ -3892,6 +4143,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         project_id: string;
@@ -3923,6 +4175,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         asset_id: string;
@@ -3956,6 +4209,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         asset_id: string;
@@ -3989,6 +4243,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path?: never;
       cookie?: never;
@@ -4015,11 +4270,222 @@ export interface operations {
       };
     };
   };
+  zpay_notify_api_payments_zpay_notify_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "text/plain": string;
+        };
+      };
+    };
+  };
+  zpay_return_api_payments_zpay_return_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "text/html": string;
+        };
+      };
+    };
+  };
+  sync_recharge_order_with_zpay_api_control_recharge_orders__order_no__sync_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Control-Proxy-Token"?: string | null;
+      };
+      path: {
+        order_no: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["RechargeOrderStatusResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  create_recharge_order_api_recharge_orders_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["CreateRechargeOrderRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["RechargeOrderResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_recharge_order_status_api_recharge_orders__order_no__get: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
+      };
+      path: {
+        order_no: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["RechargeOrderStatusResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_wallet_api_wallet_get: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["WalletResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  list_wallet_transactions_api_wallet_transactions_get: {
+    parameters: {
+      query?: {
+        limit?: number;
+        offset?: number;
+      };
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["WalletTransactionPage"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   read_settings_api_admin_settings_get: {
     parameters: {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path?: never;
       cookie?: never;
@@ -4053,6 +4519,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         provider: string;
@@ -4092,6 +4559,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path?: never;
       cookie?: never;
@@ -4124,11 +4592,50 @@ export interface operations {
       };
     };
   };
+  update_billing_settings_api_admin_settings_billing_patch: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["BillingSettingsRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: number;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   connection_test_api_admin_settings_providers__provider__connection_test_post: {
     parameters: {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         provider: string;
@@ -4162,6 +4669,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         provider: string;
@@ -4195,6 +4703,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path?: never;
       cookie?: never;
@@ -4226,6 +4735,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         report_id: string;
@@ -4259,6 +4769,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path?: never;
       cookie?: never;
@@ -4294,6 +4805,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         asset_id: string;
@@ -4358,6 +4870,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         object_key: string;
@@ -4391,6 +4904,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         project_id: string;
@@ -4428,6 +4942,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         analysis_id: string;
@@ -4461,6 +4976,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         project_id: string;
@@ -4494,6 +5010,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         project_id: string;
@@ -4527,6 +5044,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         analysis_id: string;
@@ -4564,6 +5082,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         project_id: string;
@@ -4599,6 +5118,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         project_id: string;
@@ -4638,6 +5158,7 @@ export interface operations {
       };
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path?: never;
       cookie?: never;
@@ -4669,6 +5190,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path?: never;
       cookie?: never;
@@ -4704,6 +5226,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         project_id: string;
@@ -4739,6 +5262,7 @@ export interface operations {
       };
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         character_id: string;
@@ -4772,6 +5296,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         character_id: string;
@@ -4803,6 +5328,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         character_id: string;
@@ -4840,6 +5366,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path?: never;
       cookie?: never;
@@ -4871,6 +5398,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path?: never;
       cookie?: never;
@@ -4906,6 +5434,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         identity_id: string;
@@ -4939,6 +5468,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         identity_id: string;
@@ -4976,6 +5506,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         identity_id: string;
@@ -5013,6 +5544,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         identity_id: string;
@@ -5050,6 +5582,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         identity_id: string;
@@ -5087,6 +5620,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         identity_id: string;
@@ -5124,6 +5658,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         identity_id: string;
@@ -5157,6 +5692,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         identity_id: string;
@@ -5194,6 +5730,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         persona_id: string;
@@ -5227,6 +5764,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         persona_id: string;
@@ -5258,6 +5796,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         persona_id: string;
@@ -5295,6 +5834,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         persona_id: string;
@@ -5328,6 +5868,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         persona_id: string;
@@ -5365,6 +5906,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         version_id: string;
@@ -5398,6 +5940,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         version_id: string;
@@ -5431,6 +5974,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         version_id: string;
@@ -5468,6 +6012,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         version_id: string;
@@ -5501,6 +6046,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         version_id: string;
@@ -5534,6 +6080,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         character_asset_id: string;
@@ -5571,6 +6118,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         character_asset_id: string;
@@ -5604,6 +6152,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         version_id: string;
@@ -5641,6 +6190,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         character_asset_id: string;
@@ -5678,6 +6228,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         project_id: string;
@@ -5711,6 +6262,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         project_id: string;
@@ -5748,6 +6300,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         project_id: string;
@@ -5783,6 +6336,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         project_id: string;
@@ -5820,6 +6374,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         project_id: string;
@@ -5853,6 +6408,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         project_id: string;
@@ -5890,6 +6446,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         project_id: string;
@@ -5923,6 +6480,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         project_id: string;
@@ -5960,6 +6518,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         project_id: string;
@@ -5993,6 +6552,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         project_id: string;
@@ -6026,6 +6586,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         project_id: string;
@@ -6063,6 +6624,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         project_id: string;
@@ -6096,6 +6658,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path?: never;
       cookie?: never;
@@ -6127,6 +6690,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path?: never;
       cookie?: never;
@@ -6162,6 +6726,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path?: never;
       cookie?: never;
@@ -6193,6 +6758,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         identity_id: string;
@@ -6230,6 +6796,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         identity_id: string;
@@ -6263,6 +6830,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         identity_id: string;
@@ -6294,6 +6862,7 @@ export interface operations {
       query?: never;
       header?: {
         "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
       };
       path: {
         project_id: string;

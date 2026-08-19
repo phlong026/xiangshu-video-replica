@@ -30,6 +30,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.analysis import get_version, insert_version
 from app.auth import CurrentUser
+from app.internal_billing import (
+    InsufficientCreditsError,
+    finalize_internal_billing,
+    reserve_internal_billing,
+)
 from app.permissions import (
     insert_audit,
     require_asset_access,
@@ -42,6 +47,8 @@ from app.storage import (
     StorageAdapter,
     StorageBackendUnavailable,
     StoragePermissionError,
+    StoredObject,
+    cloud_storage_config_from_settings,
     require_storage_match,
     storage_object_ref_from_uri,
 )
@@ -124,6 +131,7 @@ RECONCILIATION_RESERVATION_SECONDS = 900
 FAKE_H3_OUTCOME_ENV = "VIDEO_REPLICA_FAKE_H3_OUTCOME"
 FAKE_H3_RESULT_PATH_ENV = "VIDEO_REPLICA_FAKE_H3_RESULT_PATH"
 FIRST_FRAME_URL_EXPIRES_IN = timedelta(minutes=15)
+RESULT_DOWNLOAD_CHECK_EXPIRES_IN = timedelta(minutes=5)
 # Cap archive retries so a permanently expired provider URL does not keep the
 # paid task spinning in ARCHIVE_FAILED forever.
 MAX_ARCHIVE_RETRIES = 5
@@ -194,8 +202,6 @@ class PaidRegenerationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     idempotency_key: str = Field(min_length=1, max_length=128)
-    payment_confirmed: Literal[True]
-    payment_confirmation_version: Literal["V1"]
     estimated_cost_snapshot: float | None = Field(default=None, ge=0)
     generation_reason: str = Field(min_length=1, max_length=500)
 
@@ -1340,6 +1346,28 @@ def _find_idempotent_batch(
     )
 
 
+def _reserve_generation_credit(
+    conn: sqlite3.Connection,
+    *,
+    user_id: str,
+    task_id: str,
+    billing_round: int | None = 1,
+) -> int:
+    try:
+        return reserve_internal_billing(
+            conn,
+            user_id=user_id,
+            task_id=task_id,
+            billing_round=billing_round,
+        )
+    except InsufficientCreditsError as exc:
+        raise generation_error(
+            402,
+            "INSUFFICIENT_CREDITS",
+            "Available credits are insufficient for this generation request.",
+        ) from exc
+
+
 def create_generation_batch(
     conn: sqlite3.Connection,
     *,
@@ -1417,7 +1445,6 @@ def create_generation_batch(
                     "METASO_SETTINGS_UNAVAILABLE",
                     "Save a readable METASO API Key before queuing a real H3 task.",
                 ) from exc
-            require_cos_first_frame_storage(conn)
 
         prompt = require_version(
             conn,
@@ -1454,6 +1481,11 @@ def create_generation_batch(
             asset_id=request.first_frame_asset_id,
             action="generation_batch.create",
         )
+        if request.provider == "metaso":
+            require_cos_first_frame_storage(
+                conn,
+                storage_uri=str(first_frame["storage_uri"]),
+            )
         if str(first_frame["project_id"]) != project_id:
             raise generation_error(
                 400,
@@ -1547,6 +1579,11 @@ def create_generation_batch(
                     request.prompt_version_id,
                     json.dumps(prompt_snapshot, ensure_ascii=True, sort_keys=True),
                 ),
+            )
+            _reserve_generation_credit(
+                conn,
+                user_id=actor.id,
+                task_id=task_id,
             )
         conn.commit()
     except sqlite3.IntegrityError:
@@ -1726,6 +1763,11 @@ def regenerate_generation_batch(
                     actor.id,
                 ),
             )
+            _reserve_generation_credit(
+                conn,
+                user_id=actor.id,
+                task_id=replacement_task_id,
+            )
         insert_audit(
             conn,
             actor=actor,
@@ -1738,7 +1780,6 @@ def regenerate_generation_batch(
                 "source_task_ids": source_task_ids,
                 "quantity": len(source_tasks),
                 "generation_reason": request.generation_reason,
-                "payment_confirmation_version": request.payment_confirmation_version,
                 "estimated_cost_snapshot": request.estimated_cost_snapshot,
                 "idempotency_key_hash": content_hash(request.idempotency_key),
             },
@@ -1895,6 +1936,11 @@ def regenerate_generation_task(
                 actor.id,
             ),
         )
+        _reserve_generation_credit(
+            conn,
+            user_id=actor.id,
+            task_id=replacement_task_id,
+        )
         cursor = conn.execute(
             """
             UPDATE generation_tasks
@@ -1923,7 +1969,6 @@ def regenerate_generation_task(
                 "source_task_id": task_id,
                 "replacement_batch_id": new_batch_id,
                 "generation_reason": request.generation_reason,
-                "payment_confirmation_version": request.payment_confirmation_version,
                 "estimated_cost_snapshot": request.estimated_cost_snapshot,
                 "idempotency_key_hash": content_hash(request.idempotency_key),
             },
@@ -1973,8 +2018,6 @@ def paid_regeneration_request_hash(
             canonical_snapshot_hash(snapshot) for snapshot in prompt_snapshots
         ],
         "quantity": len(source_task_ids),
-        "payment_confirmed": request.payment_confirmed,
-        "payment_confirmation_version": request.payment_confirmation_version,
         "estimated_cost_snapshot": request.estimated_cost_snapshot,
     }
     return content_hash(json.dumps(payload, ensure_ascii=True, sort_keys=True))
@@ -2132,15 +2175,27 @@ def require_confirmed_first_frame(
             ) from exc
 
 
-def require_cos_first_frame_storage(conn: sqlite3.Connection) -> None:
-    """真实 Metaso 生成的首帧必须可签 HTTPS URL：COS 未配置即拒绝提交。"""
-    has_cos = conn.execute("SELECT 1 FROM provider_settings WHERE provider = 'cos'").fetchone()
-    if has_cos is None:
+def require_cos_first_frame_storage(
+    conn: sqlite3.Connection,
+    *,
+    storage_uri: str | None = None,
+) -> None:
+    """真实 Metaso 生成只接受当前 COS 配置下的首帧。"""
+    try:
+        config = SettingsRepository(conn).load_provider_config("cos")
+        if not config:
+            raise ValueError("COS settings are missing")
+        cloud = cloud_storage_config_from_settings("cos", config)
+        if storage_uri is not None:
+            first_frame = storage_object_ref_from_uri(storage_uri)
+            if first_frame.provider != "cos" or first_frame.bucket != cloud.bucket:
+                raise ValueError("first frame is not stored in the configured COS bucket")
+    except (SettingsUnavailableError, ValueError) as exc:
         raise generation_error(
             422,
             "METASO_REQUIRES_CLOUD_STORAGE",
             "METASO H3 requires an HTTPS first-frame URL; save COS settings before generating.",
-        )
+        ) from exc
 
 
 def run_next_generation_task(
@@ -2156,6 +2211,23 @@ def run_next_generation_task(
         return None
 
     task_id = str(lease["id"])
+    batch_id = str(lease["batch_id"])
+    source_storage = first_frame_storage or storage
+    archive_retry = bool(
+        lease.get("archive_status") == "ARCHIVE_FAILED" and lease.get("provider_result_url")
+    )
+    if str(lease["provider"]) == "metaso" and (
+        storage.provider != "cos" or (not archive_retry and source_storage.provider != "cos")
+    ):
+        if archive_retry:
+            _release_archive_retry(conn, task_id=task_id, batch_id=batch_id)
+        else:
+            mark_task_provider_settings_unavailable(
+                conn,
+                task_id=task_id,
+                batch_id=batch_id,
+            )
+        return get_task_result(conn, task_id)
     if provider is None:
         try:
             provider = h3_provider_for_task(conn, str(lease["provider"]))
@@ -2163,12 +2235,12 @@ def run_next_generation_task(
             if lease.get("archive_status") == "ARCHIVE_FAILED" and lease.get("provider_result_url"):
                 # Archive retry never starts a paid call; if the provider settings
                 # vanished, back off instead of failing the paid result forever.
-                _release_archive_retry(conn, task_id=task_id, batch_id=str(lease["batch_id"]))
+                _release_archive_retry(conn, task_id=task_id, batch_id=batch_id)
                 return get_task_result(conn, task_id)
             mark_task_provider_settings_unavailable(
                 conn,
                 task_id=task_id,
-                batch_id=str(lease["batch_id"]),
+                batch_id=batch_id,
             )
             return get_task_result(conn, task_id)
     if isinstance(provider, MetasoH3Provider) and provider.task_created_observer is None:
@@ -2188,11 +2260,10 @@ def run_next_generation_task(
         return _retry_archive(
             conn,
             task_id=task_id,
-            batch_id=str(lease["batch_id"]),
+            batch_id=batch_id,
             storage=storage,
             provider=provider,
         )
-    source_storage = first_frame_storage or storage
     try:
         first_frame = storage_object_ref_from_uri(str(lease["first_frame_uri"]))
         require_storage_match(source_storage, first_frame)
@@ -2238,6 +2309,7 @@ def run_next_generation_task(
         return get_task_result(conn, task_id)
 
     result_asset_id: str | None = None
+    stored: StoredObject | None = None
     archive_status = "ARCHIVED"
     error_code = None
     error_message = None
@@ -2250,101 +2322,136 @@ def run_next_generation_task(
             provider_result.result_content,
             content_type="video/mp4",
         )
-    except StorageBackendUnavailable:
+        _verify_archived_result(storage, stored)
+    except (StorageBackendUnavailable, StoragePermissionError, ValueError):
+        if stored is not None:
+            try:
+                storage.delete_object(stored.key, actor_id=None)
+            except Exception as cleanup_exc:
+                logger.warning(
+                    "archive verification cleanup failed for task %s: %s",
+                    task_id,
+                    type(cleanup_exc).__name__,
+                )
+            stored = None
         archive_status = "ARCHIVE_FAILED"
         error_code = "ARCHIVE_STORAGE_UNAVAILABLE"
         error_message = "Generation result could not be archived to configured storage."
     else:
         result_asset_id = str(uuid4())
+    try:
         with conn:
+            if stored is not None and result_asset_id is not None:
+                conn.execute(
+                    """
+                    INSERT INTO assets (
+                        id,
+                        project_id,
+                        kind,
+                        storage_uri,
+                        sha256,
+                        size_bytes,
+                        content_type,
+                        created_by_user_id
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        result_asset_id,
+                        str(lease["project_id"]),
+                        "video",
+                        stored.uri,
+                        stored.sha256,
+                        stored.size,
+                        stored.content_type,
+                        str(lease["created_by_user_id"]),
+                    ),
+                )
             conn.execute(
                 """
-                INSERT INTO assets (
+                UPDATE generation_tasks
+                SET
+                    provider_task_id = ?,
+                    status = 'SUCCEEDED',
+                    archive_status = ?,
+                    quality_status = ?,
+                    quality_issue_codes = ?,
+                    result_asset_id = ?,
+                    provider_request_json = ?,
+                    provider_result_url = ?,
+                    error_code = ?,
+                    error_message_redacted = ?,
+                    submitted_at = COALESCE(submitted_at, CURRENT_TIMESTAMP),
+                    completed_at = CURRENT_TIMESTAMP,
+                    locked_by = NULL,
+                    locked_until = NULL,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (
+                    provider_result.provider_task_id,
+                    archive_status,
+                    provider_result.audio_quality_status,
+                    json.dumps(provider_result.quality_issue_codes, ensure_ascii=True),
+                    result_asset_id,
+                    json.dumps(provider_request, ensure_ascii=True, sort_keys=True),
+                    retained_result_url,
+                    error_code,
+                    error_message,
+                    task_id,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO external_call_logs (
                     id,
-                    project_id,
-                    kind,
-                    storage_uri,
-                    sha256,
-                    size_bytes,
-                    content_type,
-                    created_by_user_id
+                    generation_task_id,
+                    provider,
+                    model,
+                    endpoint_name,
+                    provider_request_id,
+                    http_status,
+                    request_hash
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    result_asset_id,
-                    str(lease["project_id"]),
-                    "video",
-                    stored.uri,
-                    stored.sha256,
-                    stored.size,
-                    stored.content_type,
-                    str(lease["created_by_user_id"]),
+                    str(uuid4()),
+                    task_id,
+                    str(lease["provider"]),
+                    H3_MODEL,
+                    "createImageToVideo",
+                    provider_result.provider_task_id,
+                    200,
+                    request_hash,
                 ),
             )
-
-    with conn:
-        conn.execute(
-            """
-            UPDATE generation_tasks
-            SET
-                provider_task_id = ?,
-                status = 'SUCCEEDED',
-                archive_status = ?,
-                quality_status = ?,
-                quality_issue_codes = ?,
-                result_asset_id = ?,
-                provider_request_json = ?,
-                provider_result_url = ?,
-                error_code = ?,
-                error_message_redacted = ?,
-                submitted_at = COALESCE(submitted_at, CURRENT_TIMESTAMP),
-                completed_at = CURRENT_TIMESTAMP,
-                locked_by = NULL,
-                locked_until = NULL,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-            """,
-            (
-                provider_result.provider_task_id,
-                archive_status,
-                provider_result.audio_quality_status,
-                json.dumps(provider_result.quality_issue_codes, ensure_ascii=True),
-                result_asset_id,
-                json.dumps(provider_request, ensure_ascii=True, sort_keys=True),
-                retained_result_url,
-                error_code,
-                error_message,
-                task_id,
-            ),
-        )
-        conn.execute(
-            """
-            INSERT INTO external_call_logs (
-                id,
-                generation_task_id,
-                provider,
-                model,
-                endpoint_name,
-                provider_request_id,
-                http_status,
-                request_hash
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                str(uuid4()),
-                task_id,
-                str(lease["provider"]),
-                H3_MODEL,
-                "createImageToVideo",
-                provider_result.provider_task_id,
-                200,
-                request_hash,
-            ),
-        )
-        refresh_batch_status(conn, batch_id=str(lease["batch_id"]))
+            if archive_status == "ARCHIVED":
+                finalize_internal_billing(conn, task_id=task_id, outcome="success")
+            _refresh_batch_status_in_transaction(conn, batch_id=str(lease["batch_id"]))
+    except Exception:
+        if stored is not None:
+            try:
+                storage.delete_object(stored.key, actor_id=None)
+            except Exception as cleanup_exc:
+                logger.warning(
+                    "archive rollback cleanup failed for task %s: %s",
+                    task_id,
+                    type(cleanup_exc).__name__,
+                )
+        raise
     return get_task_result(conn, task_id)
+
+
+def _verify_archived_result(storage: StorageAdapter, stored: StoredObject) -> None:
+    archived = storage.head_object(stored.key)
+    if archived is None or archived.size != stored.size:
+        raise StorageBackendUnavailable("archived result metadata is unavailable")
+    storage.create_download_intent(
+        stored.key,
+        expires_in=RESULT_DOWNLOAD_CHECK_EXPIRES_IN,
+        can_read=True,
+    )
 
 
 def _store_and_finalize_archive(
@@ -2372,6 +2479,7 @@ def _store_and_finalize_archive(
         else ""
     )
     try:
+        _verify_archived_result(storage, stored)
         with conn:
             if reconcile_reservation is not None:
                 _renew_reconcile_reservation_in_transaction(
@@ -2422,6 +2530,7 @@ def _store_and_finalize_archive(
             )
             if reconcile_reservation is not None and task_update.rowcount != 1:
                 raise _reconcile_reservation_lost()
+            finalize_internal_billing(conn, task_id=task_id, outcome="success")
             _refresh_batch_status_in_transaction(conn, batch_id=batch_id)
             result = get_task_result(conn, task_id)
             if reconcile_reservation is not None:
@@ -2731,6 +2840,7 @@ def retry_generation_task(
             SELECT
                 task.batch_id,
                 batch.project_id,
+                batch.created_by_user_id,
                 task.status,
                 task.archive_status,
                 task.quality_status,
@@ -2825,6 +2935,12 @@ def retry_generation_task(
                 )
             retry_path = "PRE_PROVIDER"
             audit_action = "generation_task.retry_queued"
+            _reserve_generation_credit(
+                conn,
+                user_id=str(row["created_by_user_id"]),
+                task_id=task_id,
+                billing_round=None,
+            )
             conn.execute(
                 """
                 UPDATE generation_tasks
@@ -3304,6 +3420,11 @@ def reconcile_submission_uncertain_task(
             )
             if reconcile_reservation is not None and task_update.rowcount != 1:
                 raise _reconcile_reservation_lost()
+            finalize_internal_billing(
+                conn,
+                task_id=task_id,
+                outcome="cancelled" if status == "cancelled" else "failed",
+            )
             _refresh_batch_status_in_transaction(conn, batch_id=batch_id)
             result = get_task_result(conn, task_id)
             if reconcile_reservation is not None:
@@ -3350,7 +3471,8 @@ def _release_archive_retry(conn: sqlite3.Connection, *, task_id: str, batch_id: 
                 """,
                 (next_count, task_id),
             )
-            refresh_batch_status(conn, batch_id=batch_id)
+            finalize_internal_billing(conn, task_id=task_id, outcome="failed")
+            _refresh_batch_status_in_transaction(conn, batch_id=batch_id)
             return
         conn.execute(
             """
@@ -3523,7 +3645,8 @@ def mark_task_provider_settings_unavailable(
             """,
             (task_id,),
         )
-    refresh_batch_status(conn, batch_id=batch_id)
+        finalize_internal_billing(conn, task_id=task_id, outcome="failed")
+        _refresh_batch_status_in_transaction(conn, batch_id=batch_id)
 
 
 def mark_task_provider_failed(
@@ -3550,7 +3673,8 @@ def mark_task_provider_failed(
             """,
             (provider_task_id, task_id),
         )
-    refresh_batch_status(conn, batch_id=batch_id)
+        finalize_internal_billing(conn, task_id=task_id, outcome="failed")
+        _refresh_batch_status_in_transaction(conn, batch_id=batch_id)
 
 
 def mark_task_first_frame_url_sign_failed(
@@ -3576,7 +3700,8 @@ def mark_task_first_frame_url_sign_failed(
             """,
             (task_id,),
         )
-    refresh_batch_status(conn, batch_id=batch_id)
+        finalize_internal_billing(conn, task_id=task_id, outcome="failed")
+        _refresh_batch_status_in_transaction(conn, batch_id=batch_id)
 
 
 def mark_expired_active_leases_needing_attention(conn: sqlite3.Connection) -> None:

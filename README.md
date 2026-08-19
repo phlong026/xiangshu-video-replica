@@ -69,6 +69,14 @@ Set-Location server
 
 管理端手动同步使用 `POST /api/control/recharge-orders/{order_no}/sync`。API 只保存 `CONTROL_PROXY_TOKEN_DIGEST`（原始高熵令牌的 SHA-256）和 `CONTROL_ADMIN_USER_ID`；反向代理必须移除外部传入的 `X-Control-Proxy-Token`，完成管理认证后再注入原始令牌。业务 Bearer Token 不能代替控制代理令牌。
 
+### 内部钱包与按条计费
+
+`GET /api/wallet` 返回当前内部用户的可用条数和冻结条数；`GET /api/wallet/transactions` 用 `limit`、`offset` 分页返回当前用户自己的追加式流水。创建一条生成任务会在同一个 SQLite 事务内写入 `RESERVE`，并把 1 条从可用余额移到冻结余额；余额不足返回 `402 INSUFFICIENT_CREDITS`，批次、任务、Prompt 状态和钱包不会部分提交。
+
+所有任务终态只经过 `finalize_internal_billing(task_id, outcome)`：成片写入已配置的结果存储并通过对象元数据和下载签名检查后写 `SETTLE`；失败或取消写 `RELEASE`；Provider 已成功但归档失败时继续冻结，等待原任务归档重试。付费重生成会创建新任务并重新冻结，安全的原任务重试在上一轮已返还后进入下一计费轮次。请求中的旧字段 `payment_confirmed`、`payment_confirmation_version` 已被拒绝，不能代替服务端钱包校验。
+
+生成结果存储现在跟随业务主存储：内部云端配置 COS 后成片进入 COS；未配置 COS 时仅供本地开发回退本地盘。已产生钱包流水的批次为不可变账务记录，API 不允许删除。
+
 ### 本地存储（无 COS 凭据的开发机）
 
 开发机没有 COS 凭据时，可将运行设置切换为本地文件系统存储，走完完整上传/归档流程：

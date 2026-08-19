@@ -265,7 +265,7 @@ describe("generation workflow API", () => {
     );
   });
 
-  it("posts explicit paid regeneration contracts for batches and tasks", async () => {
+  it("posts wallet-backed regeneration contracts for batches and tasks", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ id: "replacement-batch" }),
@@ -273,8 +273,6 @@ describe("generation workflow API", () => {
     vi.stubGlobal("fetch", fetchMock);
     const input = {
       idempotency_key: "paid-regeneration-key",
-      payment_confirmed: true as const,
-      payment_confirmation_version: "V1" as const,
       estimated_cost_snapshot: 2.5,
       generation_reason: "人工确认重新生成",
     };

@@ -567,8 +567,6 @@ describe("TaskRecordsPanel", () => {
     await waitFor(() =>
       expect(api.regenerateGenerationBatch).toHaveBeenCalledWith("batch-1", {
         idempotency_key: expect.any(String),
-        payment_confirmed: true,
-        payment_confirmation_version: "V1",
         estimated_cost_snapshot: 2.5,
         generation_reason: "再生成一批备选",
       }),
@@ -654,8 +652,6 @@ describe("TaskRecordsPanel", () => {
     expect(replayRequest.idempotency_key).toBe(firstRequest.idempotency_key);
     expect(firstRequest).toEqual({
       idempotency_key: expect.any(String),
-      payment_confirmed: true,
-      payment_confirmation_version: "V1",
       estimated_cost_snapshot: 1.25,
       generation_reason: "音频质检失败后重新生成",
     });

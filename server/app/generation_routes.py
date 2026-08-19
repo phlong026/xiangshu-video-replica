@@ -48,7 +48,7 @@ from app.generation import (
     version_state,
 )
 from app.media import storage_key_from_uri
-from app.media_routes import get_local_result_storage
+from app.media_routes import get_generation_result_storage
 from app.permissions import (
     require_not_auditor,
     require_project_access,
@@ -316,6 +316,25 @@ def delete_generation_batch_record(
             },
         )
 
+    has_billing_ledger = conn.execute(
+        """
+        SELECT 1
+        FROM wallet_transactions
+        JOIN generation_tasks ON generation_tasks.id = wallet_transactions.task_id
+        WHERE generation_tasks.batch_id = ?
+        LIMIT 1
+        """,
+        (batch_id,),
+    ).fetchone()
+    if has_billing_ledger:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "BILLED_BATCH_IMMUTABLE",
+                "message": "已产生钱包流水的批次必须保留，不能删除。",
+            },
+        )
+
     result_assets = conn.execute(
         """
         SELECT assets.id, assets.storage_uri
@@ -332,8 +351,7 @@ def delete_generation_batch_record(
         ).fetchone()[0]
     )
 
-    # 尽力清理云端产物：后端不可用（如云凭证已移除）不阻塞删除，失败
-    # 数进审计日志；审计日志本身始终保留，付费记录仍可对账。
+    # 未计费历史批次尽力清理云端产物；后端不可用不阻塞删除，失败数进审计。
     storage_cleanup_failed_count = 0
     for asset in result_assets:
         try:
@@ -585,6 +603,6 @@ def reconcile_uncertain_task(
         actor=actor,
         request=request,
         # 归档重试只写生成成片，固定落本地盘（与 worker 归档一致）。
-        storage_factory=lambda: get_local_result_storage(conn),
+        storage_factory=lambda: get_generation_result_storage(conn),
         provider_factory=provider_factory,
     )
