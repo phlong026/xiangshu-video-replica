@@ -23,7 +23,11 @@ import {
   retryGenerationTask,
   type UserRole,
 } from "./api";
-import { VideoResultStage } from "./VideoResultStage";
+import {
+  readSnapshotNumber,
+  readSnapshotString,
+  VideoResultStage,
+} from "./VideoResultStage";
 
 const BATCH_STORAGE_KEY = "generation.batchId";
 const POLL_INTERVAL_MS = 2_000;
@@ -956,21 +960,27 @@ function BatchPanel({
     counts.needs_attention > 0;
   return (
     <div className="batch-panel">
-      <div className="progress-header">
-        <div>
-          <span className="progress-percent">
-            {batch.progress.progress_percent}%
-          </span>
-          <p>
-            已完成 {batch.progress.terminal_count} /{" "}
-            {batch.progress.total_count}
-          </p>
-        </div>
+      <div className="batch-overview">
         <span
           className={`batch-status batch-status--${batch.status.toLowerCase()}`}
         >
           {formatStatus(batch.status)}
         </span>
+        <span className="batch-overview__progress">
+          {batch.progress.progress_percent}%
+        </span>
+        <span className="batch-overview__count">
+          已完成 {batch.progress.terminal_count} / {batch.progress.total_count}
+        </span>
+        {countItems.length > 0 ? (
+          <span className="batch-overview__chips">
+            {countItems.map(([label, value]) => (
+              <span key={label} className="batch-overview__chip">
+                {label} {value}
+              </span>
+            ))}
+          </span>
+        ) : null}
       </div>
       <div
         aria-label="批次进度"
@@ -981,17 +991,6 @@ function BatchPanel({
         role="progressbar"
       >
         <span style={{ width: `${batch.progress.progress_percent}%` }} />
-      </div>
-      <div className="count-grid">
-        {countItems.length > 0 ? (
-          countItems.map(([label, value]) => (
-            <span key={label}>
-              {label} {value}
-            </span>
-          ))
-        ) : (
-          <span className="count-grid__empty">暂无任务状态变化</span>
-        )}
       </div>
       {hasAttentionItems ? (
         <section aria-label="需要关注" className="batch-attention-panel">
@@ -1028,52 +1027,54 @@ function BatchPanel({
         </section>
       ) : null}
       {canOperate ? (
-        <section
+        <details
           className="paid-regeneration-controls"
           aria-label="整批付费再次生成"
         >
-          <div>
-            <strong>整批再次生成</strong>
+          <summary>整批再次生成（付费）</summary>
+          <div className="paid-regeneration-body">
             <p>
-              仅复用本批次的冻结请求与 Prompt，将新建 {batch.quantity}{" "}
-              个付费任务。 金额快照：{formatCost(estimatedBatchCost(batch))}
+              仅复用本批次的冻结请求与 Prompt，将新建 {batch.quantity} 个付费
+              任务。 金额快照：{formatCost(estimatedBatchCost(batch))}
             </p>
+            <label>
+              <span>整批重生成原因</span>
+              <input
+                aria-label="整批重生成原因"
+                disabled={batchActionBusy}
+                maxLength={500}
+                onChange={(event) =>
+                  onBatchRegenerationReasonChange(event.target.value)
+                }
+                placeholder="说明为什么需要再生成整批视频"
+                value={batchRegenerationReason}
+              />
+            </label>
+            <label className="paid-confirmation-check">
+              <input
+                aria-label={`确认新建 ${batch.quantity} 个付费任务`}
+                checked={batchPaymentConfirmed}
+                disabled={batchActionBusy}
+                onChange={(event) =>
+                  onBatchPaymentConfirmationChange(event.target.checked)
+                }
+                type="checkbox"
+              />
+              <span>
+                我已确认本次会新增 {batch.quantity} 次 Provider 付费调用
+              </span>
+            </label>
+            <button
+              disabled={
+                !batchReason || !batchPaymentConfirmed || batchActionBusy
+              }
+              onClick={onRegenerateBatch}
+              type="button"
+            >
+              整批付费再次生成
+            </button>
           </div>
-          <label>
-            <span>整批重生成原因</span>
-            <input
-              aria-label="整批重生成原因"
-              disabled={batchActionBusy}
-              maxLength={500}
-              onChange={(event) =>
-                onBatchRegenerationReasonChange(event.target.value)
-              }
-              placeholder="说明为什么需要再生成整批视频"
-              value={batchRegenerationReason}
-            />
-          </label>
-          <label className="paid-confirmation-check">
-            <input
-              aria-label={`确认新建 ${batch.quantity} 个付费任务`}
-              checked={batchPaymentConfirmed}
-              disabled={batchActionBusy}
-              onChange={(event) =>
-                onBatchPaymentConfirmationChange(event.target.checked)
-              }
-              type="checkbox"
-            />
-            <span>
-              我已确认本次会新增 {batch.quantity} 次 Provider 付费调用
-            </span>
-          </label>
-          <button
-            disabled={!batchReason || !batchPaymentConfirmed || batchActionBusy}
-            onClick={onRegenerateBatch}
-            type="button"
-          >
-            整批付费再次生成
-          </button>
-        </section>
+        </details>
       ) : null}
       <ul className="task-list">
         {batch.tasks.map((task) => (
@@ -1159,220 +1160,274 @@ function TaskItem({
   const actionReason = taskActionReason.trim();
   const taskActionBusy = Boolean(activeTaskAction);
 
+  const resolution = readSnapshotString(task, "resolution");
+  const outputDuration = readSnapshotNumber(task, "output_duration_seconds");
+
   return (
     <li className="task-item task-result-card">
-      <div className="task-result-heading">
-        <div>
-          <strong>{task.id}</strong>
-          <span>阶段：{taskStage(task)}</span>
-        </div>
-        <div className="task-actions">
-          {attentionNeeded ? (
-            <span className="attention-tag">需要处理</span>
-          ) : null}
-          {canReconcile ? (
-            <button
-              aria-label={`对账 ${task.id}`}
-              disabled={taskActionBusy}
-              type="button"
-              onClick={() => onReconcile(task.id)}
-            >
-              对账
-            </button>
-          ) : null}
-        </div>
-      </div>
-
-      {task.superseded_by_task_id ? (
-        <p className="task-resolution-note">
-          已由任务 {task.superseded_by_task_id}{" "}
-          替代；本记录仅保留历史失败与质检事实。
-        </p>
-      ) : null}
-      {canRetry || canConfirmNotCharged ? (
-        <div className="task-resolution-controls">
-          <label>
-            <span>处理原因</span>
-            <input
-              aria-label={`处理原因 ${task.id}`}
-              disabled={taskActionBusy}
-              maxLength={500}
-              onChange={(event) =>
-                onTaskActionReasonChange(task.id, event.target.value)
-              }
-              placeholder="填写本次处理依据"
-              value={taskActionReason}
-            />
-          </label>
-          {canRetry ? (
-            <button
-              aria-label={`${task.archive_status === "ARCHIVE_FAILED" ? "重试归档" : "安全重试"} ${task.id}`}
-              disabled={!actionReason || taskActionBusy}
-              onClick={() => onRetry(task)}
-              type="button"
-            >
-              {task.archive_status === "ARCHIVE_FAILED"
-                ? "重试归档"
-                : "安全重试"}
-            </button>
-          ) : null}
-          {canConfirmNotCharged ? (
-            <button
-              aria-label={`确认未计费 ${task.id}`}
-              disabled={!actionReason || taskActionBusy}
-              onClick={() => onConfirmNotCharged(task)}
-              type="button"
-            >
-              确认未计费并重新入队
-            </button>
-          ) : null}
-        </div>
-      ) : null}
-      {canOperate && requiresAdminConfirmation && userRole !== "admin" ? (
-        <p className="task-resolution-note">
-          需管理员核对账单并确认未计费后才能重提。
-        </p>
-      ) : null}
-      {canRegenerate ? (
-        <div className="task-paid-regeneration">
-          <div>
-            <strong>付费重新生成视频</strong>
-            <p>
-              只复用该任务的冻结 Prompt，新建一次 Provider 调用；
-              原失败或质检记录保留。金额快照：{formatCost(task.estimated_cost)}
-            </p>
+      <div className="task-detail-grid">
+        {/* 左栏：结果事实。预览、质检与 dl 事实表按阅读顺序纵向排布。 */}
+        <div className="task-detail-main">
+          <div className="task-result-heading">
+            <div>
+              <strong className="task-id-mono">{task.id}</strong>
+              <span>阶段：{taskStage(task)}</span>
+            </div>
+            {attentionNeeded ? (
+              <span className="attention-tag">需要处理</span>
+            ) : null}
           </div>
-          <label>
-            <span>重新生成原因</span>
-            <input
-              aria-label={`重新生成原因 ${task.id}`}
-              disabled={taskActionBusy}
-              maxLength={500}
-              onChange={(event) =>
-                onTaskActionReasonChange(task.id, event.target.value)
-              }
-              placeholder="填写本次新增付费生成的原因"
-              value={taskActionReason}
-            />
-          </label>
-          <label className="paid-confirmation-check">
-            <input
-              aria-label={`确认为任务 ${task.id} 新增一次付费生成`}
-              checked={taskPaymentConfirmed}
-              disabled={taskActionBusy}
-              onChange={(event) =>
-                onTaskPaymentConfirmationChange(task.id, event.target.checked)
-              }
-              type="checkbox"
-            />
-            <span>我已确认本次将产生一次新的 Provider 付费调用</span>
-          </label>
-          <button
-            aria-label={`付费重新生成 ${task.id}`}
-            disabled={!actionReason || !taskPaymentConfirmed || taskActionBusy}
-            onClick={() => onRegenerate(task)}
-            type="button"
+
+          {task.superseded_by_task_id ? (
+            <p className="task-resolution-note">
+              已由任务 {task.superseded_by_task_id}{" "}
+              替代；本记录仅保留历史失败与质检事实。
+            </p>
+          ) : null}
+
+          <div
+            className={
+              audioFailed
+                ? "quality-summary quality-summary--failed"
+                : qualityPassed
+                  ? "quality-summary"
+                  : "quality-summary quality-summary--pending"
+            }
           >
-            付费重新生成
-          </button>
+            <strong>
+              {audioFailed ? "音频质检失败" : qualityLabel(task.quality_status)}
+            </strong>
+            <p>
+              {audioFailed
+                ? "该结果不能作为合格交付，后续只能重新生成视频。"
+                : qualityPassed
+                  ? "音频正常，结果可进入人工确认。"
+                  : "结果归档后将自动执行音频质检。"}
+            </p>
+            {task.quality_issue_codes.length > 0 ? (
+              <span>{task.quality_issue_codes.join(" · ")}</span>
+            ) : null}
+          </div>
+
+          {task.error_message_redacted ? (
+            <p className="task-error-summary">{task.error_message_redacted}</p>
+          ) : null}
+
+          {task.result_asset_id ? (
+            <div className="task-result-actions">
+              <span className="muted">结果已归档</span>
+              {canOperate ? (
+                <>
+                  <button
+                    disabled={activeResultAction === previewAction}
+                    onClick={() => void onPreview(task)}
+                    type="button"
+                  >
+                    {previewUrl ? `刷新预览 ${task.id}` : `加载预览 ${task.id}`}
+                  </button>
+                  <button
+                    disabled={activeResultAction === downloadAction}
+                    onClick={() => void onDownload(task)}
+                    type="button"
+                  >
+                    下载 MP4 {task.id}
+                  </button>
+                </>
+              ) : (
+                <span className="muted">审计只读，不可预览或下载结果</span>
+              )}
+            </div>
+          ) : (
+            <span className="muted">等待结果归档</span>
+          )}
+          {task.result_asset_id && canOperate ? (
+            <section
+              aria-label={`结果播放器 ${task.id}`}
+              className="task-result-preview"
+            >
+              {previewUrl ? (
+                // biome-ignore lint/a11y/useMediaCaption: Generated Provider videos do not include a separate caption asset.
+                <video
+                  aria-label={`结果预览 ${task.id}`}
+                  className="task-result-video"
+                  controls
+                  preload="auto"
+                  src={previewUrl}
+                />
+              ) : (
+                <span className="muted">
+                  点击加载预览，系统将签发新的短期链接。
+                </span>
+              )}
+            </section>
+          ) : null}
+          {resultError ? (
+            <p className="task-error-summary" role="status">
+              {resultError}
+            </p>
+          ) : null}
+
+          <dl className="task-facts">
+            <div>
+              <dt>模型</dt>
+              <dd>{task.model}</dd>
+            </div>
+            {resolution ? (
+              <div>
+                <dt>分辨率</dt>
+                <dd>{resolution}</dd>
+              </div>
+            ) : null}
+            {outputDuration !== null ? (
+              <div>
+                <dt>成片时长</dt>
+                <dd>{outputDuration} 秒</dd>
+              </div>
+            ) : null}
+            <div>
+              <dt>生成耗时</dt>
+              <dd>{formatDuration(task.duration_seconds)}</dd>
+            </div>
+            <div>
+              <dt>费用</dt>
+              <dd>{formatCost(task.actual_cost ?? task.estimated_cost)}</dd>
+            </div>
+            <div>
+              <dt>尝试</dt>
+              <dd>{task.attempt ?? 0} 次</dd>
+            </div>
+            <div>
+              <dt>Provider 尾号</dt>
+              <dd>
+                {task.provider_task_id_tail
+                  ? task.provider_task_id_tail
+                  : "未公开"}
+              </dd>
+            </div>
+            {task.submitted_at ? (
+              <div>
+                <dt>提交时间</dt>
+                <dd>{formatTimestamp(task.submitted_at)}</dd>
+              </div>
+            ) : null}
+          </dl>
         </div>
-      ) : null}
 
-      <div className="task-metadata-grid">
-        <span>耗时 {formatDuration(task.duration_seconds)}</span>
-        <span>
-          {task.provider_task_id_tail
-            ? `Provider 尾号 ${task.provider_task_id_tail}`
-            : "Provider 尾号未公开"}
-        </span>
-        <span>
-          尝试 {task.attempt ?? 0} 次 · 归档重试 {task.archive_retry_count ?? 0}{" "}
-          次
-        </span>
-        <span>费用 {formatCost(task.actual_cost ?? task.estimated_cost)}</span>
-      </div>
-
-      <div
-        className={
-          audioFailed
-            ? "quality-summary quality-summary--failed"
-            : qualityPassed
-              ? "quality-summary"
-              : "quality-summary quality-summary--pending"
-        }
-      >
-        <strong>
-          {audioFailed ? "音频质检失败" : qualityLabel(task.quality_status)}
-        </strong>
-        <p>
-          {audioFailed
-            ? "该结果不能作为合格交付，后续只能重新生成视频。"
-            : qualityPassed
-              ? "音频正常，结果可进入人工确认。"
-              : "结果归档后将自动执行音频质检。"}
-        </p>
-        {task.quality_issue_codes.length > 0 ? (
-          <span>{task.quality_issue_codes.join(" · ")}</span>
+        {/* 右栏：处理操作折叠区。默认收起，避免表单噪音淹没结果事实。 */}
+        {canOperate ? (
+          <aside className="task-detail-ops" aria-label={`任务操作 ${task.id}`}>
+            {canReconcile || canRetry || canConfirmNotCharged ? (
+              <details className="task-resolution-controls">
+                <summary>处理此任务</summary>
+                <div className="task-detail-ops__body">
+                  {canReconcile ? (
+                    <button
+                      aria-label={`对账 ${task.id}`}
+                      disabled={taskActionBusy}
+                      type="button"
+                      onClick={() => onReconcile(task.id)}
+                    >
+                      对账
+                    </button>
+                  ) : null}
+                  {canRetry || canConfirmNotCharged ? (
+                    <label>
+                      <span>处理原因</span>
+                      <input
+                        aria-label={`处理原因 ${task.id}`}
+                        disabled={taskActionBusy}
+                        maxLength={500}
+                        onChange={(event) =>
+                          onTaskActionReasonChange(task.id, event.target.value)
+                        }
+                        placeholder="填写本次处理依据"
+                        value={taskActionReason}
+                      />
+                    </label>
+                  ) : null}
+                  {canRetry ? (
+                    <button
+                      aria-label={`${task.archive_status === "ARCHIVE_FAILED" ? "重试归档" : "安全重试"} ${task.id}`}
+                      disabled={!actionReason || taskActionBusy}
+                      onClick={() => onRetry(task)}
+                      type="button"
+                    >
+                      {task.archive_status === "ARCHIVE_FAILED"
+                        ? "重试归档"
+                        : "安全重试"}
+                    </button>
+                  ) : null}
+                  {canConfirmNotCharged ? (
+                    <button
+                      aria-label={`确认未计费 ${task.id}`}
+                      disabled={!actionReason || taskActionBusy}
+                      onClick={() => onConfirmNotCharged(task)}
+                      type="button"
+                    >
+                      确认未计费并重新入队
+                    </button>
+                  ) : null}
+                  {requiresAdminConfirmation && userRole !== "admin" ? (
+                    <p className="task-resolution-note">
+                      需管理员核对账单并确认未计费后才能重提。
+                    </p>
+                  ) : null}
+                </div>
+              </details>
+            ) : null}
+            {canRegenerate ? (
+              <details className="task-paid-regeneration">
+                <summary>付费重新生成</summary>
+                <div className="task-detail-ops__body">
+                  <p>
+                    只复用该任务的冻结 Prompt，新建一次 Provider 调用；
+                    原失败或质检记录保留。金额快照：
+                    {formatCost(task.estimated_cost)}
+                  </p>
+                  <label>
+                    <span>重新生成原因</span>
+                    <input
+                      aria-label={`重新生成原因 ${task.id}`}
+                      disabled={taskActionBusy}
+                      maxLength={500}
+                      onChange={(event) =>
+                        onTaskActionReasonChange(task.id, event.target.value)
+                      }
+                      placeholder="填写本次新增付费生成的原因"
+                      value={taskActionReason}
+                    />
+                  </label>
+                  <label className="paid-confirmation-check">
+                    <input
+                      aria-label={`确认为任务 ${task.id} 新增一次付费生成`}
+                      checked={taskPaymentConfirmed}
+                      disabled={taskActionBusy}
+                      onChange={(event) =>
+                        onTaskPaymentConfirmationChange(
+                          task.id,
+                          event.target.checked,
+                        )
+                      }
+                      type="checkbox"
+                    />
+                    <span>我已确认本次将产生一次新的 Provider 付费调用</span>
+                  </label>
+                  <button
+                    aria-label={`付费重新生成 ${task.id}`}
+                    disabled={
+                      !actionReason || !taskPaymentConfirmed || taskActionBusy
+                    }
+                    onClick={() => onRegenerate(task)}
+                    type="button"
+                  >
+                    付费重新生成
+                  </button>
+                </div>
+              </details>
+            ) : null}
+          </aside>
         ) : null}
       </div>
-
-      {task.error_message_redacted ? (
-        <p className="task-error-summary">{task.error_message_redacted}</p>
-      ) : null}
-
-      {task.result_asset_id ? (
-        <div className="task-result-actions">
-          <span className="muted">结果已归档</span>
-          {canOperate ? (
-            <>
-              <button
-                disabled={activeResultAction === previewAction}
-                onClick={() => void onPreview(task)}
-                type="button"
-              >
-                {previewUrl ? `刷新预览 ${task.id}` : `加载预览 ${task.id}`}
-              </button>
-              <button
-                disabled={activeResultAction === downloadAction}
-                onClick={() => void onDownload(task)}
-                type="button"
-              >
-                下载 MP4 {task.id}
-              </button>
-            </>
-          ) : (
-            <span className="muted">审计只读，不可预览或下载结果</span>
-          )}
-        </div>
-      ) : (
-        <span className="muted">等待结果归档</span>
-      )}
-      {task.result_asset_id && canOperate ? (
-        <section
-          aria-label={`结果播放器 ${task.id}`}
-          className="task-result-preview"
-        >
-          {previewUrl ? (
-            // biome-ignore lint/a11y/useMediaCaption: Generated Provider videos do not include a separate caption asset.
-            <video
-              aria-label={`结果预览 ${task.id}`}
-              className="task-result-video"
-              controls
-              preload="auto"
-              src={previewUrl}
-            />
-          ) : (
-            <span className="muted">
-              点击加载预览，系统将签发新的短期链接。
-            </span>
-          )}
-        </section>
-      ) : null}
-      {resultError ? (
-        <p className="task-error-summary" role="status">
-          {resultError}
-        </p>
-      ) : null}
     </li>
   );
 }

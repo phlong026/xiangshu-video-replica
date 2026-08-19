@@ -912,7 +912,10 @@ function parseServerTime(value: string | null | undefined): number | null {
   return Number.isNaN(ms) ? null : ms;
 }
 
-function readSnapshotString(task: GenerationTask, key: string): string | null {
+export function readSnapshotString(
+  task: GenerationTask,
+  key: string,
+): string | null {
   const snapshot = task.prompt_snapshot;
   if (!snapshot || typeof snapshot !== "object") {
     return null;
@@ -921,7 +924,10 @@ function readSnapshotString(task: GenerationTask, key: string): string | null {
   return typeof value === "string" && value ? value : null;
 }
 
-function readSnapshotNumber(task: GenerationTask, key: string): number | null {
+export function readSnapshotNumber(
+  task: GenerationTask,
+  key: string,
+): number | null {
   const snapshot = task.prompt_snapshot;
   if (!snapshot || typeof snapshot !== "object") {
     return null;

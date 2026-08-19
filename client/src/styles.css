@@ -2331,17 +2331,9 @@ button.history-version--active {
   background: #2a161d;
 }
 
-.section-heading,
-.progress-header,
-.task-item,
-.task-actions {
+.section-heading {
   display: flex;
   align-items: center;
-}
-
-.section-heading,
-.progress-header,
-.task-item {
   justify-content: space-between;
   gap: 20px;
 }
@@ -2358,6 +2350,7 @@ button.history-version--active {
   padding: 8px 12px;
   color: #8d8798;
   background: #0e0e12;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2394,14 +2387,37 @@ button.history-version--active {
   margin-top: 22px;
 }
 
-.progress-header p {
-  margin: 4px 0 0;
-  color: #aaa297;
+/* 批次概览条：状态/进度/完成数/统计 chips 一行横排。 */
+.batch-overview {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
 }
 
-.progress-percent {
-  font-size: 40px;
+.batch-overview__progress {
+  font-size: 18px;
   font-weight: 800;
+}
+
+.batch-overview__count {
+  color: #aaa297;
+  font-size: 13px;
+}
+
+.batch-overview__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.batch-overview__chip {
+  border: 1px solid #26262e;
+  border-radius: 999px;
+  padding: 4px 9px;
+  color: #a49db0;
+  background: #0e0e12;
+  font-size: 12px;
 }
 
 .batch-status,
@@ -2433,28 +2449,6 @@ button.history-version--active {
   border-radius: inherit;
   background: #79dda9;
   transition: width 180ms ease;
-}
-
-.count-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 10px;
-  margin-top: 18px;
-}
-
-.count-grid span {
-  border: 1px solid #26262e;
-  border-radius: 8px;
-  padding: 10px;
-  color: #d8d4cc;
-  background: #0e0e12;
-  font-size: 13px;
-}
-
-.count-grid__empty {
-  grid-column: 1 / -1;
-  color: #8d8798;
-  font-size: 12px;
 }
 
 /* 运维详情第二段：异常与来源信息集中在一个面板内，不再平铺四条横幅。 */
@@ -2498,18 +2492,6 @@ button.history-version--active {
   margin-top: 6px;
   color: #aaa297;
   font-size: 13px;
-}
-
-.task-actions {
-  justify-content: flex-end;
-  gap: 10px;
-  min-width: 170px;
-}
-
-.task-actions a {
-  color: #79dda9;
-  font-weight: 700;
-  text-decoration: none;
 }
 
 .muted {
@@ -2696,6 +2678,32 @@ button.history-version--active {
   padding: 18px;
 }
 
+/* 任务卡两栏：左=结果事实（预览+事实表），右=处理操作折叠区。 */
+.task-detail-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(280px, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.task-detail-main {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.task-detail-ops {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.task-id-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
 .task-result-heading > div:first-child {
   min-width: 0;
 }
@@ -2706,32 +2714,55 @@ button.history-version--active {
   white-space: nowrap;
 }
 
-.task-metadata-grid {
+/* dl 事实表：dt 12px 元信息、dd 13px 正文，两列网格铺开。 */
+.task-facts {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
-  opacity: 0.82;
+  margin: 0;
 }
 
-.task-metadata-grid span {
-  margin: 0;
+.task-facts > div {
   border: 1px solid #302839;
   border-radius: 8px;
   padding: 9px 10px;
   background: #141419;
-  color: #a49db0;
+}
+
+.task-facts dt {
+  color: #8d8798;
   font-size: 12px;
+}
+
+.task-facts dd {
+  margin: 3px 0 0;
+  color: #d8d4cc;
+  font-size: 13px;
 }
 
 .task-resolution-controls {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: end;
   gap: 10px;
   border: 1px solid #4a3d24;
   border-radius: 10px;
   padding: 12px;
   background: #171220;
+}
+
+.task-resolution-controls summary,
+.task-paid-regeneration summary,
+.paid-regeneration-controls summary {
+  cursor: pointer;
+  color: #f0d7a9;
+  font-size: 14px;
+  font-weight: 600;
+  user-select: none;
+}
+
+.task-detail-ops__body {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
 }
 
 .task-resolution-controls label {
@@ -2814,6 +2845,12 @@ button.history-version--active {
   background: #241a12;
 }
 
+.paid-regeneration-body {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+}
+
 .paid-regeneration-controls p,
 .task-paid-regeneration p {
   margin: 5px 0 0;
@@ -2822,8 +2859,8 @@ button.history-version--active {
   line-height: 1.5;
 }
 
-.paid-regeneration-controls > label:not(.paid-confirmation-check),
-.task-paid-regeneration > label:not(.paid-confirmation-check) {
+.paid-regeneration-controls label:not(.paid-confirmation-check),
+.task-paid-regeneration label:not(.paid-confirmation-check) {
   display: grid;
   gap: 7px;
 }
@@ -4078,6 +4115,10 @@ button.regenerate-button {
 
 @media (max-width: 1180px) {
   .task-records-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .task-detail-grid {
     grid-template-columns: 1fr;
   }
 
