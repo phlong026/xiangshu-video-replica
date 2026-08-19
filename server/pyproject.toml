@@ -16,6 +16,7 @@ dev = [
     "httpx==0.28.1",
     "mypy==2.3.0",
     "pytest==9.1.1",
+    "python-multipart==0.0.20",
     "ruff==0.16.2",
 ]
 

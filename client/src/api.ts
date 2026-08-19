@@ -786,6 +786,60 @@ export async function completeIdentitySourceUpload(
   );
 }
 
+export interface SimpleCharacterUploadIntent {
+  upload_url: string;
+  asset_id: string;
+  method: "PUT";
+  expires_in: number;
+}
+
+export interface SimpleCharacterUploadResult {
+  version_id: string;
+  persona_id: string;
+  identity_id: string;
+  combined_asset_url: string;
+  view_assets: [RequiredCharacterViewType, string][];
+}
+
+export async function uploadSimpleCharacter(
+  projectId: string,
+  file: File,
+  onProgress?: (progressPercent: number) => void,
+  signal?: AbortSignal,
+): Promise<SimpleCharacterUploadResult> {
+  // Step 1: Create upload intent
+  const intent = await requestApiJson<SimpleCharacterUploadIntent>(
+    "/api/simple-characters/upload-intent",
+    "创建上传意图失败",
+    { method: "POST" },
+  );
+
+  // Step 2: Upload file directly to storage
+  await uploadStorageObject(
+    {
+      headers: {},
+      method: intent.method,
+      url: intent.upload_url,
+    },
+    file,
+    onProgress || (() => {}),
+    "上传人物图片",
+    signal,
+  );
+
+  // Step 3: Trigger generation (backend handles the rest)
+  return requestApiJson<SimpleCharacterUploadResult>(
+    `/api/simple-characters/${encodeURIComponent(projectId)}/generate`,
+    "创建简单角色失败",
+    {
+      method: "POST",
+      headers: { "Content-Type": file.type },
+      body: file,
+    },
+    CLOUD_OP_TIMEOUT_MS * 2,
+  );
+}
+
 export async function listCharacterPersonas(
   identityId: string,
 ): Promise<CharacterPersona[]> {
