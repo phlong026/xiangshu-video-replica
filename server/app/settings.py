@@ -9,6 +9,7 @@ from typing import Any, Literal
 from cryptography.fernet import Fernet, InvalidToken
 
 from app.local_settings_key import LocalSettingsKeyStoreError, load_or_create_local_settings_key
+from app.zpay import parse_enabled_channels
 
 ProviderName = Literal["apilio", "metaso", "cos", "deepseek"]
 
@@ -75,6 +76,36 @@ class SettingsRepository:
         provider_name = normalize_provider(provider)
         normalized = normalize_config(config)
         validate_provider_config(provider_name, normalized)
+        return self._save_encrypted_config(
+            provider_name,
+            normalized,
+            actor_user_id=actor_user_id,
+        )
+
+    def save_zpay_config(
+        self,
+        config: dict[str, Any],
+        *,
+        actor_user_id: str,
+    ) -> dict[str, Any]:
+        normalized = normalize_config(config)
+        validate_zpay_config(normalized)
+        normalized["enabled_channels"] = ",".join(
+            parse_enabled_channels(normalized["enabled_channels"])
+        )
+        return self._save_encrypted_config(
+            "zpay",
+            normalized,
+            actor_user_id=actor_user_id,
+        )
+
+    def _save_encrypted_config(
+        self,
+        provider: str,
+        normalized: dict[str, str],
+        *,
+        actor_user_id: str,
+    ) -> dict[str, Any]:
         encrypted_config = self.fernet.encrypt(
             json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).decode("ascii")
@@ -95,16 +126,22 @@ class SettingsRepository:
                     updated_by_user_id = excluded.updated_by_user_id,
                     updated_at = CURRENT_TIMESTAMP
                 """,
-                (provider_name, encrypted_config, actor_user_id),
+                (provider, encrypted_config, actor_user_id),
             )
 
-        return self.read_provider_config(provider_name)
+        return self._read_encrypted_config(provider)
 
     def read_provider_config(self, provider: str) -> dict[str, Any]:
         provider_name = normalize_provider(provider)
-        config = self.load_provider_config(provider_name)
+        return self._read_encrypted_config(provider_name)
+
+    def read_zpay_config(self) -> dict[str, Any]:
+        return self._read_encrypted_config("zpay")
+
+    def _read_encrypted_config(self, provider: str) -> dict[str, Any]:
+        config = self._load_encrypted_config(provider)
         return {
-            "provider": provider_name,
+            "provider": provider,
             "configured": bool(config),
             "config": mask_config(config),
         }
@@ -116,9 +153,15 @@ class SettingsRepository:
 
     def load_provider_config(self, provider: str) -> dict[str, str]:
         provider_name = normalize_provider(provider)
+        return self._load_encrypted_config(provider_name)
+
+    def load_zpay_config(self) -> dict[str, str]:
+        return self._load_encrypted_config("zpay")
+
+    def _load_encrypted_config(self, provider: str) -> dict[str, str]:
         row = self.conn.execute(
             "SELECT encrypted_config FROM provider_settings WHERE provider = ?",
-            (provider_name,),
+            (provider,),
         ).fetchone()
         if row is None:
             return {}
@@ -296,6 +339,17 @@ def validate_provider_config(provider: ProviderName, config: dict[str, str]) -> 
         raise ValueError(f"missing required setting: {', '.join(missing)}")
 
 
+def validate_zpay_config(config: dict[str, str]) -> None:
+    allowed_fields = {"pid", "key", "enabled_channels"}
+    unexpected = sorted(set(config) - allowed_fields)
+    if unexpected:
+        raise ValueError(f"unsupported ZPay setting: {', '.join(unexpected)}")
+    missing = [field for field in allowed_fields if not config.get(field)]
+    if missing:
+        raise ValueError(f"missing required ZPay setting: {', '.join(sorted(missing))}")
+    parse_enabled_channels(config["enabled_channels"])
+
+
 def validate_runtime_settings(
     *,
     max_generation_count_per_batch: int,
@@ -343,7 +397,7 @@ def mask_config(config: dict[str, str]) -> dict[str, str]:
 
 def is_secret_field(key: str) -> bool:
     lowered = key.lower()
-    return any(marker in lowered for marker in SECRET_FIELDS)
+    return lowered == "key" or any(marker in lowered for marker in SECRET_FIELDS)
 
 
 def mask_secret(value: str) -> str:
