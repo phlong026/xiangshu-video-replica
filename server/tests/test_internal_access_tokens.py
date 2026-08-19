@@ -174,3 +174,22 @@ def test_revoked_token_returns_401_immediately(
     assert json.loads(revoked.stdout) == {"revoked": True, "token_id": token_id}
     assert after.status_code == 401
     assert after.json()["detail"]["code"] == "AUTH_INVALID_TOKEN"
+
+
+def test_unset_auth_mode_fails_closed_even_when_legacy_identities_exist(
+    internal_client: TestClient,
+    internal_account: tuple[Path, str, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, user_id, _, _ = internal_account
+    monkeypatch.delenv("VIDEO_REPLICA_AUTH_MODE", raising=False)
+    monkeypatch.setenv("VIDEO_REPLICA_DESKTOP_USER_ID", user_id)
+    monkeypatch.setenv("VIDEO_REPLICA_ALLOW_DEV_IDENTITY_HEADER", "1")
+
+    response = internal_client.get(
+        "/api/auth/me",
+        headers={"X-Dev-User-Id": user_id},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"]["code"] == "AUTH_TOKEN_REQUIRED"

@@ -11,7 +11,7 @@ from typing import Annotated, Literal, Protocol
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictInt
 
 from app.auth import AuthenticatedUser, CurrentUser, Database
 from app.auth import get_database as auth_get_database
@@ -42,9 +42,9 @@ class RuntimeSettingsRequest(BaseModel):
 
 
 class BillingSettingsRequest(BaseModel):
-    internal_base_unit_price_fen: int
-    min_recharge_fen: int
-    recharge_step_fen: int
+    internal_base_unit_price_fen: StrictInt
+    min_recharge_fen: StrictInt
+    recharge_step_fen: StrictInt
 
 
 class ProviderTestResult(BaseModel):

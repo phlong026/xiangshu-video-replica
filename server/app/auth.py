@@ -17,7 +17,7 @@ VALID_ROLES: set[str] = {"employee", "admin", "auditor"}
 DESKTOP_USER_ID_ENV = "VIDEO_REPLICA_DESKTOP_USER_ID"
 ALLOW_DEV_IDENTITY_HEADER_ENV = "VIDEO_REPLICA_ALLOW_DEV_IDENTITY_HEADER"
 AUTH_MODE_ENV = "VIDEO_REPLICA_AUTH_MODE"
-INTERNAL_AUTH_MODES = {"internal", "internal_token"}
+LEGACY_AUTH_MODES = {"desktop", "development"}
 
 
 @dataclass(frozen=True)
@@ -118,7 +118,7 @@ def invalid_token_error() -> HTTPException:
 
 
 def internal_auth_required() -> bool:
-    return os.environ.get(AUTH_MODE_ENV, "").lower() in INTERNAL_AUTH_MODES
+    return os.environ.get(AUTH_MODE_ENV, "").lower() not in LEGACY_AUTH_MODES
 
 
 def authenticate_user(conn: sqlite3.Connection, user_id: str | None) -> CurrentUser:

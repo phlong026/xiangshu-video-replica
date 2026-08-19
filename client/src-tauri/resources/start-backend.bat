@@ -11,6 +11,7 @@ if "%VIDEO_REPLICA_DESKTOP_USER_ID%"=="" (
   echo VIDEO_REPLICA_DESKTOP_USER_ID is required
   exit /b 1
 )
+if "%VIDEO_REPLICA_AUTH_MODE%"=="" set "VIDEO_REPLICA_AUTH_MODE=desktop"
 if "%VIDEO_REPLICA_STORAGE_ROOT%"=="" set VIDEO_REPLICA_STORAGE_ROOT=%CD%\storage
 
 rem 打包命令是一个整体，禁止一部分走 sidecar、另一部分误回退到开发目录。
