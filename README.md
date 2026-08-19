@@ -79,6 +79,8 @@ Set-Location server
 
 生产构建必须把 `VITE_API_BASE_URL` 设为与页面同源的 HTTPS 地址。参考 `deploy/nginx/internal-p0.conf.example` 保护 `/admin` 和 `/api/control/*`：IP/VPN 白名单与 Basic Auth 必须同时通过，浏览器永远接触不到控制代理原始令牌。FastAPI 继续只监听 `127.0.0.1`；若 Nginx 前面还有负载均衡或 CDN，必须先按可信代理范围正确恢复客户端地址，否则不要直接复用样例中的 IP 白名单。
 
+Linux 单机部署的环境模板、systemd 单元、SQLite 检查/备份/恢复和验收命令统一见 `docs/内部运营P0单机部署与验收记录.md`。部署文件只覆盖一个 API、一个 Worker、一个本机 SQLite 文件和同机静态页；它们不代表真实 ZPay、COS 或 Provider 已验收。
+
 ### 内部钱包与按条计费
 
 `GET /api/wallet` 返回当前内部用户的可用条数和冻结条数；`GET /api/wallet/transactions` 用 `limit`、`offset` 分页返回当前用户自己的追加式流水。创建一条生成任务会在同一个 SQLite 事务内写入 `RESERVE`，并把 1 条从可用余额移到冻结余额；余额不足返回 `402 INSUFFICIENT_CREDITS`，批次、任务、Prompt 状态和钱包不会部分提交。
