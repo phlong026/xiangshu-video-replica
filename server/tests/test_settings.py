@@ -636,6 +636,35 @@ def test_admin_can_read_and_update_internal_billing_settings(client: TestClient)
     }
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("internal_base_unit_price_fen", True),
+        ("min_recharge_fen", "10000"),
+        ("recharge_step_fen", 1000.0),
+    ],
+)
+def test_billing_settings_api_rejects_coerced_integer_values(
+    client: TestClient,
+    field: str,
+    value: object,
+) -> None:
+    payload: dict[str, object] = {
+        "internal_base_unit_price_fen": 1000,
+        "min_recharge_fen": 10000,
+        "recharge_step_fen": 1000,
+    }
+    payload[field] = value
+
+    response = client.patch(
+        "/api/admin/settings/billing",
+        headers=admin_headers(),
+        json=payload,
+    )
+
+    assert response.status_code == 422
+
+
 def test_admin_cannot_enable_removed_oss_storage(client: TestClient) -> None:
     response = client.patch(
         "/api/admin/settings/runtime",

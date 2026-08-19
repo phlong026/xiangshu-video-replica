@@ -25,6 +25,7 @@ uv sync --project server --locked
 
 ```powershell
 $env:VIDEO_REPLICA_ALLOW_DEV_IDENTITY_HEADER = "1"
+$env:VIDEO_REPLICA_AUTH_MODE = "development"
 npm run dev:server
 ```
 
@@ -41,7 +42,20 @@ $env:VITE_DEV_USER_ID = "employee_1" # 调试设置页时改为现有 admin 用�
 npm run tauri:dev
 ```
 
-开发 Header 只在 Vite 开发构建中发送；生产构建即使误设 `VITE_DEV_USER_ID` 也会忽略它。发布/内测运行必须由服务端设置 `VIDEO_REPLICA_DESKTOP_USER_ID`，`/api/auth/me` 再从数据库读取显示名称和角色，客户端不能自行声明 admin 身份。
+开发 Header 只在 Vite 开发构建中发送；生产构建即使误设 `VITE_DEV_USER_ID` 也会忽略它。桌面发布/内测运行必须由服务端设置 `VIDEO_REPLICA_AUTH_MODE=desktop` 和 `VIDEO_REPLICA_DESKTOP_USER_ID`，`/api/auth/me` 再从数据库读取显示名称和角色，客户端不能自行声明 admin 身份。
+
+### 内部云端 P0 身份
+
+内部云端模式使用受控 CLI 创建账号和钱包，并签发只显示一次的 Bearer Token。数据库只保存令牌 SHA-256 摘要：
+
+```powershell
+Set-Location server
+.venv\Scripts\python.exe -m app.internal_accounts --db-path C:\video-replica\data\app.db create-user --username operator_1 --display-name "运营一号"
+.venv\Scripts\python.exe -m app.internal_accounts --db-path C:\video-replica\data\app.db issue-token --user-id "上一步输出的 user_id"
+.venv\Scripts\python.exe -m app.internal_accounts --db-path C:\video-replica\data\app.db revoke-token --token-id "签发时输出的 token_id"
+```
+
+认证默认采用 fail-closed 的内部令牌模式；部署时仍应显式设置 `VIDEO_REPLICA_AUTH_MODE=internal`，并且不要设置 `VIDEO_REPLICA_DESKTOP_USER_ID` 或 `VIDEO_REPLICA_ALLOW_DEV_IDENTITY_HEADER`。该模式下业务 API 只接受 `Authorization: Bearer <token>`；令牌撤销后立即失效。只有显式设置 `desktop` 或 `development` 才会启用旧身份路径。原始令牌不会再次显示，应由客户端系统安全存储或受控 Secret 工具保管，不得写入仓库、日志或普通配置文件。
 
 ### 本地存储（无 COS 凭据的开发机）
 
@@ -109,6 +123,7 @@ Windows 内测、升级、卸载、SQLite 备份恢复和日志策略见 `docs/W
 $env:VIDEO_REPLICA_HOME = "$env:LOCALAPPDATA\VideoReplicaWorkbench"
 $env:VIDEO_REPLICA_DB_PATH = "$env:VIDEO_REPLICA_HOME\data\app.db"
 $env:VIDEO_REPLICA_LOG_DIR = "$env:VIDEO_REPLICA_HOME\logs"
+$env:VIDEO_REPLICA_AUTH_MODE = "desktop"
 $env:VIDEO_REPLICA_DESKTOP_USER_ID = "内部用户ID" # 必须对应 users 表中的已启用用户
 # 可选：仅安全部署系统注入；留空则由当前 Windows 用户 DPAPI 持久化
 # $env:VIDEO_REPLICA_SETTINGS_KEY = "<由 Secret 系统注入的稳定 Fernet 主密钥>"
