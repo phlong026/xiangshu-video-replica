@@ -1092,3 +1092,35 @@ def test_update_cos_settings_lifecycle_failure_does_not_block_save(
         ).fetchall()
     ]
     assert audit_actions == ["cos_lifecycle.failed"]
+
+
+def test_masked_secret_roundtrip_does_not_overwrite_saved_secret(
+    client: TestClient,
+    conn: sqlite3.Connection,
+) -> None:
+    """GET 返回的掩码配置被原样 PUT 回传时，不得把真实凭据覆盖成掩码字符串。"""
+    repo = SettingsRepository(conn)
+    repo.save_provider_config(
+        "cos",
+        {
+            "access_key_id": "AKID-real-key-id-1234",
+            "secret_access_key": "real-secret-value-5678",
+            "bucket": "mask-roundtrip",
+            "region": "ap-shanghai",
+        },
+        actor_user_id="admin_1",
+    )
+
+    # 模拟前端把 GET 到的掩码 config 原样回传
+    masked = repo.read_provider_config("cos")["config"]
+    response = client.put(
+        "/api/admin/settings/providers/cos",
+        headers=admin_headers(),
+        json={"config": masked},
+    )
+
+    assert response.status_code == 200
+    saved = repo.load_provider_config("cos")
+    assert saved["access_key_id"] == "AKID-real-key-id-1234"
+    assert saved["secret_access_key"] == "real-secret-value-5678"
+    assert saved["bucket"] == "mask-roundtrip"

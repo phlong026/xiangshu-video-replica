@@ -195,7 +195,7 @@ def apply_cos_lifecycle_rules(
             cloud_storage_config_from_settings("cos", config)
         )
     except (ValueError, StorageBackendUnavailable) as exc:
-        logger.warning("COS lifecycle rules skipped: %s", exc)
+        logger.warning("COS lifecycle rules skipped: %s", exc, exc_info=True)
         return {
             "status": "skipped",
             "message": "对象存储配置不完整或客户端初始化失败，已跳过生命周期规则下发。",
@@ -527,6 +527,10 @@ def merge_provider_config(
 ) -> dict[str, str]:
     merged = dict(saved_config)
     for key, value in incoming_config.items():
+        # 掩码值（mask_secret 产出的 ******** 尾号形态）回传等于"未修改该
+        # 密钥"：保留库中原值，避免把真实凭据覆盖成星号字符串。
+        if is_secret_field(key) and value.strip().startswith("********"):
+            continue
         if value.strip():
             merged[key] = value
         elif not is_secret_field(key):
