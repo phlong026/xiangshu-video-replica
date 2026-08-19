@@ -371,22 +371,55 @@ input:focus {
 }
 
 .service-badge {
+  --service-signal-color: #d4a72c;
+  align-items: flex-end;
+  background: #14141e;
   border: 1px solid var(--line);
   border-radius: 6px;
-  padding: 7px 10px;
-  color: #c9c4ba;
-  background: #14141e;
-  font-size: 12px;
+  display: inline-flex;
+  gap: 2px;
+  height: 30px;
+  justify-content: center;
+  padding: 6px 8px;
+  width: 42px;
 }
 
 .service-badge--connected {
   border-color: #276d51;
-  color: #79dda9;
+  --service-signal-color: #79dda9;
 }
 
 .service-badge--disconnected {
   border-color: #7a3f48;
-  color: #ff9aa8;
+  --service-signal-color: #ff5f73;
+}
+
+.service-badge--checking {
+  border-color: #6f5a25;
+  --service-signal-color: #d4a72c;
+}
+
+.service-badge__bar {
+  background: var(--service-signal-color);
+  border-radius: 2px 2px 1px 1px;
+  display: block;
+  width: 4px;
+}
+
+.service-badge__bar:nth-child(1) {
+  height: 6px;
+}
+
+.service-badge__bar:nth-child(2) {
+  height: 10px;
+}
+
+.service-badge__bar:nth-child(3) {
+  height: 14px;
+}
+
+.service-badge__bar:nth-child(4) {
+  height: 18px;
 }
 
 .empty-state {

@@ -172,9 +172,11 @@ describe("App", () => {
     expect(screen.queryByRole("button", { name: "设置" })).toBeNull();
     expect(screen.getByText("林夏")).toBeInTheDocument();
     expect(screen.getByText("普通员工")).toBeInTheDocument();
-    await waitFor(() =>
-      expect(screen.getByText("本地服务已连接")).toBeInTheDocument(),
-    );
+    const serviceStatus = await screen.findByRole("status", {
+      name: "本地服务已连接",
+    });
+    expect(serviceStatus).toHaveTextContent("");
+    expect(screen.queryByText("本地服务已连接")).toBeNull();
     expect(fetchMock).toHaveBeenCalledWith("http://127.0.0.1:8000/health", {
       signal: expect.any(AbortSignal),
     });

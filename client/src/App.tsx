@@ -472,8 +472,15 @@ function ServiceBadge({ state }: { state: ServiceState }) {
   };
 
   return (
-    <span className={`service-badge service-badge--${state}`} role="status">
-      {labels[state]}
+    <span
+      aria-label={labels[state]}
+      className={`service-badge service-badge--${state}`}
+      role="status"
+      title={labels[state]}
+    >
+      {[1, 2, 3, 4].map((bar) => (
+        <span aria-hidden="true" className="service-badge__bar" key={bar} />
+      ))}
     </span>
   );
 }
