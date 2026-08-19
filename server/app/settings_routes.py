@@ -18,6 +18,7 @@ from app.auth import get_database as auth_get_database
 from app.permissions import require_role
 from app.settings import ProviderName, SettingsRepository, is_secret_field, normalize_provider
 from app.storage import (
+    CloudStorageAdapter,
     CloudStorageConfig,
     StorageAdapter,
     StorageBackendUnavailable,
@@ -183,6 +184,42 @@ class StorageProviderTester:
         return self.fallback.paid_test(provider, config)
 
 
+def apply_cos_lifecycle_rules(
+    config: dict[str, str],
+    *,
+    actor_id: str,
+) -> dict[str, str]:
+    """保存 COS 配置后对齐桶生命周期规则；下发失败不阻断配置保存。"""
+    try:
+        adapter = create_storage_adapter(
+            cloud_storage_config_from_settings("cos", config)
+        )
+    except (ValueError, StorageBackendUnavailable) as exc:
+        logger.warning("COS lifecycle rules skipped: %s", exc)
+        return {
+            "status": "skipped",
+            "message": "对象存储配置不完整或客户端初始化失败，已跳过生命周期规则下发。",
+        }
+    cloud_adapter = adapter if isinstance(adapter, CloudStorageAdapter) else None
+    if cloud_adapter is None:
+        return {
+            "status": "skipped",
+            "message": "当前存储适配器不支持生命周期规则。",
+        }
+    try:
+        cloud_adapter.apply_lifecycle_rules(actor_id=actor_id)
+    except StorageBackendUnavailable as exc:
+        logger.warning("COS lifecycle rules apply failed: %s", exc)
+        return {
+            "status": "failed",
+            "message": "生命周期规则下发失败；配置已保存，可重新保存以重试。",
+        }
+    return {
+        "status": "applied",
+        "message": "人物图片长期保留；视频与项目素材 180 天后自动删除。",
+    }
+
+
 def get_provider_tester() -> ProviderTester:
     return StorageProviderTester()
 
@@ -258,6 +295,20 @@ def update_provider_settings(
         entity_id=provider_name,
         metadata_json=f'{{"provider":"{provider_name}"}}',
     )
+
+    lifecycle = None
+    if provider_name == "cos":
+        lifecycle = apply_cos_lifecycle_rules(incoming_config, actor_id=admin.id)
+        write_audit_log(
+            conn,
+            actor_user_id=admin.id,
+            action=f"cos_lifecycle.{lifecycle['status']}",
+            entity_type="provider_settings",
+            entity_id="cos",
+            metadata_json=json.dumps({"status": lifecycle["status"]}, sort_keys=True),
+        )
+    if lifecycle is not None and isinstance(result, dict):
+        result["lifecycle"] = lifecycle
     return result
 
 
