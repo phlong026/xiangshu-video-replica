@@ -4,7 +4,7 @@ import sqlite3
 from typing import Literal
 from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, StrictInt
 
 from app.auth import AuthenticatedUser, Database
@@ -47,6 +47,15 @@ class RechargeOrderStatusResponse(BaseModel):
     channel: str
     created_at: str
     paid_at: str | None
+
+
+class RechargeOrderPage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[RechargeOrderStatusResponse]
+    total: int
+    limit: int
+    offset: int
 
 
 @router.post(
@@ -127,6 +136,39 @@ def create_recharge_order(
     raise HTTPException(
         status_code=503,
         detail={"code": "ORDER_NUMBER_UNAVAILABLE", "message": "Unable to allocate order number."},
+    )
+
+
+@router.get("/recharge-orders", response_model=RechargeOrderPage)
+def list_recharge_orders(
+    conn: Database,
+    actor: AuthenticatedUser,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+) -> RechargeOrderPage:
+    total = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM recharge_orders WHERE user_id = ?",
+            (actor.id,),
+        ).fetchone()[0]
+    )
+    rows = conn.execute(
+        """
+        SELECT
+            id, user_id, merchant_order_no, provider, provider_trade_no, channel, status,
+            amount_fen, credits, notify_digest, created_at, paid_at
+        FROM recharge_orders
+        WHERE user_id = ?
+        ORDER BY created_at DESC, id DESC
+        LIMIT ? OFFSET ?
+        """,
+        (actor.id, limit, offset),
+    ).fetchall()
+    return RechargeOrderPage(
+        items=[RechargeOrderStatusResponse(**serialize_recharge_order(row)) for row in rows],
+        total=total,
+        limit=limit,
+        offset=offset,
     )
 
 
