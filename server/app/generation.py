@@ -590,6 +590,9 @@ class TaskSummary(BaseModel):
 
 class TaskResult(TaskSummary):
     prompt_snapshot: dict[str, Any] | None
+    # Provider 返回的成片直连播放链接（临时签名 URL）。客户端优先用它
+    # 在线播放，链接过期后回退到本地归档副本；非 HTTPS（如 fake://）不外露。
+    provider_result_url: str | None = None
 
 
 class BatchProgress(BaseModel):
@@ -2131,15 +2134,12 @@ def require_confirmed_first_frame(
 
 def require_cos_first_frame_storage(conn: sqlite3.Connection) -> None:
     """真实 Metaso 生成的首帧必须可签 HTTPS URL：COS 未配置即拒绝提交。"""
-    has_cos = conn.execute(
-        "SELECT 1 FROM provider_settings WHERE provider = 'cos'"
-    ).fetchone()
+    has_cos = conn.execute("SELECT 1 FROM provider_settings WHERE provider = 'cos'").fetchone()
     if has_cos is None:
         raise generation_error(
             422,
             "METASO_REQUIRES_CLOUD_STORAGE",
-            "METASO H3 requires an HTTPS first-frame URL; save COS settings "
-            "before generating.",
+            "METASO H3 requires an HTTPS first-frame URL; save COS settings before generating.",
         )
 
 
@@ -2241,7 +2241,9 @@ def run_next_generation_task(
     archive_status = "ARCHIVED"
     error_code = None
     error_message = None
-    retained_result_url: str | None = None
+    # 成功路径也保留 Provider 直连链接：客户端优先用它在线播放（零下载
+    # 等待）；归档失败时它同时是后续 Worker 补救重下的唯一来源（会过期）。
+    retained_result_url = provider_result.result_url
     try:
         stored = storage.put_object(
             f"generation-results/{task_id}.mp4",
@@ -2252,9 +2254,6 @@ def run_next_generation_task(
         archive_status = "ARCHIVE_FAILED"
         error_code = "ARCHIVE_STORAGE_UNAVAILABLE"
         error_message = "Generation result could not be archived to configured storage."
-        # Retain the provider URL so a later Worker pass can re-download and
-        # re-archive the already-paid H3 result instead of losing it.
-        retained_result_url = provider_result.result_url
     else:
         result_asset_id = str(uuid4())
         with conn:
@@ -2410,7 +2409,6 @@ def _store_and_finalize_archive(
                     status = 'SUCCEEDED',
                     archive_status = 'ARCHIVED',
                     result_asset_id = ?,
-                    provider_result_url = NULL,
                     error_code = NULL,
                     error_message_redacted = NULL,
                     locked_by = NULL,
@@ -4615,9 +4613,15 @@ def task_result(row: sqlite3.Row) -> TaskResult:
         if row["prompt_snapshot_json"] is None
         else json.loads(str(row["prompt_snapshot_json"]))
     )
+    provider_result_url = optional_text(row["provider_result_url"])
     return TaskResult(
         **summary.model_dump(),
         prompt_snapshot=prompt_snapshot,
+        provider_result_url=(
+            provider_result_url
+            if provider_result_url is not None and provider_result_url.startswith("https://")
+            else None
+        ),
     )
 
 

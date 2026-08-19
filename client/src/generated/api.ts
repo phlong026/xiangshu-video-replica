@@ -2835,6 +2835,8 @@ export interface components {
       prompt_snapshot: {
         [key: string]: unknown;
       } | null;
+      /** Provider Result Url */
+      provider_result_url?: string | null;
     };
     /** TaskSummary */
     TaskSummary: {
