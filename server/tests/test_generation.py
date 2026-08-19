@@ -2830,9 +2830,21 @@ def test_generation_can_queue_metaso_after_its_key_is_saved(
     key = Fernet.generate_key().decode("ascii")
     monkeypatch.setenv(SETTINGS_KEY_ENV, key)
     with connect_database(db_path) as conn:
-        SettingsRepository(conn, fernet=Fernet(key.encode("ascii"))).save_provider_config(
+        repo = SettingsRepository(conn, fernet=Fernet(key.encode("ascii")))
+        repo.save_provider_config(
             "metaso",
             {"api_key": "metaso-test-key"},
+            actor_user_id="admin_1",
+        )
+        # 真实 Metaso 生成要求 COS 首帧 HTTPS URL：配置了 COS 才允许排队。
+        repo.save_provider_config(
+            "cos",
+            {
+                "access_key_id": "cos-id",
+                "secret_access_key": "cos-secret",
+                "bucket": "metaso-frames",
+                "region": "ap-shanghai",
+            },
             actor_user_id="admin_1",
         )
 
@@ -3731,7 +3743,7 @@ def test_reconcile_route_is_idempotent_and_audited(
     )
     monkeypatch.setattr(
         generation_routes_module,
-        "get_media_storage",
+        "get_local_result_storage",
         lambda _conn: FakeStorageAdapter(provider="cos", bucket="generation-results"),
     )
     prompt_id = create_locked_prompt(client)
@@ -3778,7 +3790,7 @@ def test_reconcile_route_is_idempotent_and_audited(
 
     monkeypatch.setattr(
         generation_routes_module,
-        "get_media_storage",
+        "get_local_result_storage",
         unavailable_storage,
         raising=False,
     )
@@ -3836,7 +3848,7 @@ def test_reconcile_route_recovers_an_abandoned_pending_reservation(
     )
     monkeypatch.setattr(
         generation_routes_module,
-        "get_media_storage",
+        "get_local_result_storage",
         lambda _conn: FakeStorageAdapter(provider="cos", bucket="generation-results"),
     )
     prompt_id = create_locked_prompt(client)
@@ -3945,7 +3957,7 @@ def test_reconcile_provider_failure_does_not_require_storage_settings(
     )
     monkeypatch.setattr(
         generation_routes_module,
-        "get_media_storage",
+        "get_local_result_storage",
         unavailable_storage,
     )
     prompt_id = create_locked_prompt(client)
@@ -4052,7 +4064,7 @@ def test_reconcile_lost_reservation_cannot_finalize_an_archived_result(
     )
     monkeypatch.setattr(
         generation_routes_module,
-        "get_media_storage",
+        "get_local_result_storage",
         lambda _conn: storage,
     )
     prompt_id = create_locked_prompt(client)
@@ -4631,3 +4643,37 @@ def test_generation_batch_delete_forbidden_for_non_creator_and_auditor(
     assert auditor.status_code == 403
     assert missing.status_code == 404
     assert admin.status_code == 204
+
+
+def test_generation_rejects_metaso_without_cos_settings(
+    client: TestClient,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """真实 Metaso 生成的首帧需要 HTTPS URL：未配置 COS 时排队被 422 拒绝。"""
+    key = Fernet.generate_key().decode("ascii")
+    monkeypatch.setenv(SETTINGS_KEY_ENV, key)
+    with connect_database(db_path) as conn:
+        SettingsRepository(conn, fernet=Fernet(key.encode("ascii"))).save_provider_config(
+            "metaso",
+            {"api_key": "metaso-test-key"},
+            actor_user_id="admin_1",
+        )
+
+    prompt_id = create_locked_prompt(client)
+    response = client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json={
+            "quantity": 1,
+            "prompt_version_id": prompt_id,
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+            "idempotency_key": "metaso-no-cos",
+            "provider": "metaso",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "METASO_REQUIRES_CLOUD_STORAGE"

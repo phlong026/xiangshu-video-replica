@@ -1791,7 +1791,7 @@ describe("App", () => {
     ).toBeInTheDocument();
   });
 
-  it("warns about bucket CORS rules when the storage provider switches to COS", async () => {
+  it("shows the fixed storage policy hint on the runtime form", async () => {
     const settingsResponse = {
       providers: {
         metaso: { provider: "metaso", configured: false, config: {} },
@@ -1829,13 +1829,12 @@ describe("App", () => {
     expect(
       await screen.findByRole("heading", { name: "运行设置" }),
     ).toBeInTheDocument();
-    expect(screen.queryByText(/跨域访问 CORS/)).not.toBeInTheDocument();
-
-    fireEvent.change(screen.getByLabelText("存储方式"), {
-      target: { value: "cos" },
-    });
-
-    expect(screen.getByText(/跨域访问 CORS/)).toBeInTheDocument();
+    // 存储策略已固化：人物图片/参考视频/首帧上云，成片仅本机；提示固定展示。
+    expect(
+      screen.getByText(/人物图片、参考视频与首帧保存到腾讯云存储/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/生成的成片仅保存在本机/)).toBeInTheDocument();
+    expect(screen.queryByLabelText("存储方式")).not.toBeInTheDocument();
   });
 
   it("lets an admin configure providers and run per-provider connection tests", async () => {
@@ -1915,14 +1914,7 @@ describe("App", () => {
     expect(screen.queryByLabelText("Region")).not.toBeInTheDocument();
     expect(screen.getByText(/区域固定为上海/)).toBeInTheDocument();
     expect(screen.queryByText("阿里云 OSS")).not.toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText("存储方式"), {
-      target: { value: "cos" },
-    });
-    expect(screen.getByText("存储方式修改尚未保存")).toBeInTheDocument();
-    await act(async () => Promise.resolve());
-    expect(screen.getByText("存储方式修改尚未保存")).toBeInTheDocument();
     fireEvent.click(screen.getAllByRole("button", { name: "保存" })[4]);
-    expect(screen.getByLabelText("存储方式")).toBeDisabled();
     expect(screen.getByLabelText("单次生成数量上限")).toBeDisabled();
     expect(screen.getByLabelText("视频生成并发数")).toBeDisabled();
     expect(screen.getByRole("button", { name: "正在保存" })).toBeDisabled();
@@ -1937,7 +1929,7 @@ describe("App", () => {
       await Promise.resolve();
     });
     expect(await screen.findByText("已保存")).toBeInTheDocument();
-    expect(screen.getByLabelText("存储方式")).toBeEnabled();
+    expect(screen.getByLabelText("单次生成数量上限")).toBeEnabled();
     expect(
       screen.getByText(/测试连接会创建并删除一个临时对象/),
     ).toBeInTheDocument();

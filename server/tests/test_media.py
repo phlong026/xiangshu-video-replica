@@ -22,7 +22,7 @@ from app.media import (
 from app.media import (
     create_upload_intent as create_media_upload_intent,
 )
-from app.media_routes import get_media_storage, get_video_probe
+from app.media_routes import get_local_result_storage, get_media_storage, get_video_probe
 from app.settings import SettingsRepository
 from app.storage import FakeStorageAdapter, LocalStorageAdapter
 
@@ -195,10 +195,12 @@ def test_complete_upload_calculates_a_content_hash_when_storage_head_has_none(
     assert completed.sha256 == hashlib.sha256(content).hexdigest()
 
 
-def test_media_storage_uses_the_selected_cloud_provider(
+def test_media_storage_prefers_cos_when_configured(
     db_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """业务主存储（源视频/人物图片/首帧）：配置了 COS 即上云，不再依赖
+    runtime 的存储开关——拆解与付费生成都需要 HTTPS URL。"""
     monkeypatch.setenv("VIDEO_REPLICA_SETTINGS_KEY", Fernet.generate_key().decode("ascii"))
     selected_storage = FakeStorageAdapter(provider="cos", bucket="private-bucket")
     monkeypatch.setattr("app.media_routes.create_storage_adapter", lambda _: selected_storage)
@@ -218,11 +220,64 @@ def test_media_storage_uses_the_selected_cloud_provider(
         repo.save_runtime_settings(
             max_generation_count_per_batch=4,
             max_concurrent_h3_tasks=2,
-            active_storage_provider="cos",
+            active_storage_provider="local",
             actor_user_id="admin_1",
         )
 
         assert get_media_storage(conn) is selected_storage
+
+
+def test_media_storage_falls_back_to_local_without_cos(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """未配置 COS 时主存储退回本地盘，桌面单机场景仍可用。"""
+    monkeypatch.setenv("VIDEO_REPLICA_SETTINGS_KEY", Fernet.generate_key().decode("ascii"))
+    root = tmp_path / "local-storage"
+    monkeypatch.setenv("VIDEO_REPLICA_STORAGE_ROOT", str(root))
+
+    with connect_database(db_path) as conn:
+        repo = SettingsRepository(conn)
+        repo.save_runtime_settings(
+            max_generation_count_per_batch=4,
+            max_concurrent_h3_tasks=2,
+            active_storage_provider="cos",
+            actor_user_id="admin_1",
+        )
+
+        storage = get_media_storage(conn)
+        assert isinstance(storage, LocalStorageAdapter)
+        assert storage.root == root.resolve()
+
+
+def test_local_result_storage_is_always_local_even_when_cos_configured(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """生成成片归档固定本地盘不上云：即使配置了 COS（成片是存储大头，
+    读取按存储 URI 的 provider 路由到本地下载）。"""
+    monkeypatch.setenv("VIDEO_REPLICA_SETTINGS_KEY", Fernet.generate_key().decode("ascii"))
+    root = tmp_path / "local-results"
+    monkeypatch.setenv("VIDEO_REPLICA_STORAGE_ROOT", str(root))
+
+    with connect_database(db_path) as conn:
+        repo = SettingsRepository(conn)
+        repo.save_provider_config(
+            "cos",
+            {
+                "access_key_id": "cos-id",
+                "secret_access_key": "cos-secret",
+                "bucket": "private-bucket",
+                "region": "ap-shanghai",
+            },
+            actor_user_id="admin_1",
+        )
+
+        storage = get_local_result_storage(conn)
+        assert isinstance(storage, LocalStorageAdapter)
+        assert storage.root == root.resolve()
 
 
 def test_get_media_storage_uses_local_adapter_when_provider_is_local(

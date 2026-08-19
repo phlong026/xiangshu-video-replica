@@ -312,8 +312,6 @@ function RuntimeForm({
   const [status, setStatus] = useState("");
   const [isSaving, setIsSaving] = useState(false);
   const previousRuntimeRef = useRef(runtime);
-  const isStorageChangePending =
-    values.active_storage_provider !== runtime.active_storage_provider;
 
   useEffect(() => {
     if (previousRuntimeRef.current === runtime) {
@@ -354,22 +352,6 @@ function RuntimeForm({
       <h3>运行设置</h3>
       <div className="runtime-fields">
         <label>
-          存储方式
-          <select
-            disabled={isSaving}
-            value={values.active_storage_provider}
-            onChange={(event) =>
-              setValues((current) => ({
-                ...current,
-                active_storage_provider: event.target.value as "cos" | "local",
-              }))
-            }
-          >
-            <option value="cos">腾讯云存储</option>
-            <option value="local">本地存储（仅开发）</option>
-          </select>
-        </label>
-        <label>
           单次生成数量上限
           <input
             disabled={isSaving}
@@ -400,19 +382,14 @@ function RuntimeForm({
           />
         </label>
       </div>
-      {values.active_storage_provider === "cos" ? (
-        <p className="storage-provider-hint">
-          请先在存储桶的跨域访问 CORS 设置中放行本应用的 PUT/GET/HEAD
-          请求，否则上传会失败。
-        </p>
-      ) : null}
+      <p className="storage-provider-hint">
+        人物图片、参考视频与首帧保存到腾讯云存储（需在桶 CORS 放行
+        PUT/GET/HEAD，否则上传失败）；生成的成片仅保存在本机。
+      </p>
       <div className="form-actions">
         <button disabled={isSaving} type="submit">
           {isSaving ? "正在保存" : "保存"}
         </button>
-        {isStorageChangePending ? (
-          <span className="runtime-pending">存储方式修改尚未保存</span>
-        ) : null}
         {status ? <span role="status">{status}</span> : null}
       </div>
     </form>

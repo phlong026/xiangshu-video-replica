@@ -64,15 +64,27 @@ class CompleteUploadResponse(BaseModel):
 
 
 def get_media_storage(conn: Database) -> StorageAdapter:
+    """业务主存储：源参考视频（拆解需要 HTTPS URL）、人物图片、多视角
+    图与首帧。配置了 COS 就上云；未配置退回本地盘（桌面单机场景）。"""
     try:
         repo = SettingsRepository(conn)
-        runtime = repo.read_runtime_settings()
-        provider = str(runtime["active_storage_provider"])
-        if provider == "local":
-            return create_local_storage_from_environment()
-        config = repo.load_provider_config(provider)
-        return create_storage_adapter(cloud_storage_config_from_settings(provider, config))
+        config = repo.load_provider_config("cos")
+        if config:
+            return create_storage_adapter(cloud_storage_config_from_settings("cos", config))
+        return create_local_storage_from_environment()
     except (SettingsUnavailableError, StorageBackendUnavailable, ValueError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "STORAGE_SETTINGS_UNAVAILABLE"},
+        ) from exc
+
+
+def get_local_result_storage(conn: Database) -> StorageAdapter:
+    """生成结果归档存储：成片视频固定落本地盘不上云（按需节省云存储
+    成本；读取按存储 URI 的 provider 路由，本地对象走 API 签名下载）。"""
+    try:
+        return create_local_storage_from_environment()
+    except StorageBackendUnavailable as exc:
         raise HTTPException(
             status_code=503,
             detail={"code": "STORAGE_SETTINGS_UNAVAILABLE"},
@@ -84,6 +96,7 @@ def get_video_probe() -> VideoProbe:
 
 
 MediaStorage = Annotated[StorageAdapter, Depends(get_media_storage)]
+LocalResultStorage = Annotated[StorageAdapter, Depends(get_local_result_storage)]
 InjectedVideoProbe = Annotated[VideoProbe, Depends(get_video_probe)]
 
 

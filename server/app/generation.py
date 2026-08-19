@@ -1414,16 +1414,7 @@ def create_generation_batch(
                     "METASO_SETTINGS_UNAVAILABLE",
                     "Save a readable METASO API Key before queuing a real H3 task.",
                 ) from exc
-            storage_row = conn.execute(
-                "SELECT active_storage_provider FROM runtime_settings WHERE id = 1"
-            ).fetchone()
-            if storage_row is not None and storage_row["active_storage_provider"] == "local":
-                raise generation_error(
-                    422,
-                    "METASO_REQUIRES_CLOUD_STORAGE",
-                    "METASO H3 requires an HTTPS first-frame URL; switch storage to "
-                    "COS before generating.",
-                )
+            require_cos_first_frame_storage(conn)
 
         prompt = require_version(
             conn,
@@ -2015,15 +2006,7 @@ def require_regeneration_provider_ready(
             "METASO_SETTINGS_UNAVAILABLE",
             "Save a readable METASO API Key before queuing a real H3 task.",
         ) from exc
-    storage_row = conn.execute(
-        "SELECT active_storage_provider FROM runtime_settings WHERE id = 1"
-    ).fetchone()
-    if storage_row is not None and storage_row["active_storage_provider"] == "local":
-        raise generation_error(
-            422,
-            "METASO_REQUIRES_CLOUD_STORAGE",
-            "METASO H3 requires an HTTPS first-frame URL; switch storage to COS before generating.",
-        )
+    require_cos_first_frame_storage(conn)
 
 
 def require_task_paid_regeneration_state(row: sqlite3.Row) -> None:
@@ -2144,6 +2127,20 @@ def require_confirmed_first_frame(
                 "FIRST_FRAME_CONFIRMATION_REQUIRED",
                 "The confirmed first frame is stale; generate and confirm it again before H3.",
             ) from exc
+
+
+def require_cos_first_frame_storage(conn: sqlite3.Connection) -> None:
+    """真实 Metaso 生成的首帧必须可签 HTTPS URL：COS 未配置即拒绝提交。"""
+    has_cos = conn.execute(
+        "SELECT 1 FROM provider_settings WHERE provider = 'cos'"
+    ).fetchone()
+    if has_cos is None:
+        raise generation_error(
+            422,
+            "METASO_REQUIRES_CLOUD_STORAGE",
+            "METASO H3 requires an HTTPS first-frame URL; save COS settings "
+            "before generating.",
+        )
 
 
 def run_next_generation_task(
