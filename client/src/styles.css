@@ -2235,12 +2235,9 @@ button.history-version--active {
   gap: 12px;
 }
 
-.provider-card--wide {
-  grid-column: 1 / -1;
-}
-
-.provider-card--wide .field-stack {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+/* 服务连接 2×2 平衡网格：cos 卡字段多，半宽内两列排布。 */
+.provider-card[data-provider="cos"] .field-stack {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .field-stack label,
@@ -4223,18 +4220,15 @@ button.regenerate-button {
   }
 
   .section-heading,
-  .progress-header,
   .task-item {
     align-items: flex-start;
     flex-direction: column;
   }
 
   .batch-input-row,
-  .count-grid,
-  .task-metadata-grid,
   .provider-grid,
   .runtime-fields,
-  .provider-card--wide .field-stack,
+  .provider-card[data-provider="cos"] .field-stack,
   .shot-time-grid,
   .shot-field-grid,
   .generation-source-grid,
