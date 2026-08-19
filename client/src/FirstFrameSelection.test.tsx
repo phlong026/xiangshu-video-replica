@@ -472,7 +472,9 @@ describe("FirstFrameSelection", () => {
 
     // 红线 3：进入页面给不自动触发生成；预存候选仅展示不预选。
     expect(generateFirstFrames).not.toHaveBeenCalled();
-    expect(screen.getByRole("radio", { name: /首帧候选 1/ })).not.toBeChecked();
+    expect(
+      await screen.findByRole("radio", { name: /首帧候选 1/ }),
+    ).not.toBeChecked();
 
     fireEvent.click(screen.getByRole("button", { name: "重新生成候选首帧" }));
     await waitFor(() => expect(generateFirstFrames).toHaveBeenCalledOnce());
