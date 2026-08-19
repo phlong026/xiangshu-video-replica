@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the Video Replica SQLite backup every day
+
+[Timer]
+OnCalendar=*-*-* 03:20:00
+RandomizedDelaySec=10m
+Persistent=true
+Unit=video-replica-backup.service
+
+[Install]
+WantedBy=timers.target

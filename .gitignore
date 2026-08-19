@@ -36,6 +36,8 @@ client/src-tauri/icons/ios/
 .env
 .env.*
 !.env.example
+deploy/*.env
+deploy/nginx/*.conf
 账号信息.md
 data/
 *.db

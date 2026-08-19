@@ -9,6 +9,16 @@ from pathlib import Path
 from app.db import connect_database
 
 
+def check_database(database_path: str | Path) -> Path:
+    database = Path(database_path)
+    if not database.exists():
+        raise FileNotFoundError(database)
+
+    with connect_database(database) as conn:
+        _check_integrity(conn)
+    return database.resolve()
+
+
 def backup_database(source_path: str | Path, backup_path: str | Path) -> Path:
     source = Path(source_path)
     backup = Path(backup_path)
@@ -79,6 +89,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="SQLite backup and restore tools")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    check_parser = subparsers.add_parser("check")
+    check_parser.add_argument("database")
+
     backup_parser = subparsers.add_parser("backup")
     backup_parser.add_argument("source")
     backup_parser.add_argument("backup")
@@ -92,7 +105,9 @@ def main() -> None:
     daily_parser.add_argument("backup_dir")
 
     args = parser.parse_args()
-    if args.command == "backup":
+    if args.command == "check":
+        output = check_database(args.database)
+    elif args.command == "backup":
         output = backup_database(args.source, args.backup)
     elif args.command == "restore":
         output = restore_database(args.backup, args.target)

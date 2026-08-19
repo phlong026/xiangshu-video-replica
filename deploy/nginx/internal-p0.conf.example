@@ -8,8 +8,15 @@ server {
     ssl_certificate /etc/letsencrypt/live/internal.example.com/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/internal.example.com/privkey.pem;
 
-    root /opt/video-replica/client-dist;
+    root /opt/video-replica/app/client/dist;
     index index.html;
+
+    location = /health {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Control-Proxy-Token "";
+    }
 
     # ZPay must reach these two public paths without Basic Auth.
     location = /api/payments/zpay/notify {
