@@ -416,12 +416,16 @@ P0 复用现有 `users`、任务、设置和审计能力，只新增或调整以
 
 | 接口 | 用途 |
 | --- | --- |
-| `GET/PUT /api/control/settings/billing` | 内部价格与充值规则 |
-| `GET/PUT /api/control/settings/zpay` | ZPay 配置；密钥只覆盖更新 |
+| `GET /api/control/settings` | 读取内部价格、ZPay 掩码配置和部署派生 URL |
+| `PATCH /api/control/settings/billing` | 内部价格与充值规则 |
+| `PATCH /api/control/settings/zpay` | ZPay 配置；密钥只覆盖更新 |
+| `GET /api/control/accounts` | 内部账号、可用/冻结条数和令牌数量 |
 | `GET /api/control/recharge-orders` | 订单查询和过滤 |
 | `POST /api/control/recharge-orders/{order_no}/sync` | 主动查单补偿 |
-| `GET /api/control/wallets` | 内部账号余额和流水 |
-| `GET /api/control/billing-reconciliation` | 只读对账结果与导出 |
+| `GET /api/control/wallet-transactions` | 只读账务流水 |
+| `GET /api/control/billing-reconciliation` | 只读对账结果 |
+| `GET /api/control/recharge-orders.csv` | 导出充值订单 CSV |
+| `GET /api/control/wallet-transactions.csv` | 导出账务流水 CSV |
 
 P0 不提供手工改余额接口。需要修复数据时先通过只读对账确认原因，再走受控 CLI 和完整记录，避免后台随意改账。
 
@@ -451,6 +455,8 @@ P0 不提供手工改余额接口。需要修复数据时先通过只读对账�
 3. ZPay 和内部价格设置。
 
 管理入口由反向代理保护，不做应用内登录页。也不做总览大屏、套餐、设备、报表、审计中心和管理员管理页。必要审计仍由后端记录，P0 只通过日志或数据库查询查看。
+
+反向代理样例见 `deploy/nginx/internal-p0.conf.example`。部署时必须替换域名、证书、Basic Auth 文件和高熵 `X-Control-Proxy-Token` 原文，并在 FastAPI 环境中只保存该令牌的 SHA-256 摘要。
 
 ---
 

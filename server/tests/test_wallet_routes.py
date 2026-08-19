@@ -82,7 +82,13 @@ def test_wallet_returns_only_the_authenticated_users_balance(wallet_client: Test
     response = wallet_client.get("/api/wallet", headers={"X-Dev-User-Id": "user_1"})
 
     assert response.status_code == 200
-    assert response.json() == {"available_credits": 7, "reserved_credits": 2}
+    assert response.json() == {
+        "available_credits": 7,
+        "reserved_credits": 2,
+        "internal_unit_price_fen": 1000,
+        "min_recharge_fen": 10000,
+        "recharge_step_fen": 1000,
+    }
 
 
 def test_wallet_transactions_are_owner_scoped_and_paginated(wallet_client: TestClient) -> None:

@@ -167,6 +167,67 @@ def test_create_recharge_order_rejects_invalid_amounts(
         assert conn.execute("SELECT COUNT(*) FROM recharge_orders").fetchone()[0] == 0
 
 
+def test_recharge_order_list_is_owner_scoped_and_paginated(
+    recharge_api: tuple[TestClient, Path, dict[str, str]],
+) -> None:
+    client, db_path, headers = recharge_api
+    first = client.post("/api/recharge-orders", headers=headers, json={"amount_fen": 10000})
+    second = client.post("/api/recharge-orders", headers=headers, json={"amount_fen": 20000})
+    assert first.status_code == 201
+    assert second.status_code == 201
+
+    with connect_database(db_path) as conn:
+        create_user(
+            conn,
+            username="operator_2",
+            display_name="Operator Two",
+            user_id="user_2",
+        )
+        conn.execute(
+            """
+            INSERT INTO recharge_orders (
+                id, user_id, merchant_order_no, channel, status, pricing_scope,
+                base_unit_price_fen_snapshot, charged_unit_price_fen_snapshot,
+                min_recharge_fen_snapshot, recharge_step_fen_snapshot,
+                amount_fen, credits
+            ) VALUES (
+                'other_order', 'user_2', '202608199999999999999999999999',
+                'alipay', 'PENDING', 'INTERNAL', 1000, 1000, 10000, 1000, 10000, 10
+            )
+            """
+        )
+        conn.commit()
+
+    page = client.get(
+        "/api/recharge-orders?limit=1&offset=0",
+        headers=headers,
+    )
+    next_page = client.get(
+        "/api/recharge-orders?limit=1&offset=1",
+        headers=headers,
+    )
+
+    assert page.status_code == 200
+    assert page.json()["total"] == 2
+    assert page.json()["limit"] == 1
+    assert page.json()["offset"] == 0
+    assert len(page.json()["items"]) == 1
+    assert len(next_page.json()["items"]) == 1
+    assert {
+        page.json()["items"][0]["order_no"],
+        next_page.json()["items"][0]["order_no"],
+    } == {first.json()["order_no"], second.json()["order_no"]}
+    assert "202608199999999999999999999999" not in page.text + next_page.text
+
+    assert (
+        client.get(
+            "/api/recharge-orders?limit=101",
+            headers=headers,
+        ).status_code
+        == 422
+    )
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
