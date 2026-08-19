@@ -200,6 +200,14 @@ input:focus {
   margin-top: 20px;
 }
 
+.login-token-field {
+  display: grid;
+  gap: 8px;
+  margin-top: 18px;
+  color: #c9c2b8;
+  font-size: 13px;
+}
+
 .eyebrow {
   color: #c9a35c;
   font-size: 12px;
@@ -371,22 +379,55 @@ input:focus {
 }
 
 .service-badge {
+  --service-signal-color: #d4a72c;
+  align-items: flex-end;
+  background: #14141e;
   border: 1px solid var(--line);
   border-radius: 6px;
-  padding: 7px 10px;
-  color: #c9c4ba;
-  background: #14141e;
-  font-size: 12px;
+  display: inline-flex;
+  gap: 2px;
+  height: 30px;
+  justify-content: center;
+  padding: 6px 8px;
+  width: 42px;
 }
 
 .service-badge--connected {
   border-color: #276d51;
-  color: #79dda9;
+  --service-signal-color: #79dda9;
 }
 
 .service-badge--disconnected {
   border-color: #7a3f48;
-  color: #ff9aa8;
+  --service-signal-color: #ff5f73;
+}
+
+.service-badge--checking {
+  border-color: #6f5a25;
+  --service-signal-color: #d4a72c;
+}
+
+.service-badge__bar {
+  background: var(--service-signal-color);
+  border-radius: 2px 2px 1px 1px;
+  display: block;
+  width: 4px;
+}
+
+.service-badge__bar:nth-child(1) {
+  height: 6px;
+}
+
+.service-badge__bar:nth-child(2) {
+  height: 10px;
+}
+
+.service-badge__bar:nth-child(3) {
+  height: 14px;
+}
+
+.service-badge__bar:nth-child(4) {
+  height: 18px;
 }
 
 .empty-state {
@@ -610,7 +651,7 @@ input:focus {
   font-size: 13px;
 }
 
-/* 生成流程详情页：四段自上而下滚动（解析提示词 → 源画面与人物 → 首帧与文案 → 提交生成） */
+/* 生成流程详情页：五段自上而下滚动（解析 → 源画面人物 → 首帧 → 自定义文案 → 提交） */
 .flow-page {
   display: grid;
   gap: 16px;
@@ -700,23 +741,6 @@ input:focus {
   border-radius: 8px;
   padding: 12px 14px;
   background: rgba(11, 11, 14, 0.6);
-}
-
-.flow-script__head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.flow-script__head h3 {
-  margin: 0;
-  font-size: 14px;
-}
-
-.flow-script__actions {
-  display: flex;
-  gap: 8px;
 }
 
 .flow-script textarea {
@@ -1711,6 +1735,39 @@ button.workspace-tab--active {
   margin: 0;
   color: #aaa297;
   line-height: 1.55;
+}
+
+.first-frame-generation-progress {
+  display: grid;
+  gap: 8px;
+  border: 1px solid rgba(109, 230, 177, 0.32);
+  border-radius: 9px;
+  padding: 14px 16px;
+  background: rgba(25, 60, 48, 0.24);
+}
+
+.first-frame-generation-progress__heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.first-frame-generation-progress__heading strong {
+  color: #dff9ed;
+  font-size: 13px;
+}
+
+.first-frame-generation-progress__heading span {
+  color: #8fe2bb;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.first-frame-generation-progress progress {
+  width: 100%;
+  height: 8px;
+  accent-color: #6de6b1;
 }
 
 .first-frame-controls {
@@ -4664,4 +4721,257 @@ button.regenerate-button {
   color: #91deb4;
   font-size: 11px;
   font-weight: 700;
+}
+
+.wallet-page {
+  display: grid;
+  gap: 20px;
+}
+
+.wallet-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.wallet-summary-card,
+.wallet-section {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+}
+
+.wallet-summary-card {
+  display: grid;
+  gap: 8px;
+  padding: 22px;
+}
+
+.wallet-summary-card span,
+.wallet-summary-card small,
+.wallet-section p {
+  color: #aaa297;
+}
+
+.wallet-summary-card strong {
+  color: #f1d39b;
+  font-size: clamp(24px, 4vw, 34px);
+}
+
+.wallet-section {
+  padding: 22px;
+}
+
+.wallet-section h2 {
+  margin: 0 0 14px;
+  font-size: 18px;
+}
+
+.wallet-section__heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.wallet-section__heading p {
+  margin: 0 0 16px;
+}
+
+.recharge-presets {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.recharge-presets button {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 16px 12px;
+}
+
+.recharge-presets span {
+  color: #e8decf;
+  font-size: 12px;
+}
+
+.custom-recharge-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.custom-recharge-form label {
+  display: grid;
+  gap: 7px;
+  color: #c9c2b8;
+  font-size: 13px;
+}
+
+.custom-recharge-form button {
+  min-height: 44px;
+}
+
+.wallet-notice {
+  margin: 14px 0 0;
+  color: #91deb4;
+}
+
+.table-scroll {
+  overflow-x: auto;
+}
+
+.internal-table {
+  width: 100%;
+  min-width: 620px;
+  border-collapse: collapse;
+  color: #e8e3db;
+  font-size: 13px;
+}
+
+.internal-table th,
+.internal-table td {
+  border-bottom: 1px solid var(--line);
+  padding: 11px 10px;
+  text-align: left;
+}
+
+.internal-table th {
+  color: #aaa297;
+  font-weight: 600;
+}
+
+@media (max-width: 720px) {
+  .wallet-summary-grid,
+  .recharge-presets,
+  .custom-recharge-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .wallet-section,
+  .wallet-summary-card {
+    padding: 16px;
+  }
+}
+
+.admin-shell {
+  min-height: 100vh;
+  padding: 28px;
+  background: #111214;
+  color: #f2ede5;
+}
+
+.admin-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 18px;
+}
+
+.admin-header h1 {
+  margin: 8px 0 0;
+  font-size: 28px;
+}
+
+.admin-tabs,
+.admin-actions,
+.admin-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.admin-tabs {
+  margin-bottom: 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.admin-tab {
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: #c9c2b8;
+}
+
+.admin-tab.is-active {
+  border-bottom-color: #d6a94d;
+  color: #f2ede5;
+}
+
+.admin-panel {
+  display: grid;
+  gap: 18px;
+}
+
+.admin-panel h2,
+.admin-form h2 {
+  margin: 0;
+  font-size: 17px;
+}
+
+.admin-actions {
+  justify-content: flex-end;
+}
+
+.admin-metrics span,
+.readonly-value {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 10px 12px;
+}
+
+.admin-form {
+  display: grid;
+  max-width: 720px;
+  gap: 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  padding: 20px;
+}
+
+.admin-form label,
+.admin-readonly-field {
+  display: grid;
+  gap: 7px;
+  color: #c9c2b8;
+  font-size: 13px;
+}
+
+.admin-form input[readonly] {
+  color: #aaa297;
+}
+
+.admin-checks {
+  display: flex;
+  gap: 16px;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.admin-checks label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.admin-checks input {
+  width: auto;
+}
+
+@media (max-width: 720px) {
+  .admin-shell {
+    padding: 16px;
+  }
+
+  .admin-actions,
+  .admin-actions button {
+    width: 100%;
+  }
 }

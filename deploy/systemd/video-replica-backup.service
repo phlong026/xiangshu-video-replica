@@ -1,0 +1,17 @@
+[Unit]
+Description=Video Replica SQLite online backup
+After=video-replica-api.service
+
+[Service]
+Type=oneshot
+User=video-replica
+Group=video-replica
+WorkingDirectory=/opt/video-replica/app
+ExecStart=/opt/video-replica/app/server/.venv/bin/python -m app.backup daily /var/lib/video-replica/app.db /var/backups/video-replica
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/video-replica
+ReadWritePaths=/var/backups/video-replica

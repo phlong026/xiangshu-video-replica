@@ -9,6 +9,7 @@ from typing import Any, Literal
 from cryptography.fernet import Fernet, InvalidToken
 
 from app.local_settings_key import LocalSettingsKeyStoreError, load_or_create_local_settings_key
+from app.zpay import parse_enabled_channels
 
 ProviderName = Literal["apilio", "metaso", "cos", "deepseek"]
 
@@ -35,6 +36,12 @@ DEFAULT_RUNTIME_SETTINGS: dict[str, int | str] = {
     "max_generation_count_per_batch": 4,
     "max_concurrent_h3_tasks": 2,
     "active_storage_provider": "cos",
+}
+DEFAULT_BILLING_SETTINGS: dict[str, int] = {
+    "internal_base_unit_price_fen": 1000,
+    "charged_unit_price_fen": 1000,
+    "min_recharge_fen": 10000,
+    "recharge_step_fen": 1000,
 }
 
 
@@ -69,6 +76,36 @@ class SettingsRepository:
         provider_name = normalize_provider(provider)
         normalized = normalize_config(config)
         validate_provider_config(provider_name, normalized)
+        return self._save_encrypted_config(
+            provider_name,
+            normalized,
+            actor_user_id=actor_user_id,
+        )
+
+    def save_zpay_config(
+        self,
+        config: dict[str, Any],
+        *,
+        actor_user_id: str,
+    ) -> dict[str, Any]:
+        normalized = normalize_config(config)
+        validate_zpay_config(normalized)
+        normalized["enabled_channels"] = ",".join(
+            parse_enabled_channels(normalized["enabled_channels"])
+        )
+        return self._save_encrypted_config(
+            "zpay",
+            normalized,
+            actor_user_id=actor_user_id,
+        )
+
+    def _save_encrypted_config(
+        self,
+        provider: str,
+        normalized: dict[str, str],
+        *,
+        actor_user_id: str,
+    ) -> dict[str, Any]:
         encrypted_config = self.fernet.encrypt(
             json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).decode("ascii")
@@ -89,16 +126,22 @@ class SettingsRepository:
                     updated_by_user_id = excluded.updated_by_user_id,
                     updated_at = CURRENT_TIMESTAMP
                 """,
-                (provider_name, encrypted_config, actor_user_id),
+                (provider, encrypted_config, actor_user_id),
             )
 
-        return self.read_provider_config(provider_name)
+        return self._read_encrypted_config(provider)
 
     def read_provider_config(self, provider: str) -> dict[str, Any]:
         provider_name = normalize_provider(provider)
-        config = self.load_provider_config(provider_name)
+        return self._read_encrypted_config(provider_name)
+
+    def read_zpay_config(self) -> dict[str, Any]:
+        return self._read_encrypted_config("zpay")
+
+    def _read_encrypted_config(self, provider: str) -> dict[str, Any]:
+        config = self._load_encrypted_config(provider)
         return {
-            "provider": provider_name,
+            "provider": provider,
             "configured": bool(config),
             "config": mask_config(config),
         }
@@ -110,9 +153,15 @@ class SettingsRepository:
 
     def load_provider_config(self, provider: str) -> dict[str, str]:
         provider_name = normalize_provider(provider)
+        return self._load_encrypted_config(provider_name)
+
+    def load_zpay_config(self) -> dict[str, str]:
+        return self._load_encrypted_config("zpay")
+
+    def _load_encrypted_config(self, provider: str) -> dict[str, str]:
         row = self.conn.execute(
             "SELECT encrypted_config FROM provider_settings WHERE provider = ?",
-            (provider_name,),
+            (provider,),
         ).fetchone()
         if row is None:
             return {}
@@ -185,6 +234,57 @@ class SettingsRepository:
             "active_storage_provider": str(row["active_storage_provider"]),
         }
 
+    def save_billing_settings(
+        self,
+        *,
+        internal_base_unit_price_fen: int,
+        min_recharge_fen: int,
+        recharge_step_fen: int,
+        actor_user_id: str | None,
+    ) -> dict[str, int]:
+        validate_billing_settings(
+            internal_base_unit_price_fen=internal_base_unit_price_fen,
+            min_recharge_fen=min_recharge_fen,
+            recharge_step_fen=recharge_step_fen,
+        )
+        with self.conn:
+            self.conn.execute(
+                """
+                UPDATE runtime_settings
+                SET internal_base_unit_price_fen = ?,
+                    min_recharge_fen = ?,
+                    recharge_step_fen = ?,
+                    updated_by_user_id = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = 1
+                """,
+                (
+                    internal_base_unit_price_fen,
+                    min_recharge_fen,
+                    recharge_step_fen,
+                    actor_user_id,
+                ),
+            )
+        return self.read_billing_settings()
+
+    def read_billing_settings(self) -> dict[str, int]:
+        row = self.conn.execute(
+            """
+            SELECT internal_base_unit_price_fen, min_recharge_fen, recharge_step_fen
+            FROM runtime_settings
+            WHERE id = 1
+            """
+        ).fetchone()
+        if row is None:
+            return dict(DEFAULT_BILLING_SETTINGS)
+        base_price = int(row["internal_base_unit_price_fen"])
+        return {
+            "internal_base_unit_price_fen": base_price,
+            "charged_unit_price_fen": base_price,
+            "min_recharge_fen": int(row["min_recharge_fen"]),
+            "recharge_step_fen": int(row["recharge_step_fen"]),
+        }
+
 
 def fernet_from_environment() -> Fernet:
     return Fernet(settings_encryption_key().encode("ascii"))
@@ -239,6 +339,17 @@ def validate_provider_config(provider: ProviderName, config: dict[str, str]) -> 
         raise ValueError(f"missing required setting: {', '.join(missing)}")
 
 
+def validate_zpay_config(config: dict[str, str]) -> None:
+    allowed_fields = {"pid", "key", "enabled_channels"}
+    unexpected = sorted(set(config) - allowed_fields)
+    if unexpected:
+        raise ValueError(f"unsupported ZPay setting: {', '.join(unexpected)}")
+    missing = [field for field in allowed_fields if not config.get(field)]
+    if missing:
+        raise ValueError(f"missing required ZPay setting: {', '.join(sorted(missing))}")
+    parse_enabled_channels(config["enabled_channels"])
+
+
 def validate_runtime_settings(
     *,
     max_generation_count_per_batch: int,
@@ -253,6 +364,31 @@ def validate_runtime_settings(
         raise ValueError("active_storage_provider must be cos or local")
 
 
+def validate_billing_settings(
+    *,
+    internal_base_unit_price_fen: int,
+    min_recharge_fen: int,
+    recharge_step_fen: int,
+) -> None:
+    values = (
+        internal_base_unit_price_fen,
+        min_recharge_fen,
+        recharge_step_fen,
+    )
+    if any(isinstance(value, bool) or not isinstance(value, int) for value in values):
+        raise ValueError("billing settings must use integer fen values")
+    if internal_base_unit_price_fen <= 0:
+        raise ValueError("internal_base_unit_price_fen must be positive")
+    if min_recharge_fen < 10000:
+        raise ValueError("min_recharge_fen must be at least 10000")
+    if recharge_step_fen < 1000:
+        raise ValueError("recharge_step_fen must be at least 1000")
+    if min_recharge_fen % recharge_step_fen != 0:
+        raise ValueError("min_recharge_fen must be divisible by recharge_step_fen")
+    if recharge_step_fen % internal_base_unit_price_fen != 0:
+        raise ValueError("recharge_step_fen must be divisible by internal_base_unit_price_fen")
+
+
 def mask_config(config: dict[str, str]) -> dict[str, str]:
     return {
         key: mask_secret(value) if is_secret_field(key) else value for key, value in config.items()
@@ -261,7 +397,7 @@ def mask_config(config: dict[str, str]) -> dict[str, str]:
 
 def is_secret_field(key: str) -> bool:
     lowered = key.lower()
-    return any(marker in lowered for marker in SECRET_FIELDS)
+    return lowered == "key" or any(marker in lowered for marker in SECRET_FIELDS)
 
 
 def mask_secret(value: str) -> str:

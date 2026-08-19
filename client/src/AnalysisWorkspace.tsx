@@ -171,11 +171,7 @@ const SHOT_TEXT_FIELDS: Array<{
   { key: "transition", label: "转场" },
 ];
 
-type UpstreamBusySource =
-  | "character"
-  | "source-frame"
-  | "reference"
-  | "first-frame";
+type UpstreamBusySource = "character" | "source-frame" | "reference";
 
 export function AnalysisWorkspace({
   currentUserId,
@@ -209,6 +205,7 @@ export function AnalysisWorkspace({
   const [isSaving, setIsSaving] = useState(false);
   const [isGenerationBusy, setIsGenerationBusy] = useState(false);
   const [isUpstreamBusy, setIsUpstreamBusy] = useState(false);
+  const [isFirstFrameBusy, setIsFirstFrameBusy] = useState(false);
   const [isAnalysisMissing, setIsAnalysisMissing] = useState(false);
   const [isStartingAnalysis, setIsStartingAnalysis] = useState(false);
   const [characterSelection, setCharacterSelection] =
@@ -419,7 +416,11 @@ export function AnalysisWorkspace({
 
   const isWorkspaceBusy = isGenerationBusy || isUpstreamBusy;
   const draftsReadOnly =
-    readOnly || isSaving || shotCardsDirty || isWorkspaceBusy;
+    readOnly ||
+    isSaving ||
+    shotCardsDirty ||
+    isWorkspaceBusy ||
+    isFirstFrameBusy;
 
   // P0-03-02：源画面特征预填建议（镜头卡首镜头映射；未确认时一次性预填，
   // 用户改过的字段不被覆盖，确认仍为人工动作）。
@@ -555,6 +556,9 @@ export function AnalysisWorkspace({
   }
 
   function handleStartGeneration() {
+    if (isFirstFrameBusy) {
+      return;
+    }
     const blocked = readiness.missing.filter(
       (item) => !pipelineFixableKeys.has(item.key),
     );
@@ -641,8 +645,8 @@ export function AnalysisWorkspace({
     [handleUpstreamBusyChange],
   );
   const handleFirstFrameBusyChange = useCallback(
-    (busy: boolean) => handleUpstreamBusyChange("first-frame", busy),
-    [handleUpstreamBusyChange],
+    (busy: boolean) => setIsFirstFrameBusy(busy),
+    [],
   );
 
   function handleClose() {
@@ -982,7 +986,7 @@ export function AnalysisWorkspace({
                   onBusyChange={handleCharacterBusyChange}
                   onVersionChange={handleCharacterSelectionChange}
                   projectId={project.id}
-                  readOnly={readOnly}
+                  readOnly={readOnly || isFirstFrameBusy}
                 />
               </section>
               <section
@@ -1003,7 +1007,7 @@ export function AnalysisWorkspace({
                     onSelectionChange={handleSourceFrameSelectionChange}
                     projectId={project.id}
                     referenceAssetId={project.reference_asset_id}
-                    readOnly={readOnly}
+                    readOnly={readOnly || isFirstFrameBusy}
                   />
                 ) : (
                   <PipelineSkeleton note="先在上方选择角色版本" />
@@ -1031,7 +1035,7 @@ export function AnalysisWorkspace({
                     onBusyChange={handleReferenceBusyChange}
                     onSelectionChange={handleCharacterReferenceSelectionChange}
                     projectId={project.id}
-                    readOnly={readOnly}
+                    readOnly={readOnly || isFirstFrameBusy}
                     sourceFrameSelection={sourceFrameSelection}
                   />
                 ) : (
@@ -1165,7 +1169,12 @@ export function AnalysisWorkspace({
             返回
           </button>
           <button
-            disabled={readOnly || isWorkspaceBusy || generationDrafts.isLoading}
+            disabled={
+              readOnly ||
+              isWorkspaceBusy ||
+              isFirstFrameBusy ||
+              generationDrafts.isLoading
+            }
             onClick={handleStartGeneration}
             type="button"
           >

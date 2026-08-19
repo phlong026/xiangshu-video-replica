@@ -1,0 +1,81 @@
+# Internal P0 single-host reverse proxy example.
+# Replace all example values before deployment. Keep FastAPI bound to 127.0.0.1.
+
+server {
+    listen 443 ssl http2;
+    server_name internal.example.com;
+
+    ssl_certificate /etc/letsencrypt/live/internal.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/internal.example.com/privkey.pem;
+
+    root /opt/video-replica/app/client/dist;
+    index index.html;
+
+    location = /health {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Control-Proxy-Token "";
+    }
+
+    # ZPay must reach these two public paths without Basic Auth.
+    location = /api/payments/zpay/notify {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Control-Proxy-Token "";
+    }
+
+    location = /api/payments/zpay/return {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Control-Proxy-Token "";
+    }
+
+    # If another trusted proxy sits in front of nginx, configure real_ip first;
+    # otherwise these rules see the proxy address, not the operator address.
+    location ^~ /admin {
+        satisfy all;
+        allow 10.0.0.0/8;
+        allow 172.16.0.0/12;
+        allow 192.168.0.0/16;
+        deny all;
+
+        auth_basic "Internal control";
+        auth_basic_user_file /etc/nginx/video-replica-admin.htpasswd;
+
+        try_files $uri $uri/ /index.html;
+    }
+
+    location ^~ /api/control/ {
+        satisfy all;
+        allow 10.0.0.0/8;
+        allow 172.16.0.0/12;
+        allow 192.168.0.0/16;
+        deny all;
+
+        auth_basic "Internal control";
+        auth_basic_user_file /etc/nginx/video-replica-admin.htpasswd;
+
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        # Do not forward the browser's Basic Authorization value upstream.
+        proxy_set_header Authorization "";
+
+        # Overwrite any external value. FastAPI stores only SHA-256 digest of this raw token.
+        proxy_set_header X-Control-Proxy-Token "REPLACE_WITH_32_BYTE_RANDOM_TOKEN";
+    }
+
+    location /api/ {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Control-Proxy-Token "";
+    }
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}

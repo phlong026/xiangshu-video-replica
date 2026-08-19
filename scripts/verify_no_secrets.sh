@@ -13,6 +13,7 @@ scan_paths=(
   "scripts"
   "e2e"
   "docs"
+  "deploy"
 )
 
 patterns=(
@@ -34,5 +35,28 @@ for pattern in "${patterns[@]}"; do
     exit 2
   fi
 done
+
+deploy_token_matches=""
+if deploy_token_matches="$(
+  git grep -n -I -E --untracked --no-exclude-standard \
+    -e 'proxy_set_header[[:space:]]+X-Control-Proxy-Token' -- deploy
+)"; then
+  while IFS= read -r match; do
+    if [[ "$match" == *'proxy_set_header X-Control-Proxy-Token "";'* ]]; then
+      continue
+    fi
+    if [[ "$match" == *.example:*'proxy_set_header X-Control-Proxy-Token "REPLACE_WITH_32_BYTE_RANDOM_TOKEN";'* ]]; then
+      continue
+    fi
+    echo "Unexpected raw control proxy token in deployment file: $match" >&2
+    exit 1
+  done <<< "$deploy_token_matches"
+else
+  deploy_token_scan_status=$?
+  if [[ $deploy_token_scan_status -ne 1 ]]; then
+    echo "Deployment token scan failed." >&2
+    exit 2
+  fi
+fi
 
 echo "No hardcoded secrets detected in runtime contract surface."

@@ -73,7 +73,7 @@ function rejectUploadEntries(files: File[]): UploadItem[] {
 // 项目页 = 「上传 → 拆解 → 生成流程」的主动线：
 // 顶部上传区支持一次选择多个视频（每个视频一个项目，串行上传并自动
 // 拆解）；列表行展示拆解状态；已拆解的项目进入生成流程详情页
-//（四段滚动完成付费生成），或进入工作区做高级编辑。
+//（五段滚动完成付费生成），或进入工作区做高级编辑。
 export function ProjectsPage({
   canWrite,
   onOpenAnalysis,

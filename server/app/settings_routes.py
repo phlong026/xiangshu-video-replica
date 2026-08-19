@@ -11,7 +11,7 @@ from typing import Annotated, Literal, Protocol
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictInt
 
 from app.auth import AuthenticatedUser, CurrentUser, Database
 from app.auth import get_database as auth_get_database
@@ -39,6 +39,12 @@ class RuntimeSettingsRequest(BaseModel):
     max_generation_count_per_batch: int
     max_concurrent_h3_tasks: int
     active_storage_provider: Literal["cos", "local"] | None = None
+
+
+class BillingSettingsRequest(BaseModel):
+    internal_base_unit_price_fen: StrictInt
+    min_recharge_fen: StrictInt
+    recharge_step_fen: StrictInt
 
 
 class ProviderTestResult(BaseModel):
@@ -259,6 +265,7 @@ def read_settings(
     return {
         "providers": repo.read_all_provider_configs(),
         "runtime": repo.read_runtime_settings(),
+        "billing": repo.read_billing_settings(),
     }
 
 
@@ -340,6 +347,36 @@ def update_runtime_settings(
         entity_type="runtime_settings",
         entity_id="1",
         metadata_json='{"setting":"runtime_limits"}',
+    )
+    return result
+
+
+@router.patch("/billing")
+def update_billing_settings(
+    payload: BillingSettingsRequest,
+    conn: Database,
+    admin: SettingsAdmin,
+) -> dict[str, int]:
+    try:
+        result = SettingsRepository(conn).save_billing_settings(
+            internal_base_unit_price_fen=payload.internal_base_unit_price_fen,
+            min_recharge_fen=payload.min_recharge_fen,
+            recharge_step_fen=payload.recharge_step_fen,
+            actor_user_id=admin.id,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "INVALID_SETTINGS", "message": str(exc)},
+        ) from exc
+
+    write_audit_log(
+        conn,
+        actor_user_id=admin.id,
+        action="billing_settings.update",
+        entity_type="runtime_settings",
+        entity_id="1",
+        metadata_json='{"setting":"internal_billing"}',
     )
     return result
 

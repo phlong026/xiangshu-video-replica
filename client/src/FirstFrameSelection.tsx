@@ -18,6 +18,40 @@ import {
 const DEFAULT_PROMPT =
   "保留原图的镜头位置、人物姿态、动作、场景、构图、道具、光线与色调，只将原人物身份替换为角色库人物；保持自然皮肤、正确肢体和真实透视；不得增加或删除主体。";
 
+type PendingFirstFrameGeneration = {
+  promise: Promise<AnalysisVersion>;
+  startedAt: number;
+};
+
+// 生成接口本身是一个长 HTTP 请求。把进行中的 Promise 放在页面组件之外，
+// 路由切换卸载组件时请求仍会继续；回到同一项目后只重新挂接，不重复付费调用。
+// 这不是跨应用重启的持久任务，关闭本地服务或刷新整个 WebView 仍会中断挂接。
+const pendingFirstFrameGenerations = new Map<
+  string,
+  PendingFirstFrameGeneration
+>();
+
+function getOrStartFirstFrameGeneration(
+  projectId: string,
+  start: () => Promise<AnalysisVersion>,
+): PendingFirstFrameGeneration {
+  const existing = pendingFirstFrameGenerations.get(projectId);
+  if (existing) {
+    return existing;
+  }
+  const pending = { promise: start(), startedAt: Date.now() };
+  pendingFirstFrameGenerations.set(projectId, pending);
+  void pending.promise.then(
+    () => {
+      if (pendingFirstFrameGenerations.get(projectId) === pending) {
+        pendingFirstFrameGenerations.delete(projectId);
+      }
+    },
+    () => {},
+  );
+  return pending;
+}
+
 export function FirstFrameSelection({
   legacyCharacterSelected = false,
   onBusyChange,
@@ -51,7 +85,14 @@ export function FirstFrameSelection({
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [generationStartedAt, setGenerationStartedAt] = useState<number | null>(
+    null,
+  );
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const loadRequestId = useRef(0);
+  const generationWatchId = useRef(0);
+  const onBusyChangeRef = useRef(onBusyChange);
+  onBusyChangeRef.current = onBusyChange;
   const referenceSelectionId = referenceSelection?.id ?? "";
   const canGenerate =
     Boolean(sourceFrameSelectionId) &&
@@ -68,7 +109,6 @@ export function FirstFrameSelection({
       loadRequestId.current = requestId;
       const isCurrentRequest = () => requestId === loadRequestId.current;
       setIsLoading(true);
-      setIsSubmitting(false);
       setError("");
       try {
         const [latestState, selection, versions] = await Promise.all([
@@ -196,12 +236,77 @@ export function FirstFrameSelection({
     ],
   );
 
+  const followGeneration = useCallback(
+    async (pending: PendingFirstFrameGeneration) => {
+      const watchId = generationWatchId.current + 1;
+      generationWatchId.current = watchId;
+      onBusyChangeRef.current?.(true);
+      setIsSubmitting(true);
+      setGenerationStartedAt(pending.startedAt);
+      setElapsedSeconds(
+        Math.max(0, Math.floor((Date.now() - pending.startedAt) / 1000)),
+      );
+      setError("");
+      setStatus("");
+      try {
+        const generated = await pending.promise;
+        if (watchId !== generationWatchId.current) {
+          return;
+        }
+        setStatus("候选首帧已更新，正在读取候选…");
+        await load(generated, true);
+      } catch (requestError) {
+        if (watchId !== generationWatchId.current) {
+          return;
+        }
+        if (pendingFirstFrameGenerations.get(projectId) === pending) {
+          // A mounted page has now consumed the background failure. Keeping a
+          // rejection only while nobody is mounted lets users see it on return
+          // without making every later retry reuse a rejected Promise.
+          pendingFirstFrameGenerations.delete(projectId);
+        }
+        setError(
+          requestError instanceof Error
+            ? requestError.message
+            : "生成人物置换首帧失败。",
+        );
+      } finally {
+        if (watchId === generationWatchId.current) {
+          setIsSubmitting(false);
+          setGenerationStartedAt(null);
+          onBusyChangeRef.current?.(false);
+        }
+      }
+    },
+    [load, projectId],
+  );
+
   useEffect(() => {
     void load();
+    onBusyChangeRef.current?.(false);
+    const pending = pendingFirstFrameGenerations.get(projectId);
+    if (pending) {
+      void followGeneration(pending);
+    }
     return () => {
       loadRequestId.current += 1;
+      generationWatchId.current += 1;
     };
-  }, [load]);
+  }, [followGeneration, load, projectId]);
+
+  useEffect(() => {
+    if (generationStartedAt === null) {
+      return;
+    }
+    const updateElapsed = () => {
+      setElapsedSeconds(
+        Math.max(0, Math.floor((Date.now() - generationStartedAt) / 1000)),
+      );
+    };
+    updateElapsed();
+    const intervalId = window.setInterval(updateElapsed, 1000);
+    return () => window.clearInterval(intervalId);
+  }, [generationStartedAt]);
 
   const payload = version ? readFirstFrameCandidates(version) : null;
   const isHistoryVersion = Boolean(version && version.id !== latestVersionId);
@@ -219,46 +324,21 @@ export function FirstFrameSelection({
       setError("候选数量必须是 1–3 的整数。");
       return;
     }
-    const requestId = loadRequestId.current;
-    onBusyChange?.(true);
-    setIsSubmitting(true);
-    setError("");
-    setStatus("");
-    try {
-      const binding = referenceSelection
-        ? {
-            character_version_id: referenceSelection.character_version_id,
-            character_reference_selection_id: referenceSelection.id,
-          }
-        : {};
-      const generated = await generateFirstFrames(projectId, {
+    const binding = referenceSelection
+      ? {
+          character_version_id: referenceSelection.character_version_id,
+          character_reference_selection_id: referenceSelection.id,
+        }
+      : {};
+    const pending = getOrStartFirstFrameGeneration(projectId, () =>
+      generateFirstFrames(projectId, {
         model: simplified ? "gpt-image-2" : model,
         prompt: simplified ? DEFAULT_PROMPT : prompt,
         quantity,
         ...binding,
-      });
-      if (requestId !== loadRequestId.current) {
-        return;
-      }
-      // 过程性中性文案：成功路径由 load 内 canAutoSelect 分支覆盖为预选
-      // 提示；若候选数据无效早退，不会残留与事实矛盾的预选文案（评审 Minor）。
-      setStatus("候选首帧已更新，正在读取候选…");
-      await load(generated, true);
-    } catch (requestError) {
-      if (requestId !== loadRequestId.current) {
-        return;
-      }
-      setError(
-        requestError instanceof Error
-          ? requestError.message
-          : "生成人物置换首帧失败。",
-      );
-    } finally {
-      if (requestId === loadRequestId.current) {
-        setIsSubmitting(false);
-      }
-      onBusyChange?.(false);
-    }
+      }),
+    );
+    await followGeneration(pending);
   }
 
   async function handleConfirm() {
@@ -380,6 +460,19 @@ export function FirstFrameSelection({
           确认用于 H3 的首帧
         </button>
       </div>
+      {generationStartedAt !== null ? (
+        <div className="first-frame-generation-progress" role="status">
+          <div className="first-frame-generation-progress__heading">
+            <strong>正在云端生成人物置换首帧</strong>
+            <span>已等待 {elapsedSeconds} 秒</span>
+          </div>
+          <progress aria-label="人物置换首帧生成进度" />
+          <p>通常需要 1–3 分钟，复杂画面可能稍久，请耐心等待。</p>
+          <p>
+            可以离开当前页面；只要本地服务未关闭，生成会继续，返回后会自动显示结果。请勿重复提交。
+          </p>
+        </div>
+      ) : null}
       {isLoading ? <p className="status-note">正在读取首帧候选</p> : null}
       {error ? <p className="settings-error">{error}</p> : null}
       {status ? <p className="setup-success">{status}</p> : null}

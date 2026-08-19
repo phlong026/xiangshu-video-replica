@@ -112,9 +112,8 @@ describe("CharacterSelection", () => {
   it("shows only server-approved options with all seven published assets", async () => {
     render(<CharacterSelection projectId="project-1" />);
 
-    fireEvent.click(
-      await screen.findByRole("button", { name: "选择角色版本" }),
-    );
+    await screen.findByText(/已自动选择角色版本/);
+    fireEvent.click(screen.getByRole("button", { name: "更换" }));
 
     const optionLabel =
       await screen.findByLabelText(/林夏.*乡墅项目管理专家.*V3/);

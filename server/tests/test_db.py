@@ -11,7 +11,7 @@ import pytest
 from alembic import command
 from cryptography.fernet import Fernet
 
-from app.backup import backup_database, restore_database, run_daily_backup
+from app.backup import backup_database, check_database, restore_database, run_daily_backup
 from app.db import alembic_config, connect_database, initialize_database
 from app.repositories import GenerationTaskRepository
 
@@ -37,7 +37,7 @@ def test_initialize_database_applies_sqlite_pragmas_and_migrations(tmp_path: Pat
     assert journal_mode == "wal"
     assert foreign_keys == 1
     assert busy_timeout >= 5000
-    assert alembic_versions == ["021_generation_batch_display_name"]
+    assert alembic_versions == ["023_zpay_provider"]
     assert "schema_migrations" not in tables
     assert {
         "users",
@@ -77,7 +77,7 @@ def test_alembic_upgrades_empty_database_to_head(tmp_path: Path) -> None:
             for row in conn.execute("PRAGMA foreign_key_list(generation_tasks)").fetchall()
         }
 
-    assert version == "021_generation_batch_display_name"
+    assert version == "023_zpay_provider"
     assert {
         "locked_by",
         "locked_until",
@@ -143,7 +143,7 @@ def test_retry_lineage_revision_is_reversible(tmp_path: Path) -> None:
 
     with connect_database(db_path) as conn:
         assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == (
-            "021_generation_batch_display_name"
+            "023_zpay_provider"
         )
 
 
@@ -199,7 +199,7 @@ def test_remove_oss_migration_purges_settings_and_selects_safe_fallback(
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute("UPDATE runtime_settings SET active_storage_provider = 'oss' WHERE id = 1")
 
-    assert version == "021_generation_batch_display_name"
+    assert version == "023_zpay_provider"
     assert "oss" not in providers
     assert active_provider == expected_provider
 
@@ -297,7 +297,7 @@ def test_runtime_bootstrap_upgrades_an_existing_database_before_startup(
     assert result.returncode == 0, result.stderr
     with connect_database(db_path) as conn:
         assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == (
-            "021_generation_batch_display_name"
+            "023_zpay_provider"
         )
         assert (
             conn.execute(
@@ -496,6 +496,23 @@ def test_backup_restore_preserves_tasks_versions_and_audit_counts(tmp_path: Path
         }
 
     assert counts == {"generation_tasks": 1, "versions": 1, "audit_logs": 1}
+
+
+def test_database_integrity_check_and_cli_reject_corruption(tmp_path: Path) -> None:
+    db_path = tmp_path / "app.db"
+    broken_path = tmp_path / "broken.db"
+    with initialize_database(db_path):
+        pass
+    broken_path.write_text("not a sqlite database", encoding="utf-8")
+
+    assert check_database(db_path) == db_path.resolve()
+    subprocess.run(
+        [sys.executable, "-m", "app.backup", "check", str(db_path)],
+        check=True,
+        cwd=Path(__file__).resolve().parents[1],
+    )
+    with pytest.raises(sqlite3.DatabaseError):
+        check_database(broken_path)
 
 
 def test_backup_refuses_missing_source_without_creating_empty_database(tmp_path: Path) -> None:

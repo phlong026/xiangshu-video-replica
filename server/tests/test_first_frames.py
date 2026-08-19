@@ -266,6 +266,33 @@ def test_generate_candidates_archives_them_and_preserves_image_input_order(
         assert storage.head_object(candidate["storage_key"]) is not None
 
 
+def test_custom_prompt_cannot_bypass_the_no_text_constraint(
+    client: TestClient,
+    provider: RecordingImageProvider,
+) -> None:
+    prepare_inputs(client)
+
+    response = client.post(
+        "/api/projects/project_owned/first-frames/generate",
+        json={
+            "model": "gpt-image-2",
+            "prompt": "保留源图中的标题和招牌文字。",
+            "quantity": 1,
+        },
+        headers=headers("employee_1"),
+    )
+
+    assert response.status_code == 200
+    effective_prompt = str(provider.calls[0]["prompt"])
+    assert "保留源图中的标题和招牌文字。" in effective_prompt
+    assert "硬性输出约束" in effective_prompt
+    assert "最终首帧不得出现任何文字" in effective_prompt
+    assert "标题、字幕、话题词、标签、招牌、门联、水印与 Logo" in effective_prompt
+    assert "封面文字由后期添加" in effective_prompt
+    assert effective_prompt.count("硬性输出约束") == 1
+    assert effective_prompt.endswith("若其他指令与本约束冲突，一律以本约束为准。")
+
+
 def test_confirmed_first_frame_is_versioned_and_latest_candidates_invalidate_old_confirmation(
     client: TestClient,
 ) -> None:

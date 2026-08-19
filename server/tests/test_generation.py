@@ -39,7 +39,7 @@ from app.generation_routes import get_h3_provider
 from app.generation_worker import run_worker_once
 from app.main import app
 from app.settings import SETTINGS_KEY_ENV, SettingsRepository
-from app.storage import FakeStorageAdapter, StorageBackendUnavailable
+from app.storage import FakeStorageAdapter, StorageBackendUnavailable, StoragePermissionError
 
 
 def _fake_public_dns(hostname: str, port: int, type: int) -> list[tuple[object, ...]]:
@@ -100,6 +100,18 @@ def seed_data(conn: sqlite3.Connection) -> None:
             ("employee_2", "employee_2", "Employee Two", "employee"),
             ("admin_1", "admin_1", "Admin One", "admin"),
             ("auditor_1", "auditor_1", "Auditor One", "auditor"),
+        ],
+    )
+    conn.executemany(
+        """
+        INSERT INTO wallets (user_id, available_credits, reserved_credits)
+        VALUES (?, ?, 0)
+        """,
+        [
+            ("employee_1", 1000),
+            ("employee_2", 1000),
+            ("admin_1", 1000),
+            ("auditor_1", 0),
         ],
     )
     conn.executemany(
@@ -582,8 +594,6 @@ def paid_regeneration_payload(
 ) -> dict[str, object]:
     return {
         "idempotency_key": key,
-        "payment_confirmed": True,
-        "payment_confirmation_version": "V1",
         "estimated_cost_snapshot": estimated_cost,
         "generation_reason": reason,
     }
@@ -1069,7 +1079,7 @@ def test_task_paid_regeneration_rejects_non_payable_states(
     assert response.json()["detail"]["code"] == expected_code
 
 
-def test_paid_regeneration_requires_write_access_and_explicit_payment_confirmation(
+def test_paid_regeneration_requires_write_access_and_rejects_legacy_confirmation_fields(
     client: TestClient,
 ) -> None:
     prompt_id = create_locked_prompt(client)
@@ -1613,7 +1623,7 @@ def test_prompt_revision_freezes_sources_and_batch_reports_staleness(
     assert compiled.status_code == 200
     compiled_payload = compiled.json()["payload"]
     assert compiled_payload["status"] == "SAVED"
-    assert compiled_payload["template_version"] == "h3.prompt.v3"
+    assert compiled_payload["template_version"] == "h3.prompt.v4"
     assert len(compiled_payload["template_hash"]) == 64
     assert compiled_payload["source_analysis_version_id"] is None
     assert compiled_payload["script_version_id"] == script["id"]
@@ -1762,7 +1772,7 @@ def test_prompt_compiler_rescales_shot_timeline_to_output_duration(
 
     assert compiled.status_code == 200
     payload = compiled.json()["payload"]
-    assert payload["template_version"] == "h3.prompt.v3"
+    assert payload["template_version"] == "h3.prompt.v4"
     assert payload["source_duration_seconds"] == 10
     assert payload["timeline_scale_factor"] == 0.4
     assert "生成一条 4 秒" in payload["prompt_text"]
@@ -1816,6 +1826,12 @@ def test_compile_prompt_text_renders_structured_motion_as_movement_instructions(
     # motion.camera_motion 枚举优先于自由文本“手持跟拍”。
     assert "手持平稳跟拍" in prompt_text
     assert "人物严格按各镜头的动作与运镜描述真实运动" in prompt_text
+    narration_sync_rule = (
+        "严格按照每个时间段组织配音，不得漏句、改写、重复或者交换顺序，"
+        "每句话的起止时间和对应的镜头同步。"
+    )
+    assert prompt_text.count(narration_sync_rule) == 1
+    assert prompt_text.endswith(narration_sync_rule)
 
 
 def test_compile_prompt_text_falls_back_to_action_text_for_legacy_shots() -> None:
@@ -1853,7 +1869,7 @@ def test_compile_prompt_text_falls_back_to_action_text_for_legacy_shots() -> Non
 @pytest.mark.parametrize(
     ("template_attribute", "next_value"),
     [
-        ("H3_PROMPT_TEMPLATE_VERSION", "h3.prompt.v4"),
+        ("H3_PROMPT_TEMPLATE_VERSION", "h3.prompt.v5"),
         ("H3_PROMPT_TEMPLATE_HASH", "new-template-hash"),
     ],
 )
@@ -2905,6 +2921,13 @@ def test_generation_can_queue_metaso_after_its_key_is_saved(
             },
             actor_user_id="admin_1",
         )
+        conn.execute(
+            """
+            UPDATE assets
+            SET storage_uri = 'cos://metaso-frames/first-frame.png'
+            WHERE id = 'first_frame_owned'
+            """
+        )
 
     prompt_id = create_locked_prompt(client)
     response = client.post(
@@ -2924,6 +2947,50 @@ def test_generation_can_queue_metaso_after_its_key_is_saved(
     assert response.status_code == 200
     assert response.json()["status"] == "QUEUED"
     assert response.json()["tasks"][0]["status"] == "PENDING"
+
+
+def test_metaso_batch_rejects_non_cos_first_frame_even_when_settings_are_saved(
+    client: TestClient,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    key = Fernet.generate_key().decode("ascii")
+    monkeypatch.setenv(SETTINGS_KEY_ENV, key)
+    with connect_database(db_path) as conn:
+        repo = SettingsRepository(conn, fernet=Fernet(key.encode("ascii")))
+        repo.save_provider_config(
+            "metaso",
+            {"api_key": "metaso-test-key"},
+            actor_user_id="admin_1",
+        )
+        repo.save_provider_config(
+            "cos",
+            {
+                "access_key_id": "cos-id",
+                "secret_access_key": "cos-secret",
+                "bucket": "metaso-frames",
+                "region": "ap-shanghai",
+            },
+            actor_user_id="admin_1",
+        )
+
+    prompt_id = create_locked_prompt(client)
+    response = client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json={
+            "quantity": 1,
+            "prompt_version_id": prompt_id,
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+            "idempotency_key": "metaso-non-cos-frame",
+            "provider": "metaso",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "METASO_REQUIRES_CLOUD_STORAGE"
 
 
 def test_locked_prompt_is_consumed_by_only_one_distinct_idempotency_key(
@@ -3742,6 +3809,11 @@ class ReconcileFailedProvider(MetasoH3Provider):
         return {"id": provider_task_id, "status": "failed"}
 
 
+class ReconcileCancelledProvider(MetasoH3Provider):
+    def _query_task(self, provider_task_id: str) -> dict[str, Any]:
+        return {"id": provider_task_id, "status": "cancelled"}
+
+
 def test_reconcile_submission_uncertain_recovers_succeeded_result(
     db_path: Path, client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3783,11 +3855,20 @@ def test_reconcile_submission_uncertain_recovers_succeeded_result(
         row = conn.execute(
             "SELECT status, archive_status, result_asset_id FROM generation_tasks"
         ).fetchone()
+        wallet = conn.execute(
+            """
+            SELECT available_credits, reserved_credits
+            FROM wallets WHERE user_id = 'employee_1'
+            """
+        ).fetchone()
+        billing_rows = _task_billing_rows(conn, str(task["id"]))
 
     assert result is not None
     assert row["status"] == "SUCCEEDED"
     assert row["archive_status"] == "ARCHIVED"
     assert row["result_asset_id"] is not None
+    assert dict(wallet) == {"available_credits": 999, "reserved_credits": 0}
+    assert billing_rows == [("RESERVE", 1), ("SETTLE", 1)]
 
 
 def test_reconcile_route_is_idempotent_and_audited(
@@ -4706,6 +4787,60 @@ def test_generation_batch_delete_forbidden_for_non_creator_and_auditor(
     assert admin.status_code == 204
 
 
+def test_generation_batch_delete_preserves_append_only_billing_ledger(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    prompt_id = create_locked_prompt(client)
+    created = client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json={
+            "quantity": 1,
+            "prompt_version_id": prompt_id,
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+            "idempotency_key": "billed-batch-cannot-delete",
+        },
+    )
+    batch_id = str(created.json()["id"])
+    with connect_database(db_path) as conn:
+        run_next_generation_task(
+            conn,
+            worker_id="billed-delete-guard",
+            provider=FakeH3Provider(),
+            storage=FakeStorageAdapter(provider="cos", bucket="generation-results"),
+            first_frame_storage=FakeStorageAdapter(provider="fake", bucket="generation-results"),
+        )
+
+    response = client.delete(
+        f"/api/generation-batches/{batch_id}",
+        headers=auth_headers("employee_1"),
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "BILLED_BATCH_IMMUTABLE"
+    with connect_database(db_path) as conn:
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM generation_batches WHERE id = ?", (batch_id,)
+            ).fetchone()[0]
+            == 1
+        )
+        assert (
+            conn.execute(
+                """
+            SELECT COUNT(*)
+            FROM wallet_transactions
+            WHERE task_id IN (SELECT id FROM generation_tasks WHERE batch_id = ?)
+            """,
+                (batch_id,),
+            ).fetchone()[0]
+            == 2
+        )
+
+
 def test_generation_rejects_metaso_without_cos_settings(
     client: TestClient,
     db_path: Path,
@@ -4738,3 +4873,501 @@ def test_generation_rejects_metaso_without_cos_settings(
 
     assert response.status_code == 422
     assert response.json()["detail"]["code"] == "METASO_REQUIRES_CLOUD_STORAGE"
+
+
+def _task_billing_rows(conn: sqlite3.Connection, task_id: str) -> list[tuple[str, int]]:
+    return [
+        (str(row["type"]), int(row["billing_round"]))
+        for row in conn.execute(
+            """
+            SELECT type, billing_round
+            FROM wallet_transactions
+            WHERE task_id = ?
+            ORDER BY billing_round, type
+            """,
+            (task_id,),
+        ).fetchall()
+    ]
+
+
+def test_generation_batch_reserves_one_credit_per_task_and_replay_is_free(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    prompt_id = create_locked_prompt(client)
+    payload = {
+        "quantity": 2,
+        "prompt_version_id": prompt_id,
+        "first_frame_asset_id": "first_frame_owned",
+        "output_duration_seconds": 10,
+        "resolution": "768P",
+        "idempotency_key": "billing-reserve-two",
+    }
+
+    first = client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json=payload,
+    )
+    replay = client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json=payload,
+    )
+
+    assert first.status_code == 200
+    assert replay.status_code == 200
+    assert replay.json()["id"] == first.json()["id"]
+    task_ids = [str(task["id"]) for task in first.json()["tasks"]]
+    with connect_database(db_path) as conn:
+        wallet = conn.execute(
+            """
+            SELECT available_credits, reserved_credits
+            FROM wallets WHERE user_id = 'employee_1'
+            """
+        ).fetchone()
+        reserve_count = conn.execute(
+            """
+            SELECT COUNT(*) FROM wallet_transactions
+            WHERE user_id = 'employee_1' AND type = 'RESERVE'
+            """
+        ).fetchone()[0]
+        task_rows = {task_id: _task_billing_rows(conn, task_id) for task_id in task_ids}
+
+    assert dict(wallet) == {"available_credits": 998, "reserved_credits": 2}
+    assert reserve_count == 2
+    assert all(rows == [("RESERVE", 1)] for rows in task_rows.values())
+
+
+def test_generation_batch_insufficient_credits_rolls_back_everything(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    prompt_id = create_locked_prompt(client)
+    with connect_database(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE wallets SET available_credits = 1, reserved_credits = 0
+            WHERE user_id = 'employee_1'
+            """
+        )
+        conn.commit()
+
+    response = client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json={
+            "quantity": 2,
+            "prompt_version_id": prompt_id,
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+            "idempotency_key": "billing-insufficient",
+        },
+    )
+
+    assert response.status_code == 402
+    assert response.json()["detail"]["code"] == "INSUFFICIENT_CREDITS"
+    with connect_database(db_path) as conn:
+        wallet = conn.execute(
+            """
+            SELECT available_credits, reserved_credits
+            FROM wallets WHERE user_id = 'employee_1'
+            """
+        ).fetchone()
+        batch_count = conn.execute(
+            """
+            SELECT COUNT(*) FROM generation_batches
+            WHERE idempotency_key = 'billing-insufficient'
+            """
+        ).fetchone()[0]
+        transaction_count = conn.execute(
+            "SELECT COUNT(*) FROM wallet_transactions WHERE type = 'RESERVE'"
+        ).fetchone()[0]
+        prompt = conn.execute(
+            "SELECT payload_json FROM versions WHERE id = ?",
+            (prompt_id,),
+        ).fetchone()
+
+    assert dict(wallet) == {"available_credits": 1, "reserved_credits": 0}
+    assert batch_count == 0
+    assert transaction_count == 0
+    assert json.loads(str(prompt["payload_json"]))["status"] == "LOCKED"
+
+
+def test_archived_generation_settles_once_but_archive_failure_stays_reserved(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    prompt_id = create_locked_prompt(client)
+    created = client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json={
+            "quantity": 1,
+            "prompt_version_id": prompt_id,
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+            "idempotency_key": "billing-settle",
+        },
+    )
+    assert created.status_code == 200
+    task_id = str(created.json()["tasks"][0]["id"])
+
+    with connect_database(db_path) as conn:
+        first = run_next_generation_task(
+            conn,
+            worker_id="billing-success",
+            provider=FakeH3Provider(),
+            storage=FakeStorageAdapter(provider="cos", bucket="generation-results"),
+            first_frame_storage=FakeStorageAdapter(provider="fake", bucket="generation-results"),
+        )
+        second = run_next_generation_task(
+            conn,
+            worker_id="billing-success",
+            provider=FakeH3Provider(),
+            storage=FakeStorageAdapter(provider="cos", bucket="generation-results"),
+        )
+        wallet = conn.execute(
+            """
+            SELECT available_credits, reserved_credits
+            FROM wallets WHERE user_id = 'employee_1'
+            """
+        ).fetchone()
+        rows = _task_billing_rows(conn, task_id)
+
+    assert first is not None
+    assert first.archive_status == "ARCHIVED"
+    assert second is None
+    assert dict(wallet) == {"available_credits": 999, "reserved_credits": 0}
+    assert rows == [("RESERVE", 1), ("SETTLE", 1)]
+
+    second_prompt_id = create_locked_prompt(client, script_text="另一个归档失败任务。")
+    failed_archive = client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json={
+            "quantity": 1,
+            "prompt_version_id": second_prompt_id,
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+            "idempotency_key": "billing-archive-failed",
+        },
+    )
+    failed_task_id = str(failed_archive.json()["tasks"][0]["id"])
+
+    class FailingArchiveStorage(FakeStorageAdapter):
+        def put_object(self, key: str, content: bytes, *, content_type: str):  # type: ignore[override]
+            raise StorageBackendUnavailable("simulated archive outage")
+
+    with connect_database(db_path) as conn:
+        result = run_next_generation_task(
+            conn,
+            worker_id="billing-archive-failure",
+            provider=FakeH3Provider(),
+            storage=FailingArchiveStorage(provider="cos", bucket="generation-results"),
+            first_frame_storage=FakeStorageAdapter(provider="fake", bucket="generation-results"),
+        )
+        wallet = conn.execute(
+            """
+            SELECT available_credits, reserved_credits
+            FROM wallets WHERE user_id = 'employee_1'
+            """
+        ).fetchone()
+        rows = _task_billing_rows(conn, failed_task_id)
+
+    assert result is not None
+    assert result.archive_status == "ARCHIVE_FAILED"
+    assert dict(wallet) == {"available_credits": 998, "reserved_credits": 1}
+    assert rows == [("RESERVE", 1)]
+
+
+def test_undownloadable_archived_result_does_not_settle(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    prompt_id = create_locked_prompt(client)
+    created = client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json={
+            "quantity": 1,
+            "prompt_version_id": prompt_id,
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+            "idempotency_key": "billing-undownloadable-archive",
+        },
+    )
+    task_id = str(created.json()["tasks"][0]["id"])
+
+    class UndownloadableStorage(FakeStorageAdapter):
+        def create_download_intent(self, key: str, *, expires_in, can_read: bool):  # type: ignore[no-untyped-def,override]
+            del key, expires_in, can_read
+            raise StoragePermissionError("simulated download signing failure")
+
+    with connect_database(db_path) as conn:
+        result = run_next_generation_task(
+            conn,
+            worker_id="billing-undownloadable",
+            provider=FakeH3Provider(),
+            storage=UndownloadableStorage(provider="cos", bucket="generation-results"),
+            first_frame_storage=FakeStorageAdapter(provider="fake", bucket="generation-results"),
+        )
+        wallet = conn.execute(
+            """
+            SELECT available_credits, reserved_credits
+            FROM wallets WHERE user_id = 'employee_1'
+            """
+        ).fetchone()
+        task = conn.execute(
+            """
+            SELECT archive_status, result_asset_id
+            FROM generation_tasks WHERE id = ?
+            """,
+            (task_id,),
+        ).fetchone()
+        rows = _task_billing_rows(conn, task_id)
+
+    assert result is not None
+    assert dict(task) == {"archive_status": "ARCHIVE_FAILED", "result_asset_id": None}
+    assert dict(wallet) == {"available_credits": 999, "reserved_credits": 1}
+    assert rows == [("RESERVE", 1)]
+
+
+def test_terminal_provider_failure_releases_reserved_credit(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    prompt_id = create_locked_prompt(client)
+    created = client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json={
+            "quantity": 1,
+            "prompt_version_id": prompt_id,
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+            "idempotency_key": "billing-provider-failed",
+        },
+    )
+    task_id = str(created.json()["tasks"][0]["id"])
+
+    class TerminalFailureProvider(FakeH3Provider):
+        def create_image_to_video(self, request: dict[str, Any]) -> H3CreateResult:
+            del request
+            raise H3ProviderFailed("terminal provider failure", terminal=True)
+
+    with connect_database(db_path) as conn:
+        result = run_next_generation_task(
+            conn,
+            worker_id="billing-provider-failed",
+            provider=TerminalFailureProvider(),
+            storage=FakeStorageAdapter(provider="cos", bucket="generation-results"),
+        )
+        wallet = conn.execute(
+            """
+            SELECT available_credits, reserved_credits
+            FROM wallets WHERE user_id = 'employee_1'
+            """
+        ).fetchone()
+        rows = _task_billing_rows(conn, task_id)
+
+    assert result is not None
+    assert result.status == "FAILED"
+    assert dict(wallet) == {"available_credits": 1000, "reserved_credits": 0}
+    assert rows == [("RELEASE", 1), ("RESERVE", 1)]
+
+
+def test_metaso_worker_rejects_non_cos_storage_before_provider_call(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    prompt_id = create_locked_prompt(client)
+    created = client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json={
+            "quantity": 1,
+            "prompt_version_id": prompt_id,
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+            "idempotency_key": "billing-metaso-storage-guard",
+        },
+    )
+    task_id = str(created.json()["tasks"][0]["id"])
+
+    class CountingProvider(FakeH3Provider):
+        calls = 0
+
+        def create_image_to_video(self, request: dict[str, Any]) -> H3CreateResult:
+            del request
+            self.calls += 1
+            raise AssertionError("provider must not be called with non-COS storage")
+
+    provider = CountingProvider()
+    with connect_database(db_path) as conn:
+        with conn:
+            conn.execute(
+                "UPDATE generation_tasks SET provider = 'metaso' WHERE id = ?",
+                (task_id,),
+            )
+        result = run_next_generation_task(
+            conn,
+            worker_id="billing-metaso-storage-guard",
+            provider=provider,
+            storage=FakeStorageAdapter(provider="fake", bucket="generation-results"),
+        )
+        wallet = conn.execute(
+            """
+            SELECT available_credits, reserved_credits
+            FROM wallets WHERE user_id = 'employee_1'
+            """
+        ).fetchone()
+        task = conn.execute(
+            "SELECT status, error_code FROM generation_tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        rows = _task_billing_rows(conn, task_id)
+
+    assert result is not None
+    assert provider.calls == 0
+    assert dict(task) == {"status": "FAILED", "error_code": "METASO_SETTINGS_UNAVAILABLE"}
+    assert dict(wallet) == {"available_credits": 1000, "reserved_credits": 0}
+    assert rows == [("RELEASE", 1), ("RESERVE", 1)]
+
+
+def test_reconciled_provider_cancellation_releases_reserved_credit(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    prompt_id = create_locked_prompt(client)
+    created = client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json={
+            "quantity": 1,
+            "prompt_version_id": prompt_id,
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+            "idempotency_key": "billing-provider-cancelled",
+        },
+    )
+    task_id = str(created.json()["tasks"][0]["id"])
+    batch_id = str(created.json()["id"])
+
+    with connect_database(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE generation_tasks
+            SET status = 'SUBMISSION_UNCERTAIN', provider_task_id = 'provider-cancelled'
+            WHERE id = ?
+            """,
+            (task_id,),
+        )
+        conn.commit()
+        result = reconcile_submission_uncertain_task(
+            conn,
+            task_id=task_id,
+            batch_id=batch_id,
+            project_id="project_owned",
+            created_by_user_id="employee_1",
+            storage_factory=lambda: FakeStorageAdapter(provider="cos", bucket="generation-results"),
+            provider=ReconcileCancelledProvider(api_key="test-key"),
+        )
+        wallet = conn.execute(
+            """
+            SELECT available_credits, reserved_credits
+            FROM wallets WHERE user_id = 'employee_1'
+            """
+        ).fetchone()
+        rows = _task_billing_rows(conn, task_id)
+
+    assert result.status == "FAILED"
+    assert result.error_code == "PROVIDER_TERMINAL"
+    assert dict(wallet) == {"available_credits": 1000, "reserved_credits": 0}
+    assert rows == [("RELEASE", 1), ("RESERVE", 1)]
+
+
+def test_pre_provider_retry_reserves_a_new_round_after_release(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    prompt_id = create_locked_prompt(client)
+    created = client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json={
+            "quantity": 1,
+            "prompt_version_id": prompt_id,
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+            "idempotency_key": "billing-pre-provider-retry",
+        },
+    )
+    task_id = str(created.json()["tasks"][0]["id"])
+    with connect_database(db_path) as conn:
+        from app.generation import mark_task_first_frame_url_sign_failed
+
+        mark_task_first_frame_url_sign_failed(
+            conn,
+            task_id=task_id,
+            batch_id=str(created.json()["id"]),
+        )
+
+    retried = client.post(
+        f"/api/generation-tasks/{task_id}/retry",
+        headers=auth_headers("employee_1"),
+        json={"idempotency_key": "billing-retry-round-2", "retry_reason": "签名配置已修复"},
+    )
+
+    assert retried.status_code == 200
+    with connect_database(db_path) as conn:
+        wallet = conn.execute(
+            """
+            SELECT available_credits, reserved_credits
+            FROM wallets WHERE user_id = 'employee_1'
+            """
+        ).fetchone()
+        rows = _task_billing_rows(conn, task_id)
+
+    assert dict(wallet) == {"available_credits": 999, "reserved_credits": 1}
+    assert rows == [("RELEASE", 1), ("RESERVE", 1), ("RESERVE", 2)]
+
+
+def test_paid_regeneration_rejects_legacy_payment_confirmation_fields(
+    client: TestClient,
+) -> None:
+    prompt_id = create_locked_prompt(client)
+    source = client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json={
+            "quantity": 1,
+            "prompt_version_id": prompt_id,
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+            "idempotency_key": "legacy-payment-source",
+            "fake_audio_quality": "missing",
+        },
+    )
+    task_id = str(source.json()["tasks"][0]["id"])
+
+    response = client.post(
+        f"/api/generation-tasks/{task_id}/regenerate",
+        headers=auth_headers("employee_1"),
+        json={
+            **paid_regeneration_payload("legacy-payment-confirmation"),
+            "payment_confirmed": True,
+            "payment_confirmation_version": "V1",
+        },
+    )
+
+    assert response.status_code == 422

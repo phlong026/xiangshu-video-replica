@@ -7,8 +7,8 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
 import { App } from "./App";
+import { setInternalAccessToken } from "./api";
 
 const healthResponse = { status: "ok", service: "video-replica-api" };
 const employeeUser = {
@@ -114,11 +114,13 @@ function batchResponse(overrides = {}) {
 
 describe("App", () => {
   beforeEach(() => {
+    setInternalAccessToken(null);
     window.localStorage.clear();
     window.location.hash = "";
   });
 
   afterEach(() => {
+    setInternalAccessToken(null);
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
     vi.useRealTimers();
@@ -169,18 +171,58 @@ describe("App", () => {
     );
     expect(screen.getByRole("button", { name: "人物库" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "任务记录" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "余额与充值" })).toBeEnabled();
     expect(screen.queryByRole("button", { name: "设置" })).toBeNull();
     expect(screen.getByText("林夏")).toBeInTheDocument();
     expect(screen.getByText("普通员工")).toBeInTheDocument();
-    await waitFor(() =>
-      expect(screen.getByText("本地服务已连接")).toBeInTheDocument(),
-    );
+    const serviceStatus = await screen.findByRole("status", {
+      name: "本地服务已连接",
+    });
+    expect(serviceStatus).toHaveTextContent("");
+    expect(screen.queryByText("本地服务已连接")).toBeNull();
     expect(fetchMock).toHaveBeenCalledWith("http://127.0.0.1:8000/health", {
       signal: expect.any(AbortSignal),
     });
   });
 
-  it("restores an allowed deep link and renders one shared four-entry shell", async () => {
+  it("renders one wallet panel from the shared navigation", async () => {
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/health")) {
+        return Promise.resolve({ ok: true, json: async () => healthResponse });
+      }
+      if (url.endsWith("/api/wallet")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            available_credits: 12,
+            reserved_credits: 1,
+            internal_unit_price_fen: 1000,
+            min_recharge_fen: 10000,
+            recharge_step_fen: 1000,
+          }),
+        });
+      }
+      if (
+        url.includes("/api/wallet/transactions?") ||
+        url.includes("/api/recharge-orders?")
+      ) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ items: [], total: 0, limit: 20, offset: 0 }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => [] });
+    });
+    vi.stubGlobal("fetch", withAuth(fetchMock));
+
+    render(<App />);
+    await enterWorkspace();
+    fireEvent.click(screen.getByRole("button", { name: "余额与充值" }));
+
+    expect(await screen.findAllByText("10元 / 条")).toHaveLength(1);
+  });
+
+  it("restores an allowed deep link and renders one shared workspace shell", async () => {
     window.location.hash = "#characters";
     const fetchMock = vi.fn((url: string) => {
       if (url.endsWith("/health")) {
@@ -195,7 +237,7 @@ describe("App", () => {
     expect(
       await screen.findByRole("heading", { level: 1, name: "人物库" }),
     ).toBeInTheDocument();
-    for (const label of ["项目", "人物库", "任务记录", "设置"]) {
+    for (const label of ["项目", "人物库", "任务记录", "余额与充值", "设置"]) {
       expect(screen.getByRole("button", { name: label })).toBeEnabled();
     }
     expect(screen.getByRole("button", { name: "人物库" })).toHaveClass(
@@ -250,6 +292,47 @@ describe("App", () => {
       "http://127.0.0.1:8000/health",
       expect.anything(),
     );
+  });
+
+  it("uses an in-memory internal access token after cloud authentication fails", async () => {
+    const fetchMock = vi.fn((url: string, options?: RequestInit) => {
+      if (url.endsWith("/api/auth/me")) {
+        const authorization = (options?.headers as Headers | undefined)?.get(
+          "Authorization",
+        );
+        if (authorization === "Bearer internal-user-token") {
+          return Promise.resolve({ ok: true, json: async () => employeeUser });
+        }
+        return Promise.resolve({
+          ok: false,
+          status: 401,
+          json: async () => ({ detail: { message: "missing identity" } }),
+        });
+      }
+      if (url.endsWith("/health")) {
+        return Promise.resolve({ ok: true, json: async () => healthResponse });
+      }
+      return Promise.resolve({ ok: true, json: async () => [] });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+
+    await screen.findByText("身份验证失败：missing identity（401）");
+    fireEvent.change(screen.getByLabelText("内部访问令牌（云端模式）"), {
+      target: { value: "internal-user-token" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "进入" }));
+
+    expect(
+      await screen.findByRole("heading", { level: 1, name: "项目" }),
+    ).toBeInTheDocument();
+    const authenticatedCall = fetchMock.mock.calls.find(([, options]) =>
+      (options?.headers as Headers | undefined)?.has("Authorization"),
+    );
+    expect(authenticatedCall).toBeDefined();
+    const headers = authenticatedCall?.[1]?.headers as Headers;
+    expect(headers.get("Authorization")).toBe("Bearer internal-user-token");
   });
 
   it("shows the employee project list with the quick-upload zone", async () => {
