@@ -137,6 +137,27 @@ def create_storage_adapter(config: CloudStorageConfig) -> StorageAdapter:
     return CloudStorageAdapter(config)
 
 
+# COS 生命周期策略：人物图片（users/ 前缀：身份素材 + 角色版本图）长期
+# 保留——不配置规则即永久；项目源视频/首帧与生成成片按 180 天（6 个月）
+# 到期自动删除。COS 规则只认前缀，新增顶层业务前缀时需同步评估这里。
+COS_MEDIA_RETENTION_DAYS = 180
+
+COS_LIFECYCLE_RULES: list[dict[str, object]] = [
+    {
+        "ID": "expire-project-media-180d",
+        "Filter": {"Prefix": "projects/"},
+        "Status": "Enabled",
+        "Expiration": {"Days": COS_MEDIA_RETENTION_DAYS},
+    },
+    {
+        "ID": "expire-generation-results-180d",
+        "Filter": {"Prefix": "generation-results/"},
+        "Status": "Enabled",
+        "Expiration": {"Days": COS_MEDIA_RETENTION_DAYS},
+    },
+]
+
+
 STORAGE_ROOT_ENV = "VIDEO_REPLICA_STORAGE_ROOT"
 
 
@@ -545,6 +566,22 @@ class CloudStorageAdapter(_BaseStorageAdapter):
         actor_id: str | None = None,
     ) -> StoredObject:
         return super().archive_result(source, destination_key=destination_key, actor_id=actor_id)
+
+    def apply_lifecycle_rules(self, *, actor_id: str | None = None) -> None:
+        """把媒体保留策略下发为桶级生命周期规则（覆盖式对齐，幂等）。"""
+        try:
+            self._client.put_bucket_lifecycle(
+                Bucket=self.bucket,
+                LifecycleConfiguration={"Rule": COS_LIFECYCLE_RULES},
+            )
+        except Exception as exc:
+            raise StorageBackendUnavailable("cloud lifecycle rule apply failed") from exc
+        self._audit(
+            "lifecycle_rules.applied",
+            "succeeded",
+            f"{self.bucket}/lifecycle-rules",
+            actor_id,
+        )
 
     def _signed_url(self, method: str, key: str, expires_at: datetime) -> str:
         seconds_remaining = max(1, _timestamp(expires_at) - _timestamp(datetime.now(UTC)))

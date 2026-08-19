@@ -26,7 +26,12 @@ from app.settings_routes import (
     get_provider_tester,
     router,
 )
-from app.storage import FakeStorageAdapter, StorageBackendUnavailable
+from app.storage import (
+    CloudStorageAdapter,
+    CloudStorageConfig,
+    FakeStorageAdapter,
+    StorageBackendUnavailable,
+)
 
 
 @pytest.fixture()
@@ -996,3 +1001,94 @@ def test_storage_provider_tester_preserves_put_failure_when_best_effort_cleanup_
         "failure_phase": "put",
         "message": "对象存储连接测试失败，且清理动作失败；可能残留测试对象，请查看本地服务日志。",
     }
+
+
+def test_update_cos_settings_applies_lifecycle_rules(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """保存 COS 配置后下发桶生命周期规则：视频/项目素材 180 天过期，
+    users/（人物图片）不配规则即长期。"""
+    calls: list[dict[str, object]] = []
+
+    class RecordingLifecycleClient:
+        def put_bucket_lifecycle(self, **kwargs: object) -> None:
+            calls.append(cast("dict[str, object]", kwargs))
+
+    def fake_factory(config: object) -> CloudStorageAdapter:
+        return CloudStorageAdapter(
+            cast("CloudStorageConfig", config), client=RecordingLifecycleClient()
+        )
+
+    monkeypatch.setattr("app.settings_routes.create_storage_adapter", fake_factory)
+
+    response = client.put(
+        "/api/admin/settings/providers/cos",
+        headers=admin_headers(),
+        json={
+            "config": {
+                "access_key_id": "cos-id",
+                "secret_access_key": "cos-secret",
+                "bucket": "lifecycle-bucket",
+                "region": "ap-shanghai",
+            }
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(calls) == 1
+    assert calls[0]["Bucket"] == "lifecycle-bucket"
+    configuration = cast("dict[str, object]", calls[0]["LifecycleConfiguration"])
+    rules = cast("list[dict[str, object]]", configuration["Rule"])
+    prefix_days = {
+        cast("dict[str, object]", rule["Filter"])["Prefix"]: cast(
+            "dict[str, object]", rule["Expiration"]
+        )["Days"]
+        for rule in rules
+    }
+    assert prefix_days == {"projects/": 180, "generation-results/": 180}
+    assert response.json()["lifecycle"]["status"] == "applied"
+
+
+def test_update_cos_settings_lifecycle_failure_does_not_block_save(
+    client: TestClient,
+    conn: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """生命周期下发失败不得阻断配置保存：状态回 failed、配置落库、审计留痕。"""
+
+    class FailingLifecycleClient:
+        def put_bucket_lifecycle(self, **kwargs: object) -> None:
+            raise RuntimeError("lifecycle api down")
+
+    monkeypatch.setattr(
+        "app.settings_routes.create_storage_adapter",
+        lambda config: CloudStorageAdapter(
+            cast("CloudStorageConfig", config), client=FailingLifecycleClient()
+        ),
+    )
+
+    response = client.put(
+        "/api/admin/settings/providers/cos",
+        headers=admin_headers(),
+        json={
+            "config": {
+                "access_key_id": "cos-id",
+                "secret_access_key": "cos-secret",
+                "bucket": "lifecycle-bucket",
+                "region": "ap-shanghai",
+            }
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["lifecycle"]["status"] == "failed"
+    repo = SettingsRepository(conn)
+    assert repo.load_provider_config("cos")["bucket"] == "lifecycle-bucket"
+    audit_actions = [
+        row[0]
+        for row in conn.execute(
+            "SELECT action FROM audit_logs WHERE action LIKE 'cos_lifecycle%'"
+        ).fetchall()
+    ]
+    assert audit_actions == ["cos_lifecycle.failed"]
