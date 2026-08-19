@@ -22,7 +22,7 @@ from app.media import (
 from app.media import (
     create_upload_intent as create_media_upload_intent,
 )
-from app.media_routes import get_local_result_storage, get_media_storage, get_video_probe
+from app.media_routes import get_generation_result_storage, get_media_storage, get_video_probe
 from app.settings import SettingsRepository
 from app.storage import FakeStorageAdapter, LocalStorageAdapter
 
@@ -251,16 +251,14 @@ def test_media_storage_falls_back_to_local_without_cos(
         assert storage.root == root.resolve()
 
 
-def test_local_result_storage_is_always_local_even_when_cos_configured(
+def test_generation_result_storage_uses_cos_when_configured(
     db_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
-    """生成成片归档固定本地盘不上云：即使配置了 COS（成片是存储大头，
-    读取按存储 URI 的 provider 路由到本地下载）。"""
+    """内部计费只有在成片进入已配置的 COS 后才允许结算。"""
     monkeypatch.setenv("VIDEO_REPLICA_SETTINGS_KEY", Fernet.generate_key().decode("ascii"))
-    root = tmp_path / "local-results"
-    monkeypatch.setenv("VIDEO_REPLICA_STORAGE_ROOT", str(root))
+    selected_storage = FakeStorageAdapter(provider="cos", bucket="private-bucket")
+    monkeypatch.setattr("app.media_routes.create_storage_adapter", lambda _: selected_storage)
 
     with connect_database(db_path) as conn:
         repo = SettingsRepository(conn)
@@ -275,9 +273,7 @@ def test_local_result_storage_is_always_local_even_when_cos_configured(
             actor_user_id="admin_1",
         )
 
-        storage = get_local_result_storage(conn)
-        assert isinstance(storage, LocalStorageAdapter)
-        assert storage.root == root.resolve()
+        assert get_generation_result_storage(conn) is selected_storage
 
 
 def test_get_media_storage_uses_local_adapter_when_provider_is_local(

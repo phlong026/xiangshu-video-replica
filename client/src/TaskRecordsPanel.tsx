@@ -494,8 +494,6 @@ export function TaskRecordsPanel({
     try {
       const replacement = await regenerateGenerationBatch(batch.id, {
         idempotency_key: operationKey,
-        payment_confirmed: true,
-        payment_confirmation_version: "V1",
         estimated_cost_snapshot: estimatedCost,
         generation_reason: reason,
       });
@@ -532,8 +530,6 @@ export function TaskRecordsPanel({
     try {
       const replacement = await regenerateGenerationTask(task.id, {
         idempotency_key: operationKey,
-        payment_confirmed: true,
-        payment_confirmation_version: "V1",
         estimated_cost_snapshot: estimatedCost,
         generation_reason: trimmedReason,
       });

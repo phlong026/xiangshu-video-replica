@@ -79,16 +79,9 @@ def get_media_storage(conn: Database) -> StorageAdapter:
         ) from exc
 
 
-def get_local_result_storage(conn: Database) -> StorageAdapter:
-    """生成结果归档存储：成片视频固定落本地盘不上云（按需节省云存储
-    成本；读取按存储 URI 的 provider 路由，本地对象走 API 签名下载）。"""
-    try:
-        return create_local_storage_from_environment()
-    except StorageBackendUnavailable as exc:
-        raise HTTPException(
-            status_code=503,
-            detail={"code": "STORAGE_SETTINGS_UNAVAILABLE"},
-        ) from exc
+def get_generation_result_storage(conn: Database) -> StorageAdapter:
+    """成片归档跟随业务主存储；内部云端配置 COS 后结果必须进入 COS。"""
+    return get_media_storage(conn)
 
 
 def get_video_probe() -> VideoProbe:
@@ -96,7 +89,7 @@ def get_video_probe() -> VideoProbe:
 
 
 MediaStorage = Annotated[StorageAdapter, Depends(get_media_storage)]
-LocalResultStorage = Annotated[StorageAdapter, Depends(get_local_result_storage)]
+GenerationResultStorage = Annotated[StorageAdapter, Depends(get_generation_result_storage)]
 InjectedVideoProbe = Annotated[VideoProbe, Depends(get_video_probe)]
 
 
