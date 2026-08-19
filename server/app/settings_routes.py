@@ -191,9 +191,7 @@ def apply_cos_lifecycle_rules(
 ) -> dict[str, str]:
     """保存 COS 配置后对齐桶生命周期规则；下发失败不阻断配置保存。"""
     try:
-        adapter = create_storage_adapter(
-            cloud_storage_config_from_settings("cos", config)
-        )
+        adapter = create_storage_adapter(cloud_storage_config_from_settings("cos", config))
     except (ValueError, StorageBackendUnavailable) as exc:
         logger.warning("COS lifecycle rules skipped: %s", exc, exc_info=True)
         return {

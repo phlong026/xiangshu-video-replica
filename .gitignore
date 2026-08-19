@@ -44,3 +44,7 @@ data/
 
 # ChatGPT 项目同步工具生成的镜像副本
 AGENTS_副本.md
+# 运行时验证产物（UI 截图等）
+.verify/
+# 后台服务日志
+nohup.out
