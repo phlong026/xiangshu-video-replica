@@ -643,7 +643,7 @@ input:focus {
   font-size: 13px;
 }
 
-/* 生成流程详情页：四段自上而下滚动（解析提示词 → 源画面与人物 → 首帧与文案 → 提交生成） */
+/* 生成流程详情页：五段自上而下滚动（解析 → 源画面人物 → 首帧 → 自定义文案 → 提交） */
 .flow-page {
   display: grid;
   gap: 16px;
@@ -733,23 +733,6 @@ input:focus {
   border-radius: 8px;
   padding: 12px 14px;
   background: rgba(11, 11, 14, 0.6);
-}
-
-.flow-script__head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.flow-script__head h3 {
-  margin: 0;
-  font-size: 14px;
-}
-
-.flow-script__actions {
-  display: flex;
-  gap: 8px;
 }
 
 .flow-script textarea {
@@ -1744,6 +1727,39 @@ button.workspace-tab--active {
   margin: 0;
   color: #aaa297;
   line-height: 1.55;
+}
+
+.first-frame-generation-progress {
+  display: grid;
+  gap: 8px;
+  border: 1px solid rgba(109, 230, 177, 0.32);
+  border-radius: 9px;
+  padding: 14px 16px;
+  background: rgba(25, 60, 48, 0.24);
+}
+
+.first-frame-generation-progress__heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.first-frame-generation-progress__heading strong {
+  color: #dff9ed;
+  font-size: 13px;
+}
+
+.first-frame-generation-progress__heading span {
+  color: #8fe2bb;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.first-frame-generation-progress progress {
+  width: 100%;
+  height: 8px;
+  accent-color: #6de6b1;
 }
 
 .first-frame-controls {

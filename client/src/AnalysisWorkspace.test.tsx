@@ -569,7 +569,6 @@ describe("AnalysisWorkspace workflow gates", () => {
       ["模拟角色保存中", "模拟角色保存完成"],
       ["模拟源画面保存中", "模拟源画面保存完成"],
       ["模拟人物参考保存中", "模拟人物参考保存完成"],
-      ["模拟首帧保存中", "模拟首帧保存完成"],
     ]) {
       fireEvent.click(screen.getByRole("button", { name: startLabel }));
       expect(onWorkspaceBusyChange).toHaveBeenLastCalledWith(true);
@@ -584,6 +583,19 @@ describe("AnalysisWorkspace workflow gates", () => {
         screen.getByRole("button", { name: "模拟创建批次" }),
       ).toBeEnabled();
     }
+    onWorkspaceBusyChange.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "模拟首帧保存中" }));
+    expect(onWorkspaceBusyChange).not.toHaveBeenCalledWith(true);
+    expect(screen.getByRole("button", { name: "返回" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "切换角色版本" })).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "标记源画面失效" }),
+    ).toBeDisabled();
+    expect(screen.getByRole("button", { name: "完成人物参考" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "模拟创建批次" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "模拟首帧保存完成" }));
+    expect(screen.getByRole("button", { name: "切换角色版本" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "模拟创建批次" })).toBeEnabled();
     fireEvent.click(screen.getByRole("button", { name: "模拟角色保存中" }));
     fireEvent.click(screen.getByRole("button", { name: "模拟角色保存中" }));
     fireEvent.click(screen.getByRole("button", { name: "模拟角色保存完成" }));
@@ -596,7 +608,7 @@ describe("AnalysisWorkspace workflow gates", () => {
     );
   });
 
-  it("keeps workspace busy while multiple upstream sources overlap (P0-01-02 行为锁定)", async () => {
+  it("keeps input locks but releases navigation when only first-frame generation remains", async () => {
     const onWorkspaceBusyChange = vi.fn();
     vi.mocked(api.getLatestProjectShotCards).mockResolvedValue({
       id: "shot-card-2",
@@ -635,21 +647,23 @@ describe("AnalysisWorkspace workflow gates", () => {
     await screen.findByText("拆解完成");
     // 首帧区块需要角色已选才渲染，先建立选择链。
     fireEvent.click(screen.getByRole("button", { name: "完成角色选择" }));
-    // 两个不同上游源同时 busy：整体必须保持 busy。
+    // 常规保存动作仍锁住整个工作区；首帧生成只锁输入，不锁导航。
     fireEvent.click(screen.getByRole("button", { name: "模拟角色保存中" }));
     expect(onWorkspaceBusyChange).toHaveBeenLastCalledWith(true);
     fireEvent.click(screen.getByRole("button", { name: "模拟首帧保存中" }));
     expect(onWorkspaceBusyChange).toHaveBeenLastCalledWith(true);
 
-    // 解除其中一个源：另一个仍 busy，导航仍被阻断。
+    // 常规保存结束后导航恢复，但首帧依赖的输入和建批动作仍锁定。
     fireEvent.click(screen.getByRole("button", { name: "模拟角色保存完成" }));
-    expect(onWorkspaceBusyChange).toHaveBeenLastCalledWith(true);
-    expect(screen.getByRole("button", { name: "返回" })).toBeDisabled();
-
-    // 解除最后一个源：整体才恢复空闲。
-    fireEvent.click(screen.getByRole("button", { name: "模拟首帧保存完成" }));
     expect(onWorkspaceBusyChange).toHaveBeenLastCalledWith(false);
     expect(screen.getByRole("button", { name: "返回" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "切换角色版本" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "开始生成" })).toBeDisabled();
+
+    // 首帧生成结束后输入恢复；当前夹具尚未完成源画面链路，所以主按钮仍不可用。
+    fireEvent.click(screen.getByRole("button", { name: "模拟首帧保存完成" }));
+    expect(onWorkspaceBusyChange).toHaveBeenLastCalledWith(false);
+    expect(screen.getByRole("button", { name: "切换角色版本" })).toBeEnabled();
   });
 
   it("blocks upstream selection changes while generation is busy (P0-01-02 行为锁定)", async () => {

@@ -166,6 +166,116 @@ describe("FirstFrameSelection", () => {
     );
   });
 
+  it("keeps one generation request alive across page changes and reattaches progress", async () => {
+    let resolveGeneration:
+      | ((version: typeof candidatesVersion) => void)
+      | undefined;
+    const pendingGeneration = new Promise<typeof candidatesVersion>(
+      (resolve) => {
+        resolveGeneration = resolve;
+      },
+    );
+    vi.mocked(generateFirstFrames).mockReturnValue(pendingGeneration);
+
+    const firstPage = render(
+      <FirstFrameSelection
+        projectId="project-1"
+        referenceSelection={referenceSelection}
+        simplified
+        sourceFrameSelectionId="source-selection-1"
+      />,
+    );
+    await screen.findByText("人物置换首帧");
+    fireEvent.click(screen.getByRole("button", { name: "重新生成候选首帧" }));
+
+    expect(
+      await screen.findByRole("progressbar", {
+        name: "人物置换首帧生成进度",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/可以离开当前页面.*本地服务未关闭.*生成会继续/),
+    ).toBeInTheDocument();
+
+    firstPage.unmount();
+    render(
+      <FirstFrameSelection
+        projectId="project-1"
+        referenceSelection={referenceSelection}
+        simplified
+        sourceFrameSelectionId="source-selection-1"
+      />,
+    );
+
+    expect(
+      await screen.findByRole("progressbar", {
+        name: "人物置换首帧生成进度",
+      }),
+    ).toBeInTheDocument();
+    expect(generateFirstFrames).toHaveBeenCalledOnce();
+
+    await act(async () => {
+      resolveGeneration?.(candidatesVersion);
+      await pendingGeneration;
+    });
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("progressbar", {
+          name: "人物置换首帧生成进度",
+        }),
+      ).toBeNull(),
+    );
+  });
+
+  it("shows a background generation failure when the user returns", async () => {
+    let rejectGeneration: ((reason: Error) => void) | undefined;
+    const pendingGeneration = new Promise<typeof candidatesVersion>(
+      (_resolve, reject) => {
+        rejectGeneration = reject;
+      },
+    );
+    vi.mocked(generateFirstFrames).mockReturnValue(pendingGeneration);
+
+    const firstPage = render(
+      <FirstFrameSelection
+        projectId="project-1"
+        referenceSelection={referenceSelection}
+        simplified
+        sourceFrameSelectionId="source-selection-1"
+      />,
+    );
+    await screen.findByText("人物置换首帧");
+    fireEvent.click(screen.getByRole("button", { name: "重新生成候选首帧" }));
+    await screen.findByRole("progressbar", {
+      name: "人物置换首帧生成进度",
+    });
+    firstPage.unmount();
+
+    await act(async () => {
+      rejectGeneration?.(new Error("云端首帧生成失败，请重试。"));
+      await pendingGeneration.catch(() => undefined);
+    });
+
+    render(
+      <FirstFrameSelection
+        projectId="project-1"
+        referenceSelection={referenceSelection}
+        simplified
+        sourceFrameSelectionId="source-selection-1"
+      />,
+    );
+
+    expect(
+      await screen.findByText("云端首帧生成失败，请重试。"),
+    ).toBeInTheDocument();
+    expect(generateFirstFrames).toHaveBeenCalledOnce();
+    expect(
+      screen.queryByRole("progressbar", {
+        name: "人物置换首帧生成进度",
+      }),
+    ).toBeNull();
+  });
+
   it("loads history and uses the binding-less generation path for a legacy character", async () => {
     render(
       <FirstFrameSelection

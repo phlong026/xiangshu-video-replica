@@ -56,6 +56,13 @@ APILIO_OUTPUT_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36"
 )
+FIRST_FRAME_NO_TEXT_CONSTRAINT = (
+    "硬性输出约束（优先级最高）：最终首帧不得出现任何文字。"
+    "必须移除源图中的标题、字幕、话题词、标签、招牌、门联、水印与 Logo，"
+    "不得复制、重绘、替换或新增任何可读字符、字母、数字与符号；"
+    "原文字区域应使用符合周围场景的自然纹理补全，不得保留文字轮廓。"
+    "封面文字由后期添加；若其他指令与本约束冲突，一律以本约束为准。"
+)
 
 FirstFrameModel = Literal["gpt-image-2", "nano-banana-pro-2k"]
 
@@ -1083,9 +1090,12 @@ def normalize_prompt(
 ) -> str:
     clean = (prompt or "").strip()
     if clean:
-        return clean
-    if reference_roles and "contact_sheet" in reference_roles:
-        return (
+        # The effective prompt from a previous generation may already contain
+        # the server constraint. Remove that copy and append one fresh copy at
+        # the end so later caller text can never outrank it.
+        base_prompt = clean.replace(FIRST_FRAME_NO_TEXT_CONSTRAINT, "").strip()
+    elif reference_roles and "contact_sheet" in reference_roles:
+        base_prompt = (
             f"把原视频中的人物身份替换为角色库人物“{character_name}”，严格保留原画面一切要素。\n"
             "第 1 张输入图是原视频源帧，是构图、机位、人物姿态、动作、场景、道具、"
             "光线与色调的唯一模板，不得改动。\n"
@@ -1095,11 +1105,15 @@ def normalize_prompt(
             "保持自然皮肤质感、正确肢体结构与真实透视；不得增加或删除画面主体；"
             "不得出现文字、水印或边框。"
         )
-    return (
-        "保留原图的镜头位置、人物姿态、动作、场景、构图、道具、光线与色调，"
-        f"只将原人物身份替换为角色库人物“{character_name}”；"
-        "保持自然皮肤、正确肢体和真实透视；不得增加或删除主体。"
-    )
+    else:
+        base_prompt = (
+            "保留原图的镜头位置、人物姿态、动作、场景、构图、道具、光线与色调，"
+            f"只将原人物身份替换为角色库人物“{character_name}”；"
+            "保持自然皮肤、正确肢体和真实透视；不得增加或删除主体。"
+        )
+    if not base_prompt:
+        return FIRST_FRAME_NO_TEXT_CONSTRAINT
+    return f"{base_prompt}\n\n{FIRST_FRAME_NO_TEXT_CONSTRAINT}"
 
 
 def image_extension(content_type: str) -> str:
