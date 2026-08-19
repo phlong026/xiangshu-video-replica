@@ -56,7 +56,7 @@ from app.storage import (
 SCRIPT_KIND = "script"
 H3_PROMPT_KIND = "h3_prompt"
 GENERATION_SCHEMA_VERSION = "c.generation.v1"
-H3_PROMPT_TEMPLATE_VERSION = "h3.prompt.v3"
+H3_PROMPT_TEMPLATE_VERSION = "h3.prompt.v4"
 H3_PROMPT_TEMPLATE_SPEC = (
     (
         "intro",
@@ -74,6 +74,11 @@ H3_PROMPT_TEMPLATE_SPEC = (
     (
         "outro",
         "环境音与音乐保持自然；不要增加无关人物，不要身份突变、肢体异常或画面闪烁。",
+    ),
+    (
+        "narration_sync",
+        "严格按照每个时间段组织配音，不得漏句、改写、重复或者交换顺序，"
+        "每句话的起止时间和对应的镜头同步。",
     ),
 )
 H3_PROMPT_TEMPLATES = dict(H3_PROMPT_TEMPLATE_SPEC)
@@ -4544,6 +4549,7 @@ def compile_prompt_text(
         )
     lines.append(H3_PROMPT_TEMPLATES["script"].format(full_text=script_payload["full_text"]))
     lines.append(H3_PROMPT_TEMPLATES["outro"])
+    lines.append(H3_PROMPT_TEMPLATES["narration_sync"])
     return "\n".join(lines)
 
 

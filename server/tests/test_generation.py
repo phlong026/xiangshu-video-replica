@@ -1623,7 +1623,7 @@ def test_prompt_revision_freezes_sources_and_batch_reports_staleness(
     assert compiled.status_code == 200
     compiled_payload = compiled.json()["payload"]
     assert compiled_payload["status"] == "SAVED"
-    assert compiled_payload["template_version"] == "h3.prompt.v3"
+    assert compiled_payload["template_version"] == "h3.prompt.v4"
     assert len(compiled_payload["template_hash"]) == 64
     assert compiled_payload["source_analysis_version_id"] is None
     assert compiled_payload["script_version_id"] == script["id"]
@@ -1772,7 +1772,7 @@ def test_prompt_compiler_rescales_shot_timeline_to_output_duration(
 
     assert compiled.status_code == 200
     payload = compiled.json()["payload"]
-    assert payload["template_version"] == "h3.prompt.v3"
+    assert payload["template_version"] == "h3.prompt.v4"
     assert payload["source_duration_seconds"] == 10
     assert payload["timeline_scale_factor"] == 0.4
     assert "生成一条 4 秒" in payload["prompt_text"]
@@ -1826,6 +1826,12 @@ def test_compile_prompt_text_renders_structured_motion_as_movement_instructions(
     # motion.camera_motion 枚举优先于自由文本“手持跟拍”。
     assert "手持平稳跟拍" in prompt_text
     assert "人物严格按各镜头的动作与运镜描述真实运动" in prompt_text
+    narration_sync_rule = (
+        "严格按照每个时间段组织配音，不得漏句、改写、重复或者交换顺序，"
+        "每句话的起止时间和对应的镜头同步。"
+    )
+    assert prompt_text.count(narration_sync_rule) == 1
+    assert prompt_text.endswith(narration_sync_rule)
 
 
 def test_compile_prompt_text_falls_back_to_action_text_for_legacy_shots() -> None:
@@ -1863,7 +1869,7 @@ def test_compile_prompt_text_falls_back_to_action_text_for_legacy_shots() -> Non
 @pytest.mark.parametrize(
     ("template_attribute", "next_value"),
     [
-        ("H3_PROMPT_TEMPLATE_VERSION", "h3.prompt.v4"),
+        ("H3_PROMPT_TEMPLATE_VERSION", "h3.prompt.v5"),
         ("H3_PROMPT_TEMPLATE_HASH", "new-template-hash"),
     ],
 )
