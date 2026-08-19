@@ -4,7 +4,7 @@ import {
   type CharacterViewType,
   deleteSimpleCharacterIdentity,
   downloadCharacterAsset,
-  getAssetDownloadUrl,
+  getCachedCharacterAssetUrl,
   listSimpleCharacterLibrary,
   regenerateContactSheet,
   renamePersonIdentity,
@@ -77,7 +77,7 @@ export function CharacterLibrary({
   const loadPreviewUrls = useCallback(async (assetIds: string[]) => {
     const results = await Promise.allSettled(
       assetIds.map(async (assetId) => {
-        const download = await getAssetDownloadUrl(assetId);
+        const download = await getCachedCharacterAssetUrl(assetId);
         return [assetId, download.url] as const;
       }),
     );

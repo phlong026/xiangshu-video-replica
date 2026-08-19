@@ -13,7 +13,7 @@ vi.mock("./api", async (importOriginal) => {
     renamePersonIdentity: vi.fn(),
     deleteSimpleCharacterIdentity: vi.fn(),
     uploadSimpleCharacter: vi.fn(),
-    getAssetDownloadUrl: vi.fn(),
+    getCachedCharacterAssetUrl: vi.fn(),
     downloadCharacterAsset: vi.fn(),
   };
 });
@@ -58,9 +58,11 @@ describe("CharacterLibrary", () => {
     // resetAllMocks (not clearAllMocks) also drops leftover mockResolvedValueOnce
     // queues from earlier tests, which would otherwise leak into this one.
     vi.resetAllMocks();
-    vi.mocked(api.getAssetDownloadUrl).mockImplementation(async (assetId) => ({
-      url: `http://127.0.0.1:8000/mock/${assetId}`,
-    }));
+    vi.mocked(api.getCachedCharacterAssetUrl).mockImplementation(
+      async (assetId) => ({
+        url: `http://127.0.0.1:8000/mock/${assetId}`,
+      }),
+    );
     vi.mocked(api.downloadCharacterAsset).mockResolvedValue(undefined);
     vi.mocked(api.deleteSimpleCharacterIdentity).mockResolvedValue(undefined);
     vi.spyOn(window, "confirm").mockReturnValue(true);
@@ -104,6 +106,12 @@ describe("CharacterLibrary", () => {
     expect(
       screen.getByRole("button", { name: "下载拼合图" }),
     ).toBeInTheDocument();
+    expect(api.getCachedCharacterAssetUrl).toHaveBeenCalledWith(
+      entry.views[0].asset_id,
+    );
+    expect(api.getCachedCharacterAssetUrl).toHaveBeenCalledWith(
+      foreignEntry.contact_sheet_asset_id,
+    );
   });
 
   it("closes the lightbox via Esc, the backdrop, and the close button", async () => {

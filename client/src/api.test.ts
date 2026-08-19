@@ -9,8 +9,10 @@ import {
   createGenerationResultPreviewUrl,
   createProject,
   createScriptVersion,
+  downloadCharacterAsset,
   downloadGenerationResult,
   generateFirstFrames,
+  getCachedCharacterAssetUrl,
   getCharacterReferenceRecommendation,
   getCurrentUser,
   getGenerationBatch,
@@ -92,6 +94,63 @@ describe("generation workflow API", () => {
 
     await vi.advanceTimersByTimeAsync(1_000);
     expect(revokeObjectUrl).toHaveBeenCalledWith("blob:generation-result");
+  });
+
+  it("uses the local character cache for previews and manual downloads", async () => {
+    vi.useFakeTimers();
+    const characterBlob = new Blob(["character"], { type: "image/png" });
+    const cachedUrl =
+      "http://127.0.0.1:8000/api/assets/character-cache/cache.png?expires=1&sig=test";
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ url: cachedUrl }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ url: cachedUrl }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        blob: async () => characterBlob,
+      });
+    const createObjectUrl = vi.fn(() => "blob:character");
+    const revokeObjectUrl = vi.fn();
+    const anchorClick = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(() => undefined);
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("URL", {
+      createObjectURL: createObjectUrl,
+      revokeObjectURL: revokeObjectUrl,
+    });
+
+    await expect(getCachedCharacterAssetUrl("asset 1")).resolves.toEqual({
+      url: cachedUrl,
+    });
+    await downloadCharacterAsset("asset 1", "人物.png");
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "http://127.0.0.1:8000/api/assets/asset%201/cached-url",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "http://127.0.0.1:8000/api/assets/asset%201/cached-url",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      cachedUrl,
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(createObjectUrl).toHaveBeenCalledWith(characterBlob);
+    expect(anchorClick).toHaveBeenCalledOnce();
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(revokeObjectUrl).toHaveBeenCalledWith("blob:character");
   });
 
   it("returns the signed streaming url directly for in-player preview", async () => {
