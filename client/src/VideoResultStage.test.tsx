@@ -98,6 +98,7 @@ function renderStage(
     previewUrls: {} as Record<string, string>,
     resultErrors: {} as Record<string, string>,
     ...overrides,
+    onPreviewSourceError: overrides.onPreviewSourceError ?? vi.fn(),
   };
   render(<VideoResultStage {...props} />);
   return props;
