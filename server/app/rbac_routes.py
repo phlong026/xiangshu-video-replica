@@ -14,9 +14,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.auth import (
     AuthenticatedUser,
     Database,
-    authenticate_user,
+    authenticate_request,
     identity_source,
-    identity_user_id,
 )
 from app.media import storage_key_from_uri
 from app.media_routes import LOCAL_API_BASE_URL
@@ -138,11 +137,20 @@ class AuditLogResponse(BaseModel):
 def read_me(
     conn: Database,
     dev_user_id: Annotated[str | None, Header(alias="X-Dev-User-Id")] = None,
+    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> UserResponse:
     try:
-        actor = authenticate_user(conn, identity_user_id(dev_user_id))
+        actor = authenticate_request(
+            conn,
+            authorization=authorization,
+            dev_user_id=dev_user_id,
+        )
     except HTTPException as exc:
-        write_login_failure(conn, error=exc, identity_source_name=identity_source(dev_user_id))
+        write_login_failure(
+            conn,
+            error=exc,
+            identity_source_name=identity_source(dev_user_id, authorization),
+        )
         raise
     write_audit(
         conn,

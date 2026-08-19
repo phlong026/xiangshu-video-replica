@@ -103,7 +103,7 @@ app.add_middleware(
     ],
     allow_credentials=False,
     allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"],
-    allow_headers=["Content-Type", "X-Dev-User-Id"],
+    allow_headers=["Authorization", "Content-Type", "X-Dev-User-Id"],
 )
 app.include_router(generation_router)
 app.include_router(rbac_router)
