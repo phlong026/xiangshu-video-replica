@@ -81,6 +81,11 @@ describe("Fake provider E2E contract", () => {
           json: async () => healthResponse,
         });
       }
+      // 项目列表端点必须返回数组：fallback 若透传 completedFakeBatch
+      // 对象，ProjectsPage 的 projects.some 会在挂载竞态窗口内崩溃。
+      if (url.endsWith("/api/projects")) {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
       return Promise.resolve({
         ok: true,
         json: async () => completedFakeBatch,

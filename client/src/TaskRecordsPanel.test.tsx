@@ -1080,4 +1080,77 @@ describe("TaskRecordsPanel", () => {
       ),
     );
   });
+
+  it("renders the ops detail with an overview bar, fact table, and collapsed controls", async () => {
+    vi.mocked(api.getGenerationBatch).mockResolvedValue(
+      batch({
+        status: "SUCCEEDED",
+        quantity: 1,
+        progress: {
+          total_count: 1,
+          terminal_count: 1,
+          progress_percent: 100,
+          counts: {
+            pending: 0,
+            submitting: 0,
+            queued: 0,
+            running: 0,
+            archiving: 0,
+            succeeded: 1,
+            failed: 0,
+            cancelled: 0,
+            needs_attention: 0,
+          },
+        },
+        tasks: [
+          task({
+            id: "task-ops-layout",
+            prompt_snapshot: {
+              status: "LOCKED",
+              resolution: "1080x1920",
+              output_duration_seconds: 15,
+            },
+            available_actions: ["RECONCILE", "REGENERATE"],
+          }),
+        ],
+      }),
+    );
+
+    render(
+      <TaskRecordsPanel
+        handoffBatch={null}
+        onHandoffConsumed={vi.fn()}
+        userRole="employee"
+      />,
+    );
+    await switchToOpsView();
+
+    // 概览条：状态徽章、进度百分比与完成计数同层呈现。
+    expect(await screen.findByText("100%")).toBeInTheDocument();
+    expect(screen.getByText("已完成 1 / 1")).toBeInTheDocument();
+    expect(screen.getByText("成功 1")).toBeInTheDocument();
+
+    // 左栏事实表：快照解析出的分辨率与成片时长与模型、费用并列。
+    expect(screen.getByText("模型")).toBeInTheDocument();
+    expect(screen.getByText("1080x1920")).toBeInTheDocument();
+    expect(screen.getByText("成片时长")).toBeInTheDocument();
+    expect(screen.getByText("15 秒")).toBeInTheDocument();
+    expect(screen.getByText("提交时间")).toBeInTheDocument();
+    expect(screen.getByText("2026-08-16 10:00:00")).toBeInTheDocument();
+
+    // 右栏操作区默认收起，展开后呈现对账与付费重生成入口。
+    const resolutionControls = screen
+      .getByText("处理此任务", { selector: "summary" })
+      .closest("details");
+    expect(resolutionControls).not.toHaveAttribute("open");
+    const paidRegeneration = screen
+      .getByText("付费重新生成", { selector: "summary" })
+      .closest("details");
+    expect(paidRegeneration).not.toHaveAttribute("open");
+
+    fireEvent.click(screen.getByText("处理此任务", { selector: "summary" }));
+    expect(
+      screen.getByRole("button", { name: "对账 task-ops-layout" }),
+    ).toBeInTheDocument();
+  });
 });
