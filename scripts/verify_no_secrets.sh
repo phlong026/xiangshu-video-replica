@@ -36,13 +36,11 @@ for pattern in "${patterns[@]}"; do
   fi
 done
 
-if ! command -v rg >/dev/null 2>&1; then
-  echo "Secret scan requires rg for deployment token checks." >&2
-  exit 2
-fi
-
 deploy_token_matches=""
-if deploy_token_matches="$(rg --hidden --no-ignore -n --no-heading 'proxy_set_header[[:space:]]+X-Control-Proxy-Token' deploy)"; then
+if deploy_token_matches="$(
+  git grep -n -I -E --untracked --no-exclude-standard \
+    -e 'proxy_set_header[[:space:]]+X-Control-Proxy-Token' -- deploy
+)"; then
   while IFS= read -r match; do
     if [[ "$match" == *'proxy_set_header X-Control-Proxy-Token "";'* ]]; then
       continue

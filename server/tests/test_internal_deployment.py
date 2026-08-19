@@ -64,11 +64,11 @@ def test_secret_scan_covers_deployment_files_and_rejects_raw_control_tokens() ->
     assert '"deploy"' in secret_scan
     assert "REPLACE_WITH_32_BYTE_RANDOM_TOKEN" in secret_scan
     assert "Unexpected raw control proxy token" in secret_scan
-    assert "command -v rg" in secret_scan
-    assert "Secret scan requires rg for deployment token checks." in secret_scan
+    assert "command -v rg" not in secret_scan
+    assert "Secret scan requires rg for deployment token checks." not in secret_scan
     assert "Deployment token scan failed." in secret_scan
-    assert "rg --hidden --no-ignore" in secret_scan
-    assert "rg --hidden --no-ignore" + " -n" in secret_scan
+    assert "git grep -n -I -E --untracked --no-exclude-standard" in secret_scan
+    assert "rg --hidden --no-ignore" not in secret_scan
     assert "deploy || true" not in secret_scan
     assert "deploy/*.env" in gitignore
     assert "deploy/nginx/*.conf" in gitignore
