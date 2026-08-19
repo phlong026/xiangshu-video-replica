@@ -763,6 +763,16 @@ def test_project_owner_receives_short_lived_storage_download_url(client: TestCli
     assert "sig=" in response.json()["url"]
 
 
+def test_non_character_asset_cannot_use_character_cache(client: TestClient) -> None:
+    response = client.post(
+        "/api/assets/asset_owned/cached-url",
+        headers=auth_headers("employee_1"),
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "CHARACTER_CACHE_UNSUPPORTED"
+
+
 def test_download_audit_does_not_store_temporary_url(client: TestClient, db_path: Path) -> None:
     response = client.post(
         "/api/assets/asset_owned/download-url",

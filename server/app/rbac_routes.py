@@ -1,22 +1,29 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
+import logging
+import os
+import re
 import sqlite3
 import time
+from _thread import LockType
 from datetime import timedelta
+from pathlib import Path
+from threading import Lock
 from typing import Annotated, cast
 from urllib.parse import quote
 from uuid import uuid4
 
-from fastapi import APIRouter, Header, HTTPException, Response, status
+from fastapi import APIRouter, Header, HTTPException, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.auth import (
     AuthenticatedUser,
     Database,
-    authenticate_user,
+    authenticate_request,
     identity_source,
-    identity_user_id,
 )
 from app.media import storage_key_from_uri
 from app.media_routes import LOCAL_API_BASE_URL
@@ -42,6 +49,19 @@ from app.storage import (
 
 router = APIRouter(prefix="/api", tags=["rbac"])
 DOWNLOAD_URL_EXPIRES_IN = timedelta(minutes=15)
+CHARACTER_CACHE_KINDS = frozenset({"character_contact_sheet", "character_generated_image"})
+CHARACTER_CACHE_SUFFIXES = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+}
+CHARACTER_CACHE_CONTENT_TYPES = {
+    suffix: content_type for content_type, suffix in CHARACTER_CACHE_SUFFIXES.items()
+}
+CHARACTER_CACHE_NAME = re.compile(r"^[0-9a-f]{64}\.(?:jpg|png|webp)$")
+CHARACTER_CACHE_LOCKS: dict[str, LockType] = {}
+CHARACTER_CACHE_LOCKS_GUARD = Lock()
+logger = logging.getLogger(__name__)
 
 
 class UserResponse(BaseModel):
@@ -84,6 +104,106 @@ class AssetResponse(BaseModel):
 
 class DownloadUrlResponse(BaseModel):
     url: str
+
+
+def _character_cache_root() -> Path:
+    home = os.environ.get("VIDEO_REPLICA_HOME", "").strip()
+    if home:
+        return (Path(home) / "storage-cache" / "character-images").resolve()
+    return (local_storage_root() / ".cache" / "character-images").resolve()
+
+
+def _character_cache_identity(row: sqlite3.Row) -> tuple[str, str]:
+    kind = str(row["kind"])
+    content_type = str(row["content_type"] or "").split(";", 1)[0].strip().lower()
+    if kind not in CHARACTER_CACHE_KINDS or content_type not in CHARACTER_CACHE_SUFFIXES:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "CHARACTER_CACHE_UNSUPPORTED"},
+        )
+    source_version = str(row["sha256"] or row["storage_uri"])
+    digest = hashlib.sha256(f"{row['id']}:{source_version}".encode()).hexdigest()
+    return f"{digest}{CHARACTER_CACHE_SUFFIXES[content_type]}", content_type
+
+
+def _character_cache_path(cache_name: str) -> Path:
+    if CHARACTER_CACHE_NAME.fullmatch(cache_name) is None:
+        raise HTTPException(status_code=404, detail={"code": "CHARACTER_CACHE_NOT_FOUND"})
+    return _character_cache_root() / cache_name
+
+
+def _character_cache_lock(cache_name: str) -> LockType:
+    with CHARACTER_CACHE_LOCKS_GUARD:
+        return CHARACTER_CACHE_LOCKS.setdefault(cache_name, Lock())
+
+
+def _populate_character_cache(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+) -> tuple[str, str]:
+    cache_name, content_type = _character_cache_identity(row)
+    try:
+        cache_path = _character_cache_path(cache_name)
+    except StorageBackendUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "CHARACTER_CACHE_UNAVAILABLE"},
+        ) from exc
+    with _character_cache_lock(cache_name):
+        if cache_path.is_file():
+            return cache_name, content_type
+
+        storage_uri = str(row["storage_uri"])
+        object_key = storage_key_from_uri(storage_uri)
+        try:
+            content = storage_for_asset(conn, storage_uri).get_object(object_key)
+        except (KeyError, OSError, StorageBackendUnavailable) as exc:
+            logger.error(
+                "character cache source read failed for asset %s: %s",
+                row["id"],
+                type(exc).__name__,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "CHARACTER_CACHE_UNAVAILABLE"},
+            ) from exc
+
+        expected_sha256 = str(row["sha256"] or "").lower()
+        if expected_sha256 and not hmac.compare_digest(
+            hashlib.sha256(content).hexdigest(),
+            expected_sha256,
+        ):
+            logger.error("character cache source hash mismatch for asset %s", row["id"])
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "CHARACTER_CACHE_UNAVAILABLE"},
+            )
+
+        temporary_path = cache_path.with_name(f".{cache_path.name}.{uuid4().hex}.tmp")
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary_path.write_bytes(content)
+            temporary_path.replace(cache_path)
+        except OSError as exc:
+            logger.error(
+                "character cache write failed for asset %s: %s",
+                row["id"],
+                type(exc).__name__,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "CHARACTER_CACHE_UNAVAILABLE"},
+            ) from exc
+        finally:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning(
+                    "character cache temporary cleanup failed for asset %s: %s",
+                    row["id"],
+                    type(exc).__name__,
+                )
+    return cache_name, content_type
 
 
 def storage_for_asset(conn: sqlite3.Connection, storage_uri: str) -> StorageAdapter:
@@ -138,11 +258,20 @@ class AuditLogResponse(BaseModel):
 def read_me(
     conn: Database,
     dev_user_id: Annotated[str | None, Header(alias="X-Dev-User-Id")] = None,
+    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> UserResponse:
     try:
-        actor = authenticate_user(conn, identity_user_id(dev_user_id))
+        actor = authenticate_request(
+            conn,
+            authorization=authorization,
+            dev_user_id=dev_user_id,
+        )
     except HTTPException as exc:
-        write_login_failure(conn, error=exc, identity_source_name=identity_source(dev_user_id))
+        write_login_failure(
+            conn,
+            error=exc,
+            identity_source_name=identity_source(dev_user_id, authorization),
+        )
         raise
     write_audit(
         conn,
@@ -610,6 +739,89 @@ def create_download_url(
             detail={"code": "STORAGE_PROVIDER_UNAVAILABLE"},
         ) from exc
     return DownloadUrlResponse(url=intent.url)
+
+
+@router.post("/assets/{asset_id}/cached-url", response_model=DownloadUrlResponse)
+def create_cached_character_url(
+    asset_id: str,
+    conn: Database,
+    actor: AuthenticatedUser,
+) -> DownloadUrlResponse:
+    row = require_asset_access(
+        conn,
+        actor=actor,
+        asset_id=asset_id,
+        action="asset.character_cache.read",
+    )
+    cache_name, _ = _populate_character_cache(conn, row)
+    expires_at = str(int(time.time()) + int(DOWNLOAD_URL_EXPIRES_IN.total_seconds()))
+    signed_key = f"character-cache/{cache_name}"
+    signature = local_download_signature(
+        signed_key,
+        expires_at,
+        secret=settings_encryption_key(),
+    )
+    return DownloadUrlResponse(
+        url=(
+            f"{LOCAL_API_BASE_URL}/api/assets/character-cache/{cache_name}"
+            f"?expires={expires_at}&sig={signature}"
+        )
+    )
+
+
+@router.get("/assets/character-cache/{cache_name}")
+def read_cached_character_asset(cache_name: str, request: Request) -> Response:
+    expires_at = request.query_params.get("expires")
+    signature = request.query_params.get("sig")
+    signed_key = f"character-cache/{cache_name}"
+    if (
+        not expires_at
+        or not signature
+        or not expires_at.isdigit()
+        or len(expires_at) > 20
+        or int(expires_at) < int(time.time())
+        or not hmac.compare_digest(
+            signature,
+            local_download_signature(
+                signed_key,
+                expires_at,
+                secret=settings_encryption_key(),
+            ),
+        )
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "CHARACTER_CACHE_FORBIDDEN"},
+        )
+    try:
+        cache_path = _character_cache_path(cache_name)
+    except StorageBackendUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "CHARACTER_CACHE_UNAVAILABLE"},
+        ) from exc
+    if not cache_path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "CHARACTER_CACHE_NOT_FOUND"},
+        )
+    try:
+        content = cache_path.read_bytes()
+    except OSError as exc:
+        logger.error(
+            "character cache read failed for file %s: %s",
+            cache_name,
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "CHARACTER_CACHE_UNAVAILABLE"},
+        ) from exc
+    return Response(
+        content=content,
+        media_type=CHARACTER_CACHE_CONTENT_TYPES[cache_path.suffix],
+        headers={"Cache-Control": "private, max-age=900"},
+    )
 
 
 @router.get("/audit-logs", response_model=list[AuditLogResponse])

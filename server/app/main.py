@@ -18,11 +18,14 @@ from app.character_routes import router as character_router
 from app.first_frame_routes import router as first_frame_router
 from app.generation_routes import router as generation_router
 from app.media_routes import router as media_router
+from app.payment_routes import router as payment_router
 from app.rbac_routes import router as rbac_router
+from app.recharge_routes import router as recharge_router
 from app.settings import SettingsUnavailableError
 from app.settings_routes import router as settings_router
 from app.simple_character_routes import router as character_simple_router
 from app.source_frame_routes import router as source_frame_router
+from app.wallet_routes import router as wallet_router
 
 # Non-loopback hosts that are still accepted: TestClient uses "testclient",
 # and "localhost" is a loopback alias but not parseable as an IP address.
@@ -103,10 +106,13 @@ app.add_middleware(
     ],
     allow_credentials=False,
     allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"],
-    allow_headers=["Content-Type", "X-Dev-User-Id"],
+    allow_headers=["Authorization", "Content-Type", "X-Dev-User-Id"],
 )
 app.include_router(generation_router)
 app.include_router(rbac_router)
+app.include_router(payment_router)
+app.include_router(recharge_router)
+app.include_router(wallet_router)
 app.include_router(settings_router)
 app.include_router(media_router)
 app.include_router(analysis_router)

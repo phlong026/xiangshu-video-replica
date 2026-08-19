@@ -16,7 +16,11 @@ test("@smoke starts the isolated desktop shell with clean browser evidence", asy
     await expect(
       page.getByRole("navigation", { name: "主导航" }),
     ).toBeVisible();
-    await expect(page.getByRole("status")).toHaveText("本地服务已连接");
+    const serviceStatus = page.getByRole("status", {
+      name: "本地服务已连接",
+    });
+    await expect(serviceStatus).toBeVisible();
+    await expect(serviceStatus).toHaveText("");
     await runWorkerOnce({ label: "smoke-empty-queue" });
     await page.screenshot({
       path: path.join(runDir, "screenshots", "1584x1024-smoke.png"),

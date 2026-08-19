@@ -1273,14 +1273,21 @@ export async function downloadCharacterAsset(
   assetId: string,
   filename: string,
 ): Promise<void> {
-  const download = await getAssetDownloadUrl(assetId);
-  // The download URL is absolute and pre-signed, so fetch it directly instead
-  // of going through requestApi (which would concatenate the API base again).
-  const response = await fetch(download.url);
-  if (!response.ok) {
-    throw new Error(`下载人物视角图失败（${response.status}）`);
+  const download = await getCachedCharacterAssetUrl(assetId);
+  const controller = new AbortController();
+  const timeout = window.setTimeout(
+    () => controller.abort(),
+    CLOUD_OP_TIMEOUT_MS,
+  );
+  try {
+    const response = await fetch(download.url, { signal: controller.signal });
+    if (!response.ok) {
+      throw new Error(`下载人物视角图失败（${response.status}）`);
+    }
+    downloadBlob(await response.blob(), filename);
+  } finally {
+    window.clearTimeout(timeout);
   }
-  downloadBlob(await response.blob(), filename);
 }
 
 export async function getProjectMainCharacter(
@@ -1531,6 +1538,17 @@ export async function getAssetDownloadUrl(
   return requestApiJson<DownloadUrl>(
     `/api/assets/${encodeURIComponent(assetId)}/download-url`,
     "读取源画面失败",
+    { method: "POST" },
+    CLOUD_OP_TIMEOUT_MS,
+  );
+}
+
+export async function getCachedCharacterAssetUrl(
+  assetId: string,
+): Promise<DownloadUrl> {
+  return requestApiJson<DownloadUrl>(
+    `/api/assets/${encodeURIComponent(assetId)}/cached-url`,
+    "读取人物图片缓存失败",
     { method: "POST" },
     CLOUD_OP_TIMEOUT_MS,
   );

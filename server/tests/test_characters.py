@@ -138,7 +138,7 @@ def test_characters_migration_creates_library_tables(db_path: Path) -> None:
             ).fetchall()
         }
 
-    assert version == "021_generation_batch_display_name"
+    assert version == "023_zpay_provider"
     assert {
         "characters",
         "project_main_characters",

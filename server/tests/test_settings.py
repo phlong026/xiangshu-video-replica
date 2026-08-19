@@ -122,7 +122,7 @@ def test_settings_migration_creates_tables_and_defaults(tmp_path: Path, settings
             """
         ).fetchone()
 
-    assert version == "021_generation_batch_display_name"
+    assert version == "023_zpay_provider"
     assert {"provider_settings", "runtime_settings"}.issubset(tables)
     assert dict(runtime) == {
         "max_generation_count_per_batch": 4,
@@ -606,6 +606,63 @@ def test_admin_can_update_runtime_limits(client: TestClient) -> None:
         "max_concurrent_h3_tasks": 4,
         "active_storage_provider": "cos",
     }
+
+
+def test_admin_can_read_and_update_internal_billing_settings(client: TestClient) -> None:
+    initial = client.get("/api/admin/settings", headers=admin_headers())
+    updated = client.patch(
+        "/api/admin/settings/billing",
+        headers=admin_headers(),
+        json={
+            "internal_base_unit_price_fen": 1000,
+            "min_recharge_fen": 20000,
+            "recharge_step_fen": 2000,
+        },
+    )
+
+    assert initial.status_code == 200
+    assert initial.json()["billing"] == {
+        "internal_base_unit_price_fen": 1000,
+        "charged_unit_price_fen": 1000,
+        "min_recharge_fen": 10000,
+        "recharge_step_fen": 1000,
+    }
+    assert updated.status_code == 200
+    assert updated.json() == {
+        "internal_base_unit_price_fen": 1000,
+        "charged_unit_price_fen": 1000,
+        "min_recharge_fen": 20000,
+        "recharge_step_fen": 2000,
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("internal_base_unit_price_fen", True),
+        ("min_recharge_fen", "10000"),
+        ("recharge_step_fen", 1000.0),
+    ],
+)
+def test_billing_settings_api_rejects_coerced_integer_values(
+    client: TestClient,
+    field: str,
+    value: object,
+) -> None:
+    payload: dict[str, object] = {
+        "internal_base_unit_price_fen": 1000,
+        "min_recharge_fen": 10000,
+        "recharge_step_fen": 1000,
+    }
+    payload[field] = value
+
+    response = client.patch(
+        "/api/admin/settings/billing",
+        headers=admin_headers(),
+        json=payload,
+    )
+
+    assert response.status_code == 422
 
 
 def test_admin_cannot_enable_removed_oss_storage(client: TestClient) -> None:

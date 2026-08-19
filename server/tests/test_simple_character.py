@@ -4,12 +4,16 @@ import hashlib
 import json
 import sqlite3
 import struct
+import time
 import zlib
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
+from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 import app.rbac_routes as rbac_routes
@@ -385,6 +389,95 @@ def test_contact_sheet_download_url_allowed_for_employees(
         )
         assert response.status_code == 200, response.text
         assert response.json()["url"]
+
+
+def test_character_cache_downloads_once_and_serves_local_copy(
+    client: TestClient,
+    storage: FakeStorageAdapter,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    created = generate_global(client).json()
+    asset_id = created["contact_sheet_asset_id"]
+    monkeypatch.setenv("VIDEO_REPLICA_HOME", str(tmp_path / "video-replica-home"))
+    monkeypatch.setenv("VIDEO_REPLICA_SETTINGS_KEY", Fernet.generate_key().decode("ascii"))
+    monkeypatch.setattr(rbac_routes, "storage_for_asset", lambda conn, storage_uri: storage)
+
+    get_object_calls: list[str] = []
+    original_get_object = storage.get_object
+
+    def counted_get_object(key: str) -> bytes:
+        get_object_calls.append(key)
+        time.sleep(0.05)
+        return original_get_object(key)
+
+    monkeypatch.setattr(storage, "get_object", counted_get_object)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        requests = [
+            executor.submit(
+                client.post,
+                f"/api/assets/{asset_id}/cached-url",
+                headers=headers("employee_1"),
+            )
+            for _ in range(2)
+        ]
+        first, second = (request.result() for request in requests)
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert len(get_object_calls) == 1
+
+    # Drop process-only state and make any cloud read fail: the next request
+    # must still succeed from the file cache, as it would after an app restart.
+    with rbac_routes.CHARACTER_CACHE_LOCKS_GUARD:
+        rbac_routes.CHARACTER_CACHE_LOCKS.clear()
+
+    def unexpected_storage(*_args: object) -> FakeStorageAdapter:
+        raise AssertionError("cached character image must not be downloaded again")
+
+    monkeypatch.setattr(rbac_routes, "storage_for_asset", unexpected_storage)
+
+    auditor = client.post(
+        f"/api/assets/{asset_id}/cached-url",
+        headers=headers("auditor_1"),
+    )
+    assert auditor.status_code == 200, auditor.text
+    assert len(get_object_calls) == 1
+
+    parsed = urlsplit(second.json()["url"])
+    cached = client.get(f"{parsed.path}?{parsed.query}")
+    assert cached.status_code == 200
+    assert cached.content == b"contact-sheet-image"
+    assert cached.headers["content-type"].startswith("image/png")
+
+    invalid_signature = client.get(f"{parsed.path}?{parsed.query}x")
+    assert invalid_signature.status_code == 403
+
+
+def test_character_cache_rejects_source_with_wrong_hash(
+    client: TestClient,
+    storage: FakeStorageAdapter,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    created = generate_global(client).json()
+    asset_id = created["contact_sheet_asset_id"]
+    cache_home = tmp_path / "video-replica-home"
+    monkeypatch.setenv("VIDEO_REPLICA_HOME", str(cache_home))
+    monkeypatch.setenv("VIDEO_REPLICA_SETTINGS_KEY", Fernet.generate_key().decode("ascii"))
+    monkeypatch.setattr(rbac_routes, "storage_for_asset", lambda conn, storage_uri: storage)
+    monkeypatch.setattr(storage, "get_object", lambda key: b"corrupted-image")
+
+    response = client.post(
+        f"/api/assets/{asset_id}/cached-url",
+        headers=headers("employee_1"),
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "CHARACTER_CACHE_UNAVAILABLE"
+    cache_root = cache_home / "storage-cache" / "character-images"
+    assert not cache_root.exists() or not any(cache_root.iterdir())
 
 
 def test_contact_sheet_provider_failure_falls_back_to_placeholder(

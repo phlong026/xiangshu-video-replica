@@ -22,7 +22,6 @@ import {
   readAnalysisPayload,
   readFirstFrameSelectionPayload,
   reviseGenerationPrompt,
-  rewriteProjectScript,
   type SourceFrameCharacterFeatures,
   saveShotCards,
   selectCharacterReferences,
@@ -51,8 +50,8 @@ const DEFAULT_FEATURE_SUGGESTION: SourceFrameCharacterFeatures = {
   body_completeness: "UPPER_BODY",
 };
 
-// 项目详情流程页 = 「解析提示词 → 源画面与人物 → 首帧与文案 → 提交生成」
-// 四段自上而下滚动。人物参考在角色与源画面就绪后全自动匹配（无人工确认）；
+// 项目详情流程页 = 「解析提示词 → 源画面与人物 → 人物置换首帧 → 自定义文案 → 提交生成」
+// 五段自上而下滚动。人物参考在角色与源画面就绪后全自动匹配（无人工确认）；
 // stale 级联（角色/源画面变 → 清参考与首帧）、幂等建批、付费红线全部沿用
 // 快速生成动线的服务端语义。
 export function ProjectDetailFlow({
@@ -80,14 +79,14 @@ export function ProjectDetailFlow({
     useState<AnalysisVersion | null>(null);
   const [originalScript, setOriginalScript] = useState("");
   const [scriptText, setScriptText] = useState("");
-  const [scriptError, setScriptError] = useState("");
-  const [isRewriting, setIsRewriting] = useState(false);
+  const [firstFrameGenerationBusy, setFirstFrameGenerationBusy] =
+    useState(false);
   const [generationPhase, setGenerationPhase] =
     useState<GenerationPhase>("idle");
   const [generationError, setGenerationError] = useState("");
   const [generationMessage, setGenerationMessage] = useState("");
-  // 用户在第一段编辑并另存过的提示词文本：提交时基于最新编译版本再套用，
-  // 保证文案/首帧变化不丢失，同时用户的手工编辑生效。
+  // 用户在第一段编辑并另存过的提示词文本。自定义文案未变时提交会复用；
+  // 文案变化时必须让服务端重新编译，避免旧的完整 Prompt 覆盖新文案。
   const [revisedPromptText, setRevisedPromptText] = useState<string | null>(
     null,
   );
@@ -105,9 +104,11 @@ export function ProjectDetailFlow({
   const firstFrameAssetId = firstFramePayload?.first_frame_asset_id ?? null;
   const isUpstreamBusy = upstreamBusyRef.current.size > 0;
   const isBusy = generationPhase === "running" || isUpstreamBusy;
+  const scriptWasEdited = scriptText.trim() !== originalScript.trim();
   const canStart =
     Boolean(firstFrameAssetId) &&
     !isBusy &&
+    !firstFrameGenerationBusy &&
     !readOnly &&
     generationPhase !== "done";
 
@@ -179,7 +180,7 @@ export function ProjectDetailFlow({
     };
   }, [project.id]);
 
-  // 拆解就绪后预填文案：默认原文案；用户可二创或直接改写。
+  // 拆解就绪后把原文案直接带入自定义文案框，用户可在原内容上修改。
   // readAnalysisPayload 解包服务端落库的 payload.analysis 包装结构。
   useEffect(() => {
     if (!analysisVersion) {
@@ -291,7 +292,7 @@ export function ProjectDetailFlow({
     const latest = await getLatestGenerationPrompt(project.id);
     if (!latest.version) {
       throw new Error(
-        "还没有已编译的 Prompt 版本。可先在第四段提交一次生成，之后再编辑另存。",
+        "还没有已编译的 Prompt 版本。可先在第五段提交一次生成，之后再编辑另存。",
       );
     }
     await reviseGenerationPrompt(project.id, {
@@ -302,35 +303,6 @@ export function ProjectDetailFlow({
     setPreview((current) =>
       current ? { ...current, prompt_text: text } : current,
     );
-  }
-
-  async function handleRewriteScript() {
-    const base = scriptText.trim() || originalScript.trim();
-    if (!base) {
-      setScriptError("没有可改写的文案，请先完成视频拆解。");
-      return;
-    }
-    markUpstreamBusy("rewrite", true);
-    setIsRewriting(true);
-    setScriptError("");
-    try {
-      const result = await rewriteProjectScript(project.id, base);
-      setScriptText(result.rewritten_text);
-    } catch (rewriteError) {
-      setScriptError(
-        rewriteError instanceof Error
-          ? rewriteError.message
-          : "AI 改写失败，请稍后重试。",
-      );
-    } finally {
-      setIsRewriting(false);
-      markUpstreamBusy("rewrite", false);
-    }
-  }
-
-  function restoreOriginalScript() {
-    setScriptText(originalScript);
-    setScriptError("");
   }
 
   async function ensureShotCardVersion(): Promise<string> {
@@ -354,14 +326,13 @@ export function ProjectDetailFlow({
   }
 
   // 幂等复用条件在快速生成基础上加文本比较：同镜头卡版本且文案未变时
-  // 不重复建版本；文案与原文一致按 original 落库，任何修改（含二创结果）
-  // 按 custom 另存。
+  // 不重复建版本；文案与原文一致按 original 落库，任何修改按 custom 另存。
   async function ensureScriptVersion(
     shotCardVersionId: string,
   ): Promise<string> {
     const text = scriptText.trim();
     if (!text) {
-      throw new Error("口播文案为空，请先填写或恢复原文案。");
+      throw new Error("自定义文案为空，请填写文案后再提交生成。");
     }
     const source = text === originalScript.trim() ? "original" : "custom";
     const latest = await getLatestScriptVersion(project.id);
@@ -393,7 +364,7 @@ export function ProjectDetailFlow({
   }
 
   async function handleStartGeneration() {
-    if (!firstFrameAssetId || isBusy || readOnly) {
+    if (!firstFrameAssetId || isBusy || firstFrameGenerationBusy || readOnly) {
       return;
     }
     setGenerationPhase("running");
@@ -410,10 +381,10 @@ export function ProjectDetailFlow({
         output_duration_seconds: duration,
         resolution: "768P",
       });
-      // 用户在第一段编辑另存过提示词时，把编辑文本套用到本次编译结果的
-      // 之上（revise 基于最新编译版本），提交的仍是用户确认过的全文。
+      // 只有文案未改时才复用第一段保存的完整 Prompt。自定义文案变化后，
+      // compiled 已包含新文本，不能再被此前保存的旧 Prompt 覆盖。
       let promptVersionId = compiled.id;
-      if (revisedPromptText?.trim()) {
+      if (revisedPromptText?.trim() && !scriptWasEdited) {
         const revised = await reviseGenerationPrompt(project.id, {
           base_prompt_version_id: compiled.id,
           prompt_text: revisedPromptText,
@@ -499,7 +470,7 @@ export function ProjectDetailFlow({
         <div>
           <h2>生成流程</h2>
           <p className="flow-header__note">
-            解析 → 源画面人物 → 首帧文案 → 提交生成
+            解析 → 源画面人物 → 人物置换首帧 → 自定义文案 → 提交生成
           </p>
         </div>
         <button
@@ -537,8 +508,13 @@ export function ProjectDetailFlow({
         ) : null}
       </fieldset>
 
-      <fieldset className="flow-step">
+      <fieldset className="flow-step" disabled={firstFrameGenerationBusy}>
         <legend>② 源画面与人物</legend>
+        {firstFrameGenerationBusy ? (
+          <p className="status-note">
+            当前首帧正在使用这组源画面与人物，生成结束前暂不能更改。
+          </p>
+        ) : null}
         <CharacterSelection
           onBusyChange={(busy) => markUpstreamBusy("character", busy)}
           onVersionChange={handleCharacterChange}
@@ -558,15 +534,15 @@ export function ProjectDetailFlow({
       </fieldset>
 
       <fieldset className="flow-step">
-        <legend>③ 首帧与文案</legend>
+        <legend>③ 人物置换首帧</legend>
         {referenceStatus ? (
           referenceStatus
         ) : (
-          <p className="flow-hint">确认源画面与角色后自动生成首帧。</p>
+          <p className="flow-hint">确认源画面与角色后，即可生成首帧。</p>
         )}
         {sourceFrameSelection ? (
           <FirstFrameSelection
-            onBusyChange={(busy) => markUpstreamBusy("first-frame", busy)}
+            onBusyChange={setFirstFrameGenerationBusy}
             onSelectionChange={handleFirstFrameChange}
             projectId={project.id}
             readOnly={readOnly}
@@ -575,47 +551,34 @@ export function ProjectDetailFlow({
             sourceFrameSelectionId={sourceFrameSelection.id}
           />
         ) : null}
+      </fieldset>
+
+      <fieldset className="flow-step">
+        <legend>④ 自定义文案</legend>
         <div className="flow-script">
-          <div className="flow-script__head">
-            <h3>口播文案</h3>
-            <div className="flow-script__actions">
-              <button
-                className="secondary-button"
-                disabled={isRewriting || readOnly || !originalScript.trim()}
-                onClick={restoreOriginalScript}
-                type="button"
-              >
-                使用原文案
-              </button>
-              <button
-                className="secondary-button"
-                disabled={isRewriting || readOnly}
-                onClick={() => void handleRewriteScript()}
-                type="button"
-              >
-                {isRewriting ? "AI 二创中" : "AI 二创改写"}
-              </button>
-            </div>
-          </div>
+          <p className="flow-hint">
+            已带入拆解原文，可直接修改；不修改则沿用原文。提交时会把当前内容重新编译进视频
+            Prompt。
+          </p>
           <textarea
-            aria-label="口播文案"
+            aria-label="自定义文案"
             disabled={readOnly}
             onChange={(event) => setScriptText(event.target.value)}
             value={scriptText}
           />
-          {scriptError ? (
-            <p className="settings-error" role="alert">
-              {scriptError}
-            </p>
-          ) : null}
         </div>
       </fieldset>
 
       <fieldset className="flow-step" disabled={!firstFrameAssetId}>
-        <legend>④ 提交生成</legend>
+        <legend>⑤ 提交生成</legend>
         {firstFrameAssetId ? (
           <>
-            {revisedPromptText ? (
+            {scriptWasEdited ? (
+              <p className="status-note">
+                将以当前自定义文案重新编译视频 Prompt；第一步保存过的旧 Prompt
+                不会覆盖本次文案。
+              </p>
+            ) : revisedPromptText ? (
               <p className="status-note">
                 将以你在第一段编辑后的提示词文本提交。
               </p>
