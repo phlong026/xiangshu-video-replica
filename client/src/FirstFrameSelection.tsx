@@ -41,14 +41,10 @@ function getOrStartFirstFrameGeneration(
   }
   const pending = { promise: start(), startedAt: Date.now() };
   pendingFirstFrameGenerations.set(projectId, pending);
-  void pending.promise.then(
-    () => {
-      if (pendingFirstFrameGenerations.get(projectId) === pending) {
-        pendingFirstFrameGenerations.delete(projectId);
-      }
-    },
-    () => {},
-  );
+  // Keep a resolved request attachable until a mounted page has loaded its
+  // result. A route/input refresh can invalidate the first watcher after the
+  // HTTP response but before React consumes it.
+  void pending.promise.catch(() => {});
   return pending;
 }
 
@@ -267,6 +263,12 @@ export function FirstFrameSelection({
         }
         setStatus("候选首帧已更新，正在读取候选…");
         await load(generated, true);
+        if (
+          watchId === generationWatchId.current &&
+          pendingFirstFrameGenerations.get(projectId) === pending
+        ) {
+          pendingFirstFrameGenerations.delete(projectId);
+        }
       } catch (requestError) {
         if (watchId !== generationWatchId.current) {
           return;

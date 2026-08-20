@@ -227,6 +227,75 @@ describe("FirstFrameSelection", () => {
     );
   });
 
+  it("reattaches a resolved generation until the replacement page consumes it", async () => {
+    let resolveGeneration:
+      | ((version: typeof candidatesVersion) => void)
+      | undefined;
+    const pendingGeneration = new Promise<typeof candidatesVersion>(
+      (resolve) => {
+        resolveGeneration = resolve;
+      },
+    );
+    let releaseStaleLoad:
+      | ((value: { version: typeof candidatesVersion; stale: false }) => void)
+      | undefined;
+    const staleLoad = new Promise<{
+      version: typeof candidatesVersion;
+      stale: false;
+    }>((resolve) => {
+      releaseStaleLoad = resolve;
+    });
+    vi.mocked(generateFirstFrames).mockReturnValue(pendingGeneration);
+
+    const firstPage = render(
+      <FirstFrameSelection
+        projectId="project-1"
+        referenceSelection={referenceSelection}
+        simplified
+        sourceFrameSelectionId="source-selection-1"
+      />,
+    );
+    await screen.findByText("人物置换首帧");
+    fireEvent.click(screen.getByRole("button", { name: "重新生成候选首帧" }));
+    await screen.findByRole("progressbar", {
+      name: "人物置换首帧生成进度",
+    });
+
+    vi.mocked(getLatestProjectFirstFrames).mockReturnValueOnce(staleLoad);
+    await act(async () => {
+      resolveGeneration?.(candidatesVersion);
+      await pendingGeneration;
+    });
+    await waitFor(() =>
+      expect(getLatestProjectFirstFrames).toHaveBeenCalledTimes(2),
+    );
+
+    firstPage.unmount();
+    render(
+      <FirstFrameSelection
+        projectId="project-1"
+        referenceSelection={referenceSelection}
+        simplified
+        sourceFrameSelectionId="source-selection-1"
+      />,
+    );
+
+    expect(
+      await screen.findByText("已自动预选第一张候选，请查看后单击确认。"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /首帧候选 1/ })).toBeChecked();
+    expect(
+      screen.queryByRole("progressbar", {
+        name: "人物置换首帧生成进度",
+      }),
+    ).toBeNull();
+
+    await act(async () => {
+      releaseStaleLoad?.({ version: candidatesVersion, stale: false });
+      await staleLoad;
+    });
+  });
+
   it("shows a background generation failure when the user returns", async () => {
     let rejectGeneration: ((reason: Error) => void) | undefined;
     const pendingGeneration = new Promise<typeof candidatesVersion>(
