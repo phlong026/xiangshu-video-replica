@@ -118,6 +118,26 @@ def test_runbook_provisions_a_writable_sqlite_parent_for_the_service_user() -> N
     )
 
 
+def test_runbook_keeps_release_tree_traversable_by_nginx() -> None:
+    runbook = read_repo_file("docs/内部运营P0单机部署与验收记录.md")
+
+    assert (
+        "sudo install -d -o video-replica -g video-replica -m 0755 "
+        "/opt/video-replica/releases\n" in runbook
+    )
+    assert (
+        "sudo install -d -o video-replica -g video-replica -m 0755 \\\n"
+        "  /opt/video-replica/releases/<AUDITED_COMMIT>\n" in runbook
+    )
+
+
+def test_runbook_grants_nginx_worker_read_access_to_basic_auth_file() -> None:
+    runbook = read_repo_file("docs/内部运营P0单机部署与验收记录.md")
+
+    assert "sudo chown root:www-data /etc/nginx/video-replica-admin.htpasswd\n" in runbook
+    assert "sudo chmod 0640 /etc/nginx/video-replica-admin.htpasswd\n" in runbook
+
+
 def test_fake_acceptance_runner_is_local_only_and_declares_external_gaps() -> None:
     script_path = REPO_ROOT / "scripts/p0_acceptance_evidence.py"
     module = load_acceptance_module()
