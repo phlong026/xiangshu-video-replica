@@ -142,9 +142,9 @@ export function FirstFrameSelection({
         setLatestVersionId(latest?.id ?? "");
         setHistory(versions);
         setVersion(displayVersion);
-        setSelectedAssetId("");
         setPreviewUrls({});
         if (!displayVersion) {
+          setSelectedAssetId("");
           setStatus(
             latestState.stale || selection.stale
               ? "上游输入已更新，请重新生成人物置换首帧。"
@@ -160,6 +160,7 @@ export function FirstFrameSelection({
         }
         const payload = readFirstFrameCandidates(displayVersion);
         if (!payload) {
+          setSelectedAssetId("");
           setError("首帧候选数据格式无效，请重新生成。");
           return;
         }
@@ -174,9 +175,20 @@ export function FirstFrameSelection({
           !(latestState.stale || selection.stale) &&
           displayVersion.id === latest?.id &&
           !currentSelection;
-        if (canAutoSelect) {
-          setSelectedAssetId(payload.candidates[0]?.asset_id ?? "");
-        }
+        const canPreserveSelection =
+          !(latestState.stale || selection.stale) &&
+          displayVersion.id === latest?.id;
+        setSelectedAssetId((currentAssetId) => {
+          if (canAutoSelect) {
+            return payload.candidates[0]?.asset_id ?? "";
+          }
+          return canPreserveSelection &&
+            payload.candidates.some(
+              (candidate) => candidate.asset_id === currentAssetId,
+            )
+            ? currentAssetId
+            : "";
+        });
         if (latestState.stale || selection.stale) {
           setStatus("上游输入已更新，请重新生成人物置换首帧。");
         } else if (displayVersion.id !== latest?.id) {

@@ -605,6 +605,40 @@ describe("FirstFrameSelection", () => {
     );
   });
 
+  it("preserves the generated candidate selection across a same-version reload", async () => {
+    const firstSelectionChange = vi.fn();
+    const { rerender } = render(
+      <FirstFrameSelection
+        onSelectionChange={firstSelectionChange}
+        projectId="project-1"
+        referenceSelection={referenceSelection}
+        sourceFrameSelectionId="source-selection-1"
+      />,
+    );
+    await screen.findByText("人物置换首帧");
+    fireEvent.click(screen.getByRole("button", { name: "重新生成候选首帧" }));
+    await screen.findByText("已自动预选第一张候选，请查看后单击确认。");
+    expect(screen.getByRole("radio", { name: /首帧候选 1/ })).toBeChecked();
+
+    const callsBeforeReload = vi.mocked(getLatestProjectFirstFrames).mock.calls
+      .length;
+    rerender(
+      <FirstFrameSelection
+        onSelectionChange={vi.fn()}
+        projectId="project-1"
+        referenceSelection={referenceSelection}
+        sourceFrameSelectionId="source-selection-1"
+      />,
+    );
+    await waitFor(() =>
+      expect(getLatestProjectFirstFrames).toHaveBeenCalledTimes(
+        callsBeforeReload + 1,
+      ),
+    );
+
+    expect(screen.getByRole("radio", { name: /首帧候选 1/ })).toBeChecked();
+  });
+
   // P0-03-04：旧确认与新生成候选不一致时同样预选第一张，重新确认保持单击。
   it("auto-selects the first candidate after regenerating over a stale confirmation (P0-03-04)", async () => {
     vi.mocked(getLatestProjectFirstFrameSelection).mockResolvedValue({
