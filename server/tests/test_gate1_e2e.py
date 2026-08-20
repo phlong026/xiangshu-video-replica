@@ -274,6 +274,21 @@ def test_port_probe_accepts_a_recently_released_address(
     gate1_e2e._require_available_port("127.0.0.1", 8000)
 
 
+def test_gate1_api_port_accepts_a_safe_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("GATE1_API_PORT", raising=False)
+    assert gate1_e2e._gate1_api_port() == 8000
+
+    monkeypatch.setenv("GATE1_API_PORT", "18000")
+    assert gate1_e2e._gate1_api_port() == 18000
+
+    for value in ("80", "5173", "65536", "not-a-port"):
+        monkeypatch.setenv("GATE1_API_PORT", value)
+        with pytest.raises(ValueError, match="GATE1_API_PORT"):
+            gate1_e2e._gate1_api_port()
+
+
 def test_generate_test_media_uses_deterministic_ffmpeg_outputs(
     tmp_path: Path,
 ) -> None:
@@ -377,17 +392,22 @@ def test_gate1_runtime_environment_forces_isolated_desktop_auth(
     monkeypatch.setenv("VIDEO_REPLICA_AUTH_MODE", "internal")
     monkeypatch.setenv("VIDEO_REPLICA_ALLOW_DEV_IDENTITY_HEADER", "1")
     monkeypatch.setenv("VITE_GENERATION_PROVIDER", "metaso")
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://production.example.com")
 
     environment = gate1_e2e._gate1_runtime_environment(
         database_path=tmp_path / "gate1.sqlite3",
         storage_root=tmp_path / "storage",
         settings_key="test-settings-key",
         fake_h3_result_path=tmp_path / "reference.mp4",
+        api_url="http://127.0.0.1:18000",
     )
 
     assert environment["VIDEO_REPLICA_AUTH_MODE"] == "desktop"
     assert environment["VIDEO_REPLICA_ALLOW_DEV_IDENTITY_HEADER"] == "0"
     assert environment["VITE_GENERATION_PROVIDER"] == "fake_h3"
+    assert environment["VITE_API_BASE_URL"] == "http://127.0.0.1:18000"
+    assert environment["VIDEO_REPLICA_LOCAL_API_BASE_URL"] == "http://127.0.0.1:18000"
+    assert environment["PUBLIC_BASE_URL"] == ""
 
 
 def test_run_metadata_records_whether_the_suite_is_filtered(tmp_path: Path) -> None:

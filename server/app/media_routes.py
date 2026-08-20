@@ -33,13 +33,39 @@ from app.storage import (
 router = APIRouter(prefix="/api/assets", tags=["media"])
 LOCAL_API_BASE_URL = "http://127.0.0.1:8000"
 PUBLIC_BASE_URL_ENV = "PUBLIC_BASE_URL"
+LOCAL_API_BASE_URL_ENV = "VIDEO_REPLICA_LOCAL_API_BASE_URL"
+AUTH_MODE_ENV = "VIDEO_REPLICA_AUTH_MODE"
 
 
 def api_base_url() -> str:
     """Use the public HTTPS origin on a server and localhost for desktop fallback."""
     configured = os.environ.get(PUBLIC_BASE_URL_ENV, "").strip()
     if not configured:
-        return LOCAL_API_BASE_URL
+        local_configured = os.environ.get(LOCAL_API_BASE_URL_ENV, "").strip()
+        if not local_configured:
+            return LOCAL_API_BASE_URL
+        parsed_local = urlsplit(local_configured)
+        if (
+            os.environ.get(AUTH_MODE_ENV, "").strip() != "desktop"
+            or parsed_local.scheme != "http"
+            or parsed_local.hostname not in {"127.0.0.1", "localhost", "::1"}
+            or parsed_local.username is not None
+            or parsed_local.password is not None
+            or parsed_local.path not in {"", "/"}
+            or parsed_local.query
+            or parsed_local.fragment
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "LOCAL_API_BASE_URL_INVALID",
+                    "message": (
+                        "VIDEO_REPLICA_LOCAL_API_BASE_URL must be a loopback HTTP "
+                        "origin in desktop auth mode."
+                    ),
+                },
+            )
+        return f"http://{parsed_local.netloc}"
 
     parsed = urlsplit(configured)
     if (

@@ -49,6 +49,27 @@ def test_public_api_origin_rejects_a_missing_hostname(
     assert exc_info.value.detail["code"] == "PUBLIC_BASE_URL_INVALID"
 
 
+def test_api_base_url_allows_only_desktop_loopback_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("PUBLIC_BASE_URL", raising=False)
+    monkeypatch.setenv("VIDEO_REPLICA_AUTH_MODE", "desktop")
+    monkeypatch.setenv("VIDEO_REPLICA_LOCAL_API_BASE_URL", "http://127.0.0.1:18000/")
+
+    assert api_base_url() == "http://127.0.0.1:18000"
+
+    monkeypatch.setenv("VIDEO_REPLICA_AUTH_MODE", "internal")
+    with pytest.raises(HTTPException) as internal_exc:
+        api_base_url()
+    assert internal_exc.value.detail["code"] == "LOCAL_API_BASE_URL_INVALID"
+
+    monkeypatch.setenv("VIDEO_REPLICA_AUTH_MODE", "desktop")
+    monkeypatch.setenv("VIDEO_REPLICA_LOCAL_API_BASE_URL", "http://example.com:18000")
+    with pytest.raises(HTTPException) as external_exc:
+        api_base_url()
+    assert external_exc.value.detail["code"] == "LOCAL_API_BASE_URL_INVALID"
+
+
 @pytest.fixture()
 def db_path(tmp_path: Path) -> Iterator[Path]:
     path = tmp_path / "media.db"
