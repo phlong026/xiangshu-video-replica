@@ -213,3 +213,24 @@ Next step: Alembic compatibility check (T06)
    - PG DSN configuration (from this fixture)
    - Connection pool implementation
    - Async session management
+
+---
+
+## Section 14 Ledger Record
+
+```text
+任务/工作包：T03 / DB-01
+Owner / Reviewer：DB/QA（Agent 执行）/ chatgpt-codex-connector（PR #30 评审，2×P1 已修复）
+分支 / 基线 SHA：feat/customer-v3-t03-pg-fixture / 基线 7e75576（重建后）
+上游规格段落：docs/客户版任务清单-V3.md §1 T03 行、§12.1 DB-01
+改动文件：server/pyproject.toml、server/uv.lock、server/tests/test_postgres_migrations.py、scripts/pg-fixture.sh、T03-EVIDENCE.md、docs/客户版任务清单-V3.md（T03/DB-01 状态）
+失败测试或回归锁定：PG fixture 测试在无 PG 环境自动 skip（CI 可重复运行）
+实现结果：postgres:16-alpine 容器（端口 5433）+ 管理脚本 + 4 项连接测试全绿；CI 无 PG 时跳过不阻塞
+验证命令与通过数：uv run pytest tests/test_postgres_migrations.py → 4 passed（本地 PG）；CI Linux gate pass（skip 路径）
+证据层级：LOCALLY_VERIFIED
+安全与可观测性：测试凭据仅限本地 fixture（testuser/testpass，非生产）
+迁移与回滚：./scripts/pg-fixture.sh clean 可完全清除容器与卷
+外部授权记录：无
+未测试项：CI 内嵌 PG service（T05/T06 接入后启用真实断言）
+Lore 提交 SHA：见 PR #30 squash 合并 SHA
+```
