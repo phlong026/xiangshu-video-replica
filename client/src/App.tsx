@@ -389,14 +389,22 @@ function AppSidebar({
   navigationDisabled: boolean;
   onNavigate: (page: WorkspacePage) => void;
 }) {
+  const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
+  const userMenuRef = useRef<HTMLDivElement>(null);
   const items: Array<{
-    icon: "characters" | "projects" | "settings" | "tasks" | "wallet";
+    icon: "characters" | "projects" | "tasks";
     label: string;
     page: WorkspacePage;
   }> = [
     { icon: "projects", label: "项目", page: "projects" },
     { icon: "characters", label: "人物库", page: "characters" },
     { icon: "tasks", label: "任务记录", page: "tasks" },
+  ];
+  const userItems: Array<{
+    icon: "settings" | "wallet";
+    label: string;
+    page: WorkspacePage;
+  }> = [
     { icon: "wallet", label: "余额与充值", page: "wallet" },
     ...(currentUser.role === "admin"
       ? [
@@ -408,6 +416,42 @@ function AppSidebar({
         ]
       : []),
   ];
+
+  useEffect(() => {
+    if (!isUserMenuOpen) {
+      return;
+    }
+
+    function closeOutside(event: PointerEvent) {
+      if (!userMenuRef.current?.contains(event.target as Node)) {
+        setIsUserMenuOpen(false);
+      }
+    }
+
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key !== "Escape") {
+        return;
+      }
+      setIsUserMenuOpen(false);
+      userMenuRef.current
+        ?.querySelector<HTMLButtonElement>(".sidebar-user")
+        ?.focus();
+    }
+
+    document.addEventListener("pointerdown", closeOutside);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOutside);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [isUserMenuOpen]);
+
+  function navigateFromUserMenu(nextPage: WorkspacePage) {
+    setIsUserMenuOpen(false);
+    onNavigate(nextPage);
+  }
+
+  const isUserPage = activePage === "wallet" || activePage === "settings";
   return (
     <aside className="app-sidebar">
       <div className="app-brand">
@@ -444,16 +488,58 @@ function AppSidebar({
           </button>
         ))}
       </nav>
-      <div className="sidebar-user">
-        <span className="sidebar-user__avatar" aria-hidden="true">
-          <SidebarIcon name="user" />
-        </span>
-        <span>
-          <strong>{currentUser.display_name}</strong>
-          <small className="sidebar-user__subtitle">
-            {formatRole(currentUser.role)}
-          </small>
-        </span>
+      <div className="sidebar-user-menu" ref={userMenuRef}>
+        <button
+          aria-controls="sidebar-user-actions"
+          aria-expanded={isUserMenuOpen}
+          aria-label="用户菜单"
+          className={
+            isUserPage ? "sidebar-user sidebar-user--active" : "sidebar-user"
+          }
+          disabled={navigationDisabled}
+          onClick={() => setIsUserMenuOpen((isOpen) => !isOpen)}
+          type="button"
+        >
+          <span className="sidebar-user__avatar" aria-hidden="true">
+            <SidebarIcon name="user" />
+          </span>
+          <span className="sidebar-user__identity">
+            <strong>{currentUser.display_name}</strong>
+            <small className="sidebar-user__subtitle">
+              {formatRole(currentUser.role)}
+            </small>
+          </span>
+          <span className="sidebar-user__chevron" aria-hidden="true">
+            <svg aria-hidden="true" viewBox="0 0 16 16">
+              <path d="m4 6 4 4 4-4" />
+            </svg>
+          </span>
+        </button>
+        {isUserMenuOpen ? (
+          <fieldset
+            aria-label="用户功能"
+            className="sidebar-user__menu"
+            id="sidebar-user-actions"
+          >
+            {userItems.map((item) => (
+              <button
+                aria-current={activePage === item.page ? "page" : undefined}
+                className={
+                  activePage === item.page
+                    ? "sidebar-user__menu-item sidebar-user__menu-item--active"
+                    : "sidebar-user__menu-item"
+                }
+                disabled={navigationDisabled}
+                key={item.page}
+                onClick={() => navigateFromUserMenu(item.page)}
+                type="button"
+              >
+                <SidebarIcon name={item.icon} />
+                {item.label}
+              </button>
+            ))}
+          </fieldset>
+        ) : null}
       </div>
     </aside>
   );
