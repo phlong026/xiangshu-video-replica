@@ -583,6 +583,141 @@ describe("FirstFrameSelection", () => {
 
     expect(onSelectionChange).not.toHaveBeenCalledWith(confirmedSelection);
     expect(onBusyChange).toHaveBeenLastCalledWith(false);
+    expect(
+      screen.getByRole("button", { name: "重新生成候选首帧" }),
+    ).toBeInTheDocument();
+  });
+
+  it("accepts a confirmation response across a same-input reload", async () => {
+    const confirmedSelection = {
+      ...candidatesVersion,
+      id: "first-frame-selection-1",
+      kind: "first_frame_selection",
+      payload: {
+        first_frame_candidates_version_id: candidatesVersion.id,
+        first_frame_asset_id: "first-1",
+      },
+    };
+    let resolveConfirmation:
+      | ((selection: typeof confirmedSelection) => void)
+      | undefined;
+    const pendingConfirmation = new Promise<typeof confirmedSelection>(
+      (resolve) => {
+        resolveConfirmation = resolve;
+      },
+    );
+    vi.mocked(confirmFirstFrame).mockReturnValue(pendingConfirmation);
+    const onSelectionChange = vi.fn();
+    const { rerender } = render(
+      <FirstFrameSelection
+        onSelectionChange={onSelectionChange}
+        projectId="project-1"
+        referenceSelection={referenceSelection}
+        sourceFrameSelectionId="source-selection-1"
+      />,
+    );
+
+    await screen.findByAltText("首帧候选 1");
+    fireEvent.click(screen.getByRole("radio", { name: /首帧候选 1/ }));
+    fireEvent.click(screen.getByRole("button", { name: "确认用于 H3 的首帧" }));
+    await waitFor(() => expect(confirmFirstFrame).toHaveBeenCalledOnce());
+
+    rerender(
+      <FirstFrameSelection
+        onSelectionChange={onSelectionChange}
+        projectId="project-1"
+        referenceSelection={referenceSelection}
+        simplified
+        sourceFrameSelectionId="source-selection-1"
+      />,
+    );
+    await act(async () => {
+      resolveConfirmation?.(confirmedSelection);
+      await pendingConfirmation;
+    });
+
+    expect(onSelectionChange).toHaveBeenCalledWith(confirmedSelection);
+    expect(
+      screen.getByRole("button", { name: "重新生成候选首帧" }),
+    ).toBeInTheDocument();
+  });
+
+  it("ignores a confirmation response after the component unmounts", async () => {
+    const confirmedSelection = {
+      ...candidatesVersion,
+      id: "first-frame-selection-1",
+      kind: "first_frame_selection",
+      payload: {
+        first_frame_candidates_version_id: candidatesVersion.id,
+        first_frame_asset_id: "first-1",
+      },
+    };
+    let resolveConfirmation:
+      | ((selection: typeof confirmedSelection) => void)
+      | undefined;
+    const pendingConfirmation = new Promise<typeof confirmedSelection>(
+      (resolve) => {
+        resolveConfirmation = resolve;
+      },
+    );
+    vi.mocked(confirmFirstFrame).mockReturnValue(pendingConfirmation);
+    const onSelectionChange = vi.fn();
+    const page = render(
+      <FirstFrameSelection
+        onSelectionChange={onSelectionChange}
+        projectId="project-1"
+        referenceSelection={referenceSelection}
+        sourceFrameSelectionId="source-selection-1"
+      />,
+    );
+
+    await screen.findByAltText("首帧候选 1");
+    fireEvent.click(screen.getByRole("radio", { name: /首帧候选 1/ }));
+    fireEvent.click(screen.getByRole("button", { name: "确认用于 H3 的首帧" }));
+    await waitFor(() => expect(confirmFirstFrame).toHaveBeenCalledOnce());
+
+    page.unmount();
+    await act(async () => {
+      resolveConfirmation?.(confirmedSelection);
+      await pendingConfirmation;
+    });
+
+    expect(onSelectionChange).not.toHaveBeenCalledWith(confirmedSelection);
+  });
+
+  it("locks candidate controls while confirmation is pending", async () => {
+    let resolveConfirmation:
+      | ((selection: typeof candidatesVersion) => void)
+      | undefined;
+    const pendingConfirmation = new Promise<typeof candidatesVersion>(
+      (resolve) => {
+        resolveConfirmation = resolve;
+      },
+    );
+    vi.mocked(confirmFirstFrame).mockReturnValue(pendingConfirmation);
+    render(
+      <FirstFrameSelection
+        projectId="project-1"
+        referenceSelection={referenceSelection}
+        sourceFrameSelectionId="source-selection-1"
+      />,
+    );
+
+    await screen.findByAltText("首帧候选 1");
+    fireEvent.click(screen.getByRole("radio", { name: /首帧候选 1/ }));
+    fireEvent.click(screen.getByRole("button", { name: "确认用于 H3 的首帧" }));
+    await waitFor(() => expect(confirmFirstFrame).toHaveBeenCalledOnce());
+
+    expect(screen.getByRole("radio", { name: /首帧候选 1/ })).toBeDisabled();
+    expect(screen.getByRole("radio", { name: /首帧候选 2/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "版本 #2" })).toBeDisabled();
+
+    await act(async () => {
+      resolveConfirmation?.(candidatesVersion);
+      await pendingConfirmation;
+    });
+
+    expect(screen.getByRole("radio", { name: /首帧候选 1/ })).toBeEnabled();
   });
 
   it("ignores a legacy confirmation response after the source selection changes", async () => {

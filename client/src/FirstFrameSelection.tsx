@@ -87,9 +87,20 @@ export function FirstFrameSelection({
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const loadRequestId = useRef(0);
   const generationWatchId = useRef(0);
+  const confirmationLifecycleId = useRef(0);
   const onBusyChangeRef = useRef(onBusyChange);
   onBusyChangeRef.current = onBusyChange;
   const referenceSelectionId = referenceSelection?.id ?? "";
+  const confirmationBindingKey = [
+    projectId,
+    sourceFrameSelectionId ?? "",
+    referenceSelectionId,
+    legacyCharacterSelected ? "legacy" : "versioned",
+    version?.id ?? "",
+    selectedAssetId,
+  ].join("\0");
+  const confirmationBindingKeyRef = useRef(confirmationBindingKey);
+  confirmationBindingKeyRef.current = confirmationBindingKey;
   const canGenerate =
     Boolean(sourceFrameSelectionId) &&
     Boolean(referenceSelection || legacyCharacterSelected);
@@ -308,6 +319,14 @@ export function FirstFrameSelection({
     };
   }, [followGeneration, load, projectId]);
 
+  useEffect(
+    () => () => {
+      confirmationLifecycleId.current += 1;
+      onBusyChangeRef.current?.(false);
+    },
+    [],
+  );
+
   useEffect(() => {
     if (generationStartedAt === null) {
       return;
@@ -363,13 +382,17 @@ export function FirstFrameSelection({
       setError("请先加载并查看最新候选首帧预览，再进行确认。");
       return;
     }
-    const requestId = loadRequestId.current;
-    onBusyChange?.(true);
+    const submittedBindingKey = confirmationBindingKey;
+    const submittedLifecycleId = confirmationLifecycleId.current;
+    const isCurrentConfirmation = () =>
+      submittedLifecycleId === confirmationLifecycleId.current &&
+      submittedBindingKey === confirmationBindingKeyRef.current;
+    onBusyChangeRef.current?.(true);
     setIsSubmitting(true);
     setError("");
     try {
       const selection = await confirmFirstFrame(projectId, selectedAssetId);
-      if (requestId !== loadRequestId.current) {
+      if (!isCurrentConfirmation()) {
         return;
       }
       const selectedIndex = payload?.candidates.findIndex(
@@ -380,17 +403,17 @@ export function FirstFrameSelection({
       );
       onSelectionChange?.(selection);
     } catch (requestError) {
-      if (requestId !== loadRequestId.current) {
+      if (!isCurrentConfirmation()) {
         return;
       }
       setError(
         requestError instanceof Error ? requestError.message : "确认首帧失败。",
       );
     } finally {
-      if (requestId === loadRequestId.current) {
+      if (submittedLifecycleId === confirmationLifecycleId.current) {
         setIsSubmitting(false);
+        onBusyChangeRef.current?.(false);
       }
-      onBusyChange?.(false);
     }
   }
 
@@ -520,6 +543,7 @@ export function FirstFrameSelection({
                 checked={selectedAssetId === candidate.asset_id}
                 disabled={
                   readOnly ||
+                  isSubmitting ||
                   !previewUrls[candidate.asset_id] ||
                   isHistoryVersion
                 }
@@ -553,6 +577,7 @@ export function FirstFrameSelection({
                   : "history-version"
               }
               key={historyVersion.id}
+              disabled={isSubmitting}
               onClick={() => void load(historyVersion)}
               type="button"
             >
