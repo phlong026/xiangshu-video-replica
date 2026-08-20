@@ -242,7 +242,7 @@ async function previewAndDownloadResults(page, runDir) {
     await expect(resultButton).toHaveAttribute("aria-pressed", "true");
 
     // 客户视角结果舞台会自动签发并加载当前结果，不再提供手动“加载预览”。
-    const video = page.getByLabel(`结果预览 ${taskId}`);
+    const video = page.getByLabel(`结果预览 ${taskId}`, { exact: true });
     await expect(video).toBeVisible();
     await expect
       .poll(() => video.evaluate((element) => element.readyState))
@@ -309,7 +309,7 @@ async function verifyRestoredWorkspace(page, runDir) {
   await expect(resultButtons).toHaveCount(3);
   const firstTaskId = await resultTaskId(resultButtons.first());
   await expect(resultButtons.first()).toHaveAttribute("aria-pressed", "true");
-  const video = page.getByLabel(`结果预览 ${firstTaskId}`);
+  const video = page.getByLabel(`结果预览 ${firstTaskId}`, { exact: true });
   await expect
     .poll(() => video.evaluate((element) => element.readyState))
     .toBeGreaterThanOrEqual(2);
