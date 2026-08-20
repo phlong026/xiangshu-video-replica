@@ -1,0 +1,31 @@
+
+> video-replica-desktop@0.1.0 test:gate1
+> uv --cache-dir .uv-cache run --project server --locked python -m app.gate1_e2e
+
+INFO  [alembic.runtime.migration] Context impl SQLiteImpl.
+INFO  [alembic.runtime.migration] Will assume non-transactional DDL.
+INFO  [alembic.runtime.migration] Running upgrade  -> 001_core
+INFO  [alembic.runtime.migration] Running upgrade 001_core -> 002_settings
+INFO  [alembic.runtime.migration] Running upgrade 002_settings -> 003_characters
+INFO  [alembic.runtime.migration] Running upgrade 003_characters -> 004_generation
+INFO  [alembic.runtime.migration] Running upgrade 004_generation -> 005_remove_provider_result_url
+INFO  [alembic.runtime.migration] Running upgrade 005_remove_provider_result_url -> 006_active_storage_provider
+INFO  [alembic.runtime.migration] Running upgrade 006_active_storage_provider -> 007_local_storage_provider
+INFO  [alembic.runtime.migration] Running upgrade 007_local_storage_provider -> 008_provider_result_url
+INFO  [alembic.runtime.migration] Running upgrade 008_provider_result_url -> 009_idempotency_project_scope
+INFO  [alembic.runtime.migration] Running upgrade 009_idempotency_project_scope -> 010_add_asset_metadata
+INFO  [alembic.runtime.migration] Running upgrade 010_add_asset_metadata -> 011_add_archive_retry_count
+INFO  [alembic.runtime.migration] Running upgrade 011_add_archive_retry_count -> 012_character_domain
+INFO  [alembic.runtime.migration] Running upgrade 012_character_domain -> 013_character_identity_assets
+INFO  [alembic.runtime.migration] Running upgrade 013_character_identity_assets -> 014_character_image_generation
+INFO  [alembic.runtime.migration] Running upgrade 014_character_image_generation -> 015_character_asset_publication
+INFO  [alembic.runtime.migration] Running upgrade 015_character_asset_publication -> 016_character_reference_snapshot
+INFO  [alembic.runtime.migration] Running upgrade 016_character_reference_snapshot -> 017_generation_task_retry_lineage
+INFO  [alembic.runtime.migration] Running upgrade 017_generation_task_retry_lineage -> 018_remove_oss_storage
+INFO  [alembic.runtime.migration] Running upgrade 018_remove_oss_storage -> 019_character_simple_upload
+INFO  [alembic.runtime.migration] Running upgrade 019_character_simple_upload -> 020_deepseek_provider
+INFO  [alembic.runtime.migration] Running upgrade 020_deepseek_provider -> 021_generation_batch_display_name
+INFO  [alembic.runtime.migration] Running upgrade 021_generation_batch_display_name -> 022_internal_billing
+INFO  [alembic.runtime.migration] Running upgrade 022_internal_billing -> 023_zpay_provider
+INFO  [alembic.runtime.migration] Running upgrade 023_zpay_provider -> 024_wallet_backfill
+GATE1_EXIT=0

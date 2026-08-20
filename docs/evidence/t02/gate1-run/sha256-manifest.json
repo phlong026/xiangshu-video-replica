@@ -1,0 +1,208 @@
+{
+  "commit_sha": "f1f1a7afd4c0240fa5834fef3d31bd570d5fc636",
+  "files": [
+    {
+      "path": "browser/.last-run.json",
+      "sha256": "91d1c43004802cd49950d78eb11c8fa7d05da8ffffe219a8b13b2f561bc00903",
+      "size_bytes": 45
+    },
+    {
+      "path": "browser/positive-flow--positive-cr-13e9a-ores-three-completed-videos/trace.zip",
+      "sha256": "6896b68f4bc729902a0d8730d6fd3169d1827add0e624ce3742a813b33524a8b",
+      "size_bytes": 19061877
+    },
+    {
+      "path": "browser/positive-flow--positive-cr-13e9a-ores-three-completed-videos/video.webm",
+      "sha256": "537802273cb6ae19d052f71d43abdc9a44e034c71a0bcf7bbed9d84455a1cf69",
+      "size_bytes": 596961
+    },
+    {
+      "path": "browser/recovery-video/page@002bf2e6e31c796cc9e6ce60fb8cf666.webm",
+      "sha256": "7072fc461fcd1979198d55711876c67653af4743547f095dbc60ab6e09e141a4",
+      "size_bytes": 426823
+    },
+    {
+      "path": "browser/smoke--smoke-starts-the-is-d6fb0-with-clean-browser-evidence/trace.zip",
+      "sha256": "255a276293527b4ca388a84c741920801dbdd8b41bda2543eaa905dea8641838",
+      "size_bytes": 204249
+    },
+    {
+      "path": "browser/smoke--smoke-starts-the-is-d6fb0-with-clean-browser-evidence/video.webm",
+      "sha256": "b1ec4be2610ac4c2acd9b8b22c9e746458982e4e9fb9506c3577109679771a75",
+      "size_bytes": 60669
+    },
+    {
+      "path": "downloads/recovered-result.mp4",
+      "sha256": "c20de61b631085987d797cd23fe9266e255cb528f167178d612673528f51e87d",
+      "size_bytes": 4972085
+    },
+    {
+      "path": "downloads/result-1.mp4",
+      "sha256": "c20de61b631085987d797cd23fe9266e255cb528f167178d612673528f51e87d",
+      "size_bytes": 4972085
+    },
+    {
+      "path": "downloads/result-2.mp4",
+      "sha256": "c20de61b631085987d797cd23fe9266e255cb528f167178d612673528f51e87d",
+      "size_bytes": 4972085
+    },
+    {
+      "path": "downloads/result-3.mp4",
+      "sha256": "c20de61b631085987d797cd23fe9266e255cb528f167178d612673528f51e87d",
+      "size_bytes": 4972085
+    },
+    {
+      "path": "logs/1024x768-layout.json",
+      "sha256": "39cec40181d81b7a5392193216ce1d011e30bc87191b86216926992659f1957d",
+      "size_bytes": 229
+    },
+    {
+      "path": "logs/api.log",
+      "sha256": "2db220f087ed8dcbb8e84510522a175efe6579623fd6eac7fe15e516413873c8",
+      "size_bytes": 49167
+    },
+    {
+      "path": "logs/failure-recovery-summary.json",
+      "sha256": "922389c8cf8e43ac253abacb9fbb93e5f332f4c174f1252e38f69f6c01a3badd",
+      "size_bytes": 516
+    },
+    {
+      "path": "logs/media.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size_bytes": 0
+    },
+    {
+      "path": "logs/playwright-report.json",
+      "sha256": "00c1906143c49c6d55e640b009eabf83c076a7a3244ad90ae91e4ae1df14f8ae",
+      "size_bytes": 6474
+    },
+    {
+      "path": "logs/playwright.log",
+      "sha256": "19a136bac7f116b4a14cf6d7f65501b70c16dc3673546d4b2c7c4d6bac7c0fb1",
+      "size_bytes": 325
+    },
+    {
+      "path": "logs/positive-flow-console-errors.json",
+      "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+      "size_bytes": 3
+    },
+    {
+      "path": "logs/positive-flow-console-warnings.json",
+      "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+      "size_bytes": 3
+    },
+    {
+      "path": "logs/positive-flow-network-cancellations.json",
+      "sha256": "a556ae78e50f8d89979c1eda1a64208b249ccdfe65910ca4492f14537491c866",
+      "size_bytes": 603
+    },
+    {
+      "path": "logs/positive-flow-network-failures.json",
+      "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+      "size_bytes": 3
+    },
+    {
+      "path": "logs/recovery-flow-console-errors.json",
+      "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+      "size_bytes": 3
+    },
+    {
+      "path": "logs/recovery-flow-console-warnings.json",
+      "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+      "size_bytes": 3
+    },
+    {
+      "path": "logs/recovery-flow-network-cancellations.json",
+      "sha256": "c44e620edea3d4cc90b60b9673cf1fcc462c6e6672240717b4a3cdd9f9ad8a9e",
+      "size_bytes": 603
+    },
+    {
+      "path": "logs/recovery-flow-network-failures.json",
+      "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+      "size_bytes": 3
+    },
+    {
+      "path": "logs/smoke-console-errors.json",
+      "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+      "size_bytes": 3
+    },
+    {
+      "path": "logs/smoke-console-warnings.json",
+      "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+      "size_bytes": 3
+    },
+    {
+      "path": "logs/smoke-network-cancellations.json",
+      "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+      "size_bytes": 3
+    },
+    {
+      "path": "logs/smoke-network-failures.json",
+      "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+      "size_bytes": 3
+    },
+    {
+      "path": "logs/vite.log",
+      "sha256": "82f8693bed55ed37a698bd4a63a360e26a175398c796b8fc198ac43a6395307f",
+      "size_bytes": 768
+    },
+    {
+      "path": "logs/worker.log",
+      "sha256": "a9c04492338bf7e07dce1cb865ea8788ea0504661f7d11e5ada237f1a507e231",
+      "size_bytes": 1480
+    },
+    {
+      "path": "media/authorization.png",
+      "sha256": "78bf2bb8a6eac95736df127965e1792cd01817a5f4a57a40749267987a8b37c2",
+      "size_bytes": 192940
+    },
+    {
+      "path": "media/reference.mp4",
+      "sha256": "c20de61b631085987d797cd23fe9266e255cb528f167178d612673528f51e87d",
+      "size_bytes": 4972085
+    },
+    {
+      "path": "media/source.png",
+      "sha256": "e4d8c94d264aaa330b68d0af795040aa4d8108c7de0f97ae4d4c973bb7c737ad",
+      "size_bytes": 164848
+    },
+    {
+      "path": "run.json",
+      "sha256": "5203f579352e1c37f3140e8ba6f5c98c8aec70dc61c77b1ce140c215b20477c6",
+      "size_bytes": 548
+    },
+    {
+      "path": "screenshots/1024x768-failure-recovery.png",
+      "sha256": "310df2c0dd8a6d44ad120e7599cd30950b6c703d8157d3668cf1f276f4c7aea9",
+      "size_bytes": 89256
+    },
+    {
+      "path": "screenshots/1584x1024-failure-recovery.png",
+      "sha256": "106371a26a118c90b0952b2a7a34e24663554c0f2ae0efe37e14a4215791db07",
+      "size_bytes": 76352
+    },
+    {
+      "path": "screenshots/1584x1024-positive-results.png",
+      "sha256": "e17a310d65df9e0b5f3c843241f49941436b554aef92130ef954b9ea05768731",
+      "size_bytes": 128751
+    },
+    {
+      "path": "screenshots/1584x1024-published-character.png",
+      "sha256": "bc26edac86b16d75d5d2b096f8f7b804453591ccfddc74de2e3640d33fd01920",
+      "size_bytes": 125000
+    },
+    {
+      "path": "screenshots/1584x1024-recovered-results.png",
+      "sha256": "d458539a56dcd51d39c51054bb4e0109591c73ba7eed8214ff0c10577d73d57b",
+      "size_bytes": 128233
+    },
+    {
+      "path": "screenshots/1584x1024-smoke.png",
+      "sha256": "6041bf5c8a272815aae4cfa9c18acebd05cce08db24fe10349fde6e9b337eb87",
+      "size_bytes": 121948
+    }
+  ],
+  "run_id": "20260820T172807Z",
+  "schema_version": 1,
+  "status": "passed"
+}

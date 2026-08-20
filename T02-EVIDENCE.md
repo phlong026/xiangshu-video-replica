@@ -97,16 +97,17 @@ $ pytest --rootdir server server/tests -v
 
 ---
 
-### 7. Gate1 E2E Migration Check ✅
+### 7. Gate1 E2E Complete Playwright Flow ✅
 
 ```bash
-$ uv run python -m app.gate1_e2e
-INFO  Running upgrade → 001_core
-...
-INFO  Running upgrade 023_zpay_provider → 024_wallet_backfill
-Migration completed to head 024
+$ npm run test:gate1   # run_id: 20260820T172807Z, commit f1f1a7a
+# Alembic: 001_core -> 024_wallet_backfill (24 revisions)
+# Playwright: Running 2 tests using 1 worker
+#   [1/2] positive-flow.spec.mjs — creates a character, restarts, and restores three completed videos
+#   [2/2] smoke.spec.mjs — starts the isolated desktop shell with clean browser evidence
+#   2 passed (23.2s)
 ```
-**Result**: PASS (Alembic migrations up to head 024 verified)
+**Result**: PASS — full Gate 1 flow (API + Web + one-shot Worker + FakeProvider, SQLite) on commit `f1f1a7a`. Key artifacts archived in `docs/evidence/t02/gate1-run/` (run.json, playwright.log, api.log, worker.log, sha256-manifest.json).
 
 ---
 
@@ -123,13 +124,13 @@ Based on the test results, the following P0 core flows have been validated:
 7. **Wallet/Billing**: Balance queries, recharge orders, transaction history
 8. **ZPay Integration**: Payment signature validation, money amount handling
 9. **Storage Operations**: Local/COS file uploads, downloads, metadata
-10. **IDempotency**: Project-scope and activation-code-scope request deduplication
+10. **IDempotency**: Project-scope request deduplication (activation-code scope does not exist yet; it is T10+ scope and must not be claimed in this baseline)
 
 ## Known Issues / Skipped Items
 
 | Item | Status | Reason |
 | --- | --- | --- |
-| Gate1 E2E Playwright flow | Not fully executed | Requires specific output directory configuration; migration path validated only |
+| Gate1 E2E Playwright flow | ✅ Executed and passed | Full flow run 20260820T172807Z on commit f1f1a7a; see `docs/evidence/t02/gate1-run/` |
 | PostgreSQL tests | Not applicable | Current baseline uses SQLite (T03 will introduce PG fixture) |
 | Customer edition flows | Pending | T10+ will implement activation code logic |
 
@@ -151,15 +152,18 @@ Next steps (M0 continuation):
 
 ## Evidence Files Location
 
-All raw test outputs saved in `/tmp/t02_*.log`:
-- `/tmp/t02_tauri.log` - Tauri compilation
-- `/tmp/t02_e2e.log` - E2E biome check
-- `/tmp/t02_client_check.log` - Frontend tests
-- `/tmp/t02_ruff.log` - Backend ruff check
-- `/tmp/t02_mypy.log` - Backend mypy
-- `/tmp/t02_pytest.log` - Pytest unit tests
-- `/tmp/t02_gate1.log` - Gate1 migration
-- `/tmp/t02_secret_scan.log` - Secret scan
+Raw test outputs are archived in this repository under `docs/evidence/t02/` (each file includes its SHA256 in `docs/evidence/t02/SHA256SUMS.txt`):
+- `docs/evidence/t02/t02_tauri.log` - Tauri compilation
+- `docs/evidence/t02/t02_e2e.log` - E2E biome check
+- `docs/evidence/t02/t02_client_check.log` - Frontend tests
+- `docs/evidence/t02/t02_ruff.log` - Backend ruff check
+- `docs/evidence/t02/t02_mypy.log` - Backend mypy
+- `docs/evidence/t02/t02_pytest.log` - Pytest unit tests (full -v output)
+- `docs/evidence/t02/t02_gate1.log` - Gate1 migration phase
+- `docs/evidence/t02/t02_gate1_full.log` - Gate1 complete Playwright flow
+- `docs/evidence/t02/t02_secret_scan.log` - Secret scan
+
+Note: `/tmp/t02_*.log` was only a transient collection point during the run; the canonical copies live in this directory. The task-status ledger is `docs/客户版任务清单-V3.md` (Chinese filename); status flips are recorded there, not in any English-named mirror.
 
 ---
 
@@ -169,3 +173,24 @@ All raw test outputs saved in `/tmp/t02_*.log`:
 2. Delete worktree branch locally and remotely
 3. Start T03 (PostgreSQL fixture) - can parallelize with T04
 4. Continue M0 milestone toward T06
+
+---
+
+## Section 14 Ledger Record (任务领取与证据记录模板)
+
+```text
+任务/工作包：T02 / BASE-01 / BASE-02
+Owner / Reviewer：QA+后端（Agent 执行）/ chatgpt-codex-connector（PR 评审）
+分支 / 基线 SHA：feat/customer-v3-t02-baseline / 基线 75100a3，证据提交 f1f1a7a（Gate1 绑定）
+上游规格段落：docs/客户版任务清单-V3.md §1 T02 行、§12.1 BASE-01/BASE-02
+改动文件：T02-EVIDENCE.md、docs/evidence/t02/*（13 个证据文件+SHA256SUMS）、docs/客户版任务清单-V3.md（T02/BASE-01/BASE-02 状态）
+失败测试或回归锁定：本任务为回归锁定本身（基线快照），无新增失败测试
+实现结果：全量回归绿（server 582、client 324、Tauri cargo check、ruff/mypy、secret scan）+ Gate 1 Playwright 2/2 通过
+验证命令与通过数：npm run check:tauri / check:e2e / check --workspace client(324) / ruff+mypy / pytest(582) / test:gate1(2)
+证据层级：LOCALLY_VERIFIED
+安全与可观测性：verify_no_secrets.sh 通过；Gate1 browser console 错误清单见 gate1-run
+迁移与回滚：无代码改动，纯证据与账本更新；Gate1 运行时为独立临时库，不触碰主数据
+外部授权记录：无
+未测试项：PG 相关（T03+）；客户域流程（T10+）
+Lore 提交 SHA：f1f1a7a（基线提交）、后续证据提交见 PR #29 squash SHA
+```
