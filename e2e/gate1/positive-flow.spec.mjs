@@ -141,11 +141,22 @@ async function createProjectBatchViaOneClick(page) {
   });
   await expect(page.getByText(/FakeGemini 演示拆解/)).toBeVisible();
 
+  // 角色自动预选会立即触发源画面自动提取；这段上游初始化期间工作区
+  // 会进入 aria-busy=true 并禁用表单。先等候候选提取完成，避免 fill()
+  // 的 actionability 检查与 busy 翻转落在同一帧，造成输入未落入 React 状态。
+  await expect(
+    page.getByText("已自动提取候选源画面，请核对后确认。"),
+  ).toBeAttached({ timeout: 15_000 });
+  const workspaceGrid = page.locator(".analysis-workspace-grid");
+  await expect(workspaceGrid).toHaveAttribute("aria-busy", "false");
+
   // 标签页①（默认激活）：S01 原口播触发 800ms 防抖自动保存（P0-02-03），
   // 首个镜头卡版本无需手动保存按钮。
-  await page
-    .getByLabel("S01 原口播")
-    .fill("夏日咖啡馆的好项目，要从真实需求出发。");
+  const firstShotSpokenText = page.getByLabel("S01 原口播");
+  const customSpokenText = "夏日咖啡馆的好项目，要从真实需求出发。";
+  await expect(firstShotSpokenText).toBeEditable();
+  await firstShotSpokenText.fill(customSpokenText);
+  await expect(firstShotSpokenText).toHaveValue(customSpokenText);
   await expect(page.getByText(/已自动保存 · 版本 #/)).toBeVisible();
 
   await page.getByRole("radio", { name: "自定义稿" }).check();
