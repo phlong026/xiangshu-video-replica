@@ -11,11 +11,14 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections.abc import Callable, Coroutine
+from typing import Any
 
-import asyncpg
+import asyncpg  # type: ignore[import-untyped]
 import pytest
 
 DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
+SKIP_REASON = "PostgreSQL fixture not reachable; start it via scripts/pg-fixture.sh start"
 
 
 def _pg_dsn() -> str:
@@ -37,11 +40,11 @@ def _pg_available(dsn: str) -> bool:
 
 pytestmark = pytest.mark.skipif(
     not _pg_available(_pg_dsn()),
-    reason=f"PostgreSQL fixture not reachable at {_pg_dsn()}; start it via scripts/pg-fixture.sh start",
+    reason=SKIP_REASON,
 )
 
 
-def _run(coro_fn):  # keep tests sync-friendly under the repo's sync pytest layout
+def _run(coro_fn: Callable[[], Coroutine[Any, Any, None]]) -> None:
     return asyncio.run(coro_fn())
 
 
