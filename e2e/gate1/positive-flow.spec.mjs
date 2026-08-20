@@ -364,15 +364,23 @@ async function verifyFailureRecoveryPaths(page, runDir) {
   await expect(failedCard).toHaveCount(1);
   await expect(archiveCard).toHaveCount(1);
   await expect(uncertainCard).toHaveCount(1);
-  await expect(page.locator(".attention-banner")).toHaveText("需要处理 2");
+  await expect(
+    page
+      .getByRole("region", { name: "需要关注" })
+      .getByText("需要处理 2", { exact: true }),
+  ).toBeVisible();
 
   const failedTaskId = await taskIdFromCard(failedCard);
   const archiveTaskId = await taskIdFromCard(archiveCard);
   const uncertainTaskId = await taskIdFromCard(uncertainCard);
-  const archiveProviderTail = await archiveCard
-    .getByText(/^Provider 尾号 /)
-    .textContent();
-  expect(archiveProviderTail).toMatch(/^Provider 尾号 \S+$/);
+  const archiveProviderTail = await taskFactValue(archiveCard, "Provider 尾号");
+  expect(archiveProviderTail).toMatch(/^\S+$/);
+  expect(archiveProviderTail).not.toBe("未公开");
+
+  // 运维动作按风险默认折叠：先显式展开，再验证付费与安全重试边界。
+  await openDetailsWithin(failedCard, "details.task-paid-regeneration");
+  await openDetailsWithin(archiveCard, "details.task-resolution-controls");
+  await openDetailsWithin(uncertainCard, "details.task-resolution-controls");
 
   await expect(
     failedCard.getByText(
@@ -400,16 +408,12 @@ async function verifyFailureRecoveryPaths(page, runDir) {
   await expect(
     archiveCard.getByLabel(new RegExp(`付费重新生成 ${archiveTaskId}`)),
   ).toHaveCount(0);
-  await expect(
-    archiveCard.getByText("尝试 1 次 · 归档重试 0 次"),
-  ).toBeVisible();
+  expect(await taskFactValue(archiveCard, "尝试")).toBe("1 次");
 
   await expect(
     uncertainCard.getByText("Fake H3 submission result is unknown"),
   ).toBeVisible();
-  await expect(
-    uncertainCard.getByText("Provider 尾号未公开", { exact: true }),
-  ).toBeVisible();
+  expect(await taskFactValue(uncertainCard, "Provider 尾号")).toBe("未公开");
   await expect(
     uncertainCard.getByLabel(`确认未计费 ${uncertainTaskId}`),
   ).toBeDisabled();
@@ -436,13 +440,14 @@ async function verifyFailureRecoveryPaths(page, runDir) {
   await expect(retriedArchiveCard.getByText("阶段：已归档")).toBeVisible({
     timeout: 15_000,
   });
-  await expect(
-    retriedArchiveCard.getByText(archiveProviderTail ?? ""),
-  ).toBeVisible();
-  await expect(
-    retriedArchiveCard.getByText("尝试 1 次 · 归档重试 0 次"),
-  ).toBeVisible();
+  expect(await taskFactValue(retriedArchiveCard, "Provider 尾号")).toBe(
+    archiveProviderTail,
+  );
+  expect(await taskFactValue(retriedArchiveCard, "尝试")).toBe("1 次");
+  const archiveTaskAfterRetry = await readActiveBatchTask(page, archiveTaskId);
+  expect(archiveTaskAfterRetry.archive_retry_count).toBe(0);
 
+  await openDetailsWithin(uncertainCard, "details.task-resolution-controls");
   await uncertainCard
     .getByLabel(`处理原因 ${uncertainTaskId}`)
     .fill("已核对 Fake H3 未产生计费与 Provider 任务");
@@ -464,13 +469,15 @@ async function verifyFailureRecoveryPaths(page, runDir) {
   await expect(recoveredUncertainCard.getByText("阶段：已归档")).toBeVisible({
     timeout: 15_000,
   });
-  await expect(
-    recoveredUncertainCard.getByText("尝试 2 次 · 归档重试 0 次"),
-  ).toBeVisible();
+  expect(await taskFactValue(recoveredUncertainCard, "尝试")).toBe("2 次");
   await expect(
     page.getByRole("progressbar", { name: "批次进度" }),
   ).toHaveAttribute("aria-valuenow", "100");
-  await expect(page.getByText("需要处理 2", { exact: true })).toHaveCount(0);
+  await expect(
+    page
+      .getByRole("region", { name: "需要关注" })
+      .getByText("需要处理 2", { exact: true }),
+  ).toHaveCount(0);
 
   const output = {
     failed: { task_id: failedTaskId, required_action: "paid_regeneration" },
@@ -479,7 +486,7 @@ async function verifyFailureRecoveryPaths(page, runDir) {
       provider_tail_before_retry: archiveProviderTail,
       attempt_after_retry: 1,
       archive_retry_performed: true,
-      failed_archive_retry_count: 0,
+      failed_archive_retry_count: archiveTaskAfterRetry.archive_retry_count,
     },
     submission_uncertain: {
       task_id: uncertainTaskId,
@@ -548,20 +555,65 @@ async function refreshActiveBatch(page) {
 
 function taskCardForStage(page, stage) {
   return page
-    .locator("li.task-result-card")
+    .locator(".task-list > li.task-result-card")
     .filter({ hasText: `阶段：${stage}` });
 }
 
 function taskCardById(page, taskId) {
-  return page.locator("li.task-result-card").filter({ hasText: taskId });
+  return page
+    .locator(".task-list > li.task-result-card")
+    .filter({ hasText: taskId });
 }
 
 async function taskIdFromCard(card) {
-  const value = (
-    await card.locator(".task-result-heading strong").textContent()
-  )?.trim();
+  const value = (await card.locator(".task-id-mono").textContent())?.trim();
   expect(value).toBeTruthy();
   return value;
+}
+
+async function openDetailsWithin(scope, selector) {
+  const details = scope.locator(selector);
+  await expect(details).toHaveCount(1);
+  if ((await details.getAttribute("open")) === null) {
+    await details.locator(":scope > summary").click();
+  }
+  await expect(details).toHaveAttribute("open", "");
+}
+
+async function taskFactValue(card, label) {
+  const fact = card.locator(".task-facts > div").filter({ hasText: label });
+  await expect(fact.getByText(label, { exact: true })).toHaveCount(1);
+  const value = (await fact.locator("dd").textContent())?.trim();
+  expect(value).toBeTruthy();
+  return value;
+}
+
+async function readActiveBatchTask(page, taskId) {
+  const activeBatch = page.locator(
+    'button[aria-pressed="true"][aria-label^="打开批次 "]',
+  );
+  const label = await activeBatch.getAttribute("aria-label");
+  const batchId = label?.slice("打开批次 ".length).trim();
+  if (!batchId) {
+    throw new Error("无法解析当前批次 ID");
+  }
+  const task = await page.evaluate(
+    async ({ activeBatchId, expectedTaskId }) => {
+      const response = await fetch(
+        `/api/generation-batches/${encodeURIComponent(activeBatchId)}`,
+      );
+      if (!response.ok) {
+        throw new Error(`读取当前批次失败（${response.status}）`);
+      }
+      const batch = await response.json();
+      return batch.tasks.find((item) => item.id === expectedTaskId) ?? null;
+    },
+    { activeBatchId: batchId, expectedTaskId: taskId },
+  );
+  if (!task) {
+    throw new Error(`当前批次中不存在任务 ${taskId}`);
+  }
+  return task;
 }
 
 function requiredEnvironmentPath(name) {
