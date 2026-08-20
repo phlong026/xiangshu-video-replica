@@ -164,15 +164,15 @@ async function createProjectBatchViaOneClick(page) {
   await expect(page.getByText("当前角色：Gate 1 林夏")).toBeVisible();
 
   // 源画面：角色就绪后自动提取候选（P0-03-02，本地截帧无费用），候选与
-  // 特征按镜头卡建议预填（S01 近景 → CLOSE_UP/FACE_ONLY），确认即可。
+  // 特征按当前保守默认值预填（正面半身、上半身可见），确认即可。
   await expect(
     page.getByText("已自动提取候选源画面，请核对后确认。"),
   ).toBeVisible({ timeout: 20_000 });
   await expect(page.getByAltText("候选源画面 1")).toBeVisible();
   await expect(page.getByLabel("人物朝向")).toHaveValue("FRONT");
-  await expect(page.getByLabel("人物景别")).toHaveValue("CLOSE_UP");
+  await expect(page.getByLabel("人物景别")).toHaveValue("HALF_BODY");
   await expect(page.getByLabel("面部可见性")).toHaveValue("VISIBLE");
-  await expect(page.getByLabel("身体完整度")).toHaveValue("FACE_ONLY");
+  await expect(page.getByLabel("身体完整度")).toHaveValue("UPPER_BODY");
   await expect(page.getByRole("radio", { name: /候选 1/ })).toBeChecked();
   await page.getByRole("button", { name: "确认源画面" }).click();
   await expect(page.getByText("已确认候选源画面 1。")).toBeVisible();
