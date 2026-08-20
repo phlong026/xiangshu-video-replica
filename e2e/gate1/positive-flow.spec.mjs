@@ -597,10 +597,11 @@ async function readActiveBatchTask(page, taskId) {
   if (!batchId) {
     throw new Error("无法解析当前批次 ID");
   }
+  const apiUrl = requiredEnvironmentPath("GATE1_API_URL");
   const task = await page.evaluate(
-    async ({ activeBatchId, expectedTaskId }) => {
+    async ({ activeBatchId, apiBaseUrl, expectedTaskId }) => {
       const response = await fetch(
-        `/api/generation-batches/${encodeURIComponent(activeBatchId)}`,
+        `${apiBaseUrl}/api/generation-batches/${encodeURIComponent(activeBatchId)}`,
       );
       if (!response.ok) {
         throw new Error(`读取当前批次失败（${response.status}）`);
@@ -608,7 +609,7 @@ async function readActiveBatchTask(page, taskId) {
       const batch = await response.json();
       return batch.tasks.find((item) => item.id === expectedTaskId) ?? null;
     },
-    { activeBatchId: batchId, expectedTaskId: taskId },
+    { activeBatchId: batchId, apiBaseUrl: apiUrl, expectedTaskId: taskId },
   );
   if (!task) {
     throw new Error(`当前批次中不存在任务 ${taskId}`);
