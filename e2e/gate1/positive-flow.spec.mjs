@@ -138,7 +138,7 @@ async function createProjectBatchViaOneClick(page) {
   await expect(page.getByRole("heading", { name: "复刻工作台" })).toBeVisible({
     timeout: 30_000,
   });
-  await expect(page.getByText("FakeGemini video analysis")).toBeVisible();
+  await expect(page.getByText(/FakeGemini 演示拆解/)).toBeVisible();
 
   // 标签页①（默认激活）：S01 原口播触发 800ms 防抖自动保存（P0-02-03），
   // 首个镜头卡版本无需手动保存按钮。
