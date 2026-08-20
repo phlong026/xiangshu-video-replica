@@ -1,0 +1,5 @@
+
+> video-replica-desktop@0.1.0 check:e2e
+> biome check e2e
+
+Checked 6 files in 24ms. No fixes applied.

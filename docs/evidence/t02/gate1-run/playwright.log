@@ -1,0 +1,8 @@
+
+[harness] started playwright pid=98811
+
+Running 2 tests using 1 worker
+
+[1/2] e2e/gate1/positive-flow.spec.mjs:10:1 › @positive creates a character, restarts, and restores three completed videos
+[2/2] e2e/gate1/smoke.spec.mjs:7:1 › @smoke starts the isolated desktop shell with clean browser evidence
+  2 passed (23.2s)

@@ -1,0 +1,15 @@
+{
+  "commit_sha": "f1f1a7afd4c0240fa5834fef3d31bd570d5fc636",
+  "formal_run": true,
+  "gate_scope": "macOS desktop FakeProvider E2E; not Windows WebView2 acceptance",
+  "media": {
+    "authorization_image": "media/authorization.png",
+    "reference_video": "media/reference.mp4",
+    "source_image": "media/source.png"
+  },
+  "playwright_arguments": [],
+  "run_id": "20260820T172807Z",
+  "runtime": "React/Vite + FastAPI + one-shot Worker + SQLite + LocalStorageAdapter",
+  "schema_version": 1,
+  "started_at": "2026-08-20T17:28:08.169643+00:00"
+}

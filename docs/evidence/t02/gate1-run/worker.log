@@ -1,0 +1,28 @@
+
+[worker:positive-video-1] outcome=ok max_tasks=1 exit=0 timed_out=false
+2026-08-21 01:28:16,028 INFO generation worker processed 1 task(s)
+
+[worker:positive-video-2] outcome=ok max_tasks=1 exit=0 timed_out=false
+2026-08-21 01:28:18,183 INFO generation worker processed 1 task(s)
+
+[worker:positive-video-3] outcome=ok max_tasks=1 exit=0 timed_out=false
+2026-08-21 01:28:20,359 INFO generation worker processed 1 task(s)
+
+[worker:failure-submission-uncertain] outcome=submission_uncertain max_tasks=1 exit=0 timed_out=false
+2026-08-21 01:28:25,027 INFO generation worker processed 1 task(s)
+
+[worker:failure-provider-terminal] outcome=provider_failed max_tasks=1 exit=0 timed_out=false
+2026-08-21 01:28:25,394 INFO generation worker processed 1 task(s)
+
+[worker:failure-archive] outcome=ok max_tasks=1 exit=0 timed_out=false
+2026-08-21 01:28:25,720 WARNING local object write failed for key generation-results/d80d94e8-c0ca-4ee6-963d-34e0dabb9e4d.mp4: FileExistsError
+2026-08-21 01:28:25,720 INFO generation worker processed 1 task(s)
+
+[worker:failure-archive-safe-retry] outcome=ok max_tasks=1 exit=0 timed_out=false
+2026-08-21 01:28:27,599 INFO generation worker processed 1 task(s)
+
+[worker:failure-uncertain-admin-requeue] outcome=ok max_tasks=1 exit=0 timed_out=false
+2026-08-21 01:28:29,852 INFO generation worker processed 1 task(s)
+
+[worker:smoke-empty-queue] outcome=ok max_tasks=1 exit=0 timed_out=false
+2026-08-21 01:28:33,122 INFO generation worker processed 0 task(s)
