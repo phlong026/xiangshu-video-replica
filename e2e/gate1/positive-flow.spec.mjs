@@ -539,7 +539,9 @@ async function verifyCompactViewport(page, runDir) {
 }
 
 async function refreshActiveBatch(page) {
-  const activeBatch = page.locator("button.batch-history-card--active");
+  const activeBatch = page.locator(
+    'button[aria-pressed="true"][aria-label^="打开批次 "]',
+  );
   await expect(activeBatch).toHaveCount(1);
   await activeBatch.click();
 }
