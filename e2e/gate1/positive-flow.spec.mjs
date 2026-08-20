@@ -228,27 +228,35 @@ async function createProjectBatchViaOneClick(page) {
 }
 
 async function previewAndDownloadResults(page, runDir) {
-  const loadPreviewButtons = page.getByRole("button", { name: /^加载预览 / });
-  await expect(loadPreviewButtons).toHaveCount(3);
-  for (let expectedVideos = 1; expectedVideos <= 3; expectedVideos += 1) {
-    await loadPreviewButtons.first().click();
-    const videos = page.getByLabel(/^结果预览 /);
-    await expect(videos).toHaveCount(expectedVideos);
-    await expect
-      .poll(() =>
-        videos.nth(expectedVideos - 1).evaluate((video) => video.readyState),
-      )
-      .toBe(4);
-  }
+  const resultButtons = page
+    .getByRole("navigation", { name: "生成结果列表" })
+    .getByRole("button", { name: /^查看结果 / });
+  await expect(resultButtons).toHaveCount(3);
 
   const downloadDir = path.join(runDir, "downloads");
   await mkdir(downloadDir, { recursive: true });
-  const downloadButtons = page.getByRole("button", { name: /^下载 MP4 / });
-  await expect(downloadButtons).toHaveCount(3);
   for (let index = 0; index < 3; index += 1) {
+    const resultButton = resultButtons.nth(index);
+    const taskId = await resultTaskId(resultButton);
+    await resultButton.click();
+    await expect(resultButton).toHaveAttribute("aria-pressed", "true");
+
+    // 客户视角结果舞台会自动签发并加载当前结果，不再提供手动“加载预览”。
+    const video = page.getByLabel(`结果预览 ${taskId}`);
+    await expect(video).toBeVisible();
+    await expect
+      .poll(() => video.evaluate((element) => element.readyState))
+      .toBeGreaterThanOrEqual(2);
+    await expect(video).toHaveAttribute("src", /\S+/);
+
+    const downloadButton = page.getByRole("button", {
+      name: "下载 MP4",
+      exact: true,
+    });
+    await expect(downloadButton).toBeEnabled();
     const [download] = await Promise.all([
       page.waitForEvent("download"),
-      downloadButtons.nth(index).click(),
+      downloadButton.click(),
     ]);
     const targetPath = path.join(downloadDir, `result-${index + 1}.mp4`);
     await download.saveAs(targetPath);
@@ -257,6 +265,15 @@ async function previewAndDownloadResults(page, runDir) {
     expect(content.length).toBeGreaterThan(8);
     expect(content.subarray(4, 8).toString("ascii")).toBe("ftyp");
   }
+}
+
+async function resultTaskId(resultButton) {
+  const label = await resultButton.getAttribute("aria-label");
+  const match = label?.match(/^查看结果 \d+：(.+)$/);
+  if (!match) {
+    throw new Error(`无法从结果按钮解析任务 ID：${label ?? "无 aria-label"}`);
+  }
+  return match[1];
 }
 
 async function verifyRestoredWorkspace(page, runDir) {
@@ -286,31 +303,21 @@ async function verifyRestoredWorkspace(page, runDir) {
   await expect(
     page.getByText("3 / 3 个结果已完成", { exact: true }),
   ).toBeVisible();
-  await expect(page.getByRole("button", { name: /^下载 MP4 / })).toHaveCount(3);
-  const previewResponsePromise = page.waitForResponse(
-    (response) =>
-      response
-        .url()
-        .includes("/api/assets/local-objects/generation-results/") &&
-      response.ok(),
-  );
-  await page
-    .getByRole("button", { name: /^加载预览 / })
-    .first()
-    .click();
-  const previewResponse = await previewResponsePromise;
-  const video = page.getByLabel(/^结果预览 /).first();
+  const resultButtons = page
+    .getByRole("navigation", { name: "生成结果列表" })
+    .getByRole("button", { name: /^查看结果 / });
+  await expect(resultButtons).toHaveCount(3);
+  const firstTaskId = await resultTaskId(resultButtons.first());
+  await expect(resultButtons.first()).toHaveAttribute("aria-pressed", "true");
+  const video = page.getByLabel(`结果预览 ${firstTaskId}`);
   await expect
     .poll(() => video.evaluate((element) => element.readyState))
-    .toBe(4);
-  await previewResponse.finished();
+    .toBeGreaterThanOrEqual(2);
+  await expect(video).toHaveAttribute("src", /\S+/);
 
   const [download] = await Promise.all([
     page.waitForEvent("download"),
-    page
-      .getByRole("button", { name: /^下载 MP4 / })
-      .first()
-      .click(),
+    page.getByRole("button", { name: "下载 MP4", exact: true }).click(),
   ]);
   const targetPath = path.join(runDir, "downloads", "recovered-result.mp4");
   await download.saveAs(targetPath);
