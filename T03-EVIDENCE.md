@@ -104,14 +104,14 @@ def test_independent_connections(pg_dsn):
 ## Full Test Output
 
 ```bash
-$ uv run python -m pytest tests/test_postgres_fixture.py -v
+$ uv run python -m pytest tests/test_postgres_migrations.py -v
 ============================= test session starts ==============================
 collected 4 items
 
-tests/test_postgres_fixture.py::test_database_creation PASSED            [ 25%]
-tests/test_postgres_fixture.py::test_user_identity PASSED                [ 50%]
+tests/test_postgres_migrations.py::test_database_creation PASSED            [ 25%]
+tests/test_postgres_migrations.py::test_user_identity PASSED                [ 50%]
 tests/test_postgres_version.py::test_postgres_version PASSED             [ 75%]
-tests/test_postgres_fixture.py::test_independent_connections PASSED      [100%]
+tests/test_postgres_migrations.py::test_independent_connections PASSED      [100%]
 
 ============================== 4 passed in 0.10s ===============================
 ```
@@ -172,7 +172,7 @@ services:
 | File | Purpose | Lines |
 | --- | --- | --- |
 | `server/pyproject.toml` | Added asyncio_mode config | +2 |
-| `server/tests/test_postgres_fixture.py` | New test suite | +56 |
+| `server/tests/test_postgres_migrations.py` | New test suite | +56 |
 | `scripts/pg-fixture.sh` | Container management script | +121 |
 | `T03-EVIDENCE.md` | This evidence document | ~150 |
 
