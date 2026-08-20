@@ -119,19 +119,20 @@ async function createAndPublishCharacter(page) {
 // 仍需切自定义稿保存。用户确认类动作 = 4（源画面/参考/首帧对/生成）。
 async function createProjectBatchViaOneClick(page) {
   const mediaDir = requiredEnvironmentPath("GATE1_MEDIA_DIR");
-  // 品牌改版后项目页常驻创建表单（原「新建复刻」弹层已移除）：
-  // 人物库返回后切项目页，直接填表单提交（按钮文案「开始」）。
+  // 当前项目页以视频文件名自动建项目并立即拆解，不再要求先填写项目名。
   await page.getByRole("button", { name: "项目", exact: true }).click();
-  // 品牌改版后项目页同时存在 h1「项目」（工作台标题）与
-  // h2「项目」（#project-list-title），断言需加 level 消歧。
-  await expect(
-    page.getByRole("heading", { name: "项目", exact: true, level: 2 }),
-  ).toBeVisible();
-  await page.getByLabel("项目名称").fill("Gate 1 夏日咖啡馆口播");
+  await expect(page.getByRole("region", { name: "项目" })).toBeVisible();
+  await page.getByLabel("选择一个或多个参考视频").setInputFiles({
+    name: "Gate 1 夏日咖啡馆口播.mp4",
+    mimeType: "video/mp4",
+    buffer: await readFile(path.join(mediaDir, "reference.mp4")),
+  });
+  await expect(page.getByText("已提交拆解")).toBeVisible({
+    timeout: 30_000,
+  });
   await page
-    .getByLabel("参考视频")
-    .setInputFiles(path.join(mediaDir, "reference.mp4"));
-  await page.getByRole("button", { name: "开始", exact: true }).click();
+    .getByRole("button", { name: "打开项目 Gate 1 夏日咖啡馆口播" })
+    .click();
   // 三标签页改版后工作台主标题为 h2「复刻工作台」（原「镜头卡片」
   // heading 已随内容配置标签页结构移除）。
   await expect(page.getByRole("heading", { name: "复刻工作台" })).toBeVisible({
@@ -242,12 +243,12 @@ async function previewAndDownloadResults(page, runDir) {
 
 async function verifyRestoredWorkspace(page, runDir) {
   await enterWorkspace(page);
-  // 品牌改版后列表标题 h2 为「项目」（#project-list-title），
-  // 原文本「项目列表」已不存在；与工作台 h1 同名，需 level 消歧。
+  await expect(page.getByRole("region", { name: "项目" })).toBeVisible();
   await expect(
-    page.getByRole("heading", { name: "项目", exact: true, level: 2 }),
+    page.getByRole("button", {
+      name: "打开项目 Gate 1 夏日咖啡馆口播",
+    }),
   ).toBeVisible();
-  await expect(page.getByText("Gate 1 夏日咖啡馆口播")).toBeVisible();
 
   await page.getByRole("button", { name: "人物库" }).click();
   const characterPreview = page.getByRole("button", {
