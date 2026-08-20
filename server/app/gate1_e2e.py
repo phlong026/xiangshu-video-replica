@@ -423,6 +423,7 @@ def _gate1_runtime_environment(
             "VIDEO_REPLICA_FAKE_H3_RESULT_PATH": str(fake_h3_result_path),
             "VIDEO_REPLICA_FAKE_SOURCE_IMAGE_INSPECTOR": "1",
             "VIDEO_REPLICA_STORAGE_ROOT": str(storage_root),
+            "VITE_GENERATION_PROVIDER": "fake_h3",
         }
     )
     return environment

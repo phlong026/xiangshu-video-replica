@@ -341,6 +341,7 @@ def test_gate1_runtime_environment_forces_isolated_desktop_auth(
 ) -> None:
     monkeypatch.setenv("VIDEO_REPLICA_AUTH_MODE", "internal")
     monkeypatch.setenv("VIDEO_REPLICA_ALLOW_DEV_IDENTITY_HEADER", "1")
+    monkeypatch.setenv("VITE_GENERATION_PROVIDER", "metaso")
 
     environment = gate1_e2e._gate1_runtime_environment(
         database_path=tmp_path / "gate1.sqlite3",
@@ -351,6 +352,7 @@ def test_gate1_runtime_environment_forces_isolated_desktop_auth(
 
     assert environment["VIDEO_REPLICA_AUTH_MODE"] == "desktop"
     assert environment["VIDEO_REPLICA_ALLOW_DEV_IDENTITY_HEADER"] == "0"
+    assert environment["VITE_GENERATION_PROVIDER"] == "fake_h3"
 
 
 def test_run_metadata_records_whether_the_suite_is_filtered(tmp_path: Path) -> None:
