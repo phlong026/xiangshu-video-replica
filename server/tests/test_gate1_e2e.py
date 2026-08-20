@@ -239,6 +239,56 @@ def test_wait_for_http_accepts_a_ready_service() -> None:
         thread.join(timeout=1)
 
 
+def test_port_probe_accepts_a_recently_released_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RecentlyReleasedPort:
+        def __init__(self) -> None:
+            self.reuse_address = False
+
+        def __enter__(self) -> RecentlyReleasedPort:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def setsockopt(self, level: int, option: int, value: int) -> None:
+            if (level, option, value) == (
+                socket.SOL_SOCKET,
+                socket.SO_REUSEADDR,
+                1,
+            ):
+                self.reuse_address = True
+
+        def bind(self, address: tuple[str, int]) -> None:
+            assert address == ("127.0.0.1", 8000)
+            if not self.reuse_address:
+                raise OSError("address remains in TIME_WAIT")
+
+    monkeypatch.setattr(
+        gate1_e2e.socket,
+        "socket",
+        lambda *args: RecentlyReleasedPort(),
+    )
+
+    gate1_e2e._require_available_port("127.0.0.1", 8000)
+
+
+def test_gate1_api_port_accepts_a_safe_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("GATE1_API_PORT", raising=False)
+    assert gate1_e2e._gate1_api_port() == 8000
+
+    monkeypatch.setenv("GATE1_API_PORT", "18000")
+    assert gate1_e2e._gate1_api_port() == 18000
+
+    for value in ("80", "5173", "65536", "not-a-port"):
+        monkeypatch.setenv("GATE1_API_PORT", value)
+        with pytest.raises(ValueError, match="GATE1_API_PORT"):
+            gate1_e2e._gate1_api_port()
+
+
 def test_generate_test_media_uses_deterministic_ffmpeg_outputs(
     tmp_path: Path,
 ) -> None:
@@ -333,6 +383,31 @@ def test_gate_status_reserves_passed_for_the_unfiltered_suite() -> None:
         gate1_e2e._gate_status(0, playwright_arguments=["--grep", "@smoke"]) == "diagnostic_passed"
     )
     assert gate1_e2e._gate_status(1, playwright_arguments=[]) == "failed"
+
+
+def test_gate1_runtime_environment_forces_isolated_desktop_auth(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VIDEO_REPLICA_AUTH_MODE", "internal")
+    monkeypatch.setenv("VIDEO_REPLICA_ALLOW_DEV_IDENTITY_HEADER", "1")
+    monkeypatch.setenv("VITE_GENERATION_PROVIDER", "metaso")
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://production.example.com")
+
+    environment = gate1_e2e._gate1_runtime_environment(
+        database_path=tmp_path / "gate1.sqlite3",
+        storage_root=tmp_path / "storage",
+        settings_key="test-settings-key",
+        fake_h3_result_path=tmp_path / "reference.mp4",
+        api_url="http://127.0.0.1:18000",
+    )
+
+    assert environment["VIDEO_REPLICA_AUTH_MODE"] == "desktop"
+    assert environment["VIDEO_REPLICA_ALLOW_DEV_IDENTITY_HEADER"] == "0"
+    assert environment["VITE_GENERATION_PROVIDER"] == "fake_h3"
+    assert environment["VITE_API_BASE_URL"] == "http://127.0.0.1:18000"
+    assert environment["VIDEO_REPLICA_LOCAL_API_BASE_URL"] == "http://127.0.0.1:18000"
+    assert environment["PUBLIC_BASE_URL"] == ""
 
 
 def test_run_metadata_records_whether_the_suite_is_filtered(tmp_path: Path) -> None:

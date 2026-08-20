@@ -56,6 +56,15 @@ function openTaskRecords() {
   fireEvent.click(screen.getByRole("button", { name: "任务记录" }));
 }
 
+function openUserMenu() {
+  fireEvent.click(screen.getByRole("button", { name: "用户菜单" }));
+}
+
+function openUserPage(name: "余额与充值" | "设置") {
+  openUserMenu();
+  fireEvent.click(screen.getByRole("button", { name }));
+}
+
 function isBatchHistoryRequest(url: string) {
   return url.includes("/api/generation-batches?");
 }
@@ -171,8 +180,27 @@ describe("App", () => {
     );
     expect(screen.getByRole("button", { name: "人物库" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "任务记录" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "余额与充值" })).toBeEnabled();
-    expect(screen.queryByRole("button", { name: "设置" })).toBeNull();
+    const navigation = screen.getByRole("navigation", { name: "主导航" });
+    expect(
+      within(navigation).queryByRole("button", { name: "余额与充值" }),
+    ).toBeNull();
+    expect(
+      within(navigation).queryByRole("button", { name: "设置" }),
+    ).toBeNull();
+    const userMenuButton = screen.getByRole("button", { name: "用户菜单" });
+    expect(userMenuButton).toHaveAttribute("aria-expanded", "false");
+    openUserMenu();
+    const userActions = screen.getByRole("group", { name: "用户功能" });
+    expect(userMenuButton).toHaveAttribute("aria-expanded", "true");
+    expect(
+      within(userActions).getByRole("button", { name: "余额与充值" }),
+    ).toBeEnabled();
+    expect(
+      within(userActions).queryByRole("button", { name: "设置" }),
+    ).toBeNull();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(userMenuButton).toHaveAttribute("aria-expanded", "false");
+    expect(userMenuButton).toHaveFocus();
     expect(screen.getByText("林夏")).toBeInTheDocument();
     expect(screen.getByText("普通员工")).toBeInTheDocument();
     const serviceStatus = await screen.findByRole("status", {
@@ -217,7 +245,7 @@ describe("App", () => {
 
     render(<App />);
     await enterWorkspace();
-    fireEvent.click(screen.getByRole("button", { name: "余额与充值" }));
+    openUserPage("余额与充值");
 
     expect(await screen.findAllByText("10元 / 条")).toHaveLength(1);
   });
@@ -237,9 +265,17 @@ describe("App", () => {
     expect(
       await screen.findByRole("heading", { level: 1, name: "人物库" }),
     ).toBeInTheDocument();
-    for (const label of ["项目", "人物库", "任务记录", "余额与充值", "设置"]) {
+    for (const label of ["项目", "人物库", "任务记录"]) {
       expect(screen.getByRole("button", { name: label })).toBeEnabled();
     }
+    openUserMenu();
+    const userActions = screen.getByRole("group", { name: "用户功能" });
+    expect(
+      within(userActions).getByRole("button", { name: "余额与充值" }),
+    ).toBeEnabled();
+    expect(
+      within(userActions).getByRole("button", { name: "设置" }),
+    ).toBeEnabled();
     expect(screen.getByRole("button", { name: "人物库" })).toHaveClass(
       "nav-button--active",
     );
@@ -262,7 +298,14 @@ describe("App", () => {
       await screen.findByRole("heading", { level: 1, name: "项目" }),
     ).toBeInTheDocument();
     expect(screen.queryByLabelText("项目名称")).toBeNull();
-    expect(screen.queryByRole("button", { name: "设置" })).toBeNull();
+    openUserMenu();
+    const userActions = screen.getByRole("group", { name: "用户功能" });
+    expect(
+      within(userActions).queryByRole("button", { name: "设置" }),
+    ).toBeNull();
+    expect(
+      within(userActions).getByRole("button", { name: "余额与充值" }),
+    ).toBeEnabled();
     expect(screen.getByRole("button", { name: "人物库" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "任务记录" })).toBeEnabled();
     expect(window.location.hash).toBe("#projects");
@@ -1907,7 +1950,7 @@ describe("App", () => {
 
     render(<App />);
     await enterWorkspace();
-    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    openUserPage("设置");
 
     expect(
       await screen.findByRole("heading", { name: "运行设置" }),
@@ -1980,7 +2023,7 @@ describe("App", () => {
 
     render(<App />);
     await enterWorkspace();
-    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    openUserPage("设置");
 
     expect(
       await screen.findByRole("heading", { name: "视频生成" }),
@@ -2062,7 +2105,7 @@ describe("App", () => {
 
     render(<App />);
     await enterWorkspace();
-    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    openUserPage("设置");
 
     expect(await screen.findByRole("alert")).toHaveTextContent(message);
   });

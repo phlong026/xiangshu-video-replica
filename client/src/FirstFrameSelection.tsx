@@ -41,14 +41,10 @@ function getOrStartFirstFrameGeneration(
   }
   const pending = { promise: start(), startedAt: Date.now() };
   pendingFirstFrameGenerations.set(projectId, pending);
-  void pending.promise.then(
-    () => {
-      if (pendingFirstFrameGenerations.get(projectId) === pending) {
-        pendingFirstFrameGenerations.delete(projectId);
-      }
-    },
-    () => {},
-  );
+  // Keep a resolved request attachable until a mounted page has loaded its
+  // result. A route/input refresh can invalidate the first watcher after the
+  // HTTP response but before React consumes it.
+  void pending.promise.catch(() => {});
   return pending;
 }
 
@@ -91,9 +87,20 @@ export function FirstFrameSelection({
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const loadRequestId = useRef(0);
   const generationWatchId = useRef(0);
+  const confirmationLifecycleId = useRef(0);
   const onBusyChangeRef = useRef(onBusyChange);
   onBusyChangeRef.current = onBusyChange;
   const referenceSelectionId = referenceSelection?.id ?? "";
+  const confirmationBindingKey = [
+    projectId,
+    sourceFrameSelectionId ?? "",
+    referenceSelectionId,
+    legacyCharacterSelected ? "legacy" : "versioned",
+    version?.id ?? "",
+    selectedAssetId,
+  ].join("\0");
+  const confirmationBindingKeyRef = useRef(confirmationBindingKey);
+  confirmationBindingKeyRef.current = confirmationBindingKey;
   const canGenerate =
     Boolean(sourceFrameSelectionId) &&
     Boolean(referenceSelection || legacyCharacterSelected);
@@ -142,9 +149,9 @@ export function FirstFrameSelection({
         setLatestVersionId(latest?.id ?? "");
         setHistory(versions);
         setVersion(displayVersion);
-        setSelectedAssetId("");
         setPreviewUrls({});
         if (!displayVersion) {
+          setSelectedAssetId("");
           setStatus(
             latestState.stale || selection.stale
               ? "上游输入已更新，请重新生成人物置换首帧。"
@@ -160,6 +167,7 @@ export function FirstFrameSelection({
         }
         const payload = readFirstFrameCandidates(displayVersion);
         if (!payload) {
+          setSelectedAssetId("");
           setError("首帧候选数据格式无效，请重新生成。");
           return;
         }
@@ -174,9 +182,20 @@ export function FirstFrameSelection({
           !(latestState.stale || selection.stale) &&
           displayVersion.id === latest?.id &&
           !currentSelection;
-        if (canAutoSelect) {
-          setSelectedAssetId(payload.candidates[0]?.asset_id ?? "");
-        }
+        const canPreserveSelection =
+          !(latestState.stale || selection.stale) &&
+          displayVersion.id === latest?.id;
+        setSelectedAssetId((currentAssetId) => {
+          if (canAutoSelect) {
+            return payload.candidates[0]?.asset_id ?? "";
+          }
+          return canPreserveSelection &&
+            payload.candidates.some(
+              (candidate) => candidate.asset_id === currentAssetId,
+            )
+            ? currentAssetId
+            : "";
+        });
         if (latestState.stale || selection.stale) {
           setStatus("上游输入已更新，请重新生成人物置换首帧。");
         } else if (displayVersion.id !== latest?.id) {
@@ -255,6 +274,12 @@ export function FirstFrameSelection({
         }
         setStatus("候选首帧已更新，正在读取候选…");
         await load(generated, true);
+        if (
+          watchId === generationWatchId.current &&
+          pendingFirstFrameGenerations.get(projectId) === pending
+        ) {
+          pendingFirstFrameGenerations.delete(projectId);
+        }
       } catch (requestError) {
         if (watchId !== generationWatchId.current) {
           return;
@@ -293,6 +318,14 @@ export function FirstFrameSelection({
       generationWatchId.current += 1;
     };
   }, [followGeneration, load, projectId]);
+
+  useEffect(
+    () => () => {
+      confirmationLifecycleId.current += 1;
+      onBusyChangeRef.current?.(false);
+    },
+    [],
+  );
 
   useEffect(() => {
     if (generationStartedAt === null) {
@@ -349,13 +382,17 @@ export function FirstFrameSelection({
       setError("请先加载并查看最新候选首帧预览，再进行确认。");
       return;
     }
-    const requestId = loadRequestId.current;
-    onBusyChange?.(true);
+    const submittedBindingKey = confirmationBindingKey;
+    const submittedLifecycleId = confirmationLifecycleId.current;
+    const isCurrentConfirmation = () =>
+      submittedLifecycleId === confirmationLifecycleId.current &&
+      submittedBindingKey === confirmationBindingKeyRef.current;
+    onBusyChangeRef.current?.(true);
     setIsSubmitting(true);
     setError("");
     try {
       const selection = await confirmFirstFrame(projectId, selectedAssetId);
-      if (requestId !== loadRequestId.current) {
+      if (!isCurrentConfirmation()) {
         return;
       }
       const selectedIndex = payload?.candidates.findIndex(
@@ -366,17 +403,17 @@ export function FirstFrameSelection({
       );
       onSelectionChange?.(selection);
     } catch (requestError) {
-      if (requestId !== loadRequestId.current) {
+      if (!isCurrentConfirmation()) {
         return;
       }
       setError(
         requestError instanceof Error ? requestError.message : "确认首帧失败。",
       );
     } finally {
-      if (requestId === loadRequestId.current) {
+      if (submittedLifecycleId === confirmationLifecycleId.current) {
         setIsSubmitting(false);
+        onBusyChangeRef.current?.(false);
       }
-      onBusyChange?.(false);
     }
   }
 
@@ -506,6 +543,7 @@ export function FirstFrameSelection({
                 checked={selectedAssetId === candidate.asset_id}
                 disabled={
                   readOnly ||
+                  isSubmitting ||
                   !previewUrls[candidate.asset_id] ||
                   isHistoryVersion
                 }
@@ -539,6 +577,7 @@ export function FirstFrameSelection({
                   : "history-version"
               }
               key={historyVersion.id}
+              disabled={isSubmitting}
               onClick={() => void load(historyVersion)}
               type="button"
             >

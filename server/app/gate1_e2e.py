@@ -25,6 +25,8 @@ from cryptography.fernet import Fernet
 from app.gate1_bootstrap import bootstrap_gate1_database
 
 CommandRunner = Callable[[list[str]], None]
+DEFAULT_GATE1_API_PORT = 8000
+GATE1_WEB_PORT = 5173
 
 
 @dataclass(frozen=True)
@@ -404,6 +406,35 @@ def verify_evidence_manifest(manifest_path: Path) -> None:
             raise ValueError(f"Gate 1 evidence hash mismatch: {relative_value}")
 
 
+def _gate1_runtime_environment(
+    *,
+    database_path: Path,
+    storage_root: Path,
+    settings_key: str,
+    fake_h3_result_path: Path,
+    api_url: str,
+) -> dict[str, str]:
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PYTHONUNBUFFERED": "1",
+            "PUBLIC_BASE_URL": "",
+            "VIDEO_REPLICA_AUTH_MODE": "desktop",
+            "VIDEO_REPLICA_ALLOW_DEV_IDENTITY_HEADER": "0",
+            "VIDEO_REPLICA_DB_PATH": str(database_path),
+            "VIDEO_REPLICA_SETTINGS_KEY": settings_key,
+            "VIDEO_REPLICA_DESKTOP_USER_ID": "gate1_admin",
+            "VIDEO_REPLICA_FAKE_H3_RESULT_PATH": str(fake_h3_result_path),
+            "VIDEO_REPLICA_FAKE_SOURCE_IMAGE_INSPECTOR": "1",
+            "VIDEO_REPLICA_LOCAL_API_BASE_URL": api_url,
+            "VIDEO_REPLICA_STORAGE_ROOT": str(storage_root),
+            "VITE_API_BASE_URL": api_url,
+            "VITE_GENERATION_PROVIDER": "fake_h3",
+        }
+    )
+    return environment
+
+
 def run_gate1(
     *,
     repository_root: Path,
@@ -418,27 +449,25 @@ def run_gate1(
     exit_code = 1
     try:
         commit_sha = _git_commit(repository_root)
+        api_port = _gate1_api_port()
+        api_url = f"http://127.0.0.1:{api_port}"
+        web_url = f"http://127.0.0.1:{GATE1_WEB_PORT}"
         _require_command("ffmpeg")
         _require_command("uv")
         _require_command("npm")
-        _require_available_port("127.0.0.1", 8000)
-        _require_available_port("127.0.0.1", 5173)
+        _require_available_port("127.0.0.1", api_port)
+        _require_available_port("127.0.0.1", GATE1_WEB_PORT)
 
         settings_key = Fernet.generate_key().decode("ascii")
         database_path = paths.runtime_dir / "gate1.sqlite3"
         storage_root = paths.runtime_dir / "storage"
         storage_root.mkdir()
-        runtime_env = os.environ.copy()
-        runtime_env.update(
-            {
-                "PYTHONUNBUFFERED": "1",
-                "VIDEO_REPLICA_DB_PATH": str(database_path),
-                "VIDEO_REPLICA_SETTINGS_KEY": settings_key,
-                "VIDEO_REPLICA_DESKTOP_USER_ID": "gate1_admin",
-                "VIDEO_REPLICA_FAKE_H3_RESULT_PATH": str(paths.media_dir / "reference.mp4"),
-                "VIDEO_REPLICA_FAKE_SOURCE_IMAGE_INSPECTOR": "1",
-                "VIDEO_REPLICA_STORAGE_ROOT": str(storage_root),
-            }
+        runtime_env = _gate1_runtime_environment(
+            database_path=database_path,
+            storage_root=storage_root,
+            settings_key=settings_key,
+            fake_h3_result_path=paths.media_dir / "reference.mp4",
+            api_url=api_url,
         )
 
         previous_key = os.environ.get("VIDEO_REPLICA_SETTINGS_KEY")
@@ -483,12 +512,12 @@ def run_gate1(
                     "--host",
                     "127.0.0.1",
                     "--port",
-                    "8000",
+                    str(api_port),
                 ],
                 cwd=repository_root,
                 env=runtime_env,
                 log_path=paths.logs_dir / "api.log",
-                health_url="http://127.0.0.1:8000/health",
+                health_url=f"{api_url}/health",
                 request_path=api_restart_request_path,
                 completion_path=api_restart_completion_path,
             )
@@ -506,20 +535,20 @@ def run_gate1(
                         "--host",
                         "127.0.0.1",
                         "--port",
-                        "5173",
+                        str(GATE1_WEB_PORT),
                     ],
                     cwd=repository_root,
                     env=runtime_env,
                     log_path=paths.logs_dir / "vite.log",
                 )
-                wait_for_http("http://127.0.0.1:5173/")
+                wait_for_http(f"{web_url}/")
 
                 playwright_env = runtime_env.copy()
                 playwright_env.update(
                     {
                         "GATE1_RUN_DIR": str(paths.run_dir),
-                        "GATE1_WEB_URL": "http://127.0.0.1:5173",
-                        "GATE1_API_URL": "http://127.0.0.1:8000",
+                        "GATE1_WEB_URL": web_url,
+                        "GATE1_API_URL": api_url,
                         "GATE1_API_RESTART_REQUEST_PATH": str(api_restart_request_path),
                         "GATE1_API_RESTART_COMPLETION_PATH": str(api_restart_completion_path),
                         "GATE1_MEDIA_DIR": str(paths.media_dir),
@@ -628,9 +657,25 @@ def _stop_process_tree(process: subprocess.Popen[bytes]) -> None:
 def _require_available_port(host: str, port: int) -> None:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         try:
+            # 与 Uvicorn/Vite 的监听行为一致：允许立即复用刚释放、仍处于
+            # TIME_WAIT 的本地地址，同时仍会拒绝真正存在的监听进程。
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             probe.bind((host, port))
         except OSError as exc:
             raise RuntimeError(f"Gate 1 requires free port {host}:{port}") from exc
+
+
+def _gate1_api_port() -> int:
+    raw_value = os.environ.get("GATE1_API_PORT", "").strip()
+    if not raw_value:
+        return DEFAULT_GATE1_API_PORT
+    try:
+        port = int(raw_value)
+    except ValueError as exc:
+        raise ValueError("GATE1_API_PORT must be an integer from 1024 to 65535") from exc
+    if port < 1024 or port > 65535 or port == GATE1_WEB_PORT:
+        raise ValueError("GATE1_API_PORT must be from 1024 to 65535 and differ from the web port")
+    return port
 
 
 def _require_command(command: str) -> None:

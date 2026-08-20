@@ -86,11 +86,69 @@ def test_nginx_routes_health_to_api_and_keeps_payment_callbacks_public() -> None
     assert "root /opt/video-replica/app/client/dist;" in nginx
 
 
+def test_nginx_supports_real_upload_sizes_long_provider_calls_and_https_only() -> None:
+    nginx = read_repo_file("deploy/nginx/internal-p0.conf.example")
+
+    assert "listen 80;" in nginx
+    assert "return 301 https://$host$request_uri;" in nginx
+    assert "client_max_body_size 64m;" in nginx
+    assert "proxy_connect_timeout 5s;" in nginx
+    assert "proxy_send_timeout 310s;" in nginx
+    assert "proxy_read_timeout 310s;" in nginx
+    assert 'add_header Strict-Transport-Security "max-age=31536000" always;' in nginx
+    assert 'add_header X-Content-Type-Options "nosniff" always;' in nginx
+    assert 'add_header X-Frame-Options "DENY" always;' in nginx
+
+
+def test_real_generation_and_reconciliation_use_configured_media_storage() -> None:
+    worker = read_repo_file("server/app/generation_worker.py")
+    routes = read_repo_file("server/app/generation_routes.py")
+
+    assert "get_local_result_storage" not in worker
+    assert "generation_storage=asset_storage" in worker
+    assert "storage_factory=lambda: get_media_storage(conn)" in routes
+
+
+def test_runbook_provisions_a_writable_sqlite_parent_for_the_service_user() -> None:
+    runbook = read_repo_file("docs/内部运营P0单机部署与验收记录.md")
+
+    assert (
+        "sudo install -d -o video-replica -g video-replica -m 0700 "
+        "/var/lib/video-replica\n" in runbook
+    )
+
+
+def test_runbook_keeps_release_tree_traversable_by_nginx() -> None:
+    runbook = read_repo_file("docs/内部运营P0单机部署与验收记录.md")
+
+    assert (
+        "sudo install -d -o video-replica -g video-replica -m 0755 "
+        "/opt/video-replica/releases\n" in runbook
+    )
+    assert (
+        "sudo install -d -o video-replica -g video-replica -m 0755 \\\n"
+        "  /opt/video-replica/releases/<AUDITED_COMMIT>\n" in runbook
+    )
+
+
+def test_runbook_grants_nginx_worker_read_access_to_basic_auth_file() -> None:
+    runbook = read_repo_file("docs/内部运营P0单机部署与验收记录.md")
+
+    assert "sudo chown root:www-data /etc/nginx/video-replica-admin.htpasswd\n" in runbook
+    assert "sudo chmod 0640 /etc/nginx/video-replica-admin.htpasswd\n" in runbook
+
+
 def test_fake_acceptance_runner_is_local_only_and_declares_external_gaps() -> None:
     script_path = REPO_ROOT / "scripts/p0_acceptance_evidence.py"
     module = load_acceptance_module()
 
     tests = module.ACCEPTANCE_TESTS
+    for node_id in tests:
+        path, separator, test_name = node_id.partition("::")
+        assert separator, f"acceptance node id is missing a test name: {node_id}"
+        assert f"def {test_name}(" in read_repo_file(path), (
+            f"acceptance node id points to a missing test: {node_id}"
+        )
     assert any(
         "test_valid_notify_credits_wallet_and_duplicate_notify_is_idempotent" in item
         for item in tests

@@ -3885,7 +3885,7 @@ def test_reconcile_route_is_idempotent_and_audited(
     )
     monkeypatch.setattr(
         generation_routes_module,
-        "get_local_result_storage",
+        "get_media_storage",
         lambda _conn: FakeStorageAdapter(provider="cos", bucket="generation-results"),
     )
     prompt_id = create_locked_prompt(client)
@@ -3932,7 +3932,7 @@ def test_reconcile_route_is_idempotent_and_audited(
 
     monkeypatch.setattr(
         generation_routes_module,
-        "get_local_result_storage",
+        "get_media_storage",
         unavailable_storage,
         raising=False,
     )
@@ -3990,7 +3990,7 @@ def test_reconcile_route_recovers_an_abandoned_pending_reservation(
     )
     monkeypatch.setattr(
         generation_routes_module,
-        "get_local_result_storage",
+        "get_media_storage",
         lambda _conn: FakeStorageAdapter(provider="cos", bucket="generation-results"),
     )
     prompt_id = create_locked_prompt(client)
@@ -4099,7 +4099,7 @@ def test_reconcile_provider_failure_does_not_require_storage_settings(
     )
     monkeypatch.setattr(
         generation_routes_module,
-        "get_local_result_storage",
+        "get_media_storage",
         unavailable_storage,
     )
     prompt_id = create_locked_prompt(client)
@@ -4206,7 +4206,7 @@ def test_reconcile_lost_reservation_cannot_finalize_an_archived_result(
     )
     monkeypatch.setattr(
         generation_routes_module,
-        "get_local_result_storage",
+        "get_media_storage",
         lambda _conn: storage,
     )
     prompt_id = create_locked_prompt(client)
@@ -4993,6 +4993,40 @@ def test_generation_batch_insufficient_credits_rolls_back_everything(
     assert batch_count == 0
     assert transaction_count == 0
     assert json.loads(str(prompt["payload_json"]))["status"] == "LOCKED"
+
+
+def test_generation_batch_missing_wallet_returns_structured_invariant_error(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    prompt_id = create_locked_prompt(client)
+    with connect_database(db_path) as conn:
+        conn.execute("DELETE FROM wallets WHERE user_id = 'employee_1'")
+        conn.commit()
+
+    response = client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json={
+            "quantity": 1,
+            "prompt_version_id": prompt_id,
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+            "idempotency_key": "billing-missing-wallet",
+        },
+    )
+
+    assert response.status_code == 500
+    assert response.json()["detail"]["code"] == "BILLING_INVARIANT_VIOLATION"
+    with connect_database(db_path) as conn:
+        batch_count = conn.execute(
+            """
+            SELECT COUNT(*) FROM generation_batches
+            WHERE idempotency_key = 'billing-missing-wallet'
+            """
+        ).fetchone()[0]
+    assert batch_count == 0
 
 
 def test_archived_generation_settles_once_but_archive_failure_stays_reserved(

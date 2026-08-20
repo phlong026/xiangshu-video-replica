@@ -1,24 +1,28 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import sqlite3
 import struct
+import threading
 import time
 import zlib
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 from urllib.parse import urlsplit
 
 import pytest
 from cryptography.fernet import Fernet
+from fastapi import UploadFile
 from fastapi.testclient import TestClient
 
 import app.rbac_routes as rbac_routes
 import app.simple_character_routes as simple_character_routes
-from app.auth import get_database
+from app.auth import CurrentUser, get_database
 from app.character_identity import REQUIRED_CHARACTER_VIEW_TYPES
 from app.character_identity_routes import get_character_storage
 from app.character_image_generation import deterministic_png, png_chunk
@@ -30,6 +34,8 @@ from app.media import storage_key_from_uri
 from app.media_routes import get_media_storage
 from app.simple_character import (
     SIMPLE_CONTACT_SHEET_MODEL,
+    SimpleCharacterCreationResult,
+    SimpleCharacterView,
     _decode_png_rgb,
     contact_sheet_placeholder_png,
     crop_contact_sheet_views,
@@ -196,6 +202,67 @@ def test_simple_character_rejects_empty_name(client: TestClient) -> None:
     )
     assert response.status_code == 422
     assert response.json()["detail"]["code"] == "SIMPLE_CHARACTER_NAME_REQUIRED"
+
+
+def test_simple_character_generation_runs_provider_work_off_the_event_loop(
+    db_path: Path,
+    storage: FakeStorageAdapter,
+    contact_sheet_provider: StubContactSheetProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    event_loop_thread_id = threading.get_ident()
+    provider_thread_id: int | None = None
+
+    def observed_create_simple_character(
+        *args: object, **kwargs: object
+    ) -> SimpleCharacterCreationResult:
+        nonlocal provider_thread_id
+        provider_thread_id = threading.get_ident()
+        return SimpleCharacterCreationResult(
+            identity_id="identity-1",
+            persona_id="persona-1",
+            character_version_id="version-1",
+            publication_hash="hash-1",
+            contact_sheet_asset_id="asset-1",
+            views=(SimpleCharacterView(view_type="FRONT_FACE", asset_id="asset-front"),),
+        )
+
+    monkeypatch.setattr(
+        simple_character_routes,
+        "create_simple_character",
+        observed_create_simple_character,
+    )
+
+    class InMemoryUpload:
+        size = 5
+        content_type = "image/png"
+
+        async def read(self) -> bytes:
+            return b"image"
+
+    async def generate_character() -> simple_character_routes.SimpleCharacterResponse:
+        with connect_database(db_path) as conn:
+            return await simple_character_routes._run_simple_character_creation(
+                conn=conn,
+                actor=CurrentUser(
+                    id="employee_1",
+                    username="employee_1",
+                    display_name="Employee One",
+                    role="employee",
+                ),
+                storage=storage,
+                provider=contact_sheet_provider,
+                file=cast(UploadFile, InMemoryUpload()),
+                display_name="荣哥",
+                persona_name="",
+                project_id="project-owned",
+            )
+
+    response = asyncio.run(generate_character())
+
+    assert response.character_version_id == "version-1"
+    assert provider_thread_id is not None
+    assert provider_thread_id != event_loop_thread_id
 
 
 def test_auditor_cannot_generate(client: TestClient) -> None:
@@ -453,6 +520,30 @@ def test_character_cache_downloads_once_and_serves_local_copy(
 
     invalid_signature = client.get(f"{parsed.path}?{parsed.query}x")
     assert invalid_signature.status_code == 403
+
+
+def test_approved_character_view_can_use_local_cache(
+    client: TestClient,
+    storage: FakeStorageAdapter,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    created = generate_global(client).json()
+    asset_id = created["views"][0]["asset_id"]
+    monkeypatch.setenv("VIDEO_REPLICA_HOME", str(tmp_path / "video-replica-home"))
+    monkeypatch.setenv("VIDEO_REPLICA_SETTINGS_KEY", Fernet.generate_key().decode("ascii"))
+    monkeypatch.setattr(rbac_routes, "storage_for_asset", lambda conn, storage_uri: storage)
+
+    response = client.post(
+        f"/api/assets/{asset_id}/cached-url",
+        headers=headers("employee_1"),
+    )
+
+    assert response.status_code == 200, response.text
+    parsed = urlsplit(response.json()["url"])
+    cached = client.get(f"{parsed.path}?{parsed.query}")
+    assert cached.status_code == 200
+    assert cached.headers["content-type"].startswith("image/png")
 
 
 def test_character_cache_rejects_source_with_wrong_hash(

@@ -126,6 +126,7 @@ def deployment_config_from_environment() -> ZPayDeploymentConfig:
     if (
         parsed.scheme != "https"
         or not parsed.netloc
+        or parsed.hostname is None
         or parsed.username is not None
         or parsed.password is not None
         or parsed.path not in {"", "/"}

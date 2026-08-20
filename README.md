@@ -77,7 +77,7 @@ Set-Location server
 
 同一份 React/Vite 构建在 `/admin` 渲染独立内部管理页，只提供账号与钱包只读列表、充值订单与查单、只读对账/CSV、ZPay 配置和内部价格设置。密钥只展示掩码，新密钥留空表示保留旧值；网关、异步回调和同步返回地址来自部署环境，只读不可提交。管理页没有手工改余额、补单或令牌签发入口。
 
-生产构建必须把 `VITE_API_BASE_URL` 设为与页面同源的 HTTPS 地址。参考 `deploy/nginx/internal-p0.conf.example` 保护 `/admin` 和 `/api/control/*`：IP/VPN 白名单与 Basic Auth 必须同时通过，浏览器永远接触不到控制代理原始令牌。FastAPI 继续只监听 `127.0.0.1`；若 Nginx 前面还有负载均衡或 CDN，必须先按可信代理范围正确恢复客户端地址，否则不要直接复用样例中的 IP 白名单。
+生产构建建议显式把 `VITE_API_BASE_URL` 设为与页面同源的 HTTPS 地址，便于发布审计；未设置时，HTTPS Web 生产页会安全回退到 `window.location.origin`，桌面端和开发构建仍使用本机 API。参考 `deploy/nginx/internal-p0.conf.example` 保护 `/admin` 和 `/api/control/*`：IP/VPN 白名单与 Basic Auth 必须同时通过，浏览器永远接触不到控制代理原始令牌。FastAPI 继续只监听 `127.0.0.1`；若 Nginx 前面还有负载均衡或 CDN，必须先按可信代理范围正确恢复客户端地址，否则不要直接复用样例中的 IP 白名单。
 
 Linux 单机部署的环境模板、systemd 单元、SQLite 检查/备份/恢复和验收命令统一见 `docs/内部运营P0单机部署与验收记录.md`。部署文件只覆盖一个 API、一个 Worker、一个本机 SQLite 文件和同机静态页；它们不代表真实 ZPay、COS 或 Provider 已验收。
 
@@ -97,7 +97,7 @@ Linux 单机部署的环境模板、systemd 单元、SQLite 检查/备份/恢复
 $env:VIDEO_REPLICA_STORAGE_ROOT = "C:\video-replica-storage"   # 本地存储根目录（必填）
 ```
 
-在管理员设置中将 `active_storage_provider` 设为 `local`。local 模式下上传不依赖云厂商签名 URL，而是经 `http://127.0.0.1:8000/api/assets/local-objects/...` 由服务端落盘到 `VIDEO_REPLICA_STORAGE_ROOT`。该模式仅用于本地/内测，不应在生产启用（生产只使用腾讯云 COS）。
+在管理员设置中将 `active_storage_provider` 设为 `local`。local 模式下上传不依赖云厂商签名 URL，而是经 `/api/assets/local-objects/...` 由服务端落盘到 `VIDEO_REPLICA_STORAGE_ROOT`：本地开发未设 `PUBLIC_BASE_URL` 时使用 `http://127.0.0.1:8000`，服务器设置合法 `PUBLIC_BASE_URL` 后使用该 HTTPS origin。该模式仅用于本地/内测，不应在生产启用（生产只使用腾讯云 COS）。
 
 ### 管理员配置持久化
 

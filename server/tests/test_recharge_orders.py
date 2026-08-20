@@ -22,7 +22,7 @@ def test_zpay_provider_migration_is_reversible(tmp_path: Path) -> None:
     db_path = tmp_path / "zpay-migration.db"
     with initialize_database(db_path) as conn:
         assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == (
-            "023_zpay_provider"
+            "024_wallet_backfill"
         )
 
     command.downgrade(alembic_config(db_path), "022_internal_billing")
@@ -38,7 +38,7 @@ def test_zpay_provider_migration_is_reversible(tmp_path: Path) -> None:
     command.upgrade(alembic_config(db_path), "head")
     with connect_database(db_path) as conn:
         assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == (
-            "023_zpay_provider"
+            "024_wallet_backfill"
         )
 
 
@@ -263,6 +263,7 @@ def test_create_recharge_order_rejects_client_owned_fields(
     ("environment_name", "value"),
     [
         ("PUBLIC_BASE_URL", "https://video.example?tenant=forged"),
+        ("PUBLIC_BASE_URL", "https://:443"),
         ("ZPAY_GATEWAY_URL", "https://evil.example/submit.php"),
         ("ZPAY_GATEWAY_URL", "https://zpayz.cn/submit.php?redirect=evil"),
     ],

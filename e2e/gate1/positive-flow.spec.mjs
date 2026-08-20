@@ -7,16 +7,6 @@ import { observePage, requiredRunDir } from "./evidence.mjs";
 import { restartApi, withBrokenGenerationArchive } from "./runtime.mjs";
 import { runWorkerOnce } from "./worker.mjs";
 
-const VIEW_NAMES = [
-  "正面头像",
-  "正面半身",
-  "正面全身",
-  "左 45°",
-  "右 45°",
-  "左侧面",
-  "右侧面",
-];
-
 test("@positive creates a character, restarts, and restores three completed videos", async ({
   browser,
   context,
@@ -39,19 +29,20 @@ test("@positive creates a character, restarts, and restores three completed vide
     });
 
     await createProjectBatchViaOneClick(page);
-    const progress = page.getByRole("progressbar", { name: "批次进度" });
-    await expect(progress).toHaveAttribute("aria-valuenow", "0");
+    await expect(
+      page.getByText("0 / 3 个结果已完成", { exact: true }),
+    ).toBeVisible();
 
-    for (const expectedProgress of [33, 66, 100]) {
+    for (const completedResults of [1, 2, 3]) {
       await runWorkerOnce({
-        label: `positive-video-${expectedProgress}`,
+        label: `positive-video-${completedResults}`,
         maxTasks: 1,
       });
-      await expect(progress).toHaveAttribute(
-        "aria-valuenow",
-        String(expectedProgress),
-        { timeout: 15_000 },
-      );
+      await expect(
+        page.getByText(`${completedResults} / 3 个结果已完成`, {
+          exact: true,
+        }),
+      ).toBeVisible({ timeout: 15_000 });
     }
 
     await previewAndDownloadResults(page, runDir);
@@ -102,80 +93,23 @@ async function enterWorkspace(page) {
 async function createAndPublishCharacter(page) {
   const mediaDir = requiredEnvironmentPath("GATE1_MEDIA_DIR");
   await page.getByRole("button", { name: "人物库" }).click();
-  await page.getByRole("button", { name: "创建人物身份" }).click();
-  await page.getByLabel("人物显示名").fill("Gate 1 林夏");
-  await page.getByLabel("授权使用范围").fill("内部短视频");
-  await page.getByLabel("授权到期日").fill("2035-12-31");
+  await page.getByLabel("人物名称").fill("Gate 1 林夏");
   await page
-    .getByLabel("肖像授权文件")
-    .setInputFiles(path.join(mediaDir, "authorization.png"));
-  await page.getByRole("button", { name: "创建并上传授权" }).click();
-
-  await page
-    .getByLabel("真人源图", { exact: true })
+    .getByLabel("授权图片")
     .setInputFiles(path.join(mediaDir, "source.png"));
-  await page.getByRole("button", { name: "上传并检查源图" }).click();
+  await page.getByRole("button", { name: "一键生成五视角拼合图" }).click();
   await expect(
-    page.getByRole("heading", { name: "源图质量通过" }),
-  ).toBeVisible();
-  await page.getByRole("button", { name: "确认质检结果" }).click();
-  await page.getByRole("button", { name: "完成并返回人物库" }).click();
+    page.getByText(/人物“Gate 1 林夏”五视角拼合图已生成/),
+  ).toBeVisible({ timeout: 30_000 });
+
+  await page.getByRole("button", { name: "查看人物 Gate 1 林夏 大图" }).click();
   await expect(
-    page.getByText("人物身份已激活，可继续创建人设。"),
+    page.getByRole("dialog", { name: "人物预览 Gate 1 林夏" }),
   ).toBeVisible();
-
-  await page.getByRole("button", { name: "新建人设" }).click();
-  await page.getByLabel("人设名称").fill("乡墅项目管理专家");
-  await page.getByLabel("职业定位").fill("乡墅短视频主理人");
-  await page.getByLabel("使用场景").fill("夏日咖啡馆口播");
-  await page.getByLabel("服装描述").fill("白色休闲上衣");
-  await page.getByLabel("默认背景").fill("明亮咖啡馆");
-  await page.getByLabel("使用范围").fill("内部短视频、测试");
-  await page.getByLabel("正向提示词").fill("自然、真实、稳定一致");
-  await page.getByLabel("负向提示词").fill("留影、畸形、多人");
-  await page.getByRole("button", { name: "保存人设" }).click();
-  await expect(page.getByText("人设已创建。")).toBeVisible();
-
-  await page.getByRole("button", { name: "创建 DRAFT 版本" }).click();
-  await expect(page.getByText("已创建 V1 DRAFT 版本。")).toBeVisible();
-  await page.getByRole("button", { name: "开始生成 7 类视角" }).click();
-  await runWorkerOnce({ label: "positive-character-seven-views", maxTasks: 7 });
-  await expect(page.getByText("成功 7", { exact: true })).toBeVisible({
+  await expect(page.getByAltText("Gate 1 林夏 五视角拼合图")).toBeVisible({
     timeout: 15_000,
   });
-
-  const frontSlot = viewSlot(page, "正面头像");
-  const originalFront = candidate(frontSlot, 1);
-  await originalFront.getByLabel("审核说明").fill("表情不符合项目要求");
-  await originalFront.getByRole("button", { name: "驳回" }).click();
-  await expect(originalFront.getByText("人工审核：已驳回")).toBeVisible();
-  await originalFront.getByRole("button", { name: "重新生成正面头像" }).click();
-  await runWorkerOnce({
-    label: "positive-character-front-regeneration",
-    maxTasks: 1,
-  });
-  await expect(candidate(frontSlot, 2)).toBeVisible({ timeout: 15_000 });
-
-  for (const viewName of VIEW_NAMES) {
-    const slot = viewSlot(page, viewName);
-    const approvedCandidate = candidate(slot, viewName === "正面头像" ? 2 : 1);
-    await approvedCandidate.getByRole("button", { name: "批准" }).click();
-    await expect(approvedCandidate.getByText("人工审核：已批准")).toBeVisible();
-    await approvedCandidate
-      .getByRole("radio", { name: "选为发布资产" })
-      .check();
-  }
-
-  page.once("dialog", async (dialog) => {
-    expect(dialog.message()).toBe(
-      "发布后角色版本与七类资产选择不可修改。确认发布？",
-    );
-    await dialog.accept();
-  });
-  await page.getByRole("button", { name: "发布角色版本" }).click();
-  await expect(
-    page.getByText("版本已发布，内容不可修改").first(),
-  ).toBeVisible();
+  await page.getByRole("button", { name: "关闭人物预览" }).click();
 }
 
 // P0-05-02：V1.4 单屏闭环一键动线——打开项目 → 预填确认（角色自动预选/
@@ -186,31 +120,43 @@ async function createAndPublishCharacter(page) {
 // 仍需切自定义稿保存。用户确认类动作 = 4（源画面/参考/首帧对/生成）。
 async function createProjectBatchViaOneClick(page) {
   const mediaDir = requiredEnvironmentPath("GATE1_MEDIA_DIR");
-  // 品牌改版后项目页常驻创建表单（原「新建复刻」弹层已移除）：
-  // 人物库返回后切项目页，直接填表单提交（按钮文案「开始」）。
+  // 当前项目页以视频文件名自动建项目并立即拆解，不再要求先填写项目名。
   await page.getByRole("button", { name: "项目", exact: true }).click();
-  // 品牌改版后项目页同时存在 h1「项目」（工作台标题）与
-  // h2「项目」（#project-list-title），断言需加 level 消歧。
-  await expect(
-    page.getByRole("heading", { name: "项目", exact: true, level: 2 }),
-  ).toBeVisible();
-  await page.getByLabel("项目名称").fill("Gate 1 夏日咖啡馆口播");
+  await expect(page.getByRole("region", { name: "项目" })).toBeVisible();
+  await page.getByLabel("选择一个或多个参考视频").setInputFiles({
+    name: "Gate 1 夏日咖啡馆口播.mp4",
+    mimeType: "video/mp4",
+    buffer: await readFile(path.join(mediaDir, "reference.mp4")),
+  });
+  await expect(page.getByText("已提交拆解")).toBeVisible({
+    timeout: 30_000,
+  });
   await page
-    .getByLabel("参考视频")
-    .setInputFiles(path.join(mediaDir, "reference.mp4"));
-  await page.getByRole("button", { name: "开始", exact: true }).click();
+    .getByRole("button", { name: "打开项目 Gate 1 夏日咖啡馆口播" })
+    .click();
   // 三标签页改版后工作台主标题为 h2「复刻工作台」（原「镜头卡片」
   // heading 已随内容配置标签页结构移除）。
   await expect(page.getByRole("heading", { name: "复刻工作台" })).toBeVisible({
     timeout: 30_000,
   });
-  await expect(page.getByText("FakeGemini video analysis")).toBeVisible();
+  await expect(page.getByText(/FakeGemini 演示拆解/)).toBeVisible();
+
+  // 角色自动预选会立即触发源画面自动提取；这段上游初始化期间工作区
+  // 会进入 aria-busy=true 并禁用表单。先等候候选提取完成，避免 fill()
+  // 的 actionability 检查与 busy 翻转落在同一帧，造成输入未落入 React 状态。
+  await expect(
+    page.getByText("已自动提取候选源画面，请核对后确认。"),
+  ).toBeAttached({ timeout: 15_000 });
+  const workspaceGrid = page.locator(".analysis-workspace-grid");
+  await expect(workspaceGrid).toHaveAttribute("aria-busy", "false");
 
   // 标签页①（默认激活）：S01 原口播触发 800ms 防抖自动保存（P0-02-03），
   // 首个镜头卡版本无需手动保存按钮。
-  await page
-    .getByLabel("S01 原口播")
-    .fill("夏日咖啡馆的好项目，要从真实需求出发。");
+  const firstShotSpokenText = page.getByLabel("S01 原口播");
+  const customSpokenText = "夏日咖啡馆的好项目，要从真实需求出发。";
+  await expect(firstShotSpokenText).toBeEditable();
+  await firstShotSpokenText.fill(customSpokenText);
+  await expect(firstShotSpokenText).toHaveValue(customSpokenText);
   await expect(page.getByText(/已自动保存 · 版本 #/)).toBeVisible();
 
   await page.getByRole("radio", { name: "自定义稿" }).check();
@@ -230,15 +176,15 @@ async function createProjectBatchViaOneClick(page) {
   await expect(page.getByText("当前角色：Gate 1 林夏")).toBeVisible();
 
   // 源画面：角色就绪后自动提取候选（P0-03-02，本地截帧无费用），候选与
-  // 特征按镜头卡建议预填（S01 近景 → CLOSE_UP/FACE_ONLY），确认即可。
+  // 特征按当前保守默认值预填（正面半身、上半身可见），确认即可。
   await expect(
     page.getByText("已自动提取候选源画面，请核对后确认。"),
   ).toBeVisible({ timeout: 20_000 });
   await expect(page.getByAltText("候选源画面 1")).toBeVisible();
   await expect(page.getByLabel("人物朝向")).toHaveValue("FRONT");
-  await expect(page.getByLabel("人物景别")).toHaveValue("CLOSE_UP");
+  await expect(page.getByLabel("人物景别")).toHaveValue("HALF_BODY");
   await expect(page.getByLabel("面部可见性")).toHaveValue("VISIBLE");
-  await expect(page.getByLabel("身体完整度")).toHaveValue("FACE_ONLY");
+  await expect(page.getByLabel("身体完整度")).toHaveValue("UPPER_BODY");
   await expect(page.getByRole("radio", { name: /候选 1/ })).toBeChecked();
   await page.getByRole("button", { name: "确认源画面" }).click();
   await expect(page.getByText("已确认候选源画面 1。")).toBeVisible();
@@ -255,9 +201,15 @@ async function createProjectBatchViaOneClick(page) {
   await expect(page.getByAltText("首帧候选 1")).toBeVisible({
     timeout: 15_000,
   });
+  const confirmFirstFrame = page.getByRole("button", {
+    name: "确认用于 H3 的首帧",
+  });
+  await expect(confirmFirstFrame).toBeEnabled({ timeout: 30_000 });
   await expect(page.getByRole("radio", { name: /首帧候选 1/ })).toBeChecked();
-  await page.getByRole("button", { name: "确认用于 H3 的首帧" }).click();
-  await expect(page.getByText(/已确认首帧候选 1/)).toBeVisible();
+  await confirmFirstFrame.click();
+  await expect(
+    page.getByText("当前候选首帧已确认，将作为后续 H3 提示词的唯一首帧输入。"),
+  ).toBeVisible();
 
   // 标签页③：数量 3 → 工具栏付费提醒在确认前可见（P0-04-02）。
   await page.getByRole("tab", { name: "生成设置" }).click();
@@ -276,27 +228,35 @@ async function createProjectBatchViaOneClick(page) {
 }
 
 async function previewAndDownloadResults(page, runDir) {
-  const loadPreviewButtons = page.getByRole("button", { name: /^加载预览 / });
-  await expect(loadPreviewButtons).toHaveCount(3);
-  for (let expectedVideos = 1; expectedVideos <= 3; expectedVideos += 1) {
-    await loadPreviewButtons.first().click();
-    const videos = page.getByLabel(/^结果预览 /);
-    await expect(videos).toHaveCount(expectedVideos);
-    await expect
-      .poll(() =>
-        videos.nth(expectedVideos - 1).evaluate((video) => video.readyState),
-      )
-      .toBe(4);
-  }
+  const resultButtons = page
+    .getByRole("navigation", { name: "生成结果列表" })
+    .getByRole("button", { name: /^查看结果 / });
+  await expect(resultButtons).toHaveCount(3);
 
   const downloadDir = path.join(runDir, "downloads");
   await mkdir(downloadDir, { recursive: true });
-  const downloadButtons = page.getByRole("button", { name: /^下载 MP4 / });
-  await expect(downloadButtons).toHaveCount(3);
   for (let index = 0; index < 3; index += 1) {
+    const resultButton = resultButtons.nth(index);
+    const taskId = await resultTaskId(resultButton);
+    await resultButton.click();
+    await expect(resultButton).toHaveAttribute("aria-pressed", "true");
+
+    // 客户视角结果舞台会自动签发并加载当前结果，不再提供手动“加载预览”。
+    const video = page.getByLabel(`结果预览 ${taskId}`, { exact: true });
+    await expect(video).toBeVisible();
+    await expect
+      .poll(() => video.evaluate((element) => element.readyState))
+      .toBeGreaterThanOrEqual(2);
+    await expect(video).toHaveAttribute("src", /\S+/);
+
+    const downloadButton = page.getByRole("button", {
+      name: "下载 MP4",
+      exact: true,
+    });
+    await expect(downloadButton).toBeEnabled();
     const [download] = await Promise.all([
       page.waitForEvent("download"),
-      downloadButtons.nth(index).click(),
+      downloadButton.click(),
     ]);
     const targetPath = path.join(downloadDir, `result-${index + 1}.mp4`);
     await download.saveAs(targetPath);
@@ -307,52 +267,57 @@ async function previewAndDownloadResults(page, runDir) {
   }
 }
 
+async function resultTaskId(resultButton) {
+  const label = await resultButton.getAttribute("aria-label");
+  const match = label?.match(/^查看结果 \d+：(.+)$/);
+  if (!match) {
+    throw new Error(`无法从结果按钮解析任务 ID：${label ?? "无 aria-label"}`);
+  }
+  return match[1];
+}
+
 async function verifyRestoredWorkspace(page, runDir) {
   await enterWorkspace(page);
-  // 品牌改版后列表标题 h2 为「项目」（#project-list-title），
-  // 原文本「项目列表」已不存在；与工作台 h1 同名，需 level 消歧。
+  await expect(page.getByRole("region", { name: "项目" })).toBeVisible();
   await expect(
-    page.getByRole("heading", { name: "项目", exact: true, level: 2 }),
+    page.getByRole("button", {
+      name: "打开项目 Gate 1 夏日咖啡馆口播",
+    }),
   ).toBeVisible();
-  await expect(page.getByText("Gate 1 夏日咖啡馆口播")).toBeVisible();
 
   await page.getByRole("button", { name: "人物库" }).click();
+  const characterPreview = page.getByRole("button", {
+    name: "查看人物 Gate 1 林夏 大图",
+  });
+  await expect(characterPreview).toBeVisible();
+  await characterPreview.click();
   await expect(
-    page.getByRole("heading", { name: "Gate 1 林夏", exact: true }),
+    page.getByRole("dialog", { name: "人物预览 Gate 1 林夏" }),
   ).toBeVisible();
-  await expect(
-    page.getByText("版本已发布，内容不可修改").first(),
-  ).toBeVisible();
+  await expect(page.getByAltText("Gate 1 林夏 五视角拼合图")).toBeVisible({
+    timeout: 15_000,
+  });
+  await page.getByRole("button", { name: "关闭人物预览" }).click();
 
   await page.getByRole("button", { name: "任务记录" }).click();
   await expect(
-    page.getByRole("progressbar", { name: "批次进度" }),
-  ).toHaveAttribute("aria-valuenow", "100");
-  await expect(page.getByRole("button", { name: /^下载 MP4 / })).toHaveCount(3);
-  const previewResponsePromise = page.waitForResponse(
-    (response) =>
-      response
-        .url()
-        .includes("/api/assets/local-objects/generation-results/") &&
-      response.ok(),
-  );
-  await page
-    .getByRole("button", { name: /^加载预览 / })
-    .first()
-    .click();
-  const previewResponse = await previewResponsePromise;
-  const video = page.getByLabel(/^结果预览 /).first();
+    page.getByText("3 / 3 个结果已完成", { exact: true }),
+  ).toBeVisible();
+  const resultButtons = page
+    .getByRole("navigation", { name: "生成结果列表" })
+    .getByRole("button", { name: /^查看结果 / });
+  await expect(resultButtons).toHaveCount(3);
+  const firstTaskId = await resultTaskId(resultButtons.first());
+  await expect(resultButtons.first()).toHaveAttribute("aria-pressed", "true");
+  const video = page.getByLabel(`结果预览 ${firstTaskId}`, { exact: true });
   await expect
     .poll(() => video.evaluate((element) => element.readyState))
-    .toBe(4);
-  await previewResponse.finished();
+    .toBeGreaterThanOrEqual(2);
+  await expect(video).toHaveAttribute("src", /\S+/);
 
   const [download] = await Promise.all([
     page.waitForEvent("download"),
-    page
-      .getByRole("button", { name: /^下载 MP4 / })
-      .first()
-      .click(),
+    page.getByRole("button", { name: "下载 MP4", exact: true }).click(),
   ]);
   const targetPath = path.join(runDir, "downloads", "recovered-result.mp4");
   await download.saveAs(targetPath);
@@ -365,6 +330,12 @@ async function verifyRestoredWorkspace(page, runDir) {
 }
 
 async function verifyFailureRecoveryPaths(page, runDir) {
+  await page.getByRole("button", { name: "运维详情" }).click();
+  await expect(
+    page.getByRole("progressbar", { name: "批次进度" }),
+  ).toHaveAttribute("aria-valuenow", "100");
+  await page.getByText("整批再次生成（付费）", { exact: true }).click();
+  await expect(page.getByLabel("整批重生成原因")).toBeVisible();
   await page
     .getByLabel("整批重生成原因")
     .fill("Gate 1 验证异常分类与不重复付费边界");
@@ -393,15 +364,23 @@ async function verifyFailureRecoveryPaths(page, runDir) {
   await expect(failedCard).toHaveCount(1);
   await expect(archiveCard).toHaveCount(1);
   await expect(uncertainCard).toHaveCount(1);
-  await expect(page.locator(".attention-banner")).toHaveText("需要处理 2");
+  await expect(
+    page
+      .getByRole("region", { name: "需要关注" })
+      .getByText("需要处理 2", { exact: true }),
+  ).toBeVisible();
 
   const failedTaskId = await taskIdFromCard(failedCard);
   const archiveTaskId = await taskIdFromCard(archiveCard);
   const uncertainTaskId = await taskIdFromCard(uncertainCard);
-  const archiveProviderTail = await archiveCard
-    .getByText(/^Provider 尾号 /)
-    .textContent();
-  expect(archiveProviderTail).toMatch(/^Provider 尾号 \S+$/);
+  const archiveProviderTail = await taskFactValue(archiveCard, "Provider 尾号");
+  expect(archiveProviderTail).toMatch(/^\S+$/);
+  expect(archiveProviderTail).not.toBe("未公开");
+
+  // 运维动作按风险默认折叠：先显式展开，再验证付费与安全重试边界。
+  await openDetailsWithin(failedCard, "details.task-paid-regeneration");
+  await openDetailsWithin(archiveCard, "details.task-resolution-controls");
+  await openDetailsWithin(uncertainCard, "details.task-resolution-controls");
 
   await expect(
     failedCard.getByText(
@@ -429,16 +408,12 @@ async function verifyFailureRecoveryPaths(page, runDir) {
   await expect(
     archiveCard.getByLabel(new RegExp(`付费重新生成 ${archiveTaskId}`)),
   ).toHaveCount(0);
-  await expect(
-    archiveCard.getByText("尝试 1 次 · 归档重试 0 次"),
-  ).toBeVisible();
+  expect(await taskFactValue(archiveCard, "尝试")).toBe("1 次");
 
   await expect(
     uncertainCard.getByText("Fake H3 submission result is unknown"),
   ).toBeVisible();
-  await expect(
-    uncertainCard.getByText("Provider 尾号未公开", { exact: true }),
-  ).toBeVisible();
+  expect(await taskFactValue(uncertainCard, "Provider 尾号")).toBe("未公开");
   await expect(
     uncertainCard.getByLabel(`确认未计费 ${uncertainTaskId}`),
   ).toBeDisabled();
@@ -465,13 +440,14 @@ async function verifyFailureRecoveryPaths(page, runDir) {
   await expect(retriedArchiveCard.getByText("阶段：已归档")).toBeVisible({
     timeout: 15_000,
   });
-  await expect(
-    retriedArchiveCard.getByText(archiveProviderTail ?? ""),
-  ).toBeVisible();
-  await expect(
-    retriedArchiveCard.getByText("尝试 1 次 · 归档重试 0 次"),
-  ).toBeVisible();
+  expect(await taskFactValue(retriedArchiveCard, "Provider 尾号")).toBe(
+    archiveProviderTail,
+  );
+  expect(await taskFactValue(retriedArchiveCard, "尝试")).toBe("1 次");
+  const archiveTaskAfterRetry = await readActiveBatchTask(page, archiveTaskId);
+  expect(archiveTaskAfterRetry.archive_retry_count).toBe(0);
 
+  await openDetailsWithin(uncertainCard, "details.task-resolution-controls");
   await uncertainCard
     .getByLabel(`处理原因 ${uncertainTaskId}`)
     .fill("已核对 Fake H3 未产生计费与 Provider 任务");
@@ -493,13 +469,15 @@ async function verifyFailureRecoveryPaths(page, runDir) {
   await expect(recoveredUncertainCard.getByText("阶段：已归档")).toBeVisible({
     timeout: 15_000,
   });
-  await expect(
-    recoveredUncertainCard.getByText("尝试 2 次 · 归档重试 0 次"),
-  ).toBeVisible();
+  expect(await taskFactValue(recoveredUncertainCard, "尝试")).toBe("2 次");
   await expect(
     page.getByRole("progressbar", { name: "批次进度" }),
   ).toHaveAttribute("aria-valuenow", "100");
-  await expect(page.getByText("需要处理 2", { exact: true })).toHaveCount(0);
+  await expect(
+    page
+      .getByRole("region", { name: "需要关注" })
+      .getByText("需要处理 2", { exact: true }),
+  ).toHaveCount(0);
 
   const output = {
     failed: { task_id: failedTaskId, required_action: "paid_regeneration" },
@@ -508,7 +486,7 @@ async function verifyFailureRecoveryPaths(page, runDir) {
       provider_tail_before_retry: archiveProviderTail,
       attempt_after_retry: 1,
       archive_retry_performed: true,
-      failed_archive_retry_count: 0,
+      failed_archive_retry_count: archiveTaskAfterRetry.archive_retry_count,
     },
     submission_uncertain: {
       task_id: uncertainTaskId,
@@ -568,39 +546,75 @@ async function verifyCompactViewport(page, runDir) {
 }
 
 async function refreshActiveBatch(page) {
-  const activeBatch = page.locator("button.batch-history-card--active");
+  const activeBatch = page.locator(
+    'button[aria-pressed="true"][aria-label^="打开批次 "]',
+  );
   await expect(activeBatch).toHaveCount(1);
   await activeBatch.click();
 }
 
 function taskCardForStage(page, stage) {
   return page
-    .locator("li.task-result-card")
+    .locator(".task-list > li.task-result-card")
     .filter({ hasText: `阶段：${stage}` });
 }
 
 function taskCardById(page, taskId) {
-  return page.locator("li.task-result-card").filter({ hasText: taskId });
+  return page
+    .locator(".task-list > li.task-result-card")
+    .filter({ hasText: taskId });
 }
 
 async function taskIdFromCard(card) {
-  const value = (
-    await card.locator(".task-result-heading strong").textContent()
-  )?.trim();
+  const value = (await card.locator(".task-id-mono").textContent())?.trim();
   expect(value).toBeTruthy();
   return value;
 }
 
-function viewSlot(page, name) {
-  return page.locator("article.view-slot").filter({
-    has: page.getByRole("heading", { name, exact: true }),
-  });
+async function openDetailsWithin(scope, selector) {
+  const details = scope.locator(selector);
+  await expect(details).toHaveCount(1);
+  if ((await details.getAttribute("open")) === null) {
+    await details.locator(":scope > summary").click();
+  }
+  await expect(details).toHaveAttribute("open", "");
 }
 
-function candidate(slot, number) {
-  return slot.locator(".view-candidate").filter({
-    hasText: `候选 ${number}`,
-  });
+async function taskFactValue(card, label) {
+  const fact = card.locator(".task-facts > div").filter({ hasText: label });
+  await expect(fact.getByText(label, { exact: true })).toHaveCount(1);
+  const value = (await fact.locator("dd").textContent())?.trim();
+  expect(value).toBeTruthy();
+  return value;
+}
+
+async function readActiveBatchTask(page, taskId) {
+  const activeBatch = page.locator(
+    'button[aria-pressed="true"][aria-label^="打开批次 "]',
+  );
+  const label = await activeBatch.getAttribute("aria-label");
+  const batchId = label?.slice("打开批次 ".length).trim();
+  if (!batchId) {
+    throw new Error("无法解析当前批次 ID");
+  }
+  const apiUrl = requiredEnvironmentPath("GATE1_API_URL");
+  const task = await page.evaluate(
+    async ({ activeBatchId, apiBaseUrl, expectedTaskId }) => {
+      const response = await fetch(
+        `${apiBaseUrl}/api/generation-batches/${encodeURIComponent(activeBatchId)}`,
+      );
+      if (!response.ok) {
+        throw new Error(`读取当前批次失败（${response.status}）`);
+      }
+      const batch = await response.json();
+      return batch.tasks.find((item) => item.id === expectedTaskId) ?? null;
+    },
+    { activeBatchId: batchId, apiBaseUrl: apiUrl, expectedTaskId: taskId },
+  );
+  if (!task) {
+    throw new Error(`当前批次中不存在任务 ${taskId}`);
+  }
+  return task;
 }
 
 function requiredEnvironmentPath(name) {

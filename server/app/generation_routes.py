@@ -48,7 +48,7 @@ from app.generation import (
     version_state,
 )
 from app.media import storage_key_from_uri
-from app.media_routes import get_local_result_storage
+from app.media_routes import get_media_storage
 from app.permissions import (
     require_not_auditor,
     require_project_access,
@@ -602,7 +602,8 @@ def reconcile_uncertain_task(
         created_by_user_id=str(row["created_by_user_id"]),
         actor=actor,
         request=request,
-        # 归档重试只写生成成片，固定落本地盘（与 worker 归档一致）。
-        storage_factory=lambda: get_local_result_storage(conn),
+        # 归档重试必须与 Worker 使用同一业务存储，避免真实 Metaso
+        # 成片落本地后无法满足 COS 结算前提。
+        storage_factory=lambda: get_media_storage(conn),
         provider_factory=provider_factory,
     )

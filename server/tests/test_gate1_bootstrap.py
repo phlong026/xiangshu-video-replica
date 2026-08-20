@@ -9,7 +9,7 @@ from app.db import connect_database
 from app.gate1_bootstrap import bootstrap_gate1_database
 
 
-def test_gate1_bootstrap_creates_only_identity_and_local_runtime(
+def test_gate1_bootstrap_creates_identity_funded_wallet_and_local_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -31,6 +31,24 @@ def test_gate1_bootstrap_creates_only_identity_and_local_runtime(
             FROM runtime_settings WHERE id = 1
             """
         ).fetchone()
+        wallet = conn.execute(
+            """
+            SELECT available_credits, reserved_credits
+            FROM wallets WHERE user_id = 'gate1_admin'
+            """
+        ).fetchone()
+        recharge = conn.execute(
+            """
+            SELECT status, credits FROM recharge_orders
+            WHERE user_id = 'gate1_admin'
+            """
+        ).fetchone()
+        charge = conn.execute(
+            """
+            SELECT type, available_delta, reserved_delta
+            FROM wallet_transactions WHERE user_id = 'gate1_admin'
+            """
+        ).fetchone()
         project_count = conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0]
         version_count = conn.execute("SELECT COUNT(*) FROM versions").fetchone()[0]
         provider_count = conn.execute("SELECT COUNT(*) FROM provider_settings").fetchone()[0]
@@ -47,6 +65,13 @@ def test_gate1_bootstrap_creates_only_identity_and_local_runtime(
         "max_generation_count_per_batch": 6,
         "max_concurrent_h3_tasks": 2,
         "active_storage_provider": "local",
+    }
+    assert dict(wallet) == {"available_credits": 10, "reserved_credits": 0}
+    assert dict(recharge) == {"status": "PAID", "credits": 10}
+    assert dict(charge) == {
+        "type": "CHARGE",
+        "available_delta": 10,
+        "reserved_delta": 0,
     }
     assert project_count == 0
     assert version_count == 0

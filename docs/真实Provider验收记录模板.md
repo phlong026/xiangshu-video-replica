@@ -1,7 +1,7 @@
 # 真实 Provider 验收记录模板
 
 > 适用范围：Gate 2 真实 Provider 验收
-> 当前状态：记录模板；不代表任何 Provider 已通过
+> 当前状态：历史组件级记录模板；其中已填写的真实样本只证明对应组件/环境，不代表当前客户 V3 发布候选已通过真实联合链路
 > 填写要求：只记录脱敏证据，不保存完整密钥、Authorization、完整签名 URL 或供应商临时下载 URL
 >
 > **2026-08-17 首批真实记录已填入**：Apilio Gemini 视频拆解、Tencent COS 存储（见 §2、§3.4、§5、§7、§8）。其余 Provider 仍为 SOURCE_PENDING。
