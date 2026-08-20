@@ -15,18 +15,20 @@
 
 ## Executive Summary
 
-Scanned all Python modules in `server/app/` for direct SQLite dependencies and dialect-specific syntax. Identified **32 modules** with direct `sqlite3` imports, plus Alembic migrations using SQLite-specific patterns. Documented each dialect feature used and provided PostgreSQL migration alternatives with risk levels.
+Scanned all Python modules under `server/app/`, `server/tests/`, and `server/migrations/` for direct SQLite dependencies and dialect-specific syntax. This report is the DB-02 line-level inventory; it corrects the earlier draft (per PR #31 review): production-code BEGIN IMMEDIATE counts, SQL-vs-Python datetime expressions, the test-suite dependency surface, and the no-ORM constraint are now stated precisely.
 
-### Key Statistics
+### Key Statistics (verified 2026-08-21, base 75100a3)
 
-- **Modules with `import sqlite3`**: 32 files
-- **BEGIN IMMEDIATE usages**: 23 occurrences across 9 files
-- **datetime() / strftime() functions**: 7 occurrences across 5 files  
-- **sqlite3.Row/Error types**: 155 total lines, 24 files
+- **Production modules with `import sqlite3`**: 32 files in `server/app/`
+- **Test files with `import sqlite3`**: 26 files in `server/tests/` (regression surface, not runtime)
+- **Migration env with sqlite branch**: `server/migrations/env.py` (3 sqlite references)
+- **BEGIN IMMEDIATE**: 26 total — 23 in production code (9 files) + 3 in tests (3 files); exact per-file counts below
+- **SQL-dialect datetime expressions**: 4 occurrences in 2 files (`datetime('now', ...)` in SQL strings); the 3 remaining `strftime(...)` hits are plain Python formatting and need no SQL migration
+- **sqlite3.Row / sqlite3.Error types**: 155 lines across 24 files
 - **ON CONFLICT / INSERT OR IGNORE**: 7 occurrences across 4 files
-- **PRAGMA statements**: Multiple in db.py
-- **row_factory / check_same_thread**: In db.py only
-- **batch_alter_table (Alembic SQLite-specific)**: 16 migrations
+- **`?` qmark placeholders**: ~180 occurrences across 32 production modules
+- **PRAGMA / row_factory / check_same_thread**: `db.py` only
+- **batch_alter_table in Alembic revisions**: 16 migrations
 
 ---
 
@@ -42,7 +44,7 @@ Scanned all Python modules in `server/app/` for direct SQLite dependencies and d
 - `PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}`
 - `_sqlite_url()` helper function
 
-**Migration Complexity**: 🔴 **HIGH** - Must refactor to asyncpg + SQLAlchemy connection pool
+**Migration Complexity**: 🔴 **HIGH** — Must refactor to a PG DSN + connection pool (psycopg3 + psycopg_pool; asyncpg stays for async-only helpers). Customer-production startup must reject SQLite (T05 fail-closed).
 
 **Alternatives**:
 ```python
@@ -205,70 +207,80 @@ Files scanned:
 
 ## Dialect Feature Inventory
 
-### 1. BEGIN IMMEDIATE (23 occurrences, 9 files)
+### 1. BEGIN IMMEDIATE (26 occurrences: 23 production + 3 test)
 
-**Purpose**: Prevent write-write conflicts by acquiring exclusive lock early
+**Purpose**: Prevent write-write conflicts by acquiring an exclusive lock before the transaction body
 
-**Files**:
-- `first_frames.py` (3x)
-- `generation.py` (8x)
-- `analysis.py` (2x)
-- `project_character_selection.py` (1x)
-- `character_image_generation.py` (2x)
-- `zpay_payments.py` (2x)
-- `character_asset_review.py` (1x)
-- `simple_character.py` (1x)
-- `character_reference_matching.py` (3x)
+**Exact per-file counts** (grep -c verified):
 
-**PostgreSQL Alternatives**:
+Production (`server/app/`, 23 occurrences in 9 files):
+
+| File | Count |
+| --- | --- |
+| `generation.py` | 11 |
+| `character_image_generation.py` | 3 |
+| `simple_character.py` | 2 |
+| `character_asset_review.py` | 2 |
+| `analysis.py` | 1 |
+| `zpay_payments.py` | 1 |
+| `project_character_selection.py` | 1 |
+| `first_frames.py` | 1 |
+| `character_reference_matching.py` | 1 |
+
+Tests (`server/tests/`, 3 occurrences in 3 files — must be converted together with the modules they exercise):
+
+| File | Count |
+| --- | --- |
+| `test_wallet_billing_service.py` | 1 |
+| `test_payments.py` | 1 |
+| `test_db.py` | 1 |
+
+**PostgreSQL Alternatives** (driver-level, no ORM — per `docs/客户版代码开发清单-V3.md` §8.1 "不引入 ORM、Redis 或队列框架"):
+
 ```python
-# Option 1: Explicit isolation level
-async with begin_transaction(isolation_level="SERIALIZABLE"):
-    # perform writes
-    
-# Option 2: Pessimistic locking
-await conn.execute(text("LOCK TABLE users IN EXCLUSIVE MODE"))
-    
-# Option 3: Optimistic concurrency via version column
+# psycopg3, SERIALIZABLE isolation + retry on serialization failure
+import psycopg
+
+with psycopg.connect(dsn, autocommit=False) as conn:
+    conn.isolation_level = psycopg.IsolationLevel.SERIALIZABLE
+    try:
+        with conn.transaction():
+            ...  # former BEGIN IMMEDIATE body
+    except psycopg.errors.SerializationFailure:
+        ...  # bounded retry loop
 ```
 
-**Risk Assessment**: 🔴 **HIGH** — Concurrent modifications could fail silently if not properly handled
+For task-lease claiming (generation.py), prefer `SELECT ... FOR UPDATE SKIP LOCKED` over table locks; the ADR is frozen in T24 (QUE-01).
+
+**Risk Assessment**: 🔴 **HIGH** — concurrent-write semantics differ; each of the 23 production sites needs an individual transaction-boundary review (SES-04/QUE-01/QUE-02 will do this route by route, not by batch replacement)
 
 ---
 
-### 2. datetime() / strftime() Functions (7 occurrences, 5 files)
+### 2. SQL datetime expressions (4 occurrences, 2 files) — plus 3 non-SQL Python strftime
 
-**Purpose**: Generate timestamps for audit logs, backup filenames, etc.
+**SQL-dialect `datetime('now', ...)` inside SQL strings** (these change semantics on PG and must be rewritten):
 
-**Files**:
-- `backup.py` (backup filename format)
-- `zpay.py` (transaction time format)
-- `generation.py` (task timestamp)
-- `gate1_e2e.py` (test fixtures)
-- `repositories.py` (audit logging)
-
-**Usage Examples**:
-```python
-datetime('now', 'localtime')  # Returns formatted string
-strftime('%Y-%m-%d %H:%M:%S', 'now')
-```
+| File | Line | Expression |
+| --- | --- | --- |
+| `generation.py` | 2708 | `AND datetime(updated_at) <= datetime('now', ?)` |
+| `generation.py` | 3503 | `next_poll_at = datetime('now', '+60 seconds')` |
+| `generation.py` | 3748 | `next_poll_at = datetime('now', '+60 seconds')` |
+| `repositories.py` | 80 | `locked_until = datetime('now', ?)` |
 
 **PostgreSQL Alternatives**:
 ```sql
--- Standard ISO format
-NOW()::TEXT  -- 2026-08-21 00:32:45
+-- generation.py:2708
+AND updated_at <= now() - make_interval(secs => %s)
 
--- Custom formatting
-TO_CHAR(NOW(), 'YYYY-MM-DD HH24:MI:SS')
-
--- Unix timestamp
-EXTRACT(EPOCH FROM NOW())
-
--- Date-only
-CURRENT_DATE
+-- generation.py:3503/3748, repositories.py:80 (parameterized offset)
+next_poll_at = now() + make_interval(secs => %s)
+locked_until  = now() + make_interval(secs => %s)
 ```
+Note the parameter becomes a plain integer offset (seconds) instead of a SQLite modifier string like `'+60 seconds'`; callers must pass numbers. PG server time is the only trusted clock (SES-01).
 
-**Risk Assessment**: 🟡 **MEDIUM** — Easy replacement, no semantic change
+**Not SQL-dialect (no migration needed, listed to close the earlier ambiguity):** plain-Python `datetime.now(UTC).strftime(...)` formatting in `backup.py:66`, `zpay.py:94`, `gate1_e2e.py:738`. These format timestamps in application code and behave identically regardless of database backend.
+
+**Risk Assessment**: 🟡 **MEDIUM** — 4 sites, mechanical rewrite, but the `?` modifier-string → integer-seconds change touches call sites
 
 ---
 
@@ -284,21 +296,19 @@ row = cursor.fetchone()
 username = row['username']  # Column name access
 ```
 
-**PostgreSQL Alternatives**:
+**PostgreSQL Alternatives** (driver-level dict-row access, no ORM):
 ```python
-from sqlalchemy.orm import Session
-session = Session(engine)
-user = session.query(User).filter(User.id == id).first()
-username = user.username  # Attribute access
+import psycopg
+from psycopg.rows import dict_row
 
-# Or raw SQL
-result = session.execute(text("SELECT * FROM users WHERE id = :id"), {"id": id})
-username = result.fetchone()[0]  # Positional access
-# Or use RowMapping
-username = result.fetchone()._mapping['username']
+# dict_row gives the same string-keyed access as sqlite3.Row
+with psycopg.connect(dsn, row_factory=dict_row) as conn:
+    row = conn.execute("SELECT * FROM users WHERE id = %s", (user_id,)).fetchone()
+    username = row["username"]
 ```
+`psycopg.rows.dict_row` preserves the exact `row["column"]` call pattern, so the ~155 usage lines convert mechanically without introducing an ORM layer.
 
-**Risk Assessment**: 🟢 **LOW** — SQLAlchemy ORM makes this transparent
+**Risk Assessment**: 🟢 **LOW** — mechanical rewrite with dict_row
 
 ---
 
@@ -407,20 +417,14 @@ conn.execute(
 )
 ```
 
-**PostgreSQL Alternatives**:
+**PostgreSQL Alternatives** (psycopg3, no ORM):
 ```python
-# psycopg2 / asyncpg style (%s placeholder):
+# psycopg3 native style (%s placeholder, closest to current qmark code):
 cur.execute("SELECT * FROM users WHERE id = %s AND status = %s", (user_id, status))
-
-# SQLAlchemy style (:name placeholder):
-stmt = text("SELECT * FROM users WHERE id = :user_id AND status = :status")
-result = session.execute(stmt, {"user_id": user_id, "status": status})
-
-# Positional parameters ($n):
-cur.execute("SELECT * FROM users WHERE id = $1 AND status = $2", (user_id, status))
 ```
+No named-parameter indirection is required: `%s` placeholders keep the same positional tuple binding as `?`, minimizing diff noise across the ~180 call sites.
 
-**Risk Assessment**: 🟡 **MEDIUM** — All need systematic replacement, but straightforward
+**Risk Assessment**: 🟡 **MEDIUM** — systematic but mechanical; grep-able pattern
 
 ---
 
@@ -537,15 +541,15 @@ env:
 
 ## Conclusion
 
-Total count: **32 modules** identified with direct SQLite dependencies, matching the estimate in `docs/客户版代码开发清单-V3.md`. Key risks center on BEGIN IMMEDIATE patterns (23 usages), datetime functions (7 usages), and ON CONFLICT clauses (7 usages). 
+Dependency surface (this report is the DB-02 deliverable; it is **evidence only** — the sole task-status ledger remains `docs/客户版任务清单-V3.md`):
 
-All issues are **replaceable** but require systematic refactoring:
-- Transaction semantics preserved via SERIALIZABLE isolation
-- Timestamps via TO_CHAR/NOW()
-- UPSERT via standard ON CONFLICT syntax (already supported)
-- Row access via SQLAlchemy ORM or RowMapping
+- **32 production modules** in `server/app/` with direct `sqlite3` imports (the "33 modules" figure in `docs/客户版代码开发清单-V3.md` §8 counts this set plus `server/migrations/env.py`)
+- **26 test files** in `server/tests/` with direct `sqlite3` imports — they must migrate together with the modules they exercise, or the PG regression in T05+ loses coverage
+- **1 migration env** (`server/migrations/env.py`) with a sqlite-only parent-directory branch
 
-Estimated effort: 45–65 person-days (including tests + documentation)
+Key risks: BEGIN IMMEDIATE (23 production sites, concentrated in `generation.py` with 11), SQL-dialect datetime (4 sites), ON CONFLICT clauses (7 sites). All are replaceable at the **driver level with psycopg3** (`dict_row`, `%s` placeholders, `SERIALIZABLE` transactions, `make_interval`) — deliberately **no ORM rewrite**, per the frozen constraint in `docs/客户版代码开发清单-V3.md` §8.1.
+
+Estimated effort: 45–65 person-days (including tests + documentation), consistent with the V3 plan's Lane-A budget.
 
 ---
 
@@ -555,3 +559,24 @@ Estimated effort: 45–65 person-days (including tests + documentation)
 - See also: `docs/客户版开发计划-V3.md` §12 (DB-02 line-level inventory)
 - Related task: T05 (db.py refactor), T06 (Alembic on PG)
 
+
+---
+
+## Section 14 Ledger Record
+
+```text
+任务/工作包：T04 / DB-02
+Owner / Reviewer：DB（Agent 执行）/ chatgpt-codex-connector（PR #31 评审，3×P1+2×P2 已全部修复）
+分支 / 基线 SHA：feat/customer-v3-t04-sqlite-inventory / 基线 75100a3
+上游规格段落：docs/客户版任务清单-V3.md §1 T04 行、§12.1 DB-02；docs/客户版代码开发清单-V3.md §8
+改动文件：T04-SQLITE-INVENTORY.md、docs/客户版任务清单-V3.md（T04/DB-02 状态）
+失败测试或回归锁定：静态扫描类任务，无失败测试
+实现结果：行级清单覆盖 app 32 模块 + tests 26 文件 + migrations/env.py；BEGIN IMMEDIATE 26 处精确分布；SQL 方言 datetime 4 处与 Python 层 strftime 3 处区分；全部替代方案为 psycopg3 驱动层（无 ORM）
+验证命令与通过数：grep -rc/-rn 精确统计（见文档各表）
+证据层级：CODE_PRESENT
+安全与可观测性：N/A
+迁移与回滚：纯文档
+外部授权记录：无
+未测试项：N/A
+Lore 提交 SHA：见 PR #31 squash 合并 SHA
+```
