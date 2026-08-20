@@ -29,19 +29,20 @@ test("@positive creates a character, restarts, and restores three completed vide
     });
 
     await createProjectBatchViaOneClick(page);
-    const progress = page.getByRole("progressbar", { name: "批次进度" });
-    await expect(progress).toHaveAttribute("aria-valuenow", "0");
+    await expect(
+      page.getByText("0 / 3 个结果已完成", { exact: true }),
+    ).toBeVisible();
 
-    for (const expectedProgress of [33, 66, 100]) {
+    for (const completedResults of [1, 2, 3]) {
       await runWorkerOnce({
-        label: `positive-video-${expectedProgress}`,
+        label: `positive-video-${completedResults}`,
         maxTasks: 1,
       });
-      await expect(progress).toHaveAttribute(
-        "aria-valuenow",
-        String(expectedProgress),
-        { timeout: 15_000 },
-      );
+      await expect(
+        page.getByText(`${completedResults} / 3 个结果已完成`, {
+          exact: true,
+        }),
+      ).toBeVisible({ timeout: 15_000 });
     }
 
     await previewAndDownloadResults(page, runDir);
@@ -272,8 +273,8 @@ async function verifyRestoredWorkspace(page, runDir) {
 
   await page.getByRole("button", { name: "任务记录" }).click();
   await expect(
-    page.getByRole("progressbar", { name: "批次进度" }),
-  ).toHaveAttribute("aria-valuenow", "100");
+    page.getByText("3 / 3 个结果已完成", { exact: true }),
+  ).toBeVisible();
   await expect(page.getByRole("button", { name: /^下载 MP4 / })).toHaveCount(3);
   const previewResponsePromise = page.waitForResponse(
     (response) =>
@@ -311,6 +312,10 @@ async function verifyRestoredWorkspace(page, runDir) {
 }
 
 async function verifyFailureRecoveryPaths(page, runDir) {
+  await page.getByRole("button", { name: "运维详情" }).click();
+  await expect(
+    page.getByRole("progressbar", { name: "批次进度" }),
+  ).toHaveAttribute("aria-valuenow", "100");
   await page
     .getByLabel("整批重生成原因")
     .fill("Gate 1 验证异常分类与不重复付费边界");
