@@ -334,6 +334,8 @@ async function verifyFailureRecoveryPaths(page, runDir) {
   await expect(
     page.getByRole("progressbar", { name: "批次进度" }),
   ).toHaveAttribute("aria-valuenow", "100");
+  await page.getByText("整批再次生成（付费）", { exact: true }).click();
+  await expect(page.getByLabel("整批重生成原因")).toBeVisible();
   await page
     .getByLabel("整批重生成原因")
     .fill("Gate 1 验证异常分类与不重复付费边界");
