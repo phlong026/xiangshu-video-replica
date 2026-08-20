@@ -522,6 +522,30 @@ def test_character_cache_downloads_once_and_serves_local_copy(
     assert invalid_signature.status_code == 403
 
 
+def test_approved_character_view_can_use_local_cache(
+    client: TestClient,
+    storage: FakeStorageAdapter,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    created = generate_global(client).json()
+    asset_id = created["views"][0]["asset_id"]
+    monkeypatch.setenv("VIDEO_REPLICA_HOME", str(tmp_path / "video-replica-home"))
+    monkeypatch.setenv("VIDEO_REPLICA_SETTINGS_KEY", Fernet.generate_key().decode("ascii"))
+    monkeypatch.setattr(rbac_routes, "storage_for_asset", lambda conn, storage_uri: storage)
+
+    response = client.post(
+        f"/api/assets/{asset_id}/cached-url",
+        headers=headers("employee_1"),
+    )
+
+    assert response.status_code == 200, response.text
+    parsed = urlsplit(response.json()["url"])
+    cached = client.get(f"{parsed.path}?{parsed.query}")
+    assert cached.status_code == 200
+    assert cached.headers["content-type"].startswith("image/png")
+
+
 def test_character_cache_rejects_source_with_wrong_hash(
     client: TestClient,
     storage: FakeStorageAdapter,

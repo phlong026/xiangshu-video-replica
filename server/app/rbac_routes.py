@@ -49,7 +49,13 @@ from app.storage import (
 
 router = APIRouter(prefix="/api", tags=["rbac"])
 DOWNLOAD_URL_EXPIRES_IN = timedelta(minutes=15)
-CHARACTER_CACHE_KINDS = frozenset({"character_contact_sheet", "character_generated_image"})
+CHARACTER_CACHE_KINDS = frozenset(
+    {
+        "character_contact_sheet",
+        "character_generated_image",
+        "character_approved_image",
+    }
+)
 CHARACTER_CACHE_SUFFIXES = {
     "image/jpeg": ".jpg",
     "image/png": ".png",
