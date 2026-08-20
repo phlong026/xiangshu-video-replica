@@ -404,6 +404,30 @@ def verify_evidence_manifest(manifest_path: Path) -> None:
             raise ValueError(f"Gate 1 evidence hash mismatch: {relative_value}")
 
 
+def _gate1_runtime_environment(
+    *,
+    database_path: Path,
+    storage_root: Path,
+    settings_key: str,
+    fake_h3_result_path: Path,
+) -> dict[str, str]:
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PYTHONUNBUFFERED": "1",
+            "VIDEO_REPLICA_AUTH_MODE": "desktop",
+            "VIDEO_REPLICA_ALLOW_DEV_IDENTITY_HEADER": "0",
+            "VIDEO_REPLICA_DB_PATH": str(database_path),
+            "VIDEO_REPLICA_SETTINGS_KEY": settings_key,
+            "VIDEO_REPLICA_DESKTOP_USER_ID": "gate1_admin",
+            "VIDEO_REPLICA_FAKE_H3_RESULT_PATH": str(fake_h3_result_path),
+            "VIDEO_REPLICA_FAKE_SOURCE_IMAGE_INSPECTOR": "1",
+            "VIDEO_REPLICA_STORAGE_ROOT": str(storage_root),
+        }
+    )
+    return environment
+
+
 def run_gate1(
     *,
     repository_root: Path,
@@ -428,17 +452,11 @@ def run_gate1(
         database_path = paths.runtime_dir / "gate1.sqlite3"
         storage_root = paths.runtime_dir / "storage"
         storage_root.mkdir()
-        runtime_env = os.environ.copy()
-        runtime_env.update(
-            {
-                "PYTHONUNBUFFERED": "1",
-                "VIDEO_REPLICA_DB_PATH": str(database_path),
-                "VIDEO_REPLICA_SETTINGS_KEY": settings_key,
-                "VIDEO_REPLICA_DESKTOP_USER_ID": "gate1_admin",
-                "VIDEO_REPLICA_FAKE_H3_RESULT_PATH": str(paths.media_dir / "reference.mp4"),
-                "VIDEO_REPLICA_FAKE_SOURCE_IMAGE_INSPECTOR": "1",
-                "VIDEO_REPLICA_STORAGE_ROOT": str(storage_root),
-            }
+        runtime_env = _gate1_runtime_environment(
+            database_path=database_path,
+            storage_root=storage_root,
+            settings_key=settings_key,
+            fake_h3_result_path=paths.media_dir / "reference.mp4",
         )
 
         previous_key = os.environ.get("VIDEO_REPLICA_SETTINGS_KEY")

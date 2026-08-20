@@ -335,6 +335,24 @@ def test_gate_status_reserves_passed_for_the_unfiltered_suite() -> None:
     assert gate1_e2e._gate_status(1, playwright_arguments=[]) == "failed"
 
 
+def test_gate1_runtime_environment_forces_isolated_desktop_auth(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VIDEO_REPLICA_AUTH_MODE", "internal")
+    monkeypatch.setenv("VIDEO_REPLICA_ALLOW_DEV_IDENTITY_HEADER", "1")
+
+    environment = gate1_e2e._gate1_runtime_environment(
+        database_path=tmp_path / "gate1.sqlite3",
+        storage_root=tmp_path / "storage",
+        settings_key="test-settings-key",
+        fake_h3_result_path=tmp_path / "reference.mp4",
+    )
+
+    assert environment["VIDEO_REPLICA_AUTH_MODE"] == "desktop"
+    assert environment["VIDEO_REPLICA_ALLOW_DEV_IDENTITY_HEADER"] == "0"
+
+
 def test_run_metadata_records_whether_the_suite_is_filtered(tmp_path: Path) -> None:
     paths = prepare_gate1_run(tmp_path, run_id="filtered-run")
 
