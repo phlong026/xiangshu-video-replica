@@ -33,6 +33,7 @@ import {
   reviseGenerationPrompt,
   SESSION_EXPIRED_EVENT,
   selectCharacterReferences,
+  setInternalAccessToken,
   startVideoAnalysis,
   uploadReferenceVideo,
 } from "./api";
@@ -1087,6 +1088,61 @@ describe("uploadReferenceVideo", () => {
 
     expect(LocalUploadRequest.latest?.headers.get("X-Dev-User-Id")).toBe(
       "employee_1",
+    );
+  });
+
+  it("forwards the internal Bearer token instead of the dev header for local uploads", async () => {
+    class ManagedUploadRequest {
+      static latest: ManagedUploadRequest | null = null;
+      headers = new Map<string, string>();
+      onerror: (() => void) | null = null;
+      onload: (() => void) | null = null;
+      ontimeout: (() => void) | null = null;
+      status = 204;
+      timeout = 0;
+      upload: { onprogress: ((event: ProgressEvent) => void) | null } = {
+        onprogress: null,
+      };
+
+      constructor() {
+        ManagedUploadRequest.latest = this;
+      }
+
+      open() {}
+      setRequestHeader(name: string, value: string) {
+        this.headers.set(name, value);
+      }
+      send() {
+        this.onload?.();
+      }
+    }
+
+    vi.stubGlobal("XMLHttpRequest", ManagedUploadRequest);
+    setInternalAccessToken("internal-token-1");
+
+    try {
+      await uploadReferenceVideo(
+        {
+          asset_id: "asset-1",
+          project_id: "project-1",
+          storage_key: "projects/project-1/reference.mp4",
+          method: "PUT",
+          url: "http://127.0.0.1:8000/api/assets/local-objects/projects/project-1/reference.mp4",
+          headers: { "Content-Type": "video/mp4" },
+          expires_at: "2030-01-01T00:00:00Z",
+        },
+        new File(["video"], "reference.mp4", { type: "video/mp4" }),
+        vi.fn(),
+      );
+    } finally {
+      setInternalAccessToken(null);
+    }
+
+    expect(ManagedUploadRequest.latest?.headers.get("Authorization")).toBe(
+      "Bearer internal-token-1",
+    );
+    expect(ManagedUploadRequest.latest?.headers.has("X-Dev-User-Id")).toBe(
+      false,
     );
   });
 

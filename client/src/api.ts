@@ -1131,8 +1131,17 @@ function uploadStorageObject(
     // not cut off on slow links, while small files keep a tight bound.
     request.timeout = Math.max(60_000, Math.ceil(file.size / 200));
     const devUserId = getDevelopmentUserId();
-    if (devUserId && isLocalApiUploadUrl(intent.url)) {
-      request.setRequestHeader("X-Dev-User-Id", devUserId);
+    if (isLocalApiUploadUrl(intent.url)) {
+      // Mirror requestApi's auth precedence: the internal Bearer token wins in
+      // managed mode; otherwise fall back to the development identity header.
+      if (internalAccessToken) {
+        request.setRequestHeader(
+          "Authorization",
+          `Bearer ${internalAccessToken}`,
+        );
+      } else if (devUserId) {
+        request.setRequestHeader("X-Dev-User-Id", devUserId);
+      }
     }
     for (const [name, value] of Object.entries(intent.headers)) {
       request.setRequestHeader(name, value);
