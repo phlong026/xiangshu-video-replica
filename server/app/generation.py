@@ -31,6 +31,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.analysis import get_version, insert_version
 from app.auth import CurrentUser
 from app.internal_billing import (
+    BillingInvariantError,
     InsufficientCreditsError,
     finalize_internal_billing,
     reserve_internal_billing,
@@ -1370,6 +1371,18 @@ def _reserve_generation_credit(
             402,
             "INSUFFICIENT_CREDITS",
             "Available credits are insufficient for this generation request.",
+        ) from exc
+    except BillingInvariantError as exc:
+        logger.error(
+            "generation billing invariant failed for user %s task %s: %s",
+            user_id,
+            task_id,
+            exc,
+        )
+        raise generation_error(
+            500,
+            "BILLING_INVARIANT_VIOLATION",
+            "Billing state is inconsistent; contact an administrator.",
         ) from exc
 
 

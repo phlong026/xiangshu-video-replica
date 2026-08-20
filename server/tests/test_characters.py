@@ -138,7 +138,7 @@ def test_characters_migration_creates_library_tables(db_path: Path) -> None:
             ).fetchall()
         }
 
-    assert version == "023_zpay_provider"
+    assert version == "024_wallet_backfill"
     assert {
         "characters",
         "project_main_characters",

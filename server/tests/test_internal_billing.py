@@ -10,7 +10,7 @@ from cryptography.fernet import Fernet
 from app.db import alembic_config, connect_database, initialize_database
 from app.settings import SettingsRepository
 
-HEAD_REVISION = "023_zpay_provider"
+HEAD_REVISION = "024_wallet_backfill"
 
 
 def seed_subjects(conn: sqlite3.Connection) -> None:
@@ -144,6 +144,31 @@ def test_internal_billing_migration_is_reversible(tmp_path: Path) -> None:
         assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == (
             HEAD_REVISION
         )
+
+
+def test_wallet_backfill_covers_users_created_before_internal_billing(tmp_path: Path) -> None:
+    db_path = tmp_path / "wallet-backfill.db"
+    command.upgrade(alembic_config(db_path), "021_generation_batch_display_name")
+    with connect_database(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO users (id, username, display_name, role)
+            VALUES ('existing_user', 'existing_user', 'Existing User', 'employee')
+            """
+        )
+        conn.commit()
+
+    command.upgrade(alembic_config(db_path), "head")
+
+    with connect_database(db_path) as conn:
+        wallet = conn.execute(
+            """
+            SELECT available_credits, reserved_credits
+            FROM wallets WHERE user_id = 'existing_user'
+            """
+        ).fetchone()
+
+    assert dict(wallet) == {"available_credits": 0, "reserved_credits": 0}
 
 
 def test_wallets_reject_negative_balances(tmp_path: Path) -> None:
