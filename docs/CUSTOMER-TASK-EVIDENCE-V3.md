@@ -1,6 +1,6 @@
 # Customer Edition Task Evidence Record V3
 
-> Note: This file is the evidence ledger for `docs/customer-task-list-V3.md`; each task closure must record details per Section 14 template. The task list remains the single source of truth for status.
+> Note: This file is the evidence ledger for `docs/客户版任务清单-V3.md`; each task closure must record details per Section 14 template. The task list remains the single source of truth for status.
 
 ## T01 — Freeze V3 Main Specifications
 
@@ -9,8 +9,8 @@
 | **Owner** | Architecture/Product |
 | **Reviewer** | (N/A - spec freeze doesn't require independent reviewer) |
 | **Branch / SHA** | `feat/customer-v3-t01-freeze-spec` / (TBD after commit) |
-| **Upstream Spec Sections** | `docs/customer-development-plan-V3.md` §1; `docs/customer-task-list-V3.md` Header & Table T01 |
-| **Files Changed** | - Update `docs/customer-task-list-V3.md` Header status<br>- Update Task Table T01 status `[~]`→`[x]`<br>- Add `docs/客户版任务证据记录-V3.md` (this file as ENG version) |
+| **Upstream Spec Sections** | `docs/客户版开发计划-V3.md` §1; `docs/客户版任务清单-V3.md` Header & Table T01 |
+| **Files Changed** | - Update `docs/客户版任务清单-V3.md` Header status<br>- Update Task Table T01 status `[~]`→`[x]`<br>- Add `docs/客户版任务证据记录-V3.md` (this file as ENG version) |
 | **Failure Test or Regression Lock** | N/A for spec freeze tasks |
 | **Implementation Result** | User session confirmed V3 execution plan and boundaries; frozen downstream design dependencies on file mapping and document structure |
 | **Verification Command and Pass Count** | N/A |
@@ -32,7 +32,7 @@
 
 #### Unique File Mapping Frozen
 
-Per unique implementation file mappings frozen in `docs/customer-code-list-V3.md` §3:
+Per unique implementation file mappings frozen in `docs/客户版代码开发清单-V3.md` §3:
 
 **Migration themes sequence** (cannot override existing revisions):
 - `server/migrations/versions/025_postgres_runtime_compatibility.py`
@@ -71,7 +71,28 @@ Per Plan §12 "Development Start Suggestion": First batch starts only T02–T06;
 
 ## Evidence Maintenance Rules
 
-1. **Status sync**: Only update task status (`[ ]/[~]/[x]/[!]`) in `docs/customer-task-list-V3.md`
+1. **Status sync**: Only update task status (`[ ]/[~]/[x]/[!]`) in `docs/客户版任务清单-V3.md`
 2. **Evidence registration**: Detailed evidence for each task registered in corresponding section of this file
 3. **SHA recording**: Complete Lore commit SHA recorded in both task list and this file
 4. **Blocking markers**: Tasks requiring external authorization/resources marked with `[!]` and documented blocking items
+
+---
+
+## T01 Section 14 Ledger Record
+
+```text
+任务/工作包：T01
+Owner / Reviewer：架构/产品（Agent 执行）/ chatgpt-codex-connector（PR #28 评审）
+分支 / 基线 SHA：feat/customer-v3-t01-freeze-spec / 基线 4f197b4
+上游规格段落：docs/客户版开发计划-V3.md §1/§7；docs/客户版代码开发清单-V3.md §3
+改动文件：docs/客户版任务清单-V3.md（T01 状态 [~]→[x]、Header）、docs/CUSTOMER-TASK-EVIDENCE-V3.md（本文件）、.gitignore（忽略 .worktrees/ 并行工作区）
+失败测试或回归锁定：规格冻结类任务，无失败测试；回归锁定由 T02 基线承担
+实现结果：用户 2026-08-20 会话确认 V3 口径；冻结六段迁移主题与唯一文件映射；账本 T01 已关闭
+验证命令与通过数：N/A（纯文档）
+证据层级：CODE_PRESENT（文档冻结）
+安全与可观测性：N/A
+迁移与回滚：R0 保留内部 P0 release/tag
+外部授权记录：无
+未测试项：N/A
+Lore 提交 SHA：见 PR #28 squash 合并 SHA
+```

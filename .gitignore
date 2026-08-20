@@ -50,3 +50,4 @@ AGENTS_副本.md
 .verify/
 # 后台服务日志
 nohup.out
+.worktrees/
