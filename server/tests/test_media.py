@@ -22,7 +22,7 @@ from app.media import (
 from app.media import (
     create_upload_intent as create_media_upload_intent,
 )
-from app.media_routes import get_local_result_storage, get_media_storage, get_video_probe
+from app.media_routes import api_base_url, get_media_storage, get_video_probe
 from app.settings import SettingsRepository
 from app.storage import FakeStorageAdapter, LocalStorageAdapter
 
@@ -35,6 +35,18 @@ class FakeVideoProbe:
         assert content
         assert filename
         return VideoMetadata(duration_seconds=self.duration_seconds)
+
+
+def test_public_api_origin_rejects_a_missing_hostname(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://:443")
+
+    with pytest.raises(HTTPException) as exc_info:
+        api_base_url()
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail["code"] == "PUBLIC_BASE_URL_INVALID"
 
 
 @pytest.fixture()
@@ -251,35 +263,6 @@ def test_media_storage_falls_back_to_local_without_cos(
         assert storage.root == root.resolve()
 
 
-def test_local_result_storage_is_always_local_even_when_cos_configured(
-    db_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """生成成片归档固定本地盘不上云：即使配置了 COS（成片是存储大头，
-    读取按存储 URI 的 provider 路由到本地下载）。"""
-    monkeypatch.setenv("VIDEO_REPLICA_SETTINGS_KEY", Fernet.generate_key().decode("ascii"))
-    root = tmp_path / "local-results"
-    monkeypatch.setenv("VIDEO_REPLICA_STORAGE_ROOT", str(root))
-
-    with connect_database(db_path) as conn:
-        repo = SettingsRepository(conn)
-        repo.save_provider_config(
-            "cos",
-            {
-                "access_key_id": "cos-id",
-                "secret_access_key": "cos-secret",
-                "bucket": "private-bucket",
-                "region": "ap-shanghai",
-            },
-            actor_user_id="admin_1",
-        )
-
-        storage = get_local_result_storage(conn)
-        assert isinstance(storage, LocalStorageAdapter)
-        assert storage.root == root.resolve()
-
-
 def test_get_media_storage_uses_local_adapter_when_provider_is_local(
     db_path: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -327,6 +310,7 @@ def test_local_storage_intent_url_and_upload_endpoint(
     db_path: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv("VIDEO_REPLICA_SETTINGS_KEY", Fernet.generate_key().decode("ascii"))
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://video.example.com")
     root = tmp_path / "local-storage"
     monkeypatch.setenv("VIDEO_REPLICA_STORAGE_ROOT", str(root))
     storage = LocalStorageAdapter(root=root)
@@ -355,7 +339,7 @@ def test_local_storage_intent_url_and_upload_endpoint(
         )
         assert intent_resp.status_code == 200
         intent = intent_resp.json()
-        assert intent["url"].startswith("http://127.0.0.1:8000/api/assets/local-objects/")
+        assert intent["url"].startswith("https://video.example.com/api/assets/local-objects/")
 
         put_resp = client.put(
             f"/api/assets/local-objects/{intent['storage_key']}",
@@ -627,6 +611,7 @@ def test_local_download_url_and_proxy(
     monkeypatch.delenv("VIDEO_REPLICA_DISABLE_LOCAL_KEYSTORE", raising=False)
     monkeypatch.setattr("app.settings.load_or_create_local_settings_key", lambda: key)
     monkeypatch.setenv("VIDEO_REPLICA_STORAGE_ROOT", str(tmp_path / "local-storage"))
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://video.example.com")
     storage = LocalStorageAdapter(root=tmp_path / "local-storage")
     storage.put_object(
         "projects/project_owned/uploads/asset-1/demo.mp4",
@@ -672,7 +657,7 @@ def test_local_download_url_and_proxy(
         )
         assert url_resp.status_code == 200
         url = url_resp.json()["url"]
-        assert url.startswith("http://127.0.0.1:8000/api/assets/local-objects/")
+        assert url.startswith("https://video.example.com/api/assets/local-objects/")
 
         from urllib.parse import urlsplit
 

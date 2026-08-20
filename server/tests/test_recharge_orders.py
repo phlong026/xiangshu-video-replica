@@ -263,6 +263,7 @@ def test_create_recharge_order_rejects_client_owned_fields(
     ("environment_name", "value"),
     [
         ("PUBLIC_BASE_URL", "https://video.example?tenant=forged"),
+        ("PUBLIC_BASE_URL", "https://:443"),
         ("ZPAY_GATEWAY_URL", "https://evil.example/submit.php"),
         ("ZPAY_GATEWAY_URL", "https://zpayz.cn/submit.php?redirect=evil"),
     ],

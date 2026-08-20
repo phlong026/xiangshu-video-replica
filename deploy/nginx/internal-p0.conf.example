@@ -2,6 +2,12 @@
 # Replace all example values before deployment. Keep FastAPI bound to 127.0.0.1.
 
 server {
+    listen 80;
+    server_name internal.example.com;
+    return 301 https://$host$request_uri;
+}
+
+server {
     listen 443 ssl http2;
     server_name internal.example.com;
 
@@ -10,6 +16,22 @@ server {
 
     root /opt/video-replica/app/client/dist;
     index index.html;
+
+    # Simple character uploads are capped at 10 MB in FastAPI. Keep enough
+    # headroom for multipart overhead and the 50 MB local-development route.
+    client_max_body_size 64m;
+
+    # Analysis and image-edit providers can legitimately take several minutes.
+    # The browser allows 300 seconds, so nginx must not terminate them at its
+    # default 60-second proxy timeout.
+    proxy_connect_timeout 5s;
+    proxy_send_timeout 310s;
+    proxy_read_timeout 310s;
+
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "no-referrer" always;
 
     location = /health {
         proxy_pass http://127.0.0.1:8000;

@@ -28,6 +28,7 @@ import {
   lockGenerationPrompt,
   regenerateGenerationBatch,
   regenerateGenerationTask,
+  resolveApiBaseUrl,
   retryGenerationTask,
   reviseGenerationPrompt,
   SESSION_EXPIRED_EVENT,
@@ -35,6 +36,41 @@ import {
   startVideoAnalysis,
   uploadReferenceVideo,
 } from "./api";
+
+describe("API base URL resolution", () => {
+  it("uses the serving HTTPS origin for a production web build", () => {
+    expect(
+      resolveApiBaseUrl(undefined, true, {
+        origin: "https://video.example.com",
+        protocol: "https:",
+      }),
+    ).toBe("https://video.example.com");
+  });
+
+  it("keeps the local API fallback for desktop and development runtimes", () => {
+    expect(
+      resolveApiBaseUrl(undefined, true, {
+        origin: "tauri://localhost",
+        protocol: "tauri:",
+      }),
+    ).toBe("http://127.0.0.1:8000");
+    expect(
+      resolveApiBaseUrl(undefined, false, {
+        origin: "http://127.0.0.1:5173",
+        protocol: "http:",
+      }),
+    ).toBe("http://127.0.0.1:8000");
+  });
+
+  it("prefers and normalizes an explicitly configured API origin", () => {
+    expect(
+      resolveApiBaseUrl(" https://api.example.com/ ", true, {
+        origin: "https://video.example.com",
+        protocol: "https:",
+      }),
+    ).toBe("https://api.example.com");
+  });
+});
 
 const generationVersion = {
   id: "version-1",

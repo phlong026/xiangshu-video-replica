@@ -15,7 +15,7 @@ from app.character_image_generation import (
 )
 from app.db import connect_database
 from app.generation import run_next_generation_task
-from app.media_routes import get_local_result_storage, get_media_storage
+from app.media_routes import get_media_storage
 from app.storage import StorageAdapter
 
 logger = logging.getLogger(__name__)
@@ -73,14 +73,14 @@ def run_forever(*, db_path: Path, worker_id: str, idle_seconds: float) -> None:
     while True:
         try:
             with connect_database(db_path) as conn:
-                # 人物/首帧/源视频跟随 COS 配置；成片归档固定本地盘。
+                # 云端模式下所有需要持久保留的生成资产都进入 COS；
+                # 未配置 COS 的桌面开发环境仍由 get_media_storage 回退本地盘。
                 asset_storage = get_media_storage(conn)
-                media_storage = get_local_result_storage(conn)
                 processed = run_worker_once(
                     conn,
                     worker_id=worker_id,
                     storage=asset_storage,
-                    generation_storage=media_storage,
+                    generation_storage=asset_storage,
                     first_frame_storage=asset_storage,
                 )
         except HTTPException as exc:
@@ -119,12 +119,11 @@ def main() -> None:
     if args.once:
         with connect_database(db_path) as conn:
             asset_storage = get_media_storage(conn)
-            media_storage = get_local_result_storage(conn)
             processed = run_worker_once(
                 conn,
                 worker_id=args.worker_id,
                 storage=asset_storage,
-                generation_storage=media_storage,
+                generation_storage=asset_storage,
                 first_frame_storage=asset_storage,
                 max_tasks=args.max_tasks,
             )

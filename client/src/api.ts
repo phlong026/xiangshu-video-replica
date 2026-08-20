@@ -12,6 +12,31 @@ const ANALYSIS_TIMEOUT_MS = 300_000;
 export const SESSION_EXPIRED_EVENT = "video-replica:session-expired";
 let internalAccessToken: string | null = null;
 
+type ApiRuntimeLocation = Pick<Location, "origin" | "protocol">;
+
+export function resolveApiBaseUrl(
+  configuredUrl: string | undefined,
+  isProduction: boolean,
+  runtimeLocation: ApiRuntimeLocation,
+): string {
+  const normalizedUrl = configuredUrl?.trim().replace(/\/+$/, "");
+  if (normalizedUrl) {
+    return normalizedUrl;
+  }
+  if (isProduction && runtimeLocation.protocol === "https:") {
+    return runtimeLocation.origin;
+  }
+  return DEFAULT_API_BASE_URL;
+}
+
+function apiBaseUrl(): string {
+  return resolveApiBaseUrl(
+    import.meta.env.VITE_API_BASE_URL,
+    import.meta.env.PROD,
+    window.location,
+  );
+}
+
 type HealthResponse = components["schemas"]["HealthResponse"];
 export type UserRole = "employee" | "admin" | "auditor";
 
@@ -2106,9 +2131,7 @@ async function requestJson<T>(path: string, errorPrefix: string): Promise<T> {
   );
 
   try {
-    const apiBaseUrl =
-      import.meta.env.VITE_API_BASE_URL ?? DEFAULT_API_BASE_URL;
-    const response = await fetch(`${apiBaseUrl}${path}`, {
+    const response = await fetch(`${apiBaseUrl()}${path}`, {
       signal: controller.signal,
     });
 
@@ -2312,13 +2335,12 @@ async function requestControl(
 ): Promise<Response> {
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
-  const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? DEFAULT_API_BASE_URL;
   const headers = new Headers(init.headers);
   if (init.body && !(init.body instanceof FormData)) {
     headers.set("Content-Type", "application/json");
   }
   try {
-    return await fetch(`${apiBaseUrl}${path}`, {
+    return await fetch(`${apiBaseUrl()}${path}`, {
       ...init,
       headers,
       signal: controller.signal,
@@ -2340,7 +2362,6 @@ async function requestApi(
 ): Promise<Response> {
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
-  const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? DEFAULT_API_BASE_URL;
   const headers = new Headers(init.headers);
   const devUserId = getDevelopmentUserId();
 
@@ -2354,7 +2375,7 @@ async function requestApi(
   }
 
   try {
-    const response = await fetch(`${apiBaseUrl}${path}`, {
+    const response = await fetch(`${apiBaseUrl()}${path}`, {
       ...init,
       headers,
       signal: controller.signal,

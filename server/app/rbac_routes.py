@@ -26,7 +26,7 @@ from app.auth import (
     identity_source,
 )
 from app.media import storage_key_from_uri
-from app.media_routes import LOCAL_API_BASE_URL
+from app.media_routes import api_base_url
 from app.permissions import (
     require_asset_access,
     require_not_auditor,
@@ -724,7 +724,7 @@ def create_download_url(
             expires_at = str(int(time.time()) + int(DOWNLOAD_URL_EXPIRES_IN.total_seconds()))
             signature = local_download_signature(object_key, expires_at, secret=secret)
             url = (
-                f"{LOCAL_API_BASE_URL}/api/assets/local-objects/{quote(object_key, safe='/')}"
+                f"{api_base_url()}/api/assets/local-objects/{quote(object_key, safe='/')}"
                 f"?expires={expires_at}&sig={signature}"
             )
             return DownloadUrlResponse(url=url)
@@ -763,7 +763,7 @@ def create_cached_character_url(
     )
     return DownloadUrlResponse(
         url=(
-            f"{LOCAL_API_BASE_URL}/api/assets/character-cache/{cache_name}"
+            f"{api_base_url()}/api/assets/character-cache/{cache_name}"
             f"?expires={expires_at}&sig={signature}"
         )
     )

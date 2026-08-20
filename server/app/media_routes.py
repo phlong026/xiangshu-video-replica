@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import hmac
 import json
+import os
 import time
 from typing import Annotated
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
@@ -31,6 +32,34 @@ from app.storage import (
 
 router = APIRouter(prefix="/api/assets", tags=["media"])
 LOCAL_API_BASE_URL = "http://127.0.0.1:8000"
+PUBLIC_BASE_URL_ENV = "PUBLIC_BASE_URL"
+
+
+def api_base_url() -> str:
+    """Use the public HTTPS origin on a server and localhost for desktop fallback."""
+    configured = os.environ.get(PUBLIC_BASE_URL_ENV, "").strip()
+    if not configured:
+        return LOCAL_API_BASE_URL
+
+    parsed = urlsplit(configured)
+    if (
+        parsed.scheme != "https"
+        or not parsed.netloc
+        or parsed.hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "PUBLIC_BASE_URL_INVALID",
+                "message": "PUBLIC_BASE_URL must be an HTTPS origin without a path.",
+            },
+        )
+    return f"https://{parsed.netloc}"
 
 
 class UploadIntentRequest(BaseModel):
@@ -79,24 +108,11 @@ def get_media_storage(conn: Database) -> StorageAdapter:
         ) from exc
 
 
-def get_local_result_storage(conn: Database) -> StorageAdapter:
-    """生成结果归档存储：成片视频固定落本地盘不上云（按需节省云存储
-    成本；读取按存储 URI 的 provider 路由，本地对象走 API 签名下载）。"""
-    try:
-        return create_local_storage_from_environment()
-    except StorageBackendUnavailable as exc:
-        raise HTTPException(
-            status_code=503,
-            detail={"code": "STORAGE_SETTINGS_UNAVAILABLE"},
-        ) from exc
-
-
 def get_video_probe() -> VideoProbe:
     return FFprobeVideoProbe()
 
 
 MediaStorage = Annotated[StorageAdapter, Depends(get_media_storage)]
-LocalResultStorage = Annotated[StorageAdapter, Depends(get_local_result_storage)]
 InjectedVideoProbe = Annotated[VideoProbe, Depends(get_video_probe)]
 
 
@@ -121,7 +137,7 @@ def create_asset_upload_intent(
         # The client cannot PUT to a `local://` scheme URL; route uploads through
         # the local server endpoint instead so the desktop app can upload files.
         upload_url = (
-            f"{LOCAL_API_BASE_URL}/api/assets/local-objects/{quote(intent.storage_key, safe='/')}"
+            f"{api_base_url()}/api/assets/local-objects/{quote(intent.storage_key, safe='/')}"
         )
     return UploadIntentResponse(
         asset_id=intent.asset_id,

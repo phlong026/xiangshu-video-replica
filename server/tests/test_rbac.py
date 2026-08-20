@@ -749,7 +749,11 @@ def test_project_owner_can_read_asset(client: TestClient) -> None:
     assert response.json()["project_id"] == "project_owned"
 
 
-def test_project_owner_receives_short_lived_storage_download_url(client: TestClient) -> None:
+def test_project_owner_receives_short_lived_storage_download_url(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://video.example.com")
     response = client.post(
         "/api/assets/asset_owned/download-url",
         headers=auth_headers("employee_1"),
@@ -757,7 +761,7 @@ def test_project_owner_receives_short_lived_storage_download_url(client: TestCli
 
     assert response.status_code == 200
     assert response.json()["url"].startswith(
-        "http://127.0.0.1:8000/api/assets/local-objects/outputs/asset_owned.mp4?"
+        "https://video.example.com/api/assets/local-objects/outputs/asset_owned.mp4?"
     )
     assert "expires=" in response.json()["url"]
     assert "sig=" in response.json()["url"]

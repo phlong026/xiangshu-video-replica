@@ -22,7 +22,7 @@ ACCEPTANCE_TESTS = (
     "server/tests/test_wallet_billing_service.py::test_finalize_success_settles_only_an_archived_result",
     "server/tests/test_wallet_billing_service.py::test_real_provider_result_must_be_archived_in_cos",
     "server/tests/test_wallet_billing_service.py::test_finalize_failure_or_cancellation_releases_credit_once",
-    "server/tests/test_media.py::test_generation_result_storage_uses_cos_when_configured",
+    "server/tests/test_media.py::test_media_storage_prefers_cos_when_configured",
     "server/tests/test_generation.py::test_archived_generation_settles_once_but_archive_failure_stays_reserved",
     "server/tests/test_generation.py::test_undownloadable_archived_result_does_not_settle",
     "server/tests/test_generation.py::test_terminal_provider_failure_releases_reserved_credit",

@@ -16,6 +16,7 @@ from fastapi import (
     status,
 )
 from pydantic import BaseModel, ConfigDict
+from starlette.concurrency import run_in_threadpool
 
 from app.auth import AuthenticatedUser, Database
 from app.character_contracts import PersonIdentity, RequiredCharacterViewType
@@ -340,7 +341,10 @@ async def _run_simple_character_creation(
     content = await file.read()
     effective_persona_name = persona_name.strip() or display_name.strip()
     try:
-        result = create_simple_character(
+        # `create_simple_character` performs provider calls and image work, so
+        # keep the FastAPI event loop free by running it in a worker thread.
+        result = await run_in_threadpool(
+            create_simple_character,
             conn,
             actor=actor,
             project_id=project_id,

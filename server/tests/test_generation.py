@@ -3885,7 +3885,7 @@ def test_reconcile_route_is_idempotent_and_audited(
     )
     monkeypatch.setattr(
         generation_routes_module,
-        "get_local_result_storage",
+        "get_media_storage",
         lambda _conn: FakeStorageAdapter(provider="cos", bucket="generation-results"),
     )
     prompt_id = create_locked_prompt(client)
@@ -3932,7 +3932,7 @@ def test_reconcile_route_is_idempotent_and_audited(
 
     monkeypatch.setattr(
         generation_routes_module,
-        "get_local_result_storage",
+        "get_media_storage",
         unavailable_storage,
         raising=False,
     )
@@ -3990,7 +3990,7 @@ def test_reconcile_route_recovers_an_abandoned_pending_reservation(
     )
     monkeypatch.setattr(
         generation_routes_module,
-        "get_local_result_storage",
+        "get_media_storage",
         lambda _conn: FakeStorageAdapter(provider="cos", bucket="generation-results"),
     )
     prompt_id = create_locked_prompt(client)
@@ -4099,7 +4099,7 @@ def test_reconcile_provider_failure_does_not_require_storage_settings(
     )
     monkeypatch.setattr(
         generation_routes_module,
-        "get_local_result_storage",
+        "get_media_storage",
         unavailable_storage,
     )
     prompt_id = create_locked_prompt(client)
@@ -4206,7 +4206,7 @@ def test_reconcile_lost_reservation_cannot_finalize_an_archived_result(
     )
     monkeypatch.setattr(
         generation_routes_module,
-        "get_local_result_storage",
+        "get_media_storage",
         lambda _conn: storage,
     )
     prompt_id = create_locked_prompt(client)
