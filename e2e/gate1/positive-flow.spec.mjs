@@ -7,16 +7,6 @@ import { observePage, requiredRunDir } from "./evidence.mjs";
 import { restartApi, withBrokenGenerationArchive } from "./runtime.mjs";
 import { runWorkerOnce } from "./worker.mjs";
 
-const VIEW_NAMES = [
-  "正面头像",
-  "正面半身",
-  "正面全身",
-  "左 45°",
-  "右 45°",
-  "左侧面",
-  "右侧面",
-];
-
 test("@positive creates a character, restarts, and restores three completed videos", async ({
   browser,
   context,
@@ -102,80 +92,23 @@ async function enterWorkspace(page) {
 async function createAndPublishCharacter(page) {
   const mediaDir = requiredEnvironmentPath("GATE1_MEDIA_DIR");
   await page.getByRole("button", { name: "人物库" }).click();
-  await page.getByRole("button", { name: "创建人物身份" }).click();
-  await page.getByLabel("人物显示名").fill("Gate 1 林夏");
-  await page.getByLabel("授权使用范围").fill("内部短视频");
-  await page.getByLabel("授权到期日").fill("2035-12-31");
+  await page.getByLabel("人物名称").fill("Gate 1 林夏");
   await page
-    .getByLabel("肖像授权文件")
-    .setInputFiles(path.join(mediaDir, "authorization.png"));
-  await page.getByRole("button", { name: "创建并上传授权" }).click();
-
-  await page
-    .getByLabel("真人源图", { exact: true })
+    .getByLabel("授权图片")
     .setInputFiles(path.join(mediaDir, "source.png"));
-  await page.getByRole("button", { name: "上传并检查源图" }).click();
+  await page.getByRole("button", { name: "一键生成五视角拼合图" }).click();
   await expect(
-    page.getByRole("heading", { name: "源图质量通过" }),
-  ).toBeVisible();
-  await page.getByRole("button", { name: "确认质检结果" }).click();
-  await page.getByRole("button", { name: "完成并返回人物库" }).click();
+    page.getByText(/人物“Gate 1 林夏”五视角拼合图已生成/),
+  ).toBeVisible({ timeout: 30_000 });
+
+  await page.getByRole("button", { name: "查看人物 Gate 1 林夏 大图" }).click();
   await expect(
-    page.getByText("人物身份已激活，可继续创建人设。"),
+    page.getByRole("dialog", { name: "人物预览 Gate 1 林夏" }),
   ).toBeVisible();
-
-  await page.getByRole("button", { name: "新建人设" }).click();
-  await page.getByLabel("人设名称").fill("乡墅项目管理专家");
-  await page.getByLabel("职业定位").fill("乡墅短视频主理人");
-  await page.getByLabel("使用场景").fill("夏日咖啡馆口播");
-  await page.getByLabel("服装描述").fill("白色休闲上衣");
-  await page.getByLabel("默认背景").fill("明亮咖啡馆");
-  await page.getByLabel("使用范围").fill("内部短视频、测试");
-  await page.getByLabel("正向提示词").fill("自然、真实、稳定一致");
-  await page.getByLabel("负向提示词").fill("留影、畸形、多人");
-  await page.getByRole("button", { name: "保存人设" }).click();
-  await expect(page.getByText("人设已创建。")).toBeVisible();
-
-  await page.getByRole("button", { name: "创建 DRAFT 版本" }).click();
-  await expect(page.getByText("已创建 V1 DRAFT 版本。")).toBeVisible();
-  await page.getByRole("button", { name: "开始生成 7 类视角" }).click();
-  await runWorkerOnce({ label: "positive-character-seven-views", maxTasks: 7 });
-  await expect(page.getByText("成功 7", { exact: true })).toBeVisible({
+  await expect(page.getByAltText("Gate 1 林夏 五视角拼合图")).toBeVisible({
     timeout: 15_000,
   });
-
-  const frontSlot = viewSlot(page, "正面头像");
-  const originalFront = candidate(frontSlot, 1);
-  await originalFront.getByLabel("审核说明").fill("表情不符合项目要求");
-  await originalFront.getByRole("button", { name: "驳回" }).click();
-  await expect(originalFront.getByText("人工审核：已驳回")).toBeVisible();
-  await originalFront.getByRole("button", { name: "重新生成正面头像" }).click();
-  await runWorkerOnce({
-    label: "positive-character-front-regeneration",
-    maxTasks: 1,
-  });
-  await expect(candidate(frontSlot, 2)).toBeVisible({ timeout: 15_000 });
-
-  for (const viewName of VIEW_NAMES) {
-    const slot = viewSlot(page, viewName);
-    const approvedCandidate = candidate(slot, viewName === "正面头像" ? 2 : 1);
-    await approvedCandidate.getByRole("button", { name: "批准" }).click();
-    await expect(approvedCandidate.getByText("人工审核：已批准")).toBeVisible();
-    await approvedCandidate
-      .getByRole("radio", { name: "选为发布资产" })
-      .check();
-  }
-
-  page.once("dialog", async (dialog) => {
-    expect(dialog.message()).toBe(
-      "发布后角色版本与七类资产选择不可修改。确认发布？",
-    );
-    await dialog.accept();
-  });
-  await page.getByRole("button", { name: "发布角色版本" }).click();
-  await expect(
-    page.getByText("版本已发布，内容不可修改").first(),
-  ).toBeVisible();
+  await page.getByRole("button", { name: "关闭人物预览" }).click();
 }
 
 // P0-05-02：V1.4 单屏闭环一键动线——打开项目 → 预填确认（角色自动预选/
@@ -317,12 +250,18 @@ async function verifyRestoredWorkspace(page, runDir) {
   await expect(page.getByText("Gate 1 夏日咖啡馆口播")).toBeVisible();
 
   await page.getByRole("button", { name: "人物库" }).click();
+  const characterPreview = page.getByRole("button", {
+    name: "查看人物 Gate 1 林夏 大图",
+  });
+  await expect(characterPreview).toBeVisible();
+  await characterPreview.click();
   await expect(
-    page.getByRole("heading", { name: "Gate 1 林夏", exact: true }),
+    page.getByRole("dialog", { name: "人物预览 Gate 1 林夏" }),
   ).toBeVisible();
-  await expect(
-    page.getByText("版本已发布，内容不可修改").first(),
-  ).toBeVisible();
+  await expect(page.getByAltText("Gate 1 林夏 五视角拼合图")).toBeVisible({
+    timeout: 15_000,
+  });
+  await page.getByRole("button", { name: "关闭人物预览" }).click();
 
   await page.getByRole("button", { name: "任务记录" }).click();
   await expect(
@@ -589,18 +528,6 @@ async function taskIdFromCard(card) {
   )?.trim();
   expect(value).toBeTruthy();
   return value;
-}
-
-function viewSlot(page, name) {
-  return page.locator("article.view-slot").filter({
-    has: page.getByRole("heading", { name, exact: true }),
-  });
-}
-
-function candidate(slot, number) {
-  return slot.locator(".view-candidate").filter({
-    hasText: `候选 ${number}`,
-  });
 }
 
 function requiredEnvironmentPath(name) {
