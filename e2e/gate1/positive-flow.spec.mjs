@@ -189,6 +189,9 @@ async function createProjectBatchViaOneClick(page) {
   await expect(page.getByAltText("首帧候选 1")).toBeVisible({
     timeout: 15_000,
   });
+  await expect(
+    page.getByText("已自动预选第一张候选，请查看后单击确认。"),
+  ).toBeVisible({ timeout: 30_000 });
   await expect(page.getByRole("radio", { name: /首帧候选 1/ })).toBeChecked();
   await page.getByRole("button", { name: "确认用于 H3 的首帧" }).click();
   await expect(
