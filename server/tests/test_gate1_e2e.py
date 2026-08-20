@@ -239,6 +239,41 @@ def test_wait_for_http_accepts_a_ready_service() -> None:
         thread.join(timeout=1)
 
 
+def test_port_probe_accepts_a_recently_released_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RecentlyReleasedPort:
+        def __init__(self) -> None:
+            self.reuse_address = False
+
+        def __enter__(self) -> RecentlyReleasedPort:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def setsockopt(self, level: int, option: int, value: int) -> None:
+            if (level, option, value) == (
+                socket.SOL_SOCKET,
+                socket.SO_REUSEADDR,
+                1,
+            ):
+                self.reuse_address = True
+
+        def bind(self, address: tuple[str, int]) -> None:
+            assert address == ("127.0.0.1", 8000)
+            if not self.reuse_address:
+                raise OSError("address remains in TIME_WAIT")
+
+    monkeypatch.setattr(
+        gate1_e2e.socket,
+        "socket",
+        lambda *args: RecentlyReleasedPort(),
+    )
+
+    gate1_e2e._require_available_port("127.0.0.1", 8000)
+
+
 def test_generate_test_media_uses_deterministic_ffmpeg_outputs(
     tmp_path: Path,
 ) -> None:

@@ -647,6 +647,9 @@ def _stop_process_tree(process: subprocess.Popen[bytes]) -> None:
 def _require_available_port(host: str, port: int) -> None:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         try:
+            # 与 Uvicorn/Vite 的监听行为一致：允许立即复用刚释放、仍处于
+            # TIME_WAIT 的本地地址，同时仍会拒绝真正存在的监听进程。
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             probe.bind((host, port))
         except OSError as exc:
             raise RuntimeError(f"Gate 1 requires free port {host}:{port}") from exc
