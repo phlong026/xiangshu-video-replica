@@ -191,7 +191,9 @@ async function createProjectBatchViaOneClick(page) {
   });
   await expect(page.getByRole("radio", { name: /首帧候选 1/ })).toBeChecked();
   await page.getByRole("button", { name: "确认用于 H3 的首帧" }).click();
-  await expect(page.getByText(/已确认首帧候选 1/)).toBeVisible();
+  await expect(
+    page.getByText("当前候选首帧已确认，将作为后续 H3 提示词的唯一首帧输入。"),
+  ).toBeVisible();
 
   // 标签页③：数量 3 → 工具栏付费提醒在确认前可见（P0-04-02）。
   await page.getByRole("tab", { name: "生成设置" }).click();
