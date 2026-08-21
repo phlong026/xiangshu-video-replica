@@ -144,9 +144,7 @@ def _validate_schema(
         source_columns, source_pk = _sqlite_columns(sqlite_conn, table)
         target_columns, target_pk, _ = _pg_columns(pg_conn, table)
         if set(source_columns) != set(target_columns) or source_pk != target_pk:
-            raise MigrationPreconditionError(
-                f"source/target schema differs for table {table!r}"
-            )
+            raise MigrationPreconditionError(f"source/target schema differs for table {table!r}")
     return source_tables
 
 
@@ -163,9 +161,7 @@ def _ensure_source_invariants(sqlite_conn: sqlite3.Connection) -> None:
         raise MigrationReconciliationError(_issue_summary(issues))
 
 
-def _target_has_non_seed_data(
-    pg_conn: psycopg.Connection[Any], tables: Sequence[str]
-) -> bool:
+def _target_has_non_seed_data(pg_conn: psycopg.Connection[Any], tables: Sequence[str]) -> bool:
     for table in tables:
         if table in SEED_TABLES:
             continue
