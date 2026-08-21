@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from app import backup as backup_module
 from app.backup import create_readonly_snapshot
 from scripts.reconcile_customer_billing import (
     ColumnSpec,
@@ -108,6 +109,90 @@ def test_readonly_snapshot_preserves_source_and_is_private(tmp_path: Path) -> No
     assert stat.S_IMODE(snapshot.stat().st_mode) == 0o600
     with sqlite3.connect(snapshot) as conn:
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+
+
+class _TrackingConnection:
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self.connection = connection
+        self.closed = False
+
+    def __getattr__(self, name: str):  # type: ignore[no-untyped-def]
+        return getattr(self.connection, name)
+
+    def __enter__(self) -> _TrackingConnection:
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        if exc_type is None:
+            self.connection.commit()
+        else:
+            self.connection.rollback()
+
+    def close(self) -> None:
+        self.closed = True
+        self.connection.close()
+
+
+def test_snapshot_closes_readonly_connection_deterministically(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.db"
+    snapshot = tmp_path / "snapshot.db"
+    _basic_sqlite(source)
+    tracking = _TrackingConnection(backup_module._readonly_connection(source))
+
+    def open_tracking(_: Path) -> _TrackingConnection:
+        return tracking
+
+    monkeypatch.setattr(backup_module, "_readonly_connection", open_tracking)
+    create_readonly_snapshot(source, snapshot)
+
+    assert tracking.closed
+
+
+def test_snapshot_publish_rolls_back_when_temp_cleanup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    temporary = tmp_path / ".snapshot.tmp"
+    destination = tmp_path / "snapshot.db"
+    temporary.write_bytes(b"immutable-evidence")
+    original_unlink = Path.unlink
+
+    def fail_temporary_unlink(self: Path, missing_ok: bool = False) -> None:
+        if self == temporary:
+            raise OSError("injected temporary cleanup failure")
+        original_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", fail_temporary_unlink)
+    with pytest.raises(OSError, match="injected temporary cleanup failure"):
+        backup_module._publish_without_overwrite(temporary, destination)
+
+    assert temporary.exists()
+    assert not destination.exists()
+
+
+def test_snapshot_rechecks_source_after_publication_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.db"
+    snapshot = tmp_path / "snapshot.db"
+    _basic_sqlite(source)
+    original_publish = backup_module._publish_without_overwrite
+
+    def mutate_then_publish(temporary: Path, destination: Path) -> None:
+        with sqlite3.connect(source) as writer:
+            writer.execute("UPDATE wallets SET available_credits = 11 WHERE user_id = 'u1'")
+            writer.commit()
+        original_publish(temporary, destination)
+
+    monkeypatch.setattr(backup_module, "_publish_without_overwrite", mutate_then_publish)
+    with pytest.raises(RuntimeError, match="source changed"):
+        create_readonly_snapshot(source, snapshot)
+
+    assert not snapshot.exists()
 
 
 def test_snapshot_refuses_existing_evidence(tmp_path: Path) -> None:

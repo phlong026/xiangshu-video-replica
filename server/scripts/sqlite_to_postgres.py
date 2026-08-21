@@ -13,6 +13,7 @@ import json
 import sqlite3
 from collections import defaultdict, deque
 from collections.abc import Iterator, Mapping, Sequence
+from contextlib import closing
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -465,7 +466,7 @@ def migrate_snapshot(
         raise ValueError("batch_size must be positive")
     _validate_snapshot(snapshot)
 
-    with connect_sqlite_readonly(snapshot.path) as sqlite_conn:
+    with closing(connect_sqlite_readonly(snapshot.path)) as sqlite_conn:
         _ensure_source_invariants(sqlite_conn)
         with psycopg.connect(postgres_dsn, row_factory=dict_row) as pg_conn:
             with pg_conn.transaction():

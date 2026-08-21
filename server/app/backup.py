@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import os
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -97,8 +98,11 @@ def _publish_without_overwrite(temporary: Path, destination: Path) -> None:
         os.link(temporary, destination)
     except FileExistsError:
         raise FileExistsError(f"migration snapshot already exists: {destination}") from None
-    else:
+    try:
         temporary.unlink()
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
 
 
 def create_readonly_snapshot(
@@ -131,10 +135,10 @@ def create_readonly_snapshot(
     linked = False
     try:
         _assert_quiescent_source(source)
-        with _readonly_connection(source) as source_conn:
+        with closing(_readonly_connection(source)) as source_conn:
             _check_integrity(source_conn)
             data_version_before = int(source_conn.execute("PRAGMA data_version").fetchone()[0])
-            with sqlite3.connect(temporary) as snapshot_conn:
+            with closing(sqlite3.connect(temporary)) as snapshot_conn:
                 source_conn.backup(snapshot_conn)
                 _check_integrity(snapshot_conn)
             data_version_after = int(source_conn.execute("PRAGMA data_version").fetchone()[0])
@@ -162,6 +166,18 @@ def create_readonly_snapshot(
             os.fsync(stream.fileno())
         _publish_without_overwrite(temporary, snapshot)
         linked = True
+        _assert_quiescent_source(source)
+        final_stat = source.stat()
+        final_hash = sha256_file(source)
+        if (
+            before_hash != final_hash
+            or before_stat.st_size != final_stat.st_size
+            or before_stat.st_mtime_ns != final_stat.st_mtime_ns
+        ):
+            raise RuntimeError(
+                "SQLite source changed while the snapshot was created; "
+                "stop every writer and retry the maintenance window"
+            )
         os.chmod(snapshot, 0o600)
         if snapshot.stat().st_mode & 0o077:
             raise PermissionError("migration snapshot permissions are not private (expected 0600)")

@@ -76,6 +76,12 @@ pytest server/tests/test_sqlite_to_postgres.py               → 10 passed, 4 sk
 - PG16 第三次绿测进一步发现 `psycopg.Connection` 无 `executemany()`，结果 `2 failed, 14 passed`；实现改为事务连接内 `cursor.executemany()`，继续由真实 PG16 导入覆盖。
 - 三个原始格式失败文件已由仓库锁定 Ruff 版本格式化；最终证据层级仍以正式 PR 三门禁为准。
 
+## 最终快照原子性评审红绿证据（2026-08-21）
+
+- 红测：SQLite 上下文只提交、不关闭；hard-link 已发布后临时文件删除失败会残留目标；最终源哈希检查后仍可发生写入。三个专项回归结果为 `3 failed`。
+- 绿测：快照源/目标连接及迁移、对账只读连接均显式关闭；发布清理失败时回删目标 link；发布边界后再次检查 sidecar、hash、size、mtime，竞态失败时删除已发布快照。
+- PostgreSQL 16 下完整 T07 专项测试在修复后通过；最终任务状态仍以标准三门禁为准。
+
 ## DB-06 维护窗口与回滚契约
 
 - R0：保留现有内部 P0 release/tag 和原 SQLite 数据文件，不覆盖、不删除；

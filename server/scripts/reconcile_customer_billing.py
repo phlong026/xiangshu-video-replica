@@ -13,6 +13,7 @@ import math
 import sqlite3
 from collections import defaultdict
 from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import closing
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, time
 from decimal import Decimal
@@ -998,7 +999,7 @@ def reconcile_databases(
     sqlite_path: str | Path,
     postgres_dsn: str,
 ) -> ReconciliationReport:
-    with connect_sqlite_readonly(sqlite_path) as sqlite_conn:
+    with closing(connect_sqlite_readonly(sqlite_path)) as sqlite_conn:
         with psycopg.connect(postgres_dsn, row_factory=dict_row) as pg_conn:
             return reconcile_connection_pair(sqlite_conn, pg_conn)
 
