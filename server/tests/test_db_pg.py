@@ -121,6 +121,20 @@ def test_production_rejects_sqlite() -> None:
             validate_customer_production(resolve_database_config())
 
 
+def test_production_rejects_leftover_db_path() -> None:
+    """Customer production + PG URL + legacy DB_PATH is ambiguous and must
+    fail closed instead of silently preferring the URL (PR #32 review P1)."""
+    with _env(
+        **{
+            "VIDEO_REPLICA_CUSTOMER_PRODUCTION": "true",
+            DATABASE_URL_ENV: "postgresql://u:p@host:5432/db",
+            "VIDEO_REPLICA_DB_PATH": "/leftover/app.db",
+        }
+    ):
+        with pytest.raises(RuntimeError, match="VIDEO_REPLICA_DB_PATH"):
+            validate_customer_production(resolve_database_config())
+
+
 def test_non_production_allows_sqlite() -> None:
     with _env(**{"VIDEO_REPLICA_CUSTOMER_PRODUCTION": "", DATABASE_URL_ENV: "sqlite:////tmp/x.db"}):
         config = resolve_database_config()

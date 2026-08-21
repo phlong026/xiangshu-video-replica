@@ -118,7 +118,9 @@ def validate_customer_production(config: DatabaseConfig) -> None:
 
     ``VIDEO_REPLICA_CUSTOMER_PRODUCTION`` marks the customer boundary. In that
     mode a missing URL or a SQLite target must abort startup instead of
-    silently falling back to the single-file internal runtime.
+    silently falling back to the single-file internal runtime. A leftover
+    ``VIDEO_REPLICA_DB_PATH`` alongside a PG URL is likewise rejected: an
+    ambiguous customer-production configuration is an error, not a hint.
     """
     if not _is_customer_production():
         return
@@ -126,6 +128,13 @@ def validate_customer_production(config: DatabaseConfig) -> None:
         raise RuntimeError(
             "customer production requires PostgreSQL: set "
             f"{DATABASE_URL_ENV} to a postgresql:// DSN (SQLite startup is rejected)"
+        )
+    leftover_db_path = os.environ.get(DB_PATH_ENV, "").strip()
+    if leftover_db_path:
+        raise RuntimeError(
+            "customer production must not set the legacy "
+            f"{DB_PATH_ENV}; remove it and keep only {DATABASE_URL_ENV} "
+            "(ambiguous database configuration is rejected)"
         )
 
 
