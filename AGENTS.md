@@ -40,15 +40,17 @@
 ## 验证命令（PR 前必须全绿）
 
 ```bash
-# server/ 目录
-uv run python -m pytest tests -q            # 全量 pytest，零回归
+# 1) 先启动 PostgreSQL fixture（Docker PG16，端口 5433；脚本必须带子命令，无参数会打印 usage 并退出 1）
+scripts/pg-fixture.sh start
+
+# 2) 服务端全量验证（server/ 目录；fixture 未启动时 PG 套件按 skip 运行，不得声明 AUTOMATED_VERIFIED）
+uv run python -m pytest tests -q            # 全量 pytest，零回归（PG 套件默认连 localhost:5433 fixture）
 uv run ruff check . && uv run ruff format --check . && uv run mypy app
 
-# 仓库根目录（等价于 CI Linux 质量门，覆盖前端/Tauri/服务端全套）
+# 3) 全仓门禁（仓库根目录，等价于 CI Linux 质量门，覆盖前端/Tauri/服务端全套）
 npm run check
 
-# PostgreSQL fixture（Docker PG16；PG 相关测试必须真实跑，CI 目前按 skip 运行）
-scripts/pg-fixture.sh
+# 收尾：scripts/pg-fixture.sh stop；DSN 覆盖用环境变量 TEST_POSTGRESQL_URL
 ```
 
 ## 环境变量备忘
