@@ -7,6 +7,12 @@ from pathlib import Path
 from cryptography.fernet import Fernet
 
 from app.db import initialize_database
+from app.db_pg import (
+    DatabaseMode,
+    check_pg_ready,
+    resolve_database_config,
+    validate_customer_production,
+)
 from app.local_settings_key import LocalSettingsKeyStoreError, persist_local_settings_key
 from app.settings import (
     LOCAL_KEYSTORE_DISABLED_ENV,
@@ -34,7 +40,24 @@ def bootstrap_runtime(db_path: str | Path) -> None:
 
 
 def main() -> None:
-    db_path_value = os.environ.get("VIDEO_REPLICA_DB_PATH", "").strip()
+    # T05: resolve the database mode first so customer production fails closed
+    # before any SQLite file is touched.
+    config = resolve_database_config()
+    validate_customer_production(config)
+
+    if config.mode is DatabaseMode.POSTGRESQL:
+        # PG runtime: warm the pool and verify the server round-trip. Alembic
+        # migrations against PG are executed once T06 lands; the ready check
+        # itself is the API bootstrap contract for the PG lane.
+        ready = check_pg_ready()
+        logging.getLogger(__name__).info(
+            "PostgreSQL runtime ready (pool_max=%d, server_now=%s)",
+            ready.pool_size,
+            ready.server_now.isoformat(),
+        )
+        return
+
+    db_path_value = config.sqlite_path
     if not db_path_value:
         raise SystemExit("VIDEO_REPLICA_DB_PATH is required")
 

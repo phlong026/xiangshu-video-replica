@@ -9,6 +9,7 @@ dependencies = [
     "cos-python-sdk-v5==1.9.44",
     "cryptography==50.0.0",
     "fastapi==0.141.1",
+    "psycopg[binary,pool]>=3.2",
     "pytest-asyncio>=1.4.0",
     "python-multipart==0.0.31",
     "sqlalchemy>=2.0.52",

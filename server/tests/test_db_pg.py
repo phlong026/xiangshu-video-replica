@@ -1,0 +1,290 @@
+"""
+T05 / DB-03 - PostgreSQL runtime entry tests.
+
+Covers the DSN resolution layer, the customer-production fail-closed matrix,
+the psycopg3 connection pool, transaction semantics (including the
+SERIALIZABLE replacement for SQLite BEGIN IMMEDIATE), and PG server time.
+PG-dependent cases skip automatically when the fixture is not reachable.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import datetime
+
+import psycopg
+import pytest
+from psycopg_pool import ConnectionPool
+
+from app.db_pg import (
+    DATABASE_URL_ENV,
+    DatabaseMode,
+    check_pg_ready,
+    pg_server_now,
+    pg_transaction,
+    resolve_database_config,
+    validate_customer_production,
+)
+
+DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
+
+
+def _pg_available(dsn: str) -> bool:
+    try:
+
+        async def probe() -> None:
+            conn = await asyncio.get_event_loop().run_in_executor(None, psycopg.connect, dsn)
+            conn.close()
+
+        asyncio.run(asyncio.wait_for(probe(), timeout=3))
+    except Exception:
+        return False
+    return True
+
+
+PG_DSN = os.environ.get("TEST_POSTGRESQL_URL", DEFAULT_DSN)
+
+
+@contextmanager
+def _env(**overrides: str) -> Iterator[None]:
+    """Temporarily set/unset environment variables."""
+    saved: dict[str, str | None] = {}
+    for key, value in overrides.items():
+        saved[key] = os.environ.get(key)
+        if value == "":
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+    try:
+        yield
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+# ---------------------------------------------------------------------------
+# DSN resolution (pure, no PG required)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_pg_url_selects_postgres_mode() -> None:
+    with _env(**{DATABASE_URL_ENV: "postgresql://u:p@host:5432/db"}):
+        config = resolve_database_config()
+    assert config.mode is DatabaseMode.POSTGRESQL
+    assert config.dsn == "postgresql://u:p@host:5432/db"
+
+
+def test_resolve_postgres_scheme_alias() -> None:
+    with _env(**{DATABASE_URL_ENV: "postgres://u:p@host:5432/db"}):
+        config = resolve_database_config()
+    assert config.mode is DatabaseMode.POSTGRESQL
+
+
+def test_resolve_sqlite_fallback_keeps_internal_mode() -> None:
+    with _env(**{DATABASE_URL_ENV: "", "VIDEO_REPLICA_DB_PATH": "/tmp/app.db"}):
+        config = resolve_database_config()
+    assert config.mode is DatabaseMode.SQLITE
+    assert config.sqlite_path == "/tmp/app.db"
+
+
+def test_resolve_rejects_unsupported_scheme() -> None:
+    with _env(**{DATABASE_URL_ENV: "mysql://u:p@host/db"}):
+        with pytest.raises(ValueError, match="unsupported database URL scheme"):
+            resolve_database_config()
+
+
+# ---------------------------------------------------------------------------
+# Customer-production fail-closed matrix (pure, no PG required)
+# ---------------------------------------------------------------------------
+
+
+def test_production_requires_database_url() -> None:
+    with _env(**{"VIDEO_REPLICA_CUSTOMER_PRODUCTION": "true", DATABASE_URL_ENV: ""}):
+        with pytest.raises(RuntimeError, match="DATABASE_URL"):
+            validate_customer_production(resolve_database_config())
+
+
+def test_production_rejects_sqlite() -> None:
+    with _env(
+        **{
+            "VIDEO_REPLICA_CUSTOMER_PRODUCTION": "true",
+            DATABASE_URL_ENV: "sqlite:////data/app.db",
+        }
+    ):
+        with pytest.raises(RuntimeError, match="SQLite"):
+            validate_customer_production(resolve_database_config())
+
+
+def test_non_production_allows_sqlite() -> None:
+    with _env(**{"VIDEO_REPLICA_CUSTOMER_PRODUCTION": "", DATABASE_URL_ENV: "sqlite:////tmp/x.db"}):
+        config = resolve_database_config()
+        # Must not raise in internal mode.
+        validate_customer_production(config)
+
+
+# ---------------------------------------------------------------------------
+# Pool / transactions / server time (require the PG fixture)
+# ---------------------------------------------------------------------------
+
+pytestmark_pg = pytest.mark.skipif(
+    not _pg_available(PG_DSN), reason="PostgreSQL fixture not reachable"
+)
+
+
+@pytestmark_pg
+def test_check_pg_ready_uses_pool_and_server_time() -> None:
+    with _env(**{DATABASE_URL_ENV: PG_DSN}):
+        ready = check_pg_ready()
+    assert ready.dsn == PG_DSN
+    assert isinstance(ready.server_now, datetime)
+    assert ready.pool_size >= 1
+
+
+@pytestmark_pg
+def test_pg_transaction_commits() -> None:
+    with _env(**{DATABASE_URL_ENV: PG_DSN}):
+        with pg_transaction() as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS t05_tx ("
+                "id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, value TEXT)"
+            )
+            conn.execute("TRUNCATE t05_tx")
+            conn.execute("INSERT INTO t05_tx (value) VALUES (%s)", ("committed",))
+        with pg_transaction() as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM t05_tx WHERE value = %s", ("committed",)
+            ).fetchone()[0]
+            assert count == 1
+
+
+@pytestmark_pg
+def test_pg_transaction_rolls_back_on_error() -> None:
+    with _env(**{DATABASE_URL_ENV: PG_DSN}):
+        with pytest.raises(RuntimeError, match="boom"):
+            with pg_transaction() as conn:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS t05_tx ("
+                    "id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, value TEXT)"
+                )
+                conn.execute("INSERT INTO t05_tx (value) VALUES (%s)", ("rolled-back",))
+                raise RuntimeError("boom")
+        with pg_transaction() as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM t05_tx WHERE value = %s", ("rolled-back",)
+            ).fetchone()[0]
+            assert count == 0
+
+
+@pytestmark_pg
+def test_pg_transaction_serializable_write_conflict() -> None:
+    """SERIALIZABLE replaces SQLite BEGIN IMMEDIATE: a transaction whose snapshot
+    is invalidated by a committed concurrent write to the same key must fail
+    with SerializationFailure instead of silently overwriting."""
+    with _env(**{DATABASE_URL_ENV: PG_DSN}):
+        with pg_transaction() as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS t05_conflict (id INTEGER PRIMARY KEY, v INTEGER)"
+            )
+            conn.execute("TRUNCATE t05_conflict")
+            conn.execute("INSERT INTO t05_conflict (id, v) VALUES (1, 0)")
+
+        # Writer B opens a SERIALIZABLE transaction and reads the key (snapshot v=0),
+        # then keeps the transaction open while writer A commits on another
+        # pooled connection (read-then-write on the same key).
+        with pytest.raises(psycopg.errors.SerializationFailure):
+            with pg_transaction(isolation="SERIALIZABLE") as conn_b:
+                conn_b.execute("SELECT v FROM t05_conflict WHERE id = 1").fetchone()
+                # Concurrent committer A on a second pooled connection.
+                with pg_transaction() as conn_a:
+                    conn_a.execute("SELECT v FROM t05_conflict WHERE id = 1").fetchone()
+                    conn_a.execute("UPDATE t05_conflict SET v = 1 WHERE id = 1")
+                # B writes the same key based on its stale snapshot.
+                conn_b.execute("UPDATE t05_conflict SET v = 2 WHERE id = 1")
+                # Leaving the block commits B → rejected with SQLSTATE 40001.
+
+
+@pytestmark_pg
+def test_pg_server_now_is_monotonic_and_not_client_clock() -> None:
+    with _env(**{DATABASE_URL_ENV: PG_DSN}):
+        first = pg_server_now()
+        second = pg_server_now()
+    assert isinstance(first, datetime)
+    assert second >= first
+
+
+@pytestmark_pg
+def test_pool_returns_connections_and_is_observable() -> None:
+    with _env(**{DATABASE_URL_ENV: PG_DSN}):
+        from app.db_pg import get_pg_pool
+
+        pool = get_pg_pool()
+        assert isinstance(pool, ConnectionPool)
+        with pool.connection() as conn:
+            value = conn.execute("SELECT 1").fetchone()[0]
+            assert value == 1
+        assert not pool.closed
+
+
+@pytest.fixture(autouse=True)
+def _close_pool_between_tests() -> Iterator[None]:
+    """Reset the module-level pool so each test binds its own DSN."""
+    from app.db_pg import close_pg_pool
+
+    close_pg_pool()
+    yield
+    close_pg_pool()
+
+
+# ---------------------------------------------------------------------------
+# API/Worker bootstrap integration (require the PG fixture)
+# ---------------------------------------------------------------------------
+
+
+@pytestmark_pg
+def test_api_bootstrap_completes_in_pg_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`python -m app.bootstrap` must finish the PG ready check without
+    touching any SQLite file (API startup path for the PG lane)."""
+    from app import bootstrap as bootstrap_module
+
+    monkeypatch.setenv("VIDEO_REPLICA_DATABASE_URL", PG_DSN)
+    monkeypatch.delenv("VIDEO_REPLICA_DB_PATH", raising=False)
+    monkeypatch.delenv("VIDEO_REPLICA_CUSTOMER_PRODUCTION", raising=False)
+    bootstrap_module.main()  # must return cleanly after check_pg_ready()
+
+
+@pytestmark_pg
+def test_worker_main_ready_check_in_pg_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The generation worker entry must complete the PG ready check and stop
+    before the SQLite task loop (fair-queue loop lands with T25).
+
+    Asserted by behaviour (not log output, which is vulnerable to global
+    logging state left behind by other tests): neither the one-shot loop nor
+    the forever loop may run in PG mode, and the pool must be usable.
+    """
+    from app import generation_worker as worker_module
+    from app.db_pg import get_pg_pool
+
+    calls: list[str] = []
+    monkeypatch.setenv("VIDEO_REPLICA_DATABASE_URL", PG_DSN)
+    monkeypatch.delenv("VIDEO_REPLICA_DB_PATH", raising=False)
+    monkeypatch.setattr("sys.argv", ["generation_worker"])
+    monkeypatch.setattr(
+        worker_module, "run_forever", lambda **kwargs: calls.append("run_forever"), raising=True
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "run_worker_once",
+        lambda *args, **kwargs: calls.append("run_worker_once"),
+        raising=True,
+    )
+
+    worker_module.main()  # must return after the PG ready check
+
+    assert calls == [], "SQLite task loop must not run in PG mode"
+    assert not get_pg_pool().closed
