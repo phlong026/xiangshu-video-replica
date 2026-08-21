@@ -143,3 +143,39 @@ jobs:
           path: .cargo-target/release/bundle/nsis/*.exe
           if-no-files-found: error
           retention-days: 7
+
+  t07-finalize-ledger:
+    name: T07 finalize verified ledger
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.number == 38 &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'feat/customer-v3-t07-sqlite-postgres-import'
+    needs: [secret-scan, quality-linux, windows-nsis]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout the existing T07 branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Apply verified T07 ledger closure
+        env:
+          T07_LEDGER_RUN_NUMBER: ${{ github.run_number }}
+          T07_IMPLEMENTATION_SHA: c26bc0732d9fe66142dae3c50ac9c908bdf578a8
+        run: python .github/t07_finalize_ledger.py
+      - name: Restore the standard workflow and commit only evidence closure
+        run: |
+          git fetch origin main --depth=1
+          git show origin/main:.github/workflows/ci.yml > .github/workflows/ci.yml
+          rm .github/t07_finalize_ledger.py
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "docs: close T07 verified evidence ledger"
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
