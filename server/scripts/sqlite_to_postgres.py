@@ -27,6 +27,7 @@ from psycopg import sql
 from psycopg.rows import dict_row
 from psycopg.types.json import Json, Jsonb
 
+from app.backup import SqliteSnapshot, create_readonly_snapshot
 from scripts.reconcile_customer_billing import (
     ReconciliationIssue,
     ReconciliationReport,
@@ -37,8 +38,6 @@ from scripts.reconcile_customer_billing import (
     reconcile_connection_pair,
     validate_database_invariants,
 )
-
-from app.backup import SqliteSnapshot, create_readonly_snapshot
 
 ImportStatus = Literal["imported", "already_reconciled"]
 SERVER_DIR = Path(__file__).resolve().parent.parent
