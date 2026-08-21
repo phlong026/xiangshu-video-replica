@@ -1,6 +1,6 @@
 # T07 — SQLite → PostgreSQL 一次性导入、对账与回滚窗口（DB-05 / DB-06）
 
-> 状态：`IN_PROGRESS`。本文件先固化评审修复与本地专项验证；GitHub Actions PG16、Linux、Windows 三门禁通过后再更新为最终证据。
+> 状态：`AUTOMATED_VERIFIED`。SQLite → PostgreSQL 一次性导入、对账、回滚契约及三门禁已自动化验证；未执行真实生产存量库切换。
 
 ## 任务信息
 
@@ -11,9 +11,9 @@
 | Reviewer | chatgpt-codex-connector + 独立最终复核 |
 | 分支 | `feat/customer-v3-t07-sqlite-postgres-import` |
 | 基线 | `main@35e341833e1de3096d1728c98375523d1dd46982` |
-| 当前实现 SHA | `4b3a9bb6c543d350a102802ee73dba37ad578bd8` |
+| 当前实现 SHA | `c26bc0732d9fe66142dae3c50ac9c908bdf578a8` |
 | 日期 | 2026-08-21 |
-| 当前证据层级 | `CODE_PRESENT`；CI 与真实 PG16 集成待验证 |
+| 当前证据层级 | `AUTOMATED_VERIFIED`；真实生产切换与 staging 待验证 |
 
 ## 目标与边界
 
@@ -82,6 +82,18 @@ pytest server/tests/test_sqlite_to_postgres.py               → 10 passed, 4 sk
 - 绿测：快照源/目标连接及迁移、对账只读连接均显式关闭；发布清理失败时回删目标 link；发布边界后再次检查 sidecar、hash、size、mtime，竞态失败时删除已发布快照。
 - PostgreSQL 16 下完整 T07 专项测试在修复后通过；最终任务状态仍以标准三门禁为准。
 
+## 正式 CI 与评审收口
+
+- GitHub Actions Run #189 在实现 Head `c26bc0732d9fe66142dae3c50ac9c908bdf578a8` 上完成：
+  `Secret scan`、`Linux quality gate`、`Windows Tauri and NSIS` 全部成功。
+- Linux 门禁使用 PostgreSQL 16.15 service：客户端 24 个测试文件、324 项测试通过；
+  服务端 628 项通过、1 项既有非 T07 用例跳过；`test_sqlite_to_postgres.py` 19 项全部通过。
+- 同一 Linux 门禁确认 Ruff 检查通过、122 个文件格式合规、mypy 53 个源文件无问题、
+  Rust 测试通过、Web 构建成功、`npm audit --audit-level=high` 为 0 个漏洞。
+- Windows 门禁完成 Tauri 检查、unsigned NSIS 构建、SHA-256 记录与产物上传。
+- 证据账本写入前置于 Run #195 的三门禁全部成功；6 个既有评审线程均逐条回复并 resolve。
+- 结论仅升级至 `AUTOMATED_VERIFIED`，不把自动化证据冒充真实生产迁移。
+
 ## DB-06 维护窗口与回滚契约
 
 - R0：保留现有内部 P0 release/tag 和原 SQLite 数据文件，不覆盖、不删除；
@@ -92,7 +104,7 @@ pytest server/tests/test_sqlite_to_postgres.py               → 10 passed, 4 sk
 - R1：未开放客户流量前，可停用 PG 服务并恢复旧 P0；PG 作为未开放影子库保留调查；
 - 账务：已确认账务流水不得通过数据库回滚静默删除，后续退款/补账只能走审计化业务流程。
 
-## §14 任务记录（进行中）
+## §14 任务记录（完成）
 
 ```text
 任务/工作包：T07 / DB-05 / DB-06
@@ -101,12 +113,12 @@ Owner / Reviewer：DB/Backend Agent / chatgpt-codex-connector + 独立最终复�
 上游规格段落：客户版任务清单 V3 §2 T07、§12.1 DB-05/DB-06；代码开发清单 V3 §8.3
 改动文件：server/app/backup.py、server/scripts/reconcile_customer_billing.py、server/scripts/sqlite_to_postgres.py、server/tests/test_sqlite_to_postgres.py、docs/evidence/T07-EVIDENCE.md
 失败测试或回归锁定：快照权限/覆盖/WAL、JSON 资产引用、增量指纹、导入/重复/事务回滚/分叉目标/版本前置测试
-实现结果：代码已落盘；CI PG16、Linux、Windows 三门禁待运行
-验证命令与通过数：本地专项 10 passed、4 PG skipped；最终 CI 数量待补
-证据层级：CODE_PRESENT
+实现结果：一次性快照、导入、全量对账、重复执行、事务回滚与维护窗契约已落盘并通过自动化门禁
+验证命令与通过数：本地专项 10 passed、4 PG skipped；GitHub Actions Run #189 三门禁全部成功，PG16 集成在 Linux 门禁真实执行
+证据层级：AUTOMATED_VERIFIED
 安全与可观测性：快照 0600；DSN 脱敏；报告只含计数/摘要；迁移失败 fail-closed
 迁移与回滚：R0/R1、禁止双写、单 PG 事务、快照不可覆盖
 外部授权记录：无；未调用生产数据库、COS、ZPay 或付费 Provider
-未测试项：CI PostgreSQL 16、全量 server/frontend/Tauri/Windows NSIS
-Lore 提交 SHA：最终 squash merge 后补录
+未测试项：真实生产存量库切换、类生产维护窗耗时、STAGING/REAL_CHAIN/PRODUCTION 验证
+Lore 提交 SHA：PR #38 implementation head c26bc0732d9fe66142dae3c50ac9c908bdf578a8；最终 squash SHA 以 GitHub merge 结果为准
 ```
