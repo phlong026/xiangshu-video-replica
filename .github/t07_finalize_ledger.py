@@ -149,7 +149,7 @@ def append_ledger(ledger_run_number: str, implementation_sha: str) -> None:
 | Field | Content |
 | --- | --- |
 | **Owner** | DB / Backend |
-| **Reviewer** | chatgpt-codex-connector + independ final verification |
+| **Reviewer** | chatgpt-codex-connector + independent final verification |
 | **Branch / Base SHA** | `{BRANCH}` / `main@{BASE_SHA}` |
 | **Verified Implementation SHA** | `{implementation_sha}` |
 | **Upstream Spec Sections** | Task list §2 T07, §12.1 DB-05/DB-06; code checklist §8.3 |
@@ -183,7 +183,7 @@ Owner / Reviewer：DB/Backend Agent / chatgpt-codex-connector + independent fina
 Lore 提交 SHA：PR #38 implementation head {implementation_sha}；最终 squash SHA 以 GitHub merge 结果为准
 ```
 """
-    LEDGER.write_text(text.rstrip() + entry + "\n", encoding="utf-8")
+    LEDGER.write_text(text.rstrip() + entry.rstrip() + "\n", encoding="utf-8")
 
 
 def main() -> None:
