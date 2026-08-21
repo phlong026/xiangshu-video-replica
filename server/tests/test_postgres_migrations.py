@@ -3,8 +3,9 @@ T03 / DB-01 - PostgreSQL 16 fixture tests (canonical path per V3 frozen file map
 
 Verifies: the local/CI PG fixture is reachable, is PostgreSQL 16, and supports
 concurrent independent connections. Tests are skipped automatically when no
-PostgreSQL is available (e.g. the Linux quality gate before the PG service is
-wired into CI), so SQLite-only environments stay green.
+PostgreSQL is available, so SQLite-only environments stay green; the Linux
+quality gate wires a postgres:16 service and sets TEST_POSTGRESQL_URL so these
+tests always run in CI (M0 review H2).
 """
 
 from __future__ import annotations
@@ -104,11 +105,6 @@ def test_independent_connections() -> None:
 # T06 / DB-04 — full upgrade/downgrade/re-upgrade rehearsal on PostgreSQL
 # ---------------------------------------------------------------------------
 
-_skip_no_pg = pytest.mark.skipif(
-    not _pg_available(_pg_dsn()),
-    reason=f"PostgreSQL fixture not reachable at {_pg_dsn()}",
-)
-
 
 def _admin_dsn() -> str:
     return _pg_dsn().rsplit("/", 1)[0] + "/postgres"
@@ -134,7 +130,6 @@ def _alembic_config(dsn: str):  # type: ignore[no-untyped-def]
     return config
 
 
-@_skip_no_pg
 def test_pg_full_upgrade_downgrade_reupgrade_and_indexes() -> None:
     """DB-04 rehearsal: empty PG database, upgrade to head, verify key tables/
     constraints, downgrade to base, then re-upgrade to head. Historical
@@ -154,7 +149,9 @@ def test_pg_full_upgrade_downgrade_reupgrade_and_indexes() -> None:
 
         with psycopg.connect(dsn) as conn:
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-            assert version == "024_wallet_backfill", f"unexpected head revision: {version}"
+            assert version == "025_postgres_runtime_compatibility", (
+                f"unexpected head revision: {version}"
+            )
 
             tables = {
                 row[0]
@@ -204,6 +201,11 @@ def test_pg_full_upgrade_downgrade_reupgrade_and_indexes() -> None:
                 "uq_recharge_orders_provider_trade_no": "provider_trade_no IS NOT NULL",
                 "uq_wallet_transactions_charge_order": "type = 'CHARGE'",
                 "uq_wallet_transactions_reserve_round": "type = 'RESERVE'",
+                # C1 regression lock: 022 shipped sqlite_where-only; the
+                # predicate is restored append-only by 025 on PG.
+                "uq_wallet_transactions_terminal_round": (
+                    "ANY (ARRAY['SETTLE'::text, 'RELEASE'::text])"
+                ),
             }
             for name, predicate in expected_partial.items():
                 assert name in index_defs, f"partial unique index {name} missing on PG"
@@ -227,6 +229,128 @@ def test_pg_full_upgrade_downgrade_reupgrade_and_indexes() -> None:
         command.upgrade(_alembic_config(sqlalchemy_dsn), "head")
         with psycopg.connect(dsn) as conn:
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-            assert version == "024_wallet_backfill"
+            assert version == "025_postgres_runtime_compatibility"
     finally:
         _drop_database("t06_migrate_test")
+
+
+def test_pg_wallet_terminal_round_row_level() -> None:
+    """C1 row-level regression: the billing lifecycle must work on PG.
+
+    internal_billing writes RESERVE first and the terminal SETTLE (or
+    RELEASE) afterwards with the *same* (task_id, billing_round). With the
+    degraded table-wide unique index from 022 the terminal insert was
+    rejected; with the 025 partial index it must succeed, while a second
+    terminal row on the same key must still be rejected.
+    """
+    from alembic import command
+
+    db_name = "m0_c1_row_test"
+    dsn = _pg_dsn().rsplit("/", 1)[0] + f"/{db_name}"
+    sqlalchemy_dsn = dsn.replace("postgresql://", "postgresql+psycopg://")
+    _drop_database(db_name)
+    with psycopg.connect(_admin_dsn(), autocommit=True) as conn:
+        conn.execute(f'CREATE DATABASE "{db_name}"')
+
+    def insert_tx(
+        conn: psycopg.Connection, tx_id: str, tx_type: str, avail: int, reserved: int
+    ) -> None:
+        conn.execute(
+            "INSERT INTO wallet_transactions "
+            "(id, user_id, type, available_delta, reserved_delta, "
+            " task_id, billing_round, idempotency_key) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            (tx_id, "u1", tx_type, avail, reserved, "t1", 1, f"{tx_type.lower()}:t1:1"),
+        )
+
+    try:
+        command.upgrade(_alembic_config(sqlalchemy_dsn), "head")
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            conn.execute(
+                "INSERT INTO users (id, username, display_name) VALUES ('u1', 'u1', 'User One')"
+            )
+            conn.execute(
+                "INSERT INTO projects (id, owner_user_id, name) VALUES ('p1', 'u1', 'C1 Repro')"
+            )
+            conn.execute(
+                "INSERT INTO generation_batches "
+                "(id, project_id, created_by_user_id, idempotency_key, "
+                " request_hash, request_snapshot_json) "
+                "VALUES ('b1', 'p1', 'u1', 'b1-idem', 'b1-hash', '{}')"
+            )
+            conn.execute(
+                "INSERT INTO generation_tasks (id, batch_id, provider, model) "
+                "VALUES ('t1', 'b1', 'apilio', 'test-model')"
+            )
+            conn.execute("INSERT INTO wallets (user_id) VALUES ('u1')")
+
+            # RESERVE then SETTLE on the same (task_id, billing_round):
+            # the exact sequence that failed with 022's degraded index.
+            insert_tx(conn, "tx1", "RESERVE", -1, 1)
+            insert_tx(conn, "tx2", "SETTLE", 0, -1)
+
+            # A second terminal row on the same key must still be rejected
+            # by the partial unique index (idempotency of the terminal side).
+            with pytest.raises(psycopg.errors.UniqueViolation):
+                insert_tx(conn, "tx3", "RELEASE", 1, -1)
+    finally:
+        _drop_database(db_name)
+
+
+def test_pg_wallet_downgrade_blocked_when_ledger_has_settled_rounds() -> None:
+    """Review P1 regression: 025 downgrade must refuse (loudly, with the
+    recovery path) once the ledger legitimately holds a RESERVE row plus a
+    terminal row sharing (task_id, billing_round) — recreating the 022
+    table-wide unique index would raise a uniqueness violation and brick the
+    rollback. An empty ledger still downgrades symmetrically (Stage 2 of the
+    rehearsal above)."""
+    from alembic import command
+
+    db_name = "m0_p1_downgrade_test"
+    dsn = _pg_dsn().rsplit("/", 1)[0] + f"/{db_name}"
+    sqlalchemy_dsn = dsn.replace("postgresql://", "postgresql+psycopg://")
+    _drop_database(db_name)
+    with psycopg.connect(_admin_dsn(), autocommit=True) as conn:
+        conn.execute(f'CREATE DATABASE "{db_name}"')
+
+    try:
+        command.upgrade(_alembic_config(sqlalchemy_dsn), "head")
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            conn.execute(
+                "INSERT INTO users (id, username, display_name) VALUES ('u1', 'u1', 'User One')"
+            )
+            conn.execute(
+                "INSERT INTO projects (id, owner_user_id, name) VALUES ('p1', 'u1', 'P1 Repro')"
+            )
+            conn.execute(
+                "INSERT INTO generation_batches "
+                "(id, project_id, created_by_user_id, idempotency_key, "
+                " request_hash, request_snapshot_json) "
+                "VALUES ('b1', 'p1', 'u1', 'b1-idem', 'b1-hash', '{}')"
+            )
+            conn.execute(
+                "INSERT INTO generation_tasks (id, batch_id, provider, model) "
+                "VALUES ('t1', 'b1', 'apilio', 'test-model')"
+            )
+            conn.execute("INSERT INTO wallets (user_id) VALUES ('u1')")
+            for tx_id, tx_type, avail, reserved in (
+                ("tx1", "RESERVE", -1, 1),
+                ("tx2", "SETTLE", 0, -1),
+            ):
+                conn.execute(
+                    "INSERT INTO wallet_transactions "
+                    "(id, user_id, type, available_delta, reserved_delta, "
+                    " task_id, billing_round, idempotency_key) "
+                    "VALUES (%s, 'u1', %s, %s, %s, 't1', 1, %s)",
+                    (tx_id, tx_type, avail, reserved, f"{tx_type.lower()}:t1:1"),
+                )
+
+        with pytest.raises(RuntimeError, match="cannot downgrade 025"):
+            command.downgrade(_alembic_config(sqlalchemy_dsn), "024_wallet_backfill")
+
+        # The database must be left exactly at head (no partial rollback).
+        with psycopg.connect(dsn) as conn:
+            version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+        assert version == "025_postgres_runtime_compatibility"
+    finally:
+        _drop_database(db_name)
