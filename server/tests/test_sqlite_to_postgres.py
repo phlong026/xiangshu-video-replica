@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from uuid import uuid4
@@ -202,6 +203,29 @@ def test_readonly_snapshot_does_not_mutate_source(tmp_path: Path) -> None:
             conn.execute("DELETE FROM users")
 
 
+def test_cli_requires_maintenance_window_confirmation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _seed_source(tmp_path / "source.db")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "sqlite_to_postgres.py",
+            "--sqlite",
+            str(source),
+            "--postgres-url",
+            "postgresql://redacted.invalid/customer",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        sqlite_to_postgres.main()
+
+    assert exc_info.value.code == 2
+
+
 def test_import_and_reconcile_happy_path(tmp_path: Path, postgres_database: str) -> None:
     source = _seed_source(tmp_path / "source.db")
 
@@ -214,7 +238,16 @@ def test_import_and_reconcile_happy_path(tmp_path: Path, postgres_database: str)
     assert result.status == "imported"
     assert result.reconciliation.ok
     assert result.source_sha256 == sha256_file(source)
-    assert "testpass" not in json.dumps(result.to_dict(), sort_keys=True)
+    payload = json.dumps(result.to_dict(), sort_keys=True)
+    assert "testpass" not in payload
+    assert "customer-one" not in payload
+    assert "cos://private-bucket/results/asset-1.mp4" not in payload
+    assert result.reconciliation.tables
+    for table in result.reconciliation.tables:
+        assert table.source_count == table.target_count
+        assert table.source_pk_sha256 == table.target_pk_sha256
+        assert table.source_rows_sha256 == table.target_rows_sha256
+        assert len(table.source_rows_sha256) == 64
     with psycopg.connect(postgres_database) as conn:
         assert conn.execute("SELECT count(*) FROM users").fetchone()[0] == 1
         assert conn.execute("SELECT available_credits FROM wallets").fetchone()[0] == 3
@@ -243,6 +276,8 @@ def test_import_rolls_back_on_injected_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = _seed_source(tmp_path / "source.db")
+    source_sha256 = sha256_file(source)
+    snapshot_path = tmp_path / "snapshot.db"
     original = sqlite_to_postgres._insert_table_rows
     calls = 0
 
@@ -260,9 +295,17 @@ def test_import_rolls_back_on_injected_failure(
         import_sqlite_to_postgres(
             source,
             postgres_database,
-            snapshot_path=tmp_path / "snapshot.db",
+            snapshot_path=snapshot_path,
         )
 
+    assert sha256_file(source) == source_sha256
+    assert snapshot_path.is_file()
+    with sqlite3.connect(f"{source.as_uri()}?mode=ro", uri=True) as conn:
+        assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert conn.execute("SELECT count(*) FROM users").fetchone()[0] == 1
+    with sqlite3.connect(f"{snapshot_path.as_uri()}?mode=ro", uri=True) as conn:
+        assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert conn.execute("SELECT count(*) FROM wallet_transactions").fetchone()[0] == 1
     with psycopg.connect(postgres_database) as conn:
         assert conn.execute("SELECT count(*) FROM users").fetchone()[0] == 0
         assert conn.execute("SELECT count(*) FROM wallet_transactions").fetchone()[0] == 0
@@ -280,6 +323,27 @@ def test_unknown_source_revision_is_rejected(tmp_path: Path, postgres_database: 
             postgres_database,
             snapshot_path=tmp_path / "snapshot.db",
         )
+
+
+def test_divergent_non_seed_target_is_rejected(tmp_path: Path, postgres_database: str) -> None:
+    source = _seed_source(tmp_path / "source.db")
+    with psycopg.connect(postgres_database) as conn:
+        conn.execute(
+            "INSERT INTO users (id, username, display_name) VALUES (%s, %s, %s)",
+            ("target-user", "target-only", "Target Only"),
+        )
+        conn.commit()
+
+    with pytest.raises(MigrationPreconditionError, match="non-seed data"):
+        import_sqlite_to_postgres(
+            source,
+            postgres_database,
+            snapshot_path=tmp_path / "snapshot.db",
+        )
+
+    with psycopg.connect(postgres_database) as conn:
+        assert conn.execute("SELECT count(*) FROM users").fetchone()[0] == 1
+        assert conn.execute("SELECT username FROM users").fetchone()[0] == "target-only"
 
 
 def test_wallet_recalculation_detects_drift(tmp_path: Path, postgres_database: str) -> None:
@@ -306,6 +370,37 @@ def test_paid_order_without_charge_is_detected(tmp_path: Path, postgres_database
 
     assert not report.ok
     assert any(issue.code == "paid_order_charge_mismatch" for issue in report.issues)
+
+
+def test_non_paid_order_with_charge_blocks_import(tmp_path: Path, postgres_database: str) -> None:
+    source = _seed_source(tmp_path / "source.db")
+    with connect_database(source) as conn:
+        conn.execute("UPDATE recharge_orders SET status = 'PENDING', paid_at = NULL")
+        conn.commit()
+
+    with pytest.raises(MigrationReconciliationError, match="unpaid_order_has_charge"):
+        import_sqlite_to_postgres(
+            source,
+            postgres_database,
+            snapshot_path=tmp_path / "snapshot.db",
+        )
+
+
+def test_charge_without_order_blocks_import(tmp_path: Path, postgres_database: str) -> None:
+    source = _seed_source(tmp_path / "source.db")
+    with connect_database(source) as conn:
+        conn.execute("UPDATE recharge_orders SET status = 'PENDING', paid_at = NULL")
+        conn.execute(
+            "UPDATE wallet_transactions SET recharge_order_id = NULL WHERE id = 'tx-charge-1'"
+        )
+        conn.commit()
+
+    with pytest.raises(MigrationReconciliationError, match="charge_without_order"):
+        import_sqlite_to_postgres(
+            source,
+            postgres_database,
+            snapshot_path=tmp_path / "snapshot.db",
+        )
 
 
 def test_asset_reference_orphan_blocks_import(tmp_path: Path, postgres_database: str) -> None:
