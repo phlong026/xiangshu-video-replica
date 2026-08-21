@@ -104,6 +104,28 @@ def test_snapshot_publish_rolls_back_when_temp_cleanup_fails(
     assert not destination.exists()
 
 
+def test_snapshot_rechecks_source_after_publication_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.db"
+    snapshot = tmp_path / "snapshot.db"
+    _basic_sqlite(source)
+    original_publish = backup_module._publish_without_overwrite
+
+    def mutate_then_publish(temporary: Path, destination: Path) -> None:
+        with sqlite3.connect(source) as writer:
+            writer.execute("UPDATE wallets SET available_credits = 11 WHERE user_id = 'u1'")
+            writer.commit()
+        original_publish(temporary, destination)
+
+    monkeypatch.setattr(backup_module, "_publish_without_overwrite", mutate_then_publish)
+    with pytest.raises(RuntimeError, match="source changed"):
+        create_readonly_snapshot(source, snapshot)
+
+    assert not snapshot.exists()
+
+
 '''
     edit(TEST, r"(?=def test_snapshot_refuses_existing_evidence)", tests)
     result = run(
@@ -121,12 +143,13 @@ def test_snapshot_publish_rolls_back_when_temp_cleanup_fails(
         "server",
         "server/tests/test_sqlite_to_postgres.py::test_snapshot_closes_readonly_connection_deterministically",
         "server/tests/test_sqlite_to_postgres.py::test_snapshot_publish_rolls_back_when_temp_cleanup_fails",
+        "server/tests/test_sqlite_to_postgres.py::test_snapshot_rechecks_source_after_publication_boundary",
         "-q",
         ok=False,
     )
-    if result.returncode == 0 or "2 failed" not in result.stdout:
-        raise RuntimeError("snapshot resource/atomicity regressions did not produce two red tests")
-    print("T07_RED_SNAPSHOT_RESOURCE_ATOMICITY=2_failed", flush=True)
+    if result.returncode == 0 or "3 failed" not in result.stdout:
+        raise RuntimeError("snapshot resource/atomicity regressions did not produce three red tests")
+    print("T07_RED_SNAPSHOT_RESOURCE_ATOMICITY=3_failed", flush=True)
 
 
 def implement() -> None:
@@ -162,6 +185,21 @@ def implement() -> None:
         r"with sqlite3\.connect\(temporary\) as snapshot_conn:",
         "with closing(sqlite3.connect(temporary)) as snapshot_conn:",
     )
+    final_check = '''        linked = True
+        _assert_quiescent_source(source)
+        final_stat = source.stat()
+        final_hash = sha256_file(source)
+        if (
+            before_hash != final_hash
+            or before_stat.st_size != final_stat.st_size
+            or before_stat.st_mtime_ns != final_stat.st_mtime_ns
+        ):
+            raise RuntimeError(
+                "SQLite source changed while the snapshot was created; "
+                "stop every writer and retry the maintenance window"
+            )
+'''
+    edit(BACKUP, r"        linked = True\n", final_check)
 
     edit(RECONCILE, r"import sqlite3\n", "import sqlite3\nfrom contextlib import closing\n")
     edit(
@@ -186,6 +224,7 @@ def verify() -> None:
         "server/scripts/sqlite_to_postgres.py",
         "server/tests/test_sqlite_to_postgres.py",
     )
+    run(*base, "ruff", "check", "--fix", *files)
     run(*base, "ruff", "format", *files)
     run(*base, "ruff", "check", *files)
     run(*base, "ruff", "format", "--check", *files)
@@ -207,8 +246,8 @@ def evidence() -> None:
     marker = "## DB-06 维护窗口与回滚契约\n"
     section = '''## 最终快照原子性评审红绿证据（2026-08-21）
 
-- 红测：SQLite 连接上下文只提交、不关闭；hard-link 已发布后临时文件删除失败会残留目标快照。两个专项回归结果为 `2 failed`。
-- 绿测：快照源连接、目标连接和迁移/对账只读连接均显式关闭；发布清理失败时回删目标 link，保持“成功或无目标”的原子语义。
+- 红测：SQLite 上下文只提交、不关闭；hard-link 已发布后临时文件删除失败会残留目标；最终源哈希检查后仍可发生写入。三个专项回归结果为 `3 failed`。
+- 绿测：快照源/目标连接及迁移、对账只读连接均显式关闭；发布清理失败时回删目标 link；发布边界后再次检查 sidecar、hash、size、mtime，竞态失败时删除已发布快照。
 - PostgreSQL 16 下完整 T07 专项测试在修复后通过；最终任务状态仍以标准三门禁为准。
 
 '''
