@@ -115,6 +115,7 @@ def upgrade() -> None:
         ["task_id", "action"],
         unique=True,
         sqlite_where=sa.text("result_status = 'PENDING'"),
+        postgresql_where=sa.text("result_status = 'PENDING'"),
     )
 
 

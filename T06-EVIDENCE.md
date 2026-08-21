@@ -41,6 +41,7 @@ databases; PG-only branches satisfy both).
 | 3 | Implicit `rowid` column does not exist on PG | `014_character_image_generation.py` | PG branch uses `ctid` tie-breaker; on the PG path the backfill table is empty (0 rows), SQLite keeps `rowid` |
 | 4 | Identifier `fk_external_call_logs_...` (87 chars) exceeds PG's 63-char cap | `014_character_image_generation.py` | PG branch uses short name `fk_external_call_logs_char_gen_task`; SQLite keeps the historical name verbatim |
 | 5 | `alembic_version.version_num` is VARCHAR(32); `017_generation_task_retry_lineage` is 35 chars (SQLite ignores declared width) | `migrations/env.py` | `widen_postgres_version_table()`: pre-create the table at VARCHAR(64) (Alembic skips existing tables) / widen in place for interrupted upgrades; SQLite untouched |
+| 6 | **Partial unique indexes declared with `sqlite_where` were silently dropped on PG** (incl. the anti-double-billing constraints `uq_recharge_orders_provider_trade_no`, `uq_wallet_transactions_charge_order`, `uq_wallet_transactions_reserve_round`) — found by PR #33 review P1 | `012`, `017`, `022` | Each `create_index` now also carries the equivalent `postgresql_where` (Alembic's cross-dialect pattern: each dialect picks its own kwarg); the rehearsal test asserts all 5 partial indexes exist on PG **with their WHERE clauses** via `pg_indexes.indexdef` |
 
 ## Critical Bug Found & Fixed During Verification
 
@@ -60,6 +61,7 @@ not log inspection.
 | `server/migrations/env.py` | `widen_postgres_version_table()` + explicit commit (PG-only) |
 | `server/migrations/versions/009_idempotency_project_scope.py` | dialect-guarded FK detach/reattach |
 | `server/migrations/versions/014_character_image_generation.py` | dialect-guarded rowid→ctid + short FK name |
+| `server/migrations/versions/012_character_domain.py`, `017_generation_task_retry_lineage.py`, `022_internal_billing.py` | +`postgresql_where` on 5 partial unique indexes (PR review P1) |
 | `server/tests/test_postgres_migrations.py` | +1 rehearsal test (three-stage, real assertions) |
 
 ## Regression

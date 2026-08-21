@@ -270,6 +270,7 @@ def _create_domain_tables() -> None:
         ["character_version_id", "view_type"],
         unique=True,
         sqlite_where=sa.text("is_published_selection = 1"),
+        postgresql_where=sa.text("is_published_selection = 1"),
     )
 
     op.create_table(

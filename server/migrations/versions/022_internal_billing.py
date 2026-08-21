@@ -138,6 +138,7 @@ def upgrade() -> None:
         ["provider_trade_no"],
         unique=True,
         sqlite_where=sa.text("provider_trade_no IS NOT NULL"),
+        postgresql_where=sa.text("provider_trade_no IS NOT NULL"),
     )
 
     op.create_table(
@@ -184,6 +185,7 @@ def upgrade() -> None:
         ["recharge_order_id"],
         unique=True,
         sqlite_where=sa.text("type = 'CHARGE'"),
+        postgresql_where=sa.text("type = 'CHARGE'"),
     )
     op.create_index(
         "uq_wallet_transactions_reserve_round",
@@ -191,6 +193,7 @@ def upgrade() -> None:
         ["task_id", "billing_round"],
         unique=True,
         sqlite_where=sa.text("type = 'RESERVE'"),
+        postgresql_where=sa.text("type = 'RESERVE'"),
     )
     op.create_index(
         "uq_wallet_transactions_terminal_round",

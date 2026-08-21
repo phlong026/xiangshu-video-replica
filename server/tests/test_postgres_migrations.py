@@ -187,13 +187,30 @@ def test_pg_full_upgrade_downgrade_reupgrade_and_indexes() -> None:
                 "009 must re-attach the FK on PG"
             )
 
-            indexes = {
-                row[0]
+            # Partial unique indexes must exist on PG with their WHERE clauses
+            # (sqlite_where is silently ignored by PG — DB-04/P1 review).
+            index_defs = {
+                row[0]: row[1]
                 for row in conn.execute(
-                    "SELECT indexname FROM pg_indexes WHERE schemaname = 'public'"
+                    "SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = 'public'"
                 ).fetchall()
             }
-            assert any(idx.startswith("idx_generation_tasks_prompt_version") for idx in indexes)
+            assert any(
+                name.startswith("idx_generation_tasks_prompt_version") for name in index_defs
+            )
+            expected_partial = {
+                "uq_character_assets_published_view": "is_published_selection = 1",
+                "uq_generation_task_operations_pending": "result_status = 'PENDING'",
+                "uq_recharge_orders_provider_trade_no": "provider_trade_no IS NOT NULL",
+                "uq_wallet_transactions_charge_order": "type = 'CHARGE'",
+                "uq_wallet_transactions_reserve_round": "type = 'RESERVE'",
+            }
+            for name, predicate in expected_partial.items():
+                assert name in index_defs, f"partial unique index {name} missing on PG"
+                assert predicate in index_defs[name], (
+                    f"{name} must be a partial index with WHERE {predicate}, "
+                    f"got: {index_defs[name]}"
+                )
 
         # Stage 2: downgrade all the way to base.
         command.downgrade(_alembic_config(sqlalchemy_dsn), "base")
