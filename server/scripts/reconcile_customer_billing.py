@@ -411,9 +411,7 @@ def _paid_charge_issues(
     tables = set(_table_names(conn, dialect))
     if not {"recharge_orders", "wallet_transactions"}.issubset(tables):
         return []
-    orders = _mapping_rows(
-        conn.execute("SELECT id, user_id, status, credits FROM recharge_orders")
-    )
+    orders = _mapping_rows(conn.execute("SELECT id, user_id, status, credits FROM recharge_orders"))
     charges = _mapping_rows(
         conn.execute(
             """
