@@ -1,6 +1,7 @@
 import ipaddress
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from typing import Any, Literal
 
 from fastapi import FastAPI, Request, Response
@@ -16,6 +17,7 @@ from app.character_identity_routes import router as character_identity_router
 from app.character_reference_routes import router as character_reference_router
 from app.character_routes import router as character_router
 from app.control_routes import router as control_router
+from app.db_pg import close_pg_pool
 from app.first_frame_routes import router as first_frame_router
 from app.generation_routes import router as generation_router
 from app.media_routes import router as media_router
@@ -51,7 +53,16 @@ class VideoReplicaAPI(FastAPI):
         return schema
 
 
-app = VideoReplicaAPI(title="Video Replica API", version="0.1.0")
+@asynccontextmanager
+async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
+    yield
+    # M0 review M2: release the PG pool on shutdown so pooled connections
+    # don't outlive the process. No-op on the SQLite lane (the pool is never
+    # opened there) and when the pool was never created in PG mode.
+    close_pg_pool()
+
+
+app = VideoReplicaAPI(title="Video Replica API", version="0.1.0", lifespan=_lifespan)
 
 
 @app.exception_handler(SettingsUnavailableError)

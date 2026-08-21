@@ -22,6 +22,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
+from typing import Literal
 
 import psycopg
 from psycopg_pool import ConnectionPool
@@ -36,9 +37,22 @@ POOL_MAX_ENV = "VIDEO_REPLICA_PG_POOL_MAX"
 
 DEFAULT_POOL_MIN = 1
 DEFAULT_POOL_MAX = 8
+# Pool hygiene (M0 review M1): stale connections are recycled instead of
+# being handed out after a server restart or network blip.
+DEFAULT_POOL_MAX_LIFETIME = 3600.0
+DEFAULT_POOL_MAX_IDLE = 600.0
+DEFAULT_POOL_TIMEOUT = 30.0
 PG_URL_SCHEMES = ("postgresql://", "postgres://")
 SQLITE_URL_SCHEMES = ("sqlite:///", "sqlite://")
 _TRUTHY = {"1", "true", "yes", "on"}
+
+# M0 review M3: the isolation level is interpolated into a SET statement, so
+# it must be constrained to a closed set (Literal for callers, frozenset for
+# runtime validation) instead of accepting arbitrary strings.
+IsolationLevel = Literal["READ COMMITTED", "REPEATABLE READ", "SERIALIZABLE"]
+_ALLOWED_ISOLATION_LEVELS: frozenset[str] = frozenset(
+    {"READ COMMITTED", "REPEATABLE READ", "SERIALIZABLE"}
+)
 
 
 class DatabaseMode(Enum):
@@ -156,6 +170,14 @@ def _pool_bounds() -> tuple[int, int]:
     return pool_min, pool_max
 
 
+def _as_datetime(value: object) -> datetime:
+    """Narrow a fetched ``now()`` value (psycopg3 already returns a
+    tz-aware datetime; the str round-trip is only a fallback)."""
+    if isinstance(value, datetime):
+        return value
+    return datetime.fromisoformat(str(value))
+
+
 def get_pg_pool() -> ConnectionPool:
     """Return the process-wide PG connection pool (lazily created)."""
     global _pool
@@ -173,6 +195,10 @@ def get_pg_pool() -> ConnectionPool:
                 max_size=pool_max,
                 open=True,
                 name="video-replica-pg",
+                check=ConnectionPool.check_connection,
+                max_lifetime=DEFAULT_POOL_MAX_LIFETIME,
+                max_idle=DEFAULT_POOL_MAX_IDLE,
+                timeout=DEFAULT_POOL_TIMEOUT,
             )
             _pool = pool
         return _pool
@@ -188,7 +214,7 @@ def close_pg_pool() -> None:
 
 
 @contextmanager
-def pg_transaction(*, isolation: str | None = None) -> Iterator[psycopg.Connection]:
+def pg_transaction(*, isolation: IsolationLevel | None = None) -> Iterator[psycopg.Connection]:
     """Run a transaction on a pooled connection.
 
     ``isolation="SERIALIZABLE"`` is the replacement for SQLite's
@@ -196,33 +222,38 @@ def pg_transaction(*, isolation: str | None = None) -> Iterator[psycopg.Connecti
     write race fail with ``psycopg.errors.SerializationFailure`` and the
     caller decides how to retry.
     """
+    if isolation is not None:
+        level = isolation.upper().strip()
+        if level not in _ALLOWED_ISOLATION_LEVELS:
+            # Fail before acquiring a pooled connection: the level feeds a
+            # SET statement and must never be an arbitrary string.
+            raise ValueError(
+                f"unsupported isolation level {isolation!r}; expected one of "
+                f"{sorted(_ALLOWED_ISOLATION_LEVELS)}"
+            )
     pool = get_pg_pool()
     with pool.connection() as conn:
-        try:
-            with conn.transaction():
-                if isolation is not None:
-                    conn.execute(f"SET TRANSACTION ISOLATION LEVEL {isolation}")
-                yield conn
-        except Exception:
-            # pool.connection() returns the connection to the pool; a failed
-            # transaction was already rolled back by conn.transaction().
-            raise
+        # pool.connection() returns the connection to the pool; a failed
+        # transaction was already rolled back by conn.transaction().
+        with conn.transaction():
+            if isolation is not None:
+                conn.execute(f"SET TRANSACTION ISOLATION LEVEL {level}")
+            yield conn
 
 
 def pg_server_now() -> datetime:
     """Return PostgreSQL server time (the only trusted clock, SES-01)."""
     pool = get_pg_pool()
     with pool.connection() as conn:
-        value = _fetch_scalar(conn, "SELECT now()")
-        return datetime.fromisoformat(str(value))
+        return _as_datetime(_fetch_scalar(conn, "SELECT now()"))
 
 
 def check_pg_ready() -> PgReadyInfo:
     """Ready check for API/Worker startup: pool warm-up + server round-trip."""
-    validate_customer_production(resolve_database_config())
+    config = resolve_database_config()
+    validate_customer_production(config)
     pool = get_pg_pool()
     with pool.connection() as conn:
-        server_now = datetime.fromisoformat(str(_fetch_scalar(conn, "SELECT now()")))
+        server_now = _as_datetime(_fetch_scalar(conn, "SELECT now()"))
         _fetch_scalar(conn, "SELECT 1")
-    dsn = resolve_database_config().dsn or ""
-    return PgReadyInfo(dsn=dsn, server_now=server_now, pool_size=pool.max_size)
+    return PgReadyInfo(dsn=config.dsn or "", server_now=server_now, pool_size=pool.max_size)

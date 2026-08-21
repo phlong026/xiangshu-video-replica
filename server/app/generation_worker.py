@@ -17,6 +17,7 @@ from app.db import connect_database
 from app.db_pg import (
     DatabaseMode,
     check_pg_ready,
+    close_pg_pool,
     resolve_database_config,
     validate_customer_production,
 )
@@ -125,7 +126,9 @@ def main() -> None:
     if config.mode is DatabaseMode.POSTGRESQL:
         # PG worker runtime: prove readiness (pool + server round-trip). The
         # fair-queue task loop moves onto PG with T24/T25 (Lane C); until then
-        # the PG mode intentionally stops after the ready check.
+        # the PG mode intentionally stops after the ready check — but loudly:
+        # exiting 0 would look healthy to systemd's Restart=on-failure and
+        # silently drop the worker (M0 review H1 fail-open).
         ready = check_pg_ready()
         logger.info(
             "PostgreSQL worker runtime ready (pool_max=%d, server_now=%s); "
@@ -133,7 +136,12 @@ def main() -> None:
             ready.pool_size,
             ready.server_now.isoformat(),
         )
-        return
+        close_pg_pool()
+        raise SystemExit(
+            "PostgreSQL worker task loop is not implemented until T25 (fair-queue "
+            "lane); exiting with failure so process supervision does not mistake "
+            "this for a healthy idle worker"
+        )
 
     db_path_value = config.sqlite_path
     if not db_path_value:

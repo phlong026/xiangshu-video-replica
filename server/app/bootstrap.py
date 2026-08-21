@@ -10,6 +10,7 @@ from app.db import initialize_database
 from app.db_pg import (
     DatabaseMode,
     check_pg_ready,
+    close_pg_pool,
     resolve_database_config,
     validate_customer_production,
 )
@@ -55,6 +56,10 @@ def main() -> None:
             ready.pool_size,
             ready.server_now.isoformat(),
         )
+        # bootstrap is a short-lived process: release the pooled connections
+        # before exit (M0 review M2; close_pg_pool is a no-op on the SQLite
+        # lane, which never opens a pool).
+        close_pg_pool()
         return
 
     db_path_value = config.sqlite_path
