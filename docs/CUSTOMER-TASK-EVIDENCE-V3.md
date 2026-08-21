@@ -1,6 +1,8 @@
 # Customer Edition Task Evidence Record V3
 
 > Note: This file is the evidence ledger for `docs/客户版任务清单-V3.md`; each task closure must record details per Section 14 template. The task list remains the single source of truth for status.
+>
+> **Evidence location (M0 review M8 unification, 2026-08-21)**: per-task evidence documents live under `docs/evidence/` (T02–T06 evidence files moved from the repository root; run-fix evidence under `docs/evidence/m0-review-fixes/`). Historical self-references inside those documents to their original root paths are preserved as record snapshots.
 
 ## T01 — Freeze V3 Main Specifications
 
@@ -8,7 +10,7 @@
 | --- | --- |
 | **Owner** | Architecture/Product |
 | **Reviewer** | (N/A - spec freeze doesn't require independent reviewer) |
-| **Branch / SHA** | `feat/customer-v3-t01-freeze-spec` / (TBD after commit) |
+| **Branch / SHA** | `feat/customer-v3-t01-freeze-spec` / `7e75576aaf462b5c492d02651b4256734d2a6334` (PR #28 squash) |
 | **Upstream Spec Sections** | `docs/客户版开发计划-V3.md` §1; `docs/客户版任务清单-V3.md` Header & Table T01 |
 | **Files Changed** | - Update `docs/客户版任务清单-V3.md` Header status<br>- Update Task Table T01 status `[~]`→`[x]`<br>- Add `docs/客户版任务证据记录-V3.md` (this file as ENG version) |
 | **Failure Test or Regression Lock** | N/A for spec freeze tasks |
@@ -19,7 +21,7 @@
 | **Migration and Rollback** | R0 preserves current internal P0 release/tag; V3 branch evolves independently |
 | **External Authorization Record** | None |
 | **Untested Items** | N/A |
-| **Lore Commit SHA** | (TBD) |
+| **Lore Commit SHA** | `7e75576aaf462b5c492d02651b4256734d2a6334` |
 
 ### Acceptance Evidence
 
@@ -94,5 +96,28 @@ Owner / Reviewer：架构/产品（Agent 执行）/ chatgpt-codex-connector（PR
 迁移与回滚：R0 保留内部 P0 release/tag
 外部授权记录：无
 未测试项：N/A
-Lore 提交 SHA：见 PR #28 squash 合并 SHA
+Lore 提交 SHA：7e75576aaf462b5c492d02651b4256734d2a6334（PR #28 squash 合并）
 ```
+
+---
+
+## T02–T06 Evidence Index (M0 review M8 backfill)
+
+Per-task evidence documents (moved to `docs/evidence/` on 2026-08-21; SHAs are
+the squash-merge commits on `main`):
+
+| Task | Squash SHA (main) | PR | Evidence document |
+| --- | --- | --- | --- |
+| T02 | `7b81df86dff0c1e4cb558595e63c712d4ee38979` | #29 | `docs/evidence/T02-EVIDENCE.md` (+ `docs/evidence/t02/` gate artifacts) |
+| T03 | `66b520e98f107db143ce23c98ba62d676ac8ef28` | #30 | `docs/evidence/T03-EVIDENCE.md` |
+| T04 | `81303219ba4326a0530571a5c3263fdf8bfb7aa5` | #31 | `docs/evidence/T04-SQLITE-INVENTORY.md` |
+| T05 | `c152766bbef54e07e7db7b89804ff071c2bf82cb` | #32 | `docs/evidence/T05-EVIDENCE.md` |
+| T06 | `d797e6dafaa5356db94c3d36afd12af93d7835af` | #33 | `docs/evidence/T06-EVIDENCE.md` |
+
+M0-review remediation runs (evidence under `docs/evidence/m0-review-fixes/`):
+
+| Run | Scope | PR |
+| --- | --- | --- |
+| P0 | C1 (revision 025) + H2 (CI PG service) + review P1 downgrade guard + LOW-2 | #35 |
+| P1/P2 code | H1 worker exit + H3 alembic DSN + M1–M6 + M7 doc + LOW-1/3 | #36 |
+| P2 docs | H4 inventory addendum + M8 evidence unification + M9 ledger correction + H1 exit-gate wording | #37 |

@@ -432,15 +432,37 @@ No named-parameter indirection is required: `%s` placeholders keep the same posi
 
 ### SQLite-Specific Migrations
 
+> **M0 review H4 addendum (2026-08-21)**: the original issue list below
+> omitted the `sqlite_where` partial-index parameter class entirely — the
+> exact risk category that later produced CRITICAL defect C1
+> (`uq_wallet_transactions_terminal_round` degraded to a table-wide unique
+> index on PG, blocking every wallet settlement). Items 1 and 5 below are
+> corrected/expanded accordingly; per DB-02's own evidence requirements this
+> list now carries file names, line numbers, PG counterparts, and risk
+> levels.
+
 **Identified Issues**:
 
-1. **batch_alter_table**: 16 migrations use this (not portable to PG without ALTER TABLE)
+1. **batch_alter_table**: 16 migration files / 36 call sites (not portable to PG without care). The original list below also wrongly named `017_generation_task_retry_lineage.py` and `022_internal_billing.py` — neither contains a `batch_alter_table` call. Complete, line-numbered inventory:
 
-   Files with batch_alter_table:
-   - `012_character_domain.py`
-   - `017_generation_task_retry_lineage.py`
-   - `022_internal_billing.py`
-   - + 13 others
+   | File | Lines (`upgrade`/`downgrade`) | Tables touched |
+   | --- | --- | --- |
+   | `004_generation.py` | 13, 34 | generation_tasks |
+   | `005_remove_provider_result_url.py` | 13, 18 | generation_tasks |
+   | `006_active_storage_provider.py` | 13, 29 | runtime_settings |
+   | `007_local_storage_provider.py` | 14, 29 | runtime_settings |
+   | `008_provider_result_url.py` | 22 | generation_tasks |
+   | `010_add_asset_metadata.py` | 15, 22 | assets |
+   | `011_add_archive_retry_count.py` | 15, 27 | generation_tasks |
+   | `012_character_domain.py` | 51, 350 | project_main_characters |
+   | `013_character_identity_assets.py` | 23, 154 | assets |
+   | `014_character_image_generation.py` | 21, 81, 134, 146, 165 | character_generation_tasks, external_call_logs |
+   | `015_character_asset_publication.py` | 13, 28 | character_versions |
+   | `016_character_reference_snapshot.py` | 13, 25 | character_reference_selections |
+   | `018_remove_oss_storage.py` | 38, 47, 57, 60 | runtime_settings, provider_settings |
+   | `019_character_simple_upload.py` | 17, 29 | character_versions |
+   | `020_deepseek_provider.py` | 14, 24 | provider_settings |
+   | `023_zpay_provider.py` | 12, 22 | provider_settings |
 
    **PG Alternative**:
    ```python
@@ -452,6 +474,19 @@ No named-parameter indirection is required: `%s` placeholders keep the same posi
 3. **Inline FOREIGN KEY definitions** in CREATE TABLE statements (works in both but order matters differently)
 
 4. **DEFAULT CURRENT_TIMESTAMP** variations (SQLite's `'now'` vs PG's `CURRENT_TIMESTAMP`)
+
+5. **`sqlite_where` partial-index parameters** — 🔴 **CRITICAL** (risk class that produced review C1). SQLAlchemy silently drops dialect-foreign `*_where` kwargs: an index declared with only `sqlite_where` loses its predicate entirely on PostgreSQL and degrades into a table-wide unique constraint. Complete inventory (every `sqlite_*` kwarg in the chain) and its remediation status:
+
+   | File:Line | Index | sqlite_where predicate | PG counterpart | Status |
+   | --- | --- | --- | --- | --- |
+   | `012_character_domain.py:272` | `uq_character_assets_published_view` | `is_published_selection = 1` | `postgresql_where` added (T06, same call) | ✅ fixed in 012 at publish-time review |
+   | `017_generation_task_retry_lineage.py:117` | `uq_generation_task_operations_pending` | `result_status = 'PENDING'` | `postgresql_where` added (T06) | ✅ fixed |
+   | `022_internal_billing.py:140` | `uq_recharge_orders_provider_trade_no` | `provider_trade_no IS NOT NULL` | `postgresql_where` added (T06) | ✅ fixed |
+   | `022_internal_billing.py:187` | `uq_wallet_transactions_charge_order` | `type = 'CHARGE'` | `postgresql_where` added (T06) | ✅ fixed |
+   | `022_internal_billing.py:195` | `uq_wallet_transactions_reserve_round` | `type = 'RESERVE'` | `postgresql_where` added (T06) | ✅ fixed |
+   | `022_internal_billing.py:203` | `uq_wallet_transactions_terminal_round` | `type IN ('SETTLE', 'RELEASE')` | **none — silently dropped on PG** | ✅ fixed append-only by `025_postgres_runtime_compatibility` (published 022 untouched per DB-04 No-Go) |
+
+   **Guard**: `server/tests/test_migration_dialect_contract.py` (AST scan, runs without PG) fails any new `create_index` that declares `sqlite_where` without `postgresql_where`; the single 022 legacy exemption is documented in-code and must not grow.
 
 ### Migration Environment Setup
 
@@ -487,9 +522,9 @@ def ensure_sqlite_parent_directory(url: str) -> None:
 
 ### Phase 1: Foundation (T05-T06)
 
-1. Refactor `db.py` to use asyncpg + connection pool
-2. Update Alembic environment for PG URL support
-3. Test upgrade/downgrade cycles
+1. ~~Refactor `db.py` to use asyncpg + connection pool~~ **Corrected (M0 review H4)**: the runtime driver is **psycopg3 + psycopg_pool only** per the frozen spec §8.1 — T05 delivered `app/db_pg.py` on psycopg3; asyncpg is dev/test-only. The original asyncpg recommendation here contradicted the spec and this document's own line 47.
+2. Update Alembic environment for PG URL support — **done**: `VIDEO_REPLICA_DATABASE_URL` is honoured by `migrations/env.py` (M0 review H3), with bare `postgresql://` rewritten to the psycopg3 driver.
+3. Test upgrade/downgrade cycles — **done**: full-chain rehearsal plus row-level billing regression on PG 16 (CI runs it on every PR via the embedded postgres service).
 
 ### Phase 2: Core Workflows (T07-T10)
 
