@@ -165,8 +165,9 @@ jobs:
         run: |
           git init .
           git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
-          git config http.https://github.com/.extraheader "AUTHORIZATION: bearer ${GITHUB_TOKEN}"
-          git fetch --no-tags --depth=1 origin "${T07_BRANCH}"
+          auth=$(printf 'x-access-token:%s' "${GITHUB_TOKEN}" | base64 -w0)
+          git -c http.extraheader="AUTHORIZATION: basic ${auth}" \
+            fetch --no-tags --depth=1 origin "${T07_BRANCH}"
           git checkout --detach FETCH_HEAD
           test "$(git rev-parse HEAD)" = "${T07_HEAD_SHA}"
       - name: Apply verified T07 ledger closure
@@ -176,6 +177,7 @@ jobs:
         run: python .github/t07_finalize_ledger.py
       - name: Commit only the verified T07 evidence closure
         env:
+          GITHUB_TOKEN: ${{ github.token }}
           T07_BRANCH: ${{ github.event.pull_request.head.ref }}
           T07_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
@@ -194,5 +196,7 @@ jobs:
           git diff --cached --check
           git diff --cached --quiet && exit 1
           git commit -m "docs: close T07 verified evidence ledger"
-          git push origin HEAD:"refs/heads/${T07_BRANCH}" \
+          auth=$(printf 'x-access-token:%s' "${GITHUB_TOKEN}" | base64 -w0)
+          git -c http.extraheader="AUTHORIZATION: basic ${auth}" \
+            push origin HEAD:"refs/heads/${T07_BRANCH}" \
             --force-with-lease="refs/heads/${T07_BRANCH}:${T07_HEAD_SHA}"
