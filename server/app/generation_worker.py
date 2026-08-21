@@ -14,6 +14,12 @@ from app.character_image_generation import (
     run_next_character_generation_task,
 )
 from app.db import connect_database
+from app.db_pg import (
+    DatabaseMode,
+    check_pg_ready,
+    resolve_database_config,
+    validate_customer_production,
+)
 from app.generation import run_next_generation_task
 from app.media_routes import get_media_storage
 from app.storage import StorageAdapter
@@ -110,11 +116,29 @@ def main() -> None:
     if args.max_tasks is not None and not args.once:
         parser.error("--max-tasks requires --once")
 
-    db_path_value = os.environ.get("VIDEO_REPLICA_DB_PATH")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+    # T05: resolve the database mode first so customer production fails closed
+    # before any SQLite file is touched.
+    config = resolve_database_config()
+    validate_customer_production(config)
+    if config.mode is DatabaseMode.POSTGRESQL:
+        # PG worker runtime: prove readiness (pool + server round-trip). The
+        # fair-queue task loop moves onto PG with T24/T25 (Lane C); until then
+        # the PG mode intentionally stops after the ready check.
+        ready = check_pg_ready()
+        logger.info(
+            "PostgreSQL worker runtime ready (pool_max=%d, server_now=%s); "
+            "PG task loop lands with the fair-queue lane (T25)",
+            ready.pool_size,
+            ready.server_now.isoformat(),
+        )
+        return
+
+    db_path_value = config.sqlite_path
     if not db_path_value:
         raise SystemExit("VIDEO_REPLICA_DB_PATH is required")
     db_path = Path(db_path_value)
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
     if args.once:
         with connect_database(db_path) as conn:
