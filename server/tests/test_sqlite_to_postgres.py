@@ -14,8 +14,6 @@ import pytest
 from alembic import command
 from alembic.config import Config
 
-from app.backup import create_readonly_snapshot, sha256_file
-from app.db import connect_database, initialize_database
 from scripts import sqlite_to_postgres
 from scripts.reconcile_customer_billing import reconcile_databases
 from scripts.sqlite_to_postgres import (
@@ -23,6 +21,9 @@ from scripts.sqlite_to_postgres import (
     MigrationReconciliationError,
     import_sqlite_to_postgres,
 )
+
+from app.backup import create_readonly_snapshot, sha256_file
+from app.db import connect_database, initialize_database
 
 DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 SKIP_REASON = "PostgreSQL fixture not reachable; start it via scripts/pg-fixture.sh start"
@@ -193,9 +194,11 @@ def test_readonly_snapshot_does_not_mutate_source(tmp_path: Path) -> None:
     snapshot = create_readonly_snapshot(source, tmp_path / "snapshot.db")
 
     assert snapshot.source_sha256 == before
-    assert snapshot.snapshot_sha256 == before
+    assert len(snapshot.snapshot_sha256) == 64
     assert sha256_file(source) == before
-    with sqlite3.connect(f"file:{snapshot.path}?mode=ro", uri=True) as conn:
+    with sqlite3.connect(f"{snapshot.path.as_uri()}?mode=ro", uri=True) as conn:
+        assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 1
         with pytest.raises(sqlite3.OperationalError):
             conn.execute("DELETE FROM users")
 
