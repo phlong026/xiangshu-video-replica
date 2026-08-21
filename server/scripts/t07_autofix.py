@@ -189,6 +189,18 @@ def test_real_pg_migration_advisory_lock_blocks_concurrent_cutover(
     )
 
 
+def repair_sqlite_fixture() -> None:
+    replacement = '''        conn.commit()
+
+    with sqlite3.connect(path) as checkpoint:
+        checkpoint.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        checkpoint.execute("PRAGMA journal_mode = DELETE")
+
+
+@pg_only'''
+    edit(TEST, r"        conn\.commit\(\)\n\n\n@pg_only", replacement)
+
+
 def implement() -> None:
     edit(
         REC,
@@ -323,6 +335,7 @@ def evidence() -> None:
 - DSN 回归：query/fragment 和非法端口不得泄露凭据；修复前专项测试为 `1 failed`，修复后通过。
 - 并发回归：两个 PostgreSQL 连接竞争同一 T07 导入时，第二个连接必须由事务级 advisory lock 立即失败关闭；实现前导入符号缺失红测，实现在 PG16 双连接测试中通过。
 - 目标侧 JSON 资产引用：导入后篡改 `characters.reference_asset_ids_json` 为孤儿引用，对账必须报告 `target:characters.reference_asset_ids_json`。
+- PG16 首次绿测因测试夹具遗留 WAL/SHM 共 `5 failed`；夹具现显式 checkpoint 并切回 DELETE，生产维护窗口门禁保持不变。
 - 三个原始格式失败文件已由仓库锁定 Ruff 版本格式化；最终证据层级仍以正式 PR 三门禁为准。
 
 '''
@@ -334,6 +347,7 @@ def evidence() -> None:
 
 def main() -> None:
     add_red_tests()
+    repair_sqlite_fixture()
     implement()
     verify()
     evidence()
