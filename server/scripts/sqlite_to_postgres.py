@@ -269,9 +269,7 @@ def _insert_table_rows(
         update_columns = [column for column in columns if column not in primary_key]
         if update_columns:
             updates = sql.SQL(", ").join(
-                sql.SQL("{} = EXCLUDED.{}").format(
-                    sql.Identifier(column), sql.Identifier(column)
-                )
+                sql.SQL("{} = EXCLUDED.{}").format(sql.Identifier(column), sql.Identifier(column))
                 for column in update_columns
             )
             query = base + sql.SQL(" ON CONFLICT ({}) DO UPDATE SET {}").format(
