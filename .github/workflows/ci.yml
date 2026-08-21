@@ -34,6 +34,25 @@ jobs:
     name: Linux quality gate
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    services:
+      # M0 review H2: run the PostgreSQL tests in CI instead of silently
+      # skipping them. Port/host/credentials mirror scripts/pg-fixture.sh so
+      # TEST_POSTGRESQL_URL stays identical locally and in CI.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: testuser
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: customer_v3_test
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U testuser -d customer_v3_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      TEST_POSTGRESQL_URL: postgresql://testuser:testpass@localhost:5433/customer_v3_test
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

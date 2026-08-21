@@ -10,7 +10,7 @@ from cryptography.fernet import Fernet
 from app.db import alembic_config, connect_database, initialize_database
 from app.settings import SettingsRepository
 
-HEAD_REVISION = "024_wallet_backfill"
+HEAD_REVISION = "025_postgres_runtime_compatibility"
 
 
 def seed_subjects(conn: sqlite3.Connection) -> None:
