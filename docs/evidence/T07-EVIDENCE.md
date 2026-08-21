@@ -67,6 +67,15 @@ pytest server/tests/test_sqlite_to_postgres.py               → 10 passed, 4 sk
 - 主键/行/钱包漂移；
 - JSON 资产孤儿在写入前拒绝。
 
+## 独立安全评审新增红绿证据（2026-08-21）
+
+- DSN 回归：query/fragment 和非法端口不得泄露凭据；修复前专项测试为 `1 failed`，修复后通过。
+- 并发回归：两个 PostgreSQL 连接竞争同一 T07 导入时，第二个连接必须由事务级 advisory lock 立即失败关闭；实现前导入符号缺失红测，实现在 PG16 双连接测试中通过。
+- 目标侧 JSON 资产引用：导入后篡改 `characters.reference_asset_ids_json` 为孤儿引用，对账必须报告 `target:characters.reference_asset_ids_json`。
+- PG16 首次绿测因测试夹具遗留 WAL/SHM 共 `5 failed`；第二次因 SQLite 上下文未关闭连接导致切换 journal mode 时 `database is locked`。夹具现显式关闭连接、checkpoint 并切回 DELETE，生产维护窗口门禁保持不变。
+- PG16 第三次绿测进一步发现 `psycopg.Connection` 无 `executemany()`，结果 `2 failed, 14 passed`；实现改为事务连接内 `cursor.executemany()`，继续由真实 PG16 导入覆盖。
+- 三个原始格式失败文件已由仓库锁定 Ruff 版本格式化；最终证据层级仍以正式 PR 三门禁为准。
+
 ## DB-06 维护窗口与回滚契约
 
 - R0：保留现有内部 P0 release/tag 和原 SQLite 数据文件，不覆盖、不删除；

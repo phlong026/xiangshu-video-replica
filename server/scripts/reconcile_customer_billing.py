@@ -18,7 +18,7 @@ from datetime import date, datetime, time
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import quote, unquote, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, unquote, urlsplit, urlunsplit
 from uuid import UUID, uuid4
 
 import psycopg
@@ -131,36 +131,58 @@ class _UnorderedDigest:
 
 
 def redact_postgres_dsn(dsn: str) -> str:
-    """Remove credentials from a PostgreSQL DSN before logging."""
+    "Remove credentials and optional DSN parameters before logging."
 
     try:
         parts = urlsplit(dsn)
-    except ValueError:
+        if not parts.scheme.startswith("postgres"):
+            return "<redacted-postgres-dsn>"
+        hostname = parts.hostname or ""
+        port = parts.port
+        username = parts.username
+    except (UnicodeError, ValueError):
         return "<redacted-postgres-dsn>"
-    if not parts.scheme.startswith("postgres"):
-        return "<redacted-postgres-dsn>"
-    hostname = parts.hostname or ""
     if ":" in hostname and not hostname.startswith("["):
         hostname = f"[{hostname}]"
     netloc = hostname
-    if parts.port is not None:
-        netloc += f":{parts.port}"
-    if parts.username:
-        netloc = f"{quote(unquote(parts.username), safe='')}@{netloc}"
-    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+    if port is not None:
+        netloc += f":{port}"
+    if username:
+        netloc = f"{quote(unquote(username), safe='')}@{netloc}"
+    return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+
+
+def _dsn_sensitive_values(dsn: str) -> set[str]:
+    candidates = {dsn}
+    try:
+        parts = urlsplit(dsn)
+    except ValueError:
+        return candidates
+    for value in (parts.username, parts.password, parts.fragment):
+        if value:
+            decoded = unquote(value)
+            candidates.update({value, decoded, quote(decoded, safe="")})
+    try:
+        query_pairs = parse_qsl(parts.query, keep_blank_values=True, strict_parsing=False)
+    except ValueError:
+        query_pairs = []
+    for key, value in query_pairs:
+        if key:
+            decoded_key = unquote(key)
+            candidates.update({key, decoded_key, quote(decoded_key, safe="")})
+        if value:
+            decoded_value = unquote(value)
+            candidates.update({value, decoded_value, quote(decoded_value, safe="")})
+    return candidates
 
 
 def safe_error_message(error: Exception, dsn: str) -> str:
     message = str(error)
-    candidates = {dsn}
-    try:
-        parts = urlsplit(dsn)
-        if parts.password:
-            candidates.add(parts.password)
-            candidates.add(unquote(parts.password))
-    except ValueError:
-        pass
-    for candidate in sorted((item for item in candidates if item), key=len, reverse=True):
+    for candidate in sorted(
+        (item for item in _dsn_sensitive_values(dsn) if item),
+        key=len,
+        reverse=True,
+    ):
         message = message.replace(candidate, "<redacted>")
     return message
 
@@ -350,9 +372,7 @@ def _canonical_json(value: object) -> object:
     return canonical_value(value, None)
 
 
-def _row_payload(
-    row: Mapping[str, object], columns: Sequence[ColumnSpec]
-) -> bytes:
+def _row_payload(row: Mapping[str, object], columns: Sequence[ColumnSpec]) -> bytes:
     values = [canonical_value(row[column.name], column.target_type) for column in columns]
     return json.dumps(
         values,
@@ -470,8 +490,7 @@ def _table_reconciliation(
                 code="table_column_mismatch",
                 scope=table,
                 detail=(
-                    f"column sets differ: source={len(source_columns)} "
-                    f"target={len(target_columns)}"
+                    f"column sets differ: source={len(source_columns)} target={len(target_columns)}"
                 ),
             )
         )
@@ -776,8 +795,7 @@ def _json_asset_reference_issues_sqlite(
         columns, _ = _sqlite_columns(conn, table)
         for column in (name for name in columns if name.endswith("_asset_ids_json")):
             query = (
-                f"SELECT {_quote_sqlite_identifier(column)} "
-                f"FROM {_quote_sqlite_identifier(table)}"
+                f"SELECT {_quote_sqlite_identifier(column)} FROM {_quote_sqlite_identifier(table)}"
             )
             invalid = 0
             orphan = 0
@@ -833,9 +851,7 @@ def _json_asset_reference_issues_pg(
                     if not rows:
                         break
                     for row in rows:
-                        asset_ids, malformed = _parse_asset_id_list(
-                            _row_value(row, column, 0)
-                        )
+                        asset_ids, malformed = _parse_asset_id_list(_row_value(row, column, 0))
                         invalid += int(malformed)
                         orphan += sum(asset_id not in known_assets for asset_id in asset_ids)
             if invalid:

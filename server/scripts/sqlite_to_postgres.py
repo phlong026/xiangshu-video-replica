@@ -43,6 +43,7 @@ from scripts.reconcile_customer_billing import (
 ImportStatus = Literal["imported", "already_reconciled"]
 SERVER_DIR = Path(__file__).resolve().parent.parent
 SEED_TABLES = frozenset({"runtime_settings"})
+MIGRATION_ADVISORY_LOCK_KEYS = (0x543037, 0x44423035)
 
 
 class MigrationSafetyError(RuntimeError):
@@ -145,6 +146,20 @@ def require_maintenance_window(confirmed: bool) -> None:
         )
 
 
+def require_migration_lock(pg_conn: Any) -> None:
+    row = pg_conn.execute(
+        "SELECT pg_try_advisory_xact_lock(%s, %s) AS acquired",
+        MIGRATION_ADVISORY_LOCK_KEYS,
+    ).fetchone()
+    if row is None:
+        raise MigrationSafetyError("migration advisory-lock query returned no row")
+    acquired = bool(row["acquired"] if isinstance(row, Mapping) else row[0])
+    if not acquired:
+        raise MigrationSafetyError(
+            "another T07 migration owns the PostgreSQL cutover lock; aborting"
+        )
+
+
 def require_validated_postgres_foreign_keys(pg_conn: Any) -> None:
     row = pg_conn.execute(
         """
@@ -216,10 +231,7 @@ def topological_order(
     dependencies: Mapping[str, set[str]],
 ) -> list[str]:
     node_set = set(nodes)
-    remaining = {
-        node: set(dependencies.get(node, set())) & node_set
-        for node in node_set
-    }
+    remaining = {node: set(dependencies.get(node, set())) & node_set for node in node_set}
     dependants: dict[str, set[str]] = defaultdict(set)
     for node, parents in remaining.items():
         for parent in parents:
@@ -344,13 +356,14 @@ def _insert_table_rows(
         query = base
 
     total = 0
-    for rows in _sqlite_row_batches(sqlite_conn, table, columns, batch_size):
-        parameters = [
-            tuple(_convert_value(row[column], target_types[column]) for column in columns)
-            for row in rows
-        ]
-        pg_conn.executemany(query, parameters)
-        total += len(rows)
+    with pg_conn.cursor() as cursor:
+        for rows in _sqlite_row_batches(sqlite_conn, table, columns, batch_size):
+            parameters = [
+                tuple(_convert_value(row[column], target_types[column]) for column in columns)
+                for row in rows
+            ]
+            cursor.executemany(query, parameters)
+            total += len(rows)
     return total
 
 
@@ -456,6 +469,7 @@ def migrate_snapshot(
         _ensure_source_invariants(sqlite_conn)
         with psycopg.connect(postgres_dsn, row_factory=dict_row) as pg_conn:
             with pg_conn.transaction():
+                require_migration_lock(pg_conn)
                 _validate_revisions(sqlite_conn, pg_conn)
                 require_validated_postgres_foreign_keys(pg_conn)
                 tables = _validate_schema(sqlite_conn, pg_conn)

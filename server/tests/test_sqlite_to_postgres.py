@@ -19,10 +19,12 @@ from scripts.reconcile_customer_billing import (
     validate_database_invariants,
 )
 from scripts.sqlite_to_postgres import (
+    MIGRATION_ADVISORY_LOCK_KEYS,
     MigrationReconciliationError,
     MigrationSafetyError,
     migrate_snapshot,
     require_maintenance_window,
+    require_migration_lock,
     require_validated_postgres_foreign_keys,
     topological_order,
     validate_revision_pair,
@@ -142,12 +144,32 @@ def test_snapshot_rejects_active_wal_sidecars(tmp_path: Path) -> None:
 
 
 def test_redaction_and_error_messages_never_expose_passwords() -> None:
-    dsn = "postgresql://migration:super%40secret@db.example/customer"
+    dsn = (
+        "postgresql://migration:super%40secret@db.example/customer"
+        "?sslpassword=query%40sensitive&application_name=t07#fragment%40sensitive"
+    )
     redacted = redact_postgres_dsn(dsn)
-    message = safe_error_message(RuntimeError(f"failed for {dsn} and super@secret"), dsn)
+    message = safe_error_message(
+        RuntimeError(
+            f"failed for {dsn}; credentials: super@secret, query@sensitive, "
+            "query%40sensitive, fragment@sensitive, sslpassword"
+        ),
+        dsn,
+    )
     assert redacted == "postgresql://migration@db.example/customer"
-    assert "super%40secret" not in message
-    assert "super@secret" not in message
+    assert (
+        redact_postgres_dsn("postgresql://migration:hidden@db.example:notaport/customer")
+        == "<redacted-postgres-dsn>"
+    )
+    for sensitive_value in (
+        "super%40secret",
+        "super@secret",
+        "query@sensitive",
+        "query%40sensitive",
+        "fragment@sensitive",
+        "sslpassword",
+    ):
+        assert sensitive_value not in message
 
 
 def test_table_digest_is_order_independent_streaming_and_separates_pk(tmp_path: Path) -> None:
@@ -288,6 +310,30 @@ def test_unvalidated_postgres_foreign_keys_block_import() -> None:
     require_validated_postgres_foreign_keys(_ScalarConnection(0))
 
 
+class _BooleanCursor:
+    def __init__(self, value: bool) -> None:
+        self.value = value
+
+    def fetchone(self) -> tuple[bool]:
+        return (self.value,)
+
+
+class _AdvisoryLockConnection:
+    def __init__(self, acquired: bool) -> None:
+        self.acquired = acquired
+
+    def execute(self, query: str, params: tuple[int, int]) -> _BooleanCursor:
+        assert "pg_try_advisory_xact_lock" in query
+        assert params == MIGRATION_ADVISORY_LOCK_KEYS
+        return _BooleanCursor(self.acquired)
+
+
+def test_migration_advisory_lock_fails_closed() -> None:
+    require_migration_lock(_AdvisoryLockConnection(True))
+    with pytest.raises(MigrationSafetyError, match="another T07 migration"):
+        require_migration_lock(_AdvisoryLockConnection(False))
+
+
 DEFAULT_PG_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 PG_SKIP = "PostgreSQL fixture not reachable; run scripts/pg-fixture.sh start"
 
@@ -322,9 +368,7 @@ def _drop_database(name: str) -> None:
     from psycopg import sql
 
     with psycopg.connect(_admin_dsn(), autocommit=True) as conn:
-        statement = sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(
-            sql.Identifier(name)
-        )
+        statement = sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name))
         conn.execute(statement)
 
 
@@ -459,6 +503,39 @@ def _create_head_source(path: Path) -> None:
             ("tx-t07", "u-t07", 10, "o-t07", "t07-charge"),
         )
         conn.commit()
+    conn.close()
+
+    with sqlite3.connect(path) as checkpoint:
+        checkpoint.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        checkpoint.execute("PRAGMA journal_mode = DELETE")
+
+
+@pg_only
+def test_real_pg_migration_advisory_lock_blocks_concurrent_cutover(
+    tmp_path: Path,
+) -> None:
+    import psycopg
+
+    source = tmp_path / "source.db"
+    _create_head_source(source)
+    snapshot = create_readonly_snapshot(source, tmp_path / "snapshot.db")
+    name = "t07_compact_lock"
+    dsn = _create_database(name)
+    try:
+        _upgrade_pg(dsn)
+        with psycopg.connect(dsn) as blocker:
+            with blocker.transaction():
+                blocker.execute(
+                    "SELECT pg_advisory_xact_lock(%s, %s)",
+                    MIGRATION_ADVISORY_LOCK_KEYS,
+                )
+                with pytest.raises(
+                    MigrationSafetyError,
+                    match="another T07 migration",
+                ):
+                    migrate_snapshot(snapshot, dsn)
+    finally:
+        _drop_database(name)
 
 
 @pg_only
@@ -556,6 +633,10 @@ def test_real_pg_reconciliation_detects_pk_row_wallet_and_asset_drift(
                 "UPDATE assets SET storage_uri = %s WHERE id = %s",
                 ("cos://private/changed.mp4", "a-t07"),
             )
+            target.execute(
+                "UPDATE characters SET reference_asset_ids_json = %s::jsonb WHERE id = %s",
+                ('["missing-target-json"]', "c-t07"),
+            )
             target.execute("DELETE FROM wallet_transactions WHERE id = %s", ("tx-t07",))
             target.commit()
             with connect_sqlite_readonly(snapshot.path) as source_conn:
@@ -564,6 +645,10 @@ def test_real_pg_reconciliation_detects_pk_row_wallet_and_asset_drift(
         issue_pairs = {(issue.code, issue.scope) for issue in report.issues}
         assert ("table_primary_key_mismatch", "users") in issue_pairs
         assert ("table_hash_mismatch", "assets") in issue_pairs
+        assert (
+            "asset_reference_orphan",
+            "target:characters.reference_asset_ids_json",
+        ) in issue_pairs
         assert any(issue.code == "wallet_balance_mismatch" for issue in report.issues)
     finally:
         _drop_database(name)
