@@ -13,7 +13,7 @@ import json
 import math
 import sqlite3
 from collections import defaultdict
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
@@ -252,7 +252,9 @@ def _table_names(conn: sqlite3.Connection | psycopg.Connection[Any], dialect: Di
     ]
 
 
-def _sqlite_column_specs(conn: sqlite3.Connection, table: str) -> tuple[list[ColumnSpec], list[str]]:
+def _sqlite_column_specs(
+    conn: sqlite3.Connection, table: str
+) -> tuple[list[ColumnSpec], list[str]]:
     rows = conn.execute(f"PRAGMA table_info({_quote_sqlite_identifier(table)})").fetchall()
     specs = [
         ColumnSpec(
@@ -1138,7 +1140,9 @@ def redact_postgres_dsn(dsn: str) -> str:
         host = f"[{host}]"
     port = "" if parsed.port is None else f":{parsed.port}"
     username = "" if parsed.username is None else f"{parsed.username}@"
-    return urlunsplit((parsed.scheme, f"{username}{host}{port}", parsed.path, parsed.query, parsed.fragment))
+    return urlunsplit(
+        (parsed.scheme, f"{username}{host}{port}", parsed.path, parsed.query, parsed.fragment)
+    )
 
 
 def safe_error_message(error: BaseException, postgres_dsn: str) -> str:
