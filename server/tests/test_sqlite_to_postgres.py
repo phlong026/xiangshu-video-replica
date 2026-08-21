@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import sqlite3
 import stat
@@ -100,15 +99,38 @@ def test_snapshot_refuses_existing_evidence(tmp_path: Path) -> None:
     snapshot = tmp_path / "snapshot.db"
     _basic_sqlite(source)
     snapshot.write_text("do-not-overwrite", encoding="utf-8")
+
     with pytest.raises(FileExistsError):
         create_readonly_snapshot(source, snapshot)
+
     assert snapshot.read_text(encoding="utf-8") == "do-not-overwrite"
+
+
+def test_snapshot_rejects_uncheckpointed_wal(tmp_path: Path) -> None:
+    source = tmp_path / "source.db"
+    snapshot = tmp_path / "snapshot.db"
+    writer = sqlite3.connect(source)
+    try:
+        assert writer.execute("PRAGMA journal_mode = WAL").fetchone()[0].lower() == "wal"
+        writer.execute("CREATE TABLE sample (id INTEGER PRIMARY KEY, value TEXT NOT NULL)")
+        writer.execute("INSERT INTO sample (value) VALUES ('committed-in-wal')")
+        writer.commit()
+        wal = Path(f"{source}-wal")
+        assert wal.exists() and wal.stat().st_size > 0
+
+        with pytest.raises(RuntimeError, match="WAL contains uncheckpointed frames"):
+            create_readonly_snapshot(source, snapshot)
+    finally:
+        writer.close()
+
+    assert not snapshot.exists()
 
 
 def test_redaction_and_error_messages_never_expose_passwords() -> None:
     dsn = "postgresql://migration:super%40secret@db.example/customer"
     redacted = redact_postgres_dsn(dsn)
     message = safe_error_message(RuntimeError("failed for password super%40secret"), dsn)
+
     assert redacted == "postgresql://migration@db.example/customer"
     assert "super%40secret" not in message
     assert "super@secret" not in message
@@ -126,17 +148,39 @@ def test_table_digest_is_order_independent_and_separates_pk_from_rows(tmp_path: 
             conn.execute("CREATE TABLE sample (id TEXT PRIMARY KEY, value TEXT NOT NULL)")
             conn.executemany("INSERT INTO sample VALUES (?, ?)", rows)
     specs = (ColumnSpec("id", "text", False), ColumnSpec("value", "text", False))
+
     with sqlite3.connect(first) as left, sqlite3.connect(second) as right:
-        left_digest = compute_table_digest(left, "sample", specs, ("id",))
-        right_digest = compute_table_digest(right, "sample", specs, ("id",))
+        left_digest = compute_table_digest(left, "sample", specs, ("id",), batch_size=1)
+        right_digest = compute_table_digest(right, "sample", specs, ("id",), batch_size=1)
         assert left_digest == right_digest
         right.execute("UPDATE sample SET value = 'changed' WHERE id = 'b'")
-        changed = compute_table_digest(right, "sample", specs, ("id",))
+        changed = compute_table_digest(right, "sample", specs, ("id",), batch_size=1)
+
     assert changed.primary_key_sha256 == left_digest.primary_key_sha256
     assert changed.row_sha256 != left_digest.row_sha256
 
 
-def test_wallet_and_asset_invariants_detect_drift(tmp_path: Path) -> None:
+def test_table_digest_streams_large_tables_in_bounded_batches(tmp_path: Path) -> None:
+    database = tmp_path / "large.db"
+    with sqlite3.connect(database) as conn:
+        conn.execute("CREATE TABLE sample (id INTEGER PRIMARY KEY, value TEXT NOT NULL)")
+        conn.executemany(
+            "INSERT INTO sample (id, value) VALUES (?, ?)",
+            ((index, f"value-{index}") for index in range(5000)),
+        )
+        digest = compute_table_digest(
+            conn,
+            "sample",
+            (ColumnSpec("id", "integer", False), ColumnSpec("value", "text", False)),
+            ("id",),
+            batch_size=17,
+        )
+
+    assert digest.row_count == 5000
+    assert len(digest.row_sha256) == 64
+
+
+def test_wallet_and_scalar_asset_invariants_detect_drift(tmp_path: Path) -> None:
     database = tmp_path / "source.db"
     _basic_sqlite(database)
     with sqlite3.connect(database) as conn:
@@ -146,12 +190,41 @@ def test_wallet_and_asset_invariants_detect_drift(tmp_path: Path) -> None:
         conn.execute("UPDATE generation_tasks SET result_asset_id = 'missing' WHERE id = 't1'")
         wallet = validate_wallet_invariants(conn)
         assets = validate_asset_references_sqlite(conn)
+
     assert not wallet.ok
     assert wallet.wallet_balance_mismatches == 1
     assert wallet.paid_without_charge == 1
     assert not assets.ok
     assert assets.orphan_reference_count == 1
     assert assets.object_storage_checked is False
+
+
+def test_json_asset_references_are_validated(tmp_path: Path) -> None:
+    database = tmp_path / "json-assets.db"
+    with sqlite3.connect(database) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE assets (id TEXT PRIMARY KEY);
+            CREATE TABLE characters (
+                id TEXT PRIMARY KEY,
+                reference_asset_ids_json TEXT
+            );
+            CREATE TABLE character_reference_selections (
+                id TEXT PRIMARY KEY,
+                recommended_asset_ids_json TEXT,
+                selected_asset_ids_json TEXT
+            );
+            INSERT INTO assets VALUES ('a1');
+            INSERT INTO characters VALUES ('c1', '["a1", "missing-1"]');
+            INSERT INTO character_reference_selections
+            VALUES ('s1', '["a1"]', '["missing-2"]');
+            """
+        )
+        result = validate_asset_references_sqlite(conn)
+
+    assert not result.ok
+    assert result.orphan_reference_count == 2
+    assert result.invalid_json_count == 0
 
 
 def test_canonical_values_are_stable() -> None:
@@ -426,7 +499,7 @@ def test_real_pg_divergent_target_and_revision_mismatch_fail_closed(tmp_path: Pa
                 ("other", "other", "Other"),
             )
             conn.commit()
-        with pytest.raises(MigrationSafetyError, match="non-empty"):
+        with pytest.raises(MigrationSafetyError, match="non-empty target"):
             migrate_snapshot(snapshot, dsn)
         with psycopg.connect(dsn) as conn:
             assert conn.execute("SELECT id FROM users").fetchall() == [("other",)]
