@@ -365,9 +365,7 @@ def _wallet_issues(
         str(row["user_id"]): (int(row["available_total"]), int(row["reserved_total"]))
         for row in transactions
     }
-    wallets = _mapping_rows(
-        conn.execute("SELECT user_id, available_credits, reserved_credits FROM wallets")
-    )
+    wallets = _mapping_rows(conn.execute("SELECT user_id, available_credits, reserved_credits FROM wallets"))
     issues: list[ReconciliationIssue] = []
     wallet_users: set[str] = set()
     for wallet in wallets:
