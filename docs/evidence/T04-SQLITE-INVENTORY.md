@@ -443,7 +443,7 @@ No named-parameter indirection is required: `%s` placeholders keep the same posi
 
 **Identified Issues**:
 
-1. **batch_alter_table**: 16 migration files / 35 call sites (not portable to PG without care). The original list below also wrongly named `017_generation_task_retry_lineage.py` and `022_internal_billing.py` — neither contains a `batch_alter_table` call. Complete, line-numbered inventory:
+1. **batch_alter_table**: 16 migration files / 36 call sites (not portable to PG without care). The original list below also wrongly named `017_generation_task_retry_lineage.py` and `022_internal_billing.py` — neither contains a `batch_alter_table` call. Complete, line-numbered inventory:
 
    | File | Lines (`upgrade`/`downgrade`) | Tables touched |
    | --- | --- | --- |

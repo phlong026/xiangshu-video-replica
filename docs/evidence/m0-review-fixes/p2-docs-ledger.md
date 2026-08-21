@@ -75,3 +75,19 @@ terminal_round 无 WHERE 子句（评审实机复现已归档）。
 ## 未测试项
 
 - 无（文档批次）
+
+## 评审机器人 P2 修复（PR #37 review，3 条均成立）
+
+1. **Root evidence location pointers（P2）**：AGENTS.md 工作流第 4 条与交接指南
+   仍指示未来任务在仓库根目录建 `TXX-EVIDENCE.md`（并把根目录 T06-EVIDENCE.md
+   当模板）——搬家后指引指向已删除文件，未来 agent 会重建 M8 要消除的分叉。
+   两处指引已同步改为 `docs/evidence/TXX-EVIDENCE.md`
+   （模板 `docs/evidence/T06-EVIDENCE.md`）。
+2. **PG API integration task ownership（P2）**：修订文案沿用了评审报告 H1 原文的
+   "T24/T25"表述，但 T24 是队列 ADR、T25 仅是 Worker 公平队列，无任务承接
+   API 路由 PG 化。已改为准确锚点：API/Worker 业务接入由 **T07–T09（Lane A/B）
+   与 T24–T27（Lane C）** 承接（与 §11 PostgreSQL 行"父任务 T03–T09"一致）。
+3. **batch_alter_table 计数（P2）**：正文写 35，表格枚举行号合计实为 36
+   （004×2+005×2+006×2+007×2+008×1+010×2+011×2+012×2+013×2+014×5+015×2
+   +016×2+018×4+019×2+020×2+023×2），与全仓 `with op.batch_alter_table`
+   检索一致；总数已更正为 36。

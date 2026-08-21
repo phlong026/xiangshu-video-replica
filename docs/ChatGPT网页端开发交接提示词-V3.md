@@ -42,7 +42,7 @@
 2. 分支：从最新 main 切 `feat/customer-v3-tXX-短横线描述`；若依赖未合并的前序任务分支，先告诉我并征得同意后再基于该分支。
 3. 测试先行：先写会失败的测试（红），再实现（绿）。禁止先写实现再补测试。
 4. 全量验证（命令见 §7）零回归后才算完成。
-5. 更新账本（与代码同一个 PR 内）：任务清单 TX 状态 `[ ]`→`[x]`（含 §12 工作包状态与文件头部状态行）；`docs/CUSTOMER-TASK-EVIDENCE-V3.md` 登记；根目录新建 `TXX-EVIDENCE.md`（结构参照 `T06-EVIDENCE.md`，含 §14 模板全文；根目录已有 T02/T03/T05/T06 先例）。
+5. 更新账本（与代码同一个 PR 内）：任务清单 TX 状态 `[ ]`→`[x]`（含 §12 工作包状态与文件头部状态行）；`docs/CUSTOMER-TASK-EVIDENCE-V3.md` 登记；新建 `docs/evidence/TXX-EVIDENCE.md`（结构参照 `docs/evidence/T06-EVIDENCE.md`，含 §14 模板全文；2026-08-21 M0 评审 M8 起证据文件统一放 `docs/evidence/`，不再用仓库根目录）。
 6. 提交推送并开 PR：标题 `TXX: <英文摘要>`；正文含改动摘要、验证命令与通过数、证据层级、未测试项、回滚方式。
 7. CI 三门禁全绿（secret 扫描 / Linux 质量门 / Windows NSIS）后通知我评审；合并由我执行，或经我明确授权后以所有者账号 phlong026 执行 squash merge。
 8. 一个 PR 只承载一个任务；一个提交不得混杂无关任务。
