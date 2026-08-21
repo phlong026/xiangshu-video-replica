@@ -143,3 +143,509 @@ jobs:
           path: .cargo-target/release/bundle/nsis/*.exe
           if-no-files-found: error
           retention-days: 7
+
+  t07-red-green-autofix:
+    name: T07 red-green security and concurrency autofix
+    if: ${{ github.event_name == 'pull_request' && github.head_ref == 'feat/customer-v3-t07-sqlite-postgres-import' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: testuser
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: customer_v3_test
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U testuser -d customer_v3_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      TEST_POSTGRESQL_URL: postgresql://testuser:testpass@localhost:5433/customer_v3_test
+    steps:
+      - name: Checkout task branch with write credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: feat/customer-v3-t07-sqlite-postgres-import
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Set up uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.0"
+          enable-cache: false
+      - name: Install locked server dependencies
+        run: uv sync --project server --locked --group dev --python 3.12
+      - name: Add security and target JSON regression tests
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              target = Path(path)
+              text = target.read_text(encoding="utf-8")
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"expected one patch anchor in {path}, found {count}")
+              target.write_text(text.replace(old, new), encoding="utf-8")
+
+          test_path = "server/tests/test_sqlite_to_postgres.py"
+          replace_once(
+              test_path,
+              '''def test_redaction_and_error_messages_never_expose_passwords() -> None:
+              dsn = "postgresql://migration:super%40secret@db.example/customer"
+              redacted = redact_postgres_dsn(dsn)
+              message = safe_error_message(RuntimeError(f"failed for {dsn} and super@secret"), dsn)
+              assert redacted == "postgresql://migration@db.example/customer"
+              assert "super%40secret" not in message
+              assert "super@secret" not in message
+          ''',
+              '''def test_redaction_and_error_messages_never_expose_passwords() -> None:
+              dsn = (
+                  "postgresql://migration:super%40secret@db.example/customer"
+                  "?sslpassword=query%40sensitive&application_name=t07#fragment%40sensitive"
+              )
+              redacted = redact_postgres_dsn(dsn)
+              message = safe_error_message(
+                  RuntimeError(
+                      f"failed for {dsn}; credentials: super@secret, query@sensitive, "
+                      "query%40sensitive, fragment@sensitive"
+                  ),
+                  dsn,
+              )
+              assert redacted == "postgresql://migration@db.example/customer"
+              assert (
+                  redact_postgres_dsn(
+                      "postgresql://migration:hidden@db.example:notaport/customer"
+                  )
+                  == "<redacted-postgres-dsn>"
+              )
+              for sensitive_value in (
+                  "super%40secret",
+                  "super@secret",
+                  "query@sensitive",
+                  "query%40sensitive",
+                  "fragment@sensitive",
+                  "sslpassword",
+              ):
+                  assert sensitive_value not in message
+          ''',
+          )
+          replace_once(
+              test_path,
+              '''            target.execute(
+                          "UPDATE assets SET storage_uri = %s WHERE id = %s",
+                          ("cos://private/changed.mp4", "a-t07"),
+                      )
+                      target.execute("DELETE FROM wallet_transactions WHERE id = %s", ("tx-t07",))
+          ''',
+              '''            target.execute(
+                          "UPDATE assets SET storage_uri = %s WHERE id = %s",
+                          ("cos://private/changed.mp4", "a-t07"),
+                      )
+                      target.execute(
+                          "UPDATE characters SET reference_asset_ids_json = %s WHERE id = %s",
+                          ('["missing-target-json"]', "c-t07"),
+                      )
+                      target.execute("DELETE FROM wallet_transactions WHERE id = %s", ("tx-t07",))
+          ''',
+          )
+          replace_once(
+              test_path,
+              '''        assert ("table_hash_mismatch", "assets") in issue_pairs
+                      assert any(issue.code == "wallet_balance_mismatch" for issue in report.issues)
+          ''',
+              '''        assert ("table_hash_mismatch", "assets") in issue_pairs
+                      assert (
+                          "asset_reference_orphan",
+                          "target:characters.reference_asset_ids_json",
+                      ) in issue_pairs
+                      assert any(issue.code == "wallet_balance_mismatch" for issue in report.issues)
+          ''',
+          )
+          PY
+      - name: Prove DSN leakage regression is red
+        shell: bash
+        run: |
+          set +e
+          uv --cache-dir .uv-cache run --project server --locked python -m pytest \
+            --rootdir server \
+            server/tests/test_sqlite_to_postgres.py::test_redaction_and_error_messages_never_expose_passwords \
+            -q | tee /tmp/t07-security-red.txt
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "Expected the security regression to be red before implementation." >&2
+            exit 1
+          fi
+          grep -q "1 failed" /tmp/t07-security-red.txt
+      - name: Add migration concurrency regression tests
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              target = Path(path)
+              text = target.read_text(encoding="utf-8")
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"expected one patch anchor in {path}, found {count}")
+              target.write_text(text.replace(old, new), encoding="utf-8")
+
+          path = "server/tests/test_sqlite_to_postgres.py"
+          replace_once(
+              path,
+              '''from scripts.sqlite_to_postgres import (
+              MigrationReconciliationError,
+              MigrationSafetyError,
+              migrate_snapshot,
+              require_maintenance_window,
+              require_validated_postgres_foreign_keys,
+              topological_order,
+              validate_revision_pair,
+          )
+          ''',
+              '''from scripts.sqlite_to_postgres import (
+              MIGRATION_ADVISORY_LOCK_KEYS,
+              MigrationReconciliationError,
+              MigrationSafetyError,
+              migrate_snapshot,
+              require_maintenance_window,
+              require_migration_lock,
+              require_validated_postgres_foreign_keys,
+              topological_order,
+              validate_revision_pair,
+          )
+          ''',
+          )
+          replace_once(
+              path,
+              '''def test_unvalidated_postgres_foreign_keys_block_import() -> None:
+              with pytest.raises(MigrationSafetyError, match="unvalidated foreign-key"):
+                  require_validated_postgres_foreign_keys(_ScalarConnection(2))
+              require_validated_postgres_foreign_keys(_ScalarConnection(0))
+
+
+          DEFAULT_PG_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
+          ''',
+              '''def test_unvalidated_postgres_foreign_keys_block_import() -> None:
+              with pytest.raises(MigrationSafetyError, match="unvalidated foreign-key"):
+                  require_validated_postgres_foreign_keys(_ScalarConnection(2))
+              require_validated_postgres_foreign_keys(_ScalarConnection(0))
+
+
+          class _BooleanCursor:
+              def __init__(self, value: bool) -> None:
+                  self.value = value
+
+              def fetchone(self) -> tuple[bool]:
+                  return (self.value,)
+
+
+          class _AdvisoryLockConnection:
+              def __init__(self, acquired: bool) -> None:
+                  self.acquired = acquired
+
+              def execute(self, query: str, params: tuple[int, int]) -> _BooleanCursor:
+                  assert "pg_try_advisory_xact_lock" in query
+                  assert params == MIGRATION_ADVISORY_LOCK_KEYS
+                  return _BooleanCursor(self.acquired)
+
+
+          def test_migration_advisory_lock_fails_closed() -> None:
+              require_migration_lock(_AdvisoryLockConnection(True))
+              with pytest.raises(MigrationSafetyError, match="another T07 migration"):
+                  require_migration_lock(_AdvisoryLockConnection(False))
+
+
+          DEFAULT_PG_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
+          ''',
+          )
+          replace_once(
+              path,
+              '''
+
+          @pg_only
+          def test_real_pg_import_reconcile_repeat_and_rollback(tmp_path: Path) -> None:
+          ''',
+              '''
+
+          @pg_only
+          def test_real_pg_migration_advisory_lock_blocks_concurrent_cutover(
+              tmp_path: Path,
+          ) -> None:
+              import psycopg
+
+              source = tmp_path / "source.db"
+              _create_head_source(source)
+              snapshot = create_readonly_snapshot(source, tmp_path / "snapshot.db")
+              name = "t07_compact_lock"
+              dsn = _create_database(name)
+              try:
+                  _upgrade_pg(dsn)
+                  with psycopg.connect(dsn) as blocker:
+                      with blocker.transaction():
+                          blocker.execute(
+                              "SELECT pg_advisory_xact_lock(%s, %s)",
+                              MIGRATION_ADVISORY_LOCK_KEYS,
+                          )
+                          with pytest.raises(
+                              MigrationSafetyError,
+                              match="another T07 migration",
+                          ):
+                              migrate_snapshot(snapshot, dsn)
+              finally:
+                  _drop_database(name)
+
+
+          @pg_only
+          def test_real_pg_import_reconcile_repeat_and_rollback(tmp_path: Path) -> None:
+          ''',
+          )
+          PY
+      - name: Prove migration concurrency regression is red
+        shell: bash
+        run: |
+          set +e
+          uv --cache-dir .uv-cache run --project server --locked python -m pytest \
+            --rootdir server \
+            server/tests/test_sqlite_to_postgres.py::test_migration_advisory_lock_fails_closed \
+            -q 2>&1 | tee /tmp/t07-lock-red.txt
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "Expected the advisory-lock regression to be red before implementation." >&2
+            exit 1
+          fi
+          grep -Eq "cannot import name|ImportError|ERROR" /tmp/t07-lock-red.txt
+      - name: Implement DSN hardening and PostgreSQL migration fencing
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              target = Path(path)
+              text = target.read_text(encoding="utf-8")
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"expected one patch anchor in {path}, found {count}")
+              target.write_text(text.replace(old, new), encoding="utf-8")
+
+          reconcile = "server/scripts/reconcile_customer_billing.py"
+          replace_once(
+              reconcile,
+              "from urllib.parse import quote, unquote, urlsplit, urlunsplit",
+              "from urllib.parse import parse_qsl, quote, unquote, urlsplit, urlunsplit",
+          )
+          replace_once(
+              reconcile,
+              '''def redact_postgres_dsn(dsn: str) -> str:
+              """Remove credentials from a PostgreSQL DSN before logging."""
+
+              try:
+                  parts = urlsplit(dsn)
+              except ValueError:
+                  return "<redacted-postgres-dsn>"
+              if not parts.scheme.startswith("postgres"):
+                  return "<redacted-postgres-dsn>"
+              hostname = parts.hostname or ""
+              if ":" in hostname and not hostname.startswith("["):
+                  hostname = f"[{hostname}]"
+              netloc = hostname
+              if parts.port is not None:
+                  netloc += f":{parts.port}"
+              if parts.username:
+                  netloc = f"{quote(unquote(parts.username), safe='')}@{netloc}"
+              return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
+
+          def safe_error_message(error: Exception, dsn: str) -> str:
+              message = str(error)
+              candidates = {dsn}
+              try:
+                  parts = urlsplit(dsn)
+                  if parts.password:
+                      candidates.add(parts.password)
+                      candidates.add(unquote(parts.password))
+              except ValueError:
+                  pass
+              for candidate in sorted((item for item in candidates if item), key=len, reverse=True):
+                  message = message.replace(candidate, "<redacted>")
+              return message
+          ''',
+              '''def redact_postgres_dsn(dsn: str) -> str:
+              """Remove credentials and optional DSN parameters before logging."""
+
+              try:
+                  parts = urlsplit(dsn)
+                  if not parts.scheme.startswith("postgres"):
+                      return "<redacted-postgres-dsn>"
+                  hostname = parts.hostname or ""
+                  port = parts.port
+                  username = parts.username
+              except (UnicodeError, ValueError):
+                  return "<redacted-postgres-dsn>"
+              if ":" in hostname and not hostname.startswith("["):
+                  hostname = f"[{hostname}]"
+              netloc = hostname
+              if port is not None:
+                  netloc += f":{port}"
+              if username:
+                  netloc = f"{quote(unquote(username), safe='')}@{netloc}"
+              return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+
+
+          def _dsn_sensitive_values(dsn: str) -> set[str]:
+              candidates = {dsn}
+              try:
+                  parts = urlsplit(dsn)
+              except ValueError:
+                  return candidates
+              for value in (parts.username, parts.password, parts.fragment):
+                  if value:
+                      decoded = unquote(value)
+                      candidates.update({value, decoded, quote(decoded, safe="")})
+              try:
+                  query_pairs = parse_qsl(parts.query, keep_blank_values=True, strict_parsing=False)
+              except ValueError:
+                  query_pairs = []
+              for _, value in query_pairs:
+                  if value:
+                      decoded = unquote(value)
+                      candidates.update({value, decoded, quote(decoded, safe="")})
+              return candidates
+
+
+          def safe_error_message(error: Exception, dsn: str) -> str:
+              message = str(error)
+              for candidate in sorted(
+                  (item for item in _dsn_sensitive_values(dsn) if item),
+                  key=len,
+                  reverse=True,
+              ):
+                  message = message.replace(candidate, "<redacted>")
+              return message
+          ''',
+          )
+
+          migration = "server/scripts/sqlite_to_postgres.py"
+          replace_once(
+              migration,
+              '''SEED_TABLES = frozenset({"runtime_settings"})
+          ''',
+              '''SEED_TABLES = frozenset({"runtime_settings"})
+          MIGRATION_ADVISORY_LOCK_KEYS = (0x543037, 0x44423035)
+          ''',
+          )
+          replace_once(
+              migration,
+              '''def require_maintenance_window(confirmed: bool) -> None:
+              if not confirmed:
+                  raise MigrationSafetyError(
+                      "maintenance window confirmation is required; stop all SQLite writers first"
+                  )
+
+
+          def require_validated_postgres_foreign_keys(pg_conn: Any) -> None:
+          ''',
+              '''def require_maintenance_window(confirmed: bool) -> None:
+              if not confirmed:
+                  raise MigrationSafetyError(
+                      "maintenance window confirmation is required; stop all SQLite writers first"
+                  )
+
+
+          def require_migration_lock(pg_conn: Any) -> None:
+              row = pg_conn.execute(
+                  "SELECT pg_try_advisory_xact_lock(%s, %s) AS acquired",
+                  MIGRATION_ADVISORY_LOCK_KEYS,
+              ).fetchone()
+              if row is None:
+                  raise MigrationSafetyError("migration advisory-lock query returned no row")
+              acquired = bool(row["acquired"] if isinstance(row, Mapping) else row[0])
+              if not acquired:
+                  raise MigrationSafetyError(
+                      "another T07 migration owns the PostgreSQL cutover lock; aborting"
+                  )
+
+
+          def require_validated_postgres_foreign_keys(pg_conn: Any) -> None:
+          ''',
+          )
+          replace_once(
+              migration,
+              '''            with pg_conn.transaction():
+                              _validate_revisions(sqlite_conn, pg_conn)
+          ''',
+              '''            with pg_conn.transaction():
+                              require_migration_lock(pg_conn)
+                              _validate_revisions(sqlite_conn, pg_conn)
+          ''',
+          )
+          PY
+      - name: Format and run complete T07 PostgreSQL 16 regression
+        shell: bash
+        run: |
+          uv --cache-dir .uv-cache run --project server --locked ruff format \
+            server/scripts/reconcile_customer_billing.py \
+            server/scripts/sqlite_to_postgres.py \
+            server/tests/test_sqlite_to_postgres.py
+          uv --cache-dir .uv-cache run --project server --locked ruff check \
+            server/app/backup.py \
+            server/scripts/reconcile_customer_billing.py \
+            server/scripts/sqlite_to_postgres.py \
+            server/tests/test_sqlite_to_postgres.py
+          uv --cache-dir .uv-cache run --project server --locked ruff format --check \
+            server/app/backup.py \
+            server/scripts/reconcile_customer_billing.py \
+            server/scripts/sqlite_to_postgres.py \
+            server/tests/test_sqlite_to_postgres.py
+          uv --cache-dir .uv-cache run --project server --locked python -m pytest \
+            --rootdir server server/tests/test_sqlite_to_postgres.py -q
+      - name: Record red-green evidence and push code-only result
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("docs/evidence/T07-EVIDENCE.md")
+          text = path.read_text(encoding="utf-8")
+          anchor = "## DB-06 维护窗口与回滚契约\n"
+          section = '''## 独立安全评审新增红绿证据（2026-08-21）
+
+- DSN 回归：query/fragment 和非法端口不得泄露凭据；修复前专项测试为 `1 failed`，修复后通过。
+- 并发回归：两个 PostgreSQL 连接竞争同一 T07 导入时，第二个连接必须由事务级 advisory lock 立即失败关闭；实现前导入符号缺失红测，实现在 PG16 双连接测试中通过。
+- 目标侧 JSON 资产引用：导入后篡改 `characters.reference_asset_ids_json` 为孤儿引用，对账必须报告 `target:characters.reference_asset_ids_json`。
+- 三个原始格式失败文件已由仓库锁定 Ruff 版本格式化；最终证据层级仍以正式 PR 三门禁为准。
+
+'''
+          if section not in text:
+              if anchor not in text:
+                  raise SystemExit("T07 evidence insertion anchor not found")
+              path.write_text(text.replace(anchor, section + anchor), encoding="utf-8")
+          PY
+          git fetch origin main
+          git checkout origin/main -- .github/workflows/ci.yml
+          git diff --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            .github/workflows/ci.yml \
+            docs/evidence/T07-EVIDENCE.md \
+            server/scripts/reconcile_customer_billing.py \
+            server/scripts/sqlite_to_postgres.py \
+            server/tests/test_sqlite_to_postgres.py
+          git commit -m "fix: fence and harden T07 migration"
+          git push origin HEAD:feat/customer-v3-t07-sqlite-postgres-import
