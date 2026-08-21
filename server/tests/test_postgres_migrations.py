@@ -12,9 +12,11 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import Callable, Coroutine
+from pathlib import Path
 from typing import Any
 
 import asyncpg  # type: ignore[import-untyped]
+import psycopg
 import pytest
 
 DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
@@ -96,3 +98,118 @@ def test_independent_connections() -> None:
             await conn2.close()
 
     _run(case)
+
+
+# ---------------------------------------------------------------------------
+# T06 / DB-04 — full upgrade/downgrade/re-upgrade rehearsal on PostgreSQL
+# ---------------------------------------------------------------------------
+
+_skip_no_pg = pytest.mark.skipif(
+    not _pg_available(_pg_dsn()),
+    reason=f"PostgreSQL fixture not reachable at {_pg_dsn()}",
+)
+
+
+def _admin_dsn() -> str:
+    return _pg_dsn().rsplit("/", 1)[0] + "/postgres"
+
+
+def _rehearsal_dsn() -> str:
+    """Dedicated database for the rehearsal (downgrade drops every table)."""
+    return _pg_dsn().rsplit("/", 1)[0] + "/t06_migrate_test"
+
+
+def _drop_database(db_name: str) -> None:
+    with psycopg.connect(_admin_dsn(), autocommit=True) as conn:
+        conn.execute(f'DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)')
+
+
+def _alembic_config(dsn: str):  # type: ignore[no-untyped-def]
+    from alembic.config import Config
+
+    server_dir = Path(__file__).resolve().parent.parent
+    config = Config(str(server_dir / "alembic.ini"))
+    config.set_main_option("script_location", str(server_dir / "migrations"))
+    config.set_main_option("sqlalchemy.url", dsn)
+    return config
+
+
+@_skip_no_pg
+def test_pg_full_upgrade_downgrade_reupgrade_and_indexes() -> None:
+    """DB-04 rehearsal: empty PG database, upgrade to head, verify key tables/
+    constraints, downgrade to base, then re-upgrade to head. Historical
+    revisions keep their SQLite behaviour; PG-only branches are dialect-guarded
+    inside the revisions and env.py."""
+    from alembic import command
+
+    dsn = _rehearsal_dsn()
+    sqlalchemy_dsn = dsn.replace("postgresql://", "postgresql+psycopg://")
+    _drop_database("t06_migrate_test")
+    with psycopg.connect(_admin_dsn(), autocommit=True) as conn:
+        conn.execute('CREATE DATABASE "t06_migrate_test"')
+
+    try:
+        # Stage 1: upgrade to head on the empty database.
+        command.upgrade(_alembic_config(sqlalchemy_dsn), "head")
+
+        with psycopg.connect(dsn) as conn:
+            version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+            assert version == "024_wallet_backfill", f"unexpected head revision: {version}"
+
+            tables = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'"
+                ).fetchall()
+            }
+            for required in (
+                "users",
+                "projects",
+                "characters",
+                "generation_batches",
+                "generation_tasks",
+                "wallets",
+                "wallet_transactions",
+                "recharge_orders",
+                "character_generation_tasks",
+                "external_call_logs",
+            ):
+                assert required in tables, f"missing table {required} after upgrade head"
+
+            constraints = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT conname FROM pg_constraint WHERE connamespace = 'public'::regnamespace"
+                ).fetchall()
+            }
+            assert "uq_generation_batches_user_project_key" in constraints
+            assert "generation_tasks_batch_id_fkey" in constraints, (
+                "009 must re-attach the FK on PG"
+            )
+
+            indexes = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT indexname FROM pg_indexes WHERE schemaname = 'public'"
+                ).fetchall()
+            }
+            assert any(idx.startswith("idx_generation_tasks_prompt_version") for idx in indexes)
+
+        # Stage 2: downgrade all the way to base.
+        command.downgrade(_alembic_config(sqlalchemy_dsn), "base")
+        with psycopg.connect(dsn) as conn:
+            tables = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'"
+                ).fetchall()
+            }
+            assert "users" not in tables, "downgrade to base must drop business tables"
+
+        # Stage 3: re-upgrade to head (rehearsal of a rolled-back deployment).
+        command.upgrade(_alembic_config(sqlalchemy_dsn), "head")
+        with psycopg.connect(dsn) as conn:
+            version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+            assert version == "024_wallet_backfill"
+    finally:
+        _drop_database("t06_migrate_test")

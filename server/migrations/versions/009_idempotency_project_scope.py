@@ -58,8 +58,21 @@ def _rebuild(conn, *, create_sql: str) -> None:
         FROM generation_batches
         """
     )
+    # PostgreSQL enforces the generation_tasks FK that SQLite ignores, so the
+    # dependent constraint must be detached before the swap and re-attached
+    # afterwards. SQLite keeps its historical single-step path untouched.
+    is_postgresql = conn.dialect.name == "postgresql"
+    if is_postgresql:
+        conn.exec_driver_sql(
+            "ALTER TABLE generation_tasks DROP CONSTRAINT generation_tasks_batch_id_fkey"
+        )
     conn.exec_driver_sql("DROP TABLE generation_batches")
     conn.exec_driver_sql("ALTER TABLE generation_batches_new RENAME TO generation_batches")
+    if is_postgresql:
+        conn.exec_driver_sql(
+            "ALTER TABLE generation_tasks ADD CONSTRAINT generation_tasks_batch_id_fkey "
+            "FOREIGN KEY (batch_id) REFERENCES generation_batches (id) ON DELETE CASCADE"
+        )
 
 
 def upgrade() -> None:
