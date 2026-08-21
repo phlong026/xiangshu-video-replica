@@ -11,9 +11,13 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sqlite3
+import subprocess
+import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
+from pathlib import Path
 
 import psycopg
 import pytest
@@ -245,6 +249,41 @@ def test_pool_returns_connections_and_is_observable() -> None:
         assert not pool.closed
 
 
+@pytestmark_pg
+def test_pool_applies_hygiene_parameters() -> None:
+    """M0 review M1: the pool must check connections and recycle them by
+    lifetime/idle bounds instead of handing out possibly-dead sockets."""
+    with _env(**{DATABASE_URL_ENV: PG_DSN}):
+        from app.db_pg import (
+            DEFAULT_POOL_MAX_IDLE,
+            DEFAULT_POOL_MAX_LIFETIME,
+            DEFAULT_POOL_TIMEOUT,
+            get_pg_pool,
+        )
+
+        pool = get_pg_pool()
+        # NB: ``pool.check`` is a *method* (runs the checks on demand); the
+        # configured callback lives on the private ``_check`` attribute.
+        assert pool._check == ConnectionPool.check_connection
+        assert pool.max_lifetime == DEFAULT_POOL_MAX_LIFETIME
+        assert pool.max_idle == DEFAULT_POOL_MAX_IDLE
+        assert pool.timeout == DEFAULT_POOL_TIMEOUT
+
+
+def test_pg_transaction_rejects_unknown_isolation_level() -> None:
+    """M0 review M3: the isolation level feeds a SET statement, so anything
+    outside the closed allow-list must be rejected before touching the DB."""
+    from app.db_pg import _ALLOWED_ISOLATION_LEVELS  # noqa: PLC2701 - assert surface
+
+    with pytest.raises(ValueError, match="unsupported isolation level"):
+        with pg_transaction(isolation="SERIALIZABLE; DROP TABLE users"):  # type: ignore[arg-type]
+            pass
+
+    assert "SERIALIZABLE" in _ALLOWED_ISOLATION_LEVELS
+    assert "READ COMMITTED" in _ALLOWED_ISOLATION_LEVELS
+    assert "REPEATABLE READ" in _ALLOWED_ISOLATION_LEVELS
+
+
 @pytest.fixture(autouse=True)
 def _close_pool_between_tests() -> Iterator[None]:
     """Reset the module-level pool so each test binds its own DSN."""
@@ -275,11 +314,14 @@ def test_api_bootstrap_completes_in_pg_mode(monkeypatch: pytest.MonkeyPatch) -> 
 @pytestmark_pg
 def test_worker_main_ready_check_in_pg_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     """The generation worker entry must complete the PG ready check and stop
-    before the SQLite task loop (fair-queue loop lands with T25).
+    before the SQLite task loop (fair-queue loop lands with T25) — loudly:
+    M0 review H1 requires a non-zero exit so Restart=on-failure supervision
+    never mistakes the unimplemented PG loop for a healthy idle worker.
 
     Asserted by behaviour (not log output, which is vulnerable to global
     logging state left behind by other tests): neither the one-shot loop nor
-    the forever loop may run in PG mode, and the pool must be usable.
+    the forever loop may run in PG mode, and the pool must be usable after
+    the worker released it.
     """
     from app import generation_worker as worker_module
     from app.db_pg import get_pg_pool
@@ -298,7 +340,81 @@ def test_worker_main_ready_check_in_pg_mode(monkeypatch: pytest.MonkeyPatch) -> 
         raising=True,
     )
 
-    worker_module.main()  # must return after the PG ready check
+    with pytest.raises(SystemExit) as excinfo:
+        worker_module.main()
 
+    assert excinfo.value.code != 0, "PG-mode worker must not exit 0 before T25"
     assert calls == [], "SQLite task loop must not run in PG mode"
+    # The worker closes its pool before exiting; a fresh pool must still be
+    # creatable from the same configuration.
     assert not get_pg_pool().closed
+
+
+# ---------------------------------------------------------------------------
+# M0 review H3 — VIDEO_REPLICA_DATABASE_URL drives `alembic upgrade head`
+# ---------------------------------------------------------------------------
+
+
+def _alembic_head() -> str:
+    from alembic.script import ScriptDirectory
+
+    server_dir = Path(__file__).resolve().parent.parent
+    return ScriptDirectory(str(server_dir / "migrations")).get_current_head()
+
+
+def _run_alembic_upgrade_head() -> subprocess.CompletedProcess[str]:
+    server_dir = Path(__file__).resolve().parent.parent
+    return subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
+        cwd=server_dir,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+
+
+def test_alembic_env_var_targets_sqlite_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """H3: the env var must override the alembic.ini default, so `alembic
+    upgrade head` targets the configured SQLite file instead of data/app.db."""
+    db_path = tmp_path / "env-var.db"
+    monkeypatch.setenv(DATABASE_URL_ENV, f"sqlite:///{db_path}")
+
+    result = _run_alembic_upgrade_head()
+
+    assert result.returncode == 0, result.stderr
+    assert db_path.exists(), "env var must redirect migrations away from data/app.db"
+    with sqlite3.connect(db_path) as conn:
+        version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+    assert version == _alembic_head()
+
+
+@pytestmark_pg
+def test_alembic_env_var_dsn_runs_migrations_on_pg(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """H3: a bare ``postgresql://`` env var must be rewritten to the psycopg3
+    driver (bare URLs resolve to psycopg2, which is not installed) and drive
+    the real `alembic upgrade head` against a fresh PG database — the exact
+    operator path the ini-file default used to block."""
+    db_name = "h3_env_url_test"
+    admin_dsn = PG_DSN.rsplit("/", 1)[0] + "/postgres"
+    dsn = PG_DSN.rsplit("/", 1)[0] + f"/{db_name}"
+    with psycopg.connect(admin_dsn, autocommit=True) as conn:
+        conn.execute(f'DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)')
+        conn.execute(f'CREATE DATABASE "{db_name}"')
+
+    # Deliberately the bare postgresql:// scheme: the rewrite is part of the
+    # behaviour under test.
+    monkeypatch.setenv(DATABASE_URL_ENV, dsn)
+    try:
+        result = _run_alembic_upgrade_head()
+        assert result.returncode == 0, result.stderr
+        with psycopg.connect(dsn) as conn:
+            version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+        assert version == _alembic_head()
+    finally:
+        with psycopg.connect(admin_dsn, autocommit=True) as conn:
+            conn.execute(f'DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)')

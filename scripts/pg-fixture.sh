@@ -112,7 +112,7 @@ case "$1" in
         echo "Running PostgreSQL fixture tests..."
         export TEST_POSTGRESQL_URL="postgresql://testuser:testpass@localhost:${HOST_PORT}/customer_v3_test"
         cd server
-        uv run python -m pytest tests/test_postgres_fixture.py -v
+        uv run python -m pytest tests/test_postgres_migrations.py -v
         ;;
         
     *)

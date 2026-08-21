@@ -1260,12 +1260,10 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },
-    { name = "asyncpg" },
     { name = "cos-python-sdk-v5" },
     { name = "cryptography" },
     { name = "fastapi" },
     { name = "psycopg", extra = ["binary", "pool"] },
-    { name = "pytest-asyncio" },
     { name = "python-multipart" },
     { name = "sqlalchemy" },
     { name = "uvicorn" },
@@ -1273,21 +1271,21 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "asyncpg" },
     { name = "httpx" },
     { name = "mypy" },
     { name = "pytest" },
+    { name = "pytest-asyncio" },
     { name = "ruff" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "alembic", specifier = "==1.17.2" },
-    { name = "asyncpg", specifier = ">=0.31.0" },
     { name = "cos-python-sdk-v5", specifier = "==1.9.44" },
     { name = "cryptography", specifier = "==50.0.0" },
     { name = "fastapi", specifier = "==0.141.1" },
     { name = "psycopg", extras = ["binary", "pool"], specifier = ">=3.2" },
-    { name = "pytest-asyncio", specifier = ">=1.4.0" },
     { name = "python-multipart", specifier = "==0.0.31" },
     { name = "sqlalchemy", specifier = ">=2.0.52" },
     { name = "uvicorn", specifier = "==0.52.2" },
@@ -1295,9 +1293,11 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "asyncpg", specifier = ">=0.31.0" },
     { name = "httpx", specifier = "==0.28.1" },
     { name = "mypy", specifier = "==2.3.0" },
     { name = "pytest", specifier = "==9.1.1" },
+    { name = "pytest-asyncio", specifier = ">=1.4.0" },
     { name = "ruff", specifier = "==0.16.2" },
 ]
 
