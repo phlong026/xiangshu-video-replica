@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import secrets
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -18,6 +19,18 @@ class SqliteSnapshot:
     snapshot_sha256: str
     source_size_bytes: int
     created_at: str
+
+    @property
+    def snapshot_path(self) -> Path:
+        """Compatibility alias used by the migration and review tests."""
+
+        return self.path
+
+    @property
+    def sha256(self) -> str:
+        """Compatibility alias for the immutable snapshot digest."""
+
+        return self.snapshot_sha256
 
 
 def sha256_file(path: str | Path) -> str:
@@ -42,16 +55,58 @@ def _readonly_connection(database: Path) -> sqlite3.Connection:
     return conn
 
 
+def _source_state(source: Path) -> tuple[tuple[str, int, int, str], ...]:
+    """Return a stable digest of the SQLite main database and WAL sidecar.
+
+    The shared-memory sidecar is intentionally excluded because merely opening a
+    WAL database may update lock bytes in that file. Any committed data that can
+    affect the snapshot must appear in the main database or the WAL sidecar.
+    """
+
+    state: list[tuple[str, int, int, str]] = []
+    for candidate in (source, Path(f"{source}-wal")):
+        if candidate.exists():
+            stat_result = candidate.stat()
+            state.append(
+                (
+                    candidate.name,
+                    stat_result.st_size,
+                    stat_result.st_mtime_ns,
+                    sha256_file(candidate),
+                )
+            )
+        else:
+            state.append((candidate.name, -1, -1, "missing"))
+    return tuple(state)
+
+
+def _reject_uncheckpointed_wal(source: Path) -> None:
+    wal = Path(f"{source}-wal")
+    if wal.exists() and wal.stat().st_size > 0:
+        raise RuntimeError(
+            "SQLite WAL contains uncheckpointed frames; stop all writers, run a "
+            "TRUNCATE checkpoint, and retry the maintenance-window snapshot"
+        )
+
+
+def _create_private_empty_file(path: Path) -> None:
+    descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+    os.close(descriptor)
+    os.chmod(path, 0o600)
+
+
 def create_readonly_snapshot(
     source_path: str | Path,
     snapshot_path: str | Path,
 ) -> SqliteSnapshot:
-    """Create an atomic, integrity-checked SQLite snapshot without writing the source.
+    """Create an immutable, private and integrity-checked SQLite snapshot.
 
-    The source is opened through SQLite's ``mode=ro`` URI and ``query_only`` is
-    enabled before the backup API is used. The source file hash is checked
-    before and after the snapshot so a maintenance-window migration fails
-    closed if another writer changed the file while the snapshot was taken.
+    The source is never opened for writing. A non-empty WAL sidecar is rejected
+    so committed WAL-only changes cannot be silently omitted. The main database
+    and WAL state are compared before and after the backup, while SQLite's
+    ``data_version`` guards commits observed by the read connection. The target
+    path is created with ``O_EXCL`` and therefore can never overwrite rollback
+    evidence from a previous migration rehearsal.
     """
 
     source = Path(source_path)
@@ -60,16 +115,24 @@ def create_readonly_snapshot(
         raise FileNotFoundError(source)
     if source.resolve() == snapshot.resolve():
         raise ValueError("snapshot path must differ from the source database")
+    if snapshot.exists():
+        raise FileExistsError(snapshot)
 
     snapshot.parent.mkdir(parents=True, exist_ok=True)
-    temporary = snapshot.with_name(f".{snapshot.name}.tmp")
-    temporary.unlink(missing_ok=True)
-
-    before_hash = sha256_file(source)
+    temporary = snapshot.with_name(f".{snapshot.name}.{secrets.token_hex(8)}.tmp")
+    _reject_uncheckpointed_wal(source)
+    before_state = _source_state(source)
+    source_hash = sha256_file(source)
     source_size = source.stat().st_size
+
     try:
+        _create_private_empty_file(temporary)
         with _readonly_connection(source) as source_conn:
             _check_integrity(source_conn)
+            journal_mode_row = source_conn.execute("PRAGMA journal_mode").fetchone()
+            journal_mode = "" if journal_mode_row is None else str(journal_mode_row[0]).lower()
+            if journal_mode == "wal":
+                _reject_uncheckpointed_wal(source)
             data_version_before = int(source_conn.execute("PRAGMA data_version").fetchone()[0])
             with sqlite3.connect(temporary) as snapshot_conn:
                 source_conn.backup(snapshot_conn)
@@ -80,20 +143,30 @@ def create_readonly_snapshot(
                     "SQLite source changed while the read-only snapshot was being created; "
                     "stop writers and retry the maintenance window"
                 )
-        after_hash = sha256_file(source)
-        if before_hash != after_hash:
+
+        _reject_uncheckpointed_wal(source)
+        after_state = _source_state(source)
+        if before_state != after_state or source_hash != sha256_file(source):
             raise RuntimeError(
-                "SQLite source changed while the read-only snapshot was being created; "
-                "stop writers and retry the maintenance window"
+                "SQLite source or WAL changed while the read-only snapshot was being created; "
+                "stop writers, checkpoint WAL, and retry"
             )
+
+        os.chmod(temporary, 0o600)
+        _create_private_empty_file(snapshot)
         os.replace(temporary, snapshot)
+        os.chmod(snapshot, 0o600)
+        with sqlite3.connect(snapshot) as snapshot_conn:
+            _check_integrity(snapshot_conn)
     except Exception:
         temporary.unlink(missing_ok=True)
+        if snapshot.exists() and snapshot.stat().st_size == 0:
+            snapshot.unlink(missing_ok=True)
         raise
 
     return SqliteSnapshot(
         path=snapshot.resolve(),
-        source_sha256=before_hash,
+        source_sha256=source_hash,
         snapshot_sha256=sha256_file(snapshot),
         source_size_bytes=source_size,
         created_at=datetime.now(UTC).isoformat(),
