@@ -50,9 +50,32 @@ def downgrade() -> None:
     bind = op.get_bind()
     if bind.dialect.name != "postgresql":
         return
-    # Restore the schema exactly as the published chain left it on PostgreSQL
-    # (the degraded table-wide unique index), so downgrade/base/upgrade
-    # rehearsals stay symmetric with 022 as shipped.
+    # Review P1: once any billing round completed under 025, the ledger
+    # legitimately holds a RESERVE row plus a terminal row sharing
+    # (task_id, billing_round). The 022 shape (table-wide unique) cannot
+    # coexist with that data — recreating it would raise a uniqueness
+    # violation and brick the rollback. Fail loudly instead, with the
+    # recovery path spelled out; an empty (or unsettled) ledger still
+    # downgrades symmetrically with the published chain.
+    has_settled_rounds = bind.execute(
+        sa.text(
+            "SELECT EXISTS ("
+            "  SELECT 1 FROM wallet_transactions AS r"
+            "  JOIN wallet_transactions AS t"
+            "    ON t.task_id = r.task_id AND t.billing_round = r.billing_round"
+            "  WHERE r.type = 'RESERVE'"
+            "    AND t.type IN ('SETTLE', 'RELEASE'))"
+        )
+    ).scalar()
+    if has_settled_rounds:
+        raise RuntimeError(
+            "cannot downgrade 025_postgres_runtime_compatibility: "
+            "wallet_transactions already holds settled rounds (a RESERVE row and "
+            "a SETTLE/RELEASE row share (task_id, billing_round)), which the 022 "
+            "table-wide unique index cannot hold. Keep revision 025, or resolve "
+            "the ledger manually (per the No-Go rule, confirmed billing rows must "
+            "never be deleted to make a downgrade pass) before rolling back."
+        )
     op.drop_index("uq_wallet_transactions_terminal_round", table_name="wallet_transactions")
     op.create_index(
         "uq_wallet_transactions_terminal_round",
