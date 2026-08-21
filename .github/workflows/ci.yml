@@ -200,7 +200,7 @@ jobs:
             'docs/CUSTOMER-TASK-EVIDENCE-V3.md' \
             'docs/evidence/T07-EVIDENCE.md' \
             'docs/客户版任务清单-V3.md' | sort)
-          actual_final=$(git diff --name-only | sort)
+          actual_final=$(git diff --name-only HEAD | sort)
           test "${actual_final}" = "${expected_final}"
 
           git config user.name "github-actions[bot]"
