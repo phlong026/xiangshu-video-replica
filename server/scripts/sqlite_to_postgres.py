@@ -137,8 +137,7 @@ def _validate_schema(
     extra = sorted(target_tables - set(source_tables))
     if missing or extra:
         raise MigrationPreconditionError(
-            "source/target table contract differs "
-            f"(missing={len(missing)}, extra={len(extra)})"
+            f"source/target table contract differs (missing={len(missing)}, extra={len(extra)})"
         )
     for table in source_tables:
         source_columns, source_pk = _sqlite_columns(sqlite_conn, table)
