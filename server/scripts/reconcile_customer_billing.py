@@ -1,24 +1,26 @@
-"""T07 database reconciliation for the SQLite-to-PostgreSQL cutover.
+"""T07 reconciliation for the one-shot SQLite-to-PostgreSQL cutover.
 
-The report contains only counts and SHA-256 digests. It deliberately avoids
-raw business values, credentials, storage URLs, activation codes, and tokens.
+Reports contain only counts and SHA-256 digests. Raw business values,
+credentials, storage URLs, activation codes and tokens are never emitted.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import math
 import sqlite3
 from collections import defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass
-from datetime import date, datetime, time
+from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
-from uuid import UUID
+from urllib.parse import unquote, urlsplit, urlunsplit
+from uuid import UUID, uuid4
 
 import psycopg
 from psycopg import sql
@@ -26,9 +28,31 @@ from psycopg.rows import dict_row
 
 Dialect = Literal["sqlite", "postgresql"]
 EXCLUDED_TABLES = frozenset({"alembic_version"})
+JSON_ASSET_ID_COLUMNS = frozenset(
+    {
+        "reference_asset_ids_json",
+        "recommended_asset_ids_json",
+        "selected_asset_ids_json",
+    }
+)
+_DIGEST_MODULUS = 1 << 256
 
 
 @dataclass(frozen=True)
+class ColumnSpec:
+    name: str
+    target_type: str | None
+    nullable: bool = True
+
+
+@dataclass(frozen=True)
+class TableDigest:
+    row_count: int
+    primary_key_sha256: str | None
+    row_sha256: str
+
+
+@dataclass(frozen=True, eq=False)
 class ReconciliationIssue:
     code: str
     scope: str
@@ -36,6 +60,47 @@ class ReconciliationIssue:
 
     def to_dict(self) -> dict[str, str]:
         return asdict(self)
+
+    @property
+    def identifier(self) -> str:
+        if self.code in {
+            "table_row_count_mismatch",
+            "table_primary_key_mismatch",
+            "table_hash_mismatch",
+        }:
+            return f"TABLE_DIGEST_MISMATCH:{self.scope}"
+        if self.code.startswith("wallet_") or self.code in {
+            "paid_order_charge_mismatch",
+            "unpaid_order_has_charge",
+            "charge_without_order",
+            "generation_billing_round_mismatch",
+            "generation_billing_owner_mismatch",
+            "generation_billing_round_gap",
+        }:
+            prefix = "TARGET" if self.scope.startswith("target:") else "SOURCE"
+            return f"{prefix}_WALLET_INVARIANT_FAILED"
+        return f"{self.code.upper()}:{self.scope}"
+
+    def __str__(self) -> str:
+        return self.identifier
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, ReconciliationIssue):
+            return (
+                self.code,
+                self.scope,
+                self.detail,
+            ) == (
+                other.code,
+                other.scope,
+                other.detail,
+            )
+        if isinstance(other, str):
+            return other in {self.identifier, self.code, f"{self.code}:{self.scope}"}
+        return False
+
+    def __hash__(self) -> int:
+        return hash((self.code, self.scope, self.detail))
 
 
 @dataclass(frozen=True)
@@ -71,6 +136,10 @@ class ReconciliationReport:
     def ok(self) -> bool:
         return not self.issues and all(table.matches for table in self.tables)
 
+    @property
+    def issue_ids(self) -> tuple[str, ...]:
+        return tuple(issue.identifier for issue in self.issues)
+
     def to_dict(self) -> dict[str, object]:
         return {
             "ok": self.ok,
@@ -79,23 +148,78 @@ class ReconciliationReport:
         }
 
 
+@dataclass(frozen=True)
+class WalletInvariantResult:
+    wallet_balance_mismatches: int
+    paid_without_charge: int
+    other_issue_count: int
+
+    @property
+    def ok(self) -> bool:
+        return not (
+            self.wallet_balance_mismatches or self.paid_without_charge or self.other_issue_count
+        )
+
+
+@dataclass(frozen=True)
+class AssetReferenceResult:
+    orphan_reference_count: int
+    invalid_json_count: int
+    object_storage_checked: bool = False
+
+    @property
+    def ok(self) -> bool:
+        return self.orphan_reference_count == 0 and self.invalid_json_count == 0
+
+
 def _quote_sqlite_identifier(identifier: str) -> str:
     return '"' + identifier.replace('"', '""') + '"'
 
 
-def _open_sqlite_readonly(path: str | Path) -> sqlite3.Connection:
+def _row_value(row: object, key: str, index: int) -> object:
+    if isinstance(row, sqlite3.Row):
+        return row[key]
+    if isinstance(row, Mapping):
+        return row[key]
+    if isinstance(row, Sequence) and not isinstance(row, (str, bytes, bytearray)):
+        return row[index]
+    raise TypeError(f"unsupported database row type: {type(row)!r}")
+
+
+def _cursor_mappings(cursor: Any, *, batch_size: int = 1000) -> Iterator[dict[str, object]]:
+    description = cursor.description or ()
+    names = [str(column.name if hasattr(column, "name") else column[0]) for column in description]
+    while True:
+        rows = cursor.fetchmany(batch_size)
+        if not rows:
+            return
+        for row in rows:
+            if isinstance(row, sqlite3.Row):
+                yield {key: row[key] for key in row.keys()}
+            elif isinstance(row, Mapping):
+                yield {str(key): value for key, value in row.items()}
+            else:
+                yield dict(zip(names, row, strict=True))
+
+
+def connect_sqlite_readonly(path: str | Path) -> sqlite3.Connection:
     database = Path(path)
     if not database.is_file():
         raise FileNotFoundError(database)
     conn = sqlite3.connect(
         f"{database.resolve().as_uri()}?mode=ro",
         uri=True,
+        timeout=5,
         check_same_thread=False,
     )
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA query_only = ON")
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 5000")
     return conn
+
+
+_open_sqlite_readonly = connect_sqlite_readonly
 
 
 def _table_names(conn: sqlite3.Connection | psycopg.Connection[Any], dialect: Dialect) -> list[str]:
@@ -108,7 +232,11 @@ def _table_names(conn: sqlite3.Connection | psycopg.Connection[Any], dialect: Di
             ORDER BY name
             """
         ).fetchall()
-        return [str(row[0]) for row in rows if str(row[0]) not in EXCLUDED_TABLES]
+        return [
+            str(_row_value(row, "name", 0))
+            for row in rows
+            if str(_row_value(row, "name", 0)) not in EXCLUDED_TABLES
+        ]
     rows = conn.execute(
         """
         SELECT table_name
@@ -117,32 +245,58 @@ def _table_names(conn: sqlite3.Connection | psycopg.Connection[Any], dialect: Di
         ORDER BY table_name
         """
     ).fetchall()
-    return [str(row["table_name"]) for row in rows if str(row["table_name"]) not in EXCLUDED_TABLES]
+    return [
+        str(_row_value(row, "table_name", 0))
+        for row in rows
+        if str(_row_value(row, "table_name", 0)) not in EXCLUDED_TABLES
+    ]
+
+
+def _sqlite_column_specs(conn: sqlite3.Connection, table: str) -> tuple[list[ColumnSpec], list[str]]:
+    rows = conn.execute(f"PRAGMA table_info({_quote_sqlite_identifier(table)})").fetchall()
+    specs = [
+        ColumnSpec(
+            name=str(_row_value(row, "name", 1)),
+            target_type=str(_row_value(row, "type", 2) or "text").lower(),
+            nullable=not bool(int(_row_value(row, "notnull", 3))),
+        )
+        for row in rows
+    ]
+    primary_key = [
+        str(_row_value(row, "name", 1))
+        for row in sorted(rows, key=lambda item: int(_row_value(item, "pk", 5)))
+        if int(_row_value(row, "pk", 5))
+    ]
+    return specs, primary_key
 
 
 def _sqlite_columns(conn: sqlite3.Connection, table: str) -> tuple[list[str], list[str]]:
-    rows = conn.execute(f"PRAGMA table_info({_quote_sqlite_identifier(table)})").fetchall()
-    columns = [str(row[1]) for row in rows]
-    primary_key = [str(row[1]) for row in sorted(rows, key=lambda row: int(row[5])) if int(row[5])]
-    return columns, primary_key
+    specs, primary_key = _sqlite_column_specs(conn, table)
+    return [spec.name for spec in specs], primary_key
 
 
-def _pg_columns(
+def _pg_column_specs(
     conn: psycopg.Connection[Any], table: str
-) -> tuple[list[str], list[str], dict[str, str]]:
+) -> tuple[list[ColumnSpec], list[str]]:
     rows = conn.execute(
         """
-        SELECT column_name, data_type, udt_name
+        SELECT column_name, data_type, udt_name, is_nullable
         FROM information_schema.columns
         WHERE table_schema = 'public' AND table_name = %s
         ORDER BY ordinal_position
         """,
         (table,),
     ).fetchall()
-    columns = [str(row["column_name"]) for row in rows]
-    types = {
-        str(row["column_name"]): str(row["udt_name"] or row["data_type"]).lower() for row in rows
-    }
+    specs = [
+        ColumnSpec(
+            name=str(_row_value(row, "column_name", 0)),
+            target_type=str(
+                _row_value(row, "udt_name", 2) or _row_value(row, "data_type", 1)
+            ).lower(),
+            nullable=str(_row_value(row, "is_nullable", 3)).upper() == "YES",
+        )
+        for row in rows
+    ]
     pk_rows = conn.execute(
         """
         SELECT kcu.column_name
@@ -157,19 +311,19 @@ def _pg_columns(
         """,
         (table,),
     ).fetchall()
-    primary_key = [str(row["column_name"]) for row in pk_rows]
-    return columns, primary_key, types
+    primary_key = [str(_row_value(row, "column_name", 0)) for row in pk_rows]
+    return specs, primary_key
 
 
-def _canonical_boolean(value: object) -> int:
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"1", "true", "t", "yes", "on"}:
-            return 1
-        if normalized in {"0", "false", "f", "no", "off"}:
-            return 0
-        raise ValueError("invalid boolean value in reconciliation input")
-    return int(bool(value))
+def _pg_columns(
+    conn: psycopg.Connection[Any], table: str
+) -> tuple[list[str], list[str], dict[str, str]]:
+    specs, primary_key = _pg_column_specs(conn, table)
+    return (
+        [spec.name for spec in specs],
+        primary_key,
+        {spec.name: str(spec.target_type or "text") for spec in specs},
+    )
 
 
 def _canonical_decimal(value: object) -> str:
@@ -181,7 +335,16 @@ def _canonical_decimal(value: object) -> str:
     return format(number.normalize(), "f")
 
 
-def _canonical_value(value: object, target_type: str | None) -> object:
+def _canonical_datetime(value: object) -> str:
+    parsed = value if isinstance(value, datetime) else datetime.fromisoformat(
+        str(value).replace("Z", "+00:00")
+    )
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(UTC)
+    return parsed.isoformat()
+
+
+def canonical_value(value: object, target_type: str | None) -> object:
     if value is None:
         return None
     normalized_type = None if target_type is None else target_type.lower()
@@ -189,9 +352,16 @@ def _canonical_value(value: object, target_type: str | None) -> object:
         value = bytes(value)
     if normalized_type == "bytea" or isinstance(value, bytes):
         raw = value if isinstance(value, bytes) else bytes(value)
-        return {"bytes_sha256": hashlib.sha256(raw).hexdigest(), "size": len(raw)}
+        return {"base64": base64.b64encode(raw).decode("ascii")}
     if normalized_type in {"bool", "boolean"}:
-        return _canonical_boolean(value)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "t", "yes", "on"}:
+                return True
+            if normalized in {"0", "false", "f", "no", "off"}:
+                return False
+            raise ValueError("invalid boolean value in reconciliation input")
+        return bool(value)
     if normalized_type in {"int2", "int4", "int8", "smallint", "integer", "bigint"}:
         return int(value)
     if normalized_type in {"numeric", "decimal"}:
@@ -209,12 +379,7 @@ def _canonical_value(value: object, target_type: str | None) -> object:
         parsed_date = value if isinstance(value, date) else date.fromisoformat(str(value))
         return parsed_date.isoformat()
     if normalized_type in {"timestamp", "timestamptz"}:
-        parsed_datetime = (
-            value
-            if isinstance(value, datetime)
-            else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        )
-        return parsed_datetime.isoformat()
+        return _canonical_datetime(value)
     if normalized_type in {"time", "timetz"}:
         parsed_time = value if isinstance(value, time) else time.fromisoformat(str(value))
         return parsed_time.isoformat()
@@ -222,7 +387,7 @@ def _canonical_value(value: object, target_type: str | None) -> object:
         parsed = json.loads(value) if isinstance(value, str) else value
         return _canonical_json(parsed)
     if isinstance(value, bool):
-        return int(value)
+        return value
     if isinstance(value, int):
         return value
     if isinstance(value, Decimal):
@@ -233,81 +398,166 @@ def _canonical_value(value: object, target_type: str | None) -> object:
         if math.isinf(value):
             return "Infinity" if value > 0 else "-Infinity"
         return format(value, ".17g")
-    if isinstance(value, (datetime, date, time)):
+    if isinstance(value, datetime):
+        return _canonical_datetime(value)
+    if isinstance(value, (date, time)):
         return value.isoformat()
     if isinstance(value, UUID):
         return str(value)
     if isinstance(value, (dict, list, tuple)):
         return _canonical_json(value)
-    return str(value) if not isinstance(value, str) else value
+    return value if isinstance(value, str) else str(value)
+
+
+_canonical_value = canonical_value
 
 
 def _canonical_json(value: object) -> object:
     if isinstance(value, Mapping):
-        ordered = sorted(value.items(), key=lambda item: str(item[0]))
-        return {str(key): _canonical_json(item) for key, item in ordered}
+        return {
+            str(key): _canonical_json(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
     if isinstance(value, (list, tuple)):
         return [_canonical_json(item) for item in value]
-    return _canonical_value(value, None)
-
-
-def _digest_lines(lines: Iterable[str]) -> str:
-    digest = hashlib.sha256()
-    for line in sorted(lines):
-        digest.update(line.encode("utf-8"))
-        digest.update(b"\n")
-    return digest.hexdigest()
+    return canonical_value(value, None)
 
 
 def _row_payload(
-    row: Mapping[str, object], columns: Sequence[str], target_types: Mapping[str, str]
-) -> str:
-    values = [_canonical_value(row[column], target_types.get(column)) for column in columns]
-    return json.dumps(values, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    row: Mapping[str, object], columns: Sequence[ColumnSpec]
+) -> bytes:
+    values = [canonical_value(row[column.name], column.target_type) for column in columns]
+    return json.dumps(
+        values,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
 
 
-def _fetch_sqlite_rows(
-    conn: sqlite3.Connection, table: str, columns: Sequence[str]
-) -> list[dict[str, object]]:
-    names = ", ".join(_quote_sqlite_identifier(column) for column in columns)
-    rows = conn.execute(f"SELECT {names} FROM {_quote_sqlite_identifier(table)}").fetchall()
-    return [{key: row[key] for key in row.keys()} for row in rows]
+def _pk_payload(
+    row: Mapping[str, object], by_name: Mapping[str, ColumnSpec], primary_key: Sequence[str]
+) -> bytes:
+    values = [canonical_value(row[column], by_name[column].target_type) for column in primary_key]
+    return json.dumps(
+        values,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
 
 
-def _fetch_pg_rows(
-    conn: psycopg.Connection[Any], table: str, columns: Sequence[str]
-) -> list[dict[str, object]]:
+class _MultisetDigest:
+    def __init__(self) -> None:
+        self.count = 0
+        self.xor = 0
+        self.total = 0
+        self.square_total = 0
+
+    def add(self, digest_bytes: bytes) -> None:
+        value = int.from_bytes(digest_bytes, "big")
+        self.count += 1
+        self.xor ^= value
+        self.total = (self.total + value) % _DIGEST_MODULUS
+        self.square_total = (self.square_total + value * value) % _DIGEST_MODULUS
+
+    def hexdigest(self) -> str:
+        payload = (
+            self.count.to_bytes(16, "big")
+            + self.xor.to_bytes(32, "big")
+            + self.total.to_bytes(32, "big")
+            + self.square_total.to_bytes(32, "big")
+        )
+        return hashlib.sha256(payload).hexdigest()
+
+
+def _sqlite_digest_cursor(
+    conn: sqlite3.Connection,
+    table: str,
+    columns: Sequence[ColumnSpec],
+    primary_key: Sequence[str],
+) -> Any:
+    selected = ", ".join(_quote_sqlite_identifier(column.name) for column in columns)
+    query = f"SELECT {selected} FROM {_quote_sqlite_identifier(table)}"
+    if primary_key:
+        query += " ORDER BY " + ", ".join(
+            _quote_sqlite_identifier(column) for column in primary_key
+        )
+    return conn.execute(query)
+
+
+def _pg_digest_cursor(
+    conn: psycopg.Connection[Any],
+    table: str,
+    columns: Sequence[ColumnSpec],
+    primary_key: Sequence[str],
+) -> Any:
     query = sql.SQL("SELECT {} FROM {}").format(
-        sql.SQL(", ").join(sql.Identifier(column) for column in columns),
+        sql.SQL(", ").join(sql.Identifier(column.name) for column in columns),
         sql.Identifier(table),
     )
-    rows = conn.execute(query).fetchall()
-    return [dict(row) for row in rows]
-
-
-def _fingerprint(
-    rows: Sequence[Mapping[str, object]],
-    columns: Sequence[str],
-    primary_key: Sequence[str],
-    target_types: Mapping[str, str],
-) -> tuple[int, str | None, str]:
-    row_payloads = [_row_payload(row, columns, target_types) for row in rows]
-    row_hash = _digest_lines(
-        hashlib.sha256(payload.encode("utf-8")).hexdigest() for payload in row_payloads
-    )
-    pk_hash: str | None = None
     if primary_key:
-        pk_payloads = [
-            json.dumps(
-                [_canonical_value(row[column], target_types.get(column)) for column in primary_key],
-                ensure_ascii=False,
-                separators=(",", ":"),
-                sort_keys=True,
-            )
-            for row in rows
-        ]
-        pk_hash = _digest_lines(pk_payloads)
-    return len(rows), pk_hash, row_hash
+        query += sql.SQL(" ORDER BY {} ").format(
+            sql.SQL(", ").join(sql.Identifier(column) for column in primary_key)
+        )
+    cursor = conn.cursor(name=f"t07_digest_{uuid4().hex}", row_factory=dict_row)
+    cursor.execute(query)
+    return cursor
+
+
+def compute_table_digest(
+    conn: sqlite3.Connection | psycopg.Connection[Any],
+    table: str,
+    columns: Sequence[ColumnSpec],
+    primary_key: Sequence[str],
+    *,
+    batch_size: int = 1000,
+) -> TableDigest:
+    """Compute a deterministic digest in bounded batches.
+
+    Primary-key tables are streamed in key order. Tables without a primary key
+    use a commutative SHA-256 multiset accumulator, so insertion order does not
+    affect the result and no table-sized Python list is created.
+    """
+
+    if batch_size < 1:
+        raise ValueError("batch_size must be positive")
+    by_name = {column.name: column for column in columns}
+    if set(primary_key) - set(by_name):
+        raise ValueError("primary-key columns must be included in the digest columns")
+
+    if isinstance(conn, sqlite3.Connection):
+        cursor = _sqlite_digest_cursor(conn, table, columns, primary_key)
+        close_cursor = True
+    else:
+        cursor = _pg_digest_cursor(conn, table, columns, primary_key)
+        close_cursor = True
+
+    row_stream = hashlib.sha256()
+    pk_stream = hashlib.sha256() if primary_key else None
+    multiset = _MultisetDigest()
+    row_count = 0
+    try:
+        for row in _cursor_mappings(cursor, batch_size=batch_size):
+            payload = _row_payload(row, columns)
+            row_hash = hashlib.sha256(payload).digest()
+            if primary_key:
+                row_stream.update(row_hash)
+                assert pk_stream is not None
+                pk_stream.update(_pk_payload(row, by_name, primary_key))
+                pk_stream.update(b"\n")
+            else:
+                multiset.add(row_hash)
+            row_count += 1
+    finally:
+        if close_cursor:
+            cursor.close()
+
+    return TableDigest(
+        row_count=row_count,
+        primary_key_sha256=None if pk_stream is None else pk_stream.hexdigest(),
+        row_sha256=row_stream.hexdigest() if primary_key else multiset.hexdigest(),
+    )
 
 
 def _table_reconciliation(
@@ -315,16 +565,18 @@ def _table_reconciliation(
     pg_conn: psycopg.Connection[Any],
     table: str,
 ) -> tuple[TableReconciliation | None, list[ReconciliationIssue]]:
+    source_specs, source_pk = _sqlite_column_specs(sqlite_conn, table)
+    target_specs, target_pk = _pg_column_specs(pg_conn, table)
+    source_names = [column.name for column in source_specs]
+    target_by_name = {column.name: column for column in target_specs}
     issues: list[ReconciliationIssue] = []
-    source_columns, source_pk = _sqlite_columns(sqlite_conn, table)
-    target_columns, target_pk, target_types = _pg_columns(pg_conn, table)
-    if set(source_columns) != set(target_columns):
+    if set(source_names) != set(target_by_name):
         issues.append(
             ReconciliationIssue(
                 code="table_column_mismatch",
                 scope=table,
                 detail=(
-                    f"column sets differ: source={len(source_columns)} target={len(target_columns)}"
+                    f"column sets differ: source={len(source_names)} target={len(target_by_name)}"
                 ),
             )
         )
@@ -339,32 +591,36 @@ def _table_reconciliation(
         )
         return None, issues
 
-    source_rows = _fetch_sqlite_rows(sqlite_conn, table, source_columns)
-    target_rows = _fetch_pg_rows(pg_conn, table, source_columns)
-    source_count, source_pk_hash, source_rows_hash = _fingerprint(
-        source_rows, source_columns, source_pk, target_types
-    )
-    target_count, target_pk_hash, target_rows_hash = _fingerprint(
-        target_rows, source_columns, source_pk, target_types
-    )
+    digest_specs = [
+        ColumnSpec(
+            name=name,
+            target_type=target_by_name[name].target_type,
+            nullable=target_by_name[name].nullable,
+        )
+        for name in source_names
+    ]
+    source_digest = compute_table_digest(sqlite_conn, table, digest_specs, source_pk)
+    target_digest = compute_table_digest(pg_conn, table, digest_specs, source_pk)
     result = TableReconciliation(
         table=table,
-        source_count=source_count,
-        target_count=target_count,
-        source_pk_sha256=source_pk_hash,
-        target_pk_sha256=target_pk_hash,
-        source_rows_sha256=source_rows_hash,
-        target_rows_sha256=target_rows_hash,
+        source_count=source_digest.row_count,
+        target_count=target_digest.row_count,
+        source_pk_sha256=source_digest.primary_key_sha256,
+        target_pk_sha256=target_digest.primary_key_sha256,
+        source_rows_sha256=source_digest.row_sha256,
+        target_rows_sha256=target_digest.row_sha256,
     )
-    if source_count != target_count:
+    if source_digest.row_count != target_digest.row_count:
         issues.append(
             ReconciliationIssue(
                 code="table_row_count_mismatch",
                 scope=table,
-                detail=f"source={source_count} target={target_count}",
+                detail=(
+                    f"source={source_digest.row_count} target={target_digest.row_count}"
+                ),
             )
         )
-    if source_pk_hash != target_pk_hash:
+    if source_digest.primary_key_sha256 != target_digest.primary_key_sha256:
         issues.append(
             ReconciliationIssue(
                 code="table_primary_key_mismatch",
@@ -372,7 +628,7 @@ def _table_reconciliation(
                 detail="primary-key set SHA-256 differs",
             )
         )
-    if source_rows_hash != target_rows_hash:
+    if source_digest.row_sha256 != target_digest.row_sha256:
         issues.append(
             ReconciliationIssue(
                 code="table_hash_mismatch",
@@ -383,15 +639,8 @@ def _table_reconciliation(
     return result, issues
 
 
-def _mapping_rows(cursor: Any) -> list[dict[str, object]]:
-    rows = cursor.fetchall()
-    result: list[dict[str, object]] = []
-    for row in rows:
-        if isinstance(row, sqlite3.Row):
-            result.append({key: row[key] for key in row.keys()})
-        else:
-            result.append(dict(row))
-    return result
+def _all_mappings(cursor: Any) -> list[dict[str, object]]:
+    return list(_cursor_mappings(cursor))
 
 
 def _wallet_issues(
@@ -400,7 +649,7 @@ def _wallet_issues(
     tables = set(_table_names(conn, dialect))
     if not {"wallets", "wallet_transactions"}.issubset(tables):
         return []
-    transactions = _mapping_rows(
+    transactions = _all_mappings(
         conn.execute(
             """
             SELECT user_id,
@@ -415,7 +664,7 @@ def _wallet_issues(
         str(row["user_id"]): (int(row["available_total"]), int(row["reserved_total"]))
         for row in transactions
     }
-    wallets = _mapping_rows(
+    wallets = _all_mappings(
         conn.execute("SELECT user_id, available_credits, reserved_credits FROM wallets")
     )
     issues: list[ReconciliationIssue] = []
@@ -461,8 +710,10 @@ def _paid_charge_issues(
     tables = set(_table_names(conn, dialect))
     if not {"recharge_orders", "wallet_transactions"}.issubset(tables):
         return []
-    orders = _mapping_rows(conn.execute("SELECT id, user_id, status, credits FROM recharge_orders"))
-    charges = _mapping_rows(
+    orders = _all_mappings(
+        conn.execute("SELECT id, user_id, status, credits FROM recharge_orders")
+    )
+    charges = _all_mappings(
         conn.execute(
             """
             SELECT recharge_order_id, user_id, available_delta, reserved_delta
@@ -526,7 +777,7 @@ def _generation_billing_issues(
     required = {"wallet_transactions", "generation_tasks", "generation_batches"}
     if not required.issubset(tables):
         return []
-    rows = _mapping_rows(
+    rows = _all_mappings(
         conn.execute(
             """
             SELECT task_id, billing_round, type, user_id
@@ -535,7 +786,7 @@ def _generation_billing_issues(
             """
         )
     )
-    owners = _mapping_rows(
+    owners = _all_mappings(
         conn.execute(
             """
             SELECT task.id AS task_id, batch.created_by_user_id AS owner_user_id
@@ -589,36 +840,110 @@ def _generation_billing_issues(
     return issues
 
 
+def _is_json_asset_column(column: str) -> bool:
+    return column in JSON_ASSET_ID_COLUMNS or column.endswith("_asset_ids_json")
+
+
+def _extract_asset_ids(value: object) -> tuple[set[str], bool]:
+    if value is None or value == "":
+        return set(), True
+    try:
+        parsed = json.loads(value) if isinstance(value, str) else value
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return set(), False
+
+    identifiers: set[str] = set()
+
+    def visit(item: object) -> None:
+        if isinstance(item, str):
+            identifiers.add(item)
+        elif isinstance(item, Mapping):
+            for nested in item.values():
+                visit(nested)
+        elif isinstance(item, (list, tuple, set)):
+            for nested in item:
+                visit(nested)
+
+    visit(parsed)
+    return identifiers, True
+
+
+def _asset_ids_sqlite(conn: sqlite3.Connection) -> set[str]:
+    cursor = conn.execute("SELECT id FROM assets")
+    return {str(row["id"] if isinstance(row, sqlite3.Row) else row[0]) for row in cursor}
+
+
+def _asset_ids_pg(conn: psycopg.Connection[Any]) -> set[str]:
+    cursor = conn.execute("SELECT id FROM assets")
+    return {str(_row_value(row, "id", 0)) for row in cursor}
+
+
 def _asset_reference_issues_sqlite(
     conn: sqlite3.Connection, side: str
 ) -> list[ReconciliationIssue]:
     tables = _table_names(conn, "sqlite")
     if "assets" not in tables:
         return []
+    asset_ids = _asset_ids_sqlite(conn)
     issues: list[ReconciliationIssue] = []
     for table in tables:
         if table == "assets":
             continue
         columns, _ = _sqlite_columns(conn, table)
         for column in columns:
-            if column != "asset_id" and not column.endswith("_asset_id"):
-                continue
-            query = (
-                f"SELECT COUNT(*) FROM {_quote_sqlite_identifier(table)} AS child "
-                "LEFT JOIN assets AS parent ON "
-                f"child.{_quote_sqlite_identifier(column)} = parent.id "
-                f"WHERE child.{_quote_sqlite_identifier(column)} IS NOT NULL "
-                "AND parent.id IS NULL"
-            )
-            count = int(conn.execute(query).fetchone()[0])
-            if count:
-                issues.append(
-                    ReconciliationIssue(
-                        code="asset_reference_orphan",
-                        scope=f"{side}:{table}.{column}",
-                        detail=f"asset reference orphan count={count}",
-                    )
+            if column == "asset_id" or column.endswith("_asset_id"):
+                query = (
+                    f"SELECT COUNT(*) FROM {_quote_sqlite_identifier(table)} AS child "
+                    "LEFT JOIN assets AS parent ON "
+                    f"child.{_quote_sqlite_identifier(column)} = parent.id "
+                    f"WHERE child.{_quote_sqlite_identifier(column)} IS NOT NULL "
+                    "AND parent.id IS NULL"
                 )
+                count = int(conn.execute(query).fetchone()[0])
+                if count:
+                    issues.append(
+                        ReconciliationIssue(
+                            code="asset_reference_orphan",
+                            scope=f"{side}:{table}.{column}",
+                            detail=f"asset reference orphan count={count}",
+                        )
+                    )
+            if _is_json_asset_column(column):
+                query = (
+                    f"SELECT {_quote_sqlite_identifier(column)} "
+                    f"FROM {_quote_sqlite_identifier(table)} "
+                    f"WHERE {_quote_sqlite_identifier(column)} IS NOT NULL"
+                )
+                orphan_count = 0
+                invalid_json_count = 0
+                cursor = conn.execute(query)
+                while True:
+                    rows = cursor.fetchmany(1000)
+                    if not rows:
+                        break
+                    for row in rows:
+                        value = row[column] if isinstance(row, sqlite3.Row) else row[0]
+                        references, valid = _extract_asset_ids(value)
+                        if not valid:
+                            invalid_json_count += 1
+                        else:
+                            orphan_count += len(references - asset_ids)
+                if invalid_json_count:
+                    issues.append(
+                        ReconciliationIssue(
+                            code="asset_reference_json_invalid",
+                            scope=f"{side}:{table}.{column}",
+                            detail=f"invalid JSON rows={invalid_json_count}",
+                        )
+                    )
+                if orphan_count:
+                    issues.append(
+                        ReconciliationIssue(
+                            code="asset_reference_orphan",
+                            scope=f"{side}:{table}.{column}",
+                            detail=f"JSON asset reference orphan count={orphan_count}",
+                        )
+                    )
     return issues
 
 
@@ -628,32 +953,108 @@ def _asset_reference_issues_pg(
     tables = _table_names(conn, "postgresql")
     if "assets" not in tables:
         return []
+    asset_ids = _asset_ids_pg(conn)
     issues: list[ReconciliationIssue] = []
     for table in tables:
         if table == "assets":
             continue
         columns, _, _ = _pg_columns(conn, table)
         for column in columns:
-            if column != "asset_id" and not column.endswith("_asset_id"):
-                continue
-            query = sql.SQL(
-                "SELECT COUNT(*) AS orphan_count FROM {} AS child "
-                "LEFT JOIN assets AS parent ON child.{} = parent.id "
-                "WHERE child.{} IS NOT NULL AND parent.id IS NULL"
-            ).format(sql.Identifier(table), sql.Identifier(column), sql.Identifier(column))
-            row = conn.execute(query).fetchone()
-            if row is None:
-                raise RuntimeError("asset reconciliation count query returned no row")
-            count = int(row["orphan_count"])
-            if count:
-                issues.append(
-                    ReconciliationIssue(
-                        code="asset_reference_orphan",
-                        scope=f"{side}:{table}.{column}",
-                        detail=f"asset reference orphan count={count}",
+            if column == "asset_id" or column.endswith("_asset_id"):
+                query = sql.SQL(
+                    "SELECT COUNT(*) AS orphan_count FROM {} AS child "
+                    "LEFT JOIN assets AS parent ON child.{} = parent.id "
+                    "WHERE child.{} IS NOT NULL AND parent.id IS NULL"
+                ).format(sql.Identifier(table), sql.Identifier(column), sql.Identifier(column))
+                row = conn.execute(query).fetchone()
+                if row is None:
+                    raise RuntimeError("asset reconciliation count query returned no row")
+                count = int(_row_value(row, "orphan_count", 0))
+                if count:
+                    issues.append(
+                        ReconciliationIssue(
+                            code="asset_reference_orphan",
+                            scope=f"{side}:{table}.{column}",
+                            detail=f"asset reference orphan count={count}",
+                        )
                     )
+            if _is_json_asset_column(column):
+                query = sql.SQL("SELECT {} FROM {} WHERE {} IS NOT NULL").format(
+                    sql.Identifier(column), sql.Identifier(table), sql.Identifier(column)
                 )
+                cursor = conn.cursor(name=f"t07_asset_{uuid4().hex}", row_factory=dict_row)
+                cursor.execute(query)
+                orphan_count = 0
+                invalid_json_count = 0
+                try:
+                    while True:
+                        rows = cursor.fetchmany(1000)
+                        if not rows:
+                            break
+                        for row in rows:
+                            references, valid = _extract_asset_ids(row[column])
+                            if not valid:
+                                invalid_json_count += 1
+                            else:
+                                orphan_count += len(references - asset_ids)
+                finally:
+                    cursor.close()
+                if invalid_json_count:
+                    issues.append(
+                        ReconciliationIssue(
+                            code="asset_reference_json_invalid",
+                            scope=f"{side}:{table}.{column}",
+                            detail=f"invalid JSON rows={invalid_json_count}",
+                        )
+                    )
+                if orphan_count:
+                    issues.append(
+                        ReconciliationIssue(
+                            code="asset_reference_orphan",
+                            scope=f"{side}:{table}.{column}",
+                            detail=f"JSON asset reference orphan count={orphan_count}",
+                        )
+                    )
     return issues
+
+
+def validate_asset_references_sqlite(conn: sqlite3.Connection) -> AssetReferenceResult:
+    issues = _asset_reference_issues_sqlite(conn, "source")
+    orphan_count = sum(
+        int(issue.detail.rsplit("=", 1)[-1])
+        for issue in issues
+        if issue.code == "asset_reference_orphan"
+    )
+    invalid_count = sum(
+        int(issue.detail.rsplit("=", 1)[-1])
+        for issue in issues
+        if issue.code == "asset_reference_json_invalid"
+    )
+    return AssetReferenceResult(
+        orphan_reference_count=orphan_count,
+        invalid_json_count=invalid_count,
+    )
+
+
+def validate_wallet_invariants(
+    conn: sqlite3.Connection | psycopg.Connection[Any],
+    dialect: Dialect | None = None,
+) -> WalletInvariantResult:
+    resolved: Dialect = dialect or (
+        "sqlite" if isinstance(conn, sqlite3.Connection) else "postgresql"
+    )
+    issues = [
+        *_wallet_issues(conn, resolved, "source"),
+        *_paid_charge_issues(conn, resolved, "source"),
+        *_generation_billing_issues(conn, resolved, "source"),
+    ]
+    wallet_mismatches = sum(issue.code == "wallet_balance_mismatch" for issue in issues)
+    paid_without_charge = sum(issue.code == "paid_order_charge_mismatch" for issue in issues)
+    return WalletInvariantResult(
+        wallet_balance_mismatches=wallet_mismatches,
+        paid_without_charge=paid_without_charge,
+        other_issue_count=len(issues) - wallet_mismatches - paid_without_charge,
+    )
 
 
 def validate_database_invariants(
@@ -708,13 +1109,49 @@ def reconcile_connection_pair(
     return ReconciliationReport(tables=tuple(tables), issues=tuple(issues))
 
 
+def reconcile_connections(
+    sqlite_conn: sqlite3.Connection,
+    pg_conn: psycopg.Connection[Any],
+    *,
+    source_snapshot_sha256: str | None = None,
+    target_dsn: str | None = None,
+) -> ReconciliationReport:
+    del source_snapshot_sha256, target_dsn
+    return reconcile_connection_pair(sqlite_conn, pg_conn)
+
+
 def reconcile_databases(
     sqlite_path: str | Path,
     postgres_dsn: str,
 ) -> ReconciliationReport:
-    with _open_sqlite_readonly(sqlite_path) as sqlite_conn:
+    with connect_sqlite_readonly(sqlite_path) as sqlite_conn:
         with psycopg.connect(postgres_dsn, row_factory=dict_row) as pg_conn:
             return reconcile_connection_pair(sqlite_conn, pg_conn)
+
+
+def redact_postgres_dsn(dsn: str) -> str:
+    parsed = urlsplit(dsn)
+    if not parsed.scheme:
+        return "<redacted-postgres-dsn>"
+    host = parsed.hostname or ""
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    port = "" if parsed.port is None else f":{parsed.port}"
+    username = "" if parsed.username is None else f"{parsed.username}@"
+    return urlunsplit((parsed.scheme, f"{username}{host}{port}", parsed.path, parsed.query, parsed.fragment))
+
+
+def safe_error_message(error: BaseException, postgres_dsn: str) -> str:
+    message = str(error)
+    parsed = urlsplit(postgres_dsn)
+    secrets_to_remove = {postgres_dsn}
+    if parsed.password:
+        secrets_to_remove.add(parsed.password)
+        secrets_to_remove.add(unquote(parsed.password))
+    for secret in sorted(secrets_to_remove, key=len, reverse=True):
+        if secret:
+            message = message.replace(secret, "<redacted>")
+    return message.replace(postgres_dsn, redact_postgres_dsn(postgres_dsn))
 
 
 def main() -> None:
@@ -724,7 +1161,10 @@ def main() -> None:
     parser.add_argument("--output", help="optional JSON report path")
     args = parser.parse_args()
 
-    report = reconcile_databases(args.sqlite, args.postgres_url)
+    try:
+        report = reconcile_databases(args.sqlite, args.postgres_url)
+    except Exception as error:
+        raise SystemExit(safe_error_message(error, args.postgres_url)) from error
     payload = json.dumps(report.to_dict(), ensure_ascii=False, indent=2, sort_keys=True)
     if args.output:
         output = Path(args.output)
