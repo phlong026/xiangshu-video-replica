@@ -175,28 +175,47 @@ jobs:
           T07_LEDGER_RUN_NUMBER: ${{ github.run_number }}
           T07_IMPLEMENTATION_SHA: c26bc0732d9fe66142dae3c50ac9c908bdf578a8
         run: python .github/t07_finalize_ledger.py
-      - name: Commit only the verified T07 evidence closure
+      - name: Commit verified T07 evidence and remove temporary automation
         env:
           GITHUB_TOKEN: ${{ github.token }}
           T07_BRANCH: ${{ github.event.pull_request.head.ref }}
           T07_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          expected=$(printf '%s\n' \
+          expected_docs=$(printf '%s\n' \
             'docs/CUSTOMER-TASK-EVIDENCE-V3.md' \
             'docs/evidence/T07-EVIDENCE.md' \
             'docs/客户版任务清单-V3.md' | sort)
-          actual=$(git diff --name-only | sort)
-          test "${actual}" = "${expected}"
+          actual_docs=$(git diff --name-only | sort)
+          test "${actual_docs}" = "${expected_docs}"
+
+          auth=$(printf 'x-access-token:%s' "${GITHUB_TOKEN}" | base64 -w0)
+          git -c http.extraheader="AUTHORIZATION: basic ${auth}" \
+            fetch --no-tags --depth=1 origin main:refs/remotes/origin/main
+          git checkout origin/main -- .github/workflows/ci.yml
+          git rm .github/t07_finalize_ledger.py
+
+          expected_final=$(printf '%s\n' \
+            '.github/t07_finalize_ledger.py' \
+            '.github/workflows/ci.yml' \
+            'docs/CUSTOMER-TASK-EVIDENCE-V3.md' \
+            'docs/evidence/T07-EVIDENCE.md' \
+            'docs/客户版任务清单-V3.md' | sort)
+          actual_final=$(git diff --name-only | sort)
+          test "${actual_final}" = "${expected_final}"
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add \
+            .github/workflows/ci.yml \
             docs/CUSTOMER-TASK-EVIDENCE-V3.md \
             docs/evidence/T07-EVIDENCE.md \
             docs/客户版任务清单-V3.md
           git diff --cached --check
-          git diff --cached --quiet && exit 1
+          if git diff --cached --quiet; then
+            echo "T07 ledger finalizer produced no staged changes" >&2
+            exit 1
+          fi
           git commit -m "docs: close T07 verified evidence ledger"
-          auth=$(printf 'x-access-token:%s' "${GITHUB_TOKEN}" | base64 -w0)
           git -c http.extraheader="AUTHORIZATION: basic ${auth}" \
             push origin HEAD:"refs/heads/${T07_BRANCH}" \
             --force-with-lease="refs/heads/${T07_BRANCH}:${T07_HEAD_SHA}"
