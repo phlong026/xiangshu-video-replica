@@ -9,6 +9,14 @@ branch_labels = None
 depends_on = None
 
 
+def _external_call_fk_name(dialect_name: str) -> str:
+    """PostgreSQL caps identifiers at 63 bytes; keep the historical SQLite
+    name verbatim so existing SQLite databases stay bit-identical."""
+    if dialect_name == "postgresql":
+        return "fk_external_call_logs_char_gen_task"
+    return "fk_external_call_logs_character_generation_task_id_character_generation_tasks"
+
+
 def upgrade() -> None:
     with op.batch_alter_table("character_generation_tasks") as batch_op:
         batch_op.add_column(sa.Column("idempotency_key", sa.Text()))
@@ -41,9 +49,18 @@ def upgrade() -> None:
         )
 
     connection = op.get_bind()
+    # SQLite orders ties by the implicit rowid (insertion order). PostgreSQL has
+    # no implicit rowid; its closest physical-order equivalent is ctid. On the
+    # PG upgrade path this table is freshly created and empty, so the backfill
+    # affects zero rows and the tie-breaker only needs to be valid SQL.
+    row_tiebreaker = (
+        "earlier.ctid <= task.ctid"
+        if connection.dialect.name == "postgresql"
+        else "earlier.rowid <= task.rowid"
+    )
     connection.execute(
         sa.text(
-            """
+            f"""
             UPDATE character_generation_tasks AS task
             SET idempotency_key = 'legacy:' || task.id,
                 request_hash = 'legacy:' || task.id,
@@ -52,7 +69,7 @@ def upgrade() -> None:
                     FROM character_generation_tasks AS earlier
                     WHERE earlier.character_version_id = task.character_version_id
                       AND earlier.view_type = task.view_type
-                      AND earlier.rowid <= task.rowid
+                      AND {row_tiebreaker}
                 )
             WHERE idempotency_key IS NULL
                OR request_hash IS NULL
@@ -117,7 +134,7 @@ def upgrade() -> None:
     with op.batch_alter_table("external_call_logs") as batch_op:
         batch_op.add_column(sa.Column("character_generation_task_id", sa.Text()))
         batch_op.create_foreign_key(
-            "fk_external_call_logs_character_generation_task_id_character_generation_tasks",
+            _external_call_fk_name(op.get_bind().dialect.name),
             "character_generation_tasks",
             ["character_generation_task_id"],
             ["id"],
@@ -128,7 +145,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     with op.batch_alter_table("external_call_logs") as batch_op:
         batch_op.drop_constraint(
-            "fk_external_call_logs_character_generation_task_id_character_generation_tasks",
+            _external_call_fk_name(op.get_bind().dialect.name),
             type_="foreignkey",
         )
         batch_op.drop_column("character_generation_task_id")
