@@ -156,7 +156,10 @@ def test_table_digest_is_order_independent_and_separates_pk_from_rows(tmp_path: 
         right.execute("UPDATE sample SET value = 'changed' WHERE id = 'b'")
         changed = compute_table_digest(right, "sample", specs, ("id",), batch_size=1)
 
-    assert changed.primary_key_sha256 == left_digest.primary_key_sha256
+    assert (
+        changed.primary_key_sha256
+        == left_digest.primary_key_sha256
+    )
     assert changed.row_sha256 != left_digest.row_sha256
 
 
