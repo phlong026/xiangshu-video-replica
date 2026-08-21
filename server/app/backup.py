@@ -3,17 +3,19 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
-import secrets
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
 
 from app.db import connect_database
 
 
 @dataclass(frozen=True)
 class SqliteSnapshot:
+    """Immutable evidence for one legacy SQLite cutover snapshot."""
+
     path: Path
     source_sha256: str
     snapshot_sha256: str
@@ -22,7 +24,7 @@ class SqliteSnapshot:
 
     @property
     def snapshot_path(self) -> Path:
-        """Compatibility alias used by the migration and review tests."""
+        """Compatibility alias used by migration callers and evidence tooling."""
 
         return self.path
 
@@ -41,9 +43,36 @@ def sha256_file(path: str | Path) -> str:
     return digest.hexdigest()
 
 
+def _sqlite_sidecars(database: Path) -> tuple[Path, ...]:
+    return tuple(
+        Path(f"{database}{suffix}")
+        for suffix in ("-wal", "-shm", "-journal")
+        if Path(f"{database}{suffix}").exists()
+    )
+
+
+def _assert_quiescent_source(database: Path) -> None:
+    """Fail closed unless SQLite has checkpointed and all writers are stopped.
+
+    A WAL commit can leave the main database file unchanged, so comparing only
+    that file's hash is insufficient. During the maintenance window every
+    SQLite process must be stopped and the final connection closed, which
+    checkpoints/removes WAL sidecars. Any sidecar before or after the backup is
+    therefore treated as evidence of an active or incompletely stopped writer.
+    """
+
+    sidecars = _sqlite_sidecars(database)
+    if sidecars:
+        names = ", ".join(path.name for path in sidecars)
+        raise RuntimeError(
+            "SQLite source is not quiescent: WAL/journal sidecars are present "
+            f"({names}); stop every writer, close all connections, checkpoint, and retry"
+        )
+
+
 def _readonly_connection(database: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(
-        f"{database.resolve().as_uri()}?mode=ro",
+        f"{database.resolve().as_uri()}?mode=ro&immutable=1",
         uri=True,
         timeout=5,
         check_same_thread=False,
@@ -55,58 +84,33 @@ def _readonly_connection(database: Path) -> sqlite3.Connection:
     return conn
 
 
-def _source_state(source: Path) -> tuple[tuple[str, int, int, str], ...]:
-    """Return a stable digest of the SQLite main database and WAL sidecar.
-
-    The shared-memory sidecar is intentionally excluded because merely opening a
-    WAL database may update lock bytes in that file. Any committed data that can
-    affect the snapshot must appear in the main database or the WAL sidecar.
-    """
-
-    state: list[tuple[str, int, int, str]] = []
-    for candidate in (source, Path(f"{source}-wal")):
-        if candidate.exists():
-            stat_result = candidate.stat()
-            state.append(
-                (
-                    candidate.name,
-                    stat_result.st_size,
-                    stat_result.st_mtime_ns,
-                    sha256_file(candidate),
-                )
-            )
-        else:
-            state.append((candidate.name, -1, -1, "missing"))
-    return tuple(state)
-
-
-def _reject_uncheckpointed_wal(source: Path) -> None:
-    wal = Path(f"{source}-wal")
-    if wal.exists() and wal.stat().st_size > 0:
-        raise RuntimeError(
-            "SQLite WAL contains uncheckpointed frames; stop all writers, run a "
-            "TRUNCATE checkpoint, and retry the maintenance-window snapshot"
-        )
-
-
-def _create_private_empty_file(path: Path) -> None:
+def _create_private_file(path: Path) -> None:
     descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
     os.close(descriptor)
     os.chmod(path, 0o600)
+
+
+def _publish_without_overwrite(temporary: Path, destination: Path) -> None:
+    """Atomically publish a same-directory file without replacing evidence."""
+
+    try:
+        os.link(temporary, destination)
+    except FileExistsError:
+        raise FileExistsError(f"migration snapshot already exists: {destination}") from None
+    else:
+        temporary.unlink()
 
 
 def create_readonly_snapshot(
     source_path: str | Path,
     snapshot_path: str | Path,
 ) -> SqliteSnapshot:
-    """Create an immutable, private and integrity-checked SQLite snapshot.
+    """Create a private, immutable, integrity-checked SQLite snapshot.
 
-    The source is never opened for writing. A non-empty WAL sidecar is rejected
-    so committed WAL-only changes cannot be silently omitted. The main database
-    and WAL state are compared before and after the backup, while SQLite's
-    ``data_version`` guards commits observed by the read connection. The target
-    path is created with ``O_EXCL`` and therefore can never overwrite rollback
-    evidence from a previous migration rehearsal.
+    The source is opened read-only and immutable. WAL/journal sidecars are
+    rejected before and after the online backup so a WAL-backed write cannot be
+    silently omitted while the main file hash remains unchanged. The output is
+    created as mode ``0600`` and published with a no-overwrite hard link.
     """
 
     source = Path(source_path)
@@ -116,23 +120,19 @@ def create_readonly_snapshot(
     if source.resolve() == snapshot.resolve():
         raise ValueError("snapshot path must differ from the source database")
     if snapshot.exists():
-        raise FileExistsError(snapshot)
+        raise FileExistsError(f"migration snapshot already exists: {snapshot}")
 
     snapshot.parent.mkdir(parents=True, exist_ok=True)
-    temporary = snapshot.with_name(f".{snapshot.name}.{secrets.token_hex(8)}.tmp")
-    _reject_uncheckpointed_wal(source)
-    before_state = _source_state(source)
-    source_hash = sha256_file(source)
-    source_size = source.stat().st_size
+    temporary = snapshot.with_name(f".{snapshot.name}.{os.getpid()}.{uuid4().hex}.tmp")
+    _create_private_file(temporary)
 
+    before_hash = sha256_file(source)
+    before_stat = source.stat()
+    linked = False
     try:
-        _create_private_empty_file(temporary)
+        _assert_quiescent_source(source)
         with _readonly_connection(source) as source_conn:
             _check_integrity(source_conn)
-            journal_mode_row = source_conn.execute("PRAGMA journal_mode").fetchone()
-            journal_mode = "" if journal_mode_row is None else str(journal_mode_row[0]).lower()
-            if journal_mode == "wal":
-                _reject_uncheckpointed_wal(source)
             data_version_before = int(source_conn.execute("PRAGMA data_version").fetchone()[0])
             with sqlite3.connect(temporary) as snapshot_conn:
                 source_conn.backup(snapshot_conn)
@@ -140,35 +140,42 @@ def create_readonly_snapshot(
             data_version_after = int(source_conn.execute("PRAGMA data_version").fetchone()[0])
             if data_version_before != data_version_after:
                 raise RuntimeError(
-                    "SQLite source changed while the read-only snapshot was being created; "
-                    "stop writers and retry the maintenance window"
+                    "SQLite source changed while the snapshot was created; "
+                    "stop every writer and retry the maintenance window"
                 )
 
-        _reject_uncheckpointed_wal(source)
-        after_state = _source_state(source)
-        if before_state != after_state or source_hash != sha256_file(source):
+        _assert_quiescent_source(source)
+        after_stat = source.stat()
+        after_hash = sha256_file(source)
+        if (
+            before_hash != after_hash
+            or before_stat.st_size != after_stat.st_size
+            or before_stat.st_mtime_ns != after_stat.st_mtime_ns
+        ):
             raise RuntimeError(
-                "SQLite source or WAL changed while the read-only snapshot was being created; "
-                "stop writers, checkpoint WAL, and retry"
+                "SQLite source changed while the snapshot was created; "
+                "stop every writer and retry the maintenance window"
             )
 
         os.chmod(temporary, 0o600)
-        _create_private_empty_file(snapshot)
-        os.replace(temporary, snapshot)
+        with temporary.open("rb") as stream:
+            os.fsync(stream.fileno())
+        _publish_without_overwrite(temporary, snapshot)
+        linked = True
         os.chmod(snapshot, 0o600)
-        with sqlite3.connect(snapshot) as snapshot_conn:
-            _check_integrity(snapshot_conn)
+        if snapshot.stat().st_mode & 0o077:
+            raise PermissionError("migration snapshot permissions are not private (expected 0600)")
     except Exception:
         temporary.unlink(missing_ok=True)
-        if snapshot.exists() and snapshot.stat().st_size == 0:
+        if linked:
             snapshot.unlink(missing_ok=True)
         raise
 
     return SqliteSnapshot(
         path=snapshot.resolve(),
-        source_sha256=source_hash,
+        source_sha256=before_hash,
         snapshot_sha256=sha256_file(snapshot),
-        source_size_bytes=source_size,
+        source_size_bytes=before_stat.st_size,
         created_at=datetime.now(UTC).isoformat(),
     )
 

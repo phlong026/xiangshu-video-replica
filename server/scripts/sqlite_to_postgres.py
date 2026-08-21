@@ -1,16 +1,15 @@
 """One-shot, fail-closed SQLite-to-PostgreSQL migration for T07 / DB-05.
 
-This is deliberately not a dual-write bridge. Operators stop all SQLite
-writers, checkpoint WAL, create an immutable read-only snapshot, import every
-table in one PostgreSQL transaction, reconcile data and billing invariants, and
-commit only when every check passes.
+This is not a dual-write bridge. It requires a confirmed maintenance window,
+creates an immutable private SQLite snapshot, imports all rows in one
+PostgreSQL transaction, reconciles table/billing/asset facts, and commits only
+when every check passes.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import sqlite3
 from collections import defaultdict, deque
 from collections.abc import Iterator, Mapping, Sequence
@@ -19,7 +18,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import psycopg
 from alembic.config import Config
@@ -32,11 +31,10 @@ from app.backup import SqliteSnapshot, create_readonly_snapshot, sha256_file
 from scripts.reconcile_customer_billing import (
     ReconciliationIssue,
     ReconciliationReport,
-    _open_sqlite_readonly,
     _pg_columns,
-    _row_value,
     _sqlite_columns,
     _table_names,
+    connect_sqlite_readonly,
     reconcile_connection_pair,
     safe_error_message,
     validate_database_invariants,
@@ -47,15 +45,15 @@ SERVER_DIR = Path(__file__).resolve().parent.parent
 SEED_TABLES = frozenset({"runtime_settings"})
 
 
-class MigrationPreconditionError(RuntimeError):
-    """The source, snapshot or target is not safe to migrate."""
+class MigrationSafetyError(RuntimeError):
+    """The source or target does not satisfy the cutover safety contract."""
 
 
-class MigrationReconciliationError(RuntimeError):
-    """The imported database failed one or more fail-closed checks."""
+class MigrationReconciliationError(MigrationSafetyError):
+    """Imported data failed one or more fail-closed reconciliation checks."""
 
 
-MigrationSafetyError = MigrationPreconditionError
+MigrationPreconditionError = MigrationSafetyError
 
 
 @dataclass(frozen=True)
@@ -93,38 +91,44 @@ def _alembic_script() -> ScriptDirectory:
     return ScriptDirectory.from_config(config)
 
 
-def _release_head_revision() -> str:
+def release_head_revision() -> str:
     head = _alembic_script().get_current_head()
     if head is None:
-        raise MigrationPreconditionError("Alembic has no single migration head")
+        raise MigrationSafetyError("Alembic has no single migration head")
     return head
+
+
+_release_head_revision = release_head_revision
 
 
 def validate_revision_pair(
     source_revision: str,
     target_revision: str,
+    *,
     expected_head: str | None = None,
 ) -> None:
-    expected = expected_head or _release_head_revision()
+    expected = expected_head or release_head_revision()
     if source_revision != expected or target_revision != expected:
         raise MigrationSafetyError(
             "Alembic revision mismatch: expected T07 Alembic head "
-            f"{expected!r}, source={source_revision!r}, target={target_revision!r}"
+            f"{expected}; source={source_revision}, target={target_revision}"
         )
 
 
 def _sqlite_revision(conn: sqlite3.Connection) -> str:
     row = conn.execute("SELECT version_num FROM alembic_version").fetchone()
     if row is None:
-        raise MigrationPreconditionError("source Alembic revision is missing")
-    return str(_row_value(row, "version_num", 0))
+        raise MigrationSafetyError("source Alembic revision is missing")
+    return str(row[0])
 
 
 def _pg_revision(conn: psycopg.Connection[Any]) -> str:
     row = conn.execute("SELECT version_num FROM alembic_version").fetchone()
     if row is None:
-        raise MigrationPreconditionError("target Alembic revision is missing")
-    return str(_row_value(row, "version_num", 0))
+        raise MigrationSafetyError("target Alembic revision is missing")
+    if isinstance(row, Mapping):
+        return str(row["version_num"])
+    return str(row[0])
 
 
 def _validate_revisions(
@@ -137,25 +141,24 @@ def _validate_revisions(
 def require_maintenance_window(confirmed: bool) -> None:
     if not confirmed:
         raise MigrationSafetyError(
-            "maintenance window confirmation is required; stop all SQLite writers and "
-            "checkpoint WAL before migration"
+            "maintenance window confirmation is required; stop all SQLite writers first"
         )
 
 
-def require_validated_postgres_foreign_keys(conn: Any) -> None:
-    row = conn.execute(
+def require_validated_postgres_foreign_keys(pg_conn: Any) -> None:
+    row = pg_conn.execute(
         """
-        SELECT COUNT(*) AS unvalidated_count
+        SELECT COUNT(*)
         FROM pg_constraint
         WHERE contype = 'f' AND NOT convalidated
         """
     ).fetchone()
     if row is None:
-        raise MigrationSafetyError("unable to validate PostgreSQL foreign-key state")
-    count = int(_row_value(row, "unvalidated_count", 0))
+        raise MigrationSafetyError("PostgreSQL foreign-key validation query returned no row")
+    count = int(row[0] if not isinstance(row, Mapping) else next(iter(row.values())))
     if count:
         raise MigrationSafetyError(
-            f"PostgreSQL contains {count} unvalidated foreign-key constraint(s)"
+            f"target has {count} unvalidated foreign-key constraints; validate them before import"
         )
 
 
@@ -168,14 +171,14 @@ def _validate_schema(
     missing = sorted(set(source_tables) - target_tables)
     extra = sorted(target_tables - set(source_tables))
     if missing or extra:
-        raise MigrationPreconditionError(
+        raise MigrationSafetyError(
             f"source/target table contract differs (missing={len(missing)}, extra={len(extra)})"
         )
     for table in source_tables:
         source_columns, source_pk = _sqlite_columns(sqlite_conn, table)
         target_columns, target_pk, _ = _pg_columns(pg_conn, table)
         if set(source_columns) != set(target_columns) or source_pk != target_pk:
-            raise MigrationPreconditionError(f"source/target schema differs for table {table!r}")
+            raise MigrationSafetyError(f"source/target schema differs for table {table!r}")
     return source_tables
 
 
@@ -183,6 +186,8 @@ def _issue_summary(issues: Sequence[ReconciliationIssue]) -> str:
     codes = sorted({issue.code for issue in issues})
     if "asset_reference_orphan" in codes:
         return "asset reference reconciliation failed (asset_reference_orphan)"
+    if "asset_reference_json_invalid" in codes:
+        return "asset reference reconciliation failed (asset_reference_json_invalid)"
     return "database reconciliation failed (" + ", ".join(codes[:8]) + ")"
 
 
@@ -199,8 +204,9 @@ def _target_has_non_seed_data(pg_conn: psycopg.Connection[Any], tables: Sequence
         count_query = sql.SQL("SELECT COUNT(*) AS count FROM {}").format(sql.Identifier(table))
         row = pg_conn.execute(count_query).fetchone()
         if row is None:
-            raise MigrationPreconditionError(f"could not count target table {table!r}")
-        if int(_row_value(row, "count", 0)):
+            raise MigrationSafetyError(f"count query returned no row for table {table!r}")
+        count = int(row["count"] if isinstance(row, Mapping) else row[0])
+        if count:
             return True
     return False
 
@@ -233,7 +239,7 @@ def topological_order(
     if len(ordered) != len(node_set):
         blocked = sorted(node_set - set(ordered))
         raise MigrationSafetyError(
-            f"foreign-key dependency cycle prevents safe import: {len(blocked)} table(s)"
+            f"foreign-key dependency cycle prevents safe import: {len(blocked)} tables"
         )
     return ordered
 
@@ -244,7 +250,7 @@ def _dependency_order(sqlite_conn: sqlite3.Connection, tables: Sequence[str]) ->
     for table in tables:
         escaped = '"' + table.replace('"', '""') + '"'
         for row in sqlite_conn.execute(f"PRAGMA foreign_key_list({escaped})").fetchall():
-            parent = str(_row_value(row, "table", 2))
+            parent = str(row[2])
             if parent in nodes and parent != table:
                 dependencies[table].add(parent)
     return topological_order(nodes, dependencies)
@@ -264,7 +270,12 @@ def _convert_value(value: object, target_type: str) -> object:
         return Decimal(str(value))
     if normalized_type in {"bool", "boolean"}:
         if isinstance(value, str):
-            return value.strip().lower() in {"1", "true", "yes", "on"}
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "t", "yes", "on"}:
+                return True
+            if normalized in {"0", "false", "f", "no", "off"}:
+                return False
+            raise MigrationSafetyError("invalid boolean value in SQLite source")
         return bool(value)
     if normalized_type == "bytea":
         if isinstance(value, memoryview):
@@ -316,7 +327,7 @@ def _insert_table_rows(
     )
     if table in SEED_TABLES:
         if not primary_key:
-            raise MigrationPreconditionError(f"seed table {table!r} has no primary key")
+            raise MigrationSafetyError(f"seed table {table!r} has no primary key")
         update_columns = [column for column in columns if column not in primary_key]
         if update_columns:
             updates = sql.SQL(", ").join(
@@ -324,7 +335,8 @@ def _insert_table_rows(
                 for column in update_columns
             )
             query = base + sql.SQL(" ON CONFLICT ({}) DO UPDATE SET {}").format(
-                sql.SQL(", ").join(sql.Identifier(column) for column in primary_key), updates
+                sql.SQL(", ").join(sql.Identifier(column) for column in primary_key),
+                updates,
             )
         else:
             query = base + sql.SQL(" ON CONFLICT DO NOTHING")
@@ -354,18 +366,21 @@ def _reset_sequences(pg_conn: psycopg.Connection[Any], tables: Sequence[str]) ->
     ).fetchall()
     allowed = set(tables)
     for row in rows:
-        table = str(_row_value(row, "table_name", 0))
-        column = str(_row_value(row, "column_name", 1))
+        table = str(row["table_name"] if isinstance(row, Mapping) else row[0])
+        column = str(row["column_name"] if isinstance(row, Mapping) else row[1])
         if table not in allowed:
             continue
         sequence_row = pg_conn.execute(
-            "SELECT pg_get_serial_sequence(%s, %s) AS sequence_name", (table, column)
+            "SELECT pg_get_serial_sequence(%s, %s) AS sequence_name",
+            (table, column),
         ).fetchone()
-        sequence = (
-            None
-            if sequence_row is None
-            else _row_value(sequence_row, "sequence_name", 0)
-        )
+        sequence = None
+        if sequence_row is not None:
+            sequence = (
+                sequence_row["sequence_name"]
+                if isinstance(sequence_row, Mapping)
+                else sequence_row[0]
+            )
         if not sequence:
             continue
         maximum_query = sql.SQL("SELECT MAX({}) AS maximum FROM {}").format(
@@ -373,8 +388,8 @@ def _reset_sequences(pg_conn: psycopg.Connection[Any], tables: Sequence[str]) ->
         )
         maximum_row = pg_conn.execute(maximum_query).fetchone()
         if maximum_row is None:
-            raise MigrationPreconditionError(f"could not inspect sequence for {table}.{column}")
-        maximum = _row_value(maximum_row, "maximum", 0)
+            raise MigrationSafetyError(f"sequence maximum query returned no row for {table!r}")
+        maximum = maximum_row["maximum"] if isinstance(maximum_row, Mapping) else maximum_row[0]
         if maximum is None:
             pg_conn.execute("SELECT setval(%s, 1, false)", (sequence,))
         else:
@@ -382,10 +397,8 @@ def _reset_sequences(pg_conn: psycopg.Connection[Any], tables: Sequence[str]) ->
 
 
 def _default_snapshot_path(source: Path) -> Path:
-    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
-    return source.with_name(
-        f"{source.stem}.t07-snapshot-{stamp}-{uuid4().hex[:8]}{source.suffix or '.db'}"
-    )
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ")
+    return source.with_name(f"{source.stem}.t07-snapshot-{stamp}{source.suffix or '.db'}")
 
 
 def _write_report(path: str | Path | None, result: ImportResult) -> None:
@@ -393,14 +406,10 @@ def _write_report(path: str | Path | None, result: ImportResult) -> None:
         return
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(result.to_dict(), ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-    descriptor = os.open(output, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            stream.write(payload)
-    except Exception:
-        output.unlink(missing_ok=True)
-        raise
+    output.write_text(
+        json.dumps(result.to_dict(), ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _result(
@@ -419,14 +428,14 @@ def _result(
     )
 
 
-def _verify_snapshot(snapshot: SqliteSnapshot) -> None:
+def _validate_snapshot(snapshot: SqliteSnapshot) -> None:
     if not snapshot.path.is_file():
         raise FileNotFoundError(snapshot.path)
     actual = sha256_file(snapshot.path)
     if actual != snapshot.snapshot_sha256:
-        raise MigrationSafetyError(
-            "snapshot SHA-256 mismatch; immutable migration evidence changed after creation"
-        )
+        raise MigrationSafetyError("SQLite snapshot SHA-256 does not match its immutable evidence")
+    if snapshot.path.stat().st_mode & 0o077:
+        raise MigrationSafetyError("SQLite snapshot is not private; expected permissions 0600")
 
 
 def migrate_snapshot(
@@ -437,52 +446,53 @@ def migrate_snapshot(
     batch_size: int = 1000,
     fail_after_table: str | None = None,
 ) -> ImportResult:
+    """Import one verified snapshot and commit only after full reconciliation."""
+
     if batch_size < 1:
         raise ValueError("batch_size must be positive")
-    _verify_snapshot(snapshot)
+    _validate_snapshot(snapshot)
 
-    with _open_sqlite_readonly(snapshot.path) as sqlite_conn:
+    with connect_sqlite_readonly(snapshot.path) as sqlite_conn:
         _ensure_source_invariants(sqlite_conn)
         with psycopg.connect(postgres_dsn, row_factory=dict_row) as pg_conn:
             with pg_conn.transaction():
-                require_validated_postgres_foreign_keys(pg_conn)
                 _validate_revisions(sqlite_conn, pg_conn)
+                require_validated_postgres_foreign_keys(pg_conn)
                 tables = _validate_schema(sqlite_conn, pg_conn)
 
                 current = reconcile_connection_pair(sqlite_conn, pg_conn)
                 if current.ok:
                     result = _result("already_reconciled", snapshot, (), current)
-                else:
-                    if _target_has_non_seed_data(pg_conn, tables):
-                        raise MigrationSafetyError(
-                            "non-empty target PostgreSQL contains divergent non-seed data; "
-                            "refusing to overwrite or merge state"
-                        )
+                    _write_report(report_path, result)
+                    return result
+                if _target_has_non_seed_data(pg_conn, tables):
+                    raise MigrationSafetyError(
+                        "target PostgreSQL is non-empty and does not reconcile exactly; "
+                        "refusing to overwrite or merge divergent state"
+                    )
 
-                    imported: list[ImportedTable] = []
-                    for table in _dependency_order(sqlite_conn, tables):
-                        columns, primary_key = _sqlite_columns(sqlite_conn, table)
-                        _, _, target_types = _pg_columns(pg_conn, table)
-                        source_rows = _insert_table_rows(
-                            sqlite_conn,
-                            pg_conn,
-                            table,
-                            columns,
-                            primary_key,
-                            target_types,
-                            batch_size=batch_size,
-                        )
-                        imported.append(ImportedTable(table=table, source_rows=source_rows))
-                        if fail_after_table == table:
-                            raise RuntimeError(f"injected failure after table {table}")
-                    _reset_sequences(pg_conn, tables)
+                imported: list[ImportedTable] = []
+                for table in _dependency_order(sqlite_conn, tables):
+                    columns, primary_key = _sqlite_columns(sqlite_conn, table)
+                    _, _, target_types = _pg_columns(pg_conn, table)
+                    source_rows = _insert_table_rows(
+                        sqlite_conn,
+                        pg_conn,
+                        table,
+                        columns,
+                        primary_key,
+                        target_types,
+                        batch_size=batch_size,
+                    )
+                    imported.append(ImportedTable(table=table, source_rows=source_rows))
+                    if fail_after_table == table:
+                        raise RuntimeError(f"injected failure after table {table}")
+                _reset_sequences(pg_conn, tables)
 
-                    reconciliation = reconcile_connection_pair(sqlite_conn, pg_conn)
-                    if not reconciliation.ok:
-                        raise MigrationReconciliationError(
-                            _issue_summary(reconciliation.issues)
-                        )
-                    result = _result("imported", snapshot, imported, reconciliation)
+                reconciliation = reconcile_connection_pair(sqlite_conn, pg_conn)
+                if not reconciliation.ok:
+                    raise MigrationReconciliationError(_issue_summary(reconciliation.issues))
+                result = _result("imported", snapshot, imported, reconciliation)
             _write_report(report_path, result)
             return result
 
@@ -491,10 +501,11 @@ def import_sqlite_to_postgres(
     source_path: str | Path,
     postgres_dsn: str,
     *,
+    maintenance_window_confirmed: bool = False,
     snapshot_path: str | Path | None = None,
     report_path: str | Path | None = None,
     batch_size: int = 1000,
-    maintenance_window_confirmed: bool = False,
+    fail_after_table: str | None = None,
 ) -> ImportResult:
     require_maintenance_window(maintenance_window_confirmed)
     source = Path(source_path)
@@ -504,6 +515,7 @@ def import_sqlite_to_postgres(
         postgres_dsn,
         report_path=report_path,
         batch_size=batch_size,
+        fail_after_table=fail_after_table,
     )
 
 
@@ -512,12 +524,12 @@ def main() -> None:
     parser.add_argument("--sqlite", required=True, help="legacy SQLite database path")
     parser.add_argument("--postgres-url", required=True, help="PostgreSQL DSN (never printed)")
     parser.add_argument("--snapshot", help="explicit immutable snapshot output path")
-    parser.add_argument("--report", help="optional immutable JSON report path")
+    parser.add_argument("--report", help="optional JSON report path")
     parser.add_argument("--batch-size", type=int, default=1000)
     parser.add_argument(
         "--maintenance-window-confirmed",
         action="store_true",
-        help="required acknowledgement that all SQLite writers are stopped and WAL is checkpointed",
+        help="required acknowledgement that all SQLite writers are stopped",
     )
     args = parser.parse_args()
 
@@ -525,13 +537,13 @@ def main() -> None:
         result = import_sqlite_to_postgres(
             args.sqlite,
             args.postgres_url,
+            maintenance_window_confirmed=args.maintenance_window_confirmed,
             snapshot_path=args.snapshot,
             report_path=args.report,
             batch_size=args.batch_size,
-            maintenance_window_confirmed=args.maintenance_window_confirmed,
         )
     except Exception as error:
-        raise SystemExit(safe_error_message(error, args.postgres_url)) from error
+        parser.exit(1, safe_error_message(error, args.postgres_url) + "\n")
     print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2, sort_keys=True))
 
 
