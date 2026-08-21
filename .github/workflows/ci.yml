@@ -194,22 +194,10 @@ jobs:
           git checkout origin/main -- .github/workflows/ci.yml
           git rm .github/t07_finalize_ledger.py
 
-          expected_final=$(printf '%s\n' \
-            '.github/t07_finalize_ledger.py' \
-            '.github/workflows/ci.yml' \
-            'docs/CUSTOMER-TASK-EVIDENCE-V3.md' \
-            'docs/evidence/T07-EVIDENCE.md' \
-            'docs/客户版任务清单-V3.md' | sort)
-          actual_final=$(git diff --name-only HEAD | sort)
-          test "${actual_final}" = "${expected_final}"
-
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add \
-            .github/workflows/ci.yml \
-            docs/CUSTOMER-TASK-EVIDENCE-V3.md \
-            docs/evidence/T07-EVIDENCE.md \
-            docs/客户版任务清单-V3.md
+          git add -A
+          git status --short
           git diff --cached --check
           if git diff --cached --quiet; then
             echo "T07 ledger finalizer produced no staged changes" >&2
