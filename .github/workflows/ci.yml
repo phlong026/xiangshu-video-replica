@@ -157,25 +157,42 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Checkout the existing T07 branch
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.event.pull_request.head.ref }}
-          fetch-depth: 0
-          persist-credentials: true
+      - name: Fetch the verified T07 head without another checkout action
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          T07_BRANCH: ${{ github.event.pull_request.head.ref }}
+          T07_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git init .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git config http.https://github.com/.extraheader "AUTHORIZATION: bearer ${GITHUB_TOKEN}"
+          git fetch --no-tags --depth=1 origin "${T07_BRANCH}"
+          git checkout --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "${T07_HEAD_SHA}"
       - name: Apply verified T07 ledger closure
         env:
           T07_LEDGER_RUN_NUMBER: ${{ github.run_number }}
           T07_IMPLEMENTATION_SHA: c26bc0732d9fe66142dae3c50ac9c908bdf578a8
         run: python .github/t07_finalize_ledger.py
-      - name: Restore the standard workflow and commit only evidence closure
+      - name: Commit only the verified T07 evidence closure
+        env:
+          T07_BRANCH: ${{ github.event.pull_request.head.ref }}
+          T07_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          git fetch origin main --depth=1
-          git show origin/main:.github/workflows/ci.yml > .github/workflows/ci.yml
-          rm .github/t07_finalize_ledger.py
+          expected=$(printf '%s\n' \
+            'docs/CUSTOMER-TASK-EVIDENCE-V3.md' \
+            'docs/evidence/T07-EVIDENCE.md' \
+            'docs/客户版任务清单-V3.md' | sort)
+          actual=$(git diff --name-only | sort)
+          test "${actual}" = "${expected}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
+          git add \
+            docs/CUSTOMER-TASK-EVIDENCE-V3.md \
+            docs/evidence/T07-EVIDENCE.md \
+            docs/客户版任务清单-V3.md
           git diff --cached --check
+          git diff --cached --quiet && exit 1
           git commit -m "docs: close T07 verified evidence ledger"
-          git push origin HEAD:${{ github.event.pull_request.head.ref }}
+          git push origin HEAD:"refs/heads/${T07_BRANCH}" \
+            --force-with-lease="refs/heads/${T07_BRANCH}:${T07_HEAD_SHA}"
