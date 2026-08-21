@@ -161,19 +161,72 @@ def _pg_columns(
     return columns, primary_key, types
 
 
+def _canonical_boolean(value: object) -> int:
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "t", "yes", "on"}:
+            return 1
+        if normalized in {"0", "false", "f", "no", "off"}:
+            return 0
+        raise ValueError("invalid boolean value in reconciliation input")
+    return int(bool(value))
+
+
+def _canonical_decimal(value: object) -> str:
+    number = value if isinstance(value, Decimal) else Decimal(str(value))
+    if not number.is_finite():
+        return str(number)
+    if number == 0:
+        return "0"
+    return format(number.normalize(), "f")
+
+
 def _canonical_value(value: object, target_type: str | None) -> object:
     if value is None:
         return None
+    normalized_type = None if target_type is None else target_type.lower()
     if isinstance(value, memoryview):
         value = bytes(value)
-    if isinstance(value, bytes):
-        return {"bytes_sha256": hashlib.sha256(value).hexdigest(), "size": len(value)}
+    if normalized_type == "bytea" or isinstance(value, bytes):
+        raw = value if isinstance(value, bytes) else bytes(value)
+        return {"bytes_sha256": hashlib.sha256(raw).hexdigest(), "size": len(raw)}
+    if normalized_type in {"bool", "boolean"}:
+        return _canonical_boolean(value)
+    if normalized_type in {"int2", "int4", "int8", "smallint", "integer", "bigint"}:
+        return int(value)
+    if normalized_type in {"numeric", "decimal"}:
+        return _canonical_decimal(value)
+    if normalized_type in {"float4", "float8", "real", "double precision"}:
+        number = float(value)
+        if math.isnan(number):
+            return "NaN"
+        if math.isinf(number):
+            return "Infinity" if number > 0 else "-Infinity"
+        return format(number, ".17g")
+    if normalized_type == "uuid":
+        return str(value if isinstance(value, UUID) else UUID(str(value)))
+    if normalized_type == "date":
+        parsed_date = value if isinstance(value, date) else date.fromisoformat(str(value))
+        return parsed_date.isoformat()
+    if normalized_type in {"timestamp", "timestamptz"}:
+        parsed_datetime = (
+            value
+            if isinstance(value, datetime)
+            else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        )
+        return parsed_datetime.isoformat()
+    if normalized_type in {"time", "timetz"}:
+        parsed_time = value if isinstance(value, time) else time.fromisoformat(str(value))
+        return parsed_time.isoformat()
+    if normalized_type in {"json", "jsonb"}:
+        parsed = json.loads(value) if isinstance(value, str) else value
+        return _canonical_json(parsed)
     if isinstance(value, bool):
         return int(value)
     if isinstance(value, int):
         return value
     if isinstance(value, Decimal):
-        return format(value, "f")
+        return _canonical_decimal(value)
     if isinstance(value, float):
         if math.isnan(value):
             return "NaN"
@@ -184,9 +237,6 @@ def _canonical_value(value: object, target_type: str | None) -> object:
         return value.isoformat()
     if isinstance(value, UUID):
         return str(value)
-    if target_type in {"json", "jsonb"}:
-        parsed = json.loads(value) if isinstance(value, str) else value
-        return _canonical_json(parsed)
     if isinstance(value, (dict, list, tuple)):
         return _canonical_json(value)
     return str(value) if not isinstance(value, str) else value
@@ -422,9 +472,12 @@ def _paid_charge_issues(
         )
     )
     by_order: dict[str, list[dict[str, object]]] = defaultdict(list)
+    charges_without_order = 0
     for charge in charges:
         order_id = charge["recharge_order_id"]
-        if order_id is not None:
+        if order_id is None:
+            charges_without_order += 1
+        else:
             by_order[str(order_id)].append(charge)
     order_by_id = {str(order["id"]): order for order in orders}
     issues: list[ReconciliationIssue] = []
@@ -454,12 +507,13 @@ def _paid_charge_issues(
                 )
             )
     orphan_charges = set(by_order) - set(order_by_id)
-    if orphan_charges:
+    missing_order_count = charges_without_order + len(orphan_charges)
+    if missing_order_count:
         issues.append(
             ReconciliationIssue(
                 code="charge_without_order",
                 scope=f"{side}:wallet_transactions",
-                detail=f"CHARGE rows reference missing orders: {len(orphan_charges)}",
+                detail=f"CHARGE rows reference missing orders: {missing_order_count}",
             )
         )
     return issues
@@ -583,11 +637,14 @@ def _asset_reference_issues_pg(
             if column != "asset_id" and not column.endswith("_asset_id"):
                 continue
             query = sql.SQL(
-                "SELECT COUNT(*) FROM {} AS child "
+                "SELECT COUNT(*) AS orphan_count FROM {} AS child "
                 "LEFT JOIN assets AS parent ON child.{} = parent.id "
                 "WHERE child.{} IS NOT NULL AND parent.id IS NULL"
             ).format(sql.Identifier(table), sql.Identifier(column), sql.Identifier(column))
-            count = int(conn.execute(query).fetchone()[0])
+            row = conn.execute(query).fetchone()
+            if row is None:
+                raise RuntimeError("asset reconciliation count query returned no row")
+            count = int(row["orphan_count"])
             if count:
                 issues.append(
                     ReconciliationIssue(
