@@ -8,6 +8,7 @@ from cryptography.fernet import Fernet
 
 from app.db import initialize_database
 from app.db_pg import (
+    CUSTOMER_PRODUCTION_ENV,
     DatabaseMode,
     check_pg_ready,
     close_pg_pool,
@@ -24,6 +25,72 @@ from app.settings import (
 )
 
 logger = logging.getLogger(__name__)
+
+# T09 / DB-08 — customer-production security gate (dev doc §17).
+_TRUTHY = {"1", "true", "yes", "on"}
+_ADMIN_SESSION_HMAC_KEY_ENV = "VIDEO_REPLICA_ADMIN_SESSION_HMAC_KEY"
+_LEGACY_CONTROL_ENVS = ("CONTROL_PROXY_TOKEN_DIGEST", "CONTROL_ADMIN_USER_ID")
+_DEV_AUTH_MODES = {"desktop", "development"}
+
+
+def _is_customer_production() -> bool:
+    return os.environ.get(CUSTOMER_PRODUCTION_ENV, "").strip().lower() in _TRUTHY
+
+
+def customer_production_security_violations() -> list[str]:
+    """List every customer-production boundary violation in the environment.
+
+    No-op outside customer production so internal P0 deployments keep their
+    dev identity, local assets and legacy control proxy token.
+    """
+    if not _is_customer_production():
+        return []
+    violations: list[str] = []
+    legacy = [name for name in _LEGACY_CONTROL_ENVS if os.environ.get(name, "").strip()]
+    if legacy:
+        violations.append(
+            "legacy single-admin control identity must not represent operators in "
+            f"customer production: unset {', '.join(legacy)}"
+        )
+    auth_mode = os.environ.get("VIDEO_REPLICA_AUTH_MODE", "").strip().lower()
+    if auth_mode in _DEV_AUTH_MODES:
+        violations.append(
+            f"development identity mode is forbidden in customer production: "
+            f"VIDEO_REPLICA_AUTH_MODE={auth_mode}"
+        )
+    if os.environ.get("VIDEO_REPLICA_ALLOW_DEV_IDENTITY_HEADER", "").strip() == "1":
+        violations.append(
+            "VIDEO_REPLICA_ALLOW_DEV_IDENTITY_HEADER=1 is forbidden in customer production"
+        )
+    if os.environ.get("VIDEO_REPLICA_DESKTOP_USER_ID", "").strip():
+        violations.append(
+            "VIDEO_REPLICA_DESKTOP_USER_ID (dev identity) is forbidden in customer production"
+        )
+    if os.environ.get("VIDEO_REPLICA_STORAGE_ROOT", "").strip():
+        violations.append(
+            "persistent local assets (VIDEO_REPLICA_STORAGE_ROOT) are forbidden in "
+            "customer production: configure the private COS storage provider instead"
+        )
+    admin_key_names = (
+        f"{_ADMIN_SESSION_HMAC_KEY_ENV}_V1",
+        _ADMIN_SESSION_HMAC_KEY_ENV,
+    )
+    if not any(os.environ.get(name, "").strip() for name in admin_key_names):
+        violations.append(
+            "admin session HMAC key is missing: set "
+            f"{admin_key_names[0]} (or the un-suffixed {admin_key_names[1]})"
+        )
+    return violations
+
+
+def assert_customer_production_security() -> None:
+    """Fail closed (RuntimeError) when a customer-production boot carries any
+    forbidden legacy/dev/local configuration (T09 exit gate)."""
+    violations = customer_production_security_violations()
+    if violations:
+        raise RuntimeError(
+            "customer production security gate failed:\n- " + "\n- ".join(violations)
+        )
 
 
 def bootstrap_runtime(db_path: str | Path) -> None:
@@ -42,9 +109,12 @@ def bootstrap_runtime(db_path: str | Path) -> None:
 
 def main() -> None:
     # T05: resolve the database mode first so customer production fails closed
-    # before any SQLite file is touched.
+    # before any SQLite file is touched. T09: the security gate then rejects
+    # legacy single-admin mappings, dev identities, local assets and missing
+    # admin-session keys before the ready check or any pool warm-up.
     config = resolve_database_config()
     validate_customer_production(config)
+    assert_customer_production_security()
 
     if config.mode is DatabaseMode.POSTGRESQL:
         # PG runtime: warm the pool and verify the server round-trip. Alembic

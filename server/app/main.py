@@ -10,6 +10,7 @@ from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from app.admin_auth_routes import router as admin_auth_router
 from app.analysis_routes import router as analysis_router
 from app.character_contracts import character_domain_openapi_schemas
 from app.character_generation_routes import router as character_generation_router
@@ -55,6 +56,13 @@ class VideoReplicaAPI(FastAPI):
 
 @asynccontextmanager
 async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
+    # T09 / DB-08: fail the API process closed at startup when a customer-
+    # production boot still carries legacy single-admin mappings, dev identity,
+    # local assets or a missing admin-session key (uvicorn aborts on lifespan
+    # errors). No-op on the internal SQLite lane.
+    from app.bootstrap import assert_customer_production_security
+
+    assert_customer_production_security()
     yield
     # M0 review M2: release the PG pool on shutdown so pooled connections
     # don't outlive the process. No-op on the SQLite lane (the pool is never
@@ -118,12 +126,13 @@ app.add_middleware(
     ],
     allow_credentials=False,
     allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"],
-    allow_headers=["Authorization", "Content-Type", "X-Dev-User-Id"],
+    allow_headers=["Authorization", "Content-Type", "X-Dev-User-Id", "X-Admin-CSRF"],
 )
 app.include_router(generation_router)
 app.include_router(rbac_router)
 app.include_router(payment_router)
 app.include_router(control_router)
+app.include_router(admin_auth_router)
 app.include_router(recharge_router)
 app.include_router(wallet_router)
 app.include_router(settings_router)
