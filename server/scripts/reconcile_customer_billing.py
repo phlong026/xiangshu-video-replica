@@ -11,7 +11,6 @@ import hashlib
 import json
 import math
 import sqlite3
-from collections import defaultdict
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import closing
 from dataclasses import asdict, dataclass
@@ -30,6 +29,20 @@ Dialect = Literal["sqlite", "postgresql"]
 EXCLUDED_TABLES = frozenset({"alembic_version"})
 DEFAULT_DIGEST_BATCH_SIZE = 1000
 _DIGEST_MODULUS = 1 << 256
+_MAX_SAFE_MESSAGE_LENGTH = 600
+
+# Only these exception types carry verbatim messages in CLI failures. They are
+# raised exclusively by this tool's own guardrails with fixed wording; driver
+# and row-conversion exceptions (sqlite3.Error, psycopg.Error, ValueError,
+# json.JSONDecodeError, ...) can embed raw business values such as
+# PostgreSQL's ``DETAIL: Failing row contains (...)`` and therefore degrade
+# to their class name plus a bounded stage hint instead.
+_VERBATIM_ERROR_TYPES: tuple[type[BaseException], ...] = (
+    RuntimeError,
+    FileNotFoundError,
+    FileExistsError,
+    PermissionError,
+)
 
 
 @dataclass(frozen=True)
@@ -177,15 +190,32 @@ def _dsn_sensitive_values(dsn: str) -> set[str]:
     return candidates
 
 
-def safe_error_message(error: Exception, dsn: str) -> str:
-    message = str(error)
-    for candidate in sorted(
-        (item for item in _dsn_sensitive_values(dsn) if item),
-        key=len,
-        reverse=True,
-    ):
-        message = message.replace(candidate, "<redacted>")
-    return message
+def safe_error_message(error: Exception, dsn: str, *, stage: str = "migration") -> str:
+    """Render a migration failure without exposing source business values.
+
+    ``str(error)`` of driver or row-conversion exceptions can embed storage
+    URIs, token digests, provider configuration, or PostgreSQL's
+    ``DETAIL: Failing row contains (...)`` with the failing row itself. Only
+    the tool's own guardrail exception types keep a verbatim message — still
+    scrubbed for DSN fragments and hard length-bound; every other exception
+    degrades to its class name plus the bounded stage hint.
+    """
+
+    if isinstance(error, _VERBATIM_ERROR_TYPES):
+        message = str(error)
+        for candidate in sorted(
+            (item for item in _dsn_sensitive_values(dsn) if item),
+            key=len,
+            reverse=True,
+        ):
+            message = message.replace(candidate, "<redacted>")
+        if len(message) > _MAX_SAFE_MESSAGE_LENGTH:
+            message = message[:_MAX_SAFE_MESSAGE_LENGTH] + "…<truncated>"
+        return f"{type(error).__name__}: {message}"
+    return (
+        f"{type(error).__name__} during {stage}; error text suppressed "
+        "(migration errors never include source business values)"
+    )
 
 
 def _quote_sqlite_identifier(identifier: str) -> str:
@@ -557,17 +587,53 @@ def _table_reconciliation(
     return result, issues
 
 
-def _mapping_rows(cursor: Any) -> list[dict[str, object]]:
-    rows = cursor.fetchall()
-    result: list[dict[str, object]] = []
-    for row in rows:
-        if isinstance(row, sqlite3.Row):
-            result.append({key: row[key] for key in row.keys()})
-        elif isinstance(row, Mapping):
-            result.append(dict(row))
-        else:
-            raise TypeError("database connection must return mapping rows")
-    return result
+def _count_rows(
+    conn: sqlite3.Connection | psycopg.Connection[Any], query: str | sql.Composed
+) -> int:
+    """Run a COUNT query on either dialect and return the integer result.
+
+    The billing and asset invariants are expressed as SQL aggregates and
+    anti-joins so a production-sized ledger never has to be materialised in
+    Python (bounded memory end to end).
+    """
+
+    if isinstance(conn, sqlite3.Connection):
+        if not isinstance(query, str):
+            raise TypeError("sqlite count queries must be plain SQL text")
+        row: object = conn.execute(query).fetchone()
+    else:
+        row = conn.execute(query).fetchone()
+    if row is None:
+        raise RuntimeError("reconciliation count query returned no row")
+    if isinstance(row, Mapping):
+        value = next(iter(row.values()))
+    else:
+        value = row[0]  # type: ignore[index]
+    return int(value)  # type: ignore[arg-type]
+
+
+_WALLET_AGGREGATE_MISMATCH_QUERY = """
+SELECT COUNT(*) AS bad
+FROM wallets AS w
+LEFT JOIN (
+    SELECT user_id,
+           COALESCE(SUM(available_delta), 0) AS available_total,
+           COALESCE(SUM(reserved_delta), 0) AS reserved_total
+    FROM wallet_transactions
+    GROUP BY user_id
+) AS ledger ON ledger.user_id = w.user_id
+WHERE w.available_credits != COALESCE(ledger.available_total, 0)
+   OR w.reserved_credits != COALESCE(ledger.reserved_total, 0)
+   OR w.available_credits < 0
+   OR w.reserved_credits < 0
+"""
+
+_WALLET_MISSING_FOR_LEDGER_OWNER_QUERY = """
+SELECT COUNT(*) AS bad
+FROM (SELECT DISTINCT user_id FROM wallet_transactions) AS ledger
+LEFT JOIN wallets AS w ON w.user_id = ledger.user_id
+WHERE w.user_id IS NULL
+"""
 
 
 def _wallet_issues(
@@ -576,59 +642,67 @@ def _wallet_issues(
     tables = set(_table_names(conn, dialect))
     if not {"wallets", "wallet_transactions"}.issubset(tables):
         return []
-    transactions = _mapping_rows(
-        conn.execute(
-            """
-            SELECT user_id,
-                   COALESCE(SUM(available_delta), 0) AS available_total,
-                   COALESCE(SUM(reserved_delta), 0) AS reserved_total
-            FROM wallet_transactions
-            GROUP BY user_id
-            """
-        )
-    )
-    totals = {
-        str(row["user_id"]): (int(row["available_total"]), int(row["reserved_total"]))
-        for row in transactions
-    }
-    wallets = _mapping_rows(
-        conn.execute("SELECT user_id, available_credits, reserved_credits FROM wallets")
-    )
     issues: list[ReconciliationIssue] = []
-    wallet_users: set[str] = set()
-    for wallet in wallets:
-        user_id = str(wallet["user_id"])
-        wallet_users.add(user_id)
-        expected_available, expected_reserved = totals.get(user_id, (0, 0))
-        actual_available = int(wallet["available_credits"])
-        actual_reserved = int(wallet["reserved_credits"])
-        if (
-            actual_available != expected_available
-            or actual_reserved != expected_reserved
-            or actual_available < 0
-            or actual_reserved < 0
-        ):
-            issues.append(
-                ReconciliationIssue(
-                    code="wallet_balance_mismatch",
-                    scope=f"{side}:wallets",
-                    detail=(
-                        "wallet aggregate differs from append-only transaction deltas "
-                        f"for 1 user (available={actual_available}/{expected_available}, "
-                        f"reserved={actual_reserved}/{expected_reserved})"
-                    ),
-                )
+    mismatched = _count_rows(conn, _WALLET_AGGREGATE_MISMATCH_QUERY)
+    if mismatched:
+        issues.append(
+            ReconciliationIssue(
+                code="wallet_balance_mismatch",
+                scope=f"{side}:wallets",
+                detail=(
+                    "wallets whose balances differ from the append-only "
+                    f"transaction aggregates: {mismatched}"
+                ),
             )
-    missing_wallets = set(totals) - wallet_users
-    if missing_wallets:
+        )
+    missing = _count_rows(conn, _WALLET_MISSING_FOR_LEDGER_OWNER_QUERY)
+    if missing:
         issues.append(
             ReconciliationIssue(
                 code="wallet_missing_for_ledger_owner",
                 scope=f"{side}:wallets",
-                detail=f"ledger owners without wallets: {len(missing_wallets)}",
+                detail=f"ledger owners without wallets: {missing}",
             )
         )
     return issues
+
+
+_PAID_ORDER_CHARGE_MISMATCH_QUERY = """
+SELECT COUNT(*) AS bad
+FROM recharge_orders AS o
+WHERE o.status = 'PAID'
+  AND (
+    (
+      SELECT COUNT(*) FROM wallet_transactions AS c
+      WHERE c.type = 'CHARGE' AND c.recharge_order_id = o.id
+    ) != 1
+    OR NOT EXISTS (
+      SELECT 1 FROM wallet_transactions AS c
+      WHERE c.type = 'CHARGE'
+        AND c.recharge_order_id = o.id
+        AND c.user_id = o.user_id
+        AND c.available_delta = o.credits
+        AND c.reserved_delta = 0
+    )
+  )
+"""
+
+_UNPAID_ORDER_WITH_CHARGE_QUERY = """
+SELECT COUNT(*) AS bad
+FROM recharge_orders AS o
+WHERE o.status != 'PAID'
+  AND EXISTS (
+    SELECT 1 FROM wallet_transactions AS c
+    WHERE c.type = 'CHARGE' AND c.recharge_order_id = o.id
+  )
+"""
+
+_CHARGE_WITHOUT_ORDER_QUERY = """
+SELECT COUNT(*) AS bad
+FROM wallet_transactions AS c
+LEFT JOIN recharge_orders AS o ON o.id = c.recharge_order_id
+WHERE c.type = 'CHARGE' AND (c.recharge_order_id IS NULL OR o.id IS NULL)
+"""
 
 
 def _paid_charge_issues(
@@ -637,62 +711,76 @@ def _paid_charge_issues(
     tables = set(_table_names(conn, dialect))
     if not {"recharge_orders", "wallet_transactions"}.issubset(tables):
         return []
-    orders = _mapping_rows(conn.execute("SELECT id, user_id, status, credits FROM recharge_orders"))
-    charges = _mapping_rows(
-        conn.execute(
-            """
-            SELECT recharge_order_id, user_id, available_delta, reserved_delta
-            FROM wallet_transactions
-            WHERE type = 'CHARGE'
-            """
-        )
-    )
-    by_order: dict[str, list[dict[str, object]]] = defaultdict(list)
-    charges_without_order = 0
-    for charge in charges:
-        order_id = charge["recharge_order_id"]
-        if order_id is None:
-            charges_without_order += 1
-        else:
-            by_order[str(order_id)].append(charge)
-    order_by_id = {str(order["id"]): order for order in orders}
     issues: list[ReconciliationIssue] = []
-    for order_id, order in order_by_id.items():
-        linked = by_order.get(order_id, [])
-        if str(order["status"]) == "PAID":
-            valid = (
-                len(linked) == 1
-                and str(linked[0]["user_id"]) == str(order["user_id"])
-                and int(linked[0]["available_delta"]) == int(order["credits"])
-                and int(linked[0]["reserved_delta"]) == 0
+    paid_mismatched = _count_rows(conn, _PAID_ORDER_CHARGE_MISMATCH_QUERY)
+    if paid_mismatched:
+        issues.append(
+            ReconciliationIssue(
+                code="paid_order_charge_mismatch",
+                scope=f"{side}:recharge_orders",
+                detail=(
+                    f"PAID orders without exactly one shape-matching CHARGE: {paid_mismatched}"
+                ),
             )
-            if not valid:
-                issues.append(
-                    ReconciliationIssue(
-                        code="paid_order_charge_mismatch",
-                        scope=f"{side}:recharge_orders",
-                        detail="a PAID order does not have exactly one shape-matching CHARGE",
-                    )
-                )
-        elif linked:
-            issues.append(
-                ReconciliationIssue(
-                    code="unpaid_order_has_charge",
-                    scope=f"{side}:recharge_orders",
-                    detail="a non-PAID order has one or more CHARGE rows",
-                )
+        )
+    unpaid_with_charge = _count_rows(conn, _UNPAID_ORDER_WITH_CHARGE_QUERY)
+    if unpaid_with_charge:
+        issues.append(
+            ReconciliationIssue(
+                code="unpaid_order_has_charge",
+                scope=f"{side}:recharge_orders",
+                detail=f"non-PAID orders with CHARGE rows: {unpaid_with_charge}",
             )
-    orphan_charges = set(by_order) - set(order_by_id)
-    missing_order_count = charges_without_order + len(orphan_charges)
-    if missing_order_count:
+        )
+    charge_without_order = _count_rows(conn, _CHARGE_WITHOUT_ORDER_QUERY)
+    if charge_without_order:
         issues.append(
             ReconciliationIssue(
                 code="charge_without_order",
                 scope=f"{side}:wallet_transactions",
-                detail=f"CHARGE rows reference missing orders: {missing_order_count}",
+                detail=f"CHARGE rows reference missing orders: {charge_without_order}",
             )
         )
     return issues
+
+
+_BILLING_ROUND_MISMATCH_QUERY = """
+SELECT COUNT(*) AS bad
+FROM (
+    SELECT task_id, billing_round,
+           SUM(CASE WHEN type = 'RESERVE' THEN 1 ELSE 0 END) AS reserves,
+           SUM(CASE WHEN type IN ('SETTLE', 'RELEASE') THEN 1 ELSE 0 END) AS terminals
+    FROM wallet_transactions
+    WHERE task_id IS NOT NULL AND billing_round IS NOT NULL
+    GROUP BY task_id, billing_round
+) AS rounds
+WHERE rounds.reserves != 1 OR rounds.terminals > 1
+"""
+
+_BILLING_OWNER_MISMATCH_QUERY = """
+SELECT COUNT(*) AS bad
+FROM wallet_transactions AS wt
+LEFT JOIN generation_tasks AS t ON t.id = wt.task_id
+LEFT JOIN generation_batches AS b ON b.id = t.batch_id
+WHERE wt.task_id IS NOT NULL AND wt.billing_round IS NOT NULL
+  AND (t.id IS NULL OR b.id IS NULL
+       OR b.created_by_user_id IS NULL
+       OR b.created_by_user_id != wt.user_id)
+"""
+
+_BILLING_ROUND_GAP_QUERY = """
+SELECT COUNT(*) AS bad
+FROM (
+    SELECT task_id,
+           MIN(billing_round) AS first_round,
+           MAX(billing_round) AS last_round,
+           COUNT(DISTINCT billing_round) AS distinct_rounds
+    FROM wallet_transactions
+    WHERE task_id IS NOT NULL AND billing_round IS NOT NULL
+    GROUP BY task_id
+) AS spans
+WHERE spans.first_round != 1 OR spans.distinct_rounds != spans.last_round
+"""
 
 
 def _generation_billing_issues(
@@ -702,113 +790,96 @@ def _generation_billing_issues(
     required = {"wallet_transactions", "generation_tasks", "generation_batches"}
     if not required.issubset(tables):
         return []
-    rows = _mapping_rows(
-        conn.execute(
-            """
-            SELECT task_id, billing_round, type, user_id
-            FROM wallet_transactions
-            WHERE task_id IS NOT NULL AND billing_round IS NOT NULL
-            """
-        )
-    )
-    owners = _mapping_rows(
-        conn.execute(
-            """
-            SELECT task.id AS task_id, batch.created_by_user_id AS owner_user_id
-            FROM generation_tasks AS task
-            JOIN generation_batches AS batch ON batch.id = task.batch_id
-            """
-        )
-    )
-    owner_by_task = {str(row["task_id"]): str(row["owner_user_id"]) for row in owners}
-    grouped: dict[tuple[str, int], list[dict[str, object]]] = defaultdict(list)
-    rounds_by_task: dict[str, set[int]] = defaultdict(set)
-    for row in rows:
-        task_id = str(row["task_id"])
-        billing_round = int(row["billing_round"])
-        grouped[(task_id, billing_round)].append(row)
-        rounds_by_task[task_id].add(billing_round)
     issues: list[ReconciliationIssue] = []
-    for (task_id, billing_round), entries in grouped.items():
-        reserves = [entry for entry in entries if str(entry["type"]) == "RESERVE"]
-        terminals = [entry for entry in entries if str(entry["type"]) in {"SETTLE", "RELEASE"}]
-        if len(reserves) != 1 or len(terminals) > 1:
-            issues.append(
-                ReconciliationIssue(
-                    code="generation_billing_round_mismatch",
-                    scope=f"{side}:wallet_transactions",
-                    detail=(
-                        "a task billing round lacks exactly one RESERVE or has multiple terminals "
-                        f"(round={billing_round})"
-                    ),
-                )
+    round_mismatched = _count_rows(conn, _BILLING_ROUND_MISMATCH_QUERY)
+    if round_mismatched:
+        issues.append(
+            ReconciliationIssue(
+                code="generation_billing_round_mismatch",
+                scope=f"{side}:wallet_transactions",
+                detail=(
+                    "task billing rounds without exactly one RESERVE or with "
+                    f"multiple terminals: {round_mismatched}"
+                ),
             )
-        owner = owner_by_task.get(task_id)
-        if owner is None or any(str(entry["user_id"]) != owner for entry in entries):
-            issues.append(
-                ReconciliationIssue(
-                    code="generation_billing_owner_mismatch",
-                    scope=f"{side}:wallet_transactions",
-                    detail="a task billing round is not owned by the generation batch owner",
-                )
+        )
+    owner_mismatched = _count_rows(conn, _BILLING_OWNER_MISMATCH_QUERY)
+    if owner_mismatched:
+        issues.append(
+            ReconciliationIssue(
+                code="generation_billing_owner_mismatch",
+                scope=f"{side}:wallet_transactions",
+                detail=(
+                    f"task billing rows not owned by the generation batch owner: {owner_mismatched}"
+                ),
             )
-    for rounds in rounds_by_task.values():
-        expected = set(range(1, max(rounds) + 1))
-        if rounds != expected:
-            issues.append(
-                ReconciliationIssue(
-                    code="generation_billing_round_gap",
-                    scope=f"{side}:wallet_transactions",
-                    detail=f"billing rounds are not contiguous for 1 task ({len(rounds)} rounds)",
-                )
+        )
+    round_gaps = _count_rows(conn, _BILLING_ROUND_GAP_QUERY)
+    if round_gaps:
+        issues.append(
+            ReconciliationIssue(
+                code="generation_billing_round_gap",
+                scope=f"{side}:wallet_transactions",
+                detail=f"tasks with non-contiguous billing rounds: {round_gaps}",
             )
+        )
     return issues
-
-
-def _asset_ids_sqlite(conn: sqlite3.Connection) -> set[str]:
-    return {str(row[0]) for row in conn.execute("SELECT id FROM assets").fetchall()}
-
-
-def _asset_ids_pg(conn: psycopg.Connection[Any]) -> set[str]:
-    return {str(_row_value(row, "id")) for row in conn.execute("SELECT id FROM assets").fetchall()}
-
-
-def _parse_asset_id_list(raw: object) -> tuple[list[str], bool]:
-    if raw is None:
-        return [], False
-    try:
-        value = json.loads(raw) if isinstance(raw, str) else raw
-    except (TypeError, json.JSONDecodeError):
-        return [], True
-    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
-        return [], True
-    return value, False
 
 
 def _json_asset_reference_issues_sqlite(
     conn: sqlite3.Connection,
     tables: Sequence[str],
-    known_assets: set[str],
     side: str,
 ) -> list[ReconciliationIssue]:
+    """Validate ``*_asset_ids_json`` columns with in-database JSON expansion.
+
+    The malformed-shape and orphan-reference invariants run as SQLite
+    ``json_valid``/``json_type``/``json_each`` queries so neither the asset
+    ID universe nor the referencing rows are ever materialised in Python.
+    ``CASE`` guards keep every JSON function behind the preceding validity
+    check, because evaluating ``json_type``/``json_each`` on malformed JSON
+    would raise instead of counting.
+    """
+
     issues: list[ReconciliationIssue] = []
     for table in tables:
         columns, _ = _sqlite_columns(conn, table)
         for column in (name for name in columns if name.endswith("_asset_ids_json")):
-            query = (
-                f"SELECT {_quote_sqlite_identifier(column)} FROM {_quote_sqlite_identifier(table)}"
+            quoted_table = _quote_sqlite_identifier(table)
+            quoted_column = _quote_sqlite_identifier(column)
+            invalid = _count_rows(
+                conn,
+                f"""
+                SELECT COUNT(*) FROM {quoted_table} AS row_src
+                WHERE row_src.{quoted_column} IS NOT NULL
+                  AND CASE
+                        WHEN json_valid(row_src.{quoted_column}) = 0 THEN 1
+                        WHEN json_type(row_src.{quoted_column}) != 'array' THEN 1
+                        WHEN EXISTS (
+                          SELECT 1 FROM json_each(row_src.{quoted_column}) AS element
+                          WHERE element.type != 'text'
+                        ) THEN 1
+                        ELSE 0
+                      END = 1
+                """,
             )
-            invalid = 0
-            orphan = 0
-            cursor = conn.execute(query)
-            while True:
-                rows = cursor.fetchmany(DEFAULT_DIGEST_BATCH_SIZE)
-                if not rows:
-                    break
-                for row in rows:
-                    asset_ids, malformed = _parse_asset_id_list(row[0])
-                    invalid += int(malformed)
-                    orphan += sum(asset_id not in known_assets for asset_id in asset_ids)
+            orphan = _count_rows(
+                conn,
+                f"""
+                SELECT COUNT(*) FROM {quoted_table} AS row_src
+                WHERE row_src.{quoted_column} IS NOT NULL
+                  AND CASE
+                        WHEN json_valid(row_src.{quoted_column}) = 1
+                         AND json_type(row_src.{quoted_column}) = 'array'
+                        THEN EXISTS (
+                          SELECT 1 FROM json_each(row_src.{quoted_column}) AS element
+                          WHERE element.type = 'text'
+                            AND element.value NOT IN (SELECT id FROM assets)
+                        )
+                        ELSE 0
+                      END = 1
+                """,
+            )
             if invalid:
                 issues.append(
                     ReconciliationIssue(
@@ -831,30 +902,61 @@ def _json_asset_reference_issues_sqlite(
 def _json_asset_reference_issues_pg(
     conn: psycopg.Connection[Any],
     tables: Sequence[str],
-    known_assets: set[str],
     side: str,
 ) -> list[ReconciliationIssue]:
+    """Validate ``*_asset_ids_json`` columns with in-database JSON expansion.
+
+    The TEXT columns are validated with ``pg_input_is_valid`` (PostgreSQL 16+,
+    matching the project's PG16 baseline) and expanded with
+    ``jsonb_array_elements_text`` so neither the asset ID universe nor the
+    referencing rows are materialised in Python. ``CASE`` guards keep every
+    cast behind the preceding validity check: PostgreSQL does not guarantee
+    short-circuit evaluation inside ``AND``/``OR`` chains.
+    """
+
     issues: list[ReconciliationIssue] = []
     for table in tables:
         columns, _, _ = _pg_columns(conn, table)
         for column in (name for name in columns if name.endswith("_asset_ids_json")):
-            query = sql.SQL("SELECT {} FROM {}").format(
-                sql.Identifier(column), sql.Identifier(table)
+            identifiers = {"table": sql.Identifier(table), "column": sql.Identifier(column)}
+            invalid = _count_rows(
+                conn,
+                sql.SQL(
+                    """
+                    SELECT COUNT(*) FROM {table} AS row_src
+                    WHERE row_src.{column} IS NOT NULL
+                      AND CASE
+                            WHEN NOT pg_input_is_valid(row_src.{column}, 'jsonb') THEN true
+                            WHEN jsonb_typeof(row_src.{column}::jsonb) IS DISTINCT FROM 'array'
+                              THEN true
+                            WHEN EXISTS (
+                              SELECT 1
+                              FROM jsonb_array_elements(row_src.{column}::jsonb) AS element
+                              WHERE jsonb_typeof(element) IS DISTINCT FROM 'string'
+                            ) THEN true
+                            ELSE false
+                          END
+                    """
+                ).format(**identifiers),
             )
-            invalid = 0
-            orphan = 0
-            cursor_name = f"t07_asset_json_{uuid4().hex}"
-            with conn.cursor(name=cursor_name) as cursor:
-                cursor.itersize = DEFAULT_DIGEST_BATCH_SIZE
-                cursor.execute(query)
-                while True:
-                    rows = cursor.fetchmany(DEFAULT_DIGEST_BATCH_SIZE)
-                    if not rows:
-                        break
-                    for row in rows:
-                        asset_ids, malformed = _parse_asset_id_list(_row_value(row, column, 0))
-                        invalid += int(malformed)
-                        orphan += sum(asset_id not in known_assets for asset_id in asset_ids)
+            orphan = _count_rows(
+                conn,
+                sql.SQL(
+                    """
+                    SELECT COUNT(*) FROM {table} AS row_src
+                    WHERE row_src.{column} IS NOT NULL
+                      AND CASE
+                            WHEN NOT pg_input_is_valid(row_src.{column}, 'jsonb') THEN false
+                            WHEN jsonb_typeof(row_src.{column}::jsonb) = 'array' THEN EXISTS (
+                              SELECT 1
+                              FROM jsonb_array_elements_text(row_src.{column}::jsonb) AS element
+                              WHERE element.value NOT IN (SELECT id FROM assets)
+                            )
+                            ELSE false
+                          END
+                    """
+                ).format(**identifiers),
+            )
             if invalid:
                 issues.append(
                     ReconciliationIssue(
@@ -904,7 +1006,7 @@ def _asset_reference_issues_sqlite(
                         detail=f"asset reference orphan count={count}",
                     )
                 )
-    issues.extend(_json_asset_reference_issues_sqlite(conn, tables, _asset_ids_sqlite(conn), side))
+    issues.extend(_json_asset_reference_issues_sqlite(conn, tables, side))
     return issues
 
 
@@ -939,7 +1041,7 @@ def _asset_reference_issues_pg(
                         detail=f"asset reference orphan count={count}",
                     )
                 )
-    issues.extend(_json_asset_reference_issues_pg(conn, tables, _asset_ids_pg(conn), side))
+    issues.extend(_json_asset_reference_issues_pg(conn, tables, side))
     return issues
 
 
@@ -1014,7 +1116,7 @@ def main() -> None:
     try:
         report = reconcile_databases(args.sqlite, args.postgres_url)
     except Exception as error:
-        parser.exit(1, safe_error_message(error, args.postgres_url) + "\n")
+        parser.exit(1, safe_error_message(error, args.postgres_url, stage="reconciliation") + "\n")
     payload = json.dumps(report.to_dict(), ensure_ascii=False, indent=2, sort_keys=True)
     if args.output:
         output = Path(args.output)

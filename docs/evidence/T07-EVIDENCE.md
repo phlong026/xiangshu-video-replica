@@ -39,33 +39,47 @@ T07 只提供维护窗口中的一次性迁移，不建立 SQLite/PostgreSQL 双
 
 ## 文件与完整性
 
+Blob SHA 随 PR #38 第二轮评审修复刷新（writer fence / bounded errors / SQL 化对账 / 计数化报告）；
+最终以 squash 合并结果为准。
+
 | 文件 | Git blob SHA |
 | --- | --- |
-| `server/app/backup.py` | `29cad8a1b3ca7405d7dfc60bcdf285a09ff43dd2` |
-| `server/scripts/reconcile_customer_billing.py` | `fa7518e246a69f43863c5cfe21ea3f157bab4c9e` |
-| `server/scripts/sqlite_to_postgres.py` | `00fe2666182e4982a8ea2ccb40bb7b75dd1dd885` |
-| `server/tests/test_sqlite_to_postgres.py` | `cad23d2ab50a13101092916705a6de2feac9e2ab` |
+| `server/app/backup.py` | `18b3008cf3d2083565af46e64e69c7ed3ca92282` |
+| `server/scripts/reconcile_customer_billing.py` | `65b551b9656a2b65658ccd460b5a1523a42766d0` |
+| `server/scripts/sqlite_to_postgres.py` | `ea20e9f31fe71f034475a89b24adee559860c97c` |
+| `server/tests/test_sqlite_to_postgres.py` | `2e2a14a241e1858caaaf0e03b1651ab77a0008f7` |
 
 临时展开载荷与一次性 workflow 已在同一分支提交中自删除，不属于 PR 最终差异。
 
+## PR #38 第二轮评审修复（2026-08-22）
+
+| 等级 | 问题 | 处置 |
+| --- | --- | --- |
+| P1 | `final_stat` 在最终哈希之前采样且无 writer fence，存在 TOCTOU 窗口 | 新增 `_writer_fence`：从首次 hash 到元数据计算完成全程持有源库 `BEGIN IMMEDIATE`（意外恢复的 writer 提交即 SQLITE_BUSY；进程崩溃锁自动释放；不写库故不产生 journal）；最终复核改为 hash→stat 顺序；快照哈希计算移入 fence 内 |
+| P1 | `str(error)` 可能携带业务行（PG `DETAIL: Failing row contains (...)`、存储 URI、token 摘要），现有脱敏只移除 DSN 派生串 | `safe_error_message` 改为 allowlist：仅本工具守卫异常（RuntimeError/FileNotFoundError/FileExistsError/PermissionError）保留 verbatim 消息（仍 DSN 脱敏 + 600 字符硬截断）；其余异常降级为「异常类名 + 阶段提示」，两个 CLI 均接入 `stage=` |
+| P2 | 钱包/充值/账务轮次/owner/资产 ID 检查仍用 `fetchall()` 物化全表 | 五组不变量全部改为 SQL 聚合/反连接（LEFT JOIN + COALESCE、NOT EXISTS、SUM(CASE)/COUNT(DISTINCT)）；JSON 资产引用改为数据库端展开（SQLite `json_valid`/`json_type`/`json_each`；PG16 `pg_input_is_valid` + `jsonb_array_elements_text`，`CASE` 守卫防止对非数组求值抛错）；Python 端不再物化任何业务表或资产 ID 集合 |
+| P2 | `wallet_balance_mismatch` detail 携带精确余额（actual/expected） | 全部 invariant detail 计数化：仅报告不匹配条数，不含任何业务值 |
+| P2 | 证据文件完整性哈希仍指向旧 `4b3a9bb` 版本 blob | 已按本轮修复后的最终实现重新生成（见上表） |
+
+附带发现：源库持久化 `journal_mode=WAL` 标志（header 字节 18/19）在 WAL 文件被清理后仍存在，
+普通连接（含 fence）打开会重新产生 `-wal`/`-shm`。新增 `_assert_delete_journal_mode`
+（直读 header，不开连接）fail-closed：维护窗口契约明确要求源库以 DELETE 模式收尾
+（`wal_checkpoint(TRUNCATE)` + `journal_mode = DELETE`，与 `_create_head_source` 实践一致）。
+
 ## 当前专项验证
 
-本地隔离验证（外部依赖用最小导入 stub，仅验证本任务纯 Python 逻辑和测试可收集性）：
+本地隔离验证（真实 PG16 fixture 已启动，`scripts/pg-fixture.sh start`）：
 
 ```text
-python -m py_compile <4 个 T07 文件>                         → PASS
-AST 未使用 import 扫描                                      → 0
-100 字符行长扫描                                             → 0
-pytest server/tests/test_sqlite_to_postgres.py               → 10 passed, 4 skipped
+uv run python -m pytest tests/test_sqlite_to_postgres.py   → 24 passed（含 5 项真实 PG16 集成）
+uv run python -m pytest tests -q                            → 634 passed, 1 warning
+ruff check . / ruff format --check .                       → 全部通过（122 文件）
+mypy app                                                   → 53 源文件无问题
 ```
 
-4 个 skipped 为依赖真实 PostgreSQL 16 的集成用例，必须由 CI fixture 执行后方可升级证据层级：
-
-- 一次性导入、完整对账、重复执行；
-- 注入失败后的全事务回滚；
-- 分叉目标与 Alembic revision 不一致 fail-closed；
-- 主键/行/钱包漂移；
-- JSON 资产孤儿在写入前拒绝。
+第二轮评审新增红绿测试：fence 阻止恢复 writer 提交、fence 阻止并发快照（释放后可重试）、
+绕过 SQLite 锁的直接文件突变仍被 hash→stat 终检捕获、非 allowlist 异常不泄露业务值、
+余额 detail 仅计数、generation billing 三类漂移（round/owner/gap）检测。
 
 ## 独立安全评审新增红绿证据（2026-08-21）
 

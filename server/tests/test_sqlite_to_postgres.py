@@ -173,22 +173,85 @@ def test_snapshot_publish_rolls_back_when_temp_cleanup_fails(
     assert not destination.exists()
 
 
-def test_snapshot_rechecks_source_after_publication_boundary(
+def test_snapshot_writer_fence_blocks_resumed_writer_commit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A resumed writer cannot commit while the fence is held (PR review P1).
+
+    The old TOCTOU window (writer landing between the final hash/stat checks
+    and the metadata computation) is closed by holding BEGIN IMMEDIATE for the
+    whole snapshot creation: the resumed writer now fails with SQLITE_BUSY
+    instead of silently changing the source after the checks passed.
+    """
+
+    source = tmp_path / "source.db"
+    snapshot = tmp_path / "snapshot.db"
+    _basic_sqlite(source)
+    before = source.read_bytes()
+    original_publish = backup_module._publish_without_overwrite
+
+    def attempt_write_during_publish(temporary: Path, destination: Path) -> None:
+        writer = sqlite3.connect(source, timeout=0)
+        try:
+            with pytest.raises(sqlite3.OperationalError):
+                writer.execute("UPDATE wallets SET available_credits = 11 WHERE user_id = 'u1'")
+                writer.commit()
+        finally:
+            writer.close()
+        original_publish(temporary, destination)
+
+    monkeypatch.setattr(backup_module, "_publish_without_overwrite", attempt_write_during_publish)
+    metadata = create_readonly_snapshot(source, snapshot)
+
+    assert source.read_bytes() == before
+    assert metadata.path == snapshot.resolve()
+
+
+def test_snapshot_writer_fence_blocks_concurrent_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.db"
+    _basic_sqlite(source)
+    original_publish = backup_module._publish_without_overwrite
+
+    def concurrent_snapshot_during_publish(temporary: Path, destination: Path) -> None:
+        with pytest.raises(RuntimeError, match="migration writer fence"):
+            create_readonly_snapshot(source, tmp_path / "second.db")
+        original_publish(temporary, destination)
+
+    monkeypatch.setattr(
+        backup_module, "_publish_without_overwrite", concurrent_snapshot_during_publish
+    )
+    create_readonly_snapshot(source, tmp_path / "first.db")
+    # The fence is released once the snapshot completes: a later snapshot succeeds.
+    create_readonly_snapshot(source, tmp_path / "third.db")
+
+
+def test_snapshot_final_recheck_detects_direct_file_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Byte-level mutation that bypasses SQLite locking is still caught.
+
+    POSIX advisory locks only constrain cooperating processes; a direct file
+    write after publication is the last TOCTOU variant and must still fail
+    the final hash/stat re-check (hash first, then stat) and roll the
+    published snapshot back.
+    """
+
     source = tmp_path / "source.db"
     snapshot = tmp_path / "snapshot.db"
     _basic_sqlite(source)
     original_publish = backup_module._publish_without_overwrite
 
-    def mutate_then_publish(temporary: Path, destination: Path) -> None:
-        with sqlite3.connect(source) as writer:
-            writer.execute("UPDATE wallets SET available_credits = 11 WHERE user_id = 'u1'")
-            writer.commit()
+    def mutate_file_after_publish(temporary: Path, destination: Path) -> None:
         original_publish(temporary, destination)
+        with open(source, "r+b") as stream:
+            stream.write(b"X")
 
-    monkeypatch.setattr(backup_module, "_publish_without_overwrite", mutate_then_publish)
+    monkeypatch.setattr(backup_module, "_publish_without_overwrite", mutate_file_after_publish)
     with pytest.raises(RuntimeError, match="source changed"):
         create_readonly_snapshot(source, snapshot)
 
@@ -224,7 +287,18 @@ def test_snapshot_rejects_active_wal_sidecars(tmp_path: Path) -> None:
     finally:
         writer.close()
 
-    metadata = create_readonly_snapshot(source, tmp_path / "after-close.db")
+    # The WAL file is gone after the last close, but the persistent WAL
+    # journal-mode flag in the header remains: the next ordinary connection
+    # (including the snapshot writer fence) would resurrect -wal/-shm. The
+    # maintenance-window contract requires the source to end in DELETE mode,
+    # so the snapshot fails closed with an explicit switch instruction.
+    assert not Path(f"{source}-wal").exists()
+    with pytest.raises(RuntimeError, match="WAL journal mode"):
+        create_readonly_snapshot(source, tmp_path / "after-close.db")
+
+    with sqlite3.connect(source) as switcher:
+        assert switcher.execute("PRAGMA journal_mode = DELETE").fetchone()[0].lower() == "delete"
+    metadata = create_readonly_snapshot(source, tmp_path / "after-delete.db")
     assert metadata.path.exists()
 
 
@@ -255,6 +329,114 @@ def test_redaction_and_error_messages_never_expose_passwords() -> None:
         "sslpassword",
     ):
         assert sensitive_value not in message
+
+
+def test_safe_error_message_bounds_untrusted_exception_text() -> None:
+    """Driver/conversion errors degrade to class + stage, never raw text (PR review P1)."""
+
+    dsn = "postgresql://migration:secret@db.example/customer"
+    leaky_value_error = ValueError(
+        "invalid literal for int() with base 10: 'cos://private/customer-row.mp4'"
+    )
+    bounded = safe_error_message(leaky_value_error, dsn, stage="import")
+    assert "cos://private/customer-row.mp4" not in bounded
+    assert "ValueError" in bounded
+    assert "import" in bounded
+
+    leaky_driver_error = sqlite3.DatabaseError(
+        "DETAIL:  Failing row contains (cos://private/secret.mp4, token-digest-123)"
+    )
+    bounded_driver = safe_error_message(leaky_driver_error, dsn, stage="reconciliation")
+    assert "secret.mp4" not in bounded_driver
+    assert "token-digest-123" not in bounded_driver
+    assert "DatabaseError" in bounded_driver
+    assert "reconciliation" in bounded_driver
+
+    oversized = safe_error_message(RuntimeError("x" * 10_000 + " trailing-secret"), dsn)
+    assert len(oversized) < 10_000
+    assert oversized.endswith("…<truncated>")
+
+
+def test_wallet_mismatch_detail_reports_counts_only(tmp_path: Path) -> None:
+    """Wallet drift reports carry counts, never exact balances (PR review P2)."""
+
+    database = tmp_path / "source.db"
+    _basic_sqlite(database)
+    with sqlite3.connect(database) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("UPDATE wallets SET available_credits = 987654321 WHERE user_id = 'u1'")
+        conn.commit()
+        issues = validate_database_invariants(conn, "sqlite", "source")
+
+    wallet_issues = [issue for issue in issues if issue.code == "wallet_balance_mismatch"]
+    assert wallet_issues
+    for issue in wallet_issues:
+        assert "987654321" not in issue.detail
+        assert "available=" not in issue.detail
+        assert "reserved=" not in issue.detail
+
+
+def _billing_sqlite(path: Path) -> None:
+    with sqlite3.connect(path) as conn:
+        conn.executescript(
+            """
+            PRAGMA foreign_keys = ON;
+            CREATE TABLE generation_batches (
+                id TEXT PRIMARY KEY,
+                created_by_user_id TEXT NOT NULL
+            );
+            CREATE TABLE generation_tasks (
+                id TEXT PRIMARY KEY,
+                batch_id TEXT NOT NULL REFERENCES generation_batches(id)
+            );
+            CREATE TABLE wallet_transactions (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                type TEXT NOT NULL,
+                available_delta INTEGER NOT NULL,
+                reserved_delta INTEGER NOT NULL,
+                recharge_order_id TEXT,
+                task_id TEXT,
+                billing_round INTEGER
+            );
+            INSERT INTO generation_batches VALUES ('b-owner', 'u-owner');
+            INSERT INTO generation_batches VALUES ('b-other', 'u-other');
+            INSERT INTO generation_tasks VALUES ('t-double', 'b-owner');
+            INSERT INTO generation_tasks VALUES ('t-wrong', 'b-other');
+            INSERT INTO generation_tasks VALUES ('t-gap', 'b-owner');
+            -- t-double: one round with two RESERVE rows -> round mismatch
+            INSERT INTO wallet_transactions VALUES
+                ('w1', 'u-owner', 'RESERVE', 0, 5, NULL, 't-double', 1);
+            INSERT INTO wallet_transactions VALUES
+                ('w2', 'u-owner', 'RESERVE', 0, 5, NULL, 't-double', 1);
+            -- t-wrong: billing rows not owned by the batch owner
+            INSERT INTO wallet_transactions VALUES
+                ('w3', 'u-owner', 'RESERVE', 0, 5, NULL, 't-wrong', 1);
+            INSERT INTO wallet_transactions VALUES
+                ('w4', 'u-owner', 'SETTLE', 3, -5, NULL, 't-wrong', 1);
+            -- t-gap: billing starts at round 2 -> non-contiguous rounds
+            INSERT INTO wallet_transactions VALUES
+                ('w5', 'u-owner', 'RESERVE', 0, 5, NULL, 't-gap', 2);
+            INSERT INTO wallet_transactions VALUES
+                ('w6', 'u-owner', 'RELEASE', 0, -5, NULL, 't-gap', 2);
+            """
+        )
+
+
+def test_generation_billing_invariants_detect_drift(tmp_path: Path) -> None:
+    database = tmp_path / "billing.db"
+    _billing_sqlite(database)
+    with sqlite3.connect(database) as conn:
+        conn.row_factory = sqlite3.Row
+        issues = validate_database_invariants(conn, "sqlite", "source")
+
+    codes = {issue.code for issue in issues}
+    assert "generation_billing_round_mismatch" in codes
+    assert "generation_billing_owner_mismatch" in codes
+    assert "generation_billing_round_gap" in codes
+    for issue in issues:
+        assert "u-owner" not in issue.detail
+        assert "u-other" not in issue.detail
 
 
 def test_table_digest_is_order_independent_streaming_and_separates_pk(tmp_path: Path) -> None:

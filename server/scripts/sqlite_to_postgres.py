@@ -558,7 +558,7 @@ def main() -> None:
             batch_size=args.batch_size,
         )
     except Exception as error:
-        parser.exit(1, safe_error_message(error, args.postgres_url) + "\n")
+        parser.exit(1, safe_error_message(error, args.postgres_url, stage="migration") + "\n")
     print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2, sort_keys=True))
 
 
