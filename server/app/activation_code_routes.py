@@ -9,8 +9,11 @@ snapshot, the unique CHARGE ledger row, the ACTIVE code state and the
 epoch-1 session with a 90-second lease — all or nothing.
 
 Idempotency envelope (revision 029, ``customer_idempotency_envelopes``): the
-raw client key never reaches the database — only its SHA-256 digest. The
-envelope placeholder is inserted first with ``ON CONFLICT DO NOTHING``, so
+engine lives in ``app.customer_idempotency`` since T14 / ACT-07 so the later
+customer write paths (second-device enroll, login, recharge) share one
+contract. The raw client key never reaches the database — only its SHA-256
+digest. The envelope placeholder is inserted first with ``ON CONFLICT DO
+NOTHING``, so
 concurrent same-key writers serialize on the unique index; the winner seals
 the one-time response into an AES-GCM envelope (keyed digests of the device
 fingerprint / credentials never persist in plaintext), and a same-key retry
@@ -38,10 +41,8 @@ fails closed with 503 (SQLite stays the internal P0 lane).
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import hmac
-import json
 import logging
 import os
 import secrets
@@ -49,8 +50,6 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import psycopg
-from cryptography.exceptions import InvalidTag
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from fastapi import APIRouter, HTTPException, Request, Response
 from psycopg.errors import UniqueViolation
 from pydantic import BaseModel, ConfigDict, Field
@@ -61,6 +60,23 @@ from app.activation_code_service import (
     iter_code_digests,
     normalize_activation_code,
 )
+from app.customer_idempotency import (
+    EnvelopeRecord,
+    IdempotencyKeyError,
+    complete_envelope,
+    customer_aead_key,
+    envelope_aad,
+    highest_customer_aead_key,
+    idempotency_key_digest,
+    insert_envelope,
+    load_envelope,
+    open_response,
+    recovery_window_seconds,
+    seal_response,
+)
+from app.customer_idempotency import (
+    request_hash as compute_request_hash,
+)
 from app.db_pg import get_pg_pool, pg_transaction
 
 logger = logging.getLogger(__name__)
@@ -70,16 +86,11 @@ REQUEST_ID_HEADER = "X-Request-Id"
 REPLAY_HEADER = "X-Idempotent-Replay"
 
 DEVICE_FINGERPRINT_HMAC_KEY_ENV = "VIDEO_REPLICA_DEVICE_FINGERPRINT_HMAC_KEY"
-CUSTOMER_IDEMPOTENCY_AEAD_KEY_ENV = "VIDEO_REPLICA_CUSTOMER_IDEMPOTENCY_AEAD_KEY"
-CUSTOMER_IDEMPOTENCY_RECOVERY_SECONDS_ENV = "VIDEO_REPLICA_CUSTOMER_IDEMPOTENCY_RECOVERY_SECONDS"
 
 # T19 / SES-01: heartbeat every 30 seconds, lease 90 seconds. The activation
 # transaction grants the first lease; renewals are the T19 application layer.
 SESSION_LEASE_SECONDS = 90
-DEFAULT_RECOVERY_WINDOW_SECONDS = 24 * 60 * 60
 MIN_HMAC_KEY_BYTES = 32
-AESGCM_KEY_BYTES = 32
-AESGCM_NONCE_BYTES = 12
 MAX_KEY_VERSION = 64
 USERNAME_MAX_ATTEMPTS = 5
 FINGERPRINT_UNIQUE_CONSTRAINT = "uq_customer_devices_fingerprint"
@@ -138,24 +149,6 @@ def _device_domain_hmac_key(key_version: int) -> bytes:
     )
 
 
-def _customer_idempotency_aead_key(key_version: int) -> bytes:
-    """The response-envelope AEAD key (base64, exactly 32 decoded bytes)."""
-    for name in _env_key_candidates(CUSTOMER_IDEMPOTENCY_AEAD_KEY_ENV, key_version):
-        value = os.environ.get(name, "").strip()
-        if not value:
-            continue
-        try:
-            raw = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
-        except ValueError as exc:
-            raise ActivationKeyError(f"{name} is not valid base64") from exc
-        if len(raw) != AESGCM_KEY_BYTES:
-            raise ActivationKeyError(f"{name} must decode to exactly {AESGCM_KEY_BYTES} bytes")
-        return raw
-    raise ActivationKeyError(
-        f"{CUSTOMER_IDEMPOTENCY_AEAD_KEY_ENV} for key version {key_version} is not configured"
-    )
-
-
 def _highest_device_domain_key() -> tuple[int, bytes]:
     configured = _configured_key_versions(DEVICE_FINGERPRINT_HMAC_KEY_ENV)
     if not configured:
@@ -164,100 +157,13 @@ def _highest_device_domain_key() -> tuple[int, bytes]:
     return version, _device_domain_hmac_key(version)
 
 
-def _highest_customer_aead_key() -> tuple[int, bytes]:
-    configured = _configured_key_versions(CUSTOMER_IDEMPOTENCY_AEAD_KEY_ENV)
-    if not configured:
-        raise ActivationKeyError(
-            f"no {CUSTOMER_IDEMPOTENCY_AEAD_KEY_ENV} key version is configured"
-        )
-    version = max(configured)
-    return version, _customer_idempotency_aead_key(version)
-
-
-def _recovery_window_seconds() -> int:
-    raw = os.environ.get(CUSTOMER_IDEMPOTENCY_RECOVERY_SECONDS_ENV, "").strip()
-    if not raw:
-        return DEFAULT_RECOVERY_WINDOW_SECONDS
-    try:
-        value = int(raw)
-    except ValueError:
-        logger.warning(
-            "invalid %s=%r, using default %d",
-            CUSTOMER_IDEMPOTENCY_RECOVERY_SECONDS_ENV,
-            raw,
-            DEFAULT_RECOVERY_WINDOW_SECONDS,
-        )
-        return DEFAULT_RECOVERY_WINDOW_SECONDS
-    return value if value > 0 else DEFAULT_RECOVERY_WINDOW_SECONDS
-
-
 # ---------------------------------------------------------------------------
-# Keyed digests and the AEAD response envelope (§7 / §12.1)
+# Keyed digests (§7 / §12.1)
 # ---------------------------------------------------------------------------
 
 
 def _keyed_digest(key: bytes, value: str) -> str:
     return hmac.new(key, value.encode("utf-8"), hashlib.sha256).hexdigest()
-
-
-def _envelope_aad(operation: str, scope: str, key_digest: str) -> bytes:
-    return f"customer-idempotency:{operation}:{scope}:{key_digest}".encode()
-
-
-def _b64encode(data: bytes) -> str:
-    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
-
-
-def _b64decode(data: str) -> bytes:
-    return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
-
-
-def _seal_response(payload: dict[str, object], *, key: bytes, aad: bytes) -> str:
-    plaintext = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
-    nonce = secrets.token_bytes(AESGCM_NONCE_BYTES)
-    sealed = AESGCM(key).encrypt(nonce, plaintext, aad)
-    return _b64encode(nonce + sealed)
-
-
-def _open_response(ciphertext: str, *, key: bytes, aad: bytes) -> dict[str, object]:
-    try:
-        blob = _b64decode(ciphertext)
-        nonce, sealed = blob[:AESGCM_NONCE_BYTES], blob[AESGCM_NONCE_BYTES:]
-        plaintext = AESGCM(key).decrypt(nonce, sealed, aad)
-    except (InvalidTag, ValueError) as exc:
-        # A sealed envelope that no configured key can open is a configuration
-        # failure, not a client error — refuse loudly instead of replaying
-        # garbage (T14 completes the rotation-window story).
-        raise ActivationKeyError("idempotency envelope ciphertext verification failed") from exc
-    try:
-        decoded = json.loads(plaintext)
-    except json.JSONDecodeError as exc:
-        raise ActivationKeyError("idempotency envelope payload is malformed") from exc
-    if not isinstance(decoded, dict):
-        raise ActivationKeyError("idempotency envelope payload is malformed")
-    return decoded
-
-
-def _idempotency_key_digest(key: str) -> str:
-    return hashlib.sha256(key.encode("utf-8")).hexdigest()
-
-
-def _request_hash(canonical_code: str, body: CustomerActivationRequest) -> str:
-    # The hash freezes the *normalized* request (the same values the business
-    # path uses after strip()), so a retry that only differs in surrounding
-    # whitespace still replays instead of conflicting (PR review P3).
-    payload = json.dumps(
-        {
-            "activation_code": canonical_code,
-            "device_fingerprint": body.device_fingerprint.strip(),
-            "device_name": body.device_name.strip(),
-            "device_platform": body.device_platform.strip(),
-        },
-        separators=(",", ":"),
-        sort_keys=True,
-        ensure_ascii=False,
-    )
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -300,64 +206,6 @@ _RESPONSE_FIELDS = (
 def _response_from_payload(payload: dict[str, object]) -> CustomerActivationResponse:
     return CustomerActivationResponse.model_validate(
         {field: payload[field] for field in _RESPONSE_FIELDS}
-    )
-
-
-# ---------------------------------------------------------------------------
-# Idempotency envelope persistence (revision 029)
-# ---------------------------------------------------------------------------
-
-
-def _insert_envelope(
-    conn: psycopg.Connection,
-    *,
-    scope: str,
-    key_digest: str,
-    request_hash: str,
-) -> str | None:
-    """Insert the placeholder; returns its id, or ``None`` on key reuse."""
-    envelope_id = str(uuid.uuid4())
-    inserted = conn.execute(
-        "INSERT INTO customer_idempotency_envelopes "
-        "(id, operation, scope, key_digest, request_hash) "
-        "VALUES (%s, %s, %s, %s, %s) "
-        "ON CONFLICT (operation, scope, key_digest) DO NOTHING",
-        (envelope_id, ACTIVATE_OPERATION, scope, key_digest, request_hash),
-    ).rowcount
-    return envelope_id if inserted == 1 else None
-
-
-def _load_envelope(
-    conn: psycopg.Connection,
-    *,
-    scope: str,
-    key_digest: str,
-) -> tuple[str, str | None, int | None, str | None] | None:
-    """Return (request_hash, ciphertext, key_version, recovery_expires_at)."""
-    row = conn.execute(
-        "SELECT request_hash, ciphertext, key_version, recovery_expires_at "
-        "FROM customer_idempotency_envelopes "
-        "WHERE operation = %s AND scope = %s AND key_digest = %s",
-        (ACTIVATE_OPERATION, scope, key_digest),
-    ).fetchone()
-    if row is None:
-        return None
-    return str(row[0]), row[1], row[2], row[3]
-
-
-def _complete_envelope(
-    conn: psycopg.Connection,
-    envelope_id: str,
-    *,
-    ciphertext: str,
-    key_version: int,
-    recovery_expires_at: str,
-) -> None:
-    conn.execute(
-        "UPDATE customer_idempotency_envelopes "
-        "SET ciphertext = %s, key_version = %s, recovery_expires_at = %s "
-        "WHERE id = %s",
-        (ciphertext, key_version, recovery_expires_at, envelope_id),
     )
 
 
@@ -620,9 +468,9 @@ def activate_first_device(
 
     try:
         fingerprint_key_version, hmac_key = _highest_device_domain_key()
-        aead_key_version, aead_key = _highest_customer_aead_key()
+        aead_key_version, aead_key = highest_customer_aead_key()
         code_digests = [digest for digest, _version in iter_code_digests(canonical_code)]
-    except ActivationKeyError:
+    except (ActivationKeyError, IdempotencyKeyError):
         logger.warning("activation keys unavailable: configuration is incomplete")
         raise _http(
             503,
@@ -642,9 +490,16 @@ def activate_first_device(
     ]
     fingerprint_hmac = fingerprint_digests[-1]
     scope_candidates = list(reversed(fingerprint_digests))
-    key_digest = _idempotency_key_digest(idempotency_key)
-    request_hash = _request_hash(canonical_code, body)
-    recovery_seconds = _recovery_window_seconds()
+    key_digest = idempotency_key_digest(idempotency_key)
+    req_hash = compute_request_hash(
+        {
+            "activation_code": canonical_code,
+            "device_fingerprint": fingerprint,
+            "device_name": device_name,
+            "device_platform": device_platform,
+        }
+    )
+    recovery_seconds = recovery_window_seconds()
     request_id = request.headers.get(REQUEST_ID_HEADER, "").strip() or str(uuid.uuid4())
 
     try:
@@ -652,48 +507,63 @@ def activate_first_device(
             # Key reuse may have scoped its envelope under an older fingerprint
             # digest before a rotation: look through every configured version's
             # scope (highest first) before inserting a fresh placeholder.
-            existing: tuple[str, tuple[str, str | None, int | None, str | None]] | None = None
+            found_scope: str | None = None
+            record: EnvelopeRecord | None = None
             for scope_candidate in scope_candidates:
-                loaded = _load_envelope(conn, scope=scope_candidate, key_digest=key_digest)
+                loaded = load_envelope(
+                    conn,
+                    operation=ACTIVATE_OPERATION,
+                    scope=scope_candidate,
+                    key_digest=key_digest,
+                )
                 if loaded is not None:
-                    existing = (scope_candidate, loaded)
+                    found_scope = scope_candidate
+                    record = loaded
                     break
 
             envelope_id: str | None = None
-            if existing is None:
-                envelope_id = _insert_envelope(
+            if record is None:
+                envelope_id = insert_envelope(
                     conn,
+                    operation=ACTIVATE_OPERATION,
                     scope=fingerprint_hmac,
                     key_digest=key_digest,
-                    request_hash=request_hash,
+                    request_hash=req_hash,
                 )
                 if envelope_id is None:
                     # Concurrent same-key writer won the placeholder insert (the
                     # insert blocked on the unique index until the other
                     # transaction committed): load the committed envelope back.
-                    loaded = _load_envelope(conn, scope=fingerprint_hmac, key_digest=key_digest)
+                    loaded = load_envelope(
+                        conn,
+                        operation=ACTIVATE_OPERATION,
+                        scope=fingerprint_hmac,
+                        key_digest=key_digest,
+                    )
                     if loaded is not None:
-                        existing = (fingerprint_hmac, loaded)
+                        found_scope = fingerprint_hmac
+                        record = loaded
 
-            if existing is not None:
-                found_scope, stored = existing
-                stored_request_hash, ciphertext, key_version, recovery_expires_at = stored
-                if stored_request_hash != request_hash:
+            if record is not None:
+                assert found_scope is not None
+                if record.request_hash != req_hash:
                     raise _http(
                         409,
                         "IDEMPOTENCY_CONFLICT",
                         "This idempotency key was already used for a different request.",
                     )
+                ciphertext = record.ciphertext
+                key_version = record.key_version
                 if ciphertext is None or key_version is None:
                     # Purged or never completed: the key is spent and the
-                    # response is no longer recoverable (T14 refines this).
+                    # response is no longer recoverable (T14 / ACT-07).
                     raise _http(
                         409,
                         "IDEMPOTENCY_CONFLICT",
                         "This idempotency key is no longer recoverable.",
                     )
-                if recovery_expires_at is not None and (
-                    datetime.fromisoformat(str(recovery_expires_at)) <= datetime.now(UTC)
+                if record.recovery_expires_at is not None and (
+                    datetime.fromisoformat(str(record.recovery_expires_at)) <= datetime.now(UTC)
                 ):
                     raise _http(
                         409,
@@ -701,12 +571,12 @@ def activate_first_device(
                         "This idempotency key is no longer recoverable.",
                     )
                 try:
-                    replayed = _open_response(
-                        str(ciphertext),
-                        key=_customer_idempotency_aead_key(int(key_version)),
-                        aad=_envelope_aad(ACTIVATE_OPERATION, found_scope, key_digest),
+                    replayed = open_response(
+                        ciphertext,
+                        key=customer_aead_key(key_version),
+                        aad=envelope_aad(ACTIVATE_OPERATION, found_scope, key_digest),
                     )
-                except ActivationKeyError:
+                except IdempotencyKeyError:
                     # The envelope's key version was retired inside the
                     # recovery window (or the ciphertext is otherwise
                     # unopenable): a server-side failure answers 503, never an
@@ -766,15 +636,15 @@ def activate_first_device(
                 .replace(microsecond=0)
                 .isoformat()
             )
-            ciphertext = _seal_response(
+            sealed_ciphertext = seal_response(
                 payload,
                 key=aead_key,
-                aad=_envelope_aad(ACTIVATE_OPERATION, fingerprint_hmac, key_digest),
+                aad=envelope_aad(ACTIVATE_OPERATION, fingerprint_hmac, key_digest),
             )
-            _complete_envelope(
+            complete_envelope(
                 conn,
                 envelope_id,
-                ciphertext=ciphertext,
+                ciphertext=sealed_ciphertext,
                 key_version=aead_key_version,
                 recovery_expires_at=recovery_expires_at,
             )

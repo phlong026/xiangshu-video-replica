@@ -1,0 +1,30 @@
+[Unit]
+Description=Video Replica maintenance sweep (expired idempotency envelopes)
+Wants=network-online.target
+After=network-online.target
+# Persistent=true replay at boot may race a same-host PostgreSQL still coming
+# up: a small retry budget absorbs that (session review P3).
+StartLimitIntervalSec=300
+StartLimitBurst=4
+
+[Service]
+Type=oneshot
+User=video-replica
+Group=video-replica
+WorkingDirectory=/opt/video-replica/app/server
+EnvironmentFile=/etc/video-replica/customer.env
+Environment=PYTHONUNBUFFERED=1
+# T14 / ACT-07: purge expired customer idempotency envelopes — the sealed
+# ciphertext, key version and recovery window are nulled under purged_at so
+# the 029 CHECK coupling keeps every purged row payload-free and the table
+# cannot grow unboundedly. Counts only in the output (no business values).
+# Later tasks (T23 reconciliation, expiry sweeps) append their own
+# ExecStart= lines here — one line per maintenance concern.
+ExecStart=/opt/video-replica/app/server/.venv/bin/python -m scripts.purge_idempotency_envelopes
+Restart=on-failure
+RestartSec=30
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict

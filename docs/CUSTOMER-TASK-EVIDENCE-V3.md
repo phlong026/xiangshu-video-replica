@@ -396,3 +396,42 @@ Owner / Reviewer：后端/账务（Agent 执行）/ 会话内代码评审
 未测试项：T14 幂等恢复完善；T15 限流/防枚举；T16-T18 设备；T19-T20 会话；T22 ZPay 续充；T28+ 前端；STAGING/REAL_CHAIN/PRODUCTION
 Lore 提交 SHA：见 PR squash 合并 SHA
 ```
+
+
+## T14 — AEAD Idempotency Recovery & Expired-Envelope Cleanup (ACT-07)
+
+| Field | Content |
+| --- | --- |
+| **Owner** | Backend/Security |
+| **Reviewer** | session-internal code review |
+| **Branch / Base SHA** | `feat/customer-v3-t14-idempotency-recovery` / `main@fec36c7` (T13, PR #44 squash) |
+| **Verified Implementation SHA** | PR squash merge result (see `docs/evidence/T14-EVIDENCE.md`) |
+| **Upstream Spec Sections** | Task list §3 T14, §12.2 ACT-07; code checklist §9.1 (frozen `customer_idempotency.py` / `test_customer_idempotency.py`), §10.1 (purge CLI), §12 (maintenance service/timer); activation-code dev doc §11.2 (idempotency envelope), §7 (key red lines); acceptance spec §2 |
+| **Failure Test or Regression Lock** | 18 cases: module units 8 (request hash whitespace-stable + param-distinguishing; key digest hides the raw key; seal/open round-trip; wrong AAD rejected; ciphertext holds no plaintext secret — ACT-07; AEAD rotation window resolves V1/V2; retired key version fails closed; recovery-window env override); PG integration 7 on the dedicated migrated fixture DB (envelope lifecycle insert→complete→load→open; same-key different-hash conflict evidence; expired window visible; purge clears only expired — expired/live/already-purged triple, second run returns 0; purged envelope no longer recoverable; the 029-reserved recovery index exists); CLI 3 (real purge, dry-run keeps rows, missing DSN exits 1). T13's 42 activation cases kept green as the refactor regression lock (incl. the 100-thread ACT-06 race and same-key recovery) |
+| **Implementation Result** | The envelope engine extracted from T13's route into the frozen shared module `server/app/customer_idempotency.py` (operation-generalized for T17/T19/T22 reuse): versioned AEAD keys, sha256 key digest + normalized request hash, AES-256-GCM seal/open with `operation/scope/key_digest` AAD binding, envelope persistence, and the T14 cleanup story — `count_expired_envelopes` / `purge_expired_envelopes` null the ciphertext triple under `purged_at` in one UPDATE walking the 029-reserved recovery index (CHECK coupling keeps a purged row payload-free; idempotent re-run). The maintenance CLI (`scripts/purge_idempotency_envelopes.py`, dry-run / fail-closed DSN, counts-only output) runs from the new sandboxed `video-replica-maintenance.service` daily timer (04:10, staggered against the 03:20 backup). `activation_code_routes.py` refactored onto the module with zero behaviour change; expired windows answer 409 (key spent); retired key versions inside the window answer 503 |
+| **Verification Command and Pass Count** | `pytest tests/test_customer_idempotency.py` → 18 passed; four-file T13+T14 special → 60 passed; full suite → 795 passed + 3 skipped (798 collected = 780 baseline + 18 new, PG fixture, zero regressions; the 3 skips are the pre-existing Windows-environment bash cases — POSIX launcher ×2 + secret-scan shell — which run on the Linux CI gates; one gate1_e2e thread-timing flaky in an earlier run was isolated and passed on re-run); ruff/format/mypy green (142 files formatted, 58 source files typed); post-review fix re-run: special 60 passed + full 795/3 re-confirmed; CLI verified end-to-end (--help, missing-DSN exit 1, unmigrated database fails loud) |
+| **Evidence Level** | `AUTOMATED_VERIFIED` |
+| **Security and Observability** | No directly usable plaintext secret in the envelope (sealed ciphertext is the only persisted copy of the one-time response; tests lock both the key name and the value out of the ciphertext); raw idempotency key stored as sha256 digest only; AAD binding prevents cross-row replay; purge output counts only; retired key versions fail closed 503 inside the recovery window; expiry decided on the server clock only |
+| **Migration and Rollback** | No new migration (029 already reserved `purged_at`, the payload three-state coupling CHECK and the recovery index — T14 ships the job that uses them); rollback = revert code (envelope schema unchanged; the purge is safely interruptible and re-runnable) |
+| **External Authorization Record** | None; no real ZPay/COS/paid provider/external codes/gray release/public launch |
+| **Untested Items** | T17/T19/T22 reuse of the shared engine (delivered by those tasks); real systemd environment for the maintenance timer (ops acceptance lands with the T36 deployment manual); shared rate limiting + timing parity (T15/ACT-08); STAGING/REAL_CHAIN/PRODUCTION |
+| **Lore Commit SHA** | PR squash merge SHA |
+
+### T14 Section 14 Ledger Record
+
+```text
+任务/工作包：T14 / ACT-07
+Owner / Reviewer：后端/安全（Agent 执行）/ 会话内代码评审
+分支 / 基线 SHA：feat/customer-v3-t14-idempotency-recovery / 基线 fec36c7（T13 PR #44 squash）
+上游规格段落：客户版任务清单 V3 §3 T14、§12.2 ACT-07；代码开发清单 V3 §9.1 customer_idempotency.py/test_customer_idempotency.py、§10.1 purge CLI、§12 maintenance service/timer 冻结名；激活码开发文档 §11.2 幂等信封、§7 密钥红线；测试与验收规格 §2
+改动文件：server/app/customer_idempotency.py（新增 334 行冻结名）、server/scripts/purge_idempotency_envelopes.py（新增维护 CLI）、server/app/activation_code_routes.py（重构接入共享模块，行为零变化）、server/tests/test_customer_idempotency.py（新增 18 用例）、deploy/systemd/video-replica-maintenance.service/.timer（新增冻结名）、deploy/customer.env.example（补 T13 设备域密钥占位+T14 AEAD 密钥/恢复窗口占位）、docs/evidence/T14-EVIDENCE.md、任务与证据账本
+失败测试或回归锁定：先红后绿 18 例（模块级 8+PG 集成 7+CLI 3）；T13 42 例作为重构回归锁定全部保持绿（含 ACT-06 100 并发与同键恢复）
+实现结果：幂等信封引擎提取为共享模块（operation 泛化供 T17/T19/T22 复用）；恢复窗口到期后同 key 409；purge 单条 UPDATE 清空密文三列并记 purged_at（029 CHECK 耦合、幂等重跑为 0）；maintenance timer 每日清理；路由重构后信封行为与 T13 完全一致
+验证命令与通过数：专项 18 passed；T13+T14 四文件 60 passed；全量 795 passed + 3 skipped（总数 798，零回归；3 个 skip 为既存 Windows 环境性 bash 用例，Linux CI 上全跑；含一次 gate1_e2e 线程时序 flaky 的隔离重跑）；评审修复后终跑专项 60 + 全量 795/3 复确认；ruff/format/mypy 全绿
+证据层级：AUTOMATED_VERIFIED
+安全与可观测性：信封不保存可直接使用的明文 secret（密文为唯一持久化副本，测试锁定）；原始幂等键仅存 SHA-256 摘要；AAD 绑定防跨行重放；purge 输出仅计数；退役密钥版本 503 fail-closed；到期判定只用服务器时钟
+迁移与回滚：无新迁移（029 已预留全部结构）；回滚=还原代码，purge 可安全中止与重跑
+外部授权记录：无
+未测试项：T17/T19/T22 共享引擎复用；maintenance timer 真实 systemd 环境（随 T36）；T15；STAGING/REAL_CHAIN/PRODUCTION
+Lore 提交 SHA：见 PR squash 合并 SHA
+```
