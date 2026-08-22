@@ -60,6 +60,9 @@ _CODE_CONFUSABLES = str.maketrans({"O": "0", "I": "1", "L": "1"})
 
 MIN_HMAC_KEY_BYTES = 32
 MIN_AEAD_KEY_BYTES = 32
+# AES-GCM accepts exactly 16/24/32-byte keys and this module is the AES-256
+# export path, so the AEAD key must decode to exactly 32 bytes (PR #42 P2).
+AESGCM_KEY_BYTES = 32
 MAX_KEY_VERSION = 64
 AESGCM_NONCE_BYTES = 12
 
@@ -197,6 +200,7 @@ def _resolve_env_bytes(
     environ: Mapping[str, str] | None,
     minimum_bytes: int,
     decode: bool,
+    exact_bytes: int | None = None,
 ) -> bytes:
     source = os.environ if environ is None else environ
     for name in _env_key_candidates(base_env, key_version):
@@ -214,6 +218,10 @@ def _resolve_env_bytes(
         if len(raw) < minimum_bytes:
             raise ActivationKeyError(
                 f"{name} must decode to at least {minimum_bytes} bytes, got {len(raw)}"
+            )
+        if exact_bytes is not None and len(raw) != exact_bytes:
+            raise ActivationKeyError(
+                f"{name} must decode to exactly {exact_bytes} bytes, got {len(raw)}"
             )
         return raw
     raise ActivationKeyError(
@@ -236,13 +244,19 @@ def activation_code_hmac_key(
 
 
 def export_aead_key(key_version: int, *, environ: Mapping[str, str] | None = None) -> bytes:
-    """Resolve the versioned AEAD export key (base64, >= 32 decoded bytes)."""
+    """Resolve the versioned AEAD export key (base64, exactly 32 decoded bytes).
+
+    AES-GCM only accepts 16/24/32-byte keys and this is the AES-256 export
+    path, so anything other than exactly 32 decoded bytes is a configuration
+    error, not a longer-is-safer bonus (PR #42 P2).
+    """
     return _resolve_env_bytes(
         ACTIVATION_EXPORT_AEAD_KEY_ENV,
         key_version,
         environ=environ,
         minimum_bytes=MIN_AEAD_KEY_BYTES,
         decode=True,
+        exact_bytes=AESGCM_KEY_BYTES,
     )
 
 
@@ -374,8 +388,13 @@ def generate_batch_codes(
     """
     if quantity < 1:
         raise ActivationCodeError("quantity must be at least 1")
+    # The batch row is locked for the whole transaction (PR #42 P1): two API
+    # instances generating for the same batch otherwise read the same budget
+    # and pre-insert count, both pass this check and jointly overshoot the
+    # frozen quantity. FOR UPDATE serializes the check-then-insert sequence.
     batch_row = conn.execute(
-        "SELECT quantity FROM activation_code_batches WHERE id = %s", (batch_id,)
+        "SELECT quantity FROM activation_code_batches WHERE id = %s FOR UPDATE",
+        (batch_id,),
     ).fetchone()
     if batch_row is None:
         raise ActivationCodeError(f"unknown batch {batch_id!r}")
@@ -432,7 +451,9 @@ def create_batch_export(
 
     Writes the ``activation_code_exports`` row (ciphertext, SHA-256, key
     version, short expiry) plus an EXPORTED event per code. The plaintext is
-    only inside the envelope — never in a column, event or log.
+    only inside the envelope — never in a column, event or log. The 027
+    exports table is the storage carrier for this task; private-COS object
+    delivery is layered on top by T36 / COS-01 (task-list boundary, PR #42).
     """
     if not codes:
         raise ActivationExportError("an export requires at least one generated code")
@@ -488,7 +509,9 @@ def fetch_export_package(
 
     One-time (``downloaded_at IS NULL`` enforced under row lock) and
     expiry-checked against real timestamps; the download actor is persisted on
-    the export row. The caller owns the transaction.
+    the export row. The caller owns the transaction. Private-COS object
+    delivery for the controlled operator flow is layered on by T36 / COS-01;
+    the audit semantics implemented here stay authoritative (PR #42).
     """
     row = conn.execute(
         "SELECT batch_id, ciphertext, key_version, expires_at, downloaded_at "

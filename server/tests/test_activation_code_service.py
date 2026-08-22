@@ -271,6 +271,12 @@ def test_export_aead_key_resolution() -> None:
     environ = {f"{ACTIVATION_EXPORT_AEAD_KEY_ENV}_V1": _b64key(b"short")}
     with pytest.raises(ActivationKeyError, match="at least"):
         export_aead_key(1, environ=environ)
+    # PR #42 P2: AES-GCM accepts only 16/24/32-byte keys and this is the
+    # AES-256 path — a longer key must fail at configuration resolution,
+    # not as a raw ValueError inside AESGCM().
+    environ = {f"{ACTIVATION_EXPORT_AEAD_KEY_ENV}_V1": _b64key(secrets.token_bytes(48))}
+    with pytest.raises(ActivationKeyError, match="exactly 32 bytes"):
+        export_aead_key(1, environ=environ)
 
 
 # ---------------------------------------------------------------------------
@@ -435,6 +441,52 @@ def test_generate_batch_codes_rejects_overrun(catalog_db: psycopg.Connection) ->
         "SELECT count(*) FROM activation_codes WHERE batch_id = %s", ("batch-cap",)
     ).fetchone()[0]
     assert landed == 3
+
+
+def test_generate_batch_codes_serializes_on_batch_row_lock(service_pg_dsn: str) -> None:
+    # PR #42 P1: two concurrent generators must not read the same budget and
+    # jointly overshoot. The in-flight transaction holds the batch row lock,
+    # so a second generator waits on that lock (lock-timeout proves it) and,
+    # once the first commits, sees the spent budget and fails closed.
+    first = psycopg.connect(service_pg_dsn)
+    second = psycopg.connect(service_pg_dsn)
+    try:
+        _insert_batch(first, "batch-lock", quantity=3)
+        first.commit()  # the batch row itself must be visible before racing
+        generate_batch_codes(
+            first,
+            "batch-lock",
+            quantity=3,
+            key_version=1,
+            hmac_key=TEST_HMAC_KEY_V1.encode(),
+            actor_user_id="u-admin",
+        )
+        second.execute("SET LOCAL lock_timeout = '2s'")
+        with pytest.raises(psycopg.errors.LockNotAvailable):
+            generate_batch_codes(
+                second,
+                "batch-lock",
+                quantity=1,
+                key_version=1,
+                hmac_key=TEST_HMAC_KEY_V1.encode(),
+                actor_user_id="u-admin",
+            )
+        second.rollback()
+        first.commit()
+        with pytest.raises(ActivationCodeError, match="budget exceeded"):
+            generate_batch_codes(
+                second,
+                "batch-lock",
+                quantity=1,
+                key_version=1,
+                hmac_key=TEST_HMAC_KEY_V1.encode(),
+                actor_user_id="u-admin",
+            )
+    finally:
+        second.rollback()
+        second.close()
+        first.rollback()
+        first.close()
 
 
 def test_generated_digests_unique_across_batches(catalog_db: psycopg.Connection) -> None:
