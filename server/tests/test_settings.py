@@ -122,7 +122,7 @@ def test_settings_migration_creates_tables_and_defaults(tmp_path: Path, settings
             """
         ).fetchone()
 
-    assert version == "027_activation_code_catalog"
+    assert version == "028_admin_write_idempotency"
     assert {"provider_settings", "runtime_settings"}.issubset(tables)
     assert dict(runtime) == {
         "max_generation_count_per_batch": 4,

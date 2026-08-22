@@ -195,10 +195,10 @@ def _validate_schema(
     target_tables = set(_table_names(pg_conn, "postgresql"))
     missing = sorted(set(source_tables) - target_tables)
     extra = sorted(target_tables - set(source_tables))
-    # PG-only tables from revisions 026/027 (admin_sessions; the activation
-    # code catalog) are expected on the target head but must still be empty:
-    # the T07 cutover happens before the customer production line opens, so
-    # any row there is divergent state.
+    # PG-only tables from revisions 026/027/028 (admin_sessions; the activation
+    # code catalog; the admin write idempotency ledger) are expected on the
+    # target head but must still be empty: the T07 cutover happens before the
+    # customer production line opens, so any row there is divergent state.
     unexpected_extra = [table for table in extra if table not in PG_ONLY_TABLES]
     divergent_pg_only = [
         table for table in extra if table in PG_ONLY_TABLES and _pg_table_row_count(pg_conn, table)

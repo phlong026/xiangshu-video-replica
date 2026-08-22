@@ -10,7 +10,7 @@ from cryptography.fernet import Fernet
 from app.db import alembic_config, connect_database, initialize_database
 from app.settings import SettingsRepository
 
-HEAD_REVISION = "027_activation_code_catalog"
+HEAD_REVISION = "028_admin_write_idempotency"
 
 
 def seed_subjects(conn: sqlite3.Connection) -> None:
