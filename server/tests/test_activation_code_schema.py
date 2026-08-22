@@ -26,6 +26,7 @@ CODES_TABLE = "activation_codes"
 DELIVERIES_TABLE = "activation_code_deliveries"
 EXPORTS_TABLE = "activation_code_exports"
 ACTIVATIONS_TABLE = "activation_code_activations"
+EVENTS_TABLE = "activation_code_events"
 
 _HEAD_REVISION = "027_activation_code_catalog"
 
@@ -174,6 +175,7 @@ def test_catalog_tables_and_columns(catalog_dsn: str) -> None:
             DELIVERIES_TABLE,
             EXPORTS_TABLE,
             ACTIVATIONS_TABLE,
+            EVENTS_TABLE,
         ):
             assert table in tables, f"missing table {table} after upgrade head"
 
@@ -211,6 +213,7 @@ def test_catalog_tables_and_columns(catalog_dsn: str) -> None:
             "activated_at",
             "suspended_at",
             "revoked_at",
+            "expired_at",
         }
         assert columns(DELIVERIES_TABLE) == {
             "id",
@@ -241,6 +244,15 @@ def test_catalog_tables_and_columns(catalog_dsn: str) -> None:
             "first_device_id",
             "recharge_order_id",
             "activated_at",
+        }
+        assert columns(EVENTS_TABLE) == {
+            "id",
+            "code_id",
+            "event",
+            "actor_user_id",
+            "reason",
+            "request_id",
+            "created_at",
         }
 
 
@@ -362,6 +374,33 @@ def test_code_status_machine_enforced(catalog_dsn: str) -> None:
             _insert_code(conn, 14, masked_code="   ")
         with pytest.raises(psycopg.errors.ForeignKeyViolation):
             _insert_code(conn, 15, batch_id="batch-ghost")
+
+        # Acceptance spec §2.1: the full six-state machine — GENERATED is the
+        # pre-delivery state (no issued_at yet), EXPIRED is the unactivated
+        # end state past the batch activation window (PR-review P1).
+        _insert_code(conn, 18, status="GENERATED", issued_at=None)
+        with pytest.raises(psycopg.errors.CheckViolation):
+            # GENERATED has not been delivered, so issued_at must stay NULL
+            _insert_code(conn, 19, status="GENERATED")
+        _insert_code(
+            conn,
+            20,
+            status="EXPIRED",
+            expired_at="2026-08-23T00:00:00+00:00",
+        )
+        with pytest.raises(psycopg.errors.CheckViolation):
+            # expiry never follows activation — a bound code cannot expire
+            _insert_code(
+                conn,
+                21,
+                status="EXPIRED",
+                expired_at="2026-08-23T00:00:00+00:00",
+                bound_user_id="u-cust",
+                activated_at="2026-08-22T01:00:00+00:00",
+            )
+        with pytest.raises(psycopg.errors.CheckViolation):
+            # EXPIRED needs its own proof timestamp
+            _insert_code(conn, 22, status="EXPIRED")
 
 
 def test_one_active_binding_per_user(catalog_dsn: str) -> None:
@@ -485,6 +524,42 @@ def test_export_ciphertext_only_with_expiry(catalog_dsn: str) -> None:
                 "VALUES ('exp-4', 'batch-ghost', 'aead-ciphertext', "
                 "'sha256-digest', 1, 'u-admin', '2099-01-01T00:00:00+00:00')"
             )
+
+
+def test_activation_code_events_append_only(catalog_dsn: str) -> None:
+    """ACT-01 work package: the catalog carries an append-only event table —
+    suspension, revocation, delivery and activation leave an immutable
+    actor/reason/request record that PostgreSQL itself refuses to rewrite
+    (PR-review P1)."""
+    with psycopg.connect(catalog_dsn, autocommit=True) as conn:
+        _insert_batch(conn, 1)
+        _insert_code(conn, 1)
+        conn.execute(
+            f"INSERT INTO {EVENTS_TABLE} "
+            "(id, code_id, event, actor_user_id, reason, request_id) "
+            "VALUES ('evt-1', 'code-1', 'GENERATED', 'u-admin', "
+            " 'batch generated', 'req-1')"
+        )
+        conn.execute(
+            f"INSERT INTO {EVENTS_TABLE} (id, code_id, event) "
+            "VALUES ('evt-2', 'code-1', 'ACTIVATED')"
+        )
+        with pytest.raises(psycopg.errors.CheckViolation):
+            conn.execute(
+                f"INSERT INTO {EVENTS_TABLE} (id, code_id, event) "
+                "VALUES ('evt-3', 'code-1', 'UNKNOWN')"
+            )
+        with pytest.raises(psycopg.errors.ForeignKeyViolation):
+            conn.execute(
+                f"INSERT INTO {EVENTS_TABLE} (id, code_id, event, actor_user_id) "
+                "VALUES ('evt-4', 'code-1', 'REVOKED', 'u-ghost')"
+            )
+        with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
+            conn.execute(f"UPDATE {EVENTS_TABLE} SET reason = 'tampered' WHERE id = 'evt-1'")
+        with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
+            conn.execute(f"DELETE FROM {EVENTS_TABLE} WHERE id = 'evt-1'")
+        count = conn.execute(f"SELECT COUNT(*) FROM {EVENTS_TABLE}").fetchone()[0]
+        assert count == 2  # both rows survived the refused rewrites
 
 
 # ---------------------------------------------------------------------------

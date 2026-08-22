@@ -59,18 +59,45 @@ branch_labels = None
 depends_on = None
 
 _BATCH_STATUS = "status IN ('OPEN', 'CLOSED')"
-# Dev doc §12.1: activation validates ISSUED codes and flips them to ACTIVE
-# with a binding; SUSPENDED/REVOKED are operator side states (suspended_at /
-# revoked_at prove the transition, revoked rows keep their binding for audit).
-_CODE_STATUS = "status IN ('ISSUED', 'ACTIVE', 'SUSPENDED', 'REVOKED')"
+# Dev doc §12.1 + acceptance spec §2.1: GENERATED is the pre-delivery state
+# (T11 lands codes there before handout), ISSUED follows delivery, activation
+# validates ISSUED codes and flips them to ACTIVE with a binding;
+# SUSPENDED/REVOKED are operator side states (suspended_at / revoked_at prove
+# the transition, revoked rows keep their binding for audit); EXPIRED is the
+# unactivated end state past the batch activation window (expired_at proves
+# it — a bound code never expires through this state).
+_CODE_STATUS = "status IN ('GENERATED', 'ISSUED', 'ACTIVE', 'SUSPENDED', 'REVOKED', 'EXPIRED')"
 _CODE_STATUS_SHAPE = (
-    "(status = 'ISSUED' AND bound_user_id IS NULL AND activated_at IS NULL "
-    "AND suspended_at IS NULL AND revoked_at IS NULL) OR "
-    "(status = 'ACTIVE' AND bound_user_id IS NOT NULL AND activated_at IS NOT NULL "
-    "AND suspended_at IS NULL AND revoked_at IS NULL) OR "
-    "(status = 'SUSPENDED' AND suspended_at IS NOT NULL AND revoked_at IS NULL) OR "
-    "(status = 'REVOKED' AND revoked_at IS NOT NULL)"
+    "(status = 'GENERATED' AND issued_at IS NULL AND bound_user_id IS NULL "
+    "AND activated_at IS NULL AND suspended_at IS NULL AND revoked_at IS NULL "
+    "AND expired_at IS NULL) OR "
+    "(status = 'ISSUED' AND issued_at IS NOT NULL AND bound_user_id IS NULL "
+    "AND activated_at IS NULL AND suspended_at IS NULL AND revoked_at IS NULL "
+    "AND expired_at IS NULL) OR "
+    "(status = 'ACTIVE' AND issued_at IS NOT NULL AND bound_user_id IS NOT NULL "
+    "AND activated_at IS NOT NULL AND suspended_at IS NULL AND revoked_at IS NULL "
+    "AND expired_at IS NULL) OR "
+    "(status = 'SUSPENDED' AND suspended_at IS NOT NULL AND revoked_at IS NULL "
+    "AND expired_at IS NULL) OR "
+    "(status = 'REVOKED' AND revoked_at IS NOT NULL AND expired_at IS NULL) OR "
+    "(status = 'EXPIRED' AND expired_at IS NOT NULL AND bound_user_id IS NULL "
+    "AND activated_at IS NULL AND suspended_at IS NULL AND revoked_at IS NULL)"
 )
+_EVENT_TYPES = (
+    "event IN ('GENERATED', 'DELIVERED', 'ACTIVATED', 'SUSPENDED', 'RESUMED', "
+    "'REVOKED', 'EXPIRED', 'EXPORTED')"
+)
+_APPEND_ONLY_TRIGGER = """
+CREATE FUNCTION activation_code_events_refuse_rewrite() RETURNS trigger AS $refuse$
+BEGIN
+    RAISE EXCEPTION 'activation_code_events is append-only';
+END;
+$refuse$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_activation_code_events_append_only
+BEFORE UPDATE OR DELETE ON activation_code_events
+FOR EACH ROW EXECUTE FUNCTION activation_code_events_refuse_rewrite();
+"""
 
 
 def _created_at() -> sa.Column[str]:
@@ -93,6 +120,7 @@ def upgrade() -> None:
     _create_deliveries()
     _create_exports()
     _create_activations()
+    _create_events()
 
 
 def _create_batches() -> None:
@@ -172,13 +200,20 @@ def _create_codes() -> None:
             "status",
             sa.Text(),
             nullable=False,
-            server_default="ISSUED",
+            # Codes land GENERATED first (pre-delivery); delivery flips them
+            # to ISSUED with issued_at. A bare INSERT without a status cannot
+            # claim ISSUED, because the shape matrix would then demand
+            # issued_at — fail-closed by construction.
+            server_default="GENERATED",
         ),
         sa.Column("bound_user_id", sa.Text(), sa.ForeignKey("users.id")),
-        sa.Column("issued_at", sa.Text(), nullable=False),
+        # issued_at marks delivery: GENERATED codes (not yet handed out) keep
+        # it NULL; every delivered state (ISSUED onwards) proves it NOT NULL.
+        sa.Column("issued_at", sa.Text()),
         sa.Column("activated_at", sa.Text()),
         sa.Column("suspended_at", sa.Text()),
         sa.Column("revoked_at", sa.Text()),
+        sa.Column("expired_at", sa.Text()),
         sa.CheckConstraint(_CODE_STATUS, name="ck_activation_codes_status"),
         sa.CheckConstraint(
             _CODE_STATUS_SHAPE,
@@ -352,6 +387,40 @@ def _create_activations() -> None:
     )
 
 
+def _create_events() -> None:
+    # ACT-01 work package requires an append-only event table: suspension,
+    # revocation, delivery and activation leave an immutable
+    # actor/reason/request record that the database itself refuses to
+    # rewrite — mutable status/timestamp columns alone cannot carry that
+    # audit history (PR-review P1).
+    op.create_table(
+        "activation_code_events",
+        sa.Column("id", sa.Text(), primary_key=True),
+        sa.Column(
+            "code_id",
+            sa.Text(),
+            sa.ForeignKey("activation_codes.id"),
+            nullable=False,
+        ),
+        sa.Column("event", sa.Text(), nullable=False),
+        sa.Column("actor_user_id", sa.Text(), sa.ForeignKey("users.id")),
+        sa.Column("reason", sa.Text()),
+        sa.Column("request_id", sa.Text()),
+        _created_at(),
+        sa.CheckConstraint(_EVENT_TYPES, name="ck_activation_code_events_type"),
+        sa.CheckConstraint(
+            "length(trim(event)) > 0",
+            name="ck_activation_code_events_event_not_blank",
+        ),
+    )
+    op.create_index(
+        "idx_activation_code_events_code",
+        "activation_code_events",
+        ["code_id", "created_at"],
+    )
+    op.execute(_APPEND_ONLY_TRIGGER)
+
+
 def downgrade() -> None:
     bind = op.get_bind()
     if bind.dialect.name != "postgresql":
@@ -373,6 +442,12 @@ def downgrade() -> None:
         )
     op.drop_index("idx_activation_code_activations_user", table_name="activation_code_activations")
     op.drop_table("activation_code_activations")
+    op.execute(
+        "DROP TRIGGER IF EXISTS trg_activation_code_events_append_only ON activation_code_events"
+    )
+    op.execute("DROP FUNCTION IF EXISTS activation_code_events_refuse_rewrite()")
+    op.drop_index("idx_activation_code_events_code", table_name="activation_code_events")
+    op.drop_table("activation_code_events")
     op.drop_index("idx_activation_code_exports_batch", table_name="activation_code_exports")
     op.drop_table("activation_code_exports")
     op.drop_index(

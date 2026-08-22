@@ -13,10 +13,11 @@
 
 ## Exit-Gate Verification
 
-Task exit gate: *一码一户、状态机、绑定唯一、可追溯记录通过 PG 验证；数据库不得保存激活码明文* — delivered as revision `027_activation_code_catalog` plus 9 fail-first PG tests (`server/tests/test_activation_code_schema.py`), every invariant proven by PostgreSQL constraints (never application code):
+Task exit gate: *一码一户、状态机、绑定唯一、可追溯记录、追加事件通过 PG 验证；数据库不得保存激活码明文* — delivered as revision `027_activation_code_catalog` plus 10 fail-first PG tests (`server/tests/test_activation_code_schema.py`), every invariant proven by PostgreSQL constraints (never application code):
 
 - **One code per user** — partial unique index `uq_activation_codes_bound_user_current` over `ACTIVE`/`SUSPENDED` bindings; revoked rows keep their binding for audit without squatting the user slot, and `activation_code_activations.user_id UNIQUE` makes activation a once-per-user fact.
-- **Status machine** — `ISSUED → ACTIVE` with `SUSPENDED`/`REVOKED` side states (dev doc §12.1: activation validates `ISSUED` and flips to `ACTIVE` with a binding); the full shape matrix is one CHECK (`ck_activation_codes_status_shape`): ISSUED must be unbound and untouched, ACTIVE must carry binding + `activated_at`, SUSPENDED requires `suspended_at`, REVOKED requires `revoked_at`.
+- **Status machine** — six states per acceptance spec §2.1: `GENERATED → ISSUED → ACTIVE` with `SUSPENDED`/`REVOKED` side states and `EXPIRED` as the unactivated end state; the full shape matrix is one CHECK (`ck_activation_codes_status_shape`): GENERATED is pre-delivery (`issued_at` NULL), ISSUED proves `issued_at`, ACTIVE adds binding + `activated_at`, SUSPENDED/REVOKED/EXPIRED carry their own proof timestamps, and a bound code can never move to EXPIRED.
+- **Append-only events** — `activation_code_events` (PR #41 P1): every GENERATED/DELIVERED/ACTIVATED/SUSPENDED/RESUMED/REVOKED/EXPIRED/EXPORTED transition leaves an immutable actor/reason/request record; a BEFORE UPDATE OR DELETE trigger makes PostgreSQL itself refuse rewrites (fail-first test proves UPDATE/DELETE both raise).
 - **Traceable records** — `activation_code_deliveries` (channel / external order / recipient ref / actor FK) and `activation_code_exports` (AEAD ciphertext + SHA-256 digest + key version + short-lived expiry + one-time download audit); every catalog row traces to a real `users.id`.
 - **No plaintext** — exact column sets are asserted per table (`test_catalog_tables_and_columns`): codes store only `code_digest` + `digest_key_version` + `masked_code`; exports store only AEAD `ciphertext` + `ciphertext_sha256`. No plaintext column can slip in without breaking the assertion.
 
@@ -29,6 +30,7 @@ Task exit gate: *一码一户、状态机、绑定唯一、可追溯记录通过
 | `activation_code_deliveries` | channel / `external_order_ref` / `recipient_ref` / `delivered_by_user_id` FK / `delivered_at` / note; multiple delivery records per code allowed (channel corrections) |
 | `activation_code_exports` | AEAD `ciphertext` + `ciphertext_sha256` + `key_version >= 1` + `expires_at > created_at` (short-lived) + `downloaded_at` / `downloaded_by_user_id` (one-time download audit) |
 | `activation_code_activations` | one-shot fact: `code_id` / `user_id` / `recharge_order_id` each UNIQUE (§11.3), `first_device_id` nullable (FK attaches with the T16 device revision under the append-only fix rule) |
+| `activation_code_events` | append-only audit trail (ACT-01 work package, PR #41 P1): typed events (GENERATED/DELIVERED/ACTIVATED/SUSPENDED/RESUMED/REVOKED/EXPIRED/EXPORTED) with actor FK / reason / request id; a BEFORE UPDATE OR DELETE trigger refuses rewrites at the database level |
 
 ## 2. Migration Semantics
 
@@ -40,13 +42,20 @@ Task exit gate: *一码一户、状态机、绑定唯一、可追溯记录通过
 
 | File | Change |
 | --- | --- |
-| `server/migrations/versions/027_activation_code_catalog.py` | new (frozen name): 5 tables, 18 CHECK constraints (incl. timestamp-cast expiry checks and the binding↔activation coupling), 4 unique constraints (`code_digest` + the activation triple-unique) plus the partial unique index, 5 secondary indexes, downgrade guard |
-| `server/tests/test_activation_code_schema.py` | new: 9 fail-first PG tests (tables/columns, batch shapes, digest uniqueness, status machine, one-binding-per-user, delivery traceability, export ciphertext/expiry, one-shot activation facts, downgrade) |
+| `server/migrations/versions/027_activation_code_catalog.py` | new (frozen name): 6 tables, 20 CHECK constraints (six-state shape matrix, timestamp-cast expiry checks, binding↔activation coupling), 4 unique constraints (`code_digest` + the activation triple-unique) plus the partial unique index, 6 secondary indexes, append-only trigger, downgrade guard |
+| `server/tests/test_activation_code_schema.py` | new: 10 fail-first PG tests (tables/columns, batch shapes, digest uniqueness, six-state machine, one-binding-per-user, delivery traceability, export ciphertext/expiry, append-only events, one-shot activation facts, downgrade) |
 | `server/tests/test_postgres_migrations.py` | head assertions 026→027 (rehearsal, re-upgrade, wallet guard stay-at-head) and the 026 downgrade-guard test adapted to the longer chain (`-2`, transactional rollback documented) |
-| `server/scripts/reconcile_customer_billing.py` | `PG_ONLY_TABLES` extended with the five revision-027 catalog tables: empty catalog tables on the PG target head pass the T07 import contract, any row fails closed (026 `admin_sessions` precedent) |
+| `server/scripts/reconcile_customer_billing.py` | `PG_ONLY_TABLES` extended with the six revision-027 catalog tables (incl. the event table): empty catalog tables on the PG target head pass the T07 import contract, any row fails closed (026 `admin_sessions` precedent) |
 | `server/scripts/sqlite_to_postgres.py` | table-contract comment updated for the 026/027 PG-only set |
 | `server/tests/test_sqlite_to_postgres.py` | new fail-first contract test (empty catalog accepted + a catalog row fails closed) and the `validate_revision_pair` head updated to 027 |
 | `server/tests/test_db.py`, `test_character_domain.py`, `test_characters.py`, `test_internal_billing.py`, `test_recharge_orders.py`, `test_settings.py` | SQLite-lane head assertions 026→027 (the 027 guard is a no-op on SQLite, so the recorded version moves with the head) |
+
+## PR #41 Review Fixes (Codex)
+
+1. **P1 — six-state machine**: the first cut locked only ISSUED/ACTIVE/SUSPENDED/REVOKED, so T11's `GENERATED` landing and expiration processing (`EXPIRED`) would have hit CheckViolation (acceptance spec §2.1 lists six legal states). 027 was still unpublished, so it was amended in place: `GENERATED` (pre-delivery, `issued_at` NULL, status server default), `EXPIRED` (`expired_at` proof column, unactivated only — a bound code never expires), full shape-matrix branches, red→green locks for all new branches.
+2. **P1 — append-only event table**: ACT-01's work package text requires "批次、码、发放、导出、激活事实**和事件表**" with "追加事件通过 PG 测试", but the first cut shipped only the five fact tables, leaving T12/T13 flows without an immutable actor/reason/request record. Added `activation_code_events` (typed-event CHECK, actor FK, request id) with a BEFORE UPDATE OR DELETE trigger that makes PostgreSQL refuse rewrites; a new fail-first test proves inserts pass while UPDATE/DELETE raise.
+
+Both fixes extend the earlier lexical-expiry and coupling repairs (see §Pre-PR Review Fixes below); `PG_ONLY_TABLES` covers the event table for the T07 cutover contract.
 
 ## Pre-PR Review Fixes
 
@@ -63,9 +72,9 @@ The same lexical-comparison pattern pre-exists in published revision 026 (`admin
 ```
 # PostgreSQL fixture up (scripts/pg-fixture.sh start; docker customer-v3-pg-test, PG16 :5433)
 $ uv run python -m pytest tests/test_activation_code_schema.py tests/test_postgres_migrations.py tests/test_sqlite_to_postgres.py -q
-45 passed                       # 9 T10 catalog cases (incl. the three review locks) + 10 migration-suite cases + 26 T07 import cases
+46 passed                       # 10 T10 catalog cases (incl. all review locks) + 10 migration-suite cases + 26 T07 import cases
 $ uv run python -m pytest tests -q
-687 passed, 2 warnings          # full suite on the PG fixture (zero regressions)
+688 passed, 2 warnings          # full suite on the PG fixture (zero regressions)
 $ uv run ruff check . && uv run ruff format --check . && uv run mypy app
 all green
 # No client/e2e/Tauri changes in this task; npm run check gates re-verified in CI
