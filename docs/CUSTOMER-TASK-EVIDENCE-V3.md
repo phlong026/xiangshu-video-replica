@@ -424,7 +424,7 @@ Lore 提交 SHA：见 PR squash 合并 SHA
 Owner / Reviewer：后端/安全（Agent 执行）/ 会话内代码评审
 分支 / 基线 SHA：feat/customer-v3-t14-idempotency-recovery / 基线 fec36c7（T13 PR #44 squash）
 上游规格段落：客户版任务清单 V3 §3 T14、§12.2 ACT-07；代码开发清单 V3 §9.1 customer_idempotency.py/test_customer_idempotency.py、§10.1 purge CLI、§12 maintenance service/timer 冻结名；激活码开发文档 §11.2 幂等信封、§7 密钥红线；测试与验收规格 §2
-改动文件：server/app/customer_idempotency.py（新增 334 行冻结名）、server/scripts/purge_idempotency_envelopes.py（新增维护 CLI）、server/app/activation_code_routes.py（重构接入共享模块，行为零变化）、server/tests/test_customer_idempotency.py（新增 18 用例）、deploy/systemd/video-replica-maintenance.service/.timer（新增冻结名）、deploy/customer.env.example（补 T13 设备域密钥占位+T14 AEAD 密钥/恢复窗口占位）、docs/evidence/T14-EVIDENCE.md、任务与证据账本
+改动文件：server/app/customer_idempotency.py（新增 334 行冻结名）、server/scripts/purge_idempotency_envelopes.py（新增维护 CLI）、server/app/activation_code_routes.py（重构接入共享模块，行为零变化）、server/tests/test_customer_idempotency.py（新增 18 用例）、deploy/systemd/video-replica-maintenance.service/.timer（新增冻结名；OnFailure=告警挂钩）、deploy/systemd/video-replica-maintenance-alert.service（新增：purge 重试预算耗尽的 ALERT 级 journald 告警单元，PR #45 评审 P2）、deploy/customer.env.example（补 T13 设备域密钥占位+T14 AEAD 密钥/恢复窗口占位）、docs/evidence/T14-EVIDENCE.md、任务与证据账本
 失败测试或回归锁定：先红后绿 18 例（模块级 8+PG 集成 7+CLI 3）；T13 42 例作为重构回归锁定全部保持绿（含 ACT-06 100 并发与同键恢复）
 实现结果：幂等信封引擎提取为共享模块（operation 泛化供 T17/T19/T22 复用）；恢复窗口到期后同 key 409；purge 单条 UPDATE 清空密文三列并记 purged_at（029 CHECK 耦合、幂等重跑为 0）；maintenance timer 每日清理；路由重构后信封行为与 T13 完全一致
 验证命令与通过数：专项 18 passed；T13+T14 四文件 60 passed；全量 795 passed + 3 skipped（总数 798，零回归；3 个 skip 为既存 Windows 环境性 bash 用例，Linux CI 上全跑；含一次 gate1_e2e 线程时序 flaky 的隔离重跑）；评审修复后终跑专项 60 + 全量 795/3 复确认；ruff/format/mypy 全绿
