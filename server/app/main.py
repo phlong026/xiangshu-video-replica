@@ -10,6 +10,7 @@ from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from app.activation_code_routes import router as customer_activation_router
 from app.admin_activation_routes import router as admin_activation_router
 from app.admin_auth_routes import router as admin_auth_router
 from app.analysis_routes import router as analysis_router
@@ -134,6 +135,7 @@ app.include_router(rbac_router)
 app.include_router(payment_router)
 app.include_router(control_router)
 app.include_router(admin_auth_router)
+app.include_router(customer_activation_router)
 app.include_router(admin_activation_router)
 app.include_router(recharge_router)
 app.include_router(wallet_router)
