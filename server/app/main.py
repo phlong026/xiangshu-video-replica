@@ -10,6 +10,7 @@ from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from app.activation_code_routes import router as customer_activation_router
 from app.admin_activation_routes import router as admin_activation_router
 from app.admin_auth_routes import router as admin_auth_router
 from app.analysis_routes import router as analysis_router
@@ -126,14 +127,28 @@ app.add_middleware(
         "tauri://localhost",
     ],
     allow_credentials=False,
-    allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"],
-    allow_headers=["Authorization", "Content-Type", "X-Dev-User-Id", "X-Admin-CSRF"],
+    allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
+    # PR #44 review P1: first activation is called from the WebView/browser
+    # client with a mandatory Idempotency-Key (plus X-Request-Id); without
+    # them in allow_headers the CORS preflight fails before the handler runs.
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "X-Dev-User-Id",
+        "X-Admin-CSRF",
+        "Idempotency-Key",
+        "X-Request-Id",
+    ],
+    # The same review's other half: browser JS must be able to read the
+    # replay marker and the echoed request id on the activation response.
+    expose_headers=["X-Request-Id", "X-Idempotent-Replay"],
 )
 app.include_router(generation_router)
 app.include_router(rbac_router)
 app.include_router(payment_router)
 app.include_router(control_router)
 app.include_router(admin_auth_router)
+app.include_router(customer_activation_router)
 app.include_router(admin_activation_router)
 app.include_router(recharge_router)
 app.include_router(wallet_router)

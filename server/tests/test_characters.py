@@ -138,7 +138,7 @@ def test_characters_migration_creates_library_tables(db_path: Path) -> None:
             ).fetchall()
         }
 
-    assert version == "031_admin_write_idempotency"
+    assert version == "029_customer_sessions_and_idempotency"
     assert {
         "characters",
         "project_main_characters",

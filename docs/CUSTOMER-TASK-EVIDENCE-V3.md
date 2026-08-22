@@ -356,3 +356,43 @@ Owner / Reviewer：后端/管理（Agent 执行）/ 会话内代码评审
 未测试项：首次激活原子事务（T13）；AEAD 幂等恢复（T14）；共享限流与防枚举（T15）；管理端前端页面（T32）；多实例部署形态（T36+）；STAGING/REAL_CHAIN/PRODUCTION
 Lore 提交 SHA：见 PR squash 合并 SHA
 ```
+
+
+## T13 — First-Activation Atomic Transaction (ACT-05 / ACT-06)
+
+| Field | Content |
+| --- | --- |
+| **Owner** | Backend/Billing |
+| **Reviewer** | session-internal code review |
+| **Branch / Base SHA** | `feat/customer-v3-t13-first-activation` / `main@83a5bb2` (T12, PR #43 squash) |
+| **Verified Implementation SHA** | PR squash merge result (see `docs/evidence/T13-EVIDENCE.md`) |
+| **Upstream Spec Sections** | Task list §3 T13, §12.2 ACT-05/ACT-06; code checklist (frozen `activation_code_routes.py`, migrations `028_customer_devices_and_activations` / `029_customer_sessions_and_idempotency`); activation-code dev doc §11.2 (idempotency envelope), §11.3 (concurrency invariants), §12.1 (first-activation transaction), §7 (key red lines); acceptance spec §2 |
+| **Files Changed** | `server/app/activation_code_routes.py` (new, 742 lines: versioned key resolution, keyed digests, AES-GCM envelope, one-transaction activation chain, unified anti-enumeration); `server/migrations/versions/028_customer_devices_and_activations.py` (new, PG-only, frozen name: two-slot `customer_devices` + digest/version columns + partial unique indexes `uq_customer_devices_slot`/`uq_customer_devices_fingerprint` + 027 deferred `first_device_id` FK attach + activated-guard downgrade refusal); `server/migrations/versions/029_customer_sessions_and_idempotency.py` (new, PG-only, frozen name: `customer_session_state` single-session invariant + epoch monotonic trigger, `customer_session_events` append-only trigger, `customer_idempotency_envelopes` unique (operation, scope, key_digest) + three-state coupling CHECK + purged_at); `server/app/main.py` (router mount; PR #44 review P1 — CORS `allow_headers` adds `Idempotency-Key`/`X-Request-Id`, `expose_headers` adds `X-Request-Id`/`X-Idempotent-Replay`); `server/tests/test_activation_code_routes.py` (new, 24 red→green cases: 16 original + 5 session-review + 3 PR #44-review regressions); `server/tests/test_customer_activation.py` (new, 5 concurrency cases incl. ACT-06 100 threads); `server/tests/test_activation_code_schema.py` (2 T10 cases adapted + 3 PR #44-review trigger cases); `server/tests/test_admin_activation_routes.py` (TRUNCATE covers new tables); 9 test files + `server/scripts/sqlite_to_postgres.py` + `server/scripts/reconcile_customer_billing.py` (head 031→029, PG_ONLY_TABLES + four new tables) |
+| **Failure Test or Regression Lock** | 32 cases: atomic happy path (201, full chain incl. wallet balance + epoch-1 90 s lease); request-id echo; missing Idempotency-Key 400; unified 400 ×7 (unknown/malformed/expired/suspended/revoked/active/generated); same fingerprint second code 409 `USER_ALREADY_ACTIVATED`; same key + same body replays identical identity (replay header + original request id); same key + different body 409; SQLite fail-closed 503 (runtime checked before keys); log scan — no plaintext code/token; 100 threads/one barrier/one code → one 201 + 99 × 400 with exactly one of each fact row; concurrent same-key recovery → identical username/device token/session token, one CHARGE; concurrent same-fingerprint cross-code → one 201 + one 409, losing code untouched; business failure releases the key; username collision regenerates in-transaction (savepoint); session-review regressions (naive batch expiry → unified 400, envelope row shape, recovery-window env override, expired-window refusal, whitespace-padding replay); PR #44-review regressions (CORS preflight permits `Idempotency-Key`/`X-Request-Id` + actual response exposes replay markers; rotation-window fingerprint check — V1-bound device + V2 added → second code still 409 with one user/CHARGE; envelope scoped under V1 still replays after V2 is added; both 029 triggers installed — epoch decrease and audit-table UPDATE/DELETE rejected) |
+| **Implementation Result** | `POST /api/customer/activate` creates the whole customer chain in exactly one `pg_transaction()`: FOR UPDATE code lock → server-generated `customer` user (savepoint retry ≤5) → funded wallet → slot-1 device (keyed digests + versions) → PAID `provider=activation_code` order (frozen batch price, base=charged per PRICE-01) → unique CHARGE (`activation_code:charge:{order_id}`) → activation fact (attaches 027's dangling FK) → ACTIVE code + ACTIVATED event → epoch-1 session + 90 s lease; idempotency envelope per revision 029 (sha256 key digest only, AAD-bound AES-GCM sealed response, 24 h recovery window, business failure rolls the placeholder back); unified 400 anti-enumeration; PG runtime fails closed 503 before key resolution |
+| **Verification Command and Pass Count** | `pytest tests/test_activation_code_routes.py tests/test_customer_activation.py tests/test_activation_code_schema.py` → 42 passed; full suite → 780 passed (PG fixture; the three previously-skipped network-dependent cases also ran green); ruff/format/mypy green; client workspace → 324 passed; biome e2e clean; cargo fmt+check clean; secret-scan patterns clean (see `docs/evidence/T13-EVIDENCE.md`) |
+| **Evidence Level** | `AUTOMATED_VERIFIED` |
+| **Security and Observability** | plaintext code/device token/session token only in the HTTP response and the AEAD envelope column (log-scan test); idempotency keys stored as sha256 digests; fingerprint + credential digests keyed HMAC with versioned rotation; unified anti-enumeration rejections; request id on every response, event and replay |
+| **Migration and Rollback** | new migrations 028/029 (frozen names, chained off the live head 031; 030 stays reserved for T25); PG-only (SQLite lane advances the revision only); 028 refuses downgrade while an activation fact exists (audit-chain guard); 029 downgrade symmetric (runtime caches, not business facts); T07 cutover keeps the four new tables PG-only-exempted-but-empty |
+| **External Authorization Record** | None; no real ZPay/COS/paid provider/external codes/gray release/public launch |
+| **Untested Items** | AEAD recovery completion + expired-envelope cleanup (T14/ACT-07); shared rate limiting + timing parity (T15/ACT-08); second device + pairing (T16–T18); session lifecycle (T19–T20); ZPay coexistence recharge (T22/BILL-01); frontend/desktop (T28+); STAGING/REAL_CHAIN/PRODUCTION |
+| **Lore Commit SHA** | PR squash merge SHA |
+
+### T13 Section 14 Ledger Record
+
+```text
+任务/工作包：T13 / ACT-05 + ACT-06
+Owner / Reviewer：后端/账务（Agent 执行）/ 会话内代码评审
+分支 / 基线 SHA：feat/customer-v3-t13-first-activation / 基线 83a5bb2（T12 PR #43 squash）
+上游规格段落：客户版任务清单 V3 §3 T13、§12.2 ACT-05/ACT-06；代码开发清单 V3（activation_code_routes.py、028/029 迁移冻结名）；激活码开发文档 §11.2 幂等信封、§11.3 并发不变量、§12.1 首次激活事务、§7 密钥红线；测试与验收规格 §2
+改动文件：server/app/activation_code_routes.py（新增 742 行）、server/migrations/versions/028_customer_devices_and_activations.py（新增，PG-only，冻结名）、server/migrations/versions/029_customer_sessions_and_idempotency.py（新增，PG-only，冻结名）、server/app/main.py（挂载+CORS 幂等头/expose 头）、server/tests/test_activation_code_routes.py（新增 24 用例，含会话评审 5 条+PR #44 评审 3 条回归）、server/tests/test_customer_activation.py（新增 5 并发用例含 ACT-06 100 并发）、server/tests/test_activation_code_schema.py（2 用例适配+3 条触发器回归）、server/tests/test_admin_activation_routes.py（TRUNCATE 纳新表）、9 个既有测试文件+2 个脚本（head 断言 031→029、PG_ONLY_TABLES 纳四张新表）、docs/evidence/T13-EVIDENCE.md、任务与证据账本
+失败测试或回归锁定：先红后绿——契约 24 例（含会话评审 P2/P3 修复回归：naive 过期统一 400、信封形状、恢复窗 env、过期拒绝重放、空白填充重放；PR #44 评审回归：CORS 预检允许幂等头/实际响应 expose 回放标记、轮换窗口指纹检查 V1 绑定设备+V2 新增二码仍 409 且一 user/一 CHARGE、V1 作用域信封 V2 新增后仍可重放）（原子全链/请求 id 回显/幂等键必填/统一 400 七场景/同指纹二码 409/同键同体重放+replay 头/同键异体 409/SQLite fail-closed 503/日志无明文）；并发 5 例（100 并发恰一成功+全库恰一份事实/同键并发恢复同一身份且仅一笔 CHARGE/同指纹跨码并发一胜一 409/业务失败释放幂等键/用户名碰撞事务内保存点重试）；schema 2 例适配+3 例触发器回归（两触发器存在、epoch 降低拒绝、审计表 UPDATE/DELETE 拒绝）
+实现结果：单事务激活链（user+wallet+slot1+PAID order+CHARGE+activation+ACTIVE code+事件+epoch-1 session/90s 租约）全有或全无；幂等信封 029（摘要入库/AAD 绑定/24h 恢复窗/业务失败回滚释放键）；统一 400 防枚举；PG fail-closed 先于密钥检查
+验证命令与通过数：专项 42 passed；全量 780 passed（PG fixture，含此前 3 个 skip 的网络依赖用例）；ruff/format/mypy 全绿；client 324 passed；biome/cargo/secret 扫描 clean
+证据层级：AUTOMATED_VERIFIED
+安全与可观测性：明文只存在于 HTTP 响应与 AEAD 信封列；幂等键仅存摘要；指纹/凭据 keyed HMAC 版本化；统一防枚举；request id 全链路
+迁移与回滚：028/029 冻结名从 head 031 顺延；PG-only；028 激活存在拒绝降级；029 对称；T07 导入新表必须为空
+外部授权记录：无；未调用真实 ZPay/COS/付费 Provider/对外发码/灰度/公网发布
+未测试项：T14 幂等恢复完善；T15 限流/防枚举；T16-T18 设备；T19-T20 会话；T22 ZPay 续充；T28+ 前端；STAGING/REAL_CHAIN/PRODUCTION
+Lore 提交 SHA：见 PR squash 合并 SHA
+```
