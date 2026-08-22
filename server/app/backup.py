@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import os
 import sqlite3
+import sys
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
@@ -223,7 +224,10 @@ def create_readonly_snapshot(
                 )
 
             os.chmod(temporary, 0o600)
-            with temporary.open("rb") as stream:
+            # Windows FlushFileBuffers fails with EBADF on a read-only file
+            # descriptor; "rb+" keeps the durability flush meaningful
+            # cross-platform.
+            with temporary.open("rb+") as stream:
                 os.fsync(stream.fileno())
             _publish_without_overwrite(temporary, snapshot)
             linked = True
@@ -243,7 +247,10 @@ def create_readonly_snapshot(
                     "stop every writer and retry the maintenance window"
                 )
             os.chmod(snapshot, 0o600)
-            if snapshot.stat().st_mode & 0o077:
+            # Windows reports a synthesized 0o666 mode for every file
+            # regardless of the requested 0600, so the privacy assertion is
+            # POSIX-only.
+            if sys.platform != "win32" and snapshot.stat().st_mode & 0o077:
                 raise PermissionError(
                     "migration snapshot permissions are not private (expected 0600)"
                 )
@@ -285,7 +292,10 @@ def backup_database(source_path: str | Path, backup_path: str | Path) -> Path:
 
     with connect_database(source) as source_conn:
         _check_integrity(source_conn)
-        with sqlite3.connect(temp_backup) as backup_conn:
+        # sqlite3's context manager only commits/rolls back the transaction;
+        # closing() is required to release the file handle before
+        # os.replace, otherwise Windows raises WinError 32 on the rename.
+        with closing(sqlite3.connect(temp_backup)) as backup_conn:
             source_conn.backup(backup_conn)
             _check_integrity(backup_conn)
 
@@ -304,9 +314,9 @@ def restore_database(backup_path: str | Path, target_path: str | Path) -> Path:
     if temp_target.exists():
         temp_target.unlink()
 
-    with sqlite3.connect(backup) as backup_conn:
+    with closing(sqlite3.connect(backup)) as backup_conn:
         _check_integrity(backup_conn)
-        with sqlite3.connect(temp_target) as target_conn:
+        with closing(sqlite3.connect(temp_target)) as target_conn:
             backup_conn.backup(target_conn)
             _check_integrity(target_conn)
 

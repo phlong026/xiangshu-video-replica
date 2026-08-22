@@ -9,6 +9,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import time
 import traceback
 from collections.abc import Callable, Mapping
@@ -92,7 +93,13 @@ class ManagedProcesses:
             log_file.close()
             raise
         self._processes.append(_ManagedProcess(process=process, log_file=log_file))
-        _append_text(log_path, f"\n[harness] started {name} pid={process.pid}\n")
+        # On Windows the child inherits the raw OS log handle without
+        # O_APPEND, so a harness write through a freshly opened descriptor can
+        # land at offset 0 and clobber the child's output. Writing through the
+        # held "ab" file object keeps CRT O_APPEND semantics (seek to end
+        # before every write, shared position) on every platform.
+        log_file.write(f"\n[harness] started {name} pid={process.pid}\n".encode())
+        log_file.flush()
         return process
 
     def close(self) -> None:
@@ -623,7 +630,9 @@ def _media_command_runner(log_path: Path) -> CommandRunner:
 
 
 def _stop_process_tree(process: subprocess.Popen[bytes]) -> None:
-    if os.name == "nt":
+    # sys.platform (rather than os.name) lets mypy's platform stubs narrow
+    # away the POSIX-only os.killpg/SIGKILL calls on Windows.
+    if sys.platform == "win32":
         if process.poll() is not None:
             return
         subprocess.run(
@@ -644,7 +653,7 @@ def _stop_process_tree(process: subprocess.Popen[bytes]) -> None:
         return
     except subprocess.TimeoutExpired:
         pass
-    if os.name == "nt":
+    if sys.platform == "win32":
         process.kill()
     else:
         try:

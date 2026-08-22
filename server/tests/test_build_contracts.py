@@ -5,10 +5,41 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _bash_path() -> str | None:
+    # Resolve the interpreter explicitly: Windows' CreateProcess searches
+    # System32 before PATH, so a bare "bash" argument can silently resolve
+    # to the WSL launcher stub (System32\bash.exe / WindowsApps\bash.exe)
+    # even when git-bash is first on PATH. The stub's exit status drifts
+    # with the WSL service state and its UTF-16 diagnostics kill text-mode
+    # output readers mid-decode, so the POSIX launcher tests need a native
+    # Windows POSIX shell (git-bash) or a real POSIX system, probed once at
+    # import time.
+    bash = shutil.which("bash")
+    if bash is None:
+        return None
+    if sys.platform == "win32":
+        lowered = {part.lower() for part in Path(bash).parts}
+        if "system32" in lowered or "windowsapps" in lowered:
+            return None
+    probe = subprocess.run(
+        [bash, "-c", "exit 0"],
+        check=False,
+        capture_output=True,
+        timeout=30,
+    )
+    return bash if probe.returncode == 0 else None
+
+
+BASH = _bash_path()
 
 
 def test_cargo_build_uses_workspace_isolated_target_directory() -> None:
@@ -91,6 +122,9 @@ def test_pull_requests_run_linux_quality_and_windows_nsis_gates() -> None:
 
 
 def test_posix_backend_launcher_executes_default_commands(tmp_path: Path) -> None:
+    if BASH is None:
+        pytest.skip("a functional bash is required for the POSIX launcher flow")
+    assert BASH is not None
     launcher = tmp_path / "start-backend.sh"
     shutil.copy2(REPO_ROOT / "client/src-tauri/resources/start-backend.sh", launcher)
     launcher.chmod(launcher.stat().st_mode | stat.S_IXUSR)
@@ -126,7 +160,7 @@ esac
     }
 
     result = subprocess.run(
-        ["bash", str(launcher)],
+        [BASH, str(launcher)],
         check=False,
         capture_output=True,
         env=env,
@@ -160,24 +194,25 @@ def test_packaged_launchers_reject_partial_command_overrides(tmp_path: Path) -> 
         },
     )
     expected_error = "packaged bootstrap, server, and worker commands must be set together"
-    for overrides in partial_overrides:
-        env = {
-            **os.environ,
-            "VIDEO_REPLICA_DB_PATH": str(tmp_path / "app.db"),
-            "VIDEO_REPLICA_DESKTOP_USER_ID": "employee_1",
-            **overrides,
-        }
-        result = subprocess.run(
-            ["bash", str(launcher)],
-            check=False,
-            capture_output=True,
-            env=env,
-            text=True,
-            timeout=10,
-        )
+    if BASH is not None:
+        for overrides in partial_overrides:
+            env = {
+                **os.environ,
+                "VIDEO_REPLICA_DB_PATH": str(tmp_path / "app.db"),
+                "VIDEO_REPLICA_DESKTOP_USER_ID": "employee_1",
+                **overrides,
+            }
+            result = subprocess.run(
+                [BASH, str(launcher)],
+                check=False,
+                capture_output=True,
+                env=env,
+                text=True,
+                timeout=10,
+            )
 
-        assert result.returncode != 0
-        assert expected_error in result.stderr
+            assert result.returncode != 0
+            assert expected_error in str(result.stderr)
 
     windows_launcher = (REPO_ROOT / "client/src-tauri/resources/start-backend.bat").read_text(
         encoding="utf-8"
@@ -188,33 +223,41 @@ def test_packaged_launchers_reject_partial_command_overrides(tmp_path: Path) -> 
 
 
 def test_posix_packaged_launcher_runs_without_uv_or_server_sources(tmp_path: Path) -> None:
+    if BASH is None:
+        pytest.skip("a functional bash is required for the POSIX launcher flow")
+    assert BASH is not None
     launcher = tmp_path / "start-backend.sh"
     shutil.copy2(REPO_ROOT / "client/src-tauri/resources/start-backend.sh", launcher)
     launcher.chmod(launcher.stat().st_mode | stat.S_IXUSR)
 
     marker_dir = tmp_path / "markers"
     marker_dir.mkdir()
-    commands: dict[str, Path] = {}
+    commands: dict[str, str] = {}
     for name in ("bootstrap", "server", "worker"):
         command = tmp_path / name
+        # as_posix(): the launcher hands the override commands to
+        # ``sh -c``, where Windows backslash separators would be eaten as
+        # escape characters (identical to str() on POSIX).
+        command_path = command.as_posix()
+        marker_path = (marker_dir / name).as_posix()
         command.write_text(
-            f"#!/bin/sh\nprintf '%s' '{name}' > '{marker_dir / name}'\n",
+            f"#!/bin/sh\nprintf '%s' '{name}' > '{marker_path}'\n",
             encoding="utf-8",
         )
         command.chmod(command.stat().st_mode | stat.S_IXUSR)
-        commands[name] = command
+        commands[name] = command_path
 
     env = {
         **os.environ,
         "PATH": "/usr/bin:/bin",
         "VIDEO_REPLICA_DB_PATH": str(tmp_path / "app.db"),
         "VIDEO_REPLICA_DESKTOP_USER_ID": "employee_1",
-        "VIDEO_REPLICA_BOOTSTRAP_CMD": str(commands["bootstrap"]),
-        "VIDEO_REPLICA_SERVER_CMD": str(commands["server"]),
-        "VIDEO_REPLICA_WORKER_CMD": str(commands["worker"]),
+        "VIDEO_REPLICA_BOOTSTRAP_CMD": commands["bootstrap"],
+        "VIDEO_REPLICA_SERVER_CMD": commands["server"],
+        "VIDEO_REPLICA_WORKER_CMD": commands["worker"],
     }
     result = subprocess.run(
-        ["bash", str(launcher)],
+        [BASH, str(launcher)],
         check=False,
         capture_output=True,
         env=env,

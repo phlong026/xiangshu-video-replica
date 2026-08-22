@@ -364,11 +364,16 @@ def _alembic_head() -> str:
 
 def _run_alembic_upgrade_head() -> subprocess.CompletedProcess[str]:
     server_dir = Path(__file__).resolve().parent.parent
+    # Alembic echoes migration comments that may contain non-ASCII bytes;
+    # decode as UTF-8 with replacement instead of the ambient Windows code
+    # page, whose reader thread would otherwise die mid-decode and leave
+    # stderr as None.
     return subprocess.run(
         [sys.executable, "-m", "alembic", "upgrade", "head"],
         cwd=server_dir,
         capture_output=True,
-        text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=180,
         check=False,
     )

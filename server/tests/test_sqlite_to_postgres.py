@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import stat
+import sys
 from pathlib import Path
 
 import pytest
@@ -106,7 +107,10 @@ def test_readonly_snapshot_preserves_source_and_is_private(tmp_path: Path) -> No
     assert metadata.sha256 == metadata.snapshot_sha256
     assert len(metadata.source_sha256) == 64
     assert len(metadata.snapshot_sha256) == 64
-    assert stat.S_IMODE(snapshot.stat().st_mode) == 0o600
+    # Windows reports a synthesized 0o666 mode for every file; the 0600
+    # privacy assertion is POSIX-only (mirrors the guard in app/backup.py).
+    if sys.platform != "win32":
+        assert stat.S_IMODE(snapshot.stat().st_mode) == 0o600
     with sqlite3.connect(snapshot) as conn:
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
 
