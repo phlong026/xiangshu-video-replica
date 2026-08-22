@@ -691,3 +691,84 @@ def test_downgrade_drops_catalog_and_blocks_when_activated(catalog_dsn: str) -> 
             ACTIVATIONS_TABLE,
         ):
             assert table not in tables, f"{table} must be dropped by downgrade"
+
+
+# ---------------------------------------------------------------------------
+# PR #44 review P2: the 029 session triggers must be installed and enforced
+# ---------------------------------------------------------------------------
+
+
+def _insert_session_chain(conn: psycopg.Connection) -> None:
+    """Seed the minimum chain for one session row: batch -> ACTIVE code ->
+    bound device -> live session state plus one audit event."""
+    _insert_batch(conn, 1)
+    _insert_code(
+        conn,
+        1,
+        status="ACTIVE",
+        bound_user_id="u-cust",
+        activated_at="2026-08-22T01:00:00+00:00",
+    )
+    conn.execute(
+        "INSERT INTO customer_devices "
+        "(id, activation_code_id, user_id, slot_no, display_name, platform, "
+        " fingerprint_hmac, fingerprint_key_version, token_digest, token_key_version) "
+        "VALUES ('dev-1', 'code-1', 'u-cust', 1, 'Dev', 'windows', "
+        "'fp-hmac-1', 1, 'tok-digest-1', 1)"
+    )
+    conn.execute(
+        "INSERT INTO customer_session_state "
+        "(user_id, activation_code_id, device_id, session_id, token_digest, "
+        " session_epoch, lease_until) "
+        "VALUES ('u-cust', 'code-1', 'dev-1', 'sess-1', 'sess-digest-1', 5, "
+        "'2099-01-01T00:00:00+00:00')"
+    )
+    conn.execute(
+        "INSERT INTO customer_session_events "
+        "(id, event, user_id, activation_code_id, device_id, session_id, session_epoch) "
+        "VALUES ('evt-1', 'ACTIVATED', 'u-cust', 'code-1', 'dev-1', 'sess-1', 5)"
+    )
+
+
+def test_session_triggers_installed(catalog_dsn: str) -> None:
+    """PR #44 review P2: 029 defined the epoch-monotonicity DDL but never
+    executed it — both session triggers must actually exist on the tables."""
+    with psycopg.connect(catalog_dsn, autocommit=True) as conn:
+        triggers = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT tgname FROM pg_trigger WHERE NOT tgisinternal "
+                "AND tgrelid IN ("
+                " 'customer_session_state'::regclass,"
+                " 'customer_session_events'::regclass)"
+            ).fetchall()
+        }
+    assert "trg_customer_session_state_epoch_monotonic" in triggers
+    assert "trg_customer_session_events_append_only" in triggers
+
+
+def test_session_epoch_decrease_is_rejected(catalog_dsn: str) -> None:
+    """The database invariant itself (§11.3): nothing may lower a live
+    session epoch — a decrease would resurrect a fenced-out device."""
+    with psycopg.connect(catalog_dsn) as conn:
+        _insert_session_chain(conn)
+        conn.commit()
+        with pytest.raises(psycopg.errors.RaiseException, match="must never decrease"):
+            conn.execute(
+                "UPDATE customer_session_state SET session_epoch = session_epoch - 1 "
+                "WHERE user_id = 'u-cust'"
+            )
+        conn.rollback()
+
+
+def test_session_events_append_only_is_enforced(catalog_dsn: str) -> None:
+    """UPDATE and DELETE on the audit table must be refused by the trigger."""
+    with psycopg.connect(catalog_dsn) as conn:
+        _insert_session_chain(conn)
+        conn.commit()
+        with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
+            conn.execute("UPDATE customer_session_events SET event = 'LOGIN' WHERE id = 'evt-1'")
+        conn.rollback()
+        with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
+            conn.execute("DELETE FROM customer_session_events WHERE id = 'evt-1'")
+        conn.rollback()

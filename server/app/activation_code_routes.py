@@ -402,7 +402,7 @@ def _run_activation(
     *,
     canonical_code: str,
     code_digests: list[str],
-    fingerprint_hmac: str,
+    fingerprint_digests: list[str],
     fingerprint_key_version: int,
     hmac_key: bytes,
     device_name: str,
@@ -445,9 +445,13 @@ def _run_activation(
 
     # Fast-path fingerprint check; the concurrent race is settled by the
     # partial unique index uq_customer_devices_fingerprint (§11.3).
+    # PR #44 review P1: check every retained fingerprint-key version — during
+    # a rotation window (V1 retained, V2 added) a device bound under the older
+    # version must still be recognized, or the same physical device could
+    # redeem a second code and receive a second user, wallet and first charge.
     bound = conn.execute(
-        "SELECT 1 FROM customer_devices WHERE fingerprint_hmac = %s AND status = 'BOUND'",
-        (fingerprint_hmac,),
+        "SELECT 1 FROM customer_devices WHERE fingerprint_hmac = ANY(%s) AND status = 'BOUND'",
+        (fingerprint_digests,),
     ).fetchone()
     if bound is not None:
         raise _http(
@@ -477,7 +481,8 @@ def _run_activation(
             user_id,
             device_name,
             device_platform,
-            fingerprint_hmac,
+            # New bindings always carry the highest configured key version.
+            fingerprint_digests[-1],
             fingerprint_key_version,
             token_digest,
             fingerprint_key_version,
@@ -625,34 +630,60 @@ def activate_first_device(
             "Activation keys are not configured; activation is refused.",
         ) from None
 
-    fingerprint_hmac = _keyed_digest(hmac_key, fingerprint)
-    scope = fingerprint_hmac
+    # PR #44 review P1: during a rotation window several device-domain key
+    # versions stay configured at once. Compute the fingerprint digest under
+    # *every* retained version — the binding check (inside the transaction)
+    # and the envelope-scope lookup below must both recognize an identity
+    # established under an older version, while new rows always carry the
+    # highest version's digest.
+    fingerprint_digests = [
+        _keyed_digest(_device_domain_hmac_key(version), fingerprint)
+        for version in _configured_key_versions(DEVICE_FINGERPRINT_HMAC_KEY_ENV)
+    ]
+    fingerprint_hmac = fingerprint_digests[-1]
+    scope_candidates = list(reversed(fingerprint_digests))
     key_digest = _idempotency_key_digest(idempotency_key)
     request_hash = _request_hash(canonical_code, body)
-    aad = _envelope_aad(ACTIVATE_OPERATION, scope, key_digest)
     recovery_seconds = _recovery_window_seconds()
     request_id = request.headers.get(REQUEST_ID_HEADER, "").strip() or str(uuid.uuid4())
 
     try:
         with pg_transaction() as conn:
-            envelope_id = _insert_envelope(
-                conn,
-                scope=scope,
-                key_digest=key_digest,
-                request_hash=request_hash,
-            )
-            if envelope_id is None:
-                # Concurrent or sequential key reuse: a committed envelope is
-                # the only visible shape here (the insert waited for the other
-                # transaction), so anything unrecoverable is a conflict.
-                loaded = _load_envelope(conn, scope=scope, key_digest=key_digest)
-                if loaded is None or loaded[0] != request_hash:
+            # Key reuse may have scoped its envelope under an older fingerprint
+            # digest before a rotation: look through every configured version's
+            # scope (highest first) before inserting a fresh placeholder.
+            existing: tuple[str, tuple[str, str | None, int | None, str | None]] | None = None
+            for scope_candidate in scope_candidates:
+                loaded = _load_envelope(conn, scope=scope_candidate, key_digest=key_digest)
+                if loaded is not None:
+                    existing = (scope_candidate, loaded)
+                    break
+
+            envelope_id: str | None = None
+            if existing is None:
+                envelope_id = _insert_envelope(
+                    conn,
+                    scope=fingerprint_hmac,
+                    key_digest=key_digest,
+                    request_hash=request_hash,
+                )
+                if envelope_id is None:
+                    # Concurrent same-key writer won the placeholder insert (the
+                    # insert blocked on the unique index until the other
+                    # transaction committed): load the committed envelope back.
+                    loaded = _load_envelope(conn, scope=fingerprint_hmac, key_digest=key_digest)
+                    if loaded is not None:
+                        existing = (fingerprint_hmac, loaded)
+
+            if existing is not None:
+                found_scope, stored = existing
+                stored_request_hash, ciphertext, key_version, recovery_expires_at = stored
+                if stored_request_hash != request_hash:
                     raise _http(
                         409,
                         "IDEMPOTENCY_CONFLICT",
                         "This idempotency key was already used for a different request.",
                     )
-                _, ciphertext, key_version, recovery_expires_at = loaded
                 if ciphertext is None or key_version is None:
                     # Purged or never completed: the key is spent and the
                     # response is no longer recoverable (T14 refines this).
@@ -673,7 +704,7 @@ def activate_first_device(
                     replayed = _open_response(
                         str(ciphertext),
                         key=_customer_idempotency_aead_key(int(key_version)),
-                        aad=aad,
+                        aad=_envelope_aad(ACTIVATE_OPERATION, found_scope, key_digest),
                     )
                 except ActivationKeyError:
                     # The envelope's key version was retired inside the
@@ -695,7 +726,7 @@ def activate_first_device(
                 # review P3).
                 logger.info(
                     "customer activation idempotent replay: scope=%s key_version=%s request=%s",
-                    scope,
+                    found_scope,
                     key_version,
                     replay_request_id if isinstance(replay_request_id, str) else "-",
                 )
@@ -715,11 +746,14 @@ def activate_first_device(
                     "ACTIVATION_SERVICE_UNAVAILABLE",
                     "The database clock is unavailable.",
                 )
+            # mypy: the replay branch above returns or raises whenever an
+            # existing envelope was found, so only a fresh placeholder flows on.
+            assert envelope_id is not None
             payload = _run_activation(
                 conn,
                 canonical_code=canonical_code,
                 code_digests=code_digests,
-                fingerprint_hmac=fingerprint_hmac,
+                fingerprint_digests=fingerprint_digests,
                 fingerprint_key_version=fingerprint_key_version,
                 hmac_key=hmac_key,
                 device_name=device_name,
@@ -732,7 +766,11 @@ def activate_first_device(
                 .replace(microsecond=0)
                 .isoformat()
             )
-            ciphertext = _seal_response(payload, key=aead_key, aad=aad)
+            ciphertext = _seal_response(
+                payload,
+                key=aead_key,
+                aad=_envelope_aad(ACTIVATE_OPERATION, fingerprint_hmac, key_digest),
+            )
             _complete_envelope(
                 conn,
                 envelope_id,

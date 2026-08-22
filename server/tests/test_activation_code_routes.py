@@ -775,3 +775,109 @@ def test_same_key_whitespace_padding_replays(client: TestClient, clean_state: st
     assert padded.status_code == 201, padded.text
     assert padded.headers.get(REPLAY_HEADER) == "true"
     assert padded.json()["device_token"] == first.json()["device_token"]
+
+
+# ---------------------------------------------------------------------------
+# PR #44 review regressions: CORS preflight, rotation-window fingerprints,
+# cross-version envelope scope, installed session triggers
+# ---------------------------------------------------------------------------
+
+
+def test_cors_preflight_permits_idempotency_headers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """PR #44 review P1: the WebView/browser client must pass the mandatory
+    Idempotency-Key (and X-Request-Id) through the CORS preflight, and read
+    the replay/request-id response headers on the actual response."""
+    from app.main import app as main_app
+
+    monkeypatch.delenv("VIDEO_REPLICA_CUSTOMER_PRODUCTION", raising=False)
+    with TestClient(main_app) as main_client:
+        preflight = main_client.options(
+            ACTIVATE_PATH,
+            headers={
+                "Origin": "http://localhost:5173",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": ("idempotency-key, x-request-id, content-type"),
+            },
+        )
+        assert preflight.status_code == 200, preflight.text
+        allowed = preflight.headers.get("access-control-allow-headers", "").lower()
+        assert "idempotency-key" in allowed
+        assert "x-request-id" in allowed
+
+        # The expose headers live on the actual (non-preflight) response — a
+        # validation error still passes through the CORS middleware, so the
+        # status does not matter, only the readable header contract.
+        actual = main_client.post(
+            ACTIVATE_PATH,
+            headers={"Origin": "http://localhost:5173", IDEMPOTENCY_KEY_HEADER: "key-cors"},
+        )
+        assert actual.status_code == 422, actual.text
+    exposed = actual.headers.get("access-control-expose-headers", "").lower()
+    assert "x-idempotent-replay" in exposed
+    assert "x-request-id" in exposed
+
+
+def test_fingerprint_rotation_window_blocks_second_activation(
+    client: TestClient,
+    clean_state: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #44 review P1: during a rotation window (V1 retained, V2 added) a
+    fingerprint bound under V1 must still be recognized — the same physical
+    device may never redeem a second code for a second user and first charge."""
+    first_code = generate_activation_code()
+    second_code = generate_activation_code()
+    with psycopg.connect(clean_state) as conn:
+        _insert_code(conn, code_id="code-rot-1", batch_id="batch-rot-1", plaintext=first_code)
+        _insert_code(conn, code_id="code-rot-2", batch_id="batch-rot-2", plaintext=second_code)
+
+    first = _activate(client, code=first_code, fingerprint="fp-rotating", key="key-rot-a")
+    assert first.status_code == 201, first.text
+
+    # Rotation: V2 is configured while V1 stays retained.
+    monkeypatch.setenv("VIDEO_REPLICA_DEVICE_FINGERPRINT_HMAC_KEY_V2", secrets.token_urlsafe(48))
+    second = _activate(client, code=second_code, fingerprint="fp-rotating", key="key-rot-b")
+    assert second.status_code == 409, second.text
+    assert second.json()["detail"]["code"] == "USER_ALREADY_ACTIVATED"
+
+    with psycopg.connect(clean_state) as conn:
+        assert _count(conn, "SELECT COUNT(*) FROM users WHERE role = 'customer'") == 1
+        assert _count(conn, "SELECT COUNT(*) FROM wallet_transactions WHERE type = 'CHARGE'") == 1
+        assert (
+            _row(conn, "SELECT status FROM activation_codes WHERE id = %s", ("code-rot-2",))[0]
+            == "ISSUED"
+        )
+
+
+def test_envelope_scope_recovery_survives_key_rotation(
+    client: TestClient,
+    clean_state: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #44 review P1: a retry created before the rotation (envelope scope
+    under the V1 fingerprint digest) must still replay after V2 is added —
+    the one-time credentials stay recoverable across the rotation window."""
+    plaintext = generate_activation_code()
+    with psycopg.connect(clean_state) as conn:
+        _insert_code(conn, code_id="code-scope", batch_id="batch-scope", plaintext=plaintext)
+
+    first = _activate(client, code=plaintext, fingerprint="fp-scope", key="key-scope")
+    assert first.status_code == 201, first.text
+
+    # Rotate both the device-domain HMAC and the envelope AEAD keys; V1 stays
+    # retained so the sealed envelope remains decryptable.
+    monkeypatch.setenv("VIDEO_REPLICA_DEVICE_FINGERPRINT_HMAC_KEY_V2", secrets.token_urlsafe(48))
+    monkeypatch.setenv(
+        "VIDEO_REPLICA_CUSTOMER_IDEMPOTENCY_AEAD_KEY_V2",
+        _b64key(secrets.token_bytes(32)),
+    )
+
+    replay = _activate(client, code=plaintext, fingerprint="fp-scope", key="key-scope")
+    assert replay.status_code == 201, replay.text
+    assert replay.headers.get(REPLAY_HEADER) == "true"
+    assert replay.json()["device_token"] == first.json()["device_token"]
+    assert replay.json()["session_token"] == first.json()["session_token"]
+
+    with psycopg.connect(clean_state) as conn:
+        assert _count(conn, "SELECT COUNT(*) FROM customer_idempotency_envelopes") == 1
+        assert _count(conn, "SELECT COUNT(*) FROM wallet_transactions WHERE type = 'CHARGE'") == 1

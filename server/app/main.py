@@ -127,8 +127,21 @@ app.add_middleware(
         "tauri://localhost",
     ],
     allow_credentials=False,
-    allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"],
-    allow_headers=["Authorization", "Content-Type", "X-Dev-User-Id", "X-Admin-CSRF"],
+    allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
+    # PR #44 review P1: first activation is called from the WebView/browser
+    # client with a mandatory Idempotency-Key (plus X-Request-Id); without
+    # them in allow_headers the CORS preflight fails before the handler runs.
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "X-Dev-User-Id",
+        "X-Admin-CSRF",
+        "Idempotency-Key",
+        "X-Request-Id",
+    ],
+    # The same review's other half: browser JS must be able to read the
+    # replay marker and the echoed request id on the activation response.
+    expose_headers=["X-Request-Id", "X-Idempotent-Replay"],
 )
 app.include_router(generation_router)
 app.include_router(rbac_router)

@@ -154,6 +154,10 @@ def _create_session_state() -> None:
             name="ck_customer_session_state_heartbeat_not_before_created",
         ),
     )
+    # PR #44 review P2: install the epoch-monotonicity trigger — the DDL was
+    # defined above but never executed, so the database invariant (epoch may
+    # never decrease, §11.3) was not actually enforced on upgraded databases.
+    op.execute(_EPOCH_MONOTONIC_TRIGGER)
 
 
 def _create_session_events() -> None:
