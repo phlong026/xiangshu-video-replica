@@ -13,12 +13,12 @@
 
 ## Exit-Gate Verification
 
-Task exit gate: *actor、reason、幂等键、request id 和审计齐全* (task list §3 T12) + ACT-04 gate: *RBAC、CSRF、reason、Idempotency-Key、request id 和审计测试；未登录、auditor 写入和缺少二次确认必须拒绝* — delivered as `server/app/admin_activation_routes.py` (frozen name, mounted in `main.py`) over migration `028_admin_write_idempotency`, with 37 fail-first tests (`server/tests/test_admin_activation_routes.py`, on a dedicated migrated PG fixture database):
+Task exit gate: *actor、reason、幂等键、request id 和审计齐全* (task list §3 T12) + ACT-04 gate: *RBAC、CSRF、reason、Idempotency-Key、request id 和审计测试；未登录、auditor 写入和缺少二次确认必须拒绝* — delivered as `server/app/admin_activation_routes.py` (frozen name, mounted in `main.py`) over migration `028_admin_write_idempotency`, with 38 fail-first tests (`server/tests/test_admin_activation_routes.py`, on a dedicated migrated PG fixture database; the 38th locks the PR #43 review P2 cross-resource idempotency conflict):
 
 - **actor** — every route resolves the operator through the T09 `AdminWriter`/`AdminReader` session dependencies (HttpOnly admin cookie + CSRF); the actor's `users.id` lands on the batch, the idempotency snapshot and every catalog event.
 - **reason** — the §15 write contract refuses any mutation without `confirm=true` plus a non-blank `reason` (400 `CONFIRMATION_REQUIRED` / `REASON_REQUIRED`); the reason is persisted on deliveries and lifecycle events.
-- **幂等键** — `Idempotency-Key` header is mandatory (400 `IDEMPOTENCY_KEY_REQUIRED`); same key + same canonical request replays the stored response with `X-Idempotent-Replay: true`, same key + different body is a 409 `IDEMPOTENCY_CONFLICT`, and concurrent same-key writers serialize on the 028 unique index (two-thread barrier test).
-- **request id** — every fresh write returns `X-Request-Id` (UUID) echoed inside the payload, and the replay path restores the original one; lifecycle events persist it.
+- **幂等键** — `Idempotency-Key` header is mandatory (400 `IDEMPOTENCY_KEY_REQUIRED`); same key + same canonical request replays the stored response with `X-Idempotent-Replay: true`, same key + different body is a 409 `IDEMPOTENCY_CONFLICT`, and — per the PR #43 review P2 fix — the canonical request includes the concrete path parameters, so the same key with the same body aimed at a *different* resource of the same parameterized route is also a 409 instead of a silent cross-resource replay; concurrent same-key writers serialize on the 028 unique index (two-thread barrier test).
+- **request id** — every fresh write returns `X-Request-Id` (UUID) echoed inside the payload, and the replay path restores the original one; lifecycle events persist it; the one-time download persists it on the export row itself (`download_request_id`, PR #43 review P1 fix).
 - **审计** — GENERATED/EXPORTED/DELIVERED/SUSPENDED/RESUMED/REVOKED events land in the append-only `activation_code_events` table with actor + reason + request id.
 - **红线** — unauthenticated calls 401; auditor (read role) writes 403; the GET list needs only the reader role; CSRF failures reject.
 
@@ -31,12 +31,12 @@ Task exit gate: *actor、reason、幂等键、request id 和审计齐全* (task 
 `_write_with_idempotency` runs the business write and its snapshot in **one** transaction:
 
 1. `INSERT … ON CONFLICT (actor_user_id, route, idempotency_key_digest) DO NOTHING` — the winner gets the placeholder row id; a concurrent same-key writer blocks on the unique index until the first transaction commits/rolls back (PG insert-wait semantics), so replay never races the original.
-2. On key reuse the stored snapshot is loaded; `request_hash` (sha256 of canonical JSON `{route, body}` with the **route template**, never the concrete path) must match and the response columns must be complete, otherwise 409 `IDEMPOTENCY_CONFLICT`. A match replays the stored status + body with `X-Idempotent-Replay: true`.
+2. On key reuse the stored snapshot is loaded; `request_hash` (sha256 of canonical JSON `{route, path_params, body}` — the **route template plus the concrete path parameters**, never the bare concrete path, PR #43 review P2) must match and the response columns must be complete, otherwise 409 `IDEMPOTENCY_CONFLICT`. A match replays the stored status + body with `X-Idempotent-Replay: true`.
 3. The winner's business result is back-filled (`response_status`, `response_body`) before commit; a business failure rolls the placeholder back with the transaction, releasing the key for an honest retry.
 
 The raw key never reaches the database (sha256 digest — the `admin_sessions` precedent). Migration 028 additionally CHECKs the (status, body) NULL-pairing so a half-written placeholder fails closed at the storage layer. Revision numbering follows the code-checklist §3.1 clause ("实际编号以实施当日 Alembic head 为准"): the admin-write idempotency theme has no frozen number, so it lands as 028 on the then-current head 027, PG-only per the 025–027 precedent (the internal SQLite lane keeps its legacy control path).
 
-**Plaintext red line**: the one-time download route deliberately bypasses the snapshot layer — its response contains the plaintext codes, which must never persist (not in a snapshot, not in a log). The `downloaded_at` one-shot constraint on the exports table is the anti-replay mechanism there, and the write contract (key/confirm/reason) is still enforced for the audit trail.
+**Plaintext red line**: the one-time download route deliberately bypasses the snapshot layer — its response contains the plaintext codes, which must never persist (not in a snapshot, not in a log). The `downloaded_at` one-shot constraint on the exports table is the anti-replay mechanism there, and the write contract (key/confirm/reason) is still enforced for the audit trail. Revision 028 additionally appends `download_reason` + `download_request_id` columns to `activation_code_exports` with a coupling CHECK (`(downloaded_at IS NULL) = (download_reason IS NULL) AND (downloaded_at IS NULL) = (download_request_id IS NULL)`), so the highest-risk admin operation durably records its justification alongside the actor — the PR #43 review P1 fix; the one-shot update guard makes the tuple effectively immutable.
 
 ## 3. Routes (all under `/api/control`)
 
@@ -51,19 +51,20 @@ The raw key never reaches the database (sha256 digest — the `admin_sessions` p
 
 Key-version helpers added to `activation_code_service.py` (`highest_code_hmac_key_version`, `highest_export_aead_key_version`, `configured_export_aead_keys`) resolve the highest configured version before the transaction opens and support every configured version on download (rotation window).
 
-## 4. Test Coverage (37 red → green)
+## 4. Test Coverage (38 red → green)
 
 | Group | Cases |
 | --- | --- |
 | Authn/RBAC/CSRF | unauthenticated 401 ×2; auditor write 403; auditor GET list 200; admin GET list 200; CSRF-missing write rejected |
 | Batches | happy path lands actor + OPEN status; name blank / face value ≤ 0 / credits ≤ 0 / quantity ≤ 0 / expiry blank → 400 with code `BATCH_VALIDATION_FAILED` |
 | Generate | happy path (codes + export + GENERATED/EXPORTED events, masked only in response); unknown batch 404; closed batch 409; budget overrun 409 leaves zero extra rows; missing HMAC key 503 with no DB rows; missing AEAD key 503 with no export row; code-digest uniqueness across the batch |
-| Download | happy path returns plaintext once + actor persisted; second download 409 `EXPORT_ALREADY_DOWNLOADED`; expired 409 `EXPORT_EXPIRED`; unknown export 404; no snapshot row is ever written for a download (plaintext red line) |
+| Download | happy path returns plaintext once + actor persisted + reason/request id on the export row (PR #43 review P1); second download 409 `EXPORT_ALREADY_DOWNLOADED`; expired 409 `EXPORT_EXPIRED`; unknown export 404; no snapshot row is ever written for a download (plaintext red line) |
 | Deliver | happy path ISSUED + DELIVERED event + reason; unknown code 404; non-ISSUED source 409; channel blank 400; duplicate delivery on the same code 409 |
 | Suspend/Resume/Revoke | ACTIVE→SUSPENDED lands `suspended_at` + event; SUSPENDED→ACTIVE clears `suspended_at`; ISSUED→REVOKED terminal; SUSPENDED→REVOKED; un-activated resume 409 (no SUSPENDED→ISSUED edge); revoked-code suspend 409; revoke event carries reason + request id |
 | Listing | filter by batch/status; page shape (masked only) |
 | Write contract | one test walks key/confirm/reason rejections across three routes |
 | Concurrency | two threads, one barrier, same key on create-batch → both 201-or-replay, exactly one batch row, one snapshot row |
+| Cross-resource idempotency | same key + identical body revoking code A then code B → 409 `IDEMPOTENCY_CONFLICT` for B, B stays ISSUED (PR #43 review P2) |
 
 ## 5. Head-Roll Maintenance (027 → 028)
 
@@ -73,11 +74,11 @@ Key-version helpers added to `activation_code_service.py` (`highest_code_hmac_ke
 
 | File | Change |
 | --- | --- |
-| `server/app/admin_activation_routes.py` | new (frozen name): §15 write contract, 028 idempotency snapshot layer, 8 routes |
-| `server/migrations/versions/028_admin_write_idempotency.py` | new: PG-only snapshot table + unique (actor, route, key digest) + response-pairing CHECK |
-| `server/app/activation_code_service.py` | added key-version helpers (`_configured_key_versions`, `highest_code_hmac_key_version`, `highest_export_aead_key_version`, `configured_export_aead_keys`) |
+| `server/app/admin_activation_routes.py` | new (frozen name): §15 write contract, 028 idempotency snapshot layer (request hash incl. path params), 8 routes |
+| `server/migrations/versions/028_admin_write_idempotency.py` | new: PG-only snapshot table + unique (actor, route, key digest) + response-pairing CHECK + `activation_code_exports.download_reason`/`download_request_id` audit columns (PR #43 review fixes) |
+| `server/app/activation_code_service.py` | added key-version helpers (`_configured_key_versions`, `highest_code_hmac_key_version`, `highest_export_aead_key_version`, `configured_export_aead_keys`); `fetch_export_package` persists the download reason + request id |
 | `server/app/main.py` | mount `admin_activation_router` |
-| `server/tests/test_admin_activation_routes.py` | new: 37 fail-first cases on a dedicated migrated fixture DB |
+| `server/tests/test_admin_activation_routes.py` | new: 38 fail-first cases on a dedicated migrated fixture DB |
 | 9 test files (`test_db`, `test_postgres_migrations`, `test_activation_code_schema`, `test_sqlite_to_postgres`, `test_internal_billing`, `test_recharge_orders`, `test_character_domain`, `test_characters`, `test_settings`) | head assertions 027 → 028; downgrade-guard step counts +1 |
 | `server/scripts/reconcile_customer_billing.py` | `admin_write_idempotency` in `PG_ONLY_TABLES` |
 | `server/scripts/sqlite_to_postgres.py` | PG-only-tables comment covers 028 |
@@ -91,13 +92,21 @@ The batch-creation API validates the frozen commercial snapshot (name/face value
 ```text
 # PostgreSQL fixture up (scripts/pg-fixture.sh start; docker customer-v3-pg-test, PG16 :5433)
 $ uv run python -m pytest tests/test_admin_activation_routes.py -q
-37 passed
+38 passed
 $ uv run python -m pytest tests -q
-747 passed, 2 warnings          # full suite on the PG fixture (zero regressions)
+748 passed, 2 warnings          # full suite on the PG fixture (zero regressions)
 $ uv run ruff check . && uv run ruff format --check . && uv run mypy app
 all green
 # No client/e2e/Tauri changes in this task; npm run check gates re-verified in CI
 ```
+
+## PR #43 Review Fixes
+
+Three review comments landed on the PR (2 P1, 1 P2), each addressed substantively:
+
+1. **P2 — cross-resource idempotency replay**: the request fingerprint covered only the route template + body, so one key reused with an identical body against a *different* `{code_id}` replayed the first resource's response and silently left the second untouched. Fixed: the concrete path parameters join the canonical hash, plus a regression test (revoke A → 200, revoke B same key/body → 409 `IDEMPOTENCY_CONFLICT`, B stays ISSUED).
+2. **P1 — download audit lost the reason**: the one-time plaintext download validated the write contract but discarded the reason; the durable record kept only actor + timestamp. Fixed: revision 028 appends `download_reason` / `download_request_id` to `activation_code_exports` (coupling CHECK with `downloaded_at`; the one-shot guard makes the tuple immutable), `fetch_export_package` persists both (required parameters — callers cannot forget), and the download log line carries the reason.
+3. **P1 — frozen 028 assignment**: the reviewer asked to move the table to a "non-conflicting revision", but on a linear Alembic chain the then-current head was 027, so 028 was the only available number; the code checklist §3.1 clause ("实际编号以实施当日 Alembic head 为准，不得覆盖既有 revision") covers exactly this head-roll, the same precedent 026 itself relied on when it landed the admin-session table ahead of T09. The frozen *names* stay reserved for their topics with rolled numbers (the device/session revisions land next with their frozen filenames); no published revision was rewritten.
 
 ## Section 14 Ledger Record
 
@@ -106,10 +115,10 @@ all green
 Owner / Reviewer：后端/管理（Agent 执行）/ 会话内代码评审
 分支 / 基线 SHA：feat/customer-v3-t12-admin-activation-routes / 基线 d7e293d（T11 PR #42 squash）
 上游规格段落：客户版任务清单 V3 §3 T12、§12.2 ACT-04；代码开发清单 V3（admin_activation_routes.py 冻结名）；激活码开发文档 §11.3 幂等不变量、§15 管理写合同；测试与验收规格 §2
-改动文件：server/app/admin_activation_routes.py（新增 894 行：写合同+幂等快照层+8 路由）、server/migrations/versions/028_admin_write_idempotency.py（新增，PG-only）、server/app/activation_code_service.py（追加 4 个密钥版本解析函数）、server/app/main.py（挂载）、server/tests/test_admin_activation_routes.py（新增 37 用例，专用迁移 fixture 库）、9 个既有测试文件（head 断言 027→028，downgrade 守卫步数 +1）、server/scripts/reconcile_customer_billing.py + sqlite_to_postgres.py（PG_ONLY_TABLES 纳入 admin_write_idempotency）、docs/evidence/T12-EVIDENCE.md、任务与证据账本
-失败测试或回归锁定：先红后绿——未登录 401/auditor 写 403/auditor 读 200/CSRF 拒；批次校验（名称/面值/额度/数量/有效期 400）；生成（未知批次 404/关闭批次 409/超发 409 零残留/密钥缺失 503 零写入）；下载（一次性/过期/未知/明文不入快照）；发放（渠道校验/状态机/重复发放 409）；暂停/恢复/作废（六态矩阵+suspended_at 形状+事件含 reason 与 request id）；幂等（同键同参回放+replay 头/同键异参 409/并发双线程 barrier 串行化单批次）；写合同（key/confirm/reason 顺序报错）
-实现结果：§15 管理写合同（CSRF+reason+Idempotency-Key+request id）+ 028 幂等快照层（actor/route/key digest 唯一、request_hash 冻结、同事务占位-回填、业务失败回滚释放键）+ 8 条路由（批次/生成/下载/发放/暂停/恢复/作废/列表）；明文码仅存于一次性下载响应（绕过快照层，downloaded_at 一次性约束防重放）；SQLite 车道 fail-closed 503
-验证命令与通过数：test_admin_activation_routes 37 passed；全量 747 passed（PG fixture）；ruff/format/mypy 全绿
+改动文件：server/app/admin_activation_routes.py（新增：写合同+幂等快照层+8 路由，request hash 含路径参数）、server/migrations/versions/028_admin_write_idempotency.py（新增，PG-only，含 exports 下载审计列）、server/app/activation_code_service.py（追加 4 个密钥版本解析函数；fetch_export_package 持久化下载 reason/request id）、server/app/main.py（挂载）、server/tests/test_admin_activation_routes.py（新增 38 用例，专用迁移 fixture 库）、9 个既有测试文件（head 断言 027→028，downgrade 守卫步数 +1）、server/scripts/reconcile_customer_billing.py + sqlite_to_postgres.py（PG_ONLY_TABLES 纳入 admin_write_idempotency）、docs/evidence/T12-EVIDENCE.md、任务与证据账本
+失败测试或回归锁定：先红后绿——未登录 401/auditor 写 403/auditor 读 200/CSRF 拒；批次校验（名称/面值/额度/数量/有效期 400）；生成（未知批次 404/关闭批次 409/超发 409 零残留/密钥缺失 503 零写入）；下载（一次性/过期/未知/明文不入快照/reason 与 request id 落审计列）；发放（渠道校验/状态机/重复发放 409）；暂停/恢复/作废（六态矩阵+suspended_at 形状+事件含 reason 与 request id）；幂等（同键同参回放+replay 头/同键异参 409/同键同参异资源 409 跨资源不回放/并发双线程 barrier 串行化单批次）；写合同（key/confirm/reason 顺序报错）
+实现结果：§15 管理写合同（CSRF+reason+Idempotency-Key+request id）+ 028 幂等快照层（actor/route/key digest 唯一、request_hash 冻结（含路径参数）、同事务占位-回填、业务失败回滚释放键）+ 8 条路由（批次/生成/下载/发放/暂停/恢复/作废/列表）；明文码仅存于一次性下载响应（绕过快照层，downloaded_at 一次性约束防重放，下载 reason/request id 持久化于 exports 审计列）；SQLite 车道 fail-closed 503
+验证命令与通过数：test_admin_activation_routes 38 passed；全量 748 passed（PG fixture）；ruff/format/mypy 全绿
 证据层级：AUTOMATED_VERIFIED
 安全与可观测性：管理写全链路 actor 可追溯（批次/快照/事件均落 users.id）；幂等键仅存 sha256 摘要；明文不入库不入快照不入日志；RBAC 写/读分离；CSRF 强制；request id 全响应+全事件
 迁移与回滚：新迁移 028（编号按代码开发清单 §3.1 head 顺延条款）；PG-only（SQLite 车道零变化，仅 revision 推进）；downgrade 对称（快照为重放缓存非业务事实）；T07 导入工具保持 admin_write_idempotency PG-only 豁免但必须为空

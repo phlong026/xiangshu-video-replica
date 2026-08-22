@@ -552,15 +552,19 @@ def test_export_one_time_download_audited(
             export_id,
             downloaded_by_user_id="u-admin",
             aead_keys={1: TEST_AEAD_KEY},
+            download_reason="渠道取件",
+            download_request_id="req-download-1",
         )
         assert codes == [record.plaintext_code for record in generated]
         audited = catalog_db.execute(
-            "SELECT downloaded_at, downloaded_by_user_id FROM activation_code_exports "
-            "WHERE id = %s",
+            "SELECT downloaded_at, downloaded_by_user_id, download_reason, download_request_id "
+            "FROM activation_code_exports WHERE id = %s",
             (export_id,),
         ).fetchone()
         assert audited is not None and audited[0] is not None
         assert audited[1] == "u-admin"
+        assert audited[2] == "渠道取件"
+        assert audited[3] == "req-download-1"
 
         # One-time: a second download is refused and never rewrites the audit.
         with pytest.raises(ActivationExportError, match="already downloaded"):
@@ -569,6 +573,8 @@ def test_export_one_time_download_audited(
                 export_id,
                 downloaded_by_user_id="u-admin",
                 aead_keys={1: TEST_AEAD_KEY},
+                download_reason="渠道取件",
+                download_request_id="req-download-2",
             )
     # Red line: the plaintext never leaks into any log record.
     for record in generated:
@@ -603,6 +609,8 @@ def test_expired_export_rejected(catalog_db: psycopg.Connection) -> None:
             export_id,
             downloaded_by_user_id="u-admin",
             aead_keys={1: TEST_AEAD_KEY},
+            download_reason="渠道取件",
+            download_request_id="req-download-expired",
             now=future,
         )
     row = catalog_db.execute(
@@ -678,4 +686,6 @@ def test_fetch_unknown_export_rejected(catalog_db: psycopg.Connection) -> None:
             "export-ghost",
             downloaded_by_user_id="u-admin",
             aead_keys={1: TEST_AEAD_KEY},
+            download_reason="渠道取件",
+            download_request_id="req-download-unknown",
         )

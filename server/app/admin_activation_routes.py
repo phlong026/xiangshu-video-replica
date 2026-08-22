@@ -36,7 +36,7 @@ import hashlib
 import json
 import logging
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -115,10 +115,22 @@ def _canonical_route(request: Request) -> str:
     return f"{request.method.upper()} {template}"
 
 
-def _request_hash(route: str, body: BaseModel) -> str:
-    """Freeze the canonical request (route + JSON body) for conflict checks."""
+def _request_hash(route: str, path_params: Mapping[str, str], body: BaseModel) -> str:
+    """Freeze the canonical request for conflict checks.
+
+    The route *template* alone does not identify the target resource: the same
+    key with the same body against ``/activation-codes/{code_id}/revoke`` for
+    code A and code B would otherwise hash identically, so the second call
+    would wrongly replay the first response while B stays untouched (PR #43
+    review P2). The concrete path parameters are therefore part of the
+    fingerprint.
+    """
     payload = json.dumps(
-        {"route": route, "body": body.model_dump()},
+        {
+            "route": route,
+            "path_params": {name: path_params[name] for name in sorted(path_params)},
+            "body": body.model_dump(),
+        },
         separators=(",", ":"),
         sort_keys=True,
         ensure_ascii=False,
@@ -225,7 +237,7 @@ def _write_with_idempotency(
     """
     idempotency_key, _reason = _require_write_contract(request, body)
     route = _canonical_route(request)
-    request_hash = _request_hash(route, body)
+    request_hash = _request_hash(route, dict(request.path_params), body)
     request_id = str(uuid.uuid4())
     try:
         with pg_transaction() as conn:
@@ -496,10 +508,10 @@ def download_activation_code_export(
     Deliberately outside the idempotency snapshot layer: the response carries
     plaintext codes that must never persist (No-Go), and the one-time
     ``downloaded_at`` constraint already refuses any second download. The
-    write contract (key / confirm / reason) is still enforced so the audit
-    trail keeps its actor + reason + request id.
+    write contract (key / confirm / reason) is still enforced, and the reason
+    + request id land in the durable export audit columns (PR #43 review P1).
     """
-    _require_write_contract(request, body)
+    _key, reason = _require_write_contract(request, body)
     request_id = str(uuid.uuid4())
     try:
         aead_keys = configured_export_aead_keys()
@@ -510,6 +522,8 @@ def download_activation_code_export(
                     export_id,
                     downloaded_by_user_id=actor.user_id,
                     aead_keys=aead_keys,
+                    download_reason=reason,
+                    download_request_id=request_id,
                 )
             except ActivationExportError as exc:
                 message = str(exc)
@@ -552,11 +566,12 @@ def download_activation_code_export(
     response.headers[REQUEST_ID_HEADER] = request_id
     # Plaintext codes never reach the logs — only counts and identifiers.
     logger.info(
-        "activation export downloaded: export=%s actor=%s codes=%d request=%s",
+        "activation export downloaded: export=%s actor=%s codes=%d request=%s reason=%s",
         export_id,
         actor.user_id,
         len(codes),
         request_id,
+        reason,
     )
     return payload
 

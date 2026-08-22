@@ -345,10 +345,10 @@ Lore 提交 SHA：见 PR squash 合并 SHA
 Owner / Reviewer：后端/管理（Agent 执行）/ 会话内代码评审
 分支 / 基线 SHA：feat/customer-v3-t12-admin-activation-routes / 基线 d7e293d（T11 PR #42 squash）
 上游规格段落：客户版任务清单 V3 §3 T12、§12.2 ACT-04；代码开发清单 V3（admin_activation_routes.py 冻结名）；激活码开发文档 §11.3 幂等不变量、§15 管理写合同；测试与验收规格 §2
-改动文件：server/app/admin_activation_routes.py（新增 894 行：写合同+幂等快照层+8 路由）、server/migrations/versions/028_admin_write_idempotency.py（新增，PG-only）、server/app/activation_code_service.py（追加 4 个密钥版本解析函数）、server/app/main.py（挂载）、server/tests/test_admin_activation_routes.py（新增 37 用例，专用迁移 fixture 库）、9 个既有测试文件（head 断言 027→028，downgrade 守卫步数 +1）、server/scripts/reconcile_customer_billing.py + sqlite_to_postgres.py（PG_ONLY_TABLES 纳入 admin_write_idempotency）、docs/evidence/T12-EVIDENCE.md、任务与证据账本
-失败测试或回归锁定：先红后绿——未登录 401/auditor 写 403/auditor 读 200/CSRF 拒；批次校验（名称/面值/额度/数量/有效期 400）；生成（未知批次 404/关闭批次 409/超发 409 零残留/密钥缺失 503 零写入）；下载（一次性/过期/未知/明文不入快照）；发放（渠道校验/状态机/重复发放 409）；暂停/恢复/作废（六态矩阵+suspended_at 形状+事件含 reason 与 request id）；幂等（同键同参回放+replay 头/同键异参 409/并发双线程 barrier 串行化单批次）；写合同（key/confirm/reason 顺序报错）
+改动文件：server/app/admin_activation_routes.py（新增 894 行：写合同+幂等快照层+8 路由）、server/migrations/versions/028_admin_write_idempotency.py（新增，PG-only，含 download 审计耦合 CHECK）、server/app/activation_code_service.py（追加 4 个密钥版本解析函数；fetch_export_package 增 download_reason/download_request_id 必填参数）、server/app/main.py（挂载）、server/tests/test_admin_activation_routes.py（新增 38 用例，专用迁移 fixture 库）、9 个既有测试文件（head 断言 027→028，downgrade 守卫步数 +1）、server/scripts/reconcile_customer_billing.py + sqlite_to_postgres.py（PG_ONLY_TABLES 纳入 admin_write_idempotency）、docs/evidence/T12-EVIDENCE.md、任务与证据账本
+失败测试或回归锁定：先红后绿——未登录 401/auditor 写 403/auditor 读 200/CSRF 拒；批次校验（名称/面值/额度/数量/有效期 400）；生成（未知批次 404/关闭批次 409/超发 409 零残留/密钥缺失 503 零写入）；下载（一次性/过期/未知/明文不入快照/downloaded_at+reason+request id 审计元组落库）；发放（渠道校验/状态机/重复发放 409）；暂停/恢复/作废（六态矩阵+suspended_at 形状+事件含 reason 与 request id）；幂等（同键同参回放+replay 头/同键异参 409/同键跨资源 409 仅目标 A 生效/并发双线程 barrier 串行化单批次）；写合同（key/confirm/reason 顺序报错）
 实现结果：§15 管理写合同（CSRF+reason+Idempotency-Key+request id）+ 028 幂等快照层（actor/route/key digest 唯一、request_hash 冻结、同事务占位-回填、业务失败回滚释放键）+ 8 条路由（批次/生成/下载/发放/暂停/恢复/作废/列表）；明文码仅存于一次性下载响应（绕过快照层，downloaded_at 一次性约束防重放）；SQLite 车道 fail-closed 503
-验证命令与通过数：test_admin_activation_routes 37 passed；全量 747 passed（PG fixture）；ruff/format/mypy 全绿
+验证命令与通过数：test_admin_activation_routes 38 passed；全量 748 passed（PG fixture）；ruff/format/mypy 全绿
 证据层级：AUTOMATED_VERIFIED
 安全与可观测性：管理写全链路 actor 可追溯（批次/快照/事件均落 users.id）；幂等键仅存 sha256 摘要；明文不入库不入快照不入日志；RBAC 写/读分离；CSRF 强制；request id 全响应+全事件
 迁移与回滚：新迁移 028（编号按代码开发清单 §3.1 head 顺延条款）；PG-only（SQLite 车道零变化，仅 revision 推进）；downgrade 对称（快照为重放缓存非业务事实）；T07 导入工具保持 admin_write_idempotency PG-only 豁免但必须为空

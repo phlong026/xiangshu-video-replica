@@ -592,8 +592,8 @@ def test_download_returns_plaintext_once_and_audits(
         }
         audit = _row(
             conn,
-            "SELECT downloaded_at, downloaded_by_user_id FROM activation_code_exports "
-            "WHERE id = %s",
+            "SELECT downloaded_at, downloaded_by_user_id, download_reason, download_request_id "
+            "FROM activation_code_exports WHERE id = %s",
             (export_id,),
         )
     for code in body["codes"]:
@@ -602,6 +602,10 @@ def test_download_returns_plaintext_once_and_audits(
     assert audit is not None
     assert audit[0] is not None
     assert audit[1] == "admin_u"
+    # PR #43 review P1: the reason and request id of the highest-risk admin
+    # operation must be durably recorded, not validated and dropped.
+    assert audit[2] == "渠道取件"
+    assert audit[3] == body["request_id"]
 
 
 def test_download_rejects_second_download(
@@ -905,6 +909,41 @@ def test_revoke_idempotent_replay(
             (code_id,),
         )[0]
     assert events == 1
+
+
+def test_idempotency_same_key_different_resource_conflicts(
+    client: TestClient, admin_headers: dict[str, str], clean_state: str
+) -> None:
+    """PR #43 review P2: the request fingerprint must identify the resource.
+
+    Reusing one key with an identical body against a *different* code of the
+    same parameterized route must be a 409 conflict, never a replay of the
+    first code's response (which would silently leave the second code
+    untouched).
+    """
+    _export_id, code_ids = _generated_export(client, admin_headers, quantity=2)
+    code_a, code_b = code_ids
+    _deliver(client, admin_headers, code_a)
+    _deliver(client, admin_headers, code_b)
+    key = "key-cross-resource"
+    first = _status_action(client, admin_headers, code_a, "revoke", key=key)
+    assert first.status_code == 200, first.text
+    second = _status_action(client, admin_headers, code_b, "revoke", key=key)
+    assert second.status_code == 409, second.text
+    assert second.json()["detail"]["code"] == "IDEMPOTENCY_CONFLICT"
+    assert second.headers.get(REPLAY_HEADER) is None
+    with psycopg.connect(clean_state) as conn:
+        statuses = {
+            row[0]: row[1]
+            for row in conn.execute(
+                "SELECT id, status FROM activation_codes WHERE id = ANY(%s)",
+                (code_ids,),
+            ).fetchall()
+        }
+    assert statuses[code_a] == "REVOKED"
+    # Code B stays untouched: the conflict refused the write instead of
+    # replaying code A's success for it.
+    assert statuses[code_b] == "ISSUED"
 
 
 def test_status_action_rejects_unknown_code(

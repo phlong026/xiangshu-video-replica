@@ -236,6 +236,11 @@ def test_catalog_tables_and_columns(catalog_dsn: str) -> None:
             "expires_at",
             "downloaded_at",
             "downloaded_by_user_id",
+            # Download audit columns appended by 028 (PR #43 review P1):
+            # the one-time plaintext download durably records its reason and
+            # request id next to the actor.
+            "download_reason",
+            "download_request_id",
         }
         assert columns(ACTIVATIONS_TABLE) == {
             "id",
