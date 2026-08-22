@@ -240,3 +240,42 @@ Owner / Reviewer：安全/后端/OPS（Agent 执行）/ chatgpt-codex-connector�
 未测试项：T32 管理端页面；T36 多实例；STAGING/REAL_CHAIN/PRODUCTION
 Lore 提交 SHA：见 PR squash 合并 SHA
 ```
+
+## T10 — Activation Code Catalog Schema (ACT-01, migration 027)
+
+| Field | Content |
+| --- | --- |
+| **Owner** | DB/Backend |
+| **Reviewer** | chatgpt-codex-connector |
+| **Branch / Base SHA** | `feat/customer-v3-t10-activation-code-schema` / `main@4cc04b3` (PR #40 squash) |
+| **Verified Implementation SHA** | PR squash merge result (see `docs/evidence/T10-EVIDENCE.md`) |
+| **Upstream Spec Sections** | Task list §3 T10, §12.2 ACT-01; code checklist §3.3 (frozen `027_activation_code_catalog.py`); activation-code dev doc §5/§11.2/§11.3/§12.1 |
+| **Files Changed** | `server/migrations/versions/027_activation_code_catalog.py` (new, frozen name: 6 tables incl. the append-only event table + full constraint set); `server/tests/test_activation_code_schema.py` (new, 10 red→green PG cases); `server/tests/test_postgres_migrations.py` (head assertions 026→027; 026 downgrade-guard adapted to the longer chain with `-2` + transactional-rollback lock); `server/scripts/reconcile_customer_billing.py` (`PG_ONLY_TABLES` += six 027 catalog tables); `server/scripts/sqlite_to_postgres.py` (comment); `server/tests/test_sqlite_to_postgres.py` (new empty-catalog-accepted/row-fails-closed contract test + `validate_revision_pair` head); SQLite-lane head assertions 026→027 in `test_db.py`, `test_character_domain.py`, `test_characters.py`, `test_internal_billing.py`, `test_recharge_orders.py`, `test_settings.py` |
+| **Failure Test or Regression Lock** | 10 catalog cases: exact column sets per table (no-plaintext red line), batch shapes (status/positive snapshots/expiry window incl. the same-day timestamp-cast case/creator FK), global-unique `code_digest` across batches, six-state machine shape matrix (GENERATED pre-delivery, ISSUED proven, ACTIVE bound+timestamped, SUSPENDED/REVOKED proven + coupling, EXPIRED unactivated-only, unknown states rejected), partial unique index for one current binding per user, delivery traceability (actor FK/non-blank channel), export ciphertext-only (AEAD+SHA256+key version+short expiry), append-only events (typed CHECK + UPDATE/DELETE refused by trigger), one-shot activation facts (code/user/first-charge order each UNIQUE), downgrade refuses existing activation facts and multi-step downgrades roll back atomically; plus the T07 import contract: empty 027 catalog tables accepted, any catalog row fails closed |
+| **Implementation Result** | `027_activation_code_catalog` lands `activation_code_batches` (frozen commercial snapshots), `activation_codes` (digest + key version + masked form only, six-state machine CHECK per acceptance spec §2.1), `activation_code_deliveries`, `activation_code_exports` (AEAD ciphertext + SHA-256 + one-time download audit), `activation_code_activations` (triple-unique one-shot fact) and `activation_code_events` (append-only audit trail enforced by a BEFORE UPDATE OR DELETE trigger); PG-only per 025/026 precedent; `first_device_id` FK deferred to the T16 device revision under the append-only fix rule; T07 cutover tooling keeps the catalog PG-only-exempted-but-empty invariant via `PG_ONLY_TABLES` |
+| **Verification Command and Pass Count** | `pytest tests/test_activation_code_schema.py tests/test_postgres_migrations.py tests/test_sqlite_to_postgres.py` → 46 passed; full suite + ruff/format/mypy green (recorded at PR); CI three gates green. Pre-PR review: 1 P2 + 2 P3 fixed; PR #41 Codex review: 2 P1 fixed (six-state machine + append-only event table) — all with red→green locks (see `docs/evidence/T10-EVIDENCE.md`) |
+| **Evidence Level** | `AUTOMATED_VERIFIED` |
+| **Security and Observability** | no plaintext code in DB (column-set assertions); digest + versioned keys; exports carry AEAD ciphertext + SHA-256 only; every catalog row traces to a real `users.id` |
+| **Migration and Rollback** | new frozen-name migration 027; PG-only (SQLite lane unchanged); symmetric downgrade on an empty catalog; fail-loud once activation facts exist |
+| **External Authorization Record** | None |
+| **Untested Items** | application layer (T11 generation/HMAC/AEAD export, T12 admin API); activation transaction (T13); device FK (T16); STAGING/REAL_CHAIN/PRODUCTION |
+| **Lore Commit SHA** | PR squash merge SHA |
+
+### T10 Section 14 Ledger Record
+
+```text
+任务/工作包：T10 / ACT-01
+Owner / Reviewer：DB/后端（Agent 执行）/ chatgpt-codex-connector（PR 评审）
+分支 / 基线 SHA：feat/customer-v3-t10-activation-code-schema / 基线 4cc04b3（PR #40 squash）
+上游规格段落：客户版任务清单 V3 §3 T10、§12.2 ACT-01；代码开发清单 V3 §3.3（027_activation_code_catalog.py 冻结名）；激活码开发文档 §5/§11.2/§11.3/§12.1
+改动文件：server/migrations/versions/027_activation_code_catalog.py（新增 5 表全约束）、server/tests/test_activation_code_schema.py（新增 9 用例）、server/tests/test_postgres_migrations.py（head 断言与 downgrade guard 适配 027 链）、server/scripts/reconcile_customer_billing.py（PG_ONLY_TABLES 纳入 5 张 027 目录表）、server/scripts/sqlite_to_postgres.py（注释）、server/tests/test_sqlite_to_postgres.py（新增空目录接受/有行拒收合同测试 + validate_revision_pair head 027）、test_db/test_character_domain/test_characters/test_internal_billing/test_recharge_orders/test_settings 六个 SQLite 车道套件 head 断言 026→027 联动
+失败测试或回归锁定：先红后绿——9 用例锁定 5 表精确列集（无明文列红线）、批次形状、码摘要全局唯一、状态机形状矩阵、当前有效绑定一户一码（部分唯一索引）、发放可追溯、导出仅密文（AEAD+SHA256+短时效+key version）、激活事实三重唯一（code/user/首充订单）、downgrade 拒绝已有激活事实且多步降级事务性回滚；T07 导入合同测试锁定空目录表接受、目录有行 fail closed
+实现结果：027_activation_code_catalog 落地批次/码/发放/导出/激活事实 5 表（PG-only），全部不变量由数据库约束证明；码仅存 HMAC 摘要+key version+掩码；激活事实链禁止 downgrade 删除；first_device_id 留待 T16 设备迁移按追加修复规则补 FK；T07 导入工具保持“目录表 PG-only 豁免但必须为空”不变量
+验证命令与通过数：test_activation_code_schema 9 passed + 迁移套件 19 passed + test_sqlite_to_postgres 26 passed；全量与 lint 数字见 PR；CI 三门禁全绿
+证据层级：AUTOMATED_VERIFIED
+安全与可观测性：无明文激活码入库（列集断言锁定）；摘要+版本化 key；导出仅 AEAD 密文+SHA256；所有操作行追溯真实 users.id
+迁移与回滚：新迁移 027（冻结名）；PG-only（SQLite 车道零变化）；空目录 downgrade 对称；有激活事实时 fail-loud
+外部授权记录：无
+未测试项：应用层（T11/T12）；激活事务链路（T13）；设备 FK（T16）；STAGING/REAL_CHAIN/PRODUCTION
+Lore 提交 SHA：见 PR squash 合并 SHA
+```
