@@ -30,6 +30,7 @@ from psycopg.types.json import Json, Jsonb
 
 from app.backup import SqliteSnapshot, create_readonly_snapshot, sha256_file
 from scripts.reconcile_customer_billing import (
+    PG_ONLY_TABLES,
     ReconciliationIssue,
     ReconciliationReport,
     _pg_columns,
@@ -178,6 +179,13 @@ def require_validated_postgres_foreign_keys(pg_conn: Any) -> None:
         )
 
 
+def _pg_table_row_count(pg_conn: psycopg.Connection[Any], table: str) -> int:
+    row = pg_conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()
+    if row is None:
+        raise MigrationSafetyError(f"count query returned no row for table {table!r}")
+    return int(row["count"] if isinstance(row, Mapping) else row[0])
+
+
 def _validate_schema(
     sqlite_conn: sqlite3.Connection,
     pg_conn: psycopg.Connection[Any],
@@ -186,9 +194,17 @@ def _validate_schema(
     target_tables = set(_table_names(pg_conn, "postgresql"))
     missing = sorted(set(source_tables) - target_tables)
     extra = sorted(target_tables - set(source_tables))
-    if missing or extra:
+    # PG-only tables from revision 026 (admin_sessions) are expected on the
+    # target head but must still be empty: the T07 cutover happens before the
+    # customer production line opens, so any row there is divergent state.
+    unexpected_extra = [table for table in extra if table not in PG_ONLY_TABLES]
+    divergent_pg_only = [
+        table for table in extra if table in PG_ONLY_TABLES and _pg_table_row_count(pg_conn, table)
+    ]
+    if missing or unexpected_extra or divergent_pg_only:
         raise MigrationSafetyError(
-            f"source/target table contract differs (missing={len(missing)}, extra={len(extra)})"
+            "source/target table contract differs "
+            f"(missing={len(missing)}, extra={len(unexpected_extra) + len(divergent_pg_only)})"
         )
     for table in source_tables:
         source_columns, source_pk = _sqlite_columns(sqlite_conn, table)

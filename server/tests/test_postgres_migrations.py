@@ -149,7 +149,7 @@ def test_pg_full_upgrade_downgrade_reupgrade_and_indexes() -> None:
 
         with psycopg.connect(dsn) as conn:
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-            assert version == "025_postgres_runtime_compatibility", (
+            assert version == "026_customer_security_and_billing", (
                 f"unexpected head revision: {version}"
             )
 
@@ -168,6 +168,7 @@ def test_pg_full_upgrade_downgrade_reupgrade_and_indexes() -> None:
                 "wallets",
                 "wallet_transactions",
                 "recharge_orders",
+                "admin_sessions",
                 "character_generation_tasks",
                 "external_call_logs",
             ):
@@ -229,7 +230,7 @@ def test_pg_full_upgrade_downgrade_reupgrade_and_indexes() -> None:
         command.upgrade(_alembic_config(sqlalchemy_dsn), "head")
         with psycopg.connect(dsn) as conn:
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-            assert version == "025_postgres_runtime_compatibility"
+            assert version == "026_customer_security_and_billing"
     finally:
         _drop_database("t06_migrate_test")
 
@@ -351,6 +352,299 @@ def test_pg_wallet_downgrade_blocked_when_ledger_has_settled_rounds() -> None:
         # The database must be left exactly at head (no partial rollback).
         with psycopg.connect(dsn) as conn:
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+        assert version == "026_customer_security_and_billing"
+    finally:
+        _drop_database(db_name)
+
+
+# ---------------------------------------------------------------------------
+# T08 / DB-07 — billing provider / pricing_scope conditional constraints
+# ---------------------------------------------------------------------------
+
+_T08_BASELINE_ORDER = {
+    "id": "o-t08",
+    "user_id": "u-t08",
+    "merchant_order_no": "T08-ORDER",
+    "provider": "zpay",
+    "provider_trade_no": None,
+    "channel": "alipay",
+    "status": "PENDING",
+    "pricing_scope": "INTERNAL",
+    "base_unit_price_fen_snapshot": 1000,
+    "charged_unit_price_fen_snapshot": 1000,
+    "min_recharge_fen_snapshot": 10000,
+    "recharge_step_fen_snapshot": 1000,
+    "amount_fen": 10000,
+    "credits": 10,
+    "paid_at": None,
+}
+
+
+def _t08_database(db_name: str) -> str:
+    from alembic import command
+
+    _drop_database(db_name)
+    with psycopg.connect(_admin_dsn(), autocommit=True) as conn:
+        conn.execute(f'CREATE DATABASE "{db_name}"')
+    dsn = _pg_dsn().rsplit("/", 1)[0] + f"/{db_name}"
+    command.upgrade(_alembic_config(dsn.replace("postgresql://", "postgresql+psycopg://")), "head")
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO users (id, username, display_name) VALUES ('u-t08', 'u-t08', 'T08')"
+        )
+    return dsn
+
+
+def _insert_t08_order(conn: psycopg.Connection, seq: int, **overrides: object) -> None:
+    row = {
+        **_T08_BASELINE_ORDER,
+        "id": f"o-t08-{seq}",
+        "merchant_order_no": f"T08-ORDER-{seq}",
+        **overrides,
+    }
+    columns = ", ".join(row)
+    placeholders = ", ".join("%s" for _ in row)
+    conn.execute(
+        f"INSERT INTO recharge_orders ({columns}) VALUES ({placeholders})",
+        tuple(row.values()),
+    )
+
+
+def test_pg_billing_provider_shapes_accepted_and_rejected() -> None:
+    """DB-07 exit gate: zpay / activation_code / admin_adjustment legal shapes
+    pass, illegal shapes are rejected by PostgreSQL check constraints — not by
+    application code (No-Go rule)."""
+
+    db_name = "t08_billing_shapes"
+    dsn = _t08_database(db_name)
+    try:
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            # --- legal shapes -------------------------------------------------
+            # zpay + INTERNAL + PENDING: the existing internal recharge flow.
+            _insert_t08_order(conn, 1)
+            # zpay + CUSTOMER_STANDARD + PAID with trade number: customer
+            # top-up through ZPay (T22) at a customer price >= base price.
+            _insert_t08_order(
+                conn,
+                2,
+                pricing_scope="CUSTOMER_STANDARD",
+                status="PAID",
+                charged_unit_price_fen_snapshot=1500,
+                amount_fen=15000,
+                credits=10,
+                provider_trade_no="ZPAY-TRADE-2",
+                paid_at="2026-08-22T00:00:00+00:00",
+            )
+            # activation_code + CUSTOMER_STANDARD + PAID, no third-party trade
+            # number, face value below the internal minimum recharge (the
+            # batch face value decides, min/step ladders do not apply).
+            _insert_t08_order(
+                conn,
+                3,
+                provider="activation_code",
+                pricing_scope="CUSTOMER_STANDARD",
+                status="PAID",
+                charged_unit_price_fen_snapshot=1500,
+                amount_fen=1500,
+                credits=1,
+                paid_at="2026-08-22T00:00:00+00:00",
+            )
+            # admin_adjustment + INTERNAL + PAID, no trade number, amount below
+            # the minimum recharge and off the step ladder (adjustments are
+            # defined by their audited source document).
+            _insert_t08_order(
+                conn,
+                4,
+                provider="admin_adjustment",
+                status="PAID",
+                amount_fen=5000,
+                credits=5,
+                paid_at="2026-08-22T00:00:00+00:00",
+            )
+
+            # A CHARGE transaction referencing the activation_code order keeps
+            # the existing append-only ledger shape (provider-agnostic).
+            conn.execute(
+                "INSERT INTO wallet_transactions "
+                "(id, user_id, type, available_delta, reserved_delta, "
+                " recharge_order_id, idempotency_key) "
+                "VALUES ('tx-t08-3', 'u-t08', 'CHARGE', 1, 0, 'o-t08-3', 'charge:o-t08-3')"
+            )
+
+            # --- illegal shapes ----------------------------------------------
+            def rejected(seq: int, **overrides: object) -> None:
+                with pytest.raises(psycopg.errors.CheckViolation):
+                    _insert_t08_order(conn, seq, **overrides)
+
+            rejected(10, provider="wechat")  # unknown provider
+            rejected(11, pricing_scope="CHANNEL_A")  # scope frozen until PRICE-01
+            rejected(
+                12,
+                provider="activation_code",
+                status="PAID",
+                paid_at="2026-08-22T00:00:00+00:00",
+            )  # scope pairing: activation_code is customer-only
+            rejected(
+                13,
+                provider="activation_code",
+                pricing_scope="CUSTOMER_STANDARD",
+                status="PENDING",
+                charged_unit_price_fen_snapshot=1500,
+                amount_fen=1500,
+                credits=1,
+            )  # activation must land PAID atomically
+            rejected(
+                14,
+                provider="activation_code",
+                pricing_scope="CUSTOMER_STANDARD",
+                status="PAID",
+                provider_trade_no="X",
+                charged_unit_price_fen_snapshot=1500,
+                amount_fen=1500,
+                credits=1,
+                paid_at="2026-08-22T00:00:00+00:00",
+            )  # no third-party trade number for activation codes
+            rejected(
+                15,
+                provider="admin_adjustment",
+                amount_fen=5000,
+                credits=5,
+            )  # adjustments must land PAID atomically (default PENDING here)
+            rejected(
+                16,
+                status="PAID",
+                provider_trade_no=None,
+                paid_at="2026-08-22T00:00:00+00:00",
+            )  # a paid ZPay order must carry its provider trade number
+            rejected(22, provider_trade_no="ZPAY-SQUAT")  # a non-PAID ZPay order must not
+            #   reserve a globally unique third-party trade number (review P2)
+            rejected(
+                17,
+                pricing_scope="CUSTOMER_STANDARD",
+                charged_unit_price_fen_snapshot=500,
+                amount_fen=5000,
+                credits=10,
+            )  # customer price must never undercut the internal base price
+            rejected(18, amount_fen=9000, credits=9)  # zpay: below min recharge
+            rejected(19, amount_fen=10500)  # zpay: off the recharge step ladder
+            rejected(20, credits=9)  # credits * price != amount (all providers)
+            rejected(21, status="REFUNDED")  # unknown status (022 regression)
+    finally:
+        _drop_database(db_name)
+
+
+def test_pg_admin_sessions_schema_and_invariants() -> None:
+    """026 must carry the full frozen topic (review P1): the admin_sessions
+    data layer for T09/DB-08 — digests only, unique session digest, expiry
+    ordering, actor FK — lands in the same revision as the billing
+    constraints so T09 is never left without a compliant schema home."""
+
+    db_name = "t08_admin_sessions"
+    dsn = _t08_database(db_name)
+    try:
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            conn.execute(
+                "INSERT INTO users (id, username, display_name, role) "
+                "VALUES ('u-admin', 'u-admin', 'Admin', 'admin')"
+            )
+            conn.execute(
+                "INSERT INTO admin_sessions "
+                "(id, actor_user_id, session_digest, csrf_digest, "
+                " last_activity_at, expires_at, created_ip_digest, created_ua_digest) "
+                "VALUES ('as1', 'u-admin', 'digest-1', 'csrf-1', "
+                " '2026-08-22T00:00:01+00:00', '2099-01-01T00:00:00+00:00', "
+                " 'ip-digest', 'ua-digest')"
+            )
+            # A second session for the same actor is fine (session rotation),
+            # but the session digest is globally unique.
+            conn.execute(
+                "INSERT INTO admin_sessions "
+                "(id, actor_user_id, session_digest, csrf_digest, "
+                " last_activity_at, expires_at, created_ip_digest, created_ua_digest) "
+                "VALUES ('as2', 'u-admin', 'digest-2', 'csrf-2', "
+                " '2026-08-22T00:00:01+00:00', '2099-01-01T00:00:00+00:00', "
+                " 'ip-digest', 'ua-digest')"
+            )
+            with pytest.raises(psycopg.errors.UniqueViolation):
+                conn.execute(
+                    "INSERT INTO admin_sessions "
+                    "(id, actor_user_id, session_digest, csrf_digest, "
+                    " last_activity_at, expires_at, created_ip_digest, created_ua_digest) "
+                    "VALUES ('as3', 'u-admin', 'digest-1', 'csrf-3', "
+                    " '2026-08-22T00:00:01+00:00', '2099-01-01T00:00:00+00:00', "
+                    " 'ip-digest', 'ua-digest')"
+                )
+            with pytest.raises(psycopg.errors.CheckViolation):
+                conn.execute(
+                    "INSERT INTO admin_sessions "
+                    "(id, actor_user_id, session_digest, csrf_digest, "
+                    " last_activity_at, expires_at, created_ip_digest, created_ua_digest) "
+                    "VALUES ('as4', 'u-admin', 'digest-4', 'csrf-4', "
+                    " '2026-08-22T00:00:01+00:00', '2026-08-21T00:00:00+00:00', "
+                    " 'ip-digest', 'ua-digest')"
+                )  # expires_at must be after created_at
+            with pytest.raises(psycopg.errors.ForeignKeyViolation):
+                conn.execute(
+                    "INSERT INTO admin_sessions "
+                    "(id, actor_user_id, session_digest, csrf_digest, "
+                    " last_activity_at, expires_at, created_ip_digest, created_ua_digest) "
+                    "VALUES ('as5', 'u-missing', 'digest-5', 'csrf-5', "
+                    " '2026-08-22T00:00:01+00:00', '2099-01-01T00:00:00+00:00', "
+                    " 'ip-digest', 'ua-digest')"
+                )  # every session must trace back to a real actor
+
+            indexes = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT indexname FROM pg_indexes WHERE tablename = 'admin_sessions'"
+                ).fetchall()
+            }
+            assert any(name.startswith("idx_admin_sessions_actor_status") for name in indexes)
+    finally:
+        _drop_database(db_name)
+
+
+def test_pg_billing_constraints_downgrade_guard() -> None:
+    """026 downgrade refuses (loudly) once non-zpay / non-INTERNAL orders exist;
+    an empty ledger downgrades symmetrically back to the 022 constraint set."""
+
+    from alembic import command
+
+    db_name = "t08_downgrade_guard"
+    dsn = _t08_database(db_name)
+    sqlalchemy_dsn = dsn.replace("postgresql://", "postgresql+psycopg://")
+    try:
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            _insert_t08_order(
+                conn,
+                1,
+                provider="activation_code",
+                pricing_scope="CUSTOMER_STANDARD",
+                status="PAID",
+                charged_unit_price_fen_snapshot=1500,
+                amount_fen=1500,
+                credits=1,
+                paid_at="2026-08-22T00:00:00+00:00",
+            )
+
+        with pytest.raises(RuntimeError, match="cannot downgrade 026"):
+            command.downgrade(_alembic_config(sqlalchemy_dsn), "-1")
+        with psycopg.connect(dsn) as conn:
+            version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+        assert version == "026_customer_security_and_billing"
+
+        # Remove the customer order (test data only — confirmed production rows
+        # are never deleted, which is exactly why the guard exists) and the
+        # downgrade becomes possible again.
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            conn.execute("DELETE FROM recharge_orders WHERE provider != 'zpay'")
+        command.downgrade(_alembic_config(sqlalchemy_dsn), "-1")
+        with psycopg.connect(dsn) as conn:
+            version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
         assert version == "025_postgres_runtime_compatibility"
+        # Back on 022 constraints, a customer-scope order is rejected again.
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            with pytest.raises(psycopg.errors.CheckViolation):
+                _insert_t08_order(conn, 2, pricing_scope="CUSTOMER_STANDARD")
     finally:
         _drop_database(db_name)

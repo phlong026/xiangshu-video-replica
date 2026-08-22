@@ -144,6 +144,45 @@ M0-review remediation runs (evidence under `docs/evidence/m0-review-fixes/`):
 | **Untested Items** | Real production dataset cutover, staging maintenance-window timing, real-chain and production evidence |
 | **Lore Commit SHA** | PR #38 implementation head `c26bc0732d9fe66142dae3c50ac9c908bdf578a8`; final squash SHA is the GitHub merge result |
 
+## T08 — Billing Provider / Pricing Scope Conditional Constraints
+
+| Field | Content |
+| --- | --- |
+| **Owner** | Billing / DB |
+| **Reviewer** | chatgpt-codex-connector |
+| **Branch / Base SHA** | `feat/customer-v3-t08-billing-provider-constraints` / `main@9f60eea615ab9dee177eb0892b3789dabda196dd` |
+| **Verified Implementation SHA** | PR squash merge result (see `docs/evidence/T08-EVIDENCE.md` for blob integrity hashes) |
+| **Upstream Spec Sections** | Task list §2 T08, §12.1 DB-07; code checklist §3.1 (frozen migration name `026_customer_security_and_billing`); acceptance spec §7 (provider/price-scope shapes verified by PG check constraints); activation-code dev doc §12.1 |
+| **Files Changed** | `server/migrations/versions/026_customer_security_and_billing.py` (new); `server/tests/test_postgres_migrations.py` (+2 tests); 7 test files' head-revision assertions; task list + evidence ledger |
+| **Failure Test or Regression Lock** | 4 legal shapes accepted and 12 illegal shapes rejected by PG16 CheckViolation; downgrade guard refuses with customer rows and restores verbatim 022 shapes on an empty ledger; red-green record against the 025 head |
+| **Implementation Result** | PG-only revision 026 enforces provider enum (zpay/activation_code/admin_adjustment), pricing_scope enum (INTERNAL/CUSTOMER_STANDARD), scope pairing, paid-on-creation for non-zpay, trade-number presence rules, customer price floor (charged >= base), and min/step ladders limited to zpay |
+| **Verification Command and Pass Count** | `pytest tests/test_postgres_migrations.py` → 9 passed; full suite → 636 passed; ruff/format/mypy green; `npm run check` full gate green |
+| **Evidence Level** | `AUTOMATED_VERIFIED` (real PostgreSQL 16 locally and in the CI Linux gate) |
+| **Security and Observability** | Constraints enforced by the database layer, not application code (DB-07 No-Go); SQLite internal runtime untouched |
+| **Migration and Rollback** | PG-only append-only revision (025 precedent); guarded downgrade keeps confirmed billing rows intact |
+| **External Authorization Record** | None |
+| **Untested Items** | Business write paths for activation_code/admin_adjustment orders (T13 activation transaction, T23 adjustment API); STAGING/REAL_CHAIN/PRODUCTION |
+| **Lore Commit SHA** | PR squash merge SHA |
+
+### T08 Section 14 Ledger Record
+
+```text
+任务/工作包：T08 / DB-07
+Owner / Reviewer：Billing/DB（Agent 执行）/ chatgpt-codex-connector（PR 评审）
+分支 / 基线 SHA：feat/customer-v3-t08-billing-provider-constraints / 基线 9f60eea615ab9dee177eb0892b3789dabda196dd
+上游规格段落：客户版任务清单 V3 §2 T08、§12.1 DB-07；代码开发清单 V3 §3.1；测试与验收规格 V3 §7；激活码开发文档 §12.1
+改动文件：server/migrations/versions/026_customer_security_and_billing.py（新增）、server/tests/test_postgres_migrations.py、7 个测试文件 head 断言、任务与证据账本
+失败测试或回归锁定：先红后绿——4 组合法形状 + 12 组非法形状 PG16 CheckViolation；downgrade 守卫（有客户行拒绝降级、空账本对称回退）
+实现结果：026 PG-only 迁移以 8 条 provider 条件 CHECK 约束扩展账务来源、价格域、客户价下限与 min/step 阶梯适用范围
+验证命令与通过数：test_postgres_migrations 9 passed；全量 636 passed；ruff/format/mypy 全绿；npm run check 全仓门禁通过
+证据层级：AUTOMATED_VERIFIED
+安全与可观测性：约束全部由数据库层强制；SQLite 内部运行时零改动
+迁移与回滚：PG-only、downgrade 带数据守卫，空账本对称回退并逐字恢复 022 约束
+外部授权记录：无
+未测试项：activation_code/admin_adjustment 业务写入路径（T13/T23）；STAGING/REAL_CHAIN/PRODUCTION
+Lore 提交 SHA：见 PR squash 合并 SHA
+```
+
 ### T07 Section 14 Ledger Record
 
 ```text
