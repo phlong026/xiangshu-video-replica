@@ -28,7 +28,7 @@ EXPORTS_TABLE = "activation_code_exports"
 ACTIVATIONS_TABLE = "activation_code_activations"
 EVENTS_TABLE = "activation_code_events"
 
-_HEAD_REVISION = "027_activation_code_catalog"
+_HEAD_REVISION = "031_admin_write_idempotency"
 
 
 def _pg_dsn() -> str:
@@ -236,6 +236,11 @@ def test_catalog_tables_and_columns(catalog_dsn: str) -> None:
             "expires_at",
             "downloaded_at",
             "downloaded_by_user_id",
+            # Download audit columns appended by 031 (PR #43 review P1):
+            # the one-time plaintext download durably records its reason and
+            # request id next to the actor.
+            "download_reason",
+            "download_request_id",
         }
         assert columns(ACTIVATIONS_TABLE) == {
             "id",
@@ -650,12 +655,14 @@ def test_downgrade_drops_catalog_and_blocks_when_activated(catalog_dsn: str) -> 
         _insert_paid_order(conn, "order-1")
         _insert_activation(conn, 1)
     with pytest.raises(RuntimeError, match="cannot downgrade 027"):
-        command.downgrade(_alembic_config(sqlalchemy_dsn), "-1")
+        # Two steps: 031->027 (empty idempotency ledger, symmetric) then
+        # 027->026, which the guard refuses.
+        command.downgrade(_alembic_config(sqlalchemy_dsn), "-2")
 
     # Remove the fact (test data only) and the downgrade is symmetric.
     with psycopg.connect(catalog_dsn, autocommit=True) as conn:
         conn.execute(f"DELETE FROM {ACTIVATIONS_TABLE}")
-    command.downgrade(_alembic_config(sqlalchemy_dsn), "-1")
+    command.downgrade(_alembic_config(sqlalchemy_dsn), "-2")
     with psycopg.connect(catalog_dsn) as conn:
         version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
         assert version == "026_customer_security_and_billing"

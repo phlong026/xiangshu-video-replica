@@ -503,15 +503,19 @@ def fetch_export_package(
     *,
     downloaded_by_user_id: str,
     aead_keys: Mapping[int, bytes],
+    download_reason: str,
+    download_request_id: str,
     now: datetime | None = None,
 ) -> list[str]:
     """The single audited download path for an export package.
 
     One-time (``downloaded_at IS NULL`` enforced under row lock) and
     expiry-checked against real timestamps; the download actor is persisted on
-    the export row. The caller owns the transaction. Private-COS object
-    delivery for the controlled operator flow is layered on by T36 / COS-01;
-    the audit semantics implemented here stay authoritative (PR #42).
+    the export row. ``download_reason`` and ``download_request_id`` complete
+    the durable audit record (PR #43 review P1: the reason used to be
+    validated and dropped). The caller owns the transaction. Private-COS
+    object delivery for the controlled operator flow is layered on by T36 /
+    COS-01; the audit semantics implemented here stay authoritative (PR #42).
     """
     row = conn.execute(
         "SELECT batch_id, ciphertext, key_version, expires_at, downloaded_at "
@@ -531,10 +535,65 @@ def fetch_export_package(
         raise ActivationExportError(f"AEAD key for key version {key_version} is not available")
     codes = decrypt_code_package(ciphertext, key=key, batch_id=batch_id)
     updated = conn.execute(
-        "UPDATE activation_code_exports SET downloaded_at = %s, downloaded_by_user_id = %s "
+        "UPDATE activation_code_exports "
+        "SET downloaded_at = %s, downloaded_by_user_id = %s, "
+        "download_reason = %s, download_request_id = %s "
         "WHERE id = %s AND downloaded_at IS NULL",
-        (current.replace(microsecond=0).isoformat(), downloaded_by_user_id, export_id),
+        (
+            current.replace(microsecond=0).isoformat(),
+            downloaded_by_user_id,
+            download_reason,
+            download_request_id,
+            export_id,
+        ),
     ).rowcount
     if updated != 1:
         raise ActivationExportError("export package was already downloaded")
     return codes
+
+
+# ---------------------------------------------------------------------------
+# Highest configured key versions (T12 admin generation / download paths)
+# ---------------------------------------------------------------------------
+
+
+def _configured_key_versions(base_env: str, environ: Mapping[str, str] | None) -> list[int]:
+    """Scan ``_V1.._V64`` (plus the un-suffixed version-1 alias)."""
+    source = os.environ if environ is None else environ
+    return [
+        version
+        for version in range(1, MAX_KEY_VERSION + 1)
+        if any(source.get(name, "").strip() for name in _env_key_candidates(base_env, version))
+    ]
+
+
+def highest_code_hmac_key_version(*, environ: Mapping[str, str] | None = None) -> int:
+    """Highest configured HMAC key version — new codes digest with it."""
+    configured = _configured_key_versions(ACTIVATION_CODE_HMAC_KEY_ENV, environ)
+    if not configured:
+        raise ActivationKeyError(f"no {ACTIVATION_CODE_HMAC_KEY_ENV} key version is configured")
+    return max(configured)
+
+
+def highest_export_aead_key_version(*, environ: Mapping[str, str] | None = None) -> int:
+    """Highest configured AEAD key version — new export packages seal with it."""
+    configured = _configured_key_versions(ACTIVATION_EXPORT_AEAD_KEY_ENV, environ)
+    if not configured:
+        raise ActivationKeyError(f"no {ACTIVATION_EXPORT_AEAD_KEY_ENV} key version is configured")
+    return max(configured)
+
+
+def configured_export_aead_keys(*, environ: Mapping[str, str] | None = None) -> dict[int, bytes]:
+    """Resolve every configured AEAD key, versioned.
+
+    The download path must open export packages sealed under older key
+    versions during the rotation window, so it resolves the full mapping
+    rather than a single version.
+    """
+    source = os.environ if environ is None else environ
+    keys: dict[int, bytes] = {}
+    for version in _configured_key_versions(ACTIVATION_EXPORT_AEAD_KEY_ENV, source):
+        keys[version] = export_aead_key(version, environ=source)
+    if not keys:
+        raise ActivationKeyError(f"no {ACTIVATION_EXPORT_AEAD_KEY_ENV} key version is configured")
+    return keys
