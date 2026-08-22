@@ -211,10 +211,10 @@ Lore 提交 SHA：PR #38 implementation head c26bc0732d9fe66142dae3c50ac9c908bdf
 | **Branch / Base SHA** | `feat/customer-v3-t09-admin-session-csrf` / `main@e50f931` (PR #39 squash) |
 | **Verified Implementation SHA** | PR squash merge result (see `docs/evidence/T09-EVIDENCE.md`) |
 | **Upstream Spec Sections** | Task list §2 T09, §12.1 DB-08; code checklist §3.2 (frozen `admin_auth_routes.py`); activation-code dev doc §15 (`admin_sessions` from revision 026); acceptance spec §8 |
-| **Files Changed** | `server/app/admin_auth_routes.py` (new); `server/scripts/issue_admin_exchange_credential.py` (new); `server/tests/test_admin_auth.py` (new, 36 cases); `server/app/bootstrap.py`; `server/app/main.py`; `server/app/control_auth.py`; `deploy/customer.env.example` (new); `client/vite.config.ts` (Node-25 webstorage test compat); 11 stash-restored tracked files with Windows hardening |
-| **Failure Test or Regression Lock** | 36 red→green cases: credential issue/verify/expiry/tamper/single-use (nonce-digest PK collision), session whoami/logout/expiry/revocation/disable-invalidation, CSRF missing/mismatch, auditor read-only, secure cookie shape, per-violation + aggregated fail-closed gate, runtime legacy-identity 403, PG-unavailable 503 |
-| **Implementation Result** | `ASX1` single-use HMAC exchange credential (versioned keys) → HttpOnly `admin_session` cookie (path `/api/control`, strict, secure in production) + per-session CSRF (`X-Admin-CSRF`); SHA-256 digests only in DB; PostgreSQL time the sole clock; AdminReader/AdminWriter RBAC; customer-production gate fails closed in both bootstrap `main()` and API `_lifespan` (legacy single-admin mapping / dev identity / local assets / missing HMAC key; SQLite/DSN via T05 gate) |
-| **Verification Command and Pass Count** | `pytest tests/test_admin_auth.py` → 36 passed; full suite → 674 passed (PG fixture); ruff/format/mypy green; client check (biome 54 / tsc / vitest 324), check:e2e, check:tauri, verify_no_secrets all green |
+| **Files Changed** | `server/app/admin_auth_routes.py` (new, non-object-JSON guard); `server/scripts/issue_admin_exchange_credential.py` (new); `server/tests/test_admin_auth.py` (new, 39 cases incl. 3 PR-review locks); `server/app/bootstrap.py` (version-aware key discovery + min-length gate); `server/app/main.py`; `server/app/control_auth.py`; `deploy/customer.env.example` (new); `client/vite.config.ts` (Node-25 webstorage test compat); 11 stash-restored tracked files with Windows hardening |
+| **Failure Test or Regression Lock** | 39 red→green cases: credential issue/verify/expiry/tamper/single-use (nonce-digest PK collision), non-object JSON bodies rejected as malformed, session whoami/logout/expiry/revocation/disable-invalidation, CSRF missing/mismatch, auditor read-only, secure cookie shape, per-violation + aggregated fail-closed gate, boot with only a rotated `_V2` key, weak key (< 32 B) rejected at boot, runtime legacy-identity 403, PG-unavailable 503 |
+| **Implementation Result** | `ASX1` single-use HMAC exchange credential (versioned keys) → HttpOnly `admin_session` cookie (path `/api/control`, strict, secure in production) + per-session CSRF (`X-Admin-CSRF`); SHA-256 digests only in DB; PostgreSQL time the sole clock; AdminReader/AdminWriter RBAC; customer-production gate fails closed in both bootstrap `main()` and API `_lifespan` (legacy single-admin mapping / dev identity / local assets / missing-or-weak HMAC key — any configured `…_VN` version suffices after rotation; SQLite/DSN via T05 gate) |
+| **Verification Command and Pass Count** | `pytest tests/test_admin_auth.py` → 39 passed; full suite → 677 passed (PG fixture); ruff/format/mypy green; client check (biome 54 / tsc / vitest 324), check:e2e, check:tauri, verify_no_secrets all green. PR #40 review: 3 Codex P2 findings substantively fixed (see `docs/evidence/T09-EVIDENCE.md` §3) |
 | **Evidence Level** | `AUTOMATED_VERIFIED` |
 | **Security and Observability** | digests-only storage; logs record exception class + actor/session ids only; placeholders-only env example; key ≥ 32 bytes with version rotation |
 | **Migration and Rollback** | no new migration (reuses published 026 `admin_sessions`); internal SQLite lane behaviour unchanged |
@@ -226,13 +226,13 @@ Lore 提交 SHA：PR #38 implementation head c26bc0732d9fe66142dae3c50ac9c908bdf
 
 ```text
 任务/工作包：T09 / DB-08
-Owner / Reviewer：安全/后端/OPS（Agent 执行）/ chatgpt-codex-connector（PR 评审）
+Owner / Reviewer：安全/后端/OPS（Agent 执行）/ chatgpt-codex-connector（PR 评审，3 条 P2 意见已逐条实质修复）
 分支 / 基线 SHA：feat/customer-v3-t09-admin-session-csrf / 基线 e50f931（PR #39 squash）
 上游规格段落：客户版任务清单 V3 §2 T09、§12.1 DB-08；代码开发清单 V3 §3.2；激活码开发文档 §15；测试与验收规格 V3 §8
-改动文件：server/app/admin_auth_routes.py（新增）、server/scripts/issue_admin_exchange_credential.py（新增）、server/tests/test_admin_auth.py（新增 36 用例）、server/app/bootstrap.py、server/app/main.py、server/app/control_auth.py、deploy/customer.env.example（新增）、client/vite.config.ts、11 个 stash 事故重建文件、docs/evidence/T09-EVIDENCE.md、任务与证据账本
-失败测试或回归锁定：先红后绿——凭据签发/验签/过期/篡改/单次使用（nonce 摘要主键撞唯一约束）、会话全生命周期、CSRF、RBAC、cookie 形状、安全门逐项+聚合、运行时 legacy 403、PG 缺失 503
-实现结果：ASX1 一次性 HMAC 凭据 → HttpOnly cookie + CSRF（仅摘要入库，PG 唯一时钟）；客户生产安全门双重 fail-closed，五类启动拒绝全部落地
-验证命令与通过数：test_admin_auth 36 passed；全量 674 passed（PG fixture）；ruff/format/mypy、client check、check:e2e、check:tauri、verify_no_secrets 全绿
+改动文件：server/app/admin_auth_routes.py（新增，含非对象 JSON 防护）、server/scripts/issue_admin_exchange_credential.py（新增）、server/tests/test_admin_auth.py（新增 39 用例）、server/app/bootstrap.py（版本化密钥发现+长度校验）、server/app/main.py、server/app/control_auth.py、deploy/customer.env.example（新增）、client/vite.config.ts、11 个 stash 事故重建文件、docs/evidence/T09-EVIDENCE.md、任务与证据账本
+失败测试或回归锁定：先红后绿——凭据签发/验签/过期/篡改/单次使用（nonce 摘要主键撞唯一约束）/非对象 JSON 拒收、会话全生命周期、CSRF、RBAC、cookie 形状、安全门逐项+聚合（含仅 _V2 可启动、短密钥启动即拒）、运行时 legacy 403、PG 缺失 503
+实现结果：ASX1 一次性 HMAC 凭据 → HttpOnly cookie + CSRF（仅摘要入库，PG 唯一时钟）；客户生产安全门双重 fail-closed，五类启动拒绝全部落地；PR #40 评审 3 条 P2 意见逐条实质修复（密钥轮换启动、启动期强度校验、非对象 JSON 401）
+验证命令与通过数：test_admin_auth 39 passed；全量 677 passed（PG fixture）；ruff/format/mypy、client check、check:e2e、check:tauri、verify_no_secrets 全绿
 证据层级：AUTOMATED_VERIFIED
 安全与可观测性：仅摘要入库；日志无凭据/token；密钥≥32字节版本化；env 样例全占位符
 迁移与回滚：无新迁移（复用 026）；内部 SQLite 车道零变化

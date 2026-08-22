@@ -162,10 +162,15 @@ def parse_and_verify_exchange_credential(
         raise ExchangeCredentialError("exchange credential is malformed")
     prefix, body, signature_text = parts
     try:
-        decoded: dict[str, object] = dict(json.loads(_b64decode(body)))
+        loaded = json.loads(_b64decode(body))
         signature = _b64decode(signature_text)
     except (ValueError, UnicodeDecodeError) as exc:
         raise ExchangeCredentialError("exchange credential is malformed") from exc
+    # Valid non-object JSON (null/number/string/array) must reject as malformed
+    # instead of raising TypeError from a dict() conversion.
+    if not isinstance(loaded, dict):
+        raise ExchangeCredentialError("exchange credential is malformed")
+    decoded: dict[str, object] = loaded
 
     actor = decoded.get("actor")
     exp = decoded.get("exp")

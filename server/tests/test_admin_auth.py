@@ -155,6 +155,20 @@ def test_exchange_credential_malformed_rejected() -> None:
             parse_and_verify_exchange_credential(malformed, now=now, key=key)
 
 
+def test_exchange_credential_non_object_json_rejected() -> None:
+    """PR review P2: valid non-object JSON bodies (null/number/string/array)
+    must reject as malformed instead of raising TypeError from dict()."""
+    import base64
+
+    now = datetime.now(UTC)
+    key = TEST_KEY.encode()
+    for raw in (b"null", b"1", b'"x"', b"[1,2]"):
+        body = base64.urlsafe_b64encode(raw).decode().rstrip("=")
+        signature = base64.urlsafe_b64encode(b"\x00" * 32).decode().rstrip("=")
+        with pytest.raises(ExchangeCredentialError):
+            parse_and_verify_exchange_credential(f"ASX1.{body}.{signature}", now=now, key=key)
+
+
 def test_admin_hmac_key_versioned_env_resolution() -> None:
     with _env(
         **{
@@ -249,6 +263,28 @@ def test_security_gate_reports_all_violations_at_once() -> None:
     assert "CONTROL_ADMIN_USER_ID" in message
     assert "STORAGE_ROOT" in message
     assert "ADMIN_SESSION_HMAC_KEY" in message
+
+
+def test_security_gate_allows_startup_with_only_rotated_v2_key() -> None:
+    """PR review P2: after rotation retires V1, a configured later key
+    version must keep customer production booting instead of tripping a
+    hardcoded V1-only existence check."""
+    env = _clean_production_env()
+    env[ADMIN_SESSION_HMAC_KEY_ENV] = ""
+    env[f"{ADMIN_SESSION_HMAC_KEY_ENV}_V1"] = ""
+    env[f"{ADMIN_SESSION_HMAC_KEY_ENV}_V2"] = TEST_KEY
+    with _env(**env):
+        assert_customer_production_security()  # must not raise
+
+
+def test_security_gate_rejects_short_admin_key_at_startup() -> None:
+    """PR review P2: a configured-but-weak key must fail the boot itself,
+    not surface later as a runtime ValueError from admin_hmac_key()."""
+    env = _clean_production_env()
+    env[ADMIN_SESSION_HMAC_KEY_ENV] = "short"
+    with _env(**env):
+        with pytest.raises(RuntimeError, match="at least 32 bytes"):
+            assert_customer_production_security()
 
 
 def test_legacy_control_identity_rejected_at_runtime_in_customer_production() -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Mapping
 from pathlib import Path
 
 from cryptography.fernet import Fernet
@@ -29,12 +30,39 @@ logger = logging.getLogger(__name__)
 # T09 / DB-08 — customer-production security gate (dev doc §17).
 _TRUTHY = {"1", "true", "yes", "on"}
 _ADMIN_SESSION_HMAC_KEY_ENV = "VIDEO_REPLICA_ADMIN_SESSION_HMAC_KEY"
+_ADMIN_KEY_VERSION_PREFIX = f"{_ADMIN_SESSION_HMAC_KEY_ENV}_V"
+# Keep in sync with admin_auth_routes.MIN_HMAC_KEY_BYTES; importing the route
+# module here would drag the FastAPI dependency chain into bootstrap.
+_MIN_ADMIN_KEY_BYTES = 32
 _LEGACY_CONTROL_ENVS = ("CONTROL_PROXY_TOKEN_DIGEST", "CONTROL_ADMIN_USER_ID")
 _DEV_AUTH_MODES = {"desktop", "development"}
 
 
 def _is_customer_production() -> bool:
     return os.environ.get(CUSTOMER_PRODUCTION_ENV, "").strip().lower() in _TRUTHY
+
+
+def _configured_admin_session_keys(
+    environ: Mapping[str, str],
+) -> list[tuple[str, str]]:
+    """Every configured admin-session HMAC key variable (un-suffixed or ``_VN``).
+
+    Key rotation retires old versions once outstanding credentials expire, so
+    any configured version (e.g. only ``_V2`` after retiring ``_V1``) must keep
+    customer production booting instead of tripping a V1-only check.
+    """
+    found: list[tuple[str, str]] = []
+    for name in sorted(environ):
+        value = environ[name].strip()
+        if not value:
+            continue
+        if name == _ADMIN_SESSION_HMAC_KEY_ENV:
+            found.append((name, value))
+        elif name.startswith(_ADMIN_KEY_VERSION_PREFIX):
+            suffix = name[len(_ADMIN_KEY_VERSION_PREFIX) :]
+            if suffix.isdigit() and int(suffix) >= 1:
+                found.append((name, value))
+    return found
 
 
 def customer_production_security_violations() -> list[str]:
@@ -71,15 +99,23 @@ def customer_production_security_violations() -> list[str]:
             "persistent local assets (VIDEO_REPLICA_STORAGE_ROOT) are forbidden in "
             "customer production: configure the private COS storage provider instead"
         )
-    admin_key_names = (
-        f"{_ADMIN_SESSION_HMAC_KEY_ENV}_V1",
-        _ADMIN_SESSION_HMAC_KEY_ENV,
-    )
-    if not any(os.environ.get(name, "").strip() for name in admin_key_names):
+    configured_keys = _configured_admin_session_keys(os.environ)
+    if not configured_keys:
         violations.append(
             "admin session HMAC key is missing: set "
-            f"{admin_key_names[0]} (or the un-suffixed {admin_key_names[1]})"
+            f"{_ADMIN_SESSION_HMAC_KEY_ENV}_V1, the un-suffixed "
+            f"{_ADMIN_SESSION_HMAC_KEY_ENV}, or any later key version kept "
+            "after a rotation"
         )
+    else:
+        # A configured-but-weak key must fail the boot itself instead of
+        # surfacing later as a runtime error from admin_hmac_key().
+        for name, value in configured_keys:
+            if len(value.encode("utf-8")) < _MIN_ADMIN_KEY_BYTES:
+                violations.append(
+                    f"{name} must be at least {_MIN_ADMIN_KEY_BYTES} bytes "
+                    "for the customer-production admin session HMAC key"
+                )
     return violations
 
 
