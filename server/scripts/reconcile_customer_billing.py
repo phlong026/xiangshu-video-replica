@@ -27,6 +27,11 @@ from psycopg.rows import dict_row
 
 Dialect = Literal["sqlite", "postgresql"]
 EXCLUDED_TABLES = frozenset({"alembic_version"})
+# PostgreSQL-only tables created by revision 026 for the customer production
+# line (per-operator admin sessions, T09/DB-08). They have no SQLite
+# counterpart in the T07 import source, so an empty such table on the target
+# is expected; a non-empty one is divergent state and must fail closed.
+PG_ONLY_TABLES: frozenset[str] = frozenset({"admin_sessions"})
 DEFAULT_DIGEST_BATCH_SIZE = 1000
 _DIGEST_MODULUS = 1 << 256
 _MAX_SAFE_MESSAGE_LENGTH = 600
@@ -1077,12 +1082,21 @@ def reconcile_connection_pair(
                 detail=f"target is missing source tables: {len(missing)}",
             )
         )
-    if extra:
+    unexpected_extra = [table for table in extra if table not in PG_ONLY_TABLES]
+    divergent_pg_only = [
+        table
+        for table in extra
+        if table in PG_ONLY_TABLES and _count_rows(pg_conn, f'SELECT COUNT(*) FROM "{table}"')
+    ]
+    if unexpected_extra or divergent_pg_only:
         issues.append(
             ReconciliationIssue(
                 code="target_table_extra",
                 scope="schema",
-                detail=f"target has tables absent from source: {len(extra)}",
+                detail=(
+                    "target has tables absent from the source: "
+                    f"{len(unexpected_extra) + len(divergent_pg_only)}"
+                ),
             )
         )
 

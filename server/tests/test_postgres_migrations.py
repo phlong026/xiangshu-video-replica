@@ -168,6 +168,7 @@ def test_pg_full_upgrade_downgrade_reupgrade_and_indexes() -> None:
                 "wallets",
                 "wallet_transactions",
                 "recharge_orders",
+                "admin_sessions",
                 "character_generation_tasks",
                 "external_call_logs",
             ):
@@ -515,6 +516,8 @@ def test_pg_billing_provider_shapes_accepted_and_rejected() -> None:
                 provider_trade_no=None,
                 paid_at="2026-08-22T00:00:00+00:00",
             )  # a paid ZPay order must carry its provider trade number
+            rejected(22, provider_trade_no="ZPAY-SQUAT")  # a non-PAID ZPay order must not
+            #   reserve a globally unique third-party trade number (review P2)
             rejected(
                 17,
                 pricing_scope="CUSTOMER_STANDARD",
@@ -526,6 +529,77 @@ def test_pg_billing_provider_shapes_accepted_and_rejected() -> None:
             rejected(19, amount_fen=10500)  # zpay: off the recharge step ladder
             rejected(20, credits=9)  # credits * price != amount (all providers)
             rejected(21, status="REFUNDED")  # unknown status (022 regression)
+    finally:
+        _drop_database(db_name)
+
+
+def test_pg_admin_sessions_schema_and_invariants() -> None:
+    """026 must carry the full frozen topic (review P1): the admin_sessions
+    data layer for T09/DB-08 — digests only, unique session digest, expiry
+    ordering, actor FK — lands in the same revision as the billing
+    constraints so T09 is never left without a compliant schema home."""
+
+    db_name = "t08_admin_sessions"
+    dsn = _t08_database(db_name)
+    try:
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            conn.execute(
+                "INSERT INTO users (id, username, display_name, role) "
+                "VALUES ('u-admin', 'u-admin', 'Admin', 'admin')"
+            )
+            conn.execute(
+                "INSERT INTO admin_sessions "
+                "(id, actor_user_id, session_digest, csrf_digest, "
+                " last_activity_at, expires_at, created_ip_digest, created_ua_digest) "
+                "VALUES ('as1', 'u-admin', 'digest-1', 'csrf-1', "
+                " '2026-08-22T00:00:01+00:00', '2099-01-01T00:00:00+00:00', "
+                " 'ip-digest', 'ua-digest')"
+            )
+            # A second session for the same actor is fine (session rotation),
+            # but the session digest is globally unique.
+            conn.execute(
+                "INSERT INTO admin_sessions "
+                "(id, actor_user_id, session_digest, csrf_digest, "
+                " last_activity_at, expires_at, created_ip_digest, created_ua_digest) "
+                "VALUES ('as2', 'u-admin', 'digest-2', 'csrf-2', "
+                " '2026-08-22T00:00:01+00:00', '2099-01-01T00:00:00+00:00', "
+                " 'ip-digest', 'ua-digest')"
+            )
+            with pytest.raises(psycopg.errors.UniqueViolation):
+                conn.execute(
+                    "INSERT INTO admin_sessions "
+                    "(id, actor_user_id, session_digest, csrf_digest, "
+                    " last_activity_at, expires_at, created_ip_digest, created_ua_digest) "
+                    "VALUES ('as3', 'u-admin', 'digest-1', 'csrf-3', "
+                    " '2026-08-22T00:00:01+00:00', '2099-01-01T00:00:00+00:00', "
+                    " 'ip-digest', 'ua-digest')"
+                )
+            with pytest.raises(psycopg.errors.CheckViolation):
+                conn.execute(
+                    "INSERT INTO admin_sessions "
+                    "(id, actor_user_id, session_digest, csrf_digest, "
+                    " last_activity_at, expires_at, created_ip_digest, created_ua_digest) "
+                    "VALUES ('as4', 'u-admin', 'digest-4', 'csrf-4', "
+                    " '2026-08-22T00:00:01+00:00', '2026-08-21T00:00:00+00:00', "
+                    " 'ip-digest', 'ua-digest')"
+                )  # expires_at must be after created_at
+            with pytest.raises(psycopg.errors.ForeignKeyViolation):
+                conn.execute(
+                    "INSERT INTO admin_sessions "
+                    "(id, actor_user_id, session_digest, csrf_digest, "
+                    " last_activity_at, expires_at, created_ip_digest, created_ua_digest) "
+                    "VALUES ('as5', 'u-missing', 'digest-5', 'csrf-5', "
+                    " '2026-08-22T00:00:01+00:00', '2099-01-01T00:00:00+00:00', "
+                    " 'ip-digest', 'ua-digest')"
+                )  # every session must trace back to a real actor
+
+            indexes = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT indexname FROM pg_indexes WHERE tablename = 'admin_sessions'"
+                ).fetchall()
+            }
+            assert any(name.startswith("idx_admin_sessions_actor_status") for name in indexes)
     finally:
         _drop_database(db_name)
 

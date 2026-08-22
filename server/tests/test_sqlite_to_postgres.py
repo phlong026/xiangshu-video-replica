@@ -922,6 +922,41 @@ def test_real_pg_reconciliation_detects_pk_row_wallet_and_asset_drift(
 
 
 @pg_only
+def test_real_pg_import_rejects_non_empty_target_only_table(tmp_path: Path) -> None:
+    """A non-empty PG-only table (admin_sessions, revision 026) is divergent
+    state: the T07 cutover happens before the customer production line opens,
+    so the import must fail closed on the table contract."""
+
+    import psycopg
+
+    source = tmp_path / "source.db"
+    _create_head_source(source)
+    snapshot = create_readonly_snapshot(source, tmp_path / "snapshot.db")
+    name = "t08_pg_only_guard"
+    dsn = _create_database(name)
+    try:
+        _upgrade_pg(dsn)
+        with psycopg.connect(dsn) as conn:
+            conn.execute(
+                "INSERT INTO users (id, username, display_name, role) "
+                "VALUES ('u-admin', 'u-admin', 'Admin', 'admin')"
+            )
+            conn.execute(
+                "INSERT INTO admin_sessions "
+                "(id, actor_user_id, session_digest, csrf_digest, "
+                " last_activity_at, expires_at, created_ip_digest, created_ua_digest) "
+                "VALUES ('as1', 'u-admin', 'digest-1', 'csrf-1', "
+                " '2026-08-22T00:00:00+00:00', '2099-01-01T00:00:00+00:00', "
+                " 'ip-digest', 'ua-digest')"
+            )
+            conn.commit()
+        with pytest.raises(MigrationSafetyError, match="table contract differs"):
+            migrate_snapshot(snapshot, dsn)
+    finally:
+        _drop_database(name)
+
+
+@pg_only
 def test_real_pg_import_rejects_json_asset_orphan_before_writing_target(
     tmp_path: Path,
 ) -> None:

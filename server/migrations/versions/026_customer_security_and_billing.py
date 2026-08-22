@@ -17,10 +17,17 @@ only funding source in the internal P0 product. The customer V3 line adds:
 Per DB-07's exit gate these shapes are enforced by PostgreSQL CHECK
 constraints, not application code, and each provider keeps only its legal
 shape: scope pairing, paid-on-creation for non-zpay providers, trade-number
-presence rules, a customer price floor (PRICE-01: customer prices never
-undercut the internal base price), and min/step ladder applicability limited
-to zpay (activation face values and adjustment amounts are defined by their
-source documents).
+presence strictly bound to the paid state, a customer price floor (PRICE-01:
+customer prices never undercut the internal base price), and min/step ladder
+applicability limited to zpay (activation face values and adjustment amounts
+are defined by their source documents).
+
+The revision also creates the ``admin_sessions`` table — the "管理员会话"
+part of the frozen 026 topic (code checklist §3.1) — so that T09 / DB-08 has
+a compliant schema home; publishing a partial 026 would leave T09 nowhere to
+land its data layer (published revisions are never rewritten and 027–030
+are reserved for their own topics). T09 implements the application layer
+(session exchange, CSRF, RBAC, fail-closed startup) on top of it.
 
 PostgreSQL is the customer production source of truth, so this revision only
 executes there (025 precedent). SQLite remains the internal P0 runtime and
@@ -56,10 +63,15 @@ _PROVIDER_SCOPE_PAIRING = (
 _PROVIDER_STATUS = (
     "provider = 'zpay' OR (provider IN ('activation_code', 'admin_adjustment') AND status = 'PAID')"
 )
-# A paid ZPay order always carries its third-party trade number (written by the
-# verified notify flow); activation/adjustment orders have no third party.
+# The trade number and the PAID transition are written by the same atomic
+# UPDATE in the verified notify/query flow (zpay_payments.confirm_recharge_payment),
+# so a ZPay order's trade number is strictly bound to its paid state: a
+# non-PAID row with a trade number could squat a globally unique third-party
+# trade number and make the real callback for another order fail as already
+# bound (review P2).
 _PROVIDER_TRADE_NO = (
-    "(provider = 'zpay' AND (status != 'PAID' OR provider_trade_no IS NOT NULL)) OR "
+    "(provider = 'zpay' AND status = 'PAID' AND provider_trade_no IS NOT NULL) OR "
+    "(provider = 'zpay' AND status != 'PAID' AND provider_trade_no IS NULL) OR "
     "(provider IN ('activation_code', 'admin_adjustment') AND provider_trade_no IS NULL)"
 )
 # PRICE-01 floor: a customer price must never undercut the internal base price.
@@ -95,12 +107,75 @@ def upgrade() -> None:
     bind = op.get_bind()
     if bind.dialect.name != "postgresql":
         # SQLite: internal P0 runtime / T07 import source only — every row is
-        # zpay/INTERNAL, which the published 022 constraints already enforce.
+        # zpay/INTERNAL, which the published 022 constraints already enforce,
+        # and admin sessions are a customer-production concern (T09).
         return
     for name in _REPLACED_CONSTRAINTS:
         op.drop_constraint(name, "recharge_orders", type_="check")
     for name, condition in _NEW_CONSTRAINTS:
         op.create_check_constraint(name, "recharge_orders", condition)
+    _create_admin_sessions()
+
+
+def _create_admin_sessions() -> None:
+    """Per-operator admin sessions for T09 / DB-08 (review P1).
+
+    The frozen 026 topic in the code checklist (§3.1) is "用户/账务扩展、
+    管理员会话、共享限流所需数据". Publishing this revision with only the
+    billing constraints would leave T09 without a compliant place for its
+    schema (published revisions must never be rewritten and the 027–030
+    names are reserved for their own topics), so the admin-session data
+    layer ships here; T09 implements the session/CSRF/RBAC/fail-closed
+    application layer on top of it. Column set follows dev doc §11.2
+    (session digest, actor user, CSRF digest, expiry/revocation, last
+    activity, creation IP/UA digests) and §15 (separate admin cookie per
+    operator; digests only — raw secrets never reach the database).
+
+    Shared rate-limit data has no frozen column-level design yet; T15
+    (ACT-08) lands it under the checklist's "实际编号以实施当日 Alembic
+    head 为准" clause.
+    """
+
+    op.create_table(
+        "admin_sessions",
+        sa.Column("id", sa.Text(), primary_key=True),
+        sa.Column(
+            "actor_user_id",
+            sa.Text(),
+            sa.ForeignKey("users.id", ondelete="CASCADE"),
+            nullable=False,
+        ),
+        sa.Column("session_digest", sa.Text(), nullable=False, unique=True),
+        sa.Column("csrf_digest", sa.Text(), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.Text(),
+            nullable=False,
+            server_default=sa.text("CURRENT_TIMESTAMP"),
+        ),
+        sa.Column("last_activity_at", sa.Text(), nullable=False),
+        sa.Column("expires_at", sa.Text(), nullable=False),
+        sa.Column("revoked_at", sa.Text()),
+        sa.Column("created_ip_digest", sa.Text(), nullable=False),
+        sa.Column("created_ua_digest", sa.Text(), nullable=False),
+        sa.CheckConstraint(
+            "expires_at > created_at",
+            name="ck_admin_sessions_expires_after_created",
+        ),
+        sa.CheckConstraint(
+            "length(trim(session_digest)) > 0",
+            name="ck_admin_sessions_session_digest_not_blank",
+        ),
+        sa.CheckConstraint(
+            "length(trim(csrf_digest)) > 0",
+            name="ck_admin_sessions_csrf_digest_not_blank",
+        ),
+    )
+    op.create_index(
+        "idx_admin_sessions_actor_status",
+        "admin_sessions",
+        ["actor_user_id", "revoked_at"],
+    )
 
 
 def downgrade() -> None:
@@ -130,6 +205,8 @@ def downgrade() -> None:
         )
     for name, _condition in _NEW_CONSTRAINTS:
         op.drop_constraint(name, "recharge_orders", type_="check")
+    op.drop_index("idx_admin_sessions_actor_status", table_name="admin_sessions")
+    op.drop_table("admin_sessions")
     # Restore the published 022 shapes verbatim.
     op.create_check_constraint(
         "ck_recharge_orders_provider", "recharge_orders", "provider = 'zpay'"
