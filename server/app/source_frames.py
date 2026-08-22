@@ -74,13 +74,19 @@ class FFmpegSourceFrameExtractor:
             raise SourceFrameExtractorUnavailable("ffmpeg is required for source frame extraction")
 
         suffix = Path(filename).suffix.lower()
-        with tempfile.NamedTemporaryFile(suffix=suffix) as video_file:
-            video_file.write(content)
-            video_file.flush()
+        # NamedTemporaryFile holds a share-none handle for its whole lifetime
+        # on Windows, so a separate ffmpeg process cannot open the video at
+        # all. Write a real file inside a private temporary directory and
+        # close it before invoking ffmpeg; the directory cleanup still
+        # removes everything on exit.
+        with tempfile.TemporaryDirectory(prefix="video-replica-source-frame-") as directory:
+            video_path = str(Path(directory) / f"reference{suffix}")
+            with open(video_path, "wb") as video_file:
+                video_file.write(content)
             frames = []
             for timestamp in timestamps_seconds:
-                image = self._extract_jpeg(ffmpeg, video_file.name, timestamp)
-                grayscale = self._extract_grayscale(ffmpeg, video_file.name, timestamp)
+                image = self._extract_jpeg(ffmpeg, video_path, timestamp)
+                grayscale = self._extract_grayscale(ffmpeg, video_path, timestamp)
                 frames.append(
                     ExtractedSourceFrame(
                         timestamp_seconds=timestamp,

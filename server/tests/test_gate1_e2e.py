@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -22,6 +23,15 @@ from app.gate1_e2e import (
     wait_for_http,
     write_evidence_manifest,
 )
+
+
+def _isolated_child_env() -> dict[str, str]:
+    # A Windows child that opens sockets dies with Winsock WinError 10106
+    # when SystemRoot is missing from its environment, so keep the platform
+    # minimum; an empty environment is fine everywhere else.
+    if sys.platform == "win32":
+        return {"SystemRoot": os.environ["SystemRoot"]}
+    return {}
 
 
 class _HealthHandler(BaseHTTPRequestHandler):
@@ -57,7 +67,10 @@ def test_write_evidence_manifest_hashes_evidence_but_excludes_runtime(tmp_path: 
     api_log = paths.logs_dir / "api.log"
     screenshot = paths.screenshots_dir / "workspace.png"
     database = paths.runtime_dir / "gate1.sqlite3"
-    api_log.write_text("api ready\n", encoding="utf-8")
+    # newline="" keeps the on-disk bytes identical to the hashed b"...\n"
+    # literals below; the default text-mode newline translation on Windows
+    # would otherwise turn \n into \r\n and break the manifest hash.
+    api_log.write_text("api ready\n", encoding="utf-8", newline="")
     screenshot.write_bytes(b"fake-png")
     database.write_bytes(b"private-runtime-state")
 
@@ -82,7 +95,7 @@ def test_write_evidence_manifest_hashes_evidence_but_excludes_runtime(tmp_path: 
     ]
     verify_evidence_manifest(manifest_path)
 
-    api_log.write_text("tampered\n", encoding="utf-8")
+    api_log.write_text("tampered\n", encoding="utf-8", newline="")
     with pytest.raises(ValueError, match="hash mismatch"):
         verify_evidence_manifest(manifest_path)
 
@@ -200,7 +213,7 @@ def test_api_restart_controller_replaces_the_service_and_acknowledges_request(
                 "127.0.0.1",
             ],
             cwd=tmp_path,
-            env={},
+            env=_isolated_child_env(),
             log_path=log_path,
             health_url=f"http://127.0.0.1:{port}/",
             request_path=request_path,

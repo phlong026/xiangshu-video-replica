@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+import sys
 from collections import defaultdict, deque
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import closing
@@ -464,7 +465,9 @@ def _validate_snapshot(snapshot: SqliteSnapshot) -> None:
     actual = sha256_file(snapshot.path)
     if actual != snapshot.snapshot_sha256:
         raise MigrationSafetyError("SQLite snapshot SHA-256 does not match its immutable evidence")
-    if snapshot.path.stat().st_mode & 0o077:
+    # Windows reports a synthesized 0o666 mode for every file regardless of
+    # the 0600 creation request (mirrors the platform guard in app/backup.py).
+    if sys.platform != "win32" and snapshot.path.stat().st_mode & 0o077:
         raise MigrationSafetyError("SQLite snapshot is not private; expected permissions 0600")
 
 
