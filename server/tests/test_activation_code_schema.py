@@ -28,7 +28,7 @@ EXPORTS_TABLE = "activation_code_exports"
 ACTIVATIONS_TABLE = "activation_code_activations"
 EVENTS_TABLE = "activation_code_events"
 
-_HEAD_REVISION = "028_admin_write_idempotency"
+_HEAD_REVISION = "031_admin_write_idempotency"
 
 
 def _pg_dsn() -> str:
@@ -236,7 +236,7 @@ def test_catalog_tables_and_columns(catalog_dsn: str) -> None:
             "expires_at",
             "downloaded_at",
             "downloaded_by_user_id",
-            # Download audit columns appended by 028 (PR #43 review P1):
+            # Download audit columns appended by 031 (PR #43 review P1):
             # the one-time plaintext download durably records its reason and
             # request id next to the actor.
             "download_reason",
@@ -655,7 +655,7 @@ def test_downgrade_drops_catalog_and_blocks_when_activated(catalog_dsn: str) -> 
         _insert_paid_order(conn, "order-1")
         _insert_activation(conn, 1)
     with pytest.raises(RuntimeError, match="cannot downgrade 027"):
-        # Two steps: 028->027 (empty idempotency ledger, symmetric) then
+        # Two steps: 031->027 (empty idempotency ledger, symmetric) then
         # 027->026, which the guard refuses.
         command.downgrade(_alembic_config(sqlalchemy_dsn), "-2")
 

@@ -1,12 +1,16 @@
 """T12 / ACT-04 — admin write idempotency.
 
-The code checklist §3.1 freezes migration *themes*, not numbers
-("实际编号以实施当日 Alembic head 为准"), and the admin-write idempotency
-table has no frozen column-level design in any published revision — dev doc
-§11.3 only fixes the invariant ("管理写幂等键按 actor、canonical route 和
-key digest 唯一"). This revision lands that data layer at the current head
-(026 precedent: the shared rate-limit data lands under the same clause when
-T15 arrives, taking the then-current head as well).
+The code checklist §3.1 freezes migration *themes* with suggested numbers
+025–030, and the AGENTS.md / task-list red line freezes those exact file
+names — ``028_customer_devices_and_activations`` through
+``030_user_fair_queue`` are reserved for the T16/T20/T25 themes. The
+admin-write idempotency table is an inserted theme with no frozen number of
+its own (dev doc §11.3 only fixes the invariant "管理写幂等键按 actor、
+canonical route 和 key digest 唯一"), so this revision lands as **031** to
+keep the 028–030 suggested-number window free for the frozen themes (PR #43
+review P1; the revision is still part of this unpublished PR, so renaming is
+allowed under the append-only rule). The device/session/queue revisions will
+chain off the then-current head and keep their frozen file names.
 
 ``admin_write_idempotency`` snapshots one admin write per
 (actor, canonical route, idempotency key digest):
@@ -45,7 +49,7 @@ PostgreSQL only (025–027 precedent): admin activation writes are a
 customer-production concern; the internal SQLite lane keeps its legacy
 control path and never grows this table.
 
-Revision ID: 028_admin_write_idempotency
+Revision ID: 031_admin_write_idempotency
 Revises: 027_activation_code_catalog
 """
 
@@ -54,7 +58,7 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = "028_admin_write_idempotency"
+revision = "031_admin_write_idempotency"
 down_revision = "027_activation_code_catalog"
 branch_labels = None
 depends_on = None

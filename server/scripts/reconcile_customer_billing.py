@@ -27,7 +27,7 @@ from psycopg.rows import dict_row
 
 Dialect = Literal["sqlite", "postgresql"]
 EXCLUDED_TABLES = frozenset({"alembic_version"})
-# PostgreSQL-only tables created by revisions 026/027/028 for the customer
+# PostgreSQL-only tables created by revisions 026/027/031 for the customer
 # production line (per-operator admin sessions, T09/DB-08; the activation
 # code catalog incl. its append-only event table, T10/ACT-01; the admin
 # write idempotency ledger, T12/ACT-04). They have no SQLite counterpart in

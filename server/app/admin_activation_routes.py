@@ -7,7 +7,7 @@ revocation and listing — every write behind the T09 admin session / CSRF /
 RBAC gate plus the admin write contract (dev doc §15: real actor, reason,
 confirmation, Idempotency-Key, request id).
 
-Write idempotency (dev doc §6.3 / §11.3, table from revision 028): each
+Write idempotency (dev doc §6.3 / §11.3, table from revision 031): each
 business write runs inside one PostgreSQL transaction that first inserts an
 ``admin_write_idempotency`` placeholder keyed by (actor, canonical route,
 key digest) with ``INSERT ... ON CONFLICT DO NOTHING``. The winner back-fills
@@ -139,7 +139,7 @@ def _request_hash(route: str, path_params: Mapping[str, str], body: BaseModel) -
 
 
 # ---------------------------------------------------------------------------
-# Idempotency snapshot layer (revision 028)
+# Idempotency snapshot layer (revision 031)
 # ---------------------------------------------------------------------------
 
 
