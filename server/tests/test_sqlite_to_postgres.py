@@ -540,7 +540,7 @@ def test_canonical_values_are_stable() -> None:
 
 
 def test_revision_dependency_and_maintenance_guards() -> None:
-    head = "026_customer_security_and_billing"
+    head = "027_activation_code_catalog"
     validate_revision_pair(head, head, expected_head=head)
     with pytest.raises(MigrationSafetyError, match="Alembic revision mismatch"):
         validate_revision_pair("024_wallet_backfill", head, expected_head=head)
@@ -958,6 +958,55 @@ def test_real_pg_import_rejects_non_empty_target_only_table(tmp_path: Path) -> N
             migrate_snapshot(snapshot, dsn)
     finally:
         _drop_database(name)
+
+
+@pg_only
+def test_real_pg_import_accepts_empty_activation_code_catalog_but_rejects_rows(
+    tmp_path: Path,
+) -> None:
+    """Revision 027 adds five PG-only activation-catalog tables to the target
+    head. The internal SQLite lane never sells activation codes, so empty
+    catalog tables are expected; a catalog row before the T07 cutover is
+    divergent state and must fail closed (T10 follow-up to the 026 guard)."""
+
+    import psycopg
+
+    source = tmp_path / "source.db"
+    _create_head_source(source)
+    snapshot = create_readonly_snapshot(source, tmp_path / "snapshot.db")
+
+    empty_name = "t10_pg_only_empty"
+    empty_dsn = _create_database(empty_name)
+    try:
+        _upgrade_pg(empty_dsn)
+        migrate_snapshot(snapshot, empty_dsn)
+        with psycopg.connect(empty_dsn) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 1
+    finally:
+        _drop_database(empty_name)
+
+    divergent_name = "t10_pg_only_divergent"
+    divergent_dsn = _create_database(divergent_name)
+    try:
+        _upgrade_pg(divergent_dsn)
+        with psycopg.connect(divergent_dsn) as conn:
+            conn.execute(
+                "INSERT INTO users (id, username, display_name, role) "
+                "VALUES ('u-admin', 'u-admin', 'Admin', 'admin')"
+            )
+            conn.execute(
+                "INSERT INTO activation_code_batches "
+                "(id, name, face_value_fen, unit_price_fen_snapshot, "
+                "credits_snapshot, quantity, activation_expires_at, "
+                "status, created_by_user_id) "
+                "VALUES ('batch-1', 'launch', 1500, 1500, 1, 10, "
+                "'2099-01-01T00:00:00+00:00', 'OPEN', 'u-admin')"
+            )
+            conn.commit()
+        with pytest.raises(MigrationSafetyError, match="table contract differs"):
+            migrate_snapshot(snapshot, divergent_dsn)
+    finally:
+        _drop_database(divergent_name)
 
 
 @pg_only
