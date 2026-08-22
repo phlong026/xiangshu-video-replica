@@ -138,7 +138,7 @@ def test_characters_migration_creates_library_tables(db_path: Path) -> None:
             ).fetchall()
         }
 
-    assert version == "025_postgres_runtime_compatibility"
+    assert version == "026_customer_security_and_billing"
     assert {
         "characters",
         "project_main_characters",
