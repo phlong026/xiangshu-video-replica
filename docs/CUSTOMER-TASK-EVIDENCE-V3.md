@@ -279,3 +279,41 @@ Owner / Reviewer：DB/后端（Agent 执行）/ chatgpt-codex-connector（PR 评
 未测试项：应用层（T11/T12）；激活事务链路（T13）；设备 FK（T16）；STAGING/REAL_CHAIN/PRODUCTION
 Lore 提交 SHA：见 PR squash 合并 SHA
 ```
+
+## T11 — Activation Code Generation, Versioned Digests and AEAD Export (ACT-02 + ACT-03)
+
+| Field | Content |
+| --- | --- |
+| **Owner** | Backend/Security |
+| **Reviewer** | session-internal code review (0 P1 / 2 P2 / 5 P3, all substantively fixed) |
+| **Branch / Base SHA** | `feat/customer-v3-t11-activation-code-service` / `main@570cd42` (PR #41 squash) |
+| **Verified Implementation SHA** | PR squash merge result (see `docs/evidence/T11-EVIDENCE.md`) |
+| **Upstream Spec Sections** | Task list §3 T11, §12.2 ACT-02/ACT-03; code checklist (frozen `activation_code_service.py`); activation-code dev doc §5/§12.1; acceptance spec §2.1 |
+| **Files Changed** | `server/app/activation_code_service.py` (new, 517 lines: normalization/CSPRNG/masking, versioned HMAC/AEAD key resolution, rotation-window digests, six-state matrix, AES-GCM envelope, batch generation + one-time audited export); `server/tests/test_activation_code_service.py` (new, 21 red→green cases: 12 unit + 9 PG on a dedicated migrated fixture database); `deploy/customer.env.example` (T11 key families registered with generation commands and `_V2` rotation comments) |
+| **Failure Test or Regression Lock** | 21 cases: entropy floor (140 bit ≥128) + full-alphabet + confusable-free + 500-code uniqueness, human-variant normalization (deterministically seeded confusables), malformed-format rejection, stable masking (prefix + first/last 4 visible, middle 20 hidden), digest determinism/keyed-ness/64-hex, HMAC key env resolution (V2/un-suffixed V1/short-key rejected/missing explicit), key-rotation verification window (old versions verifiable, highest first), full 6×6 transition matrix, AEAD roundtrip with no plaintext in ciphertext, tamper + wrong-batch rejection, AEAD key resolution (invalid base64/short), GENERATED landing + events + no plaintext in catalog, unknown batch rejected, budget overrun rejected (frozen `quantity` snapshot), cross-batch digest uniqueness (60+60), one-time audited download (FOR UPDATE + conditional UPDATE + whole-life caplog plaintext scan), expiry rejected (`downloaded_at` stays NULL), EXPORTED events, cross-batch export refused, unknown export rejected |
+| **Implementation Result** | `XS04` 140-bit Crockford-base32 codes (CSPRNG, injectable `rng` for fixtures only); HMAC-SHA256 versioned digests stored as digest + key version + masked form only; AES-256-GCM export envelope bound to its batch via AAD with SHA-256 integrity and short TTL; `fetch_export_package` is the single one-time audited download path; six-state matrix exported for T12/T13; batch `quantity` enforced as the frozen issuance budget |
+| **Verification Command and Pass Count** | `pytest tests/test_activation_code_service.py` → 21 passed; full suite → 709 passed (PG fixture); ruff/format/mypy green. Pre-PR review: 2 P2 + 5 P3 all fixed with red tests (see `docs/evidence/T11-EVIDENCE.md` §Pre-PR Review Fixes) |
+| **Evidence Level** | `AUTOMATED_VERIFIED` |
+| **Security and Observability** | no predictable codes (CSPRNG + entropy-floor lock); no reversible DB fields (digest + mask only); no plaintext in columns/events/logs (whole-life caplog scan); exports carry AEAD ciphertext + SHA-256 only; download actor persisted; keys ≥32 bytes, versioned rotation with an old-version verification window |
+| **Migration and Rollback** | no new migration (application layer over published 027); SQLite lane unchanged |
+| **Untested Items** | admin API routes (T12); first-activation atomic transaction (T13); AEAD idempotent recovery (T14); shared rate limiting / anti-enumeration (T15); real private-COS object delivery (T36+); STAGING/REAL_CHAIN/PRODUCTION |
+| **Lore Commit SHA** | PR squash merge SHA |
+
+### T11 Section 14 Ledger Record
+
+```text
+任务/工作包：T11 / ACT-02 + ACT-03
+Owner / Reviewer：后端/安全（Agent 执行）/ 会话内代码评审（0 P1、2 P2 + 5 P3 全部实质修复）
+分支 / 基线 SHA：feat/customer-v3-t11-activation-code-service / 基线 570cd42（PR #41 squash）
+上游规格段落：客户版任务清单 V3 §3 T11、§12.2 ACT-02/ACT-03；代码开发清单 V3（activation_code_service.py 冻结名）；激活码开发文档 §5/§12.1；测试与验收规格 §2.1
+改动文件：server/app/activation_code_service.py（新增 517 行）、server/tests/test_activation_code_service.py（新增 21 用例：12 单元 + 9 PG）、deploy/customer.env.example（T11 双密钥族登记）、docs/evidence/T11-EVIDENCE.md、任务与证据账本
+失败测试或回归锁定：先红后绿——熵结构（140 bit）、碰撞（500 码唯一+跨批次 60+60）、掩码、旧 key 验证窗、6×6 转移矩阵、AEAD 无明文、篡改/错批次拒、一次性下载审计（caplog 全生命周期）、过期拒、超发拒、跨批次导出拒、未知批次/导出拒
+实现结果：XS04 140-bit 码 + 版本化 HMAC 摘要 + 批次绑定 AEAD 导出 + 六态矩阵；批次 quantity 冻结预算；明文仅存于返回值与内存
+验证命令与通过数：test_activation_code_service 21 passed；全量 709 passed（PG fixture）；ruff/format/mypy 全绿
+证据层级：AUTOMATED_VERIFIED
+安全与可观测性：无可预测码、无可逆字段、列/事件/日志全链路无明文、导出仅密文+SHA256、下载 actor 落审计、密钥版本化轮换
+迁移与回滚：无新迁移；SQLite 车道零变化
+外部授权记录：无；未调用真实 ZPay/COS/付费 Provider/发码/灰度/公网发布
+未测试项：T12 管理 API；T13 激活事务；T14 AEAD 幂等恢复；T15 限流/防枚举；私有 COS 真实投递；STAGING/REAL_CHAIN/PRODUCTION
+Lore 提交 SHA：见 PR squash 合并 SHA
+```
