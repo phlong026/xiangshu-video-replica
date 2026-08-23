@@ -163,6 +163,9 @@ def devices_dsn() -> Iterator[str]:
 def route_state(devices_dsn: str) -> Iterator[str]:
     close_pg_pool()
     with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        # 036 refuses TRUNCATE of the append-only audit tables; the replica
+        # role suspends triggers for this cleanup sweep only.
+        conn.execute("SET session_replication_role = replica")
         conn.execute(
             "TRUNCATE customer_session_events, customer_session_state, "
             "customer_idempotency_envelopes, "
@@ -172,6 +175,7 @@ def route_state(devices_dsn: str) -> Iterator[str]:
             "wallet_transactions, recharge_orders, wallets, users, "
             f"{COUNTERS_TABLE}, {FAILURES_TABLE} CASCADE"
         )
+        conn.execute("SET session_replication_role = DEFAULT")
         conn.execute(
             "INSERT INTO users (id, username, display_name, role) "
             "VALUES ('admin_u', 'admin_u', 'Admin User', 'admin')"
