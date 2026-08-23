@@ -37,6 +37,9 @@ def client(db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> It
     storage_root = tmp_path / "private-storage"
     monkeypatch.setenv("VIDEO_REPLICA_SETTINGS_KEY", Fernet.generate_key().decode("ascii"))
     monkeypatch.setenv("VIDEO_REPLICA_STORAGE_ROOT", str(storage_root))
+    # Migrated routes (BusinessDb.write) open their own SQLite connection from
+    # the env path; it must point at the same database the override yields.
+    monkeypatch.setenv("VIDEO_REPLICA_DB_PATH", str(db_path))
     storage = LocalStorageAdapter(root=storage_root, bucket="private-bucket")
     storage.put_object("outputs/asset_owned.mp4", b"video", content_type="video/mp4")
     app.dependency_overrides[get_database] = database_override

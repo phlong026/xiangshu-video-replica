@@ -74,7 +74,7 @@ def recharge_api(
 
     def override_database() -> Iterator[BusinessConnection]:
         with connect_database(db_path) as conn:
-            yield conn
+            yield BusinessConnection.sqlite(conn)
 
     app.dependency_overrides[get_database] = override_database
     try:

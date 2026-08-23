@@ -24,7 +24,7 @@ def insert_audit(
     conn.execute(
         """
         INSERT INTO audit_logs (id, actor_user_id, action, entity_type, entity_id, metadata_json)
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s)
         """,
         (
             str(uuid4()),
@@ -94,7 +94,7 @@ def require_not_auditor(
     require_role(
         conn,
         actor=actor,
-        allowed_roles={"employee", "admin"},
+        allowed_roles={"employee", "admin", "customer"},
         action=action,
         entity_type=entity_type,
         entity_id=entity_id,
@@ -112,7 +112,7 @@ def require_project_access(
         """
         SELECT id, owner_user_id, name, status
         FROM projects
-        WHERE id = ?
+        WHERE id = %s
         """,
         (project_id,),
     ).fetchone()
@@ -151,7 +151,7 @@ def require_asset_access(
         SELECT id, project_id, kind, storage_uri, sha256, size_bytes, content_type,
                metadata_json
         FROM assets
-        WHERE id = ?
+        WHERE id = %s
         """,
         (asset_id,),
     ).fetchone()
@@ -195,7 +195,7 @@ def require_asset_access(
           ON version.id = character_asset.character_version_id
         JOIN character_personas AS persona ON persona.id = version.persona_id
         JOIN person_identities AS identity ON identity.id = persona.identity_id
-        WHERE character_asset.asset_id = ?
+        WHERE character_asset.asset_id = %s
           AND character_asset.review_status = 'APPROVED'
           AND character_asset.is_published_selection = 1
           AND version.status = 'PUBLISHED'
@@ -246,7 +246,7 @@ def _identity_from_asset_metadata(conn: BusinessConnection, row: sqlite3.Row) ->
             source_quality_status,
             status AS identity_status
         FROM person_identities
-        WHERE id = ?
+        WHERE id = %s
         """,
         (identity_id,),
     ).fetchone()
@@ -274,7 +274,7 @@ def _published_contact_sheet_identity(
         FROM character_versions AS version
         JOIN character_personas AS persona ON persona.id = version.persona_id
         JOIN person_identities AS identity ON identity.id = persona.identity_id
-        WHERE version.id = ?
+        WHERE version.id = %s
           AND version.status = 'PUBLISHED'
         LIMIT 1
         """,
@@ -289,7 +289,7 @@ def project_id_for_task(conn: BusinessConnection, task_id: str) -> str:
         SELECT generation_batches.project_id
         FROM generation_tasks
         JOIN generation_batches ON generation_batches.id = generation_tasks.batch_id
-        WHERE generation_tasks.id = ?
+        WHERE generation_tasks.id = %s
         """,
         (task_id,),
     ).fetchone()

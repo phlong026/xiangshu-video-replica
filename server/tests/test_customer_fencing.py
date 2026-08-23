@@ -129,6 +129,7 @@ def route_state(fencing_dsn: str) -> Iterator[str]:
             "activation_code_deliveries, activation_code_exports, activation_codes, "
             "activation_code_batches, admin_write_idempotency, admin_sessions, "
             "wallet_transactions, recharge_orders, wallets, users, "
+            "projects, audit_logs, "
             "security_rate_limit_counters, security_auth_failures CASCADE"
         )
         conn.execute("SET session_replication_role = DEFAULT")
@@ -144,10 +145,12 @@ def route_state(fencing_dsn: str) -> Iterator[str]:
 def customer_app(monkeypatch: pytest.MonkeyPatch, route_state: str) -> Iterator[FastAPI]:
     from app.activation_code_routes import router as activation_code_router
     from app.customer_session_routes import router as customer_session_router
+    from app.rbac_routes import router as rbac_router
 
     app = FastAPI()
     app.include_router(activation_code_router)
     app.include_router(customer_session_router)
+    app.include_router(rbac_router)
     monkeypatch.setenv(DATABASE_URL_ENV, route_state)
     monkeypatch.delenv("VIDEO_REPLICA_CUSTOMER_PRODUCTION", raising=False)
     monkeypatch.setenv(ACTIVATION_CODE_HMAC_KEY_ENV, TEST_KEY)
@@ -656,6 +659,80 @@ def test_code_status_gate_locks_the_code_through_establishment(
     with psycopg.connect(_fencing_dsn(), autocommit=True) as conn:
         row = conn.execute("SELECT status FROM activation_codes WHERE id = 'code-a'").fetchone()
     assert str(row[0]) == "ACTIVE"
+
+
+# ---------------------------------------------------------------------------
+# T21 wiring — the customer business write route (SES-04, plan C)
+# ---------------------------------------------------------------------------
+
+PROJECTS_PATH = "/api/projects"
+
+
+def _business_login(client: TestClient, customer: dict, key: str) -> str:
+    resp = client.post(
+        LOGIN_PATH,
+        json={},
+        headers={**_bearer(customer["device_token"]), IDEMPOTENCY_KEY_HEADER: key},
+    )
+    assert resp.status_code == 201, resp.text
+    return str(resp.json()["session_token"])
+
+
+def test_customer_creates_a_project_owned_by_them(client: TestClient) -> None:
+    """The migrated write route runs the customer's session through
+    fenced_pg_transaction and attributes the project to the session's user."""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    token = _business_login(client, customer, "idem-login-a")
+    resp = client.post(PROJECTS_PATH, json={"name": "Customer Project"}, headers=_bearer(token))
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["owner_user_id"] == customer["user_id"]
+    with psycopg.connect(_fencing_dsn(), autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT owner_user_id FROM projects WHERE name = 'Customer Project'"
+        ).fetchone()
+    assert str(row[0]) == customer["user_id"]
+
+
+def test_other_customer_cannot_touch_a_foreign_project(client: TestClient) -> None:
+    """Two-code IDOR: B's fenced session cannot rename A's project — 403
+    PROJECT_FORBIDDEN inside the business write transaction."""
+    alice = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    bob = _activated_customer(client, code=SECOND_CODE, fingerprint="fp-b", suffix="b")
+    alice_token = _business_login(client, alice, "idem-login-alice")
+    created = client.post(
+        PROJECTS_PATH, json={"name": "Alice Project"}, headers=_bearer(alice_token)
+    )
+    assert created.status_code == 201, created.text
+    project_id = created.json()["id"]
+
+    bob_token = _business_login(client, bob, "idem-login-bob")
+    renamed = client.patch(
+        f"{PROJECTS_PATH}/{project_id}/name",
+        json={"name": "Hijack"},
+        headers=_bearer(bob_token),
+    )
+    assert renamed.status_code == 403, renamed.text
+    assert renamed.json()["detail"]["code"] == "PROJECT_FORBIDDEN"
+    with psycopg.connect(_fencing_dsn(), autocommit=True) as conn:
+        row = conn.execute("SELECT name FROM projects WHERE id = %s", (project_id,)).fetchone()
+    assert str(row[0]) == "Alice Project"
+
+
+def test_unknown_session_token_cannot_create_a_project(client: TestClient) -> None:
+    """The early snapshot gate 401s a session token that owns no live row, and
+    no project lands. (The snapshot-vs-transaction epoch race itself is locked
+    at the fenced_pg_transaction helper level.)"""
+    _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    resp = client.post(
+        PROJECTS_PATH,
+        json={"name": "Stale"},
+        headers=_bearer(secrets.token_urlsafe(32)),
+    )
+    assert resp.status_code == 401, resp.text
+    assert resp.json()["detail"]["code"] == "SESSION_REPLACED"
+    with psycopg.connect(_fencing_dsn(), autocommit=True) as conn:
+        row = conn.execute("SELECT count(*) FROM projects WHERE name = 'Stale'").fetchone()
+    assert int(row[0]) == 0
 
 
 # ---------------------------------------------------------------------------

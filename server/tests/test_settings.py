@@ -53,7 +53,7 @@ def db_path(tmp_path: Path, settings_key: str) -> Path:
 @pytest.fixture()
 def conn(db_path: Path) -> Iterator[BusinessConnection]:
     with connect_database(db_path) as connection:
-        yield connection
+        yield BusinessConnection.sqlite(connection)
 
 
 @pytest.fixture()
@@ -63,7 +63,7 @@ def client(db_path: Path) -> Iterator[TestClient]:
 
     def override_database() -> Iterator[BusinessConnection]:
         with connect_database(db_path) as connection:
-            yield connection
+            yield BusinessConnection.sqlite(connection)
 
     app.dependency_overrides[get_database] = override_database
     tester = FakeProviderTester()
@@ -254,7 +254,7 @@ def test_settings_api_reports_wrong_key_without_deleting_saved_config(
 
     def override_database() -> Iterator[BusinessConnection]:
         with connect_database(db_path) as connection:
-            yield connection
+            yield BusinessConnection.sqlite(connection)
 
     production_app.dependency_overrides[get_database] = override_database
     try:

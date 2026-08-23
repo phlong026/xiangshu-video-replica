@@ -177,7 +177,7 @@ def test_owner_can_upload_complete_and_query_video_asset(
     assert asset.json()["project_id"] == "project_owned"
     assert asset.json()["size_bytes"] == len(b"video-bytes")
     assert asset.json()["content_type"] == "video/mp4"
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         project = conn.execute(
             "SELECT status FROM projects WHERE id = ?", ("project_owned",)
         ).fetchone()
@@ -206,7 +206,7 @@ def test_complete_upload_calculates_a_content_hash_when_storage_head_has_none(
     )
     storage = HeadWithoutHashStorage(provider="fake", bucket="private-bucket")
     content = b"video-bytes"
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         intent = create_media_upload_intent(
             conn,
             actor=actor,
@@ -239,7 +239,7 @@ def test_media_storage_prefers_cos_when_configured(
     selected_storage = FakeStorageAdapter(provider="cos", bucket="private-bucket")
     monkeypatch.setattr("app.media_routes.create_storage_adapter", lambda _: selected_storage)
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         repo = SettingsRepository(conn)
         repo.save_provider_config(
             "cos",
@@ -271,7 +271,7 @@ def test_media_storage_falls_back_to_local_without_cos(
     root = tmp_path / "local-storage"
     monkeypatch.setenv("VIDEO_REPLICA_STORAGE_ROOT", str(root))
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         repo = SettingsRepository(conn)
         repo.save_runtime_settings(
             max_generation_count_per_batch=4,
@@ -292,7 +292,7 @@ def test_get_media_storage_uses_local_adapter_when_provider_is_local(
     root = tmp_path / "local-storage"
     monkeypatch.setenv("VIDEO_REPLICA_STORAGE_ROOT", str(root))
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         repo = SettingsRepository(conn)
         repo.save_runtime_settings(
             max_generation_count_per_batch=4,
@@ -312,7 +312,7 @@ def test_get_media_storage_local_without_root_raises(
     monkeypatch.setenv("VIDEO_REPLICA_SETTINGS_KEY", Fernet.generate_key().decode("ascii"))
     monkeypatch.delenv("VIDEO_REPLICA_STORAGE_ROOT", raising=False)
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         repo = SettingsRepository(conn)
         repo.save_runtime_settings(
             max_generation_count_per_batch=4,
@@ -456,7 +456,7 @@ def test_complete_rejects_a_non_reference_video_asset(
     client: TestClient,
     db_path: Path,
 ) -> None:
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             """
             INSERT INTO assets (
@@ -485,7 +485,7 @@ def test_complete_rejects_a_non_reference_video_asset(
 
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "ASSET_NOT_REFERENCE_VIDEO"
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         project = conn.execute(
             "SELECT status FROM projects WHERE id = ?", ("project_owned",)
         ).fetchone()
@@ -592,7 +592,7 @@ def test_default_probe_failure_does_not_mark_upload_complete(
         display_name="Employee One",
         role="employee",
     )
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         intent = create_media_upload_intent(
             conn,
             actor=actor,
@@ -641,7 +641,7 @@ def test_local_download_url_and_proxy(
         content_type="video/mp4",
     )
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             """
             INSERT INTO assets (

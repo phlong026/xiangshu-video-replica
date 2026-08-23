@@ -22,21 +22,27 @@ route uses:
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Annotated
 
 import psycopg
-from fastapi import HTTPException, Request
+from fastapi import Depends, HTTPException, Request
 
 from app.activation_code_service import ActivationKeyError
+from app.auth import CurrentUser, authenticate_request
 from app.customer_auth import (
     CustomerSessionContext,
     SessionFencingError,
     verify_session_context,
 )
 from app.customer_device_service import _token_digests
+from app.db import connect_database
 from app.db_pg import IsolationLevel, get_pg_pool, pg_transaction
+from app.db_portable import BusinessConnection
 
 AUTHORIZATION_HEADER = "Authorization"
 BEARER_SCHEME = "bearer"
@@ -81,15 +87,24 @@ def customer_session_snapshot(request: Request) -> CustomerSessionSnapshot | Non
     503 fail-closed when the device-domain keys are misconfigured (a server
     outage must never masquerade as a client credential problem).
     """
-    token = _bearer_token(request)
-    if token is None:
-        return None
     try:
         get_pg_pool()
     except (RuntimeError, ValueError):
         # No PostgreSQL runtime — the internal/desktop lane has no customer
         # sessions; the caller uses the internal identity instead.
         return None
+    token = _bearer_token(request)
+    if token is None:
+        # PostgreSQL is configured: this is the customer lane, where the
+        # session token is the only identity. A missing token must not fall
+        # through to the internal lane.
+        raise HTTPException(
+            401,
+            detail={
+                "code": "SESSION_TOKEN_REQUIRED",
+                "message": "A Bearer session token is required on the customer lane.",
+            },
+        )
     try:
         digests = _token_digests(token)
     except ActivationKeyError as exc:
@@ -156,3 +171,79 @@ def fenced_pg_transaction(
             401,
             detail={"code": exc.code, "message": exc.message},
         ) from None
+
+
+@dataclass(frozen=True)
+class BusinessDb:
+    """The single dependency migrated business write routes use (plan B.3).
+
+    ``write()`` dispatches by deployment mode: the customer lane opens the
+    write inside ``fenced_pg_transaction`` (the session is re-verified under
+    the row lock and the actor is the session's customer), while the
+    internal/desktop lane opens a fresh SQLite connection, resolves the
+    internal ``AuthenticatedUser`` and yields without fencing.
+    """
+
+    snapshot: CustomerSessionSnapshot | None
+    authorization: str | None
+    dev_user_id: str | None
+
+    @contextmanager
+    def write(
+        self,
+        *,
+        isolation: IsolationLevel | None = None,
+    ) -> Iterator[tuple[BusinessConnection, CurrentUser]]:
+        """One customer business-write transaction + its acting user."""
+        if self.snapshot is not None:
+            with fenced_pg_transaction(self.snapshot, isolation=isolation) as (conn, ctx):
+                bc = BusinessConnection.postgres(conn)
+                bc.ctx = ctx
+                actor = CurrentUser(
+                    id=ctx.user_id,
+                    username=ctx.user_id,
+                    display_name=ctx.user_id,
+                    role="customer",
+                )
+                yield bc, actor
+            return
+        db_path = os.environ.get("VIDEO_REPLICA_DB_PATH")
+        if not db_path:
+            raise HTTPException(
+                503,
+                detail={
+                    "code": "DATABASE_NOT_CONFIGURED",
+                    "message": "VIDEO_REPLICA_DB_PATH is required for API requests.",
+                },
+            )
+        raw = connect_database(Path(db_path))
+        bc = BusinessConnection.sqlite(raw)
+        try:
+            actor = authenticate_request(
+                bc,
+                authorization=self.authorization,
+                dev_user_id=self.dev_user_id,
+            )
+            yield bc, actor
+        finally:
+            raw.close()
+
+
+def get_business_db(request: Request) -> BusinessDb:
+    """FastAPI dependency: the customer-business write entry for migrated routes.
+
+    On the customer lane the session snapshot is taken here (the early 401
+    gate); the final verdict always happens in ``fenced_pg_transaction``
+    inside ``write()`` (the SES-04 red line).
+    """
+    snapshot = customer_session_snapshot(request)
+    if snapshot is not None:
+        return BusinessDb(snapshot=snapshot, authorization=None, dev_user_id=None)
+    return BusinessDb(
+        snapshot=None,
+        authorization=request.headers.get("Authorization"),
+        dev_user_id=request.headers.get("X-Dev-User-Id"),
+    )
+
+
+BusinessDbDep = Annotated[BusinessDb, Depends(get_business_db)]

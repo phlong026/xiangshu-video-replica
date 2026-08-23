@@ -24,7 +24,7 @@ import re
 import sqlite3
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 import psycopg
 
@@ -185,10 +185,17 @@ class SQLiteBackend:
 
 
 class PostgresBackend:
-    """Wraps a psycopg connection; execute runs the native ``%s`` SQL."""
+    """Wraps a psycopg connection; execute runs the native ``%s`` SQL.
+
+    The connection carries a ``sqlite3.Row``-shaped row factory — the
+    business services read rows both by position (``row[0]``) and by column
+    name (``row["owner_user_id"]``), and psycopg's plain tuples only support
+    position.
+    """
 
     def __init__(self, conn: psycopg.Connection) -> None:
         self._conn = conn
+        conn.row_factory = cast(Any, _named_row_factory)
 
     def execute(self, sql: str, params: Sequence[object] = ()) -> psycopg.Cursor:
         return self._conn.execute(sql, params)
@@ -196,6 +203,47 @@ class PostgresBackend:
     @property
     def raw(self) -> psycopg.Connection:
         return self._conn
+
+
+class _NamedRow:
+    """A psycopg row that also answers ``row["column"]`` (the sqlite3.Row shape).
+
+    The business services read rows both by position (``row[0]``) and by
+    column name (``row["owner_user_id"]``); psycopg's plain tuples only
+    support position, so the PG backend returns these. ``__iter__``/``len``
+    keep tuple-shaped call sites working; unknown names raise ValueError.
+    """
+
+    __slots__ = ("_values", "_names")
+
+    def __init__(self, values: tuple[object, ...], names: tuple[str, ...]) -> None:
+        self._values = values
+        self._names = names
+
+    def __getitem__(self, key: object) -> object:
+        if isinstance(key, str):
+            return self._values[self._names.index(key)]
+        return self._values[cast(int, key)]
+
+    def __iter__(self) -> Iterator[object]:
+        return iter(self._values)
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def keys(self) -> tuple[str, ...]:
+        return self._names
+
+
+def _named_row_factory(cursor: psycopg.Cursor) -> Callable[[Sequence[object]], _NamedRow]:
+    """psycopg3 row factory: called once with the cursor, returns the per-row
+    maker bound to that query's column names."""
+    names = tuple(col[0] for col in cursor.description) if cursor.description else ()
+
+    def maker(values: Sequence[object]) -> _NamedRow:
+        return _NamedRow(tuple(values), names)
+
+    return maker
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +270,12 @@ class BusinessConnection:
 
     def execute(self, sql: str, params: Sequence[object] = ()) -> _BusinessCursor:
         return self._backend.execute(sql, params)
+
+    def executemany(self, sql: str, seq: list[Sequence[object]]) -> None:
+        """sqlite3-shaped batch insert; test seeding uses it. No-op on PG
+        (psycopg has no executemany — the PG lane never needs it)."""
+        if isinstance(self._backend, SQLiteBackend):
+            self._backend.raw.executemany(translate_to_sqlite(sql), seq)
 
     def commit(self) -> None:
         if isinstance(self._backend, SQLiteBackend):

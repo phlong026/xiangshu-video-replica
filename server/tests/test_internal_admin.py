@@ -33,6 +33,7 @@ def internal_admin_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[tuple[TestClient, Path, dict[str, str], dict[str, str]]]:
     db_path = tmp_path / "internal-admin.db"
+    monkeypatch.setenv("VIDEO_REPLICA_DB_PATH", str(db_path))
     monkeypatch.setenv(SETTINGS_KEY_ENV, Fernet.generate_key().decode("ascii"))
     monkeypatch.setenv("VIDEO_REPLICA_AUTH_MODE", "internal")
     monkeypatch.setenv("PUBLIC_BASE_URL", "https://internal.example")
@@ -115,7 +116,7 @@ def internal_admin_context(
 
     def override_database() -> Iterator[BusinessConnection]:
         with connect_database(db_path) as conn:
-            yield conn
+            yield BusinessConnection.sqlite(conn)
 
     app.dependency_overrides[get_database] = override_database
     try:
