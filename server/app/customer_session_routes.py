@@ -193,21 +193,30 @@ def _find_envelope(
     operation: str,
     scopes: list[str],
     key_digest: str,
-) -> tuple[str, EnvelopeRecord] | None:
-    """The committed envelope for this key across the scope candidates."""
+) -> tuple[str, EnvelopeRecord, datetime] | None:
+    """The committed envelope for this key across the scope candidates.
+
+    Returns the PostgreSQL ``now()`` sampled in this same envelope-read
+    transaction: the recovery-window verdict must use the trusted
+    server-side clock, never the application process clock (SES-01, the
+    activation-route ``_server_now`` precedent; PR #51 review P2)."""
     for scope in scopes:
         record = load_envelope(conn, operation=operation, scope=scope, key_digest=key_digest)
         if record is not None:
-            return scope, record
+            return scope, record, _transaction_now(conn)
     return None
 
 
-def _envelope_recoverable(record: EnvelopeRecord, *, req_hash: str) -> tuple[str, int]:
+def _envelope_recoverable(
+    record: EnvelopeRecord, *, req_hash: str, now: datetime
+) -> tuple[str, int]:
     """Validate the envelope for replay; returns (ciphertext, key_version).
 
     Raises 409 ``IDEMPOTENCY_CONFLICT`` unless the envelope replays this
     exact request; the returned pair is fully narrowed for the AEAD open.
-    """
+    The recovery window is judged against ``now`` — the PostgreSQL clock
+    sampled in the envelope-read transaction (never the process clock;
+    PR #51 review P2)."""
     if record.request_hash != req_hash:
         raise _http(
             409,
@@ -219,7 +228,7 @@ def _envelope_recoverable(record: EnvelopeRecord, *, req_hash: str) -> tuple[str
         or record.ciphertext is None
         or record.key_version is None
         or record.recovery_expires_at is None
-        or datetime.fromisoformat(str(record.recovery_expires_at)) <= datetime.now(UTC)
+        or datetime.fromisoformat(str(record.recovery_expires_at)) <= now
     ):
         raise _http(
             409,
@@ -235,9 +244,10 @@ def _replay_login_response(
     req_hash: str,
     scope: str,
     key_digest: str,
+    now: datetime,
 ) -> tuple[LoginResponse, int]:
     """Replay the sealed login response (and its original status code)."""
-    ciphertext, key_version = _envelope_recoverable(record, req_hash=req_hash)
+    ciphertext, key_version = _envelope_recoverable(record, req_hash=req_hash, now=now)
     try:
         sealed = open_response(
             ciphertext,
@@ -261,9 +271,10 @@ def _replay_logout_response(
     req_hash: str,
     scope: str,
     key_digest: str,
+    now: datetime,
 ) -> None:
     """Replay the sealed logout (a 204 with no body — integrity-checked)."""
-    ciphertext, key_version = _envelope_recoverable(record, req_hash=req_hash)
+    ciphertext, key_version = _envelope_recoverable(record, req_hash=req_hash, now=now)
     try:
         open_response(
             ciphertext,
@@ -344,9 +355,9 @@ def login(body: LoginRequest, request: Request, response: Response) -> LoginResp
             conn, operation=LOGIN_OPERATION, scopes=scope_candidates, key_digest=key_digest
         )
     if found is not None:
-        scope, existing = found
+        scope, existing, envelope_now = found
         replayed, replay_status = _replay_login_response(
-            existing, req_hash=req_hash, scope=scope, key_digest=key_digest
+            existing, req_hash=req_hash, scope=scope, key_digest=key_digest, now=envelope_now
         )
         response.headers[REPLAY_HEADER] = "true"
         response.status_code = replay_status
@@ -407,9 +418,9 @@ def login(body: LoginRequest, request: Request, response: Response) -> LoginResp
                     "IDEMPOTENCY_CONFLICT",
                     "The sealed response is no longer recoverable.",
                 )
-            scope, existing = found
+            scope, existing, envelope_now = found
             replayed, replay_status = _replay_login_response(
-                existing, req_hash=req_hash, scope=scope, key_digest=key_digest
+                existing, req_hash=req_hash, scope=scope, key_digest=key_digest, now=envelope_now
             )
             response.headers[REPLAY_HEADER] = "true"
             response.status_code = replay_status
@@ -556,8 +567,10 @@ def logout(request: Request, response: Response) -> None:
             conn, operation=LOGOUT_OPERATION, scopes=scope_candidates, key_digest=key_digest
         )
     if found is not None:
-        scope, existing = found
-        _replay_logout_response(existing, req_hash=req_hash, scope=scope, key_digest=key_digest)
+        scope, existing, envelope_now = found
+        _replay_logout_response(
+            existing, req_hash=req_hash, scope=scope, key_digest=key_digest, now=envelope_now
+        )
         response.headers[REPLAY_HEADER] = "true"
         return None
 
@@ -582,8 +595,10 @@ def logout(request: Request, response: Response) -> None:
                     "IDEMPOTENCY_CONFLICT",
                     "The sealed response is no longer recoverable.",
                 )
-            scope, existing = found
-            _replay_logout_response(existing, req_hash=req_hash, scope=scope, key_digest=key_digest)
+            scope, existing, envelope_now = found
+            _replay_logout_response(
+                existing, req_hash=req_hash, scope=scope, key_digest=key_digest, now=envelope_now
+            )
             response.headers[REPLAY_HEADER] = "true"
             return None
 

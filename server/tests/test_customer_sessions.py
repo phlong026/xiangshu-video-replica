@@ -725,6 +725,38 @@ def test_login_lost_response_replays_same_token_and_epoch(client: TestClient) ->
     assert [e[0] for e in _session_events()] == ["ACTIVATED", "LOGIN"]
 
 
+def test_replay_recovery_window_uses_the_postgresql_clock(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #51 review P2: the envelope recovery window is judged on the
+    PostgreSQL clock, never on the application process clock — an API node
+    whose clock runs ahead of PostgreSQL must not reject a still-valid
+    lost-response replay (nor may a lagging node accept an expired one).
+    The deadline was minted from ``SELECT now()`` and the verdict compares
+    against the same server-side clock sampled in the envelope-read
+    transaction (SES-01; the activation-route ``_server_now`` precedent)."""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    headers = {
+        **_bearer(customer["device_token"]),
+        IDEMPOTENCY_KEY_HEADER: "idem-clock-skew-1",
+    }
+    first = client.post(LOGIN_PATH, json={}, headers=headers)
+    assert first.status_code == 201, first.text
+
+    class _SkewedDatetime(datetime):
+        """An API node whose process clock is a decade ahead of PostgreSQL."""
+
+        @classmethod
+        def now(cls, tz: object = None) -> datetime:
+            return datetime.now(UTC) + timedelta(days=3650)
+
+    monkeypatch.setattr("app.customer_session_routes.datetime", _SkewedDatetime)
+    replay = client.post(LOGIN_PATH, json={}, headers=headers)
+    assert replay.status_code == 201, replay.text
+    assert replay.headers.get(REPLAY_HEADER) == "true"
+    assert replay.json() == first.json()
+
+
 def test_login_same_key_different_body_answers_idempotency_conflict(client: TestClient) -> None:
     customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
     headers = {
