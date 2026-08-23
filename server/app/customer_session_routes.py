@@ -418,7 +418,12 @@ def _establish_session_route(
     if found is not None:
         scope, existing, envelope_now = found
         replayed, replay_status = _replay_login_response(
-            existing, req_hash=req_hash, scope=scope, key_digest=key_digest, now=envelope_now, operation=operation
+            existing,
+            req_hash=req_hash,
+            scope=scope,
+            key_digest=key_digest,
+            now=envelope_now,
+            operation=operation,
         )
         response.headers[REPLAY_HEADER] = "true"
         response.status_code = replay_status
@@ -489,7 +494,12 @@ def _establish_session_route(
                 )
             scope, existing, envelope_now = found
             replayed, replay_status = _replay_login_response(
-                existing, req_hash=req_hash, scope=scope, key_digest=key_digest, now=envelope_now, operation=operation
+                existing,
+                req_hash=req_hash,
+                scope=scope,
+                key_digest=key_digest,
+                now=envelope_now,
+                operation=operation,
             )
             response.headers[REPLAY_HEADER] = "true"
             response.status_code = replay_status
