@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from typing import Any, Protocol
 
@@ -246,6 +246,11 @@ class BusinessConnection:
     def close(self) -> None:
         if isinstance(self._backend, SQLiteBackend):
             self._backend.raw.close()
+
+    def set_trace_callback(self, callback: Callable[[str], object] | None) -> None:
+        """sqlite3-shaped SQL trace hook (tests count statements). No-op on PG."""
+        if isinstance(self._backend, SQLiteBackend):
+            self._backend.raw.set_trace_callback(callback)
 
     # --- context-manager: `with conn:` commits on success, rolls back on error
     # --- (the sqlite3 contract the services already rely on)
