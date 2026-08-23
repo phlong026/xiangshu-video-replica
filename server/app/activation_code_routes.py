@@ -82,6 +82,7 @@ from app.security_rate_limit import (
     DIMENSION_ACTIVATE_CODE,
     DIMENSION_ACTIVATE_IP,
     RateLimitDecision,
+    _server_now,
     activation_code_limit,
     activation_ip_limit,
     apply_anti_enumeration_delay,
@@ -108,6 +109,9 @@ MIN_HMAC_KEY_BYTES = 32
 MAX_KEY_VERSION = 64
 USERNAME_MAX_ATTEMPTS = 5
 FINGERPRINT_UNIQUE_CONSTRAINT = "uq_customer_devices_fingerprint"
+# M2 review M1: the cross-version probe key (revision 034) — its unique
+# violation is the same "device already holds an activation" fact.
+FINGERPRINT_CANONICAL_UNIQUE_CONSTRAINT = "uq_customer_devices_fingerprint_canonical"
 USERS_USERNAME_CONSTRAINT = "users_username_key"
 ACTIVATE_OPERATION = "activate"
 
@@ -209,7 +213,7 @@ def _probe_replayable_response(
         if record.ciphertext is None or record.key_version is None:
             return None
         if record.recovery_expires_at is not None and (
-            datetime.fromisoformat(str(record.recovery_expires_at)) <= datetime.now(UTC)
+            datetime.fromisoformat(str(record.recovery_expires_at)) <= _server_now(conn)
         ):
             return None
         try:
@@ -426,8 +430,10 @@ def _run_activation(
     # version must still be recognized, or the same physical device could
     # redeem a second code and receive a second user, wallet and first charge.
     bound = conn.execute(
-        "SELECT 1 FROM customer_devices WHERE fingerprint_hmac = ANY(%s) AND status = 'BOUND'",
-        (fingerprint_digests,),
+        "SELECT 1 FROM customer_devices "
+        "WHERE (fingerprint_hmac = ANY(%s) OR fingerprint_canonical = %s) "
+        "AND status = 'BOUND'",
+        (fingerprint_digests, fingerprint_digests[0]),
     ).fetchone()
     if bound is not None:
         raise _http(
@@ -449,8 +455,9 @@ def _run_activation(
     conn.execute(
         "INSERT INTO customer_devices "
         "(id, activation_code_id, user_id, slot_no, display_name, platform, "
-        " fingerprint_hmac, fingerprint_key_version, token_digest, token_key_version) "
-        "VALUES (%s, %s, %s, 1, %s, %s, %s, %s, %s, %s)",
+        " fingerprint_hmac, fingerprint_key_version, fingerprint_canonical, "
+        " token_digest, token_key_version) "
+        "VALUES (%s, %s, %s, 1, %s, %s, %s, %s, %s, %s, %s)",
         (
             device_id,
             code_id,
@@ -460,6 +467,12 @@ def _run_activation(
             # New bindings always carry the highest configured key version.
             fingerprint_digests[-1],
             fingerprint_key_version,
+            # M2 review M1: the cross-version probe key — the *lowest*
+            # retained version's digest. In an add-version rollout window
+            # every instance shares that lowest version, so the canonical
+            # value is identical across a heterogeneous fleet and the
+            # binding check / unique index cross the version boundary.
+            fingerprint_digests[0],
             token_digest,
             fingerprint_key_version,
         ),
@@ -787,7 +800,7 @@ def activate_first_device(
                         "This idempotency key is no longer recoverable.",
                     )
                 if record.recovery_expires_at is not None and (
-                    datetime.fromisoformat(str(record.recovery_expires_at)) <= datetime.now(UTC)
+                    datetime.fromisoformat(str(record.recovery_expires_at)) <= _server_now(conn)
                 ):
                     raise _http(
                         409,
@@ -874,9 +887,13 @@ def activate_first_device(
             )
     except UniqueViolation as exc:
         constraint = exc.diag.constraint_name or ""
-        if constraint == FINGERPRINT_UNIQUE_CONSTRAINT:
+        if constraint in (
+            FINGERPRINT_UNIQUE_CONSTRAINT,
+            FINGERPRINT_CANONICAL_UNIQUE_CONSTRAINT,
+        ):
             # The concurrent second code on the same fingerprint lost the
-            # partial-unique-index race: exactly one binding survives.
+            # partial-unique-index race (same-string or cross-version
+            # canonical): exactly one binding survives.
             raise _http(
                 409,
                 "USER_ALREADY_ACTIVATED",

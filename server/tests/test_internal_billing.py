@@ -10,7 +10,7 @@ from cryptography.fernet import Fernet
 from app.db import alembic_config, connect_database, initialize_database
 from app.settings import SettingsRepository
 
-HEAD_REVISION = "032_security_rate_limits"
+HEAD_REVISION = "036_low_review_constraint_guards"
 
 
 def seed_subjects(conn: sqlite3.Connection) -> None:

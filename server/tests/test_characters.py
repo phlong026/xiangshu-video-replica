@@ -138,7 +138,7 @@ def test_characters_migration_creates_library_tables(db_path: Path) -> None:
             ).fetchall()
         }
 
-    assert version == "032_security_rate_limits"
+    assert version == "036_low_review_constraint_guards"
     assert {
         "characters",
         "project_main_characters",

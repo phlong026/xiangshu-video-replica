@@ -210,8 +210,13 @@ def security_dsn() -> Iterator[str]:
 @pytest.fixture()
 def clean_counters(security_dsn: str) -> Iterator[str]:
     with psycopg.connect(_t15_dsn(), autocommit=True) as conn:
+        # Counters are a cache (plain TRUNCATE), but the failures table is
+        # append-only: 036 refuses its TRUNCATE, so the cleanup suspends
+        # triggers via the replica role.
+        conn.execute("SET session_replication_role = replica")
         conn.execute(f"TRUNCATE {COUNTERS_TABLE}")
         conn.execute(f"TRUNCATE {FAILURES_TABLE}")
+        conn.execute("SET session_replication_role = DEFAULT")
     yield security_dsn
 
 
@@ -277,6 +282,50 @@ def test_window_resets_after_expiry(clean_counters: str) -> None:
             now=now,
         )
         assert fresh.allowed
+
+
+def test_stale_counter_rows_are_purged_active_window_kept(
+    clean_counters: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M2 review M3: every identifier that ever attempted activation keeps
+    its counter row forever without a sweep. Lapsed window rows must be
+    deletable by the maintenance CLI while the still-active window keeps
+    enforcing (counters are cache, not audit — the failure table carries
+    the audit trail)."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.security_rate_limit import (
+        count_stale_counters,
+        purge_stale_counters,
+        rate_limit_window_seconds,
+    )
+
+    monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_WINDOW_SECONDS", "60")
+    window = rate_limit_window_seconds()
+    now = datetime.now(UTC)
+    stale_start = (now - timedelta(seconds=2 * window)).replace(microsecond=0).isoformat()
+    active_start = now.replace(microsecond=0).isoformat()
+    with psycopg.connect(_t15_dsn(), autocommit=True) as conn:
+        conn.execute(
+            f"INSERT INTO {COUNTERS_TABLE} (bucket_key, window_start, hit_count, updated_at) "
+            "VALUES (%s, %s, 5, %s)",
+            ("activate:ip|stale", stale_start, stale_start),
+        )
+        conn.execute(
+            f"INSERT INTO {COUNTERS_TABLE} (bucket_key, window_start, hit_count, updated_at) "
+            "VALUES (%s, %s, 1, %s)",
+            ("activate:ip|active", active_start, active_start),
+        )
+
+        assert count_stale_counters(conn, now=now) == 1
+        assert purge_stale_counters(conn, now=now) == 1
+        rows = {
+            str(row[0]): int(row[1])
+            for row in conn.execute(
+                f"SELECT bucket_key, hit_count FROM {COUNTERS_TABLE}"
+            ).fetchall()
+        }
+    assert rows == {"activate:ip|active": 1}, "only the active window row survives"
 
 
 def test_dimensions_are_independent(clean_counters: str) -> None:
@@ -460,6 +509,9 @@ def test_failure_record_holds_no_plaintext_code(clean_counters: str) -> None:
 def route_state(security_dsn: str) -> Iterator[str]:
     close_pg_pool()
     with psycopg.connect(_t15_dsn(), autocommit=True) as conn:
+        # 036 refuses TRUNCATE of the append-only audit tables; the replica
+        # role suspends triggers for this cleanup sweep only.
+        conn.execute("SET session_replication_role = replica")
         conn.execute(
             "TRUNCATE customer_session_events, customer_session_state, "
             "customer_idempotency_envelopes, "
@@ -469,6 +521,7 @@ def route_state(security_dsn: str) -> Iterator[str]:
             "wallet_transactions, recharge_orders, wallets, users, "
             f"{COUNTERS_TABLE}, {FAILURES_TABLE} CASCADE"
         )
+        conn.execute("SET session_replication_role = DEFAULT")
         conn.execute(
             "INSERT INTO users (id, username, display_name, role) "
             "VALUES ('admin_u', 'admin_u', 'Admin User', 'admin')"
@@ -790,14 +843,17 @@ def test_downgrade_refuses_once_failures_exist(security_dsn: str) -> None:
     # The refusal left the schema untouched at head.
     with psycopg.connect(_t15_dsn()) as conn:
         version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-    assert version == "032_security_rate_limits"
+    assert version == "036_low_review_constraint_guards"
 
-    # TRUNCATE bypasses the row-level append-only trigger (it only fires
-    # on UPDATE/DELETE), so the fixture cleanup pattern doubles as the way
-    # to restore an empty audit trail — with which the downgrade is
-    # symmetric, and upgrading back restores the security tables.
+    # TRUNCATE only bypasses the row-level append-only trigger (it fires on
+    # UPDATE/DELETE); 036 added a statement-level TRUNCATE guard, so the
+    # cleanup suspends triggers via the replica role. With an empty audit
+    # trail the downgrade is symmetric, and upgrading back restores the
+    # security tables.
     with psycopg.connect(_t15_dsn(), autocommit=True) as conn:
+        conn.execute("SET session_replication_role = replica")
         conn.execute(f"TRUNCATE {FAILURES_TABLE}")
+        conn.execute("SET session_replication_role = DEFAULT")
     command.downgrade(config, "029_customer_sessions_and_idempotency")
     with psycopg.connect(_t15_dsn()) as conn:
         version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
@@ -814,4 +870,4 @@ def test_downgrade_refuses_once_failures_exist(security_dsn: str) -> None:
     command.upgrade(config, "head")
     with psycopg.connect(_t15_dsn()) as conn:
         version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-    assert version == "032_security_rate_limits"
+    assert version == "036_low_review_constraint_guards"

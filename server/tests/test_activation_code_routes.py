@@ -127,6 +127,9 @@ def clean_state(activation_pg_dsn: str) -> Iterator[str]:
     """Per-test isolation: truncate every table the activation chain touches."""
     close_pg_pool()
     with psycopg.connect(activation_pg_dsn, autocommit=True) as conn:
+        # 036 refuses TRUNCATE of the append-only audit tables; the replica
+        # role suspends triggers for this cleanup sweep only.
+        conn.execute("SET session_replication_role = replica")
         conn.execute(
             "TRUNCATE customer_session_events, customer_session_state, "
             "customer_idempotency_envelopes, "
@@ -136,6 +139,7 @@ def clean_state(activation_pg_dsn: str) -> Iterator[str]:
             "wallet_transactions, recharge_orders, wallets, users, "
             "security_rate_limit_counters, security_auth_failures CASCADE"
         )
+        conn.execute("SET session_replication_role = DEFAULT")
         conn.execute(
             "INSERT INTO users (id, username, display_name, role) "
             "VALUES ('admin_u', 'admin_u', 'Admin User', 'admin')"

@@ -52,6 +52,7 @@ TEST_EXPORT_AEAD_KEY = secrets.token_bytes(32)  # exactly 32 bytes, never a real
 IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
 REQUEST_ID_HEADER = "X-Request-Id"
 REPLAY_HEADER = "X-Idempotent-Replay"
+BATCH_CREATION_ENV = "VIDEO_REPLICA_ALLOW_ACTIVATION_BATCH_CREATION"
 
 
 def _b64key(raw: bytes) -> str:
@@ -121,6 +122,9 @@ def clean_state(activation_pg_dsn: str) -> Iterator[str]:
     """Per-test isolation: truncate the admin activation tables + sessions."""
     close_pg_pool()
     with psycopg.connect(activation_pg_dsn, autocommit=True) as conn:
+        # 036 refuses TRUNCATE of the append-only audit tables; the replica
+        # role suspends triggers for this cleanup sweep only.
+        conn.execute("SET session_replication_role = replica")
         conn.execute(
             "TRUNCATE customer_session_events, customer_session_state, "
             "customer_idempotency_envelopes, customer_devices, "
@@ -128,6 +132,7 @@ def clean_state(activation_pg_dsn: str) -> Iterator[str]:
             "activation_code_deliveries, activation_code_exports, activation_codes, "
             "activation_code_batches, admin_write_idempotency, admin_sessions"
         )
+        conn.execute("SET session_replication_role = DEFAULT")
     yield activation_pg_dsn
     close_pg_pool()
 
@@ -147,6 +152,11 @@ def admin_app(monkeypatch: pytest.MonkeyPatch, clean_state: str) -> Iterator[Fas
     monkeypatch.setenv(ACTIVATION_EXPORT_AEAD_KEY_ENV, _b64key(TEST_EXPORT_AEAD_KEY))
     monkeypatch.delenv("VIDEO_REPLICA_AUTH_MODE", raising=False)
     monkeypatch.delenv("VIDEO_REPLICA_ALLOW_DEV_IDENTITY_HEADER", raising=False)
+    # M2 review H2: batch creation is refused until PRICE-01 freezes (the
+    # production default). These cases exercise the minting business logic,
+    # so the suite opts in explicitly; the kill-switch itself has its own
+    # tests below.
+    monkeypatch.setenv(BATCH_CREATION_ENV, "true")
     yield app
 
 
@@ -423,9 +433,11 @@ def test_generate_creates_codes_and_export(
     assert {row[2] for row in rows} == {"GENERATED"}
     assert {row[0] for row in events} == {"GENERATED", "EXPORTED"}
     assert all(row[1] == "admin_u" for row in events)
-    # GENERATED events carry the request id; EXPORTED events (sealed by the
-    # T11 export helper inside the same transaction) only carry the actor.
-    assert all(row[2] for row in events if row[0] == "GENERATED")
+    # M2 review H1: both event kinds carry the request id now — GENERATED
+    # writes it from the write contract and EXPORTED (sealed by the T11
+    # export helper inside the same transaction) receives it via
+    # create_batch_export's request_id argument.
+    assert all(row[2] for row in events)
     assert exports == 1
     # The response and every log record stay plaintext-free.
     response_text = response.text
@@ -1130,3 +1142,156 @@ def test_idempotency_concurrent_same_key_serializes(admin_app: FastAPI, clean_st
         snapshots = _row(conn, "SELECT count(*) FROM admin_write_idempotency")[0]
     assert batches == 1
     assert snapshots == 1
+
+
+def test_minting_audit_persists_reason_and_request_id(
+    client: TestClient,
+    admin_headers: dict[str, str],
+    clean_state: str,
+) -> None:
+    """M2 review H1: the minting path must persist the write contract's
+    reason and request id into the durable audit trail — the batch row
+    (creation_reason/creation_request_id), every GENERATED event (reason) and
+    every EXPORTED event (request_id) — instead of letting them evaporate
+    after contract validation."""
+    created = _create_batch(client, admin_headers, quantity=2, key="mint-audit-batch")
+    assert created.status_code == 201, created.text
+    batch = created.json()
+    generated = _generate(
+        client, admin_headers, batch["batch_id"], quantity=2, key="mint-audit-gen"
+    )
+    assert generated.status_code == 201, generated.text
+    gen_request_id = generated.headers[REQUEST_ID_HEADER]
+
+    with psycopg.connect(clean_state) as conn:
+        batch_reason, batch_request_id = conn.execute(
+            "SELECT creation_reason, creation_request_id "
+            "FROM activation_code_batches WHERE id = %s",
+            (batch["batch_id"],),
+        ).fetchone()
+        generated_reasons = conn.execute(
+            "SELECT reason FROM activation_code_events "
+            "WHERE event = 'GENERATED' AND code_id IN "
+            "(SELECT id FROM activation_codes WHERE batch_id = %s)",
+            (batch["batch_id"],),
+        ).fetchall()
+        exported_request_ids = conn.execute(
+            "SELECT request_id FROM activation_code_events "
+            "WHERE event = 'EXPORTED' AND code_id IN "
+            "(SELECT id FROM activation_codes WHERE batch_id = %s)",
+            (batch["batch_id"],),
+        ).fetchall()
+
+    assert batch_reason == "渠道备货"
+    assert batch_request_id == batch["request_id"]
+    assert len(generated_reasons) == 2
+    assert all(row[0] == "生成批次码" for row in generated_reasons)
+    assert len(exported_request_ids) == 2
+    assert all(row[0] == gen_request_id for row in exported_request_ids)
+
+
+# ---------------------------------------------------------------------------
+# M2 review H2 — PRICE-01 kill-switch on batch creation
+# ---------------------------------------------------------------------------
+
+
+def test_batch_creation_refused_until_price_freeze_decision(
+    client: TestClient,
+    admin_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    clean_state: str,
+) -> None:
+    """M2 review H2: PRICE-01 forbids customer-sale batches until the price
+    decision freezes, and the only current guard was a doc note. Without an
+    explicit opt-in the API must fail closed — no batch row, so the
+    "1-fen face value / 1M credits" mistake stays unmintable."""
+    monkeypatch.delenv(BATCH_CREATION_ENV, raising=False)
+    response = _create_batch(client, admin_headers, quantity=5)
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"]["code"] == "BATCH_CREATION_DISABLED"
+    with psycopg.connect(clean_state) as conn:
+        count = conn.execute("SELECT count(*) FROM activation_code_batches").fetchone()[0]
+    assert count == 0, "a refused batch creation must leave no row behind"
+
+
+def test_batch_creation_refusal_leaves_idempotency_key_unused(
+    client: TestClient,
+    admin_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    clean_state: str,
+) -> None:
+    """The refusal must fire before the idempotency envelope is written —
+    otherwise every probe during the freeze burns the operator's
+    Idempotency-Key and the post-opt-in retry replays the 403 forever."""
+    monkeypatch.delenv(BATCH_CREATION_ENV, raising=False)
+    key = "price01-frozen-key"
+    refused = _create_batch(client, admin_headers, quantity=1, key=key)
+    assert refused.status_code == 403, refused.text
+    with psycopg.connect(clean_state) as conn:
+        count = conn.execute("SELECT count(*) FROM admin_write_idempotency").fetchone()[0]
+    assert count == 0, "the kill-switch refusal must not consume the idempotency key"
+    # The same key still mints once the opt-in is explicit.
+    monkeypatch.setenv(BATCH_CREATION_ENV, "true")
+    allowed = _create_batch(client, admin_headers, quantity=1, key=key)
+    assert allowed.status_code == 201, allowed.text
+
+
+def test_batch_creation_requires_explicit_true_not_any_truthy_string(
+    client: TestClient,
+    admin_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the exact "true" opt-in opens minting — "false" (and by the same
+    parsing any other string) stays closed."""
+    monkeypatch.setenv(BATCH_CREATION_ENV, "false")
+    response = _create_batch(client, admin_headers, quantity=1)
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"]["code"] == "BATCH_CREATION_DISABLED"
+
+
+def test_download_maps_corrupt_inner_payload_to_400(
+    client: TestClient, admin_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A decryptable package with a corrupt inner payload is client data rot.
+
+    ``decrypt_code_package`` raises ``InvalidActivationCodeError`` for a
+    malformed inner payload; the download route only catches
+    ``ActivationExportError``, so the error escapes as an uncontrolled 500
+    (M2 review LOW).
+    """
+    from app import admin_activation_routes
+    from app.activation_code_service import InvalidActivationCodeError
+
+    export_id, _code_ids = _generated_export(client, admin_headers, quantity=1)
+
+    def corrupt_package(*args: object, **kwargs: object) -> list[str]:
+        raise InvalidActivationCodeError("inner payload is not a valid code package")
+
+    monkeypatch.setattr(admin_activation_routes, "fetch_export_package", corrupt_package)
+    response = _download(client, admin_headers, export_id)
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"]["code"] == "EXPORT_PACKAGE_INVALID"
+
+
+def test_generate_maps_unexpected_value_error_to_503(
+    client: TestClient, admin_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unexpected ValueError inside an idempotent write fails closed 503.
+
+    The write envelope only catches ``RuntimeError``; any ``ValueError`` from
+    the envelope or the business closure escapes as a raw 500. T13 already
+    catches both classes — this aligns the admin lane (M2 review LOW).
+    """
+    from app import admin_activation_routes
+
+    batch_response = _create_batch(client, admin_headers, quantity=1)
+    assert batch_response.status_code == 201, batch_response.text
+    batch_id = batch_response.json()["batch_id"]
+
+    def explode(*args: object, **kwargs: object) -> list[dict[str, object]]:
+        raise ValueError("injected malformed envelope state")
+
+    monkeypatch.setattr(admin_activation_routes, "generate_batch_codes", explode)
+    response = _generate(client, admin_headers, batch_id, quantity=1)
+    assert response.status_code == 503, response.text
+    assert response.json()["detail"]["code"] == "ACTIVATION_SERVICE_UNAVAILABLE"

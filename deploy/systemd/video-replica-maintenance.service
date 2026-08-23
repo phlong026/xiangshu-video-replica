@@ -28,6 +28,14 @@ Environment=PYTHONUNBUFFERED=1
 # Later tasks (T23 reconciliation, expiry sweeps) append their own
 # ExecStart= lines here — one line per maintenance concern.
 ExecStart=/opt/video-replica/app/server/.venv/bin/python -m scripts.purge_idempotency_envelopes
+# M2 review M2: expired export ciphertext is sealed plaintext — null the
+# payload once the retention window past expiry lapses (audit columns
+# stay). Counts only in the output.
+ExecStart=/opt/video-replica/app/server/.venv/bin/python -m scripts.purge_expired_export_ciphertexts
+# M2 review M3: counter rows on fully lapsed windows can never be
+# consulted again — sweeping them keeps the table bounded (the append-only
+# failure table is the audit trail and is untouched).
+ExecStart=/opt/video-replica/app/server/.venv/bin/python -m scripts.purge_stale_rate_limit_counters
 Restart=on-failure
 RestartSec=30
 UMask=0077

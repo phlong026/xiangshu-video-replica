@@ -16,7 +16,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from datetime import UTC, datetime
+from datetime import datetime
 
 import psycopg
 
@@ -46,8 +46,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    now = datetime.now(UTC)
     with psycopg.connect(args.database_url) as conn:
+        # The recovery window is decided on the server clock: writes, route
+        # checks and this purge must all read the same PostgreSQL clock, or
+        # host-clock drift shifts the window boundary (M2 review LOW).
+        now: datetime = conn.execute("SELECT now()").fetchone()[0]
         if args.dry_run:
             eligible = count_expired_envelopes(conn, now=now)
             print(f"expired idempotency envelopes eligible for purge: {eligible}")

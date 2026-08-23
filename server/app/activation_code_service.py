@@ -75,7 +75,12 @@ ALLOWED_CODE_TRANSITIONS: Mapping[str, frozenset[str]] = {
     "GENERATED": frozenset({"ISSUED", "EXPIRED", "REVOKED"}),
     "ISSUED": frozenset({"ACTIVE", "SUSPENDED", "EXPIRED", "REVOKED"}),
     "ACTIVE": frozenset({"SUSPENDED", "REVOKED"}),
-    "SUSPENDED": frozenset({"ACTIVE", "EXPIRED", "REVOKED"}),
+    # M2 review M6: SUSPENDED→EXPIRED is deliberately absent — 027's shape
+    # CHECK couples EXPIRED with suspended_at IS NULL, so a direct
+    # transition would violate the database or erase the suspension audit.
+    # A suspended code ends via REVOKED (which may carry suspended_at) or
+    # after an explicit resume.
+    "SUSPENDED": frozenset({"ACTIVE", "REVOKED"}),
     "REVOKED": frozenset(),
     "EXPIRED": frozenset(),
 }
@@ -378,13 +383,16 @@ def generate_batch_codes(
     hmac_key: bytes,
     actor_user_id: str,
     request_id: str | None = None,
+    reason: str = "",
     rng: random.Random | None = None,
 ) -> list[GeneratedCode]:
     """Mint ``quantity`` codes for a batch and land them as GENERATED.
 
     Each code row stores only the keyed digest and the masked form; the
     plaintext exists solely in the returned records. A GENERATED event per
-    code keeps the append-only trail (027). The caller owns the transaction.
+    code keeps the append-only trail (027) — carrying the write-contract
+    ``reason`` (M2 review H1: minting must not drop the audited "why").
+    The caller owns the transaction.
     """
     if quantity < 1:
         raise ActivationCodeError("quantity must be at least 1")
@@ -413,24 +421,26 @@ def generate_batch_codes(
     for _ in range(quantity):
         code = generate_activation_code(rng=rng)
         digest = compute_code_digest(code, key=hmac_key)
+        masked_code = mask_activation_code(code)
         code_id = str(uuid.uuid4())
         conn.execute(
             "INSERT INTO activation_codes "
             "(id, batch_id, code_digest, digest_key_version, masked_code, status) "
             "VALUES (%s, %s, %s, %s, %s, 'GENERATED')",
-            (code_id, batch_id, digest, key_version, mask_activation_code(code)),
+            (code_id, batch_id, digest, key_version, masked_code),
         )
         conn.execute(
-            "INSERT INTO activation_code_events (id, code_id, event, actor_user_id, request_id) "
-            "VALUES (%s, %s, 'GENERATED', %s, %s)",
-            (str(uuid.uuid4()), code_id, actor_user_id, request_id),
+            "INSERT INTO activation_code_events "
+            "(id, code_id, event, actor_user_id, request_id, reason) "
+            "VALUES (%s, %s, 'GENERATED', %s, %s, %s)",
+            (str(uuid.uuid4()), code_id, actor_user_id, request_id, reason),
         )
         generated.append(
             GeneratedCode(
                 code_id=code_id,
                 plaintext_code=code,
                 code_digest=digest,
-                masked_code=mask_activation_code(code),
+                masked_code=masked_code,
             )
         )
     return generated
@@ -445,6 +455,7 @@ def create_batch_export(
     ttl_seconds: int,
     key_version: int,
     aead_key: bytes,
+    request_id: str | None = None,
     now: datetime | None = None,
 ) -> str:
     """Seal freshly generated codes into a one-time AEAD export package.
@@ -490,9 +501,9 @@ def create_batch_export(
     )
     for record in codes:
         conn.execute(
-            "INSERT INTO activation_code_events (id, code_id, event, actor_user_id) "
-            "VALUES (%s, %s, 'EXPORTED', %s)",
-            (str(uuid.uuid4()), record.code_id, requested_by_user_id),
+            "INSERT INTO activation_code_events (id, code_id, event, actor_user_id, request_id) "
+            "VALUES (%s, %s, 'EXPORTED', %s, %s)",
+            (str(uuid.uuid4()), record.code_id, requested_by_user_id, request_id),
         )
     return export_id
 
@@ -597,3 +608,79 @@ def configured_export_aead_keys(*, environ: Mapping[str, str] | None = None) -> 
     if not keys:
         raise ActivationKeyError(f"no {ACTIVATION_EXPORT_AEAD_KEY_ENV} key version is configured")
     return keys
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Normalize a datetime to UTC (naive input is treated as UTC)."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+# ---------------------------------------------------------------------------
+# M2 review M2 — expired export ciphertext purge (maintenance sweep)
+# ---------------------------------------------------------------------------
+
+EXPORT_CIPHERTEXT_RETENTION_ENV = "VIDEO_REPLICA_EXPORT_CIPHERTEXT_RETENTION_SECONDS"
+DEFAULT_EXPORT_CIPHERTEXT_RETENTION_SECONDS = 7 * 86400
+
+
+def _export_retention_seconds(retention_seconds: int | None) -> int:
+    """Retention past expiry before the ciphertext sweep may null a row.
+
+    An explicit argument wins (CLI/tests); otherwise the env override, with
+    the 7-day default sized to outlast key-version retirement windows.
+    """
+    if retention_seconds is not None:
+        return retention_seconds
+    raw = os.environ.get(EXPORT_CIPHERTEXT_RETENTION_ENV, "").strip()
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = 0
+        if value > 0:
+            return value
+    return DEFAULT_EXPORT_CIPHERTEXT_RETENTION_SECONDS
+
+
+def count_expired_export_ciphertexts(
+    conn: psycopg.Connection, *, now: datetime, retention_seconds: int | None = None
+) -> int:
+    """How many exports have lapsed their post-expiry retention window."""
+    row = conn.execute(
+        "SELECT count(*) FROM activation_code_exports "
+        "WHERE purged_at IS NULL "
+        "AND ciphertext IS NOT NULL "
+        "AND (expires_at::timestamptz + make_interval(secs => %s)) <= %s::timestamptz",
+        (_export_retention_seconds(retention_seconds), _as_utc(now)),
+    ).fetchone()
+    return int(row[0]) if row is not None else 0
+
+
+def purge_expired_export_ciphertexts(
+    conn: psycopg.Connection, *, now: datetime, retention_seconds: int | None = None
+) -> int:
+    """Null the payload of every lapsed export; returns the purged count.
+
+    The 035 CHECK coupling (``purged_at IS NULL OR ciphertext IS NULL
+    AND ...``) forces the ciphertext, its digest and the key version to
+    leave together with ``purged_at`` arriving — a purged row is
+    structurally unable to carry a redeemable secret while the audit
+    columns (batch, requester, download moments, reason, request id) stay.
+    Idempotent: already-purged rows never match again.
+    """
+    purged = conn.execute(
+        "UPDATE activation_code_exports "
+        "SET ciphertext = NULL, ciphertext_sha256 = NULL, key_version = NULL, "
+        "purged_at = %s "
+        "WHERE purged_at IS NULL "
+        "AND ciphertext IS NOT NULL "
+        "AND (expires_at::timestamptz + make_interval(secs => %s)) <= %s::timestamptz",
+        (
+            _as_utc(now).isoformat(),
+            _export_retention_seconds(retention_seconds),
+            _as_utc(now),
+        ),
+    ).rowcount
+    return int(purged)

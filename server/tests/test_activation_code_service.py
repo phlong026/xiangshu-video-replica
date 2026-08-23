@@ -213,7 +213,12 @@ def test_status_transition_matrix() -> None:
         "GENERATED": {"ISSUED", "EXPIRED", "REVOKED"},
         "ISSUED": {"ACTIVE", "SUSPENDED", "EXPIRED", "REVOKED"},
         "ACTIVE": {"SUSPENDED", "REVOKED"},
-        "SUSPENDED": {"ACTIVE", "EXPIRED", "REVOKED"},
+        # M2 review M6: no SUSPENDED→EXPIRED — 027's shape CHECK couples
+        # EXPIRED with suspended_at IS NULL, so a direct transition would
+        # either violate the database or erase the suspension audit. A
+        # suspended code reaches its end state via REVOKED (which may carry
+        # suspended_at) or after an explicit resume.
+        "SUSPENDED": {"ACTIVE", "REVOKED"},
         "REVOKED": set(),
         "EXPIRED": set(),
     }
@@ -688,4 +693,91 @@ def test_fetch_unknown_export_rejected(catalog_db: psycopg.Connection) -> None:
             aead_keys={1: TEST_AEAD_KEY},
             download_reason="渠道取件",
             download_request_id="req-download-unknown",
+        )
+
+
+# ---------------------------------------------------------------------------
+# M2 review M2 — expired export ciphertext purge
+# ---------------------------------------------------------------------------
+
+
+def test_expired_export_ciphertext_purged_but_audit_kept(
+    catalog_db: psycopg.Connection,
+) -> None:
+    """M2 review M2: an export package's ciphertext is sealed plaintext —
+    once the retention window past expiry lapses, the purge must null the
+    payload (ciphertext, digest, key version) while the audit columns stay
+    intact, and the CHECK coupling must keep a purged row structurally
+    unable to carry a secret again."""
+    from app.activation_code_service import (
+        count_expired_export_ciphertexts,
+        purge_expired_export_ciphertexts,
+    )
+
+    _insert_batch(catalog_db, "batch-purge", quantity=2)
+    generated = generate_batch_codes(
+        catalog_db,
+        "batch-purge",
+        quantity=2,
+        key_version=1,
+        hmac_key=TEST_HMAC_KEY_V1.encode(),
+        actor_user_id="u-admin",
+    )
+    now = datetime.now(UTC).replace(microsecond=0)
+    # One export lapsed past the retention window, one still inside it.
+    # create_batch_export stamps created_at from the DB clock, so the
+    # lapsed row is rewound afterwards (expires stays after created).
+    lapsed = create_batch_export(
+        catalog_db,
+        "batch-purge",
+        generated,
+        requested_by_user_id="u-admin",
+        ttl_seconds=60,
+        key_version=1,
+        aead_key=TEST_AEAD_KEY,
+        now=now,
+    )
+    catalog_db.execute(
+        "UPDATE activation_code_exports SET created_at = %s, expires_at = %s WHERE id = %s",
+        (
+            (now - timedelta(hours=3)).isoformat(),
+            (now - timedelta(hours=2)).isoformat(),
+            lapsed,
+        ),
+    )
+    fresh = create_batch_export(
+        catalog_db,
+        "batch-purge",
+        generated,
+        requested_by_user_id="u-admin",
+        ttl_seconds=3600,
+        key_version=1,
+        aead_key=TEST_AEAD_KEY,
+        now=now,
+    )
+    assert count_expired_export_ciphertexts(catalog_db, now=now, retention_seconds=3600) == 1
+    assert purge_expired_export_ciphertexts(catalog_db, now=now, retention_seconds=3600) == 1
+    row = catalog_db.execute(
+        "SELECT ciphertext, ciphertext_sha256, key_version, purged_at, "
+        "requested_by_user_id, created_at "
+        "FROM activation_code_exports WHERE id = %s",
+        (lapsed,),
+    ).fetchone()
+    assert row is not None
+    assert row[0] is None and row[1] is None and row[2] is None
+    assert row[3] is not None, "the purge must stamp purged_at"
+    assert row[4] == "u-admin" and row[5] is not None  # audit columns intact
+    kept = catalog_db.execute(
+        "SELECT ciphertext IS NOT NULL, purged_at FROM activation_code_exports WHERE id = %s",
+        (fresh,),
+    ).fetchone()
+    assert kept is not None and kept[0] and kept[1] is None
+
+    # The purge is idempotent and the CHECK coupling refuses re-arming a
+    # purged row with a payload.
+    assert purge_expired_export_ciphertexts(catalog_db, now=now, retention_seconds=3600) == 0
+    with pytest.raises(psycopg.errors.CheckViolation):
+        catalog_db.execute(
+            "UPDATE activation_code_exports SET ciphertext = %s WHERE id = %s",
+            ("re-armed", lapsed),
         )

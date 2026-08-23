@@ -28,7 +28,7 @@ EXPORTS_TABLE = "activation_code_exports"
 ACTIVATIONS_TABLE = "activation_code_activations"
 EVENTS_TABLE = "activation_code_events"
 
-_HEAD_REVISION = "032_security_rate_limits"
+_HEAD_REVISION = "036_low_review_constraint_guards"
 
 
 def _pg_dsn() -> str:
@@ -200,6 +200,10 @@ def test_catalog_tables_and_columns(catalog_dsn: str) -> None:
             "status",
             "created_by_user_id",
             "created_at",
+            # 033 (M2 review H1): write-once creation audit columns, the
+            # batch-row twin of 031's download audit pair.
+            "creation_reason",
+            "creation_request_id",
         }
         assert columns(CODES_TABLE) == {
             "id",
@@ -241,6 +245,9 @@ def test_catalog_tables_and_columns(catalog_dsn: str) -> None:
             # request id next to the actor.
             "download_reason",
             "download_request_id",
+            # 035 (M2 review M2): purge stamp — once set, the CHECK
+            # coupling forces ciphertext/digest/key_version to be NULL.
+            "purged_at",
         }
         assert columns(ACTIVATIONS_TABLE) == {
             "id",

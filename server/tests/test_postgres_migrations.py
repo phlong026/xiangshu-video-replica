@@ -149,7 +149,9 @@ def test_pg_full_upgrade_downgrade_reupgrade_and_indexes() -> None:
 
         with psycopg.connect(dsn) as conn:
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-            assert version == "032_security_rate_limits", f"unexpected head revision: {version}"
+            assert version == ("036_low_review_constraint_guards"), (
+                f"unexpected head revision: {version}"
+            )
 
             tables = {
                 row[0]
@@ -228,7 +230,7 @@ def test_pg_full_upgrade_downgrade_reupgrade_and_indexes() -> None:
         command.upgrade(_alembic_config(sqlalchemy_dsn), "head")
         with psycopg.connect(dsn) as conn:
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-            assert version == "032_security_rate_limits"
+            assert version == "036_low_review_constraint_guards"
     finally:
         _drop_database("t06_migrate_test")
 
@@ -350,7 +352,7 @@ def test_pg_wallet_downgrade_blocked_when_ledger_has_settled_rounds() -> None:
         # The database must be left exactly at head (no partial rollback).
         with psycopg.connect(dsn) as conn:
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-        assert version == "032_security_rate_limits"
+        assert version == "036_low_review_constraint_guards"
     finally:
         _drop_database(db_name)
 
@@ -446,6 +448,7 @@ def test_pg_billing_provider_shapes_accepted_and_rejected() -> None:
                 amount_fen=1500,
                 credits=1,
                 paid_at="2026-08-22T00:00:00+00:00",
+                channel=None,
             )
             # admin_adjustment + INTERNAL + PAID, no trade number, amount below
             # the minimum recharge and off the step ladder (adjustments are
@@ -458,6 +461,7 @@ def test_pg_billing_provider_shapes_accepted_and_rejected() -> None:
                 amount_fen=5000,
                 credits=5,
                 paid_at="2026-08-22T00:00:00+00:00",
+                channel=None,
             )
 
             # A CHARGE transaction referencing the activation_code order keeps
@@ -623,10 +627,14 @@ def test_pg_billing_constraints_downgrade_guard() -> None:
                 amount_fen=1500,
                 credits=1,
                 paid_at="2026-08-22T00:00:00+00:00",
+                channel=None,
             )
 
         with pytest.raises(RuntimeError, match="cannot downgrade 026"):
-            # Six steps from head: 032->029 (empty security rate-limit layer,
+            # Ten steps from head: 036->035 (guards drop symmetrically on an empty guard layer)
+            # then 034->033 (empty cross-version probe key layer, symmetric)
+            # then 033->032 (empty batch-creation audit layer, symmetric)
+            # then 032->029 (empty security rate-limit layer,
             # symmetric) then 029->028 (empty session/envelope layer, symmetric)
             # then 028->031 (empty device layer, symmetric) then
             # 031->027 (empty idempotency ledger, symmetric) then
@@ -638,11 +646,11 @@ def test_pg_billing_constraints_downgrade_guard() -> None:
             command.downgrade(_alembic_config(sqlalchemy_dsn), "025_postgres_runtime_compatibility")
         with psycopg.connect(dsn) as conn:
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-        assert version == "032_security_rate_limits"
+        assert version == "036_low_review_constraint_guards"
 
         # Remove the customer order (test data only — confirmed production rows
         # are never deleted, which is exactly why the guard exists) and the
-        # downgrade becomes possible again. Six steps
+        # downgrade becomes possible again. Nine steps
         # (032->029->028->031->027->026->025) restore the 022 constraint set the
         # final assertion exercises.
         with psycopg.connect(dsn, autocommit=True) as conn:
@@ -655,5 +663,77 @@ def test_pg_billing_constraints_downgrade_guard() -> None:
         with psycopg.connect(dsn, autocommit=True) as conn:
             with pytest.raises(psycopg.errors.CheckViolation):
                 _insert_t08_order(conn, 2, pricing_scope="CUSTOMER_STANDARD")
+    finally:
+        _drop_database(db_name)
+
+
+def test_pg_low_review_constraint_guards() -> None:
+    """M1/M2 review LOW: channel / paid_at couplings, timezone-safe session
+    expiry ordering, and TRUNCATE-refusing guards on the three append-only
+    audit tables — all enforced by PostgreSQL, not application code."""
+
+    db_name = "t_low_review_guards"
+    dsn = _t08_database(db_name)
+    try:
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            # channel is the legacy internal payment rail; a customer order
+            # (activation_code) carrying one is a constraint-matrix hole (M1 LOW).
+            with pytest.raises(psycopg.errors.CheckViolation):
+                _insert_t08_order(
+                    conn,
+                    20,
+                    provider="activation_code",
+                    pricing_scope="CUSTOMER_STANDARD",
+                    status="PAID",
+                    charged_unit_price_fen_snapshot=1500,
+                    amount_fen=1500,
+                    credits=1,
+                    paid_at="2026-08-22T00:00:00+00:00",
+                    channel="alipay",
+                )
+            # A PAID order without a payment timestamp is not a complete fact.
+            with pytest.raises(psycopg.errors.CheckViolation):
+                _insert_t08_order(
+                    conn,
+                    21,
+                    provider="activation_code",
+                    pricing_scope="CUSTOMER_STANDARD",
+                    status="PAID",
+                    charged_unit_price_fen_snapshot=1500,
+                    amount_fen=1500,
+                    credits=1,
+                )
+            # The internal rail keeps its channel (baseline row already proves it).
+
+            # Mixed timezone offsets defeat the textual expires_at > created_at
+            # comparison: 03:00Z is 11:00+08, strictly after 10:00+08, but
+            # sorts before it as text. The CHECK must compare as timestamptz.
+            conn.execute(
+                "INSERT INTO admin_sessions "
+                "(id, actor_user_id, session_digest, csrf_digest, created_at, "
+                " last_activity_at, expires_at, created_ip_digest, created_ua_digest) "
+                "VALUES ('sess-mixed-tz', 'u-t08', 'd1', 'c1', "
+                "'2026-08-23T10:00:00+08:00', '2026-08-23T10:00:00+08:00', "
+                "'2026-08-23T03:00:00Z', 'ip', 'ua')"
+            )
+            with pytest.raises(psycopg.errors.CheckViolation):
+                conn.execute(
+                    "INSERT INTO admin_sessions "
+                    "(id, actor_user_id, session_digest, csrf_digest, created_at, "
+                    " last_activity_at, expires_at, created_ip_digest, created_ua_digest) "
+                    "VALUES ('sess-expired', 'u-t08', 'd2', 'c2', "
+                    "'2026-08-23T10:00:00+08:00', '2026-08-23T10:00:00+08:00', "
+                    "'2026-08-23T02:00:00Z', 'ip', 'ua')"
+                )
+
+            # Statement-level TRUNCATE must not be a silent mass-delete around
+            # the row-level append-only triggers (M2 LOW).
+            for table in (
+                "activation_code_events",
+                "customer_session_events",
+                "security_auth_failures",
+            ):
+                with pytest.raises(psycopg.errors.RaiseException):
+                    conn.execute(f"TRUNCATE {table}")
     finally:
         _drop_database(db_name)
