@@ -37,7 +37,19 @@
 - 任何真实 API key、激活码明文、设备/session token 不得进入代码、日志、测试夹具或 PR。
 - 证据层级逐级推进（`CODE_PRESENT → AUTOMATED_VERIFIED → STAGING_VERIFIED → REAL_CHAIN_VERIFIED → PRODUCTION_GO`）；未过真实链路不得标 `PRODUCTION_GO`。
 
-## 验证命令（PR 前必须全绿）
+## 验证命令（分层：开发期快速反馈，任务收尾全量门禁）
+
+> **分层原则**：全量 pytest（约 21 分钟，958+ 用例）每任务只跑**一次**——收尾提交 PR 前。开发期每轮迭代只跑受影响专项（秒级），不要每次跑全量。**严禁两个全量 pytest 实例同时打同一个 PG fixture**（各 PG 测试文件有独立库，但 5 个文件共享 `customer_v3_test`，并发会互踩造成假性失败——2026-08-23 T19 实测教训）。
+
+### 开发期（每任务每轮迭代，快）
+
+```bash
+# server/ 目录；fixture 未启动时 PG 套件按 skip 运行
+uv run python -m pytest tests/test_<受影响文件>.py -q   # 只跑专项，秒级
+uv run ruff check . && uv run ruff format --check . && uv run mypy app
+```
+
+### 任务收尾（每任务一次，PR 前必须全绿）
 
 ```bash
 # 1) 先启动 PostgreSQL fixture（Docker PG16，端口 5433；脚本必须带子命令，无参数会打印 usage 并退出 1）
