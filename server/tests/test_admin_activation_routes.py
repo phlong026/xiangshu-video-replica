@@ -127,10 +127,13 @@ def clean_state(activation_pg_dsn: str) -> Iterator[str]:
         conn.execute("SET session_replication_role = replica")
         # device_pairing_requests (revision 037) references customer_devices
         # and activation_codes: it must ride the same TRUNCATE, or PostgreSQL
-        # refuses to truncate the referenced tables.
+        # refuses to truncate the referenced tables. admin_device_events
+        # (revision 038) references device_pairing_requests / customer_devices
+        # / activation_codes / users for the same reason.
         conn.execute(
             "TRUNCATE customer_session_events, customer_session_state, "
             "customer_idempotency_envelopes, device_pairing_requests, "
+            "admin_device_events, "
             "customer_devices, "
             "activation_code_events, activation_code_activations, "
             "activation_code_deliveries, activation_code_exports, activation_codes, "

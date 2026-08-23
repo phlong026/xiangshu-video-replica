@@ -138,7 +138,7 @@ def test_characters_migration_creates_library_tables(db_path: Path) -> None:
             ).fetchall()
         }
 
-    assert version == "037_device_pairing_requests"
+    assert version == "038_admin_device_operations"
     assert {
         "characters",
         "project_main_characters",

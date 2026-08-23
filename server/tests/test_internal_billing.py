@@ -10,7 +10,7 @@ from cryptography.fernet import Fernet
 from app.db import alembic_config, connect_database, initialize_database
 from app.settings import SettingsRepository
 
-HEAD_REVISION = "037_device_pairing_requests"
+HEAD_REVISION = "038_admin_device_operations"
 
 
 def seed_subjects(conn: sqlite3.Connection) -> None:

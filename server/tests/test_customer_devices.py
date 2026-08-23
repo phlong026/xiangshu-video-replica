@@ -1,4 +1,5 @@
-"""T16 / DEV-01 — two current device slots, credentials and unbind history.
+"""T16 / T18 / DEV-01 — two current device slots, credentials and unbind history,
+the admin verification lane.
 
 Fail-first tests for the frozen files ``server/app/customer_device_service.py``
 and ``server/app/customer_device_routes.py`` (code checklist §3.2 / §3.3):
@@ -7,8 +8,13 @@ slot invariants in the database (partial unique indexes); this task delivers
 the application layer on top — device credential authentication, the
 two-slot status view, unbinding with its preserved audit history, and the
 third-device block that the second-device enroll flow (T17) will consult.
+T18 adds the administrator fallback lane (§12.2 step 3 / §9.2 / §15):
+the live-first-device rejection, the admin-verified approval once the first
+device is released, the admin unbind and credential revocation lanes, and
+the ``admin_device_events`` audit trail (revision 038).
 
-Contract under test (task list §3 T16; dev doc §3.2 / §6.1 / §13.2):
+Contract under test (task list §3 T16 / T18; dev doc §3.2 / §6.1 / §6.2 /
+§9.2 / §12.2 / §13.2 / §15):
 
 - the device credential is the long-lived secret returned once at bind time;
   it authenticates device-management requests via ``Authorization: Bearer``
@@ -31,7 +37,16 @@ Contract under test (task list §3 T16; dev doc §3.2 / §6.1 / §13.2):
   P2): a client that lost the 204 retries with the same key + same target
   and replays the sealed 204 — even though its own credential is by then no
   longer resolvable — while the same key against a different target answers
-  409 ``IDEMPOTENCY_CONFLICT`` (400 ``IDEMPOTENCY_KEY_REQUIRED`` otherwise).
+  409 ``IDEMPOTENCY_CONFLICT`` (400 ``IDEMPOTENCY_KEY_REQUIRED`` otherwise);
+- T18 management lanes: ``GET /api/control/devices`` lists device metadata
+  without keyed digests (§6.2), ``POST /api/control/device-pairings/{id}/approve``
+  routes through the operator after verifying issuance record and activation
+  fact when the first device is unavailable (§12.2 step 3), and
+  ``POST /api/control/devices/{id}/unbind`` / ``revoke-credential`` are
+  audited with the real acting administrator, a human-readable reason and an
+  Idempotency-Key (dev doc §15: 真实 actor、原因、二次确认和审计存在);
+- revision 038 creates the append-only ``admin_device_events`` table (the
+  029 trigger precedent + the 036 TRUNCATE guard shared function).
 """
 
 from __future__ import annotations
@@ -54,6 +69,11 @@ from app.activation_code_service import (
     ACTIVATION_CODE_HMAC_KEY_ENV,
     compute_code_digest,
 )
+from app.admin_auth_routes import (
+    ADMIN_CSRF_HEADER,
+    ADMIN_SESSION_HMAC_KEY_ENV,
+    issue_exchange_credential,
+)
 from app.db_pg import DATABASE_URL_ENV, close_pg_pool
 
 DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
@@ -65,11 +85,14 @@ TEST_KEY = secrets.token_urlsafe(48)  # code HMAC key (v1), never a real secret
 TEST_FINGERPRINT_KEY_V1 = secrets.token_urlsafe(48)
 TEST_FINGERPRINT_KEY_V2 = secrets.token_urlsafe(48)
 TEST_ENVELOPE_AEAD_KEY = secrets.token_bytes(32)
+TEST_ADMIN_SESSION_KEY = secrets.token_urlsafe(48)  # admin-session HMAC key
 
 ACTIVATE_PATH = "/api/customer/activate"
 DEVICES_PATH = "/api/customer/devices"
 ENROLL_PATH = "/api/customer/devices/enroll"
 APPROVE_PATH = "/api/customer/device-pairings"
+ADMIN_DEVICES_PATH = "/api/control/devices"
+ADMIN_PAIRINGS_PATH = "/api/control/device-pairings"
 IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
 REQUEST_ID_HEADER = "X-Request-Id"
 REPLAY_HEADER = "X-Idempotent-Replay"
@@ -171,6 +194,7 @@ def route_state(devices_dsn: str) -> Iterator[str]:
         conn.execute(
             "TRUNCATE customer_session_events, customer_session_state, "
             "customer_idempotency_envelopes, device_pairing_requests, "
+            "admin_device_events, "
             "customer_devices, activation_code_events, activation_code_activations, "
             "activation_code_deliveries, activation_code_exports, activation_codes, "
             "activation_code_batches, admin_write_idempotency, admin_sessions, "
@@ -179,8 +203,9 @@ def route_state(devices_dsn: str) -> Iterator[str]:
         )
         conn.execute("SET session_replication_role = DEFAULT")
         conn.execute(
-            "INSERT INTO users (id, username, display_name, role) "
-            "VALUES ('admin_u', 'admin_u', 'Admin User', 'admin')"
+            "INSERT INTO users (id, username, display_name, role) VALUES "
+            "('admin_u', 'admin_u', 'Admin User', 'admin'), "
+            "('auditor_u', 'auditor_u', 'Auditor User', 'auditor')"
         )
     yield devices_dsn
     close_pg_pool()
@@ -189,14 +214,19 @@ def route_state(devices_dsn: str) -> Iterator[str]:
 @pytest.fixture()
 def customer_app(monkeypatch: pytest.MonkeyPatch, route_state: str) -> Iterator[FastAPI]:
     from app.activation_code_routes import router as activation_code_router
+    from app.admin_auth_routes import router as admin_auth_router
+    from app.admin_device_routes import router as admin_device_router
     from app.customer_device_routes import router as customer_device_router
 
     app = FastAPI()
     app.include_router(activation_code_router)
     app.include_router(customer_device_router)
+    app.include_router(admin_auth_router)
+    app.include_router(admin_device_router)
     monkeypatch.setenv(DATABASE_URL_ENV, route_state)
     monkeypatch.delenv("VIDEO_REPLICA_CUSTOMER_PRODUCTION", raising=False)
     monkeypatch.setenv(ACTIVATION_CODE_HMAC_KEY_ENV, TEST_KEY)
+    monkeypatch.setenv(ADMIN_SESSION_HMAC_KEY_ENV, TEST_ADMIN_SESSION_KEY)
     monkeypatch.setenv("VIDEO_REPLICA_DEVICE_FINGERPRINT_HMAC_KEY", TEST_FINGERPRINT_KEY_V1)
     monkeypatch.setenv("VIDEO_REPLICA_DEVICE_FINGERPRINT_HMAC_KEY_V2", TEST_FINGERPRINT_KEY_V2)
     monkeypatch.setenv(
@@ -208,6 +238,10 @@ def customer_app(monkeypatch: pytest.MonkeyPatch, route_state: str) -> Iterator[
     monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_ACTIVATE_CODE", "1000")
     monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_WINDOW_SECONDS", "300")
     monkeypatch.setattr("app.activation_code_routes.apply_anti_enumeration_delay", lambda: None)
+    # The admin lanes must run on real admin sessions, never a dev identity
+    # header shortcut (the T12 fixture precedent).
+    monkeypatch.delenv("VIDEO_REPLICA_AUTH_MODE", raising=False)
+    monkeypatch.delenv("VIDEO_REPLICA_ALLOW_DEV_IDENTITY_HEADER", raising=False)
     yield app
 
 
@@ -1610,6 +1644,7 @@ def _insert_pairing_row(
     expires_at: str = FUTURE_EXPIRY,
     approved_at: str | None = None,
     approved_by_device_id: str | None = None,
+    approved_by_admin_user_id: str | None = None,
     consumed_at: str | None = None,
     consumed_device_id: str | None = None,
 ) -> None:
@@ -1618,8 +1653,9 @@ def _insert_pairing_row(
             "INSERT INTO device_pairing_requests "
             "(id, activation_code_id, candidate_fingerprint_hmac, "
             " candidate_fingerprint_key_version, display_name, platform, status, "
-            " expires_at, approved_at, approved_by_device_id, consumed_at, consumed_device_id) "
-            "VALUES (%s, %s, %s, 1, 'Shape Probe', 'windows', %s, %s, %s, %s, %s, %s)",
+            " expires_at, approved_at, approved_by_device_id, "
+            " approved_by_admin_user_id, consumed_at, consumed_device_id) "
+            "VALUES (%s, %s, %s, 1, 'Shape Probe', 'windows', %s, %s, %s, %s, %s, %s, %s)",
             (
                 pairing_id,
                 activation_code_id,
@@ -1628,6 +1664,7 @@ def _insert_pairing_row(
                 expires_at,
                 approved_at,
                 approved_by_device_id,
+                approved_by_admin_user_id,
                 consumed_at,
                 consumed_device_id,
             ),
@@ -1802,6 +1839,528 @@ def _bind_raw(
 
 
 # ---------------------------------------------------------------------------
+# T18 — administrator device operations (approve / unbind / revoke)
+# ---------------------------------------------------------------------------
+
+
+def _admin_session(client: TestClient, actor: str = "admin_u") -> dict[str, str]:
+    """Exchange a real admin session cookie + CSRF header (the T12 pattern)."""
+    response = client.post(
+        "/api/control/admin/session/exchange",
+        json={"credential": issue_exchange_credential(actor, ttl_seconds=3600)},
+    )
+    assert response.status_code == 201, response.text
+    return {ADMIN_CSRF_HEADER: response.json()["csrf_token"]}
+
+
+def _admin_write(
+    client: TestClient,
+    headers: dict[str, str],
+    path: str,
+    *,
+    key: str | None = None,
+    reason: str = "客服核验工单 #1001",
+    confirm: bool = True,
+) -> object:
+    all_headers = dict(headers)
+    all_headers[IDEMPOTENCY_KEY_HEADER] = key or f"key-{uuid.uuid4()}"
+    return client.post(
+        path,
+        json={"confirm": confirm, "reason": reason},
+        headers=all_headers,
+    )
+
+
+def _admin_event_row(event: str) -> tuple | None:
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        return conn.execute(
+            "SELECT event, admin_user_id, target_user_id, device_id, "
+            "pairing_request_id, activation_code_id, reason, request_id "
+            "FROM admin_device_events WHERE event = %s",
+            (event,),
+        ).fetchone()
+
+
+def test_admin_device_list_gates_and_hides_secrets(client: TestClient) -> None:
+    """§6.2 / §15: the device list sits behind the admin session gate, the
+    auditor may read it, and keyed digests never leave the store."""
+    unauthenticated = client.get(ADMIN_DEVICES_PATH)
+    assert unauthenticated.status_code == 401
+
+    customer = _activated_customer(
+        client, code=FIRST_CODE, fingerprint="fp-admin-list", suffix="alist"
+    )
+    listed = client.get(ADMIN_DEVICES_PATH, headers=_admin_session(client))
+    assert listed.status_code == 200, listed.text
+    items = listed.json()["items"]
+    assert len(items) == 1
+    item = items[0]
+    assert item["device_id"] == customer["device_id"]
+    assert item["status"] == "BOUND"
+    assert item["slot_no"] == 1
+    serialized = str(listed.json())
+    assert "fingerprint" not in serialized
+    assert "token_digest" not in serialized
+
+    # The auditor is read-only, and this is the read path (§15).
+    client.cookies.clear()
+    auditor_view = client.get(ADMIN_DEVICES_PATH, headers=_admin_session(client, "auditor_u"))
+    assert auditor_view.status_code == 200
+    assert len(auditor_view.json()["items"]) == 1
+
+
+def test_admin_approve_rejects_live_first_device(client: TestClient) -> None:
+    """§12.2 step 3: a live first device owns the approval — the admin lane
+    fails closed with 403 and leaves no audit row behind."""
+    _activated_customer(client, code=FIRST_CODE, fingerprint="fp-adm-ap1", suffix="ap1")
+    enroll = _enroll(client, code=FIRST_CODE, fingerprint="fp-adm-ap1-2nd", key="idem-ap1")
+    assert enroll.status_code == 202, enroll.text
+    pairing_id = enroll.json()["pairing_request_id"]
+
+    refused = _admin_write(
+        client, _admin_session(client), f"{ADMIN_PAIRINGS_PATH}/{pairing_id}/approve"
+    )
+    assert refused.status_code == 403, refused.text
+    assert refused.json()["detail"]["code"] == "PAIRING_FIRST_DEVICE_AVAILABLE"
+
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        row = _pairing_row(conn, pairing_id)
+    assert row is not None and row[0] == "PENDING"
+    assert _admin_event_row("PAIRING_ADMIN_APPROVED") is None
+
+
+def test_admin_approve_opens_after_first_device_release(client: TestClient) -> None:
+    """The fallback lane: first device released → the admin approval lands
+    with its lineage and one audit row (the T18 DoD: 真实 actor、原因、
+    二次确认和审计存在)."""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-adm-ap2", suffix="ap2")
+    release = client.delete(
+        f"{DEVICES_PATH}/{customer['device_id']}",
+        headers={**_bearer(customer["device_token"]), IDEMPOTENCY_KEY_HEADER: "idem-ap2-rel"},
+    )
+    assert release.status_code == 204, release.text
+
+    enroll = _enroll(client, code=FIRST_CODE, fingerprint="fp-adm-ap2-2nd", key="idem-ap2")
+    assert enroll.status_code == 202, enroll.text
+    pairing_id = enroll.json()["pairing_request_id"]
+
+    approved = _admin_write(
+        client,
+        _admin_session(client),
+        f"{ADMIN_PAIRINGS_PATH}/{pairing_id}/approve",
+        key="adm-ap2",
+        reason="客服核验发放记录后批准",
+    )
+    assert approved.status_code == 200, approved.text
+    body = approved.json()
+    assert body["status"] == "APPROVED"
+    assert body["outcome"] == "approved"
+
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT status, approved_at, approved_by_device_id, approved_by_admin_user_id "
+            "FROM device_pairing_requests WHERE id = %s",
+            (pairing_id,),
+        ).fetchone()
+    assert row is not None
+    assert row[0] == "APPROVED"
+    assert row[1] is not None
+    assert row[2] is None
+    assert str(row[3]) == "admin_u"
+
+    event = _admin_event_row("PAIRING_ADMIN_APPROVED")
+    assert event is not None
+    assert str(event[1]) == "admin_u"
+    assert str(event[2]) == customer["user_id"]
+    assert event[3] is None  # the approval proves the pairing, not a device
+    assert str(event[4]) == pairing_id
+    assert str(event[5]) == _code_id_of_user(customer["user_id"])
+    assert str(event[6]) == "客服核验发放记录后批准"
+    assert str(event[7]) == body["request_id"]
+
+    # A second approval (different key) is idempotent: the state stays and
+    # the outcome names it, without a second audit row.
+    again = _admin_write(
+        client, _admin_session(client), f"{ADMIN_PAIRINGS_PATH}/{pairing_id}/approve"
+    )
+    assert again.status_code == 200, again.text
+    assert again.json()["outcome"] == "already_approved"
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        count = conn.execute(
+            "SELECT count(*) FROM admin_device_events WHERE event = 'PAIRING_ADMIN_APPROVED'"
+        ).fetchone()
+    assert count is not None and int(count[0]) == 1
+
+
+def test_admin_approve_outcomes(client: TestClient) -> None:
+    """404 unknown pairing, 409 expired (lazily flipped), 409 consumed."""
+    headers = _admin_session(client)
+    missing = _admin_write(client, headers, f"{ADMIN_PAIRINGS_PATH}/{uuid.uuid4()}/approve")
+    assert missing.status_code == 404, missing.text
+    assert missing.json()["detail"]["code"] == "PAIRING_NOT_FOUND"
+
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-adm-ap3", suffix="ap3")
+    release = client.delete(
+        f"{DEVICES_PATH}/{customer['device_id']}",
+        headers={**_bearer(customer["device_token"]), IDEMPOTENCY_KEY_HEADER: "idem-ap3-rel"},
+    )
+    assert release.status_code == 204, release.text
+    enroll = _enroll(client, code=FIRST_CODE, fingerprint="fp-adm-ap3-2nd", key="idem-ap3")
+    pairing_id = enroll.json()["pairing_request_id"]
+
+    _expire_pairing(pairing_id)
+    expired_key = "idem-ap3-expired"
+    expired = _admin_write(
+        client, headers, f"{ADMIN_PAIRINGS_PATH}/{pairing_id}/approve", key=expired_key
+    )
+    assert expired.status_code == 409, expired.text
+    assert expired.json()["detail"]["code"] == "PAIRING_EXPIRED"
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        status = conn.execute(
+            "SELECT status FROM device_pairing_requests WHERE id = %s", (pairing_id,)
+        ).fetchone()
+    assert status is not None and status[0] == "EXPIRED"
+    # The deferred 409 replay lock (session review P3): the same key must
+    # answer the same 409 — the snapshot layer recorded the error response
+    # while committing the lazy flip, so the replay must not re-execute.
+    replayed_expired = _admin_write(
+        client, headers, f"{ADMIN_PAIRINGS_PATH}/{pairing_id}/approve", key=expired_key
+    )
+    assert replayed_expired.status_code == 409, replayed_expired.text
+    assert replayed_expired.headers.get(REPLAY_HEADER) == "true"
+    assert replayed_expired.json() == expired.json()
+
+    consumed_pairing = str(uuid.uuid4())
+    _insert_pairing_row(
+        pairing_id=consumed_pairing,
+        activation_code_id=_code_id_of_user(customer["user_id"]),
+        fingerprint_digest="digest-ap3-consumed",
+        status="CONSUMED",
+        approved_at="2026-01-01T00:00:00+00:00",
+        approved_by_admin_user_id="admin_u",
+        consumed_at="2026-01-01T00:01:00+00:00",
+        consumed_device_id=customer["device_id"],
+    )
+    consumed = _admin_write(client, headers, f"{ADMIN_PAIRINGS_PATH}/{consumed_pairing}/approve")
+    assert consumed.status_code == 409, consumed.text
+    assert consumed.json()["detail"]["code"] == "PAIRING_ALREADY_CONSUMED"
+
+
+def test_admin_pairing_verification_view(client: TestClient) -> None:
+    """The verification view carries the full §12.2 step-3 evidence: the
+    masked code, its delivery records (connector review P2 — who delivered,
+    on which channel, to which recipient), the activation fact and the
+    first-device status behind the admin_lane summary."""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-adm-vv", suffix="vv")
+    enroll = _enroll(client, code=FIRST_CODE, fingerprint="fp-adm-vv-2nd", key="idem-vv")
+    pairing_id = enroll.json()["pairing_request_id"]
+    code_id = _code_id_of_user(customer["user_id"])
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO activation_code_deliveries "
+            "(id, code_id, channel, external_order_ref, recipient_ref, "
+            "delivered_by_user_id, delivered_at) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            (
+                "del-vv-1",
+                code_id,
+                "manual",
+                "T18-VV-ORDER",
+                "customer-vv@example.com",
+                "admin_u",
+                "2026-01-02T00:00:00+00:00",
+            ),
+        )
+
+    view = client.get(f"{ADMIN_PAIRINGS_PATH}/{pairing_id}", headers=_admin_session(client))
+    assert view.status_code == 200, view.text
+    body = view.json()
+    assert body["pairing"]["id"] == pairing_id
+    assert body["pairing"]["activation_code_id"] == code_id
+    assert body["pairing"]["status"] == "PENDING"
+    assert body["code"]["code_id"] == code_id
+    assert body["code"]["masked_code"]  # masked evidence, never plaintext
+    assert body["activation"]["user_id"] == customer["user_id"]
+    assert body["first_device"]["device_id"] == customer["device_id"]
+    assert body["first_device"]["status"] == "BOUND"
+    # The first device is still bound — the fallback lane stays closed.
+    assert body["admin_lane"] == "CLOSED_FIRST_DEVICE_BOUND"
+    assert len(body["deliveries"]) == 1
+    delivery = body["deliveries"][0]
+    assert delivery["channel"] == "manual"
+    assert delivery["external_order_ref"] == "T18-VV-ORDER"
+    assert delivery["recipient_ref"] == "customer-vv@example.com"
+    assert delivery["delivered_by_user_id"] == "admin_u"
+
+    missing = client.get(f"{ADMIN_PAIRINGS_PATH}/{uuid.uuid4()}", headers=_admin_session(client))
+    assert missing.status_code == 404
+    assert missing.json()["detail"]["code"] == "PAIRING_NOT_FOUND"
+
+
+def test_admin_unbind_releases_device_and_riding_session(client: TestClient) -> None:
+    """The admin unbind mirrors the customer lane (§9.2) with the actor
+    recorded as the administrator and one audit row."""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-adm-un1", suffix="un1")
+    device_id = customer["device_id"]
+
+    unbound = _admin_write(
+        client,
+        _admin_session(client),
+        f"{ADMIN_DEVICES_PATH}/{device_id}/unbind",
+        key="adm-un1",
+        reason="客户手机丢失，客服解绑",
+    )
+    assert unbound.status_code == 200, unbound.text
+    assert unbound.json()["status"] == "UNBOUND"
+
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT status, unbound_at, revoked_at FROM customer_devices WHERE id = %s",
+            (device_id,),
+        ).fetchone()
+        session = conn.execute(
+            "SELECT session_epoch, lease_until FROM customer_session_state WHERE user_id = %s",
+            (customer["user_id"],),
+        ).fetchone()
+        logout = conn.execute(
+            "SELECT event, actor_user_id, reason FROM customer_session_events "
+            "WHERE user_id = %s ORDER BY created_at DESC, id DESC LIMIT 1",
+            (customer["user_id"],),
+        ).fetchone()
+    assert row is not None and row[0] == "UNBOUND" and row[1] is not None and row[2] is None
+    assert session is not None and session[0] == 2
+    assert datetime.fromisoformat(str(session[1])) <= datetime.now(UTC)
+    assert logout is not None and logout[0] == "LOGOUT"
+    assert str(logout[1]) == "admin_u"
+    assert str(logout[2]) == "客户手机丢失，客服解绑"
+
+    event = _admin_event_row("DEVICE_ADMIN_UNBOUND")
+    assert event is not None
+    assert str(event[1]) == "admin_u"
+    assert str(event[2]) == customer["user_id"]
+    assert str(event[3]) == device_id
+    assert event[4] is None
+    assert str(event[6]) == "客户手机丢失，客服解绑"
+    assert str(event[7]) == unbound.json()["request_id"]
+
+    afterwards = client.get(DEVICES_PATH, headers=_bearer(customer["device_token"]))
+    assert afterwards.status_code == 401
+    assert afterwards.json()["detail"]["code"] == "DEVICE_REVOKED"
+
+
+def test_admin_revoke_credential_marks_revoked(client: TestClient) -> None:
+    """The stronger release: ``REVOKED`` keeps the 028 shape (revoked_at set,
+    unbound_at NULL), the session dies and the audit names the lane."""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-adm-rv1", suffix="rv1")
+    device_id = customer["device_id"]
+
+    revoked = _admin_write(
+        client,
+        _admin_session(client),
+        f"{ADMIN_DEVICES_PATH}/{device_id}/revoke-credential",
+        key="adm-rv1",
+        reason="设备疑似泄露，撤销凭据",
+    )
+    assert revoked.status_code == 200, revoked.text
+    assert revoked.json()["status"] == "REVOKED"
+
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT status, unbound_at, revoked_at FROM customer_devices WHERE id = %s",
+            (device_id,),
+        ).fetchone()
+        session = conn.execute(
+            "SELECT session_epoch FROM customer_session_state WHERE user_id = %s",
+            (customer["user_id"],),
+        ).fetchone()
+    assert row is not None and row[0] == "REVOKED"
+    assert row[1] is None and row[2] is not None
+    assert session is not None and session[0] == 2
+
+    event = _admin_event_row("DEVICE_CREDENTIAL_REVOKED")
+    assert event is not None
+    assert str(event[1]) == "admin_u"
+    assert str(event[3]) == device_id
+    assert str(event[6]) == "设备疑似泄露，撤销凭据"
+
+    afterwards = client.get(DEVICES_PATH, headers=_bearer(customer["device_token"]))
+    assert afterwards.status_code == 401
+    assert afterwards.json()["detail"]["code"] == "DEVICE_REVOKED"
+
+
+def test_admin_unbind_outcomes(client: TestClient) -> None:
+    """404 unknown device, 409 when the device is not currently bound."""
+    headers = _admin_session(client)
+    missing = _admin_write(client, headers, f"{ADMIN_DEVICES_PATH}/{uuid.uuid4()}/unbind")
+    assert missing.status_code == 404, missing.text
+    assert missing.json()["detail"]["code"] == "DEVICE_NOT_FOUND"
+
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-adm-un2", suffix="un2")
+    device_id = customer["device_id"]
+    first = _admin_write(client, headers, f"{ADMIN_DEVICES_PATH}/{device_id}/unbind")
+    assert first.status_code == 200, first.text
+    second = _admin_write(client, headers, f"{ADMIN_DEVICES_PATH}/{device_id}/unbind")
+    assert second.status_code == 409, second.text
+    assert second.json()["detail"]["code"] == "DEVICE_ALREADY_RELEASED"
+
+
+def test_admin_write_contract_enforced(client: TestClient) -> None:
+    """§15 / §9.3: key, confirmation and reason are mandatory; the auditor
+    is read-only; an unauthenticated caller never reaches the business."""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-adm-wc", suffix="wc")
+    path = f"{ADMIN_DEVICES_PATH}/{customer['device_id']}/unbind"
+    headers = _admin_session(client)
+
+    no_key = client.post(path, json={"confirm": True, "reason": "r"}, headers=headers)
+    assert no_key.status_code == 400
+    assert no_key.json()["detail"]["code"] == "IDEMPOTENCY_KEY_REQUIRED"
+
+    unconfirmed = _admin_write(client, headers, path, confirm=False)
+    assert unconfirmed.status_code == 400
+    assert unconfirmed.json()["detail"]["code"] == "CONFIRMATION_REQUIRED"
+
+    no_reason = _admin_write(client, headers, path, reason="   ")
+    assert no_reason.status_code == 400
+    assert no_reason.json()["detail"]["code"] == "REASON_REQUIRED"
+
+    client.cookies.clear()
+    auditor = _admin_write(client, _admin_session(client, "auditor_u"), path)
+    assert auditor.status_code == 403
+    assert auditor.json()["detail"]["code"] == "AUDITOR_READ_ONLY"
+
+    client.cookies.clear()
+    unauthenticated = _admin_write(client, {}, path)
+    assert unauthenticated.status_code == 401
+
+    # None of the refusals touched the device or wrote an audit row.
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        status = conn.execute(
+            "SELECT status FROM customer_devices WHERE id = %s",
+            (customer["device_id"],),
+        ).fetchone()
+    assert status is not None and status[0] == "BOUND"
+    assert _admin_event_row("DEVICE_ADMIN_UNBOUND") is None
+
+
+def test_admin_unbind_idempotent_replay_and_conflict(client: TestClient) -> None:
+    """Same key + same body replays the stored response; the same key against
+    a different body is a conflict (the revision 031 snapshot semantics)."""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-adm-idm", suffix="idm")
+    path = f"{ADMIN_DEVICES_PATH}/{customer['device_id']}/unbind"
+    headers = _admin_session(client)
+    key = "adm-idem-idm"
+
+    first = _admin_write(client, headers, path, key=key)
+    assert first.status_code == 200, first.text
+    assert REPLAY_HEADER not in first.headers
+
+    # The device is already released; without the snapshot layer this retry
+    # would answer 409 — the replay must answer the stored 200.
+    retry = _admin_write(client, headers, path, key=key)
+    assert retry.status_code == 200, retry.text
+    assert retry.headers.get(REPLAY_HEADER) == "true"
+    assert retry.json() == first.json()
+
+    conflict = _admin_write(client, headers, path, key=key, reason="另一个原因")
+    assert conflict.status_code == 409, conflict.text
+    assert conflict.json()["detail"]["code"] == "IDEMPOTENCY_CONFLICT"
+
+
+def test_pairing_verification_view_shows_lane_state(client: TestClient) -> None:
+    """The operator's verification view (§12.2 step 3): issuance record,
+    activation fact, first-device status and the admin lane summary."""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-adm-vw", suffix="vw")
+    enroll = _enroll(client, code=FIRST_CODE, fingerprint="fp-adm-vw-2nd", key="idem-vw")
+    pairing_id = enroll.json()["pairing_request_id"]
+
+    view = client.get(f"{ADMIN_PAIRINGS_PATH}/{pairing_id}", headers=_admin_session(client))
+    assert view.status_code == 200, view.text
+    body = view.json()
+    assert body["pairing"]["status"] == "PENDING"
+    assert body["pairing"]["activation_code_id"] == _code_id_of_user(customer["user_id"])
+    assert body["code"]["status"] == "ACTIVE"
+    assert body["code"]["masked_code"]
+    assert body["activation"]["user_id"] == customer["user_id"]
+    assert body["activation"]["first_device_id"] == customer["device_id"]
+    assert body["first_device"]["status"] == "BOUND"
+    assert body["admin_lane"] == "CLOSED_FIRST_DEVICE_BOUND"
+
+    release = client.delete(
+        f"{DEVICES_PATH}/{customer['device_id']}",
+        headers={**_bearer(customer["device_token"]), IDEMPOTENCY_KEY_HEADER: "idem-vw-rel"},
+    )
+    assert release.status_code == 204, release.text
+    reopened = client.get(f"{ADMIN_PAIRINGS_PATH}/{pairing_id}", headers=_admin_session(client))
+    assert reopened.status_code == 200
+    assert reopened.json()["first_device"]["status"] == "UNBOUND"
+    assert reopened.json()["admin_lane"] == "OPEN"
+
+    missing = client.get(f"{ADMIN_PAIRINGS_PATH}/{uuid.uuid4()}", headers=_admin_session(client))
+    assert missing.status_code == 404
+
+
+def test_admin_device_events_append_only_and_no_truncate(client: TestClient) -> None:
+    """Revision 038: UPDATE, DELETE and TRUNCATE on the audit table are all
+    refused by PostgreSQL itself (the 029 / 036 trigger precedents)."""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-adm-ao", suffix="ao")
+    unbound = _admin_write(
+        client,
+        _admin_session(client),
+        f"{ADMIN_DEVICES_PATH}/{customer['device_id']}/unbind",
+    )
+    assert unbound.status_code == 200, unbound.text
+
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        with pytest.raises(psycopg.errors.RaiseException):
+            conn.execute("UPDATE admin_device_events SET reason = 'tampered'")
+        with pytest.raises(psycopg.errors.RaiseException):
+            conn.execute("DELETE FROM admin_device_events")
+        with pytest.raises(psycopg.errors.RaiseException):
+            conn.execute("TRUNCATE admin_device_events")
+        survivors = conn.execute("SELECT count(*) FROM admin_device_events").fetchone()
+    assert survivors is not None and int(survivors[0]) == 1
+
+
+def test_admin_device_events_downgrade_guard(route_state: str) -> None:
+    """Revision 038's downgrade refuses once audit rows exist (the 037
+    guard precedent): the operator lineage must survive any rollback."""
+    from alembic import command
+    from alembic.config import Config
+
+    _seed_issuable_code(FIRST_CODE, code_id="code-038-guard", batch_id="batch-038-guard")
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        # A plain SQL row — the guard tests the migration constraints, not the
+        # application-layer key configuration (route_state sets no device
+        # fingerprint key env; the digests below are inert literals).
+        conn.execute(
+            "INSERT INTO customer_devices "
+            "(id, activation_code_id, user_id, slot_no, display_name, platform, "
+            " fingerprint_hmac, fingerprint_key_version, token_digest, token_key_version) "
+            "VALUES ('device-038-guard', 'code-038-guard', 'admin_u', 1, 'Guard', 'windows', "
+            "'fp-038-guard', 1, 'token-038-guard', 1)"
+        )
+        conn.execute(
+            "INSERT INTO admin_device_events "
+            "(id, event, admin_user_id, target_user_id, device_id, "
+            " activation_code_id, reason, request_id) "
+            "VALUES ('event-038-guard', 'DEVICE_ADMIN_UNBOUND', 'admin_u', 'admin_u', "
+            "'device-038-guard', 'code-038-guard', 'guard', 'req-038-guard')"
+        )
+
+    server_dir = Path(__file__).resolve().parent.parent
+    config = Config(str(server_dir / "alembic.ini"))
+    config.set_main_option("script_location", str(server_dir / "migrations"))
+    config.set_main_option(
+        "sqlalchemy.url", _t16_dsn().replace("postgresql://", "postgresql+psycopg://")
+    )
+
+    with pytest.raises(RuntimeError, match="cannot downgrade 038_admin_device_operations"):
+        command.downgrade(config, "037_device_pairing_requests")
+    with psycopg.connect(_t16_dsn()) as conn:
+        version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+    assert version == "038_admin_device_operations"
+
+
+# ---------------------------------------------------------------------------
 # Migration 033 downgrade guard (runs last: it cycles the fixture schema)
 # ---------------------------------------------------------------------------
 
@@ -1834,14 +2393,22 @@ def test_pairing_downgrade_refuses_once_rows_exist(route_state: str) -> None:
 
     with pytest.raises(RuntimeError, match="cannot downgrade 037_device_pairing_requests"):
         command.downgrade(config, "032_security_rate_limits")
-    # The refusal left the schema untouched at head.
+    # The refusal left the schema untouched at head. The whole downgrade
+    # chain runs in one transaction (env.py: no transaction_per_migration),
+    # so 038's already-executed downgrade rolls back with 037's refusal —
+    # the version stays at the current head.
     with psycopg.connect(_t16_dsn()) as conn:
         version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-    assert version == "037_device_pairing_requests"
+    assert version == "038_admin_device_operations"
 
     # An emptied table downgrades symmetrically, and upgrading back restores
-    # the schema for any rerun of this module.
+    # the schema for any rerun of this module. Revision 038 added the
+    # admin_device_events → device_pairing_requests FK, so both tables must
+    # empty together (and behind the replica role — 036/038 refuse bare
+    # TRUNCATEs of the append-only audit tables).
     with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
-        conn.execute("TRUNCATE device_pairing_requests")
+        conn.execute("SET session_replication_role = replica")
+        conn.execute("TRUNCATE admin_device_events, device_pairing_requests")
+        conn.execute("SET session_replication_role = DEFAULT")
     command.downgrade(config, "032_security_rate_limits")
     command.upgrade(config, "head")
