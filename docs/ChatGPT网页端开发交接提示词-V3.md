@@ -51,7 +51,7 @@
 
 ## 6. 硬性红线（违反即返工，无例外）
 
-- 迁移文件名冻结：`025_postgres_runtime_compatibility` / `026_customer_security_and_billing` / `027_activation_code_catalog` / `028_customer_devices_and_activations` / `029_customer_sessions_and_idempotency` / `030_user_fair_queue`；已发布 revision 只能追加修复，不得篡改。
+- 迁移文件名冻结：`025_postgres_runtime_compatibility` / `026_customer_security_and_billing` / `027_activation_code_catalog` / `028_customer_devices_and_activations` / `029_customer_sessions_and_idempotency` / `030_user_fair_queue`；其中 `030_user_fair_queue` 为 T25 公平队列预留（尚未创建，不得挪用编号）；T12 起追加发布 `031_admin_write_idempotency`（T12）、`032_security_rate_limits`（T15）、`033_batch_creation_audit`/`034_device_fingerprint_canonical`/`035_export_ciphertext_purge`/`036_low_review_constraint_guards`（M1/M2 评审修复），实际链序 `027→031→028→029→032→033→034→035→036`；已发布 revision 只能追加修复，不得篡改。
 - 技术约束：禁止引入 ORM、Redis、消息队列框架；禁止 SQLite/PG 双真源；psycopg 同步驱动 + `%s` 占位符按 T04 清单逐点迁移。
 - 并行红线：T13 不得早于 T08/T10；T20 不得早于 T19；T21 必须逐写路由验证 fencing，不许批量替换依赖了事；T25 公平队列必须 PG-first；T36 不得用单实例健康检查冒充多实例；T40 真实付费链路必须人工授权。
 - 安全红线：任何真实 API key、激活码明文、设备/session token 不得出现在代码、日志、测试夹具或 PR 中；激活码导出必须 AEAD 加密。

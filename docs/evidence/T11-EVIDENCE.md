@@ -13,7 +13,7 @@
 
 ## Exit-Gate Verification
 
-Task exit gate: *熵测试、日志扫描、导出下载审计通过* — delivered as `server/app/activation_code_service.py` (application layer over the revision-027 catalog) plus 21 fail-first tests (`server/tests/test_activation_code_service.py`, 12 unit + 9 PG integration):
+Task exit gate: *熵测试、日志扫描、导出下载审计通过* — delivered as `server/app/activation_code_service.py` (application layer over the revision-027 catalog) plus 22 fail-first tests (`server/tests/test_activation_code_service.py`, 12 unit + 10 PG integration):
 
 - **Entropy** — `XS04-XXXXXXX-XXXXXXX-XXXXXXX-XXXXXXX`: prefix + 4 groups × 7 Crockford-base32 characters (no I/L/O/U) = 28 × log2(32) = **140 bits ≥ 128** (acceptance spec §2.1), minted by `secrets.SystemRandom().choice`; the entropy test locks the bit floor, full-alphabet coverage across 500 codes and confusable-free output, plus 500-code uniqueness.
 - **Log scanning** — the one-time-download test runs caplog at DEBUG across the package's whole life (create + first download + refused second download) and asserts no plaintext code ever appears in any log record; the DB-side twin asserts plaintext never matches `masked_code`/`code_digest` columns.
