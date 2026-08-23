@@ -346,7 +346,14 @@ def unbind_device(
         return OUTCOME_NOT_BOUND
     activation_code_id = str(row[2])
 
-    now_iso = server_now.replace(microsecond=0).isoformat()
+    # PR #47 Codex review P2: keep the PostgreSQL microsecond precision —
+    # trimming the timestamp to whole seconds is what once forced the
+    # GREATEST fallback below to a full second (a lease living up to 1 s in
+    # the future while the device was already released). The full-precision
+    # transaction clock always postdates the session's created_at (the
+    # activation transaction committed before this unbind began), so the
+    # trimmed-seconds collision class disappears.
+    now_iso = server_now.isoformat()
     conn.execute(
         "UPDATE customer_devices SET status = 'UNBOUND', unbound_at = %s WHERE id = %s",
         (now_iso, device_id),
@@ -357,15 +364,18 @@ def unbind_device(
     # device, bump the epoch (the monotonic trigger allows only upward
     # movement) and pull the lease into the past so fencing rejects any
     # in-flight request from the released credential's session token. The
-    # GREATEST keeps the "immediately expired" lease on the right side of
-    # the ck_customer_session_state_lease_after_created check when the
-    # unbind lands within the same second as the session's creation (a
-    # naive now can sit at or before created_at once microseconds are
-    # trimmed); the lease then expires at most one second after creation.
+    # GREATEST is a defensive same-transaction backstop for the
+    # ck_customer_session_state_lease_after_created check (a hypothetical
+    # future code path creating and unbinding within one transaction would
+    # sample an identical now()); one microsecond — not one second — keeps
+    # the "immediately expired" semantics (PR #47 Codex review P2: a lease
+    # surviving up to a second past the unbind contradicts the acceptance
+    # requirement that revocation invalidates the session immediately).
     session_row = conn.execute(
         "UPDATE customer_session_state "
         "SET session_epoch = session_epoch + 1, "
-        "lease_until = GREATEST(%s::timestamptz, created_at::timestamptz + interval '1 second'), "
+        "lease_until = GREATEST(%s::timestamptz, "
+        "created_at::timestamptz + interval '1 microsecond'), "
         "updated_at = %s "
         "WHERE device_id = %s AND user_id = %s "
         "RETURNING session_id, session_epoch",

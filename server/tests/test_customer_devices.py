@@ -26,7 +26,12 @@ Contract under test (task list §3 T16; dev doc §3.2 / §6.1 / §13.2):
 - stable error codes: 401 ``DEVICE_CREDENTIAL_REQUIRED`` /
   ``DEVICE_CREDENTIAL_INVALID`` / ``DEVICE_REVOKED``, 404 ``DEVICE_NOT_FOUND``
   (missing or foreign device — one answer, no IDOR oracle), 409
-  ``DEVICE_ALREADY_UNBOUND``.
+  ``DEVICE_ALREADY_UNBOUND``;
+- the DELETE carries a mandatory ``Idempotency-Key`` (PR #47 Codex review
+  P2): a client that lost the 204 retries with the same key + same target
+  and replays the sealed 204 — even though its own credential is by then no
+  longer resolvable — while the same key against a different target answers
+  409 ``IDEMPOTENCY_CONFLICT`` (400 ``IDEMPOTENCY_KEY_REQUIRED`` otherwise).
 """
 
 from __future__ import annotations
@@ -36,7 +41,7 @@ import os
 import secrets
 import uuid
 from collections.abc import Iterator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 
 import psycopg
@@ -65,6 +70,7 @@ ACTIVATE_PATH = "/api/customer/activate"
 DEVICES_PATH = "/api/customer/devices"
 IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
 REQUEST_ID_HEADER = "X-Request-Id"
+REPLAY_HEADER = "X-Idempotent-Replay"
 AUTHORIZATION_HEADER = "Authorization"
 FUTURE_EXPIRY = "2099-01-01T00:00:00+00:00"
 
@@ -346,7 +352,10 @@ def test_unbind_releases_slot_keeps_history_and_allows_reuse(
     device_id = customer["device_id"]
     token = customer["device_token"]
 
-    response = client.delete(f"{DEVICES_PATH}/{device_id}", headers=_bearer(token))
+    response = client.delete(
+        f"{DEVICES_PATH}/{device_id}",
+        headers={**_bearer(token), IDEMPOTENCY_KEY_HEADER: "idem-unbind-d2"},
+    )
     assert response.status_code == 204, response.text
 
     # The history row survives: audit is append-only, never deleted.
@@ -385,7 +394,11 @@ def test_unbind_revokes_session_atomically(client: TestClient) -> None:
 
     response = client.delete(
         f"{DEVICES_PATH}/{device_id}",
-        headers={**_bearer(token), REQUEST_ID_HEADER: "req-unbind-d3"},
+        headers={
+            **_bearer(token),
+            IDEMPOTENCY_KEY_HEADER: "idem-unbind-d3",
+            REQUEST_ID_HEADER: "req-unbind-d3",
+        },
     )
     assert response.status_code == 204, response.text
 
@@ -400,14 +413,18 @@ def test_unbind_revokes_session_atomically(client: TestClient) -> None:
             (customer["user_id"],),
         ).fetchone()
     assert session is not None
-    # Epoch bumped from 1 to 2 and the lease is immediately expired: the
-    # device that just lost its binding cannot ride the old session. The
-    # two-second allowance covers the GREATEST alignment against a session
-    # created within the same second as the unbind (lease then expires at
-    # created_at + 1s) plus any PG/Python clock skew.
+    # Epoch bumped from 1 to 2 and the lease is already expired at read
+    # time: the device that just lost its binding cannot ride the old
+    # session. The revoked lease keeps the full PostgreSQL microsecond
+    # precision (PR #47 Codex review P2) — it must not survive into the
+    # future, so the assertion carries no forward allowance: the unbind
+    # transaction committed before this read began, and the fixture PG
+    # clock shares the host clock source.
     assert session[0] == 2
     lease_until = datetime.fromisoformat(str(session[1]))
-    assert lease_until <= datetime.now(UTC) + timedelta(seconds=2)
+    assert lease_until <= datetime.now(UTC), (
+        f"revoked lease must already be expired, got {lease_until!s}"
+    )
     assert logout is not None
     assert logout[0] == "LOGOUT"
     assert logout[1] == "device_unbound"
@@ -417,7 +434,8 @@ def test_unbind_revokes_session_atomically(client: TestClient) -> None:
 def test_delete_missing_device_answers_not_found(client: TestClient) -> None:
     customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-dev-4", suffix="d4")
     response = client.delete(
-        f"{DEVICES_PATH}/{uuid.uuid4()}", headers=_bearer(customer["device_token"])
+        f"{DEVICES_PATH}/{uuid.uuid4()}",
+        headers={**_bearer(customer["device_token"]), IDEMPOTENCY_KEY_HEADER: "idem-unbind-d4"},
     )
     assert response.status_code == 404, response.text
     assert response.json()["detail"]["code"] == "DEVICE_NOT_FOUND"
@@ -428,7 +446,8 @@ def test_delete_foreign_users_device_answers_not_found(client: TestClient) -> No
     first = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-dev-5a", suffix="d5a")
     second = _activated_customer(client, code=SECOND_CODE, fingerprint="fp-dev-5b", suffix="d5b")
     response = client.delete(
-        f"{DEVICES_PATH}/{second['device_id']}", headers=_bearer(first["device_token"])
+        f"{DEVICES_PATH}/{second['device_id']}",
+        headers={**_bearer(first["device_token"]), IDEMPOTENCY_KEY_HEADER: "idem-unbind-d5a"},
     )
     assert response.status_code == 404, response.text
     assert response.json()["detail"]["code"] == "DEVICE_NOT_FOUND"
@@ -455,9 +474,18 @@ def test_delete_already_unbound_answers_conflict(client: TestClient) -> None:
         device_id=str(uuid.uuid4()),
         slot_no=2,
     )
-    first_delete = client.delete(f"{DEVICES_PATH}/{device_id}", headers=_bearer(second_token))
+    first_delete = client.delete(
+        f"{DEVICES_PATH}/{device_id}",
+        headers={**_bearer(second_token), IDEMPOTENCY_KEY_HEADER: "idem-unbind-d6"},
+    )
     assert first_delete.status_code == 204, first_delete.text
-    retry = client.delete(f"{DEVICES_PATH}/{device_id}", headers=_bearer(second_token))
+    # The retry burns a *fresh* key: the same key would legitimately replay
+    # the sealed 204 (the idempotent-unbind contract below), which is not
+    # what this test pins — it pins the fresh-unbind conflict answer.
+    retry = client.delete(
+        f"{DEVICES_PATH}/{device_id}",
+        headers={**_bearer(second_token), IDEMPOTENCY_KEY_HEADER: "idem-unbind-d6-retry"},
+    )
     assert retry.status_code == 409, retry.text
     assert retry.json()["detail"]["code"] == "DEVICE_ALREADY_UNBOUND"
 
@@ -475,7 +503,10 @@ def test_unbind_other_device_keeps_own_slot_and_session(client: TestClient) -> N
     # disturb it (one live session per user, device-scoped revocation).
     response = client.delete(
         f"{DEVICES_PATH}/{second_device_id}",
-        headers=_bearer(customer["device_token"]),
+        headers={
+            **_bearer(customer["device_token"]),
+            IDEMPOTENCY_KEY_HEADER: "idem-unbind-d7",
+        },
     )
     assert response.status_code == 204, response.text
 
@@ -515,7 +546,8 @@ def test_unbound_credential_answers_device_revoked(client: TestClient) -> None:
     device_ids = _device_ids_of_user(customer["user_id"])
     second_device_id = [i for i in device_ids if i != customer["device_id"]][0]
     response = client.delete(
-        f"{DEVICES_PATH}/{second_device_id}", headers=_bearer(customer["device_token"])
+        f"{DEVICES_PATH}/{second_device_id}",
+        headers={**_bearer(customer["device_token"]), IDEMPOTENCY_KEY_HEADER: "idem-unbind-d8"},
     )
     assert response.status_code == 204, response.text
     # …then the second device's own credential must report DEVICE_REVOKED —
@@ -719,6 +751,117 @@ def test_revoked_status_credential_answers_device_revoked(client: TestClient) ->
     response = client.get(DEVICES_PATH, headers=_bearer(token))
     assert response.status_code == 401, response.text
     assert response.json()["detail"]["code"] == "DEVICE_REVOKED"
+
+
+# ---------------------------------------------------------------------------
+# Idempotent unbind (PR #47 Codex review P2): the sealed-204 recovery
+# ---------------------------------------------------------------------------
+
+
+def test_unbind_requires_idempotency_key(client: TestClient) -> None:
+    """The DELETE without an Idempotency-Key answers 400, before anything."""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-dev-11", suffix="d11")
+    response = client.delete(
+        f"{DEVICES_PATH}/{customer['device_id']}", headers=_bearer(customer["device_token"])
+    )
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"]["code"] == "IDEMPOTENCY_KEY_REQUIRED"
+    # The check precedes the credential layer and any envelope write: the
+    # device row is untouched and no envelope was created for the attempt.
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        status = conn.execute(
+            "SELECT status FROM customer_devices WHERE id = %s",
+            (customer["device_id"],),
+        ).fetchone()
+        envelopes = conn.execute(
+            "SELECT count(*) FROM customer_idempotency_envelopes WHERE operation = 'device_unbind'",
+        ).fetchone()
+    assert status is not None and status[0] == "BOUND"
+    assert envelopes is not None and int(envelopes[0]) == 0
+
+
+def test_unbind_replays_sealed_204_after_response_loss(client: TestClient) -> None:
+    """The lost-204 recovery: same key + same target replays the sealed 204.
+
+    The caller unbound its *own* session-riding device, so the credential it
+    retries with is by design no longer resolvable — the recovery probe must
+    run before authentication, and the replay must not re-execute the unbind
+    (one row flip, one epoch bump, one LOGOUT event).
+    """
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-dev-12", suffix="d12")
+    device_id = customer["device_id"]
+    token = customer["device_token"]
+    key = "idem-unbind-replay-d12"
+    first = client.delete(
+        f"{DEVICES_PATH}/{device_id}",
+        headers={
+            **_bearer(token),
+            IDEMPOTENCY_KEY_HEADER: key,
+            REQUEST_ID_HEADER: "req-replay-d12",
+        },
+    )
+    assert first.status_code == 204, first.text
+    assert REPLAY_HEADER not in first.headers
+
+    # The retry rides the same — now unresolvable — credential and the same
+    # key; the sealed envelope answers before authentication ever runs, and
+    # the echoed request id is the sealed one, not a freshly minted one.
+    retry = client.delete(
+        f"{DEVICES_PATH}/{device_id}",
+        headers={**_bearer(token), IDEMPOTENCY_KEY_HEADER: key},
+    )
+    assert retry.status_code == 204, retry.text
+    assert retry.headers.get(REPLAY_HEADER) == "true"
+    assert retry.headers.get(REQUEST_ID_HEADER) == "req-replay-d12"
+
+    # The replay re-executed nothing: exactly one row flip, one epoch bump
+    # (1 -> 2, not 3) and one LOGOUT event.
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT status, unbound_at, revoked_at FROM customer_devices WHERE id = %s",
+            (device_id,),
+        ).fetchone()
+        session = conn.execute(
+            "SELECT session_epoch FROM customer_session_state WHERE user_id = %s",
+            (customer["user_id"],),
+        ).fetchone()
+        logouts = conn.execute(
+            "SELECT count(*) FROM customer_session_events WHERE user_id = %s AND event = 'LOGOUT'",
+            (customer["user_id"],),
+        ).fetchone()
+    assert row is not None and row[0] == "UNBOUND" and row[2] is None
+    assert session is not None and session[0] == 2
+    assert logouts is not None and int(logouts[0]) == 1
+
+
+def test_unbind_same_key_different_target_conflicts(client: TestClient) -> None:
+    """The key identifies one submission: a different target answers 409."""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-dev-13", suffix="d13")
+    second_device_id = str(uuid.uuid4())
+    _second_device_row(
+        user_id=customer["user_id"],
+        activation_code_id=_code_id_of_user(customer["user_id"]),
+        device_id=second_device_id,
+        slot_no=2,
+    )
+    key = "idem-unbind-conflict-d13"
+    headers = {**_bearer(customer["device_token"]), IDEMPOTENCY_KEY_HEADER: key}
+    first = client.delete(f"{DEVICES_PATH}/{second_device_id}", headers=headers)
+    assert first.status_code == 204, first.text
+
+    # Same key, but the target is now the caller's own device: the request
+    # hash differs, so the spent key answers a conflict instead of unbinding.
+    conflict = client.delete(f"{DEVICES_PATH}/{customer['device_id']}", headers=headers)
+    assert conflict.status_code == 409, conflict.text
+    assert conflict.json()["detail"]["code"] == "IDEMPOTENCY_CONFLICT"
+
+    # The second target was never touched.
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        status = conn.execute(
+            "SELECT status FROM customer_devices WHERE id = %s",
+            (customer["device_id"],),
+        ).fetchone()
+    assert status is not None and status[0] == "BOUND"
 
 
 # ---------------------------------------------------------------------------
