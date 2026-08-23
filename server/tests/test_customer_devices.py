@@ -1448,6 +1448,89 @@ def test_approve_revoked_credential_mid_flight_rejected(client: TestClient) -> N
     assert row is not None and row[0] == "PENDING" and row[3] is None
 
 
+def test_approve_rejects_non_first_device_while_first_bound(client: TestClient) -> None:
+    """PR #49 GitHub Codex review P1 (approval scope): §12.2 step 3 — the
+    approval belongs to the *first* currently-bound device
+    (``activation_code_activations.first_device_id``), never to every device
+    sharing the activation code. While the first device is alive and bound,
+    the slot-2 device cannot approve a candidate; the first device's own
+    approval still works; and the authorization precedes the state machine
+    (re-approving an already-APPROVED pairing stays the first device's lane).
+    """
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-pair-23", suffix="p23")
+    # A fresh PENDING pairing while slot 2 is still free.
+    enroll = _enroll(client, code=FIRST_CODE, fingerprint="fp-pair-23-candidate", key="idem-p23")
+    assert enroll.status_code == 202, enroll.text
+    pairing_id = enroll.json()["pairing_request_id"]
+    # Bind slot 2 directly (the T17 enroll flow is not what this test pins).
+    slot2_token = _second_device_row(
+        user_id=customer["user_id"],
+        activation_code_id=_code_id_of_user(customer["user_id"]),
+        device_id=str(uuid.uuid4()),
+        slot_no=2,
+    )
+
+    # The slot-2 device is not the first device: 403, and the pairing row
+    # stays PENDING (the refusal names the lane, no enumeration oracle — the
+    # caller is a legitimate device of this very code).
+    refused = _approve(client, slot2_token, pairing_id)
+    assert refused.status_code == 403, refused.text
+    assert refused.json()["detail"]["code"] == "PAIRING_APPROVER_FORBIDDEN"
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        row = _pairing_row(conn, pairing_id)
+    assert row is not None and row[0] == "PENDING" and row[3] is None
+
+    # The first device approves the very same pairing without friction.
+    approved = _approve(client, customer["device_token"], pairing_id)
+    assert approved.status_code == 200, approved.text
+
+    # The authorization precedes the state machine: an already-APPROVED
+    # pairing is still not re-approvable by the slot-2 device (the 403, not
+    # the first device's idempotent 200 already-approved answer).
+    refused_again = _approve(client, slot2_token, pairing_id)
+    assert refused_again.status_code == 403, refused_again.text
+    assert refused_again.json()["detail"]["code"] == "PAIRING_APPROVER_FORBIDDEN"
+
+
+def test_approve_rejects_slot2_after_first_device_unbound(client: TestClient) -> None:
+    """PR #49 GitHub Codex review P1 (approval scope): once the original
+    first device is unbound while slot 2 stays bound, the surviving slot-2
+    device must not inherit the approval — §12.2 step 3 routes that lane to
+    the administrator verification (the T18 control API, §6.1), not down to
+    the remaining device.
+    """
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-pair-24", suffix="p24")
+    # The full six-step flow binds slot 2 (the first device approves).
+    enroll = _enroll(client, code=FIRST_CODE, fingerprint="fp-pair-24-second", key="idem-p24")
+    assert enroll.status_code == 202, enroll.text
+    pairing_id = enroll.json()["pairing_request_id"]
+    assert _approve(client, customer["device_token"], pairing_id).status_code == 200
+    second = _enroll(client, code=FIRST_CODE, fingerprint="fp-pair-24-second", key="idem-p24")
+    assert second.status_code == 201, second.text
+    slot2_token = second.json()["device_token"]
+
+    # Release the original first device (self-unbind via its own credential).
+    unbind = client.delete(
+        f"{DEVICES_PATH}/{customer['device_id']}",
+        headers={**_bearer(customer["device_token"]), IDEMPOTENCY_KEY_HEADER: "idem-p24-unbind"},
+    )
+    assert unbind.status_code == 204, unbind.text
+
+    # A fresh candidate enrolls (slot 1 is free again).
+    candidate = _enroll(client, code=FIRST_CODE, fingerprint="fp-pair-24-third", key="idem-p24b")
+    assert candidate.status_code == 202, candidate.text
+    new_pairing_id = candidate.json()["pairing_request_id"]
+
+    # The surviving slot-2 device is NOT the first device: 403, the pairing
+    # stays PENDING — the administrator verification (T18) is the only lane.
+    refused = _approve(client, slot2_token, new_pairing_id)
+    assert refused.status_code == 403, refused.text
+    assert refused.json()["detail"]["code"] == "PAIRING_APPROVER_FORBIDDEN"
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        row = _pairing_row(conn, new_pairing_id)
+    assert row is not None and row[0] == "PENDING" and row[3] is None
+
+
 def test_enroll_consume_after_key_rotation_keeps_pairing_version(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

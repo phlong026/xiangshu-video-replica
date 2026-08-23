@@ -481,6 +481,7 @@ APPROVE_APPROVED = "approved"
 APPROVE_ALREADY_APPROVED = "already_approved"
 APPROVE_ALREADY_CONSUMED = "already_consumed"
 APPROVE_EXPIRED = "expired"
+APPROVE_FORBIDDEN = "forbidden"
 APPROVE_NOT_FOUND = "not_found"
 APPROVE_REVOKED = "revoked"
 APPROVE_SELF = "self_approval"
@@ -607,6 +608,15 @@ def approve_pairing_request(
       route's code → devices → pairing order;
     - ``not_found`` — no such pairing, or it belongs to another activation
       code: both answer identically (no IDOR oracle, the DELETE precedent);
+    - ``forbidden`` — the approver is a bound device of this very code but
+      not the *first* device: §12.2 step 3 grants the approval lane to the
+      first currently-bound device (validated against
+      ``activation_code_activations.first_device_id``, written once at
+      activation and never rewritten — an unlocked read is race-free), and
+      once that device is unavailable the lane moves to the T18
+      administrator verification, never down to the surviving slot 2 (PR
+      #49 GitHub Codex review P1). The check runs *before* the state
+      machine, so a non-first device cannot even re-approve;
     - ``expired`` — the request lapsed; the row flips to ``EXPIRED`` here
       (a lapsed APPROVED flips too — its approval lineage stays visible
       while the partial-unique occupancy is released, PR #49 Codex review
@@ -631,6 +641,17 @@ def approve_pairing_request(
     ).fetchone()
     if row is None or str(row[0]) != approver_device.activation_code_id:
         return APPROVE_NOT_FOUND
+    # §12.2 step 3 (PR #49 GitHub Codex review P1): the approval is the
+    # *first* currently-bound device's lane. ``first_device_id`` is written
+    # once at activation and never rewritten, so the unlocked read is
+    # race-free; a missing or NULL fact row fails closed (the pairing is a
+    # post-activation artefact, so the fact row structurally exists).
+    activation_row = conn.execute(
+        "SELECT first_device_id FROM activation_code_activations WHERE code_id = %s",
+        (approver_device.activation_code_id,),
+    ).fetchone()
+    if activation_row is None or str(activation_row[0]) != approver_device.id:
+        return APPROVE_FORBIDDEN
     status = str(row[2])
     if status == PAIRING_CONSUMED:
         return APPROVE_ALREADY_CONSUMED

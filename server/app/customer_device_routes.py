@@ -121,6 +121,7 @@ from app.activation_code_service import (
 from app.customer_device_service import (
     APPROVE_ALREADY_CONSUMED,
     APPROVE_EXPIRED,
+    APPROVE_FORBIDDEN,
     APPROVE_NOT_FOUND,
     APPROVE_REVOKED,
     APPROVE_SELF,
@@ -1163,6 +1164,18 @@ def approve_device_pairing(pairing_id: str, request: Request) -> PairingApproveR
             404,
             "PAIRING_NOT_FOUND",
             "No such pairing request for this device.",
+        )
+    if outcome == APPROVE_FORBIDDEN:
+        # §12.2 step 3 (PR #49 GitHub Codex review P1): the approval is the
+        # first currently-bound device's lane; once that device is
+        # unavailable the lane moves to the administrator verification (the
+        # T18 control API), never down to the surviving slot 2. The caller
+        # is a legitimate device of this very code, so the refusal names
+        # the lane instead of pretending the pairing does not exist.
+        raise _http(
+            403,
+            "PAIRING_APPROVER_FORBIDDEN",
+            "Only the first device may approve a pairing request.",
         )
     if outcome == APPROVE_REVOKED:
         # The approver's binding was released after the authentication
