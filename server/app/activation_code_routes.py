@@ -78,12 +78,26 @@ from app.customer_idempotency import (
     request_hash as compute_request_hash,
 )
 from app.db_pg import get_pg_pool, pg_transaction
+from app.security_rate_limit import (
+    DIMENSION_ACTIVATE_CODE,
+    DIMENSION_ACTIVATE_IP,
+    RateLimitDecision,
+    activation_code_limit,
+    activation_ip_limit,
+    apply_anti_enumeration_delay,
+    consume_rate_limit,
+    failure_alert_active,
+    failure_alert_threshold,
+    rate_limit_window_seconds,
+    record_auth_failure,
+)
 
 logger = logging.getLogger(__name__)
 
 IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
 REQUEST_ID_HEADER = "X-Request-Id"
 REPLAY_HEADER = "X-Idempotent-Replay"
+RETRY_AFTER_HEADER = "Retry-After"
 
 DEVICE_FINGERPRINT_HMAC_KEY_ENV = "VIDEO_REPLICA_DEVICE_FINGERPRINT_HMAC_KEY"
 
@@ -107,6 +121,120 @@ def _http(status: int, code: str, message: str) -> HTTPException:
 def _unavailable() -> HTTPException:
     """The unified code-side rejection (anti-enumeration, ACT-08 groundwork)."""
     return _http(400, "ACTIVATION_UNAVAILABLE", "The activation code cannot be used.")
+
+
+def _is_unified_rejection(exc: HTTPException) -> bool:
+    """Whether the exception is the single code-side 400 rejection."""
+    detail = exc.detail
+    return (
+        exc.status_code == 400
+        and isinstance(detail, dict)
+        and detail.get("code") == "ACTIVATION_UNAVAILABLE"
+    )
+
+
+def _audit_code_rejection(
+    *,
+    code_identifier: str,
+    request_id: str,
+) -> None:
+    """T15 / ACT-08: audit one unified rejection and burn the constant delay.
+
+    The failure event lands in its own autocommit transaction so a rolled-
+    back activation transaction never refunds the audit trail. Recording is
+    best-effort: a flaky audit write must not turn a legal 400 into a 500,
+    so it logs and swallows its own failure. The trailing-window alert
+    threshold is checked here and crosses as an ERROR-level log record —
+    the hook the T37 / OPS-02 alerting pipeline consumes.
+    """
+    try:
+        window = rate_limit_window_seconds()
+        with pg_transaction() as conn:
+            record_auth_failure(
+                conn,
+                dimension=DIMENSION_ACTIVATE_CODE,
+                identifier=code_identifier,
+                request_id=request_id,
+            )
+            if failure_alert_active(
+                conn,
+                dimension=DIMENSION_ACTIVATE_CODE,
+                window_seconds=window,
+                threshold=failure_alert_threshold(),
+            ):
+                logger.error(
+                    "security alert: activation code-side failures crossed the "
+                    "alert threshold (window=%ss threshold=%s)",
+                    window,
+                    failure_alert_threshold(),
+                )
+    except Exception:
+        logger.warning("security failure audit unavailable", exc_info=True)
+    # The constant-cost delay runs even when the audit write failed: the
+    # timing profile must not depend on database health.
+    apply_anti_enumeration_delay()
+
+
+def _probe_replayable_response(
+    conn: psycopg.Connection,
+    *,
+    scope_candidates: list[str],
+    key_digest: str,
+    req_hash: str,
+    response: Response,
+) -> CustomerActivationResponse | None:
+    """Read-only probe for a replayable idempotency envelope (review P2).
+
+    A fully validated, openable replay short-circuits here — the caller
+    returns it *before* the shared rate limiter runs, so a legitimate retry
+    (the client lost the response of an already-successful activation)
+    spends no abuse budget, honouring the T14 contract that retries are
+    side-effect free. Every other outcome — no envelope found, a
+    request-hash conflict, a purged or expired recovery window, a retired
+    key version — returns ``None`` and the request flows on to the original
+    limiter + transaction path, whose checks stay authoritative. The probe
+    never writes: a fall-through pays one extra indexed point read.
+    """
+    for scope_candidate in scope_candidates:
+        record = load_envelope(
+            conn,
+            operation=ACTIVATE_OPERATION,
+            scope=scope_candidate,
+            key_digest=key_digest,
+        )
+        if record is None:
+            continue
+        if record.request_hash != req_hash:
+            return None
+        if record.ciphertext is None or record.key_version is None:
+            return None
+        if record.recovery_expires_at is not None and (
+            datetime.fromisoformat(str(record.recovery_expires_at)) <= datetime.now(UTC)
+        ):
+            return None
+        try:
+            replayed = open_response(
+                record.ciphertext,
+                key=customer_aead_key(record.key_version),
+                aad=envelope_aad(ACTIVATE_OPERATION, scope_candidate, key_digest),
+            )
+        except IdempotencyKeyError:
+            return None
+        replay_request_id = replayed.get("request_id")
+        response.headers[REPLAY_HEADER] = "true"
+        if isinstance(replay_request_id, str) and replay_request_id:
+            response.headers[REQUEST_ID_HEADER] = replay_request_id
+        # The replay is a security-sensitive event (a one-time credential
+        # re-issued from the sealed envelope) — log observably, identifiers
+        # only, never plaintext.
+        logger.info(
+            "customer activation idempotent replay: scope=%s key_version=%s request=%s",
+            scope_candidate,
+            record.key_version,
+            replay_request_id if isinstance(replay_request_id, str) else "-",
+        )
+        return _response_from_payload(replayed)
+    return None
 
 
 def _generate_customer_username() -> str:
@@ -441,10 +569,15 @@ def activate_first_device(
     if not idempotency_key:
         raise _http(400, "IDEMPOTENCY_KEY_REQUIRED", "An Idempotency-Key header is required.")
 
+    # T15 / ACT-08: a normalization failure must not short-circuit — the
+    # request still passes through the shared IP-dimension limiter below, so
+    # a malformed-code burst (format probing) cannot skirt the abuse budget.
+    # The unified rejection (audit + constant delay) fires after the limiter.
+    canonical_code: str | None
     try:
         canonical_code = normalize_activation_code(body.activation_code)
     except InvalidActivationCodeError:
-        raise _unavailable() from None
+        canonical_code = None
 
     fingerprint = body.device_fingerprint.strip()
     device_name = body.device_name.strip()
@@ -469,7 +602,11 @@ def activate_first_device(
     try:
         fingerprint_key_version, hmac_key = _highest_device_domain_key()
         aead_key_version, aead_key = highest_customer_aead_key()
-        code_digests = [digest for digest, _version in iter_code_digests(canonical_code)]
+        code_digests = (
+            [digest for digest, _version in iter_code_digests(canonical_code)]
+            if canonical_code is not None
+            else []
+        )
     except (ActivationKeyError, IdempotencyKeyError):
         logger.warning("activation keys unavailable: configuration is incomplete")
         raise _http(
@@ -491,16 +628,96 @@ def activate_first_device(
     fingerprint_hmac = fingerprint_digests[-1]
     scope_candidates = list(reversed(fingerprint_digests))
     key_digest = idempotency_key_digest(idempotency_key)
+    # canonical_code is None only for malformed codes; those requests are
+    # rejected before any envelope is ever written, so their hash value can
+    # never match a stored envelope — the empty string just keeps the
+    # request-hash dict str-typed.
     req_hash = compute_request_hash(
         {
-            "activation_code": canonical_code,
+            "activation_code": canonical_code or "",
             "device_fingerprint": fingerprint,
             "device_name": device_name,
             "device_platform": device_platform,
         }
     )
-    recovery_seconds = recovery_window_seconds()
     request_id = request.headers.get(REQUEST_ID_HEADER, "").strip() or str(uuid.uuid4())
+
+    # Session review P2 (T15 / ACT-08): a legitimate idempotent retry — the
+    # client lost the response of an already-successful activation — must
+    # replay from the sealed envelope without spending any rate-limit
+    # budget. The T14 contract keeps retries side-effect free; charging
+    # them against the shared code budget would lock a legal user out of
+    # their own cached response after a few network retries. Only a fully
+    # validated, openable replay short-circuits here; every other envelope
+    # state falls through to the original flow below.
+    with pg_transaction() as conn:
+        replayed_response = _probe_replayable_response(
+            conn,
+            scope_candidates=scope_candidates,
+            key_digest=key_digest,
+            req_hash=req_hash,
+            response=response,
+        )
+    if replayed_response is not None:
+        return replayed_response
+
+    # T15 / ACT-08: the shared PG-backed rate limiter. The IP dimension is
+    # consumed by *every* activation attempt — malformed codes included, or
+    # a format-probing burst would bypass the abuse budget. The code
+    # dimension exists to stop one real code being hammered; a malformed
+    # input has no digest, so it draws no code-dimension budget (the failure
+    # audit still counts it under the fixed "malformed" identifier). Both
+    # are consumed in one autocommit transaction *outside* the activation
+    # transaction below: the budget must never be refunded when the business
+    # transaction rolls back — a rejected attempt is exactly what the
+    # limiter exists to count, and every API instance behind the load
+    # balancer draws from this same PostgreSQL budget.
+    client_ip = request.client.host if request.client is not None else "unknown"
+    _window_seconds = rate_limit_window_seconds()
+    with pg_transaction() as conn:
+        ip_decision = consume_rate_limit(
+            conn,
+            dimension=DIMENSION_ACTIVATE_IP,
+            identifier=client_ip,
+            limit=activation_ip_limit(),
+            window_seconds=_window_seconds,
+        )
+        code_decision: RateLimitDecision | None = None
+        if code_digests:
+            code_decision = consume_rate_limit(
+                conn,
+                dimension=DIMENSION_ACTIVATE_CODE,
+                identifier=code_digests[0],
+                limit=activation_code_limit(),
+                window_seconds=_window_seconds,
+            )
+    if not ip_decision.allowed or (code_decision is not None and not code_decision.allowed):
+        retry_after = max(
+            ip_decision.retry_after_seconds,
+            code_decision.retry_after_seconds if code_decision is not None else 0,
+        )
+        # The 429 leaves via raise, so the header rides the exception —
+        # mutating the response object here would be lost on the error path.
+        blocked = _http(
+            429,
+            "RATE_LIMITED",
+            "Too many activation attempts; retry later.",
+        )
+        blocked.headers = {RETRY_AFTER_HEADER: str(retry_after)}
+        raise blocked
+
+    if canonical_code is None:
+        # T15 / ACT-08: the malformed rejection joins the unified audit and
+        # constant-delay path (no valid digest exists for it — the fixed
+        # "malformed" identifier keeps the failure countable).
+        _audit_code_rejection(
+            code_identifier="malformed",
+            request_id=request.headers.get(REQUEST_ID_HEADER, "").strip() or str(uuid.uuid4()),
+        )
+        raise _unavailable() from None
+    assert canonical_code is not None  # the malformed branch above returned
+
+    recovery_seconds = recovery_window_seconds()
 
     try:
         with pg_transaction() as conn:
@@ -658,6 +875,17 @@ def activate_first_device(
                 "USER_ALREADY_ACTIVATED",
                 "This device already holds a customer activation.",
             ) from exc
+        raise
+    except HTTPException as exc:
+        # T15 / ACT-08: the unified code-side rejection is audited and pays
+        # the constant anti-enumeration delay on its way out, so unknown,
+        # expired, suspended, revoked and already-active codes share one
+        # response body *and* one latency profile.
+        if _is_unified_rejection(exc):
+            _audit_code_rejection(
+                code_identifier=code_digests[0],
+                request_id=request_id,
+            )
         raise
 
     response.headers[REQUEST_ID_HEADER] = request_id

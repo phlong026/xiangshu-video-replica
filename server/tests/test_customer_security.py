@@ -1,0 +1,760 @@
+"""T15 / ACT-08 — shared multi-instance rate limiting and anti-enumeration.
+
+Fail-first tests for the frozen files ``server/app/security_rate_limit.py``
+and migration ``032_security_rate_limits``: the activation/login abuse
+controls that must hold across *every* API instance behind the load
+balancer (ACT-08 red line: in-process rate limiting is not a multi-API
+answer — the counter state lives in PostgreSQL so a second API instance
+sees the exact same budget).
+
+Contract under test (task list §3 T15 / §12.2 ACT-08; acceptance spec §6):
+
+- fixed-window counters keyed by dimension (``activate:ip``,
+  ``activate:code``, ``login:ip``, ``login:account``) share one row per
+  bucket in PG: two independent connections — two API instances — draw
+  from the same budget atomically;
+- exceeding a limit answers 429 ``RATE_LIMITED`` with a ``Retry-After``
+  header in seconds until the window closes;
+- the window resets after expiry, dimensions stay independent, and the
+  identifier for the code dimension is the keyed digest — never the
+  plaintext activation code;
+- every code-side rejection is recorded as a security failure event
+  (append-only), aggregatable into failure metrics and an alert
+  threshold for operators;
+- the unified rejection path pays a constant anti-enumeration delay so
+  unknown, expired, suspended, revoked and already-active codes share
+  one latency profile (timing side channel).
+"""
+
+from __future__ import annotations
+
+import base64
+import os
+import secrets
+import time
+from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+import psycopg
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from app.activation_code_service import (
+    ACTIVATION_CODE_HMAC_KEY_ENV,
+    compute_code_digest,
+)
+from app.db_pg import DATABASE_URL_ENV, close_pg_pool
+
+DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
+SKIP_REASON = "PostgreSQL fixture not reachable; start it via scripts/pg-fixture.sh start"
+
+T15_DB_NAME = "t15_customer_security_test"
+
+TEST_KEY = secrets.token_urlsafe(48)  # code HMAC key (v1), never a real secret
+TEST_FINGERPRINT_KEY = secrets.token_urlsafe(48)
+TEST_ENVELOPE_AEAD_KEY = secrets.token_bytes(32)
+
+ACTIVATE_PATH = "/api/customer/activate"
+IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
+FUTURE_EXPIRY = "2099-01-01T00:00:00+00:00"
+
+# Canonical Crockford-shaped codes (prefix + 4 groups x 7 characters, no
+# O/I/L/U confusables so normalization is the identity on them).
+UNKNOWN_CODE = "XS04-AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD"
+BURST_CODE = "XS04-CCCCCCC-DDDDDDD-EEEEEEE-FFFFFFF"
+UNKNOWN_ZZ_CODE = "XS04-ZZZZZZZ-ZZZZZZZ-ZZZZZZZ-ZZZZZZZ"
+EXPIRED_CODE = "XS04-DEADBEE-DEADBEE-DEADBEE-DEADBEE"
+MALFORMED_CODE = "not-a-code!!"
+
+COUNTERS_TABLE = "security_rate_limit_counters"
+FAILURES_TABLE = "security_auth_failures"
+
+
+def _pg_dsn() -> str:
+    return os.environ.get("TEST_POSTGRESQL_URL", DEFAULT_DSN)
+
+
+def _admin_dsn() -> str:
+    return _pg_dsn().rsplit("/", 1)[0] + "/postgres"
+
+
+def _t15_dsn() -> str:
+    return _pg_dsn().rsplit("/", 1)[0] + f"/{T15_DB_NAME}"
+
+
+def _pg_available(dsn: str) -> bool:
+    try:
+        conn = psycopg.connect(dsn, connect_timeout=3)
+        conn.close()
+    except Exception:
+        return False
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Module-level units (no database) — these always run (T14 fixture-skip
+# precedent: a machine without the fixture must not report vacuous green).
+# ---------------------------------------------------------------------------
+
+
+def test_bucket_key_joins_dimension_and_identifier() -> None:
+    from app.security_rate_limit import bucket_key
+
+    key = bucket_key("activate:ip", "203.0.113.9")
+    assert key == "activate:ip|203.0.113.9"
+    assert bucket_key("login:account", "digest-abc") == "login:account|digest-abc"
+    assert bucket_key("activate:ip", "a") != bucket_key("activate:ip", "b")
+
+
+def test_rate_limit_env_overrides_and_fallbacks(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.security_rate_limit import (
+        DEFAULT_ACTIVATE_CODE_LIMIT,
+        DEFAULT_ACTIVATE_IP_LIMIT,
+        DEFAULT_FAILURE_ALERT_THRESHOLD,
+        DEFAULT_WINDOW_SECONDS,
+        activation_code_limit,
+        activation_ip_limit,
+        failure_alert_threshold,
+        rate_limit_window_seconds,
+    )
+
+    monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_ACTIVATE_IP", "3")
+    assert activation_ip_limit() == 3
+    monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_ACTIVATE_CODE", "2")
+    assert activation_code_limit() == 2
+    monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_WINDOW_SECONDS", "60")
+    assert rate_limit_window_seconds() == 60
+    monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_FAILURE_ALERT_THRESHOLD", "7")
+    assert failure_alert_threshold() == 7
+
+    # Non-numeric or non-positive values fall back to the safe defaults —
+    # a typo in the environment must never disable the limits.
+    for name in (
+        "VIDEO_REPLICA_RATE_LIMIT_ACTIVATE_IP",
+        "VIDEO_REPLICA_RATE_LIMIT_ACTIVATE_CODE",
+        "VIDEO_REPLICA_RATE_LIMIT_WINDOW_SECONDS",
+        "VIDEO_REPLICA_RATE_LIMIT_FAILURE_ALERT_THRESHOLD",
+    ):
+        monkeypatch.setenv(name, "not-a-number")
+    assert activation_ip_limit() == DEFAULT_ACTIVATE_IP_LIMIT
+    assert activation_code_limit() == DEFAULT_ACTIVATE_CODE_LIMIT
+    assert rate_limit_window_seconds() == DEFAULT_WINDOW_SECONDS
+    assert failure_alert_threshold() == DEFAULT_FAILURE_ALERT_THRESHOLD
+    for name in (
+        "VIDEO_REPLICA_RATE_LIMIT_ACTIVATE_IP",
+        "VIDEO_REPLICA_RATE_LIMIT_ACTIVATE_CODE",
+        "VIDEO_REPLICA_RATE_LIMIT_WINDOW_SECONDS",
+        "VIDEO_REPLICA_RATE_LIMIT_FAILURE_ALERT_THRESHOLD",
+    ):
+        monkeypatch.setenv(name, "0")
+    assert activation_ip_limit() == DEFAULT_ACTIVATE_IP_LIMIT
+    assert activation_code_limit() == DEFAULT_ACTIVATE_CODE_LIMIT
+    assert rate_limit_window_seconds() == DEFAULT_WINDOW_SECONDS
+    assert failure_alert_threshold() == DEFAULT_FAILURE_ALERT_THRESHOLD
+
+
+def test_anti_enumeration_delay_costs_a_constant_baseline() -> None:
+    """The unified rejection must burn measurable constant work (timing)."""
+    from app.security_rate_limit import apply_anti_enumeration_delay
+
+    started = time.perf_counter()
+    apply_anti_enumeration_delay()
+    first = time.perf_counter() - started
+    started = time.perf_counter()
+    apply_anti_enumeration_delay()
+    second = time.perf_counter() - started
+    # Both invocations clear a small floor and stay within a generous
+    # ceiling: the point is a constant cost profile, not exact duration.
+    assert first >= 0.002, f"delay too cheap to mask timing: {first}"
+    assert second >= 0.002, f"delay too cheap to mask timing: {second}"
+    assert first < 2.0 and second < 2.0
+
+
+# ---------------------------------------------------------------------------
+# PostgreSQL integration (dedicated migrated fixture database)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def security_dsn() -> Iterator[str]:
+    from alembic import command
+    from alembic.config import Config
+
+    if not _pg_available(_pg_dsn()):
+        pytest.skip(SKIP_REASON)
+    with psycopg.connect(_admin_dsn(), autocommit=True) as conn:
+        conn.execute(f'DROP DATABASE IF EXISTS "{T15_DB_NAME}" WITH (FORCE)')
+        conn.execute(f'CREATE DATABASE "{T15_DB_NAME}"')
+    server_dir = Path(__file__).resolve().parent.parent
+    config = Config(str(server_dir / "alembic.ini"))
+    config.set_main_option("script_location", str(server_dir / "migrations"))
+    config.set_main_option(
+        "sqlalchemy.url", _t15_dsn().replace("postgresql://", "postgresql+psycopg://")
+    )
+    command.upgrade(config, "head")
+    with psycopg.connect(_t15_dsn(), autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO users (id, username, display_name, role) "
+            "VALUES ('admin_u', 'admin_u', 'Admin User', 'admin') "
+            "ON CONFLICT (id) DO NOTHING"
+        )
+    try:
+        yield _t15_dsn()
+    finally:
+        with psycopg.connect(_admin_dsn(), autocommit=True) as conn:
+            conn.execute(f'DROP DATABASE IF EXISTS "{T15_DB_NAME}" WITH (FORCE)')
+
+
+@pytest.fixture()
+def clean_counters(security_dsn: str) -> Iterator[str]:
+    with psycopg.connect(_t15_dsn(), autocommit=True) as conn:
+        conn.execute(f"TRUNCATE {COUNTERS_TABLE}")
+        conn.execute(f"TRUNCATE {FAILURES_TABLE}")
+    yield security_dsn
+
+
+def test_consume_window_allows_then_blocks(clean_counters: str) -> None:
+    from app.security_rate_limit import consume_rate_limit
+
+    with psycopg.connect(_t15_dsn()) as conn:
+        for i in range(3):
+            decision = consume_rate_limit(
+                conn,
+                dimension="activate:ip",
+                identifier="198.51.100.7",
+                limit=3,
+                window_seconds=300,
+            )
+            assert decision.allowed, f"request {i + 1} must pass under the limit"
+            assert decision.retry_after_seconds == 0
+        blocked = consume_rate_limit(
+            conn,
+            dimension="activate:ip",
+            identifier="198.51.100.7",
+            limit=3,
+            window_seconds=300,
+        )
+        assert not blocked.allowed
+        assert blocked.retry_after_seconds > 0
+        assert blocked.retry_after_seconds <= 300
+
+
+def test_window_resets_after_expiry(clean_counters: str) -> None:
+    from app.security_rate_limit import consume_rate_limit
+
+    now = datetime.now(UTC).replace(microsecond=0)
+    with psycopg.connect(_t15_dsn()) as conn:
+        # Burn the whole budget inside a window that started long ago.
+        past = now - timedelta(seconds=1000)
+        for _ in range(3):
+            decision = consume_rate_limit(
+                conn,
+                dimension="activate:ip",
+                identifier="198.51.100.8",
+                limit=3,
+                window_seconds=300,
+                now=past,
+            )
+            assert decision.allowed
+        expired = consume_rate_limit(
+            conn,
+            dimension="activate:ip",
+            identifier="198.51.100.8",
+            limit=3,
+            window_seconds=300,
+            now=past,
+        )
+        assert not expired.allowed
+        # The same bucket in the present must start a fresh window.
+        fresh = consume_rate_limit(
+            conn,
+            dimension="activate:ip",
+            identifier="198.51.100.8",
+            limit=3,
+            window_seconds=300,
+            now=now,
+        )
+        assert fresh.allowed
+
+
+def test_dimensions_are_independent(clean_counters: str) -> None:
+    from app.security_rate_limit import consume_rate_limit
+
+    with psycopg.connect(_t15_dsn()) as conn:
+        for _ in range(3):
+            assert consume_rate_limit(
+                conn,
+                dimension="activate:code",
+                identifier="digest-shared",
+                limit=3,
+                window_seconds=300,
+            ).allowed
+        assert not consume_rate_limit(
+            conn,
+            dimension="activate:code",
+            identifier="digest-shared",
+            limit=3,
+            window_seconds=300,
+        ).allowed
+        # The IP dimension is untouched by the exhausted code dimension...
+        assert consume_rate_limit(
+            conn,
+            dimension="activate:ip",
+            identifier="198.51.100.9",
+            limit=3,
+            window_seconds=300,
+        ).allowed
+        # ...and a different code identifier has its own budget.
+        assert consume_rate_limit(
+            conn,
+            dimension="activate:code",
+            identifier="digest-other",
+            limit=3,
+            window_seconds=300,
+        ).allowed
+
+
+def test_counter_shared_across_connections(clean_counters: str) -> None:
+    """ACT-08 red line: two API instances share one budget in PG.
+
+    Two independent pooled connections alternate the consumption for one
+    bucket; with an in-process limiter each connection would own a private
+    counter and the pair would allow 6 hits — the shared PG counter must
+    block the 4th.
+
+    Both connections are autocommit: each consumption is one complete
+    transaction whose row lock releases on return, exactly like the
+    production ``pg_transaction()`` scope. Without it the two open
+    transactions would deadlock on the bucket's row lock.
+    """
+    from app.security_rate_limit import consume_rate_limit
+
+    first = psycopg.connect(_t15_dsn(), autocommit=True)
+    second = psycopg.connect(_t15_dsn(), autocommit=True)
+    try:
+        # Three consumptions alternate across the two connections (two API
+        # instances) and all pass — the budget is shared, not per-connection.
+        for index, conn in enumerate((first, second, first)):
+            decision = consume_rate_limit(
+                conn,
+                dimension="login:account",
+                identifier="user-42",
+                limit=3,
+                window_seconds=300,
+            )
+            assert decision.allowed, f"hit {index + 1} must share the budget"
+        # The 4th hit — from the other connection — draws from the same
+        # exhausted budget: an in-process limiter would have allowed it.
+        blocked = consume_rate_limit(
+            second,
+            dimension="login:account",
+            identifier="user-42",
+            limit=3,
+            window_seconds=300,
+        )
+        assert not blocked.allowed
+    finally:
+        first.close()
+        second.close()
+
+
+def test_record_failure_and_metrics(clean_counters: str) -> None:
+    from app.security_rate_limit import failure_metrics, record_auth_failure
+
+    now = datetime.now(UTC).replace(microsecond=0)
+    with psycopg.connect(_t15_dsn()) as conn:
+        for i in range(4):
+            record_auth_failure(
+                conn,
+                dimension="activate:code",
+                identifier="digest-abc",
+                request_id=f"req-{i}",
+                now=now - timedelta(seconds=i * 10),
+            )
+        assert failure_metrics(conn, dimension="activate:code", window_seconds=300, now=now) == 4
+        assert failure_metrics(conn, dimension="activate:ip", window_seconds=300, now=now) == 0
+
+
+def test_failure_metrics_window_scoping(clean_counters: str) -> None:
+    from app.security_rate_limit import failure_metrics, record_auth_failure
+
+    now = datetime.now(UTC).replace(microsecond=0)
+    with psycopg.connect(_t15_dsn()) as conn:
+        record_auth_failure(
+            conn,
+            dimension="login:account",
+            identifier="user-7",
+            request_id="req-old",
+            now=now - timedelta(seconds=1000),
+        )
+        record_auth_failure(
+            conn,
+            dimension="login:account",
+            identifier="user-7",
+            request_id="req-new",
+            now=now - timedelta(seconds=30),
+        )
+        assert failure_metrics(conn, dimension="login:account", window_seconds=300, now=now) == 1
+
+
+def test_failure_alert_threshold(clean_counters: str) -> None:
+    from app.security_rate_limit import failure_alert_active, record_auth_failure
+
+    now = datetime.now(UTC).replace(microsecond=0)
+    with psycopg.connect(_t15_dsn()) as conn:
+        for i in range(3):
+            record_auth_failure(
+                conn,
+                dimension="activate:ip",
+                identifier="203.0.113.77",
+                request_id=f"req-{i}",
+                now=now - timedelta(seconds=i),
+            )
+        assert not failure_alert_active(
+            conn, dimension="activate:ip", window_seconds=300, threshold=5, now=now
+        )
+        for i in range(3, 5):
+            record_auth_failure(
+                conn,
+                dimension="activate:ip",
+                identifier="203.0.113.77",
+                request_id=f"req-{i}",
+                now=now - timedelta(seconds=i),
+            )
+        assert failure_alert_active(
+            conn, dimension="activate:ip", window_seconds=300, threshold=5, now=now
+        )
+
+
+def test_failure_record_holds_no_plaintext_code(clean_counters: str) -> None:
+    """The code-dimension identifier must be a digest, never the code."""
+    from app.security_rate_limit import record_auth_failure
+
+    plaintext = "XS04-AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD"
+    digest = compute_code_digest(plaintext, key=TEST_KEY.encode("utf-8"))
+    now = datetime.now(UTC).replace(microsecond=0)
+    with psycopg.connect(_t15_dsn()) as conn:
+        record_auth_failure(
+            conn,
+            dimension="activate:code",
+            identifier=digest,
+            request_id="req-1",
+            now=now,
+        )
+        row = conn.execute(
+            f"SELECT identifier FROM {FAILURES_TABLE} WHERE request_id = 'req-1'"
+        ).fetchone()
+        assert row is not None
+        assert plaintext not in str(row[0])
+        assert str(row[0]) == digest
+
+
+# ---------------------------------------------------------------------------
+# Route integration: the activation endpoint behind the shared limiter
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def route_state(security_dsn: str) -> Iterator[str]:
+    close_pg_pool()
+    with psycopg.connect(_t15_dsn(), autocommit=True) as conn:
+        conn.execute(
+            "TRUNCATE customer_session_events, customer_session_state, "
+            "customer_idempotency_envelopes, "
+            "customer_devices, activation_code_events, activation_code_activations, "
+            "activation_code_deliveries, activation_code_exports, activation_codes, "
+            "activation_code_batches, admin_write_idempotency, admin_sessions, "
+            "wallet_transactions, recharge_orders, wallets, users, "
+            f"{COUNTERS_TABLE}, {FAILURES_TABLE} CASCADE"
+        )
+        conn.execute(
+            "INSERT INTO users (id, username, display_name, role) "
+            "VALUES ('admin_u', 'admin_u', 'Admin User', 'admin')"
+        )
+    yield security_dsn
+    close_pg_pool()
+
+
+@pytest.fixture()
+def customer_app(monkeypatch: pytest.MonkeyPatch, route_state: str) -> Iterator[FastAPI]:
+    from app.activation_code_routes import router as activation_code_router
+
+    app = FastAPI()
+    app.include_router(activation_code_router)
+    monkeypatch.setenv(DATABASE_URL_ENV, route_state)
+    monkeypatch.delenv("VIDEO_REPLICA_CUSTOMER_PRODUCTION", raising=False)
+    monkeypatch.setenv(ACTIVATION_CODE_HMAC_KEY_ENV, TEST_KEY)
+    monkeypatch.setenv("VIDEO_REPLICA_DEVICE_FINGERPRINT_HMAC_KEY", TEST_FINGERPRINT_KEY)
+    monkeypatch.setenv(
+        "VIDEO_REPLICA_CUSTOMER_IDEMPOTENCY_AEAD_KEY",
+        base64.urlsafe_b64encode(TEST_ENVELOPE_AEAD_KEY).decode("ascii").rstrip("="),
+    )
+    # Small budgets so the 429 path is reachable within a couple of calls.
+    monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_ACTIVATE_IP", "2")
+    monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_ACTIVATE_CODE", "2")
+    monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_WINDOW_SECONDS", "300")
+    # The anti-enumeration delay is monkeypatched to a no-op in the fast
+    # route cases; its constant-cost property has its own unit test above.
+    monkeypatch.setattr("app.activation_code_routes.apply_anti_enumeration_delay", lambda: None)
+    yield app
+
+
+@pytest.fixture()
+def client(customer_app: FastAPI) -> Iterator[TestClient]:
+    with TestClient(customer_app) as test_client:
+        yield test_client
+
+
+def _activate_body(code: str = UNKNOWN_CODE, fingerprint: str = "fp-t15-1") -> dict[str, str]:
+    return {
+        "activation_code": code,
+        "device_fingerprint": fingerprint,
+        "device_name": "Test Device",
+        "device_platform": "windows",
+    }
+
+
+def _activate(client: TestClient, code: str, fingerprint: str, key_suffix: str) -> object:
+    return client.post(
+        ACTIVATE_PATH,
+        json=_activate_body(code, fingerprint),
+        headers={IDEMPOTENCY_KEY_HEADER: f"idem-{key_suffix}"},
+    )
+
+
+def test_activate_returns_429_with_retry_after(client: TestClient) -> None:
+    # Two failed attempts exhaust the IP budget of 2 (the TestClient host
+    # is one fixed client address for every call). The code is well-formed
+    # but unknown, so each attempt walks the full path — limiter, main
+    # transaction, unified rejection — and actually spends the budget.
+    for suffix in ("a", "b"):
+        response = _activate(client, UNKNOWN_CODE, f"fp-{suffix}", suffix)
+        assert response.status_code == 400
+        assert response.json()["detail"]["code"] == "ACTIVATION_UNAVAILABLE"
+    blocked = _activate(client, UNKNOWN_CODE, "fp-c", "c")
+    assert blocked.status_code == 429
+    assert blocked.json()["detail"]["code"] == "RATE_LIMITED"
+    retry_after = blocked.headers.get("Retry-After")
+    assert retry_after is not None and retry_after.isdigit()
+    assert 0 < int(retry_after) <= 300
+
+
+def test_malformed_requests_share_the_ip_budget(client: TestClient) -> None:
+    """A malformed-code burst must not skirt the IP-dimension limiter.
+
+    Normalization failures have no code digest, but they still spend the
+    IP budget — otherwise format probing would bypass the abuse control
+    entirely (each request below would early-exit before the limiter).
+    """
+    for suffix in ("m1", "m2"):
+        response = _activate(client, MALFORMED_CODE, f"fp-malformed-{suffix}", suffix)
+        assert response.status_code == 400
+        assert response.json()["detail"]["code"] == "ACTIVATION_UNAVAILABLE"
+    blocked = _activate(client, MALFORMED_CODE, "fp-malformed-3", "m3")
+    assert blocked.status_code == 429
+    assert blocked.json()["detail"]["code"] == "RATE_LIMITED"
+
+
+def test_activate_code_dimension_blocks_code_burst(customer_app: FastAPI) -> None:
+    """One code hammered from distinct addresses hits its own budget.
+
+    Each request below arrives from its own client address, so the IP
+    dimension never trips (budget 2 per address, one hit each): only the
+    shared code-dimension counter can produce the third 429 — which is
+    exactly the multi-instance guarantee the red line demands.
+    """
+    addresses = ["203.0.113.10", "203.0.113.11", "203.0.113.12"]
+    for index, address in enumerate(addresses):
+        with TestClient(customer_app, client=(address, 51200 + index)) as scoped:
+            response = _activate(scoped, BURST_CODE, f"fp-code-{index}", f"code-{index}")
+            expected = 429 if index == 2 else 400
+            assert response.status_code == expected, (
+                f"request {index + 1} from {address}: expected {expected}, "
+                f"got {response.status_code} {response.json()}"
+            )
+
+
+def test_unified_rejection_records_failure(client: TestClient) -> None:
+    for suffix in ("a",):
+        response = _activate(client, UNKNOWN_CODE, f"fp-fail-{suffix}", suffix)
+        assert response.status_code == 400
+    with psycopg.connect(_t15_dsn()) as conn:
+        rows = conn.execute(f"SELECT dimension, identifier FROM {FAILURES_TABLE}").fetchall()
+    assert rows, "the unified rejection must leave a failure event"
+    code_rows = [row for row in rows if row[0] == "activate:code"]
+    assert code_rows, "the code dimension must be recorded"
+    for row in code_rows:
+        assert "XS04" not in str(row[1])
+
+
+def test_unified_rejection_applies_anti_enumeration_delay(
+    monkeypatch: pytest.MonkeyPatch, route_state: str
+) -> None:
+    """Every unified-rejection path pays the constant delay (timing side channel)."""
+    calls: list[float] = []
+
+    def _fake_delay() -> None:
+        calls.append(time.perf_counter())
+
+    from app import activation_code_routes
+
+    monkeypatch.setattr(activation_code_routes, "apply_anti_enumeration_delay", _fake_delay)
+    app = FastAPI()
+    app.include_router(activation_code_routes.router)
+    monkeypatch.setenv(DATABASE_URL_ENV, route_state)
+    monkeypatch.delenv("VIDEO_REPLICA_CUSTOMER_PRODUCTION", raising=False)
+    monkeypatch.setenv(ACTIVATION_CODE_HMAC_KEY_ENV, TEST_KEY)
+    monkeypatch.setenv("VIDEO_REPLICA_DEVICE_FINGERPRINT_HMAC_KEY", TEST_FINGERPRINT_KEY)
+    monkeypatch.setenv(
+        "VIDEO_REPLICA_CUSTOMER_IDEMPOTENCY_AEAD_KEY",
+        base64.urlsafe_b64encode(TEST_ENVELOPE_AEAD_KEY).decode("ascii").rstrip("="),
+    )
+    monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_ACTIVATE_IP", "10")
+    monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_ACTIVATE_CODE", "10")
+
+    with TestClient(app) as test_client:
+        # Unknown (well-formed) code.
+        first = _activate(test_client, UNKNOWN_ZZ_CODE, "fp-delay-1", "d1")
+        assert first.status_code == 400
+        # Malformed code (normalization failure).
+        second = _activate(test_client, MALFORMED_CODE, "fp-delay-2", "d2")
+        assert second.status_code == 400
+        # An expired batch: seed a code whose batch already expired.
+        with psycopg.connect(_t15_dsn(), autocommit=True) as conn:
+            conn.execute(
+                "INSERT INTO activation_code_batches "
+                "(id, name, face_value_fen, unit_price_fen_snapshot, credits_snapshot, "
+                "quantity, activation_expires_at, status, created_by_user_id, created_at) "
+                "VALUES ('batch-exp', 'expired', 1500, 1000, 100, 1, "
+                "'2020-01-01T00:00:00+00:00', 'OPEN', 'admin_u', "
+                "'2019-01-01T00:00:00+00:00')"
+            )
+            expired_digest = compute_code_digest(EXPIRED_CODE, key=TEST_KEY.encode("utf-8"))
+            conn.execute(
+                "INSERT INTO activation_codes "
+                "(id, batch_id, code_digest, digest_key_version, masked_code, "
+                "status, issued_at) "
+                "VALUES ('code-exp', 'batch-exp', %s, 1, 'XS04-****', "
+                "'ISSUED', '2019-06-01T00:00:00+00:00')",
+                (expired_digest,),
+            )
+        third = _activate(test_client, EXPIRED_CODE, "fp-delay-3", "d3")
+        assert third.status_code == 400
+
+    assert len(calls) == 3, (
+        "unknown, malformed and expired codes must all run the constant "
+        f"anti-enumeration delay (got {len(calls)})"
+    )
+
+
+def test_idempotent_replay_spends_no_rate_limit_budget(client: TestClient) -> None:
+    """Session review P2: a legitimate idempotent retry replays without paying.
+
+    The client lost the response of an already-successful activation and
+    retries with the same Idempotency-Key: the sealed envelope answers the
+    replay (201 + X-Idempotent-Replay) *before* the shared limiter runs,
+    so no rate-limit budget is spent. With IP and code budgets of 2, three
+    replays after one successful activation leave exactly one IP hit for
+    a fresh request, and the one after that trips the limiter — proving
+    the replays above drew nothing from the shared budget.
+    """
+    with psycopg.connect(_t15_dsn(), autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO activation_code_batches "
+            "(id, name, face_value_fen, unit_price_fen_snapshot, credits_snapshot, "
+            "quantity, activation_expires_at, status, created_by_user_id) "
+            "VALUES ('batch-replay', 'replay', 1500, 1000, 100, 1, "
+            f"'{FUTURE_EXPIRY}', 'OPEN', 'admin_u')"
+        )
+        digest = compute_code_digest(BURST_CODE, key=TEST_KEY.encode("utf-8"))
+        conn.execute(
+            "INSERT INTO activation_codes "
+            "(id, batch_id, code_digest, digest_key_version, masked_code, "
+            "status, issued_at) "
+            "VALUES ('code-replay', 'batch-replay', %s, 1, 'XS04-****', "
+            "'ISSUED', '2026-01-01T00:00:00+00:00')",
+            (digest,),
+        )
+
+    # One successful activation spends exactly one IP and one code hit.
+    first = _activate(client, BURST_CODE, "fp-replay", "replay")
+    assert first.status_code == 201, first.text
+    assert "username" in first.json()
+    assert "X-Idempotent-Replay" not in first.headers
+
+    # Same key, same body: the sealed envelope answers, zero budget spent.
+    for _ in range(3):
+        replay = _activate(client, BURST_CODE, "fp-replay", "replay")
+        assert replay.status_code == 201, replay.text
+        assert replay.headers.get("X-Idempotent-Replay") == "true"
+
+    # One IP hit remains out of the budget of 2: a fresh request passes
+    # (and answers the unified 400 for an unknown code)…
+    fresh = _activate(client, UNKNOWN_CODE, "fp-fresh", "fresh")
+    assert fresh.status_code == 400
+    # …and the next one trips the shared limiter.
+    blocked = _activate(client, UNKNOWN_CODE, "fp-blocked", "blocked")
+    assert blocked.status_code == 429
+    assert blocked.json()["detail"]["code"] == "RATE_LIMITED"
+
+
+def test_downgrade_refuses_once_failures_exist(security_dsn: str) -> None:
+    """Session review P3: the 032 downgrade guards the audit trail.
+
+    ``security_auth_failures`` is append-only audit evidence — once any
+    event exists, the downgrade must refuse loudly (026/028 guard
+    precedent) instead of dropping the table and destroying the record.
+    Runs last in this module: it cycles the shared fixture database
+    through a downgrade/upgrade round-trip.
+    """
+    from alembic import command
+    from alembic.config import Config
+
+    server_dir = Path(__file__).resolve().parent.parent
+    config = Config(str(server_dir / "alembic.ini"))
+    config.set_main_option("script_location", str(server_dir / "migrations"))
+    config.set_main_option(
+        "sqlalchemy.url", _t15_dsn().replace("postgresql://", "postgresql+psycopg://")
+    )
+
+    # One audited failure event is enough to block the downgrade.
+    with psycopg.connect(_t15_dsn(), autocommit=True) as conn:
+        conn.execute(
+            f"INSERT INTO {FAILURES_TABLE} "
+            "(id, dimension, identifier, request_id, occurred_at) "
+            "VALUES ('fail-guard', 'activate:code', 'digest-guard', 'req-guard', "
+            "'2026-08-23T00:00:00+00:00')"
+        )
+    with pytest.raises(RuntimeError, match="cannot downgrade 032_security_rate_limits"):
+        command.downgrade(config, "029_customer_sessions_and_idempotency")
+
+    # The refusal left the schema untouched at head.
+    with psycopg.connect(_t15_dsn()) as conn:
+        version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+    assert version == "032_security_rate_limits"
+
+    # TRUNCATE bypasses the row-level append-only trigger (it only fires
+    # on UPDATE/DELETE), so the fixture cleanup pattern doubles as the way
+    # to restore an empty audit trail — with which the downgrade is
+    # symmetric, and upgrading back restores the security tables.
+    with psycopg.connect(_t15_dsn(), autocommit=True) as conn:
+        conn.execute(f"TRUNCATE {FAILURES_TABLE}")
+    command.downgrade(config, "029_customer_sessions_and_idempotency")
+    with psycopg.connect(_t15_dsn()) as conn:
+        version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'"
+            ).fetchall()
+        }
+    assert version == "029_customer_sessions_and_idempotency"
+    assert COUNTERS_TABLE not in tables
+    assert FAILURES_TABLE not in tables
+
+    command.upgrade(config, "head")
+    with psycopg.connect(_t15_dsn()) as conn:
+        version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+    assert version == "032_security_rate_limits"

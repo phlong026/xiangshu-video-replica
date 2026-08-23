@@ -27,14 +27,15 @@ from psycopg.rows import dict_row
 
 Dialect = Literal["sqlite", "postgresql"]
 EXCLUDED_TABLES = frozenset({"alembic_version"})
-# PostgreSQL-only tables created by revisions 026/027/028/029/031 for the
+# PostgreSQL-only tables created by revisions 026/027/028/029/031/032 for the
 # customer production line (per-operator admin sessions, T09/DB-08; the
 # activation code catalog incl. its append-only event table, T10/ACT-01;
 # the customer device slots, pairing requests, session state/events and
 # idempotency envelopes, T13/ACT-05; the admin write idempotency ledger,
-# T12/ACT-04). They have no SQLite counterpart in the T07 import source,
-# so an empty such table on the target is expected; a non-empty one is
-# divergent state and must fail closed.
+# T12/ACT-04; the shared security rate-limit counters and the append-only
+# auth-failure audit, T15/ACT-08). They have no SQLite counterpart in the
+# T07 import source, so an empty such table on the target is expected; a
+# non-empty one is divergent state and must fail closed.
 PG_ONLY_TABLES: frozenset[str] = frozenset(
     {
         "admin_sessions",
@@ -50,6 +51,8 @@ PG_ONLY_TABLES: frozenset[str] = frozenset(
         "customer_session_events",
         "customer_idempotency_envelopes",
         "admin_write_idempotency",
+        "security_rate_limit_counters",
+        "security_auth_failures",
     }
 )
 DEFAULT_DIGEST_BATCH_SIZE = 1000

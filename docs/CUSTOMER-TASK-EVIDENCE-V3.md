@@ -435,3 +435,42 @@ Owner / Reviewer：后端/安全（Agent 执行）/ 会话内代码评审
 未测试项：T17/T19/T22 共享引擎复用；maintenance timer 真实 systemd 环境（随 T36）；T15；STAGING/REAL_CHAIN/PRODUCTION
 Lore 提交 SHA：见 PR squash 合并 SHA
 ```
+
+
+## T15 — Shared Multi-Instance Rate Limiting & Anti-Enumeration (ACT-08)
+
+| Field | Content |
+| --- | --- |
+| **Owner** | Security/Backend |
+| **Reviewer** | session-internal code review |
+| **Branch / Base SHA** | `feat/customer-v3-t15-rate-limit-anti-enumeration` / `main@c206323` (T14, PR #45 squash) |
+| **Verified Implementation SHA** | PR squash merge result (see `docs/evidence/T15-EVIDENCE.md`) |
+| **Upstream Spec Sections** | Task list §3 T15, §12.2 ACT-08; code checklist §3 (frozen `security_rate_limit.py`), §11.1 (frozen `test_customer_security.py`); activation-code dev doc §11.3 (concurrency & abuse), §7 (key red lines); acceptance spec §6 |
+| **Failure Test or Regression Lock** | 18 cases: module units 3 (bucket key; env overrides + non-numeric/non-positive fall back to safe defaults — an env typo can never disable the limits; measurable constant anti-enumeration delay baseline); PG integration 8 on the dedicated migrated fixture DB `t15_customer_security_test` (window allows then blocks; window resets after expiry; dimensions independent; **two independent connections — two API instances — share one budget atomically**; failure record + trailing-window metrics; metrics window scoping; alert threshold; the failure record holds no plaintext code); route integration 5 (429 with Retry-After; malformed requests share the IP budget; the code dimension blocks a single-code burst across IPs; every unified rejection records a failure event with the digest identifier; unknown/malformed/expired rejections all apply the constant delay); review-fix locks 2 (a fully validated idempotent replay spends no rate-limit budget while the next fresh attempt still trips the limiter; downgrade refuses once failure events exist, empty schema round-trips 032 → 029 → head). T13/T14 five-file 78 passed as the regression lock |
+| **Implementation Result** | The shared limiter lands in PostgreSQL (one atomic UPSERT per consumption — no Redis, no message queue, per the architecture red lines): the activation route spends the IP dimension on *every* attempt (malformed included) and the code dimension (keyed digest, never the plaintext) only for well-formed codes; exceeding either answers 429 `RATE_LIMITED` with `Retry-After`; windows reset after expiry. Every code-side rejection appends an append-only (trigger-guarded) failure event aggregatable into trailing-window metrics, crossing the operator threshold emits an ERROR-level log record — the T37/OPS-02 hook; the unified rejection path burns a constant PBKDF2-SHA256 cost so unknown/expired/suspended/revoked/already-active codes share one latency profile with the T13 unified 400 body. A read-only probe ahead of the limiter lets a fully validated idempotent replay short-circuit with zero budget (T14 retry contract preserved) |
+| **Verification Command and Pass Count** | `pytest tests/test_customer_security.py` → 18 passed; five-file T13/T14+T15 special → 78 passed; full suite → 816 passed (814 after the implementation round + 2 review-fix tests, PG fixture, zero regressions); ruff/format/mypy green (145 files formatted, 59 source files typed); post-review-fix re-run: special 78 + full 816 re-confirmed |
+| **Evidence Level** | `AUTOMATED_VERIFIED` |
+| **Security and Observability** | code-dimension counters and failure events store the keyed digest only (test-locked: no plaintext code in the audit table); append-only trigger refuses any rewrite of the failure audit; the anti-enumeration delay runs even when the audit write fails (the timing profile never depends on database health); windows and metrics decided on the server clock only; 429 `Retry-After` rides the exception path; alert-threshold crossing emits an ERROR-level structured log for the T37/OPS-02 pipeline |
+| **Migration and Rollback** | New migration 032 (chains off head 029; 030 stays reserved for T25 — T12/031 numbering precedent); PG-only (SQLite advances the revision only); downgrade refuses once failure events exist (audit must survive a rollback — 026/028 guard precedent); retention cleanup must not be a plain DELETE against the append-only trigger (session-identifier exemption or partition drops — documented in the migration for the future OPS task); `PG_ONLY_TABLES` in the T07 import/reconcile tool registers both tables keeping the fail-closed contract |
+| **External Authorization Record** | None; no real ZPay/COS/paid provider/external codes/gray release/public launch |
+| **Untested Items** | T19 login-lane reuse (login:ip / login:account dimensions tabled but unrouted); real multi-instance load-balancer topology (T36); reverse-proxy real-client-IP delivery verification (ops acceptance with T36); T37/OPS-02 alerting-pipeline consumption; STAGING/REAL_CHAIN/PRODUCTION |
+| **Lore Commit SHA** | PR squash merge SHA |
+
+### T15 Section 14 Ledger Record
+
+```text
+任务/工作包：T15 / ACT-08
+Owner / Reviewer：安全/后端（Agent 执行）/ 会话内代码评审
+分支 / 基线 SHA：feat/customer-v3-t15-rate-limit-anti-enumeration / 基线 c206323（T14 PR #45 squash）
+上游规格段落：客户版任务清单 V3 §3 T15、§12.2 ACT-08；代码开发清单 V3 §3 security_rate_limit.py、§11.1 test_customer_security.py 冻结名；激活码开发文档 §11.3 并发与滥用、§7 密钥红线；测试与验收规格 §6
+改动文件：server/migrations/versions/032_security_rate_limits.py（新增：counters+append-only failures 两表、维度 CHECK 词表、downgrade 守卫、保留期约束注释）、server/app/security_rate_limit.py（新增 308 行冻结名：共享固定窗口消费 UPSERT、失败审计+指标+告警阈值、常数防枚举时延、env 安全回退）、server/app/activation_code_routes.py（限流接入：IP 维度含 malformed、code 维度仅合法格式码、统一失败审计+告警日志+常数时延、429+Retry-After、限流前只读 replay 预检）、server/tests/test_customer_security.py（新增 18 用例）、server/scripts/reconcile_customer_billing.py（PG_ONLY_TABLES 登记 032 两表）、server/scripts/sqlite_to_postgres.py（注释同步）、deploy/customer.env.example（4 个限流变量+反代 IP 部署指导）、11 个测试文件（head 断言 029→032 约 20 处、downgrade 守卫测试改绝对 revision、T13 路由测试限流预算 env 提升+security 表 truncate）、docs/evidence/T15-EVIDENCE.md、任务与证据账本
+失败测试或回归锁定：先红后绿 18 例——模块级 3+PG 集成 8（专用迁移库 t15_customer_security_test）+路由集成 5+评审锁定 2；T13/T14 五文件 78 passed 作为回归锁定
+实现结果：多 API 实例共享限流落地 PG（单 UPSERT 原子消费，无 Redis/MQ）；激活接口 IP 维度全部尝试（含 malformed）计数、code 维度按 HMAC 摘要计数（明文永不过库）；超限 429 RATE_LIMITED+Retry-After；窗口过期自动重置；每次拒绝追加 append-only 审计事件并聚合成指标，超阈值打 ERROR 告警日志（T37/OPS-02 消费）；未知/过期/作废等全部拒绝共享统一 400 响应体+常数 PBKDF2 时延（关闭时序侧信道）；幂等 replay 只读预检零预算短路（T14 重试无副作用契约保持）
+验证命令与通过数：专项 18 passed；五文件 78 passed；全量 816 passed（814 实现轮 + 2 评审修复新增，零回归，PG fixture）；ruff/format/mypy 全绿（145 files formatted，59 source files typed）；实现轮全量 814 + 静态全绿后经代码评审修复 3 条（1 P2+2 P3）复跑专项 18 + 回归 60 + 静态全绿 + 全量 816 复确认
+证据层级：AUTOMATED_VERIFIED
+安全与可观测性：计数器与审计表 code 维度只存 keyed 摘要（测试锁定明文不出现）；append-only 触发器拒绝改写审计；审计写失败时时延照常（时序剖面不依赖数据库健康）；窗口与指标只用服务器时钟；env 非法值回退安全默认；429 头经异常路径携带；告警阈值 ERROR 日志为 T37 管道挂钩
+迁移与回滚：新迁移 032（避开冻结 028–030 区间，从 head 029 顺延；030 仍留给 T25）；PG-only（SQLite 仅 revision 推进）；downgrade 非空守卫；T07 导入工具登记 PG_ONLY_TABLES 保持 fail-closed 契约；回滚=032 downgrade（空表时对称）+还原代码
+外部授权记录：无；未调用真实 ZPay/COS/付费 Provider/对外发码/灰度/公网发布
+未测试项：T19 登录车道复用；真实多实例负载均衡拓扑联测（T36）；反代 IP 传递的真实部署验证（随 T36）；T37/OPS-02 告警管道消费；STAGING/REAL_CHAIN/PRODUCTION
+Lore 提交 SHA：见 PR squash 合并 SHA
+```

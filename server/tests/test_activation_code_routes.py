@@ -133,7 +133,8 @@ def clean_state(activation_pg_dsn: str) -> Iterator[str]:
             "customer_devices, activation_code_events, activation_code_activations, "
             "activation_code_deliveries, activation_code_exports, activation_codes, "
             "activation_code_batches, admin_write_idempotency, admin_sessions, "
-            "wallet_transactions, recharge_orders, wallets, users CASCADE"
+            "wallet_transactions, recharge_orders, wallets, users, "
+            "security_rate_limit_counters, security_auth_failures CASCADE"
         )
         conn.execute(
             "INSERT INTO users (id, username, display_name, role) "
@@ -156,6 +157,12 @@ def customer_app(monkeypatch: pytest.MonkeyPatch, clean_state: str) -> Iterator[
     monkeypatch.setenv(
         "VIDEO_REPLICA_CUSTOMER_IDEMPOTENCY_AEAD_KEY", _b64key(TEST_ENVELOPE_AEAD_KEY)
     )
+    # T15 / ACT-08: the limiter now guards the activate endpoint. These T13
+    # contract cases (including the 100-way ACT-06 burst from one client
+    # address) exercise activation semantics, not abuse control — raise the
+    # budgets far above any traffic the suite can generate.
+    monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_ACTIVATE_IP", "1000")
+    monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_ACTIVATE_CODE", "1000")
     yield app
 
 
