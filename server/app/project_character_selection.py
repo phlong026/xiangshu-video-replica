@@ -26,6 +26,7 @@ from app.characters import (
     get_project_main_character,
     next_version_number,
 )
+from app.db_portable import BusinessConnection
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,7 @@ SELECTION_SNAPSHOT_SCHEMA_VERSION = "project-character-selection.v1"
 
 
 def list_available_project_character_versions(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
     character_version_id: str | None = None,
@@ -125,7 +126,7 @@ def list_available_project_character_versions(
 
 
 def choose_project_character_version(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     project_id: str,

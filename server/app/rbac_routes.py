@@ -25,6 +25,7 @@ from app.auth import (
     authenticate_request,
     identity_source,
 )
+from app.db_portable import BusinessConnection
 from app.media import storage_key_from_uri
 from app.media_routes import api_base_url
 from app.permissions import (
@@ -144,7 +145,7 @@ def _character_cache_lock(cache_name: str) -> LockType:
 
 
 def _populate_character_cache(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     row: sqlite3.Row,
 ) -> tuple[str, str]:
     cache_name, content_type = _character_cache_identity(row)
@@ -212,7 +213,7 @@ def _populate_character_cache(
     return cache_name, content_type
 
 
-def storage_for_asset(conn: sqlite3.Connection, storage_uri: str) -> StorageAdapter:
+def storage_for_asset(conn: BusinessConnection, storage_uri: str) -> StorageAdapter:
     reference = storage_object_ref_from_uri(storage_uri)
     if reference.provider == "local":
         local_storage = LocalStorageAdapter(root=local_storage_root(), bucket=reference.bucket)
@@ -295,7 +296,7 @@ def read_me(
 
 
 def write_login_failure(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     error: HTTPException,
     identity_source_name: str,
@@ -631,7 +632,7 @@ def read_project(
 
 
 def project_detail_row(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     project_id: str,
 ) -> sqlite3.Row | None:
     return cast(

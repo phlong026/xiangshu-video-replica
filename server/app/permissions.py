@@ -9,10 +9,11 @@ from fastapi import HTTPException
 
 from app.auth import CurrentUser, Role
 from app.character_policy import identity_values_are_current
+from app.db_portable import BusinessConnection
 
 
 def insert_audit(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     action: str,
@@ -37,7 +38,7 @@ def insert_audit(
 
 
 def write_audit(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     action: str,
@@ -57,7 +58,7 @@ def write_audit(
 
 
 def require_role(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     allowed_roles: set[Role],
@@ -83,7 +84,7 @@ def require_role(
 
 
 def require_not_auditor(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     action: str,
@@ -101,7 +102,7 @@ def require_not_auditor(
 
 
 def require_project_access(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     project_id: str,
@@ -139,7 +140,7 @@ def require_project_access(
 
 
 def require_asset_access(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     asset_id: str,
@@ -228,7 +229,7 @@ def character_identity_is_current(row: sqlite3.Row) -> bool:
     )
 
 
-def _identity_from_asset_metadata(conn: sqlite3.Connection, row: sqlite3.Row) -> sqlite3.Row | None:
+def _identity_from_asset_metadata(conn: BusinessConnection, row: sqlite3.Row) -> sqlite3.Row | None:
     """Resolve the identity named in an asset's metadata, if any."""
     try:
         metadata = json.loads(str(row["metadata_json"] or ""))
@@ -253,7 +254,7 @@ def _identity_from_asset_metadata(conn: sqlite3.Connection, row: sqlite3.Row) ->
 
 
 def _published_contact_sheet_identity(
-    conn: sqlite3.Connection, row: sqlite3.Row
+    conn: BusinessConnection, row: sqlite3.Row
 ) -> sqlite3.Row | None:
     """Resolve the identity behind a contact sheet whose version is published."""
     try:
@@ -282,7 +283,7 @@ def _published_contact_sheet_identity(
     return identity
 
 
-def project_id_for_task(conn: sqlite3.Connection, task_id: str) -> str:
+def project_id_for_task(conn: BusinessConnection, task_id: str) -> str:
     row = conn.execute(
         """
         SELECT generation_batches.project_id

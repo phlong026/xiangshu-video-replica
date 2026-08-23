@@ -11,6 +11,7 @@ from uuid import uuid4
 from fastapi import HTTPException
 
 from app.auth import CurrentUser
+from app.db_portable import BusinessConnection
 from app.permissions import write_audit
 
 MAIN_CHARACTER_VERSION_KIND = "main_character"
@@ -39,7 +40,7 @@ class CharacterData:
 
 
 def list_characters(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     project_id: str | None,
@@ -71,7 +72,7 @@ def list_characters(
 
 
 def get_character(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     character_id: str,
     actor: CurrentUser,
@@ -84,7 +85,7 @@ def get_character(
 
 
 def create_character(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     name: str,
@@ -138,7 +139,7 @@ def create_character(
 
 
 def update_character(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     character_id: str,
@@ -204,7 +205,7 @@ def update_character(
 
 
 def delete_character(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     character_id: str,
@@ -230,7 +231,7 @@ def delete_character(
 
 
 def choose_project_main_character(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     project_id: str,
@@ -329,7 +330,7 @@ def choose_project_main_character(
 
 
 def get_project_main_character(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
 ) -> dict[str, object]:
@@ -371,7 +372,7 @@ def get_project_main_character(
 
 
 def sync_legacy_character_domain(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     character: CharacterData,
@@ -503,7 +504,7 @@ def sync_legacy_character_domain(
     return version_id
 
 
-def next_legacy_character_version_number(conn: sqlite3.Connection, persona_id: str) -> int:
+def next_legacy_character_version_number(conn: BusinessConnection, persona_id: str) -> int:
     row = conn.execute(
         """
         SELECT COALESCE(MAX(version_number), 0) + 1
@@ -539,14 +540,14 @@ def legacy_identity_status(character: CharacterData) -> tuple[str, str]:
     return "ACTIVE", "AUTHORIZED"
 
 
-def asset_sha256(conn: sqlite3.Connection, asset_id: str | None) -> str | None:
+def asset_sha256(conn: BusinessConnection, asset_id: str | None) -> str | None:
     if asset_id is None:
         return None
     row = conn.execute("SELECT sha256 FROM assets WHERE id = ?", (asset_id,)).fetchone()
     return None if row is None else str(row[0])
 
 
-def read_character(conn: sqlite3.Connection, character_id: str) -> CharacterData:
+def read_character(conn: BusinessConnection, character_id: str) -> CharacterData:
     row = conn.execute(
         """
         SELECT
@@ -613,7 +614,7 @@ def character_is_available(character: CharacterData, *, project_id: str | None) 
     return project_id in character.authorization_project_ids
 
 
-def next_version_number(conn: sqlite3.Connection, project_id: str) -> int:
+def next_version_number(conn: BusinessConnection, project_id: str) -> int:
     row = conn.execute(
         """
         SELECT COALESCE(MAX(version_number), 0) + 1
@@ -647,16 +648,16 @@ def normalize_ids(values: list[str]) -> list[str]:
     return result
 
 
-def ensure_assets_exist(conn: sqlite3.Connection, asset_ids: list[str]) -> None:
+def ensure_assets_exist(conn: BusinessConnection, asset_ids: list[str]) -> None:
     ensure_ids_exist(conn, table="assets", ids=asset_ids, code="ASSET_NOT_FOUND")
 
 
-def ensure_projects_exist(conn: sqlite3.Connection, project_ids: list[str]) -> None:
+def ensure_projects_exist(conn: BusinessConnection, project_ids: list[str]) -> None:
     ensure_ids_exist(conn, table="projects", ids=project_ids, code="PROJECT_NOT_FOUND")
 
 
 def ensure_ids_exist(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     table: str,
     ids: list[str],

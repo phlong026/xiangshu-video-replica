@@ -35,6 +35,7 @@ from app.character_policy import (
     authorization_is_expired,
     effective_identity_state_values,
 )
+from app.db_portable import BusinessConnection
 from app.permissions import require_role, write_audit
 from app.storage import (
     StorageAdapter,
@@ -251,7 +252,7 @@ def source_image_inspection_instruction() -> str:
 
 
 def create_person_identity(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     display_name: str,
@@ -308,7 +309,7 @@ def create_person_identity(
 
 
 def list_person_identities(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
 ) -> list[PersonIdentity]:
@@ -319,7 +320,7 @@ def list_person_identities(
 
 
 def get_person_identity(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     identity_id: str,
@@ -331,7 +332,7 @@ def get_person_identity(
 
 
 def update_person_identity(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     identity_id: str,
@@ -412,7 +413,7 @@ def update_person_identity(
 
 
 def create_identity_upload_intent(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     storage: StorageAdapter,
@@ -512,7 +513,7 @@ def create_identity_upload_intent(
 
 
 def complete_authorization_upload(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     storage: StorageAdapter,
@@ -606,7 +607,7 @@ def complete_authorization_upload(
 
 
 def complete_source_upload(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     storage: StorageAdapter,
@@ -758,7 +759,7 @@ def complete_source_upload(
 
 
 def create_character_persona(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     identity_id: str,
@@ -813,7 +814,7 @@ def create_character_persona(
 
 
 def list_character_personas(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     identity_id: str,
@@ -831,7 +832,7 @@ def list_character_personas(
 
 
 def get_character_persona(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     persona_id: str,
@@ -847,7 +848,7 @@ def get_character_persona(
 
 
 def update_character_persona(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     persona_id: str,
@@ -890,7 +891,7 @@ def update_character_persona(
 
 
 def delete_character_persona(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     persona_id: str,
@@ -925,7 +926,7 @@ def delete_character_persona(
 
 
 def create_character_version(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     persona_id: str,
@@ -1013,7 +1014,7 @@ def create_character_version(
 
 
 def list_character_versions(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     persona_id: str,
@@ -1044,7 +1045,7 @@ def list_character_versions(
 
 
 def get_character_version(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     version_id: str,
@@ -1060,7 +1061,7 @@ def get_character_version(
 
 
 def archive_character_version(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     version_id: str,
@@ -1262,7 +1263,7 @@ def evaluate_source_image_quality(
     )
 
 
-def read_identity_row(conn: sqlite3.Connection, identity_id: str) -> sqlite3.Row:
+def read_identity_row(conn: BusinessConnection, identity_id: str) -> sqlite3.Row:
     row = conn.execute(
         "SELECT * FROM person_identities WHERE id = ?",
         (identity_id,),
@@ -1272,7 +1273,7 @@ def read_identity_row(conn: sqlite3.Connection, identity_id: str) -> sqlite3.Row
     return cast(sqlite3.Row, row)
 
 
-def read_persona_row(conn: sqlite3.Connection, persona_id: str) -> sqlite3.Row:
+def read_persona_row(conn: BusinessConnection, persona_id: str) -> sqlite3.Row:
     row = conn.execute(
         "SELECT * FROM character_personas WHERE id = ?",
         (persona_id,),
@@ -1282,7 +1283,7 @@ def read_persona_row(conn: sqlite3.Connection, persona_id: str) -> sqlite3.Row:
     return cast(sqlite3.Row, row)
 
 
-def read_version_row(conn: sqlite3.Connection, version_id: str) -> sqlite3.Row:
+def read_version_row(conn: BusinessConnection, version_id: str) -> sqlite3.Row:
     row = conn.execute(
         "SELECT * FROM character_versions WHERE id = ?",
         (version_id,),
@@ -1372,7 +1373,7 @@ def version_from_row(row: sqlite3.Row, *, redact_source: bool) -> CharacterVersi
 
 
 def require_character_admin(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     action: str,
@@ -1437,7 +1438,7 @@ def identity_has_usable_source(row: sqlite3.Row) -> bool:
     return row["source_asset_id"] is not None and effective_identity_is_active(row)
 
 
-def identity_available_to_employee(conn: sqlite3.Connection, row: sqlite3.Row) -> bool:
+def identity_available_to_employee(conn: BusinessConnection, row: sqlite3.Row) -> bool:
     if not effective_identity_is_active(row):
         return False
     return (
@@ -1455,7 +1456,7 @@ def identity_available_to_employee(conn: sqlite3.Connection, row: sqlite3.Row) -
     )
 
 
-def persona_has_published_version(conn: sqlite3.Connection, persona_id: str) -> bool:
+def persona_has_published_version(conn: BusinessConnection, persona_id: str) -> bool:
     return (
         conn.execute(
             """
@@ -1469,7 +1470,7 @@ def persona_has_published_version(conn: sqlite3.Connection, persona_id: str) -> 
     )
 
 
-def refresh_identity_state(conn: sqlite3.Connection, identity_id: str) -> None:
+def refresh_identity_state(conn: BusinessConnection, identity_id: str) -> None:
     row = read_identity_row(conn, identity_id)
     if str(row["status"]) in {"ARCHIVED", "REVOKED"}:
         return
@@ -1485,7 +1486,7 @@ def refresh_identity_state(conn: sqlite3.Connection, identity_id: str) -> None:
 
 
 def read_uploaded_identity_asset(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     storage: StorageAdapter,
     identity_id: str,
@@ -1590,7 +1591,7 @@ def completed_asset_metadata(
 
 
 def update_completed_asset(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     asset_id: str,
     storage_uri: str,
@@ -1610,7 +1611,7 @@ def update_completed_asset(
 
 
 def persist_source_inspection_failure(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     asset: sqlite3.Row,
     stored_uri: str,
@@ -1739,7 +1740,7 @@ def persona_snapshot(row: sqlite3.Row) -> dict[str, object]:
     }
 
 
-def next_character_version_number(conn: sqlite3.Connection, persona_id: str) -> int:
+def next_character_version_number(conn: BusinessConnection, persona_id: str) -> int:
     row = conn.execute(
         """
         SELECT COALESCE(MAX(version_number), 0) + 1
@@ -1803,7 +1804,7 @@ def normalize_string_list(values: list[str]) -> list[str]:
     return result
 
 
-def ensure_user_exists(conn: sqlite3.Connection, user_id: str) -> None:
+def ensure_user_exists(conn: BusinessConnection, user_id: str) -> None:
     row = conn.execute("SELECT 1 FROM users WHERE id = ? AND is_active = 1", (user_id,)).fetchone()
     if row is None:
         raise character_error(422, "IDENTITY_OWNER_NOT_FOUND", "人物归属用户不存在或未启用。")

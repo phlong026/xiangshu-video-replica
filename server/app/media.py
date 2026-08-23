@@ -15,6 +15,7 @@ from uuid import uuid4
 from fastapi import HTTPException
 
 from app.auth import CurrentUser
+from app.db_portable import BusinessConnection
 from app.permissions import (
     require_asset_access,
     require_not_auditor,
@@ -117,7 +118,7 @@ class FFprobeVideoProbe:
 
 
 def create_upload_intent(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     storage: StorageAdapter,
@@ -197,7 +198,7 @@ def create_upload_intent(
 
 
 def complete_upload(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     storage: StorageAdapter,

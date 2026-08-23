@@ -15,6 +15,7 @@ from fastapi import HTTPException
 
 from app.analysis import insert_version
 from app.auth import CurrentUser
+from app.db_portable import BusinessConnection
 from app.media import is_reference_video_asset
 from app.permissions import (
     require_asset_access,
@@ -173,7 +174,7 @@ def score_grayscale_frame(pixels: bytes) -> float:
 
 
 def extract_source_frame_candidates(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
     asset_id: str,
@@ -358,7 +359,7 @@ def technical_score_of_candidate(candidate: dict[str, object]) -> float:
 
 
 def confirm_source_frame(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
     source_frame_asset_id: str,
@@ -444,7 +445,7 @@ def confirm_source_frame(
 
 
 def latest_version(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     project_id: str,
     kind: str,
 ) -> sqlite3.Row | None:

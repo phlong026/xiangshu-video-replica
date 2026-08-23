@@ -38,6 +38,7 @@ from app.character_identity import (
     require_character_admin,
     require_identity_active,
 )
+from app.db_portable import BusinessConnection
 from app.permissions import require_role, write_audit
 from app.storage import (
     StorageAdapter,
@@ -196,7 +197,7 @@ def png_chunk(kind: bytes, payload: bytes) -> bytes:
 
 
 def create_character_generation_tasks(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     version_id: str,
@@ -365,7 +366,7 @@ def create_character_generation_tasks(
 
 
 def regenerate_character_asset(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     character_asset_id: str,
@@ -404,7 +405,7 @@ def regenerate_character_asset(
 
 
 def list_character_generation_tasks(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     version_id: str,
@@ -430,7 +431,7 @@ def list_character_generation_tasks(
 
 
 def list_character_assets(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     version_id: str,
@@ -460,7 +461,7 @@ def list_character_assets(
 
 
 def acquire_character_generation_task(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     worker_id: str,
 ) -> sqlite3.Row | None:
@@ -507,7 +508,7 @@ def acquire_character_generation_task(
     return cast(sqlite3.Row | None, row)
 
 
-def finalize_expired_character_generation_leases(conn: sqlite3.Connection) -> None:
+def finalize_expired_character_generation_leases(conn: BusinessConnection) -> None:
     rows = conn.execute(
         """
         SELECT * FROM character_generation_tasks
@@ -558,7 +559,7 @@ def finalize_expired_character_generation_leases(conn: sqlite3.Connection) -> No
 
 
 def run_next_character_generation_task(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     worker_id: str,
     storage: StorageAdapter,
@@ -786,7 +787,7 @@ def run_next_character_generation_task(
 
 
 def load_character_image_request(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     task: sqlite3.Row,
     storage: StorageAdapter,
@@ -832,7 +833,7 @@ def load_character_image_request(
 
 
 def require_character_generation_context_active(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     task: sqlite3.Row,
 ) -> sqlite3.Row:
@@ -855,7 +856,7 @@ def require_character_generation_context_active(
 
 
 def require_character_generation_lease_owned(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     task: sqlite3.Row,
     worker_id: str,
@@ -900,7 +901,7 @@ def validate_character_image_result(result: CharacterImageResult) -> None:
 
 
 def finish_character_generation_failure(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     task: sqlite3.Row,
     worker_id: str,
@@ -983,7 +984,7 @@ def finish_character_generation_failure(
 
 
 def record_stale_character_generation_result(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     task: sqlite3.Row,
     worker_id: str,
@@ -1021,7 +1022,7 @@ def record_stale_character_generation_result(
 
 
 def insert_character_call_log(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     task: sqlite3.Row,
     latency_ms: int,
@@ -1057,7 +1058,7 @@ def insert_character_call_log(
 
 
 def insert_character_worker_audit(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     task: sqlite3.Row,
     action: str,
@@ -1081,7 +1082,7 @@ def insert_character_worker_audit(
 
 
 def update_character_version_generation_status(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     version_id: str,
 ) -> None:
@@ -1116,7 +1117,7 @@ def update_character_version_generation_status(
 
 
 def get_character_generation_task(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     task_id: str,
 ) -> CharacterGenerationTask:
     row = conn.execute(
@@ -1172,7 +1173,7 @@ def require_version_generatable(
 
 
 def next_character_candidate_number(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     version_id: str,
     view_type: RequiredCharacterViewType,
 ) -> int:
@@ -1236,7 +1237,7 @@ def character_generation_request_hash(
 
 
 def find_idempotent_character_tasks(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     version_id: str,
     idempotency_key: str,

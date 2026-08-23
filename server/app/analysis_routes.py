@@ -26,6 +26,7 @@ from app.analysis import (
     validate_shot_cards,
 )
 from app.auth import AuthenticatedUser, Database
+from app.db_portable import BusinessConnection
 from app.media import (
     DURATION_ROUNDING_TOLERANCE_SECONDS,
     MAX_DURATION_SECONDS,
@@ -418,7 +419,7 @@ def analysis_provider_error(failure: AnalysisProviderFailed) -> HTTPException:
     )
 
 
-def load_analysis_version(conn: sqlite3.Connection, analysis_id: str) -> sqlite3.Row:
+def load_analysis_version(conn: BusinessConnection, analysis_id: str) -> sqlite3.Row:
     try:
         row = get_version(conn, analysis_id)
     except LookupError as exc:

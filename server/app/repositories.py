@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import sqlite3
-
+from app.db_portable import BusinessConnection
 from app.models import GenerationTaskLease
 
 
 class GenerationTaskRepository:
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(self, conn: BusinessConnection) -> None:
         self.conn = conn
 
     def create_minimal_task(

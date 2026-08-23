@@ -24,6 +24,7 @@ from app.character_identity import (
     parse_datetime,
 )
 from app.character_policy import identity_values_are_current
+from app.db_portable import BusinessConnection
 from app.permissions import require_not_auditor, require_project_access
 from app.source_frames import (
     SOURCE_FRAME_CANDIDATES_KIND,
@@ -95,7 +96,7 @@ def recommended_body_view(features: SourceFrameFeatures) -> RequiredCharacterVie
 
 
 def create_character_reference_selection(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     project_id: str,
@@ -184,7 +185,7 @@ def create_character_reference_selection(
 
 
 def get_latest_character_reference_selection(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     project_id: str,
@@ -206,7 +207,7 @@ def get_latest_character_reference_selection(
 
 
 def get_character_reference_recommendation(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     project_id: str,
@@ -233,7 +234,7 @@ def get_character_reference_recommendation(
 
 
 def current_character_reference_selection_for_generation(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
     source_frame_version_id: str,
@@ -299,7 +300,7 @@ def current_character_reference_selection_for_generation(
 
 
 def load_reference_selection_inputs(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
     requested_asset_ids: list[str] | None,
@@ -398,7 +399,7 @@ def load_reference_selection_inputs(
 
 
 def current_source_selection(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
 ) -> dict[str, object]:
@@ -452,7 +453,7 @@ def parse_source_frame_features(selection: dict[str, object]) -> SourceFrameFeat
 
 
 def current_main_character_binding(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
 ) -> sqlite3.Row:
@@ -474,7 +475,7 @@ def current_main_character_binding(
 
 
 def load_character_context(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     version_id: str,
 ) -> tuple[sqlite3.Row, sqlite3.Row, sqlite3.Row]:
     version = conn.execute(
@@ -526,7 +527,7 @@ def invalid_publication() -> HTTPException:
 
 
 def load_published_reference_assets(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     version_id: str,
     publication_snapshot: dict[str, object],
@@ -626,7 +627,7 @@ def unique_ids(values: list[str]) -> list[str]:
 
 
 def latest_character_reference_selection_row(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
 ) -> sqlite3.Row | None:
@@ -643,7 +644,7 @@ def latest_character_reference_selection_row(
 
 
 def read_character_reference_selection_row(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     selection_id: str,
 ) -> sqlite3.Row:
@@ -698,7 +699,7 @@ def decode_string_list(value: object) -> list[str]:
 
 
 def insert_reference_audit(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     selection_id: str,

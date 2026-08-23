@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import sqlite3
 from dataclasses import dataclass
 from typing import Literal, cast
 from uuid import uuid4
+
+from app.db_portable import BusinessConnection
 
 BillingOutcome = Literal["success", "failed", "cancelled"]
 TerminalTransactionType = Literal["SETTLE", "RELEASE"]
@@ -29,7 +30,7 @@ class BillingFinalization:
 
 
 def reserve_internal_billing(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     user_id: str,
     task_id: str,
@@ -149,7 +150,7 @@ def reserve_internal_billing(
 
 
 def finalize_internal_billing(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     task_id: str,
     outcome: BillingOutcome,

@@ -30,6 +30,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.analysis import get_version, insert_version
 from app.auth import CurrentUser
+from app.db_portable import BusinessConnection
 from app.internal_billing import (
     BillingInvariantError,
     InsufficientCreditsError,
@@ -456,7 +457,7 @@ class MetasoH3Provider(H3Provider):
         }
 
 
-def metaso_h3_provider_from_settings(conn: sqlite3.Connection) -> MetasoH3Provider:
+def metaso_h3_provider_from_settings(conn: BusinessConnection) -> MetasoH3Provider:
     try:
         config = SettingsRepository(conn).load_provider_config("metaso")
     except SettingsUnavailableError as exc:
@@ -472,7 +473,7 @@ def metaso_h3_provider_from_settings(conn: sqlite3.Connection) -> MetasoH3Provid
     )
 
 
-def h3_provider_for_task(conn: sqlite3.Connection, provider_name: str) -> H3Provider:
+def h3_provider_for_task(conn: BusinessConnection, provider_name: str) -> H3Provider:
     if provider_name == "fake_h3":
         outcome = os.environ.get(FAKE_H3_OUTCOME_ENV, "ok").strip()
         if outcome not in {"ok", "provider_failed", "submission_uncertain"}:
@@ -682,7 +683,7 @@ BatchStatusFilter = Literal[
 
 
 def latest_version(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
     kind: str,
@@ -704,7 +705,7 @@ def latest_version(
 
 
 def require_latest_version(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     row: sqlite3.Row,
     project_id: str,
@@ -718,7 +719,7 @@ def require_latest_version(
 
 
 def version_state(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
     actor: CurrentUser,
@@ -741,7 +742,7 @@ def version_state(
     )
 
 
-def version_stale_reasons(conn: sqlite3.Connection, *, row: sqlite3.Row) -> list[str]:
+def version_stale_reasons(conn: BusinessConnection, *, row: sqlite3.Row) -> list[str]:
     project_id = str(row["project_id"])
     kind = str(row["kind"])
     payload = json.loads(str(row["payload_json"]))
@@ -821,7 +822,7 @@ def version_stale_reasons(conn: sqlite3.Connection, *, row: sqlite3.Row) -> list
 
 
 def shot_card_stale_reasons(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     row: sqlite3.Row,
 ) -> list[str]:
@@ -840,7 +841,7 @@ def shot_card_stale_reasons(
 
 
 def confirmed_first_frame_sources(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
     first_frame_asset_id: str,
@@ -882,7 +883,7 @@ def confirmed_first_frame_sources(
 
 
 def create_script_version(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
     actor: CurrentUser,
@@ -962,7 +963,7 @@ def create_script_version(
 
 
 def compile_prompt_version(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
     actor: CurrentUser,
@@ -1112,7 +1113,7 @@ def unwrap_analysis_payload(payload: Any) -> dict[str, Any]:
 
 
 def preview_prompt_text(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
     actor: CurrentUser,
@@ -1195,7 +1196,7 @@ def preview_prompt_text(
 
 
 def revise_prompt_version(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
     actor: CurrentUser,
@@ -1274,7 +1275,7 @@ def revise_prompt_version(
 
 
 def lock_prompt_version(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
     prompt_version_id: str,
@@ -1337,7 +1338,7 @@ def lock_prompt_version(
 
 
 def _find_idempotent_batch(
-    conn: sqlite3.Connection, *, actor_id: str, project_id: str, key: str
+    conn: BusinessConnection, *, actor_id: str, project_id: str, key: str
 ) -> sqlite3.Row | None:
     return cast(
         sqlite3.Row | None,
@@ -1353,7 +1354,7 @@ def _find_idempotent_batch(
 
 
 def _reserve_generation_credit(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     user_id: str,
     task_id: str,
@@ -1387,7 +1388,7 @@ def _reserve_generation_credit(
 
 
 def create_generation_batch(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
     actor: CurrentUser,
@@ -1636,7 +1637,7 @@ def create_generation_batch(
 
 
 def regenerate_generation_batch(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     batch_id: str,
     actor: CurrentUser,
@@ -1810,7 +1811,7 @@ def regenerate_generation_batch(
 
 
 def regenerate_generation_task(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     task_id: str,
     actor: CurrentUser,
@@ -2056,7 +2057,7 @@ def require_matching_idempotent_batch(row: sqlite3.Row, *, request_hash: str) ->
 
 
 def require_regeneration_provider_ready(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     provider_name: str,
 ) -> None:
@@ -2113,7 +2114,7 @@ def paid_cost_per_task(total: float | None, *, quantity: int) -> float | None:
 
 
 def require_confirmed_first_frame(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
     first_frame_asset_id: str,
@@ -2194,7 +2195,7 @@ def require_confirmed_first_frame(
 
 
 def require_cos_first_frame_storage(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     storage_uri: str | None = None,
 ) -> None:
@@ -2217,7 +2218,7 @@ def require_cos_first_frame_storage(
 
 
 def run_next_generation_task(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     worker_id: str,
     provider: H3Provider | None,
@@ -2472,7 +2473,7 @@ def _verify_archived_result(storage: StorageAdapter, stored: StoredObject) -> No
 
 
 def _store_and_finalize_archive(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     task_id: str,
     batch_id: str,
@@ -2573,7 +2574,7 @@ def _store_and_finalize_archive(
 
 
 def _retry_archive(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     task_id: str,
     batch_id: str,
@@ -2636,7 +2637,7 @@ def generation_task_operation_hash(
 
 
 def _idempotent_task_operation(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor_id: str,
     task_id: str,
@@ -2662,7 +2663,7 @@ def _idempotent_task_operation(
 
 
 def _record_completed_task_operation(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     task_id: str,
@@ -2693,7 +2694,7 @@ def _record_completed_task_operation(
 
 
 def _release_stale_reconcile_reservation(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     task_id: str,
     batch_id: str,
@@ -2734,7 +2735,7 @@ def _release_stale_reconcile_reservation(
 
 
 def _renew_reconcile_reservation(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     reservation: ReconcileReservation | None,
 ) -> None:
@@ -2745,7 +2746,7 @@ def _renew_reconcile_reservation(
 
 
 def _renew_reconcile_reservation_in_transaction(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     reservation_id: str,
 ) -> None:
@@ -2770,7 +2771,7 @@ def _reconcile_reservation_lost() -> HTTPException:
 
 
 def _complete_reconcile_operation_in_transaction(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     reservation: ReconcileReservation,
     task_id: str,
@@ -2826,7 +2827,7 @@ def _complete_reconcile_operation_in_transaction(
 
 
 def retry_generation_task(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     task_id: str,
     actor: CurrentUser,
@@ -3023,7 +3024,7 @@ def retry_generation_task(
 
 
 def confirm_generation_task_not_charged(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     task_id: str,
     actor: CurrentUser,
@@ -3145,7 +3146,7 @@ def confirm_generation_task_not_charged(
 
 
 def reconcile_generation_task(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     task_id: str,
     batch_id: str,
@@ -3349,7 +3350,7 @@ def reconcile_generation_task(
 
 
 def reconcile_submission_uncertain_task(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     task_id: str,
     batch_id: str,
@@ -3459,7 +3460,7 @@ def reconcile_submission_uncertain_task(
     )
 
 
-def _release_archive_retry(conn: sqlite3.Connection, *, task_id: str, batch_id: str) -> None:
+def _release_archive_retry(conn: BusinessConnection, *, task_id: str, batch_id: str) -> None:
     """Release the lease and back off ~60s so a stuck provider/storage does not
     cause a hot retry loop. Once retries are exhausted, the task is failed so a
     permanently expired provider URL does not spin forever."""
@@ -3509,7 +3510,7 @@ def _release_archive_retry(conn: sqlite3.Connection, *, task_id: str, batch_id: 
 
 
 def acquire_generation_task_lease(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     worker_id: str,
 ) -> dict[str, Any] | None:
@@ -3577,7 +3578,7 @@ def acquire_generation_task_lease(
     return load_worker_task(conn, str(row["id"]))
 
 
-def load_worker_task(conn: sqlite3.Connection, task_id: str) -> dict[str, Any]:
+def load_worker_task(conn: BusinessConnection, task_id: str) -> dict[str, Any]:
     row = conn.execute(
         """
         SELECT
@@ -3610,7 +3611,7 @@ def load_worker_task(conn: sqlite3.Connection, task_id: str) -> dict[str, Any]:
 
 
 def mark_task_submission_uncertain(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     task_id: str,
     message: str,
@@ -3641,7 +3642,7 @@ def mark_task_submission_uncertain(
 
 
 def mark_task_provider_settings_unavailable(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     task_id: str,
     batch_id: str,
@@ -3667,7 +3668,7 @@ def mark_task_provider_settings_unavailable(
 
 
 def mark_task_provider_failed(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     task_id: str,
     batch_id: str,
@@ -3695,7 +3696,7 @@ def mark_task_provider_failed(
 
 
 def mark_task_first_frame_url_sign_failed(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     task_id: str,
     batch_id: str,
@@ -3721,7 +3722,7 @@ def mark_task_first_frame_url_sign_failed(
         _refresh_batch_status_in_transaction(conn, batch_id=batch_id)
 
 
-def mark_expired_active_leases_needing_attention(conn: sqlite3.Connection) -> None:
+def mark_expired_active_leases_needing_attention(conn: BusinessConnection) -> None:
     """Do not resubmit work when a worker died after a provider call may have started."""
     with conn:
         rows = conn.execute(
@@ -3776,13 +3777,13 @@ def mark_expired_active_leases_needing_attention(conn: sqlite3.Connection) -> No
         refresh_batch_status(conn, batch_id=str(row["batch_id"]))
 
 
-def refresh_batch_status(conn: sqlite3.Connection, *, batch_id: str) -> None:
+def refresh_batch_status(conn: BusinessConnection, *, batch_id: str) -> None:
     with conn:
         _refresh_batch_status_in_transaction(conn, batch_id=batch_id)
 
 
 def _refresh_batch_status_in_transaction(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     batch_id: str,
 ) -> None:
@@ -3830,7 +3831,7 @@ def _refresh_batch_status_in_transaction(
     )
 
 
-def get_task_result(conn: sqlite3.Connection, task_id: str) -> TaskResult:
+def get_task_result(conn: BusinessConnection, task_id: str) -> TaskResult:
     row = conn.execute(
         """
         SELECT
@@ -3870,7 +3871,7 @@ def get_task_result(conn: sqlite3.Connection, task_id: str) -> TaskResult:
 
 
 def list_generation_batches(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     project_id: str | None = None,
@@ -4119,7 +4120,7 @@ def decode_batch_list_cursor(value: str, *, filters_hash: str) -> tuple[str, str
 
 
 def get_generation_batch(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     batch_id: str,
     actor: CurrentUser,
@@ -4215,7 +4216,7 @@ def get_generation_batch(
 
 
 def rename_generation_batch(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     batch_id: str,
@@ -4432,7 +4433,7 @@ def h3_audio_quality(
 
 
 def require_version(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     version_id: str,
     project_id: str,
@@ -4627,7 +4628,7 @@ def idempotency_request_hash(request: GenerationBatchRequest) -> str:
     return content_hash(json.dumps(payload, ensure_ascii=True, sort_keys=True))
 
 
-def read_runtime_limits(conn: sqlite3.Connection) -> dict[str, int]:
+def read_runtime_limits(conn: BusinessConnection) -> dict[str, int]:
     row = conn.execute(
         """
         SELECT max_generation_count_per_batch, max_concurrent_h3_tasks
@@ -4643,7 +4644,7 @@ def read_runtime_limits(conn: sqlite3.Connection) -> dict[str, int]:
     }
 
 
-def generation_runtime_limits(conn: sqlite3.Connection) -> GenerationRuntimeLimits:
+def generation_runtime_limits(conn: BusinessConnection) -> GenerationRuntimeLimits:
     runtime = read_runtime_limits(conn)
     return GenerationRuntimeLimits(
         max_quantity=runtime["max_generation_count_per_batch"],

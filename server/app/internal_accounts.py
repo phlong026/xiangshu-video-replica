@@ -3,16 +3,16 @@ from __future__ import annotations
 import argparse
 import json
 import secrets
-import sqlite3
 from pathlib import Path
 from uuid import uuid4
 
 from app.auth import VALID_ROLES, digest_access_token
 from app.db import initialize_database
+from app.db_portable import BusinessConnection
 
 
 def create_user(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     username: str,
     display_name: str,
@@ -47,7 +47,7 @@ def create_user(
 
 
 def issue_token(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     user_id: str,
     raw_token: str | None = None,
@@ -72,7 +72,7 @@ def issue_token(
     return {"token_id": resolved_token_id, "user_id": user_id, "token": token}
 
 
-def revoke_token(conn: sqlite3.Connection, *, token_id: str) -> dict[str, str | bool]:
+def revoke_token(conn: BusinessConnection, *, token_id: str) -> dict[str, str | bool]:
     with conn:
         cursor = conn.execute(
             """
@@ -108,7 +108,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
-    with initialize_database(args.db_path) as conn:
+    with BusinessConnection.sqlite(initialize_database(args.db_path)) as conn:
         if args.command == "create-user":
             result = create_user(
                 conn,

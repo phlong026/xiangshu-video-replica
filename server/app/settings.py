@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
 from functools import lru_cache
 from typing import Any, Literal
 
 from cryptography.fernet import Fernet, InvalidToken
 
+from app.db_portable import BusinessConnection
 from app.local_settings_key import LocalSettingsKeyStoreError, load_or_create_local_settings_key
 from app.zpay import parse_enabled_channels
 
@@ -62,7 +62,7 @@ class SettingsDecryptError(SettingsUnavailableError):
 
 
 class SettingsRepository:
-    def __init__(self, conn: sqlite3.Connection, fernet: Fernet | None = None) -> None:
+    def __init__(self, conn: BusinessConnection, fernet: Fernet | None = None) -> None:
         self.conn = conn
         self.fernet = fernet or fernet_from_environment()
 

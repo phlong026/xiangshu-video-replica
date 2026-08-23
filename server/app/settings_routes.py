@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import sqlite3
 import time
 import uuid
 from collections.abc import Callable
@@ -15,6 +14,7 @@ from pydantic import BaseModel, Field, StrictInt
 
 from app.auth import AuthenticatedUser, CurrentUser, Database
 from app.auth import get_database as auth_get_database
+from app.db_portable import BusinessConnection
 from app.permissions import require_role
 from app.settings import ProviderName, SettingsRepository, is_secret_field, normalize_provider
 from app.storage import (
@@ -621,7 +621,7 @@ def configured_only_message(provider: str) -> str:
 
 
 def write_audit_log(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor_user_id: str,
     action: str,

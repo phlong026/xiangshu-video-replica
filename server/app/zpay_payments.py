@@ -4,6 +4,8 @@ import sqlite3
 from typing import Literal, TypedDict, cast
 from uuid import uuid4
 
+from app.db_portable import BusinessConnection
+
 ZPAY_NOTIFY_BUSY_TIMEOUT_MS = 1000
 RechargeStatus = Literal["PENDING", "PAID", "FAILED", "CLOSED"]
 
@@ -26,7 +28,7 @@ class PaymentConfirmationError(RuntimeError):
 
 
 def read_recharge_order(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     merchant_order_no: str,
 ) -> sqlite3.Row | None:
@@ -58,7 +60,7 @@ def serialize_recharge_order(row: sqlite3.Row) -> RechargeOrderData:
 
 
 def confirm_recharge_payment(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     merchant_order_no: str,
     provider_trade_no: str,

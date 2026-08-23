@@ -22,8 +22,9 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
+from typing import Any, Protocol
 
 import psycopg
 
@@ -153,13 +154,29 @@ def translate_to_sqlite(sql: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+class _BusinessCursor(Protocol):
+    """The minimal cursor surface the business services use.
+
+    ``Any`` returns mirror the sqlite3 typeshed (and the current ``conn:
+    sqlite3.Connection`` call sites, where ``row[0]`` is already ``Any``) so
+    the migrated services keep type-checking unchanged.
+    """
+
+    def fetchone(self) -> Any: ...
+
+    def fetchall(self) -> list[Any]: ...
+
+    @property
+    def rowcount(self) -> int: ...
+
+
 class SQLiteBackend:
     """Wraps a sqlite3 connection; every execute runs the translation."""
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
 
-    def execute(self, sql: str, params: tuple[object, ...] = ()) -> sqlite3.Cursor:
+    def execute(self, sql: str, params: Sequence[object] = ()) -> sqlite3.Cursor:
         return self._conn.execute(translate_to_sqlite(sql), params)
 
     @property
@@ -173,7 +190,7 @@ class PostgresBackend:
     def __init__(self, conn: psycopg.Connection) -> None:
         self._conn = conn
 
-    def execute(self, sql: str, params: tuple[object, ...] = ()) -> psycopg.Cursor:
+    def execute(self, sql: str, params: Sequence[object] = ()) -> psycopg.Cursor:
         return self._conn.execute(sql, params)
 
     @property
@@ -203,7 +220,7 @@ class BusinessConnection:
 
     # --- sqlite3-shaped surface ---
 
-    def execute(self, sql: str, params: tuple[object, ...] = ()) -> object:
+    def execute(self, sql: str, params: Sequence[object] = ()) -> _BusinessCursor:
         return self._backend.execute(sql, params)
 
     def commit(self) -> None:

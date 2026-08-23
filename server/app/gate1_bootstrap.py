@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from app.db import initialize_database
+from app.db_portable import BusinessConnection
 from app.settings import SettingsRepository
 
 
@@ -19,7 +20,7 @@ def bootstrap_gate1_database(
     if resolved_path.exists():
         raise FileExistsError(f"Gate 1 database already exists: {resolved_path}")
 
-    with initialize_database(resolved_path) as conn:
+    with BusinessConnection.sqlite(initialize_database(resolved_path)) as conn:
         with conn:
             conn.execute(
                 """

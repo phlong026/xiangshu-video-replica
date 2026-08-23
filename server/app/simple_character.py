@@ -44,6 +44,7 @@ from app.character_identity import (
     validate_key_segment,
 )
 from app.character_image_generation import deterministic_png, png_chunk
+from app.db_portable import BusinessConnection
 from app.first_frames import FirstFrameModel, ImageInput, ImageProvider, ImageProviderFailed
 from app.media import storage_key_from_uri
 from app.permissions import require_project_access, write_audit
@@ -152,7 +153,7 @@ class SimpleLibraryEntry:
 
 
 def create_simple_character(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     project_id: str | None,
@@ -336,7 +337,7 @@ def create_simple_character(
 
 
 def list_simple_library(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
 ) -> list[SimpleLibraryEntry]:
@@ -430,7 +431,7 @@ def _group_by_identity(rows: list[sqlite3.Row]) -> dict[str, list[sqlite3.Row]]:
 
 
 def rename_simple_character_identity(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     identity_id: str,
@@ -489,7 +490,7 @@ class SimpleCharacterRegenerationResult:
 
 
 def regenerate_simple_character_contact_sheet(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     identity_id: str,
@@ -683,7 +684,7 @@ def regenerate_simple_character_contact_sheet(
     )
 
 
-def _next_version_number(conn: sqlite3.Connection, *, persona_id: str) -> int:
+def _next_version_number(conn: BusinessConnection, *, persona_id: str) -> int:
     row = conn.execute(
         "SELECT MAX(version_number) FROM character_versions WHERE persona_id = ?",
         (persona_id,),
@@ -692,11 +693,11 @@ def _next_version_number(conn: sqlite3.Connection, *, persona_id: str) -> int:
     return current + 1
 
 
-StorageResolver = Callable[[sqlite3.Connection, str], StorageAdapter]
+StorageResolver = Callable[[BusinessConnection, str], StorageAdapter]
 
 
 def delete_simple_character_identity(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     identity_id: str,
@@ -840,7 +841,7 @@ def delete_simple_character_identity(
     )
 
 
-def _identity_asset_ids(conn: sqlite3.Connection, identity_id: str) -> set[str]:
+def _identity_asset_ids(conn: BusinessConnection, identity_id: str) -> set[str]:
     """Collect every asset owned by an identity.
 
     Covers the authorization/source upload, the per-view candidates of every
@@ -910,7 +911,7 @@ def _validate_source(content: bytes, content_type: str, display_name: str) -> No
 
 
 def _store_source_asset(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     storage: StorageAdapter,
     actor: CurrentUser,
@@ -958,7 +959,7 @@ def _store_source_asset(
 
 
 def _insert_identity(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     identity_id: str,
@@ -990,7 +991,7 @@ def _insert_identity(
 
 
 def _insert_persona(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     persona_id: str,
@@ -1018,7 +1019,7 @@ def _insert_persona(
 
 
 def _insert_version(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     version_id: str,
@@ -1388,7 +1389,7 @@ def _encode_rgb_panel_png(
 
 
 def _generate_and_approve_views(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     storage: StorageAdapter,
     actor: CurrentUser,
@@ -1491,7 +1492,7 @@ def _generate_and_approve_views(
 
 
 def _publish_views(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     storage: StorageAdapter,
     actor: CurrentUser,
@@ -1660,7 +1661,7 @@ def _contact_sheet_asset_key(
 
 
 def _store_contact_sheet_asset(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     storage: StorageAdapter,
     actor: CurrentUser,

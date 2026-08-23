@@ -33,6 +33,7 @@ from app.character_identity import (
     require_character_admin,
     require_identity_active,
 )
+from app.db_portable import BusinessConnection
 from app.permissions import require_role
 from app.storage import (
     StorageAdapter,
@@ -75,7 +76,7 @@ class PreparedPublicationAsset:
 
 
 def review_character_asset(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     character_asset_id: str,
@@ -145,7 +146,7 @@ def review_character_asset(
 
 
 def list_character_asset_reviews(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     character_asset_id: str,
@@ -171,7 +172,7 @@ def list_character_asset_reviews(
 
 
 def publish_character_version(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     version_id: str,
@@ -410,7 +411,7 @@ def cleanup_publication_objects(storage: StorageAdapter, object_keys: list[str])
 
 
 def load_selected_character_assets(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     version_id: str,
     required_views: list[RequiredCharacterViewType],
@@ -591,7 +592,7 @@ def require_complete_publication_selection(
 
 
 def require_published_selection_matches(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     version_id: str,
     selected_asset_ids: dict[RequiredCharacterViewType, str],
@@ -614,7 +615,7 @@ def require_published_selection_matches(
         )
 
 
-def require_no_active_character_tasks(conn: sqlite3.Connection, version_id: str) -> None:
+def require_no_active_character_tasks(conn: BusinessConnection, version_id: str) -> None:
     active = conn.execute(
         """
         SELECT 1 FROM character_generation_tasks
@@ -652,7 +653,7 @@ def require_version_review_mutable(version: sqlite3.Row) -> None:
         )
 
 
-def read_character_asset_row(conn: sqlite3.Connection, character_asset_id: str) -> sqlite3.Row:
+def read_character_asset_row(conn: BusinessConnection, character_asset_id: str) -> sqlite3.Row:
     row = conn.execute(
         "SELECT * FROM character_assets WHERE id = ?",
         (character_asset_id,),
@@ -663,7 +664,7 @@ def read_character_asset_row(conn: sqlite3.Connection, character_asset_id: str) 
 
 
 def get_character_asset_review(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     review_id: str,
 ) -> CharacterAssetReview:
     row = conn.execute(
@@ -716,7 +717,7 @@ def effective_owner_user_id(identity: sqlite3.Row, *, fallback: str) -> str:
 
 
 def insert_audit(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     action: str,

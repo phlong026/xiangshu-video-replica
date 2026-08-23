@@ -16,6 +16,7 @@ from app.db_pg import (
     resolve_database_config,
     validate_customer_production,
 )
+from app.db_portable import BusinessConnection
 from app.local_settings_key import LocalSettingsKeyStoreError, persist_local_settings_key
 from app.settings import (
     LOCAL_KEYSTORE_DISABLED_ENV,
@@ -154,7 +155,7 @@ def assert_customer_production_security() -> None:
 
 def bootstrap_runtime(db_path: str | Path) -> None:
     key = settings_encryption_key()
-    with initialize_database(Path(db_path)) as conn:
+    with BusinessConnection.sqlite(initialize_database(Path(db_path))) as conn:
         # Decrypt every retained provider before starting either process. A
         # wrong key therefore fails closed without overwriting stored data.
         SettingsRepository(conn, fernet=Fernet(key.encode("ascii"))).read_all_provider_configs()

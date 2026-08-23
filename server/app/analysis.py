@@ -13,6 +13,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from app.db_portable import BusinessConnection
+
 ANALYSIS_KIND = "analysis"
 SHOT_CARD_KIND = "shot_card"
 SCHEMA_VERSION = "b3.analysis.v1"
@@ -445,7 +447,7 @@ def analysis_instruction(duration_seconds: float) -> str:
 
 
 def create_analysis_version(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
     asset_id: str,
@@ -468,7 +470,7 @@ def create_analysis_version(
 
 
 def create_or_recover_analysis_version(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
     asset_id: str,
@@ -507,7 +509,7 @@ def create_or_recover_analysis_version(
 
 
 def find_analysis_version_for_asset(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
     asset_id: str,
@@ -541,7 +543,7 @@ def analysis_version_payload(
 
 
 def create_shot_card_version(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     analysis_version: sqlite3.Row,
     created_by_user_id: str,
@@ -585,7 +587,7 @@ def validate_shot_cards(shots: list[dict[str, Any]], *, duration_seconds: float)
 
 
 def insert_version(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
     asset_id: str | None,
@@ -606,7 +608,7 @@ def insert_version(
 
 
 def _insert_version(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
     asset_id: str | None,
@@ -642,7 +644,7 @@ def _insert_version(
     return get_version(conn, version_id)
 
 
-def get_version(conn: sqlite3.Connection, version_id: str) -> sqlite3.Row:
+def get_version(conn: BusinessConnection, version_id: str) -> sqlite3.Row:
     row = conn.execute(
         """
         SELECT id, project_id, asset_id, kind, version_number, payload_json, created_by_user_id,
@@ -657,7 +659,7 @@ def get_version(conn: sqlite3.Connection, version_id: str) -> sqlite3.Row:
     return cast(sqlite3.Row, row)
 
 
-def next_version_number(conn: sqlite3.Connection, *, project_id: str, kind: str) -> int:
+def next_version_number(conn: BusinessConnection, *, project_id: str, kind: str) -> int:
     row = conn.execute(
         """
         SELECT COALESCE(MAX(version_number), 0) + 1
