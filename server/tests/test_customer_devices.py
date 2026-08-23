@@ -2046,6 +2046,56 @@ def test_admin_approve_outcomes(client: TestClient) -> None:
     assert consumed.json()["detail"]["code"] == "PAIRING_ALREADY_CONSUMED"
 
 
+def test_admin_pairing_verification_view(client: TestClient) -> None:
+    """The verification view carries the full §12.2 step-3 evidence: the
+    masked code, its delivery records (connector review P2 — who delivered,
+    on which channel, to which recipient), the activation fact and the
+    first-device status behind the admin_lane summary."""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-adm-vv", suffix="vv")
+    enroll = _enroll(client, code=FIRST_CODE, fingerprint="fp-adm-vv-2nd", key="idem-vv")
+    pairing_id = enroll.json()["pairing_request_id"]
+    code_id = _code_id_of_user(customer["user_id"])
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO activation_code_deliveries "
+            "(id, code_id, channel, external_order_ref, recipient_ref, "
+            "delivered_by_user_id, delivered_at) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            (
+                "del-vv-1",
+                code_id,
+                "manual",
+                "T18-VV-ORDER",
+                "customer-vv@example.com",
+                "admin_u",
+                "2026-01-02T00:00:00+00:00",
+            ),
+        )
+
+    view = client.get(f"{ADMIN_PAIRINGS_PATH}/{pairing_id}", headers=_admin_session(client))
+    assert view.status_code == 200, view.text
+    body = view.json()
+    assert body["pairing"]["id"] == pairing_id
+    assert body["pairing"]["activation_code_id"] == code_id
+    assert body["pairing"]["status"] == "PENDING"
+    assert body["code"]["code_id"] == code_id
+    assert body["code"]["masked_code"]  # masked evidence, never plaintext
+    assert body["activation"]["user_id"] == customer["user_id"]
+    assert body["first_device"]["device_id"] == customer["device_id"]
+    assert body["first_device"]["status"] == "BOUND"
+    # The first device is still bound — the fallback lane stays closed.
+    assert body["admin_lane"] == "CLOSED_FIRST_DEVICE_BOUND"
+    assert len(body["deliveries"]) == 1
+    delivery = body["deliveries"][0]
+    assert delivery["channel"] == "manual"
+    assert delivery["external_order_ref"] == "T18-VV-ORDER"
+    assert delivery["recipient_ref"] == "customer-vv@example.com"
+    assert delivery["delivered_by_user_id"] == "admin_u"
+
+    missing = client.get(f"{ADMIN_PAIRINGS_PATH}/{uuid.uuid4()}", headers=_admin_session(client))
+    assert missing.status_code == 404
+    assert missing.json()["detail"]["code"] == "PAIRING_NOT_FOUND"
+
+
 def test_admin_unbind_releases_device_and_riding_session(client: TestClient) -> None:
     """The admin unbind mirrors the customer lane (§9.2) with the actor
     recorded as the administrator and one audit row."""

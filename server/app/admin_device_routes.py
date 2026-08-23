@@ -144,7 +144,9 @@ def get_device_pairing(pairing_id: str, actor: AdminReader) -> dict[str, object]
     """The verification view an operator reads before approving.
 
     Dev doc §12.2 step 3: the admin verifies the issuance record (the code,
-    its delivery and the activation fact) before opening the fallback lane.
+    its delivery and the activation fact) before opening the fallback lane
+    (connector review P2: the delivery records — who delivered the code, on
+    which channel, to which recipient — are part of the required evidence).
     ``admin_lane`` summarises whether the fallback is open — a snapshot for
     the operator's eyes only; the write path re-validates under lock.
     """
@@ -165,6 +167,13 @@ def get_device_pairing(pairing_id: str, actor: AdminReader) -> dict[str, object]
                 "FROM activation_codes WHERE id = %s",
                 (code_id,),
             ).fetchone()
+            deliveries = conn.execute(
+                "SELECT id, channel, external_order_ref, recipient_ref, "
+                "delivered_by_user_id, delivered_at "
+                "FROM activation_code_deliveries WHERE code_id = %s "
+                "ORDER BY delivered_at ASC",
+                (code_id,),
+            ).fetchall()
             activation = conn.execute(
                 "SELECT user_id, activated_at, first_device_id "
                 "FROM activation_code_activations WHERE code_id = %s",
@@ -204,6 +213,20 @@ def get_device_pairing(pairing_id: str, actor: AdminReader) -> dict[str, object]
             "issued_at": code[3],
             "bound_user_id": code[4],
         },
+        # Issuance evidence (dev doc §12.2 step 3): who delivered the code,
+        # through which channel, to which recipient — never the code itself
+        # (the table stores no plaintext by design, 027/ACT-01).
+        "deliveries": [
+            {
+                "delivery_id": str(row[0]),
+                "channel": str(row[1]),
+                "external_order_ref": row[2],
+                "recipient_ref": row[3],
+                "delivered_by_user_id": str(row[4]),
+                "delivered_at": row[5],
+            }
+            for row in deliveries
+        ],
         "activation": None
         if activation is None
         else {
