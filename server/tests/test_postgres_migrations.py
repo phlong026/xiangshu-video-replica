@@ -149,7 +149,7 @@ def test_pg_full_upgrade_downgrade_reupgrade_and_indexes() -> None:
 
         with psycopg.connect(dsn) as conn:
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-            assert version == "032_security_rate_limits", f"unexpected head revision: {version}"
+            assert version == "033_device_pairing_requests", f"unexpected head revision: {version}"
 
             tables = {
                 row[0]
@@ -228,7 +228,7 @@ def test_pg_full_upgrade_downgrade_reupgrade_and_indexes() -> None:
         command.upgrade(_alembic_config(sqlalchemy_dsn), "head")
         with psycopg.connect(dsn) as conn:
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-            assert version == "032_security_rate_limits"
+            assert version == "033_device_pairing_requests"
     finally:
         _drop_database("t06_migrate_test")
 
@@ -350,7 +350,7 @@ def test_pg_wallet_downgrade_blocked_when_ledger_has_settled_rounds() -> None:
         # The database must be left exactly at head (no partial rollback).
         with psycopg.connect(dsn) as conn:
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-        assert version == "032_security_rate_limits"
+        assert version == "033_device_pairing_requests"
     finally:
         _drop_database(db_name)
 
@@ -626,7 +626,8 @@ def test_pg_billing_constraints_downgrade_guard() -> None:
             )
 
         with pytest.raises(RuntimeError, match="cannot downgrade 026"):
-            # Six steps from head: 032->029 (empty security rate-limit layer,
+            # Seven steps from head: 033->032 (empty pairing layer, symmetric)
+            # then 032->029 (empty security rate-limit layer,
             # symmetric) then 029->028 (empty session/envelope layer, symmetric)
             # then 028->031 (empty device layer, symmetric) then
             # 031->027 (empty idempotency ledger, symmetric) then
@@ -638,13 +639,13 @@ def test_pg_billing_constraints_downgrade_guard() -> None:
             command.downgrade(_alembic_config(sqlalchemy_dsn), "025_postgres_runtime_compatibility")
         with psycopg.connect(dsn) as conn:
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-        assert version == "032_security_rate_limits"
+        assert version == "033_device_pairing_requests"
 
         # Remove the customer order (test data only — confirmed production rows
         # are never deleted, which is exactly why the guard exists) and the
-        # downgrade becomes possible again. Six steps
-        # (032->029->028->031->027->026->025) restore the 022 constraint set the
-        # final assertion exercises.
+        # downgrade becomes possible again. Seven steps
+        # (033->032->029->028->031->027->026->025) restore the 022 constraint
+        # set the final assertion exercises.
         with psycopg.connect(dsn, autocommit=True) as conn:
             conn.execute("DELETE FROM recharge_orders WHERE provider != 'zpay'")
         command.downgrade(_alembic_config(sqlalchemy_dsn), "025_postgres_runtime_compatibility")

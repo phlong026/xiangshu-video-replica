@@ -790,7 +790,7 @@ def test_downgrade_refuses_once_failures_exist(security_dsn: str) -> None:
     # The refusal left the schema untouched at head.
     with psycopg.connect(_t15_dsn()) as conn:
         version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-    assert version == "032_security_rate_limits"
+    assert version == "033_device_pairing_requests"
 
     # TRUNCATE bypasses the row-level append-only trigger (it only fires
     # on UPDATE/DELETE), so the fixture cleanup pattern doubles as the way
@@ -814,4 +814,4 @@ def test_downgrade_refuses_once_failures_exist(security_dsn: str) -> None:
     command.upgrade(config, "head")
     with psycopg.connect(_t15_dsn()) as conn:
         version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-    assert version == "032_security_rate_limits"
+    assert version == "033_device_pairing_requests"

@@ -68,6 +68,8 @@ TEST_ENVELOPE_AEAD_KEY = secrets.token_bytes(32)
 
 ACTIVATE_PATH = "/api/customer/activate"
 DEVICES_PATH = "/api/customer/devices"
+ENROLL_PATH = "/api/customer/devices/enroll"
+APPROVE_PATH = "/api/customer/device-pairings"
 IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
 REQUEST_ID_HEADER = "X-Request-Id"
 REPLAY_HEADER = "X-Idempotent-Replay"
@@ -165,7 +167,7 @@ def route_state(devices_dsn: str) -> Iterator[str]:
     with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
         conn.execute(
             "TRUNCATE customer_session_events, customer_session_state, "
-            "customer_idempotency_envelopes, "
+            "customer_idempotency_envelopes, device_pairing_requests, "
             "customer_devices, activation_code_events, activation_code_activations, "
             "activation_code_deliveries, activation_code_exports, activation_codes, "
             "activation_code_batches, admin_write_idempotency, admin_sessions, "
@@ -862,6 +864,506 @@ def test_unbind_same_key_different_target_conflicts(client: TestClient) -> None:
             (customer["device_id"],),
         ).fetchone()
     assert status is not None and status[0] == "BOUND"
+
+
+# ---------------------------------------------------------------------------
+# T17 / DEV-02 — second-device enroll, one-shot pairing and approval
+# ---------------------------------------------------------------------------
+
+
+def _enroll(
+    client: TestClient,
+    *,
+    code: str,
+    fingerprint: str,
+    key: str,
+    name: str = "Second Device",
+    platform: str = "macos",
+) -> object:
+    return client.post(
+        ENROLL_PATH,
+        json={
+            "activation_code": code,
+            "device_fingerprint": fingerprint,
+            "device_name": name,
+            "device_platform": platform,
+        },
+        headers={IDEMPOTENCY_KEY_HEADER: key},
+    )
+
+
+def _approve(client: TestClient, token: str, pairing_id: str) -> object:
+    return client.post(f"{APPROVE_PATH}/{pairing_id}/approve", headers=_bearer(token))
+
+
+def _pairing_row(conn: psycopg.Connection, pairing_id: str) -> tuple | None:
+    return conn.execute(
+        "SELECT status, candidate_fingerprint_hmac, expires_at, approved_at, "
+        "approved_by_device_id, consumed_at, consumed_device_id "
+        "FROM device_pairing_requests WHERE id = %s",
+        (pairing_id,),
+    ).fetchone()
+
+
+def _expire_pairing(pairing_id: str) -> None:
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        conn.execute(
+            "UPDATE device_pairing_requests SET expires_at = '2020-01-01T00:00:00+00:00' "
+            "WHERE id = %s",
+            (pairing_id,),
+        )
+
+
+def _count_rows(sql: str) -> int:
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        row = conn.execute(sql).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+def test_enroll_requires_idempotency_key(client: TestClient) -> None:
+    """The enroll carries a mandatory Idempotency-Key (dev doc §6.3)."""
+    response = client.post(
+        ENROLL_PATH,
+        json={
+            "activation_code": FIRST_CODE,
+            "device_fingerprint": "fp-pair-none",
+            "device_name": "Second Device",
+            "device_platform": "macos",
+        },
+    )
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"]["code"] == "IDEMPOTENCY_KEY_REQUIRED"
+
+
+def test_enroll_creates_pending_pairing_request(client: TestClient) -> None:
+    """Step 1+2 of the §12.2 contract: a PENDING request bound to the digest."""
+    _activated_customer(client, code=FIRST_CODE, fingerprint="fp-pair-1", suffix="p1")
+    response = _enroll(client, code=FIRST_CODE, fingerprint="fp-pair-1-second", key="idem-p1")
+    assert response.status_code == 202, response.text
+    body = response.json()
+    assert body["status"] == "PENDING"
+    pairing_id = body["pairing_request_id"]
+    assert pairing_id
+    assert body["expires_at"]
+
+    from app.customer_device_service import keyed_digest
+
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        row = _pairing_row(conn, pairing_id)
+    assert row is not None
+    assert row[0] == "PENDING"
+    assert row[1] == keyed_digest(TEST_FINGERPRINT_KEY_V2.encode("utf-8"), "fp-pair-1-second")
+    assert row[3] is None and row[5] is None
+
+
+def test_enroll_pending_retry_returns_same_pairing(client: TestClient) -> None:
+    """A retried enroll (same key + same body) reuses the active request."""
+    _activated_customer(client, code=FIRST_CODE, fingerprint="fp-pair-2", suffix="p2")
+    first = _enroll(client, code=FIRST_CODE, fingerprint="fp-pair-2-second", key="idem-p2")
+    assert first.status_code == 202, first.text
+    second = _enroll(client, code=FIRST_CODE, fingerprint="fp-pair-2-second", key="idem-p2")
+    assert second.status_code == 202, second.text
+    assert second.json()["pairing_request_id"] == first.json()["pairing_request_id"]
+    # The PENDING branch never seals an envelope: nothing was spent.
+    assert _count_rows("SELECT COUNT(*) FROM device_pairing_requests") == 1
+    assert (
+        _count_rows(
+            "SELECT COUNT(*) FROM customer_idempotency_envelopes WHERE operation = 'device_enroll'"
+        )
+        == 0
+    )
+
+
+def test_enroll_rejects_unknown_code_unified(client: TestClient) -> None:
+    """Anti-enumeration: unknown and unusable codes share one 400 answer."""
+    response = _enroll(client, code=FIRST_CODE, fingerprint="fp-pair-3", key="idem-p3")
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"]["code"] == "PAIRING_UNAVAILABLE"
+
+
+def test_enroll_rejects_unactivated_code_unified(client: TestClient) -> None:
+    """An ISSUED (never activated) code answers the same unified 400."""
+    _seed_issuable_code(code=SECOND_CODE, code_id="code-p4", batch_id="batch-p4")
+    response = _enroll(client, code=SECOND_CODE, fingerprint="fp-pair-4", key="idem-p4")
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"]["code"] == "PAIRING_UNAVAILABLE"
+
+
+def test_enroll_rejects_already_bound_fingerprint(client: TestClient) -> None:
+    """A fingerprint holding a current binding cannot enroll again."""
+    _activated_customer(client, code=FIRST_CODE, fingerprint="fp-pair-5", suffix="p5")
+    response = _enroll(client, code=FIRST_CODE, fingerprint="fp-pair-5", key="idem-p5")
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "USER_ALREADY_ACTIVATED"
+    assert _count_rows("SELECT COUNT(*) FROM device_pairing_requests") == 0
+
+
+def test_enroll_third_device_blocked_slots_full(client: TestClient) -> None:
+    """Both slots BOUND: the third device cannot even start pairing."""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-pair-6", suffix="p6")
+    _second_device_row(
+        user_id=customer["user_id"],
+        activation_code_id=_code_id_of_user(customer["user_id"]),
+        device_id=str(uuid.uuid4()),
+        slot_no=2,
+    )
+    response = _enroll(client, code=FIRST_CODE, fingerprint="fp-pair-6-third", key="idem-p6")
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "DEVICE_SLOTS_FULL"
+    assert _count_rows("SELECT COUNT(*) FROM device_pairing_requests") == 0
+
+
+def test_enroll_consumes_approved_pairing_binds_slot2(client: TestClient) -> None:
+    """The full §12.2 flow: enroll, approve, enroll again -> credentials.
+
+    The second device binds slot 2 and the chain grows by exactly one
+    customer_devices row — no recharge order, no wallet transaction, no
+    new user (DEV-02 No-Go: the second device never re-charges).
+    """
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-pair-7", suffix="p7")
+    enroll = _enroll(client, code=FIRST_CODE, fingerprint="fp-pair-7-second", key="idem-p7")
+    assert enroll.status_code == 202, enroll.text
+    pairing_id = enroll.json()["pairing_request_id"]
+
+    approval = _approve(client, customer["device_token"], pairing_id)
+    assert approval.status_code == 200, approval.text
+
+    consume = _enroll(client, code=FIRST_CODE, fingerprint="fp-pair-7-second", key="idem-p7")
+    assert consume.status_code == 201, consume.text
+    credentials = consume.json()
+    assert credentials["device_id"]
+    assert credentials["slot_no"] == 2
+    assert credentials["device_token"]
+
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        row = _pairing_row(conn, pairing_id)
+        device = conn.execute(
+            "SELECT slot_no, status, user_id, display_name, platform "
+            "FROM customer_devices WHERE id = %s",
+            (credentials["device_id"],),
+        ).fetchone()
+    assert row is not None
+    assert row[0] == "CONSUMED"
+    assert row[5] is not None and str(row[6]) == credentials["device_id"]
+    assert device is not None
+    assert device[0] == 2 and device[1] == "BOUND"
+    assert str(device[2]) == customer["user_id"]
+    assert device[3] == "Second Device" and device[4] == "macos"
+
+    # No second charge: the pairing chain touches no money tables.
+    assert _count_rows("SELECT COUNT(*) FROM recharge_orders") == 1
+    assert _count_rows("SELECT COUNT(*) FROM wallet_transactions") == 1
+    assert _count_rows("SELECT COUNT(*) FROM users WHERE role = 'customer'") == 1
+
+
+def test_enroll_consume_response_loss_replays_credentials(client: TestClient) -> None:
+    """Lost 201: the same key replays the sealed credentials (§12.2 step 6)."""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-pair-8", suffix="p8")
+    enroll = _enroll(client, code=FIRST_CODE, fingerprint="fp-pair-8-second", key="idem-p8")
+    assert enroll.status_code == 202, enroll.text
+    pairing_id = enroll.json()["pairing_request_id"]
+    assert _approve(client, customer["device_token"], pairing_id).status_code == 200
+
+    first = _enroll(client, code=FIRST_CODE, fingerprint="fp-pair-8-second", key="idem-p8")
+    assert first.status_code == 201, first.text
+    replay = _enroll(client, code=FIRST_CODE, fingerprint="fp-pair-8-second", key="idem-p8")
+    assert replay.status_code == 201, replay.text
+    assert replay.headers.get(REPLAY_HEADER) == "true"
+    assert replay.json() == first.json()
+
+    # One binding, one CONSUMED pairing — the replay re-occupied nothing.
+    assert _count_rows("SELECT COUNT(*) FROM customer_devices") == 2
+    assert _count_rows("SELECT COUNT(*) FROM device_pairing_requests") == 1
+
+
+def test_enroll_same_key_different_body_conflicts(client: TestClient) -> None:
+    """The spent key answers 409 against a different request body."""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-pair-9", suffix="p9")
+    enroll = _enroll(client, code=FIRST_CODE, fingerprint="fp-pair-9-second", key="idem-p9")
+    assert enroll.status_code == 202, enroll.text
+    approved = _approve(client, customer["device_token"], enroll.json()["pairing_request_id"])
+    assert approved.status_code == 200, approved.text
+    consumed = _enroll(client, code=FIRST_CODE, fingerprint="fp-pair-9-second", key="idem-p9")
+    assert consumed.status_code == 201, consumed.text
+
+    conflict = _enroll(
+        client,
+        code=FIRST_CODE,
+        fingerprint="fp-pair-9-second",
+        key="idem-p9",
+        name="A Different Name",
+    )
+    assert conflict.status_code == 409, conflict.text
+    assert conflict.json()["detail"]["code"] == "IDEMPOTENCY_CONFLICT"
+
+
+def test_enroll_concurrent_slot2_exactly_one_winner(client: TestClient) -> None:
+    """Two approved candidates race for slot 2: exactly one binds (§12.2-5)."""
+    import json as _json
+    import threading
+
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-pair-10", suffix="p10")
+    pairing_ids: list[str] = []
+    for index in (1, 2):
+        enroll = _enroll(
+            client,
+            code=FIRST_CODE,
+            fingerprint=f"fp-pair-10-rival-{index}",
+            key=f"idem-p10-{index}",
+            name=f"Rival {index}",
+        )
+        assert enroll.status_code == 202, enroll.text
+        pairing_id = enroll.json()["pairing_request_id"]
+        assert _approve(client, customer["device_token"], pairing_id).status_code == 200
+        pairing_ids.append(pairing_id)
+
+    barrier = threading.Barrier(2)
+    results: list[tuple[int, str]] = []
+    results_lock = threading.Lock()
+
+    def worker(index: int) -> None:
+        barrier.wait()
+        response = _enroll(
+            client,
+            code=FIRST_CODE,
+            fingerprint=f"fp-pair-10-rival-{index}",
+            key=f"idem-p10-{index}",
+            name=f"Rival {index}",
+        )
+        with results_lock:
+            results.append((response.status_code, response.text))
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in (1, 2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+        assert not thread.is_alive(), "a concurrent enroll worker hung"
+
+    statuses = sorted(status for status, _ in results)
+    assert statuses == [201, 409], results
+    loser_body = _json.loads([body for status, body in results if status == 409][0])
+    assert loser_body["detail"]["code"] == "DEVICE_SLOTS_FULL"
+
+    assert _count_rows("SELECT COUNT(*) FROM customer_devices WHERE status = 'BOUND'") == 2
+    consumed = _count_rows("SELECT COUNT(*) FROM device_pairing_requests WHERE status = 'CONSUMED'")
+    assert consumed == 1
+
+
+def test_enroll_expired_pending_flips_and_creates_new(client: TestClient) -> None:
+    """A lapsed PENDING request is lazily expired, not revived."""
+    _activated_customer(client, code=FIRST_CODE, fingerprint="fp-pair-11", suffix="p11")
+    first = _enroll(client, code=FIRST_CODE, fingerprint="fp-pair-11-second", key="idem-p11")
+    assert first.status_code == 202, first.text
+    old_pairing_id = first.json()["pairing_request_id"]
+    _expire_pairing(old_pairing_id)
+
+    fresh = _enroll(client, code=FIRST_CODE, fingerprint="fp-pair-11-second", key="idem-p11")
+    assert fresh.status_code == 202, fresh.text
+    new_pairing_id = fresh.json()["pairing_request_id"]
+    assert new_pairing_id != old_pairing_id
+
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        old_row = _pairing_row(conn, old_pairing_id)
+        new_row = _pairing_row(conn, new_pairing_id)
+    assert old_row is not None and old_row[0] == "EXPIRED"
+    assert new_row is not None and new_row[0] == "PENDING"
+
+
+def test_enroll_approved_then_expired_restarts(client: TestClient) -> None:
+    """An approval is time-boxed: a lapsed APPROVED pairing restarts fresh."""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-pair-12", suffix="p12")
+    enroll = _enroll(client, code=FIRST_CODE, fingerprint="fp-pair-12-second", key="idem-p12")
+    assert enroll.status_code == 202, enroll.text
+    pairing_id = enroll.json()["pairing_request_id"]
+    assert _approve(client, customer["device_token"], pairing_id).status_code == 200
+    _expire_pairing(pairing_id)
+
+    again = _enroll(client, code=FIRST_CODE, fingerprint="fp-pair-12-second", key="idem-p12")
+    assert again.status_code == 202, again.text
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        row = _pairing_row(conn, pairing_id)
+    assert row is not None and row[0] == "EXPIRED"
+    assert row[3] is not None  # the lapsed approval stays visible in the audit
+
+
+def test_enroll_consume_with_slots_full_keeps_approved(client: TestClient) -> None:
+    """Consumption against two BOUND slots: 409 now, pairing still APPROVED."""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-pair-13", suffix="p13")
+    enroll = _enroll(client, code=FIRST_CODE, fingerprint="fp-pair-13-second", key="idem-p13")
+    assert enroll.status_code == 202, enroll.text
+    pairing_id = enroll.json()["pairing_request_id"]
+    assert _approve(client, customer["device_token"], pairing_id).status_code == 200
+
+    # Slot 2 gets taken by another binding before the consume retry.
+    _second_device_row(
+        user_id=customer["user_id"],
+        activation_code_id=_code_id_of_user(customer["user_id"]),
+        device_id=str(uuid.uuid4()),
+        slot_no=2,
+    )
+    blocked = _enroll(client, code=FIRST_CODE, fingerprint="fp-pair-13-second", key="idem-p13")
+    assert blocked.status_code == 409, blocked.text
+    assert blocked.json()["detail"]["code"] == "DEVICE_SLOTS_FULL"
+
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        row = _pairing_row(conn, pairing_id)
+    assert row is not None and row[0] == "APPROVED"
+
+
+def test_approve_requires_bearer_token(client: TestClient) -> None:
+    response = client.post(f"{APPROVE_PATH}/{str(uuid.uuid4())}/approve")
+    assert response.status_code == 401, response.text
+    assert response.json()["detail"]["code"] == "DEVICE_CREDENTIAL_REQUIRED"
+
+
+def test_approve_happy_path_records_approver(client: TestClient) -> None:
+    """Step 3: the first bound device approves; the lineage is recorded."""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-pair-14", suffix="p14")
+    enroll = _enroll(client, code=FIRST_CODE, fingerprint="fp-pair-14-second", key="idem-p14")
+    assert enroll.status_code == 202, enroll.text
+    pairing_id = enroll.json()["pairing_request_id"]
+
+    response = _approve(client, customer["device_token"], pairing_id)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["pairing_request_id"] == pairing_id
+    assert body["status"] == "APPROVED"
+
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        row = _pairing_row(conn, pairing_id)
+    assert row is not None
+    assert row[0] == "APPROVED"
+    assert row[3] is not None
+    assert row[4] is not None and str(row[4]) == customer["device_id"]
+
+
+def test_approve_missing_or_foreign_pairing_not_found(client: TestClient) -> None:
+    """Missing, random and cross-code approvals all answer one 404 (IDOR)."""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-pair-15", suffix="p15")
+    other = _activated_customer(client, code=SECOND_CODE, fingerprint="fp-pair-15b", suffix="p15b")
+
+    missing = _approve(client, customer["device_token"], str(uuid.uuid4()))
+    assert missing.status_code == 404, missing.text
+    assert missing.json()["detail"]["code"] == "PAIRING_NOT_FOUND"
+
+    enroll = _enroll(client, code=FIRST_CODE, fingerprint="fp-pair-15-second", key="idem-p15")
+    assert enroll.status_code == 202, enroll.text
+    pairing_id = enroll.json()["pairing_request_id"]
+
+    # A device bound to another code's customer must not approve this one.
+    foreign = _approve(client, other["device_token"], pairing_id)
+    assert foreign.status_code == 404, foreign.text
+    assert foreign.json()["detail"]["code"] == "PAIRING_NOT_FOUND"
+
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        row = _pairing_row(conn, pairing_id)
+    assert row is not None and row[0] == "PENDING"
+
+
+def test_approve_repeated_returns_current_state(client: TestClient) -> None:
+    """The state machine is the idempotency: re-approving answers APPROVED."""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-pair-16", suffix="p16")
+    enroll = _enroll(client, code=FIRST_CODE, fingerprint="fp-pair-16-second", key="idem-p16")
+    assert enroll.status_code == 202, enroll.text
+    pairing_id = enroll.json()["pairing_request_id"]
+
+    first = _approve(client, customer["device_token"], pairing_id)
+    assert first.status_code == 200, first.text
+    second = _approve(client, customer["device_token"], pairing_id)
+    assert second.status_code == 200, second.text
+    assert second.json() == first.json()
+
+
+def test_approve_after_consumption_conflicts(client: TestClient) -> None:
+    """CONSUMED is terminal: the one-shot request cannot be re-approved."""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-pair-17", suffix="p17")
+    enroll = _enroll(client, code=FIRST_CODE, fingerprint="fp-pair-17-second", key="idem-p17")
+    assert enroll.status_code == 202, enroll.text
+    pairing_id = enroll.json()["pairing_request_id"]
+    assert _approve(client, customer["device_token"], pairing_id).status_code == 200
+    consumed = _enroll(client, code=FIRST_CODE, fingerprint="fp-pair-17-second", key="idem-p17")
+    assert consumed.status_code == 201, consumed.text
+
+    response = _approve(client, customer["device_token"], pairing_id)
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "PAIRING_ALREADY_CONSUMED"
+
+
+def test_approve_expired_conflicts(client: TestClient) -> None:
+    """A lapsed request flips EXPIRED and refuses the approval."""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-pair-18", suffix="p18")
+    enroll = _enroll(client, code=FIRST_CODE, fingerprint="fp-pair-18-second", key="idem-p18")
+    assert enroll.status_code == 202, enroll.text
+    pairing_id = enroll.json()["pairing_request_id"]
+    _expire_pairing(pairing_id)
+
+    response = _approve(client, customer["device_token"], pairing_id)
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "PAIRING_EXPIRED"
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        row = _pairing_row(conn, pairing_id)
+    assert row is not None and row[0] == "EXPIRED"
+
+
+def test_approve_self_approval_rejected(client: TestClient) -> None:
+    """Defensive: a pairing row naming the approver's own digest is refused."""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-pair-19", suffix="p19")
+    code_id = _code_id_of_user(customer["user_id"])
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        fingerprint_row = conn.execute(
+            "SELECT fingerprint_hmac FROM customer_devices WHERE id = %s",
+            (customer["device_id"],),
+        ).fetchone()
+        assert fingerprint_row is not None
+        conn.execute(
+            "INSERT INTO device_pairing_requests "
+            "(id, activation_code_id, candidate_fingerprint_hmac, "
+            " candidate_fingerprint_key_version, display_name, platform, status, expires_at) "
+            "VALUES (%s, %s, %s, 2, 'Ghost Device', 'windows', 'PENDING', %s)",
+            (
+                str(uuid.uuid4()),
+                code_id,
+                fingerprint_row[0],
+                FUTURE_EXPIRY,
+            ),
+        )
+        pairing_id = conn.execute(
+            "SELECT id FROM device_pairing_requests WHERE activation_code_id = %s",
+            (code_id,),
+        ).fetchone()
+    assert pairing_id is not None
+
+    response = _approve(client, customer["device_token"], str(pairing_id[0]))
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "PAIRING_SELF_APPROVAL"
+
+
+def test_pairing_approval_not_transferable(client: TestClient) -> None:
+    """The approval binds the candidate digest: another device cannot use it."""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-pair-20", suffix="p20")
+    enroll = _enroll(client, code=FIRST_CODE, fingerprint="fp-pair-20-second", key="idem-p20")
+    assert enroll.status_code == 202, enroll.text
+    pairing_id = enroll.json()["pairing_request_id"]
+    assert _approve(client, customer["device_token"], pairing_id).status_code == 200
+
+    # A different fingerprint enrolling the same code gets its own PENDING
+    # request — it must not consume the approved pairing of the candidate.
+    stranger = _enroll(
+        client,
+        code=FIRST_CODE,
+        fingerprint="fp-pair-20-stranger",
+        key="idem-p20-stranger",
+        name="Stranger Device",
+    )
+    assert stranger.status_code == 202, stranger.text
+    assert stranger.json()["pairing_request_id"] != pairing_id
+
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        approved_row = _pairing_row(conn, pairing_id)
+    assert approved_row is not None and approved_row[0] == "APPROVED"
+    assert _count_rows("SELECT COUNT(*) FROM customer_devices") == 1
 
 
 # ---------------------------------------------------------------------------
