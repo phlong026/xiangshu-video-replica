@@ -1,4 +1,4 @@
-"""T19 / SES-01 — the session lease service layer (login, heartbeat, logout).
+"""T19 / SES-01 + T20 / SES-02/SES-03 — the session lease service layer.
 
 The single-online session half of the customer runtime (code checklist §3.2,
 frozen name ``customer_session_service.py``), implementing dev doc §12.3 on
@@ -16,6 +16,12 @@ epoch monotonic by trigger) and ``customer_session_events`` (append-only).
   * another device online with a live lease -> conflict (never a silent kick,
     dev doc §3.3): the caller receives the masked device hint and the
     remaining lease, and nothing changes in the database;
+  * another device online with a live lease + ``takeover=True`` (the
+    ``switch_session`` entry, §12.3 fifth line) -> the explicit atomic
+    switch: a ``SWITCH`` event records the replaced session (old device,
+    old epoch, acting user, explicit reason), then epoch + 1, a fresh
+    token and the ``LOGIN`` event land in the same transaction — the old
+    token is fenced out on every API instance the moment it commits;
 
 - ``heartbeat_session`` renews the lease (epoch untouched — §12.3 same-device
   extension) and appends a ``HEARTBEAT`` event; a token that no longer owns
@@ -26,7 +32,17 @@ epoch monotonic by trigger) and ``customer_session_events`` (append-only).
   and appends a ``LOGOUT`` event with reason ``user_logout``; the released
   lease is immediately re-loggable by the other device; a late logout after
   another device took over answers ``replaced`` without touching the new
-  session (acceptance §3.4).
+  session (acceptance §3.4);
+
+- ``revoke_session`` (T20 / SES-03 revocation propagation) terminates the
+  user's live session atomically — epoch bump, lease pulled into the past
+  and a ``LOGOUT`` event naming the acting user and the reason. The admin
+  code suspend/revoke paths call it so a suspended, revoked or otherwise
+  disabled account loses its session in the same transaction that flips
+  the code (only deleting the client token never counts as a server-side
+  revocation, SES-03 No-Go). The optional ``device_id`` filter scopes the
+  revocation to the session riding one device (the T16/T18 unbind/revoke
+  core delegates here).
 
 All timestamps come from the caller-supplied clock — the routes sample
 ``SELECT now()`` inside the business transaction (SES-01: PostgreSQL is the
@@ -75,6 +91,10 @@ LOGOUT_EXPIRED = "expired"
 
 # The session-event reason recorded on user-initiated logout.
 LOGOUT_REASON = "user_logout"
+
+# The session-event reason recorded when an explicit switch replaces a live
+# session (dev doc §12.3 fifth line).
+SWITCH_REASON = "explicit_switch"
 
 
 def mask_device_name(display_name: str) -> str:
@@ -193,13 +213,16 @@ def login_session(
     presentation_session_token: str | None,
     request_id: str,
     now: datetime | None = None,
+    takeover: bool = False,
 ) -> LoginResult:
     """Drive the §12.3 login state machine for one authenticated device.
 
     The caller has already authenticated the *device* credential and supplies
     its ``user_id`` / ``activation_code_id``; this layer locks that user's
     single session row and decides between renewal, recovery/takeover
-    (epoch + 1) and conflict.
+    (epoch + 1) and conflict. ``takeover=True`` (the ``switch_session``
+    entry) turns the live-other-device conflict into the explicit atomic
+    switch — the only path that may ever displace a live session.
     """
     now_full = now or server_now_utc()
     now_iso = now_full.replace(microsecond=0).isoformat()
@@ -320,7 +343,39 @@ def login_session(
             )
         )
 
-    # Live lease on the other device: conflict with the masked hint (§13.2).
+    # A live lease on the other device.
+    if takeover:
+        # §12.3 fifth line — the explicit atomic switch. The SWITCH event
+        # records the *replaced* session (old device, old epoch, acting
+        # user, explicit reason) and the subsequent _establish lands the
+        # epoch bump, the fresh token and the LOGIN event in the same
+        # transaction: the old token is fenced out on every API instance
+        # the moment this commits (task list T20 exit gate).
+        _write_event(
+            conn,
+            event="SWITCH",
+            user_id=user_id,
+            activation_code_id=activation_code_id,
+            device_id=current_device_id,
+            session_id=session_id,
+            session_epoch=session_epoch,
+            request_id=request_id,
+            actor_user_id=user_id,
+            reason=SWITCH_REASON,
+        )
+        return _require_established(
+            _establish(
+                conn,
+                device_id=device_id,
+                user_id=user_id,
+                activation_code_id=activation_code_id,
+                old_row=row,
+                now=now_full,
+                request_id=request_id,
+            )
+        )
+
+    # Conflict with the masked hint (§13.2).
     online_device = conn.execute(
         "SELECT display_name, slot_no FROM customer_devices WHERE id = %s",
         (current_device_id,),
@@ -603,3 +658,108 @@ def logout_session(
         session_id=session_id,
         session_epoch=session_epoch,
     )
+
+
+# ---------------------------------------------------------------------------
+# Explicit switch (dev doc §12.3 fifth line)
+# ---------------------------------------------------------------------------
+
+
+def switch_session(
+    conn: psycopg.Connection,
+    *,
+    user_id: str,
+    activation_code_id: str,
+    device_id: str,
+    presentation_session_token: str | None,
+    request_id: str,
+    now: datetime | None = None,
+) -> LoginResult:
+    """The explicit atomic switch to the calling device (SES-02).
+
+    The §12.3 state machine with ``takeover=True``: a live lease on another
+    device is displaced — never silently, only because the user explicitly
+    confirmed the switch (the route only reaches here behind the confirmed
+    client flow; a plain login never passes this flag). Every other branch
+    (missing row, lapsed lease, same-device renewal/recovery) matches the
+    login semantics exactly, so a switch never invents new states.
+    """
+    return login_session(
+        conn,
+        user_id=user_id,
+        activation_code_id=activation_code_id,
+        device_id=device_id,
+        presentation_session_token=presentation_session_token,
+        request_id=request_id,
+        now=now,
+        takeover=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Revocation propagation (T20 / SES-03)
+# ---------------------------------------------------------------------------
+
+
+# The session-event reasons recorded by the admin-driven revocations.
+REASON_CODE_SUSPENDED = "code_suspended"
+REASON_CODE_REVOKED = "code_revoked"
+
+
+def revoke_session(
+    conn: psycopg.Connection,
+    *,
+    user_id: str,
+    actor_user_id: str,
+    reason: str,
+    request_id: str,
+    now_iso: str,
+    device_id: str | None = None,
+) -> bool:
+    """Terminate the user's live session atomically (SES-03 propagation).
+
+    Epoch bump + lease pulled into the past + a ``LOGOUT`` event naming the
+    acting user and the reason — one transaction, exactly the T16 unbind
+    core generalized. The GREATEST backstop keeps the
+    ``lease_after_created`` CHECK satisfied; one microsecond — not one
+    second — preserves the "immediately expired" semantics (the PR #47
+    Codex review P2 lesson). ``device_id`` scopes the revocation to the
+    session riding that device (the T16/T18 unbind/revoke delegation);
+    ``None`` revokes whatever session the user holds (the admin code
+    suspend/revoke paths — a suspended, revoked or otherwise disabled
+    account loses its session in the same transaction).
+
+    Answers ``True`` when a session row was actually revoked; a user with
+    no session row (never activated, or the row was lost) is a no-op —
+    there was nothing to propagate.
+    """
+    where_clause = "WHERE user_id = %s"
+    params: list[object] = [user_id]
+    if device_id is not None:
+        where_clause += " AND device_id = %s"
+        params.append(device_id)
+    session_row = conn.execute(
+        "UPDATE customer_session_state "
+        "SET session_epoch = session_epoch + 1, "
+        "lease_until = GREATEST(%s::timestamptz, "
+        "created_at::timestamptz + interval '1 microsecond'), "
+        "updated_at = %s "
+        f"{where_clause} "
+        "RETURNING activation_code_id, device_id, session_id, session_epoch",
+        (now_iso, now_iso, *params),
+    ).fetchone()
+    if session_row is None:
+        return False
+    _write_event(
+        conn,
+        event="LOGOUT",
+        user_id=user_id,
+        activation_code_id=str(session_row[0]),
+        device_id=str(session_row[1]),
+        session_id=str(session_row[2]),
+        session_epoch=int(session_row[3]),
+        request_id=request_id,
+        actor_user_id=actor_user_id,
+        reason=reason,
+    )
+    return True

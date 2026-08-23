@@ -62,6 +62,11 @@ from app.activation_code_service import (
     highest_export_aead_key_version,
 )
 from app.admin_auth_routes import AdminActor, AdminReader, AdminWriter
+from app.customer_session_service import (
+    REASON_CODE_REVOKED,
+    REASON_CODE_SUSPENDED,
+    revoke_session,
+)
 from app.db_pg import pg_transaction
 
 logger = logging.getLogger(__name__)
@@ -89,6 +94,18 @@ def _http(status: int, code: str, message: str) -> HTTPException:
 
 def _now_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat()
+
+
+def _transaction_now_iso(conn: psycopg.Connection) -> str:
+    """The trusted PostgreSQL clock on the caller's transaction (SES-01).
+
+    The T20 revocation propagation pulls a session lease into the past —
+    that judgement belongs to the same server-side clock the session routes
+    use, never the possibly skewed application clock.
+    """
+    row = conn.execute("SELECT now()").fetchone()
+    now = row[0] if row is not None else datetime.now(UTC)
+    return now.isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -797,7 +814,7 @@ def suspend_activation_code(
     """Suspend a delivered code (operator side state, frozen matrix)."""
 
     def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
-        code_row = _locked_code_status(conn, code_id, "status")
+        code_row = _locked_code_status(conn, code_id, "status, bound_user_id")
         if code_row is None:
             raise _http(404, "CODE_NOT_FOUND", "Unknown activation code.")
         current = str(code_row[0])
@@ -805,6 +822,7 @@ def suspend_activation_code(
             assert_code_transition(current, "SUSPENDED")
         except InvalidCodeTransitionError as exc:
             raise _transition_error(current, "SUSPENDED") from exc
+        bound_user_id = code_row[1]
         reason = body.reason.strip()
         conn.execute(
             "UPDATE activation_codes SET status = 'SUSPENDED', suspended_at = %s WHERE id = %s",
@@ -818,6 +836,21 @@ def suspend_activation_code(
             reason=reason,
             request_id=request_id,
         )
+        # T20 / SES-03 revocation propagation: the suspension terminates the
+        # bound customer's live session in the same transaction — epoch bump,
+        # lease in the past, a LOGOUT event naming this operator and the
+        # code_suspended reason (deleting only the client token never counts
+        # as a server-side revocation). A never-activated code carries no
+        # user and no session: nothing to propagate.
+        if bound_user_id is not None:
+            revoke_session(
+                conn,
+                user_id=str(bound_user_id),
+                actor_user_id=actor.user_id,
+                reason=REASON_CODE_SUSPENDED,
+                request_id=request_id,
+                now_iso=_transaction_now_iso(conn),
+            )
         logger.info(
             "activation code suspended: code=%s actor=%s request=%s",
             code_id,
@@ -892,7 +925,7 @@ def revoke_activation_code(
     """Revoke a code permanently (terminal state, binding kept for audit)."""
 
     def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
-        code_row = _locked_code_status(conn, code_id, "status")
+        code_row = _locked_code_status(conn, code_id, "status, bound_user_id")
         if code_row is None:
             raise _http(404, "CODE_NOT_FOUND", "Unknown activation code.")
         current = str(code_row[0])
@@ -900,6 +933,7 @@ def revoke_activation_code(
             assert_code_transition(current, "REVOKED")
         except InvalidCodeTransitionError as exc:
             raise _transition_error(current, "REVOKED") from exc
+        bound_user_id = code_row[1]
         reason = body.reason.strip()
         conn.execute(
             "UPDATE activation_codes SET status = 'REVOKED', revoked_at = %s WHERE id = %s",
@@ -913,6 +947,18 @@ def revoke_activation_code(
             reason=reason,
             request_id=request_id,
         )
+        # T20 / SES-03 revocation propagation: the revocation terminates the
+        # bound customer's live session in the same transaction, exactly like
+        # the suspension above but with the terminal code_revoked reason.
+        if bound_user_id is not None:
+            revoke_session(
+                conn,
+                user_id=str(bound_user_id),
+                actor_user_id=actor.user_id,
+                reason=REASON_CODE_REVOKED,
+                request_id=request_id,
+                now_iso=_transaction_now_iso(conn),
+            )
         logger.info(
             "activation code revoked: code=%s actor=%s request=%s",
             code_id,

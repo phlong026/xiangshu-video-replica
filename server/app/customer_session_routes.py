@@ -1,4 +1,5 @@
-"""T19 / SES-01 — session login, heartbeat and logout routes.
+"""T19 / SES-01 + T20 / SES-02/SES-03 — session routes: login, switch,
+heartbeat, logout.
 
 Routes (dev doc §6.1):
 
@@ -6,30 +7,43 @@ Routes (dev doc §6.1):
   new session token on establishment/recovery, renews on same-device
   presentation of the valid session token, answers 409 ``OTHER_DEVICE_ONLINE``
   when the other device holds a live lease.
+- ``POST /api/customer/sessions/switch`` — the explicit atomic switch (T20,
+  dev doc §12.3 fifth line): displaces a live lease on the other device in
+  one transaction (SWITCH event + epoch bump + fresh token) so the old
+  token is fenced out on every API instance the moment it commits. Every
+  other branch matches the login semantics (renewal, recovery, timeout
+  takeover) — a switch never invents new states, and never silently kicks
+  without the explicit client confirmation flow (SES-02 No-Go).
 - ``POST /api/customer/sessions/heartbeat`` — session-token renewal of the lease.
 - ``POST /api/customer/sessions/logout`` — session-token logout; pulls the
   lease into the past and appends the LOGOUT event.
 
 Authentication layers:
 
-- login: the *device credential* (``Authorization: Bearer <device-token>``, the
-  T16 layer);
+- login/switch: the *device credential* (``Authorization: Bearer
+  <device-token>``, the T16 layer) plus the *code-status gate* (T20/SES-03:
+  only an ACTIVE activation code may establish a session — a suspended or
+  revoked code answers 403 and the client must not reach the workspace);
 - heartbeat/logout: the *session token* (``Authorization: Bearer <session-token>``).
 
-Idempotency (dev doc §6.3): login and logout carry a mandatory
+Idempotency (dev doc §6.3): login, switch and logout carry a mandatory
 ``Idempotency-Key``. The sealed envelope replays the lost response (same
 token, same epoch, no second LOGIN event). Same key against a different
 request body answers 409 ``IDEMPOTENCY_CONFLICT``. Heartbeat is naturally
 idempotent (renewal) and carries no envelope.
 
-Rate limiting (T15 infrastructure): login draws the ``login:ip`` budget and
-answers 429 ``RATE_LIMITED`` with ``Retry-After`` once spent.
+Rate limiting (T15 infrastructure): login and switch both draw the
+``login:ip`` budget (a switch is a login-shaped attempt — the limiter must
+not be bypassable by switching instead) and answer 429 ``RATE_LIMITED``
+with ``Retry-After`` once spent.
 
 Stable error codes (dev doc §13.2 plus the T16 precedent for REQUIRED /
 INVALID variants):
 
 - 401 ``DEVICE_CREDENTIAL_REQUIRED`` / ``DEVICE_CREDENTIAL_INVALID`` /
-  ``DEVICE_REVOKED`` (login authentication);
+  ``DEVICE_REVOKED`` (login/switch authentication);
+- 403 ``CODE_SUSPENDED`` / ``CODE_REVOKED`` (T20/SES-03: the code-status
+  gate — a suspended or revoked account never establishes a session);
 - 401 ``SESSION_TOKEN_REQUIRED`` (heartbeat/logout missing the Bearer token);
 - 401 ``SESSION_REPLACED`` — the presented token no longer owns the live
   session (another device took over, or the token is unknown);
@@ -85,6 +99,7 @@ from app.customer_session_service import (
     heartbeat_session,
     login_session,
     logout_session,
+    switch_session,
 )
 from app.db_pg import get_pg_pool, pg_transaction
 from app.security_rate_limit import (
@@ -104,6 +119,7 @@ REPLAY_HEADER = "X-Idempotent-Replay"
 RETRY_AFTER_HEADER = "Retry-After"
 
 LOGIN_OPERATION = "session_login"
+SWITCH_OPERATION = "session_switch"
 LOGOUT_OPERATION = "session_logout"
 
 # The sealed login payload carries the state-machine outcome so a replay can
@@ -245,14 +261,15 @@ def _replay_login_response(
     scope: str,
     key_digest: str,
     now: datetime,
+    operation: str,
 ) -> tuple[LoginResponse, int]:
-    """Replay the sealed login response (and its original status code)."""
+    """Replay the sealed login/switch response (and its original status code)."""
     ciphertext, key_version = _envelope_recoverable(record, req_hash=req_hash, now=now)
     try:
         sealed = open_response(
             ciphertext,
             key=customer_aead_key(key_version),
-            aad=envelope_aad(LOGIN_OPERATION, scope, key_digest),
+            aad=envelope_aad(operation, scope, key_digest),
         )
     except IdempotencyKeyError:
         raise _http(
@@ -297,13 +314,57 @@ def _recovery_expires_at(conn: psycopg.Connection) -> str:
 
 
 # ---------------------------------------------------------------------------
-# POST /login
+# POST /login + POST /switch — the §12.3 state-machine routes (shared core)
 # ---------------------------------------------------------------------------
 
 
-@router.post("/login", response_model=LoginResponse, status_code=201)
-def login(body: LoginRequest, request: Request, response: Response) -> LoginResponse:
-    """Drive the §12.3 login state machine (see the module docstring)."""
+def _require_active_code(conn: psycopg.Connection, activation_code_id: str) -> None:
+    """T20 / SES-03 code-status gate: only an ACTIVE code may hold a session.
+
+    The device credential alone proves the *device*; the binding's authority
+    is the activation code, so a suspended or revoked account must never
+    establish (or re-establish) a session — the client sees the 403 and is
+    steered away from the workspace instead of succeeding here and failing
+    later on every fenced write.
+    """
+    row = conn.execute(
+        "SELECT status FROM activation_codes WHERE id = %s", (activation_code_id,)
+    ).fetchone()
+    if row is None:
+        # The device row's FK guarantees the code exists; a missing row means
+        # the runtime state is broken — fail closed as a server-side outage.
+        logger.warning("session code-status gate found no activation code row")
+        raise _http(
+            503,
+            "SESSION_SERVICE_UNAVAILABLE",
+            "The activation code state could not be verified.",
+        )
+    status = str(row[0])
+    if status == "ACTIVE":
+        return
+    if status == "SUSPENDED":
+        raise _http(403, "CODE_SUSPENDED", "This activation code is suspended.")
+    raise _http(403, "CODE_REVOKED", "This activation code has been revoked.")
+
+
+def _establish_session_route(
+    *,
+    body: LoginRequest,
+    request: Request,
+    response: Response,
+    operation: str,
+    takeover: bool,
+) -> LoginResponse:
+    """Drive the §12.3 state machine for one authenticated device.
+
+    ``login`` and ``switch`` share every layer — device-credential auth, the
+    code-status gate, the idempotency envelope, the shared ``login:ip``
+    budget, the sealed response. The only difference is the ``takeover``
+    flag handed to the state machine, which turns a live-other-device
+    conflict into the explicit atomic switch (§12.3 fifth line) instead of
+    the 409. The envelope ``operation`` keeps the two routes' sealed
+    responses in disjoint namespaces.
+    """
     _require_pg()
 
     idempotency_key = request.headers.get(IDEMPOTENCY_KEY_HEADER, "").strip()
@@ -346,25 +407,27 @@ def login(body: LoginRequest, request: Request, response: Response) -> LoginResp
     # Replay probe *before* the rate limiter (the activation-route T15 review
     # P2 rule): the sealed 201 is the proof of the completed submission, and
     # a legitimate retry — the client lost the response of an
-    # already-successful login — must replay without spending any login:ip
-    # budget; charging retries would lock a legal user out of their own
-    # cached response after a few network retries. The probe is read-only
+    # already-successful login/switch — must replay without spending any
+    # login:ip budget; charging retries would lock a legal user out of their
+    # own cached response after a few network retries. The probe is read-only
     # and scoped to the presented credential's digest.
     with pg_transaction() as conn:
         found = _find_envelope(
-            conn, operation=LOGIN_OPERATION, scopes=scope_candidates, key_digest=key_digest
+            conn, operation=operation, scopes=scope_candidates, key_digest=key_digest
         )
     if found is not None:
         scope, existing, envelope_now = found
         replayed, replay_status = _replay_login_response(
-            existing, req_hash=req_hash, scope=scope, key_digest=key_digest, now=envelope_now
+            existing, req_hash=req_hash, scope=scope, key_digest=key_digest, now=envelope_now, operation=operation
         )
         response.headers[REPLAY_HEADER] = "true"
         response.status_code = replay_status
         return replayed
 
     # IP-dimension rate limit (T15 shared counters, a separate transaction —
-    # the spent budget is never refunded).
+    # the spent budget is never refunded). Login and switch draw the *same*
+    # login:ip budget: a switch is a login-shaped attempt, and the limiter
+    # must not be bypassable by switching instead.
     client_ip = request.client.host if request.client is not None else "unknown"
     with pg_transaction() as conn:
         decision = consume_rate_limit(
@@ -379,8 +442,8 @@ def login(body: LoginRequest, request: Request, response: Response) -> LoginResp
         blocked.headers = {RETRY_AFTER_HEADER: str(decision.retry_after_seconds)}
         raise blocked
 
-    # The business transaction: authenticate, take the envelope, drive the
-    # state machine, seal the response — one commit.
+    # The business transaction: authenticate, gate the code status, take the
+    # envelope, drive the state machine, seal the response — one commit.
     with pg_transaction() as conn:
         try:
             lookup: DeviceCredentialLookup = lookup_device_credential(conn, device_token)
@@ -397,9 +460,15 @@ def login(body: LoginRequest, request: Request, response: Response) -> LoginResp
             raise _http(401, "DEVICE_CREDENTIAL_INVALID", "The device credential is invalid.")
         device = lookup.device
 
+        # T20 / SES-03: the code-status gate — a suspended or revoked code
+        # never establishes (or re-establishes) a session. Inside the
+        # business transaction, so the refused attempt rolls the envelope
+        # back with it and the key stays reusable after a resume.
+        _require_active_code(conn, device.activation_code_id)
+
         envelope_id = insert_envelope(
             conn,
-            operation=LOGIN_OPERATION,
+            operation=operation,
             scope=scope_candidates[0],
             key_digest=key_digest,
             request_hash=req_hash,
@@ -410,7 +479,7 @@ def login(body: LoginRequest, request: Request, response: Response) -> LoginResp
             # answer from the winner's envelope. This transaction holds no
             # writes of its own, so returning while the block unwinds is safe.
             found = _find_envelope(
-                conn, operation=LOGIN_OPERATION, scopes=scope_candidates, key_digest=key_digest
+                conn, operation=operation, scopes=scope_candidates, key_digest=key_digest
             )
             if found is None:
                 raise _http(
@@ -420,7 +489,7 @@ def login(body: LoginRequest, request: Request, response: Response) -> LoginResp
                 )
             scope, existing, envelope_now = found
             replayed, replay_status = _replay_login_response(
-                existing, req_hash=req_hash, scope=scope, key_digest=key_digest, now=envelope_now
+                existing, req_hash=req_hash, scope=scope, key_digest=key_digest, now=envelope_now, operation=operation
             )
             response.headers[REPLAY_HEADER] = "true"
             response.status_code = replay_status
@@ -430,18 +499,31 @@ def login(body: LoginRequest, request: Request, response: Response) -> LoginResp
         # business transaction so the lease judgement and every written
         # timestamp share one server-side clock.
         now = _transaction_now(conn)
-        result = login_session(
-            conn,
-            user_id=device.user_id,
-            activation_code_id=device.activation_code_id,
-            device_id=device.id,
-            presentation_session_token=body.session_token,
-            request_id=request_id,
-            now=now,
-        )
+        if takeover:
+            result = switch_session(
+                conn,
+                user_id=device.user_id,
+                activation_code_id=device.activation_code_id,
+                device_id=device.id,
+                presentation_session_token=body.session_token,
+                request_id=request_id,
+                now=now,
+            )
+        else:
+            result = login_session(
+                conn,
+                user_id=device.user_id,
+                activation_code_id=device.activation_code_id,
+                device_id=device.id,
+                presentation_session_token=body.session_token,
+                request_id=request_id,
+                now=now,
+            )
         if result.outcome == LOGIN_CONFLICT:
             # Business failure: rolls back with the transaction — the key
-            # stays reusable once the lease actually lapses.
+            # stays reusable once the lease actually lapses. (Unreachable on
+            # the switch route — takeover displaces the lease instead — but
+            # the state machine's contract stays one shape.)
             raise _http(
                 409,
                 "OTHER_DEVICE_ONLINE",
@@ -451,7 +533,7 @@ def login(body: LoginRequest, request: Request, response: Response) -> LoginResp
                 lease_expires_at=result.online_lease_expires_at,
             )
 
-        aad = envelope_aad(LOGIN_OPERATION, scope_candidates[0], key_digest)
+        aad = envelope_aad(operation, scope_candidates[0], key_digest)
         sealed_payload: dict[str, object] = {
             "user_id": device.user_id,
             "device_id": device.id,
@@ -475,6 +557,44 @@ def login(body: LoginRequest, request: Request, response: Response) -> LoginResp
     sealed_payload.pop(OUTCOME_FIELD, None)
     response.status_code = 200 if outcome == LOGIN_RENEWED else 201
     return LoginResponse.model_validate(sealed_payload)
+
+
+@router.post("/login", response_model=LoginResponse, status_code=201)
+def login(body: LoginRequest, request: Request, response: Response) -> LoginResponse:
+    """Drive the §12.3 login state machine (see the module docstring)."""
+    return _establish_session_route(
+        body=body,
+        request=request,
+        response=response,
+        operation=LOGIN_OPERATION,
+        takeover=False,
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST /switch
+# ---------------------------------------------------------------------------
+
+
+@router.post("/switch", response_model=LoginResponse, status_code=201)
+def switch(body: LoginRequest, request: Request, response: Response) -> LoginResponse:
+    """Drive the §12.3 explicit atomic switch (T20 / SES-02).
+
+    The user confirmed the takeover on the client, so a live lease on the
+    other device is displaced in one transaction instead of answering 409:
+    the SWITCH event, the epoch bump and the fresh token commit together,
+    and the old token is fenced out on every API instance the moment they
+    do. Every other branch matches the login semantics (renewal, recovery,
+    timeout takeover) — a switch never invents new states, and never kicks
+    silently without the explicit client confirmation flow (SES-02 No-Go).
+    """
+    return _establish_session_route(
+        body=body,
+        request=request,
+        response=response,
+        operation=SWITCH_OPERATION,
+        takeover=True,
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -432,44 +432,25 @@ def _revoke_session_riding_device(
     """Terminate the live session riding a released device, atomically.
 
     The T16 unbind and the T18 administrator unbind/revocation share this
-    core (dev doc §9.2): epoch bump, lease pulled into the past and a
-    ``LOGOUT`` event naming the acting user and the reason. The GREATEST is
-    a defensive same-transaction backstop for the
-    ``ck_customer_session_state_lease_after_created`` check (a hypothetical
-    future code path creating and unbinding within one transaction would
-    sample an identical now()); one microsecond — not one second — keeps
-    the "immediately expired" semantics (PR #47 Codex review P2: a lease
-    surviving up to a second past the release contradicts the acceptance
-    requirement that revocation invalidates the session immediately).
+    core (dev doc §9.2). Since T20 the shared implementation lives in
+    ``customer_session_service.revoke_session`` (SES-03 revocation
+    propagation — the admin code suspend/revoke paths call it without the
+    device filter); this wrapper keeps the device-scoped contract the
+    unbind/revocation flows already test. The import stays function-local
+    because ``customer_session_service`` imports this module's digest
+    helpers at module scope.
     """
-    session_row = conn.execute(
-        "UPDATE customer_session_state "
-        "SET session_epoch = session_epoch + 1, "
-        "lease_until = GREATEST(%s::timestamptz, "
-        "created_at::timestamptz + interval '1 microsecond'), "
-        "updated_at = %s "
-        "WHERE device_id = %s AND user_id = %s "
-        "RETURNING session_id, session_epoch",
-        (now_iso, now_iso, device_id, owner_user_id),
-    ).fetchone()
-    if session_row is not None:
-        conn.execute(
-            "INSERT INTO customer_session_events "
-            "(id, event, user_id, activation_code_id, device_id, session_id, "
-            " session_epoch, actor_user_id, reason, request_id) "
-            "VALUES (%s, 'LOGOUT', %s, %s, %s, %s, %s, %s, %s, %s)",
-            (
-                str(uuid.uuid4()),
-                owner_user_id,
-                activation_code_id,
-                device_id,
-                str(session_row[0]),
-                int(session_row[1]),
-                actor_user_id,
-                reason,
-                request_id,
-            ),
-        )
+    from app.customer_session_service import revoke_session
+
+    revoke_session(
+        conn,
+        user_id=owner_user_id,
+        actor_user_id=actor_user_id,
+        reason=reason,
+        request_id=request_id,
+        now_iso=now_iso,
+        device_id=device_id,
+    )
 
 
 def server_now_utc() -> datetime:

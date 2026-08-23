@@ -60,6 +60,7 @@ import hashlib
 import os
 import secrets
 import threading
+import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -87,8 +88,13 @@ TEST_ENVELOPE_AEAD_KEY = secrets.token_bytes(32)
 
 ACTIVATE_PATH = "/api/customer/activate"
 LOGIN_PATH = "/api/customer/sessions/login"
+SWITCH_PATH = "/api/customer/sessions/switch"
 HEARTBEAT_PATH = "/api/customer/sessions/heartbeat"
 LOGOUT_PATH = "/api/customer/sessions/logout"
+SUSPEND_PATH = "/api/control/activation-codes/{code_id}/suspend"
+RESUME_PATH = "/api/control/activation-codes/{code_id}/resume"
+REVOKE_PATH = "/api/control/activation-codes/{code_id}/revoke"
+ADMIN_EXCHANGE_PATH = "/api/control/admin/session/exchange"
 IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
 REQUEST_ID_HEADER = "X-Request-Id"
 REPLAY_HEADER = "X-Idempotent-Replay"
@@ -225,15 +231,22 @@ def route_state(sessions_dsn: str) -> Iterator[str]:
 
 @pytest.fixture()
 def customer_app(monkeypatch: pytest.MonkeyPatch, route_state: str) -> Iterator[FastAPI]:
+    # T20: the revocation-propagation cases drive the admin suspend/revoke
+    # routes, so the admin auth + activation routers ride the same app.
     from app.activation_code_routes import router as activation_code_router
+    from app.admin_activation_routes import router as admin_activation_router
+    from app.admin_auth_routes import router as admin_auth_router
     from app.customer_session_routes import router as customer_session_router
 
     app = FastAPI()
     app.include_router(activation_code_router)
+    app.include_router(admin_auth_router)
+    app.include_router(admin_activation_router)
     app.include_router(customer_session_router)
     monkeypatch.setenv(DATABASE_URL_ENV, route_state)
     monkeypatch.delenv("VIDEO_REPLICA_CUSTOMER_PRODUCTION", raising=False)
     monkeypatch.setenv(ACTIVATION_CODE_HMAC_KEY_ENV, TEST_KEY)
+    monkeypatch.setenv("VIDEO_REPLICA_ADMIN_SESSION_HMAC_KEY", TEST_KEY)
     monkeypatch.setenv("VIDEO_REPLICA_DEVICE_FINGERPRINT_HMAC_KEY", TEST_FINGERPRINT_KEY_V1)
     monkeypatch.setenv("VIDEO_REPLICA_DEVICE_FINGERPRINT_HMAC_KEY_V2", TEST_FINGERPRINT_KEY_V2)
     monkeypatch.setenv(
@@ -1162,3 +1175,571 @@ def test_no_plaintext_credentials_in_session_events(client: TestClient) -> None:
         blob = " ".join(str(value) for value in row if value is not None)
         assert customer["session_token"] not in blob
         assert customer["device_token"] not in blob
+
+
+# ---------------------------------------------------------------------------
+# T20 / SES-02 — POST /api/customer/sessions/switch (the explicit atomic switch)
+# ---------------------------------------------------------------------------
+
+
+def _admin_csrf(client: TestClient) -> dict[str, str]:
+    """Exchange one admin session for its CSRF header (the T12 precedent)."""
+    from app.admin_auth_routes import ADMIN_CSRF_HEADER, issue_exchange_credential
+
+    response = client.post(
+        ADMIN_EXCHANGE_PATH,
+        json={"credential": issue_exchange_credential("admin_u", ttl_seconds=3600)},
+    )
+    assert response.status_code == 201, response.text
+    return {ADMIN_CSRF_HEADER: response.json()["csrf_token"]}
+
+
+def _admin_code_action(
+    client: TestClient,
+    code_id: str,
+    action: str,
+    *,
+    reason: str = "运营风控",
+    key: str | None = None,
+) -> object:
+    return client.post(
+        f"/api/control/activation-codes/{code_id}/{action}",
+        json={"confirm": True, "reason": reason},
+        headers={
+            **_admin_csrf(client),
+            IDEMPOTENCY_KEY_HEADER: key or f"admin-{action}-{uuid.uuid4()}",
+        },
+    )
+
+
+def _session_event_rows() -> list[dict[str, object]]:
+    """Full session events: event, epoch, device, actor, reason (creation order)."""
+    with psycopg.connect(_t19_dsn(), autocommit=True) as conn:
+        rows = conn.execute(
+            "SELECT event, session_epoch, device_id, actor_user_id, reason "
+            "FROM customer_session_events ORDER BY created_at, id"
+        ).fetchall()
+    return [
+        {
+            "event": str(row[0]),
+            "epoch": int(row[1]),
+            "device_id": str(row[2]),
+            "actor": row[3],
+            "reason": row[4],
+        }
+        for row in rows
+    ]
+
+
+def test_switch_takes_over_the_live_other_device_atomically(client: TestClient) -> None:
+    """SES-02 core: another device online + explicit switch -> epoch + 1, the
+    SWITCH event records the replaced session, a fresh session is issued, and
+    the old token is dead on every API instance the moment the transaction
+    commits (task list T20 exit gate)."""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    second_token = _second_device_row(
+        user_id=customer["user_id"],
+        activation_code_id="code-a",
+        device_id="device-b",
+        slot_no=2,
+    )
+
+    response = client.post(
+        SWITCH_PATH,
+        json={},
+        headers={
+            **_bearer(second_token),
+            IDEMPOTENCY_KEY_HEADER: "idem-switch-1",
+        },
+    )
+    assert response.status_code == 201, response.text
+    payload = response.json()
+    assert payload["device_id"] == "device-b"
+    assert payload["session_epoch"] == 2
+    assert payload["session_token"] != customer["session_token"]
+    assert payload["user_id"] == customer["user_id"]
+
+    # The row now belongs to the switching device with a live lease.
+    row_device, _, row_epoch, row_lease, _ = _session_row()
+    assert row_device == "device-b"
+    assert row_epoch == 2
+    assert datetime.fromisoformat(row_lease) > datetime.now(UTC)
+
+    # The audit trail: the SWITCH event describes the *replaced* session
+    # (old device, old epoch, acting user, explicit reason) and the LOGIN
+    # event describes the fresh one (dev doc §12.3 fifth line).
+    events = _session_event_rows()
+    switch_rows = [e for e in events if e["event"] == "SWITCH"]
+    assert len(switch_rows) == 1
+    assert switch_rows[0]["device_id"] == customer["device_id"]
+    assert switch_rows[0]["epoch"] == 1
+    assert switch_rows[0]["actor"] == customer["user_id"]
+    assert switch_rows[0]["reason"] == "explicit_switch"
+    login_rows = [e for e in events if e["event"] == "LOGIN"]
+    assert len(login_rows) == 1
+    assert login_rows[0]["device_id"] == "device-b"
+    assert login_rows[0]["epoch"] == 2
+
+    # The replaced token cannot heartbeat or logout on any instance — a late
+    # logout must not touch the new session (§12.3 closing rule).
+    stale_hb = client.post(HEARTBEAT_PATH, headers=_bearer(customer["session_token"]))
+    assert stale_hb.status_code == 401, stale_hb.text
+    assert stale_hb.json()["detail"]["code"] == "SESSION_REPLACED"
+    stale_out = client.post(
+        LOGOUT_PATH,
+        headers={
+            **_bearer(customer["session_token"]),
+            IDEMPOTENCY_KEY_HEADER: "idem-switch-late-logout",
+        },
+    )
+    assert stale_out.status_code == 401, stale_out.text
+    assert stale_out.json()["detail"]["code"] == "SESSION_REPLACED"
+    assert _session_row()[0] == "device-b"
+    assert _session_row()[3] == row_lease
+
+    # The fresh token heartbeats fine.
+    fresh_hb = client.post(HEARTBEAT_PATH, headers=_bearer(payload["session_token"]))
+    assert fresh_hb.status_code == 200, fresh_hb.text
+
+
+def test_switch_same_device_with_valid_session_token_renews_only(client: TestClient) -> None:
+    """A switch from the currently online device is a renewal, not a takeover
+    (same token, same epoch — §12.3 same-device lease extension)."""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+
+    response = client.post(
+        SWITCH_PATH,
+        json={"session_token": customer["session_token"]},
+        headers={
+            **_bearer(customer["device_token"]),
+            IDEMPOTENCY_KEY_HEADER: "idem-switch-renew",
+        },
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["session_token"] == customer["session_token"]
+    assert payload["session_epoch"] == 1
+    assert [e["event"] for e in _session_event_rows()] == ["ACTIVATED", "LOGIN"]
+
+
+def test_switch_same_device_without_token_recovers_with_epoch_bump(
+    client: TestClient,
+) -> None:
+    """Same-device recovery on the switch route: a lost session token on the
+    online device recovers via epoch + 1 and a fresh token."""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+
+    response = client.post(
+        SWITCH_PATH,
+        json={},
+        headers={
+            **_bearer(customer["device_token"]),
+            IDEMPOTENCY_KEY_HEADER: "idem-switch-recover",
+        },
+    )
+    assert response.status_code == 201, response.text
+    payload = response.json()
+    assert payload["session_epoch"] == 2
+    assert payload["session_token"] != customer["session_token"]
+
+    stale = client.post(HEARTBEAT_PATH, headers=_bearer(customer["session_token"]))
+    assert stale.status_code == 401, stale.text
+    assert stale.json()["detail"]["code"] == "SESSION_REPLACED"
+
+
+def test_switch_after_lease_expiry_takes_over_with_timeout_event(client: TestClient) -> None:
+    """A lapsed lease releases the single-online slot: the switch takes over
+    like a login (system TIMEOUT event + LOGIN, no SWITCH event — nothing live
+    was replaced)."""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    second_token = _second_device_row(
+        user_id=customer["user_id"],
+        activation_code_id="code-a",
+        device_id="device-b",
+        slot_no=2,
+    )
+    _expire_lease(customer["device_id"])
+
+    response = client.post(
+        SWITCH_PATH,
+        json={},
+        headers={
+            **_bearer(second_token),
+            IDEMPOTENCY_KEY_HEADER: "idem-switch-timeout",
+        },
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["session_epoch"] == 2
+
+    events = _session_event_rows()
+    assert sorted(e["event"] for e in events) == ["ACTIVATED", "LOGIN", "TIMEOUT"]
+    assert not [e for e in events if e["event"] == "SWITCH"]
+
+
+def test_switch_on_missing_session_row_establishes_epoch_one(client: TestClient) -> None:
+    """Defensive branch: a lost session row still yields a sound epoch-1
+    session on the switch route (the login precedent)."""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    with psycopg.connect(_t19_dsn(), autocommit=True) as conn:
+        conn.execute("SET session_replication_role = replica")
+        conn.execute("DELETE FROM customer_session_state")
+        conn.execute("SET session_replication_role = DEFAULT")
+
+    response = client.post(
+        SWITCH_PATH,
+        json={},
+        headers={
+            **_bearer(customer["device_token"]),
+            IDEMPOTENCY_KEY_HEADER: "idem-switch-orphan",
+        },
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["session_epoch"] == 1
+
+
+def test_switch_requires_bearer_device_credential(client: TestClient) -> None:
+    response = client.post(
+        SWITCH_PATH, json={}, headers={IDEMPOTENCY_KEY_HEADER: "idem-switch-auth"}
+    )
+    assert response.status_code == 401, response.text
+    assert response.json()["detail"]["code"] == "DEVICE_CREDENTIAL_REQUIRED"
+
+
+def test_switch_rejects_unknown_device_credential(client: TestClient) -> None:
+    response = client.post(
+        SWITCH_PATH,
+        json={},
+        headers={
+            **_bearer(secrets.token_urlsafe(32)),
+            IDEMPOTENCY_KEY_HEADER: "idem-switch-unknown",
+        },
+    )
+    assert response.status_code == 401, response.text
+    assert response.json()["detail"]["code"] == "DEVICE_CREDENTIAL_INVALID"
+
+
+def test_switch_requires_idempotency_key(client: TestClient) -> None:
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    response = client.post(SWITCH_PATH, json={}, headers=_bearer(customer["device_token"]))
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"]["code"] == "IDEMPOTENCY_KEY_REQUIRED"
+
+
+def test_switch_lost_response_replays_same_token_and_epoch(client: TestClient) -> None:
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    second_token = _second_device_row(
+        user_id=customer["user_id"],
+        activation_code_id="code-a",
+        device_id="device-b",
+        slot_no=2,
+    )
+    headers = {
+        **_bearer(second_token),
+        IDEMPOTENCY_KEY_HEADER: "idem-switch-replay",
+    }
+    first = client.post(SWITCH_PATH, json={}, headers=headers)
+    assert first.status_code == 201, first.text
+
+    replay = client.post(SWITCH_PATH, json={}, headers=headers)
+    assert replay.status_code == 201, replay.text
+    assert replay.headers.get(REPLAY_HEADER) == "true"
+    assert replay.json() == first.json()
+
+    # Exactly one SWITCH and one LOGIN event — the replay added nothing.
+    events = [e["event"] for e in _session_event_rows()]
+    assert events.count("SWITCH") == 1
+    assert events.count("LOGIN") == 1
+
+
+def test_switch_is_rate_limited_through_the_login_ip_budget(
+    monkeypatch: pytest.MonkeyPatch, route_state: str
+) -> None:
+    """The switch route draws the same ``login:ip`` budget as login — an
+    attacker must not bypass the login limiter by switching instead."""
+    from app.activation_code_routes import router as activation_code_router
+    from app.customer_session_routes import router as customer_session_router
+
+    app = FastAPI()
+    app.include_router(activation_code_router)
+    app.include_router(customer_session_router)
+    monkeypatch.setenv(DATABASE_URL_ENV, route_state)
+    monkeypatch.delenv("VIDEO_REPLICA_CUSTOMER_PRODUCTION", raising=False)
+    monkeypatch.setenv(ACTIVATION_CODE_HMAC_KEY_ENV, TEST_KEY)
+    monkeypatch.setenv("VIDEO_REPLICA_DEVICE_FINGERPRINT_HMAC_KEY", TEST_FINGERPRINT_KEY_V1)
+    monkeypatch.setenv("VIDEO_REPLICA_DEVICE_FINGERPRINT_HMAC_KEY_V2", TEST_FINGERPRINT_KEY_V2)
+    monkeypatch.setenv(
+        "VIDEO_REPLICA_CUSTOMER_IDEMPOTENCY_AEAD_KEY",
+        base64.urlsafe_b64encode(TEST_ENVELOPE_AEAD_KEY).decode("ascii").rstrip("="),
+    )
+    monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_ACTIVATE_IP", "1000")
+    monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_ACTIVATE_CODE", "1000")
+    monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_LOGIN_IP", "2")
+    monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_WINDOW_SECONDS", "300")
+
+    with TestClient(app) as tight_client:
+        customer = _activated_customer(
+            tight_client, code=FIRST_CODE, fingerprint="fp-a", suffix="a"
+        )
+        headers = {
+            **_bearer(customer["device_token"]),
+            IDEMPOTENCY_KEY_HEADER: "idem-switch-budget",
+        }
+        # Budget of 2: one login, one switch — the third login-shaped request
+        # is refused whichever route it takes.
+        login = tight_client.post(LOGIN_PATH, json={}, headers=headers)
+        switch = tight_client.post(
+            SWITCH_PATH,
+            json={},
+            headers={**headers, IDEMPOTENCY_KEY_HEADER: "idem-switch-budget-2"},
+        )
+        third = tight_client.post(
+            SWITCH_PATH,
+            json={},
+            headers={**headers, IDEMPOTENCY_KEY_HEADER: "idem-switch-budget-3"},
+        )
+        assert login.status_code in (200, 201), login.text
+        assert switch.status_code in (200, 201), switch.text
+        assert third.status_code == 429, third.text
+        assert third.json()["detail"]["code"] == "RATE_LIMITED"
+        assert third.headers.get(RETRY_AFTER_HEADER) is not None
+
+
+def test_concurrent_switches_from_both_devices_serialize(client: TestClient) -> None:
+    """Two devices switching at once: the row lock serializes them — both
+    succeed, each advances the epoch exactly once with exactly one LOGIN
+    event, and the row ends on the last committer."""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    second_token = _second_device_row(
+        user_id=customer["user_id"],
+        activation_code_id="code-a",
+        device_id="device-b",
+        slot_no=2,
+    )
+
+    outcomes: dict[str, int | None] = {"first": None, "second": None}
+    barrier = threading.Barrier(2)
+
+    def _switch(tag: str, token: str) -> None:
+        with TestClient(client.app) as concurrent:
+            barrier.wait()
+            response = concurrent.post(
+                SWITCH_PATH,
+                json={},
+                headers={
+                    **_bearer(token),
+                    IDEMPOTENCY_KEY_HEADER: f"idem-switch-race-{tag}",
+                },
+            )
+            outcomes[tag] = response.status_code
+
+    threads = [
+        threading.Thread(target=_switch, args=("first", customer["device_token"])),
+        threading.Thread(target=_switch, args=("second", second_token)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    # Both explicit switches are legitimate: the row lock serves them in
+    # turn, neither 500s and neither is lost.
+    assert outcomes["first"] == 201, outcomes
+    assert outcomes["second"] == 201, outcomes
+    _, _, row_epoch, row_lease, _ = _session_row()
+    assert row_epoch == 3
+    assert datetime.fromisoformat(row_lease) > datetime.now(UTC)
+    # Scheduler-independent invariants: each switch wrote exactly one LOGIN
+    # and advanced the epoch exactly once. Whether a SWITCH event rode along
+    # depends on who held the row when the lock was won — the holder's own
+    # switch is the same-device recovery (no SWITCH event), while a switch
+    # into the other device's live lease is one; one of the two orders
+    # yields both SWITCHes, the other yields one. The thread scheduler
+    # picks the order; the serialization invariants hold either way.
+    events = [e["event"] for e in _session_event_rows()]
+    assert events.count("LOGIN") == 2
+    assert events.count("SWITCH") in (1, 2)
+
+
+def test_switch_writes_no_wallet_charge(client: TestClient) -> None:
+    """Code checklist §9.1: no session path — switch included — may ever write
+    a CHARGE transaction (the activation first charge is the only one)."""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    second_token = _second_device_row(
+        user_id=customer["user_id"],
+        activation_code_id="code-a",
+        device_id="device-b",
+        slot_no=2,
+    )
+    with psycopg.connect(_t19_dsn(), autocommit=True) as conn:
+        before = conn.execute(
+            "SELECT count(*) FROM wallet_transactions WHERE type = 'CHARGE'"
+        ).fetchone()
+
+    response = client.post(
+        SWITCH_PATH,
+        json={},
+        headers={
+            **_bearer(second_token),
+            IDEMPOTENCY_KEY_HEADER: "idem-switch-no-charge",
+        },
+    )
+    assert response.status_code == 201, response.text
+
+    with psycopg.connect(_t19_dsn(), autocommit=True) as conn:
+        after = conn.execute(
+            "SELECT count(*) FROM wallet_transactions WHERE type = 'CHARGE'"
+        ).fetchone()
+    assert int(after[0]) == int(before[0])
+
+
+# ---------------------------------------------------------------------------
+# T20 / SES-03 — code-status gates on session establishment
+# ---------------------------------------------------------------------------
+
+
+def test_login_rejects_suspended_code(client: TestClient) -> None:
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    suspended = _admin_code_action(client, "code-a", "suspend", reason="风控暂停")
+    assert suspended.status_code == 200, suspended.text
+
+    response = client.post(
+        LOGIN_PATH,
+        json={},
+        headers={
+            **_bearer(customer["device_token"]),
+            IDEMPOTENCY_KEY_HEADER: "idem-login-suspended",
+        },
+    )
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"]["code"] == "CODE_SUSPENDED"
+
+
+def test_switch_rejects_suspended_code(client: TestClient) -> None:
+    """A suspended code must not be resurrected through the switch route
+    either — the establishment gate applies to every session path."""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    suspended = _admin_code_action(client, "code-a", "suspend", reason="风控暂停")
+    assert suspended.status_code == 200, suspended.text
+
+    response = client.post(
+        SWITCH_PATH,
+        json={},
+        headers={
+            **_bearer(customer["device_token"]),
+            IDEMPOTENCY_KEY_HEADER: "idem-switch-suspended",
+        },
+    )
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"]["code"] == "CODE_SUSPENDED"
+
+
+def test_login_rejects_revoked_code(client: TestClient) -> None:
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    revoked = _admin_code_action(client, "code-a", "revoke", reason="作废")
+    assert revoked.status_code == 200, revoked.text
+
+    response = client.post(
+        LOGIN_PATH,
+        json={},
+        headers={
+            **_bearer(customer["device_token"]),
+            IDEMPOTENCY_KEY_HEADER: "idem-login-revoked",
+        },
+    )
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"]["code"] == "CODE_REVOKED"
+
+
+# ---------------------------------------------------------------------------
+# T20 / SES-03 — revocation propagation: suspend/revoke kill the live session
+# ---------------------------------------------------------------------------
+
+
+def test_suspending_the_code_revokes_the_live_session(client: TestClient) -> None:
+    """SES-03: suspending the code atomically terminates the customer's live
+    session — epoch bump, lease in the past, a LOGOUT event naming the admin
+    actor and the code_suspended reason; the heartbeat then answers
+    SESSION_EXPIRED and never resurrects."""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+
+    suspended = _admin_code_action(client, "code-a", "suspend", reason="风控暂停")
+    assert suspended.status_code == 200, suspended.text
+
+    row_device, _, row_epoch, row_lease, _ = _session_row()
+    assert row_device == customer["device_id"]
+    assert row_epoch == 2
+    assert datetime.fromisoformat(row_lease) <= datetime.now(UTC) + timedelta(seconds=1)
+
+    logout_rows = [e for e in _session_event_rows() if e["event"] == "LOGOUT"]
+    assert len(logout_rows) == 1
+    assert logout_rows[0]["epoch"] == 2
+    assert logout_rows[0]["actor"] == "admin_u"
+    assert logout_rows[0]["reason"] == "code_suspended"
+
+    stale = client.post(HEARTBEAT_PATH, headers=_bearer(customer["session_token"]))
+    assert stale.status_code == 401, stale.text
+    assert stale.json()["detail"]["code"] == "SESSION_EXPIRED"
+
+
+def test_revoking_the_code_revokes_the_live_session(client: TestClient) -> None:
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+
+    revoked = _admin_code_action(client, "code-a", "revoke", reason="违规作废")
+    assert revoked.status_code == 200, revoked.text
+
+    row_device, _, row_epoch, row_lease, _ = _session_row()
+    assert row_device == customer["device_id"]
+    assert row_epoch == 2
+    assert datetime.fromisoformat(row_lease) <= datetime.now(UTC) + timedelta(seconds=1)
+
+    logout_rows = [e for e in _session_event_rows() if e["event"] == "LOGOUT"]
+    assert len(logout_rows) == 1
+    assert logout_rows[0]["reason"] == "code_revoked"
+    assert logout_rows[0]["actor"] == "admin_u"
+
+    stale = client.post(HEARTBEAT_PATH, headers=_bearer(customer["session_token"]))
+    assert stale.status_code == 401, stale.text
+    assert stale.json()["detail"]["code"] == "SESSION_EXPIRED"
+
+
+def test_resumed_code_requires_a_fresh_login(client: TestClient) -> None:
+    """Resume un-suspends the code but never resurrects the old session: the
+    customer must log in again (a fresh epoch follows)."""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    suspended = _admin_code_action(client, "code-a", "suspend", reason="风控暂停")
+    assert suspended.status_code == 200, suspended.text
+
+    resumed = _admin_code_action(client, "code-a", "resume", reason="恢复")
+    assert resumed.status_code == 200, resumed.text
+
+    # The pre-suspension token stays dead.
+    stale = client.post(HEARTBEAT_PATH, headers=_bearer(customer["session_token"]))
+    assert stale.status_code == 401, stale.text
+    assert stale.json()["detail"]["code"] == "SESSION_EXPIRED"
+
+    # A fresh login re-establishes the session (the code is ACTIVE again).
+    fresh = client.post(
+        LOGIN_PATH,
+        json={},
+        headers={
+            **_bearer(customer["device_token"]),
+            IDEMPOTENCY_KEY_HEADER: "idem-login-after-resume",
+        },
+    )
+    assert fresh.status_code == 201, fresh.text
+    assert fresh.json()["session_epoch"] == 3
+
+
+def test_suspending_an_unactivated_code_writes_no_session_logout(client: TestClient) -> None:
+    """An ISSUED code has no user and no session: the suspension path must
+    stay a no-op on the session side (never a 500)."""
+    _seed_issuable_code(code=SECOND_CODE, code_id="code-b", batch_id="batch-b")
+
+    suspended = _admin_code_action(client, "code-b", "suspend", reason="渠道退回")
+    assert suspended.status_code == 200, suspended.text
+
+    with psycopg.connect(_t19_dsn(), autocommit=True) as conn:
+        events = conn.execute("SELECT count(*) FROM customer_session_events").fetchone()
+        state = conn.execute("SELECT count(*) FROM customer_session_state").fetchone()
+    assert int(events[0]) == 0
+    assert int(state[0]) == 0
