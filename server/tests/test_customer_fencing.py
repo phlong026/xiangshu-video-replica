@@ -656,3 +656,89 @@ def test_code_status_gate_locks_the_code_through_establishment(
     with psycopg.connect(_fencing_dsn(), autocommit=True) as conn:
         row = conn.execute("SELECT status FROM activation_codes WHERE id = 'code-a'").fetchone()
     assert str(row[0]) == "ACTIVE"
+
+
+# ---------------------------------------------------------------------------
+# T21 wiring — fenced_pg_transaction (SES-04)
+# ---------------------------------------------------------------------------
+
+
+def _snapshot_for(customer: dict) -> object:
+    """Build the early CustomerSessionSnapshot the route dependency would."""
+    from app.customer_fence import CustomerSessionSnapshot
+
+    device_id, session_id, epoch, lease = _session_row()
+    return CustomerSessionSnapshot(
+        token=customer["session_token"],
+        expected_user_id=customer["user_id"],
+        expected_device_id=device_id,
+        expected_session_id=session_id,
+        expected_session_epoch=epoch,
+        expected_lease_until=lease,
+    )
+
+
+def _count_projects() -> int:
+    with psycopg.connect(_fencing_dsn(), autocommit=True) as conn:
+        row = conn.execute("SELECT count(*) FROM projects").fetchone()
+    return int(row[0])
+
+
+def test_fenced_transaction_yields_the_context_and_commits(client: TestClient) -> None:
+    """SES-04 happy path: a valid snapshot passes the in-transaction
+    re-verification, the business write commits with the session context."""
+    from app.customer_fence import fenced_pg_transaction
+
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    snapshot = _snapshot_for(customer)
+    with fenced_pg_transaction(snapshot) as (conn, ctx):
+        assert ctx.user_id == customer["user_id"]
+        assert ctx.session_epoch == 1
+        conn.execute(
+            "INSERT INTO projects (id, owner_user_id, name) VALUES (%s, %s, %s)",
+            ("p-happy", customer["user_id"], "Happy Project"),
+        )
+    assert _count_projects() == 1
+
+
+def test_fenced_transaction_fences_a_stale_snapshot_and_leaves_no_write(
+    client: TestClient,
+) -> None:
+    """SES-04 §11.1: a request that passed the early snapshot but whose
+    session was switched before the business transaction is fenced 401
+    SESSION_REPLACED and its write never lands."""
+    from fastapi import HTTPException
+
+    from app.customer_fence import fenced_pg_transaction
+
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    snapshot = _snapshot_for(customer)
+    # The switch bumps the session epoch after the snapshot was taken.
+    with psycopg.connect(_fencing_dsn(), autocommit=True) as conn:
+        conn.execute("UPDATE customer_session_state SET session_epoch = session_epoch + 1")
+    with pytest.raises(HTTPException) as ei:
+        with fenced_pg_transaction(snapshot) as (conn, _ctx):
+            conn.execute(
+                "INSERT INTO projects (id, owner_user_id, name) VALUES (%s, %s, %s)",
+                ("p-stale", customer["user_id"], "Stale Project"),
+            )
+    assert ei.value.status_code == 401
+    assert ei.value.detail["code"] == "SESSION_REPLACED"
+    assert _count_projects() == 0
+
+
+def test_fenced_transaction_rolls_back_a_failed_business_write(client: TestClient) -> None:
+    """SES-04: a business error inside the fenced transaction rolls the whole
+    transaction back — no partial write survives."""
+    from app.customer_fence import fenced_pg_transaction
+
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    snapshot = _snapshot_for(customer)
+    with pytest.raises(RuntimeError):
+        with fenced_pg_transaction(snapshot) as (conn, _ctx):
+            conn.execute(
+                "INSERT INTO projects (id, owner_user_id, name) VALUES (%s, %s, %s)",
+                ("p-rollback", customer["user_id"], "Rollback Project"),
+            )
+            raise RuntimeError("boom")
+    assert _count_projects() == 0
