@@ -84,6 +84,14 @@ $ uv run ruff check . && uv run ruff format --check . && uv run mypy app
 all green (149 files formatted, 61 source files typed)
 # client / tauri / e2e untouched by this task; CI gates re-verify
 # secret scan: clean (test keys are runtime-generated secrets.token_* fixtures, T13–T16 precedent)
+
+# Post-merge re-verification (origin/main merged: PR #48's 033–036 chain landed
+# first → migration renumbered 033→037, revision 034's canonical key adopted)
+$ uv run python -m pytest tests -q
+910 passed   # full suite incl. PR #48's ten new tests, zero regression
+$ uv run ruff check . && uv run ruff format --check . && uv run mypy app
+all green (155 files formatted, 61 source files typed)
+# npm run check: frontend 324 tests + biome green; cargo fmt --check + cargo check green
 ```
 
 ## Session Code-Review Notes
@@ -119,7 +127,7 @@ Owner / Reviewer：后端（Agent 执行）/ Codex 独立评审（1 P1+6 P2+1 P3
 改动文件：server/migrations/versions/037_device_pairing_requests.py（新增：四态状态机+形状耦合+partial unique active 索引+downgrade 守卫，PG-only，原 033 重编号）、server/app/customer_device_service.py（T17 小节：fingerprint_digests_for/lookup_active_pairing/create_pairing_request/approve_pairing_request/consume_pairing_request 含 fingerprint_canonical）、server/app/customer_device_routes.py（enroll 两阶段 202/201 路由+approve 路由约 640 行，enroll 探测含 canonical、UniqueViolation 双约束名映射）、server/tests/test_customer_devices.py（+30 用例）、10 个测试文件 22 处 head 断言 036→037（合并 main 后重扫）、docs/evidence/T17-EVIDENCE.md、任务与证据账本
 失败测试或回归锁定：先红后绿 30 例——enroll 契约 7（幂等键必需/PENDING 创建绑定候选摘要/同键重试同 pairing_id 零信封/未知码统一 400/未激活码统一 400/已绑指纹 409/两槽满 409）+完整六步流 3（slot2 绑定+无充值计数锁定/丢 201 密封凭据重放/同键异参 409）+并发与过期 5（双线程 barrier slot2 单赢家 1×201+1×409+单 CONSUMED+双 BOUND/过期 PENDING 翻转新建/APPROVED 过期重启留审计/消费时槽满保持 APPROVED）+approve 契约 7（Bearer 必需/批准人 lineage/缺失跨码统一 404 IDOR/重复幂等/已消费 409/过期 409/self-approval 409）+不可转用 1（异指纹得自身 PENDING，批准行不动，无新设备行）+Codex 评审回归锁定 6（中途解绑 stale approver→revoked/202-201 间轮换存储真实 (digest,version) 对/过期 APPROVED 经 approve 翻转释放占用/形状 CHECK 拒半写批准列/partial unique 活跃阻塞+终态复用/037 downgrade 非空守卫+空库对称降级）+GitHub connector 评审锁定 2（首设备存活时 slot-2 不能批准 403+授权先于状态机，首设备解绑后 slot-2 仍被拒——T18 管理员核验是唯一通道）
 实现结果：第二设备 enroll/第一设备批准/一次性配对落地（迁移 033+应用层）：配对行绑定候选指纹 keyed digest（明文永不过库，partial unique (code,digest) WHERE active 保单活跃行）；四态状态机 PENDING/APPROVED/CONSUMED/EXPIRED 形状耦合 CHECK；enroll 单路由状态驱动两阶段（PENDING→202 无信封不烧键，APPROVED→消费分支密封 201 一次性凭据）；消费持码行锁+next_free_slot 选空槽，两槽满 409 配对行保持 APPROVED（解绑后过期窗内仍可消费）；并发 slot2 恰一成功（码行锁串行化+_PairingRaceLost 输家重读赢家行）；approve Bearer 第一设备鉴权状态机即幂等（无 secret 无信封）；批准不可转用（绑定摘要+异指纹新 PENDING）；第二设备零充值（配对表无钱列+全流计数锁定）；防枚举复用 T15 维度预算（activate:ip/code 同池，malformed 不短路统一拒绝+审计+常数时延，IP blocked 不消费 code 维度）；只读回放预检免限流预算
-验证命令与通过数：专项 52 passed（T16 22+T17 30）；全量 870 passed 零回归；ruff/format/mypy 全绿（149 files formatted，61 source files typed）；head 断言迁移专项 135+69 复验通过（test_db/test_internal_billing/test_recharge_orders/test_settings/test_characters/test_character_domain + test_postgres_migrations/test_activation_code_schema/test_customer_security/test_sqlite_to_postgres）；首轮全量暴露 033 FK 连锁：test_admin_activation_routes.py TRUNCATE 补 device_pairing_requests 后 38 errors→38 passed；Codex 独立评审（REQUEST CHANGES：1 P1+6 P2+1 P3）逐条实质修复+回归锁定后专项 50/全量 868 复验；GitHub connector 评审 P1（批准权未限定首设备）修复+2 例回归锁定后专项 52/全量 870 复验
+验证命令与通过数：专项 52 passed（T16 22+T17 30）；全量 870 passed 零回归；ruff/format/mypy 全绿（149 files formatted，61 source files typed）；head 断言迁移专项 135+69 复验通过（test_db/test_internal_billing/test_recharge_orders/test_settings/test_characters/test_character_domain + test_postgres_migrations/test_activation_code_schema/test_customer_security/test_sqlite_to_postgres）；首轮全量暴露 033 FK 连锁：test_admin_activation_routes.py TRUNCATE 补 device_pairing_requests 后 38 errors→38 passed；Codex 独立评审（REQUEST CHANGES：1 P1+6 P2+1 P3）逐条实质修复+回归锁定后专项 50/全量 868 复验；GitHub connector 评审 P1（批准权未限定首设备）修复+2 例回归锁定后专项 52/全量 870 复验；合并 main（PR #48 落地 033–036 链，迁移重编号 033→037+采纳 034 canonical）后全量复验 910 passed 零回归+ruff/format/mypy 全绿（155/61）+npm check 前端 324 tests/biome 绿+cargo fmt/check 绿
 证据层级：AUTOMATED_VERIFIED
 安全与可观测性：候选指纹只以 keyed HMAC-SHA256 摘要过库（跨版本探测）；配对/批准/消费事件日志仅含标识符；缺失=跨码统一 404（无 IDOR 预言）；enroll 与 activate 共享防枚举面（统一 400+失败审计+告警阈值+常数 PBKDF2 时延）；一次性凭据 secrets.token_urlsafe(32)+keyed digest 存储，AEAD 信封密封（AAD 绑定 operation/scope/key_digest）；密钥配置故障 503 fail-closed；SLOT 租约与配对过期共用 PG 事务内时钟（SES-01）
 迁移与回滚：037 PG-only（SQLite early return，025-036 先例）；downgrade 非空守卫（配对行是批准 lineage 审计证据，027/028/032 先例）空库对称降级；回滚=降级 037+还原代码
