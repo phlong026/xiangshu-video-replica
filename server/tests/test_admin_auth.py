@@ -237,6 +237,12 @@ def test_security_gate_skipped_outside_customer_production() -> None:
         ({"VIDEO_REPLICA_DESKTOP_USER_ID": "admin_1"}, "DESKTOP_USER_ID"),
         ({"VIDEO_REPLICA_STORAGE_ROOT": "/var/lib/assets"}, "STORAGE_ROOT"),
         ({ADMIN_SESSION_HMAC_KEY_ENV: ""}, "ADMIN_SESSION_HMAC_KEY"),
+        (
+            {"VIDEO_REPLICA_ADMIN_SESSION_TTL_SECONDS": str(24 * 3600 + 1)},
+            "ADMIN_SESSION_TTL_SECONDS",
+        ),
+        ({"VIDEO_REPLICA_ADMIN_SESSION_TTL_SECONDS": "0"}, "ADMIN_SESSION_TTL_SECONDS"),
+        ({"VIDEO_REPLICA_ADMIN_SESSION_TTL_SECONDS": "not-a-number"}, "ADMIN_SESSION_TTL_SECONDS"),
     ],
 )
 def test_security_gate_rejects_each_violation(overrides: dict[str, str], message: str) -> None:
@@ -245,6 +251,15 @@ def test_security_gate_rejects_each_violation(overrides: dict[str, str], message
     with _env(**env):
         with pytest.raises(RuntimeError, match=message):
             assert_customer_production_security()
+
+
+def test_security_gate_accepts_in_range_admin_session_ttl() -> None:
+    """M1 review M2: an in-range TTL passes the startup gate (the boundary
+    values themselves stay legal)."""
+    env = _clean_production_env()
+    env["VIDEO_REPLICA_ADMIN_SESSION_TTL_SECONDS"] = "3600"
+    with _env(**env):
+        assert_customer_production_security()  # must not raise
 
 
 def test_security_gate_reports_all_violations_at_once() -> None:
@@ -376,7 +391,7 @@ def clean_sessions(admin_pg_dsn: str) -> Iterator[str]:
 
     close_pg_pool()
     with psycopg.connect(admin_pg_dsn, autocommit=True) as conn:
-        conn.execute("TRUNCATE admin_sessions")
+        conn.execute("TRUNCATE admin_sessions, audit_logs")
     yield admin_pg_dsn
     close_pg_pool()
 
@@ -533,6 +548,38 @@ def test_logout_revokes_session(client: TestClient, admin_session: dict[str, str
     assert after.status_code == 401
 
 
+def test_session_lifecycle_writes_persistent_audit_log(
+    client: TestClient, admin_session: dict[str, str], clean_sessions: str
+) -> None:
+    """M1 review M1: exchange (credential consumption / login) and revoke are
+    security-critical lifecycle events — they must land in audit_logs with a
+    queryable timeline, not only in application logs."""
+
+    def audit_rows(session_id: str) -> list[tuple[str, str, str, str]]:
+        with psycopg.connect(clean_sessions) as conn:
+            return [
+                (str(row[0]), str(row[1]), str(row[2]), str(row[3]))
+                for row in conn.execute(
+                    "SELECT actor_user_id, action, entity_type, entity_id "
+                    "FROM audit_logs WHERE entity_id = %s ORDER BY created_at, id",
+                    (session_id,),
+                ).fetchall()
+            ]
+
+    session_id = admin_session["session_id"]
+    assert audit_rows(session_id) == [
+        ("admin_u", "admin_session.exchange", "admin_session", session_id)
+    ]
+    logout = client.delete(
+        "/api/control/admin/session", headers={ADMIN_CSRF_HEADER: admin_session["csrf_token"]}
+    )
+    assert logout.status_code == 204
+    assert audit_rows(session_id) == [
+        ("admin_u", "admin_session.exchange", "admin_session", session_id),
+        ("admin_u", "admin_session.revoke", "admin_session", session_id),
+    ]
+
+
 def test_logout_requires_csrf_header(client: TestClient, admin_session: dict[str, str]) -> None:
     missing = client.delete("/api/control/admin/session")
     assert missing.status_code == 403
@@ -653,3 +700,100 @@ def test_pg_unconfigured_returns_service_unavailable(
         )
         assert response.status_code == 503
         assert response.json()["detail"]["code"] == "ADMIN_SESSIONS_UNAVAILABLE"
+
+
+# ---------------------------------------------------------------------------
+# M1 review H1: the real app lifespan must run the database-mode fail-closed
+# check, not only the key/identity security gate.
+# ---------------------------------------------------------------------------
+
+
+def test_api_lifespan_fails_closed_on_sqlite_lane_in_customer_production() -> None:
+    """A direct uvicorn-style boot of the real ``app.main`` app with a
+    customer-production env that still resolves to the SQLite lane must abort
+    startup. The key/identity gate passes with this env, so only the
+    database-mode check can catch it."""
+    from app.main import app as real_app
+
+    env = _clean_production_env()
+    env[DATABASE_URL_ENV] = "sqlite:///data/app.db"
+    with _env(**env):
+        with pytest.raises(RuntimeError, match="requires PostgreSQL"):
+            with TestClient(real_app):
+                pass
+
+
+def test_api_lifespan_fails_closed_on_missing_dsn_in_customer_production() -> None:
+    """Customer production without any database URL must abort the real app's
+    lifespan with the production-facing message (resolve raises RuntimeError
+    for the customer boundary; the generic internal ValueError must not leak
+    a boot)."""
+    from app.main import app as real_app
+
+    env = _clean_production_env()
+    env[DATABASE_URL_ENV] = ""
+    with _env(**env):
+        with pytest.raises(RuntimeError, match="customer production requires PostgreSQL"):
+            with TestClient(real_app):
+                pass
+
+
+def test_api_lifespan_tolerates_internal_lane_without_database_env() -> None:
+    """Regression lock: the new lifespan check must not break the internal /
+    test lane that sets no database environment at all (the legacy lane
+    resolves per-request; only the customer boundary fails closed here)."""
+    from app.main import app as real_app
+
+    with _env(
+        **{
+            DATABASE_URL_ENV: "",
+            "VIDEO_REPLICA_DB_PATH": "",
+            "VIDEO_REPLICA_CUSTOMER_PRODUCTION": "",
+        }
+    ):
+        with TestClient(real_app):
+            pass
+
+
+def test_api_lifespan_fails_closed_on_unsupported_scheme_in_customer_production() -> None:
+    """A mistyped database URL scheme in customer production must abort the
+    real app's lifespan: the unsupported-scheme ValueError is a configuration
+    error, not the tolerated missing-config case, so a healthy startup must
+    never be advertised without a usable PostgreSQL runtime (Codex P1)."""
+    from app.main import app as real_app
+
+    env = _clean_production_env()
+    env[DATABASE_URL_ENV] = "mysql://u:p@db.example.com:5432/production"
+    with _env(**env):
+        with pytest.raises(ValueError, match="unsupported database URL scheme"):
+            with TestClient(real_app):
+                pass
+
+
+def test_short_admin_hmac_key_raises_exchange_credential_error() -> None:
+    """A short key must reach the exchange 401 channel, not surface as a 500.
+
+    ``ExchangeCredentialError`` is a ``ValueError`` subclass; the plain
+    ``ValueError`` the resolver currently raises slips past the route's
+    handler and answers 500 (M1 review LOW).
+    """
+    from app.admin_auth_routes import ADMIN_SESSION_HMAC_KEY_ENV, admin_hmac_key
+
+    with pytest.raises(ExchangeCredentialError, match="at least"):
+        admin_hmac_key(1, environ={ADMIN_SESSION_HMAC_KEY_ENV: "short"})
+
+
+def test_admin_key_discovery_rejects_zero_padded_version_suffixes() -> None:
+    """``_V01`` must not boot the door open (M1 review LOW).
+
+    Zero-padded suffixes pass ``int(suffix) >= 1`` but ``admin_hmac_key(1)``
+    only reads ``_V1`` — accepting ``_V01`` in discovery yields the
+    "boots fine, every login 401" configuration trap.
+    """
+    from app.bootstrap import _ADMIN_KEY_VERSION_PREFIX, _configured_admin_session_keys
+
+    key = "k" * 64
+    padded = f"{_ADMIN_KEY_VERSION_PREFIX}01"
+    assert _configured_admin_session_keys({padded: key}) == []
+    legal = f"{_ADMIN_KEY_VERSION_PREFIX}2"
+    assert _configured_admin_session_keys({legal: key}) == [(legal, key)]

@@ -22,6 +22,7 @@ import logging
 import os
 import secrets
 import string
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -83,7 +84,9 @@ def admin_hmac_key(key_version: int, *, environ: Mapping[str, str] | None = None
         if value:
             raw = value.encode("utf-8")
             if len(raw) < MIN_HMAC_KEY_BYTES:
-                raise ValueError(
+                # ExchangeCredentialError (a ValueError subclass) so the route's
+                # exchange handler answers 401 instead of a raw 500 (M1 review LOW).
+                raise ExchangeCredentialError(
                     f"{name} must be at least {MIN_HMAC_KEY_BYTES} bytes, got {len(raw)}"
                 )
             return raw
@@ -315,6 +318,20 @@ def create_admin_session(
             session_expires_at=expires_at.isoformat(),
             last_activity_at=db_now.isoformat(),
         )
+        # M1 review M1: credential consumption (login) is a security-critical
+        # lifecycle event — same transaction as the session row so the audit
+        # trail can never drift from what actually happened.
+        conn.execute(
+            "INSERT INTO audit_logs "
+            "(id, actor_user_id, action, entity_type, entity_id, metadata_json) "
+            "VALUES (%s, %s, 'admin_session.exchange', 'admin_session', %s, %s)",
+            (
+                str(uuid.uuid4()),
+                actor.user_id,
+                actor.session_id,
+                json.dumps({"ttl_seconds": ttl_seconds}),
+            ),
+        )
     return actor, session_token, csrf_token, ttl_seconds
 
 
@@ -363,16 +380,26 @@ def load_admin_session(session_token: str) -> tuple[AdminActor, str]:
     return actor, str(row[1])
 
 
-def revoke_admin_session(session_id: str) -> None:
+def revoke_admin_session(session_id: str, actor_user_id: str = "") -> None:
     with pg_transaction() as conn:
         now_row = conn.execute("SELECT now()").fetchone()
         if now_row is None:  # pragma: no cover - SELECT now() always returns a row
             raise RuntimeError("database clock unavailable")
         db_now = _as_datetime(now_row[0])
-        conn.execute(
+        revoked = conn.execute(
             "UPDATE admin_sessions SET revoked_at = %s WHERE id = %s AND revoked_at IS NULL",
             (db_now.isoformat(), session_id),
         )
+        # M1 review M1: revocation is audited only when it actually changed
+        # state — a repeated revoke stays the silent idempotent no-op it
+        # already was, without a second audit row.
+        if revoked.rowcount and actor_user_id:
+            conn.execute(
+                "INSERT INTO audit_logs "
+                "(id, actor_user_id, action, entity_type, entity_id, metadata_json) "
+                "VALUES (%s, %s, 'admin_session.revoke', 'admin_session', %s, '{}')",
+                (str(uuid.uuid4()), actor_user_id, session_id),
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -508,7 +535,7 @@ def get_current_admin_session(actor: AdminReader) -> AdminSessionInfo:
 @router.delete("/session", status_code=204)
 def logout_admin_session(actor: AdminReader, response: Response) -> None:
     try:
-        revoke_admin_session(actor.session_id)
+        revoke_admin_session(actor.session_id, actor_user_id=actor.user_id)
     except RuntimeError as exc:
         raise _http(
             503,

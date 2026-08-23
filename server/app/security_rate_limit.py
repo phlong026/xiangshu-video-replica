@@ -305,3 +305,39 @@ def apply_anti_enumeration_delay() -> None:
         _ANTI_ENUMERATION_SALT,
         ANTI_ENUMERATION_PBKDF2_ITERATIONS,
     )
+
+
+# ---------------------------------------------------------------------------
+# M2 review M3 — stale counter sweep (maintenance concern)
+# ---------------------------------------------------------------------------
+
+
+def count_stale_counters(conn: psycopg.Connection, *, now: datetime) -> int:
+    """How many counter rows sit on a fully lapsed window.
+
+    Every identifier that ever attempted activation (including attacker
+    address pools) otherwise keeps its row forever — counters are cache,
+    not audit (the append-only failure table carries the trail).
+    """
+    cutoff = now - timedelta(seconds=rate_limit_window_seconds())
+    row = conn.execute(
+        f"SELECT count(*) FROM {COUNTERS_TABLE} WHERE window_start::timestamptz <= %s",
+        (cutoff.isoformat(),),
+    ).fetchone()
+    return int(row[0]) if row is not None else 0
+
+
+def purge_stale_counters(conn: psycopg.Connection, *, now: datetime) -> int:
+    """Delete fully lapsed counter rows; returns the purged count.
+
+    A row whose window has completely elapsed can never be consulted again
+    (``consume_rate_limit`` resets the window on the first hit after the
+    cutoff), so deleting it costs nothing and keeps the table bounded.
+    Idempotent.
+    """
+    cutoff = now - timedelta(seconds=rate_limit_window_seconds())
+    purged = conn.execute(
+        f"DELETE FROM {COUNTERS_TABLE} WHERE window_start::timestamptz <= %s",
+        (cutoff.isoformat(),),
+    ).rowcount
+    return int(purged)

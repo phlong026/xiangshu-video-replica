@@ -122,6 +122,9 @@ def concurrency_pg_dsn() -> Iterator[str]:
 def clean_state(concurrency_pg_dsn: str) -> Iterator[str]:
     close_pg_pool()
     with psycopg.connect(concurrency_pg_dsn, autocommit=True) as conn:
+        # 036 refuses TRUNCATE of the append-only audit tables; the replica
+        # role suspends triggers for this cleanup sweep only.
+        conn.execute("SET session_replication_role = replica")
         conn.execute(
             "TRUNCATE customer_session_events, customer_session_state, "
             "customer_idempotency_envelopes, "
@@ -131,6 +134,7 @@ def clean_state(concurrency_pg_dsn: str) -> Iterator[str]:
             "wallet_transactions, recharge_orders, wallets, users, "
             "security_rate_limit_counters, security_auth_failures CASCADE"
         )
+        conn.execute("SET session_replication_role = DEFAULT")
         conn.execute(
             "INSERT INTO users (id, username, display_name, role) "
             "VALUES ('admin_u', 'admin_u', 'Admin User', 'admin')"
@@ -391,6 +395,47 @@ def test_concurrent_second_code_same_fingerprint_one_success(
 # ---------------------------------------------------------------------------
 # Business failure rolls the envelope back: the key stays reusable
 # ---------------------------------------------------------------------------
+
+
+def test_rotation_window_cross_version_same_fingerprint_one_activation(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_state: str,
+) -> None:
+    """M2 review M1: during a rotation rollout instance B already carries V2
+    while instance A still runs V1-only. The same physical device presenting
+    two codes across the two instances writes two *different* fingerprint
+    digest strings, so the partial unique index (same-string only) cannot
+    settle the race and the version-scoped ANY check on A cannot see B's V2
+    row. Serialized here for a deterministic reproduction (B fully commits
+    before A runs its check) — the cross-version probe must still yield
+    exactly one activation."""
+    first_code = generate_activation_code()
+    second_code = generate_activation_code()
+    with psycopg.connect(clean_state) as conn:
+        _insert_code(conn, code_id="code-rot-a", batch_id="batch-rot-a", plaintext=first_code)
+        _insert_code(conn, code_id="code-rot-b", batch_id="batch-rot-b", plaintext=second_code)
+
+    v2_key = secrets.token_urlsafe(48)
+    # Instance B: rotation window — V1 retained, V2 added; new bindings carry
+    # the highest configured version's digest.
+    monkeypatch.setenv("VIDEO_REPLICA_DEVICE_FINGERPRINT_HMAC_KEY_V2", v2_key)
+    first = _post_activate(client, first_code, "fp-rotation", "key-rot-a")
+    assert first.status_code == 201, first.text
+
+    # Instance A: still V1-only (the rollout has not reached it yet).
+    monkeypatch.delenv("VIDEO_REPLICA_DEVICE_FINGERPRINT_HMAC_KEY_V2", raising=False)
+    second = _post_activate(client, second_code, "fp-rotation", "key-rot-b")
+    assert second.status_code == 409, second.text
+    assert "USER_ALREADY_ACTIVATED" in second.text
+
+    with psycopg.connect(clean_state) as conn:
+        assert _count(conn, "SELECT COUNT(*) FROM activation_code_activations") == 1
+        assert _count(conn, "SELECT COUNT(*) FROM customer_devices WHERE status = 'BOUND'") == 1
+        assert (
+            _count(conn, "SELECT COUNT(*) FROM recharge_orders WHERE provider = 'activation_code'")
+            == 1
+        )
 
 
 def test_failed_attempt_releases_idempotency_key(client: TestClient, clean_state: str) -> None:

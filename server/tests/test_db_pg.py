@@ -26,6 +26,7 @@ from psycopg_pool import ConnectionPool
 from app.db_pg import (
     DATABASE_URL_ENV,
     DatabaseMode,
+    MissingDatabaseConfigError,
     check_pg_ready,
     pg_server_now,
     pg_transaction,
@@ -103,6 +104,17 @@ def test_resolve_rejects_unsupported_scheme() -> None:
             resolve_database_config()
 
 
+def test_resolve_missing_internal_raises_missing_database_config_error() -> None:
+    """The internal lane may legitimately boot without any database env
+    (the legacy lane resolves per-request), so the missing-config path
+    raises the narrow MissingDatabaseConfigError — never the generic
+    ValueError also used for unsupported schemes, which the lifespan
+    must not swallow (Codex P1)."""
+    with _env(**{DATABASE_URL_ENV: "", "VIDEO_REPLICA_DB_PATH": ""}):
+        with pytest.raises(MissingDatabaseConfigError):
+            resolve_database_config()
+
+
 # ---------------------------------------------------------------------------
 # Customer-production fail-closed matrix (pure, no PG required)
 # ---------------------------------------------------------------------------
@@ -159,7 +171,9 @@ pytestmark_pg = pytest.mark.skipif(
 def test_check_pg_ready_uses_pool_and_server_time() -> None:
     with _env(**{DATABASE_URL_ENV: PG_DSN}):
         ready = check_pg_ready()
-    assert ready.dsn == PG_DSN
+    # The DSN is redacted at the PgReadyInfo boundary (M1 review LOW).
+    assert ready.dsn != PG_DSN
+    assert "testpass" not in ready.dsn
     assert isinstance(ready.server_now, datetime)
     assert ready.pool_size >= 1
 
@@ -423,3 +437,32 @@ def test_alembic_env_var_dsn_runs_migrations_on_pg(
     finally:
         with psycopg.connect(admin_dsn, autocommit=True) as conn:
             conn.execute(f'DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)')
+
+
+def test_pool_max_is_capped_at_a_hard_ceiling() -> None:
+    """A misconfigured POOL_MAX must not drain the server's connections (M1 review LOW)."""
+    from app.db_pg import POOL_MAX_ENV, _pool_bounds
+
+    with _env(**{POOL_MAX_ENV: "100000"}):
+        pool_min, pool_max = _pool_bounds()
+    assert pool_max == 64
+
+
+def test_pool_min_is_capped_at_the_hard_ceiling() -> None:
+    """A POOL_MIN above the ceiling must not yield an invalid (min > max)
+    pair: ConnectionPool rejects max_size smaller than min_size, turning
+    the connection-budget safeguard into a startup failure (Codex P2)."""
+    from app.db_pg import POOL_MAX_ENV, POOL_MIN_ENV, _pool_bounds
+
+    with _env(**{POOL_MIN_ENV: "100000", POOL_MAX_ENV: "32"}):
+        pool_min, pool_max = _pool_bounds()
+    assert (pool_min, pool_max) == (64, 64)
+
+
+def test_check_pg_ready_redacts_dsn_credentials() -> None:
+    """PgReadyInfo.dsn must never carry the password (M1 review LOW)."""
+    with _env(**{DATABASE_URL_ENV: PG_DSN}):
+        ready = check_pg_ready()
+    assert ready.dsn != PG_DSN
+    assert "testpass" not in ready.dsn
+    assert "customer_v3_test" in ready.dsn

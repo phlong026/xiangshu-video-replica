@@ -87,9 +87,9 @@ all green
 Owner / Reviewer：DB/后端（Agent 执行）/ chatgpt-codex-connector（PR 评审）
 分支 / 基线 SHA：feat/customer-v3-t10-activation-code-schema / 基线 4cc04b3（PR #40 squash）
 上游规格段落：客户版任务清单 V3 §3 T10、§12.2 ACT-01；代码开发清单 V3 §3.3（027_activation_code_catalog.py 冻结名）；激活码开发文档 §5/§11.2/§11.3/§12.1；测试与验收规格
-改动文件：server/migrations/versions/027_activation_code_catalog.py（新增 5 表全约束）、server/tests/test_activation_code_schema.py（新增 9 用例）、server/tests/test_postgres_migrations.py（head 断言与 downgrade guard 适配 027 链）、server/scripts/reconcile_customer_billing.py（PG_ONLY_TABLES 纳入 5 张 027 目录表）、server/scripts/sqlite_to_postgres.py（注释）、server/tests/test_sqlite_to_postgres.py（新增空目录接受/有行拒收合同测试 + validate_revision_pair head 027）、test_db/test_character_domain/test_characters/test_internal_billing/test_recharge_orders/test_settings 六个 SQLite 车道套件 head 断言 026→027 联动
-失败测试或回归锁定：先红后绿——9 用例锁定 5 表精确列集（无明文列红线）、批次形状（status/正数快照/过期窗口/creator FK）、码摘要全局唯一、状态机形状矩阵（ISSUED 无绑定、ACTIVE 绑定+时间戳、SUSPENDED/REVOKED 证明时间戳、UNASSIGNED/ASSIGNED 拒收）、当前有效绑定一户一码（部分唯一索引）、发放可追溯（actor FK/非空渠道）、导出仅密文（AEAD+SHA256+短时效+key version）、激活事实三重唯一（code/user/首充订单）、downgrade 拒绝已有激活事实且多步降级事务性回滚
-实现结果：027_activation_code_catalog 落地批次/码/发放/导出/激活事实 5 表（PG-only），全部不变量由数据库约束证明；码仅存 HMAC 摘要+key version+掩码；激活事实链（user/PAID 首充订单/CHARGE）禁止 downgrade 删除；first_device_id 留待 T16 设备迁移按追加修复规则补 FK
+改动文件：server/migrations/versions/027_activation_code_catalog.py（新增 6 表全约束）、server/tests/test_activation_code_schema.py（新增 10 用例）、server/tests/test_postgres_migrations.py（head 断言与 downgrade guard 适配 027 链）、server/scripts/reconcile_customer_billing.py（PG_ONLY_TABLES 纳入 6 张 027 目录表）、server/scripts/sqlite_to_postgres.py（注释）、server/tests/test_sqlite_to_postgres.py（新增空目录接受/有行拒收合同测试 + validate_revision_pair head 027）、test_db/test_character_domain/test_characters/test_internal_billing/test_recharge_orders/test_settings 六个 SQLite 车道套件 head 断言 026→027 联动
+失败测试或回归锁定：先红后绿——10 用例锁定 6 表精确列集（无明文列红线）、批次形状（status/正数快照/过期窗口/creator FK）、码摘要全局唯一、状态机形状矩阵（ISSUED 无绑定、ACTIVE 绑定+时间戳、SUSPENDED/REVOKED 证明时间戳、UNASSIGNED/ASSIGNED 拒收）、当前有效绑定一户一码（部分唯一索引）、发放可追溯（actor FK/非空渠道）、导出仅密文（AEAD+SHA256+短时效+key version）、激活事实三重唯一（code/user/首充订单）、downgrade 拒绝已有激活事实且多步降级事务性回滚
+实现结果：027_activation_code_catalog 落地批次/码/发放/导出/激活事实/追加事件 6 表（PG-only），全部不变量由数据库约束证明；码仅存 HMAC 摘要+key version+掩码；激活事实链（user/PAID 首充订单/CHARGE）禁止 downgrade 删除；first_device_id 留待 T16 设备迁移按追加修复规则补 FK
 验证命令与通过数：test_activation_code_schema 9 passed + 迁移套件 19 passed + test_sqlite_to_postgres 26 passed；全量与 lint 数字见 PR；CI 三门禁全绿
 证据层级：AUTOMATED_VERIFIED
 安全与可观测性：无明文激活码入库（列集断言锁定）；摘要+版本化 key；导出仅 AEAD 密文+SHA256；所有操作行追溯真实 users.id

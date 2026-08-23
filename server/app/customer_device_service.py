@@ -683,6 +683,7 @@ def consume_pairing_request(
     hmac_key: bytes,
     token_key_version: int,
     owner_user_id: str,
+    fingerprint_canonical: str,
     server_now: datetime,
 ) -> ConsumedPairing | None:
     """Consume an APPROVED pairing: bind the candidate to the free slot.
@@ -700,6 +701,12 @@ def consume_pairing_request(
     a version that has since been rotated below the highest one, and the
     stored pair must stay truthful (PR #49 Codex review P2). The fresh
     device token is keyed with the caller's current highest version.
+
+    ``fingerprint_canonical`` is the caller's current lowest-retained-key
+    digest of the same physical fingerprint (revision 034): the cross-version
+    probe key that keeps a re-enroll of a released device detectable even
+    after the row's own ``fingerprint_hmac`` version falls out of the
+    retained set (the activation-route M2 precedent).
     """
     slot_no = next_free_slot(conn, pairing.activation_code_id)
     if slot_no is None:
@@ -711,9 +718,9 @@ def consume_pairing_request(
     conn.execute(
         "INSERT INTO customer_devices "
         "(id, activation_code_id, user_id, slot_no, display_name, platform, "
-        " fingerprint_hmac, fingerprint_key_version, token_digest, token_key_version, "
-        " bound_at) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        " fingerprint_hmac, fingerprint_key_version, fingerprint_canonical, "
+        " token_digest, token_key_version, bound_at) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
         (
             device_id,
             pairing.activation_code_id,
@@ -723,6 +730,7 @@ def consume_pairing_request(
             pairing.platform,
             pairing.candidate_fingerprint_hmac,
             pairing.candidate_fingerprint_key_version,
+            fingerprint_canonical,
             token_digest,
             token_key_version,
             now_iso,

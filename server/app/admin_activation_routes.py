@@ -35,6 +35,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -48,6 +49,7 @@ from app.activation_code_service import (
     ActivationCodeError,
     ActivationExportError,
     ActivationKeyError,
+    InvalidActivationCodeError,
     InvalidCodeTransitionError,
     activation_code_hmac_key,
     assert_code_transition,
@@ -71,6 +73,12 @@ REPLAY_HEADER = "X-Idempotent-Replay"
 DEFAULT_EXPORT_TTL_SECONDS = 15 * 60
 DEFAULT_LIST_LIMIT = 100
 MAX_LIST_LIMIT = 200
+
+# M2 review H2 / PRICE-01: customer-sale batches stay unmintable until the
+# price-freeze decision lands. Before this the only guard was a doc note —
+# any admin writer could mint a "1-fen face value / 1M credits" batch. The
+# mechanism is an explicit env opt-in; everything else fails closed.
+BATCH_CREATION_ENV = "VIDEO_REPLICA_ALLOW_ACTIVATION_BATCH_CREATION"
 
 router = APIRouter(prefix="/api/control", tags=["admin-activation"])
 
@@ -282,9 +290,11 @@ def _write_with_idempotency(
             )
             response.headers[REQUEST_ID_HEADER] = request_id
             return payload
-    except RuntimeError as exc:
-        # The PG runtime is unavailable (internal SQLite deployments): fail
-        # closed instead of falling back to any legacy control identity.
+    except (RuntimeError, ValueError) as exc:
+        # The PG runtime is unavailable (internal SQLite deployments) or the
+        # idempotency envelope state is malformed: fail closed instead of
+        # falling back to any legacy control identity (T13 catches both
+        # classes; M2 review LOW aligns this lane).
         raise _http(
             503,
             "ACTIVATION_SERVICE_UNAVAILABLE",
@@ -328,6 +338,23 @@ def _validate_batch_payload(body: BatchCreateRequest) -> None:
         raise _http(400, "BATCH_VALIDATION_FAILED", "; ".join(problems))
 
 
+def _assert_batch_creation_allowed() -> None:
+    """Fail closed unless the operator explicitly opted in (PRICE-01).
+
+    Called before the idempotency envelope so probes during the freeze
+    never consume an Idempotency-Key — the same key mints cleanly once the
+    opt-in is set.
+    """
+    if os.environ.get(BATCH_CREATION_ENV, "").strip().lower() != "true":
+        raise _http(
+            403,
+            "BATCH_CREATION_DISABLED",
+            "Activation-code batch creation is disabled until the PRICE-01 "
+            "customer-price decision freezes; set "
+            f"{BATCH_CREATION_ENV}=true to opt in explicitly.",
+        )
+
+
 @router.post("/activation-code-batches", status_code=201)
 def create_activation_code_batch(
     body: BatchCreateRequest,
@@ -336,6 +363,7 @@ def create_activation_code_batch(
     actor: AdminWriter,
 ) -> dict[str, object]:
     """Create an OPEN batch with frozen commercial snapshots."""
+    _assert_batch_creation_allowed()
 
     def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
         _validate_batch_payload(body)
@@ -344,8 +372,9 @@ def create_activation_code_batch(
         conn.execute(
             "INSERT INTO activation_code_batches "
             "(id, name, face_value_fen, unit_price_fen_snapshot, credits_snapshot, "
-            " quantity, activation_expires_at, status, created_by_user_id) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, 'OPEN', %s)",
+            " quantity, activation_expires_at, status, created_by_user_id, "
+            " creation_reason, creation_request_id) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, 'OPEN', %s, %s, %s)",
             (
                 batch_id,
                 name,
@@ -357,6 +386,11 @@ def create_activation_code_batch(
                 body.quantity,
                 body.activation_expires_at,
                 actor.user_id,
+                # M2 review H1: the validated reason must not evaporate —
+                # the batch row is the durable "why was this minted" record
+                # (031 download-audit precedent).
+                body.reason.strip(),
+                request_id,
             ),
         )
         logger.info(
@@ -445,6 +479,7 @@ def generate_activation_codes(
                 hmac_key=hmac_key,
                 actor_user_id=actor.user_id,
                 request_id=request_id,
+                reason=body.reason.strip(),
             )
         except ActivationCodeError as exc:
             raise _http(
@@ -460,6 +495,7 @@ def generate_activation_codes(
             ttl_seconds=DEFAULT_EXPORT_TTL_SECONDS,
             key_version=aead_version,
             aead_key=aead_key,
+            request_id=request_id,
         )
         expires_row = conn.execute(
             "SELECT expires_at FROM activation_code_exports WHERE id = %s",
@@ -525,6 +561,16 @@ def download_activation_code_export(
                     download_reason=reason,
                     download_request_id=request_id,
                 )
+            except InvalidActivationCodeError as exc:
+                # A decryptable package whose inner payload is malformed is
+                # data rot of that one export, not a service outage; without
+                # this branch the error escapes as an uncontrolled 500
+                # (M2 review LOW).
+                raise _http(
+                    400,
+                    "EXPORT_PACKAGE_INVALID",
+                    "The export package could not be decoded; generate a new one.",
+                ) from exc
             except ActivationExportError as exc:
                 message = str(exc)
                 if "unknown" in message:

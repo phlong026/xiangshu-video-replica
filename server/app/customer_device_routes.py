@@ -935,13 +935,15 @@ def enroll_second_device(body: DeviceEnrollRequest, request: Request) -> Respons
             ).fetchall()
 
             # The candidate fingerprint must not already hold a binding
-            # (checked across every configured key version, the PR #44
-            # review P1 rule — this is also what makes self-approval of a
-            # pairing structurally impossible through the enroll path).
+            # (checked across every configured key version plus the
+            # revision-034 cross-version probe key, the PR #44 review P1 /
+            # activation-route M2 rule — this is also what makes self-approval
+            # of a pairing structurally impossible through the enroll path).
             bound = conn.execute(
                 "SELECT 1 FROM customer_devices "
-                "WHERE fingerprint_hmac = ANY(%s) AND status = 'BOUND'",
-                (fingerprint_digests,),
+                "WHERE (fingerprint_hmac = ANY(%s) OR fingerprint_canonical = %s) "
+                "AND status = 'BOUND'",
+                (fingerprint_digests, fingerprint_digests[0]),
             ).fetchone()
             if bound is not None:
                 raise _http(
@@ -1003,6 +1005,7 @@ def enroll_second_device(body: DeviceEnrollRequest, request: Request) -> Respons
                     hmac_key=hmac_key,
                     token_key_version=fingerprint_key_version,
                     owner_user_id=str(bound_user_id),
+                    fingerprint_canonical=fingerprint_digests[0],
                     server_now=server_now,
                 )
                 if consumed is None:
@@ -1110,7 +1113,13 @@ def enroll_second_device(body: DeviceEnrollRequest, request: Request) -> Respons
         ) from None
     except UniqueViolation as exc:
         constraint = exc.diag.constraint_name or ""
-        if constraint == "uq_customer_devices_fingerprint":
+        if constraint in (
+            "uq_customer_devices_fingerprint",
+            # Revision 034 probe key: a cross-version digest collision is the
+            # same "device already holds an activation" fact (the
+            # activation-route M2 precedent).
+            "uq_customer_devices_fingerprint_canonical",
+        ):
             # Defensive: the candidate lost the partial-unique race against a
             # concurrent binding (the pre-check inside the code-row lock
             # already covers the normal path, the T13 precedent).

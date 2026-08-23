@@ -28,7 +28,7 @@ EXPORTS_TABLE = "activation_code_exports"
 ACTIVATIONS_TABLE = "activation_code_activations"
 EVENTS_TABLE = "activation_code_events"
 
-_HEAD_REVISION = "033_device_pairing_requests"
+_HEAD_REVISION = "037_device_pairing_requests"
 
 
 def _pg_dsn() -> str:
@@ -200,6 +200,10 @@ def test_catalog_tables_and_columns(catalog_dsn: str) -> None:
             "status",
             "created_by_user_id",
             "created_at",
+            # 033 (M2 review H1): write-once creation audit columns, the
+            # batch-row twin of 031's download audit pair.
+            "creation_reason",
+            "creation_request_id",
         }
         assert columns(CODES_TABLE) == {
             "id",
@@ -241,6 +245,9 @@ def test_catalog_tables_and_columns(catalog_dsn: str) -> None:
             # request id next to the actor.
             "download_reason",
             "download_request_id",
+            # 035 (M2 review M2): purge stamp — once set, the CHECK
+            # coupling forces ciphertext/digest/key_version to be NULL.
+            "purged_at",
         }
         assert columns(ACTIVATIONS_TABLE) == {
             "id",
@@ -666,9 +673,11 @@ def test_downgrade_drops_catalog_and_blocks_when_activated(catalog_dsn: str) -> 
     with pytest.raises(RuntimeError, match="cannot downgrade 028"):
         # Down to 026; with an activation fact present the 028
         # guard (the deferred first-device FK chain) refuses on the
-        # 033 -> 032 -> 029 -> 028 -> 031 leg: 033 -> 032, 032 -> 029 and
-        # 029 -> 028 succeed (empty pairing, security and
-        # session/idempotency runtime), then 028 -> 031 is blocked.
+        # 037 -> 036 -> 035 -> 034 -> 033 -> 032 -> 029 -> 028 -> 031 leg:
+        # the leading hops drop the empty pairing/guard/ciphertext-purge/
+        # probe-key/audit layers, then 032 -> 029 and 029 -> 028 succeed
+        # (empty security and session/idempotency runtime), then
+        # 028 -> 031 is blocked.
         command.downgrade(_alembic_config(sqlalchemy_dsn), "026_customer_security_and_billing")
 
     # Remove the fact (test data only) and the downgrade is symmetric.

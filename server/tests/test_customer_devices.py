@@ -165,6 +165,9 @@ def devices_dsn() -> Iterator[str]:
 def route_state(devices_dsn: str) -> Iterator[str]:
     close_pg_pool()
     with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        # 036 refuses TRUNCATE of the append-only audit tables; the replica
+        # role suspends triggers for this cleanup sweep only.
+        conn.execute("SET session_replication_role = replica")
         conn.execute(
             "TRUNCATE customer_session_events, customer_session_state, "
             "customer_idempotency_envelopes, device_pairing_requests, "
@@ -174,6 +177,7 @@ def route_state(devices_dsn: str) -> Iterator[str]:
             "wallet_transactions, recharge_orders, wallets, users, "
             f"{COUNTERS_TABLE}, {FAILURES_TABLE} CASCADE"
         )
+        conn.execute("SET session_replication_role = DEFAULT")
         conn.execute(
             "INSERT INTO users (id, username, display_name, role) "
             "VALUES ('admin_u', 'admin_u', 'Admin User', 'admin')"
@@ -1828,12 +1832,12 @@ def test_pairing_downgrade_refuses_once_rows_exist(route_state: str) -> None:
         "sqlalchemy.url", _t16_dsn().replace("postgresql://", "postgresql+psycopg://")
     )
 
-    with pytest.raises(RuntimeError, match="cannot downgrade 033_device_pairing_requests"):
+    with pytest.raises(RuntimeError, match="cannot downgrade 037_device_pairing_requests"):
         command.downgrade(config, "032_security_rate_limits")
     # The refusal left the schema untouched at head.
     with psycopg.connect(_t16_dsn()) as conn:
         version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-    assert version == "033_device_pairing_requests"
+    assert version == "037_device_pairing_requests"
 
     # An emptied table downgrades symmetrically, and upgrading back restores
     # the schema for any rerun of this module.

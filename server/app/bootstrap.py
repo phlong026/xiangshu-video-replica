@@ -60,7 +60,10 @@ def _configured_admin_session_keys(
             found.append((name, value))
         elif name.startswith(_ADMIN_KEY_VERSION_PREFIX):
             suffix = name[len(_ADMIN_KEY_VERSION_PREFIX) :]
-            if suffix.isdigit() and int(suffix) >= 1:
+            # Reject zero-padded suffixes like _V01: they pass int() >= 1 but
+            # admin_hmac_key(1) only reads _V1, so accepting them would boot
+            # the door open while every login 401s (M1 review LOW).
+            if suffix.isdigit() and int(suffix) >= 1 and not suffix.startswith("0"):
                 found.append((name, value))
     return found
 
@@ -116,6 +119,26 @@ def customer_production_security_violations() -> list[str]:
                     f"{name} must be at least {_MIN_ADMIN_KEY_BYTES} bytes "
                     "for the customer-production admin session HMAC key"
                 )
+    # M1 review M2: an explicitly configured but out-of-range admin-session
+    # TTL must fail the boot itself instead of surfacing later as a 500 on
+    # the first exchange — the same fail-later shape PR #40 P2-2 fixed for
+    # keys. Delayed import: bootstrap must not pull the FastAPI layer.
+    from app.admin_auth_routes import (
+        ADMIN_SESSION_TTL_ENV,
+        MAX_ADMIN_SESSION_TTL_SECONDS,
+        MIN_ADMIN_SESSION_TTL_SECONDS,
+        resolve_admin_session_ttl_seconds,
+    )
+
+    if os.environ.get(ADMIN_SESSION_TTL_ENV, "").strip():
+        try:
+            resolve_admin_session_ttl_seconds()
+        except ValueError:
+            violations.append(
+                f"{ADMIN_SESSION_TTL_ENV} is invalid: must be an integer between "
+                f"{MIN_ADMIN_SESSION_TTL_SECONDS} and {MAX_ADMIN_SESSION_TTL_SECONDS} "
+                "seconds"
+            )
     return violations
 
 
