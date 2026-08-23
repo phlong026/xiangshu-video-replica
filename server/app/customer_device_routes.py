@@ -122,6 +122,7 @@ from app.customer_device_service import (
     APPROVE_ALREADY_CONSUMED,
     APPROVE_EXPIRED,
     APPROVE_NOT_FOUND,
+    APPROVE_REVOKED,
     APPROVE_SELF,
     OUTCOME_NOT_BOUND,
     OUTCOME_NOT_FOUND,
@@ -708,11 +709,16 @@ def _probe_enroll_replay(
 
 
 def _pending_response(pairing: ActivePairing, *, request_id: str) -> Response:
+    # The status mirrors the row's actual state: the normal PENDING branch
+    # answers "waiting for approval", while the race-lost re-read may catch
+    # the winner's row already APPROVED — a 202 carrying status=APPROVED
+    # tells the client to retry the enroll immediately and land on the
+    # consumption branch (PR #49 Codex review P3).
     return JSONResponse(
         status_code=202,
         content={
             "pairing_request_id": pairing.id,
-            "status": PAIRING_PENDING,
+            "status": pairing.status,
             "expires_at": pairing.expires_at,
             "request_id": request_id,
         },
@@ -914,6 +920,19 @@ def enroll_second_device(body: DeviceEnrollRequest, request: Request) -> Respons
             if batch_expiry <= server_now:
                 raise unavailable
 
+            # §12.2 step 4 (PR #49 Codex review P2): the current device rows
+            # are locked *before* the pairing row so the occupancy snapshot
+            # serializes against a concurrent unbind — without this lock a
+            # completing unbind could transiently answer 409 DEVICE_SLOTS_FULL
+            # even though the freed slot was about to be reusable. The shared
+            # lock order is code → devices → pairing (the approve route walks
+            # its tail: devices → pairing), so the two routes cannot deadlock.
+            conn.execute(
+                "SELECT slot_no FROM customer_devices "
+                "WHERE activation_code_id = %s AND status = 'BOUND' FOR UPDATE",
+                (code_id,),
+            ).fetchall()
+
             # The candidate fingerprint must not already hold a binding
             # (checked across every configured key version, the PR #44
             # review P1 rule — this is also what makes self-approval of a
@@ -981,7 +1000,7 @@ def enroll_second_device(body: DeviceEnrollRequest, request: Request) -> Respons
                     conn,
                     pairing=pairing,
                     hmac_key=hmac_key,
-                    key_version=fingerprint_key_version,
+                    token_key_version=fingerprint_key_version,
                     owner_user_id=str(bound_user_id),
                     server_now=server_now,
                 )
@@ -1051,7 +1070,11 @@ def enroll_second_device(body: DeviceEnrollRequest, request: Request) -> Respons
                 )
             except UniqueViolation:
                 # A concurrent enroll of the same code + digest won the
-                # partial-unique race. This transaction is aborted, so
+                # partial-unique race. Under the current route topology this
+                # lane is defensively unreachable (same-code enrolls serialize
+                # on the code-row lock), but it stays as depth against any
+                # future writer that inserts pairing rows outside that lock
+                # (PR #49 Codex review P3). This transaction is aborted, so
                 # reload the winner's row in a fresh transaction.
                 raise _PairingRaceLost from None
             logger.info(
@@ -1072,6 +1095,9 @@ def enroll_second_device(body: DeviceEnrollRequest, request: Request) -> Respons
                 server_now=server_now,
             )
         if winner is not None:
+            # The 202 mirrors the winner's actual state (PENDING or APPROVED)
+            # so the client retries the enroll and lands on the authoritative
+            # branch — never a stale "still waiting" answer.
             return _pending_response(winner, request_id=request_id)
         # The winner's row already lapsed or was consumed between the two
         # transactions — vanishingly rare; the client retries with a fresh
@@ -1137,6 +1163,15 @@ def approve_device_pairing(pairing_id: str, request: Request) -> PairingApproveR
             404,
             "PAIRING_NOT_FOUND",
             "No such pairing request for this device.",
+        )
+    if outcome == APPROVE_REVOKED:
+        # The approver's binding was released after the authentication
+        # snapshot (a concurrent unbind won the race): the same 401 the
+        # credential would get on any fresh request (PR #49 Codex review P1).
+        raise _http(
+            401,
+            "DEVICE_REVOKED",
+            "This device credential has been revoked.",
         )
     if outcome == APPROVE_EXPIRED:
         raise _http(

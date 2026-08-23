@@ -25,7 +25,10 @@ Status shape coupling (the 028 three-state precedent, generalized to four):
 ``PENDING`` proves neither transition column; ``APPROVED`` proves
 ``approved_at``/``approved_by_device_id`` and no consumption;
 ``CONSUMED`` proves both transitions and ``consumed_device_id``;
-``EXPIRED`` proves no consumption (it may carry an approval that lapsed).
+``EXPIRED`` proves no consumption (it may carry an approval that lapsed —
+but the approval columns must still appear as a pair: a lone
+``approved_at`` or ``approved_by_device_id`` is a malformed audit row,
+PR #49 Codex review P2).
 
 The partial unique index keeps at most one *active* pairing request per
 (activation code, candidate digest): retried enrolls reuse the existing
@@ -53,7 +56,9 @@ depends_on = None
 _PAIRING_STATUS = "status IN ('PENDING', 'APPROVED', 'CONSUMED', 'EXPIRED')"
 # Four-state shape coupling: every state proves its own transition columns.
 # EXPIRED may carry an approval that lapsed before consumption, so only the
-# consumption columns are constrained there.
+# consumption columns are constrained there — plus the approval columns must
+# arrive as a pair (both NULL or both set), or a lapsed approval could be
+# recorded half-written (PR #49 Codex review P2).
 _PAIRING_STATUS_SHAPE = (
     "(status = 'PENDING' AND approved_at IS NULL AND approved_by_device_id IS NULL "
     "AND consumed_at IS NULL AND consumed_device_id IS NULL) OR "
@@ -63,7 +68,8 @@ _PAIRING_STATUS_SHAPE = (
     "(status = 'CONSUMED' AND approved_at IS NOT NULL "
     "AND approved_by_device_id IS NOT NULL "
     "AND consumed_at IS NOT NULL AND consumed_device_id IS NOT NULL) OR "
-    "(status = 'EXPIRED' AND consumed_at IS NULL AND consumed_device_id IS NULL)"
+    "(status = 'EXPIRED' AND consumed_at IS NULL AND consumed_device_id IS NULL "
+    "AND (approved_at IS NULL) = (approved_by_device_id IS NULL))"
 )
 
 

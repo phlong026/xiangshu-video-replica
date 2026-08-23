@@ -49,7 +49,7 @@ Task exit gate: *实现第二设备 enroll、第一设备批准和一次性配�
 
 **`POST /api/customer/device-pairings/{pairing_id}/approve`** — Bearer first-device credential (the shared `_authenticate`), `SELECT now()`, the outcome mapping (404 `PAIRING_NOT_FOUND` for missing and cross-code alike, 409 `PAIRING_EXPIRED` / `PAIRING_ALREADY_CONSUMED` / `PAIRING_SELF_APPROVAL`, otherwise 200 `{pairing_request_id, status: APPROVED}`). **No envelope by design**: the state machine is the idempotency (re-approving answers the current state) and no secret ever rides the response (§12.2 step 6 — the enroll's one-time credential is the sealed surface).
 
-## 4. Test Coverage (22 red → green, T17 half of the 44)
+## 4. Test Coverage (28 red → green, T17 half of the 50)
 
 | Group | Cases |
 | --- | --- |
@@ -58,6 +58,8 @@ Task exit gate: *实现第二设备 enroll、第一设备批准和一次性配�
 | Concurrency & expiry (5) | two approved rivals race the consume branch (2-thread barrier): exactly one 201 + one 409 `DEVICE_SLOTS_FULL`, one CONSUMED row, two BOUND devices; a lapsed PENDING flips EXPIRED and a fresh request is created; a lapsed APPROVED also restarts fresh (the lapsed approval stays visible in the audit); consumption against two BOUND slots answers 409 and the pairing row **stays APPROVED** |
 | Approve contract (7) | missing Bearer → 401 `DEVICE_CREDENTIAL_REQUIRED`; happy path records `approved_at` + `approved_by_device_id` (the approver's device id); missing / random / **cross-code** pairings all answer one 404 (IDOR — the foreign pairing stays PENDING); repeated approval is idempotent (identical body); after consumption → 409 `PAIRING_ALREADY_CONSUMED`; lapsed → 409 `PAIRING_EXPIRED` with the row flipped EXPIRED; a pairing naming the approver's own digest → 409 `PAIRING_SELF_APPROVAL` |
 | Transferability (1) | a different fingerprint enrolling the same code gets its own PENDING pairing — the approved row stays APPROVED untouched and no second device row appears |
+| Codex review regression locks (6, PR #49) | mid-flight unbind: a stale authenticated device object fed to the service layer answers ``revoked`` with the pairing untouched (P1); rotation between 202 and 201: the stored (digest, version) pair stays (V1 digest, version 1) (P2); a lapsed APPROVED flips EXPIRED on the approve path and a fresh request + approval succeeds (P2); the shape CHECK rejects a PENDING-with-approved_at and an EXPIRED-with-lone-approved_at (P2); the partial unique blocks a second active row (PENDING/APPROVED) while EXPIRED/CONSUMED rows free the slot for reuse (P2); the 033 downgrade refuses once any pairing row exists and downgrades symmetrically once emptied (P2) |
+| Strengthened: slots-full round trip | the 409 leaves **zero** device_envelopes, and after the unbind route frees slot 2 the very same key finishes the consumption 201 (P2) |
 
 ## Files Changed
 
@@ -66,7 +68,7 @@ Task exit gate: *实现第二设备 enroll、第一设备批准和一次性配�
 | `server/migrations/versions/033_device_pairing_requests.py` | new: the pairing table, four-state shape coupling, partial unique active index, downgrade guard, PG-only early return |
 | `server/app/customer_device_service.py` | T17 section: `fingerprint_digests_for`, `ActivePairing`/`ConsumedPairing`, `lookup_active_pairing` (lazy expiry, cross-version probe), `create_pairing_request`, `approve_pairing_request`, `consume_pairing_request` |
 | `server/app/customer_device_routes.py` | T17 section: the enroll route (two-phase 202/201, shared limiter, unified code rejection + audit + delay, read-only replay probe, `_PairingRaceLost` lane, defensive UniqueViolation mapping) and the approve route (Bearer auth, outcome mapping, no envelope by design) |
-| `server/tests/test_customer_devices.py` | 22 fail-first T17 cases (44 total), TRUNCATE extended with `device_pairing_requests` |
+| `server/tests/test_customer_devices.py` | 28 fail-first T17 cases (50 total with T16's 22), TRUNCATE extended with `device_pairing_requests` |
 | 10 test files (head sweep) | 24 head assertions `032` → `033` (+ downgrade-chain comment updates): test_db, test_customer_security, test_character_domain, test_recharge_orders, test_postgres_migrations, test_internal_billing, test_activation_code_schema, test_settings, test_sqlite_to_postgres, test_characters |
 
 ## Regression
@@ -74,9 +76,9 @@ Task exit gate: *实现第二设备 enroll、第一设备批准和一次性配�
 ```text
 # PostgreSQL fixture up (docker customer-v3-pg-test, PG16 :5433)
 $ uv run python -m pytest tests/test_customer_devices.py -q
-44 passed   # 22 T16 + 22 T17
+50 passed   # 22 T16 + 28 T17
 $ uv run pytest tests -q
-862 passed   # full suite, zero regression (T16 baseline 840 + 22 new)
+868 passed   # full suite, zero regression (T16 baseline 840 + 28 new)
 $ uv run ruff check . && uv run ruff format --check . && uv run mypy app
 all green (149 files formatted, 61 source files typed)
 # client / tauri / e2e untouched by this task; CI gates re-verify
@@ -92,21 +94,34 @@ Self-review during implementation (pre-subagent):
 3. **A test indexing slip** — `_pairing_row` returns seven columns and the consumed-pairing assertion read `row[5]` (consumed_at) where it meant `row[6]` (consumed_device_id); caught red in the first green run, fixed to assert both.
 4. **Slots-full at consumption keeps the pairing APPROVED.** The natural implementation flipped the row CONSUMED-then-checked; the contract's reading is the opposite — an unbind inside the expiry window must still let the approved candidate consume. The rolled-back transaction also takes the envelope placeholder with it, so the failed consume never spends the key.
 
+## Codex Review Fixes (PR #49, REQUEST CHANGES → resolved)
+
+Independent Codex review of the branch diff returned 1 P1 + 6 P2 + 1 P3; every finding was substantively fixed with a regression lock:
+
+1. **P1 — a revoked device could win an approval race.** The route's `_authenticate` snapshot is unlocked, so a concurrent unbind committing between authentication and the state transition let a released credential approve. Fix: `approve_pairing_request` now re-locks the approver row (`SELECT … FOR UPDATE`) and re-validates it as `BOUND` *before* touching the pairing row (lock order devices → pairing, the tail of the enroll route's code → devices → pairing — the two routes cannot deadlock); the new `APPROVE_REVOKED` outcome answers the same 401 `DEVICE_REVOKED` a fresh request would get. Locked by the stale-approver service test.
+2. **P2 — key rotation could mislabel the stored fingerprint digest.** Consumption copied the pairing row's digest (keyed under V1 at creation) but stamped the current highest version. Fix: `ActivePairing` now carries `candidate_fingerprint_key_version` end-to-end and the device row records the truthful (digest, version) pair; the fresh token stays keyed with the current highest version (`token_key_version`). Locked by the rotation-between-202-and-201 test.
+3. **P2 — expired APPROVED rows never flipped through approve.** The expiry branch updated only PENDING rows, so a dead APPROVED kept occupying the partial-unique active index until some later enroll touched it. Fix: the flip now covers both lapsed PENDING and lapsed APPROVED (the approval lineage stays visible in the audit). Locked by the lapsed-approved approve test.
+4. **P2 — the four-state CHECK permitted malformed EXPIRED audit rows.** The EXPIRED arm constrained only the consumption columns, admitting a lone `approved_at` or `approved_by_device_id`. Fix: the arm now requires the approval columns to arrive as a pair (both NULL or both set). Locked by the shape CHECK test.
+5. **P2 — consume did not lock the current device rows.** `next_free_slot` ran on a plain SELECT, diverging from §12.2 step 4 and risking a transient 409 while an unbind was completing. Fix: the enroll route locks the code's BOUND device rows (`FOR UPDATE`) after the code-row lock and before the pairing row. Locked by the strengthened slots-full round-trip test (409 → unbind → same-key 201).
+6. **P2 — the slots-full test did not prove the envelope-placeholder rollback.** It now asserts zero surviving `device_enroll` envelopes after the 409 and that the same key finishes the consumption once a slot is freed.
+7. **P2 — migration 033's invariants lacked direct tests.** Added: shape CHECK violations (half-written approval columns), partial-unique active blocking + terminal (EXPIRED/CONSUMED) reuse, and the downgrade guard (refuses with rows, symmetric once emptied, restores head).
+8. **P3 — `_PairingRaceLost` reported a stale PENDING.** The lane stays as defensive depth (documented unreachable under the code-row lock), but the re-read's 202 now mirrors the winner's actual state (a 202 carrying status=APPROVED tells the client to retry and land on the consumption branch).
+
 ## Section 14 Ledger Record
 
 ```text
 任务/工作包：T17 / DEV-02
-Owner / Reviewer：后端（Agent 执行）/ 会话内代码评审
+Owner / Reviewer：后端（Agent 执行）/ Codex 独立评审（1 P1+6 P2+1 P3 逐条实质修复）
 分支 / 基线 SHA：feat/customer-v3-t17-second-device-pairing / 基线 8847d8e（T16 PR #47 squash）
 上游规格段落：客户版任务清单 V3 §4 T17、§12.3 DEV-02；代码开发清单 V3 §3.2 customer_device_service.py/customer_device_routes.py、§3.3 test_customer_devices.py 冻结名、迁移主题 033；激活码开发文档 §12.2 六步契约、§6.1 API 表、§13.2 错误码；测试与验收规格 §6
-改动文件：server/migrations/versions/033_device_pairing_requests.py（新增：四态状态机+形状耦合+partial unique active 索引+downgrade 守卫，PG-only）、server/app/customer_device_service.py（T17 小节：fingerprint_digests_for/lookup_active_pairing/create_pairing_request/approve_pairing_request/consume_pairing_request）、server/app/customer_device_routes.py（enroll 两阶段 202/201 路由+approve 路由约 640 行）、server/tests/test_customer_devices.py（+22 用例）、10 个测试文件 24 处 head 断言 032→033、docs/evidence/T17-EVIDENCE.md、任务与证据账本
-失败测试或回归锁定：先红后绿 22 例——enroll 契约 7（幂等键必需/PENDING 创建绑定候选摘要/同键重试同 pairing_id 零信封/未知码统一 400/未激活码统一 400/已绑指纹 409/两槽满 409）+完整六步流 3（slot2 绑定+无充值计数锁定/丢 201 密封凭据重放/同键异参 409）+并发与过期 5（双线程 barrier slot2 单赢家 1×201+1×409+单 CONSUMED+双 BOUND/过期 PENDING 翻转新建/APPROVED 过期重启留审计/消费时槽满保持 APPROVED）+approve 契约 7（Bearer 必需/批准人 lineage/缺失跨码统一 404 IDOR/重复幂等/已消费 409/过期 409/self-approval 409）+不可转用 1（异指纹得自身 PENDING，批准行不动，无新设备行）
+改动文件：server/migrations/versions/033_device_pairing_requests.py（新增：四态状态机+形状耦合+partial unique active 索引+downgrade 守卫，PG-only）、server/app/customer_device_service.py（T17 小节：fingerprint_digests_for/lookup_active_pairing/create_pairing_request/approve_pairing_request/consume_pairing_request）、server/app/customer_device_routes.py（enroll 两阶段 202/201 路由+approve 路由约 640 行）、server/tests/test_customer_devices.py（+28 用例）、10 个测试文件 24 处 head 断言 032→033、docs/evidence/T17-EVIDENCE.md、任务与证据账本
+失败测试或回归锁定：先红后绿 28 例——enroll 契约 7（幂等键必需/PENDING 创建绑定候选摘要/同键重试同 pairing_id 零信封/未知码统一 400/未激活码统一 400/已绑指纹 409/两槽满 409）+完整六步流 3（slot2 绑定+无充值计数锁定/丢 201 密封凭据重放/同键异参 409）+并发与过期 5（双线程 barrier slot2 单赢家 1×201+1×409+单 CONSUMED+双 BOUND/过期 PENDING 翻转新建/APPROVED 过期重启留审计/消费时槽满保持 APPROVED）+approve 契约 7（Bearer 必需/批准人 lineage/缺失跨码统一 404 IDOR/重复幂等/已消费 409/过期 409/self-approval 409）+不可转用 1（异指纹得自身 PENDING，批准行不动，无新设备行）+Codex 评审回归锁定 6（中途解绑 stale approver→revoked/202-201 间轮换存储真实 (digest,version) 对/过期 APPROVED 经 approve 翻转释放占用/形状 CHECK 拒半写批准列/partial unique 活跃阻塞+终态复用/033 downgrade 非空守卫+空库对称降级）
 实现结果：第二设备 enroll/第一设备批准/一次性配对落地（迁移 033+应用层）：配对行绑定候选指纹 keyed digest（明文永不过库，partial unique (code,digest) WHERE active 保单活跃行）；四态状态机 PENDING/APPROVED/CONSUMED/EXPIRED 形状耦合 CHECK；enroll 单路由状态驱动两阶段（PENDING→202 无信封不烧键，APPROVED→消费分支密封 201 一次性凭据）；消费持码行锁+next_free_slot 选空槽，两槽满 409 配对行保持 APPROVED（解绑后过期窗内仍可消费）；并发 slot2 恰一成功（码行锁串行化+_PairingRaceLost 输家重读赢家行）；approve Bearer 第一设备鉴权状态机即幂等（无 secret 无信封）；批准不可转用（绑定摘要+异指纹新 PENDING）；第二设备零充值（配对表无钱列+全流计数锁定）；防枚举复用 T15 维度预算（activate:ip/code 同池，malformed 不短路统一拒绝+审计+常数时延，IP blocked 不消费 code 维度）；只读回放预检免限流预算
-验证命令与通过数：专项 44 passed（T16 22+T17 22）；全量 862 passed 零回归；ruff/format/mypy 全绿（149 files formatted，61 source files typed）；head 断言迁移专项 135+69 复验通过（test_db/test_internal_billing/test_recharge_orders/test_settings/test_characters/test_character_domain + test_postgres_migrations/test_activation_code_schema/test_customer_security/test_sqlite_to_postgres）；首轮全量暴露 033 FK 连锁：test_admin_activation_routes.py TRUNCATE 补 device_pairing_requests 后 38 errors→38 passed，复跑全量 862 确认
+验证命令与通过数：专项 50 passed（T16 22+T17 28）；全量 868 passed 零回归；ruff/format/mypy 全绿（149 files formatted，61 source files typed）；head 断言迁移专项 135+69 复验通过（test_db/test_internal_billing/test_recharge_orders/test_settings/test_characters/test_character_domain + test_postgres_migrations/test_activation_code_schema/test_customer_security/test_sqlite_to_postgres）；首轮全量暴露 033 FK 连锁：test_admin_activation_routes.py TRUNCATE 补 device_pairing_requests 后 38 errors→38 passed；Codex 独立评审（REQUEST CHANGES：1 P1+6 P2+1 P3）逐条实质修复+回归锁定后专项 50/全量 868 复验
 证据层级：AUTOMATED_VERIFIED
 安全与可观测性：候选指纹只以 keyed HMAC-SHA256 摘要过库（跨版本探测）；配对/批准/消费事件日志仅含标识符；缺失=跨码统一 404（无 IDOR 预言）；enroll 与 activate 共享防枚举面（统一 400+失败审计+告警阈值+常数 PBKDF2 时延）；一次性凭据 secrets.token_urlsafe(32)+keyed digest 存储，AEAD 信封密封（AAD 绑定 operation/scope/key_digest）；密钥配置故障 503 fail-closed；SLOT 租约与配对过期共用 PG 事务内时钟（SES-01）
 迁移与回滚：033 PG-only（SQLite early return，025-032 先例）；downgrade 非空守卫（配对行是批准 lineage 审计证据，027/028/032 先例）空库对称降级；回滚=降级 033+还原代码
 外部授权记录：无；未调用真实 ZPay/COS/付费 Provider/对外发码/灰度/公网发布
-未测试项：管理员核验批准通道（T18 经同一状态机写穿）；login/租约维度限流（T19）；客户端 OpenAPI 重新生成（T28 前端门禁）；approve 路由并发双线程证明（FOR UPDATE+状态机幂等语义覆盖）；STAGING/REAL_CHAIN/PRODUCTION
+未测试项：管理员核验批准通道（T18 经同一状态机写穿）；login/租约维度限流（T19）；客户端 OpenAPI 重新生成（T28 前端门禁）；approve-vs-unbind 双线程并发证明（FOR UPDATE 重新验证语义覆盖）；STAGING/REAL_CHAIN/PRODUCTION
 Lore 提交 SHA：见 PR squash 合并 SHA
 ```

@@ -1189,7 +1189,13 @@ def test_enroll_approved_then_expired_restarts(client: TestClient) -> None:
 
 
 def test_enroll_consume_with_slots_full_keeps_approved(client: TestClient) -> None:
-    """Consumption against two BOUND slots: 409 now, pairing still APPROVED."""
+    """Consumption against two BOUND slots: 409 now, pairing still APPROVED.
+
+    The rolled-back consumption must also leave *no* envelope placeholder
+    behind (the idempotency key stays spendable — PR #49 Codex review P2),
+    and a slot freed afterwards must let the very same key finish the
+    consumption inside the expiry window.
+    """
     customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-pair-13", suffix="p13")
     enroll = _enroll(client, code=FIRST_CODE, fingerprint="fp-pair-13-second", key="idem-p13")
     assert enroll.status_code == 202, enroll.text
@@ -1197,10 +1203,11 @@ def test_enroll_consume_with_slots_full_keeps_approved(client: TestClient) -> No
     assert _approve(client, customer["device_token"], pairing_id).status_code == 200
 
     # Slot 2 gets taken by another binding before the consume retry.
-    _second_device_row(
+    rival_device_id = str(uuid.uuid4())
+    rival_token = _second_device_row(
         user_id=customer["user_id"],
         activation_code_id=_code_id_of_user(customer["user_id"]),
-        device_id=str(uuid.uuid4()),
+        device_id=rival_device_id,
         slot_no=2,
     )
     blocked = _enroll(client, code=FIRST_CODE, fingerprint="fp-pair-13-second", key="idem-p13")
@@ -1210,6 +1217,29 @@ def test_enroll_consume_with_slots_full_keeps_approved(client: TestClient) -> No
     with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
         row = _pairing_row(conn, pairing_id)
     assert row is not None and row[0] == "APPROVED"
+
+    # The rolled-back consumption took its envelope placeholder with it: no
+    # half-spent device_enroll envelope survives the 409.
+    assert (
+        _count_rows(
+            "SELECT COUNT(*) FROM customer_idempotency_envelopes WHERE operation = 'device_enroll'"
+        )
+        == 0
+    )
+
+    # Free slot 2 through the unbind route, then finish the consumption with
+    # the very same key — the pairing row rides the full round trip.
+    unbind = client.delete(
+        f"{DEVICES_PATH}/{rival_device_id}",
+        headers={**_bearer(rival_token), IDEMPOTENCY_KEY_HEADER: "idem-p13-free"},
+    )
+    assert unbind.status_code == 204, unbind.text
+    retry = _enroll(client, code=FIRST_CODE, fingerprint="fp-pair-13-second", key="idem-p13")
+    assert retry.status_code == 201, retry.text
+    assert retry.json()["slot_no"] == 2
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        row = _pairing_row(conn, pairing_id)
+    assert row is not None and row[0] == "CONSUMED"
 
 
 def test_approve_requires_bearer_token(client: TestClient) -> None:
@@ -1367,6 +1397,251 @@ def test_pairing_approval_not_transferable(client: TestClient) -> None:
 
 
 # ---------------------------------------------------------------------------
+# PR #49 Codex review fixes — regression locks
+# ---------------------------------------------------------------------------
+
+
+def test_approve_revoked_credential_mid_flight_rejected(client: TestClient) -> None:
+    """P1 fix: a credential released after authentication cannot approve.
+
+    The route's ``_authenticate`` snapshot is unlocked; the approval
+    transaction must re-lock and re-validate the approver row as ``BOUND``.
+    Simulating the mid-flight unbind: the binding is released directly, then
+    the (stale) authenticated device object is fed to the service layer —
+    exactly the object a winning unbind race would leave behind.
+    """
+    from app.customer_device_service import AuthenticatedDevice, approve_pairing_request
+
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-pair-21", suffix="p21")
+    enroll = _enroll(client, code=FIRST_CODE, fingerprint="fp-pair-21-second", key="idem-p21")
+    assert enroll.status_code == 202, enroll.text
+    pairing_id = enroll.json()["pairing_request_id"]
+
+    # The unbind commits *after* the route authenticated the bearer token.
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        conn.execute(
+            "UPDATE customer_devices SET status = 'UNBOUND', unbound_at = %s WHERE id = %s",
+            ("2026-08-23T00:00:00+00:00", customer["device_id"]),
+        )
+
+    stale_approver = AuthenticatedDevice(
+        id=customer["device_id"],
+        user_id=customer["user_id"],
+        activation_code_id=_code_id_of_user(customer["user_id"]),
+        slot_no=1,
+        display_name="First Device",
+        platform="windows",
+    )
+    with psycopg.connect(_t16_dsn()) as conn:
+        with conn.transaction():
+            outcome = approve_pairing_request(
+                conn,
+                pairing_id=pairing_id,
+                approver_device=stale_approver,
+                server_now=datetime.now(UTC),
+            )
+    assert outcome == "revoked"
+
+    # The pairing row was left untouched: no approval from a released device.
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        row = _pairing_row(conn, pairing_id)
+    assert row is not None and row[0] == "PENDING" and row[3] is None
+
+
+def test_enroll_consume_after_key_rotation_keeps_pairing_version(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P2 fix: consumption copies the pairing row's digest *and* its version.
+
+    A rotation between the 202 and the 201 must not mislabel the stored
+    fingerprint: the digest was keyed under V1 when the request was created,
+    and the ``customer_devices`` row must record (V1 digest, version 1) —
+    not the stale digest stamped with the new highest version.
+    """
+    from app.customer_device_service import keyed_digest
+
+    # Only V1 is configured while the pairing request is created.
+    monkeypatch.delenv("VIDEO_REPLICA_DEVICE_FINGERPRINT_HMAC_KEY_V2")
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-pair-22", suffix="p22")
+    enroll = _enroll(client, code=FIRST_CODE, fingerprint="fp-pair-22-second", key="idem-p22")
+    assert enroll.status_code == 202, enroll.text
+    pairing_id = enroll.json()["pairing_request_id"]
+
+    # The rotation window opens: V2 joins the configuration as the highest.
+    monkeypatch.setenv("VIDEO_REPLICA_DEVICE_FINGERPRINT_HMAC_KEY_V2", TEST_FINGERPRINT_KEY_V2)
+    assert _approve(client, customer["device_token"], pairing_id).status_code == 200
+    consume = _enroll(client, code=FIRST_CODE, fingerprint="fp-pair-22-second", key="idem-p22")
+    assert consume.status_code == 201, consume.text
+
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT fingerprint_hmac, fingerprint_key_version FROM customer_devices WHERE id = %s",
+            (consume.json()["device_id"],),
+        ).fetchone()
+    assert row is not None
+    assert int(row[1]) == 1, "the stored version must match the digest's key version"
+    assert str(row[0]) == keyed_digest(TEST_FINGERPRINT_KEY_V1.encode("utf-8"), "fp-pair-22-second")
+
+
+def test_approve_lapsed_approved_flips_expired_and_restarts(client: TestClient) -> None:
+    """P2 fix: a lapsed APPROVED flips to EXPIRED on the approve path too.
+
+    Without the flip the dead row would keep occupying the partial-unique
+    active index until some later enroll touched it — the approve endpoint
+    itself must release the occupancy while preserving the approval lineage.
+    """
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-pair-23", suffix="p23")
+    enroll = _enroll(client, code=FIRST_CODE, fingerprint="fp-pair-23-second", key="idem-p23")
+    assert enroll.status_code == 202, enroll.text
+    pairing_id = enroll.json()["pairing_request_id"]
+    assert _approve(client, customer["device_token"], pairing_id).status_code == 200
+    _expire_pairing(pairing_id)
+
+    response = _approve(client, customer["device_token"], pairing_id)
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "PAIRING_EXPIRED"
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        row = _pairing_row(conn, pairing_id)
+    assert row is not None and row[0] == "EXPIRED"
+    assert row[3] is not None  # the lapsed approval stays visible in the audit
+
+    # The released occupancy admits a fresh request for the same candidate.
+    again = _enroll(client, code=FIRST_CODE, fingerprint="fp-pair-23-second", key="idem-p23")
+    assert again.status_code == 202, again.text
+    new_pairing_id = again.json()["pairing_request_id"]
+    assert new_pairing_id != pairing_id
+    assert _approve(client, customer["device_token"], new_pairing_id).status_code == 200
+
+
+def _insert_pairing_row(
+    *,
+    pairing_id: str,
+    activation_code_id: str,
+    fingerprint_digest: str,
+    status: str,
+    expires_at: str = FUTURE_EXPIRY,
+    approved_at: str | None = None,
+    approved_by_device_id: str | None = None,
+    consumed_at: str | None = None,
+    consumed_device_id: str | None = None,
+) -> None:
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO device_pairing_requests "
+            "(id, activation_code_id, candidate_fingerprint_hmac, "
+            " candidate_fingerprint_key_version, display_name, platform, status, "
+            " expires_at, approved_at, approved_by_device_id, consumed_at, consumed_device_id) "
+            "VALUES (%s, %s, %s, 1, 'Shape Probe', 'windows', %s, %s, %s, %s, %s, %s)",
+            (
+                pairing_id,
+                activation_code_id,
+                fingerprint_digest,
+                status,
+                expires_at,
+                approved_at,
+                approved_by_device_id,
+                consumed_at,
+                consumed_device_id,
+            ),
+        )
+
+
+def test_pairing_status_shape_rejects_malformed_rows(route_state: str) -> None:
+    """P2 fix: the four-state CHECK rejects half-written approval columns."""
+    _seed_issuable_code(FIRST_CODE, code_id="code-shape", batch_id="batch-shape")
+
+    # PENDING carrying an approved_at: no transition column is allowed.
+    with pytest.raises(CheckViolation):
+        _insert_pairing_row(
+            pairing_id="pairing-shape-pending",
+            activation_code_id="code-shape",
+            fingerprint_digest="digest-shape",
+            status="PENDING",
+            approved_at="2026-08-23T00:00:00+00:00",
+        )
+
+    # EXPIRED with a lone approved_at (no approved_by_device_id): the
+    # approval columns must arrive as a pair.
+    with pytest.raises(CheckViolation):
+        _insert_pairing_row(
+            pairing_id="pairing-shape-expired",
+            activation_code_id="code-shape",
+            fingerprint_digest="digest-shape",
+            status="EXPIRED",
+            approved_at="2026-08-23T00:00:00+00:00",
+        )
+
+
+def test_pairing_active_unique_and_terminal_reuse(route_state: str) -> None:
+    """The partial unique index: one active row per (code, digest), terminal reuse."""
+    _seed_issuable_code(FIRST_CODE, code_id="code-uniq", batch_id="batch-uniq")
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO customer_devices "
+            "(id, activation_code_id, user_id, slot_no, display_name, platform, "
+            " fingerprint_hmac, fingerprint_key_version, token_digest, token_key_version) "
+            "VALUES ('dev-uniq', 'code-uniq', 'admin_u', 1, 'Uniq Probe', 'windows', "
+            "'fp-uniq', 1, 'tok-uniq', 1)"
+        )
+
+    _insert_pairing_row(
+        pairing_id="pairing-uniq-1",
+        activation_code_id="code-uniq",
+        fingerprint_digest="digest-uniq",
+        status="PENDING",
+    )
+    with pytest.raises(UniqueViolation):
+        _insert_pairing_row(
+            pairing_id="pairing-uniq-2",
+            activation_code_id="code-uniq",
+            fingerprint_digest="digest-uniq",
+            status="PENDING",
+        )
+
+    # EXPIRED is terminal: the same (code, digest) may start a fresh row.
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        conn.execute(
+            "UPDATE device_pairing_requests SET status = 'EXPIRED' WHERE id = 'pairing-uniq-1'"
+        )
+    _insert_pairing_row(
+        pairing_id="pairing-uniq-3",
+        activation_code_id="code-uniq",
+        fingerprint_digest="digest-uniq",
+        status="PENDING",
+    )
+
+    # APPROVED is active: it still blocks a second active row.
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        conn.execute(
+            "UPDATE device_pairing_requests SET status = 'APPROVED', "
+            "approved_at = '2026-08-23T00:00:00+00:00', "
+            "approved_by_device_id = 'dev-uniq' WHERE id = 'pairing-uniq-3'"
+        )
+    with pytest.raises(UniqueViolation):
+        _insert_pairing_row(
+            pairing_id="pairing-uniq-4",
+            activation_code_id="code-uniq",
+            fingerprint_digest="digest-uniq",
+            status="PENDING",
+        )
+
+    # CONSUMED is terminal too: the candidate may pair again afterwards.
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        conn.execute(
+            "UPDATE device_pairing_requests SET status = 'CONSUMED', "
+            "consumed_at = '2026-08-23T00:00:00+00:00', "
+            "consumed_device_id = 'dev-uniq' WHERE id = 'pairing-uniq-3'"
+        )
+    _insert_pairing_row(
+        pairing_id="pairing-uniq-5",
+        activation_code_id="code-uniq",
+        fingerprint_digest="digest-uniq",
+        status="PENDING",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -1437,3 +1712,49 @@ def _bind_raw(
                 keyed_digest(key_v1, f"tok-raw-{device_id}"),
             ),
         )
+
+
+# ---------------------------------------------------------------------------
+# Migration 033 downgrade guard (runs last: it cycles the fixture schema)
+# ---------------------------------------------------------------------------
+
+
+def test_pairing_downgrade_refuses_once_rows_exist(route_state: str) -> None:
+    """P2 fix: the 033 downgrade guards the pairing approval lineage.
+
+    ``device_pairing_requests`` rows are the audit evidence of who approved
+    which second device — once any row exists, the downgrade must refuse
+    loudly (the 027/028/032 guard precedent, the 032 test pattern). The test
+    runs last in this module and restores the fixture to head afterwards.
+    """
+    from alembic import command
+    from alembic.config import Config
+
+    _seed_issuable_code(FIRST_CODE, code_id="code-guard", batch_id="batch-guard")
+    _insert_pairing_row(
+        pairing_id="pairing-guard",
+        activation_code_id="code-guard",
+        fingerprint_digest="digest-guard",
+        status="PENDING",
+    )
+
+    server_dir = Path(__file__).resolve().parent.parent
+    config = Config(str(server_dir / "alembic.ini"))
+    config.set_main_option("script_location", str(server_dir / "migrations"))
+    config.set_main_option(
+        "sqlalchemy.url", _t16_dsn().replace("postgresql://", "postgresql+psycopg://")
+    )
+
+    with pytest.raises(RuntimeError, match="cannot downgrade 033_device_pairing_requests"):
+        command.downgrade(config, "032_security_rate_limits")
+    # The refusal left the schema untouched at head.
+    with psycopg.connect(_t16_dsn()) as conn:
+        version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+    assert version == "033_device_pairing_requests"
+
+    # An emptied table downgrades symmetrically, and upgrading back restores
+    # the schema for any rerun of this module.
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        conn.execute("TRUNCATE device_pairing_requests")
+    command.downgrade(config, "032_security_rate_limits")
+    command.upgrade(config, "head")

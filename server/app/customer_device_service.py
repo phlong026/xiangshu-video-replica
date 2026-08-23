@@ -448,11 +448,19 @@ class ActivePairing:
     ``lookup_active_pairing`` flips a lapsed row to ``EXPIRED`` in the same
     transaction and reports nothing — the caller then creates a fresh
     request, so expiry is lazy but terminal.
+
+    ``candidate_fingerprint_key_version`` is the key version the digest was
+    keyed with *when the row was created*: consumption must copy it onto the
+    ``customer_devices`` row, or a rotation between the 202 and the 201 would
+    store the old digest mislabelled as the new version (PR #49 Codex
+    review P2 — the device-domain lookups probe every configured version,
+    but the stored pair must still be truthful).
     """
 
     id: str
     activation_code_id: str
     candidate_fingerprint_hmac: str
+    candidate_fingerprint_key_version: int
     display_name: str
     platform: str
     status: str
@@ -474,6 +482,7 @@ APPROVE_ALREADY_APPROVED = "already_approved"
 APPROVE_ALREADY_CONSUMED = "already_consumed"
 APPROVE_EXPIRED = "expired"
 APPROVE_NOT_FOUND = "not_found"
+APPROVE_REVOKED = "revoked"
 APPROVE_SELF = "self_approval"
 
 
@@ -500,7 +509,8 @@ def lookup_active_pairing(
     transaction — and reported as absent so the caller creates a fresh one.
     """
     row = conn.execute(
-        "SELECT id, activation_code_id, candidate_fingerprint_hmac, display_name, "
+        "SELECT id, activation_code_id, candidate_fingerprint_hmac, "
+        "candidate_fingerprint_key_version, display_name, "
         "platform, status, expires_at "
         "FROM device_pairing_requests "
         "WHERE activation_code_id = %s AND candidate_fingerprint_hmac = ANY(%s) "
@@ -514,10 +524,11 @@ def lookup_active_pairing(
         id=str(row[0]),
         activation_code_id=str(row[1]),
         candidate_fingerprint_hmac=str(row[2]),
-        display_name=str(row[3]),
-        platform=str(row[4]),
-        status=str(row[5]),
-        expires_at=str(row[6]),
+        candidate_fingerprint_key_version=int(row[3]),
+        display_name=str(row[4]),
+        platform=str(row[5]),
+        status=str(row[6]),
+        expires_at=str(row[7]),
     )
     if _pairing_expired(pairing.expires_at, server_now):
         conn.execute(
@@ -567,6 +578,7 @@ def create_pairing_request(
         id=pairing_id,
         activation_code_id=activation_code_id,
         candidate_fingerprint_hmac=candidate_fingerprint_hmac,
+        candidate_fingerprint_key_version=candidate_fingerprint_key_version,
         display_name=display_name,
         platform=platform,
         status=PAIRING_PENDING,
@@ -585,9 +597,20 @@ def approve_pairing_request(
 
     Outcomes (translated by the routes):
 
+    - ``revoked`` — the approver's own binding was released mid-flight: the
+      route's unlocked authentication snapshot is not proof the device is
+      still ``BOUND`` (a concurrent unbind may have committed after it), so
+      the approver row is re-locked and re-validated inside this transaction
+      (PR #49 Codex review P1 — a released credential must not be able to
+      approve a pairing in the window between authentication and the state
+      transition). Lock order: devices → pairing, the tail of the enroll
+      route's code → devices → pairing order;
     - ``not_found`` — no such pairing, or it belongs to another activation
       code: both answer identically (no IDOR oracle, the DELETE precedent);
-    - ``expired`` — the request lapsed; the row flips to ``EXPIRED`` here;
+    - ``expired`` — the request lapsed; the row flips to ``EXPIRED`` here
+      (a lapsed APPROVED flips too — its approval lineage stays visible
+      while the partial-unique occupancy is released, PR #49 Codex review
+      P2);
     - ``already_approved`` — idempotent re-approval, the current state stays;
     - ``already_consumed`` — terminal; the one-shot request is spent;
     - ``self_approval`` — defensive depth: the pairing names the approver's
@@ -595,6 +618,12 @@ def approve_pairing_request(
       keeps a tampered row from laundering an approval);
     - ``approved`` — PENDING → APPROVED with the approver lineage recorded.
     """
+    approver_row = conn.execute(
+        "SELECT status, fingerprint_hmac FROM customer_devices WHERE id = %s FOR UPDATE",
+        (approver_device.id,),
+    ).fetchone()
+    if approver_row is None or str(approver_row[0]) != BOUND:
+        return APPROVE_REVOKED
     row = conn.execute(
         "SELECT activation_code_id, candidate_fingerprint_hmac, status, expires_at "
         "FROM device_pairing_requests WHERE id = %s FOR UPDATE",
@@ -606,7 +635,7 @@ def approve_pairing_request(
     if status == PAIRING_CONSUMED:
         return APPROVE_ALREADY_CONSUMED
     if status == PAIRING_EXPIRED or _pairing_expired(str(row[3]), server_now):
-        if status == PAIRING_PENDING:
+        if status in (PAIRING_PENDING, PAIRING_APPROVED):
             conn.execute(
                 "UPDATE device_pairing_requests SET status = 'EXPIRED' WHERE id = %s",
                 (pairing_id,),
@@ -615,11 +644,7 @@ def approve_pairing_request(
     if status == PAIRING_APPROVED:
         return APPROVE_ALREADY_APPROVED
     # status == PENDING here.
-    approver_fingerprint = conn.execute(
-        "SELECT fingerprint_hmac FROM customer_devices WHERE id = %s",
-        (approver_device.id,),
-    ).fetchone()
-    if approver_fingerprint is not None and str(approver_fingerprint[0]) == str(row[1]):
+    if str(approver_row[1]) == str(row[1]):
         return APPROVE_SELF
     conn.execute(
         "UPDATE device_pairing_requests "
@@ -635,18 +660,25 @@ def consume_pairing_request(
     *,
     pairing: ActivePairing,
     hmac_key: bytes,
-    key_version: int,
+    token_key_version: int,
     owner_user_id: str,
     server_now: datetime,
 ) -> ConsumedPairing | None:
     """Consume an APPROVED pairing: bind the candidate to the free slot.
 
-    The caller holds the code-row lock, so ``next_free_slot`` runs under the
-    serialization point the §12.2 contract demands; ``None`` means both
-    slots are BOUND (the pairing row stays APPROVED — a freed slot may yet
-    consume it inside the expiry window). On success the request flips to
-    ``CONSUMED`` with the binding recorded, and the one-time device
-    credential is returned for the route to seal.
+    The caller holds the code-row lock and the current device-row locks (the
+    route locks them in that order before the pairing row), so
+    ``next_free_slot`` runs under the serialization the §12.2 contract
+    demands; ``None`` means both slots are BOUND (the pairing row stays
+    APPROVED — a freed slot may yet consume it inside the expiry window).
+    On success the request flips to ``CONSUMED`` with the binding recorded,
+    and the one-time device credential is returned for the route to seal.
+
+    The fingerprint digest and its key version are copied from the pairing
+    row — the digest was keyed when the request was created, possibly under
+    a version that has since been rotated below the highest one, and the
+    stored pair must stay truthful (PR #49 Codex review P2). The fresh
+    device token is keyed with the caller's current highest version.
     """
     slot_no = next_free_slot(conn, pairing.activation_code_id)
     if slot_no is None:
@@ -669,9 +701,9 @@ def consume_pairing_request(
             pairing.display_name,
             pairing.platform,
             pairing.candidate_fingerprint_hmac,
-            key_version,
+            pairing.candidate_fingerprint_key_version,
             token_digest,
-            key_version,
+            token_key_version,
             now_iso,
         ),
     )
