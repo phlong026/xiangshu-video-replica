@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import sqlite3
 import struct
 import threading
 import time
@@ -27,6 +26,7 @@ from app.character_identity import REQUIRED_CHARACTER_VIEW_TYPES
 from app.character_identity_routes import get_character_storage
 from app.character_image_generation import deterministic_png, png_chunk
 from app.db import connect_database, initialize_database
+from app.db_portable import BusinessConnection
 from app.first_frame_routes import get_image_provider
 from app.first_frames import GeneratedImage, ImageProviderFailed
 from app.main import app
@@ -119,8 +119,8 @@ def client(
     storage: FakeStorageAdapter,
     contact_sheet_provider: StubContactSheetProvider,
 ) -> Iterator[TestClient]:
-    def database_override() -> Iterator[sqlite3.Connection]:
-        conn = connect_database(db_path)
+    def database_override() -> Iterator[BusinessConnection]:
+        conn = BusinessConnection.sqlite(connect_database(db_path))
         try:
             yield conn
         finally:

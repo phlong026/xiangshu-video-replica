@@ -307,7 +307,7 @@ def write_login_failure(
     conn.execute(
         """
         INSERT INTO audit_logs (id, actor_user_id, action, entity_type, entity_id, metadata_json)
-        VALUES (?, NULL, ?, ?, ?, ?)
+        VALUES (%s, NULL, %s, %s, %s, %s)
         """,
         (
             str(uuid4()),
@@ -418,7 +418,7 @@ def list_projects(
                 ORDER BY assets.created_at DESC, assets.rowid DESC
                 LIMIT 1
             )
-            WHERE projects.owner_user_id = ?
+            WHERE projects.owner_user_id = %s
             ORDER BY projects.created_at DESC, projects.rowid DESC
             """,
             (actor.id,),
@@ -455,7 +455,7 @@ def create_project(
         conn.execute(
             """
             INSERT INTO projects (id, owner_user_id, name)
-            VALUES (?, ?, ?)
+            VALUES (%s, %s, %s)
             """,
             (project_id, actor.id, name),
         )
@@ -509,8 +509,8 @@ def rename_project(
         conn.execute(
             """
             UPDATE projects
-            SET name = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
+            SET name = %s, updated_at = CURRENT_TIMESTAMP
+            WHERE id = %s
             """,
             (name, project_id),
         )
@@ -551,7 +551,7 @@ def delete_project(
         SELECT 1
         FROM generation_tasks
         JOIN generation_batches ON generation_batches.id = generation_tasks.batch_id
-        WHERE generation_batches.project_id = ?
+        WHERE generation_batches.project_id = %s
           AND generation_tasks.status IN
               ('PENDING', 'SUBMITTING', 'QUEUED', 'RUNNING', 'ARCHIVING')
         LIMIT 1
@@ -571,13 +571,13 @@ def delete_project(
         """
         SELECT id, storage_uri, sha256, size_bytes
         FROM assets
-        WHERE project_id = ?
+        WHERE project_id = %s
         """,
         (project_id,),
     ).fetchall()
     versions_count = int(
         conn.execute(
-            "SELECT COUNT(*) FROM versions WHERE project_id = ?",
+            "SELECT COUNT(*) FROM versions WHERE project_id = %s",
             (project_id,),
         ).fetchone()[0]
     )
@@ -599,10 +599,10 @@ def delete_project(
         # character_reference_selections references versions with ON DELETE
         # RESTRICT, so it must be cleared before the cascade removes versions.
         conn.execute(
-            "DELETE FROM character_reference_selections WHERE project_id = ?",
+            "DELETE FROM character_reference_selections WHERE project_id = %s",
             (project_id,),
         )
-        conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+        conn.execute("DELETE FROM projects WHERE id = %s", (project_id,))
     write_audit(
         conn,
         actor=actor,
@@ -679,7 +679,7 @@ def project_detail_row(
             ORDER BY assets.created_at DESC, assets.rowid DESC
             LIMIT 1
         )
-        WHERE projects.id = ?
+        WHERE projects.id = %s
         """,
             (project_id,),
         ).fetchone(),

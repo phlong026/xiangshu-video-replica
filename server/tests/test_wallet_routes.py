@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -9,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from app.auth import get_database
 from app.db import connect_database, initialize_database
+from app.db_portable import BusinessConnection
 from app.main import app
 
 
@@ -64,8 +64,8 @@ def wallet_db_path(tmp_path: Path) -> Iterator[Path]:
 
 @pytest.fixture()
 def wallet_client(wallet_db_path: Path) -> Iterator[TestClient]:
-    def database_override() -> Iterator[sqlite3.Connection]:
-        conn = connect_database(wallet_db_path)
+    def database_override() -> Iterator[BusinessConnection]:
+        conn = BusinessConnection.sqlite(connect_database(wallet_db_path))
         try:
             yield conn
         finally:

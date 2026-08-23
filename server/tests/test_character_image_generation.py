@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import struct
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -26,6 +25,7 @@ from app.character_image_generation import (
     run_next_character_generation_task,
 )
 from app.db import alembic_config, connect_database, initialize_database
+from app.db_portable import BusinessConnection
 from app.generation_worker import run_worker_once
 from app.main import app
 from app.media_routes import get_media_storage
@@ -149,8 +149,8 @@ def storage() -> FakeStorageAdapter:
 
 @pytest.fixture()
 def client(db_path: Path, storage: FakeStorageAdapter) -> Iterator[TestClient]:
-    def database_override() -> Iterator[sqlite3.Connection]:
-        conn = connect_database(db_path)
+    def database_override() -> Iterator[BusinessConnection]:
+        conn = BusinessConnection.sqlite(connect_database(db_path))
         try:
             yield conn
         finally:

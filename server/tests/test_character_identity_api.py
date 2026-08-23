@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import struct
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -30,6 +29,7 @@ from app.character_identity_routes import (
     get_source_image_inspector,
 )
 from app.db import connect_database, initialize_database
+from app.db_portable import BusinessConnection
 from app.main import app
 from app.media_routes import get_media_storage
 from app.storage import FakeStorageAdapter
@@ -97,8 +97,8 @@ def client(
     storage: FakeStorageAdapter,
     inspector: FakeSourceImageInspector,
 ) -> Iterator[TestClient]:
-    def database_override() -> Iterator[sqlite3.Connection]:
-        conn = connect_database(db_path)
+    def database_override() -> Iterator[BusinessConnection]:
+        conn = BusinessConnection.sqlite(connect_database(db_path))
         try:
             yield conn
         finally:

@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 import app.script_rewrite as script_rewrite
 from app.auth import get_database
 from app.db import connect_database, initialize_database
+from app.db_portable import BusinessConnection
 from app.main import app
 from app.settings import SETTINGS_KEY_ENV, SettingsRepository
 
@@ -25,8 +26,8 @@ def db_path(tmp_path: Path) -> Iterator[Path]:
 
 @pytest.fixture()
 def client(db_path: Path) -> Iterator[TestClient]:
-    def database_override() -> Iterator[sqlite3.Connection]:
-        conn = connect_database(db_path)
+    def database_override() -> Iterator[BusinessConnection]:
+        conn = BusinessConnection.sqlite(connect_database(db_path))
         try:
             yield conn
         finally:

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sqlite3
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +18,7 @@ from app.character_identity import (
 from app.character_identity_routes import get_character_storage
 from app.character_image_generation import deterministic_png
 from app.db import connect_database, initialize_database
+from app.db_portable import BusinessConnection
 from app.main import app
 from app.media_routes import get_media_storage
 from app.storage import FakeStorageAdapter, StorageBackendUnavailable
@@ -58,8 +58,8 @@ def storage() -> FakeStorageAdapter:
 
 @pytest.fixture()
 def client(db_path: Path, storage: FakeStorageAdapter) -> Iterator[TestClient]:
-    def database_override() -> Iterator[sqlite3.Connection]:
-        conn = connect_database(db_path)
+    def database_override() -> Iterator[BusinessConnection]:
+        conn = BusinessConnection.sqlite(connect_database(db_path))
         try:
             yield conn
         finally:

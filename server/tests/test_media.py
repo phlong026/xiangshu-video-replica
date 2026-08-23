@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from app.auth import CurrentUser, get_database
 from app.db import connect_database, initialize_database
+from app.db_portable import BusinessConnection
 from app.main import app
 from app.media import (
     FFprobeVideoProbe,
@@ -85,8 +86,8 @@ def storage() -> FakeStorageAdapter:
 
 @pytest.fixture()
 def client(db_path: Path, storage: FakeStorageAdapter) -> Iterator[TestClient]:
-    def database_override() -> Iterator[sqlite3.Connection]:
-        conn = connect_database(db_path)
+    def database_override() -> Iterator[BusinessConnection]:
+        conn = BusinessConnection.sqlite(connect_database(db_path))
         try:
             yield conn
         finally:
@@ -336,8 +337,8 @@ def test_local_storage_intent_url_and_upload_endpoint(
     monkeypatch.setenv("VIDEO_REPLICA_STORAGE_ROOT", str(root))
     storage = LocalStorageAdapter(root=root)
 
-    def database_override() -> Iterator[sqlite3.Connection]:
-        conn = connect_database(db_path)
+    def database_override() -> Iterator[BusinessConnection]:
+        conn = BusinessConnection.sqlite(connect_database(db_path))
         try:
             yield conn
         finally:
@@ -390,8 +391,8 @@ def test_local_upload_endpoint_enforces_role_and_project_gates(
     monkeypatch.setattr("app.media_routes.MAX_UPLOAD_BYTES", 8)
     storage = LocalStorageAdapter(root=tmp_path / "local-storage")
 
-    def database_override() -> Iterator[sqlite3.Connection]:
-        conn = connect_database(db_path)
+    def database_override() -> Iterator[BusinessConnection]:
+        conn = BusinessConnection.sqlite(connect_database(db_path))
         try:
             yield conn
         finally:
@@ -662,8 +663,8 @@ def test_local_download_url_and_proxy(
             ),
         )
 
-    def database_override() -> Iterator[sqlite3.Connection]:
-        conn = connect_database(db_path)
+    def database_override() -> Iterator[BusinessConnection]:
+        conn = BusinessConnection.sqlite(connect_database(db_path))
         try:
             yield conn
         finally:

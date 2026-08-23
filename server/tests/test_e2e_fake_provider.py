@@ -15,6 +15,7 @@ from test_generation import auth_headers, create_locked_prompt, seed_data
 
 from app.auth import get_database
 from app.db import connect_database, initialize_database
+from app.db_portable import BusinessConnection
 from app.generation import (
     FakeH3Provider,
     H3CreateResult,
@@ -89,8 +90,8 @@ def db_path(tmp_path: Path) -> Iterator[Path]:
 
 @pytest.fixture()
 def client(db_path: Path) -> Iterator[TestClient]:
-    def database_override() -> Iterator[sqlite3.Connection]:
-        conn = connect_database(db_path)
+    def database_override() -> Iterator[BusinessConnection]:
+        conn = BusinessConnection.sqlite(connect_database(db_path))
         try:
             yield conn
         finally:

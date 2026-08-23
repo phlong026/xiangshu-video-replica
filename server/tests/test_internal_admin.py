@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -13,6 +12,7 @@ from app.auth import get_database
 from app.control_auth import CONTROL_ADMIN_USER_ID_ENV, CONTROL_PROXY_TOKEN_DIGEST_ENV
 from app.control_routes import _spreadsheet_safe_cell
 from app.db import connect_database, initialize_database
+from app.db_portable import BusinessConnection
 from app.internal_accounts import create_user, issue_token
 from app.main import app
 from app.settings import SETTINGS_KEY_ENV, SettingsRepository
@@ -113,7 +113,7 @@ def internal_admin_context(
         )
         conn.commit()
 
-    def override_database() -> Iterator[sqlite3.Connection]:
+    def override_database() -> Iterator[BusinessConnection]:
         with connect_database(db_path) as conn:
             yield conn
 

@@ -231,6 +231,18 @@ class BusinessConnection:
         if isinstance(self._backend, SQLiteBackend):
             self._backend.raw.rollback()
 
+    @property
+    def in_transaction(self) -> bool:
+        """The sqlite3-shaped transaction-state probe the services use.
+
+        SQLite: delegates to the underlying connection. PostgreSQL: the fenced
+        transaction owns the state; report ``True`` once a transaction is open
+        (the psycopg info parity) so callers that guard on it keep working.
+        """
+        if isinstance(self._backend, SQLiteBackend):
+            return self._backend.raw.in_transaction
+        return bool(self._backend.raw.info.transaction_status)
+
     def close(self) -> None:
         if isinstance(self._backend, SQLiteBackend):
             self._backend.raw.close()

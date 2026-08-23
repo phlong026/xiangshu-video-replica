@@ -14,6 +14,7 @@ from app import character_routes, project_character_selection
 from app.auth import CurrentUser, get_database
 from app.character_identity import REQUIRED_CHARACTER_VIEW_TYPES, encode_json
 from app.db import connect_database, initialize_database
+from app.db_portable import BusinessConnection
 from app.main import app
 
 
@@ -50,8 +51,8 @@ def db_path(tmp_path: Path) -> Iterator[Path]:
 
 @pytest.fixture()
 def client(db_path: Path) -> Iterator[TestClient]:
-    def database_override() -> Iterator[sqlite3.Connection]:
-        conn = connect_database(db_path)
+    def database_override() -> Iterator[BusinessConnection]:
+        conn = BusinessConnection.sqlite(connect_database(db_path))
         try:
             yield conn
         finally:

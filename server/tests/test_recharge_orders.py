@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from app.auth import get_database
 from app.db import alembic_config, connect_database, initialize_database
+from app.db_portable import BusinessConnection
 from app.internal_accounts import create_user, issue_token
 from app.main import app
 from app.settings import SettingsRepository
@@ -71,7 +72,7 @@ def recharge_api(
             actor_user_id=str(user["user_id"]),
         )
 
-    def override_database() -> Iterator[sqlite3.Connection]:
+    def override_database() -> Iterator[BusinessConnection]:
         with connect_database(db_path) as conn:
             yield conn
 

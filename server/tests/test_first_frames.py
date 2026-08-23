@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from app.auth import get_database
 from app.db import connect_database, initialize_database
+from app.db_portable import BusinessConnection
 from app.first_frame_routes import get_image_provider
 from app.first_frames import GeneratedImage, ImageInput, RetryableImageProviderFailed
 from app.main import app
@@ -122,8 +123,8 @@ def client(
     storage: FakeStorageAdapter,
     provider: RecordingImageProvider,
 ) -> Iterator[TestClient]:
-    def database_override() -> Iterator[sqlite3.Connection]:
-        conn = connect_database(db_path)
+    def database_override() -> Iterator[BusinessConnection]:
+        conn = BusinessConnection.sqlite(connect_database(db_path))
         try:
             yield conn
         finally:

@@ -11,6 +11,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from app.db import connect_database, initialize_database
+from app.db_portable import BusinessConnection
 from app.settings import (
     SettingsDecryptError,
     SettingsKeyMissing,
@@ -50,7 +51,7 @@ def db_path(tmp_path: Path, settings_key: str) -> Path:
 
 
 @pytest.fixture()
-def conn(db_path: Path) -> Iterator[sqlite3.Connection]:
+def conn(db_path: Path) -> Iterator[BusinessConnection]:
     with connect_database(db_path) as connection:
         yield connection
 
@@ -60,7 +61,7 @@ def client(db_path: Path) -> Iterator[TestClient]:
     app = FastAPI()
     app.include_router(router)
 
-    def override_database() -> Iterator[sqlite3.Connection]:
+    def override_database() -> Iterator[BusinessConnection]:
         with connect_database(db_path) as connection:
             yield connection
 
@@ -251,7 +252,7 @@ def test_settings_api_reports_wrong_key_without_deleting_saved_config(
     )
     from app.main import app as production_app
 
-    def override_database() -> Iterator[sqlite3.Connection]:
+    def override_database() -> Iterator[BusinessConnection]:
         with connect_database(db_path) as connection:
             yield connection
 
