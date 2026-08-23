@@ -24,11 +24,16 @@ verifier is deliberately minimal and self-contained:
 - the ``expected_*`` parameters mirror §12.4's in-transaction re-comparison
   (``user_id + device_id + session_id + session_epoch + lease``): any
   mismatch answers ``SESSION_REPLACED`` so a request that passed a FastAPI
-  dependency earlier can never commit after a switch.
+  dependency earlier can never commit after a switch (the expected lease
+  must still *be* the row's lease — a lease pulled back by logout/revocation
+  is fenced even when the epoch is unchanged).
 
 Timestamps: PostgreSQL is the only trusted clock (SES-01) — the lease
-judgement samples ``SELECT now()`` on the caller's transaction, the same
-discipline as the session routes. Only keyed digests of the presented token
+judgement samples ``SELECT clock_timestamp()`` after the row lock, so a
+write transaction that began while the lease was valid but waited on the
+``FOR UPDATE`` until after it expired is judged at the *actual* wall-clock
+time (``now()`` is fixed at transaction start and would authorise the
+stale write; PR #52 P2). Only keyed digests of the presented token
 ever reach the database (§7); a misconfigured device-domain key raises
 ``ActivationKeyError`` for the calling route to fail closed with 503 (never
 a 500, never a client-credential error).
@@ -101,6 +106,7 @@ def verify_session_context(
     expected_device_id: str | None = None,
     expected_session_id: str | None = None,
     expected_session_epoch: int | None = None,
+    expected_lease_until: str | None = None,
 ) -> CustomerSessionContext:
     """Fence one customer write behind the live session row (dev doc §12.4).
 
@@ -138,10 +144,20 @@ def verify_session_context(
         raise _replaced("This session was replaced by a newer session.")
     if expected_session_epoch is not None and expected_session_epoch != session_epoch:
         raise _replaced("This session epoch was superseded by a newer session.")
+    if expected_lease_until is not None and lease_until_raw != expected_lease_until:
+        # §12.4 re-comparison of the full snapshot: the lease is part of the
+        # authority tuple. A heartbeat renews it forward (same logical
+        # session, no epoch bump) and the client never heartbeats mid-request,
+        # so an exact mismatch means the lease was pulled back (logout /
+        # revocation) — fence it. (PR #52 P2.)
+        raise _replaced("This session lease snapshot was superseded by a newer session.")
 
     # SES-01: PostgreSQL is the only trusted clock — the lease judgement
-    # runs on the caller's transaction clock, never a skewed app clock.
-    now_row = conn.execute("SELECT now()").fetchone()
+    # runs on the *actual* verification time, never the transaction-start
+    # timestamp nor a skewed app clock. clock_timestamp() advances with the
+    # wall clock, so a transaction that waited on the row lock until after
+    # the lease expired still fences the write (PR #52 P2).
+    now_row = conn.execute("SELECT clock_timestamp()").fetchone()
     now = now_row[0] if now_row is not None else datetime.now(UTC)
     if now > _as_utc(lease_until_raw):
         raise SessionFencingError(SESSION_EXPIRED, "This session lease has expired.")

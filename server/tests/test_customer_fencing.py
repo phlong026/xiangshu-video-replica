@@ -34,6 +34,8 @@ from __future__ import annotations
 import base64
 import os
 import secrets
+import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -516,3 +518,141 @@ def test_verify_never_leaks_the_token_or_digest(client: TestClient) -> None:
     with psycopg.connect(_fencing_dsn(), autocommit=True) as conn:
         digest = conn.execute("SELECT token_digest FROM customer_session_state").fetchone()
     assert str(digest[0]) not in blob
+
+
+# ---------------------------------------------------------------------------
+# PR #52 review regression locks (chatgpt-codex-connector)
+# ---------------------------------------------------------------------------
+
+
+def test_verify_accepts_the_matching_lease_snapshot(client: TestClient) -> None:
+    """PR #52 P2 happy path: a caller that supplies the exact expected lease
+    snapshot still verifies."""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    context = _verify(customer["session_token"])
+    assert context.lease_until
+    re_checked = _verify(customer["session_token"], expected_lease_until=context.lease_until)
+    assert re_checked.session_epoch == 1
+
+
+def test_verify_fences_a_lease_snapshot_that_changed(client: TestClient) -> None:
+    """PR #52 P2: §12.4 re-compares the *complete* snapshot including the
+    lease — a caller whose expected lease no longer matches the row (a lease
+    pulled back by logout/revocation between the preliminary auth step and
+    the business transaction) is fenced SESSION_REPLACED even though the
+    epoch is unchanged."""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    context = _verify(customer["session_token"])
+    original_lease = context.lease_until
+    # Move the lease forward (a renewal) so the current-row expiry check
+    # passes and only the expected-lease re-comparison can fence the write.
+    with psycopg.connect(_fencing_dsn(), autocommit=True) as conn:
+        conn.execute(
+            "UPDATE customer_session_state SET lease_until = (now() + interval '180 seconds')"
+        )
+    assert (
+        _verify_raises(customer["session_token"], expected_lease_until=original_lease)
+        == "SESSION_REPLACED"
+    )
+
+
+def test_verify_judges_the_lease_on_the_post_lock_clock(client: TestClient) -> None:
+    """PR #52 P2: the lease is judged on clock_timestamp() — the actual
+    wall-clock time after the row lock — not the transaction-start now(). A
+    write that began while the lease was still valid but waited on the
+    FOR UPDATE until after it expired is fenced SESSION_EXPIRED (a stale
+    now() would authorise it)."""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    token = customer["session_token"]
+    # Shorten the lease to ~2 s so the ~3.5 s lock wait crosses it.
+    with psycopg.connect(_fencing_dsn(), autocommit=True) as conn:
+        conn.execute(
+            "UPDATE customer_session_state SET lease_until = (now() + interval '2 seconds')::text"
+        )
+    lock_taken = threading.Event()
+    holder_done = threading.Event()
+
+    def holder() -> None:
+        # Take the session row lock first and hold it past the lease expiry.
+        with psycopg.connect(_fencing_dsn(), autocommit=False) as conn:
+            conn.execute("SELECT user_id FROM customer_session_state FOR UPDATE")
+            lock_taken.set()
+            time.sleep(3.5)
+            conn.commit()
+            holder_done.set()
+
+    def verifier() -> None:
+        assert lock_taken.wait(timeout=5)
+        code = _verify_raises(token)
+        assert code == "SESSION_EXPIRED"
+
+    t1 = threading.Thread(target=holder)
+    t2 = threading.Thread(target=verifier)
+    t1.start()
+    t2.start()
+    t1.join(timeout=8)
+    t2.join(timeout=8)
+    assert holder_done.is_set()
+
+
+def test_code_status_gate_locks_the_code_through_establishment(
+    client: TestClient,
+) -> None:
+    """PR #52 P1: the code-status gate locks the activation code row FOR
+    UPDATE through establishment, so an administrator suspend/revoke (which
+    locks the code row first, then the riding session) serializes against a
+    concurrent session establishment — a suspended code can never end up
+    with a live session. Without the lock, the suspend's UPDATE completes
+    immediately instead of waiting for the gate."""
+    from app.customer_session_routes import _require_active_code
+
+    _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    lock_held = threading.Event()
+    suspend_complete = threading.Event()
+    suspend_elapsed: list[float] = []
+    thread_errors: list[BaseException] = []
+
+    def gate_holder() -> None:
+        # The login/switch route holds this lock inside the business
+        # transaction, from the gate through login_session to commit.
+        try:
+            with psycopg.connect(_fencing_dsn(), autocommit=False) as conn:
+                _require_active_code(conn, "code-a")  # FOR UPDATE held here
+                lock_held.set()
+                time.sleep(0.4)
+                conn.commit()
+        except BaseException as exc:  # pragma: no cover - surfaces the thread error
+            thread_errors.append(exc)
+
+    def suspender() -> None:
+        try:
+            assert lock_held.wait(timeout=5)
+            start = time.monotonic()
+            with psycopg.connect(_fencing_dsn(), autocommit=False) as conn:
+                # Any write to the code row must block on the gate's FOR UPDATE;
+                # a no-op assignment avoids the status-shape CHECK so the test
+                # isolates the lock semantics.
+                conn.execute(
+                    "UPDATE activation_codes SET masked_code = masked_code WHERE id = 'code-a'"
+                )
+                conn.commit()
+            suspend_elapsed.append(time.monotonic() - start)
+            suspend_complete.set()
+        except BaseException as exc:  # pragma: no cover - surfaces the thread error
+            thread_errors.append(exc)
+
+    t1 = threading.Thread(target=gate_holder)
+    t2 = threading.Thread(target=suspender)
+    t1.start()
+    t2.start()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+    assert not thread_errors, thread_errors
+    assert suspend_complete.is_set()
+    # The suspend's UPDATE must have waited on the gate's FOR UPDATE lock
+    # (≈ the 0.4 s hold); without the lock it would complete immediately.
+    assert suspend_elapsed[0] >= 0.3
+    # The gate's read saw the code still ACTIVE (nothing changed it).
+    with psycopg.connect(_fencing_dsn(), autocommit=True) as conn:
+        row = conn.execute("SELECT status FROM activation_codes WHERE id = 'code-a'").fetchone()
+    assert str(row[0]) == "ACTIVE"

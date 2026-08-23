@@ -326,9 +326,20 @@ def _require_active_code(conn: psycopg.Connection, activation_code_id: str) -> N
     establish (or re-establish) a session — the client sees the 403 and is
     steered away from the workspace instead of succeeding here and failing
     later on every fenced write.
+
+    The code row is locked ``FOR UPDATE`` through establishment (PR #52 P1):
+    this runs inside the same business transaction as ``login_session``, so
+    the row lock is held until the session commits. An administrator
+    suspend/revoke (which locks the code row first, then revokes the riding
+    session) therefore serializes against establishment — either the gate
+    reads ACTIVE and the session commits before the suspend takes effect
+    (and the suspend then revokes it), or the suspend wins and the gate
+    reads SUSPENDED and answers 403. A suspended/revoked code can never end
+    up holding a live session.
     """
     row = conn.execute(
-        "SELECT status FROM activation_codes WHERE id = %s", (activation_code_id,)
+        "SELECT status FROM activation_codes WHERE id = %s FOR UPDATE",
+        (activation_code_id,),
     ).fetchone()
     if row is None:
         # The device row's FK guarantees the code exists; a missing row means
