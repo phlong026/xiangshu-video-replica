@@ -755,6 +755,21 @@ def test_api_lifespan_tolerates_internal_lane_without_database_env() -> None:
             pass
 
 
+def test_api_lifespan_fails_closed_on_unsupported_scheme_in_customer_production() -> None:
+    """A mistyped database URL scheme in customer production must abort the
+    real app's lifespan: the unsupported-scheme ValueError is a configuration
+    error, not the tolerated missing-config case, so a healthy startup must
+    never be advertised without a usable PostgreSQL runtime (Codex P1)."""
+    from app.main import app as real_app
+
+    env = _clean_production_env()
+    env[DATABASE_URL_ENV] = "mysql://u:p@db.example.com:5432/production"
+    with _env(**env):
+        with pytest.raises(ValueError, match="unsupported database URL scheme"):
+            with TestClient(real_app):
+                pass
+
+
 def test_short_admin_hmac_key_raises_exchange_credential_error() -> None:
     """A short key must reach the exchange 401 channel, not surface as a 500.
 

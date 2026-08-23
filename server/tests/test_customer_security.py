@@ -33,6 +33,7 @@ import os
 import secrets
 import time
 from collections.abc import Iterator
+from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -871,3 +872,114 @@ def test_downgrade_refuses_once_failures_exist(security_dsn: str) -> None:
     with psycopg.connect(_t15_dsn()) as conn:
         version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
     assert version == "036_low_review_constraint_guards"
+
+
+# ---------------------------------------------------------------------------
+# Maintenance sweep CLI (scripts/purge_stale_rate_limit_counters.py, M2 M3)
+# ---------------------------------------------------------------------------
+
+
+def test_cli_sweep_uses_postgres_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The sweep's cutoff must come from ``SELECT now()`` on the opened
+    connection, never the maintenance host's clock: a host clock ahead of
+    PostgreSQL would delete counters that ``consume_rate_limit()`` still
+    considers active, bypassing the shared abuse budget (Codex P2)."""
+    import scripts.purge_stale_rate_limit_counters as purge_cli
+
+    pg_now = datetime(2020, 1, 1, 0, 0, 0, tzinfo=UTC)  # far from the host clock
+
+    class _Cursor:
+        def fetchone(self) -> tuple[datetime]:
+            return (pg_now,)
+
+    class _FakeConn:
+        def __enter__(self) -> _FakeConn:
+            return self
+
+        def __exit__(self, *_: object) -> bool:
+            return False
+
+        def execute(self, _sql: str) -> _Cursor:
+            return _Cursor()
+
+        def transaction(self) -> nullcontext[None]:
+            return nullcontext()
+
+    captured: dict[str, object] = {}
+
+    def _fake_count(conn: object, *, now: datetime) -> int:
+        captured["now"] = now
+        return 0
+
+    monkeypatch.setattr(purge_cli.psycopg, "connect", lambda _dsn: _FakeConn())
+    monkeypatch.setattr(purge_cli, "count_stale_counters", _fake_count)
+    assert purge_cli.main(["--database-url", "postgresql://u:p@host/db", "--dry-run"]) == 0
+    assert captured["now"] == pg_now, "sweep cutoff must be the PostgreSQL clock"
+
+
+def test_cli_purges_stale_rows_active_window_kept(
+    clean_counters: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end: the CLI deletes only fully lapsed window rows, keeping the
+    still-active window's counter so the next request cannot mint a fresh
+    bucket (counters are cache, not audit)."""
+    from scripts.purge_stale_rate_limit_counters import main as purge_main
+
+    monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_WINDOW_SECONDS", "60")
+    with psycopg.connect(_t15_dsn(), autocommit=True) as conn:
+        now = conn.execute("SELECT now()").fetchone()[0]
+        stale_start = (now - timedelta(seconds=120)).replace(microsecond=0).isoformat()
+        active_start = now.replace(microsecond=0).isoformat()
+        conn.execute(
+            f"INSERT INTO {COUNTERS_TABLE} (bucket_key, window_start, hit_count, updated_at) "
+            "VALUES (%s, %s, 5, %s)",
+            ("activate:ip|cli-stale", stale_start, stale_start),
+        )
+        conn.execute(
+            f"INSERT INTO {COUNTERS_TABLE} (bucket_key, window_start, hit_count, updated_at) "
+            "VALUES (%s, %s, 1, %s)",
+            ("activate:ip|cli-active", active_start, active_start),
+        )
+
+    assert purge_main(["--database-url", _t15_dsn()]) == 0
+
+    with psycopg.connect(_t15_dsn(), autocommit=True) as conn:
+        rows = {
+            str(row[0]): int(row[1])
+            for row in conn.execute(
+                f"SELECT bucket_key, hit_count FROM {COUNTERS_TABLE}"
+            ).fetchall()
+        }
+    assert rows == {"activate:ip|cli-active": 1}, "only the active window row survives"
+
+
+def test_cli_dry_run_reports_without_deleting(
+    clean_counters: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts.purge_stale_rate_limit_counters import main as purge_main
+
+    monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_WINDOW_SECONDS", "60")
+    with psycopg.connect(_t15_dsn(), autocommit=True) as conn:
+        now = conn.execute("SELECT now()").fetchone()[0]
+        stale_start = (now - timedelta(seconds=120)).replace(microsecond=0).isoformat()
+        conn.execute(
+            f"INSERT INTO {COUNTERS_TABLE} (bucket_key, window_start, hit_count, updated_at) "
+            "VALUES (%s, %s, 5, %s)",
+            ("activate:ip|cli-dry", stale_start, stale_start),
+        )
+
+    assert purge_main(["--database-url", _t15_dsn(), "--dry-run"]) == 0
+
+    with psycopg.connect(_t15_dsn(), autocommit=True) as conn:
+        hit_count = conn.execute(
+            f"SELECT hit_count FROM {COUNTERS_TABLE} WHERE bucket_key = %s",
+            ("activate:ip|cli-dry",),
+        ).fetchone()[0]
+    assert hit_count == 5
+
+
+def test_cli_requires_a_database_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scripts.purge_stale_rate_limit_counters import main as purge_main
+
+    monkeypatch.delenv("VIDEO_REPLICA_DATABASE_URL", raising=False)
+    assert purge_main([]) == 1

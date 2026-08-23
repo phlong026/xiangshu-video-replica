@@ -72,13 +72,20 @@ async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
     # this closes the systemd/container entrypoint). resolve raises
     # RuntimeError for the customer boundary (missing DSN) — that propagates.
     # The internal lane may legitimately boot without any database env (the
-    # legacy runtime resolves per-request), so its generic ValueError is
-    # tolerated here and only the production boundary fails closed.
-    from app.db_pg import resolve_database_config, validate_customer_production
+    # legacy runtime resolves per-request), so its narrow
+    # MissingDatabaseConfigError is tolerated here. Every other resolution
+    # error — most importantly an unsupported/mistyped URL scheme — must
+    # propagate: swallowing it would advertise a healthy startup without a
+    # usable PostgreSQL runtime (Codex P1).
+    from app.db_pg import (
+        MissingDatabaseConfigError,
+        resolve_database_config,
+        validate_customer_production,
+    )
 
     try:
         _database_config = resolve_database_config()
-    except ValueError:
+    except MissingDatabaseConfigError:
         _database_config = None
     if _database_config is not None:
         validate_customer_production(_database_config)

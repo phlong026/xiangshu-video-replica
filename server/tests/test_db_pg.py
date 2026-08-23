@@ -26,6 +26,7 @@ from psycopg_pool import ConnectionPool
 from app.db_pg import (
     DATABASE_URL_ENV,
     DatabaseMode,
+    MissingDatabaseConfigError,
     check_pg_ready,
     pg_server_now,
     pg_transaction,
@@ -100,6 +101,17 @@ def test_resolve_sqlite_fallback_keeps_internal_mode() -> None:
 def test_resolve_rejects_unsupported_scheme() -> None:
     with _env(**{DATABASE_URL_ENV: "mysql://u:p@host/db"}):
         with pytest.raises(ValueError, match="unsupported database URL scheme"):
+            resolve_database_config()
+
+
+def test_resolve_missing_internal_raises_missing_database_config_error() -> None:
+    """The internal lane may legitimately boot without any database env
+    (the legacy lane resolves per-request), so the missing-config path
+    raises the narrow MissingDatabaseConfigError — never the generic
+    ValueError also used for unsupported schemes, which the lifespan
+    must not swallow (Codex P1)."""
+    with _env(**{DATABASE_URL_ENV: "", "VIDEO_REPLICA_DB_PATH": ""}):
+        with pytest.raises(MissingDatabaseConfigError):
             resolve_database_config()
 
 
@@ -434,6 +446,17 @@ def test_pool_max_is_capped_at_a_hard_ceiling() -> None:
     with _env(**{POOL_MAX_ENV: "100000"}):
         pool_min, pool_max = _pool_bounds()
     assert pool_max == 64
+
+
+def test_pool_min_is_capped_at_the_hard_ceiling() -> None:
+    """A POOL_MIN above the ceiling must not yield an invalid (min > max)
+    pair: ConnectionPool rejects max_size smaller than min_size, turning
+    the connection-budget safeguard into a startup failure (Codex P2)."""
+    from app.db_pg import POOL_MAX_ENV, POOL_MIN_ENV, _pool_bounds
+
+    with _env(**{POOL_MIN_ENV: "100000", POOL_MAX_ENV: "32"}):
+        pool_min, pool_max = _pool_bounds()
+    assert (pool_min, pool_max) == (64, 64)
 
 
 def test_check_pg_ready_redacts_dsn_credentials() -> None:

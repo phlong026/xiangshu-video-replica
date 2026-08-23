@@ -96,6 +96,16 @@ def _fetch_scalar(conn: psycopg.Connection, sql: str) -> object:
     return row[0]
 
 
+class MissingDatabaseConfigError(ValueError):
+    """The database-mode resolver found no database environment at all.
+
+    Narrower than the generic ``ValueError`` also used for unsupported
+    schemes: the API lifespan may legitimately tolerate this one on the
+    internal lane (the legacy runtime resolves per-request), while a
+    mistyped URL is a configuration error that must fail closed (Codex P1).
+    """
+
+
 def resolve_database_config() -> DatabaseConfig:
     """Resolve the active database mode from the environment.
 
@@ -128,7 +138,7 @@ def resolve_database_config() -> DatabaseConfig:
             f"customer production requires PostgreSQL: {missing} "
             f"(set {DATABASE_URL_ENV} to a postgresql:// DSN)"
         )
-    raise ValueError(missing)
+    raise MissingDatabaseConfigError(missing)
 
 
 def validate_customer_production(config: DatabaseConfig) -> None:
@@ -176,6 +186,14 @@ def _pool_bounds() -> tuple[int, int]:
             "capping %s=%d to the hard ceiling %d", POOL_MAX_ENV, pool_max, POOL_MAX_CEILING
         )
         pool_max = POOL_MAX_CEILING
+    if pool_min > POOL_MAX_CEILING:
+        # Clamp the minimum with the maximum: ConnectionPool rejects a
+        # maximum smaller than its minimum, so an unclamped min would turn
+        # the connection-budget guard into a startup failure (Codex P2).
+        logger.warning(
+            "capping %s=%d to the hard ceiling %d", POOL_MIN_ENV, pool_min, POOL_MAX_CEILING
+        )
+        pool_min = POOL_MAX_CEILING
     return pool_min, pool_max
 
 

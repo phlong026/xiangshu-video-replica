@@ -19,7 +19,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from datetime import UTC, datetime
+from datetime import datetime
 
 import psycopg
 
@@ -49,8 +49,16 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    now = datetime.now(UTC)
+    # The cutoff comes from the PostgreSQL clock (SELECT now()), never the
+    # maintenance host's clock: consume_rate_limit() stamps counters with
+    # the server clock, so a host clock ahead of PG would sweep counters
+    # the limiter still treats as active and bypass the shared abuse budget
+    # (Codex P2; same source as the idempotency purge).
     with psycopg.connect(args.database_url) as conn:
+        row = conn.execute("SELECT now()").fetchone()
+        if row is None:
+            raise RuntimeError("SELECT now() returned no rows")
+        now: datetime = row[0]
         if args.dry_run:
             eligible = count_stale_counters(conn, now=now)
             print(f"stale rate-limit counter rows eligible for purge: {eligible}")
