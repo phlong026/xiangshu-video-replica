@@ -700,6 +700,63 @@ def test_idempotent_replay_spends_no_rate_limit_budget(client: TestClient) -> No
     assert blocked.json()["detail"]["code"] == "RATE_LIMITED"
 
 
+def test_blocked_ip_mints_no_code_counter_rows(client: TestClient) -> None:
+    """PR #46 review P1: a blocked IP must stop minting code-dimension rows.
+
+    The code-dimension identifier is attacker-controlled (a random
+    well-shaped code's digest) and expired counter rows are never swept, so
+    consuming the code dimension after the IP dimension already blocked
+    would grow ``security_rate_limit_counters`` without bound — one
+    permanent row per request from a client that is already dead.
+    """
+    # Two distinct unknown well-shaped codes burn the IP budget of 2; each
+    # legitimately spends one code-dimension hit (one row each).
+    for suffix, code in (("p1a", UNKNOWN_CODE), ("p1b", BURST_CODE)):
+        response = _activate(client, code, f"fp-{suffix}", suffix)
+        assert response.status_code == 400
+    # The third request is IP-blocked: it must answer 429 *without*
+    # creating a third code-dimension counter row.
+    blocked = _activate(client, UNKNOWN_ZZ_CODE, "fp-p1c", "p1c")
+    assert blocked.status_code == 429
+    assert blocked.json()["detail"]["code"] == "RATE_LIMITED"
+    with psycopg.connect(_t15_dsn(), autocommit=True) as conn:
+        row = conn.execute(
+            f"SELECT count(*) FROM {COUNTERS_TABLE} WHERE bucket_key LIKE 'activate:code|%'"
+        ).fetchone()
+    assert row is not None and row[0] == 2, (
+        "an IP-blocked request must not mint a new code-dimension counter row "
+        f"(found {row[0]} rows; the two live rows belong to the pre-block requests)"
+    )
+
+
+def test_cors_exposes_retry_after(monkeypatch: pytest.MonkeyPatch) -> None:
+    """PR #46 review P2: browser JS must be able to read the 429 backoff hint.
+
+    CORS hides unlisted response headers from JavaScript; without
+    ``Retry-After`` in ``expose_headers`` the WebView/Tauri client cannot
+    honour the documented backoff after a 429 and retries blind against
+    the shared PG-backed budget.
+    """
+    from app.main import app as main_app
+
+    monkeypatch.delenv("VIDEO_REPLICA_CUSTOMER_PRODUCTION", raising=False)
+    with TestClient(main_app) as main_client:
+        # A validation failure still passes through the CORS middleware, so
+        # the status does not matter — only the readable header contract.
+        actual = main_client.post(
+            ACTIVATE_PATH,
+            headers={
+                "Origin": "http://localhost:5173",
+                IDEMPOTENCY_KEY_HEADER: "key-cors-p2",
+            },
+        )
+        assert actual.status_code == 422, actual.text
+    exposed = actual.headers.get("access-control-expose-headers", "").lower()
+    assert "retry-after" in exposed, (
+        "Retry-After must be CORS-exposed for the browser client to back off"
+    )
+
+
 def test_downgrade_refuses_once_failures_exist(security_dsn: str) -> None:
     """Session review P3: the 032 downgrade guards the audit trail.
 

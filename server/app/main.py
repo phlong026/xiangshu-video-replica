@@ -141,7 +141,10 @@ app.add_middleware(
     ],
     # The same review's other half: browser JS must be able to read the
     # replay marker and the echoed request id on the activation response.
-    expose_headers=["X-Request-Id", "X-Idempotent-Replay"],
+    # PR #46 review P2: Retry-After joins the exposed list — the browser/
+    # Tauri client must read the 429 backoff hint, or it retries blind and
+    # keeps burning the (shared, PG-backed) abuse budget.
+    expose_headers=["X-Request-Id", "X-Idempotent-Replay", "Retry-After"],
 )
 app.include_router(generation_router)
 app.include_router(rbac_router)

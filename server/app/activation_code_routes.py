@@ -683,7 +683,14 @@ def activate_first_device(
             window_seconds=_window_seconds,
         )
         code_decision: RateLimitDecision | None = None
-        if code_digests:
+        # PR #46 review P1: once the IP dimension blocks, the request is
+        # already dead — consuming the code dimension anyway would let a
+        # blocked client mint one unbounded counter row per random
+        # well-shaped code (the code identifier is attacker-controlled and
+        # expired rows are never swept), growing the table without bound.
+        # A blocked IP draws no code budget: its requests never reach the
+        # business layer the code dimension exists to protect.
+        if code_digests and ip_decision.allowed:
             code_decision = consume_rate_limit(
                 conn,
                 dimension=DIMENSION_ACTIVATE_CODE,
