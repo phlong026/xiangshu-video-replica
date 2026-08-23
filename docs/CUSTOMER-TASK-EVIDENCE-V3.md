@@ -474,3 +474,43 @@ Owner / Reviewer：安全/后端（Agent 执行）/ 会话内代码评审
 未测试项：T19 登录车道复用；真实多实例负载均衡拓扑联测（T36）；反代 IP 传递的真实部署验证（随 T36）；T37/OPS-02 告警管道消费；STAGING/REAL_CHAIN/PRODUCTION
 Lore 提交 SHA：见 PR squash 合并 SHA
 ```
+
+
+## T16 — Two Device Slots, Credentials & Unbind History (DEV-01)
+
+| Field | Value |
+| --- | --- |
+| **Task ID** | T16 / DEV-01 |
+| **Owner / Reviewer** | Backend/DB (Agent) / session-internal code review |
+| **Branch / Base SHA** | feat/customer-v3-t16-device-slots-unbind / base 517e1d2 (T15, PR #46 squash) |
+| **Date** | 2026-08-23 |
+| **Verified Implementation SHA** | PR squash merge result (see docs/evidence/T16-EVIDENCE.md) |
+| **Upstream Spec Sections** | Task list §3 T16, §12.3 DEV-01; code checklist §3.2 (frozen customer_device_service.py / customer_device_routes.py), §3.3 (frozen test_customer_devices.py); dev doc §3.2 device rules, §6.1 API table, §12.4 fencing, §13.2 error codes; acceptance spec §2.2/§3.3 |
+| **Failure Test or Regression Lock** | 22 cases: module units 2 (digest determinism; slot-count constant) + credential & two-slot view 7 (three-state 401s; slot view after activation) + unbind semantics 7 (slot reuse + history preserved; atomic session revocation; 404 missing/IDOR; 409 already-unbound; other-device unbind leaves own slot/session intact) + third-device block 2 (next_free_slot state machine; PG-level UniqueViolation/CheckViolation) + key rotation 1 (V2-issued credential under dual-version config; V2 retired → 401) + review-fix locks 3 (PG fail-closed 503; unconfigured keys → 503 not 401; REVOKED row → 401 DEVICE_REVOKED) + idempotent unbind 3 (PR #47 Codex P2: missing key → 400 with the row untouched; lost-204 own-device retry replays the sealed 204 with zero re-execution; same key + different target → 409 IDEMPOTENCY_CONFLICT) |
+| **Implementation Result** | The two current device slots, credentials, unbind history and the third-device block land as the application layer over the 028 schema (no new migration): the device credential authenticates via Authorization: Bearer with keyed HMAC-SHA256 digests probed across every configured key version; GET /api/customer/devices answers the two-slot status plus release history; DELETE flips BOUND→UNBOUND (row never deleted, slot immediately reusable — immune to the DEV-01 No-Go by the partial unique index) with a mandatory Idempotency-Key (PR #47 Codex P2: the T14 envelope engine seals the audit payload, a lost 204 replays with the same key + same target, the recovery probe runs before credential authentication, the same key on a different target answers 409 IDEMPOTENCY_CONFLICT) and atomically revokes the session riding the released device (epoch+1, immediately-expired lease with full microsecond precision + a 1µs GREATEST backstop, LOGOUT device_unbound event); both slots full → next_free_slot is None and PostgreSQL refuses a third BOUND row; stable error codes 401 REQUIRED/INVALID/REVOKED, 404 (missing = foreign, no IDOR oracle), 409 ALREADY_UNBOUND, 503 fail-closed (missing PG runtime / key misconfiguration — never a misleading 401 or a 500); unbind clock sampled from SELECT now() inside the transaction (SES-01) |
+| **Verification Command and Pass Count** | pytest tests/test_customer_devices.py → 22 passed; full suite → 839 passed + 1 time-boundary flaky re-run green → 840 confirmed (the flaky is test_e2e_fake_provider.py, storage-signature x-expires second rollover, SQLite generation lane — unrelated to this task's files); ruff/format/mypy all green (148 files formatted, 61 source files typed); implementation round 16 red→green + static green + full 834, then session review fixes (1 P2 + 3 P3) re-verified: special 19 + full 837, then PR #47 Codex review fixes (3 P2: lease microsecond precision / DELETE idempotency key + envelope recovery / ledger escape corruption) re-verified: special 22 + static green + full 840 |
+| **Evidence Level** | AUTOMATED_VERIFIED |
+| **Security and Observability** | the device token reaches the database only as a keyed digest (rotation-window probing); logs and events carry identifiers only; IDOR answers 404 identically for missing and foreign devices; the INVALID/REVOKED 401 distinction is the §13.2 client wipe signal (tokens are 256-bit random, not enumerable); key misconfiguration answers 503 rather than a misleading 401/500; the unbind audit event carries the request id; the success log prints after commit |
+| **Migration and Rollback** | no new migration (028's customer_devices / customer_session_state / customer_session_events schema fully ready); rollback = code revert (no schema change) |
+| **External Authorization Record** | None; no real ZPay/COS/paid provider/external codes/gray release/public launch |
+| **Untested Items** | device endpoints not behind the shared limiter (registered for the T19 review; device tokens are 256-bit, brute-force infeasible); thread-level same-key concurrent-DELETE proof (envelope ON CONFLICT + FOR UPDATE semantics cover it, T13/T14 precedent); T17 enroll wiring of next_free_slot; client OpenAPI regeneration (frontend-integration gate); STAGING/REAL_CHAIN/PRODUCTION |
+| **Lore Commit SHA** | PR squash merge SHA |
+
+### T16 Section 14 Ledger Record
+
+```text
+任务/工作包：T16 / DEV-01
+Owner / Reviewer：后端/DB（Agent 执行）/ 会话内代码评审
+分支 / 基线 SHA：feat/customer-v3-t16-device-slots-unbind / 基线 517e1d2（T15 PR #46 squash）
+上游规格段落：客户版任务清单 V3 §3 T16、§12.3 DEV-01；代码开发清单 V3 §3.2 customer_device_service.py/customer_device_routes.py、§3.3 test_customer_devices.py 冻结名；激活码开发文档 §3.2 设备规则、§6.1 API 表、§12.4 fencing、§13.2 错误码；测试与验收规格 §2.2/§3.3
+改动文件：server/app/customer_device_service.py（新增：跨密钥版本凭据解析、两槽视图、next_free_slot、unbind_device 原子会话吊销）、server/app/customer_device_routes.py（新增：Bearer 设备凭据鉴权、GET/DELETE 两路由、稳定错误码、503 fail-closed、PG 事务内时钟、提交后日志、幂等键+信封恢复）、server/tests/test_customer_devices.py（新增 22 用例，专用迁移库 t16_customer_devices_test）、server/app/main.py（路由挂载 +2 行）、docs/evidence/T16-EVIDENCE.md、任务与证据账本
+失败测试或回归锁定：先红后绿 22 例——模块级 2（摘要确定性/槽数常量）+凭据与视图 7（三态 401、激活后槽视图）+解绑语义 7（槽复用+历史保留、原子会话吊销、404 缺失/IDOR、409 重复、他设备解绑自身不受扰）+第三设备阻断 2（next_free_slot 状态机 + PG 层 UniqueViolation/CheckViolation）+密钥轮换 1（V2 签发双版本可鉴权、V2 退役后 401）+评审锁定 3（PG fail-closed 503、密钥未配置 503 非 401、REVOKED 行 401）+幂等解绑 3（PR #47 Codex P2：无键 400+行未动、丢 204 同键重试重放零重执行、同键异目标 409）
+实现结果：两当前设备槽+凭据+解绑历史+第三设备阻断落地应用层（028 schema 无新迁移）：设备凭据 Bearer 鉴权（keyed digest 跨版本探测，明文永不过库）；GET /api/customer/devices 返回两槽状态+释放历史；DELETE 解绑（BOUND→UNBOUND+unbound_at，行不删除，槽立即可复用——partial unique index 免疫 DEV-01 No-Go）携带强制 Idempotency-Key（PR #47 Codex P2：T14 信封引擎密封审计载荷，丢失 204 同键同目标可重放，预检在凭据鉴权前，同键异目标 409 IDEMPOTENCY_CONFLICT，无键 400）；解绑原子吊销所骑会话（epoch+1+立即过期租约（全微秒精度+GREATEST 1µs 兑底，PR #47 Codex P2）+LOGOUT device_unbound 事件）；两槽满 next_free_slot=None+数据库拒绝第三行；错误码 401 REQUIRED/INVALID/REVOKED、404（缺失=他人，无 IDOR 预言）、409 ALREADY_UNBOUND、503 fail-closed（无 PG/密钥未配置）；解绑时钟取 PG 事务内 now()（SES-01）
+验证命令与通过数：专项 22 passed；全量 839 passed + 1 时间边界 flaky 单独复跑通过→ 840 确认（flaky 为 test_e2e_fake_provider.py 存储签名 x-expires 秒翻转，SQLite 生成 lane，与本任务文件无依赖）；ruff/format/mypy 全绿（148 files formatted，61 source files typed）；实现轮 16 红→绿 + 静态全绿 + 全量 834 后经会话内代码评审修复 1 P2+3 P3 复跑专项 19 + 全量 837，再经 PR #47 Codex 评审修复 3 P2（lease 微秒精度/DELETE 幂等键+信封恢复/账本转义）复跑专项 22 + 静态全绿 + 全量 840 复确认
+证据层级：AUTOMATED_VERIFIED
+安全与可观测性：设备凭据只以 keyed HMAC-SHA256 摘要过库（跨版本探测兼容轮换窗口）；日志与事件仅含标识符；IDOR 统一 404（缺失=他人同应答）；401 INVALID 与 REVOKED 的区分是 §13.2 客户端擦除信号（token 为 256-bit 随机+keyed digest，不可枚举构造）；密钥配置故障 503 而非误导 401/500；解绑审计事件携带 request_id；成功日志提交后打印
+迁移与回滚：无新迁移（028 的 customer_devices/customer_session_state/customer_session_events schema 完全就绪）；回滚=还原代码（无 schema 变更）
+外部授权记录：无；未调用真实 ZPay/COS/付费 Provider/对外发码/灰度/公网发布
+未测试项：设备端点未接入共享限流（登记为 T19 评审项；设备 token 256-bit 不可暴破）；同键并发双 DELETE 线程级证明（信封 ON CONFLICT + FOR UPDATE 语义覆盖，T13/T14 同前例）；T17 enroll 接入 next_free_slot 的路由级联测；客户端 OpenAPI 重新生成（前端接入任务门禁）；STAGING/REAL_CHAIN/PRODUCTION
+Lore 提交 SHA：见 PR squash 合并 SHA
+```
