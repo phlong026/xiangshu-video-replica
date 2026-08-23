@@ -540,7 +540,7 @@ def test_canonical_values_are_stable() -> None:
 
 
 def test_revision_dependency_and_maintenance_guards() -> None:
-    head = "037_device_pairing_requests"
+    head = "038_admin_device_operations"
     validate_revision_pair(head, head, expected_head=head)
     with pytest.raises(MigrationSafetyError, match="Alembic revision mismatch"):
         validate_revision_pair("024_wallet_backfill", head, expected_head=head)

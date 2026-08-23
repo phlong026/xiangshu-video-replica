@@ -227,6 +227,28 @@ def _finish_idempotent_write(
     )
 
 
+class DeferredHTTPWriteError(Exception):
+    """A deterministic error outcome whose side effects must survive it.
+
+    The T18 admin pairing approval hit a shape the T12 lanes never had: the
+    ``expired`` outcome *writes* (the lazy PENDING/APPROVED → EXPIRED flip,
+    the T17 customer-lane semantic) before answering 409. A plain
+    ``HTTPException`` raised inside ``business`` would roll the transaction
+    back and silently drop that flip. Raising this subclass instead tells
+    ``_write_with_idempotency`` to snapshot the error response, commit the
+    side effects and re-raise the ``HTTPException`` *after* the commit — so
+    the replay of the same idempotency key returns the same error, and the
+    lazy flip survives exactly like the T17 route's raise-outside-the-``with``
+    pattern. Branches with no side effects keep raising ``HTTPException``
+    directly (rollback, the key stays free for a retry — the T12 precedent).
+    """
+
+    def __init__(self, status_code: int, code: str, message: str) -> None:
+        super().__init__(code)
+        self.status_code = status_code
+        self.body: dict[str, object] = {"detail": {"code": code, "message": message}}
+
+
 def _write_with_idempotency(
     request: Request,
     response: Response,
@@ -235,6 +257,8 @@ def _write_with_idempotency(
     business: Callable[[psycopg.Connection, str], dict[str, object]],
     *,
     success_status: int,
+    unavailable_code: str = "ACTIVATION_SERVICE_UNAVAILABLE",
+    unavailable_message: str = "Activation code management requires the PostgreSQL runtime.",
 ) -> dict[str, object]:
     """Run one admin write behind the idempotency snapshot layer.
 
@@ -242,6 +266,10 @@ def _write_with_idempotency(
     returns the response payload; the payload is snapshotted before commit.
     Callers keep plaintext codes out of it (No-Go red line) — the download
     path bypasses this layer precisely because its response must not persist.
+
+    The 503 fail-closed code/message defaults to the activation lane; the
+    T18 device lane passes its own (``DEVICE_SERVICE_UNAVAILABLE``) so the
+    §13.2 client table stays unambiguous per domain.
     """
     idempotency_key, _reason = _require_write_contract(request, body)
     route = _canonical_route(request)
@@ -281,25 +309,38 @@ def _write_with_idempotency(
                 if isinstance(replay_request_id, str):
                     response.headers[REQUEST_ID_HEADER] = replay_request_id
                 return replayed
-            payload = business(conn, request_id)
+            deferred: DeferredHTTPWriteError | None = None
+            try:
+                payload = business(conn, request_id)
+            except DeferredHTTPWriteError as exc:
+                # Snapshot the error response and keep the transaction — the
+                # business side effects (the lazy EXPIRED flip) must survive
+                # the 409, and the replay must answer the same error.
+                deferred = exc
+                payload = exc.body
             _finish_idempotent_write(
                 conn,
                 placeholder,
-                response_status=success_status,
+                response_status=deferred.status_code if deferred is not None else success_status,
                 response_body=payload,
             )
             response.headers[REQUEST_ID_HEADER] = request_id
-            return payload
+            deferred_error = deferred
     except (RuntimeError, ValueError) as exc:
         # The PG runtime is unavailable (internal SQLite deployments) or the
         # idempotency envelope state is malformed: fail closed instead of
         # falling back to any legacy control identity (T13 catches both
         # classes; M2 review LOW aligns this lane).
-        raise _http(
-            503,
-            "ACTIVATION_SERVICE_UNAVAILABLE",
-            "Activation code management requires the PostgreSQL runtime.",
-        ) from exc
+        raise _http(503, unavailable_code, unavailable_message) from exc
+    if deferred_error is not None:
+        # Re-raised only after the commit: the HTTPException handler builds a
+        # fresh response, so the request-id header set above does not ride it
+        # (the plain-raise error paths behave the same way).
+        raise HTTPException(
+            status_code=deferred_error.status_code,
+            detail=deferred_error.body["detail"],
+        ) from deferred_error
+    return payload
 
 
 # ---------------------------------------------------------------------------

@@ -82,6 +82,18 @@ UNBIND_REASON = "device_unbound"
 OUTCOME_UNBOUND = "unbound"
 OUTCOME_NOT_FOUND = "not_found"
 OUTCOME_NOT_BOUND = "not_bound"
+OUTCOME_REVOKED = "revoked"
+
+# T18 — administrator device operations (dev doc §12.2 step 3, §9.2, §15).
+# The admin-verified approval is the fallback lane for a first device that
+# is no longer available; the outcome distinct from the T17 device-lane
+# constants tells the route to answer 403 (the administrator must not
+# shortcut a live first device).
+ADMIN_APPROVE_FIRST_DEVICE_AVAILABLE = "first_device_available"
+# The append-only audit rows (revision 038) carrying the real admin actor.
+ADMIN_EVENT_PAIRING_APPROVED = "PAIRING_ADMIN_APPROVED"
+ADMIN_EVENT_DEVICE_UNBOUND = "DEVICE_ADMIN_UNBOUND"
+ADMIN_EVENT_CREDENTIAL_REVOKED = "DEVICE_CREDENTIAL_REVOKED"
 
 
 @dataclass(frozen=True)
@@ -392,14 +404,44 @@ def unbind_device(
     # session. One live session per user — when it rides the released
     # device, bump the epoch (the monotonic trigger allows only upward
     # movement) and pull the lease into the past so fencing rejects any
-    # in-flight request from the released credential's session token. The
-    # GREATEST is a defensive same-transaction backstop for the
-    # ck_customer_session_state_lease_after_created check (a hypothetical
-    # future code path creating and unbinding within one transaction would
-    # sample an identical now()); one microsecond — not one second — keeps
-    # the "immediately expired" semantics (PR #47 Codex review P2: a lease
-    # surviving up to a second past the unbind contradicts the acceptance
-    # requirement that revocation invalidates the session immediately).
+    # in-flight request from the released credential's session token.
+    _revoke_session_riding_device(
+        conn,
+        device_id=device_id,
+        owner_user_id=owner_user_id,
+        activation_code_id=activation_code_id,
+        actor_user_id=owner_user_id,
+        reason=UNBIND_REASON,
+        request_id=request_id,
+        now_iso=now_iso,
+    )
+    return OUTCOME_UNBOUND
+
+
+def _revoke_session_riding_device(
+    conn: psycopg.Connection,
+    *,
+    device_id: str,
+    owner_user_id: str,
+    activation_code_id: str,
+    actor_user_id: str,
+    reason: str,
+    request_id: str,
+    now_iso: str,
+) -> None:
+    """Terminate the live session riding a released device, atomically.
+
+    The T16 unbind and the T18 administrator unbind/revocation share this
+    core (dev doc §9.2): epoch bump, lease pulled into the past and a
+    ``LOGOUT`` event naming the acting user and the reason. The GREATEST is
+    a defensive same-transaction backstop for the
+    ``ck_customer_session_state_lease_after_created`` check (a hypothetical
+    future code path creating and unbinding within one transaction would
+    sample an identical now()); one microsecond — not one second — keeps
+    the "immediately expired" semantics (PR #47 Codex review P2: a lease
+    surviving up to a second past the release contradicts the acceptance
+    requirement that revocation invalidates the session immediately).
+    """
     session_row = conn.execute(
         "UPDATE customer_session_state "
         "SET session_epoch = session_epoch + 1, "
@@ -423,12 +465,11 @@ def unbind_device(
                 device_id,
                 str(session_row[0]),
                 int(session_row[1]),
-                owner_user_id,
-                UNBIND_REASON,
+                actor_user_id,
+                reason,
                 request_id,
             ),
         )
-    return OUTCOME_UNBOUND
 
 
 def server_now_utc() -> datetime:
@@ -747,3 +788,264 @@ def consume_pairing_request(
         slot_no=slot_no,
         device_token=device_token,
     )
+
+
+# ---------------------------------------------------------------------------
+# Administrator device operations (T18, dev doc §12.2 step 3 / §9.2 / §15)
+# ---------------------------------------------------------------------------
+
+
+def _insert_admin_device_event(
+    conn: psycopg.Connection,
+    *,
+    event: str,
+    admin_user_id: str,
+    target_user_id: str,
+    device_id: str | None,
+    pairing_request_id: str | None,
+    activation_code_id: str,
+    reason: str,
+    request_id: str,
+) -> None:
+    """Insert one append-only administrator device-operation audit row.
+
+    Revision 038: every admin lane (approve / unbind / revoke) writes the
+    real actor, the affected customer and the operator-supplied reason —
+    the T18 DoD (真实 actor、原因、二次确认和审计存在). The append-only
+    trigger and the shared TRUNCATE guard (revision 036) protect the table
+    the same way they protect the other audit trails.
+    """
+    conn.execute(
+        "INSERT INTO admin_device_events "
+        "(id, event, admin_user_id, target_user_id, device_id, "
+        " pairing_request_id, activation_code_id, reason, request_id) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        (
+            str(uuid.uuid4()),
+            event,
+            admin_user_id,
+            target_user_id,
+            device_id,
+            pairing_request_id,
+            activation_code_id,
+            reason,
+            request_id,
+        ),
+    )
+
+
+def admin_approve_pairing_request(
+    conn: psycopg.Connection,
+    *,
+    pairing_id: str,
+    admin_user_id: str,
+    reason: str,
+    request_id: str,
+    server_now: datetime,
+) -> str:
+    """Approve a PENDING pairing as the administrator fallback lane.
+
+    Dev doc §12.2 step 3: the approval belongs to the *first currently
+    bound* device; only when that device is no longer ``BOUND`` (released
+    or revoked) does the lane move to the administrator verification —
+    exactly the precondition checked first here, so a live first device is
+    never shortcut by an admin (``first_device_available`` tells the route
+    to answer 403).
+
+    Lock order devices → pairing, the tail of the enroll route's
+    code → devices → pairing order (the T17 approve precedent):
+
+    - the pairing header is read unlocked once for its ``code_id`` — the
+      column is immutable, so the read is race-free (the
+      ``first_device_id`` precedent);
+    - the first device row is locked ``FOR UPDATE`` and checked for
+      ``BOUND``: still-bound → ``first_device_available`` (fail closed for
+      the admin lane, checked before the state machine exactly like the
+      T17 ``revoked`` gate), a missing row counts as unavailable (the
+      history is never deleted, so this is the corruption corner and the
+      admin verification is the recovery lane);
+    - the pairing row is then locked and the T17 state machine replays:
+      ``not_found`` / ``already_consumed`` / ``expired`` (lazily flipped,
+      an approved-then-lapsed request included) / ``already_approved``
+      (idempotent) / ``approved`` — PENDING → APPROVED with the admin
+      lineage (``approved_by_admin_user_id``) and the audit row.
+    """
+    pairing_header = conn.execute(
+        "SELECT activation_code_id FROM device_pairing_requests WHERE id = %s",
+        (pairing_id,),
+    ).fetchone()
+    if pairing_header is None:
+        return APPROVE_NOT_FOUND
+    code_id = str(pairing_header[0])
+
+    activation_row = conn.execute(
+        "SELECT user_id, first_device_id FROM activation_code_activations WHERE code_id = %s",
+        (code_id,),
+    ).fetchone()
+    if activation_row is None:
+        # A pairing is a post-activation artefact, so the fact row
+        # structurally exists; a missing one fails closed like the T17 lane.
+        return APPROVE_NOT_FOUND
+
+    first_device_row = conn.execute(
+        "SELECT status FROM customer_devices WHERE id = %s FOR UPDATE",
+        (str(activation_row[1]),),
+    ).fetchone()
+    if first_device_row is not None and str(first_device_row[0]) == BOUND:
+        return ADMIN_APPROVE_FIRST_DEVICE_AVAILABLE
+
+    row = conn.execute(
+        "SELECT activation_code_id, status, expires_at "
+        "FROM device_pairing_requests WHERE id = %s FOR UPDATE",
+        (pairing_id,),
+    ).fetchone()
+    if row is None or str(row[0]) != code_id:
+        return APPROVE_NOT_FOUND
+    status = str(row[1])
+    if status == PAIRING_CONSUMED:
+        return APPROVE_ALREADY_CONSUMED
+    if status == PAIRING_EXPIRED or _pairing_expired(str(row[2]), server_now):
+        if status in (PAIRING_PENDING, PAIRING_APPROVED):
+            conn.execute(
+                "UPDATE device_pairing_requests SET status = 'EXPIRED' WHERE id = %s",
+                (pairing_id,),
+            )
+        return APPROVE_EXPIRED
+    if status == PAIRING_APPROVED:
+        return APPROVE_ALREADY_APPROVED
+    # status == PENDING here: the admin lineage replaces the device lineage
+    # (the _APPROVAL_LINEAGE shape of revision 038 allows exactly one).
+    conn.execute(
+        "UPDATE device_pairing_requests "
+        "SET status = 'APPROVED', approved_at = %s, approved_by_admin_user_id = %s "
+        "WHERE id = %s",
+        (server_now.isoformat(), admin_user_id, pairing_id),
+    )
+    _insert_admin_device_event(
+        conn,
+        event=ADMIN_EVENT_PAIRING_APPROVED,
+        admin_user_id=admin_user_id,
+        target_user_id=str(activation_row[0]),
+        device_id=None,
+        pairing_request_id=pairing_id,
+        activation_code_id=code_id,
+        reason=reason,
+        request_id=request_id,
+    )
+    return APPROVE_APPROVED
+
+
+def admin_unbind_device(
+    conn: psycopg.Connection,
+    *,
+    device_id: str,
+    admin_user_id: str,
+    reason: str,
+    request_id: str,
+    server_now: datetime,
+) -> str:
+    """Release a ``BOUND`` device as the administrator (T18, §9.2/§15).
+
+    The same state transition as the customer-lane ``unbind_device`` (slot
+    released, history kept), with two admin-lane differences: no owner
+    check (the administrator operates any device by design) and the audit
+    row names the real admin actor with the operator-supplied reason. The
+    session riding the released device is revoked atomically, with the
+    acting user recorded as the administrator.
+    """
+    row = conn.execute(
+        "SELECT status, user_id, activation_code_id FROM customer_devices WHERE id = %s FOR UPDATE",
+        (device_id,),
+    ).fetchone()
+    if row is None:
+        return OUTCOME_NOT_FOUND
+    if str(row[0]) != BOUND:
+        return OUTCOME_NOT_BOUND
+    owner_user_id = str(row[1])
+    activation_code_id = str(row[2])
+
+    now_iso = server_now.isoformat()
+    conn.execute(
+        "UPDATE customer_devices SET status = 'UNBOUND', unbound_at = %s WHERE id = %s",
+        (now_iso, device_id),
+    )
+    _revoke_session_riding_device(
+        conn,
+        device_id=device_id,
+        owner_user_id=owner_user_id,
+        activation_code_id=activation_code_id,
+        actor_user_id=admin_user_id,
+        reason=reason,
+        request_id=request_id,
+        now_iso=now_iso,
+    )
+    _insert_admin_device_event(
+        conn,
+        event=ADMIN_EVENT_DEVICE_UNBOUND,
+        admin_user_id=admin_user_id,
+        target_user_id=owner_user_id,
+        device_id=device_id,
+        pairing_request_id=None,
+        activation_code_id=activation_code_id,
+        reason=reason,
+        request_id=request_id,
+    )
+    return OUTCOME_UNBOUND
+
+
+def revoke_device_credential(
+    conn: psycopg.Connection,
+    *,
+    device_id: str,
+    admin_user_id: str,
+    reason: str,
+    request_id: str,
+    server_now: datetime,
+) -> str:
+    """Flip a ``BOUND`` device to ``REVOKED`` (T18, §9.2/§15).
+
+    Revocation is the stronger release: the credential is invalidated
+    without the customer's participation (the leaked-device response), the
+    row keeps the ``REVOKED``/``revoked_at`` shape of revision 028
+    (``unbound_at`` stays NULL), and the live session riding the device is
+    revoked atomically — epoch bump, lease pulled into the past, ``LOGOUT``
+    event — exactly like the unbind lane.
+    """
+    row = conn.execute(
+        "SELECT status, user_id, activation_code_id FROM customer_devices WHERE id = %s FOR UPDATE",
+        (device_id,),
+    ).fetchone()
+    if row is None:
+        return OUTCOME_NOT_FOUND
+    if str(row[0]) != BOUND:
+        return OUTCOME_NOT_BOUND
+    owner_user_id = str(row[1])
+    activation_code_id = str(row[2])
+
+    now_iso = server_now.isoformat()
+    conn.execute(
+        "UPDATE customer_devices SET status = 'REVOKED', revoked_at = %s WHERE id = %s",
+        (now_iso, device_id),
+    )
+    _revoke_session_riding_device(
+        conn,
+        device_id=device_id,
+        owner_user_id=owner_user_id,
+        activation_code_id=activation_code_id,
+        actor_user_id=admin_user_id,
+        reason=reason,
+        request_id=request_id,
+        now_iso=now_iso,
+    )
+    _insert_admin_device_event(
+        conn,
+        event=ADMIN_EVENT_CREDENTIAL_REVOKED,
+        admin_user_id=admin_user_id,
+        target_user_id=owner_user_id,
+        device_id=device_id,
+        pairing_request_id=None,
+        activation_code_id=activation_code_id,
+        reason=reason,
+        request_id=request_id,
+    )
+    return OUTCOME_REVOKED
