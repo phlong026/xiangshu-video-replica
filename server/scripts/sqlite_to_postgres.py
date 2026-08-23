@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import sys
 from collections import defaultdict, deque
@@ -444,6 +445,9 @@ def _write_report(path: str | Path | None, result: ImportResult) -> None:
         json.dumps(result.to_dict(), ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    # The report fingerprints the whole database (schema, row counts, hashes);
+    # 0600 like the snapshot it describes (M1 review LOW).
+    os.chmod(output, 0o600)
 
 
 def _result(
@@ -559,7 +563,17 @@ def import_sqlite_to_postgres(
 def main() -> None:
     parser = argparse.ArgumentParser(description="One-shot SQLite to PostgreSQL migration")
     parser.add_argument("--sqlite", required=True, help="legacy SQLite database path")
-    parser.add_argument("--postgres-url", required=True, help="PostgreSQL DSN (never printed)")
+    parser.add_argument(
+        "--postgres-url",
+        help="PostgreSQL DSN (never printed; prefer --postgres-url-env so the "
+        "credential stays out of argv, ps listings and shell history)",
+    )
+    parser.add_argument(
+        "--postgres-url-env",
+        help="name of the environment variable holding the PostgreSQL DSN — "
+        "the credential is read from the process environment, never passed "
+        "on the command line (M1 review M4)",
+    )
     parser.add_argument("--snapshot", help="explicit immutable snapshot output path")
     parser.add_argument("--report", help="optional JSON report path")
     parser.add_argument("--batch-size", type=int, default=1000)
@@ -570,17 +584,29 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    if bool(args.postgres_url) == bool(args.postgres_url_env):
+        parser.error("exactly one of --postgres-url / --postgres-url-env is required")
+    postgres_url = args.postgres_url
+    if args.postgres_url_env:
+        postgres_url = os.environ.get(args.postgres_url_env)
+        if not postgres_url:
+            parser.exit(
+                1,
+                f"environment variable {args.postgres_url_env} is empty or unset; "
+                "refusing to run without a PostgreSQL DSN\n",
+            )
+
     try:
         result = import_sqlite_to_postgres(
             args.sqlite,
-            args.postgres_url,
+            postgres_url,
             maintenance_window_confirmed=args.maintenance_window_confirmed,
             snapshot_path=args.snapshot,
             report_path=args.report,
             batch_size=args.batch_size,
         )
     except Exception as error:
-        parser.exit(1, safe_error_message(error, args.postgres_url, stage="migration") + "\n")
+        parser.exit(1, safe_error_message(error, postgres_url, stage="migration") + "\n")
     print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2, sort_keys=True))
 
 

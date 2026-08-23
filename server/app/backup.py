@@ -279,6 +279,29 @@ def check_database(database_path: str | Path) -> Path:
     return database.resolve()
 
 
+def _private_temporary(destination: Path) -> Path:
+    """A same-directory temporary owned exclusively by this writer.
+
+    The name carries the PID and a random suffix so concurrent runs never
+    unlink or reuse each other's file (the old fixed ``.{name}.tmp`` let two
+    backups clobber each other), and it is created O_EXCL with 0600 so the
+    database contents inside are not world-readable — the snapshot hygiene
+    applied to the backup/restore paths (M1 review M3).
+    """
+
+    temporary = destination.with_name(f".{destination.name}.{os.getpid()}.{uuid4().hex}.tmp")
+    _create_private_file(temporary)
+    return temporary
+
+
+def _flush_to_disk(path: Path) -> None:
+    # Windows FlushFileBuffers fails with EBADF on a read-only file
+    # descriptor; "rb+" keeps the durability flush meaningful
+    # cross-platform.
+    with path.open("rb+") as stream:
+        os.fsync(stream.fileno())
+
+
 def backup_database(source_path: str | Path, backup_path: str | Path) -> Path:
     source = Path(source_path)
     backup = Path(backup_path)
@@ -286,20 +309,21 @@ def backup_database(source_path: str | Path, backup_path: str | Path) -> Path:
         raise FileNotFoundError(source)
 
     backup.parent.mkdir(parents=True, exist_ok=True)
-    temp_backup = backup.with_name(f".{backup.name}.tmp")
-    if temp_backup.exists():
-        temp_backup.unlink()
-
-    with connect_database(source) as source_conn:
-        _check_integrity(source_conn)
-        # sqlite3's context manager only commits/rolls back the transaction;
-        # closing() is required to release the file handle before
-        # os.replace, otherwise Windows raises WinError 32 on the rename.
-        with closing(sqlite3.connect(temp_backup)) as backup_conn:
-            source_conn.backup(backup_conn)
-            _check_integrity(backup_conn)
-
-    os.replace(temp_backup, backup)
+    temp_backup = _private_temporary(backup)
+    try:
+        with connect_database(source) as source_conn:
+            _check_integrity(source_conn)
+            # sqlite3's context manager only commits/rolls back the transaction;
+            # closing() is required to release the file handle before
+            # os.replace, otherwise Windows raises WinError 32 on the rename.
+            with closing(sqlite3.connect(temp_backup)) as backup_conn:
+                source_conn.backup(backup_conn)
+                _check_integrity(backup_conn)
+        _flush_to_disk(temp_backup)
+        os.replace(temp_backup, backup)
+    except BaseException:
+        temp_backup.unlink(missing_ok=True)
+        raise
     return backup.resolve()
 
 
@@ -310,17 +334,18 @@ def restore_database(backup_path: str | Path, target_path: str | Path) -> Path:
         raise FileNotFoundError(backup)
 
     target.parent.mkdir(parents=True, exist_ok=True)
-    temp_target = target.with_name(f".{target.name}.tmp")
-    if temp_target.exists():
-        temp_target.unlink()
-
-    with closing(sqlite3.connect(backup)) as backup_conn:
-        _check_integrity(backup_conn)
-        with closing(sqlite3.connect(temp_target)) as target_conn:
-            backup_conn.backup(target_conn)
-            _check_integrity(target_conn)
-
-    os.replace(temp_target, target)
+    temp_target = _private_temporary(target)
+    try:
+        with closing(sqlite3.connect(backup)) as backup_conn:
+            _check_integrity(backup_conn)
+            with closing(sqlite3.connect(temp_target)) as target_conn:
+                backup_conn.backup(target_conn)
+                _check_integrity(target_conn)
+        _flush_to_disk(temp_target)
+        os.replace(temp_target, target)
+    except BaseException:
+        temp_target.unlink(missing_ok=True)
+        raise
     return target.resolve()
 
 

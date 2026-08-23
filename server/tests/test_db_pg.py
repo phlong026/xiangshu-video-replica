@@ -159,7 +159,9 @@ pytestmark_pg = pytest.mark.skipif(
 def test_check_pg_ready_uses_pool_and_server_time() -> None:
     with _env(**{DATABASE_URL_ENV: PG_DSN}):
         ready = check_pg_ready()
-    assert ready.dsn == PG_DSN
+    # The DSN is redacted at the PgReadyInfo boundary (M1 review LOW).
+    assert ready.dsn != PG_DSN
+    assert "testpass" not in ready.dsn
     assert isinstance(ready.server_now, datetime)
     assert ready.pool_size >= 1
 
@@ -423,3 +425,21 @@ def test_alembic_env_var_dsn_runs_migrations_on_pg(
     finally:
         with psycopg.connect(admin_dsn, autocommit=True) as conn:
             conn.execute(f'DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)')
+
+
+def test_pool_max_is_capped_at_a_hard_ceiling() -> None:
+    """A misconfigured POOL_MAX must not drain the server's connections (M1 review LOW)."""
+    from app.db_pg import POOL_MAX_ENV, _pool_bounds
+
+    with _env(**{POOL_MAX_ENV: "100000"}):
+        pool_min, pool_max = _pool_bounds()
+    assert pool_max == 64
+
+
+def test_check_pg_ready_redacts_dsn_credentials() -> None:
+    """PgReadyInfo.dsn must never carry the password (M1 review LOW)."""
+    with _env(**{DATABASE_URL_ENV: PG_DSN}):
+        ready = check_pg_ready()
+    assert ready.dsn != PG_DSN
+    assert "testpass" not in ready.dsn
+    assert "customer_v3_test" in ready.dsn

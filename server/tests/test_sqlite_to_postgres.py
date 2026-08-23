@@ -540,7 +540,7 @@ def test_canonical_values_are_stable() -> None:
 
 
 def test_revision_dependency_and_maintenance_guards() -> None:
-    head = "032_security_rate_limits"
+    head = "036_low_review_constraint_guards"
     validate_revision_pair(head, head, expected_head=head)
     with pytest.raises(MigrationSafetyError, match="Alembic revision mismatch"):
         validate_revision_pair("024_wallet_backfill", head, expected_head=head)
@@ -914,6 +914,7 @@ def test_real_pg_reconciliation_detects_pk_row_wallet_and_asset_drift(
                 report = reconcile_connection_pair(source_conn, target)
         assert not report.ok
         issue_pairs = {(issue.code, issue.scope) for issue in report.issues}
+        assert ("table_row_count_mismatch", "users") in issue_pairs
         assert ("table_primary_key_mismatch", "users") in issue_pairs
         assert ("table_hash_mismatch", "assets") in issue_pairs
         assert (
@@ -1034,3 +1035,252 @@ def test_real_pg_import_rejects_json_asset_orphan_before_writing_target(
             assert conn.execute("SELECT count(*) FROM users").fetchone()[0] == 0
     finally:
         _drop_database(name)
+
+
+# ---------------------------------------------------------------------------
+# M1 review H2 — trigger tests for the eight unreconciled mismatch codes
+# (billing invariants plus schema-contract codes). These lock the
+# reconciler's own refusal logic: construct bad data, import must fail with
+# that exact code and roll back whole.
+# ---------------------------------------------------------------------------
+
+
+_BILLING_DRIFT_CASES = (
+    (
+        "wallet_missing_for_ledger_owner",
+        "DELETE FROM wallets",
+        "u-t07 keeps ledger rows but loses the wallet row",
+    ),
+    (
+        "unpaid_order_has_charge",
+        "UPDATE recharge_orders SET status = 'PENDING'",
+        "a non-PAID order that still carries its CHARGE row",
+    ),
+    (
+        "charge_without_order",
+        "UPDATE wallet_transactions SET recharge_order_id = 'missing-order'",
+        "a CHARGE row whose order reference points nowhere",
+    ),
+)
+
+
+@pg_only
+@pytest.mark.parametrize(
+    "expected_code, drift_sql, drift_doc",
+    _BILLING_DRIFT_CASES,
+    ids=[case[0] for case in _BILLING_DRIFT_CASES],
+)
+def test_real_pg_import_rejects_billing_drift_and_rolls_back(
+    tmp_path: Path, expected_code: str, drift_sql: str, drift_doc: str
+) -> None:
+    f"""M1 review H2: the billing invariant codes must fire end to end —
+    drift ({drift_doc}) makes the import fail with the exact code and
+    leave the target untouched (the reconciler is the last gate before
+    commit)."""
+
+    import psycopg
+
+    source = tmp_path / "source.db"
+    _create_head_source(source)
+    with sqlite3.connect(source) as conn:
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute(drift_sql)
+        conn.commit()
+    snapshot = create_readonly_snapshot(source, tmp_path / "snapshot.db")
+    name = f"m1h2_{expected_code}"
+    dsn = _create_database(name)
+    try:
+        _upgrade_pg(dsn)
+        with pytest.raises(MigrationReconciliationError, match=expected_code):
+            migrate_snapshot(snapshot, dsn)
+        with psycopg.connect(dsn) as conn:
+            users = conn.execute("SELECT count(*) FROM users").fetchone()[0]
+        assert users == 0, "a refused import must leave no business row behind"
+    finally:
+        _drop_database(name)
+
+
+@pg_only
+def test_real_pg_reconciliation_schema_contract_codes(tmp_path: Path) -> None:
+    """M1 review H2: the schema-contract codes — a stray target table
+    (target_table_extra), a dropped target column (table_column_mismatch)
+    and a source table the target never got (target_table_missing) — must
+    all surface from one reconciliation pass."""
+
+    import psycopg
+    from psycopg.rows import dict_row
+
+    source = tmp_path / "source.db"
+    _create_head_source(source)
+    snapshot = create_readonly_snapshot(source, tmp_path / "snapshot.db")
+    name = "m1h2_schema_contract"
+    dsn = _create_database(name)
+    try:
+        _upgrade_pg(dsn)
+        assert migrate_snapshot(snapshot, dsn).reconciliation.ok
+        with psycopg.connect(dsn, row_factory=dict_row) as target:
+            target.execute("CREATE TABLE stray_table (id TEXT PRIMARY KEY)")
+            target.execute("ALTER TABLE assets DROP COLUMN storage_uri")
+            target.commit()
+        with sqlite3.connect(source) as conn:
+            conn.execute("CREATE TABLE late_table (id TEXT PRIMARY KEY, v TEXT)")
+            conn.commit()
+        later_snapshot = create_readonly_snapshot(source, tmp_path / "snapshot2.db")
+        with connect_sqlite_readonly(later_snapshot.path) as source_conn:
+            with psycopg.connect(dsn, row_factory=dict_row) as target:
+                report = reconcile_connection_pair(source_conn, target)
+        issue_pairs = {(issue.code, issue.scope) for issue in report.issues}
+        assert ("target_table_extra", "schema") in issue_pairs
+        assert ("table_column_mismatch", "assets") in issue_pairs
+        assert ("target_table_missing", "schema") in issue_pairs
+    finally:
+        _drop_database(name)
+
+
+@pg_only
+def test_real_pg_reconciliation_primary_key_contract_mismatch(tmp_path: Path) -> None:
+    """M1 review H2: same column set but a different primary-key column
+    order between source and target must fail the table contract before any
+    digest comparison — the PK order is part of the frozen table contract,
+    not a cosmetic detail."""
+
+    import psycopg
+    from psycopg.rows import dict_row
+
+    source = tmp_path / "source.db"
+    with sqlite3.connect(source) as conn:
+        conn.execute(
+            "CREATE TABLE sample (id TEXT, seq INTEGER, value TEXT, PRIMARY KEY (id, seq))"
+        )
+        conn.execute("INSERT INTO sample VALUES ('a', 1, 'one')")
+        conn.commit()
+    name = "m1h2_pk_contract"
+    dsn = _create_database(name)
+    try:
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            conn.execute(
+                "CREATE TABLE sample (id TEXT, seq INTEGER, value TEXT, PRIMARY KEY (seq, id))"
+            )
+        with connect_sqlite_readonly(source) as source_conn:
+            with psycopg.connect(dsn, row_factory=dict_row) as target:
+                report = reconcile_connection_pair(source_conn, target)
+        issue_pairs = {(issue.code, issue.scope) for issue in report.issues}
+        assert ("table_primary_key_contract_mismatch", "sample") in issue_pairs
+    finally:
+        _drop_database(name)
+
+
+def test_cli_reads_dsn_from_env_variable_not_argv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import sqlite_to_postgres as migration_cli
+
+    sqlite_db = tmp_path / "legacy.db"
+    sqlite_db.write_bytes(b"")
+    dsn_from_env = "postgresql://user:secret@localhost:5433/customer_v3_test"
+    monkeypatch.setenv("MIGRATION_TEST_DSN", dsn_from_env)
+    captured: dict[str, str] = {}
+
+    def fake_import(source: str, dsn: str, **_: object) -> object:
+        captured["dsn"] = dsn
+        captured["source"] = source
+        return type("Result", (), {"to_dict": lambda self: {"ok": True}})()
+
+    monkeypatch.setattr(migration_cli, "import_sqlite_to_postgres", fake_import)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "sqlite_to_postgres.py",
+            "--sqlite",
+            str(sqlite_db),
+            "--postgres-url-env",
+            "MIGRATION_TEST_DSN",
+            "--maintenance-window-confirmed",
+        ],
+    )
+    migration_cli.main()
+
+    # The credential reaches the migration only via the environment: argv,
+    # ps listings and shell history stay clean (M1 review M4).
+    assert captured["dsn"] == dsn_from_env
+    assert captured["source"] == str(sqlite_db)
+
+
+def test_cli_dsn_source_must_be_exactly_one_of_flag_or_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import sqlite_to_postgres as migration_cli
+
+    sqlite_db = tmp_path / "legacy.db"
+    sqlite_db.write_bytes(b"")
+    base_argv = ["sqlite_to_postgres.py", "--sqlite", str(sqlite_db)]
+
+    monkeypatch.setattr(migration_cli, "import_sqlite_to_postgres", lambda *a, **k: None)
+    monkeypatch.setenv("MIGRATION_TEST_DSN", "postgresql://user:secret@localhost/db")
+
+    with monkeypatch.context() as both:
+        both.setattr(
+            sys,
+            "argv",
+            base_argv
+            + [
+                "--postgres-url",
+                "postgresql://a:b@h/d",
+                "--postgres-url-env",
+                "MIGRATION_TEST_DSN",
+            ],
+        )
+        with pytest.raises(SystemExit) as both_excinfo:
+            migration_cli.main()
+        assert both_excinfo.value.code == 2
+
+    with monkeypatch.context() as neither:
+        neither.setattr(sys, "argv", base_argv + ["--maintenance-window-confirmed"])
+        with pytest.raises(SystemExit) as neither_excinfo:
+            migration_cli.main()
+        assert neither_excinfo.value.code == 2
+
+
+def test_cli_env_dsn_source_missing_variable_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from scripts import sqlite_to_postgres as migration_cli
+
+    sqlite_db = tmp_path / "legacy.db"
+    sqlite_db.write_bytes(b"")
+    monkeypatch.delenv("MIGRATION_MISSING_DSN", raising=False)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "sqlite_to_postgres.py",
+            "--sqlite",
+            str(sqlite_db),
+            "--postgres-url-env",
+            "MIGRATION_MISSING_DSN",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        migration_cli.main()
+    assert excinfo.value.code == 1
+    message = capsys.readouterr().err
+    # Names the variable, never a DSN value or other secrets.
+    assert "MIGRATION_MISSING_DSN" in message
+    assert "secret" not in message
+
+
+def test_migration_report_file_is_private(tmp_path: Path) -> None:
+    """The import report fingerprints the whole database; 0600 like the snapshot (M1 review LOW)."""
+    from scripts.sqlite_to_postgres import _write_report
+
+    report = tmp_path / "report.json"
+    _write_report(report, type("R", (), {"to_dict": lambda self: {"ok": True}})())
+    assert report.exists()
+    if os.name == "posix":
+        assert os.stat(report).st_mode & 0o777 == 0o600

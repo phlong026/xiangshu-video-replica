@@ -65,6 +65,22 @@ async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
     from app.bootstrap import assert_customer_production_security
 
     assert_customer_production_security()
+    # M1 review H1: the lifespan must run the database-mode fail-closed check
+    # too, so a direct `uvicorn app.main:app` boot cannot reach the internal
+    # SQLite lane in customer production (bootstrap.main already validates;
+    # this closes the systemd/container entrypoint). resolve raises
+    # RuntimeError for the customer boundary (missing DSN) — that propagates.
+    # The internal lane may legitimately boot without any database env (the
+    # legacy runtime resolves per-request), so its generic ValueError is
+    # tolerated here and only the production boundary fails closed.
+    from app.db_pg import resolve_database_config, validate_customer_production
+
+    try:
+        _database_config = resolve_database_config()
+    except ValueError:
+        _database_config = None
+    if _database_config is not None:
+        validate_customer_production(_database_config)
     yield
     # M0 review M2: release the PG pool on shutdown so pooled connections
     # don't outlive the process. No-op on the SQLite lane (the pool is never

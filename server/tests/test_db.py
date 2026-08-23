@@ -37,7 +37,7 @@ def test_initialize_database_applies_sqlite_pragmas_and_migrations(tmp_path: Pat
     assert journal_mode == "wal"
     assert foreign_keys == 1
     assert busy_timeout >= 5000
-    assert alembic_versions == ["032_security_rate_limits"]
+    assert alembic_versions == ["036_low_review_constraint_guards"]
     assert "schema_migrations" not in tables
     assert {
         "users",
@@ -77,7 +77,7 @@ def test_alembic_upgrades_empty_database_to_head(tmp_path: Path) -> None:
             for row in conn.execute("PRAGMA foreign_key_list(generation_tasks)").fetchall()
         }
 
-    assert version == "032_security_rate_limits"
+    assert version == "036_low_review_constraint_guards"
     assert {
         "locked_by",
         "locked_until",
@@ -143,7 +143,7 @@ def test_retry_lineage_revision_is_reversible(tmp_path: Path) -> None:
 
     with connect_database(db_path) as conn:
         assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == (
-            "032_security_rate_limits"
+            "036_low_review_constraint_guards"
         )
 
 
@@ -199,7 +199,7 @@ def test_remove_oss_migration_purges_settings_and_selects_safe_fallback(
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute("UPDATE runtime_settings SET active_storage_provider = 'oss' WHERE id = 1")
 
-    assert version == "032_security_rate_limits"
+    assert version == "036_low_review_constraint_guards"
     assert "oss" not in providers
     assert active_provider == expected_provider
 
@@ -297,7 +297,7 @@ def test_runtime_bootstrap_upgrades_an_existing_database_before_startup(
     assert result.returncode == 0, result.stderr
     with connect_database(db_path) as conn:
         assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == (
-            "032_security_rate_limits"
+            "036_low_review_constraint_guards"
         )
         assert (
             conn.execute(
@@ -524,6 +524,48 @@ def test_backup_refuses_missing_source_without_creating_empty_database(tmp_path:
 
     assert not source_path.exists()
     assert not backup_path.exists()
+
+
+def test_backup_leaves_stale_fixed_name_tmp_untouched_and_no_residue(tmp_path: Path) -> None:
+    db_path = tmp_path / "app.db"
+    backup_path = tmp_path / "backup.db"
+    stale_tmp = tmp_path / ".backup.db.tmp"
+    with initialize_database(db_path):
+        pass
+    stale_tmp.write_bytes(b"unrelated file from another writer")
+
+    backup_database(db_path, backup_path)
+
+    # The fixed-name temporary belongs to another writer; a concurrent backup
+    # must never unlink or reuse it (M1 review M3), and no random temporary
+    # may survive the success path. The published backup is private (0600,
+    # POSIX only — Windows reports a synthesized 0o666 for every file).
+    assert stale_tmp.read_bytes() == b"unrelated file from another writer"
+    assert backup_path.exists()
+    residue = [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp") and p != stale_tmp]
+    assert residue == []
+    if os.name == "posix":
+        assert os.stat(backup_path).st_mode & 0o777 == 0o600
+
+
+def test_restore_leaves_stale_fixed_name_tmp_untouched_and_no_residue(tmp_path: Path) -> None:
+    source_path = tmp_path / "app.db"
+    backup_path = tmp_path / "backup.db"
+    restored_path = tmp_path / "restored.db"
+    stale_tmp = tmp_path / ".restored.db.tmp"
+    with initialize_database(source_path):
+        pass
+    backup_database(source_path, backup_path)
+    stale_tmp.write_bytes(b"unrelated file from another writer")
+
+    restore_database(backup_path, restored_path)
+
+    assert stale_tmp.read_bytes() == b"unrelated file from another writer"
+    assert restored_path.exists()
+    residue = [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp") and p != stale_tmp]
+    assert residue == []
+    if os.name == "posix":
+        assert os.stat(restored_path).st_mode & 0o777 == 0o600
 
 
 def test_restore_keeps_existing_target_when_backup_integrity_fails(tmp_path: Path) -> None:

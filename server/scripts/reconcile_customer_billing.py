@@ -18,7 +18,7 @@ from datetime import date, datetime, time
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import parse_qsl, quote, unquote, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, unquote, urlsplit
 from uuid import UUID, uuid4
 
 import psycopg
@@ -173,25 +173,11 @@ class _UnorderedDigest:
 
 
 def redact_postgres_dsn(dsn: str) -> str:
-    "Remove credentials and optional DSN parameters before logging."
+    """Delegate to the app-layer canonical redactor (db_pg.redact_postgres_dsn)."""
 
-    try:
-        parts = urlsplit(dsn)
-        if not parts.scheme.startswith("postgres"):
-            return "<redacted-postgres-dsn>"
-        hostname = parts.hostname or ""
-        port = parts.port
-        username = parts.username
-    except (UnicodeError, ValueError):
-        return "<redacted-postgres-dsn>"
-    if ":" in hostname and not hostname.startswith("["):
-        hostname = f"[{hostname}]"
-    netloc = hostname
-    if port is not None:
-        netloc += f":{port}"
-    if username:
-        netloc = f"{quote(unquote(username), safe='')}@{netloc}"
-    return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+    from app.db_pg import redact_postgres_dsn as _redact
+
+    return _redact(dsn)
 
 
 def _dsn_sensitive_values(dsn: str) -> set[str]:

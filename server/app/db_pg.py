@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from typing import Literal
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 import psycopg
 from psycopg_pool import ConnectionPool
@@ -34,6 +35,9 @@ DB_PATH_ENV = "VIDEO_REPLICA_DB_PATH"
 CUSTOMER_PRODUCTION_ENV = "VIDEO_REPLICA_CUSTOMER_PRODUCTION"
 POOL_MIN_ENV = "VIDEO_REPLICA_PG_POOL_MIN"
 POOL_MAX_ENV = "VIDEO_REPLICA_PG_POOL_MAX"
+# A misconfigured POOL_MAX must not drain the server's connection budget
+# (shared by the multi-instance API/Worker fleet, M1 review LOW).
+POOL_MAX_CEILING = 64
 
 DEFAULT_POOL_MIN = 1
 DEFAULT_POOL_MAX = 8
@@ -167,6 +171,11 @@ def _pool_bounds() -> tuple[int, int]:
 
     pool_min = max(0, _int_env(POOL_MIN_ENV, DEFAULT_POOL_MIN))
     pool_max = max(pool_min, _int_env(POOL_MAX_ENV, DEFAULT_POOL_MAX))
+    if pool_max > POOL_MAX_CEILING:
+        logger.warning(
+            "capping %s=%d to the hard ceiling %d", POOL_MAX_ENV, pool_max, POOL_MAX_CEILING
+        )
+        pool_max = POOL_MAX_CEILING
     return pool_min, pool_max
 
 
@@ -248,6 +257,32 @@ def pg_server_now() -> datetime:
         return _as_datetime(_fetch_scalar(conn, "SELECT now()"))
 
 
+def redact_postgres_dsn(dsn: str) -> str:
+    """Remove credentials and optional DSN parameters before logging.
+
+    The single canonical redactor for the app layer; ``scripts.reconcile_customer_billing``
+    re-imports it so every lane redacts identically.
+    """
+
+    try:
+        parts = urlsplit(dsn)
+        if not parts.scheme.startswith("postgres"):
+            return "<redacted-postgres-dsn>"
+        hostname = parts.hostname or ""
+        port = parts.port
+        username = parts.username
+    except (UnicodeError, ValueError):
+        return "<redacted-postgres-dsn>"
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
+    netloc = hostname
+    if port is not None:
+        netloc += f":{port}"
+    if username:
+        netloc = f"{quote(unquote(username), safe='')}@{netloc}"
+    return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+
+
 def check_pg_ready() -> PgReadyInfo:
     """Ready check for API/Worker startup: pool warm-up + server round-trip."""
     config = resolve_database_config()
@@ -256,4 +291,10 @@ def check_pg_ready() -> PgReadyInfo:
     with pool.connection() as conn:
         server_now = _as_datetime(_fetch_scalar(conn, "SELECT now()"))
         _fetch_scalar(conn, "SELECT 1")
-    return PgReadyInfo(dsn=config.dsn or "", server_now=server_now, pool_size=pool.max_size)
+    # PgReadyInfo.dsn carries no credentials: once serialized into a log line
+    # or a readiness endpoint the full DSN would leak the password (M1 review LOW).
+    return PgReadyInfo(
+        dsn=redact_postgres_dsn(config.dsn or ""),
+        server_now=server_now,
+        pool_size=pool.max_size,
+    )
