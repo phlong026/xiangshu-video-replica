@@ -10,6 +10,7 @@ from app.character_reference_matching import (
     get_character_reference_recommendation,
     get_latest_character_reference_selection,
 )
+from app.customer_fence import BusinessDbDep
 
 router = APIRouter(prefix="/api", tags=["character-references"])
 
@@ -46,17 +47,17 @@ def read_character_reference_recommendation(
 def select_character_references(
     project_id: str,
     request: SelectCharacterReferencesRequest,
-    conn: Database,
-    actor: AuthenticatedUser,
+    db: BusinessDbDep,
 ) -> CharacterReferenceSelection:
-    return create_character_reference_selection(
-        conn,
-        actor=actor,
-        project_id=project_id,
-        expected_source_frame_version_id=request.source_frame_selection_version_id,
-        expected_character_version_id=request.character_version_id,
-        selected_asset_ids=request.selected_asset_ids,
-    )
+    with db.write() as (conn, actor):
+        return create_character_reference_selection(
+            conn,
+            actor=actor,
+            project_id=project_id,
+            expected_source_frame_version_id=request.source_frame_selection_version_id,
+            expected_character_version_id=request.character_version_id,
+            selected_asset_ids=request.selected_asset_ids,
+        )
 
 
 @router.get(

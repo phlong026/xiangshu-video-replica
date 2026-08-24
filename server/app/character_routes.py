@@ -17,6 +17,7 @@ from app.characters import (
     list_characters,
     update_character,
 )
+from app.customer_fence import BusinessDbDep
 from app.permissions import require_not_auditor, require_project_access, require_role
 from app.project_character_selection import (
     choose_project_character_version,
@@ -239,38 +240,38 @@ def delete_character_route(
 def choose_main_character_route(
     project_id: str,
     payload: ProjectMainCharacterRequest,
-    conn: Database,
-    actor: AuthenticatedUser,
+    db: BusinessDbDep,
 ) -> ProjectMainCharacterResponse:
-    require_not_auditor(
-        conn,
-        actor=actor,
-        action="project.main_character.choose",
-        entity_type="project",
-        entity_id=project_id,
-    )
-    require_project_access(
-        conn,
-        actor=actor,
-        project_id=project_id,
-        action="project.main_character.choose",
-    )
-    if payload.character_version_id is not None:
-        result = choose_project_character_version(
+    with db.write() as (conn, actor):
+        require_not_auditor(
+            conn,
+            actor=actor,
+            action="project.main_character.choose",
+            entity_type="project",
+            entity_id=project_id,
+        )
+        require_project_access(
             conn,
             actor=actor,
             project_id=project_id,
-            character_version_id=payload.character_version_id,
+            action="project.main_character.choose",
         )
-    else:
-        assert payload.character_id is not None
-        result = choose_project_main_character(
-            conn,
-            actor=actor,
-            project_id=project_id,
-            character_id=payload.character_id,
-        )
-    return ProjectMainCharacterResponse.model_validate(result)
+        if payload.character_version_id is not None:
+            result = choose_project_character_version(
+                conn,
+                actor=actor,
+                project_id=project_id,
+                character_version_id=payload.character_version_id,
+            )
+        else:
+            assert payload.character_id is not None
+            result = choose_project_main_character(
+                conn,
+                actor=actor,
+                project_id=project_id,
+                character_id=payload.character_id,
+            )
+        return ProjectMainCharacterResponse.model_validate(result)
 
 
 def character_response(character: CharacterData) -> CharacterResponse:
