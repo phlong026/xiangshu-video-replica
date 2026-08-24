@@ -7,7 +7,7 @@ export function LeaseCountdown({
 }: {
   expiresAt: string;
   onRefresh: () => void;
-}): JSX.Element {
+}): React.JSX.Element {
   const now = new Date();
   const expiry = new Date(expiresAt);
   const diffMs = expiry.getTime() - now.getTime();

@@ -11,6 +11,7 @@ import {
   customerHeartbeat,
   customerLogin,
   customerLogout,
+  customerSwitch,
 } from "../api";
 import {
   type CustomerScreen,
@@ -97,6 +98,14 @@ export function useCustomerSession(
   user: CustomerWorkspaceUser | null;
   activate(input: CustomerActivationFormInput): Promise<void>;
   retryLogin(): Promise<void>;
+  /** The explicit takeover (FE-03): the user confirmed in the conflict dialog,
+   * the server atomically displaces the other device's lease and mints a
+   * fresh session token (§14). Never invoked without a prior
+   * ``conflict-detected`` transition — no silent switching. */
+  switchSession(): Promise<void>;
+  /** The user declined the takeover: back to the login screen, the other
+   * device keeps the lease. */
+  cancelSessionSwitch(): void;
   logout(): Promise<void>;
   restartAfterExpiry(): void;
   restartAfterRevocation(): void;
@@ -200,6 +209,7 @@ export function useCustomerSession(
               slotNo: cause.onlineSlotNo ?? 0,
               leaseExpiresAt: cause.leaseExpiresAt ?? "",
             });
+            dispatch({ type: "conflict-detected" });
           }
         } else {
           setError(credentialStoreError(cause));
@@ -378,6 +388,7 @@ export function useCustomerSession(
               slotNo: cause.onlineSlotNo ?? 0,
               leaseExpiresAt: cause.leaseExpiresAt ?? "",
             });
+            dispatch({ type: "conflict-detected" });
           }
         } else {
           setError(credentialStoreError(cause));
@@ -388,6 +399,53 @@ export function useCustomerSession(
       setIsBusy(false);
     }
   }, [establishSession, store]);
+
+  // Explicit device switch (FE-03 / T30): the customer confirms the takeover
+  // in the conflict dialog; the server atomically replaces the lease and
+  // mints a fresh session token. The UI must never assume the switch
+  // succeeded before the server confirms it — only this action transitions
+  // to the workspace from the conflict screen.
+  const switchSession = useCallback(async () => {
+    setIsBusy(true);
+    setError(null);
+    try {
+      const deviceToken = await store.loadDeviceCredentialToken();
+      if (deviceToken === null) {
+        dispatch({ type: "credential-missing" });
+        return;
+      }
+      const previousSessionToken = await store.loadSessionToken();
+      const result = await customerSwitch(
+        { kind: "device", token: deviceToken },
+        {
+          idempotencyKey: newIdempotencyKey(),
+          sessionToken: previousSessionToken ?? undefined,
+        },
+      );
+      try {
+        await store.saveSessionToken(result.session.session_token);
+      } catch (cause) {
+        throw credentialStoreError(cause);
+      }
+      sessionTokenRef.current = result.session.session_token;
+      setSessionToken(result.session.session_token);
+      setUser({ userId: result.session.user_id, username: null });
+      setConflict(null);
+      dispatch({ type: "login-succeeded" });
+    } catch (cause) {
+      setError(
+        cause instanceof CustomerApiError ? cause : credentialStoreError(cause),
+      );
+    } finally {
+      setIsBusy(false);
+    }
+  }, [store]);
+
+  const cancelSessionSwitch = useCallback(() => {
+    setError(null);
+    setConflict(null);
+    dispatch({ type: "conflict-cancelled" });
+  }, []);
 
   const logout = useCallback(async () => {
     const token = sessionTokenRef.current;
@@ -440,6 +498,8 @@ export function useCustomerSession(
     user,
     activate,
     retryLogin,
+    switchSession,
+    cancelSessionSwitch,
     logout,
     restartAfterExpiry,
     restartAfterRevocation,

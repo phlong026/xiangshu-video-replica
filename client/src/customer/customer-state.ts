@@ -15,6 +15,7 @@ export type CustomerScreen =
   | "checking"
   | "activation"
   | "login"
+  | "binding-conflict"
   | "workspace"
   | "session-expired"
   | "session-replaced"
@@ -30,6 +31,13 @@ export type CustomerScreenEvent =
   | { type: "activation-succeeded" }
   // A login with the stored device credential established a session.
   | { type: "login-succeeded" }
+  // 401 OTHER_DEVICE_ONLINE during login: another device holds the live lease.
+  // The explicit takeover (switch) is a user decision — nothing switches
+  // silently (T30 / FE-03, dev doc §13.2).
+  | { type: "conflict-detected" }
+  // The user declined the takeover in the conflict dialog: back to login,
+  // the other device keeps the lease.
+  | { type: "conflict-cancelled" }
   // The user signed out (or the workspace session was closed deliberately);
   // the device credential survives, so the next stop is the login screen.
   | { type: "logout" }
@@ -71,7 +79,17 @@ export function customerScreenReducer(
       return screen === "activation" ? "workspace" : screen;
 
     case "login-succeeded":
-      return screen === "login" ? "workspace" : screen;
+      // A login ends on the workspace; the explicit switch ends there too —
+      // the server confirmed the takeover and minted a fresh session token.
+      return screen === "login" || screen === "binding-conflict"
+        ? "workspace"
+        : screen;
+
+    case "conflict-detected":
+      return screen === "login" ? "binding-conflict" : screen;
+
+    case "conflict-cancelled":
+      return screen === "binding-conflict" ? "login" : screen;
 
     case "logout":
       return screen === "workspace" ? "login" : screen;
@@ -98,7 +116,10 @@ export function customerScreenReducer(
       return screen === "device-revoked" ? "activation" : screen;
     case "credential-missing":
       // The stored device credential vanished in the middle of a retry login
-      // (FE-02 / P3 review): go straight back to activation for recovery.
-      return screen === "login" ? "activation" : screen;
+      // or an explicit switch (FE-02 / P3 review): go straight back to
+      // activation for recovery.
+      return screen === "login" || screen === "binding-conflict"
+        ? "activation"
+        : screen;
   }
 }

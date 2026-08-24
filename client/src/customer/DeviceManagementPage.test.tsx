@@ -1,19 +1,29 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+import type { CustomerDeviceListResponse } from "../api";
 import { DeviceManagementPage } from "./DeviceManagementPage";
 
 describe("DeviceManagementPage (FE-04 / T31)", () => {
-  const mockDevices = {
-    devices: [
+  const mockDevices: CustomerDeviceListResponse = {
+    slots: [
       {
-        id: "device-1",
-        device_name: "iPhone •••• AB12",
         slot_no: 1,
-        is_online: true,
-        lease_expires_at: new Date(Date.now() + 3600_000).toISOString(), // 1 小时后过期
+        device: {
+          id: "device-1",
+          slot_no: 1,
+          display_name: "iPhone •••• AB12",
+          platform: "windows",
+          status: "BOUND",
+          bound_at: new Date(Date.now() - 86400_000).toISOString(),
+          last_active_at: new Date().toISOString(),
+          unbound_at: null,
+          revoked_at: null,
+          is_current: true,
+        },
       },
+      { slot_no: 2, device: null },
     ],
-    next_free_slot: 2,
+    history: [],
   };
 
   const mockOnUnbind = vi.fn();
@@ -29,6 +39,7 @@ describe("DeviceManagementPage (FE-04 / T31)", () => {
       <DeviceManagementPage
         devices={mockDevices}
         isOnline={true}
+        leaseExpiresAt={new Date(Date.now() + 3600_000).toISOString()} // 1 小时后过期
         onUnbind={props?.onUnbind ?? mockOnUnbind}
         onError={props?.onError ?? mockOnError}
         onRecharge={props?.onRecharge ?? mockOnRecharge}
@@ -48,9 +59,7 @@ describe("DeviceManagementPage (FE-04 / T31)", () => {
 
   it("displays masked device name without exposing full fingerprint", () => {
     renderWithProps();
-    expect(
-      screen.getByText(/iPhone \u2022\u2022\u2022\u2022 AB12/i),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/iPhone •••• AB12/i)).toBeInTheDocument();
   });
 
   it("has unbind button for each device slot that calls onUnbind callback", async () => {
@@ -61,7 +70,7 @@ describe("DeviceManagementPage (FE-04 / T31)", () => {
 
     // Should prompt user to confirm action first
     await waitFor(() => {
-      expect(mockOnUnbind).toHaveBeenCalled();
+      expect(mockOnUnbind).toHaveBeenCalledWith("device-1");
     });
   });
 

@@ -2530,7 +2530,8 @@ type CustomerActivationResponse =
   components["schemas"]["CustomerActivationResponse"];
 type CustomerLoginResponse = components["schemas"]["LoginResponse"];
 type CustomerHeartbeatResponse = components["schemas"]["HeartbeatResponse"];
-type CustomerDeviceListResponse = components["schemas"]["DeviceListResponse"];
+export type CustomerDeviceListResponse =
+  components["schemas"]["DeviceListResponse"];
 type CustomerEnrollPendingResponse =
   components["schemas"]["DeviceEnrollPendingResponse"];
 type CustomerEnrollConsumedResponse =

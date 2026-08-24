@@ -4,6 +4,7 @@ import { App, WorkspaceShell } from "./App";
 import type { CurrentUser } from "./api";
 import { ActivationPage } from "./customer/ActivationPage";
 import { LoginPage } from "./customer/LoginPage";
+import { SessionConflictDialog } from "./customer/SessionConflictDialog";
 import {
   type CustomerWorkspaceUser,
   customerCredentialStore,
@@ -61,6 +62,26 @@ function CustomerShell() {
           isBusy={session.isBusy}
           error={session.error}
           conflict={session.conflict}
+        />
+      );
+    case "binding-conflict":
+      // The conflict screen only exists with conflict metadata; the reducer
+      // and this component dispatch together, so a null conflict here means
+      // the dialog already cancelled and the screen fell back to login.
+      return session.conflict === null ? (
+        <LoginPage
+          onRetryLogin={() => void session.retryLogin()}
+          isBusy={session.isBusy}
+          error={session.error}
+          conflict={session.conflict}
+        />
+      ) : (
+        <SessionConflictDialog
+          conflict={session.conflict}
+          onCancel={session.cancelSessionSwitch}
+          onSwitch={() => {
+            void session.switchSession();
+          }}
         />
       );
     case "workspace":

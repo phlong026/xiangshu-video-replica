@@ -41,6 +41,38 @@ describe("customerScreenReducer", () => {
     );
   });
 
+  it("routes an other-device-online login to the conflict screen", () => {
+    expect(customerScreenReducer("login", { type: "conflict-detected" })).toBe(
+      "binding-conflict",
+    );
+    // Guarded: a conflict can only be detected while logging in.
+    expect(
+      customerScreenReducer("workspace", { type: "conflict-detected" }),
+    ).toBe("workspace");
+  });
+
+  it("returns to the login screen when the takeover is declined", () => {
+    expect(
+      customerScreenReducer("binding-conflict", { type: "conflict-cancelled" }),
+    ).toBe("login");
+    expect(customerScreenReducer("login", { type: "conflict-cancelled" })).toBe(
+      "login",
+    );
+  });
+
+  it("ends a confirmed takeover on the workspace", () => {
+    // The server confirmed the switch and minted a fresh session token.
+    expect(
+      customerScreenReducer("binding-conflict", { type: "login-succeeded" }),
+    ).toBe("workspace");
+  });
+
+  it("sends a credential-missing switch straight to activation for recovery", () => {
+    expect(
+      customerScreenReducer("binding-conflict", { type: "credential-missing" }),
+    ).toBe("activation");
+  });
+
   it("keeps a logout on the login screen (the device credential survives)", () => {
     expect(customerScreenReducer("workspace", { type: "logout" })).toBe(
       "login",

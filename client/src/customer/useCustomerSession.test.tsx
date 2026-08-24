@@ -225,7 +225,7 @@ describe("useCustomerSession", () => {
     expect(loginCall).toBeDefined();
   });
 
-  it("shows the masked conflict instead of switching when the other device is online", async () => {
+  it("surfaces the other-device-online conflict on the conflict screen without switching", async () => {
     const store = memoryStore({ deviceToken: "device-token-1" });
     const fetchMock = stubFetch((url) => {
       if (url.endsWith("/api/customer/sessions/login")) {
@@ -249,18 +249,134 @@ describe("useCustomerSession", () => {
       useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
     );
 
-    await waitFor(() => expect(result.current.screen).toBe("login"));
+    await waitFor(() => expect(result.current.screen).toBe("binding-conflict"));
     expect(result.current.conflict).toEqual({
       deviceNameMasked: "张**的 iPad",
       slotNo: 2,
       leaseExpiresAt: "2026-08-24T12:05:00Z",
     });
-    // T29: no automatic switch — the explicit takeover flow is T30.
+    // T29/T30: no silent switch — the takeover only runs after the user
+    // confirms it in the conflict dialog.
     expect(
       fetchMock.mock.calls.some(([url]) =>
         String(url).endsWith("/api/customer/sessions/switch"),
       ),
     ).toBe(false);
+  });
+
+  it("switches to the confirmed device after the user confirms the takeover", async () => {
+    const store = memoryStore({ deviceToken: "device-token-1" });
+    const fetchMock = stubFetch((url) => {
+      if (url.endsWith("/api/customer/sessions/login")) {
+        return jsonResponse(
+          {
+            detail: {
+              code: "OTHER_DEVICE_ONLINE",
+              message: "另一台设备在线",
+              online_device_name_masked: "张**的 iPad",
+              online_slot_no: 2,
+              lease_expires_at: "2026-08-24T12:05:00Z",
+            },
+          },
+          409,
+        );
+      }
+      if (url.endsWith("/api/customer/sessions/switch")) {
+        return jsonResponse(loginBody, 201);
+      }
+      return jsonResponse({}, 500);
+    });
+
+    const { result } = renderHook(() =>
+      useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
+    );
+    await waitFor(() => expect(result.current.screen).toBe("binding-conflict"));
+
+    await act(async () => {
+      await result.current.switchSession();
+    });
+
+    expect(result.current.screen).toBe("workspace");
+    expect(result.current.conflict).toBeNull();
+    expect(store.snapshot().sessionToken).toBe(renewedSessionTokenText);
+    expect(
+      fetchMock.mock.calls.some(([url]) =>
+        String(url).endsWith("/api/customer/sessions/switch"),
+      ),
+    ).toBe(true);
+  });
+
+  it("returns to the login screen when the takeover is declined", async () => {
+    const store = memoryStore({ deviceToken: "device-token-1" });
+    stubFetch((url) => {
+      if (url.endsWith("/api/customer/sessions/login")) {
+        return jsonResponse(
+          {
+            detail: {
+              code: "OTHER_DEVICE_ONLINE",
+              message: "另一台设备在线",
+              online_device_name_masked: "张**的 iPad",
+              online_slot_no: 2,
+              lease_expires_at: "2026-08-24T12:05:00Z",
+            },
+          },
+          409,
+        );
+      }
+      return jsonResponse({}, 500);
+    });
+
+    const { result } = renderHook(() =>
+      useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
+    );
+    await waitFor(() => expect(result.current.screen).toBe("binding-conflict"));
+
+    await act(async () => {
+      result.current.cancelSessionSwitch();
+    });
+
+    expect(result.current.screen).toBe("login");
+    expect(result.current.conflict).toBeNull();
+  });
+
+  it("keeps the conflict screen when the switch request fails", async () => {
+    const store = memoryStore({ deviceToken: "device-token-1" });
+    stubFetch((url) => {
+      if (url.endsWith("/api/customer/sessions/login")) {
+        return jsonResponse(
+          {
+            detail: {
+              code: "OTHER_DEVICE_ONLINE",
+              message: "另一台设备在线",
+              online_device_name_masked: "张**的 iPad",
+              online_slot_no: 2,
+              lease_expires_at: "2026-08-24T12:05:00Z",
+            },
+          },
+          409,
+        );
+      }
+      if (url.endsWith("/api/customer/sessions/switch")) {
+        return jsonResponse(
+          { detail: { code: "INTERNAL", message: "boom" } },
+          500,
+        );
+      }
+      return jsonResponse({}, 500);
+    });
+
+    const { result } = renderHook(() =>
+      useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
+    );
+    await waitFor(() => expect(result.current.screen).toBe("binding-conflict"));
+
+    await act(async () => {
+      await result.current.switchSession();
+    });
+
+    expect(result.current.screen).toBe("binding-conflict");
+    expect(result.current.conflict).not.toBeNull();
+    expect(result.current.error).not.toBeNull();
   });
 
   it("reports the request id on an idempotency conflict", async () => {

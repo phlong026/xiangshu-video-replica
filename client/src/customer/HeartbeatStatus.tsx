@@ -9,7 +9,7 @@ export function HeartbeatStatus({
   lastHeartbeatAt: string;
   intervalSeconds?: number;
   onRefresh: () => void;
-}): JSX.Element {
+}): React.JSX.Element {
   const now = new Date();
   const heartbeat = new Date(lastHeartbeatAt);
   const diffMs = now.getTime() - heartbeat.getTime();
