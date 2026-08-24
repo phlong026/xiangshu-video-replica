@@ -1,8 +1,12 @@
 """T34 — admin audit log API.
 
 Read-only endpoint for operators and auditors to view the complete audit trail
-of all administrative actions. Currently aggregates admin_adjustments; future
-enhancements can add more event types.
+of all administrative actions. Currently aggregates admin_adjustments (the
+039 append-only table); future enhancements can add more event types.
+
+The acting administrator is resolved through ``users`` (the admin session
+``actor_user_id`` already references ``users.id``, never a separate
+``admin_users`` table — the 039 contract).
 
 Fail-closed runtime: SQLite/missing DSN returns 503 AUDIT_SERVICE_UNAVAILABLE
 instead of falling back to legacy control identity (the T12/T18 precedent).
@@ -66,15 +70,16 @@ def list_audit_log(
     
     try:
         with pg_transaction() as conn:
-            # Query admin adjustments as audit events
+            # Query admin adjustments as audit events; the acting
+            # administrator comes from users (039 admin_user_id -> users.id).
             rows = conn.execute(
                 f"""
                 SELECT aa.id, aa.admin_user_id, aa.target_user_id,
                        aa.source_document_type, aa.source_document_ref,
                        aa.reason, aa.request_id, aa.created_at,
-                       au.email as admin_email
+                       u.username as actor_username
                 FROM admin_adjustments aa
-                JOIN admin_users au ON au.id = aa.admin_user_id
+                JOIN users u ON u.id = aa.admin_user_id
                 {where}
                 ORDER BY aa.created_at DESC, aa.id
                 LIMIT %s OFFSET %s
@@ -98,7 +103,7 @@ def list_audit_log(
             "event_id": str(row[0]),
             "event_type": "ADMIN_ADJUSTMENT",
             "actor_user_id": str(row[1]),
-            "actor_email": str(row[8]),
+            "actor_username": str(row[8]),
             "target_user_id": str(row[2]),
             "source_document_type": str(row[3]),
             "source_document_ref": str(row[4]),

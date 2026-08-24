@@ -1097,3 +1097,57 @@ def test_list_adjustments_for_unknown_user_is_empty(client: TestClient) -> None:
     listing = client.get(_adjustment_path("ghost_u"), headers=admin)
     assert listing.status_code == 200
     assert listing.json()["items"] == []
+
+
+def test_list_customers_returns_activated_customers(client: TestClient) -> None:
+    """ADM-02 read path: the customer list is the activation fact (masked
+    code, username, activation time, code status) — display metadata only."""
+    admin = _admin_session(client)
+    response = client.get("/api/control/customers", headers=admin)
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["total"] == 1
+    assert payload["page"] == 1 and payload["page_size"] == 20
+    customer = payload["customers"][0]
+    assert customer["user_id"] == CUSTOMER_USER_ID
+    assert customer["username"] == "customer_u"
+    assert customer["activation_code"] == "XS04-****"
+    assert customer["status"] == "ACTIVE"
+    assert customer["created_at"]
+
+
+def test_list_customers_supports_pagination_and_username_filter(
+    client: TestClient,
+) -> None:
+    admin = _admin_session(client)
+    # The username filter matches the seeded customer.
+    response = client.get(
+        "/api/control/customers", params={"username": "customer"}, headers=admin
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["total"] == 1
+    # A filter that matches nothing returns an empty, well-formed page.
+    response = client.get(
+        "/api/control/customers", params={"username": "nobody"}, headers=admin
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["total"] == 0
+    assert response.json()["customers"] == []
+    # A page beyond the data is empty but well-formed.
+    response = client.get(
+        "/api/control/customers", params={"page": 3, "page_size": 20}, headers=admin
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["customers"] == []
+
+
+def test_list_customers_is_auditor_readable(client: TestClient) -> None:
+    auditor = _admin_session(client, actor="auditor_u")
+    response = client.get("/api/control/customers", headers=auditor)
+    assert response.status_code == 200, response.text
+    assert response.json()["total"] == 1
+
+
+def test_list_customers_rejects_anonymous(client: TestClient) -> None:
+    response = client.get("/api/control/customers")
+    assert response.status_code == 401

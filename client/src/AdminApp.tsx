@@ -1,5 +1,7 @@
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 import { AdminActivationSection } from "./admin/AdminActivationSection";
+import { CustomersPage } from "./admin/CustomersPage";
+import { DevicesPage } from "./admin/DevicesPage";
 import {
   type BillingSettings,
   type ControlAccount,
@@ -19,13 +21,21 @@ import {
   updateControlZPaySettings,
 } from "./api";
 
-type AdminTab = "accounts" | "orders" | "settings" | "activation";
+type AdminTab =
+  | "accounts"
+  | "orders"
+  | "settings"
+  | "activation"
+  | "customers"
+  | "devices";
 
 const tabs: Array<{ id: AdminTab; label: string }> = [
   { id: "accounts", label: "账号与钱包" },
   { id: "orders", label: "充值订单" },
   { id: "settings", label: "支付与价格" },
   { id: "activation", label: "激活码" },
+  { id: "customers", label: "客户" },
+  { id: "devices", label: "设备" },
 ];
 
 export function AdminApp() {
@@ -451,6 +461,8 @@ export function AdminApp() {
         </section>
       ) : null}
       {activeTab === "activation" ? <AdminActivationSection /> : null}
+      {activeTab === "customers" ? <CustomersPage /> : null}
+      {activeTab === "devices" ? <DevicesPage /> : null}
     </main>
   );
 

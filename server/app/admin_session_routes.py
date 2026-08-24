@@ -1,7 +1,8 @@
-"""T34 — admin session management API.
+"""T34 — admin customer session API.
 
-Read-only endpoint for operators and auditors to view customer session history.
-Supports pagination (limit/offset) and status filtering.
+Read-only endpoint for operators and auditors to view the live customer
+session state (revision 029 ``customer_session_state``: one row per user)
+joined to the bound device.
 
 Fail-closed runtime: SQLite/missing DSN returns 503 SESSION_SERVICE_UNAVAILABLE
 instead of falling back to legacy control identity (the T12/T18 precedent).
@@ -36,41 +37,51 @@ def list_customer_sessions(
     limit: int = DEFAULT_LIST_LIMIT,
     offset: int = 0,
 ) -> dict[str, object]:
-    """List all sessions for a target customer with pagination.
-    
-    Returns session metadata including device info, status, and timestamps.
-    Both admin and auditor roles can access this endpoint (read-only).
+    """List the live session state for a target customer.
+
+    The 029 model keeps exactly one session row per user
+    (``customer_session_state``, primary key *is* ``user_id``) so the list is
+    at most one row; device columns come from the bound ``customer_devices``
+    row and ``status`` filters on the device status (BOUND/UNBOUND/REVOKED).
+    Both admin and auditor roles can read (read-only).
     """
     bounded_limit = max(0, min(limit, MAX_LIST_LIMIT))
     bounded_offset = max(0, offset)
-    
-    clauses: list[str] = ["cs.user_id = %s"]
+
+    clauses: list[str] = ["css.user_id = %s"]
     params: list[object] = [user_id]
-    
+
     if status:
-        clauses.append("cs.status = %s")
+        clauses.append("cd.status = %s")
         params.append(status)
-    
+
     where = f"WHERE {' AND '.join(clauses)}"
-    
+
     try:
         with pg_transaction() as conn:
             rows = conn.execute(
                 f"""
-                SELECT cs.id, cs.user_id, cs.device_id, cs.session_token,
-                       cs.status, cs.created_at, cs.expires_at,
-                       cd.display_name, cd.platform, cd.slot_no
-                FROM customer_sessions cs
-                JOIN customer_devices cd ON cd.id = cs.device_id
+                SELECT css.session_id, css.user_id, u.username,
+                       css.device_id, css.session_epoch,
+                       css.lease_until, css.last_heartbeat_at,
+                       css.created_at, css.updated_at,
+                       cd.display_name, cd.platform, cd.slot_no, cd.status
+                FROM customer_session_state css
+                JOIN customer_devices cd ON cd.id = css.device_id
+                JOIN users u ON u.id = css.user_id
                 {where}
-                ORDER BY cs.created_at DESC, cs.id
+                ORDER BY css.created_at DESC, css.session_id
                 LIMIT %s OFFSET %s
                 """,
                 (*params, bounded_limit, bounded_offset),
             ).fetchall()
-            
+
             total_row = conn.execute(
-                f"SELECT COUNT(*) FROM customer_sessions cs {where}",
+                f"""
+                SELECT COUNT(*) FROM customer_session_state css
+                JOIN customer_devices cd ON cd.id = css.device_id
+                {where}
+                """,
                 tuple(params),
             ).fetchone()
     except (RuntimeError, MissingDatabaseConfigError) as exc:
@@ -79,25 +90,28 @@ def list_customer_sessions(
             SESSION_SERVICE_UNAVAILABLE,
             SESSION_SERVICE_UNAVAILABLE_MESSAGE,
         ) from exc
-    
+
     items = [
         {
             "session_id": str(row[0]),
             "user_id": str(row[1]),
-            "device_id": str(row[2]),
-            "session_token": str(row[3])[:8] + "...",  # Masked for security
-            "status": str(row[4]),
-            "created_at": str(row[5]) if row[5] is not None else "",
-            "expires_at": str(row[6]) if row[6] is not None else "",
-            "device_name": row[7],
-            "platform": str(row[8]),
-            "slot_no": int(row[9]),
+            "username": row[2],
+            "device_id": str(row[3]),
+            "session_epoch": int(row[4]),
+            "lease_until": str(row[5]) if row[5] is not None else "",
+            "last_heartbeat_at": str(row[6]) if row[6] is not None else "",
+            "created_at": str(row[7]) if row[7] is not None else "",
+            "updated_at": str(row[8]) if row[8] is not None else "",
+            "device_name": row[9],
+            "platform": str(row[10]),
+            "slot_no": int(row[11]),
+            "device_status": str(row[12]),
         }
         for row in rows
     ]
-    
+
     total = int(total_row[0]) if total_row is not None else 0
-    
+
     return {
         "items": items,
         "total": total,

@@ -487,3 +487,218 @@ export function adminActivationErrorMessage(
   }
   return fallback;
 }
+
+// ---------------------------------------------------------------------------
+// T33 — Customer management APIs (ADM-02)
+// ---------------------------------------------------------------------------
+
+export class AdminCustomerError extends Error {
+  readonly status: number | undefined;
+  readonly code: string | undefined;
+
+  constructor(message: string, status?: number, code?: string) {
+    super(message);
+    this.name = "AdminCustomerError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
+export interface CustomerListItem {
+  user_id: string;
+  username: string;
+  created_at: string;
+  activation_code: string;
+  status: string;
+}
+
+export interface CustomerListResponse {
+  customers: CustomerListItem[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface CustomerListOptions {
+  page?: number;
+  page_size?: number;
+  username_filter?: string;
+}
+
+/**
+ * Fetch the customer list with pagination and optional username filtering.
+ *
+ * GET /api/control/customers?page=&page_size=&username=
+ */
+export async function listCustomers(
+  options: CustomerListOptions = {},
+): Promise<CustomerListResponse> {
+  const params = new URLSearchParams();
+  if (options.page) params.set("page", String(options.page));
+  if (options.page_size) params.set("page_size", String(options.page_size));
+  if (options.username_filter) params.set("username", options.username_filter);
+
+  const response = await requestControl(
+    `/api/control/customers?${params.toString()}`,
+    { method: "GET" },
+  );
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new AdminCustomerError(
+      body || `HTTP ${response.status}`,
+      response.status,
+    );
+  }
+
+  return response.json() as Promise<CustomerListResponse>;
+}
+
+// ---------------------------------------------------------------------------
+// T33 — Device management APIs (ADM-02)
+// ---------------------------------------------------------------------------
+
+export class AdminDeviceError extends Error {
+  readonly status: number | undefined;
+  readonly code: string | undefined;
+
+  constructor(message: string, status?: number, code?: string) {
+    super(message);
+    this.name = "AdminDeviceError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
+export interface DeviceListItem {
+  device_id: string;
+  activation_code_id: string;
+  user_id: string;
+  slot_no: number;
+  display_name: string | null;
+  platform: string;
+  status: string;
+  bound_at: string | null;
+  unbound_at: string | null;
+  revoked_at: string | null;
+}
+
+export interface DeviceListResponse {
+  items: DeviceListItem[];
+  limit: number;
+  offset: number;
+}
+
+export interface DeviceListOptions {
+  status?: string;
+  limit?: number;
+  offset?: number;
+}
+
+/**
+ * Fetch the device list with offset-based pagination.
+ *
+ * GET /api/control/devices?status=&limit=&offset=
+ */
+export async function listDevices(
+  options: DeviceListOptions = {},
+): Promise<DeviceListResponse> {
+  const params = new URLSearchParams();
+  if (options.status) params.set("status", options.status);
+  if (options.limit !== undefined) params.set("limit", String(options.limit));
+  if (options.offset !== undefined) params.set("offset", String(options.offset));
+
+  const response = await requestControl(
+    `/api/control/devices?${params.toString()}`,
+    { method: "GET" },
+  );
+
+  if (!response.ok) {
+    throw await parseActivationError(response, "读取设备列表失败");
+  }
+
+  return response.json() as Promise<DeviceListResponse>;
+}
+
+// ---------------------------------------------------------------------------
+// T33 — Adjustment history APIs (ADM-02)
+// ---------------------------------------------------------------------------
+
+export class AdminAdjustmentError extends Error {
+  readonly status: number | undefined;
+  readonly code: string | undefined;
+
+  constructor(message: string, status?: number, code?: string) {
+    super(message);
+    this.name = "AdminAdjustmentError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
+export interface AdjustmentListItem {
+  adjustment_id: string;
+  order_id: string;
+  admin_user_id: string;
+  source_document_type: string;
+  source_document_ref: string;
+  reason: string;
+  request_id: string;
+  created_at: string;
+  amount_fen: number;
+  credits: number;
+  pricing_scope: string;
+  status: string;
+}
+
+export interface AdjustmentListResponse {
+  items: AdjustmentListItem[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface AdjustmentListOptions {
+  limit?: number;
+  offset?: number;
+}
+
+/**
+ * Fetch the adjustment history for a specific user with offset-based pagination.
+ *
+ * GET /api/control/customers/{user_id}/adjustments?limit=&offset=
+ */
+export async function listAdminAdjustments(
+  userId: string,
+  options: AdjustmentListOptions = {},
+): Promise<AdjustmentListResponse> {
+  const params = new URLSearchParams();
+  if (options.limit !== undefined) params.set("limit", String(options.limit));
+  if (options.offset !== undefined) params.set("offset", String(options.offset));
+
+  const response = await requestControl(
+    `/api/control/customers/${encodeURIComponent(userId)}/adjustments?${params.toString()}`,
+    { method: "GET" },
+  );
+
+  if (!response.ok) {
+    let detail = "读取调账历史失败";
+    try {
+      const body: unknown = await response.json();
+      if (typeof body === "object" && body !== null && !Array.isArray(body)) {
+        const d = (body as Record<string, unknown>).detail;
+        if (typeof d === "object" && d !== null) {
+          const msg = (d as Record<string, unknown>).message;
+          if (typeof msg === "string" && msg.trim()) {
+            detail = `读取调账历史失败：${msg}（${response.status}）`;
+          }
+        }
+      }
+    } catch {
+      /* non-JSON body */
+    }
+    throw new AdminAdjustmentError(detail, response.status);
+  }
+
+  return response.json() as Promise<AdjustmentListResponse>;
+}

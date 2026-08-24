@@ -581,3 +581,78 @@ def list_admin_adjustments(
 
     total = int(total_row[0]) if total_row is not None else 0
     return {"items": items, "total": total, "limit": bounded_limit, "offset": bounded_offset}
+
+
+DEFAULT_CUSTOMER_PAGE_SIZE = 20
+MAX_CUSTOMER_PAGE_SIZE = 100
+
+
+@router.get("/customers")
+def list_customers(
+    actor: AdminReader,
+    page: int = 1,
+    page_size: int = DEFAULT_CUSTOMER_PAGE_SIZE,
+    username: str = "",
+) -> dict[str, object]:
+    """Every activated customer for operators and auditors (ADM-02 read path).
+
+    A customer is the activation fact (one code, one user): the list carries
+    display metadata only — masked code, username, activation time and the
+    code status. The identity fields live on users / activation_codes; the
+    data model has no customer email, so the T33 contract uses username.
+    """
+    bounded_page = max(1, page)
+    bounded_page_size = max(1, min(page_size, MAX_CUSTOMER_PAGE_SIZE))
+    offset = (bounded_page - 1) * bounded_page_size
+
+    clauses: list[str] = []
+    params: list[object] = []
+    if username.strip():
+        clauses.append("u.username ILIKE %s")
+        params.append(f"%{username.strip()}%")
+
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    try:
+        with pg_transaction() as conn:
+            rows = conn.execute(
+                "SELECT aca.user_id, u.username, aca.activated_at, "
+                "ac.id, ac.masked_code, ac.status "
+                "FROM activation_code_activations aca "
+                "JOIN users u ON u.id = aca.user_id "
+                "JOIN activation_codes ac ON ac.id = aca.code_id "
+                f"{where} "
+                "ORDER BY aca.activated_at, aca.id "
+                "LIMIT %s OFFSET %s",
+                (*params, bounded_page_size, offset),
+            ).fetchall()
+            total_row = conn.execute(
+                "SELECT COUNT(*) FROM activation_code_activations aca "
+                "JOIN users u ON u.id = aca.user_id "
+                "JOIN activation_codes ac ON ac.id = aca.code_id "
+                f"{where}",
+                params,
+            ).fetchone()
+    except (RuntimeError, MissingDatabaseConfigError) as exc:
+        raise _http(
+            503,
+            "CUSTOMER_SERVICE_UNAVAILABLE",
+            "Customer management requires the PostgreSQL runtime.",
+        ) from exc
+
+    customers = [
+        {
+            "user_id": str(row[0]),
+            "username": str(row[1]),
+            "created_at": str(row[2]) if row[2] is not None else "",
+            "activation_code": str(row[4]),
+            "status": str(row[5]),
+        }
+        for row in rows
+    ]
+    total = int(total_row[0]) if total_row is not None else 0
+    return {
+        "customers": customers,
+        "total": total,
+        "page": bounded_page,
+        "page_size": bounded_page_size,
+    }
