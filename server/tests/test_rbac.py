@@ -840,3 +840,50 @@ def test_audit_logs_are_readable_only_by_admin_and_auditor(client: TestClient) -
     assert employee.json()["detail"]["code"] == "ROLE_FORBIDDEN"
     assert auditor.status_code == 200
     assert admin.status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("/api/projects/project_owned", 403),
+        ("/api/projects/project_owned/analysis/latest", 403),
+        ("/api/projects/project_owned/shot-cards/latest", 403),
+        ("/api/projects/project_owned/first-frames/latest", 403),
+        ("/api/projects/project_owned/source-frames/latest", 403),
+        ("/api/projects/project_owned/scripts/latest", 403),
+        ("/api/projects/project_owned/prompts/latest", 403),
+        ("/api/generation-batches?project_id=project_owned", 403),
+        ("/api/assets/asset_owned", 403),
+    ],
+)
+def test_cross_user_read_matrix_answers_forbidden(
+    client: TestClient,
+    path: str,
+    expected: int,
+) -> None:
+    """SES-05: another employee's read of a foreign project's resources answers
+    403 — every project-scoped read route enforces the owner boundary."""
+    response = client.get(path, headers=auth_headers("employee_2"))
+    assert response.status_code == expected, (path, response.text)
+
+
+def test_cross_user_wallet_is_owner_scoped_and_not_leakable(
+    client: TestClient, db_path: Path
+) -> None:
+    """SES-05: the wallet and its transactions are strictly the actor's own —
+    no cross-user parameter can address another user's balance."""
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        for user_id, credits in (("employee_1", 10), ("employee_2", 20)):
+            conn.execute(
+                "INSERT INTO wallets (user_id, available_credits, reserved_credits) "
+                "VALUES (%s, %s, 0)",
+                (user_id, credits),
+            )
+    own = client.get("/api/wallet", headers=auth_headers("employee_1"))
+    assert own.status_code == 200
+    other = client.get("/api/wallet", headers=auth_headers("employee_2"))
+    assert other.status_code == 200
+    # The balance is the actor's own (no user parameter exists to address
+    # another user's wallet) — each identity sees only its own row.
+    assert own.json()["available_credits"] == 10
+    assert other.json()["available_credits"] == 20
