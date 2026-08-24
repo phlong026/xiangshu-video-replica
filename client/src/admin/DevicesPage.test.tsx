@@ -1,7 +1,7 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
-import { DevicesPage } from "./DevicesPage";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as adminApi from "../api.admin";
+import { DevicesPage } from "./DevicesPage";
 
 // Mock the admin API module
 vi.mock("../api.admin", () => ({
@@ -112,7 +112,10 @@ describe("DevicesPage (ADM-02 / T33)", () => {
     const nextPageButton = screen.getByRole("button", { name: "下一页" });
     fireEvent.click(nextPageButton);
 
-    expect(adminApi.listDevices).toHaveBeenCalledWith({ limit: 20, offset: 20 });
+    expect(adminApi.listDevices).toHaveBeenCalledWith({
+      limit: 20,
+      offset: 20,
+    });
   });
 
   it("displays device status badges correctly", async () => {

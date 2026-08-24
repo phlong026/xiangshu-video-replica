@@ -1,8 +1,8 @@
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 
 import {
-  type CustomerListItem,
   AdminCustomerError,
+  type CustomerListItem,
   listCustomers,
 } from "../api.admin";
 import { AdjustmentsPage } from "./AdjustmentsPage";
@@ -139,7 +139,9 @@ export function CustomersPage() {
                   <td>
                     <code>{customer.activation_code}</code>
                   </td>
-                  <td>{new Date(customer.created_at).toLocaleString("zh-CN")}</td>
+                  <td>
+                    {new Date(customer.created_at).toLocaleString("zh-CN")}
+                  </td>
                   <td>
                     <span className={`status-badge status-${customer.status}`}>
                       {statusLabels[customer.status] || customer.status}

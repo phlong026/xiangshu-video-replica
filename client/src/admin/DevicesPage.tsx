@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 
 import {
-  type DeviceListItem,
   AdminDeviceError,
+  type DeviceListItem,
   listDevices,
 } from "../api.admin";
 
@@ -100,7 +100,9 @@ export function DevicesPage() {
                 <tr key={device.device_id}>
                   <td>{device.display_name || `设备 #${device.slot_no}`}</td>
                   <td>
-                    <span className={`platform-badge platform-${device.platform}`}>
+                    <span
+                      className={`platform-badge platform-${device.platform}`}
+                    >
                       {platformLabels[device.platform] || device.platform}
                     </span>
                   </td>

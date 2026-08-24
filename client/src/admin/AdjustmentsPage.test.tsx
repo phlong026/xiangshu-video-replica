@@ -1,7 +1,7 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
-import { AdjustmentsPage } from "./AdjustmentsPage";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as adminApi from "../api.admin";
+import { AdjustmentsPage } from "./AdjustmentsPage";
 
 // Mock the admin API module
 vi.mock("../api.admin", () => ({

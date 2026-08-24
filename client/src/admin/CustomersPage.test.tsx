@@ -1,7 +1,7 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
-import { CustomersPage } from "./CustomersPage";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as adminApi from "../api.admin";
+import { CustomersPage } from "./CustomersPage";
 
 // Mock the admin API module
 vi.mock("../api.admin", () => ({
@@ -113,7 +113,10 @@ describe("CustomersPage (ADM-02 / T33)", () => {
     const nextPageButton = screen.getByRole("button", { name: "下一页" });
     fireEvent.click(nextPageButton);
 
-    expect(adminApi.listCustomers).toHaveBeenCalledWith({ page: 2, page_size: 20 });
+    expect(adminApi.listCustomers).toHaveBeenCalledWith({
+      page: 2,
+      page_size: 20,
+    });
   });
 
   it("supports filtering by username", async () => {

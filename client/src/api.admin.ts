@@ -606,7 +606,8 @@ export async function listDevices(
   const params = new URLSearchParams();
   if (options.status) params.set("status", options.status);
   if (options.limit !== undefined) params.set("limit", String(options.limit));
-  if (options.offset !== undefined) params.set("offset", String(options.offset));
+  if (options.offset !== undefined)
+    params.set("offset", String(options.offset));
 
   const response = await requestControl(
     `/api/control/devices?${params.toString()}`,
@@ -674,7 +675,8 @@ export async function listAdminAdjustments(
 ): Promise<AdjustmentListResponse> {
   const params = new URLSearchParams();
   if (options.limit !== undefined) params.set("limit", String(options.limit));
-  if (options.offset !== undefined) params.set("offset", String(options.offset));
+  if (options.offset !== undefined)
+    params.set("offset", String(options.offset));
 
   const response = await requestControl(
     `/api/control/customers/${encodeURIComponent(userId)}/adjustments?${params.toString()}`,
