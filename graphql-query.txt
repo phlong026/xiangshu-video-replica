@@ -1,0 +1,21 @@
+query {
+  repository(owner: "phlong026", name: "xiangshu-video-replica") {
+    pullRequest(number: 51) {
+      reviewThreads(first: 50) {
+        nodes {
+          id
+          isResolved
+          isOutdated
+          comments(first: 20) {
+            nodes {
+              databaseId
+              body
+              path
+              line
+            }
+          }
+        }
+      }
+    }
+  }
+}

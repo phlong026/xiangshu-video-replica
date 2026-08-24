@@ -5075,3 +5075,78 @@ button.regenerate-button {
     width: 100%;
   }
 }
+
+.admin-session {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 10px 12px;
+  color: #c9c2b8;
+  font-size: 13px;
+}
+
+.admin-session button {
+  margin-left: auto;
+}
+
+.admin-hint {
+  margin: 0;
+  color: #aaa297;
+  font-size: 13px;
+}
+
+.admin-result {
+  display: grid;
+  max-width: 720px;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  padding: 16px 20px;
+}
+
+.admin-result h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.admin-result p {
+  margin: 0;
+  color: #c9c2b8;
+  font-size: 13px;
+  word-break: break-all;
+}
+
+.admin-code-list {
+  display: grid;
+  gap: 6px;
+  margin: 4px 0 0;
+  padding: 12px 12px 12px 28px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  color: #f2ede5;
+  font-size: 14px;
+  word-break: break-all;
+}
+
+.admin-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 12px;
+}
+
+.admin-filters label {
+  display: grid;
+  gap: 6px;
+  color: #c9c2b8;
+  font-size: 13px;
+}
+
+.admin-filters button {
+  align-self: end;
+}

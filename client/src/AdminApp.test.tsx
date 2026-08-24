@@ -112,6 +112,20 @@ const settings = {
 
 function installFetch() {
   const fetchMock = vi.fn((url: string, options?: RequestInit) => {
+    if (
+      url.endsWith("/api/control/admin/session") &&
+      (!options?.method || options.method === "GET")
+    ) {
+      return jsonResponse(
+        {
+          detail: {
+            code: "ADMIN_SESSION_INVALID",
+            message: "Admin session is missing, revoked or invalid.",
+          },
+        },
+        401,
+      );
+    }
     if (url.includes("/api/control/accounts?")) {
       return jsonResponse(accountsPage);
     }
@@ -260,6 +274,18 @@ describe("AdminApp", () => {
     expect(String(zpayCall?.[1]?.body)).not.toContain("gateway_url");
     expect(String(zpayCall?.[1]?.body)).not.toContain("notify_url");
     expect(String(zpayCall?.[1]?.body)).not.toContain("return_url");
+  });
+
+  it("opens the activation tab at the admin sign-in gate", async () => {
+    installFetch();
+
+    render(<AdminApp />);
+    fireEvent.click(screen.getByRole("button", { name: "激活码" }));
+
+    expect(await screen.findByLabelText("管理登录凭据")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "登录管理端" }),
+    ).toBeInTheDocument();
   });
 
   it("keeps key order actions available on a narrow viewport", async () => {

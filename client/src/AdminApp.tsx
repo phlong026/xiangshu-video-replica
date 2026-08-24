@@ -1,5 +1,5 @@
 import { type FormEvent, useCallback, useEffect, useState } from "react";
-
+import { AdminActivationSection } from "./admin/AdminActivationSection";
 import {
   type BillingSettings,
   type ControlAccount,
@@ -19,12 +19,13 @@ import {
   updateControlZPaySettings,
 } from "./api";
 
-type AdminTab = "accounts" | "orders" | "settings";
+type AdminTab = "accounts" | "orders" | "settings" | "activation";
 
 const tabs: Array<{ id: AdminTab; label: string }> = [
   { id: "accounts", label: "账号与钱包" },
   { id: "orders", label: "充值订单" },
   { id: "settings", label: "支付与价格" },
+  { id: "activation", label: "激活码" },
 ];
 
 export function AdminApp() {
@@ -449,6 +450,7 @@ export function AdminApp() {
           </form>
         </section>
       ) : null}
+      {activeTab === "activation" ? <AdminActivationSection /> : null}
     </main>
   );
 

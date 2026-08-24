@@ -1,0 +1,489 @@
+// T32 — admin activation frontend adapter.
+//
+// The customer V3 control plane lives behind the T09 admin session
+// (HttpOnly `admin_session` cookie on /api/control) plus the per-session CSRF
+// token returned once by the exchange response. The CSRF token is held in a
+// module-level variable only: it must never reach localStorage, sessionStorage
+// or any other browser persistence (ADM-01 No-Go red line) — after a page
+// refresh the cookie still authorises reads, while writes require a fresh
+// exchange.
+//
+// Every write goes out with the dev-doc §15 admin write contract:
+// `confirm: true`, a non-blank `reason`, and a unique `Idempotency-Key`
+// header, alongside the `X-Admin-CSRF` header; responses carry the audit
+// `request_id` that the pages surface to the operator.
+
+import { resolveApiBaseUrl } from "./api";
+
+const DEFAULT_TIMEOUT_MS = 5_000;
+const CSRF_HEADER = "X-Admin-CSRF";
+const IDEMPOTENCY_KEY_HEADER = "Idempotency-Key";
+
+export class AdminActivationError extends Error {
+  readonly status: number | undefined;
+  readonly code: string | undefined;
+
+  constructor(message: string, status?: number, code?: string) {
+    super(message);
+    this.name = "AdminActivationError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
+let adminCsrfToken: string | null = null;
+
+/** Drop the in-memory session state (logout, expiry, tests). */
+export function clearAdminActivationSession(): void {
+  adminCsrfToken = null;
+}
+
+function requireCsrfToken(): string {
+  if (!adminCsrfToken) {
+    throw new AdminActivationError(
+      "管理登录令牌缺失，请重新登录后再执行写操作",
+      401,
+      "ADMIN_CSRF_UNAVAILABLE",
+    );
+  }
+  return adminCsrfToken;
+}
+
+function newIdempotencyKey(): string {
+  const cryptoRef = globalThis.crypto;
+  if (cryptoRef && typeof cryptoRef.randomUUID === "function") {
+    return cryptoRef.randomUUID();
+  }
+  return `idem-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 14)}`;
+}
+
+/**
+ * Mint an idempotency key for one logical submission.
+ *
+ * The server (T12) keeps a replay snapshot keyed by (actor, route, key digest)
+ * so that a retry after an ambiguous failure (timeout / network error) replays
+ * the original response instead of creating a second batch. Pages therefore
+ * mint a key on the first submit attempt and reuse it for retries of that
+ * same submission; a fresh key is minted only after the previous submission
+ * reached a definitive outcome.
+ */
+export function createIdempotencyKey(): string {
+  return newIdempotencyKey();
+}
+
+function apiBaseUrl(): string {
+  return resolveApiBaseUrl(
+    import.meta.env.VITE_API_BASE_URL,
+    import.meta.env.PROD,
+    window.location,
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+async function parseActivationError(
+  response: Response,
+  fallback: string,
+): Promise<AdminActivationError> {
+  let code: string | undefined;
+  let message: string | undefined;
+  try {
+    const payload: unknown = await response.json();
+    if (isRecord(payload) && isRecord(payload.detail)) {
+      code =
+        typeof payload.detail.code === "string"
+          ? payload.detail.code
+          : undefined;
+      message =
+        typeof payload.detail.message === "string"
+          ? payload.detail.message
+          : undefined;
+    }
+  } catch {
+    // A non-JSON body must not hide the HTTP status.
+  }
+  const text = message?.trim()
+    ? `${fallback}：${message}（${response.status}）`
+    : `${fallback}（${response.status}）`;
+  return new AdminActivationError(text, response.status, code);
+}
+
+async function requestControl(
+  path: string,
+  init: RequestInit & { headers?: Record<string, string> },
+  timeoutMs: number = DEFAULT_TIMEOUT_MS,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const headers: Record<string, string> = { ...(init.headers ?? {}) };
+  if (init.body && !(init.body instanceof FormData)) {
+    headers["Content-Type"] = "application/json";
+  }
+  try {
+    return await fetch(`${apiBaseUrl()}${path}`, {
+      ...init,
+      headers,
+      credentials: "include",
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new AdminActivationError("请求超时，请重试");
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
+async function adminWrite<T>(
+  path: string,
+  fields: Record<string, unknown>,
+  reason: string,
+  fallback: string,
+  idempotencyKey?: string,
+): Promise<T> {
+  const csrf = requireCsrfToken();
+  const response = await requestControl(path, {
+    method: "POST",
+    headers: {
+      [CSRF_HEADER]: csrf,
+      [IDEMPOTENCY_KEY_HEADER]: idempotencyKey ?? newIdempotencyKey(),
+    },
+    body: JSON.stringify({ ...fields, confirm: true, reason }),
+  });
+  if (!response.ok) {
+    throw await parseActivationError(response, fallback);
+  }
+  return (await response.json()) as T;
+}
+
+// ---------------------------------------------------------------------------
+// Session (T09)
+// ---------------------------------------------------------------------------
+
+export type AdminActorInfo = {
+  user_id: string;
+  username: string;
+  display_name: string;
+  role: string;
+};
+
+export type AdminExchangeResult = {
+  session_id: string;
+  expires_at: string;
+  csrf_token: string;
+  actor: AdminActorInfo;
+};
+
+export type AdminSessionInfo = {
+  session_id: string;
+  expires_at: string;
+  last_activity_at: string;
+  actor: AdminActorInfo;
+};
+
+export async function exchangeAdminSession(
+  credential: string,
+): Promise<AdminExchangeResult> {
+  const response = await requestControl("/api/control/admin/session/exchange", {
+    method: "POST",
+    body: JSON.stringify({ credential }),
+  });
+  if (!response.ok) {
+    throw await parseActivationError(response, "管理登录失败");
+  }
+  const payload = (await response.json()) as AdminExchangeResult;
+  // Memory only — never persisted (No-Go red line).
+  adminCsrfToken = payload.csrf_token;
+  return payload;
+}
+
+export async function fetchAdminSession(): Promise<AdminSessionInfo> {
+  const response = await requestControl("/api/control/admin/session", {
+    method: "GET",
+  });
+  if (!response.ok) {
+    throw await parseActivationError(response, "读取管理会话失败");
+  }
+  return (await response.json()) as AdminSessionInfo;
+}
+
+export async function deleteAdminSession(): Promise<void> {
+  const csrf = requireCsrfToken();
+  const response = await requestControl("/api/control/admin/session", {
+    method: "DELETE",
+    headers: { [CSRF_HEADER]: csrf },
+  });
+  if (!response.ok) {
+    throw await parseActivationError(response, "退出管理登录失败");
+  }
+  adminCsrfToken = null;
+}
+
+// ---------------------------------------------------------------------------
+// Activation codes (T12)
+// ---------------------------------------------------------------------------
+
+export type ActivationCodeListItem = {
+  code_id: string;
+  batch_id: string;
+  masked_code: string;
+  status: string;
+  bound_user_id: string | null;
+  issued_at: string | null;
+};
+
+export type ActivationCodePage = {
+  items: ActivationCodeListItem[];
+  limit: number;
+  offset: number;
+};
+
+export type ActivationBatchResult = {
+  batch_id: string;
+  name: string;
+  face_value_fen: number;
+  unit_price_fen_snapshot: number;
+  credits_snapshot: number;
+  quantity: number;
+  activation_expires_at: string;
+  status: string;
+  created_by_user_id: string;
+  request_id: string;
+};
+
+export type ActivationGenerateResult = {
+  batch_id: string;
+  export_id: string;
+  expires_at: string;
+  codes: Array<{ code_id: string; masked_code: string }>;
+  request_id: string;
+};
+
+export type ActivationDownloadResult = {
+  export_id: string;
+  batch_id: string;
+  codes: string[];
+  downloaded_at: string;
+  request_id: string;
+};
+
+export type ActivationDeliverResult = {
+  code_id: string;
+  status: string;
+  delivery_id: string;
+  request_id: string;
+};
+
+export type ActivationCodeMutationResult = {
+  code_id: string;
+  status: string;
+  request_id: string;
+};
+
+export async function createActivationCodeBatch(
+  input: {
+    name: string;
+    face_value_fen: number;
+    credits: number;
+    quantity: number;
+    activation_expires_at: string;
+    reason: string;
+  },
+  idempotencyKey?: string,
+): Promise<ActivationBatchResult> {
+  return adminWrite<ActivationBatchResult>(
+    "/api/control/activation-code-batches",
+    {
+      name: input.name,
+      face_value_fen: input.face_value_fen,
+      credits: input.credits,
+      quantity: input.quantity,
+      activation_expires_at: input.activation_expires_at,
+    },
+    input.reason,
+    "创建激活码批次失败",
+    idempotencyKey,
+  );
+}
+
+export async function generateActivationCodes(
+  batchId: string,
+  quantity: number,
+  reason: string,
+  idempotencyKey?: string,
+): Promise<ActivationGenerateResult> {
+  return adminWrite<ActivationGenerateResult>(
+    `/api/control/activation-code-batches/${encodeURIComponent(batchId)}/generate`,
+    { quantity },
+    reason,
+    "生成激活码失败",
+    idempotencyKey,
+  );
+}
+
+export async function downloadActivationCodeExport(
+  exportId: string,
+  reason: string,
+  idempotencyKey?: string,
+): Promise<ActivationDownloadResult> {
+  return adminWrite<ActivationDownloadResult>(
+    `/api/control/activation-code-exports/${encodeURIComponent(exportId)}/download`,
+    {},
+    reason,
+    "下载明文码失败",
+    idempotencyKey,
+  );
+}
+
+export async function listActivationCodes({
+  batch_id,
+  status,
+  limit = 50,
+  offset = 0,
+}: {
+  batch_id?: string;
+  status?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<ActivationCodePage> {
+  const query = new URLSearchParams();
+  if (batch_id) {
+    query.set("batch_id", batch_id);
+  }
+  if (status) {
+    query.set("status", status);
+  }
+  query.set("limit", String(limit));
+  query.set("offset", String(offset));
+  const response = await requestControl(
+    `/api/control/activation-codes?${query}`,
+    { method: "GET" },
+  );
+  if (!response.ok) {
+    throw await parseActivationError(response, "读取激活码列表失败");
+  }
+  return (await response.json()) as ActivationCodePage;
+}
+
+export async function deliverActivationCode(
+  codeId: string,
+  input: {
+    channel: string;
+    external_order_ref?: string;
+    recipient_ref?: string;
+    reason: string;
+  },
+  idempotencyKey?: string,
+): Promise<ActivationDeliverResult> {
+  return adminWrite<ActivationDeliverResult>(
+    `/api/control/activation-codes/${encodeURIComponent(codeId)}/deliver`,
+    {
+      channel: input.channel,
+      external_order_ref: input.external_order_ref || undefined,
+      recipient_ref: input.recipient_ref || undefined,
+    },
+    input.reason,
+    "发放激活码失败",
+    idempotencyKey,
+  );
+}
+
+export async function suspendActivationCode(
+  codeId: string,
+  reason: string,
+  idempotencyKey?: string,
+): Promise<ActivationCodeMutationResult> {
+  return adminWrite<ActivationCodeMutationResult>(
+    `/api/control/activation-codes/${encodeURIComponent(codeId)}/suspend`,
+    {},
+    reason,
+    "暂停激活码失败",
+    idempotencyKey,
+  );
+}
+
+export async function resumeActivationCode(
+  codeId: string,
+  reason: string,
+  idempotencyKey?: string,
+): Promise<ActivationCodeMutationResult> {
+  return adminWrite<ActivationCodeMutationResult>(
+    `/api/control/activation-codes/${encodeURIComponent(codeId)}/resume`,
+    {},
+    reason,
+    "恢复激活码失败",
+    idempotencyKey,
+  );
+}
+
+export async function revokeActivationCode(
+  codeId: string,
+  reason: string,
+  idempotencyKey?: string,
+): Promise<ActivationCodeMutationResult> {
+  return adminWrite<ActivationCodeMutationResult>(
+    `/api/control/activation-codes/${encodeURIComponent(codeId)}/revoke`,
+    {},
+    reason,
+    "作废激活码失败",
+    idempotencyKey,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Deterministic operator-facing messages
+// ---------------------------------------------------------------------------
+
+const CODE_MESSAGES: Record<string, string> = {
+  EXCHANGE_CREDENTIAL_INVALID: "交换凭据无效或已过期，请重新获取",
+  EXCHANGE_CREDENTIAL_REUSED: "交换凭据已被使用，请重新获取",
+  ADMIN_ACTOR_INVALID: "操作员账号不可用",
+  ADMIN_ROLE_REQUIRED: "仅管理员或审计员可登录管理端",
+  ADMIN_SESSION_INVALID: "会话已失效，请重新登录",
+  ADMIN_SESSION_EXPIRED: "会话已过期，请重新登录",
+  ADMIN_SESSIONS_UNAVAILABLE: "管理会话服务暂不可用，请稍后重试",
+  ADMIN_CSRF_REQUIRED: "缺少 CSRF 令牌，请重新登录",
+  ADMIN_CSRF_INVALID: "CSRF 令牌不匹配，请重新登录",
+  ADMIN_CSRF_UNAVAILABLE: "管理登录令牌缺失，请重新登录后再执行写操作",
+  AUDITOR_READ_ONLY: "审计员只读，无法执行写操作",
+  IDEMPOTENCY_KEY_REQUIRED: "缺少幂等键，请重试",
+  IDEMPOTENCY_CONFLICT: "幂等键冲突：该键已被其他请求使用",
+  CONFIRMATION_REQUIRED: "服务端要求显式确认，请勾选确认后重试",
+  REASON_REQUIRED: "服务端要求填写操作原因，请补充后重试",
+  BATCH_VALIDATION_FAILED: "批次参数校验失败，请检查后重试",
+  BATCH_NOT_FOUND: "批次不存在",
+  BATCH_NOT_OPEN: "批次已关闭，无法生成激活码",
+  BATCH_BUDGET_EXCEEDED: "生成数量超出批次预算",
+  ACTIVATION_KEYS_UNAVAILABLE: "激活码密钥未配置，请联系运维",
+  ACTIVATION_SERVICE_UNAVAILABLE: "激活码服务暂不可用，请稍后重试",
+  EXPORT_NOT_FOUND: "导出包不存在",
+  EXPORT_ALREADY_DOWNLOADED: "该导出包已被下载过，无法再次下载",
+  EXPORT_EXPIRED: "该导出包已过期，请重新生成",
+  CODE_NOT_FOUND: "激活码不存在",
+  CODE_TRANSITION_INVALID: "当前状态不允许该操作",
+  CODE_NOT_ACTIVATED: "仅已激活的激活码可以恢复",
+  DELIVERY_VALIDATION_FAILED: "发放参数校验失败，请检查后重试",
+};
+
+export function adminActivationErrorMessage(
+  cause: unknown,
+  fallback: string,
+  overrides: Record<string, string> = {},
+): string {
+  if (cause instanceof AdminActivationError) {
+    const code = cause.code ?? "";
+    const mapped = overrides[code] ?? CODE_MESSAGES[code];
+    if (mapped) {
+      return mapped;
+    }
+    return cause.message.trim() || fallback;
+  }
+  if (cause instanceof Error && cause.message.trim()) {
+    return cause.message;
+  }
+  return fallback;
+}
