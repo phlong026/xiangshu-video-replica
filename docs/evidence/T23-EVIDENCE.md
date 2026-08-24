@@ -6,7 +6,7 @@
 | --- | --- |
 | **Task ID** | T23 / BILL-02 |
 | **Owner** | Backend (Agent) |
-| **Reviewer** | CodeReview sub-agent pass (0 P1 / 0 P2 / 4 P3, all substantively fixed with regression locks — see the review section below) + security self-review (see the ledger record); PR-round connector review pending |
+| **Reviewer** | CodeReview sub-agent pass (0 P1 / 0 P2 / 4 P3, all substantively fixed with regression locks) + PR #54 chatgpt-codex-connector pass (1 P2, fixed with a regression lock — see the review sections below) + security self-review (see the ledger record) |
 | **Branch / Base SHA** | `feat/customer-v3-t23-admin-adjustment` / base `af0308f` (main, PR #52 T20 merged) |
 | **Date** | 2026-08-24 |
 | **Evidence Level** | `AUTOMATED_VERIFIED` (PG 16 fixture, localhost:5433, real Alembic chain 001→039) |
@@ -17,7 +17,7 @@ Task exit gate (task list §5 T23): *双确认、来源单、幂等、真实 act
 
 ```bash
 $ uv run python -m pytest tests/test_admin_customer_routes.py -v
-28 passed  # 24 red→green cases + 4 review regression locks
+29 passed  # 24 red→green cases + 5 review regression locks
   # 双确认 (double confirmation): POST without confirm=true answers 400
   #   CONFIRMATION_REQUIRED; without a reason 400 REASON_REQUIRED; without an
   #   Idempotency-Key 400 IDEMPOTENCY_KEY_REQUIRED (test_missing_confirmation_
@@ -63,6 +63,14 @@ $ uv run python -m pytest tests/test_admin_customer_routes.py -v
 - **Fail-closed runtime**: SQLite / a missing DSN answers 503 `ADJUSTMENT_SERVICE_UNAVAILABLE` — never a legacy-lane answer (the T12/T18 precedent; the admin-session dependency's own fail-closed lane is T09's contract, stubbed in the dedicated test so the request reaches the adjustment route body).
 - **SES-01 clock discipline**: `paid_at` / `created_at` sample `SELECT now()` on the caller's transaction — the application process clock never stamps the ledger.
 
+## Independent Code Review — PR #54 connector (1 P2, substantively fixed)
+
+The PR #54 chatgpt-codex-connector review returned **1 P2**, substantively fixed with a regression lock:
+
+| # | Severity | Finding | Fix |
+| --- | --- | --- | --- |
+| R5 | **P2** | With the wallet balance already near the PostgreSQL int4 ceiling, an otherwise valid adjustment (the `amount_fen` guard passes — it only sees `credits × unit_price`) overflows `available_credits + credits`; PostgreSQL raises `NumericValueOutOfRange`, surfacing as an unexpected 500 on a financial endpoint | The atomic increment now carries the bound in its WHERE clause (`available_credits <= 2147483647 - %s`) so the post-increment balance stays inside the int4 column range; a skipped row with the wallet still present answers a stable 400 `ADJUSTMENT_VALIDATION_FAILED` (the vanished-wallet shape keeps its 404). Locked by `test_wallet_balance_overflow_is_rejected_not_500` — a wallet parked at 2,147,483,647 plus credits=1 answers 400, and the refused write leaves nothing behind (balance untouched, no order/CHARGE/audit rows — the whole transaction rolled back) |
+
 ## Independent Code Review — sub-agent pass (0 P1 + 0 P2 + 4 P3, all substantively fixed)
 
 The CodeReview sub-agent pass (pre-PR) returned **4 P3 findings, zero P1/P2** — every finding substantively fixed with a regression lock:
@@ -83,15 +91,15 @@ The CodeReview sub-agent pass (pre-PR) returned **4 P3 findings, zero P1/P2** �
 | `server/app/main.py` | Mount `admin_customer_router` |
 | `server/scripts/reconcile_customer_billing.py` | `PG_ONLY_TABLES` gains `admin_adjustments` — the 039 table is PG-only on the target head, so the T07 import/reconcile contract expects it empty (the T18 precedent when 038 added `admin_device_events`; without this the first full run failed 5 `test_real_pg_*` cases with `source/target table contract differs (extra=1)`) |
 | 10 migration test files (`test_db`, `test_settings`, `test_characters`, `test_character_domain`, `test_internal_billing`, `test_recharge_orders`, `test_postgres_migrations`, `test_activation_code_schema`, `test_customer_security`, `test_customer_devices`) | Head-revision assertions `038_admin_device_operations` → `039_admin_adjustments` (the standard per-migration maintenance — every new head revision updates these; 22 assertions across upgrade-head/downgrade-rehearsal/guard-refusal tests; the 038 downgrade-guard error-message matches and the `validate_revision_pair` literal stay untouched) |
-| `server/tests/test_admin_customer_routes.py` | **New** — 28 cases: schema/check-constraint/append-only/RESTRICT-FK, the happy path with its four-table assertions, the write contract, business validation (non-positive/overflow/unknown user/wallet-less), pricing scope (CUSTOMER_STANDARD vs INTERNAL vs suspended/revoked), price-snapshot freezing, the four idempotency behaviours + the half-committed placeholder lock, the post-update-balance lock, fail-closed 503, and the audit listing |
+| `server/tests/test_admin_customer_routes.py` | **New** — 29 cases: schema/check-constraint/append-only/RESTRICT-FK, the happy path with its four-table assertions, the write contract, business validation (non-positive/overflow/unknown user/wallet-less/wallet-balance-overflow), pricing scope (CUSTOMER_STANDARD vs INTERNAL vs suspended/revoked), price-snapshot freezing, the four idempotency behaviours + the half-committed placeholder lock, the post-update-balance lock, fail-closed 503, and the audit listing |
 | `docs/evidence/T23-EVIDENCE.md`, the two ledgers | Evidence records |
 
 ## Regression
 
 ```
-$ uv run python -m pytest tests/test_admin_customer_routes.py -q   # 28 passed (24 red→green + 4 review locks)
-$ uv run python -m pytest tests -q                                  # 1022 passed, 2 warnings, 0 failed
-  # 994 on the T20-merged base + 28 new (24 T23 cases + 4 review locks); zero regression.
+$ uv run python -m pytest tests/test_admin_customer_routes.py -q   # 29 passed (24 red→green + 5 review locks)
+$ uv run python -m pytest tests -q                                  # 1023 passed, 2 warnings, 0 failed
+  # 994 on the T20-merged base + 29 new (24 T23 cases + 5 review locks); zero regression.
   # The 2 warnings are the pre-existing environment artifacts (httpx deprecation
   # and the Windows GBK subprocess-reader thread in test_db.py), not failures.
 $ uv run ruff check .          → All checks passed!
@@ -104,13 +112,13 @@ $ npm run check                → green (secret scan / client biome+tsc+vitest 
 
 ```text
 任务/工作包：T23 / BILL-02（账务/管理）
-Owner / Reviewer：后端（Agent 执行）/ CodeReview 子代理评审（0 P1/0 P2/4 P3 逐条实质修复含 4 例回归锁定：半提交占位符 409 而非 500/响应余额用 RETURNING 后的真实行/SUSPENDED 计入当前绑定定价/039 FK 全 RESTRICT）+ 安全自评审；PR 轮 connector 评审待 PR 后补充
+Owner / Reviewer：后端（Agent 执行）/ CodeReview 子代理评审（0 P1/0 P2/4 P3 逐条实质修复含 4 例回归锁定）+ PR #54 chatgpt-codex-connector 评审（1 P2 已修复含回归锁定：钱包余额 int4 溢出在原子 UPDATE 条件加界 400 拒绝非 500）+ 安全自评审
 分支 / 基线 SHA：feat/customer-v3-t23-admin-adjustment / 基线 af0308f（main，T20 PR #52 合并后）
 上游规格段落：客户版任务清单 V3 §5 T23、§12.5 BILL-02；代码开发清单 V3 §9.1/§9.3 admin_customer_routes.py 冻结名；激活码开发文档 §15 管理写契约；测试与验收规格账本差额为零
-改动文件：server/migrations/versions/039_admin_adjustments.py（新增：append-only 审计表+trigger+036 共享 TRUNCATE guard+血统保 downgrade）、server/app/admin_customer_routes.py（新增：调账创建+审计列表，原子四写：PAID order+CHARGE+钱包增量+审计行）、server/app/main.py（挂载路由）、server/scripts/reconcile_customer_billing.py（PG_ONLY_TABLES 加 admin_adjustments——T07 导入对账契约适配，T18 先例）、10 个迁移测试文件 head 断言 038→039（每迁移标准维护，22 处；038 guard 消息匹配与 validate_revision_pair 字面参数保持不动）、server/tests/test_admin_customer_routes.py（新增 28 用例：24 红→绿 + 4 评审回归锁定）、docs/evidence/T23-EVIDENCE.md、任务与证据账本
-失败测试或回归锁定：先红后绿 24 例（schema 形状+唯一索引 2；CHECK 约束四形状 CheckViolation 1；append-only UPDATE/DELETE/TRUNCATE RaiseException+幸存计数 1；成功流四表断言 1；内部 scope 1；写契约 5：幂等键/确认/reason/auditor 只读/未认证；业务校验 4：非正数/int4 溢出/未知用户/无钱包；来源单枚举+空 ref 1；价格快照冻结 1；幂等 4：同键重放单次入账/同键异参 409/同键异目标 409/失败不烧键；账本差额为零 1；fail-closed 503 1；审计列表+分页 2）+ 评审回归锁定 4 例（半提交占位符 409 非 500；响应余额为 RETURNING 后真实行；SUSPENDED 计入/CODE_REVOKED 不计入当前绑定定价；RESTRICT FK 元数据+删除拒绝+审计行幸存）
+改动文件：server/migrations/versions/039_admin_adjustments.py（新增：append-only 审计表+trigger+036 共享 TRUNCATE guard+血统保 downgrade）、server/app/admin_customer_routes.py（新增：调账创建+审计列表，原子四写：PAID order+CHARGE+钱包增量+审计行）、server/app/main.py（挂载路由）、server/scripts/reconcile_customer_billing.py（PG_ONLY_TABLES 加 admin_adjustments——T07 导入对账契约适配，T18 先例）、10 个迁移测试文件 head 断言 038→039（每迁移标准维护，22 处；038 guard 消息匹配与 validate_revision_pair 字面参数保持不动）、server/tests/test_admin_customer_routes.py（新增 29 用例：24 红→绿 + 5 评审回归锁定）、docs/evidence/T23-EVIDENCE.md、任务与证据账本
+失败测试或回归锁定：先红后绿 24 例（schema 形状+唯一索引 2；CHECK 约束四形状 CheckViolation 1；append-only UPDATE/DELETE/TRUNCATE RaiseException+幸存计数 1；成功流四表断言 1；内部 scope 1；写契约 5：幂等键/确认/reason/auditor 只读/未认证；业务校验 4：非正数/int4 溢出/未知用户/无钱包；来源单枚举+空 ref 1；价格快照冻结 1；幂等 4：同键重放单次入账/同键异参 409/同键异目标 409/失败不烧键；账本差额为零 1；fail-closed 503 1；审计列表+分页 2）+ 评审回归锁定 5 例（半提交占位符 409 非 500；响应余额为 RETURNING 后真实行；SUSPENDED 计入/CODE_REVOKED 不计入当前绑定定价；RESTRICT FK 元数据+删除拒绝+审计行幸存；钱包余额 int4 溢出 400 拒绝且事务完整回滚）
 实现结果：后台调账作为单个原子事务落地（双确认+来源单+幂等快照+真实 actor 审计行四写同事务提交或回滚）；金额纪律 credits×内部单价快照冻结（PRICE-01 由构造成立，min/step 仅管 zpay 不适用调账——026 约束口径）；int4 溢出应用层防护；pricing_scope 按 027 当前绑定口径推导（ACTIVE/SUSPENDED 计入，REVOKED 仅审计）；钱包增量用 RETURNING 后真实行；admin_adjustments append-only（039 trigger+036 共享 TRUNCATE guard+全 RESTRICT FK+downgrade 血统保护）；审计列表供 operator/auditor（auditor 只读经 T09 门）；缺 PG 配置 503 fail-closed；SES-01 全部时间戳用事务内 PG 时钟
-验证命令与通过数：专项 28 passed；全量 1022 passed（994 基线+28 新增，零回归；2 警告为既有环境噪声）；ruff/format/mypy 全绿（165 files formatted，66 source files typed）；npm run check 全仓门禁绿（secret/client 324/e2e/tauri/server）
+验证命令与通过数：专项 29 passed；全量 1023 passed（994 基线+29 新增，零回归；2 警告为既有环境噪声）；ruff/format/mypy 全绿（165 files formatted，66 source files typed）；npm run check 全仓门禁绿（secret/client 324/e2e/tauri/server）
 证据层级：AUTOMATED_VERIFIED
 安全与可观测性：调账永远经 T09 admin session 门（真实 actor 写入审计行；auditor 403 AUDITOR_READ_ONLY）；§15 写契约全量执行（Idempotency-Key/confirm/reason/request id）；幂等快照层同键异参/异目标 409 防止跨资源重放（PR #43 教训回归锁定）；余额变更与 CHARGE 凭据原子绑定+账本差额为零断言（禁止直接 UPDATE 余额）；admin_adjustments 三重 append-only 防护；金额溢出与来源单形状在应用层 400 拒绝（PG CHECK 为纵深防御）；密钥/凭据不入日志
 迁移与回滚：迁移 039_admin_adjustments（down_revision=038）；有审计数据时 downgrade 拒绝（保操作员血统）；回滚需先人工导出审计

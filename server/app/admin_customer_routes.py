@@ -435,15 +435,32 @@ def create_admin_adjustment(
         # Atomic wallet credit increment — RETURNING the post-update balance so
         # the response never reports a stale pre-read plus credits (a concurrent
         # charge/settle on the same wallet would otherwise be invisible here).
+        # The WHERE bound keeps the post-increment balance inside the int4
+        # column range: PostgreSQL would otherwise raise NumericValueOutOfRange
+        # (a raw 500 on a financial endpoint — the PR #54 connector review P2).
+        # credits is a validated positive int, so 2147483647 - credits never
+        # underflows in Python; a huge credits simply makes the bound negative
+        # and every non-negative balance fails it, refusing the write.
         updated = conn.execute(
             "UPDATE wallets SET available_credits = available_credits + %s "
-            "WHERE user_id = %s RETURNING available_credits",
-            (credits, user_id),
+            "WHERE user_id = %s AND available_credits <= 2147483647 - %s "
+            "RETURNING available_credits",
+            (credits, user_id, credits),
         ).fetchone()
         if updated is None:
-            # The wallet vanished between the existence check and the increment
-            # (out-of-band maintenance) — fail the whole transaction loudly.
-            raise _http(404, "WALLET_NOT_FOUND", "Wallet not found for target user.")
+            # Distinguish the two refusal shapes: a wallet that vanished between
+            # the existence check and the increment (out-of-band maintenance)
+            # versus a balance that would overflow the int4 column.
+            wallet_exists = conn.execute(
+                "SELECT 1 FROM wallets WHERE user_id = %s", (user_id,)
+            ).fetchone()
+            if not wallet_exists:
+                raise _http(404, "WALLET_NOT_FOUND", "Wallet not found for target user.")
+            raise _http(
+                400,
+                "ADJUSTMENT_VALIDATION_FAILED",
+                "The credits amount would overflow the wallet balance integer range.",
+            )
         balance_after = int(updated[0])
 
         # Insert audit row (append-only, names the real admin)

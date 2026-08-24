@@ -743,6 +743,34 @@ def test_response_balance_is_the_post_update_row(client: TestClient) -> None:
     assert _wallet_balance(CUSTOMER_USER_ID) == (82, 0)
 
 
+def test_wallet_balance_overflow_is_rejected_not_500(client: TestClient) -> None:
+    """A balance already at the int4 ceiling plus one more credit must answer
+    a stable 400 — never a NumericValueOutOfRange-turned-500 (PR #54 review
+    P2: the amount_fen guard alone cannot see the wallet-side overflow)."""
+    admin = _admin_session(client)
+    # Park the wallet at the int4 ceiling; credits=1 passes every earlier
+    # check (amount_fen = 1 × 1000 well inside the ledger range) and only the
+    # wallet-side addition would overflow.
+    with psycopg.connect(_t23_dsn(), autocommit=True) as conn:
+        conn.execute(
+            "UPDATE wallets SET available_credits = 2147483647 WHERE user_id = %s",
+            (CUSTOMER_USER_ID,),
+        )
+    response = _create_adjustment(client, admin, credits=1, key="adj-walloverflow-1")
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"]["code"] == "ADJUSTMENT_VALIDATION_FAILED"
+    # The refused write left nothing behind: the balance is untouched and the
+    # whole transaction rolled back (no order, no CHARGE, no audit row).
+    assert _wallet_balance(CUSTOMER_USER_ID) == (2147483647, 0)
+    order_count = _fetch_one(
+        "SELECT COUNT(*) FROM recharge_orders "
+        "WHERE provider = 'admin_adjustment' AND merchant_order_no NOT LIKE 'OPENING-%%' "
+        "AND merchant_order_no NOT LIKE 'DUMMY-%%'"
+    )
+    assert order_count is not None and int(order_count[0]) == 0
+    assert _adjustment_audit_rows(CUSTOMER_USER_ID) == []
+
+
 # ---------------------------------------------------------------------------
 # The admin write contract (dev doc §15)
 # ---------------------------------------------------------------------------
