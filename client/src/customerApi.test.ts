@@ -544,6 +544,40 @@ describe("customer API error states", () => {
     expect(revoked.kind).toBe("code-revoked");
   });
 
+  it("keeps the 400 anti-enumeration rejections out of the outage state", async () => {
+    // CodeReview P1 regression lock: ACTIVATION_UNAVAILABLE /
+    // PAIRING_UNAVAILABLE are 400 anti-enumeration answers (the user must fix
+    // the activation code) — an outage grouping would steer the UI into a
+    // meaningless "service unavailable, retry" dead end.
+    const activation = await captureLoginError(
+      { detail: { code: "ACTIVATION_UNAVAILABLE", message: "bad code" } },
+      400,
+    );
+    const pairing = await captureLoginError(
+      { detail: { code: "PAIRING_UNAVAILABLE", message: "bad code" } },
+      400,
+    );
+
+    expect(activation.kind).toBe("bad-request");
+    expect(pairing.kind).toBe("bad-request");
+    expect(activation.code).toBe("ACTIVATION_UNAVAILABLE");
+  });
+
+  it("groups the remaining activation and slot conflicts under a determinate conflict state", async () => {
+    const alreadyActivated = await captureLoginError(
+      { detail: { code: "USER_ALREADY_ACTIVATED", message: "activated" } },
+      409,
+    );
+    const slotsFull = await captureLoginError(
+      { detail: { code: "DEVICE_SLOTS_FULL", message: "full" } },
+      409,
+    );
+
+    expect(alreadyActivated.kind).toBe("conflict");
+    expect(slotsFull.kind).toBe("conflict");
+    expect(slotsFull.code).toBe("DEVICE_SLOTS_FULL");
+  });
+
   it("maps transport failures to network and timeout states", async () => {
     vi.stubGlobal(
       "fetch",

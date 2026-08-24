@@ -2649,9 +2649,9 @@ function customerErrorKind(
   if (status === undefined) {
     return "unknown";
   }
-  if (code?.endsWith("_UNAVAILABLE")) {
-    return "service-unavailable";
-  }
+  // No code-suffix matching here: ACTIVATION_UNAVAILABLE / PAIRING_UNAVAILABLE
+  // are 400 anti-enumeration rejections (the user must fix the code), not
+  // outages. Every true service-interruption code arrives with status 503.
   if (status === 503) {
     return "service-unavailable";
   }
@@ -2951,11 +2951,14 @@ export async function customerUnbindDevice(
   deviceId: string,
   options: { idempotencyKey: string },
 ): Promise<void> {
-  await customerJson<undefined>(`/api/customer/devices/${deviceId}`, {
-    method: "DELETE",
-    credential,
-    idempotencyKey: options.idempotencyKey,
-  });
+  await customerJson<undefined>(
+    `/api/customer/devices/${encodeURIComponent(deviceId)}`,
+    {
+      method: "DELETE",
+      credential,
+      idempotencyKey: options.idempotencyKey,
+    },
+  );
 }
 
 export type CustomerEnrollInput = {
@@ -3015,7 +3018,7 @@ export async function customerApproveDevicePairing(
   pairingId: string,
 ): Promise<CustomerPairingApproveResponse> {
   const { body } = await customerJson<CustomerPairingApproveResponse>(
-    `/api/customer/device-pairings/${pairingId}/approve`,
+    `/api/customer/device-pairings/${encodeURIComponent(pairingId)}/approve`,
     { method: "POST", credential },
   );
   return body;
