@@ -16,8 +16,7 @@ default = ["local-sidecar"]
 # `--no-default-features` so the shipped app can never silently boot a local
 # business source of truth behind the customer's back.
 local-sidecar = []
-# DESK-01 (T29): add dpapi for secure credential vault on Windows
-dpapi = []
+local-sidecar = []
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -31,13 +30,6 @@ tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1.24", features = ["v4"] }
-# DEK-01 (T29): Windows Data Protection API for secure credential storage
-[target.'cfg(windows)'.dependencies]
-dpapi = { version = "0.3", optional = true }
-windows-sys = { version = "0.59", features = [
-    "Win32_Security_CredentialManager",
-    "Win32_Security",
-], optional = true }
 
 [profile.release]
 panic = "abort"
