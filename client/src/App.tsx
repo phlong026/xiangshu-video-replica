@@ -23,43 +23,22 @@ type WorkspacePage =
   | "settings"
   | "tasks"
   | "wallet";
-type Page = "login" | WorkspacePage;
 type ServiceState = "checking" | "connected" | "disconnected";
 
 const HEALTH_RETRY_INTERVAL_MS = 5_000;
 
+/** The internal entry: the internal login shell authenticates against the
+ * internal lane (local sidecar or the internal access token) and then hands
+ * the shared workspace shell the identity. The customer lane (/customer in
+ * RootApp) renders the same shell with a customer identity — §10.1 keeps
+ * the two login shells apart, so the internal access-token input is never
+ * a customer entry. */
 export function App() {
-  const [page, setPage] = useState<Page>("login");
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [loginError, setLoginError] = useState("");
   const [accessToken, setAccessToken] = useState("");
   const [sessionMessage, setSessionMessage] = useState("");
   const [isLoginLoading, setIsLoginLoading] = useState(false);
-  const [serviceState, setServiceState] = useState<ServiceState>("checking");
-  const [pendingBatchHandoff, setPendingBatchHandoff] =
-    useState<GenerationBatch | null>(null);
-  const [activeAnalysisProject, setActiveAnalysisProject] =
-    useState<Project | null>(null);
-  const [activeDetailProject, setActiveDetailProject] =
-    useState<Project | null>(null);
-  const [isAnalysisWorkspaceBusy, setIsAnalysisWorkspaceBusy] = useState(false);
-  const activeAnalysisBusyRef = useRef(false);
-  const activeAnalysisSessionRef = useRef(0);
-  const canWrite = currentUser?.role !== "auditor";
-
-  const handleAnalysisWorkspaceBusyChange = useCallback(
-    (session: number, busy: boolean) => {
-      if (session !== activeAnalysisSessionRef.current) {
-        return;
-      }
-      activeAnalysisBusyRef.current = busy;
-      setIsAnalysisWorkspaceBusy(busy);
-    },
-    [],
-  );
-  const consumeBatchHandoff = useCallback(() => {
-    setPendingBatchHandoff(null);
-  }, []);
 
   const handleLogin = useCallback(async () => {
     setIsLoginLoading(true);
@@ -68,10 +47,8 @@ export function App() {
     setInternalAccessToken(accessToken.trim() || null);
     try {
       const user = await getCurrentUser();
-      const nextPage = workspacePageFromHash(user);
-      ensureWorkspaceHash(nextPage);
+      ensureWorkspaceHash(workspacePageFromHash(user));
       setCurrentUser(user);
-      setPage(nextPage);
     } catch (error) {
       setCurrentUser(null);
       setLoginError(loginErrorMessage(error));
@@ -96,13 +73,8 @@ export function App() {
       setInternalAccessToken(null);
       setAccessToken("");
       setCurrentUser(null);
-      setPage("login");
-      activeAnalysisSessionRef.current += 1;
-      activeAnalysisBusyRef.current = false;
-      setIsAnalysisWorkspaceBusy(false);
-      setActiveAnalysisProject(null);
-      setActiveDetailProject(null);
-      setPendingBatchHandoff(null);
+      // The workspace shell unmounts with the identity, which already
+      // discards its analysis/detail/handoff state.
       setSessionMessage("登录已失效，请重新进入工作台。");
       setLoginError("");
     }
@@ -113,67 +85,7 @@ export function App() {
     };
   }, []);
 
-  useEffect(() => {
-    if (!currentUser) {
-      return;
-    }
-    const authenticatedUser = currentUser;
-    function syncDeepLink() {
-      if (activeAnalysisBusyRef.current) {
-        ensureWorkspaceHash("projects");
-        return;
-      }
-      const nextPage = workspacePageFromHash(authenticatedUser);
-      ensureWorkspaceHash(nextPage);
-      activeAnalysisSessionRef.current += 1;
-      activeAnalysisBusyRef.current = false;
-      setIsAnalysisWorkspaceBusy(false);
-      setActiveAnalysisProject(null);
-      setActiveDetailProject(null);
-      setPage(nextPage);
-    }
-    window.addEventListener("hashchange", syncDeepLink);
-    window.addEventListener("popstate", syncDeepLink);
-    return () => {
-      window.removeEventListener("hashchange", syncDeepLink);
-      window.removeEventListener("popstate", syncDeepLink);
-    };
-  }, [currentUser]);
-
-  useEffect(() => {
-    if (page === "login" || !currentUser) {
-      return;
-    }
-
-    let isActive = true;
-    let timeoutId: number | undefined;
-    setServiceState("checking");
-
-    async function checkHealth() {
-      try {
-        await getHealth();
-        if (isActive) {
-          setServiceState("connected");
-        }
-      } catch {
-        if (isActive) {
-          setServiceState("disconnected");
-          // Keep retrying so the badge recovers once the local backend is up.
-          timeoutId = window.setTimeout(checkHealth, HEALTH_RETRY_INTERVAL_MS);
-        }
-      }
-    }
-    void checkHealth();
-
-    return () => {
-      isActive = false;
-      if (timeoutId !== undefined) {
-        window.clearTimeout(timeoutId);
-      }
-    };
-  }, [page, currentUser]);
-
-  if (page === "login") {
+  if (currentUser === null) {
     return (
       <main className="centered-shell">
         <section className="login-card" aria-labelledby="app-title">
@@ -208,11 +120,106 @@ export function App() {
     );
   }
 
-  if (!currentUser) {
-    return null;
-  }
+  return <WorkspaceShell currentUser={currentUser} />;
+}
 
-  const workspacePage = page as WorkspacePage;
+/** The shared workspace shell (§10.1): the sidebar, the stage, and the page
+ * routing reused by both lanes. It owns the workspace navigation state; the
+ * entry component (the internal App or the customer shell in RootApp) owns
+ * the identity and the session. */
+export function WorkspaceShell({ currentUser }: { currentUser: CurrentUser }) {
+  const [page, setPage] = useState<WorkspacePage>(() =>
+    workspacePageFromHash(currentUser),
+  );
+  const [serviceState, setServiceState] = useState<ServiceState>("checking");
+  const [pendingBatchHandoff, setPendingBatchHandoff] =
+    useState<GenerationBatch | null>(null);
+  const [activeAnalysisProject, setActiveAnalysisProject] =
+    useState<Project | null>(null);
+  const [activeDetailProject, setActiveDetailProject] =
+    useState<Project | null>(null);
+  const [isAnalysisWorkspaceBusy, setIsAnalysisWorkspaceBusy] = useState(false);
+  const activeAnalysisBusyRef = useRef(false);
+  const activeAnalysisSessionRef = useRef(0);
+  const canWrite = currentUser.role !== "auditor";
+
+  const handleAnalysisWorkspaceBusyChange = useCallback(
+    (session: number, busy: boolean) => {
+      if (session !== activeAnalysisSessionRef.current) {
+        return;
+      }
+      activeAnalysisBusyRef.current = busy;
+      setIsAnalysisWorkspaceBusy(busy);
+    },
+    [],
+  );
+  const consumeBatchHandoff = useCallback(() => {
+    setPendingBatchHandoff(null);
+  }, []);
+
+  // Normalize the hash once on mount: an unauthorized/unknown deep link
+  // falls back to the projects page exactly like the internal login did.
+  useEffect(() => {
+    ensureWorkspaceHash(workspacePageFromHash(currentUser));
+  }, [currentUser]);
+
+  useEffect(() => {
+    function syncDeepLink() {
+      if (activeAnalysisBusyRef.current) {
+        ensureWorkspaceHash("projects");
+        return;
+      }
+      const nextPage = workspacePageFromHash(currentUser);
+      ensureWorkspaceHash(nextPage);
+      activeAnalysisSessionRef.current += 1;
+      activeAnalysisBusyRef.current = false;
+      setIsAnalysisWorkspaceBusy(false);
+      setActiveAnalysisProject(null);
+      setActiveDetailProject(null);
+      setPage(nextPage);
+    }
+    window.addEventListener("hashchange", syncDeepLink);
+    window.addEventListener("popstate", syncDeepLink);
+    return () => {
+      window.removeEventListener("hashchange", syncDeepLink);
+      window.removeEventListener("popstate", syncDeepLink);
+    };
+  }, [currentUser]);
+
+  // The health probe restarts on every navigation so the badge re-enters
+  // the checking state while switching pages; the page value itself is not
+  // read inside the effect.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: keep the historical navigation-time restart behaviour of the service badge.
+  useEffect(() => {
+    let isActive = true;
+    let timeoutId: number | undefined;
+    setServiceState("checking");
+
+    async function checkHealth() {
+      try {
+        await getHealth();
+        if (isActive) {
+          setServiceState("connected");
+        }
+      } catch {
+        if (isActive) {
+          setServiceState("disconnected");
+          // Keep retrying so the badge recovers once the local backend is up.
+          timeoutId = window.setTimeout(checkHealth, HEALTH_RETRY_INTERVAL_MS);
+        }
+      }
+    }
+    void checkHealth();
+
+    return () => {
+      isActive = false;
+      if (timeoutId !== undefined) {
+        window.clearTimeout(timeoutId);
+      }
+    };
+  }, [page]);
+
+  const workspacePage = page;
   const currentRole = currentUser.role;
   const analysisWorkspaceSession = activeAnalysisSessionRef.current;
   // 嵌套上下文（拆解工作区 / 生成流程详情）：页头显示"项目 / 项目名"，
@@ -384,7 +391,7 @@ function AppSidebar({
   navigationDisabled,
   onNavigate,
 }: {
-  activePage: Page;
+  activePage: WorkspacePage;
   currentUser: CurrentUser;
   navigationDisabled: boolean;
   onNavigate: (page: WorkspacePage) => void;

@@ -9,11 +9,26 @@ edition = "2021"
 name = "video_replica_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+default = ["local-sidecar"]
+# DESK-02 (T29): the internal build keeps auto-starting the bundled local
+# FastAPI sidecar exactly as before. A customer-cloud build compiles with
+# `--no-default-features` so the shipped app can never silently boot a local
+# business source of truth behind the customer's back.
+local-sidecar = []
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+# serde / serde_json / uuid are already resolved in the locked tree by the
+# Tauri dependency graph itself (Cargo.lock pins uuid 1.24) — declaring them
+# here adds no new external code to the audit surface, it only re-uses what
+# is locked (§10.2 dependency-review posture for the credential vault).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1.24", features = ["v4"] }
 
 [profile.release]
 panic = "abort"
