@@ -79,7 +79,7 @@ class SourceSelectionChangingStorage(FakeStorageAdapter):
         if self.changed:
             return stored
         self.changed = True
-        with connect_database(self.db_path) as conn:
+        with BusinessConnection.sqlite(connect_database(self.db_path)) as conn:
             current = conn.execute(
                 """
                 SELECT asset_id, payload_json
@@ -404,7 +404,7 @@ def seed_reference_context(
 
 
 def context(db_path: Path) -> SeededReferenceContext:
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         publication_hash = conn.execute(
             "SELECT publication_hash FROM character_versions WHERE id = 'character-version-v1'"
         ).fetchone()[0]
@@ -490,7 +490,7 @@ def test_default_selection_freezes_recommendation_and_reopens_idempotently(
     assert replay.json()["id"] == body["id"]
     assert latest.status_code == 200
     assert latest.json()["id"] == body["id"]
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         selection_count = conn.execute(
             "SELECT COUNT(*) FROM character_reference_selections WHERE project_id = ?",
             (seeded.project_id,),
@@ -542,7 +542,7 @@ def test_recommendation_preview_is_read_only_and_lists_all_published_assets(
     assert body["recommendation_reason_json"]["body_view_type"] == "RIGHT_45"
     assert auditor_preview.json() == body
     assert forbidden.status_code == 403
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         selection_count = conn.execute(
             "SELECT COUNT(*) FROM character_reference_selections WHERE project_id = ?",
             (seeded.project_id,),
@@ -612,7 +612,7 @@ def test_selection_rejects_an_input_binding_that_changed_before_persistence(
     )
     assert missing_binding.status_code == 422
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         current = conn.execute(
             "SELECT asset_id, payload_json FROM versions WHERE id = ?",
             (seeded.source_selection_id,),
@@ -639,7 +639,7 @@ def test_selection_rejects_an_input_binding_that_changed_before_persistence(
 
     assert stale.status_code == 409
     assert stale.json()["detail"]["code"] == "CHARACTER_REFERENCE_INPUT_BINDING_STALE"
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         selection_count = conn.execute(
             "SELECT COUNT(*) FROM character_reference_selections WHERE project_id = ?",
             (seeded.project_id,),
@@ -652,7 +652,7 @@ def test_selection_falls_back_to_default_features_and_rejects_stale_source(
     db_path: Path,
 ) -> None:
     seeded = context(db_path)
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         selection = conn.execute(
             "SELECT payload_json FROM versions WHERE id = 'source-selection-v1'"
         ).fetchone()
@@ -679,7 +679,7 @@ def test_selection_falls_back_to_default_features_and_rejects_stale_source(
     assert body["selected_asset_ids_json"] == expected
     assert body["recommendation_reason_json"]["body_view_type"] == "FRONT_HALF"
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         payload["character_features"] = features
         conn.execute(
             "UPDATE versions SET payload_json = ? WHERE id = 'source-selection-v1'",
@@ -705,7 +705,7 @@ def test_selection_falls_back_to_default_features_and_rejects_stale_source(
     assert stale.status_code == 409
     assert stale.json()["detail"]["code"] == "SOURCE_FRAME_SELECTION_STALE"
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute("DELETE FROM versions WHERE id = 'source-candidates-v2'")
         conn.execute(
             "UPDATE character_versions SET status = 'ARCHIVED' WHERE id = 'character-version-v1'"
@@ -758,7 +758,7 @@ def test_first_frame_generation_uses_frozen_reference_selection_not_new_persona_
     assert mismatched_binding.status_code == 409
     assert mismatched_binding.json()["detail"]["code"] == "FIRST_FRAME_INPUT_BINDING_STALE"
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             """
             INSERT INTO character_versions (
@@ -798,7 +798,7 @@ def test_first_frame_generation_uses_frozen_reference_selection_not_new_persona_
         b"approved-content-FRONT_FULL",
     ]
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             """
             UPDATE project_main_characters
@@ -844,7 +844,7 @@ def test_first_frame_generation_rechecks_binding_inside_final_write_transaction(
     assert generated.json()["detail"]["code"] == "FIRST_FRAME_CANDIDATES_STALE"
     assert len(racing_storage.first_frame_keys) == 1
     assert racing_storage.head_object(racing_storage.first_frame_keys[0]) is None
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         version_count = conn.execute(
             "SELECT COUNT(*) FROM versions WHERE kind = 'first_frame_candidates'"
         ).fetchone()[0]
@@ -887,7 +887,7 @@ def test_character_invalidation_blocks_new_generation_but_preserves_first_frame_
     )
     assert confirmed.status_code == 200
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         if character_invalidator == "version_archived":
             conn.execute(
                 "UPDATE character_versions SET status = 'ARCHIVED' "

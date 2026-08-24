@@ -62,7 +62,7 @@ def auth_headers(user_id: str) -> dict[str, str]:
 def configure_deepseek(db_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     key = Fernet.generate_key().decode("ascii")
     monkeypatch.setenv(SETTINGS_KEY_ENV, key)
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         SettingsRepository(conn, fernet=Fernet(key.encode("ascii"))).save_provider_config(
             "deepseek",
             {"api_key": "deepseek-test-key"},

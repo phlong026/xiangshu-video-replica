@@ -86,7 +86,7 @@ def test_create_user_cli_also_creates_empty_wallet(tmp_path: Path) -> None:
     )
     user_id = str(json.loads(result.stdout)["user_id"])
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         user = conn.execute(
             "SELECT username, display_name, role FROM users WHERE id = ?", (user_id,)
         ).fetchone()
@@ -122,7 +122,7 @@ def test_issue_token_prints_raw_value_once_and_stores_only_digest(tmp_path: Path
 
     assert issued.stdout.count(raw_token) == 1
     assert len(raw_token) >= 40
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         row = conn.execute(
             "SELECT token_digest, revoked_at FROM internal_access_tokens WHERE id = ?",
             (payload["token_id"],),

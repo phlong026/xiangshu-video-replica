@@ -146,7 +146,7 @@ def seed_version(
     publication_hash = hashlib.sha256(publication_snapshot_json.encode()).hexdigest()
     authorization_asset_id = f"authorization-{key}"
     source_asset_id = f"source-{key}"
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.executemany(
             """
             INSERT INTO assets (
@@ -298,7 +298,7 @@ def test_project_lists_only_current_published_versions_with_seven_assets(
     missing_authorization = seed_version(db_path, key="missing-authorization")
     missing_source = seed_version(db_path, key="missing-source")
     seed_version(db_path, key="incomplete", published_asset_count=6)
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             "UPDATE person_identities SET authorization_asset_id = NULL WHERE id = ?",
             (missing_authorization.identity_id,),
@@ -379,7 +379,7 @@ def test_project_selects_character_version_once_and_restores_frozen_snapshot(
     assert snapshot["character_version_number"] == 3
     assert len(snapshot["published_assets"]) == 7
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         count = conn.execute(
             "SELECT COUNT(*) FROM versions WHERE project_id = ? AND kind = 'main_character'",
             ("project-owned",),
@@ -454,7 +454,7 @@ def test_concurrent_repeat_selection_reuses_one_project_snapshot(
 
     assert sorted(response.status_code for response in responses) == [200, 200]
     assert len({response.json()["version_id"] for response in responses}) == 1
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         version_count = conn.execute(
             """
             SELECT COUNT(*) FROM versions
@@ -536,7 +536,7 @@ def test_project_snapshot_survives_character_archive_and_live_edits(
     )
     assert selected.status_code == 200
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             """
             UPDATE person_identities

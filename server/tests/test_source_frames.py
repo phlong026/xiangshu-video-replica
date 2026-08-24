@@ -195,7 +195,7 @@ def test_owner_can_extract_candidates_and_confirm_one(
     }
     assert latest.status_code == 200
     assert latest.json()["id"] == confirmed.json()["id"]
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         asset = conn.execute(
             "SELECT kind, content_type FROM assets WHERE id = ?",
             (candidates[1]["asset_id"],),

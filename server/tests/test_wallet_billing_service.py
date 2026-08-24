@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from app.db import connect_database, initialize_database
+from app.db_portable import BusinessConnection
 from app.internal_billing import (
     BillingInvariantError,
     InsufficientCreditsError,
@@ -298,7 +299,7 @@ def test_concurrent_task_reservations_cannot_overspend(tmp_path: Path) -> None:
     result_lock = threading.Lock()
 
     def reserve(task_id: str) -> None:
-        with connect_database(db_path) as conn:
+        with BusinessConnection.sqlite(connect_database(db_path)) as conn:
             barrier.wait()
             try:
                 conn.execute("BEGIN IMMEDIATE")
@@ -326,7 +327,7 @@ def test_concurrent_task_reservations_cannot_overspend(tmp_path: Path) -> None:
         thread.join()
 
     assert sorted(results) == ["insufficient", "reserved"]
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         assert wallet_state(conn) == (0, 1)
         assert (
             conn.execute(

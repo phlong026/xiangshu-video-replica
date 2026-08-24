@@ -306,6 +306,12 @@ class BusinessConnection:
         if isinstance(self._backend, SQLiteBackend):
             self._backend.raw.set_trace_callback(callback)
 
+    def iterdump(self) -> Iterator[str]:
+        """sqlite3-shaped whole-database dump (tests check no secret is stored)."""
+        if isinstance(self._backend, SQLiteBackend):
+            return self._backend.raw.iterdump()
+        return iter(())
+
     # --- context-manager: `with conn:` commits on success, rolls back on error
     # --- (the sqlite3 contract the services already rely on)
     def __enter__(self) -> BusinessConnection:

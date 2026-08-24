@@ -115,7 +115,7 @@ def internal_admin_context(
         conn.commit()
 
     def override_database() -> Iterator[BusinessConnection]:
-        with connect_database(db_path) as conn:
+        with BusinessConnection.sqlite(connect_database(db_path)) as conn:
             yield BusinessConnection.sqlite(conn)
 
     app.dependency_overrides[get_database] = override_database
@@ -219,7 +219,7 @@ def test_control_settings_mask_zpay_secret_and_keep_deployment_read_only(
     assert updated.status_code == 200
     assert updated.json()["config"]["pid"] == "merchant-456"
     assert updated.json()["config"]["key"] == "********cret"
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         assert SettingsRepository(conn).load_zpay_config()["key"] == "merchant-secret"
 
     forbidden_field = client.patch(
@@ -256,7 +256,7 @@ def test_control_billing_settings_only_update_internal_price_rules(
         "min_recharge_fen": 10000,
         "recharge_step_fen": 1000,
     }
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         stored = SettingsRepository(conn).read_billing_settings()
     assert stored == updated.json()
 
@@ -288,7 +288,7 @@ def test_control_reconciliation_and_csv_are_read_only(
     internal_admin_context: tuple[TestClient, Path, dict[str, str], dict[str, str]],
 ) -> None:
     client, db_path, control_headers, _ = internal_admin_context
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute("UPDATE users SET username = '=2+2' WHERE id = 'user_1'")
         conn.commit()
         before = (
@@ -319,7 +319,7 @@ def test_control_reconciliation_and_csv_are_read_only(
     assert ledger_csv.status_code == 200
     assert "charge_paid" in ledger_csv.text
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         after = (
             conn.execute(
                 "SELECT available_credits, reserved_credits FROM wallets WHERE user_id='user_1'"

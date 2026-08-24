@@ -8,6 +8,7 @@ from alembic import command
 from cryptography.fernet import Fernet
 
 from app.db import alembic_config, connect_database, initialize_database
+from app.db_portable import BusinessConnection
 from app.settings import SettingsRepository
 
 HEAD_REVISION = "039_admin_adjustments"
@@ -130,7 +131,7 @@ def test_internal_billing_migration_is_reversible(tmp_path: Path) -> None:
     initialize_database(db_path).close()
     command.downgrade(alembic_config(db_path), "021_generation_batch_display_name")
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         tables = {
             row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
@@ -140,7 +141,7 @@ def test_internal_billing_migration_is_reversible(tmp_path: Path) -> None:
     assert "internal_base_unit_price_fen" not in columns
 
     command.upgrade(alembic_config(db_path), "head")
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == (
             HEAD_REVISION
         )
@@ -149,7 +150,7 @@ def test_internal_billing_migration_is_reversible(tmp_path: Path) -> None:
 def test_wallet_backfill_covers_users_created_before_internal_billing(tmp_path: Path) -> None:
     db_path = tmp_path / "wallet-backfill.db"
     command.upgrade(alembic_config(db_path), "021_generation_batch_display_name")
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             """
             INSERT INTO users (id, username, display_name, role)
@@ -160,7 +161,7 @@ def test_wallet_backfill_covers_users_created_before_internal_billing(tmp_path: 
 
     command.upgrade(alembic_config(db_path), "head")
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         wallet = conn.execute(
             """
             SELECT available_credits, reserved_credits

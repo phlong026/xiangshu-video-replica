@@ -519,7 +519,7 @@ def find_analysis_version_for_asset(
         SELECT id, project_id, asset_id, kind, version_number, payload_json,
                created_by_user_id, created_at
         FROM versions
-        WHERE project_id = ? AND asset_id = ? AND kind = ?
+        WHERE project_id = %s AND asset_id = %s AND kind = %s
         ORDER BY version_number DESC
         LIMIT 1
         """,
@@ -629,7 +629,7 @@ def _insert_version(
             payload_json,
             created_by_user_id
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
         """,
         (
             version_id,
@@ -650,7 +650,7 @@ def get_version(conn: BusinessConnection, version_id: str) -> sqlite3.Row:
         SELECT id, project_id, asset_id, kind, version_number, payload_json, created_by_user_id,
                created_at
         FROM versions
-        WHERE id = ?
+        WHERE id = %s
         """,
         (version_id,),
     ).fetchone()
@@ -664,7 +664,7 @@ def next_version_number(conn: BusinessConnection, *, project_id: str, kind: str)
         """
         SELECT COALESCE(MAX(version_number), 0) + 1
         FROM versions
-        WHERE project_id = ? AND kind = ?
+        WHERE project_id = %s AND kind = %s
         """,
         (project_id, kind),
     ).fetchone()

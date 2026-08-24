@@ -187,7 +187,7 @@ def test_provider_config_survives_database_reopen(
     db_path: Path,
     settings_key: str,
 ) -> None:
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         SettingsRepository(conn).save_provider_config(
             "cos",
             {
@@ -214,7 +214,7 @@ def test_provider_config_survives_database_reopen(
 def test_provider_config_remains_encrypted_when_reopened_with_the_wrong_key(
     db_path: Path,
 ) -> None:
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         SettingsRepository(conn).save_provider_config(
             "metaso",
             {"api_key": "metaso-secret"},
@@ -239,7 +239,7 @@ def test_settings_api_reports_wrong_key_without_deleting_saved_config(
     db_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         SettingsRepository(conn).save_provider_config(
             "metaso",
             {"api_key": "metaso-secret"},
@@ -270,7 +270,7 @@ def test_settings_api_reports_wrong_key_without_deleting_saved_config(
             "message": "本地配置仍保存在数据库中，但当前主密钥缺失或不匹配；系统未覆盖已保存配置。",
         }
     }
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         assert (
             conn.execute(
                 "SELECT COUNT(*) FROM provider_settings WHERE provider = 'metaso'"
@@ -288,7 +288,7 @@ def test_bootstrap_persists_an_explicit_key_only_after_saved_settings_decrypt(
 
     monkeypatch.delenv("VIDEO_REPLICA_DISABLE_LOCAL_KEYSTORE", raising=False)
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         SettingsRepository(conn).save_provider_config(
             "metaso",
             {"api_key": "metaso-secret"},

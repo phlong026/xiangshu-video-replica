@@ -145,7 +145,7 @@ def auth_headers(user_id: str) -> dict[str, str]:
 
 
 def audit_actions(db_path: Path) -> list[str]:
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         return [str(row["action"]) for row in conn.execute("SELECT action FROM audit_logs")]
 
 
@@ -228,7 +228,7 @@ def test_auth_me_records_login_success(client: TestClient, db_path: Path) -> Non
     response = client.get("/api/auth/me", headers=auth_headers("employee_1"))
 
     assert response.status_code == 200
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         row = conn.execute(
             """
             SELECT actor_user_id, action, entity_type, entity_id, metadata_json
@@ -257,7 +257,7 @@ def test_auth_me_records_login_failure_without_storing_identity_header(
     response = client.get("/api/auth/me", headers=auth_headers("employee_1"))
 
     assert response.status_code == 401
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         row = conn.execute(
             """
             SELECT actor_user_id, action, entity_type, entity_id, metadata_json
@@ -308,7 +308,7 @@ def test_employee_can_create_and_list_only_their_projects(
         "Owned Project",
     ]
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         row = conn.execute(
             "SELECT metadata_json FROM audit_logs WHERE action = 'project.create'"
         ).fetchone()
@@ -324,7 +324,7 @@ def test_owner_can_delete_an_unfinished_project_and_its_pending_upload(
     storage = LocalStorageAdapter(root=tmp_path / "private-storage", bucket="private-bucket")
     storage_key = "projects/project_delete/uploads/asset-pending/reference.mp4"
     storage.put_object(storage_key, b"pending-video", content_type="video/mp4")
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             "INSERT INTO projects (id, owner_user_id, name) VALUES (?, ?, ?)",
             ("project_delete", "employee_1", "Delete Me"),
@@ -354,7 +354,7 @@ def test_owner_can_delete_an_unfinished_project_and_its_pending_upload(
 
     assert response.status_code == 204
     assert storage.head_object(storage_key) is None
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         project = conn.execute(
             "SELECT id FROM projects WHERE id = ?", ("project_delete",)
         ).fetchone()
@@ -372,7 +372,7 @@ def test_project_delete_removes_a_project_with_completed_work(
     assert response.status_code == 204
     storage = LocalStorageAdapter(root=tmp_path / "private-storage", bucket="private-bucket")
     assert storage.head_object("outputs/asset_owned.mp4") is None
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         remaining = {
             table: conn.execute(
                 f"SELECT COUNT(*) FROM {table} WHERE project_id = ?",  # noqa: S608
@@ -409,7 +409,7 @@ def test_project_delete_blocked_while_generation_tasks_are_active(
     client: TestClient,
     db_path: Path,
 ) -> None:
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             "UPDATE generation_tasks SET status = 'RUNNING' WHERE id = ?",
             ("task_owned",),
@@ -420,7 +420,7 @@ def test_project_delete_blocked_while_generation_tasks_are_active(
 
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "PROJECT_DELETE_HAS_ACTIVE_TASKS"
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         project = conn.execute(
             "SELECT id FROM projects WHERE id = ?", ("project_owned",)
         ).fetchone()
@@ -443,7 +443,7 @@ def test_project_delete_tolerates_storage_cleanup_failure(
     assert response.status_code == 204
     storage = LocalStorageAdapter(root=tmp_path / "private-storage", bucket="private-bucket")
     assert storage.head_object("outputs/asset_owned.mp4") is not None
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         project = conn.execute(
             "SELECT id FROM projects WHERE id = ?", ("project_owned",)
         ).fetchone()
@@ -469,7 +469,7 @@ def test_project_owner_can_rename_their_project(
     body = response.json()
     assert body["id"] == "project_owned"
     assert body["name"] == "乡墅爆款第一期"
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         stored = conn.execute(
             "SELECT name FROM projects WHERE id = ?", ("project_owned",)
         ).fetchone()
@@ -571,7 +571,7 @@ def test_project_list_exposes_reference_video_state_for_upload_recovery(
     client: TestClient,
     db_path: Path,
 ) -> None:
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             """
             INSERT INTO assets (
@@ -615,7 +615,7 @@ def test_project_list_recognizes_legacy_reference_video_uploads(
     client: TestClient,
     db_path: Path,
 ) -> None:
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             """
             INSERT INTO assets (
@@ -649,7 +649,7 @@ def test_project_list_marks_existing_analysis_as_ready(
     client: TestClient,
     db_path: Path,
 ) -> None:
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             """
             INSERT INTO assets (
@@ -694,7 +694,7 @@ def test_project_list_marks_existing_analysis_as_ready(
     assert response.status_code == 200
     assert response.json()["analysis_status"] == "READY"
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             """
             INSERT INTO assets (
@@ -788,7 +788,7 @@ def test_download_audit_does_not_store_temporary_url(client: TestClient, db_path
     )
 
     assert response.status_code == 200
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         row = conn.execute(
             """
             SELECT metadata_json
@@ -809,7 +809,7 @@ def test_download_rejects_cloud_asset_when_bucket_does_not_match_configuration(
     db_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             "UPDATE assets SET storage_uri = ? WHERE id = ?",
             ("cos://other-bucket/outputs/asset_owned.mp4", "asset_owned"),

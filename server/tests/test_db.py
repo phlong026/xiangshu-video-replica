@@ -13,6 +13,7 @@ from cryptography.fernet import Fernet
 
 from app.backup import backup_database, check_database, restore_database, run_daily_backup
 from app.db import alembic_config, connect_database, initialize_database
+from app.db_portable import BusinessConnection
 from app.repositories import GenerationTaskRepository
 
 
@@ -121,7 +122,7 @@ def test_retry_lineage_revision_is_reversible(tmp_path: Path) -> None:
 
     command.downgrade(alembic_config(db_path), "016_character_reference_snapshot")
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
         batch_columns = {
             row[1] for row in conn.execute("PRAGMA table_info(generation_batches)").fetchall()
@@ -141,7 +142,7 @@ def test_retry_lineage_revision_is_reversible(tmp_path: Path) -> None:
 
     command.upgrade(alembic_config(db_path), "head")
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == (
             "039_admin_adjustments"
         )
@@ -159,7 +160,7 @@ def test_remove_oss_migration_purges_settings_and_selects_safe_fallback(
     db_path = tmp_path / f"remove-oss-{expected_provider}.db"
     command.upgrade(alembic_config(db_path), "017_generation_task_retry_lineage")
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             "INSERT INTO users (id, username, display_name, role) "
             "VALUES ('admin', 'admin', 'Admin', 'admin')"
@@ -181,7 +182,7 @@ def test_remove_oss_migration_purges_settings_and_selects_safe_fallback(
 
     command.upgrade(alembic_config(db_path), "head")
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
         providers = {
             row[0] for row in conn.execute("SELECT provider FROM provider_settings").fetchall()
@@ -205,7 +206,7 @@ def test_remove_oss_migration_purges_settings_and_selects_safe_fallback(
 
     command.downgrade(alembic_config(db_path), "017_generation_task_retry_lineage")
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == (
             "017_generation_task_retry_lineage"
         )
@@ -215,7 +216,7 @@ def test_remove_oss_migration_refuses_to_orphan_legacy_assets(tmp_path: Path) ->
     db_path = tmp_path / "remove-oss-with-assets.db"
     command.upgrade(alembic_config(db_path), "017_generation_task_retry_lineage")
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             "INSERT INTO users (id, username, display_name, role) "
             "VALUES ('admin', 'admin', 'Admin', 'admin')"
@@ -246,7 +247,7 @@ def test_remove_oss_migration_refuses_to_orphan_legacy_assets(tmp_path: Path) ->
     with pytest.raises(RuntimeError, match="OSS-backed assets must be migrated"):
         command.upgrade(alembic_config(db_path), "head")
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == (
             "017_generation_task_retry_lineage"
         )
@@ -273,7 +274,7 @@ def test_runtime_bootstrap_upgrades_an_existing_database_before_startup(
 ) -> None:
     db_path = tmp_path / "bootstrap-upgrade.db"
     command.upgrade(alembic_config(db_path), "017_generation_task_retry_lineage")
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             "INSERT INTO provider_settings (provider, encrypted_config) "
             "VALUES ('oss', 'legacy-encrypted-value')"
@@ -295,7 +296,7 @@ def test_runtime_bootstrap_upgrades_an_existing_database_before_startup(
     )
 
     assert result.returncode == 0, result.stderr
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == (
             "039_admin_adjustments"
         )
@@ -320,7 +321,7 @@ def test_alembic_revision_can_downgrade_to_base(tmp_path: Path) -> None:
 
     command.downgrade(alembic_config(db_path), "base")
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         tables = {
             row[0]
             for row in conn.execute(
@@ -339,7 +340,7 @@ def test_generation_revision_can_downgrade_to_characters(tmp_path: Path) -> None
 
     command.downgrade(alembic_config(db_path), "003_characters")
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
         task_columns = {
             row[1] for row in conn.execute("PRAGMA table_info(generation_tasks)").fetchall()
@@ -414,7 +415,7 @@ def test_atomic_task_lease_allows_only_one_worker_with_independent_connections(
     leases_lock = threading.Lock()
 
     def compete(worker_id: str) -> None:
-        with connect_database(db_path) as conn:
+        with BusinessConnection.sqlite(connect_database(db_path)) as conn:
             barrier.wait()
             lease = GenerationTaskRepository(conn).acquire_next_lease(
                 worker_id=worker_id,
@@ -654,7 +655,7 @@ def test_migration_007_downgrade_resets_local_to_cos(tmp_path: Path) -> None:
 
     command.downgrade(alembic_config(db_path), "006_active_storage_provider")
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         provider = conn.execute(
             "SELECT active_storage_provider FROM runtime_settings WHERE id = 1"
         ).fetchone()[0]

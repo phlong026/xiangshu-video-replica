@@ -27,7 +27,7 @@ def test_zpay_provider_migration_is_reversible(tmp_path: Path) -> None:
         )
 
     command.downgrade(alembic_config(db_path), "022_internal_billing")
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == (
             "022_internal_billing"
         )
@@ -37,7 +37,7 @@ def test_zpay_provider_migration_is_reversible(tmp_path: Path) -> None:
             )
 
     command.upgrade(alembic_config(db_path), "head")
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == (
             "039_admin_adjustments"
         )
@@ -74,7 +74,7 @@ def recharge_api(
         )
 
     def override_database() -> Iterator[BusinessConnection]:
-        with connect_database(db_path) as conn:
+        with BusinessConnection.sqlite(connect_database(db_path)) as conn:
             yield BusinessConnection.sqlite(conn)
 
     app.dependency_overrides[get_database] = override_database
@@ -123,7 +123,7 @@ def test_create_recharge_order_builds_server_owned_zpay_form(
     assert len(payload["order_no"]) <= 32
     assert "merchant-secret" not in response.text
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         row = conn.execute(
             """
             SELECT user_id, merchant_order_no, provider_trade_no, channel, status,
@@ -165,7 +165,7 @@ def test_create_recharge_order_rejects_invalid_amounts(
     )
 
     assert response.status_code == 422
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         assert conn.execute("SELECT COUNT(*) FROM recharge_orders").fetchone()[0] == 0
 
 
@@ -178,7 +178,7 @@ def test_recharge_order_list_is_owner_scoped_and_paginated(
     assert first.status_code == 201
     assert second.status_code == 201
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         create_user(
             conn,
             username="operator_2",
@@ -257,7 +257,7 @@ def test_create_recharge_order_rejects_client_owned_fields(
     )
 
     assert response.status_code == 422
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         assert conn.execute("SELECT COUNT(*) FROM recharge_orders").fetchone()[0] == 0
 
 
@@ -286,7 +286,7 @@ def test_create_recharge_order_rejects_unsafe_deployment_urls(
     )
 
     assert response.status_code == 503
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         assert conn.execute("SELECT COUNT(*) FROM recharge_orders").fetchone()[0] == 0
 
 
@@ -314,7 +314,7 @@ def test_create_recharge_order_requires_encrypted_merchant_settings(
     recharge_api: tuple[TestClient, Path, dict[str, str]],
 ) -> None:
     client, db_path, headers = recharge_api
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute("DELETE FROM provider_settings WHERE provider = 'zpay'")
 
     response = client.post(
@@ -325,7 +325,7 @@ def test_create_recharge_order_requires_encrypted_merchant_settings(
 
     assert response.status_code == 503
     assert response.json()["detail"]["code"] == "ZPAY_CONFIGURATION_INVALID"
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         assert conn.execute("SELECT COUNT(*) FROM recharge_orders").fetchone()[0] == 0
 
 
@@ -334,7 +334,7 @@ def test_zpay_config_is_encrypted_and_key_is_masked(
 ) -> None:
     _, db_path, _ = recharge_api
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         encrypted = str(
             conn.execute(
                 "SELECT encrypted_config FROM provider_settings WHERE provider = 'zpay'"
