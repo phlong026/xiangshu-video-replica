@@ -670,6 +670,544 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/control/admin/session/exchange": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Exchange Admin Session */
+    post: operations["exchange_admin_session_api_control_admin_session_exchange_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/admin/session": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Get Current Admin Session */
+    get: operations["get_current_admin_session_api_control_admin_session_get"];
+    put?: never;
+    post?: never;
+    /** Logout Admin Session */
+    delete: operations["logout_admin_session_api_control_admin_session_delete"];
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/customers/{user_id}/adjustments": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List Admin Adjustments
+     * @description List all adjustments for a target user (audit trail for operators and auditors).
+     */
+    get: operations["list_admin_adjustments_api_control_customers__user_id__adjustments_get"];
+    put?: never;
+    /**
+     * Create Admin Adjustment
+     * @description Create an admin adjustment: PAID order + CHARGE + wallet + audit row.
+     */
+    post: operations["create_admin_adjustment_api_control_customers__user_id__adjustments_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/customer/activate": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Activate First Device
+     * @description Redeem an activation code and create the whole customer chain atomically.
+     */
+    post: operations["activate_first_device_api_customer_activate_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/customer/devices": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List Devices
+     * @description The two-slot status view: current bindings plus unbind history.
+     */
+    get: operations["list_devices_api_customer_devices_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/customer/devices/{device_id}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    /**
+     * Unbind Device Route
+     * @description Unbind one of the caller's own devices; the row stays as history.
+     */
+    delete: operations["unbind_device_route_api_customer_devices__device_id__delete"];
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/customer/devices/enroll": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Enroll Second Device
+     * @description Start (or finish) the second-device pairing for one activation code.
+     *
+     *     Two answers, driven by the pairing state machine: ``202`` while the
+     *     request waits for the first device's approval, ``201`` with the one-time
+     *     device credential when an approved pairing is consumed. The response
+     *     body is a raw ``JSONResponse`` either way (the two shapes differ by
+     *     design and must not be gated by response validation); the OpenAPI
+     *     contract for both shapes is declared above (``ENROLL_RESPONSES``, the
+     *     T28 client-type task) so the generated client types stay drift-free.
+     */
+    post: operations["enroll_second_device_api_customer_devices_enroll_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/customer/device-pairings/{pairing_id}/approve": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Approve Device Pairing
+     * @description The first bound device approves a PENDING pairing request.
+     *
+     *     The state machine is the idempotency: approving twice answers the
+     *     current state, and no secret ever rides the response, so this route
+     *     carries no envelope (the enroll's one-time credential is the sealed
+     *     surface, §12.2 step 6).
+     */
+    post: operations["approve_device_pairing_api_customer_device_pairings__pairing_id__approve_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/customer/sessions/login": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Login
+     * @description Drive the §12.3 login state machine (see the module docstring).
+     */
+    post: operations["login_api_customer_sessions_login_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/customer/sessions/switch": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Switch
+     * @description Drive the §12.3 explicit atomic switch (T20 / SES-02).
+     *
+     *     The user confirmed the takeover on the client, so a live lease on the
+     *     other device is displaced in one transaction instead of answering 409:
+     *     the SWITCH event, the epoch bump and the fresh token commit together,
+     *     and the old token is fenced out on every API instance the moment they
+     *     do. Every other branch matches the login semantics (renewal, recovery,
+     *     timeout takeover) — a switch never invents new states, and never kicks
+     *     silently without the explicit client confirmation flow (SES-02 No-Go).
+     */
+    post: operations["switch_api_customer_sessions_switch_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/customer/sessions/heartbeat": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Heartbeat
+     * @description Renew the session lease (epoch untouched).
+     */
+    post: operations["heartbeat_api_customer_sessions_heartbeat_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/customer/sessions/logout": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Logout
+     * @description Pull the lease into the past and append the LOGOUT event.
+     */
+    post: operations["logout_api_customer_sessions_logout_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/activation-code-batches": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Create Activation Code Batch
+     * @description Create an OPEN batch with frozen commercial snapshots.
+     */
+    post: operations["create_activation_code_batch_api_control_activation_code_batches_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/activation-code-batches/{batch_id}/generate": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Generate Activation Codes
+     * @description Mint codes for an OPEN batch and seal them into one export package.
+     *
+     *     Generation and export sealing share one transaction: the plaintext exists
+     *     only inside that transaction's memory and lands in exactly two places —
+     *     the AEAD envelope column (sealed) and the one-time download response. The
+     *     API response itself carries masked codes only.
+     */
+    post: operations["generate_activation_codes_api_control_activation_code_batches__batch_id__generate_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/activation-code-exports/{export_id}/download": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Download Activation Code Export
+     * @description The single plaintext delivery path for an export package.
+     *
+     *     Deliberately outside the idempotency snapshot layer: the response carries
+     *     plaintext codes that must never persist (No-Go), and the one-time
+     *     ``downloaded_at`` constraint already refuses any second download. The
+     *     write contract (key / confirm / reason) is still enforced, and the reason
+     *     + request id land in the durable export audit columns (PR #43 review P1).
+     */
+    post: operations["download_activation_code_export_api_control_activation_code_exports__export_id__download_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/activation-codes/{code_id}/deliver": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Deliver Activation Code
+     * @description Record a channel delivery and flip the code from GENERATED to ISSUED.
+     */
+    post: operations["deliver_activation_code_api_control_activation_codes__code_id__deliver_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/activation-codes/{code_id}/suspend": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Suspend Activation Code
+     * @description Suspend a delivered code (operator side state, frozen matrix).
+     */
+    post: operations["suspend_activation_code_api_control_activation_codes__code_id__suspend_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/activation-codes/{code_id}/resume": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Resume Activation Code
+     * @description Resume a suspended, activated code (the matrix has no back-to-ISSUED edge).
+     */
+    post: operations["resume_activation_code_api_control_activation_codes__code_id__resume_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/activation-codes/{code_id}/revoke": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Revoke Activation Code
+     * @description Revoke a code permanently (terminal state, binding kept for audit).
+     */
+    post: operations["revoke_activation_code_api_control_activation_codes__code_id__revoke_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/activation-codes": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List Activation Codes
+     * @description List codes with masked display forms — digests never leave the store.
+     */
+    get: operations["list_activation_codes_api_control_activation_codes_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/devices": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List Devices
+     * @description List devices with display metadata only — digests never leave the store.
+     */
+    get: operations["list_devices_api_control_devices_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/device-pairings/{pairing_id}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get Device Pairing
+     * @description The verification view an operator reads before approving.
+     *
+     *     Dev doc §12.2 step 3: the admin verifies the issuance record (the code,
+     *     its delivery and the activation fact) before opening the fallback lane
+     *     (connector review P2: the delivery records — who delivered the code, on
+     *     which channel, to which recipient — are part of the required evidence).
+     *     ``admin_lane`` summarises whether the fallback is open — a snapshot for
+     *     the operator's eyes only; the write path re-validates under lock.
+     */
+    get: operations["get_device_pairing_api_control_device_pairings__pairing_id__get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/device-pairings/{pairing_id}/approve": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Admin Approve Device Pairing
+     * @description Approve a PENDING pairing via the administrator fallback lane.
+     */
+    post: operations["admin_approve_device_pairing_api_control_device_pairings__pairing_id__approve_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/devices/{device_id}/unbind": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Admin Unbind Device Route
+     * @description Release a bound device as the administrator (slot freed, history kept).
+     */
+    post: operations["admin_unbind_device_route_api_control_devices__device_id__unbind_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/devices/{device_id}/revoke-credential": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Admin Revoke Device Credential
+     * @description Revoke a bound device's credential permanently (the leaked-device lane).
+     */
+    post: operations["admin_revoke_device_credential_api_control_devices__device_id__revoke_credential_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/recharge-orders": {
     parameters: {
       query?: never;
@@ -1829,6 +2367,74 @@ export interface components {
       /** Offset */
       offset: number;
     };
+    /**
+     * AdjustmentRequest
+     * @description Shared request shape for every admin adjustment write.
+     */
+    AdjustmentRequest: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default
+       */
+      reason: string;
+      /**
+       * Credits
+       * @default 0
+       */
+      credits: number;
+      /**
+       * Source Document Type
+       * @default
+       */
+      source_document_type: string;
+      /**
+       * Source Document Ref
+       * @default
+       */
+      source_document_ref: string;
+    };
+    /** AdminActorInfo */
+    AdminActorInfo: {
+      /** User Id */
+      user_id: string;
+      /** Username */
+      username: string;
+      /** Display Name */
+      display_name: string;
+      /** Role */
+      role: string;
+    };
+    /** AdminSessionInfo */
+    AdminSessionInfo: {
+      /** Session Id */
+      session_id: string;
+      /** Expires At */
+      expires_at: string;
+      /** Last Activity At */
+      last_activity_at: string;
+      actor: components["schemas"]["AdminActorInfo"];
+    };
+    /**
+     * AdminWriteContract
+     * @description Shared write-contract fields for every admin activation mutation.
+     */
+    AdminWriteContract: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default
+       */
+      reason: string;
+    };
     /** AssetResponse */
     AssetResponse: {
       /** Id */
@@ -1860,6 +2466,29 @@ export interface components {
       metadata_json: string;
       /** Created At */
       created_at: string;
+    };
+    /** BatchCreateRequest */
+    BatchCreateRequest: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default
+       */
+      reason: string;
+      /** Name */
+      name: string;
+      /** Face Value Fen */
+      face_value_fen: number;
+      /** Credits */
+      credits: number;
+      /** Quantity */
+      quantity: number;
+      /** Activation Expires At */
+      activation_expires_at: string;
     };
     /** BatchProgress */
     BatchProgress: {
@@ -2589,6 +3218,53 @@ export interface components {
       /** Expires At */
       expires_at: string;
     };
+    /** CustomerActivationRequest */
+    CustomerActivationRequest: {
+      /** Activation Code */
+      activation_code: string;
+      /** Device Fingerprint */
+      device_fingerprint: string;
+      /** Device Name */
+      device_name: string;
+      /** Device Platform */
+      device_platform: string;
+    };
+    /** CustomerActivationResponse */
+    CustomerActivationResponse: {
+      /** Username */
+      username: string;
+      /** User Id */
+      user_id: string;
+      /** Device Id */
+      device_id: string;
+      /** Device Token */
+      device_token: string;
+      /** Session Token */
+      session_token: string;
+      /** Session Epoch */
+      session_epoch: number;
+      /** Session Lease Expires At */
+      session_lease_expires_at: string;
+    };
+    /** DeliverRequest */
+    DeliverRequest: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default
+       */
+      reason: string;
+      /** Channel */
+      channel: string;
+      /** External Order Ref */
+      external_order_ref?: string | null;
+      /** Recipient Ref */
+      recipient_ref?: string | null;
+    };
     /** DeploymentSettings */
     DeploymentSettings: {
       /** Gateway Url */
@@ -2597,6 +3273,87 @@ export interface components {
       notify_url: string;
       /** Return Url */
       return_url: string;
+    };
+    /**
+     * DeviceEnrollConsumedResponse
+     * @description T28 (FE-01): the OpenAPI half of the 201 branch (the one-time device
+     *     credential handoff). Contract-only, like the pending model above.
+     */
+    DeviceEnrollConsumedResponse: {
+      /** Device Id */
+      device_id: string;
+      /** Slot No */
+      slot_no: number;
+      /** Device Token */
+      device_token: string;
+      /** Request Id */
+      request_id: string;
+    };
+    /**
+     * DeviceEnrollPendingResponse
+     * @description T28 (FE-01): the OpenAPI half of the 202 branch.
+     *
+     *     Declared for the client's generated types only — the route still answers
+     *     with a raw ``JSONResponse`` (the two bodies differ by design), so these
+     *     models never gate the runtime; they exist so ``generated/api.ts`` can type
+     *     the pairing wait without a hand-written drift.
+     */
+    DeviceEnrollPendingResponse: {
+      /** Pairing Request Id */
+      pairing_request_id: string;
+      /** Status */
+      status: string;
+      /** Expires At */
+      expires_at: string;
+      /** Request Id */
+      request_id: string;
+    };
+    /** DeviceEnrollRequest */
+    DeviceEnrollRequest: {
+      /** Activation Code */
+      activation_code: string;
+      /** Device Fingerprint */
+      device_fingerprint: string;
+      /** Device Name */
+      device_name: string;
+      /** Device Platform */
+      device_platform: string;
+    };
+    /** DeviceListResponse */
+    DeviceListResponse: {
+      /** Slots */
+      slots: components["schemas"]["DeviceSlotView"][];
+      /** History */
+      history: components["schemas"]["DeviceView"][];
+    };
+    /** DeviceSlotView */
+    DeviceSlotView: {
+      /** Slot No */
+      slot_no: number;
+      device: components["schemas"]["DeviceView"] | null;
+    };
+    /** DeviceView */
+    DeviceView: {
+      /** Id */
+      id: string;
+      /** Slot No */
+      slot_no: number;
+      /** Display Name */
+      display_name: string;
+      /** Platform */
+      platform: string;
+      /** Status */
+      status: string;
+      /** Bound At */
+      bound_at: string | null;
+      /** Last Active At */
+      last_active_at: string | null;
+      /** Unbound At */
+      unbound_at: string | null;
+      /** Revoked At */
+      revoked_at: string | null;
+      /** Is Current */
+      is_current: boolean;
     };
     /** DiagnosticProviderResult */
     DiagnosticProviderResult: {
@@ -2629,10 +3386,38 @@ export interface components {
       /** Message */
       message: string;
     };
+    /** DownloadRequest */
+    DownloadRequest: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default
+       */
+      reason: string;
+    };
     /** DownloadUrlResponse */
     DownloadUrlResponse: {
       /** Url */
       url: string;
+    };
+    /** ExchangeRequest */
+    ExchangeRequest: {
+      /** Credential */
+      credential: string;
+    };
+    /** ExchangeResponse */
+    ExchangeResponse: {
+      /** Session Id */
+      session_id: string;
+      /** Expires At */
+      expires_at: string;
+      /** Csrf Token */
+      csrf_token: string;
+      actor: components["schemas"]["AdminActorInfo"];
     };
     /** ExtractSourceFramesRequest */
     ExtractSourceFramesRequest: {
@@ -2660,6 +3445,21 @@ export interface components {
       character_version_id?: string | null;
       /** Character Reference Selection Id */
       character_reference_selection_id?: string | null;
+    };
+    /** GenerateRequest */
+    GenerateRequest: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default
+       */
+      reason: string;
+      /** Quantity */
+      quantity: number;
     };
     /** GenerationBatchListItem */
     GenerationBatchListItem: {
@@ -2780,6 +3580,17 @@ export interface components {
       /** Service */
       service: string;
     };
+    /** HeartbeatResponse */
+    HeartbeatResponse: {
+      /** Session Id */
+      session_id: string;
+      /** Session Epoch */
+      session_epoch: number;
+      /** Lease Expires At */
+      lease_expires_at: string;
+      /** Request Id */
+      request_id: string;
+    };
     /** IdentityRenameRequest */
     IdentityRenameRequest: {
       /** Display Name */
@@ -2793,6 +3604,28 @@ export interface components {
       content_type: string;
       /** Size Bytes */
       size_bytes: number;
+    };
+    /** LoginRequest */
+    LoginRequest: {
+      /** Session Token */
+      session_token?: string | null;
+    };
+    /** LoginResponse */
+    LoginResponse: {
+      /** User Id */
+      user_id: string;
+      /** Device Id */
+      device_id: string;
+      /** Session Id */
+      session_id: string;
+      /** Session Token */
+      session_token: string;
+      /** Session Epoch */
+      session_epoch: number;
+      /** Session Lease Expires At */
+      session_lease_expires_at: string;
+      /** Request Id */
+      request_id: string;
     };
     /** MaskedZPaySettings */
     MaskedZPaySettings: {
@@ -2816,6 +3649,13 @@ export interface components {
       estimated_cost_snapshot?: number | null;
       /** Generation Reason */
       generation_reason: string;
+    };
+    /** PairingApproveResponse */
+    PairingApproveResponse: {
+      /** Pairing Request Id */
+      pairing_request_id: string;
+      /** Status */
+      status: string;
     };
     /** PersonIdentity */
     PersonIdentity: {
@@ -5090,6 +5930,892 @@ export interface operations {
         };
         content: {
           "application/json": unknown;
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  exchange_admin_session_api_control_admin_session_exchange_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ExchangeRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ExchangeResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  get_current_admin_session_api_control_admin_session_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["AdminSessionInfo"];
+        };
+      };
+    };
+  };
+  logout_admin_session_api_control_admin_session_delete: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      204: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+    };
+  };
+  list_admin_adjustments_api_control_customers__user_id__adjustments_get: {
+    parameters: {
+      query?: {
+        limit?: number;
+        offset?: number;
+      };
+      header?: never;
+      path: {
+        user_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  create_admin_adjustment_api_control_customers__user_id__adjustments_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        user_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["AdjustmentRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  activate_first_device_api_customer_activate_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["CustomerActivationRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["CustomerActivationResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  list_devices_api_customer_devices_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["DeviceListResponse"];
+        };
+      };
+    };
+  };
+  unbind_device_route_api_customer_devices__device_id__delete: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        device_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      204: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  enroll_second_device_api_customer_devices_enroll_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["DeviceEnrollRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": unknown;
+        };
+      };
+      /** @description An approved pairing was consumed: the one-time device credential for the second device. */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["DeviceEnrollConsumedResponse"];
+        };
+      };
+      /** @description The pairing request waits for the first device's approval (status PENDING, or APPROVED after a lost race — retry). */
+      202: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["DeviceEnrollPendingResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  approve_device_pairing_api_customer_device_pairings__pairing_id__approve_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        pairing_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["PairingApproveResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  login_api_customer_sessions_login_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["LoginRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["LoginResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  switch_api_customer_sessions_switch_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["LoginRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["LoginResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  heartbeat_api_customer_sessions_heartbeat_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HeartbeatResponse"];
+        };
+      };
+    };
+  };
+  logout_api_customer_sessions_logout_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      204: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+    };
+  };
+  create_activation_code_batch_api_control_activation_code_batches_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["BatchCreateRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  generate_activation_codes_api_control_activation_code_batches__batch_id__generate_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        batch_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["GenerateRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  download_activation_code_export_api_control_activation_code_exports__export_id__download_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        export_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["DownloadRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  deliver_activation_code_api_control_activation_codes__code_id__deliver_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        code_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["DeliverRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  suspend_activation_code_api_control_activation_codes__code_id__suspend_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        code_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["AdminWriteContract"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  resume_activation_code_api_control_activation_codes__code_id__resume_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        code_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["AdminWriteContract"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  revoke_activation_code_api_control_activation_codes__code_id__revoke_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        code_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["AdminWriteContract"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  list_activation_codes_api_control_activation_codes_get: {
+    parameters: {
+      query?: {
+        batch_id?: string | null;
+        status?: string | null;
+        limit?: number;
+        offset?: number;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  list_devices_api_control_devices_get: {
+    parameters: {
+      query?: {
+        status?: string | null;
+        activation_code_id?: string | null;
+        user_id?: string | null;
+        limit?: number;
+        offset?: number;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  get_device_pairing_api_control_device_pairings__pairing_id__get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        pairing_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  admin_approve_device_pairing_api_control_device_pairings__pairing_id__approve_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        pairing_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["AdminWriteContract"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  admin_unbind_device_route_api_control_devices__device_id__unbind_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        device_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["AdminWriteContract"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  admin_revoke_device_credential_api_control_devices__device_id__revoke_credential_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        device_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["AdminWriteContract"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
         };
       };
       /** @description Validation Error */

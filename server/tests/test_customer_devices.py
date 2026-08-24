@@ -155,6 +155,48 @@ def test_max_slots_constant_is_two() -> None:
     assert MAX_DEVICE_SLOTS == 2
 
 
+def test_enroll_openapi_contract_declares_both_response_shapes() -> None:
+    """T28 (FE-01): the enroll route must declare its two response bodies in
+    the OpenAPI contract — 202 while the pairing waits for approval, 201 with
+    the one-time device credential. The client's generated types are cut from
+    this contract ("the OpenAPI contract lands with the T28 client-type task",
+    the route docstring), so an undeclared shape is a broken contract, not a
+    cosmetic gap: the adapter could not type the pairing wait vs. the
+    credential handoff without drifting into hand-written shapes."""
+    from app.customer_device_routes import router as customer_device_router
+
+    contract_app = FastAPI()
+    contract_app.include_router(customer_device_router)
+    schema = contract_app.openapi()
+
+    responses = schema["paths"][ENROLL_PATH]["post"]["responses"]
+    pending_ref = responses["202"]["content"]["application/json"]["schema"]["$ref"]
+    consumed_ref = responses["201"]["content"]["application/json"]["schema"]["$ref"]
+    assert pending_ref == "#/components/schemas/DeviceEnrollPendingResponse"
+    assert consumed_ref == "#/components/schemas/DeviceEnrollConsumedResponse"
+
+    components = schema["components"]["schemas"]
+    pending = components["DeviceEnrollPendingResponse"]
+    consumed = components["DeviceEnrollConsumedResponse"]
+    # The two live bodies: {pairing_request_id, status, expires_at,
+    # request_id} while PENDING/APPROVED, {device_id, slot_no, device_token,
+    # request_id} once consumed — every field is required either way.
+    assert set(pending["required"]) == {
+        "pairing_request_id",
+        "status",
+        "expires_at",
+        "request_id",
+    }
+    assert set(consumed["required"]) == {
+        "device_id",
+        "slot_no",
+        "device_token",
+        "request_id",
+    }
+    assert set(pending["properties"]) == set(pending["required"])
+    assert set(consumed["properties"]) == set(consumed["required"])
+
+
 # ---------------------------------------------------------------------------
 # PostgreSQL integration (dedicated migrated fixture database)
 # ---------------------------------------------------------------------------

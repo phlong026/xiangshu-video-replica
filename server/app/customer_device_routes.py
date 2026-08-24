@@ -105,6 +105,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import psycopg
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -541,6 +542,52 @@ class DeviceEnrollRequest(BaseModel):
     device_platform: str = Field(min_length=1, max_length=64)
 
 
+class DeviceEnrollPendingResponse(BaseModel):
+    """T28 (FE-01): the OpenAPI half of the 202 branch.
+
+    Declared for the client's generated types only — the route still answers
+    with a raw ``JSONResponse`` (the two bodies differ by design), so these
+    models never gate the runtime; they exist so ``generated/api.ts`` can type
+    the pairing wait without a hand-written drift.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    pairing_request_id: str
+    status: str
+    expires_at: str
+    request_id: str
+
+
+class DeviceEnrollConsumedResponse(BaseModel):
+    """T28 (FE-01): the OpenAPI half of the 201 branch (the one-time device
+    credential handoff). Contract-only, like the pending model above."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    device_id: str
+    slot_no: int
+    device_token: str
+    request_id: str
+
+
+# Contract-only response declarations for the enroll route: both bodies are
+# JSONResponse at runtime (validation-free by design), the OpenAPI documents
+# the two shapes so the T28 generated client types stay drift-free.
+ENROLL_RESPONSES: dict[int | str, dict[str, Any]] = {
+    202: {
+        "model": DeviceEnrollPendingResponse,
+        "description": "The pairing request waits for the first device's "
+        "approval (status PENDING, or APPROVED after a lost race — retry).",
+    },
+    201: {
+        "model": DeviceEnrollConsumedResponse,
+        "description": "An approved pairing was consumed: the one-time "
+        "device credential for the second device.",
+    },
+}
+
+
 class PairingApproveResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -727,16 +774,17 @@ def _pending_response(pairing: ActivePairing, *, request_id: str) -> Response:
     )
 
 
-@router.post("/devices/enroll")
+@router.post("/devices/enroll", responses=ENROLL_RESPONSES)
 def enroll_second_device(body: DeviceEnrollRequest, request: Request) -> Response:
     """Start (or finish) the second-device pairing for one activation code.
 
     Two answers, driven by the pairing state machine: ``202`` while the
     request waits for the first device's approval, ``201`` with the one-time
     device credential when an approved pairing is consumed. The response
-    body is a plain JSON object either way (no ``response_model`` — the two
-    shapes differ by design and the OpenAPI contract lands with the T28
-    client-type task).
+    body is a raw ``JSONResponse`` either way (the two shapes differ by
+    design and must not be gated by response validation); the OpenAPI
+    contract for both shapes is declared above (``ENROLL_RESPONSES``, the
+    T28 client-type task) so the generated client types stay drift-free.
     """
     idempotency_key = request.headers.get(IDEMPOTENCY_KEY_HEADER, "").strip()
     if not idempotency_key:

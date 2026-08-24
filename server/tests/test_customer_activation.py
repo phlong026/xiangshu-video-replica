@@ -246,6 +246,21 @@ def _count(conn: psycopg.Connection, sql: str, params: tuple | list = ()) -> int
     return int(conn.execute(sql, params).fetchone()[0])
 
 
+def test_activate_route_keeps_its_response_model_in_the_openapi_contract() -> None:
+    """T28 (FE-01): the activate route keeps its response model in the OpenAPI
+    contract — the client's generated activation type is cut from it, and a
+    dropped response_model would let hand-written shapes drift back in."""
+    from app.activation_code_routes import router as activation_code_router
+
+    contract_app = FastAPI()
+    contract_app.include_router(activation_code_router)
+    responses = contract_app.openapi()["paths"][ACTIVATE_PATH]["post"]["responses"]
+    assert (
+        responses["201"]["content"]["application/json"]["schema"]["$ref"]
+        == "#/components/schemas/CustomerActivationResponse"
+    )
+
+
 # ---------------------------------------------------------------------------
 # ACT-06: 100 concurrent activations of one code
 # ---------------------------------------------------------------------------

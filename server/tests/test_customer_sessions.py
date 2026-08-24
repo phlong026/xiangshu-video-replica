@@ -142,6 +142,34 @@ def test_lease_seconds_matches_the_frozen_30_90_contract() -> None:
     assert SESSION_LEASE_SECONDS == 90
 
 
+def test_session_routes_keep_their_response_models_in_the_openapi_contract() -> None:
+    """T28 (FE-01): login / switch / heartbeat keep their response models in
+    the OpenAPI contract. The client's generated types are cut from this
+    contract; dropping a response_model would silently shrink it and let the
+    hand-written shapes drift back in."""
+    from app.customer_session_routes import router as customer_session_router
+
+    contract_app = FastAPI()
+    contract_app.include_router(customer_session_router)
+    paths = contract_app.openapi()["paths"]
+
+    login_responses = paths["/api/customer/sessions/login"]["post"]["responses"]
+    switch_responses = paths["/api/customer/sessions/switch"]["post"]["responses"]
+    heartbeat_responses = paths["/api/customer/sessions/heartbeat"]["post"]["responses"]
+    assert (
+        login_responses["201"]["content"]["application/json"]["schema"]["$ref"]
+        == "#/components/schemas/LoginResponse"
+    )
+    assert (
+        switch_responses["201"]["content"]["application/json"]["schema"]["$ref"]
+        == "#/components/schemas/LoginResponse"
+    )
+    assert (
+        heartbeat_responses["200"]["content"]["application/json"]["schema"]["$ref"]
+        == "#/components/schemas/HeartbeatResponse"
+    )
+
+
 def test_mask_device_name_keeps_a_short_hint_only() -> None:
     from app.customer_session_service import mask_device_name
 

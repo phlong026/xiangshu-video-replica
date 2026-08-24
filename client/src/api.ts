@@ -2514,3 +2514,509 @@ function isShotCard(value: unknown): value is ShotCard {
     typeof value.transition === "string"
   );
 }
+
+// ---------------------------------------------------------------------------
+// T28 / FE-01 — customer API lane: the activation / device / session adapter.
+//
+// Every type below is cut from ./generated/api (the server's OpenAPI
+// contract) — hand-written shapes are forbidden here, and the drift guards in
+// customerApi.test.ts fail `tsc -b` the moment a regeneration changes a field
+// set. Credentials travel as explicit call arguments (dev doc §7: no global
+// plaintext variable may simulate a persisted session); the desktop-side
+// persistence lands with T29's credential adapter in the Tauri layer.
+// ---------------------------------------------------------------------------
+
+type CustomerActivationResponse =
+  components["schemas"]["CustomerActivationResponse"];
+type CustomerLoginResponse = components["schemas"]["LoginResponse"];
+type CustomerHeartbeatResponse = components["schemas"]["HeartbeatResponse"];
+type CustomerDeviceListResponse = components["schemas"]["DeviceListResponse"];
+type CustomerEnrollPendingResponse =
+  components["schemas"]["DeviceEnrollPendingResponse"];
+type CustomerEnrollConsumedResponse =
+  components["schemas"]["DeviceEnrollConsumedResponse"];
+type CustomerPairingApproveResponse =
+  components["schemas"]["PairingApproveResponse"];
+
+// Task list §10.1: the single SESSION_EXPIRED_EVENT of the internal lane is
+// split into expired / replaced / revoked so the customer workspace can show
+// the sentence that matches what actually happened, instead of one generic
+// “登录已失效” for every 401.
+export const CUSTOMER_SESSION_EXPIRED_EVENT =
+  "video-replica:customer-session-expired";
+export const CUSTOMER_SESSION_REPLACED_EVENT =
+  "video-replica:customer-session-replaced";
+export const CUSTOMER_SESSION_REVOKED_EVENT =
+  "video-replica:customer-session-revoked";
+
+/** The long-lived device credential returned once at bind time. */
+export type CustomerDeviceCredential = { kind: "device"; token: string };
+/** The short-lived session token from login / switch. */
+export type CustomerSessionCredential = { kind: "session"; token: string };
+export type CustomerCredential =
+  | CustomerDeviceCredential
+  | CustomerSessionCredential;
+
+/** Every 401/403/409/429/idempotency answer resolves to exactly one of
+ * these states — the UI never has to parse a raw status line (FE-01). */
+export type CustomerApiErrorKind =
+  | "session-expired"
+  | "session-replaced"
+  | "credential-revoked"
+  | "credential-invalid"
+  | "code-suspended"
+  | "code-revoked"
+  | "other-device-online"
+  | "idempotency-conflict"
+  | "rate-limited"
+  | "bad-request"
+  | "unauthorized"
+  | "forbidden"
+  | "not-found"
+  | "conflict"
+  | "service-unavailable"
+  | "network"
+  | "timeout"
+  | "unknown";
+
+export class CustomerApiError extends Error {
+  readonly status?: number;
+  readonly code?: string;
+  readonly retryAfterSeconds?: number;
+  /** OTHER_DEVICE_ONLINE extras (dev doc §3.3: masked hint + remaining lease). */
+  readonly onlineDeviceNameMasked?: string;
+  readonly onlineSlotNo?: number;
+  readonly leaseExpiresAt?: string;
+  /** Transport failures (network / timeout) carry no status or server code —
+   * their kind is decided at construction and cannot be derived later. */
+  private readonly transportKind?: CustomerApiErrorKind;
+
+  constructor(properties: {
+    message: string;
+    status?: number;
+    code?: string;
+    retryAfterSeconds?: number;
+    onlineDeviceNameMasked?: string;
+    onlineSlotNo?: number;
+    leaseExpiresAt?: string;
+    transportKind?: CustomerApiErrorKind;
+  }) {
+    super(properties.message);
+    this.name = "CustomerApiError";
+    this.status = properties.status;
+    this.code = properties.code;
+    this.retryAfterSeconds = properties.retryAfterSeconds;
+    this.onlineDeviceNameMasked = properties.onlineDeviceNameMasked;
+    this.onlineSlotNo = properties.onlineSlotNo;
+    this.leaseExpiresAt = properties.leaseExpiresAt;
+    this.transportKind = properties.transportKind;
+  }
+
+  get kind(): CustomerApiErrorKind {
+    return this.transportKind ?? customerErrorKind(this.status, this.code);
+  }
+}
+
+function customerErrorKind(
+  status: number | undefined,
+  code: string | undefined,
+): CustomerApiErrorKind {
+  switch (code) {
+    case "SESSION_EXPIRED":
+      return "session-expired";
+    case "SESSION_REPLACED":
+      return "session-replaced";
+    case "DEVICE_REVOKED":
+      return "credential-revoked";
+    case "DEVICE_CREDENTIAL_INVALID":
+    case "DEVICE_CREDENTIAL_REQUIRED":
+      return "credential-invalid";
+    case "CODE_SUSPENDED":
+      return "code-suspended";
+    case "CODE_REVOKED":
+      return "code-revoked";
+    case "OTHER_DEVICE_ONLINE":
+      return "other-device-online";
+    case "IDEMPOTENCY_CONFLICT":
+      return "idempotency-conflict";
+    case "RATE_LIMITED":
+      return "rate-limited";
+    case "IDEMPOTENCY_KEY_REQUIRED":
+      return "bad-request";
+    default:
+      break;
+  }
+  if (status === undefined) {
+    return "unknown";
+  }
+  if (code?.endsWith("_UNAVAILABLE")) {
+    return "service-unavailable";
+  }
+  if (status === 503) {
+    return "service-unavailable";
+  }
+  if (status === 400 || status === 422) {
+    return "bad-request";
+  }
+  if (status === 401) {
+    return "unauthorized";
+  }
+  if (status === 403) {
+    return "forbidden";
+  }
+  if (status === 404) {
+    return "not-found";
+  }
+  if (status === 409) {
+    return "conflict";
+  }
+  return "unknown";
+}
+
+/** The lifecycle outcomes that end the customer session for good, mapped to
+ * their dedicated events. A mere invalid credential never fires one — that
+ * is a caller input problem, not a session the UI must tear down. */
+function customerLifecycleEvent(
+  kind: CustomerApiErrorKind,
+): string | undefined {
+  if (kind === "session-expired") {
+    return CUSTOMER_SESSION_EXPIRED_EVENT;
+  }
+  if (kind === "session-replaced") {
+    return CUSTOMER_SESSION_REPLACED_EVENT;
+  }
+  if (
+    kind === "credential-revoked" ||
+    kind === "code-suspended" ||
+    kind === "code-revoked"
+  ) {
+    return CUSTOMER_SESSION_REVOKED_EVENT;
+  }
+  return undefined;
+}
+
+async function customerErrorFromResponse(
+  response: Response,
+): Promise<CustomerApiError> {
+  let code: string | undefined;
+  let message = `客户服务请求失败（${response.status}）`;
+  let onlineDeviceNameMasked: string | undefined;
+  let onlineSlotNo: number | undefined;
+  let leaseExpiresAt: string | undefined;
+  try {
+    const payload: unknown = await response.json();
+    if (isRecord(payload) && isRecord(payload.detail)) {
+      const detail = payload.detail;
+      if (typeof detail.code === "string") {
+        code = detail.code;
+      }
+      if (typeof detail.message === "string" && detail.message.trim()) {
+        message = detail.message;
+      }
+      if (typeof detail.online_device_name_masked === "string") {
+        onlineDeviceNameMasked = detail.online_device_name_masked;
+      }
+      if (typeof detail.online_slot_no === "number") {
+        onlineSlotNo = detail.online_slot_no;
+      }
+      if (typeof detail.lease_expires_at === "string") {
+        leaseExpiresAt = detail.lease_expires_at;
+      }
+    }
+  } catch {
+    // A missing or non-JSON error body must not hide the HTTP status.
+  }
+  const retryAfterHeader = response.headers.get("Retry-After");
+  const retryAfterSeconds = retryAfterHeader
+    ? Number.parseInt(retryAfterHeader, 10)
+    : undefined;
+  return new CustomerApiError({
+    message,
+    status: response.status,
+    code,
+    retryAfterSeconds:
+      retryAfterSeconds !== undefined && Number.isNaN(retryAfterSeconds)
+        ? undefined
+        : retryAfterSeconds,
+    onlineDeviceNameMasked,
+    onlineSlotNo,
+    leaseExpiresAt,
+  });
+}
+
+type CustomerRequestOptions = {
+  method?: string;
+  body?: unknown;
+  credential?: CustomerCredential;
+  idempotencyKey?: string;
+};
+
+function isReplayed(response: Response): boolean {
+  return response.headers.get("X-Idempotent-Replay") === "true";
+}
+
+async function requestCustomer(
+  path: string,
+  options: CustomerRequestOptions,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(
+    () => controller.abort(),
+    REQUEST_TIMEOUT_MS,
+  );
+  const headers = new Headers();
+  if (options.body !== undefined) {
+    headers.set("Content-Type", "application/json");
+  }
+  if (options.credential) {
+    headers.set("Authorization", `Bearer ${options.credential.token}`);
+  }
+  if (options.idempotencyKey) {
+    headers.set("Idempotency-Key", options.idempotencyKey);
+  }
+  try {
+    return await fetch(`${apiBaseUrl()}${path}`, {
+      method: options.method ?? (options.body !== undefined ? "POST" : "GET"),
+      headers,
+      body:
+        options.body === undefined ? undefined : JSON.stringify(options.body),
+      signal: controller.signal,
+    });
+  } catch (error) {
+    throw customerTransportError(error);
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
+function customerTransportError(error: unknown): CustomerApiError {
+  if (error instanceof DOMException && error.name === "AbortError") {
+    return new CustomerApiError({
+      message: "请求超时，请重试",
+      transportKind: "timeout",
+    });
+  }
+  if (error instanceof TypeError) {
+    return new CustomerApiError({
+      message: "网络连接失败，请检查网络",
+      transportKind: "network",
+    });
+  }
+  const message = error instanceof Error ? error.message : "客户服务请求失败";
+  return new CustomerApiError({ message });
+}
+
+async function customerJson<T>(
+  path: string,
+  options: CustomerRequestOptions,
+): Promise<{ response: Response; body: T }> {
+  const response = await requestCustomer(path, options);
+  if (!response.ok) {
+    const error = await customerErrorFromResponse(response);
+    const lifecycle = customerLifecycleEvent(error.kind);
+    if (lifecycle) {
+      window.dispatchEvent(new Event(lifecycle));
+    }
+    throw error;
+  }
+  if (response.status === 204) {
+    return { response, body: undefined as T };
+  }
+  return { response, body: (await response.json()) as T };
+}
+
+export type CustomerActivateInput = {
+  activationCode: string;
+  deviceFingerprint: string;
+  deviceName: string;
+  devicePlatform: string;
+  /** Mandatory (dev doc §6.3): activation carries an idempotency key. */
+  idempotencyKey: string;
+};
+
+/** Redeem an activation code: user + wallet + first device + first charge +
+ * first session in one transaction (POST /api/customer/activate). */
+export async function customerActivate(
+  input: CustomerActivateInput,
+): Promise<CustomerActivationResponse> {
+  const { body } = await customerJson<CustomerActivationResponse>(
+    "/api/customer/activate",
+    {
+      method: "POST",
+      body: {
+        activation_code: input.activationCode,
+        device_fingerprint: input.deviceFingerprint,
+        device_name: input.deviceName,
+        device_platform: input.devicePlatform,
+      },
+      idempotencyKey: input.idempotencyKey,
+    },
+  );
+  return body;
+}
+
+export type CustomerLoginResult = {
+  /** 201 established / recovered, 200 renewed (the server sets it). */
+  status: 200 | 201;
+  /** True when the sealed envelope replayed a lost response. */
+  replayed: boolean;
+  session: CustomerLoginResponse;
+};
+
+export type CustomerLoginOptions = {
+  idempotencyKey: string;
+  /** Presenting the previous session token renews instead of conflicting. */
+  sessionToken?: string;
+};
+
+async function customerEstablishSession(
+  path: string,
+  credential: CustomerDeviceCredential,
+  options: CustomerLoginOptions,
+): Promise<CustomerLoginResult> {
+  const { response, body } = await customerJson<CustomerLoginResponse>(path, {
+    method: "POST",
+    credential,
+    body: { session_token: options.sessionToken ?? null },
+    idempotencyKey: options.idempotencyKey,
+  });
+  const status = response.status === 200 ? 200 : 201;
+  return { status, replayed: isReplayed(response), session: body };
+}
+
+/** Device-credential login (POST /api/customer/sessions/login); 409
+ * OTHER_DEVICE_ONLINE carries the masked hint for the conflict dialog. */
+export async function customerLogin(
+  credential: CustomerDeviceCredential,
+  options: CustomerLoginOptions,
+): Promise<CustomerLoginResult> {
+  return customerEstablishSession(
+    "/api/customer/sessions/login",
+    credential,
+    options,
+  );
+}
+
+/** The explicit atomic switch (POST /api/customer/sessions/switch): displaces
+ * the other device's live lease after the user confirmed the takeover. */
+export async function customerSwitch(
+  credential: CustomerDeviceCredential,
+  options: CustomerLoginOptions,
+): Promise<CustomerLoginResult> {
+  return customerEstablishSession(
+    "/api/customer/sessions/switch",
+    credential,
+    options,
+  );
+}
+
+/** Renew the session lease (POST /api/customer/sessions/heartbeat). */
+export async function customerHeartbeat(
+  credential: CustomerSessionCredential,
+): Promise<CustomerHeartbeatResponse> {
+  const { body } = await customerJson<CustomerHeartbeatResponse>(
+    "/api/customer/sessions/heartbeat",
+    { method: "POST", credential },
+  );
+  return body;
+}
+
+/** End the session (POST /api/customer/sessions/logout → 204). */
+export async function customerLogout(
+  credential: CustomerSessionCredential,
+  options: { idempotencyKey: string },
+): Promise<void> {
+  await customerJson<undefined>("/api/customer/sessions/logout", {
+    method: "POST",
+    credential,
+    idempotencyKey: options.idempotencyKey,
+  });
+}
+
+/** The two-slot status view (GET /api/customer/devices). */
+export async function customerListDevices(
+  credential: CustomerDeviceCredential,
+): Promise<CustomerDeviceListResponse> {
+  const { body } = await customerJson<CustomerDeviceListResponse>(
+    "/api/customer/devices",
+    { credential },
+  );
+  return body;
+}
+
+/** Unbind one of the caller's own devices
+ * (DELETE /api/customer/devices/{id} → 204). */
+export async function customerUnbindDevice(
+  credential: CustomerDeviceCredential,
+  deviceId: string,
+  options: { idempotencyKey: string },
+): Promise<void> {
+  await customerJson<undefined>(`/api/customer/devices/${deviceId}`, {
+    method: "DELETE",
+    credential,
+    idempotencyKey: options.idempotencyKey,
+  });
+}
+
+export type CustomerEnrollInput = {
+  activationCode: string;
+  deviceFingerprint: string;
+  deviceName: string;
+  devicePlatform: string;
+  idempotencyKey: string;
+};
+
+export type CustomerEnrollResult =
+  | { status: 202; replayed: boolean; pending: CustomerEnrollPendingResponse }
+  | {
+      status: 201;
+      replayed: boolean;
+      credential: CustomerEnrollConsumedResponse;
+    };
+
+/** Start (or finish) the second-device pairing
+ * (POST /api/customer/devices/enroll): 202 while waiting for the first
+ * device's approval, 201 with the one-time device credential once an approved
+ * pairing is consumed. */
+export async function customerEnrollDevice(
+  input: CustomerEnrollInput,
+): Promise<CustomerEnrollResult> {
+  const { response, body } = await customerJson<
+    CustomerEnrollPendingResponse | CustomerEnrollConsumedResponse
+  >("/api/customer/devices/enroll", {
+    method: "POST",
+    body: {
+      activation_code: input.activationCode,
+      device_fingerprint: input.deviceFingerprint,
+      device_name: input.deviceName,
+      device_platform: input.devicePlatform,
+    },
+    idempotencyKey: input.idempotencyKey,
+  });
+  const replayed = isReplayed(response);
+  if (response.status === 202) {
+    return {
+      status: 202,
+      replayed,
+      pending: body as CustomerEnrollPendingResponse,
+    };
+  }
+  return {
+    status: 201,
+    replayed,
+    credential: body as CustomerEnrollConsumedResponse,
+  };
+}
+
+/** The first bound device approves a PENDING pairing request
+ * (POST /api/customer/device-pairings/{id}/approve). */
+export async function customerApproveDevicePairing(
+  credential: CustomerDeviceCredential,
+  pairingId: string,
+): Promise<CustomerPairingApproveResponse> {
+  const { body } = await customerJson<CustomerPairingApproveResponse>(
+    `/api/customer/device-pairings/${pairingId}/approve`,
+    { method: "POST", credential },
+  );
+  return body;
+}
