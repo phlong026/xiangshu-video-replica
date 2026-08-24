@@ -303,3 +303,15 @@ def test_auditor_can_list_audit_log(client: TestClient, route_state: str):
     _admin_session(client, "auditor_u")
     response = client.get(AUDIT_PATH)
     assert response.status_code == 200
+
+
+@pytest.mark.pg
+def test_list_audit_log_rejects_unknown_event_type(client: TestClient, route_state: str):
+    """An unsupported event_type must answer 400, never silently the full log."""
+    _admin_session(client)
+    response = client.get(AUDIT_PATH, params={"event_type": "DEVICE_UNBIND"})
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "INVALID_EVENT_TYPE"
+
+    ok = client.get(AUDIT_PATH, params={"event_type": "ADMIN_ADJUSTMENT"})
+    assert ok.status_code == 200

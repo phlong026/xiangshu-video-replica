@@ -52,16 +52,16 @@ def list_audit_log(
     """
     bounded_limit = max(0, min(limit, MAX_LIST_LIMIT))
     bounded_offset = max(0, offset)
-    
-    # For now, only admin_adjustments are audited
-    # Future: UNION with other audit tables
+
+    # For now, only admin_adjustments are audited; a filter naming any other
+    # type must fail loudly (never silently return the unfiltered log).
+    # Future: UNION with other audit tables, extend this enum.
+    if event_type is not None and event_type != "ADMIN_ADJUSTMENT":
+        raise _http(400, "INVALID_EVENT_TYPE", "event_type must be ADMIN_ADJUSTMENT")
+
     clauses: list[str] = []
     params: list[object] = []
-    
-    if event_type and event_type == "ADMIN_ADJUSTMENT":
-        # Filter by event type (only one type for now)
-        pass  # No additional filter needed
-    
+
     if actor_user_id:
         clauses.append("aa.admin_user_id = %s")
         params.append(actor_user_id)
