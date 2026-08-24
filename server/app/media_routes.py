@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.auth import AuthenticatedUser, Database
+from app.customer_fence import BusinessDbDep
 from app.media import (
     MAX_UPLOAD_BYTES,
     FFprobeVideoProbe,
@@ -145,19 +146,19 @@ InjectedVideoProbe = Annotated[VideoProbe, Depends(get_video_probe)]
 @router.post("/upload-intent", response_model=UploadIntentResponse)
 def create_asset_upload_intent(
     payload: UploadIntentRequest,
-    conn: Database,
-    actor: AuthenticatedUser,
+    db: BusinessDbDep,
     storage: MediaStorage,
 ) -> UploadIntentResponse:
-    intent = create_upload_intent(
-        conn,
-        actor=actor,
-        storage=storage,
-        project_id=payload.project_id,
-        filename=payload.filename,
-        content_type=payload.content_type,
-        size_bytes=payload.size_bytes,
-    )
+    with db.write() as (conn, actor):
+        intent = create_upload_intent(
+            conn,
+            actor=actor,
+            storage=storage,
+            project_id=payload.project_id,
+            filename=payload.filename,
+            content_type=payload.content_type,
+            size_bytes=payload.size_bytes,
+        )
     upload_url = intent.url
     if storage.provider == "local":
         # The client cannot PUT to a `local://` scheme URL; route uploads through
@@ -179,12 +180,14 @@ def create_asset_upload_intent(
 @router.post("/{asset_id}/complete", response_model=CompleteUploadResponse)
 def complete_asset_upload(
     asset_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    db: BusinessDbDep,
     storage: MediaStorage,
     probe: InjectedVideoProbe,
 ) -> CompleteUploadResponse:
-    completed = complete_upload(conn, actor=actor, storage=storage, probe=probe, asset_id=asset_id)
+    with db.write() as (conn, actor):
+        completed = complete_upload(
+            conn, actor=actor, storage=storage, probe=probe, asset_id=asset_id
+        )
     return CompleteUploadResponse(
         asset_id=completed.asset_id,
         project_id=completed.project_id,
@@ -246,7 +249,7 @@ async def put_local_object(
             """
             SELECT id, kind, content_type, metadata_json
             FROM assets
-            WHERE project_id IS NULL AND storage_uri = ? AND sha256 = '' AND size_bytes = 0
+            WHERE project_id IS NULL AND storage_uri = %s AND sha256 = '' AND size_bytes = 0
             """,
             (storage_uri,),
         ).fetchone()

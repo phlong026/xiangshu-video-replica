@@ -85,7 +85,15 @@ def storage() -> FakeStorageAdapter:
 
 
 @pytest.fixture()
-def client(db_path: Path, storage: FakeStorageAdapter) -> Iterator[TestClient]:
+def client(
+    db_path: Path,
+    storage: FakeStorageAdapter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[TestClient]:
+    # Migrated routes (BusinessDb.write) open their own SQLite connection from
+    # the env path; it must point at the same database the override yields.
+    monkeypatch.setenv("VIDEO_REPLICA_DB_PATH", str(db_path))
+
     def database_override() -> Iterator[BusinessConnection]:
         conn = BusinessConnection.sqlite(connect_database(db_path))
         try:
@@ -335,6 +343,7 @@ def test_local_storage_intent_url_and_upload_endpoint(
     monkeypatch.setenv("PUBLIC_BASE_URL", "https://video.example.com")
     root = tmp_path / "local-storage"
     monkeypatch.setenv("VIDEO_REPLICA_STORAGE_ROOT", str(root))
+    monkeypatch.setenv("VIDEO_REPLICA_DB_PATH", str(db_path))
     storage = LocalStorageAdapter(root=root)
 
     def database_override() -> Iterator[BusinessConnection]:

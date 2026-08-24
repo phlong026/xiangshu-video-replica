@@ -50,6 +50,7 @@ def recharge_api(
 ) -> Iterator[tuple[TestClient, Path, dict[str, str]]]:
     db_path = tmp_path / "recharge.db"
     settings_key = Fernet.generate_key().decode("ascii")
+    monkeypatch.setenv("VIDEO_REPLICA_DB_PATH", str(db_path))
     monkeypatch.setenv("VIDEO_REPLICA_SETTINGS_KEY", settings_key)
     monkeypatch.setenv("VIDEO_REPLICA_AUTH_MODE", "internal")
     monkeypatch.setenv("PUBLIC_BASE_URL", "https://video.example")

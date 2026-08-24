@@ -40,7 +40,7 @@ def read_recharge_order(
                 id, user_id, merchant_order_no, provider, provider_trade_no, channel, status,
                 amount_fen, credits, notify_digest, created_at, paid_at
             FROM recharge_orders
-            WHERE merchant_order_no = ?
+            WHERE merchant_order_no = %s
             """,
             (merchant_order_no,),
         ).fetchone(),
@@ -105,7 +105,7 @@ def confirm_recharge_payment(
             """
             SELECT merchant_order_no
             FROM recharge_orders
-            WHERE provider_trade_no = ? AND merchant_order_no != ?
+            WHERE provider_trade_no = %s AND merchant_order_no != %s
             """,
             (provider_trade_no, merchant_order_no),
         ).fetchone()
@@ -134,10 +134,10 @@ def confirm_recharge_payment(
             """
             UPDATE recharge_orders
             SET status = 'PAID',
-                provider_trade_no = ?,
-                notify_digest = ?,
+                provider_trade_no = %s,
+                notify_digest = %s,
                 paid_at = CURRENT_TIMESTAMP
-            WHERE id = ? AND status = 'PENDING'
+            WHERE id = %s AND status = 'PENDING'
             """,
             (provider_trade_no, source_digest, str(order["id"])),
         )
@@ -152,7 +152,7 @@ def confirm_recharge_payment(
             INSERT INTO wallet_transactions (
                 id, user_id, type, available_delta, reserved_delta,
                 recharge_order_id, task_id, billing_round, idempotency_key
-            ) VALUES (?, ?, 'CHARGE', ?, 0, ?, NULL, NULL, ?)
+            ) VALUES (%s, %s, 'CHARGE', %s, 0, %s, NULL, NULL, %s)
             """,
             (
                 str(uuid4()),
