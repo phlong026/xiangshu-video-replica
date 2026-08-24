@@ -174,6 +174,11 @@ def test_enroll_openapi_contract_declares_both_response_shapes() -> None:
     consumed_ref = responses["201"]["content"]["application/json"]["schema"]["$ref"]
     assert pending_ref == "#/components/schemas/DeviceEnrollPendingResponse"
     assert consumed_ref == "#/components/schemas/DeviceEnrollConsumedResponse"
+    # PR #55 review: the route only ever answers 201 or 202 — a phantom
+    # default-200 entry (an artifact of FastAPI's decorator default colliding
+    # with the explicit responses= declaration) would force every generated
+    # client to handle an impossible untyped branch.
+    assert "200" not in responses
 
     components = schema["components"]["schemas"]
     pending = components["DeviceEnrollPendingResponse"]

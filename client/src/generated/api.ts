@@ -809,6 +809,9 @@ export interface paths {
      *     design and must not be gated by response validation); the OpenAPI
      *     contract for both shapes is declared above (``ENROLL_RESPONSES``, the
      *     T28 client-type task) so the generated client types stay drift-free.
+     *     The decorator's ``status_code=202`` mirrors the pending branch so
+     *     FastAPI's default success status never materializes a phantom 200 in
+     *     the contract (PR #55 review) — the route never answers 200.
      */
     post: operations["enroll_second_device_api_customer_devices_enroll_post"];
     delete?: never;
@@ -6182,15 +6185,6 @@ export interface operations {
       };
     };
     responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": unknown;
-        };
-      };
       /** @description An approved pairing was consumed: the one-time device credential for the second device. */
       201: {
         headers: {
@@ -6264,6 +6258,15 @@ export interface operations {
       };
     };
     responses: {
+      /** @description The same device renewed its live session (the outcome-sealed envelope replays with the original token). */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["LoginResponse"];
+        };
+      };
       /** @description Successful Response */
       201: {
         headers: {
@@ -6297,6 +6300,15 @@ export interface operations {
       };
     };
     responses: {
+      /** @description The same device renewed its live session (the outcome-sealed envelope replays with the original token). */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["LoginResponse"];
+        };
+      };
       /** @description Successful Response */
       201: {
         headers: {

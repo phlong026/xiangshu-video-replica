@@ -168,6 +168,18 @@ def test_session_routes_keep_their_response_models_in_the_openapi_contract() -> 
         heartbeat_responses["200"]["content"]["application/json"]["schema"]["$ref"]
         == "#/components/schemas/HeartbeatResponse"
     )
+    # PR #55 review: the same device renewing its live session answers 200
+    # with the identical LoginResponse body (the outcome-sealed envelope),
+    # so both status codes must carry the model — a 201-only contract leaves
+    # the generated client unable to type a valid production response.
+    assert (
+        login_responses["200"]["content"]["application/json"]["schema"]["$ref"]
+        == "#/components/schemas/LoginResponse"
+    )
+    assert (
+        switch_responses["200"]["content"]["application/json"]["schema"]["$ref"]
+        == "#/components/schemas/LoginResponse"
+    )
 
 
 def test_mask_device_name_keeps_a_short_hint_only() -> None:

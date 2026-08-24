@@ -774,7 +774,7 @@ def _pending_response(pairing: ActivePairing, *, request_id: str) -> Response:
     )
 
 
-@router.post("/devices/enroll", responses=ENROLL_RESPONSES)
+@router.post("/devices/enroll", status_code=202, responses=ENROLL_RESPONSES)
 def enroll_second_device(body: DeviceEnrollRequest, request: Request) -> Response:
     """Start (or finish) the second-device pairing for one activation code.
 
@@ -785,6 +785,9 @@ def enroll_second_device(body: DeviceEnrollRequest, request: Request) -> Respons
     design and must not be gated by response validation); the OpenAPI
     contract for both shapes is declared above (``ENROLL_RESPONSES``, the
     T28 client-type task) so the generated client types stay drift-free.
+    The decorator's ``status_code=202`` mirrors the pending branch so
+    FastAPI's default success status never materializes a phantom 200 in
+    the contract (PR #55 review) — the route never answers 200.
     """
     idempotency_key = request.headers.get(IDEMPOTENCY_KEY_HEADER, "").strip()
     if not idempotency_key:

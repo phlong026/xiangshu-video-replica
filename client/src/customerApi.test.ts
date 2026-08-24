@@ -685,4 +685,99 @@ describe("customer API error states", () => {
       window.removeEventListener(CUSTOMER_SESSION_REVOKED_EVENT, record);
     }
   });
+
+  // PR #55 review: a suspended code is reversible — an admin can resume it,
+  // and the still-valid device credential must survive that window so the
+  // user can log in again right after the resume. Firing the revoked event
+  // here would make consumers drop the credential for no permanent reason.
+  it("keeps a suspended code off the revoked event lane", async () => {
+    const seen: string[] = [];
+    const record = (event: Event) => seen.push(event.type);
+    window.addEventListener(CUSTOMER_SESSION_EXPIRED_EVENT, record);
+    window.addEventListener(CUSTOMER_SESSION_REPLACED_EVENT, record);
+    window.addEventListener(CUSTOMER_SESSION_REVOKED_EVENT, record);
+
+    try {
+      const suspended = await captureLoginError(
+        { detail: { code: "CODE_SUSPENDED", message: "suspended" } },
+        403,
+      );
+      expect(suspended.kind).toBe("code-suspended");
+      expect(seen).toEqual([]);
+
+      // A revoked code is permanent — it stays on the revoked lane.
+      const revokedCode = await captureLoginError(
+        { detail: { code: "CODE_REVOKED", message: "revoked" } },
+        403,
+      );
+      expect(revokedCode.kind).toBe("code-revoked");
+      expect(seen).toEqual([CUSTOMER_SESSION_REVOKED_EVENT]);
+    } finally {
+      window.removeEventListener(CUSTOMER_SESSION_EXPIRED_EVENT, record);
+      window.removeEventListener(CUSTOMER_SESSION_REPLACED_EVENT, record);
+      window.removeEventListener(CUSTOMER_SESSION_REVOKED_EVENT, record);
+    }
+  });
+
+  // PR #55 review: dev doc §13.1 — state-changing customer requests carry
+  // X-Request-Id; §13.2 — an IDEMPOTENCY_CONFLICT must be reported with its
+  // request id, so the error keeps the id the client sent.
+  it("stamps every request with an X-Request-Id and keeps it on the error", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(201, activationBody))
+      .mockResolvedValueOnce(
+        jsonResponse(409, {
+          detail: {
+            code: "IDEMPOTENCY_CONFLICT",
+            message:
+              "This idempotency key was already used for a different request.",
+          },
+        }),
+      )
+      .mockResolvedValueOnce(jsonResponse(201, activationBody));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await customerActivate({
+      activationCode: "XS04-AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD",
+      deviceFingerprint: "fingerprint-1",
+      deviceName: "工作电脑",
+      devicePlatform: "windows",
+      idempotencyKey: "idem-activate",
+    });
+
+    const conflict = await customerLogin(
+      { kind: "device", token: deviceTokenText },
+      { idempotencyKey: "idem-login" },
+    ).then(
+      () => {
+        throw new Error("expected the login to fail");
+      },
+      (error: unknown) => {
+        expect(error).toBeInstanceOf(CustomerApiError);
+        return error as CustomerApiError;
+      },
+    );
+
+    expect(conflict.kind).toBe("idempotency-conflict");
+    // The transport minted a non-empty id and surfaced it on the error.
+    expect(conflict.requestId).toBeTruthy();
+    const loginOptions = fetchMock.mock.calls[1]?.[1] as RequestInit;
+    const loginHeaders = loginOptions.headers as Headers;
+    expect(loginHeaders.get("X-Request-Id")).toBe(conflict.requestId ?? null);
+
+    // An explicit requestId travels through instead of a minted one.
+    const explicit = await customerActivate({
+      activationCode: "XS04-AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD",
+      deviceFingerprint: "fingerprint-1",
+      deviceName: "工作电脑",
+      devicePlatform: "windows",
+      idempotencyKey: "idem-activate",
+      requestId: "req-explicit-1",
+    });
+    expect(explicit.device_token).toBe("device-token");
+    const explicitOptions = fetchMock.mock.calls[2]?.[1] as RequestInit;
+    const explicitHeaders = explicitOptions.headers as Headers;
+    expect(explicitHeaders.get("X-Request-Id")).toBe("req-explicit-1");
+  });
 });

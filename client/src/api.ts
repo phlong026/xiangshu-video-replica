@@ -2587,6 +2587,10 @@ export class CustomerApiError extends Error {
   readonly onlineDeviceNameMasked?: string;
   readonly onlineSlotNo?: number;
   readonly leaseExpiresAt?: string;
+  /** The X-Request-Id this client sent (and retains) for the failed request —
+   * the correlation key for a server-side audit lookup (dev doc §13.2: an
+   * IDEMPOTENCY_CONFLICT must be reported with its request id). */
+  readonly requestId?: string;
   /** Transport failures (network / timeout) carry no status or server code —
    * their kind is decided at construction and cannot be derived later. */
   private readonly transportKind?: CustomerApiErrorKind;
@@ -2599,6 +2603,7 @@ export class CustomerApiError extends Error {
     onlineDeviceNameMasked?: string;
     onlineSlotNo?: number;
     leaseExpiresAt?: string;
+    requestId?: string;
     transportKind?: CustomerApiErrorKind;
   }) {
     super(properties.message);
@@ -2609,6 +2614,7 @@ export class CustomerApiError extends Error {
     this.onlineDeviceNameMasked = properties.onlineDeviceNameMasked;
     this.onlineSlotNo = properties.onlineSlotNo;
     this.leaseExpiresAt = properties.leaseExpiresAt;
+    this.requestId = properties.requestId;
     this.transportKind = properties.transportKind;
   }
 
@@ -2675,7 +2681,14 @@ function customerErrorKind(
 
 /** The lifecycle outcomes that end the customer session for good, mapped to
  * their dedicated events. A mere invalid credential never fires one — that
- * is a caller input problem, not a session the UI must tear down. */
+ * is a caller input problem, not a session the UI must tear down.
+ *
+ * A suspended code (kind "code-suspended") is deliberately absent: the
+ * suspension is reversible (an admin can resume the code), so firing the
+ * revoked event would make consumers drop a still-valid device credential —
+ * after the resume the user could not log in again without device recovery.
+ * The UI surfaces the suspension through the error kind itself (PR #55
+ * review); only permanent revocations fire the event. */
 function customerLifecycleEvent(
   kind: CustomerApiErrorKind,
 ): string | undefined {
@@ -2685,11 +2698,7 @@ function customerLifecycleEvent(
   if (kind === "session-replaced") {
     return CUSTOMER_SESSION_REPLACED_EVENT;
   }
-  if (
-    kind === "credential-revoked" ||
-    kind === "code-suspended" ||
-    kind === "code-revoked"
-  ) {
+  if (kind === "credential-revoked" || kind === "code-revoked") {
     return CUSTOMER_SESSION_REVOKED_EVENT;
   }
   return undefined;
@@ -2697,6 +2706,7 @@ function customerLifecycleEvent(
 
 async function customerErrorFromResponse(
   response: Response,
+  requestId: string,
 ): Promise<CustomerApiError> {
   let code: string | undefined;
   let message = `客户服务请求失败（${response.status}）`;
@@ -2734,6 +2744,7 @@ async function customerErrorFromResponse(
     message,
     status: response.status,
     code,
+    requestId,
     retryAfterSeconds:
       retryAfterSeconds !== undefined && Number.isNaN(retryAfterSeconds)
         ? undefined
@@ -2749,6 +2760,10 @@ type CustomerRequestOptions = {
   body?: unknown;
   credential?: CustomerCredential;
   idempotencyKey?: string;
+  /** Dev doc §13.1: state-changing customer requests carry X-Request-Id.
+   * Omit it and the transport mints one (crypto.randomUUID) so every call
+   * keeps a correlation key the server audit can be looked up by. */
+  requestId?: string;
 };
 
 function isReplayed(response: Response): boolean {
@@ -2758,13 +2773,18 @@ function isReplayed(response: Response): boolean {
 async function requestCustomer(
   path: string,
   options: CustomerRequestOptions,
-): Promise<Response> {
+): Promise<{ response: Response; requestId: string }> {
   const controller = new AbortController();
   const timeout = window.setTimeout(
     () => controller.abort(),
     REQUEST_TIMEOUT_MS,
   );
+  // Dev doc §13.1: every customer request carries an X-Request-Id. The id
+  // travels back inside CustomerApiError so the UI can report it on an
+  // IDEMPOTENCY_CONFLICT (§13.2) and the audit trail can be located by it.
+  const requestId = options.requestId ?? crypto.randomUUID();
   const headers = new Headers();
+  headers.set("X-Request-Id", requestId);
   if (options.body !== undefined) {
     headers.set("Content-Type", "application/json");
   }
@@ -2775,44 +2795,50 @@ async function requestCustomer(
     headers.set("Idempotency-Key", options.idempotencyKey);
   }
   try {
-    return await fetch(`${apiBaseUrl()}${path}`, {
+    const response = await fetch(`${apiBaseUrl()}${path}`, {
       method: options.method ?? (options.body !== undefined ? "POST" : "GET"),
       headers,
       body:
         options.body === undefined ? undefined : JSON.stringify(options.body),
       signal: controller.signal,
     });
+    return { response, requestId };
   } catch (error) {
-    throw customerTransportError(error);
+    throw customerTransportError(error, requestId);
   } finally {
     window.clearTimeout(timeout);
   }
 }
 
-function customerTransportError(error: unknown): CustomerApiError {
+function customerTransportError(
+  error: unknown,
+  requestId: string,
+): CustomerApiError {
   if (error instanceof DOMException && error.name === "AbortError") {
     return new CustomerApiError({
       message: "请求超时，请重试",
+      requestId,
       transportKind: "timeout",
     });
   }
   if (error instanceof TypeError) {
     return new CustomerApiError({
       message: "网络连接失败，请检查网络",
+      requestId,
       transportKind: "network",
     });
   }
   const message = error instanceof Error ? error.message : "客户服务请求失败";
-  return new CustomerApiError({ message });
+  return new CustomerApiError({ message, requestId });
 }
 
 async function customerJson<T>(
   path: string,
   options: CustomerRequestOptions,
 ): Promise<{ response: Response; body: T }> {
-  const response = await requestCustomer(path, options);
+  const { response, requestId } = await requestCustomer(path, options);
   if (!response.ok) {
-    const error = await customerErrorFromResponse(response);
+    const error = await customerErrorFromResponse(response, requestId);
     const lifecycle = customerLifecycleEvent(error.kind);
     if (lifecycle) {
       window.dispatchEvent(new Event(lifecycle));
@@ -2832,6 +2858,8 @@ export type CustomerActivateInput = {
   devicePlatform: string;
   /** Mandatory (dev doc §6.3): activation carries an idempotency key. */
   idempotencyKey: string;
+  /** Optional correlation id; omitted, the transport mints one. */
+  requestId?: string;
 };
 
 /** Redeem an activation code: user + wallet + first device + first charge +
@@ -2850,6 +2878,7 @@ export async function customerActivate(
         device_platform: input.devicePlatform,
       },
       idempotencyKey: input.idempotencyKey,
+      requestId: input.requestId,
     },
   );
   return body;
@@ -2867,6 +2896,8 @@ export type CustomerLoginOptions = {
   idempotencyKey: string;
   /** Presenting the previous session token renews instead of conflicting. */
   sessionToken?: string;
+  /** Optional correlation id; omitted, the transport mints one. */
+  requestId?: string;
 };
 
 async function customerEstablishSession(
@@ -2879,6 +2910,7 @@ async function customerEstablishSession(
     credential,
     body: { session_token: options.sessionToken ?? null },
     idempotencyKey: options.idempotencyKey,
+    requestId: options.requestId,
   });
   const status = response.status === 200 ? 200 : 201;
   return { status, replayed: isReplayed(response), session: body };
@@ -2924,12 +2956,13 @@ export async function customerHeartbeat(
 /** End the session (POST /api/customer/sessions/logout → 204). */
 export async function customerLogout(
   credential: CustomerSessionCredential,
-  options: { idempotencyKey: string },
+  options: { idempotencyKey: string; requestId?: string },
 ): Promise<void> {
   await customerJson<undefined>("/api/customer/sessions/logout", {
     method: "POST",
     credential,
     idempotencyKey: options.idempotencyKey,
+    requestId: options.requestId,
   });
 }
 
@@ -2949,7 +2982,7 @@ export async function customerListDevices(
 export async function customerUnbindDevice(
   credential: CustomerDeviceCredential,
   deviceId: string,
-  options: { idempotencyKey: string },
+  options: { idempotencyKey: string; requestId?: string },
 ): Promise<void> {
   await customerJson<undefined>(
     `/api/customer/devices/${encodeURIComponent(deviceId)}`,
@@ -2957,6 +2990,7 @@ export async function customerUnbindDevice(
       method: "DELETE",
       credential,
       idempotencyKey: options.idempotencyKey,
+      requestId: options.requestId,
     },
   );
 }
@@ -2967,6 +3001,8 @@ export type CustomerEnrollInput = {
   deviceName: string;
   devicePlatform: string;
   idempotencyKey: string;
+  /** Optional correlation id; omitted, the transport mints one. */
+  requestId?: string;
 };
 
 export type CustomerEnrollResult =
@@ -2995,6 +3031,7 @@ export async function customerEnrollDevice(
       device_platform: input.devicePlatform,
     },
     idempotencyKey: input.idempotencyKey,
+    requestId: input.requestId,
   });
   const replayed = isReplayed(response);
   if (response.status === 202) {

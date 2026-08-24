@@ -62,6 +62,7 @@ import hashlib
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import psycopg
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -160,6 +161,19 @@ class HeartbeatResponse(BaseModel):
     session_epoch: int
     lease_expires_at: str
     request_id: str
+
+
+# T28 (PR #55 review): the same device renewing its live session answers 200
+# with the identical sealed LoginResponse body, so both status codes must
+# carry the model in the contract — a 201-only declaration leaves generated
+# clients unable to type a valid production response.
+RENEWAL_RESPONSES: dict[int | str, dict[str, Any]] = {
+    200: {
+        "model": LoginResponse,
+        "description": "The same device renewed its live session "
+        "(the outcome-sealed envelope replays with the original token).",
+    },
+}
 
 
 def _bearer_token(request: Request) -> str | None:
@@ -580,7 +594,12 @@ def _establish_session_route(
     return LoginResponse.model_validate(sealed_payload)
 
 
-@router.post("/login", response_model=LoginResponse, status_code=201)
+@router.post(
+    "/login",
+    response_model=LoginResponse,
+    status_code=201,
+    responses=RENEWAL_RESPONSES,
+)
 def login(body: LoginRequest, request: Request, response: Response) -> LoginResponse:
     """Drive the §12.3 login state machine (see the module docstring)."""
     return _establish_session_route(
@@ -597,7 +616,12 @@ def login(body: LoginRequest, request: Request, response: Response) -> LoginResp
 # ---------------------------------------------------------------------------
 
 
-@router.post("/switch", response_model=LoginResponse, status_code=201)
+@router.post(
+    "/switch",
+    response_model=LoginResponse,
+    status_code=201,
+    responses=RENEWAL_RESPONSES,
+)
 def switch(body: LoginRequest, request: Request, response: Response) -> LoginResponse:
     """Drive the §12.3 explicit atomic switch (T20 / SES-02).
 
