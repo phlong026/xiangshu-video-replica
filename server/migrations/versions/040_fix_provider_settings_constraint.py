@@ -54,6 +54,11 @@ def downgrade() -> None:
     if bind.dialect.name != "postgresql":
         return
 
+    # OPS WARNING (M3 review M4): this DELETE destroys the live ZPay merchant
+    # configuration (merchant key / pid / channel rows for provider 'zpay').
+    # Unlike the audit-lineage refusals in 037/038/039 this is configuration
+    # data, so the downgrade proceeds — but export provider_settings first if
+    # the ZPay config must survive the rollback.
     op.execute("DELETE FROM provider_settings WHERE provider = 'zpay'")
     with op.batch_alter_table("provider_settings") as batch_op:
         batch_op.drop_constraint("ck_provider_settings_supported_provider", type_="check")

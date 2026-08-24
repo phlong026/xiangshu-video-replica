@@ -1191,6 +1191,161 @@ def test_concurrent_first_logins_on_a_missing_row_never_500(client: TestClient) 
 
 
 # ---------------------------------------------------------------------------
+# M3 exit gate 2 — one hundred second-device logins all answer 409
+# ---------------------------------------------------------------------------
+
+
+def test_hundred_concurrent_second_device_logins_all_409_while_first_online(
+    client: TestClient,
+) -> None:
+    """M3 exit gate 2 (dev plan §4): with the first device online, one hundred
+    ordinary second-device logins must ALL answer 409 OTHER_DEVICE_ONLINE.
+
+    The T13 ACT-06 shape (one barrier, one hundred threads, one shared
+    TestClient) applied to the session state machine: the single
+    customer_session_state row lock serialises the writers, every loser
+    re-reads the first device's live lease and refuses — and the state row
+    must come out untouched: same device, same epoch, byte-identical lease,
+    no new events, no idempotency-envelope residue (each refused login rolls
+    its key back with the transaction).
+    """
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    second_token = _second_device_row(
+        user_id=customer["user_id"],
+        activation_code_id="code-a",
+        device_id="device-b",
+        slot_no=2,
+    )
+    before_device, before_session, before_epoch, before_lease, _ = _session_row()
+    before_login_events = [e[0] for e in _session_events()].count("LOGIN")
+    with psycopg.connect(_t19_dsn(), autocommit=True) as conn:
+        before_envelopes = int(
+            conn.execute("SELECT COUNT(*) FROM customer_idempotency_envelopes").fetchone()[0]
+        )
+
+    threads_count = 100
+    barrier = threading.Barrier(threads_count)
+    results: list[tuple[int, str]] = []
+    results_lock = threading.Lock()
+
+    def worker(index: int) -> None:
+        barrier.wait()
+        response = client.post(
+            LOGIN_PATH,
+            json={},
+            headers={
+                **_bearer(second_token),
+                IDEMPOTENCY_KEY_HEADER: f"idem-hundred-{index}",
+            },
+        )
+        with results_lock:
+            results.append((response.status_code, response.text))
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(threads_count)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=120)
+        assert not thread.is_alive(), "a concurrent login worker hung"
+
+    # Exit gate 2: every one of the 100 answers 409 OTHER_DEVICE_ONLINE.
+    assert len(results) == threads_count
+    for status, body in results:
+        assert status == 409, (status, body)
+        assert '"OTHER_DEVICE_ONLINE"' in body, body
+
+    # Zero state change: same device, same session id, same epoch, and the
+    # lease is byte-identical (a refused login never touches the row).
+    after_device, after_session, after_epoch, after_lease, _ = _session_row()
+    assert (after_device, after_session, after_epoch, after_lease) == (
+        before_device,
+        before_session,
+        before_epoch,
+        before_lease,
+    )
+    # The refused logins appended nothing (the LOGIN-event count is
+    # unchanged) and rolled their idempotency envelopes back with the
+    # transaction — the envelope count is exactly what activation left.
+    assert [e[0] for e in _session_events()].count("LOGIN") == before_login_events
+    with psycopg.connect(_t19_dsn(), autocommit=True) as conn:
+        after_envelopes = int(
+            conn.execute("SELECT COUNT(*) FROM customer_idempotency_envelopes").fetchone()[0]
+        )
+    assert after_envelopes == before_envelopes
+
+
+def test_hundred_concurrent_logins_at_lease_expiry_leave_one_current_device(
+    client: TestClient,
+) -> None:
+    """M3 exit gate 2 mirror: one hundred logins racing an expired lease must
+    leave exactly one *current* device and a consistent state machine.
+
+    The first writer to take the row lock re-establishes the session; its
+    same-device siblings then take the documented recovery path (epoch + 1
+    each, §12.3), while the other device's siblings answer 409 against the
+    fresh lease. Whatever the interleaving: no 500, exactly one session row,
+    the epoch advances by exactly one per successful login, and the lapsed
+    lease lands as exactly one TIMEOUT event.
+    """
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    second_token = _second_device_row(
+        user_id=customer["user_id"],
+        activation_code_id="code-a",
+        device_id="device-b",
+        slot_no=2,
+    )
+    _expire_lease(customer["device_id"])
+
+    threads_count = 100
+    barrier = threading.Barrier(threads_count)
+    results: list[tuple[int, str]] = []
+    results_lock = threading.Lock()
+    tokens = (customer["device_token"], second_token)
+
+    def worker(index: int) -> None:
+        barrier.wait()
+        response = client.post(
+            LOGIN_PATH,
+            json={},
+            headers={
+                **_bearer(tokens[index % 2]),
+                IDEMPOTENCY_KEY_HEADER: f"idem-expiry-{index}",
+            },
+        )
+        with results_lock:
+            results.append((response.status_code, response.text))
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(threads_count)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=120)
+        assert not thread.is_alive(), "a concurrent login worker hung"
+
+    successes = [status for status, _ in results if status == 201]
+    assert len(results) == threads_count
+    assert all(status in (201, 409) for status, _ in results), results
+    assert successes, results  # the expired lease must be taken over
+
+    # Exactly one current device, live lease, epoch advanced once per success.
+    with psycopg.connect(_t19_dsn(), autocommit=True) as conn:
+        row_count = conn.execute("SELECT COUNT(*) FROM customer_session_state").fetchone()
+        row = conn.execute(
+            "SELECT device_id, session_epoch, lease_until FROM customer_session_state"
+        ).fetchone()
+    assert int(row_count[0]) == 1
+    assert str(row[0]) in (customer["device_id"], "device-b")
+    assert int(row[1]) == 1 + len(successes)
+    assert datetime.fromisoformat(str(row[2])) > datetime.now(UTC)
+
+    # The lapsed lease was recorded exactly once; each successful login
+    # appended its LOGIN event.
+    events = _session_events()
+    assert [e[0] for e in events].count("TIMEOUT") == 1
+    assert [e[0] for e in events].count("LOGIN") == len(successes)
+
+
+# ---------------------------------------------------------------------------
 # No-Go red lines — no credential material in events or envelopes
 # ---------------------------------------------------------------------------
 

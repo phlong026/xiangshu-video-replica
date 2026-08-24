@@ -67,7 +67,6 @@ from app.customer_device_service import (
     _token_digests,
     highest_device_domain_key,
     keyed_digest,
-    server_now_utc,
 )
 
 # SES-01: heartbeat every 30 seconds, lease 90 seconds (the frozen contract;
@@ -212,7 +211,7 @@ def login_session(
     device_id: str,
     presentation_session_token: str | None,
     request_id: str,
-    now: datetime | None = None,
+    now: datetime,
     takeover: bool = False,
 ) -> LoginResult:
     """Drive the §12.3 login state machine for one authenticated device.
@@ -224,7 +223,9 @@ def login_session(
     entry) turns the live-other-device conflict into the explicit atomic
     switch — the only path that may ever displace a live session.
     """
-    now_full = now or server_now_utc()
+    # SES-01: the caller must supply the PostgreSQL server clock — a missing
+    # clock must fail closed instead of silently drifting to the host clock.
+    now_full = now
     now_iso = now_full.replace(microsecond=0).isoformat()
 
     row = conn.execute(
@@ -517,7 +518,7 @@ def heartbeat_session(
     *,
     presentation_session_token: str,
     request_id: str,
-    now: datetime | None = None,
+    now: datetime,
 ) -> HeartbeatResult:
     """Renew the live session lease; refuse stale and lapsed tokens.
 
@@ -526,7 +527,7 @@ def heartbeat_session(
     or it does not. A matching row under a lapsed lease is terminal — the
     lease is never resurrected (acceptance §3.4).
     """
-    now_full = now or server_now_utc()
+    now_full = now
 
     digests = _token_digests(presentation_session_token)
     row = conn.execute(
@@ -596,7 +597,7 @@ def logout_session(
     *,
     presentation_session_token: str,
     request_id: str,
-    now: datetime | None = None,
+    now: datetime,
 ) -> LogoutResult:
     """Release the single-online slot by pulling the lease into the past.
 
@@ -609,7 +610,7 @@ def logout_session(
     the row answers ``replaced`` without touching the new session; a lapsed
     lease answers ``expired`` (nothing to release).
     """
-    now_full = now or server_now_utc()
+    now_full = now
 
     digests = _token_digests(presentation_session_token)
     row = conn.execute(
@@ -673,7 +674,7 @@ def switch_session(
     device_id: str,
     presentation_session_token: str | None,
     request_id: str,
-    now: datetime | None = None,
+    now: datetime,
 ) -> LoginResult:
     """The explicit atomic switch to the calling device (SES-02).
 
