@@ -16,9 +16,10 @@
 Task exit gate（任务清单 §4 T21）：*项目、上传、任务、充值、设备写入均阻断迟到旧请求* —— 客户写路由在 fenced 事务内重新核验 session（SES-04），全仓业务+内部 SQL 为 PG-canonical（`%s`），SES-05 读矩阵锁跨用户边界。
 
 ```bash
-$ uv run python -m pytest tests -q   # 1054 passed, 0 failed
+$ uv run python -m pytest tests -q   # 1081 passed, 0 failed
   # 客户写路由：fenced_pg_transaction 内 verify_session_context（epoch/lease/码/设备复查）
   # 快照依赖只做早期 401；最终裁决永远在事务内（§9.2 红线）
+  # SES-04 门禁矩阵：27 条迁移写路由 × 未知 session token → 401（无一条回落内网 lane）
   # SES-05 矩阵：跨用户读项目/资产/拆解/帧/Prompt/批次 → 403 无侧信道
 $ uv run ruff check . && uv run ruff format --check . && uv run mypy app
   # All checks passed! / 122 files already formatted / Success: 68 source files
@@ -59,9 +60,9 @@ Owner / Reviewer：后端（Agent 执行）/ 独立评审待 PR 轮次
 分支 / 基线 SHA：feat/customer-v3-t21-business-fencing / 基线 a32bc56（T23 合入后 rebase）
 上游规格段落：任务清单 §4 T21、§12.3 SES-04/SES-05；代码清单 §9.2 customer_auth.py、§3.3 test_customer_fencing.py；激活码开发文档 §12.4 写请求 fencing
 改动文件：db_portable.py（新建）、customer_fence.py（新建）、全仓业务+内部 SQL %s 迁移、客户写路由 db.write() 接线（项目/media/recharge/analysis/帧/simple_character/characters/generation 13 路由）、test_db_portable.py（新建 15 用例）、test_customer_fencing.py（+3 PG 两码）、test_rbac.py（+SES-05 矩阵 10 用例）、21+ 测试文件 fixture 适配
-失败测试或回归锁定：db_portable 15 例（翻译规则/fail-closed/门面）；fenced_pg_transaction 3 例（happy/过期 401 零写入/业务回滚）；PG 两码 3 例（A 建项目 owner=A/B 改名 403 零落库/未知 token 401 零落库）；SES-05 读矩阵 10 例（跨用户 9 域 403 + wallet owner 隔离）
+失败测试或回归锁定：db_portable 15 例（翻译规则/fail-closed/门面）；fenced_pg_transaction 3 例（happy/过期 401 零写入/业务回滚）；PG 两码 3 例（A 建项目 owner=A/B 改名 403 零落库/未知 token 401 零落库）；SES-04 门禁矩阵 27 例（每条迁移写路由未知 token → 401）；SES-05 读矩阵 10 例（跨用户 9 域 403 + wallet owner 隔离）
 实现结果：① 双道数据库抽象（翻译层+门面）使单一实现全 PG 化成立；② 客户写路由在 fenced 事务内重验 session（快照仅早期 401）；③ 全仓 SQL %s-canonical（PG 兼容）；④ SES-05 跨用户读矩阵锁 owner 边界
-验证命令与通过数：全量 1054 passed 零回归（T20 994 基线 + db_portable 15 + fencing 3 + PG 两码 3 + T23 增量 + SES-05 10）；ruff/format/mypy 全绿（122 files，68 source files）
+验证命令与通过数：全量 1081 passed 零回归（T20 994 基线 + db_portable 15 + fencing 3 + PG 两码 3 + T23 增量 + SES-05 10 + SES-04 门禁 27）；ruff/format/mypy 全绿（122 files，68 source files）
 证据层级：AUTOMATED_VERIFIED
 安全与可观测性：写路由 session 在事务内重新核验（epoch 回跳不可能）；快照依赖不裁决；跨用户读统一 403/404 无侧信道；token 只以 digest 过库
 迁移与回滚：无新迁移；回滚=还原代码（SQLite lane 由翻译层兼容）
