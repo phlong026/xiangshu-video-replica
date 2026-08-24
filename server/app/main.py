@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from app.activation_code_routes import router as customer_activation_router
 from app.admin_activation_routes import router as admin_activation_router
 from app.admin_auth_routes import router as admin_auth_router
+from app.admin_customer_routes import router as admin_customer_router
 from app.admin_device_routes import router as admin_device_router
 from app.analysis_routes import router as analysis_router
 from app.character_contracts import character_domain_openapi_schemas
@@ -177,6 +178,7 @@ app.include_router(rbac_router)
 app.include_router(payment_router)
 app.include_router(control_router)
 app.include_router(admin_auth_router)
+app.include_router(admin_customer_router)
 app.include_router(customer_activation_router)
 app.include_router(customer_device_router)
 app.include_router(customer_session_router)

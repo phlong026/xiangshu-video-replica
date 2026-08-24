@@ -2357,7 +2357,7 @@ def test_admin_device_events_downgrade_guard(route_state: str) -> None:
         command.downgrade(config, "037_device_pairing_requests")
     with psycopg.connect(_t16_dsn()) as conn:
         version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-    assert version == "038_admin_device_operations"
+    assert version == "039_admin_adjustments"
 
 
 # ---------------------------------------------------------------------------
@@ -2395,11 +2395,11 @@ def test_pairing_downgrade_refuses_once_rows_exist(route_state: str) -> None:
         command.downgrade(config, "032_security_rate_limits")
     # The refusal left the schema untouched at head. The whole downgrade
     # chain runs in one transaction (env.py: no transaction_per_migration),
-    # so 038's already-executed downgrade rolls back with 037's refusal —
+    # so 039/038's already-executed downgrades roll back with 037's refusal —
     # the version stays at the current head.
     with psycopg.connect(_t16_dsn()) as conn:
         version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-    assert version == "038_admin_device_operations"
+    assert version == "039_admin_adjustments"
 
     # An emptied table downgrades symmetrically, and upgrading back restores
     # the schema for any rerun of this module. Revision 038 added the

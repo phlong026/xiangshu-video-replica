@@ -34,12 +34,14 @@ EXCLUDED_TABLES = frozenset({"alembic_version"})
 # idempotency envelopes, T13/ACT-05; the admin write idempotency ledger,
 # T12/ACT-04; the shared security rate-limit counters and the append-only
 # auth-failure audit, T15/ACT-08; the append-only admin device operations
-# audit, T18/DEV-03). They have no SQLite counterpart in the
-# T07 import source, so an empty such table on the target is expected; a
-# non-empty one is divergent state and must fail closed.
+# audit, T18/DEV-03; the append-only audited admin adjustments, T23/BILL-02).
+# They have no SQLite counterpart in the T07 import source, so an empty such
+# table on the target is expected; a non-empty one is divergent state and must
+# fail closed.
 PG_ONLY_TABLES: frozenset[str] = frozenset(
     {
         "admin_sessions",
+        "admin_adjustments",
         "admin_device_events",
         "activation_code_batches",
         "activation_codes",
