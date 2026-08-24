@@ -401,14 +401,15 @@ def test_atomic_task_lease_allows_only_one_worker_with_independent_connections(
     tmp_path: Path,
 ) -> None:
     db_path = tmp_path / "app.db"
-    with initialize_database(db_path) as conn:
-        repo = GenerationTaskRepository(conn)
-        task_id = repo.create_minimal_task(
-            user_id="user_1",
-            project_id="project_1",
-            batch_id="batch_1",
-            task_id="task_1",
-        )
+    with initialize_database(db_path) as raw:
+        with BusinessConnection.sqlite(raw) as conn:
+            repo = GenerationTaskRepository(conn)
+            task_id = repo.create_minimal_task(
+                user_id="user_1",
+                project_id="project_1",
+                batch_id="batch_1",
+                task_id="task_1",
+            )
 
     barrier = threading.Barrier(2)
     leases = []
@@ -442,16 +443,17 @@ def test_atomic_task_lease_allows_only_one_worker_with_independent_connections(
 
 def test_expired_lease_can_be_recovered_by_another_worker(tmp_path: Path) -> None:
     db_path = tmp_path / "app.db"
-    with initialize_database(db_path) as conn:
-        repo = GenerationTaskRepository(conn)
-        repo.create_minimal_task(
-            user_id="user_1",
-            project_id="project_1",
-            batch_id="batch_1",
-            task_id="task_1",
-        )
-        first = repo.acquire_next_lease(worker_id="worker_a", lease_seconds=-1)
-        recovered = repo.acquire_next_lease(worker_id="worker_b", lease_seconds=30)
+    with initialize_database(db_path) as raw:
+        with BusinessConnection.sqlite(raw) as conn:
+            repo = GenerationTaskRepository(conn)
+            repo.create_minimal_task(
+                user_id="user_1",
+                project_id="project_1",
+                batch_id="batch_1",
+                task_id="task_1",
+            )
+            first = repo.acquire_next_lease(worker_id="worker_a", lease_seconds=-1)
+            recovered = repo.acquire_next_lease(worker_id="worker_b", lease_seconds=30)
 
     assert first is not None
     assert recovered is not None
@@ -463,29 +465,30 @@ def test_backup_restore_preserves_tasks_versions_and_audit_counts(tmp_path: Path
     db_path = tmp_path / "app.db"
     backup_path = tmp_path / "backup.db"
     restored_path = tmp_path / "restored.db"
-    with initialize_database(db_path) as conn:
-        repo = GenerationTaskRepository(conn)
-        repo.create_minimal_task(
-            user_id="user_1",
-            project_id="project_1",
-            batch_id="batch_1",
-            task_id="task_1",
-        )
-        conn.execute(
-            """
-            INSERT INTO versions (id, project_id, asset_id, kind, version_number, payload_json)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            ("version_1", "project_1", None, "script", 1, "{}"),
-        )
-        conn.execute(
-            """
-            INSERT INTO audit_logs (id, actor_user_id, action, entity_type, entity_id)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            ("audit_1", "user_1", "task.created", "generation_task", "task_1"),
-        )
-        conn.commit()
+    with initialize_database(db_path) as raw:
+        with BusinessConnection.sqlite(raw) as conn:
+            repo = GenerationTaskRepository(conn)
+            repo.create_minimal_task(
+                user_id="user_1",
+                project_id="project_1",
+                batch_id="batch_1",
+                task_id="task_1",
+            )
+            conn.execute(
+                """
+                INSERT INTO versions (id, project_id, asset_id, kind, version_number, payload_json)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                ("version_1", "project_1", None, "script", 1, "{}"),
+            )
+            conn.execute(
+                """
+                INSERT INTO audit_logs (id, actor_user_id, action, entity_type, entity_id)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                ("audit_1", "user_1", "task.created", "generation_task", "task_1"),
+            )
+            conn.commit()
 
     backup_database(db_path, backup_path)
     restore_database(backup_path, restored_path)

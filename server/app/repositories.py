@@ -20,14 +20,14 @@ class GenerationTaskRepository:
             self.conn.execute(
                 """
                 INSERT OR IGNORE INTO users (id, username, display_name)
-                VALUES (?, ?, ?)
+                VALUES (%s, %s, %s)
                 """,
                 (user_id, user_id, user_id),
             )
             self.conn.execute(
                 """
                 INSERT OR IGNORE INTO projects (id, owner_user_id, name)
-                VALUES (?, ?, ?)
+                VALUES (%s, %s, %s)
                 """,
                 (project_id, user_id, project_id),
             )
@@ -41,7 +41,7 @@ class GenerationTaskRepository:
                     request_hash,
                     request_snapshot_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 """,
                 (batch_id, project_id, user_id, f"{batch_id}:key", f"{batch_id}:hash", "{}"),
             )
@@ -56,7 +56,7 @@ class GenerationTaskRepository:
                     status,
                     next_poll_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
                 """,
                 (task_id, batch_id, "I2V", "metaso", "MiniMax-H3", "PENDING"),
             )
@@ -75,8 +75,8 @@ class GenerationTaskRepository:
                 SET
                     status = 'RUNNING',
                     attempt = attempt + 1,
-                    locked_by = ?,
-                    locked_until = datetime('now', ?),
+                    locked_by = %s,
+                    locked_until = datetime('now', %s),
                     started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = (
