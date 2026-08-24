@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 from app.auth import get_database
 from app.db import connect_database, initialize_database
+from app.db_portable import BusinessConnection
 from app.main import app
 from app.media_routes import get_media_storage
 from app.source_frame_routes import ExtractSourceFramesRequest, get_source_frame_extractor
@@ -71,9 +72,17 @@ def storage() -> FakeStorageAdapter:
 
 
 @pytest.fixture()
-def client(db_path: Path, storage: FakeStorageAdapter) -> Iterator[TestClient]:
-    def database_override() -> Iterator[sqlite3.Connection]:
-        conn = connect_database(db_path)
+def client(
+    db_path: Path,
+    storage: FakeStorageAdapter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[TestClient]:
+    # Migrated routes (BusinessDb.write) open their own SQLite connection from
+    # the env path; it must point at the same database the override yields.
+    monkeypatch.setenv("VIDEO_REPLICA_DB_PATH", str(db_path))
+
+    def database_override() -> Iterator[BusinessConnection]:
+        conn = BusinessConnection.sqlite(connect_database(db_path))
         try:
             yield conn
         finally:
@@ -194,7 +203,7 @@ def test_owner_can_extract_candidates_and_confirm_one(
     }
     assert latest.status_code == 200
     assert latest.json()["id"] == confirmed.json()["id"]
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         asset = conn.execute(
             "SELECT kind, content_type FROM assets WHERE id = ?",
             (candidates[1]["asset_id"],),

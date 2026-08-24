@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from app.auth import get_database
 from app.db import connect_database, initialize_database
+from app.db_portable import BusinessConnection
 from app.main import app
 
 
@@ -23,9 +24,13 @@ def db_path(tmp_path: Path) -> Iterator[Path]:
 
 
 @pytest.fixture()
-def client(db_path: Path) -> Iterator[TestClient]:
-    def database_override() -> Iterator[sqlite3.Connection]:
-        conn = connect_database(db_path)
+def client(db_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+    # Migrated routes (BusinessDb.write) open their own SQLite connection from
+    # the env path; it must point at the same database the override yields.
+    monkeypatch.setenv("VIDEO_REPLICA_DB_PATH", str(db_path))
+
+    def database_override() -> Iterator[BusinessConnection]:
+        conn = BusinessConnection.sqlite(connect_database(db_path))
         try:
             yield conn
         finally:
@@ -129,7 +134,7 @@ def create_character(
 
 
 def test_characters_migration_creates_library_tables(db_path: Path) -> None:
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
         tables = {
             row[0]
@@ -261,7 +266,7 @@ def test_project_main_character_selection_records_immutable_version_snapshot(
         json={"name": "Mutated Hero"},
     )
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         row = conn.execute(
             """
             SELECT kind, version_number, payload_json
@@ -362,7 +367,7 @@ def test_legacy_character_writes_create_immutable_domain_versions_and_archive_id
         headers=headers("employee_1"),
     )
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         identity = conn.execute(
             "SELECT * FROM person_identities WHERE id = ?",
             (f"legacy-identity:{character_id}",),
@@ -425,7 +430,7 @@ def test_legacy_character_writes_create_immutable_domain_versions_and_archive_id
         headers=headers("admin_1"),
     )
     assert deletion.status_code == 204
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         archived = conn.execute(
             "SELECT status FROM person_identities WHERE id = ?",
             (f"legacy-identity:{character_id}",),

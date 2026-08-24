@@ -11,6 +11,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 
 from app.auth import Database
 from app.control_auth import ControlUser
+from app.db_portable import BusinessConnection
 from app.recharge_routes import RechargeOrderStatusResponse
 from app.settings import SettingsRepository
 from app.zpay import (
@@ -188,7 +189,7 @@ def sync_recharge_order_with_zpay(
     return RechargeOrderStatusResponse(**serialize_recharge_order(confirmed))
 
 
-def _load_merchant_config(conn: sqlite3.Connection) -> ZPayMerchantConfig:
+def _load_merchant_config(conn: BusinessConnection) -> ZPayMerchantConfig:
     try:
         return merchant_config_from_settings(SettingsRepository(conn).load_zpay_config())
     except ValueError as exc:

@@ -3,16 +3,16 @@ from __future__ import annotations
 import argparse
 import json
 import secrets
-import sqlite3
 from pathlib import Path
 from uuid import uuid4
 
 from app.auth import VALID_ROLES, digest_access_token
 from app.db import initialize_database
+from app.db_portable import BusinessConnection
 
 
 def create_user(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     username: str,
     display_name: str,
@@ -33,11 +33,11 @@ def create_user(
         conn.execute(
             """
             INSERT INTO users (id, username, display_name, role)
-            VALUES (?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s)
             """,
             (resolved_user_id, normalized_username, normalized_display_name, role),
         )
-        conn.execute("INSERT INTO wallets (user_id) VALUES (?)", (resolved_user_id,))
+        conn.execute("INSERT INTO wallets (user_id) VALUES (%s)", (resolved_user_id,))
     return {
         "user_id": resolved_user_id,
         "username": normalized_username,
@@ -47,14 +47,14 @@ def create_user(
 
 
 def issue_token(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     user_id: str,
     raw_token: str | None = None,
     token_id: str | None = None,
 ) -> dict[str, str | bool]:
     user = conn.execute(
-        "SELECT id FROM users WHERE id = ? AND is_active = 1", (user_id,)
+        "SELECT id FROM users WHERE id = %s AND is_active = 1", (user_id,)
     ).fetchone()
     if user is None:
         raise ValueError("active user does not exist")
@@ -65,20 +65,20 @@ def issue_token(
         conn.execute(
             """
             INSERT INTO internal_access_tokens (id, user_id, token_digest)
-            VALUES (?, ?, ?)
+            VALUES (%s, %s, %s)
             """,
             (resolved_token_id, user_id, digest_access_token(token)),
         )
     return {"token_id": resolved_token_id, "user_id": user_id, "token": token}
 
 
-def revoke_token(conn: sqlite3.Connection, *, token_id: str) -> dict[str, str | bool]:
+def revoke_token(conn: BusinessConnection, *, token_id: str) -> dict[str, str | bool]:
     with conn:
         cursor = conn.execute(
             """
             UPDATE internal_access_tokens
             SET revoked_at = COALESCE(revoked_at, CURRENT_TIMESTAMP)
-            WHERE id = ?
+            WHERE id = %s
             """,
             (token_id,),
         )
@@ -108,7 +108,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
-    with initialize_database(args.db_path) as conn:
+    with BusinessConnection.sqlite(initialize_database(args.db_path)) as conn:
         if args.command == "create-user":
             result = create_user(
                 conn,

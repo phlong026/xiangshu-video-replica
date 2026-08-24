@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -13,6 +12,7 @@ from app.auth import get_database
 from app.control_auth import CONTROL_ADMIN_USER_ID_ENV, CONTROL_PROXY_TOKEN_DIGEST_ENV
 from app.control_routes import _spreadsheet_safe_cell
 from app.db import connect_database, initialize_database
+from app.db_portable import BusinessConnection
 from app.internal_accounts import create_user, issue_token
 from app.main import app
 from app.settings import SETTINGS_KEY_ENV, SettingsRepository
@@ -33,6 +33,7 @@ def internal_admin_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[tuple[TestClient, Path, dict[str, str], dict[str, str]]]:
     db_path = tmp_path / "internal-admin.db"
+    monkeypatch.setenv("VIDEO_REPLICA_DB_PATH", str(db_path))
     monkeypatch.setenv(SETTINGS_KEY_ENV, Fernet.generate_key().decode("ascii"))
     monkeypatch.setenv("VIDEO_REPLICA_AUTH_MODE", "internal")
     monkeypatch.setenv("PUBLIC_BASE_URL", "https://internal.example")
@@ -43,79 +44,80 @@ def internal_admin_context(
         hashlib.sha256(CONTROL_TOKEN.encode()).hexdigest(),
     )
 
-    with initialize_database(db_path) as conn:
-        create_user(
-            conn,
-            user_id="admin_1",
-            username="internal-admin",
-            display_name="Internal Admin",
-            role="admin",
-        )
-        create_user(
-            conn,
-            user_id="user_1",
-            username="operator-1",
-            display_name="Operator One",
-        )
-        business_token = issue_token(
-            conn,
-            user_id="user_1",
-            raw_token="business-user-token",
-        )
-        SettingsRepository(conn).save_zpay_config(
-            {
-                "pid": "merchant-123",
-                "key": "merchant-secret",
-                "enabled_channels": "alipay,wxpay",
-            },
-            actor_user_id="admin_1",
-        )
-        conn.execute("UPDATE wallets SET available_credits = 10 WHERE user_id = 'user_1'")
-        conn.execute(
-            """
-            INSERT INTO recharge_orders (
-                id, user_id, merchant_order_no, channel, status,
-                provider_trade_no, pricing_scope,
-                base_unit_price_fen_snapshot, charged_unit_price_fen_snapshot,
-                min_recharge_fen_snapshot, recharge_step_fen_snapshot,
-                amount_fen, credits, paid_at
-            ) VALUES (
-                'order_paid', 'user_1', '202608190000000000000000000001',
-                'alipay', 'PAID', 'zpay-trade-1', 'INTERNAL',
-                1000, 1000, 10000, 1000, 10000, 10, CURRENT_TIMESTAMP
+    with initialize_database(db_path) as raw:
+        with BusinessConnection.sqlite(raw) as conn:
+            create_user(
+                conn,
+                user_id="admin_1",
+                username="internal-admin",
+                display_name="Internal Admin",
+                role="admin",
             )
-            """
-        )
-        conn.execute(
-            """
-            INSERT INTO wallet_transactions (
-                id, user_id, type, available_delta, reserved_delta,
-                recharge_order_id, idempotency_key
-            ) VALUES (
-                'charge_paid', 'user_1', 'CHARGE', 10, 0,
-                'order_paid', 'charge:order_paid'
+            create_user(
+                conn,
+                user_id="user_1",
+                username="operator-1",
+                display_name="Operator One",
             )
-            """
-        )
-        conn.execute(
-            """
-            INSERT INTO recharge_orders (
-                id, user_id, merchant_order_no, channel, status, pricing_scope,
-                base_unit_price_fen_snapshot, charged_unit_price_fen_snapshot,
-                min_recharge_fen_snapshot, recharge_step_fen_snapshot,
-                amount_fen, credits
-            ) VALUES (
-                'order_pending', 'user_1', '202608190000000000000000000002',
-                'wxpay', 'PENDING', 'INTERNAL',
-                1000, 1000, 10000, 1000, 20000, 20
+            business_token = issue_token(
+                conn,
+                user_id="user_1",
+                raw_token="business-user-token",
             )
-            """
-        )
-        conn.commit()
+            SettingsRepository(conn).save_zpay_config(
+                {
+                    "pid": "merchant-123",
+                    "key": "merchant-secret",
+                    "enabled_channels": "alipay,wxpay",
+                },
+                actor_user_id="admin_1",
+            )
+            conn.execute("UPDATE wallets SET available_credits = 10 WHERE user_id = 'user_1'")
+            conn.execute(
+                """
+                INSERT INTO recharge_orders (
+                    id, user_id, merchant_order_no, channel, status,
+                    provider_trade_no, pricing_scope,
+                    base_unit_price_fen_snapshot, charged_unit_price_fen_snapshot,
+                    min_recharge_fen_snapshot, recharge_step_fen_snapshot,
+                    amount_fen, credits, paid_at
+                ) VALUES (
+                    'order_paid', 'user_1', '202608190000000000000000000001',
+                    'alipay', 'PAID', 'zpay-trade-1', 'INTERNAL',
+                    1000, 1000, 10000, 1000, 10000, 10, CURRENT_TIMESTAMP
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO wallet_transactions (
+                    id, user_id, type, available_delta, reserved_delta,
+                    recharge_order_id, idempotency_key
+                ) VALUES (
+                    'charge_paid', 'user_1', 'CHARGE', 10, 0,
+                    'order_paid', 'charge:order_paid'
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO recharge_orders (
+                    id, user_id, merchant_order_no, channel, status, pricing_scope,
+                    base_unit_price_fen_snapshot, charged_unit_price_fen_snapshot,
+                    min_recharge_fen_snapshot, recharge_step_fen_snapshot,
+                    amount_fen, credits
+                ) VALUES (
+                    'order_pending', 'user_1', '202608190000000000000000000002',
+                    'wxpay', 'PENDING', 'INTERNAL',
+                    1000, 1000, 10000, 1000, 20000, 20
+                )
+                """
+            )
+            conn.commit()
 
-    def override_database() -> Iterator[sqlite3.Connection]:
-        with connect_database(db_path) as conn:
-            yield conn
+    def override_database() -> Iterator[BusinessConnection]:
+        with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+            yield BusinessConnection.sqlite(conn)
 
     app.dependency_overrides[get_database] = override_database
     try:
@@ -218,7 +220,7 @@ def test_control_settings_mask_zpay_secret_and_keep_deployment_read_only(
     assert updated.status_code == 200
     assert updated.json()["config"]["pid"] == "merchant-456"
     assert updated.json()["config"]["key"] == "********cret"
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         assert SettingsRepository(conn).load_zpay_config()["key"] == "merchant-secret"
 
     forbidden_field = client.patch(
@@ -255,7 +257,7 @@ def test_control_billing_settings_only_update_internal_price_rules(
         "min_recharge_fen": 10000,
         "recharge_step_fen": 1000,
     }
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         stored = SettingsRepository(conn).read_billing_settings()
     assert stored == updated.json()
 
@@ -287,7 +289,7 @@ def test_control_reconciliation_and_csv_are_read_only(
     internal_admin_context: tuple[TestClient, Path, dict[str, str], dict[str, str]],
 ) -> None:
     client, db_path, control_headers, _ = internal_admin_context
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute("UPDATE users SET username = '=2+2' WHERE id = 'user_1'")
         conn.commit()
         before = (
@@ -318,7 +320,7 @@ def test_control_reconciliation_and_csv_are_read_only(
     assert ledger_csv.status_code == 200
     assert "charge_paid" in ledger_csv.text
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         after = (
             conn.execute(
                 "SELECT available_credits, reserved_credits FROM wallets WHERE user_id='user_1'"

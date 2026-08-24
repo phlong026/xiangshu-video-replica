@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
 from functools import lru_cache
 from typing import Any, Literal
 
 from cryptography.fernet import Fernet, InvalidToken
 
+from app.db_portable import BusinessConnection
 from app.local_settings_key import LocalSettingsKeyStoreError, load_or_create_local_settings_key
 from app.zpay import parse_enabled_channels
 
@@ -62,7 +62,7 @@ class SettingsDecryptError(SettingsUnavailableError):
 
 
 class SettingsRepository:
-    def __init__(self, conn: sqlite3.Connection, fernet: Fernet | None = None) -> None:
+    def __init__(self, conn: BusinessConnection, fernet: Fernet | None = None) -> None:
         self.conn = conn
         self.fernet = fernet or fernet_from_environment()
 
@@ -120,7 +120,7 @@ class SettingsRepository:
                     created_at,
                     updated_at
                 )
-                VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                VALUES (%s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 ON CONFLICT(provider) DO UPDATE SET
                     encrypted_config = excluded.encrypted_config,
                     updated_by_user_id = excluded.updated_by_user_id,
@@ -160,7 +160,7 @@ class SettingsRepository:
 
     def _load_encrypted_config(self, provider: str) -> dict[str, str]:
         row = self.conn.execute(
-            "SELECT encrypted_config FROM provider_settings WHERE provider = ?",
+            "SELECT encrypted_config FROM provider_settings WHERE provider = %s",
             (provider,),
         ).fetchone()
         if row is None:
@@ -201,7 +201,7 @@ class SettingsRepository:
                     created_at,
                     updated_at
                 )
-                VALUES (1, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                VALUES (1, %s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 ON CONFLICT(id) DO UPDATE SET
                     max_generation_count_per_batch = excluded.max_generation_count_per_batch,
                     max_concurrent_h3_tasks = excluded.max_concurrent_h3_tasks,
@@ -251,10 +251,10 @@ class SettingsRepository:
             self.conn.execute(
                 """
                 UPDATE runtime_settings
-                SET internal_base_unit_price_fen = ?,
-                    min_recharge_fen = ?,
-                    recharge_step_fen = ?,
-                    updated_by_user_id = ?,
+                SET internal_base_unit_price_fen = %s,
+                    min_recharge_fen = %s,
+                    recharge_step_fen = %s,
+                    updated_by_user_id = %s,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = 1
                 """,

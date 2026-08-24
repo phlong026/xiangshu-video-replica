@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import struct
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -26,6 +25,7 @@ from app.character_image_generation import (
     run_next_character_generation_task,
 )
 from app.db import alembic_config, connect_database, initialize_database
+from app.db_portable import BusinessConnection
 from app.generation_worker import run_worker_once
 from app.main import app
 from app.media_routes import get_media_storage
@@ -67,7 +67,7 @@ class MutatingCharacterImageProvider(FakeCharacterImageProvider):
 
     def generate_view(self, request: CharacterImageRequest) -> CharacterImageResult:
         result = super().generate_view(request)
-        with connect_database(self.db_path) as conn:
+        with BusinessConnection.sqlite(connect_database(self.db_path)) as conn:
             if self.mutation == "revoke_identity":
                 conn.execute(
                     """
@@ -100,7 +100,7 @@ class LeaseReplacingCharacterImageProvider(FakeCharacterImageProvider):
 
     def generate_view(self, request: CharacterImageRequest) -> CharacterImageResult:
         result = super().generate_view(request)
-        with connect_database(self.db_path) as conn:
+        with BusinessConnection.sqlite(connect_database(self.db_path)) as conn:
             updated = conn.execute(
                 """
                 UPDATE character_generation_tasks
@@ -149,8 +149,8 @@ def storage() -> FakeStorageAdapter:
 
 @pytest.fixture()
 def client(db_path: Path, storage: FakeStorageAdapter) -> Iterator[TestClient]:
-    def database_override() -> Iterator[sqlite3.Connection]:
-        conn = connect_database(db_path)
+    def database_override() -> Iterator[BusinessConnection]:
+        conn = BusinessConnection.sqlite(connect_database(db_path))
         try:
             yield conn
         finally:
@@ -294,7 +294,7 @@ def test_generation_migration_adds_reversible_lease_and_call_log_contract(
 ) -> None:
     db_path = tmp_path / "migration.db"
     command.upgrade(alembic_config(db_path), "014_character_image_generation")
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         task_columns = {
             str(row[1]) for row in conn.execute("PRAGMA table_info(character_generation_tasks)")
         }
@@ -323,7 +323,7 @@ def test_generation_migration_adds_reversible_lease_and_call_log_contract(
     assert "character_generation_task_id" in call_columns
 
     command.downgrade(alembic_config(db_path), "013_character_identity_assets")
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         downgraded_task_columns = {
             str(row[1]) for row in conn.execute("PRAGMA table_info(character_generation_tasks)")
         }
@@ -369,7 +369,7 @@ def test_admin_queues_seven_views_idempotently_and_roles_fail_closed(
     assert employee_tasks.status_code == 403
     assert auditor_tasks.status_code == 200
     assert len(auditor_tasks.json()) == 7
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         task_count = conn.execute(
             "SELECT COUNT(*) FROM character_generation_tasks WHERE character_version_id = ?",
             (version_id,),
@@ -389,7 +389,7 @@ def test_generation_rejects_identity_revoked_before_or_after_enqueue(
 ) -> None:
     version = create_character_version(client, storage)
     version_id = str(version["id"])
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         identity_id = conn.execute(
             """
             SELECT persona.identity_id
@@ -413,7 +413,7 @@ def test_generation_rejects_identity_revoked_before_or_after_enqueue(
     assert rejected.status_code == 409
     assert rejected.json()["detail"]["code"] == "IDENTITY_NOT_ACTIVE"
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             """
             UPDATE person_identities
@@ -425,7 +425,7 @@ def test_generation_rejects_identity_revoked_before_or_after_enqueue(
         conn.commit()
     assert enqueue(client, version_id, key="revoked-after", views=["FRONT_FACE"]).status_code == 202
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             """
             UPDATE person_identities
@@ -475,7 +475,7 @@ def test_worker_fails_cleanly_when_version_is_archived_after_enqueue(
         == 200
     )
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         result = run_next_character_generation_task(
             conn,
             worker_id="archived-worker",
@@ -498,7 +498,7 @@ def test_worker_rejects_source_content_changed_after_version_freeze(
     assert (
         enqueue(client, version_id, key="source-changed", views=["FRONT_FACE"]).status_code == 202
     )
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         source_uri = conn.execute(
             """
             SELECT asset.storage_uri
@@ -511,7 +511,7 @@ def test_worker_rejects_source_content_changed_after_version_freeze(
     source_key = storage_object_ref_from_uri(str(source_uri)).key
     storage.put_object(source_key, png_header() + b"changed", content_type="image/png")
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         result = run_next_character_generation_task(
             conn,
             worker_id="source-check-worker",
@@ -544,7 +544,7 @@ def test_worker_revalidates_state_after_provider_returns(
     version_id = str(version["id"])
     assert enqueue(client, version_id, key=mutation, views=["FRONT_FACE"]).status_code == 202
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         result = run_next_character_generation_task(
             conn,
             worker_id="state-race-worker",
@@ -592,7 +592,7 @@ def test_worker_revalidates_state_in_success_transaction_and_cleans_object(
         return stored
 
     monkeypatch.setattr(storage, "put_object", archive_during_generated_put)
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         result = run_next_character_generation_task(
             conn,
             worker_id="storage-race-worker",
@@ -622,7 +622,7 @@ def test_stale_worker_cannot_finalize_after_lease_is_reassigned(
         enqueue(client, version_id, key="lease-reassigned", views=["FRONT_FACE"]).status_code == 202
     )
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         stale_result = run_next_character_generation_task(
             conn,
             worker_id="stale-worker",
@@ -662,7 +662,7 @@ def test_stale_worker_cannot_finalize_after_lease_is_reassigned(
     assert asset_count_after_stale == 0
     assert stale_audit_count == 1
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             """
             UPDATE character_generation_tasks
@@ -730,7 +730,7 @@ def test_stale_worker_cleans_object_when_lease_changes_during_storage(
         return stored
 
     monkeypatch.setattr(storage, "put_object", replace_lease_during_generated_put)
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         result = run_next_character_generation_task(
             conn,
             worker_id="storage-stale-worker",
@@ -772,7 +772,7 @@ def test_desktop_worker_generates_all_views_and_writes_redacted_evidence(
     response = enqueue(client, version_id, key="worker-success")
     assert response.status_code == 202
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         processed = run_worker_once(
             conn,
             worker_id="character-worker",
@@ -844,7 +844,7 @@ def test_one_invalid_view_does_not_block_the_other_six(
     version_id = str(version["id"])
     assert enqueue(client, version_id, key="isolated-failure").status_code == 202
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         processed = run_worker_once(
             conn,
             worker_id="character-worker",
@@ -898,7 +898,7 @@ def test_transient_provider_failures_retry_then_succeed(
         == 202
     )
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         first = run_next_character_generation_task(
             conn,
             worker_id="character-worker",
@@ -956,7 +956,7 @@ def test_retry_limit_and_expired_running_lease_are_recoverable(
         ).status_code
         == 202
     )
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         for _ in range(3):
             assert (
                 run_next_character_generation_task(
@@ -993,7 +993,7 @@ def test_retry_limit_and_expired_running_lease_are_recoverable(
         ).status_code
         == 202
     )
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             """
             UPDATE character_generation_tasks
@@ -1033,7 +1033,7 @@ def test_expired_final_attempt_is_failed_instead_of_stuck_running(
     version_id = str(version["id"])
     assert enqueue(client, version_id, key="expired-final", views=["RIGHT_45"]).status_code == 202
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             """
             UPDATE character_generation_tasks
@@ -1106,7 +1106,7 @@ def test_regeneration_creates_a_new_candidate_without_overwriting_review(
     assert (
         enqueue(client, version_id, key="first-candidate", views=["FRONT_FACE"]).status_code == 202
     )
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         assert (
             run_next_character_generation_task(
                 conn,
@@ -1131,7 +1131,7 @@ def test_regeneration_creates_a_new_candidate_without_overwriting_review(
     assert regenerated.status_code == 202
     assert len(regenerated.json()) == 1
     assert regenerated.json()[0]["candidate_number"] == 2
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         assert (
             run_next_character_generation_task(
                 conn,

@@ -6,6 +6,7 @@ from typing import cast
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
 from app.auth import AuthenticatedUser, Database
+from app.customer_fence import BusinessDbDep
 from app.generation import (
     BatchResult,
     BatchStatusFilter,
@@ -74,10 +75,10 @@ def get_h3_provider() -> H3Provider:
 def create_project_script(
     project_id: str,
     request: ScriptRequest,
-    conn: Database,
-    actor: AuthenticatedUser,
+    db: BusinessDbDep,
 ) -> VersionResult:
-    row = create_script_version(conn, project_id=project_id, actor=actor, request=request)
+    with db.write() as (conn, actor):
+        row = create_script_version(conn, project_id=project_id, actor=actor, request=request)
     return version_result(row)
 
 
@@ -88,27 +89,27 @@ def create_project_script(
 def rewrite_project_script(
     project_id: str,
     request: ScriptRewriteRequest,
-    conn: Database,
-    actor: AuthenticatedUser,
+    db: BusinessDbDep,
 ) -> ScriptRewriteResult:
-    require_not_auditor(
-        conn,
-        actor=actor,
-        action="project.script_rewrite",
-        entity_type="project",
-        entity_id=project_id,
-    )
-    require_project_access(
-        conn,
-        actor=actor,
-        project_id=project_id,
-        action="project.script_rewrite",
-    )
-    return rewrite_script_with_deepseek(
-        conn,
-        actor=actor,
-        source_text=request.text,
-    )
+    with db.write() as (conn, actor):
+        require_not_auditor(
+            conn,
+            actor=actor,
+            action="project.script_rewrite",
+            entity_type="project",
+            entity_id=project_id,
+        )
+        require_project_access(
+            conn,
+            actor=actor,
+            project_id=project_id,
+            action="project.script_rewrite",
+        )
+        return rewrite_script_with_deepseek(
+            conn,
+            actor=actor,
+            source_text=request.text,
+        )
 
 
 @router.get("/projects/{project_id}/scripts/latest", response_model=VersionState)
@@ -129,10 +130,10 @@ def read_latest_project_script(
 def compile_project_prompt(
     project_id: str,
     request: PromptCompileRequest,
-    conn: Database,
-    actor: AuthenticatedUser,
+    db: BusinessDbDep,
 ) -> VersionResult:
-    row = compile_prompt_version(conn, project_id=project_id, actor=actor, request=request)
+    with db.write() as (conn, actor):
+        row = compile_prompt_version(conn, project_id=project_id, actor=actor, request=request)
     return version_result(row)
 
 
@@ -155,15 +156,15 @@ def preview_project_prompt(
 def revise_project_prompt(
     project_id: str,
     request: PromptRevisionRequest,
-    conn: Database,
-    actor: AuthenticatedUser,
+    db: BusinessDbDep,
 ) -> VersionResult:
-    row = revise_prompt_version(
-        conn,
-        project_id=project_id,
-        actor=actor,
-        request=request,
-    )
+    with db.write() as (conn, actor):
+        row = revise_prompt_version(
+            conn,
+            project_id=project_id,
+            actor=actor,
+            request=request,
+        )
     return version_result(row)
 
 
@@ -188,40 +189,40 @@ def read_latest_project_prompt(
 def lock_project_prompt(
     project_id: str,
     prompt_version_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    db: BusinessDbDep,
 ) -> VersionResult:
-    row = lock_prompt_version(
-        conn,
-        project_id=project_id,
-        prompt_version_id=prompt_version_id,
-        actor=actor,
-    )
+    with db.write() as (conn, actor):
+        row = lock_prompt_version(
+            conn,
+            project_id=project_id,
+            prompt_version_id=prompt_version_id,
+            actor=actor,
+        )
     return version_result(row)
 
 
 @router.post("/projects/{project_id}/generation-batches", response_model=BatchResult)
 def create_project_generation_batch(
     project_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    db: BusinessDbDep,
     request: GenerationBatchRequest | None = None,
     provider: H3Provider = Depends(get_h3_provider),
 ) -> BatchResult:
-    if request is None:
-        if actor.role == "auditor":
-            raise HTTPException(status_code=403, detail={"code": "ROLE_FORBIDDEN"})
-        raise HTTPException(
-            status_code=422,
-            detail={"code": "GENERATION_REQUEST_REQUIRED"},
+    with db.write() as (conn, actor):
+        if request is None:
+            if actor.role == "auditor":
+                raise HTTPException(status_code=403, detail={"code": "ROLE_FORBIDDEN"})
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "GENERATION_REQUEST_REQUIRED"},
+            )
+        return create_generation_batch(
+            conn,
+            project_id=project_id,
+            actor=actor,
+            request=request,
+            provider_client=provider,
         )
-    return create_generation_batch(
-        conn,
-        project_id=project_id,
-        actor=actor,
-        request=request,
-        provider_client=provider,
-    )
 
 
 @router.get("/generation-batches", response_model=GenerationBatchListPage)
@@ -260,15 +261,15 @@ def read_generation_batch(
 def rename_generation_batch_record(
     batch_id: str,
     request: GenerationBatchRenameRequest,
-    conn: Database,
-    actor: AuthenticatedUser,
+    db: BusinessDbDep,
 ) -> BatchResult:
-    return rename_generation_batch(
-        conn,
-        actor=actor,
-        batch_id=batch_id,
-        display_name=request.display_name,
-    )
+    with db.write() as (conn, actor):
+        return rename_generation_batch(
+            conn,
+            actor=actor,
+            batch_id=batch_id,
+            display_name=request.display_name,
+        )
 
 
 @router.delete(
@@ -277,117 +278,120 @@ def rename_generation_batch_record(
 )
 def delete_generation_batch_record(
     batch_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    db: BusinessDbDep,
 ) -> Response:
-    batch = conn.execute(
-        "SELECT id, project_id, created_by_user_id FROM generation_batches WHERE id = ?",
-        (batch_id,),
-    ).fetchone()
-    if batch is None:
-        raise HTTPException(status_code=404, detail={"code": "BATCH_NOT_FOUND"})
-    if actor.role != "admin" and str(batch["created_by_user_id"]) != actor.id:
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "code": "GENERATION_BATCH_FORBIDDEN",
-                "message": "只有批次创建者或管理员可以删除批次。",
-            },
-        )
-
-    # 付费 provider 调用仍在途时禁止删除（与项目删除同一约束），否则
-    # 任务的云端回写会丢失，费用对账失去依据。
-    has_active_tasks = conn.execute(
-        """
-        SELECT 1
-        FROM generation_tasks
-        WHERE batch_id = ?
-          AND status IN ('PENDING', 'SUBMITTING', 'QUEUED', 'RUNNING', 'ARCHIVING')
-        LIMIT 1
-        """,
-        (batch_id,),
-    ).fetchone()
-    if has_active_tasks:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "BATCH_DELETE_HAS_ACTIVE_TASKS",
-                "message": "批次存在进行中的生成任务，请等待任务结束或失败后再删除。",
-            },
-        )
-
-    has_billing_ledger = conn.execute(
-        """
-        SELECT 1
-        FROM wallet_transactions
-        JOIN generation_tasks ON generation_tasks.id = wallet_transactions.task_id
-        WHERE generation_tasks.batch_id = ?
-        LIMIT 1
-        """,
-        (batch_id,),
-    ).fetchone()
-    if has_billing_ledger:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "BILLED_BATCH_IMMUTABLE",
-                "message": "已产生钱包流水的批次必须保留，不能删除。",
-            },
-        )
-
-    result_assets = conn.execute(
-        """
-        SELECT assets.id, assets.storage_uri
-        FROM assets
-        JOIN generation_tasks ON generation_tasks.result_asset_id = assets.id
-        WHERE generation_tasks.batch_id = ?
-        """,
-        (batch_id,),
-    ).fetchall()
-    task_count = int(
-        conn.execute(
-            "SELECT COUNT(*) FROM generation_tasks WHERE batch_id = ?",
+    with db.write() as (conn, actor):
+        batch = conn.execute(
+            "SELECT id, project_id, created_by_user_id FROM generation_batches WHERE id = %s",
             (batch_id,),
-        ).fetchone()[0]
-    )
-
-    # 未计费历史批次尽力清理云端产物；后端不可用不阻塞删除，失败数进审计。
-    storage_cleanup_failed_count = 0
-    for asset in result_assets:
-        try:
-            storage = storage_for_asset(conn, str(asset["storage_uri"]))
-            storage.delete_object(
-                storage_key_from_uri(str(asset["storage_uri"])), actor_id=actor.id
+        ).fetchone()
+        if batch is None:
+            raise HTTPException(status_code=404, detail={"code": "BATCH_NOT_FOUND"})
+        if actor.role != "admin" and str(batch["created_by_user_id"]) != actor.id:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "GENERATION_BATCH_FORBIDDEN",
+                    "message": "只有批次创建者或管理员可以删除批次。",
+                },
             )
-        except (HTTPException, StorageBackendUnavailable, OSError, ValueError):
-            storage_cleanup_failed_count += 1
 
-    with conn:
-        # 结果资产行必须先于批次删除（任务级联删除后子查询会失效）。
-        conn.execute(
+        # 付费 provider 调用仍在途时禁止删除（与项目删除同一约束），否则
+        # 任务的云端回写会丢失，费用对账失去依据。
+        has_active_tasks = conn.execute(
             """
-            DELETE FROM assets
-            WHERE id IN (
-                SELECT result_asset_id FROM generation_tasks
-                WHERE batch_id = ? AND result_asset_id IS NOT NULL
-            )
+            SELECT 1
+            FROM generation_tasks
+            WHERE batch_id = %s
+              AND status IN ('PENDING', 'SUBMITTING', 'QUEUED', 'RUNNING', 'ARCHIVING')
+            LIMIT 1
             """,
             (batch_id,),
+        ).fetchone()
+        if has_active_tasks:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "BATCH_DELETE_HAS_ACTIVE_TASKS",
+                    "message": "批次存在进行中的生成任务，请等待任务结束或失败后再删除。",
+                },
+            )
+
+        has_billing_ledger = conn.execute(
+            """
+            SELECT 1
+            FROM wallet_transactions
+            JOIN generation_tasks ON generation_tasks.id = wallet_transactions.task_id
+            WHERE generation_tasks.batch_id = %s
+            LIMIT 1
+            """,
+            (batch_id,),
+        ).fetchone()
+        if has_billing_ledger:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "BILLED_BATCH_IMMUTABLE",
+                    "message": "已产生钱包流水的批次必须保留，不能删除。",
+                },
+            )
+
+        result_assets = conn.execute(
+            """
+            SELECT assets.id, assets.storage_uri
+            FROM assets
+            JOIN generation_tasks ON generation_tasks.result_asset_id = assets.id
+            WHERE generation_tasks.batch_id = %s
+            """,
+            (batch_id,),
+        ).fetchall()
+        task_count = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM generation_tasks WHERE batch_id = %s",
+                (batch_id,),
+            ).fetchone()[0]
         )
-        conn.execute("DELETE FROM generation_batches WHERE id = ?", (batch_id,))
-    write_audit(
-        conn,
-        actor=actor,
-        action="generation_batch.delete",
-        entity_type="generation_batch",
-        entity_id=batch_id,
-        metadata={
-            "project_id": str(batch["project_id"]),
-            "deleted_task_count": task_count,
-            "deleted_asset_count": len(result_assets),
-            "storage_cleanup_failed_count": storage_cleanup_failed_count,
-        },
-    )
+
+        # 未计费历史批次尽力清理云端产物；后端不可用不阻塞删除，失败数进审计。
+        storage_cleanup_failed_count = 0
+        for asset in result_assets:
+            try:
+                storage = storage_for_asset(conn, str(asset["storage_uri"]))
+                storage.delete_object(
+                    storage_key_from_uri(str(asset["storage_uri"])), actor_id=actor.id
+                )
+            except (HTTPException, StorageBackendUnavailable, OSError, ValueError):
+                storage_cleanup_failed_count += 1
+
+        # The inner transaction block commits the two deletes on the SQLite lane
+        # and is a no-op on PostgreSQL, where the fenced transaction owns the
+        # commit — exactly the BusinessConnection contract.
+        with conn:
+            # 结果资产行必须先于批次删除（任务级联删除后子查询会失效）。
+            conn.execute(
+                """
+                DELETE FROM assets
+                WHERE id IN (
+                    SELECT result_asset_id FROM generation_tasks
+                    WHERE batch_id = %s AND result_asset_id IS NOT NULL
+                )
+                """,
+                (batch_id,),
+            )
+            conn.execute("DELETE FROM generation_batches WHERE id = %s", (batch_id,))
+        write_audit(
+            conn,
+            actor=actor,
+            action="generation_batch.delete",
+            entity_type="generation_batch",
+            entity_id=batch_id,
+            metadata={
+                "project_id": str(batch["project_id"]),
+                "deleted_task_count": task_count,
+                "deleted_asset_count": len(result_assets),
+                "storage_cleanup_failed_count": storage_cleanup_failed_count,
+            },
+        )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -397,40 +401,40 @@ def delete_generation_batch_record(
 )
 def regenerate_batch(
     batch_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    db: BusinessDbDep,
     request: PaidRegenerationRequest | None = None,
 ) -> BatchResult:
-    row = conn.execute(
-        "SELECT project_id FROM generation_batches WHERE id = ?",
-        (batch_id,),
-    ).fetchone()
-    if row is None:
-        raise HTTPException(status_code=404, detail={"code": "BATCH_NOT_FOUND"})
-    require_not_auditor(
-        conn,
-        actor=actor,
-        action="generation_batch.regenerate",
-        entity_type="generation_batch",
-        entity_id=batch_id,
-    )
-    require_project_access(
-        conn,
-        actor=actor,
-        project_id=str(row["project_id"]),
-        action="generation_batch.regenerate",
-    )
-    if request is None:
-        raise HTTPException(
-            status_code=422,
-            detail={"code": "PAID_REGENERATION_REQUEST_REQUIRED"},
+    with db.write() as (conn, actor):
+        row = conn.execute(
+            "SELECT project_id FROM generation_batches WHERE id = %s",
+            (batch_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail={"code": "BATCH_NOT_FOUND"})
+        require_not_auditor(
+            conn,
+            actor=actor,
+            action="generation_batch.regenerate",
+            entity_type="generation_batch",
+            entity_id=batch_id,
         )
-    return regenerate_generation_batch(
-        conn,
-        batch_id=batch_id,
-        actor=actor,
-        request=request,
-    )
+        require_project_access(
+            conn,
+            actor=actor,
+            project_id=str(row["project_id"]),
+            action="generation_batch.regenerate",
+        )
+        if request is None:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "PAID_REGENERATION_REQUEST_REQUIRED"},
+            )
+        return regenerate_generation_batch(
+            conn,
+            batch_id=batch_id,
+            actor=actor,
+            request=request,
+        )
 
 
 @router.get("/generation/runtime-limits", response_model=GenerationRuntimeLimits)
@@ -451,7 +455,7 @@ def _generation_task_context(conn: Database, task_id: str) -> sqlite3.Row:
             generation_tasks.provider
         FROM generation_tasks
         JOIN generation_batches ON generation_batches.id = generation_tasks.batch_id
-        WHERE generation_tasks.id = ?
+        WHERE generation_tasks.id = %s
         """,
         (task_id,),
     ).fetchone()
@@ -463,27 +467,27 @@ def _generation_task_context(conn: Database, task_id: str) -> sqlite3.Row:
 @router.post("/generation-tasks/{task_id}/retry", response_model=TaskResult)
 def retry_task(
     task_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    db: BusinessDbDep,
     request: GenerationTaskRetryRequest | None = None,
 ) -> TaskResult:
-    row = _generation_task_context(conn, task_id)
-    require_not_auditor(
-        conn,
-        actor=actor,
-        action="generation_task.retry",
-        entity_type="generation_task",
-        entity_id=task_id,
-    )
-    require_project_access(
-        conn,
-        actor=actor,
-        project_id=str(row["project_id"]),
-        action="generation_task.retry",
-    )
-    if request is None:
-        raise HTTPException(status_code=422, detail={"code": "RETRY_REQUEST_REQUIRED"})
-    return retry_generation_task(conn, task_id=task_id, actor=actor, request=request)
+    with db.write() as (conn, actor):
+        row = _generation_task_context(conn, task_id)
+        require_not_auditor(
+            conn,
+            actor=actor,
+            action="generation_task.retry",
+            entity_type="generation_task",
+            entity_id=task_id,
+        )
+        require_project_access(
+            conn,
+            actor=actor,
+            project_id=str(row["project_id"]),
+            action="generation_task.retry",
+        )
+        if request is None:
+            raise HTTPException(status_code=422, detail={"code": "RETRY_REQUEST_REQUIRED"})
+        return retry_generation_task(conn, task_id=task_id, actor=actor, request=request)
 
 
 @router.post(
@@ -492,35 +496,35 @@ def retry_task(
 )
 def regenerate_task(
     task_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    db: BusinessDbDep,
     request: PaidRegenerationRequest | None = None,
 ) -> BatchResult:
-    row = _generation_task_context(conn, task_id)
-    require_not_auditor(
-        conn,
-        actor=actor,
-        action="generation_task.regenerate",
-        entity_type="generation_task",
-        entity_id=task_id,
-    )
-    require_project_access(
-        conn,
-        actor=actor,
-        project_id=str(row["project_id"]),
-        action="generation_task.regenerate",
-    )
-    if request is None:
-        raise HTTPException(
-            status_code=422,
-            detail={"code": "PAID_REGENERATION_REQUEST_REQUIRED"},
+    with db.write() as (conn, actor):
+        row = _generation_task_context(conn, task_id)
+        require_not_auditor(
+            conn,
+            actor=actor,
+            action="generation_task.regenerate",
+            entity_type="generation_task",
+            entity_id=task_id,
         )
-    return regenerate_generation_task(
-        conn,
-        task_id=task_id,
-        actor=actor,
-        request=request,
-    )
+        require_project_access(
+            conn,
+            actor=actor,
+            project_id=str(row["project_id"]),
+            action="generation_task.regenerate",
+        )
+        if request is None:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "PAID_REGENERATION_REQUEST_REQUIRED"},
+            )
+        return regenerate_generation_task(
+            conn,
+            task_id=task_id,
+            actor=actor,
+            request=request,
+        )
 
 
 @router.post(
@@ -529,81 +533,81 @@ def regenerate_task(
 )
 def confirm_task_not_charged(
     task_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    db: BusinessDbDep,
     request: ConfirmNotChargedRequest | None = None,
 ) -> TaskResult:
-    row = _generation_task_context(conn, task_id)
-    require_role(
-        conn,
-        actor=actor,
-        allowed_roles={"admin"},
-        action="generation_task.confirm_not_charged",
-        entity_type="generation_task",
-        entity_id=task_id,
-    )
-    require_project_access(
-        conn,
-        actor=actor,
-        project_id=str(row["project_id"]),
-        action="generation_task.confirm_not_charged",
-    )
-    if request is None:
-        raise HTTPException(
-            status_code=422,
-            detail={"code": "CONFIRM_NOT_CHARGED_REQUEST_REQUIRED"},
+    with db.write() as (conn, actor):
+        row = _generation_task_context(conn, task_id)
+        require_role(
+            conn,
+            actor=actor,
+            allowed_roles={"admin"},
+            action="generation_task.confirm_not_charged",
+            entity_type="generation_task",
+            entity_id=task_id,
         )
-    return confirm_generation_task_not_charged(
-        conn,
-        task_id=task_id,
-        actor=actor,
-        request=request,
-    )
+        require_project_access(
+            conn,
+            actor=actor,
+            project_id=str(row["project_id"]),
+            action="generation_task.confirm_not_charged",
+        )
+        if request is None:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "CONFIRM_NOT_CHARGED_REQUEST_REQUIRED"},
+            )
+        return confirm_generation_task_not_charged(
+            conn,
+            task_id=task_id,
+            actor=actor,
+            request=request,
+        )
 
 
 @router.post("/generation-tasks/{task_id}/reconcile", response_model=TaskResult)
 def reconcile_uncertain_task(
     task_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    db: BusinessDbDep,
     request: ReconcileGenerationTaskRequest | None = None,
 ) -> TaskResult:
-    row = _generation_task_context(conn, task_id)
-    require_not_auditor(
-        conn,
-        actor=actor,
-        action="generation_task.reconcile",
-        entity_type="generation_task",
-        entity_id=task_id,
-    )
-    require_project_access(
-        conn,
-        actor=actor,
-        project_id=str(row["project_id"]),
-        action="generation_task.reconcile",
-    )
-    if request is None:
-        raise HTTPException(status_code=422, detail={"code": "RECONCILE_REQUEST_REQUIRED"})
+    with db.write() as (conn, actor):
+        row = _generation_task_context(conn, task_id)
+        require_not_auditor(
+            conn,
+            actor=actor,
+            action="generation_task.reconcile",
+            entity_type="generation_task",
+            entity_id=task_id,
+        )
+        require_project_access(
+            conn,
+            actor=actor,
+            project_id=str(row["project_id"]),
+            action="generation_task.reconcile",
+        )
+        if request is None:
+            raise HTTPException(status_code=422, detail={"code": "RECONCILE_REQUEST_REQUIRED"})
 
-    def provider_factory() -> H3Provider:
-        try:
-            return h3_provider_for_task(conn, str(row["provider"]))
-        except H3ProviderSettingsUnavailable as exc:
-            raise HTTPException(
-                status_code=503,
-                detail={"code": "METASO_SETTINGS_UNAVAILABLE"},
-            ) from exc
+        def provider_factory() -> H3Provider:
+            try:
+                return h3_provider_for_task(conn, str(row["provider"]))
+            except H3ProviderSettingsUnavailable as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail={"code": "METASO_SETTINGS_UNAVAILABLE"},
+                ) from exc
 
-    return reconcile_generation_task(
-        conn,
-        task_id=task_id,
-        batch_id=str(row["batch_id"]),
-        project_id=str(row["project_id"]),
-        created_by_user_id=str(row["created_by_user_id"]),
-        actor=actor,
-        request=request,
-        # 归档重试必须与 Worker 使用同一业务存储，避免真实 Metaso
-        # 成片落本地后无法满足 COS 结算前提。
-        storage_factory=lambda: get_media_storage(conn),
-        provider_factory=provider_factory,
-    )
+        return reconcile_generation_task(
+            conn,
+            task_id=task_id,
+            batch_id=str(row["batch_id"]),
+            project_id=str(row["project_id"]),
+            created_by_user_id=str(row["created_by_user_id"]),
+            actor=actor,
+            request=request,
+            # 归档重试必须与 Worker 使用同一业务存储，避免真实 Metaso
+            # 成片落本地后无法满足 COS 结算前提。
+            storage_factory=lambda: get_media_storage(conn),
+            provider_factory=provider_factory,
+        )

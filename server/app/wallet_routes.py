@@ -50,7 +50,7 @@ def read_wallet(conn: Database, actor: AuthenticatedUser) -> WalletResponse:
         """
         SELECT available_credits, reserved_credits
         FROM wallets
-        WHERE user_id = ?
+        WHERE user_id = %s
         """,
         (actor.id,),
     ).fetchone()
@@ -93,7 +93,7 @@ def list_wallet_transactions(
 ) -> WalletTransactionPage:
     total = int(
         conn.execute(
-            "SELECT COUNT(*) FROM wallet_transactions WHERE user_id = ?",
+            "SELECT COUNT(*) FROM wallet_transactions WHERE user_id = %s",
             (actor.id,),
         ).fetchone()[0]
     )
@@ -103,9 +103,9 @@ def list_wallet_transactions(
             id, user_id, type, available_delta, reserved_delta,
             recharge_order_id, task_id, billing_round, created_at
         FROM wallet_transactions
-        WHERE user_id = ?
+        WHERE user_id = %s
         ORDER BY created_at DESC, id DESC
-        LIMIT ? OFFSET ?
+        LIMIT %s OFFSET %s
         """,
         (actor.id, limit, offset),
     ).fetchall()

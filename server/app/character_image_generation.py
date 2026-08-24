@@ -38,6 +38,7 @@ from app.character_identity import (
     require_character_admin,
     require_identity_active,
 )
+from app.db_portable import BusinessConnection
 from app.permissions import require_role, write_audit
 from app.storage import (
     StorageAdapter,
@@ -196,7 +197,7 @@ def png_chunk(kind: bytes, payload: bytes) -> bytes:
 
 
 def create_character_generation_tasks(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     version_id: str,
@@ -252,7 +253,7 @@ def create_character_generation_tasks(
             "角色版本缺少已冻结的真人源图。",
         )
     source_asset = conn.execute(
-        "SELECT id FROM assets WHERE id = ? AND sha256 = ?",
+        "SELECT id FROM assets WHERE id = %s AND sha256 = %s",
         (source_asset_id, str(version["source_sha256"])),
     ).fetchone()
     if source_asset is None:
@@ -303,7 +304,7 @@ def create_character_generation_tasks(
                         candidate_number, attempt, max_attempts, next_poll_at, created_by
                     )
                     VALUES (
-                        ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, 0, ?, CURRENT_TIMESTAMP, ?
+                        %s, %s, %s, %s, %s, %s, 'PENDING', %s, %s, %s, 0, %s, CURRENT_TIMESTAMP, %s
                     )
                     """,
                     (
@@ -321,7 +322,7 @@ def create_character_generation_tasks(
                     ),
                 )
         conn.execute(
-            "UPDATE character_versions SET status = 'GENERATING' WHERE id = ?",
+            "UPDATE character_versions SET status = 'GENERATING' WHERE id = %s",
             (version_id,),
         )
         conn.commit()
@@ -365,14 +366,14 @@ def create_character_generation_tasks(
 
 
 def regenerate_character_asset(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     character_asset_id: str,
     idempotency_key: str,
 ) -> list[CharacterGenerationTask]:
     row = conn.execute(
-        "SELECT * FROM character_assets WHERE id = ?",
+        "SELECT * FROM character_assets WHERE id = %s",
         (character_asset_id,),
     ).fetchone()
     if row is None:
@@ -404,7 +405,7 @@ def regenerate_character_asset(
 
 
 def list_character_generation_tasks(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     version_id: str,
@@ -421,7 +422,7 @@ def list_character_generation_tasks(
     rows = conn.execute(
         """
         SELECT * FROM character_generation_tasks
-        WHERE character_version_id = ?
+        WHERE character_version_id = %s
         ORDER BY created_at, view_type, candidate_number, id
         """,
         (version_id,),
@@ -430,7 +431,7 @@ def list_character_generation_tasks(
 
 
 def list_character_assets(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     version_id: str,
@@ -440,7 +441,7 @@ def list_character_assets(
         rows = conn.execute(
             """
             SELECT * FROM character_assets
-            WHERE character_version_id = ?
+            WHERE character_version_id = %s
               AND review_status = 'APPROVED'
               AND is_published_selection = 1
             ORDER BY view_type, candidate_number, id
@@ -451,7 +452,7 @@ def list_character_assets(
         rows = conn.execute(
             """
             SELECT * FROM character_assets
-            WHERE character_version_id = ?
+            WHERE character_version_id = %s
             ORDER BY view_type, candidate_number, id
             """,
             (version.id,),
@@ -460,7 +461,7 @@ def list_character_assets(
 
 
 def acquire_character_generation_task(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     worker_id: str,
 ) -> sqlite3.Row | None:
@@ -474,7 +475,7 @@ def acquire_character_generation_task(
             """
             UPDATE character_generation_tasks
             SET status = 'RUNNING', attempt = attempt + 1,
-                locked_by = ?, locked_until = ?, next_poll_at = NULL,
+                locked_by = %s, locked_until = %s, next_poll_at = NULL,
                 started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = (
@@ -507,7 +508,7 @@ def acquire_character_generation_task(
     return cast(sqlite3.Row | None, row)
 
 
-def finalize_expired_character_generation_leases(conn: sqlite3.Connection) -> None:
+def finalize_expired_character_generation_leases(conn: BusinessConnection) -> None:
     rows = conn.execute(
         """
         SELECT * FROM character_generation_tasks
@@ -531,11 +532,11 @@ def finalize_expired_character_generation_leases(conn: sqlite3.Connection) -> No
         conn.execute(
             """
             UPDATE character_generation_tasks
-            SET status = 'FAILED', error_code = ?, error_message_redacted = ?,
+            SET status = 'FAILED', error_code = %s, error_message_redacted = %s,
                 completed_at = CURRENT_TIMESTAMP, locked_by = NULL,
                 locked_until = NULL, next_poll_at = NULL,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
+            WHERE id = %s
             """,
             (error.code, error.message_redacted, str(task["id"])),
         )
@@ -558,7 +559,7 @@ def finalize_expired_character_generation_leases(conn: sqlite3.Connection) -> No
 
 
 def run_next_character_generation_task(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     worker_id: str,
     storage: StorageAdapter,
@@ -676,7 +677,7 @@ def run_next_character_generation_task(
                 id, project_id, kind, storage_uri, sha256, size_bytes,
                 content_type, created_by_user_id, metadata_json
             )
-            VALUES (?, NULL, 'character_generated_image', ?, ?, ?, ?, ?, ?)
+            VALUES (%s, NULL, 'character_generated_image', %s, %s, %s, %s, %s, %s)
             """,
             (
                 core_asset_id,
@@ -702,7 +703,7 @@ def run_next_character_generation_task(
                 candidate_number, generation_task_id, auto_quality_json,
                 review_status, is_published_selection
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'NOT_REVIEWED', 0)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, 'NOT_REVIEWED', 0)
             """,
             (
                 character_asset_id,
@@ -717,12 +718,12 @@ def run_next_character_generation_task(
         updated = conn.execute(
             """
             UPDATE character_generation_tasks
-            SET status = 'SUCCEEDED', provider_task_id = ?, error_code = NULL,
-                error_message_redacted = NULL, cost_amount = ?,
+            SET status = 'SUCCEEDED', provider_task_id = %s, error_code = NULL,
+                error_message_redacted = NULL, cost_amount = %s,
                 completed_at = CURRENT_TIMESTAMP,
                 locked_by = NULL, locked_until = NULL, next_poll_at = NULL,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE id = ? AND status = 'RUNNING' AND locked_by = ? AND attempt = ?
+            WHERE id = %s AND status = 'RUNNING' AND locked_by = %s AND attempt = %s
             """,
             (
                 result.provider_task_id,
@@ -786,7 +787,7 @@ def run_next_character_generation_task(
 
 
 def load_character_image_request(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     task: sqlite3.Row,
     storage: StorageAdapter,
@@ -795,7 +796,7 @@ def load_character_image_request(
     require_character_generation_context_active(conn, task=task)
     source_asset_id = str(snapshot.get("source_asset_id", ""))
     source_asset = conn.execute(
-        "SELECT * FROM assets WHERE id = ?",
+        "SELECT * FROM assets WHERE id = %s",
         (source_asset_id,),
     ).fetchone()
     if source_asset is None or str(source_asset["sha256"]) != str(
@@ -832,7 +833,7 @@ def load_character_image_request(
 
 
 def require_character_generation_context_active(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     task: sqlite3.Row,
 ) -> sqlite3.Row:
@@ -855,7 +856,7 @@ def require_character_generation_context_active(
 
 
 def require_character_generation_lease_owned(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     task: sqlite3.Row,
     worker_id: str,
@@ -864,7 +865,7 @@ def require_character_generation_lease_owned(
         """
         SELECT status, locked_by, attempt
         FROM character_generation_tasks
-        WHERE id = ?
+        WHERE id = %s
         """,
         (str(task["id"]),),
     ).fetchone()
@@ -900,7 +901,7 @@ def validate_character_image_result(result: CharacterImageResult) -> None:
 
 
 def finish_character_generation_failure(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     task: sqlite3.Row,
     worker_id: str,
@@ -924,13 +925,13 @@ def finish_character_generation_failure(
         updated = conn.execute(
             """
             UPDATE character_generation_tasks
-            SET status = ?, error_code = ?, error_message_redacted = ?,
-                provider_task_id = COALESCE(?, provider_task_id),
-                cost_amount = COALESCE(?, cost_amount),
-                completed_at = CASE WHEN ? = 'FAILED' THEN CURRENT_TIMESTAMP ELSE NULL END,
-                locked_by = NULL, locked_until = NULL, next_poll_at = ?,
+            SET status = %s, error_code = %s, error_message_redacted = %s,
+                provider_task_id = COALESCE(%s, provider_task_id),
+                cost_amount = COALESCE(%s, cost_amount),
+                completed_at = CASE WHEN %s = 'FAILED' THEN CURRENT_TIMESTAMP ELSE NULL END,
+                locked_by = NULL, locked_until = NULL, next_poll_at = %s,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE id = ? AND status = 'RUNNING' AND locked_by = ? AND attempt = ?
+            WHERE id = %s AND status = 'RUNNING' AND locked_by = %s AND attempt = %s
             """,
             (
                 status,
@@ -983,7 +984,7 @@ def finish_character_generation_failure(
 
 
 def record_stale_character_generation_result(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     task: sqlite3.Row,
     worker_id: str,
@@ -1021,7 +1022,7 @@ def record_stale_character_generation_result(
 
 
 def insert_character_call_log(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     task: sqlite3.Row,
     latency_ms: int,
@@ -1038,7 +1039,7 @@ def insert_character_call_log(
             http_status, latency_ms, request_hash, response_asset_id,
             error_code, error_message_redacted
         )
-        VALUES (?, NULL, ?, ?, ?, 'character_image.generate_view', ?, ?, ?, ?, ?, ?, ?)
+        VALUES (%s, NULL, %s, %s, %s, 'character_image.generate_view', %s, %s, %s, %s, %s, %s, %s)
         """,
         (
             str(uuid4()),
@@ -1057,7 +1058,7 @@ def insert_character_call_log(
 
 
 def insert_character_worker_audit(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     task: sqlite3.Row,
     action: str,
@@ -1068,7 +1069,7 @@ def insert_character_worker_audit(
         INSERT INTO audit_logs (
             id, actor_user_id, action, entity_type, entity_id, metadata_json
         )
-        VALUES (?, ?, ?, 'character_generation_task', ?, ?)
+        VALUES (%s, %s, %s, 'character_generation_task', %s, %s)
         """,
         (
             str(uuid4()),
@@ -1081,12 +1082,12 @@ def insert_character_worker_audit(
 
 
 def update_character_version_generation_status(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     version_id: str,
 ) -> None:
     current = conn.execute(
-        "SELECT status FROM character_versions WHERE id = ?",
+        "SELECT status FROM character_versions WHERE id = %s",
         (version_id,),
     ).fetchone()
     if current is None or str(current["status"]) in {"PUBLISHED", "ARCHIVED"}:
@@ -1097,7 +1098,7 @@ def update_character_version_generation_status(
             """
             SELECT status, COUNT(*) AS count
             FROM character_generation_tasks
-            WHERE character_version_id = ?
+            WHERE character_version_id = %s
             GROUP BY status
             """,
             (version_id,),
@@ -1110,17 +1111,17 @@ def update_character_version_generation_status(
     else:
         next_status = "FAILED"
     conn.execute(
-        "UPDATE character_versions SET status = ? WHERE id = ?",
+        "UPDATE character_versions SET status = %s WHERE id = %s",
         (next_status, version_id),
     )
 
 
 def get_character_generation_task(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     task_id: str,
 ) -> CharacterGenerationTask:
     row = conn.execute(
-        "SELECT * FROM character_generation_tasks WHERE id = ?",
+        "SELECT * FROM character_generation_tasks WHERE id = %s",
         (task_id,),
     ).fetchone()
     if row is None:
@@ -1172,7 +1173,7 @@ def require_version_generatable(
 
 
 def next_character_candidate_number(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     version_id: str,
     view_type: RequiredCharacterViewType,
 ) -> int:
@@ -1181,10 +1182,10 @@ def next_character_candidate_number(
         SELECT COALESCE(MAX(candidate_number), 0) + 1
         FROM (
             SELECT candidate_number FROM character_generation_tasks
-            WHERE character_version_id = ? AND view_type = ?
+            WHERE character_version_id = %s AND view_type = %s
             UNION ALL
             SELECT candidate_number FROM character_assets
-            WHERE character_version_id = ? AND view_type = ?
+            WHERE character_version_id = %s AND view_type = %s
         )
         """,
         (version_id, view_type, version_id, view_type),
@@ -1236,7 +1237,7 @@ def character_generation_request_hash(
 
 
 def find_idempotent_character_tasks(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     version_id: str,
     idempotency_key: str,
@@ -1246,7 +1247,7 @@ def find_idempotent_character_tasks(
         conn.execute(
             """
             SELECT * FROM character_generation_tasks
-            WHERE character_version_id = ? AND idempotency_key = ?
+            WHERE character_version_id = %s AND idempotency_key = %s
             ORDER BY view_type, candidate_number, id
             """,
             (version_id, idempotency_key),

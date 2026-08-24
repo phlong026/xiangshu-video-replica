@@ -23,6 +23,7 @@ from app.character_reference_matching import (
     current_character_reference_selection_for_generation,
 )
 from app.characters import character_is_available, get_project_main_character, read_character
+from app.db_portable import BusinessConnection
 from app.permissions import (
     require_asset_access,
     require_not_auditor,
@@ -426,7 +427,7 @@ def validate_provider_image_bytes(content: bytes, content_type: str) -> None:
 
 
 def generate_first_frame_candidates(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
     actor: CurrentUser,
@@ -560,7 +561,7 @@ def generate_first_frame_candidates(
                     INSERT INTO assets (
                         id, project_id, kind, storage_uri, sha256, size_bytes, content_type,
                         created_by_user_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         candidate["asset_id"],
@@ -629,7 +630,7 @@ def generate_first_frame_candidates(
 
 
 def confirm_first_frame(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
     first_frame_asset_id: str,
@@ -697,7 +698,7 @@ def confirm_first_frame(
 
 
 def current_source_frame_selection(
-    conn: sqlite3.Connection, *, project_id: str
+    conn: BusinessConnection, *, project_id: str
 ) -> dict[str, object]:
     selection = latest_version(conn, project_id, SOURCE_FRAME_SELECTION_KIND)
     candidates = latest_version(conn, project_id, SOURCE_FRAME_CANDIDATES_KIND)
@@ -716,7 +717,7 @@ def current_source_frame_selection(
 
 
 def effective_reference_asset_ids(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     character_version_id: str,
     legacy_selected: list[str],
@@ -737,7 +738,7 @@ def effective_reference_asset_ids(
         FROM character_versions AS version
         JOIN character_personas AS persona ON persona.id = version.persona_id
         JOIN person_identities AS identity ON identity.id = persona.identity_id
-        WHERE version.id = ?
+        WHERE version.id = %s
         """,
         (character_version_id,),
     ).fetchone()
@@ -762,7 +763,7 @@ def effective_reference_asset_ids(
 
 
 def resolve_first_frame_character_inputs(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
     source_frame_selection_version_id: str,
@@ -861,7 +862,7 @@ def resolve_first_frame_character_inputs(
     )
 
 
-def current_first_frame_candidates(conn: sqlite3.Connection, *, project_id: str) -> sqlite3.Row:
+def current_first_frame_candidates(conn: BusinessConnection, *, project_id: str) -> sqlite3.Row:
     candidates = latest_version(conn, project_id, FIRST_FRAME_CANDIDATES_KIND)
     if candidates is None:
         raise first_frame_error(
@@ -901,7 +902,7 @@ def current_first_frame_candidates(conn: sqlite3.Connection, *, project_id: str)
 
 
 def require_current_first_frame_inputs(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
     source_frame_selection_version_id: str,
@@ -986,7 +987,7 @@ def first_frame_binding_stale() -> HTTPException:
 
 
 def read_character_reference_asset(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     asset_id: str,
@@ -995,7 +996,7 @@ def read_character_reference_asset(
     row = conn.execute(
         """
         SELECT id, project_id, kind, storage_uri, sha256, size_bytes, content_type
-        FROM assets WHERE id = ?
+        FROM assets WHERE id = %s
         """,
         (asset_id,),
     ).fetchone()

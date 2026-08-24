@@ -29,6 +29,7 @@ from app.analysis import (
 from app.analysis_routes import get_video_analysis_provider, signed_video_url_for_provider
 from app.auth import get_database
 from app.db import connect_database, initialize_database
+from app.db_portable import BusinessConnection
 from app.main import app
 from app.settings import SETTINGS_KEY_ENV, SettingsRepository
 from app.storage import FakeStorageAdapter
@@ -43,9 +44,13 @@ def db_path(tmp_path: Path) -> Iterator[Path]:
 
 
 @pytest.fixture()
-def client(db_path: Path) -> Iterator[TestClient]:
-    def database_override() -> Iterator[sqlite3.Connection]:
-        conn = connect_database(db_path)
+def client(db_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+    # Migrated routes (BusinessDb.write) open their own SQLite connection from
+    # the env path; it must point at the same database the override yields.
+    monkeypatch.setenv("VIDEO_REPLICA_DB_PATH", str(db_path))
+
+    def database_override() -> Iterator[BusinessConnection]:
+        conn = BusinessConnection.sqlite(connect_database(db_path))
         try:
             yield conn
         finally:
@@ -284,7 +289,8 @@ def test_video_analysis_uses_the_fixed_apilio_origin_when_legacy_base_url_exists
 ) -> None:
     key = Fernet.generate_key().decode("ascii")
     monkeypatch.setenv(SETTINGS_KEY_ENV, key)
-    with connect_database(db_path) as conn:
+    monkeypatch.setenv("VIDEO_REPLICA_DB_PATH", str(db_path))
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         SettingsRepository(conn, fernet=Fernet(key.encode("ascii"))).save_provider_config(
             "apilio",
             {
@@ -353,7 +359,7 @@ def test_analysis_can_restore_duration_from_completed_asset_metadata(
     client: TestClient,
     db_path: Path,
 ) -> None:
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             "UPDATE assets SET metadata_json = ? WHERE id = ?",
             (json.dumps({"duration_seconds": 8}), "asset_owned"),
@@ -390,7 +396,7 @@ def test_analysis_recovery_reuses_the_existing_version(
     assert recovered.json()["id"] == first.json()["id"]
     assert recovered.json()["version_number"] == 1
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         version_count = conn.execute(
             "SELECT COUNT(*) FROM versions WHERE project_id = ? AND kind = ?",
             ("project_owned", "analysis"),
@@ -409,7 +415,7 @@ def test_concurrent_analysis_recovery_creates_only_one_version(
     db_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             "UPDATE assets SET metadata_json = ? WHERE id = ?",
             (json.dumps({"duration_seconds": 8}), "asset_owned"),
@@ -454,7 +460,7 @@ def test_concurrent_analysis_recovery_creates_only_one_version(
     assert [response.status_code for response in responses] == [200, 200]
     assert provider.analysis_calls == 2
     assert len({response.json()["id"] for response in responses}) == 1
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         version_count = conn.execute(
             """
             SELECT COUNT(*)
@@ -513,7 +519,7 @@ def test_concurrent_idempotent_analysis_starts_create_only_one_version(
     assert [response.status_code for response in responses] == [200, 200]
     assert provider.analysis_calls == 2
     assert len({response.json()["id"] for response in responses}) == 1
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         version_count = conn.execute(
             """
             SELECT COUNT(*)
@@ -570,7 +576,7 @@ def test_analysis_rejects_pending_or_non_reference_assets(
     client: TestClient,
     db_path: Path,
 ) -> None:
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             "UPDATE assets SET sha256 = ?, size_bytes = ? WHERE id = ?",
             ("", 0, "asset_owned"),
@@ -640,7 +646,7 @@ def test_manual_shot_card_version_is_not_overwritten_by_new_analysis(
     assert second.status_code == 200
     assert second.json()["version_number"] == 2
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         rows = conn.execute(
             """
             SELECT kind, version_number, payload_json
@@ -665,7 +671,7 @@ def test_analysis_accepts_a_duration_within_the_upload_rounding_tolerance(
     db_path: Path,
 ) -> None:
     """Uploads tolerate 15.1s, so analysis must not reject 15.01–15.10s as invalid input."""
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             "UPDATE assets SET metadata_json = ? WHERE id = ?",
             (json.dumps({"duration_seconds": 15.05}), "asset_owned"),

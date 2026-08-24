@@ -4,10 +4,12 @@ import sqlite3
 from typing import Literal
 from uuid import uuid4
 
+import psycopg
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, StrictInt
 
 from app.auth import AuthenticatedUser, Database
+from app.customer_fence import BusinessDbDep
 from app.settings import SettingsRepository
 from app.zpay import (
     build_zpay_payment_form,
@@ -65,73 +67,72 @@ class RechargeOrderPage(BaseModel):
 )
 def create_recharge_order(
     payload: CreateRechargeOrderRequest,
-    conn: Database,
-    user: AuthenticatedUser,
+    db: BusinessDbDep,
 ) -> RechargeOrderResponse:
-    settings_repo = SettingsRepository(conn)
-    billing = settings_repo.read_billing_settings()
-    validate_recharge_amount(payload.amount_fen, billing)
-
-    try:
-        merchant = merchant_config_from_settings(settings_repo.load_zpay_config())
-        deployment = deployment_config_from_environment()
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail={"code": "ZPAY_CONFIGURATION_INVALID", "message": str(exc)},
-        ) from exc
-
-    charged_unit_price_fen = billing["charged_unit_price_fen"]
-    credits = payload.amount_fen // charged_unit_price_fen
-
     for _ in range(MAX_ORDER_NUMBER_ATTEMPTS):
         merchant_order_no = generate_merchant_order_no()
-        form_fields = build_zpay_payment_form(
-            merchant_order_no=merchant_order_no,
-            amount_fen=payload.amount_fen,
-            credits=credits,
-            merchant=merchant,
-            deployment=deployment,
-        )
         try:
-            with conn:
-                conn.execute(
-                    """
-                    INSERT INTO recharge_orders (
-                        id, user_id, merchant_order_no, provider, provider_trade_no,
-                        channel, status, pricing_scope,
-                        base_unit_price_fen_snapshot, charged_unit_price_fen_snapshot,
-                        min_recharge_fen_snapshot, recharge_step_fen_snapshot,
-                        amount_fen, credits
-                    ) VALUES (?, ?, ?, 'zpay', NULL, ?, 'PENDING', 'INTERNAL', ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        str(uuid4()),
-                        user.id,
-                        merchant_order_no,
-                        merchant.channel,
-                        billing["internal_base_unit_price_fen"],
-                        charged_unit_price_fen,
-                        billing["min_recharge_fen"],
-                        billing["recharge_step_fen"],
-                        payload.amount_fen,
-                        credits,
-                    ),
+            with db.write() as (conn, user):
+                settings_repo = SettingsRepository(conn)
+                billing = settings_repo.read_billing_settings()
+                validate_recharge_amount(payload.amount_fen, billing)
+
+                try:
+                    merchant = merchant_config_from_settings(settings_repo.load_zpay_config())
+                    deployment = deployment_config_from_environment()
+                except ValueError as exc:
+                    raise HTTPException(
+                        status_code=503,
+                        detail={"code": "ZPAY_CONFIGURATION_INVALID", "message": str(exc)},
+                    ) from exc
+
+                charged_unit_price_fen = billing["charged_unit_price_fen"]
+                credits = payload.amount_fen // charged_unit_price_fen
+                form_fields = build_zpay_payment_form(
+                    merchant_order_no=merchant_order_no,
+                    amount_fen=payload.amount_fen,
+                    credits=credits,
+                    merchant=merchant,
+                    deployment=deployment,
                 )
-        except sqlite3.IntegrityError as exc:
-            if "recharge_orders.merchant_order_no" in str(exc):
+                with conn:
+                    conn.execute(
+                        "INSERT INTO recharge_orders (\n"
+                        "    id, user_id, merchant_order_no, provider, provider_trade_no,\n"
+                        "    channel, status, pricing_scope,\n"
+                        "    base_unit_price_fen_snapshot, charged_unit_price_fen_snapshot,\n"
+                        "    min_recharge_fen_snapshot, recharge_step_fen_snapshot,\n"
+                        "    amount_fen, credits\n"
+                        ") VALUES (%s, %s, %s, 'zpay', NULL, %s, 'PENDING', 'INTERNAL', "
+                        "%s, %s, %s, %s, %s, %s)\n",
+                        (
+                            str(uuid4()),
+                            user.id,
+                            merchant_order_no,
+                            merchant.channel,
+                            billing["internal_base_unit_price_fen"],
+                            charged_unit_price_fen,
+                            billing["min_recharge_fen"],
+                            billing["recharge_step_fen"],
+                            payload.amount_fen,
+                            credits,
+                        ),
+                    )
+                return RechargeOrderResponse(
+                    order_no=merchant_order_no,
+                    status="PENDING",
+                    amount_fen=payload.amount_fen,
+                    credits=credits,
+                    gateway_url=deployment.gateway_url,
+                    method="POST",
+                    form_fields=form_fields,
+                )
+        except (sqlite3.IntegrityError, psycopg.errors.UniqueViolation) as exc:
+            # The merchant-order-number collision is a retryable random draw; any
+            # other integrity failure is a real bug and must surface.
+            if "merchant_order_no" in str(exc):
                 continue
             raise
-
-        return RechargeOrderResponse(
-            order_no=merchant_order_no,
-            status="PENDING",
-            amount_fen=payload.amount_fen,
-            credits=credits,
-            gateway_url=deployment.gateway_url,
-            method="POST",
-            form_fields=form_fields,
-        )
 
     raise HTTPException(
         status_code=503,
@@ -148,7 +149,7 @@ def list_recharge_orders(
 ) -> RechargeOrderPage:
     total = int(
         conn.execute(
-            "SELECT COUNT(*) FROM recharge_orders WHERE user_id = ?",
+            "SELECT COUNT(*) FROM recharge_orders WHERE user_id = %s",
             (actor.id,),
         ).fetchone()[0]
     )
@@ -158,9 +159,9 @@ def list_recharge_orders(
             id, user_id, merchant_order_no, provider, provider_trade_no, channel, status,
             amount_fen, credits, notify_digest, created_at, paid_at
         FROM recharge_orders
-        WHERE user_id = ?
+        WHERE user_id = %s
         ORDER BY created_at DESC, id DESC
-        LIMIT ? OFFSET ?
+        LIMIT %s OFFSET %s
         """,
         (actor.id, limit, offset),
     ).fetchall()

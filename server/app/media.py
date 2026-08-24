@@ -15,6 +15,7 @@ from uuid import uuid4
 from fastapi import HTTPException
 
 from app.auth import CurrentUser
+from app.db_portable import BusinessConnection
 from app.permissions import (
     require_asset_access,
     require_not_auditor,
@@ -117,7 +118,7 @@ class FFprobeVideoProbe:
 
 
 def create_upload_intent(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     storage: StorageAdapter,
@@ -163,7 +164,7 @@ def create_upload_intent(
                 content_type,
                 created_by_user_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 asset_id,
@@ -197,7 +198,7 @@ def create_upload_intent(
 
 
 def complete_upload(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     storage: StorageAdapter,
@@ -248,12 +249,12 @@ def complete_upload(
             """
             UPDATE assets
             SET
-                storage_uri = ?,
-                sha256 = ?,
-                size_bytes = ?,
-                content_type = ?,
-                metadata_json = ?
-            WHERE id = ?
+                storage_uri = %s,
+                sha256 = %s,
+                size_bytes = %s,
+                content_type = %s,
+                metadata_json = %s
+            WHERE id = %s
             """,
             (
                 stored.uri,
@@ -269,7 +270,7 @@ def complete_upload(
             ),
         )
         conn.execute(
-            "UPDATE projects SET status = ? WHERE id = ?",
+            "UPDATE projects SET status = %s WHERE id = %s",
             ("REFERENCE_READY", str(row["project_id"])),
         )
 

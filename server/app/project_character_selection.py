@@ -26,6 +26,7 @@ from app.characters import (
     get_project_main_character,
     next_version_number,
 )
+from app.db_portable import BusinessConnection
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,7 @@ SELECTION_SNAPSHOT_SCHEMA_VERSION = "project-character-selection.v1"
 
 
 def list_available_project_character_versions(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
     character_version_id: str | None = None,
@@ -66,7 +67,7 @@ def list_available_project_character_versions(
         JOIN character_personas AS persona ON persona.id = version.persona_id
         JOIN person_identities AS identity ON identity.id = persona.identity_id
         WHERE version.status = 'PUBLISHED'
-          AND (? IS NULL OR version.id = ?)
+          AND (%s IS NULL OR version.id = %s)
         ORDER BY identity.display_name COLLATE NOCASE, persona.id,
                  version.version_number DESC
         """,
@@ -93,7 +94,7 @@ def list_available_project_character_versions(
         WHERE version.status = 'PUBLISHED'
           AND character_asset.review_status = 'APPROVED'
           AND character_asset.is_published_selection = 1
-          AND (? IS NULL OR version.id = ?)
+          AND (%s IS NULL OR version.id = %s)
         """,
         (character_version_id, character_version_id),
     ).fetchall()
@@ -125,7 +126,7 @@ def list_available_project_character_versions(
 
 
 def choose_project_character_version(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     project_id: str,
@@ -146,7 +147,7 @@ def choose_project_character_version(
             SELECT binding.character_version_id, version.payload_json
             FROM project_main_characters AS binding
             JOIN versions AS version ON version.id = binding.version_id
-            WHERE binding.project_id = ?
+            WHERE binding.project_id = %s
             """,
             (project_id,),
         ).fetchone()
@@ -177,7 +178,7 @@ def choose_project_character_version(
             INSERT INTO versions (
                 id, project_id, asset_id, kind, version_number,
                 payload_json, created_by_user_id
-            ) VALUES (?, ?, NULL, ?, ?, ?, ?)
+            ) VALUES (%s, %s, NULL, %s, %s, %s, %s)
             """,
             (
                 selection_version_id,
@@ -193,7 +194,7 @@ def choose_project_character_version(
             INSERT INTO project_main_characters (
                 project_id, character_id, version_id, character_version_id,
                 selected_by_user_id
-            ) VALUES (?, NULL, ?, ?, ?)
+            ) VALUES (%s, NULL, %s, %s, %s)
             ON CONFLICT(project_id) DO UPDATE SET
                 character_id = NULL,
                 version_id = excluded.version_id,
@@ -212,8 +213,8 @@ def choose_project_character_version(
             """
             INSERT INTO audit_logs (
                 id, actor_user_id, action, entity_type, entity_id, metadata_json
-            ) VALUES (?, ?, 'project.main_character.choose_version',
-                      'version', ?, ?)
+            ) VALUES (%s, %s, 'project.main_character.choose_version',
+                      'version', %s, %s)
             """,
             (
                 str(uuid4()),

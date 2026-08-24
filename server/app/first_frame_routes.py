@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.auth import AuthenticatedUser, Database
+from app.customer_fence import BusinessDbDep, BusinessReadConn
 from app.first_frames import (
     APILIO_DEFAULT_BASE_URL,
     FIRST_FRAME_SELECTION_KIND,
@@ -62,10 +63,10 @@ class VersionResponse(BaseModel):
     created_at: str
 
 
-def get_image_provider(conn: Database) -> ImageProvider:
+def get_image_provider(conn: BusinessReadConn) -> ImageProvider:
     has_saved_apilio_config = (
         conn.execute(
-            "SELECT 1 FROM provider_settings WHERE provider = ?",
+            "SELECT 1 FROM provider_settings WHERE provider = %s",
             ("apilio",),
         ).fetchone()
         is not None
@@ -114,24 +115,24 @@ InjectedImageProvider = Annotated[ImageProvider, Depends(get_image_provider)]
 def generate_project_first_frames(
     project_id: str,
     request: GenerateFirstFramesRequest,
-    conn: Database,
-    actor: AuthenticatedUser,
     storage: FirstFrameStorage,
     provider: InjectedImageProvider,
+    db: BusinessDbDep,
 ) -> VersionResponse:
-    row = generate_first_frame_candidates(
-        conn,
-        project_id=project_id,
-        actor=actor,
-        storage=storage,
-        provider=provider,
-        model=request.model,
-        prompt=request.prompt,
-        quantity=request.quantity,
-        character_version_id=request.character_version_id,
-        character_reference_selection_id=request.character_reference_selection_id,
-    )
-    return version_response(row)
+    with db.write() as (conn, actor):
+        row = generate_first_frame_candidates(
+            conn,
+            project_id=project_id,
+            actor=actor,
+            storage=storage,
+            provider=provider,
+            model=request.model,
+            prompt=request.prompt,
+            quantity=request.quantity,
+            character_version_id=request.character_version_id,
+            character_reference_selection_id=request.character_reference_selection_id,
+        )
+        return version_response(row)
 
 
 @router.get("/projects/{project_id}/first-frames/latest", response_model=VersionResponse | None)
@@ -166,7 +167,7 @@ def read_first_frame_history(
         SELECT id, project_id, asset_id, kind, version_number, payload_json,
                created_by_user_id, created_at
         FROM versions
-        WHERE project_id = ? AND kind = ?
+        WHERE project_id = %s AND kind = %s
         ORDER BY version_number DESC
         LIMIT 20
         """,
@@ -179,17 +180,17 @@ def read_first_frame_history(
 def confirm_project_first_frame(
     project_id: str,
     request: ConfirmFirstFrameRequest,
-    conn: Database,
-    actor: AuthenticatedUser,
+    db: BusinessDbDep,
 ) -> VersionResponse:
-    return version_response(
-        confirm_first_frame(
-            conn,
-            project_id=project_id,
-            first_frame_asset_id=request.first_frame_asset_id,
-            actor=actor,
+    with db.write() as (conn, actor):
+        return version_response(
+            confirm_first_frame(
+                conn,
+                project_id=project_id,
+                first_frame_asset_id=request.first_frame_asset_id,
+                actor=actor,
+            )
         )
-    )
 
 
 @router.get(

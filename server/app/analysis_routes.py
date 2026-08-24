@@ -26,6 +26,8 @@ from app.analysis import (
     validate_shot_cards,
 )
 from app.auth import AuthenticatedUser, Database
+from app.customer_fence import BusinessDbDep
+from app.db_portable import BusinessConnection
 from app.media import (
     DURATION_ROUNDING_TOLERANCE_SECONDS,
     MAX_DURATION_SECONDS,
@@ -56,7 +58,7 @@ MAX_ANALYSIS_DURATION_SECONDS = MAX_DURATION_SECONDS + DURATION_ROUNDING_TOLERAN
 def get_video_analysis_provider(conn: Database) -> VideoAnalysisProvider:
     has_saved_apilio_config = (
         conn.execute(
-            "SELECT 1 FROM provider_settings WHERE provider = ?",
+            "SELECT 1 FROM provider_settings WHERE provider = %s",
             ("apilio",),
         ).fetchone()
         is not None
@@ -143,139 +145,139 @@ class VersionResponse(BaseModel):
 def create_project_analysis(
     project_id: str,
     request: CreateAnalysisRequest,
-    conn: Database,
-    actor: AuthenticatedUser,
+    db: BusinessDbDep,
 ) -> VersionResponse:
-    require_not_auditor(
-        conn,
-        actor=actor,
-        action="analysis.create",
-        entity_type="project",
-        entity_id=project_id,
-    )
-    require_project_access(conn, actor=actor, project_id=project_id, action="analysis.create")
-    asset = require_asset_access(
-        conn,
-        actor=actor,
-        asset_id=request.asset_id,
-        action="analysis.create",
-    )
-    if str(asset["project_id"]) != project_id:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "code": "ASSET_PROJECT_MISMATCH",
-                "message": "Asset does not belong to the requested project.",
-            },
-        )
-    if not is_reference_video_asset(asset):
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "code": "ANALYSIS_ASSET_NOT_REFERENCE_VIDEO",
-                "message": "Analysis requires a reference video asset.",
-            },
-        )
-    if not str(asset["sha256"]) or int(asset["size_bytes"]) <= 0:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "REFERENCE_VIDEO_NOT_READY",
-                "message": "Reference video upload is not ready for analysis.",
-            },
-        )
-
-    should_reuse = request.duration_seconds is None or request.reuse_existing
-    if should_reuse:
-        existing = find_analysis_version_for_asset(
+    with db.write() as (conn, actor):
+        require_not_auditor(
             conn,
-            project_id=project_id,
-            asset_id=request.asset_id,
+            actor=actor,
+            action="analysis.create",
+            entity_type="project",
+            entity_id=project_id,
         )
-        if existing is not None:
-            write_audit(
-                conn,
-                actor=actor,
-                action="analysis.recover_existing",
-                entity_type="version",
-                entity_id=str(existing["id"]),
-                metadata={"project_id": project_id, "asset_id": request.asset_id},
+        require_project_access(conn, actor=actor, project_id=project_id, action="analysis.create")
+        asset = require_asset_access(
+            conn,
+            actor=actor,
+            asset_id=request.asset_id,
+            action="analysis.create",
+        )
+        if str(asset["project_id"]) != project_id:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "ASSET_PROJECT_MISMATCH",
+                    "message": "Asset does not belong to the requested project.",
+                },
             )
-            return version_response(existing)
+        if not is_reference_video_asset(asset):
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "ANALYSIS_ASSET_NOT_REFERENCE_VIDEO",
+                    "message": "Analysis requires a reference video asset.",
+                },
+            )
+        if not str(asset["sha256"]) or int(asset["size_bytes"]) <= 0:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "REFERENCE_VIDEO_NOT_READY",
+                    "message": "Reference video upload is not ready for analysis.",
+                },
+            )
 
-    provider = get_video_analysis_provider(conn)
-    video_uri = str(asset["storage_uri"])
-    if provider.requires_https_video_url:
-        video_uri = signed_video_url_for_provider(
-            get_media_storage(conn),
-            asset_uri=video_uri,
-        )
-    metadata_row = conn.execute(
-        "SELECT metadata_json FROM assets WHERE id = ?", (request.asset_id,)
-    ).fetchone()
-    measured_duration: float | None = None
-    if metadata_row is not None:
-        metadata = json.loads(str(metadata_row["metadata_json"]))
-        stored_duration = metadata.get("duration_seconds")
-        if isinstance(stored_duration, int | float):
-            measured_duration = float(stored_duration)
-    if measured_duration is None:
-        measured_duration = request.duration_seconds
-    if measured_duration is None:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "code": "ANALYSIS_DURATION_UNAVAILABLE",
-                "message": "Reference video duration is unavailable; upload it again.",
-            },
-        )
-    if (
-        request.duration_seconds is not None
-        and abs(measured_duration - request.duration_seconds) > 1.0
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "code": "ANALYSIS_DURATION_MISMATCH",
-                "message": "Requested duration does not match the reference video.",
-            },
-        )
-    try:
-        result = analyze_video(
-            video_uri=video_uri,
-            video_duration_seconds=measured_duration,
-            provider=provider,
-        )
-    except AnalysisProviderFailed as exc:
-        raise analysis_provider_error(exc) from exc
-    if should_reuse:
-        row, created = create_or_recover_analysis_version(
+        should_reuse = request.duration_seconds is None or request.reuse_existing
+        if should_reuse:
+            existing = find_analysis_version_for_asset(
+                conn,
+                project_id=project_id,
+                asset_id=request.asset_id,
+            )
+            if existing is not None:
+                write_audit(
+                    conn,
+                    actor=actor,
+                    action="analysis.recover_existing",
+                    entity_type="version",
+                    entity_id=str(existing["id"]),
+                    metadata={"project_id": project_id, "asset_id": request.asset_id},
+                )
+                return version_response(existing)
+
+        provider = get_video_analysis_provider(conn)
+        video_uri = str(asset["storage_uri"])
+        if provider.requires_https_video_url:
+            video_uri = signed_video_url_for_provider(
+                get_media_storage(conn),
+                asset_uri=video_uri,
+            )
+        metadata_row = conn.execute(
+            "SELECT metadata_json FROM assets WHERE id = %s", (request.asset_id,)
+        ).fetchone()
+        measured_duration: float | None = None
+        if metadata_row is not None:
+            metadata = json.loads(str(metadata_row["metadata_json"]))
+            stored_duration = metadata.get("duration_seconds")
+            if isinstance(stored_duration, int | float):
+                measured_duration = float(stored_duration)
+        if measured_duration is None:
+            measured_duration = request.duration_seconds
+        if measured_duration is None:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "ANALYSIS_DURATION_UNAVAILABLE",
+                    "message": "Reference video duration is unavailable; upload it again.",
+                },
+            )
+        if (
+            request.duration_seconds is not None
+            and abs(measured_duration - request.duration_seconds) > 1.0
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "ANALYSIS_DURATION_MISMATCH",
+                    "message": "Requested duration does not match the reference video.",
+                },
+            )
+        try:
+            result = analyze_video(
+                video_uri=video_uri,
+                video_duration_seconds=measured_duration,
+                provider=provider,
+            )
+        except AnalysisProviderFailed as exc:
+            raise analysis_provider_error(exc) from exc
+        if should_reuse:
+            row, created = create_or_recover_analysis_version(
+                conn,
+                project_id=project_id,
+                asset_id=request.asset_id,
+                asset_uri=str(asset["storage_uri"]),
+                created_by_user_id=actor.id,
+                result=result,
+            )
+        else:
+            row = create_analysis_version(
+                conn,
+                project_id=project_id,
+                asset_id=request.asset_id,
+                asset_uri=str(asset["storage_uri"]),
+                created_by_user_id=actor.id,
+                result=result,
+            )
+            created = True
+        write_audit(
             conn,
-            project_id=project_id,
-            asset_id=request.asset_id,
-            asset_uri=str(asset["storage_uri"]),
-            created_by_user_id=actor.id,
-            result=result,
+            actor=actor,
+            action="analysis.create" if created else "analysis.recover_existing",
+            entity_type="version",
+            entity_id=str(row["id"]),
+            metadata={"project_id": project_id, "asset_id": request.asset_id},
         )
-    else:
-        row = create_analysis_version(
-            conn,
-            project_id=project_id,
-            asset_id=request.asset_id,
-            asset_uri=str(asset["storage_uri"]),
-            created_by_user_id=actor.id,
-            result=result,
-        )
-        created = True
-    write_audit(
-        conn,
-        actor=actor,
-        action="analysis.create" if created else "analysis.recover_existing",
-        entity_type="version",
-        entity_id=str(row["id"]),
-        metadata={"project_id": project_id, "asset_id": request.asset_id},
-    )
-    return version_response(row)
+        return version_response(row)
 
 
 @router.get("/analysis/{analysis_id}", response_model=VersionResponse)
@@ -306,7 +308,7 @@ def read_latest_project_analysis(
         SELECT id, project_id, asset_id, kind, version_number, payload_json, created_by_user_id,
                created_at
         FROM versions
-        WHERE project_id = ? AND kind = ?
+        WHERE project_id = %s AND kind = %s
         ORDER BY version_number DESC
         LIMIT 1
         """,
@@ -332,7 +334,7 @@ def read_latest_project_shot_card(
         SELECT id, project_id, asset_id, kind, version_number, payload_json, created_by_user_id,
                created_at
         FROM versions
-        WHERE project_id = ? AND kind = ?
+        WHERE project_id = %s AND kind = %s
         ORDER BY version_number DESC
         LIMIT 1
         """,
@@ -347,50 +349,50 @@ def read_latest_project_shot_card(
 def update_analysis_shots(
     analysis_id: str,
     request: UpdateShotCardsRequest,
-    conn: Database,
-    actor: AuthenticatedUser,
+    db: BusinessDbDep,
 ) -> VersionResponse:
-    require_not_auditor(
-        conn,
-        actor=actor,
-        action="shot_card.update",
-        entity_type="analysis",
-        entity_id=analysis_id,
-    )
-    row = load_analysis_version(conn, analysis_id)
-    require_project_access(
-        conn,
-        actor=actor,
-        project_id=str(row["project_id"]),
-        action="shot_card.update",
-    )
-    payload = json.loads(str(row["payload_json"]))
-    try:
-        shots = validate_shot_cards(
-            request.shots,
-            duration_seconds=float(payload["analysis"]["duration_seconds"]),
+    with db.write() as (conn, actor):
+        require_not_auditor(
+            conn,
+            actor=actor,
+            action="shot_card.update",
+            entity_type="analysis",
+            entity_id=analysis_id,
         )
-    except ValidationError as exc:
-        raise HTTPException(
-            status_code=422,
-            detail={"code": "SHOT_CARD_INVALID", "message": str(exc)},
-        ) from exc
+        row = load_analysis_version(conn, analysis_id)
+        require_project_access(
+            conn,
+            actor=actor,
+            project_id=str(row["project_id"]),
+            action="shot_card.update",
+        )
+        payload = json.loads(str(row["payload_json"]))
+        try:
+            shots = validate_shot_cards(
+                request.shots,
+                duration_seconds=float(payload["analysis"]["duration_seconds"]),
+            )
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "SHOT_CARD_INVALID", "message": str(exc)},
+            ) from exc
 
-    shot_card = create_shot_card_version(
-        conn,
-        analysis_version=row,
-        created_by_user_id=actor.id,
-        shots=shots,
-    )
-    write_audit(
-        conn,
-        actor=actor,
-        action="shot_card.update",
-        entity_type="version",
-        entity_id=str(shot_card["id"]),
-        metadata={"source_analysis_version_id": analysis_id},
-    )
-    return version_response(shot_card)
+        shot_card = create_shot_card_version(
+            conn,
+            analysis_version=row,
+            created_by_user_id=actor.id,
+            shots=shots,
+        )
+        write_audit(
+            conn,
+            actor=actor,
+            action="shot_card.update",
+            entity_type="version",
+            entity_id=str(shot_card["id"]),
+            metadata={"source_analysis_version_id": analysis_id},
+        )
+        return version_response(shot_card)
 
 
 def analysis_provider_error(failure: AnalysisProviderFailed) -> HTTPException:
@@ -418,7 +420,7 @@ def analysis_provider_error(failure: AnalysisProviderFailed) -> HTTPException:
     )
 
 
-def load_analysis_version(conn: sqlite3.Connection, analysis_id: str) -> sqlite3.Row:
+def load_analysis_version(conn: BusinessConnection, analysis_id: str) -> sqlite3.Row:
     try:
         row = get_version(conn, analysis_id)
     except LookupError as exc:

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import logging
-import sqlite3
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -17,6 +16,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
 from app.auth import CurrentUser
+from app.db_portable import BusinessConnection
 from app.settings import SettingsRepository, SettingsUnavailableError
 
 logger = logging.getLogger(__name__)
@@ -53,7 +53,7 @@ class ScriptRewriteResult(BaseModel):
 
 
 def rewrite_script_with_deepseek(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     source_text: str,

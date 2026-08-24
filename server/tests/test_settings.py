@@ -11,6 +11,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from app.db import connect_database, initialize_database
+from app.db_portable import BusinessConnection
 from app.settings import (
     SettingsDecryptError,
     SettingsKeyMissing,
@@ -50,9 +51,9 @@ def db_path(tmp_path: Path, settings_key: str) -> Path:
 
 
 @pytest.fixture()
-def conn(db_path: Path) -> Iterator[sqlite3.Connection]:
+def conn(db_path: Path) -> Iterator[BusinessConnection]:
     with connect_database(db_path) as connection:
-        yield connection
+        yield BusinessConnection.sqlite(connection)
 
 
 @pytest.fixture()
@@ -60,9 +61,9 @@ def client(db_path: Path) -> Iterator[TestClient]:
     app = FastAPI()
     app.include_router(router)
 
-    def override_database() -> Iterator[sqlite3.Connection]:
+    def override_database() -> Iterator[BusinessConnection]:
         with connect_database(db_path) as connection:
-            yield connection
+            yield BusinessConnection.sqlite(connection)
 
     app.dependency_overrides[get_database] = override_database
     tester = FakeProviderTester()
@@ -186,7 +187,7 @@ def test_provider_config_survives_database_reopen(
     db_path: Path,
     settings_key: str,
 ) -> None:
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         SettingsRepository(conn).save_provider_config(
             "cos",
             {
@@ -198,7 +199,7 @@ def test_provider_config_survives_database_reopen(
             actor_user_id="admin_1",
         )
 
-    with connect_database(db_path) as reopened:
+    with BusinessConnection.sqlite(connect_database(db_path)) as reopened:
         stored = SettingsRepository(reopened).load_provider_config("cos")
 
     assert settings_key
@@ -213,14 +214,14 @@ def test_provider_config_survives_database_reopen(
 def test_provider_config_remains_encrypted_when_reopened_with_the_wrong_key(
     db_path: Path,
 ) -> None:
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         SettingsRepository(conn).save_provider_config(
             "metaso",
             {"api_key": "metaso-secret"},
             actor_user_id="admin_1",
         )
 
-    with connect_database(db_path) as reopened:
+    with BusinessConnection.sqlite(connect_database(db_path)) as reopened:
         with pytest.raises(SettingsDecryptError, match="cannot be decrypted"):
             SettingsRepository(reopened, fernet=Fernet(Fernet.generate_key())).load_provider_config(
                 "metaso"
@@ -238,7 +239,7 @@ def test_settings_api_reports_wrong_key_without_deleting_saved_config(
     db_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         SettingsRepository(conn).save_provider_config(
             "metaso",
             {"api_key": "metaso-secret"},
@@ -251,9 +252,9 @@ def test_settings_api_reports_wrong_key_without_deleting_saved_config(
     )
     from app.main import app as production_app
 
-    def override_database() -> Iterator[sqlite3.Connection]:
+    def override_database() -> Iterator[BusinessConnection]:
         with connect_database(db_path) as connection:
-            yield connection
+            yield BusinessConnection.sqlite(connection)
 
     production_app.dependency_overrides[get_database] = override_database
     try:
@@ -269,7 +270,7 @@ def test_settings_api_reports_wrong_key_without_deleting_saved_config(
             "message": "本地配置仍保存在数据库中，但当前主密钥缺失或不匹配；系统未覆盖已保存配置。",
         }
     }
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         assert (
             conn.execute(
                 "SELECT COUNT(*) FROM provider_settings WHERE provider = 'metaso'"
@@ -287,7 +288,7 @@ def test_bootstrap_persists_an_explicit_key_only_after_saved_settings_decrypt(
 
     monkeypatch.delenv("VIDEO_REPLICA_DISABLE_LOCAL_KEYSTORE", raising=False)
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         SettingsRepository(conn).save_provider_config(
             "metaso",
             {"api_key": "metaso-secret"},

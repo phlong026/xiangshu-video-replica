@@ -24,6 +24,7 @@ from app.character_identity import (
     parse_datetime,
 )
 from app.character_policy import identity_values_are_current
+from app.db_portable import BusinessConnection
 from app.permissions import require_not_auditor, require_project_access
 from app.source_frames import (
     SOURCE_FRAME_CANDIDATES_KIND,
@@ -95,7 +96,7 @@ def recommended_body_view(features: SourceFrameFeatures) -> RequiredCharacterVie
 
 
 def create_character_reference_selection(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     project_id: str,
@@ -146,7 +147,7 @@ def create_character_reference_selection(
                 recommended_asset_ids_json, selected_asset_ids_json,
                 recommendation_reason_json, character_version_snapshot_json,
                 selected_by
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 selection_id,
@@ -184,7 +185,7 @@ def create_character_reference_selection(
 
 
 def get_latest_character_reference_selection(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     project_id: str,
@@ -206,7 +207,7 @@ def get_latest_character_reference_selection(
 
 
 def get_character_reference_recommendation(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     project_id: str,
@@ -233,7 +234,7 @@ def get_character_reference_recommendation(
 
 
 def current_character_reference_selection_for_generation(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
     source_frame_version_id: str,
@@ -299,7 +300,7 @@ def current_character_reference_selection_for_generation(
 
 
 def load_reference_selection_inputs(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
     requested_asset_ids: list[str] | None,
@@ -398,7 +399,7 @@ def load_reference_selection_inputs(
 
 
 def current_source_selection(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
 ) -> dict[str, object]:
@@ -452,7 +453,7 @@ def parse_source_frame_features(selection: dict[str, object]) -> SourceFrameFeat
 
 
 def current_main_character_binding(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
 ) -> sqlite3.Row:
@@ -460,7 +461,7 @@ def current_main_character_binding(
         """
         SELECT project_id, version_id, character_version_id
         FROM project_main_characters
-        WHERE project_id = ?
+        WHERE project_id = %s
         """,
         (project_id,),
     ).fetchone()
@@ -474,23 +475,23 @@ def current_main_character_binding(
 
 
 def load_character_context(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     version_id: str,
 ) -> tuple[sqlite3.Row, sqlite3.Row, sqlite3.Row]:
     version = conn.execute(
-        "SELECT * FROM character_versions WHERE id = ?",
+        "SELECT * FROM character_versions WHERE id = %s",
         (version_id,),
     ).fetchone()
     if version is None:
         raise reference_error(409, "CHARACTER_VERSION_REQUIRED", "项目人物版本不存在。")
     persona = conn.execute(
-        "SELECT * FROM character_personas WHERE id = ?",
+        "SELECT * FROM character_personas WHERE id = %s",
         (str(version["persona_id"]),),
     ).fetchone()
     if persona is None:
         raise reference_error(409, "CHARACTER_PERSONA_INVALID", "项目人物人设不存在。")
     identity = conn.execute(
-        "SELECT * FROM person_identities WHERE id = ?",
+        "SELECT * FROM person_identities WHERE id = %s",
         (str(persona["identity_id"]),),
     ).fetchone()
     if identity is None:
@@ -526,7 +527,7 @@ def invalid_publication() -> HTTPException:
 
 
 def load_published_reference_assets(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     version_id: str,
     publication_snapshot: dict[str, object],
@@ -544,7 +545,7 @@ def load_published_reference_assets(
             asset.content_type
         FROM character_assets AS character_asset
         JOIN assets AS asset ON asset.id = character_asset.asset_id
-        WHERE character_asset.character_version_id = ?
+        WHERE character_asset.character_version_id = %s
           AND character_asset.is_published_selection = 1
         """,
         (version_id,),
@@ -626,15 +627,15 @@ def unique_ids(values: list[str]) -> list[str]:
 
 
 def latest_character_reference_selection_row(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
 ) -> sqlite3.Row | None:
     row = conn.execute(
         """
         SELECT * FROM character_reference_selections
-        WHERE project_id = ?
-        ORDER BY selected_at DESC, rowid DESC
+        WHERE project_id = %s
+        ORDER BY selected_at DESC, id DESC
         LIMIT 1
         """,
         (project_id,),
@@ -643,12 +644,12 @@ def latest_character_reference_selection_row(
 
 
 def read_character_reference_selection_row(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     selection_id: str,
 ) -> sqlite3.Row:
     row = conn.execute(
-        "SELECT * FROM character_reference_selections WHERE id = ?",
+        "SELECT * FROM character_reference_selections WHERE id = %s",
         (selection_id,),
     ).fetchone()
     if row is None:
@@ -698,7 +699,7 @@ def decode_string_list(value: object) -> list[str]:
 
 
 def insert_reference_audit(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     selection_id: str,
@@ -709,7 +710,7 @@ def insert_reference_audit(
         """
         INSERT INTO audit_logs (
             id, actor_user_id, action, entity_type, entity_id, metadata_json
-        ) VALUES (?, ?, 'character_reference.select', 'character_reference_selection', ?, ?)
+        ) VALUES (%s, %s, 'character_reference.select', 'character_reference_selection', %s, %s)
         """,
         (
             str(uuid4()),

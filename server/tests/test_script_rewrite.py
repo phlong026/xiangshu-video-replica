@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 import app.script_rewrite as script_rewrite
 from app.auth import get_database
 from app.db import connect_database, initialize_database
+from app.db_portable import BusinessConnection
 from app.main import app
 from app.settings import SETTINGS_KEY_ENV, SettingsRepository
 
@@ -24,9 +25,16 @@ def db_path(tmp_path: Path) -> Iterator[Path]:
 
 
 @pytest.fixture()
-def client(db_path: Path) -> Iterator[TestClient]:
-    def database_override() -> Iterator[sqlite3.Connection]:
-        conn = connect_database(db_path)
+def client(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[TestClient]:
+    # Migrated routes (BusinessDb.write) open their own SQLite connection from
+    # the env path; it must point at the same database the override yields.
+    monkeypatch.setenv("VIDEO_REPLICA_DB_PATH", str(db_path))
+
+    def database_override() -> Iterator[BusinessConnection]:
+        conn = BusinessConnection.sqlite(connect_database(db_path))
         try:
             yield conn
         finally:
@@ -61,7 +69,7 @@ def auth_headers(user_id: str) -> dict[str, str]:
 def configure_deepseek(db_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     key = Fernet.generate_key().decode("ascii")
     monkeypatch.setenv(SETTINGS_KEY_ENV, key)
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         SettingsRepository(conn, fernet=Fernet(key.encode("ascii"))).save_provider_config(
             "deepseek",
             {"api_key": "deepseek-test-key"},

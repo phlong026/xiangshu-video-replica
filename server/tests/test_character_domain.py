@@ -15,6 +15,7 @@ from app.characters import (
     update_character,
 )
 from app.db import alembic_config, connect_database, initialize_database
+from app.db_portable import BusinessConnection
 from app.main import app
 
 CHARACTER_DOMAIN_TABLES = {
@@ -284,7 +285,7 @@ def test_legacy_character_upgrade_backfills_domain_and_preserves_project_snapsho
 
     command.upgrade(alembic_config(db_path), "head")
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         identity = conn.execute("SELECT * FROM person_identities").fetchone()
         persona = conn.execute("SELECT * FROM character_personas").fetchone()
         version = conn.execute("SELECT * FROM character_versions").fetchone()
@@ -347,7 +348,7 @@ def test_legacy_template_hash_backfill_is_reversible(tmp_path: Path) -> None:
     command.upgrade(alembic_config(db_path), "011_add_archive_retry_count")
     _seed_legacy_character(db_path)
     command.upgrade(alembic_config(db_path), "012_character_domain")
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         before = conn.execute(
             "SELECT template_version, template_hash FROM character_versions"
         ).fetchone()
@@ -355,7 +356,7 @@ def test_legacy_template_hash_backfill_is_reversible(tmp_path: Path) -> None:
     assert before["template_hash"] is None
 
     command.upgrade(alembic_config(db_path), "013_character_identity_assets")
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         upgraded = conn.execute(
             "SELECT template_version, template_hash FROM character_versions"
         ).fetchone()
@@ -363,7 +364,7 @@ def test_legacy_template_hash_backfill_is_reversible(tmp_path: Path) -> None:
     assert len(str(upgraded["template_hash"])) == 64
 
     command.downgrade(alembic_config(db_path), "012_character_domain")
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         downgraded = conn.execute(
             "SELECT template_version, template_hash FROM character_versions"
         ).fetchone()
@@ -379,7 +380,7 @@ def test_character_domain_downgrade_and_reupgrade_preserve_legacy_data(tmp_path:
 
     command.downgrade(alembic_config(db_path), "011_add_archive_retry_count")
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         tables = {
             row[0]
             for row in conn.execute(
@@ -401,7 +402,7 @@ def test_character_domain_downgrade_and_reupgrade_preserve_legacy_data(tmp_path:
 
     command.upgrade(alembic_config(db_path), "head")
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         imported_version = conn.execute(
             "SELECT id, persona_snapshot_json FROM character_versions"
         ).fetchone()
@@ -455,7 +456,7 @@ def test_character_identity_asset_downgrade_roundtrip_preserves_object_and_refer
         conn.commit()
 
     command.downgrade(alembic_config(db_path), "012_character_domain")
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         downgraded = conn.execute(
             "SELECT project_id, storage_uri FROM assets WHERE id = 'identity-source-1'"
         ).fetchone()
@@ -470,7 +471,7 @@ def test_character_identity_asset_downgrade_roundtrip_preserves_object_and_refer
     assert identity_source == "identity-source-1"
 
     command.upgrade(alembic_config(db_path), "head")
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         upgraded = conn.execute(
             "SELECT project_id FROM assets WHERE id = 'identity-source-1'"
         ).fetchone()
@@ -492,7 +493,7 @@ def test_character_image_generation_migration_downgrade_roundtrip(tmp_path: Path
 
     command.downgrade(alembic_config(db_path), "013_character_identity_assets")
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         downgraded_version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
         downgraded_task_columns = {
             row[1] for row in conn.execute("PRAGMA table_info(character_generation_tasks)")
@@ -507,7 +508,7 @@ def test_character_image_generation_migration_downgrade_roundtrip(tmp_path: Path
 
     command.upgrade(alembic_config(db_path), "head")
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         upgraded_version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
         upgraded_task_columns = {
             row[1] for row in conn.execute("PRAGMA table_info(character_generation_tasks)")
@@ -526,12 +527,12 @@ def test_character_asset_publication_migration_downgrade_roundtrip(tmp_path: Pat
     config = alembic_config(db_path)
     command.upgrade(config, "head")
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(character_versions)")}
     assert {"publication_snapshot_json", "publication_hash"} <= columns
 
     command.downgrade(config, "014_character_image_generation")
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         downgraded_version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
         downgraded_columns = {
             row[1] for row in conn.execute("PRAGMA table_info(character_versions)")
@@ -541,7 +542,7 @@ def test_character_asset_publication_migration_downgrade_roundtrip(tmp_path: Pat
     assert "publication_hash" not in downgraded_columns
 
     command.upgrade(config, "head")
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         upgraded_version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
         upgraded_columns = {row[1] for row in conn.execute("PRAGMA table_info(character_versions)")}
     assert upgraded_version == "039_admin_adjustments"
@@ -553,14 +554,14 @@ def test_character_reference_snapshot_migration_downgrade_roundtrip(tmp_path: Pa
     config = alembic_config(db_path)
     command.upgrade(config, "head")
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         columns = {
             row[1]: row for row in conn.execute("PRAGMA table_info(character_reference_selections)")
         }
     assert columns["character_version_snapshot_json"][3] == 1
 
     command.downgrade(config, "015_character_asset_publication")
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         downgraded_version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
         downgraded_columns = {
             row[1] for row in conn.execute("PRAGMA table_info(character_reference_selections)")
@@ -569,7 +570,7 @@ def test_character_reference_snapshot_migration_downgrade_roundtrip(tmp_path: Pa
     assert "character_version_snapshot_json" not in downgraded_columns
 
     command.upgrade(config, "head")
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         upgraded_version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
         upgraded_columns = {
             row[1]: row for row in conn.execute("PRAGMA table_info(character_reference_selections)")
@@ -583,7 +584,7 @@ def test_character_image_generation_migration_backfills_existing_tasks(tmp_path:
     config = alembic_config(db_path)
     command.upgrade(config, "013_character_identity_assets")
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             """
             INSERT INTO users (id, username, display_name, role)
@@ -626,7 +627,7 @@ def test_character_image_generation_migration_backfills_existing_tasks(tmp_path:
 
     command.upgrade(config, "head")
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         tasks = conn.execute(
             """
             SELECT id, idempotency_key, request_hash, candidate_number,
@@ -657,7 +658,7 @@ def test_legacy_character_upgrade_preserves_revoked_and_expired_authorization(
     db_path = tmp_path / "legacy-character-statuses.db"
     command.upgrade(alembic_config(db_path), "011_add_archive_retry_count")
     _seed_legacy_character(db_path)
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.executemany(
             """
             INSERT INTO characters (
@@ -677,7 +678,7 @@ def test_legacy_character_upgrade_preserves_revoked_and_expired_authorization(
 
     command.upgrade(alembic_config(db_path), "head")
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         states = {
             row["id"]: (row["status"], row["authorization_status"])
             for row in conn.execute(
@@ -708,7 +709,7 @@ def test_legacy_selection_write_path_keeps_character_version_link_synchronized(
     db_path = tmp_path / "legacy-character-selection.db"
     command.upgrade(alembic_config(db_path), "011_add_archive_retry_count")
     _seed_legacy_character(db_path)
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             """
             INSERT INTO characters (
@@ -736,7 +737,7 @@ def test_legacy_selection_write_path_keeps_character_version_link_synchronized(
         display_name="Admin",
         role="admin",
     )
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         choose_project_main_character(
             conn,
             actor=employee,
@@ -915,7 +916,7 @@ def _seed_legacy_character(db_path: Path) -> dict[str, object]:
         "character_snapshot": snapshot,
         "selected_by_user_id": "employee_1",
     }
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.executemany(
             """
             INSERT INTO users (id, username, display_name, role)

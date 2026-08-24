@@ -30,6 +30,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.analysis import get_version, insert_version
 from app.auth import CurrentUser
+from app.db_portable import BusinessConnection
 from app.internal_billing import (
     BillingInvariantError,
     InsufficientCreditsError,
@@ -456,7 +457,7 @@ class MetasoH3Provider(H3Provider):
         }
 
 
-def metaso_h3_provider_from_settings(conn: sqlite3.Connection) -> MetasoH3Provider:
+def metaso_h3_provider_from_settings(conn: BusinessConnection) -> MetasoH3Provider:
     try:
         config = SettingsRepository(conn).load_provider_config("metaso")
     except SettingsUnavailableError as exc:
@@ -472,7 +473,7 @@ def metaso_h3_provider_from_settings(conn: sqlite3.Connection) -> MetasoH3Provid
     )
 
 
-def h3_provider_for_task(conn: sqlite3.Connection, provider_name: str) -> H3Provider:
+def h3_provider_for_task(conn: BusinessConnection, provider_name: str) -> H3Provider:
     if provider_name == "fake_h3":
         outcome = os.environ.get(FAKE_H3_OUTCOME_ENV, "ok").strip()
         if outcome not in {"ok", "provider_failed", "submission_uncertain"}:
@@ -682,7 +683,7 @@ BatchStatusFilter = Literal[
 
 
 def latest_version(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
     kind: str,
@@ -694,7 +695,7 @@ def latest_version(
             SELECT id, project_id, asset_id, kind, version_number, payload_json,
                    created_by_user_id, created_at
             FROM versions
-            WHERE project_id = ? AND kind = ?
+            WHERE project_id = %s AND kind = %s
             ORDER BY version_number DESC
             LIMIT 1
             """,
@@ -704,7 +705,7 @@ def latest_version(
 
 
 def require_latest_version(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     row: sqlite3.Row,
     project_id: str,
@@ -718,7 +719,7 @@ def require_latest_version(
 
 
 def version_state(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
     actor: CurrentUser,
@@ -741,7 +742,7 @@ def version_state(
     )
 
 
-def version_stale_reasons(conn: sqlite3.Connection, *, row: sqlite3.Row) -> list[str]:
+def version_stale_reasons(conn: BusinessConnection, *, row: sqlite3.Row) -> list[str]:
     project_id = str(row["project_id"])
     kind = str(row["kind"])
     payload = json.loads(str(row["payload_json"]))
@@ -821,7 +822,7 @@ def version_stale_reasons(conn: sqlite3.Connection, *, row: sqlite3.Row) -> list
 
 
 def shot_card_stale_reasons(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     row: sqlite3.Row,
 ) -> list[str]:
@@ -840,7 +841,7 @@ def shot_card_stale_reasons(
 
 
 def confirmed_first_frame_sources(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
     first_frame_asset_id: str,
@@ -882,7 +883,7 @@ def confirmed_first_frame_sources(
 
 
 def create_script_version(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
     actor: CurrentUser,
@@ -962,7 +963,7 @@ def create_script_version(
 
 
 def compile_prompt_version(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
     actor: CurrentUser,
@@ -1112,7 +1113,7 @@ def unwrap_analysis_payload(payload: Any) -> dict[str, Any]:
 
 
 def preview_prompt_text(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
     actor: CurrentUser,
@@ -1195,7 +1196,7 @@ def preview_prompt_text(
 
 
 def revise_prompt_version(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
     actor: CurrentUser,
@@ -1274,7 +1275,7 @@ def revise_prompt_version(
 
 
 def lock_prompt_version(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
     prompt_version_id: str,
@@ -1318,7 +1319,7 @@ def lock_prompt_version(
             raise generation_error(409, "PROMPT_STATUS_INVALID", "Prompt cannot be locked.")
         payload["status"] = "LOCKED"
         conn.execute(
-            "UPDATE versions SET payload_json = ? WHERE id = ?",
+            "UPDATE versions SET payload_json = %s WHERE id = %s",
             (json.dumps(payload, ensure_ascii=True, sort_keys=True), prompt_version_id),
         )
         conn.commit()
@@ -1337,7 +1338,7 @@ def lock_prompt_version(
 
 
 def _find_idempotent_batch(
-    conn: sqlite3.Connection, *, actor_id: str, project_id: str, key: str
+    conn: BusinessConnection, *, actor_id: str, project_id: str, key: str
 ) -> sqlite3.Row | None:
     return cast(
         sqlite3.Row | None,
@@ -1345,7 +1346,7 @@ def _find_idempotent_batch(
             """
             SELECT id, request_hash
             FROM generation_batches
-            WHERE created_by_user_id = ? AND project_id = ? AND idempotency_key = ?
+            WHERE created_by_user_id = %s AND project_id = %s AND idempotency_key = %s
             """,
             (actor_id, project_id, key),
         ).fetchone(),
@@ -1353,7 +1354,7 @@ def _find_idempotent_batch(
 
 
 def _reserve_generation_credit(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     user_id: str,
     task_id: str,
@@ -1387,7 +1388,7 @@ def _reserve_generation_credit(
 
 
 def create_generation_batch(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
     actor: CurrentUser,
@@ -1528,8 +1529,8 @@ def create_generation_batch(
         cursor = conn.execute(
             """
             UPDATE versions
-            SET payload_json = ?
-            WHERE id = ? AND payload_json = ?
+            SET payload_json = %s
+            WHERE id = %s AND payload_json = %s
             """,
             (
                 json.dumps(used_prompt_snapshot, ensure_ascii=True, sort_keys=True),
@@ -1554,7 +1555,7 @@ def create_generation_batch(
                 request_snapshot_json,
                 status
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 batch_id,
@@ -1583,7 +1584,7 @@ def create_generation_batch(
                     prompt_snapshot_json,
                     next_poll_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
                 """,
                 (
                     task_id,
@@ -1636,14 +1637,14 @@ def create_generation_batch(
 
 
 def regenerate_generation_batch(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     batch_id: str,
     actor: CurrentUser,
     request: PaidRegenerationRequest,
 ) -> BatchResult:
     source_context = conn.execute(
-        "SELECT project_id FROM generation_batches WHERE id = ?",
+        "SELECT project_id FROM generation_batches WHERE id = %s",
         (batch_id,),
     ).fetchone()
     if source_context is None:
@@ -1670,7 +1671,7 @@ def regenerate_generation_batch(
             """
             SELECT id, project_id, request_snapshot_json
             FROM generation_batches
-            WHERE id = ?
+            WHERE id = %s
             """,
             (batch_id,),
         ).fetchone()
@@ -1681,7 +1682,7 @@ def regenerate_generation_batch(
             SELECT id, generation_mode, provider, model, prompt_version_id,
                    prompt_snapshot_json
             FROM generation_tasks
-            WHERE batch_id = ?
+            WHERE batch_id = %s
             ORDER BY created_at, id
             """,
             (batch_id,),
@@ -1736,7 +1737,7 @@ def regenerate_generation_batch(
                 request_hash, request_snapshot_json, status,
                 source_batch_id, source_task_id, generation_reason
             )
-            VALUES (?, ?, ?, ?, ?, ?, 'QUEUED', ?, NULL, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, 'QUEUED', %s, NULL, %s)
             """,
             (
                 new_batch_id,
@@ -1764,8 +1765,8 @@ def regenerate_generation_batch(
                     estimated_cost, retry_of_task_id, retry_reason,
                     retry_requested_by_user_id, retry_requested_at
                 )
-                VALUES (?, ?, ?, ?, ?, 'PENDING', 'PENDING', 'PENDING',
-                        ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                VALUES (%s, %s, %s, %s, %s, 'PENDING', 'PENDING', 'PENDING',
+                        %s, %s, CURRENT_TIMESTAMP, %s, %s, %s, %s, CURRENT_TIMESTAMP)
                 """,
                 (
                     replacement_task_id,
@@ -1810,7 +1811,7 @@ def regenerate_generation_batch(
 
 
 def regenerate_generation_task(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     task_id: str,
     actor: CurrentUser,
@@ -1821,7 +1822,7 @@ def regenerate_generation_task(
         SELECT generation_batches.project_id
         FROM generation_tasks
         JOIN generation_batches ON generation_batches.id = generation_tasks.batch_id
-        WHERE generation_tasks.id = ?
+        WHERE generation_tasks.id = %s
         """,
         (task_id,),
     ).fetchone()
@@ -1867,7 +1868,7 @@ def regenerate_generation_task(
                 batch.request_snapshot_json
             FROM generation_tasks AS task
             JOIN generation_batches AS batch ON batch.id = task.batch_id
-            WHERE task.id = ?
+            WHERE task.id = %s
             """,
             (task_id,),
         ).fetchone()
@@ -1914,7 +1915,7 @@ def regenerate_generation_task(
                 request_hash, request_snapshot_json, status,
                 source_batch_id, source_task_id, generation_reason
             )
-            VALUES (?, ?, ?, ?, ?, ?, 'QUEUED', ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, 'QUEUED', %s, %s, %s)
             """,
             (
                 new_batch_id,
@@ -1937,8 +1938,8 @@ def regenerate_generation_task(
                 estimated_cost, retry_of_task_id, retry_reason,
                 retry_requested_by_user_id, retry_requested_at
             )
-            VALUES (?, ?, ?, ?, ?, 'PENDING', 'PENDING', 'PENDING',
-                    ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            VALUES (%s, %s, %s, %s, %s, 'PENDING', 'PENDING', 'PENDING',
+                    %s, %s, CURRENT_TIMESTAMP, %s, %s, %s, %s, CURRENT_TIMESTAMP)
             """,
             (
                 replacement_task_id,
@@ -1962,9 +1963,9 @@ def regenerate_generation_task(
         cursor = conn.execute(
             """
             UPDATE generation_tasks
-            SET superseded_by_task_id = ?, superseded_at = CURRENT_TIMESTAMP,
+            SET superseded_by_task_id = %s, superseded_at = CURRENT_TIMESTAMP,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE id = ? AND superseded_by_task_id IS NULL
+            WHERE id = %s AND superseded_by_task_id IS NULL
             """,
             (replacement_task_id, task_id),
         )
@@ -2056,7 +2057,7 @@ def require_matching_idempotent_batch(row: sqlite3.Row, *, request_hash: str) ->
 
 
 def require_regeneration_provider_ready(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     provider_name: str,
 ) -> None:
@@ -2113,7 +2114,7 @@ def paid_cost_per_task(total: float | None, *, quantity: int) -> float | None:
 
 
 def require_confirmed_first_frame(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
     first_frame_asset_id: str,
@@ -2122,7 +2123,7 @@ def require_confirmed_first_frame(
         """
         SELECT id, payload_json
         FROM versions
-        WHERE project_id = ? AND kind = 'first_frame_selection'
+        WHERE project_id = %s AND kind = 'first_frame_selection'
         ORDER BY version_number DESC
         LIMIT 1
         """,
@@ -2132,7 +2133,7 @@ def require_confirmed_first_frame(
         """
         SELECT id, payload_json
         FROM versions
-        WHERE project_id = ? AND kind = 'first_frame_candidates'
+        WHERE project_id = %s AND kind = 'first_frame_candidates'
         ORDER BY version_number DESC
         LIMIT 1
         """,
@@ -2194,7 +2195,7 @@ def require_confirmed_first_frame(
 
 
 def require_cos_first_frame_storage(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     storage_uri: str | None = None,
 ) -> None:
@@ -2217,7 +2218,7 @@ def require_cos_first_frame_storage(
 
 
 def run_next_generation_task(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     worker_id: str,
     provider: H3Provider | None,
@@ -2371,7 +2372,7 @@ def run_next_generation_task(
                         content_type,
                         created_by_user_id
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         result_asset_id,
@@ -2388,22 +2389,22 @@ def run_next_generation_task(
                 """
                 UPDATE generation_tasks
                 SET
-                    provider_task_id = ?,
+                    provider_task_id = %s,
                     status = 'SUCCEEDED',
-                    archive_status = ?,
-                    quality_status = ?,
-                    quality_issue_codes = ?,
-                    result_asset_id = ?,
-                    provider_request_json = ?,
-                    provider_result_url = ?,
-                    error_code = ?,
-                    error_message_redacted = ?,
+                    archive_status = %s,
+                    quality_status = %s,
+                    quality_issue_codes = %s,
+                    result_asset_id = %s,
+                    provider_request_json = %s,
+                    provider_result_url = %s,
+                    error_code = %s,
+                    error_message_redacted = %s,
                     submitted_at = COALESCE(submitted_at, CURRENT_TIMESTAMP),
                     completed_at = CURRENT_TIMESTAMP,
                     locked_by = NULL,
                     locked_until = NULL,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
+                WHERE id = %s
                 """,
                 (
                     provider_result.provider_task_id,
@@ -2430,7 +2431,7 @@ def run_next_generation_task(
                     http_status,
                     request_hash
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     str(uuid4()),
@@ -2472,7 +2473,7 @@ def _verify_archived_result(storage: StorageAdapter, stored: StoredObject) -> No
 
 
 def _store_and_finalize_archive(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     task_id: str,
     batch_id: str,
@@ -2515,7 +2516,7 @@ def _store_and_finalize_archive(
                     content_type,
                     created_by_user_id
                 )
-                VALUES (?, ?, 'video', ?, ?, ?, ?, ?)
+                VALUES (%s, %s, 'video', %s, %s, %s, %s, %s)
                 """,
                 (
                     result_asset_id,
@@ -2533,14 +2534,14 @@ def _store_and_finalize_archive(
                 SET
                     status = 'SUCCEEDED',
                     archive_status = 'ARCHIVED',
-                    result_asset_id = ?,
+                    result_asset_id = %s,
                     error_code = NULL,
                     error_message_redacted = NULL,
                     locked_by = NULL,
                     locked_until = NULL,
                     completed_at = CURRENT_TIMESTAMP,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
+                WHERE id = %s
                 {task_state_guard}
                 """,
                 (result_asset_id, task_id),
@@ -2573,7 +2574,7 @@ def _store_and_finalize_archive(
 
 
 def _retry_archive(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     task_id: str,
     batch_id: str,
@@ -2590,7 +2591,7 @@ def _retry_archive(
             generation_batches.created_by_user_id
         FROM generation_tasks
         JOIN generation_batches ON generation_batches.id = generation_tasks.batch_id
-        WHERE generation_tasks.id = ?
+        WHERE generation_tasks.id = %s
         """,
         (task_id,),
     ).fetchone()
@@ -2636,7 +2637,7 @@ def generation_task_operation_hash(
 
 
 def _idempotent_task_operation(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor_id: str,
     task_id: str,
@@ -2648,7 +2649,7 @@ def _idempotent_task_operation(
         """
         SELECT request_hash, result_status
         FROM generation_task_operations
-        WHERE actor_user_id = ? AND task_id = ? AND action = ? AND idempotency_key = ?
+        WHERE actor_user_id = %s AND task_id = %s AND action = %s AND idempotency_key = %s
         """,
         (actor_id, task_id, action, idempotency_key),
     ).fetchone()
@@ -2662,7 +2663,7 @@ def _idempotent_task_operation(
 
 
 def _record_completed_task_operation(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     task_id: str,
@@ -2677,7 +2678,7 @@ def _record_completed_task_operation(
             id, task_id, actor_user_id, action, idempotency_key,
             request_hash, result_task_id, result_status, response_snapshot_json
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'COMPLETED', ?)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, 'COMPLETED', %s)
         """,
         (
             str(uuid4()),
@@ -2693,7 +2694,7 @@ def _record_completed_task_operation(
 
 
 def _release_stale_reconcile_reservation(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     task_id: str,
     batch_id: str,
@@ -2704,8 +2705,8 @@ def _release_stale_reconcile_reservation(
         """
         SELECT id, idempotency_key
         FROM generation_task_operations
-        WHERE task_id = ? AND action = 'RECONCILE' AND result_status = 'PENDING'
-          AND datetime(updated_at) <= datetime('now', ?)
+        WHERE task_id = %s AND action = 'RECONCILE' AND result_status = 'PENDING'
+          AND datetime(updated_at) <= datetime('now', %s)
         """,
         (task_id, f"-{RECONCILIATION_RESERVATION_SECONDS} seconds"),
     ).fetchone()
@@ -2714,7 +2715,7 @@ def _release_stale_reconcile_reservation(
     conn.execute(
         """
         DELETE FROM generation_task_operations
-        WHERE id = ? AND result_status = 'PENDING'
+        WHERE id = %s AND result_status = 'PENDING'
         """,
         (str(row["id"]),),
     )
@@ -2734,7 +2735,7 @@ def _release_stale_reconcile_reservation(
 
 
 def _renew_reconcile_reservation(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     reservation: ReconcileReservation | None,
 ) -> None:
@@ -2745,7 +2746,7 @@ def _renew_reconcile_reservation(
 
 
 def _renew_reconcile_reservation_in_transaction(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     reservation_id: str,
 ) -> None:
@@ -2753,7 +2754,7 @@ def _renew_reconcile_reservation_in_transaction(
         """
         UPDATE generation_task_operations
         SET updated_at = CURRENT_TIMESTAMP
-        WHERE id = ? AND action = 'RECONCILE' AND result_status = 'PENDING'
+        WHERE id = %s AND action = 'RECONCILE' AND result_status = 'PENDING'
         """,
         (reservation_id,),
     )
@@ -2770,7 +2771,7 @@ def _reconcile_reservation_lost() -> HTTPException:
 
 
 def _complete_reconcile_operation_in_transaction(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     reservation: ReconcileReservation,
     task_id: str,
@@ -2783,10 +2784,10 @@ def _complete_reconcile_operation_in_transaction(
         UPDATE generation_task_operations
         SET
             result_status = 'COMPLETED',
-            response_snapshot_json = ?,
+            response_snapshot_json = %s,
             updated_at = CURRENT_TIMESTAMP
-        WHERE id = ? AND actor_user_id = ? AND task_id = ?
-          AND action = 'RECONCILE' AND idempotency_key = ? AND result_status = 'PENDING'
+        WHERE id = %s AND actor_user_id = %s AND task_id = %s
+          AND action = 'RECONCILE' AND idempotency_key = %s AND result_status = 'PENDING'
         """,
         (
             json.dumps(
@@ -2826,7 +2827,7 @@ def _complete_reconcile_operation_in_transaction(
 
 
 def retry_generation_task(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     task_id: str,
     actor: CurrentUser,
@@ -2870,7 +2871,7 @@ def retry_generation_task(
                 task.superseded_by_task_id
             FROM generation_tasks AS task
             JOIN generation_batches AS batch ON batch.id = task.batch_id
-            WHERE task.id = ?
+            WHERE task.id = %s
             """,
             (task_id,),
         ).fetchone()
@@ -2911,11 +2912,11 @@ def retry_generation_task(
                     locked_by = NULL,
                     locked_until = NULL,
                     next_poll_at = CURRENT_TIMESTAMP,
-                    retry_reason = ?,
-                    retry_requested_by_user_id = ?,
+                    retry_reason = %s,
+                    retry_requested_by_user_id = %s,
                     retry_requested_at = CURRENT_TIMESTAMP,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
+                WHERE id = %s
                 """,
                 (request.retry_reason, actor.id, task_id),
             )
@@ -2974,11 +2975,11 @@ def retry_generation_task(
                     submitted_at = NULL,
                     started_at = NULL,
                     completed_at = NULL,
-                    retry_reason = ?,
-                    retry_requested_by_user_id = ?,
+                    retry_reason = %s,
+                    retry_requested_by_user_id = %s,
                     retry_requested_at = CURRENT_TIMESTAMP,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
+                WHERE id = %s
                 """,
                 (request.retry_reason, actor.id, task_id),
             )
@@ -3023,7 +3024,7 @@ def retry_generation_task(
 
 
 def confirm_generation_task_not_charged(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     task_id: str,
     actor: CurrentUser,
@@ -3061,7 +3062,7 @@ def confirm_generation_task_not_charged(
                 task.superseded_by_task_id
             FROM generation_tasks AS task
             JOIN generation_batches AS batch ON batch.id = task.batch_id
-            WHERE task.id = ?
+            WHERE task.id = %s
             """,
             (task_id,),
         ).fetchone()
@@ -3102,15 +3103,15 @@ def confirm_generation_task_not_charged(
                 submitted_at = NULL,
                 started_at = NULL,
                 completed_at = NULL,
-                retry_reason = ?,
-                retry_requested_by_user_id = ?,
+                retry_reason = %s,
+                retry_requested_by_user_id = %s,
                 retry_requested_at = CURRENT_TIMESTAMP,
                 billing_confirmation_status = 'CONFIRMED_NOT_CHARGED',
-                billing_confirmed_by_user_id = ?,
+                billing_confirmed_by_user_id = %s,
                 billing_confirmed_at = CURRENT_TIMESTAMP,
-                billing_confirmation_reason = ?,
+                billing_confirmation_reason = %s,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
+            WHERE id = %s
             """,
             (request.reason, actor.id, actor.id, request.reason, task_id),
         )
@@ -3145,7 +3146,7 @@ def confirm_generation_task_not_charged(
 
 
 def reconcile_generation_task(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     task_id: str,
     batch_id: str,
@@ -3174,7 +3175,7 @@ def reconcile_generation_task(
                 provider_task_id,
                 superseded_by_task_id
             FROM generation_tasks
-            WHERE id = ?
+            WHERE id = %s
             """,
             (task_id,),
         ).fetchone()
@@ -3217,10 +3218,10 @@ def reconcile_generation_task(
                     UPDATE generation_task_operations
                     SET
                         result_status = 'COMPLETED',
-                        response_snapshot_json = ?,
+                        response_snapshot_json = %s,
                         updated_at = CURRENT_TIMESTAMP
-                    WHERE actor_user_id = ? AND task_id = ? AND action = ?
-                      AND idempotency_key = ?
+                    WHERE actor_user_id = %s AND task_id = %s AND action = %s
+                      AND idempotency_key = %s
                     """,
                     (
                         json.dumps(
@@ -3277,7 +3278,7 @@ def reconcile_generation_task(
                 id, task_id, actor_user_id, action, idempotency_key,
                 request_hash, result_task_id, result_status
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING')
+            VALUES (%s, %s, %s, %s, %s, %s, %s, 'PENDING')
             """,
             (
                 operation_id,
@@ -3340,7 +3341,7 @@ def reconcile_generation_task(
             conn.execute(
                 """
                 DELETE FROM generation_task_operations
-                WHERE id = ? AND result_status = 'PENDING'
+                WHERE id = %s AND result_status = 'PENDING'
                 """,
                 (operation_id,),
             )
@@ -3349,7 +3350,7 @@ def reconcile_generation_task(
 
 
 def reconcile_submission_uncertain_task(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     task_id: str,
     batch_id: str,
@@ -3367,7 +3368,7 @@ def reconcile_submission_uncertain_task(
     must first confirm the charge did not occur before any resubmission.
     """
     row = conn.execute(
-        "SELECT status, provider_task_id FROM generation_tasks WHERE id = ?",
+        "SELECT status, provider_task_id FROM generation_tasks WHERE id = %s",
         (task_id,),
     ).fetchone()
     if row is None:
@@ -3426,11 +3427,11 @@ def reconcile_submission_uncertain_task(
                 SET
                     status = 'FAILED',
                     error_code = 'PROVIDER_TERMINAL',
-                    error_message_redacted = 'Provider reports the task finished with ' || ?,
+                    error_message_redacted = 'Provider reports the task finished with ' || %s,
                     locked_by = NULL,
                     locked_until = NULL,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
+                WHERE id = %s
                 {"AND status = 'SUBMISSION_UNCERTAIN'" if reconcile_reservation is not None else ""}
                 """,
                 (str(status), task_id),
@@ -3459,13 +3460,13 @@ def reconcile_submission_uncertain_task(
     )
 
 
-def _release_archive_retry(conn: sqlite3.Connection, *, task_id: str, batch_id: str) -> None:
+def _release_archive_retry(conn: BusinessConnection, *, task_id: str, batch_id: str) -> None:
     """Release the lease and back off ~60s so a stuck provider/storage does not
     cause a hot retry loop. Once retries are exhausted, the task is failed so a
     permanently expired provider URL does not spin forever."""
     with conn:
         row = conn.execute(
-            "SELECT archive_retry_count FROM generation_tasks WHERE id = ?", (task_id,)
+            "SELECT archive_retry_count FROM generation_tasks WHERE id = %s", (task_id,)
         ).fetchone()
         next_count = int(row["archive_retry_count"]) + 1 if row is not None else 1
         if next_count >= MAX_ARCHIVE_RETRIES:
@@ -3476,7 +3477,7 @@ def _release_archive_retry(conn: sqlite3.Connection, *, task_id: str, batch_id: 
                     status = 'FAILED',
                     archive_status = 'ARCHIVE_FAILED',
                     provider_result_url = NULL,
-                    archive_retry_count = ?,
+                    archive_retry_count = %s,
                     error_code = 'ARCHIVE_RETRY_EXHAUSTED',
                     error_message_redacted =
                         'Archive retries exhausted; the provider URL may have expired.',
@@ -3484,7 +3485,7 @@ def _release_archive_retry(conn: sqlite3.Connection, *, task_id: str, batch_id: 
                     locked_until = NULL,
                     next_poll_at = NULL,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
+                WHERE id = %s
                 """,
                 (next_count, task_id),
             )
@@ -3497,19 +3498,19 @@ def _release_archive_retry(conn: sqlite3.Connection, *, task_id: str, batch_id: 
             SET
                 status = 'SUCCEEDED',
                 archive_status = 'ARCHIVE_FAILED',
-                archive_retry_count = ?,
+                archive_retry_count = %s,
                 locked_by = NULL,
                 locked_until = NULL,
                 next_poll_at = datetime('now', '+60 seconds'),
                 updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
+            WHERE id = %s
             """,
             (next_count, task_id),
         )
 
 
 def acquire_generation_task_lease(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     worker_id: str,
 ) -> dict[str, Any] | None:
@@ -3535,8 +3536,8 @@ def acquire_generation_task_lease(
             SET
                 attempt = attempt + CASE WHEN status IN ('PENDING', 'QUEUED') THEN 1 ELSE 0 END,
                 status = 'SUBMITTING',
-                locked_by = ?,
-                locked_until = ?,
+                locked_by = %s,
+                locked_until = %s,
                 submitted_at = CASE
                     WHEN status IN ('PENDING', 'QUEUED')
                     THEN COALESCE(submitted_at, CURRENT_TIMESTAMP)
@@ -3577,7 +3578,7 @@ def acquire_generation_task_lease(
     return load_worker_task(conn, str(row["id"]))
 
 
-def load_worker_task(conn: sqlite3.Connection, task_id: str) -> dict[str, Any]:
+def load_worker_task(conn: BusinessConnection, task_id: str) -> dict[str, Any]:
     row = conn.execute(
         """
         SELECT
@@ -3592,7 +3593,7 @@ def load_worker_task(conn: sqlite3.Connection, task_id: str) -> dict[str, Any]:
             generation_tasks.prompt_snapshot_json
         FROM generation_tasks
         JOIN generation_batches ON generation_batches.id = generation_tasks.batch_id
-        WHERE generation_tasks.id = ?
+        WHERE generation_tasks.id = %s
         """,
         (task_id,),
     ).fetchone()
@@ -3610,7 +3611,7 @@ def load_worker_task(conn: sqlite3.Connection, task_id: str) -> dict[str, Any]:
 
 
 def mark_task_submission_uncertain(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     task_id: str,
     message: str,
@@ -3618,21 +3619,21 @@ def mark_task_submission_uncertain(
 ) -> None:
     with conn:
         row = conn.execute(
-            "SELECT batch_id FROM generation_tasks WHERE id = ?",
+            "SELECT batch_id FROM generation_tasks WHERE id = %s",
             (task_id,),
         ).fetchone()
         conn.execute(
             """
             UPDATE generation_tasks
             SET
-                provider_task_id = COALESCE(?, provider_task_id),
+                provider_task_id = COALESCE(%s, provider_task_id),
                 status = 'SUBMISSION_UNCERTAIN',
                 error_code = 'SUBMISSION_UNCERTAIN',
-                error_message_redacted = ?,
+                error_message_redacted = %s,
                 locked_by = NULL,
                 locked_until = NULL,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
+            WHERE id = %s
             """,
             (provider_task_id, message, task_id),
         )
@@ -3641,7 +3642,7 @@ def mark_task_submission_uncertain(
 
 
 def mark_task_provider_settings_unavailable(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     task_id: str,
     batch_id: str,
@@ -3658,7 +3659,7 @@ def mark_task_provider_settings_unavailable(
                 locked_by = NULL,
                 locked_until = NULL,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
+            WHERE id = %s
             """,
             (task_id,),
         )
@@ -3667,7 +3668,7 @@ def mark_task_provider_settings_unavailable(
 
 
 def mark_task_provider_failed(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     task_id: str,
     batch_id: str,
@@ -3678,7 +3679,7 @@ def mark_task_provider_failed(
             """
             UPDATE generation_tasks
             SET
-                provider_task_id = ?,
+                provider_task_id = %s,
                 status = 'FAILED',
                 error_code = 'H3_PROVIDER_FAILED',
                 error_message_redacted = 'METASO H3 task failed or returned an invalid result.',
@@ -3686,7 +3687,7 @@ def mark_task_provider_failed(
                 locked_until = NULL,
                 completed_at = CURRENT_TIMESTAMP,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
+            WHERE id = %s
             """,
             (provider_task_id, task_id),
         )
@@ -3695,7 +3696,7 @@ def mark_task_provider_failed(
 
 
 def mark_task_first_frame_url_sign_failed(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     task_id: str,
     batch_id: str,
@@ -3713,7 +3714,7 @@ def mark_task_first_frame_url_sign_failed(
                 locked_by = NULL,
                 locked_until = NULL,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
+            WHERE id = %s
             """,
             (task_id,),
         )
@@ -3721,7 +3722,7 @@ def mark_task_first_frame_url_sign_failed(
         _refresh_batch_status_in_transaction(conn, batch_id=batch_id)
 
 
-def mark_expired_active_leases_needing_attention(conn: sqlite3.Connection) -> None:
+def mark_expired_active_leases_needing_attention(conn: BusinessConnection) -> None:
     """Do not resubmit work when a worker died after a provider call may have started."""
     with conn:
         rows = conn.execute(
@@ -3776,13 +3777,13 @@ def mark_expired_active_leases_needing_attention(conn: sqlite3.Connection) -> No
         refresh_batch_status(conn, batch_id=str(row["batch_id"]))
 
 
-def refresh_batch_status(conn: sqlite3.Connection, *, batch_id: str) -> None:
+def refresh_batch_status(conn: BusinessConnection, *, batch_id: str) -> None:
     with conn:
         _refresh_batch_status_in_transaction(conn, batch_id=batch_id)
 
 
 def _refresh_batch_status_in_transaction(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     batch_id: str,
 ) -> None:
@@ -3815,7 +3816,7 @@ def _refresh_batch_status_in_transaction(
             retry_requested_at,
             prompt_snapshot_json
         FROM generation_tasks
-        WHERE batch_id = ?
+        WHERE batch_id = %s
         """,
         (batch_id,),
     ).fetchall()
@@ -3823,14 +3824,14 @@ def _refresh_batch_status_in_transaction(
     conn.execute(
         """
         UPDATE generation_batches
-        SET status = ?, updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?
+        SET status = %s, updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s
         """,
         (batch_status("QUEUED", progress), batch_id),
     )
 
 
-def get_task_result(conn: sqlite3.Connection, task_id: str) -> TaskResult:
+def get_task_result(conn: BusinessConnection, task_id: str) -> TaskResult:
     row = conn.execute(
         """
         SELECT
@@ -3860,7 +3861,7 @@ def get_task_result(conn: sqlite3.Connection, task_id: str) -> TaskResult:
             retry_requested_at,
             prompt_snapshot_json
         FROM generation_tasks
-        WHERE id = ?
+        WHERE id = %s
         """,
         (task_id,),
     ).fetchone()
@@ -3870,7 +3871,7 @@ def get_task_result(conn: sqlite3.Connection, task_id: str) -> TaskResult:
 
 
 def list_generation_batches(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     project_id: str | None = None,
@@ -3904,16 +3905,16 @@ def list_generation_batches(
     clauses = ["1 = 1"]
     parameters: list[object] = []
     if project_id is not None:
-        clauses.append("batch.project_id = ?")
+        clauses.append("batch.project_id = %s")
         parameters.append(project_id)
     elif actor.role == "employee":
-        clauses.append("project.owner_user_id = ?")
+        clauses.append("project.owner_user_id = %s")
         parameters.append(actor.id)
     if created_by_user_id is not None:
-        clauses.append("batch.created_by_user_id = ?")
+        clauses.append("batch.created_by_user_id = %s")
         parameters.append(created_by_user_id)
     if status is not None:
-        clauses.append("batch.status = ?")
+        clauses.append("batch.status = %s")
         parameters.append(status)
     if needs_attention is not None:
         exists_prefix = "" if needs_attention else "NOT "
@@ -3938,7 +3939,7 @@ def list_generation_batches(
         )
     if cursor_position is not None:
         cursor_created_at, cursor_batch_id = cursor_position
-        clauses.append("(batch.created_at < ? OR (batch.created_at = ? AND batch.id < ?))")
+        clauses.append("(batch.created_at < %s OR (batch.created_at = %s AND batch.id < %s))")
         parameters.extend([cursor_created_at, cursor_created_at, cursor_batch_id])
     parameters.append(limit + 1)
 
@@ -3963,7 +3964,7 @@ def list_generation_batches(
         JOIN users AS creator ON creator.id = batch.created_by_user_id
         WHERE {" AND ".join(clauses)}
         ORDER BY batch.created_at DESC, batch.id DESC
-        LIMIT ?
+        LIMIT %s
         """,
         tuple(parameters),
     ).fetchall()
@@ -3972,7 +3973,7 @@ def list_generation_batches(
         return GenerationBatchListPage(items=[], next_cursor=None)
 
     batch_ids = [str(row["id"]) for row in page_rows]
-    placeholders = ", ".join("?" for _ in batch_ids)
+    placeholders = ", ".join("%s" for _ in batch_ids)
     task_rows = conn.execute(
         f"""
         SELECT
@@ -4119,7 +4120,7 @@ def decode_batch_list_cursor(value: str, *, filters_hash: str) -> tuple[str, str
 
 
 def get_generation_batch(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     batch_id: str,
     actor: CurrentUser,
@@ -4129,7 +4130,7 @@ def get_generation_batch(
         SELECT id, project_id, request_snapshot_json, status, display_name,
                source_batch_id, source_task_id, generation_reason
         FROM generation_batches
-        WHERE id = ?
+        WHERE id = %s
         """,
         (batch_id,),
     ).fetchone()
@@ -4170,7 +4171,7 @@ def get_generation_batch(
             retry_requested_at,
             prompt_snapshot_json
         FROM generation_tasks
-        WHERE batch_id = ?
+        WHERE batch_id = %s
         ORDER BY created_at, id
         """,
         (batch_id,),
@@ -4215,7 +4216,7 @@ def get_generation_batch(
 
 
 def rename_generation_batch(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     batch_id: str,
@@ -4230,7 +4231,7 @@ def rename_generation_batch(
         """
         SELECT id, project_id, created_by_user_id, display_name
         FROM generation_batches
-        WHERE id = ?
+        WHERE id = %s
         """,
         (batch_id,),
     ).fetchone()
@@ -4253,8 +4254,8 @@ def rename_generation_batch(
         conn.execute(
             """
             UPDATE generation_batches
-            SET display_name = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
+            SET display_name = %s, updated_at = CURRENT_TIMESTAMP
+            WHERE id = %s
             """,
             (clean_name, batch_id),
         )
@@ -4432,7 +4433,7 @@ def h3_audio_quality(
 
 
 def require_version(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     version_id: str,
     project_id: str,
@@ -4454,7 +4455,7 @@ def estimate_spoken_duration(text: str) -> float:
 
 
 def map_script_to_shots(text: str, shots: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    sentences = [part for part in re.split(r"(?<=[。！？!?])", text) if part]
+    sentences = [part for part in re.split(r"(?<=[。！？!？])", text) if part]
     if not sentences and text:
         sentences = [text]
     mappings: list[dict[str, Any]] = []
@@ -4627,7 +4628,7 @@ def idempotency_request_hash(request: GenerationBatchRequest) -> str:
     return content_hash(json.dumps(payload, ensure_ascii=True, sort_keys=True))
 
 
-def read_runtime_limits(conn: sqlite3.Connection) -> dict[str, int]:
+def read_runtime_limits(conn: BusinessConnection) -> dict[str, int]:
     row = conn.execute(
         """
         SELECT max_generation_count_per_batch, max_concurrent_h3_tasks
@@ -4643,7 +4644,7 @@ def read_runtime_limits(conn: sqlite3.Connection) -> dict[str, int]:
     }
 
 
-def generation_runtime_limits(conn: sqlite3.Connection) -> GenerationRuntimeLimits:
+def generation_runtime_limits(conn: BusinessConnection) -> GenerationRuntimeLimits:
     runtime = read_runtime_limits(conn)
     return GenerationRuntimeLimits(
         max_quantity=runtime["max_generation_count_per_batch"],

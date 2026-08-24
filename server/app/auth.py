@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import sqlite3
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,9 +10,10 @@ from typing import Annotated, Literal, cast
 from fastapi import Depends, Header, HTTPException
 
 from app.db import connect_database
+from app.db_portable import BusinessConnection
 
-Role = Literal["employee", "admin", "auditor"]
-VALID_ROLES: set[str] = {"employee", "admin", "auditor"}
+Role = Literal["employee", "admin", "auditor", "customer"]
+VALID_ROLES: set[str] = {"employee", "admin", "auditor", "customer"}
 DESKTOP_USER_ID_ENV = "VIDEO_REPLICA_DESKTOP_USER_ID"
 ALLOW_DEV_IDENTITY_HEADER_ENV = "VIDEO_REPLICA_ALLOW_DEV_IDENTITY_HEADER"
 AUTH_MODE_ENV = "VIDEO_REPLICA_AUTH_MODE"
@@ -28,7 +28,7 @@ class CurrentUser:
     role: Role
 
 
-def get_database() -> Iterator[sqlite3.Connection]:
+def get_database() -> Iterator[BusinessConnection]:
     db_path = os.environ.get("VIDEO_REPLICA_DB_PATH")
     if not db_path:
         raise HTTPException(
@@ -39,14 +39,14 @@ def get_database() -> Iterator[sqlite3.Connection]:
             },
         )
 
-    conn = connect_database(Path(db_path))
+    conn = BusinessConnection.sqlite(connect_database(Path(db_path)))
     try:
         yield conn
     finally:
         conn.close()
 
 
-Database = Annotated[sqlite3.Connection, Depends(get_database)]
+Database = Annotated[BusinessConnection, Depends(get_database)]
 
 
 def get_current_user(
@@ -62,7 +62,7 @@ def get_current_user(
 
 
 def authenticate_request(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     authorization: str | None,
     dev_user_id: str | None,
@@ -96,12 +96,12 @@ def digest_access_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
-def authenticate_access_token(conn: sqlite3.Connection, token: str) -> CurrentUser:
+def authenticate_access_token(conn: BusinessConnection, token: str) -> CurrentUser:
     row = conn.execute(
         """
         SELECT user_id
         FROM internal_access_tokens
-        WHERE token_digest = ? AND revoked_at IS NULL
+        WHERE token_digest = %s AND revoked_at IS NULL
         """,
         (digest_access_token(token),),
     ).fetchone()
@@ -121,7 +121,7 @@ def internal_auth_required() -> bool:
     return os.environ.get(AUTH_MODE_ENV, "").lower() not in LEGACY_AUTH_MODES
 
 
-def authenticate_user(conn: sqlite3.Connection, user_id: str | None) -> CurrentUser:
+def authenticate_user(conn: BusinessConnection, user_id: str | None) -> CurrentUser:
     if not user_id:
         raise HTTPException(
             status_code=401,
@@ -135,7 +135,7 @@ def authenticate_user(conn: sqlite3.Connection, user_id: str | None) -> CurrentU
         """
         SELECT id, username, display_name, role
         FROM users
-        WHERE id = ? AND is_active = 1
+        WHERE id = %s AND is_active = 1
         """,
         (user_id,),
     ).fetchone()

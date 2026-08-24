@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import struct
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -30,6 +29,7 @@ from app.character_identity_routes import (
     get_source_image_inspector,
 )
 from app.db import connect_database, initialize_database
+from app.db_portable import BusinessConnection
 from app.main import app
 from app.media_routes import get_media_storage
 from app.storage import FakeStorageAdapter
@@ -97,8 +97,8 @@ def client(
     storage: FakeStorageAdapter,
     inspector: FakeSourceImageInspector,
 ) -> Iterator[TestClient]:
-    def database_override() -> Iterator[sqlite3.Connection]:
-        conn = connect_database(db_path)
+    def database_override() -> Iterator[BusinessConnection]:
+        conn = BusinessConnection.sqlite(connect_database(db_path))
         try:
             yield conn
         finally:
@@ -281,7 +281,7 @@ def test_admin_completes_authorized_source_upload_without_persisting_signed_url(
     assert quality["height"] == 1536
     assert quality["issue_codes"] == []
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         assets = conn.execute(
             """
             SELECT id, project_id, storage_uri, sha256, content_type, metadata_json
@@ -370,7 +370,7 @@ def test_source_quality_failure_is_actionable_and_does_not_activate_identity(
     )
     assert identity_response.json()["status"] == "DRAFT"
     assert identity_response.json()["source_quality_status"] == "FAILED"
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         metadata = conn.execute(
             "SELECT metadata_json FROM assets WHERE id = ?",
             (intent["asset_id"],),
@@ -486,7 +486,7 @@ def test_source_completion_does_not_reactivate_identity_archived_during_inspecti
 
     class ArchivingInspector:
         def inspect(self, content: bytes, *, content_type: str) -> SourceImageInspection:
-            with connect_database(db_path) as conn:
+            with BusinessConnection.sqlite(connect_database(db_path)) as conn:
                 conn.execute(
                     "UPDATE person_identities SET status = 'ARCHIVED' WHERE id = ?",
                     (identity_id,),
@@ -503,7 +503,7 @@ def test_source_completion_does_not_reactivate_identity_archived_during_inspecti
 
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "IDENTITY_AUTHORIZATION_REQUIRED"
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         archived = conn.execute(
             "SELECT status, source_asset_id FROM person_identities WHERE id = ?",
             (identity_id,),
@@ -534,7 +534,7 @@ def test_authorization_completion_does_not_undo_concurrent_revocation(
     original_get_object = storage.get_object
 
     def revoke_before_read(object_key: str) -> bytes:
-        with connect_database(db_path) as conn:
+        with BusinessConnection.sqlite(connect_database(db_path)) as conn:
             conn.execute(
                 """
                 UPDATE person_identities
@@ -555,7 +555,7 @@ def test_authorization_completion_does_not_undo_concurrent_revocation(
 
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "IDENTITY_REVOKED"
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         revoked = conn.execute(
             """
             SELECT authorization_status, status, authorization_asset_id
@@ -644,7 +644,7 @@ def test_employee_reads_only_current_authorized_published_versions(
         ).status_code
         == 404
     )
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             """
             UPDATE character_versions
@@ -751,7 +751,7 @@ def test_only_admin_can_manage_identity_and_local_identity_object_uploads(
     assert wrong_type_put.status_code == 415
     assert admin_put.status_code == 204
     assert storage.get_object(str(intent["storage_key"])) == content
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         denied_audit = conn.execute(
             """
             SELECT metadata_json FROM audit_logs
@@ -891,7 +891,7 @@ def test_unconfigured_source_inspector_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("VIDEO_REPLICA_SETTINGS_KEY", raising=False)
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         with pytest.raises(HTTPException) as error:
             get_source_image_inspector(conn)
 
@@ -905,7 +905,7 @@ def test_gate1_fake_source_inspector_requires_explicit_environment_opt_in(
 ) -> None:
     monkeypatch.setenv("VIDEO_REPLICA_FAKE_SOURCE_IMAGE_INSPECTOR", "1")
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         inspector = get_source_image_inspector(conn)
 
     assert isinstance(inspector, Gate1SourceImageInspector)

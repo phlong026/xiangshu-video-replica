@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from app.db import initialize_database
+from app.db_portable import BusinessConnection
 from app.settings import SettingsRepository
 
 
@@ -19,19 +20,19 @@ def bootstrap_gate1_database(
     if resolved_path.exists():
         raise FileExistsError(f"Gate 1 database already exists: {resolved_path}")
 
-    with initialize_database(resolved_path) as conn:
+    with BusinessConnection.sqlite(initialize_database(resolved_path)) as conn:
         with conn:
             conn.execute(
                 """
                 INSERT INTO users (id, username, display_name, role)
-                VALUES (?, ?, ?, 'admin')
+                VALUES (%s, %s, %s, 'admin')
                 """,
                 (user_id, user_id, display_name),
             )
             conn.execute(
                 """
                 INSERT INTO wallets (user_id, available_credits, reserved_credits)
-                VALUES (?, 10, 0)
+                VALUES (%s, 10, 0)
                 """,
                 (user_id,),
             )
@@ -43,7 +44,7 @@ def bootstrap_gate1_database(
                     base_unit_price_fen_snapshot, charged_unit_price_fen_snapshot,
                     min_recharge_fen_snapshot, recharge_step_fen_snapshot,
                     amount_fen, credits, paid_at
-                ) VALUES (?, ?, ?, 'gate1_fixture', 'PAID', 'INTERNAL',
+                ) VALUES (%s, %s, %s, 'gate1_fixture', 'PAID', 'INTERNAL',
                           1000, 1000, 10000, 1000, 10000, 10, CURRENT_TIMESTAMP)
                 """,
                 (recharge_order_id, user_id, recharge_order_id),
@@ -53,7 +54,7 @@ def bootstrap_gate1_database(
                 INSERT INTO wallet_transactions (
                     id, user_id, type, available_delta, reserved_delta,
                     recharge_order_id, task_id, billing_round, idempotency_key
-                ) VALUES (?, ?, 'CHARGE', 10, 0, ?, NULL, NULL, ?)
+                ) VALUES (%s, %s, 'CHARGE', 10, 0, %s, NULL, NULL, %s)
                 """,
                 (
                     f"gate1-charge-{user_id}",

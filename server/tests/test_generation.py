@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 
 from app.auth import get_database
 from app.db import connect_database, initialize_database
+from app.db_portable import BusinessConnection
 from app.generation import (
     MAX_ARCHIVE_RETRIES,
     FakeH3Provider,
@@ -73,9 +74,16 @@ def db_path(tmp_path: Path) -> Iterator[Path]:
 
 
 @pytest.fixture()
-def client(db_path: Path) -> Iterator[TestClient]:
-    def database_override() -> Iterator[sqlite3.Connection]:
-        conn = connect_database(db_path)
+def client(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[TestClient]:
+    # Migrated routes (BusinessDb.write) open their own SQLite connection from
+    # the env path; it must point at the same database the override yields.
+    monkeypatch.setenv("VIDEO_REPLICA_DB_PATH", str(db_path))
+
+    def database_override() -> Iterator[BusinessConnection]:
+        conn = BusinessConnection.sqlite(connect_database(db_path))
         try:
             yield conn
         finally:
@@ -453,7 +461,7 @@ def insert_next_shot_card_version(
     *,
     version_id: str = "shot_card_v2",
 ) -> None:
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         previous = conn.execute(
             "SELECT payload_json FROM versions WHERE id = 'shot_card_v1'"
         ).fetchone()
@@ -619,7 +627,7 @@ def test_batch_paid_regeneration_replays_frozen_snapshots_without_superseding_so
     assert source.status_code == 200
     source_batch_id = str(source.json()["id"])
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         source_batch = conn.execute(
             "SELECT request_snapshot_json FROM generation_batches WHERE id = ?",
             (source_batch_id,),
@@ -682,7 +690,7 @@ def test_batch_paid_regeneration_replays_frozen_snapshots_without_superseding_so
     assert first.json()["generation_reason"] == request["generation_reason"]
     assert first.json()["quantity"] == 2
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         regenerated_batch = conn.execute(
             """
             SELECT request_hash, request_snapshot_json, source_batch_id,
@@ -793,7 +801,7 @@ def test_task_paid_regeneration_supersedes_audio_failure_once_and_keeps_history(
     assert source.status_code == 200
     source_batch_id = str(source.json()["id"])
     source_task_id = str(source.json()["tasks"][0]["id"])
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         result = run_next_generation_task(
             conn,
             worker_id="audio-failure-worker",
@@ -834,7 +842,7 @@ def test_task_paid_regeneration_supersedes_audio_failure_once_and_keeps_history(
     assert second_key.json()["detail"]["code"] == "SOURCE_TASK_ALREADY_SUPERSEDED"
 
     replacement_task_id = str(first.json()["tasks"][0]["id"])
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         source_row = conn.execute(
             """
             SELECT status, quality_status, result_asset_id, superseded_by_task_id,
@@ -886,7 +894,7 @@ def test_task_paid_regeneration_supersedes_audio_failure_once_and_keeps_history(
     }
 
     provider = CountingRetryProvider()
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         storage = FakeStorageAdapter(provider="fake", bucket="generation-results")
         completed = run_next_generation_task(
             conn,
@@ -911,7 +919,7 @@ def test_task_paid_regeneration_accepts_a_failed_submitted_provider_call(
     db_path: Path,
     client: TestClient,
 ) -> None:
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         insert_generation_history(
             conn,
             batch_id="submitted-failure",
@@ -945,7 +953,7 @@ def test_task_paid_regeneration_concurrency_creates_only_one_replacement(
     db_path: Path,
     client: TestClient,
 ) -> None:
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         insert_generation_history(
             conn,
             batch_id="paid-regeneration-race",
@@ -985,7 +993,7 @@ def test_task_paid_regeneration_concurrency_creates_only_one_replacement(
         thread.join()
 
     assert sorted(statuses) == [200, 409]
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         assert conn.execute("SELECT COUNT(*) FROM generation_batches").fetchone()[0] == 2
         assert conn.execute("SELECT COUNT(*) FROM generation_tasks").fetchone()[0] == 2
         assert (
@@ -1050,7 +1058,7 @@ def test_task_paid_regeneration_rejects_non_payable_states(
     submitted_at: str | None,
     expected_code: str,
 ) -> None:
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         insert_generation_history(
             conn,
             batch_id=batch_id,
@@ -1127,7 +1135,7 @@ def test_paid_regeneration_requires_write_access_and_rejects_legacy_confirmation
 def test_retry_archive_failed_is_idempotent_and_never_creates_provider_task(
     db_path: Path, client: TestClient
 ) -> None:
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         insert_generation_history(
             conn,
             batch_id="archive-retry",
@@ -1157,7 +1165,7 @@ def test_retry_archive_failed_is_idempotent_and_never_creates_provider_task(
     assert first.json()["status"] == "SUCCEEDED"
 
     provider = ArchiveOnlyRetryProvider()
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         queued = conn.execute(
             "SELECT next_poll_at FROM generation_tasks WHERE id = ?",
             ("archive-retry-task",),
@@ -1190,7 +1198,7 @@ def test_retry_archive_failed_is_idempotent_and_never_creates_provider_task(
 def test_retry_pre_provider_failure_requeues_once_and_records_lineage(
     db_path: Path, client: TestClient
 ) -> None:
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         insert_generation_history(
             conn,
             batch_id="safe-retry",
@@ -1217,7 +1225,7 @@ def test_retry_pre_provider_failure_requeues_once_and_records_lineage(
     assert first.json()["status"] == "PENDING"
     assert first.json()["retry_reason"] == "修复首帧签名后重试"
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         row = conn.execute(
             """
             SELECT status, error_code, error_message_redacted, next_poll_at,
@@ -1241,7 +1249,7 @@ def test_retry_pre_provider_failure_requeues_once_and_records_lineage(
     assert operation_count == 1
 
     provider = CountingRetryProvider()
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         storage = FakeStorageAdapter(provider="fake", bucket="generation-results")
         result = run_next_generation_task(
             conn,
@@ -1323,7 +1331,7 @@ def test_retry_rejects_unsafe_state_transitions(
     error_code: str | None,
     expected_code: str,
 ) -> None:
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         insert_generation_history(
             conn,
             batch_id=batch_id,
@@ -1349,7 +1357,7 @@ def test_retry_rejects_unsafe_state_transitions(
 def test_retry_idempotency_key_conflicts_when_payload_changes(
     db_path: Path, client: TestClient
 ) -> None:
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         insert_generation_history(
             conn,
             batch_id="retry-conflict",
@@ -1378,7 +1386,7 @@ def test_retry_idempotency_key_conflicts_when_payload_changes(
 def test_only_admin_can_confirm_an_unbilled_uncertain_submission(
     db_path: Path, client: TestClient
 ) -> None:
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         insert_generation_history(
             conn,
             batch_id="confirm-unbilled",
@@ -1410,7 +1418,7 @@ def test_only_admin_can_confirm_an_unbilled_uncertain_submission(
     assert replay.status_code == 200
     assert admin.json()["status"] == "PENDING"
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         row = conn.execute(
             """
             SELECT status, billing_confirmation_status, billing_confirmed_by_user_id,
@@ -1535,7 +1543,7 @@ def test_new_analysis_makes_the_existing_shot_card_and_script_stale(
     client: TestClient,
     db_path: Path,
 ) -> None:
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         shot_card = conn.execute(
             "SELECT payload_json FROM versions WHERE id = 'shot_card_v1'"
         ).fetchone()
@@ -1566,7 +1574,7 @@ def test_new_analysis_makes_the_existing_shot_card_and_script_stale(
     )
     assert script.status_code == 200
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             """
             INSERT INTO versions (
@@ -2055,7 +2063,7 @@ def test_prompt_preview_compiles_from_the_wrapped_analysis_payload(
         "source_asset": {"id": "reference_owned", "storage_uri": "fake://reference.mp4"},
         "provider_response_ref": "resp_wrapped",
     }
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             "DELETE FROM versions WHERE project_id = ? AND kind IN (?, ?)",
             ("project_owned", "shot_card", "script"),
@@ -2100,7 +2108,7 @@ def test_prompt_compile_requires_the_currently_confirmed_first_frame(
     client: TestClient,
     db_path: Path,
 ) -> None:
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             "DELETE FROM versions WHERE project_id = ? AND kind = ?",
             ("project_owned", "first_frame_selection"),
@@ -2193,7 +2201,7 @@ def test_prompt_must_be_locked_and_batch_keeps_locked_snapshot_without_provider_
     assert task["archive_status"] == "PENDING"
     assert task["result_asset_id"] is None
     assert task["prompt_snapshot"]["status"] == "LOCKED"
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         stored = conn.execute(
             """
             SELECT prompt_snapshot_json, provider_task_id, provider_request_json
@@ -2344,7 +2352,7 @@ def test_generation_batch_quantity_limits_idempotency_and_fake_archive(
     assert too_many.status_code == 422
     assert too_many.json()["detail"]["code"] == "QUANTITY_EXCEEDS_LIMIT"
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         task_rows = conn.execute(
             """
             SELECT status, archive_status, quality_status, result_asset_id, provider_request_json
@@ -2361,7 +2369,7 @@ def test_generation_batch_quantity_limits_idempotency_and_fake_archive(
     assert {row["provider_request_json"] for row in task_rows} == {None}
 
     storage = FakeStorageAdapter(provider="fake", bucket="generation-results")
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         for _ in range(3):
             assert (
                 run_next_generation_task(
@@ -2414,7 +2422,7 @@ def test_generation_batch_replay_ignores_a_later_lower_quantity_limit(
     )
     assert first.status_code == 200
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute("UPDATE runtime_settings SET max_generation_count_per_batch = 1 WHERE id = 1")
         conn.commit()
 
@@ -2461,7 +2469,7 @@ def test_generation_batch_list_paginates_and_returns_safe_task_summaries(
     client: TestClient,
     db_path: Path,
 ) -> None:
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         insert_generation_history(conn, batch_id="batch-history-01")
         insert_generation_history(
             conn,
@@ -2561,7 +2569,7 @@ def test_batch_detail_exposes_https_provider_result_url_for_direct_playback(
 ) -> None:
     """成片直连播放契约：任务详情返回 Provider 的 HTTPS 链接，非 HTTPS
     （如 fake://）不外露；列表摘要依旧不携带该链接。"""
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         insert_generation_history(
             conn,
             batch_id="batch-direct-play-01",
@@ -2617,7 +2625,7 @@ def test_generation_batch_list_filters_and_enforces_project_scope(
     client: TestClient,
     db_path: Path,
 ) -> None:
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         insert_generation_history(
             conn,
             batch_id="batch-owned-normal",
@@ -2736,7 +2744,7 @@ def test_generation_batch_list_fetches_all_page_tasks_in_one_query(
     client: TestClient,
     db_path: Path,
 ) -> None:
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         for index in range(25):
             insert_generation_history(
                 conn,
@@ -2748,8 +2756,8 @@ def test_generation_batch_list_fetches_all_page_tasks_in_one_query(
     statements: list[str] = []
     original_override = app.dependency_overrides[get_database]
 
-    def traced_database_override() -> Iterator[sqlite3.Connection]:
-        conn = connect_database(db_path)
+    def traced_database_override() -> Iterator[BusinessConnection]:
+        conn = BusinessConnection.sqlite(connect_database(db_path))
         conn.set_trace_callback(statements.append)
         try:
             yield conn
@@ -2828,7 +2836,7 @@ def test_batch_progress_counts_archive_failed_and_audio_quality(
     assert progress["progress_percent"] == 0
     assert progress["counts"]["pending"] == 2
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         assert (
             run_next_generation_task(
                 conn,
@@ -2903,7 +2911,7 @@ def test_generation_can_queue_metaso_after_its_key_is_saved(
 ) -> None:
     key = Fernet.generate_key().decode("ascii")
     monkeypatch.setenv(SETTINGS_KEY_ENV, key)
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         repo = SettingsRepository(conn, fernet=Fernet(key.encode("ascii")))
         repo.save_provider_config(
             "metaso",
@@ -2956,7 +2964,7 @@ def test_metaso_batch_rejects_non_cos_first_frame_even_when_settings_are_saved(
 ) -> None:
     key = Fernet.generate_key().decode("ascii")
     monkeypatch.setenv(SETTINGS_KEY_ENV, key)
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         repo = SettingsRepository(conn, fernet=Fernet(key.encode("ascii")))
         repo.save_provider_config(
             "metaso",
@@ -3004,7 +3012,7 @@ def test_locked_prompt_is_consumed_by_only_one_distinct_idempotency_key(
 
     def create_batch(key: str) -> None:
         barrier.wait()
-        with connect_database(db_path) as conn:
+        with BusinessConnection.sqlite(connect_database(db_path)) as conn:
             response = client.post(
                 "/api/projects/project_owned/generation-batches",
                 headers=auth_headers("employee_1"),
@@ -3031,7 +3039,7 @@ def test_locked_prompt_is_consumed_by_only_one_distinct_idempotency_key(
         thread.join()
 
     assert sorted(results) == [200, 409]
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         batch_count = conn.execute("SELECT COUNT(*) FROM generation_batches").fetchone()[0]
         task_count = conn.execute("SELECT COUNT(*) FROM generation_tasks").fetchone()[0]
     assert batch_count == 1
@@ -3052,7 +3060,7 @@ def test_worker_respects_runtime_concurrency_limit(db_path: Path, client: TestCl
             "idempotency_key": "concurrency",
         },
     ).json()
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             """
             UPDATE runtime_settings
@@ -3104,7 +3112,7 @@ def test_concurrent_workers_cannot_exceed_runtime_concurrency_limit(
             "idempotency_key": "concurrent-workers",
         },
     ).json()
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             """
             UPDATE runtime_settings
@@ -3127,7 +3135,7 @@ def test_concurrent_workers_cannot_exceed_runtime_concurrency_limit(
     results_lock = threading.Lock()
 
     def run_worker(worker_id: str, provider: FakeH3Provider) -> None:
-        with connect_database(db_path) as conn:
+        with BusinessConnection.sqlite(connect_database(db_path)) as conn:
             result = run_next_generation_task(
                 conn,
                 worker_id=worker_id,
@@ -3148,7 +3156,7 @@ def test_concurrent_workers_cannot_exceed_runtime_concurrency_limit(
     first.join(timeout=5)
 
     assert sorted(results, key=lambda value: "" if value is None else value) == [None, "SUCCEEDED"]
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         rows = conn.execute(
             """
             SELECT status
@@ -3183,7 +3191,7 @@ def test_worker_marks_expired_active_lease_for_manual_attention_without_resubmit
     ).json()
 
     expired_at = (datetime.now(UTC) - timedelta(minutes=10)).isoformat()
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             """
             UPDATE generation_tasks
@@ -3245,7 +3253,7 @@ def test_worker_marks_submission_uncertain_without_auto_retry(
         def create_image_to_video(self, request: dict[str, Any]) -> H3CreateResult:
             raise SubmissionUncertain("provider response was lost after submit")
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         result = run_next_generation_task(
             conn,
             worker_id="worker_a",
@@ -3298,7 +3306,7 @@ def test_worker_fails_immediately_when_first_frame_url_cannot_be_signed(
         def create_image_to_video(self, request: dict[str, Any]) -> H3CreateResult:
             raise AssertionError("provider must not be called before the first-frame URL is signed")
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         result = run_next_generation_task(
             conn,
             worker_id="worker_a",
@@ -3353,7 +3361,7 @@ def test_worker_records_a_known_h3_provider_failure(
                 "METASO returned failed", provider_task_id="metaso-task-1", terminal=True
             )
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         result = run_next_generation_task(
             conn,
             worker_id="worker_a",
@@ -3393,7 +3401,7 @@ def test_worker_preserves_a_known_nonterminal_h3_task_for_manual_recovery(
         def create_image_to_video(self, request: dict[str, Any]) -> H3CreateResult:
             raise H3ProviderFailed("METASO query timed out", provider_task_id="metaso-task-2")
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         result = run_next_generation_task(
             conn,
             worker_id="worker_a",
@@ -3428,7 +3436,7 @@ def test_worker_loop_processes_all_queued_fake_tasks(
         },
     )
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         processed = run_worker_once(
             conn,
             worker_id="worker-loop",
@@ -3457,7 +3465,7 @@ def test_worker_loop_can_stop_after_one_task_for_observable_progress(
     ).json()
     storage = FakeStorageAdapter(provider="fake", bucket="generation-results")
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         processed = run_worker_once(
             conn,
             worker_id="worker-loop-limited",
@@ -3469,7 +3477,7 @@ def test_worker_loop_can_stop_after_one_task_for_observable_progress(
         f"/api/generation-batches/{created['id']}",
         headers=auth_headers("employee_1"),
     ).json()["progress"]
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         remaining = run_worker_once(
             conn,
             worker_id="worker-loop-remainder",
@@ -3504,7 +3512,7 @@ def test_fake_h3_provider_supports_deterministic_gate1_failures(
         resolution="768P",
     )
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         provider = h3_provider_for_task(conn, "fake_h3")
 
     with pytest.raises(expected_exception):
@@ -3527,7 +3535,7 @@ def test_fake_h3_provider_uses_explicit_gate1_result_fixture(
         resolution="768P",
     )
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         provider = h3_provider_for_task(conn, "fake_h3")
 
     result = provider.create_image_to_video(request)
@@ -3553,7 +3561,7 @@ def test_worker_archives_result_with_cloud_like_storage(
         },
     )
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         result = run_next_generation_task(
             conn,
             worker_id="worker_a",
@@ -3596,7 +3604,7 @@ def test_worker_archive_retry_recovers_after_initial_failure(
         def put_object(self, key: str, content: bytes, *, content_type: str):  # type: ignore[override]
             raise StorageBackendUnavailable("simulated archive outage")
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         run_next_generation_task(
             conn,
             worker_id="worker_a",
@@ -3664,7 +3672,7 @@ def test_archive_retry_download_failure_keeps_task_retryable(
         def download_result(self, url: str) -> bytes:
             raise H3ProviderFailed("download failed")
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         run_next_generation_task(
             conn,
             worker_id="worker_a",
@@ -3713,7 +3721,7 @@ def test_archive_retry_with_missing_provider_settings_backs_off_not_fails(
         def put_object(self, key: str, content: bytes, *, content_type: str):  # type: ignore[override]
             raise StorageBackendUnavailable("simulated archive outage")
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         run_next_generation_task(
             conn,
             worker_id="worker_a",
@@ -3764,7 +3772,7 @@ def test_expired_archive_retry_lease_resets_to_retryable_not_uncertain(
         def put_object(self, key: str, content: bytes, *, content_type: str):  # type: ignore[override]
             raise StorageBackendUnavailable("simulated archive outage")
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         run_next_generation_task(
             conn,
             worker_id="worker_a",
@@ -3832,7 +3840,7 @@ def test_reconcile_submission_uncertain_recovers_succeeded_result(
         },
     )
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         task = conn.execute("SELECT id, batch_id FROM generation_tasks").fetchone()
         conn.execute(
             """
@@ -3902,7 +3910,7 @@ def test_reconcile_route_is_idempotent_and_audited(
         },
     )
     task_id = created.json()["tasks"][0]["id"]
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             """
             UPDATE generation_tasks
@@ -3950,7 +3958,7 @@ def test_reconcile_route_is_idempotent_and_audited(
     assert first.status_code == 200
     assert replay.status_code == 200
     assert first.json()["result_asset_id"] == replay.json()["result_asset_id"]
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         result_asset_count = conn.execute(
             "SELECT COUNT(*) FROM assets WHERE kind = 'video' AND id = ?",
             (first.json()["result_asset_id"],),
@@ -4013,7 +4021,7 @@ def test_reconcile_route_recovers_an_abandoned_pending_reservation(
         task_id=task_id,
         payload={},
     )
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             """
             UPDATE generation_tasks
@@ -4050,7 +4058,7 @@ def test_reconcile_route_recovers_an_abandoned_pending_reservation(
 
     assert response.status_code == 200
     assert response.json()["status"] == "FAILED"
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         operations = conn.execute(
             """
             SELECT id, result_status
@@ -4116,7 +4124,7 @@ def test_reconcile_provider_failure_does_not_require_storage_settings(
         },
     )
     task_id = created.json()["tasks"][0]["id"]
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             """
             UPDATE generation_tasks
@@ -4223,7 +4231,7 @@ def test_reconcile_lost_reservation_cannot_finalize_an_archived_result(
         },
     )
     task_id = created.json()["tasks"][0]["id"]
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             """
             UPDATE generation_tasks
@@ -4246,7 +4254,7 @@ def test_reconcile_lost_reservation_cannot_finalize_an_archived_result(
     assert len(uploaded_keys) == 1
     assert uploaded_keys[0] == (f"generation-results/{task_id}/{replaced_reservation_ids[0]}.mp4")
     assert storage.head_object(uploaded_keys[0]) is None
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         task_row = conn.execute(
             "SELECT status, archive_status, result_asset_id FROM generation_tasks WHERE id = ?",
             (task_id,),
@@ -4296,7 +4304,7 @@ def test_reconcile_without_provider_task_id_requires_manual_confirmation(
         },
     )
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         task = conn.execute("SELECT id, batch_id FROM generation_tasks").fetchone()
         conn.execute(
             """
@@ -4339,7 +4347,7 @@ def test_reconcile_running_task_keeps_uncertain(db_path: Path, client: TestClien
         },
     )
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         task = conn.execute("SELECT id, batch_id FROM generation_tasks").fetchone()
         conn.execute(
             """
@@ -4399,7 +4407,7 @@ def _insert_locked_prompt_for_project(
 
 
 def test_idempotency_key_is_scoped_per_project(db_path: Path, client: TestClient) -> None:
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         _insert_locked_prompt_for_project(
             conn,
             prompt_id="prompt_a",
@@ -4488,7 +4496,7 @@ def test_metaso_batch_requires_cloud_storage(
     db_path: Path, client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("VIDEO_REPLICA_SETTINGS_KEY", Fernet.generate_key().decode("ascii"))
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute("UPDATE runtime_settings SET active_storage_provider='local' WHERE id=1")
         SettingsRepository(conn).save_provider_config(
             "metaso", {"api_key": "metaso-key"}, actor_user_id="admin_1"
@@ -4535,7 +4543,7 @@ def test_archive_retry_exhausts_to_terminal_failure(db_path: Path, client: TestC
         def download_result(self, url: str) -> bytes:
             raise H3ProviderFailed("download failed")
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         run_next_generation_task(
             conn,
             worker_id="worker_a",
@@ -4586,7 +4594,7 @@ def test_reconcile_route_guards_and_rejects_non_uncertain_task(
             "idempotency_key": "reconcile-route",
         },
     )
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         task_id = str(conn.execute("SELECT id FROM generation_tasks").fetchone()["id"])
 
     # Missing task -> 404
@@ -4632,7 +4640,7 @@ def test_generation_batch_rename_by_creator_or_admin_only(
     client: TestClient,
     db_path: Path,
 ) -> None:
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         insert_generation_history(conn, batch_id="batch-rename")
         conn.commit()
 
@@ -4680,7 +4688,7 @@ def test_generation_batch_rename_by_creator_or_admin_only(
 
     detail = client.get("/api/generation-batches/batch-rename", headers=auth_headers("employee_1"))
     listed = client.get("/api/generation-batches", headers=auth_headers("employee_1"))
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         audits = conn.execute(
             """
             SELECT metadata_json FROM audit_logs
@@ -4705,7 +4713,7 @@ def test_generation_batch_delete_removes_tasks_and_result_assets(
     client: TestClient,
     db_path: Path,
 ) -> None:
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         _insert_result_asset(conn, "asset-del")
         insert_generation_history(
             conn,
@@ -4720,7 +4728,7 @@ def test_generation_batch_delete_removes_tasks_and_result_assets(
     )
 
     assert response.status_code == 204
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         batch = conn.execute(
             "SELECT id FROM generation_batches WHERE id = ?", ("batch-del",)
         ).fetchone()
@@ -4749,7 +4757,7 @@ def test_generation_batch_delete_blocked_while_tasks_active(
     client: TestClient,
     db_path: Path,
 ) -> None:
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         insert_generation_history(conn, batch_id="batch-active")
         conn.commit()
 
@@ -4765,7 +4773,7 @@ def test_generation_batch_delete_forbidden_for_non_creator_and_auditor(
     client: TestClient,
     db_path: Path,
 ) -> None:
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         insert_generation_history(
             conn,
             batch_id="batch-guard",
@@ -4805,7 +4813,7 @@ def test_generation_batch_delete_preserves_append_only_billing_ledger(
         },
     )
     batch_id = str(created.json()["id"])
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         run_next_generation_task(
             conn,
             worker_id="billed-delete-guard",
@@ -4821,7 +4829,7 @@ def test_generation_batch_delete_preserves_append_only_billing_ledger(
 
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "BILLED_BATCH_IMMUTABLE"
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         assert (
             conn.execute(
                 "SELECT COUNT(*) FROM generation_batches WHERE id = ?", (batch_id,)
@@ -4849,7 +4857,7 @@ def test_generation_rejects_metaso_without_cos_settings(
     """真实 Metaso 生成的首帧需要 HTTPS URL：未配置 COS 时排队被 422 拒绝。"""
     key = Fernet.generate_key().decode("ascii")
     monkeypatch.setenv(SETTINGS_KEY_ENV, key)
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         SettingsRepository(conn, fernet=Fernet(key.encode("ascii"))).save_provider_config(
             "metaso",
             {"api_key": "metaso-test-key"},
@@ -4919,7 +4927,7 @@ def test_generation_batch_reserves_one_credit_per_task_and_replay_is_free(
     assert replay.status_code == 200
     assert replay.json()["id"] == first.json()["id"]
     task_ids = [str(task["id"]) for task in first.json()["tasks"]]
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         wallet = conn.execute(
             """
             SELECT available_credits, reserved_credits
@@ -4944,7 +4952,7 @@ def test_generation_batch_insufficient_credits_rolls_back_everything(
     db_path: Path,
 ) -> None:
     prompt_id = create_locked_prompt(client)
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             """
             UPDATE wallets SET available_credits = 1, reserved_credits = 0
@@ -4968,7 +4976,7 @@ def test_generation_batch_insufficient_credits_rolls_back_everything(
 
     assert response.status_code == 402
     assert response.json()["detail"]["code"] == "INSUFFICIENT_CREDITS"
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         wallet = conn.execute(
             """
             SELECT available_credits, reserved_credits
@@ -5000,7 +5008,7 @@ def test_generation_batch_missing_wallet_returns_structured_invariant_error(
     db_path: Path,
 ) -> None:
     prompt_id = create_locked_prompt(client)
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute("DELETE FROM wallets WHERE user_id = 'employee_1'")
         conn.commit()
 
@@ -5019,7 +5027,7 @@ def test_generation_batch_missing_wallet_returns_structured_invariant_error(
 
     assert response.status_code == 500
     assert response.json()["detail"]["code"] == "BILLING_INVARIANT_VIOLATION"
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         batch_count = conn.execute(
             """
             SELECT COUNT(*) FROM generation_batches
@@ -5049,7 +5057,7 @@ def test_archived_generation_settles_once_but_archive_failure_stays_reserved(
     assert created.status_code == 200
     task_id = str(created.json()["tasks"][0]["id"])
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         first = run_next_generation_task(
             conn,
             worker_id="billing-success",
@@ -5096,7 +5104,7 @@ def test_archived_generation_settles_once_but_archive_failure_stays_reserved(
         def put_object(self, key: str, content: bytes, *, content_type: str):  # type: ignore[override]
             raise StorageBackendUnavailable("simulated archive outage")
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         result = run_next_generation_task(
             conn,
             worker_id="billing-archive-failure",
@@ -5142,7 +5150,7 @@ def test_undownloadable_archived_result_does_not_settle(
             del key, expires_in, can_read
             raise StoragePermissionError("simulated download signing failure")
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         result = run_next_generation_task(
             conn,
             worker_id="billing-undownloadable",
@@ -5195,7 +5203,7 @@ def test_terminal_provider_failure_releases_reserved_credit(
             del request
             raise H3ProviderFailed("terminal provider failure", terminal=True)
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         result = run_next_generation_task(
             conn,
             worker_id="billing-provider-failed",
@@ -5244,7 +5252,7 @@ def test_metaso_worker_rejects_non_cos_storage_before_provider_call(
             raise AssertionError("provider must not be called with non-COS storage")
 
     provider = CountingProvider()
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         with conn:
             conn.execute(
                 "UPDATE generation_tasks SET provider = 'metaso' WHERE id = ?",
@@ -5295,7 +5303,7 @@ def test_reconciled_provider_cancellation_releases_reserved_credit(
     task_id = str(created.json()["tasks"][0]["id"])
     batch_id = str(created.json()["id"])
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             """
             UPDATE generation_tasks
@@ -5346,7 +5354,7 @@ def test_pre_provider_retry_reserves_a_new_round_after_release(
         },
     )
     task_id = str(created.json()["tasks"][0]["id"])
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         from app.generation import mark_task_first_frame_url_sign_failed
 
         mark_task_first_frame_url_sign_failed(
@@ -5362,7 +5370,7 @@ def test_pre_provider_retry_reserves_a_new_round_after_release(
     )
 
     assert retried.status_code == 200
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         wallet = conn.execute(
             """
             SELECT available_credits, reserved_credits

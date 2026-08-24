@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import sqlite3
 from dataclasses import dataclass
 from typing import Literal, cast
 from uuid import uuid4
+
+from app.db_portable import BusinessConnection
 
 BillingOutcome = Literal["success", "failed", "cancelled"]
 TerminalTransactionType = Literal["SETTLE", "RELEASE"]
@@ -29,7 +30,7 @@ class BillingFinalization:
 
 
 def reserve_internal_billing(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     user_id: str,
     task_id: str,
@@ -41,7 +42,7 @@ def reserve_internal_billing(
         SELECT batch.created_by_user_id
         FROM generation_tasks AS task
         JOIN generation_batches AS batch ON batch.id = task.batch_id
-        WHERE task.id = ?
+        WHERE task.id = %s
         """,
         (task_id,),
     ).fetchone()
@@ -54,7 +55,7 @@ def reserve_internal_billing(
         """
         SELECT billing_round
         FROM wallet_transactions
-        WHERE task_id = ? AND type = 'RESERVE'
+        WHERE task_id = %s AND type = 'RESERVE'
         ORDER BY billing_round DESC
         LIMIT 1
         """,
@@ -70,7 +71,7 @@ def reserve_internal_billing(
                 """
                 SELECT 1
                 FROM wallet_transactions
-                WHERE task_id = ? AND billing_round = ?
+                WHERE task_id = %s AND billing_round = %s
                   AND type IN ('SETTLE', 'RELEASE')
                 """,
                 (task_id, latest_round),
@@ -85,7 +86,7 @@ def reserve_internal_billing(
         """
         SELECT user_id
         FROM wallet_transactions
-        WHERE task_id = ? AND billing_round = ? AND type = 'RESERVE'
+        WHERE task_id = %s AND billing_round = %s AND type = 'RESERVE'
         """,
         (task_id, billing_round),
     ).fetchone()
@@ -102,7 +103,7 @@ def reserve_internal_billing(
             """
             SELECT 1
             FROM wallet_transactions
-            WHERE task_id = ? AND billing_round = ?
+            WHERE task_id = %s AND billing_round = %s
               AND type IN ('SETTLE', 'RELEASE')
             """,
             (task_id, latest_round),
@@ -117,13 +118,13 @@ def reserve_internal_billing(
             available_credits = available_credits - 1,
             reserved_credits = reserved_credits + 1,
             updated_at = CURRENT_TIMESTAMP
-        WHERE user_id = ? AND available_credits >= 1
+        WHERE user_id = %s AND available_credits >= 1
         """,
         (user_id,),
     )
     if cursor.rowcount != 1:
         wallet = conn.execute(
-            "SELECT 1 FROM wallets WHERE user_id = ?",
+            "SELECT 1 FROM wallets WHERE user_id = %s",
             (user_id,),
         ).fetchone()
         if wallet is None:
@@ -135,7 +136,7 @@ def reserve_internal_billing(
         INSERT INTO wallet_transactions (
             id, user_id, type, available_delta, reserved_delta,
             task_id, billing_round, idempotency_key
-        ) VALUES (?, ?, 'RESERVE', -1, 1, ?, ?, ?)
+        ) VALUES (%s, %s, 'RESERVE', -1, 1, %s, %s, %s)
         """,
         (
             str(uuid4()),
@@ -149,7 +150,7 @@ def reserve_internal_billing(
 
 
 def finalize_internal_billing(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     task_id: str,
     outcome: BillingOutcome,
@@ -167,7 +168,7 @@ def finalize_internal_billing(
         FROM generation_tasks AS task
         JOIN generation_batches AS batch ON batch.id = task.batch_id
         LEFT JOIN assets AS asset ON asset.id = task.result_asset_id
-        WHERE task.id = ?
+        WHERE task.id = %s
         """,
         (task_id,),
     ).fetchone()
@@ -178,7 +179,7 @@ def finalize_internal_billing(
         """
         SELECT user_id, billing_round
         FROM wallet_transactions
-        WHERE task_id = ? AND type = 'RESERVE'
+        WHERE task_id = %s AND type = 'RESERVE'
         ORDER BY billing_round DESC
         LIMIT 1
         """,
@@ -198,7 +199,7 @@ def finalize_internal_billing(
         """
         SELECT type
         FROM wallet_transactions
-        WHERE task_id = ? AND billing_round = ?
+        WHERE task_id = %s AND billing_round = %s
           AND type IN ('SETTLE', 'RELEASE')
         """,
         (task_id, billing_round),
@@ -233,10 +234,10 @@ def finalize_internal_billing(
         """
         UPDATE wallets
         SET
-            available_credits = available_credits + ?,
+            available_credits = available_credits + %s,
             reserved_credits = reserved_credits - 1,
             updated_at = CURRENT_TIMESTAMP
-        WHERE user_id = ? AND reserved_credits >= 1
+        WHERE user_id = %s AND reserved_credits >= 1
         """,
         (available_delta, user_id),
     )
@@ -248,7 +249,7 @@ def finalize_internal_billing(
         INSERT INTO wallet_transactions (
             id, user_id, type, available_delta, reserved_delta,
             task_id, billing_round, idempotency_key
-        ) VALUES (?, ?, ?, ?, -1, ?, ?, ?)
+        ) VALUES (%s, %s, %s, %s, -1, %s, %s, %s)
         """,
         (
             str(uuid4()),

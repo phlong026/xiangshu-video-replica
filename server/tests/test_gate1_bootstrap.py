@@ -6,6 +6,7 @@ import pytest
 from cryptography.fernet import Fernet
 
 from app.db import connect_database
+from app.db_portable import BusinessConnection
 from app.gate1_bootstrap import bootstrap_gate1_database
 
 
@@ -22,7 +23,7 @@ def test_gate1_bootstrap_creates_identity_funded_wallet_and_local_runtime(
         display_name="Gate 1 Admin",
     )
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         user = conn.execute("SELECT id, role FROM users WHERE id = 'gate1_admin'").fetchone()
         runtime = conn.execute(
             """

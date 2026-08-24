@@ -15,6 +15,7 @@ from test_generation import auth_headers, create_locked_prompt, seed_data
 
 from app.auth import get_database
 from app.db import connect_database, initialize_database
+from app.db_portable import BusinessConnection
 from app.generation import (
     FakeH3Provider,
     H3CreateResult,
@@ -88,9 +89,16 @@ def db_path(tmp_path: Path) -> Iterator[Path]:
 
 
 @pytest.fixture()
-def client(db_path: Path) -> Iterator[TestClient]:
-    def database_override() -> Iterator[sqlite3.Connection]:
-        conn = connect_database(db_path)
+def client(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[TestClient]:
+    # Migrated routes (BusinessDb.write) open their own SQLite connection from
+    # the env path; it must point at the same database the override yields.
+    monkeypatch.setenv("VIDEO_REPLICA_DB_PATH", str(db_path))
+
+    def database_override() -> Iterator[BusinessConnection]:
+        conn = BusinessConnection.sqlite(connect_database(db_path))
         try:
             yield conn
         finally:
@@ -144,7 +152,7 @@ def test_fake_provider_e2e_from_locked_prompt_to_worker_progress(
 
     provider = RecordingFakeProvider()
     storage = FakeStorageAdapter(provider="fake", bucket="generation-results")
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         assert run_next_generation_task(
             conn,
             worker_id="worker-a",
@@ -204,7 +212,7 @@ def test_worker_uses_temporary_storage_download_url_for_h3_first_frame(
 
     provider = RecordingFakeProvider()
     storage = RecordingDownloadStorage()
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         result = run_next_generation_task(
             conn,
             worker_id="worker-signed-url",
@@ -228,7 +236,7 @@ def test_generation_flow_never_creates_independent_audio_tasks(
     prompt_id = create_locked_prompt(client)
     batch = create_batch(client, prompt_id=prompt_id, idempotency_key="no-audio-task")
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         rows = conn.execute(
             """
             SELECT generation_mode, provider_request_json, prompt_snapshot_json
@@ -273,7 +281,7 @@ def test_three_task_mixed_batch_surfaces_partial_failure_and_downloads_successfu
     )
     provider = MixedOutcomeFakeProvider()
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute("UPDATE runtime_settings SET active_storage_provider = 'local' WHERE id = 1")
         conn.commit()
         output_storage = LocalStorageAdapter(root=storage_root)

@@ -22,6 +22,7 @@ from app.auth import AuthenticatedUser, Database
 from app.character_contracts import PersonIdentity, RequiredCharacterViewType
 from app.character_identity import character_error
 from app.character_identity_routes import get_character_storage
+from app.customer_fence import BusinessDbDep
 from app.first_frame_routes import get_image_provider
 from app.first_frames import ImageProvider
 from app.permissions import require_not_auditor, require_project_access
@@ -120,37 +121,37 @@ def create_simple_upload_intent(
 
 @router.post("/generate", response_model=SimpleCharacterResponse, status_code=201)
 async def generate_global_simple_character(
-    conn: Database,
-    actor: AuthenticatedUser,
     storage: Annotated[StorageAdapter, Depends(get_character_storage)],
     provider: InjectedImageProvider,
+    db: BusinessDbDep,
     file: Annotated[UploadFile, File()],
     display_name: Annotated[str, Form()],
     persona_name: Annotated[str, Form()] = "",
 ) -> SimpleCharacterResponse:
-    """Global one-click character creation (人物库精简流程，无项目上下文).
+    with db.write() as (conn, actor):
+        """Global one-click character creation (人物库精简流程，无项目上下文).
 
-    Mirrors the project-scoped endpoint but skips ``require_project_access``:
-    the character library page has no project context, and the creator's
-    identity ownership is recorded for later renames.
-    """
-    require_not_auditor(
-        conn,
-        actor=actor,
-        action="simple_character.create",
-        entity_type="character_version",
-        entity_id="collection",
-    )
-    return await _run_simple_character_creation(
-        conn=conn,
-        actor=actor,
-        storage=storage,
-        provider=provider,
-        file=file,
-        display_name=display_name,
-        persona_name=persona_name,
-        project_id=None,
-    )
+        Mirrors the project-scoped endpoint but skips ``require_project_access``:
+        the character library page has no project context, and the creator's
+        identity ownership is recorded for later renames.
+        """
+        require_not_auditor(
+            conn,
+            actor=actor,
+            action="simple_character.create",
+            entity_type="character_version",
+            entity_id="collection",
+        )
+        return await _run_simple_character_creation(
+            conn=conn,
+            actor=actor,
+            storage=storage,
+            provider=provider,
+            file=file,
+            display_name=display_name,
+            persona_name=persona_name,
+            project_id=None,
+        )
 
 
 @router.get("/library", response_model=list[SimpleLibraryEntryResponse])
@@ -182,16 +183,16 @@ def read_simple_library(
 def rename_identity(
     identity_id: str,
     request: IdentityRenameRequest,
-    conn: Database,
-    actor: AuthenticatedUser,
+    db: BusinessDbDep,
 ) -> PersonIdentity:
-    """Rename a character identity (owner or admin only)."""
-    return rename_simple_character_identity(
-        conn,
-        actor=actor,
-        identity_id=identity_id,
-        display_name=request.display_name,
-    )
+    with db.write() as (conn, actor):
+        """Rename a character identity (owner or admin only)."""
+        return rename_simple_character_identity(
+            conn,
+            actor=actor,
+            identity_id=identity_id,
+            display_name=request.display_name,
+        )
 
 
 @router.post(
@@ -201,74 +202,74 @@ def rename_identity(
 )
 def regenerate_contact_sheet(
     identity_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
     storage: Annotated[StorageAdapter, Depends(get_character_storage)],
     provider: InjectedImageProvider,
+    db: BusinessDbDep,
 ) -> SimpleCharacterRegenerationResponse:
-    """Re-run the five-view contact sheet from the original source photo.
+    with db.write() as (conn, actor):
+        """Re-run the five-view contact sheet from the original source photo.
 
-    Reuses the identity's stored authorization photo with the same
-    identity-preserve prompt, publishes the result as the next character
-    version, and keeps the previous published version untouched so projects
-    already bound to it continue to work.
-    """
-    require_not_auditor(
-        conn,
-        actor=actor,
-        action="simple_character.regenerate",
-        entity_type="character_version",
-        entity_id=identity_id,
-    )
-    try:
-        result = regenerate_simple_character_contact_sheet(
+        Reuses the identity's stored authorization photo with the same
+        identity-preserve prompt, publishes the result as the next character
+        version, and keeps the previous published version untouched so projects
+        already bound to it continue to work.
+        """
+        require_not_auditor(
             conn,
             actor=actor,
-            identity_id=identity_id,
-            storage=storage,
-            image_provider=provider,
+            action="simple_character.regenerate",
+            entity_type="character_version",
+            entity_id=identity_id,
         )
-    except HTTPException:
-        raise
-    except Exception as exc:  # pragma: no cover - defensive guard
-        logger.exception("Simple character regeneration failed unexpectedly")
-        raise character_error(
-            500,
-            "SIMPLE_CHARACTER_REGENERATION_FAILED",
-            "重新生成多视图失败，请稍后重试。",
-        ) from exc
-    return SimpleCharacterRegenerationResponse(
-        identity_id=result.identity_id,
-        persona_id=result.persona_id,
-        character_version_id=result.character_version_id,
-        previous_version_id=result.previous_version_id,
-        version_number=result.version_number,
-        publication_hash=result.publication_hash,
-        contact_sheet_asset_id=result.contact_sheet_asset_id,
-        views=[
-            SimpleCharacterViewResponse(
-                view_type=view.view_type,
-                asset_id=view.asset_id,
+        try:
+            result = regenerate_simple_character_contact_sheet(
+                conn,
+                actor=actor,
+                identity_id=identity_id,
+                storage=storage,
+                image_provider=provider,
             )
-            for view in result.views
-        ],
-    )
+        except HTTPException:
+            raise
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.exception("Simple character regeneration failed unexpectedly")
+            raise character_error(
+                500,
+                "SIMPLE_CHARACTER_REGENERATION_FAILED",
+                "重新生成多视图失败，请稍后重试。",
+            ) from exc
+        return SimpleCharacterRegenerationResponse(
+            identity_id=result.identity_id,
+            persona_id=result.persona_id,
+            character_version_id=result.character_version_id,
+            previous_version_id=result.previous_version_id,
+            version_number=result.version_number,
+            publication_hash=result.publication_hash,
+            contact_sheet_asset_id=result.contact_sheet_asset_id,
+            views=[
+                SimpleCharacterViewResponse(
+                    view_type=view.view_type,
+                    asset_id=view.asset_id,
+                )
+                for view in result.views
+            ],
+        )
 
 
 @router.delete("/identities/{identity_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_identity(
     identity_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    db: BusinessDbDep,
 ) -> Response:
-    """Delete a character identity with all derived assets (owner or admin)."""
-    delete_simple_character_identity(
-        conn,
-        actor=actor,
-        identity_id=identity_id,
-        storage_for_uri=storage_for_asset,
-    )
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    with db.write() as (conn, actor):
+        """Delete a character identity with all derived assets (owner or admin)."""
+        delete_simple_character_identity(
+            conn,
+            actor=actor,
+            identity_id=identity_id,
+            storage_for_uri=storage_for_asset,
+        )
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post(
@@ -278,45 +279,45 @@ def delete_identity(
 )
 async def generate_simple_character(
     project_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
     storage: Annotated[StorageAdapter, Depends(get_character_storage)],
     provider: InjectedImageProvider,
+    db: BusinessDbDep,
     file: Annotated[UploadFile, File()],
     display_name: Annotated[str, Form()],
     persona_name: Annotated[str, Form()] = "",
 ) -> SimpleCharacterResponse:
-    """Upload one authorization image and publish a seven-view character.
+    with db.write() as (conn, actor):
+        """Upload one authorization image and publish a seven-view character.
 
-    The image is stored as both the authorization proof and the source asset,
-    a single seven-view contact sheet plus the seven standard views are
-    generated, auto-approved, and the resulting character version is
-    published so it immediately appears in the project's available character
-    version list.
-    """
-    require_not_auditor(
-        conn,
-        actor=actor,
-        action="simple_character.create",
-        entity_type="character_version",
-        entity_id="collection",
-    )
-    require_project_access(
-        conn,
-        actor=actor,
-        project_id=project_id,
-        action="simple_character.create",
-    )
-    return await _run_simple_character_creation(
-        conn=conn,
-        actor=actor,
-        storage=storage,
-        provider=provider,
-        file=file,
-        display_name=display_name,
-        persona_name=persona_name,
-        project_id=project_id,
-    )
+        The image is stored as both the authorization proof and the source asset,
+        a single seven-view contact sheet plus the seven standard views are
+        generated, auto-approved, and the resulting character version is
+        published so it immediately appears in the project's available character
+        version list.
+        """
+        require_not_auditor(
+            conn,
+            actor=actor,
+            action="simple_character.create",
+            entity_type="character_version",
+            entity_id="collection",
+        )
+        require_project_access(
+            conn,
+            actor=actor,
+            project_id=project_id,
+            action="simple_character.create",
+        )
+        return await _run_simple_character_creation(
+            conn=conn,
+            actor=actor,
+            storage=storage,
+            provider=provider,
+            file=file,
+            display_name=display_name,
+            persona_name=persona_name,
+            project_id=project_id,
+        )
 
 
 async def _run_simple_character_creation(

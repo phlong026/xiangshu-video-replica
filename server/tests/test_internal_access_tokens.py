@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sqlite3
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -13,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from app.auth import get_database
 from app.db import connect_database, initialize_database
+from app.db_portable import BusinessConnection
 from app.main import app
 
 
@@ -58,9 +58,9 @@ def internal_client(
 ) -> Iterator[TestClient]:
     db_path, user_id, _, _ = internal_account
 
-    def database_override() -> Iterator[sqlite3.Connection]:
-        with connect_database(db_path) as conn:
-            yield conn
+    def database_override() -> Iterator[BusinessConnection]:
+        with connect_database(db_path) as raw:
+            yield BusinessConnection.sqlite(raw)
 
     monkeypatch.setenv("VIDEO_REPLICA_AUTH_MODE", "internal_token")
     monkeypatch.setenv("VIDEO_REPLICA_DESKTOP_USER_ID", user_id)
@@ -86,7 +86,7 @@ def test_create_user_cli_also_creates_empty_wallet(tmp_path: Path) -> None:
     )
     user_id = str(json.loads(result.stdout)["user_id"])
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         user = conn.execute(
             "SELECT username, display_name, role FROM users WHERE id = ?", (user_id,)
         ).fetchone()
@@ -122,7 +122,7 @@ def test_issue_token_prints_raw_value_once_and_stores_only_digest(tmp_path: Path
 
     assert issued.stdout.count(raw_token) == 1
     assert len(raw_token) >= 40
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         row = conn.execute(
             "SELECT token_digest, revoked_at FROM internal_access_tokens WHERE id = ?",
             (payload["token_id"],),

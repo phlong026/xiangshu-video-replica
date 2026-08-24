@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.auth import AuthenticatedUser, Database
+from app.customer_fence import BusinessDbDep
 from app.media_routes import get_media_storage
 from app.permissions import require_project_access
 from app.source_frames import (
@@ -87,21 +88,21 @@ InjectedSourceFrameExtractor = Annotated[SourceFrameExtractor, Depends(get_sourc
 def extract_project_source_frames(
     project_id: str,
     request: ExtractSourceFramesRequest,
-    conn: Database,
-    actor: AuthenticatedUser,
     storage: SourceFrameStorage,
     extractor: InjectedSourceFrameExtractor,
+    db: BusinessDbDep,
 ) -> VersionResponse:
-    row = extract_source_frame_candidates(
-        conn,
-        project_id=project_id,
-        asset_id=request.asset_id,
-        actor=actor,
-        storage=storage,
-        extractor=extractor,
-        timestamps_seconds=tuple(request.timestamps_seconds or SOURCE_FRAME_TIMESTAMPS_SECONDS),
-    )
-    return version_response(row)
+    with db.write() as (conn, actor):
+        row = extract_source_frame_candidates(
+            conn,
+            project_id=project_id,
+            asset_id=request.asset_id,
+            actor=actor,
+            storage=storage,
+            extractor=extractor,
+            timestamps_seconds=tuple(request.timestamps_seconds or SOURCE_FRAME_TIMESTAMPS_SECONDS),
+        )
+        return version_response(row)
 
 
 @router.get("/projects/{project_id}/source-frames/latest", response_model=VersionResponse | None)
@@ -121,19 +122,21 @@ def read_latest_source_frames(
 def confirm_project_source_frame(
     project_id: str,
     request: ConfirmSourceFrameRequest,
-    conn: Database,
-    actor: AuthenticatedUser,
+    db: BusinessDbDep,
 ) -> VersionResponse:
-    row = confirm_source_frame(
-        conn,
-        project_id=project_id,
-        source_frame_asset_id=request.source_frame_asset_id,
-        actor=actor,
-        character_features=(
-            None if request.character_features is None else request.character_features.model_dump()
-        ),
-    )
-    return version_response(row)
+    with db.write() as (conn, actor):
+        row = confirm_source_frame(
+            conn,
+            project_id=project_id,
+            source_frame_asset_id=request.source_frame_asset_id,
+            actor=actor,
+            character_features=(
+                None
+                if request.character_features is None
+                else request.character_features.model_dump()
+            ),
+        )
+        return version_response(row)
 
 
 @router.get(

@@ -11,6 +11,7 @@ from uuid import uuid4
 from fastapi import HTTPException
 
 from app.auth import CurrentUser
+from app.db_portable import BusinessConnection
 from app.permissions import write_audit
 
 MAIN_CHARACTER_VERSION_KIND = "main_character"
@@ -39,7 +40,7 @@ class CharacterData:
 
 
 def list_characters(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     project_id: str | None,
@@ -71,7 +72,7 @@ def list_characters(
 
 
 def get_character(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     character_id: str,
     actor: CurrentUser,
@@ -84,7 +85,7 @@ def get_character(
 
 
 def create_character(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     name: str,
@@ -113,7 +114,7 @@ def create_character(
                 is_active,
                 created_by_user_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 character_id,
@@ -138,7 +139,7 @@ def create_character(
 
 
 def update_character(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     character_id: str,
@@ -154,25 +155,25 @@ def update_character(
     params: list[object] = []
 
     if name is not None:
-        updates.append("name = ?")
+        updates.append("name = %s")
         params.append(normalize_name(name))
     if reference_asset_ids is not None:
         clean_reference_asset_ids = normalize_ids(reference_asset_ids)
         ensure_assets_exist(conn, clean_reference_asset_ids)
-        updates.append("reference_asset_ids_json = ?")
+        updates.append("reference_asset_ids_json = %s")
         params.append(encode_json_list(clean_reference_asset_ids))
     if authorization_project_ids is not None:
         clean_project_ids = normalize_ids(authorization_project_ids)
         ensure_projects_exist(conn, clean_project_ids)
-        updates.append("authorization_project_ids_json = ?")
+        updates.append("authorization_project_ids_json = %s")
         params.append(encode_json_list(clean_project_ids))
     if clear_authorization_expires_at:
         updates.append("authorization_expires_at = NULL")
     elif authorization_expires_at is not None:
-        updates.append("authorization_expires_at = ?")
+        updates.append("authorization_expires_at = %s")
         params.append(encode_datetime(authorization_expires_at))
     if is_active is not None:
-        updates.append("is_active = ?")
+        updates.append("is_active = %s")
         params.append(1 if is_active else 0)
 
     updated_fields = [assignment.split(" =", 1)[0] for assignment in updates]
@@ -184,7 +185,7 @@ def update_character(
                 f"""
                 UPDATE characters
                 SET {", ".join(updates)}
-                WHERE id = ?
+                WHERE id = %s
                 """,
                 params,
             )
@@ -204,7 +205,7 @@ def update_character(
 
 
 def delete_character(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     character_id: str,
@@ -215,11 +216,11 @@ def delete_character(
             """
             UPDATE person_identities
             SET status = 'ARCHIVED', updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
+            WHERE id = %s
             """,
             (f"{LEGACY_IDENTITY_PREFIX}{character_id}",),
         )
-        conn.execute("DELETE FROM characters WHERE id = ?", (character_id,))
+        conn.execute("DELETE FROM characters WHERE id = %s", (character_id,))
     write_audit(
         conn,
         actor=actor,
@@ -230,7 +231,7 @@ def delete_character(
 
 
 def choose_project_main_character(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     project_id: str,
@@ -267,7 +268,7 @@ def choose_project_main_character(
                 payload_json,
                 created_by_user_id
             )
-            VALUES (?, ?, NULL, ?, ?, ?, ?)
+            VALUES (%s, %s, NULL, %s, %s, %s, %s)
             """,
             (
                 version_id,
@@ -288,19 +289,19 @@ def choose_project_main_character(
                 selected_by_user_id
             )
             VALUES (
-                ?,
-                ?,
-                ?,
+                %s,
+                %s,
+                %s,
                 (
                     SELECT id
                     FROM character_versions AS compatibility_version
-                    WHERE compatibility_version.persona_id = ?
+                    WHERE compatibility_version.persona_id = %s
                       AND compatibility_version.status = 'PUBLISHED'
-                      AND compatibility_version.persona_snapshot_json = ?
+                      AND compatibility_version.persona_snapshot_json = %s
                     ORDER BY compatibility_version.version_number DESC
                     LIMIT 1
                 ),
-                ?
+                %s
             )
             ON CONFLICT(project_id) DO UPDATE SET
                 character_id = excluded.character_id,
@@ -329,7 +330,7 @@ def choose_project_main_character(
 
 
 def get_project_main_character(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     project_id: str,
 ) -> dict[str, object]:
@@ -341,7 +342,7 @@ def get_project_main_character(
             version.payload_json
         FROM project_main_characters AS main_character
         JOIN versions AS version ON version.id = main_character.version_id
-        WHERE main_character.project_id = ?
+        WHERE main_character.project_id = %s
         """,
         (project_id,),
     ).fetchone()
@@ -371,7 +372,7 @@ def get_project_main_character(
 
 
 def sync_legacy_character_domain(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     character: CharacterData,
@@ -389,7 +390,7 @@ def sync_legacy_character_domain(
         separators=(",", ":"),
     )
     identity_exists = conn.execute(
-        "SELECT 1 FROM person_identities WHERE id = ?",
+        "SELECT 1 FROM person_identities WHERE id = %s",
         (identity_id,),
     ).fetchone()
     if identity_exists is None:
@@ -400,7 +401,7 @@ def sync_legacy_character_domain(
                 authorization_scope, authorization_expires_at, source_asset_id,
                 source_quality_status, status, created_by
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'IMPORTED', ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, 'IMPORTED', %s, %s)
             """,
             (
                 identity_id,
@@ -420,7 +421,7 @@ def sync_legacy_character_domain(
                 id, identity_id, name, appearance_constraints_json,
                 usage_scope_json, created_by
             )
-            VALUES (?, ?, ?, '{}', ?, ?)
+            VALUES (%s, %s, %s, '{}', %s, %s)
             """,
             (persona_id, identity_id, character.name, scope_json, actor.id),
         )
@@ -428,11 +429,11 @@ def sync_legacy_character_domain(
         conn.execute(
             """
             UPDATE person_identities
-            SET display_name = ?, authorization_status = ?, authorization_scope = ?,
-                authorization_expires_at = ?, source_asset_id = ?,
-                source_quality_status = 'IMPORTED', status = ?,
+            SET display_name = %s, authorization_status = %s, authorization_scope = %s,
+                authorization_expires_at = %s, source_asset_id = %s,
+                source_quality_status = 'IMPORTED', status = %s,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
+            WHERE id = %s
             """,
             (
                 character.name,
@@ -447,8 +448,8 @@ def sync_legacy_character_domain(
         conn.execute(
             """
             UPDATE character_personas
-            SET name = ?, usage_scope_json = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
+            SET name = %s, usage_scope_json = %s, updated_at = CURRENT_TIMESTAMP
+            WHERE id = %s
             """,
             (character.name, scope_json, persona_id),
         )
@@ -465,8 +466,8 @@ def sync_legacy_character_domain(
             published_by, published_at, created_by
         )
         VALUES (
-            ?, ?, ?, 'PUBLISHED', ?, ?, ?, 'legacy-write-through',
-            'legacy-character-v1', '{}', ?, ?, '[]', ?, CURRENT_TIMESTAMP, ?
+            %s, %s, %s, 'PUBLISHED', %s, %s, %s, 'legacy-write-through',
+            'legacy-character-v1', '{}', %s, %s, '[]', %s, CURRENT_TIMESTAMP, %s
         )
         """,
         (
@@ -490,7 +491,7 @@ def sync_legacy_character_domain(
                 candidate_number, auto_quality_json, review_status,
                 is_published_selection
             )
-            VALUES (?, ?, ?, 'IMPORTED_REFERENCE', ?, '{}', 'APPROVED', ?)
+            VALUES (%s, %s, %s, 'IMPORTED_REFERENCE', %s, '{}', 'APPROVED', %s)
             """,
             (
                 legacy_character_asset_id(character.id, version_number, candidate_number),
@@ -503,12 +504,12 @@ def sync_legacy_character_domain(
     return version_id
 
 
-def next_legacy_character_version_number(conn: sqlite3.Connection, persona_id: str) -> int:
+def next_legacy_character_version_number(conn: BusinessConnection, persona_id: str) -> int:
     row = conn.execute(
         """
         SELECT COALESCE(MAX(version_number), 0) + 1
         FROM character_versions
-        WHERE persona_id = ?
+        WHERE persona_id = %s
         """,
         (persona_id,),
     ).fetchone()
@@ -539,14 +540,14 @@ def legacy_identity_status(character: CharacterData) -> tuple[str, str]:
     return "ACTIVE", "AUTHORIZED"
 
 
-def asset_sha256(conn: sqlite3.Connection, asset_id: str | None) -> str | None:
+def asset_sha256(conn: BusinessConnection, asset_id: str | None) -> str | None:
     if asset_id is None:
         return None
-    row = conn.execute("SELECT sha256 FROM assets WHERE id = ?", (asset_id,)).fetchone()
+    row = conn.execute("SELECT sha256 FROM assets WHERE id = %s", (asset_id,)).fetchone()
     return None if row is None else str(row[0])
 
 
-def read_character(conn: sqlite3.Connection, character_id: str) -> CharacterData:
+def read_character(conn: BusinessConnection, character_id: str) -> CharacterData:
     row = conn.execute(
         """
         SELECT
@@ -560,7 +561,7 @@ def read_character(conn: sqlite3.Connection, character_id: str) -> CharacterData
             created_at,
             updated_at
         FROM characters
-        WHERE id = ?
+        WHERE id = %s
         """,
         (character_id,),
     ).fetchone()
@@ -613,12 +614,12 @@ def character_is_available(character: CharacterData, *, project_id: str | None) 
     return project_id in character.authorization_project_ids
 
 
-def next_version_number(conn: sqlite3.Connection, project_id: str) -> int:
+def next_version_number(conn: BusinessConnection, project_id: str) -> int:
     row = conn.execute(
         """
         SELECT COALESCE(MAX(version_number), 0) + 1
         FROM versions
-        WHERE project_id = ? AND kind = ?
+        WHERE project_id = %s AND kind = %s
         """,
         (project_id, MAIN_CHARACTER_VERSION_KIND),
     ).fetchone()
@@ -647,16 +648,16 @@ def normalize_ids(values: list[str]) -> list[str]:
     return result
 
 
-def ensure_assets_exist(conn: sqlite3.Connection, asset_ids: list[str]) -> None:
+def ensure_assets_exist(conn: BusinessConnection, asset_ids: list[str]) -> None:
     ensure_ids_exist(conn, table="assets", ids=asset_ids, code="ASSET_NOT_FOUND")
 
 
-def ensure_projects_exist(conn: sqlite3.Connection, project_ids: list[str]) -> None:
+def ensure_projects_exist(conn: BusinessConnection, project_ids: list[str]) -> None:
     ensure_ids_exist(conn, table="projects", ids=project_ids, code="PROJECT_NOT_FOUND")
 
 
 def ensure_ids_exist(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     table: str,
     ids: list[str],
@@ -664,7 +665,7 @@ def ensure_ids_exist(
 ) -> None:
     if not ids:
         return
-    placeholders = ", ".join("?" for _ in ids)
+    placeholders = ", ".join("%s" for _ in ids)
     rows = conn.execute(
         f"SELECT id FROM {table} WHERE id IN ({placeholders})",
         ids,

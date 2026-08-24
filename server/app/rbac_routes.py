@@ -25,6 +25,8 @@ from app.auth import (
     authenticate_request,
     identity_source,
 )
+from app.customer_fence import BusinessDbDep
+from app.db_portable import BusinessConnection
 from app.media import storage_key_from_uri
 from app.media_routes import api_base_url
 from app.permissions import (
@@ -144,7 +146,7 @@ def _character_cache_lock(cache_name: str) -> LockType:
 
 
 def _populate_character_cache(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     row: sqlite3.Row,
 ) -> tuple[str, str]:
     cache_name, content_type = _character_cache_identity(row)
@@ -212,7 +214,7 @@ def _populate_character_cache(
     return cache_name, content_type
 
 
-def storage_for_asset(conn: sqlite3.Connection, storage_uri: str) -> StorageAdapter:
+def storage_for_asset(conn: BusinessConnection, storage_uri: str) -> StorageAdapter:
     reference = storage_object_ref_from_uri(storage_uri)
     if reference.provider == "local":
         local_storage = LocalStorageAdapter(root=local_storage_root(), bucket=reference.bucket)
@@ -295,7 +297,7 @@ def read_me(
 
 
 def write_login_failure(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     error: HTTPException,
     identity_source_name: str,
@@ -306,7 +308,7 @@ def write_login_failure(
     conn.execute(
         """
         INSERT INTO audit_logs (id, actor_user_id, action, entity_type, entity_id, metadata_json)
-        VALUES (?, NULL, ?, ?, ?, ?)
+        VALUES (%s, NULL, %s, %s, %s, %s)
         """,
         (
             str(uuid4()),
@@ -417,7 +419,7 @@ def list_projects(
                 ORDER BY assets.created_at DESC, assets.rowid DESC
                 LIMIT 1
             )
-            WHERE projects.owner_user_id = ?
+            WHERE projects.owner_user_id = %s
             ORDER BY projects.created_at DESC, projects.rowid DESC
             """,
             (actor.id,),
@@ -432,99 +434,99 @@ def list_projects(
 )
 def create_project(
     payload: CreateProjectRequest,
-    conn: Database,
-    actor: AuthenticatedUser,
+    db: BusinessDbDep,
 ) -> ProjectResponse:
-    require_not_auditor(
-        conn,
-        actor=actor,
-        action="project.create",
-        entity_type="project",
-        entity_id="new",
-    )
-    name = payload.name.strip()
-    if not name:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail={"code": "PROJECT_NAME_REQUIRED", "message": "Project name is required."},
+    with db.write() as (conn, actor):
+        require_not_auditor(
+            conn,
+            actor=actor,
+            action="project.create",
+            entity_type="project",
+            entity_id="new",
         )
+        name = payload.name.strip()
+        if not name:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={"code": "PROJECT_NAME_REQUIRED", "message": "Project name is required."},
+            )
 
-    project_id = str(uuid4())
-    with conn:
-        conn.execute(
-            """
-            INSERT INTO projects (id, owner_user_id, name)
-            VALUES (?, ?, ?)
-            """,
-            (project_id, actor.id, name),
+        project_id = str(uuid4())
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO projects (id, owner_user_id, name)
+                VALUES (%s, %s, %s)
+                """,
+                (project_id, actor.id, name),
+            )
+        write_audit(
+            conn,
+            actor=actor,
+            action="project.create",
+            entity_type="project",
+            entity_id=project_id,
+            metadata={"name": name},
         )
-    write_audit(
-        conn,
-        actor=actor,
-        action="project.create",
-        entity_type="project",
-        entity_id=project_id,
-        metadata={"name": name},
-    )
-    return ProjectResponse(
-        id=project_id,
-        owner_user_id=actor.id,
-        name=name,
-        status="ACTIVE",
-        reference_asset_id=None,
-        reference_upload_status="NOT_STARTED",
-        analysis_status="NOT_READY",
-    )
+        return ProjectResponse(
+            id=project_id,
+            owner_user_id=actor.id,
+            name=name,
+            status="ACTIVE",
+            reference_asset_id=None,
+            reference_upload_status="NOT_STARTED",
+            analysis_status="NOT_READY",
+        )
 
 
 @router.patch("/projects/{project_id}/name", response_model=ProjectResponse)
 def rename_project(
     project_id: str,
     payload: RenameProjectRequest,
-    conn: Database,
-    actor: AuthenticatedUser,
+    db: BusinessDbDep,
 ) -> ProjectResponse:
-    require_not_auditor(
-        conn,
-        actor=actor,
-        action="project.rename",
-        entity_type="project",
-        entity_id=project_id,
-    )
-    current_row = require_project_access(
-        conn,
-        actor=actor,
-        project_id=project_id,
-        action="project.rename",
-    )
+    with db.write() as (conn, actor):
+        require_not_auditor(
+            conn,
+            actor=actor,
+            action="project.rename",
+            entity_type="project",
+            entity_id=project_id,
+        )
+        current_row = require_project_access(
+            conn,
+            actor=actor,
+            project_id=project_id,
+            action="project.rename",
+        )
 
-    name = payload.name.strip()
-    if not name:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail={"code": "PROJECT_NAME_REQUIRED", "message": "Project name is required."},
+        name = payload.name.strip()
+        if not name:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={"code": "PROJECT_NAME_REQUIRED", "message": "Project name is required."},
+            )
+        with conn:
+            conn.execute(
+                """
+                UPDATE projects
+                SET name = %s, updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+                """,
+                (name, project_id),
+            )
+        write_audit(
+            conn,
+            actor=actor,
+            action="project.rename",
+            entity_type="project",
+            entity_id=project_id,
+            metadata={"from_name": str(current_row["name"]), "to_name": name},
         )
-    with conn:
-        conn.execute(
-            """
-            UPDATE projects
-            SET name = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-            """,
-            (name, project_id),
-        )
-    write_audit(
-        conn,
-        actor=actor,
-        action="project.rename",
-        entity_type="project",
-        entity_id=project_id,
-        metadata={"from_name": str(current_row["name"]), "to_name": name},
-    )
-    row = project_detail_row(conn, project_id)
-    if row is None:
-        raise RuntimeError("project disappeared after rename")
-    return project_response(row)
+        row = project_detail_row(conn, project_id)
+        if row is None:
+            raise RuntimeError("project disappeared after rename")
+        return project_response(row)
 
 
 @router.delete("/projects/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -550,7 +552,7 @@ def delete_project(
         SELECT 1
         FROM generation_tasks
         JOIN generation_batches ON generation_batches.id = generation_tasks.batch_id
-        WHERE generation_batches.project_id = ?
+        WHERE generation_batches.project_id = %s
           AND generation_tasks.status IN
               ('PENDING', 'SUBMITTING', 'QUEUED', 'RUNNING', 'ARCHIVING')
         LIMIT 1
@@ -570,13 +572,13 @@ def delete_project(
         """
         SELECT id, storage_uri, sha256, size_bytes
         FROM assets
-        WHERE project_id = ?
+        WHERE project_id = %s
         """,
         (project_id,),
     ).fetchall()
     versions_count = int(
         conn.execute(
-            "SELECT COUNT(*) FROM versions WHERE project_id = ?",
+            "SELECT COUNT(*) FROM versions WHERE project_id = %s",
             (project_id,),
         ).fetchone()[0]
     )
@@ -598,10 +600,10 @@ def delete_project(
         # character_reference_selections references versions with ON DELETE
         # RESTRICT, so it must be cleared before the cascade removes versions.
         conn.execute(
-            "DELETE FROM character_reference_selections WHERE project_id = ?",
+            "DELETE FROM character_reference_selections WHERE project_id = %s",
             (project_id,),
         )
-        conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+        conn.execute("DELETE FROM projects WHERE id = %s", (project_id,))
     write_audit(
         conn,
         actor=actor,
@@ -631,7 +633,7 @@ def read_project(
 
 
 def project_detail_row(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     project_id: str,
 ) -> sqlite3.Row | None:
     return cast(
@@ -678,7 +680,7 @@ def project_detail_row(
             ORDER BY assets.created_at DESC, assets.rowid DESC
             LIMIT 1
         )
-        WHERE projects.id = ?
+        WHERE projects.id = %s
         """,
             (project_id,),
         ).fetchone(),

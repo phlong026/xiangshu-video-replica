@@ -9,10 +9,11 @@ from fastapi import HTTPException
 
 from app.auth import CurrentUser, Role
 from app.character_policy import identity_values_are_current
+from app.db_portable import BusinessConnection
 
 
 def insert_audit(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     action: str,
@@ -23,7 +24,7 @@ def insert_audit(
     conn.execute(
         """
         INSERT INTO audit_logs (id, actor_user_id, action, entity_type, entity_id, metadata_json)
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s)
         """,
         (
             str(uuid4()),
@@ -37,7 +38,7 @@ def insert_audit(
 
 
 def write_audit(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     action: str,
@@ -57,7 +58,7 @@ def write_audit(
 
 
 def require_role(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     allowed_roles: set[Role],
@@ -83,7 +84,7 @@ def require_role(
 
 
 def require_not_auditor(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     action: str,
@@ -93,7 +94,7 @@ def require_not_auditor(
     require_role(
         conn,
         actor=actor,
-        allowed_roles={"employee", "admin"},
+        allowed_roles={"employee", "admin", "customer"},
         action=action,
         entity_type=entity_type,
         entity_id=entity_id,
@@ -101,7 +102,7 @@ def require_not_auditor(
 
 
 def require_project_access(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     project_id: str,
@@ -111,7 +112,7 @@ def require_project_access(
         """
         SELECT id, owner_user_id, name, status
         FROM projects
-        WHERE id = ?
+        WHERE id = %s
         """,
         (project_id,),
     ).fetchone()
@@ -139,7 +140,7 @@ def require_project_access(
 
 
 def require_asset_access(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     actor: CurrentUser,
     asset_id: str,
@@ -150,7 +151,7 @@ def require_asset_access(
         SELECT id, project_id, kind, storage_uri, sha256, size_bytes, content_type,
                metadata_json
         FROM assets
-        WHERE id = ?
+        WHERE id = %s
         """,
         (asset_id,),
     ).fetchone()
@@ -194,7 +195,7 @@ def require_asset_access(
           ON version.id = character_asset.character_version_id
         JOIN character_personas AS persona ON persona.id = version.persona_id
         JOIN person_identities AS identity ON identity.id = persona.identity_id
-        WHERE character_asset.asset_id = ?
+        WHERE character_asset.asset_id = %s
           AND character_asset.review_status = 'APPROVED'
           AND character_asset.is_published_selection = 1
           AND version.status = 'PUBLISHED'
@@ -228,7 +229,7 @@ def character_identity_is_current(row: sqlite3.Row) -> bool:
     )
 
 
-def _identity_from_asset_metadata(conn: sqlite3.Connection, row: sqlite3.Row) -> sqlite3.Row | None:
+def _identity_from_asset_metadata(conn: BusinessConnection, row: sqlite3.Row) -> sqlite3.Row | None:
     """Resolve the identity named in an asset's metadata, if any."""
     try:
         metadata = json.loads(str(row["metadata_json"] or ""))
@@ -245,7 +246,7 @@ def _identity_from_asset_metadata(conn: sqlite3.Connection, row: sqlite3.Row) ->
             source_quality_status,
             status AS identity_status
         FROM person_identities
-        WHERE id = ?
+        WHERE id = %s
         """,
         (identity_id,),
     ).fetchone()
@@ -253,7 +254,7 @@ def _identity_from_asset_metadata(conn: sqlite3.Connection, row: sqlite3.Row) ->
 
 
 def _published_contact_sheet_identity(
-    conn: sqlite3.Connection, row: sqlite3.Row
+    conn: BusinessConnection, row: sqlite3.Row
 ) -> sqlite3.Row | None:
     """Resolve the identity behind a contact sheet whose version is published."""
     try:
@@ -273,7 +274,7 @@ def _published_contact_sheet_identity(
         FROM character_versions AS version
         JOIN character_personas AS persona ON persona.id = version.persona_id
         JOIN person_identities AS identity ON identity.id = persona.identity_id
-        WHERE version.id = ?
+        WHERE version.id = %s
           AND version.status = 'PUBLISHED'
         LIMIT 1
         """,
@@ -282,13 +283,13 @@ def _published_contact_sheet_identity(
     return identity
 
 
-def project_id_for_task(conn: sqlite3.Connection, task_id: str) -> str:
+def project_id_for_task(conn: BusinessConnection, task_id: str) -> str:
     row = conn.execute(
         """
         SELECT generation_batches.project_id
         FROM generation_tasks
         JOIN generation_batches ON generation_batches.id = generation_tasks.batch_id
-        WHERE generation_tasks.id = ?
+        WHERE generation_tasks.id = %s
         """,
         (task_id,),
     ).fetchone()

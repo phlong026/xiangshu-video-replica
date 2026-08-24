@@ -17,6 +17,7 @@ from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from app.db import connect_database, initialize_database
+from app.db_portable import BusinessConnection
 from app.internal_accounts import create_user, issue_token
 from app.main import app
 from app.payment_routes import get_zpay_order_query_client
@@ -83,46 +84,47 @@ def payment_context(
     )
     monkeypatch.setenv("CONTROL_ADMIN_USER_ID", "admin_1")
 
-    with initialize_database(db_path) as conn:
-        admin = create_user(
-            conn,
-            username="internal_admin",
-            display_name="Internal Admin",
-            role="admin",
-            user_id="admin_1",
-        )
-        create_user(
-            conn,
-            username="operator_1",
-            display_name="Operator One",
-            user_id="user_1",
-        )
-        create_user(
-            conn,
-            username="operator_2",
-            display_name="Operator Two",
-            user_id="user_2",
-        )
-        user_token = issue_token(conn, user_id="user_1", raw_token="user-token")
-        other_token = issue_token(conn, user_id="user_2", raw_token="other-token")
-        SettingsRepository(conn).save_zpay_config(
-            {"pid": "merchant-123", "key": "merchant-secret", "enabled_channels": "alipay"},
-            actor_user_id=str(admin["user_id"]),
-        )
-        insert_pending_order(conn, order_id="order_1", user_id="user_1", order_no=ORDER_NO)
-        insert_pending_order(
-            conn,
-            order_id="order_2",
-            user_id="user_1",
-            order_no=SECOND_ORDER_NO,
-        )
-        insert_pending_order(
-            conn,
-            order_id="order_3",
-            user_id="user_2",
-            order_no=OTHER_ORDER_NO,
-        )
-        conn.commit()
+    with initialize_database(db_path) as raw:
+        with BusinessConnection.sqlite(raw) as conn:
+            admin = create_user(
+                conn,
+                username="internal_admin",
+                display_name="Internal Admin",
+                role="admin",
+                user_id="admin_1",
+            )
+            create_user(
+                conn,
+                username="operator_1",
+                display_name="Operator One",
+                user_id="user_1",
+            )
+            create_user(
+                conn,
+                username="operator_2",
+                display_name="Operator Two",
+                user_id="user_2",
+            )
+            user_token = issue_token(conn, user_id="user_1", raw_token="user-token")
+            other_token = issue_token(conn, user_id="user_2", raw_token="other-token")
+            SettingsRepository(conn).save_zpay_config(
+                {"pid": "merchant-123", "key": "merchant-secret", "enabled_channels": "alipay"},
+                actor_user_id=str(admin["user_id"]),
+            )
+            insert_pending_order(conn, order_id="order_1", user_id="user_1", order_no=ORDER_NO)
+            insert_pending_order(
+                conn,
+                order_id="order_2",
+                user_id="user_1",
+                order_no=SECOND_ORDER_NO,
+            )
+            insert_pending_order(
+                conn,
+                order_id="order_3",
+                user_id="user_2",
+                order_no=OTHER_ORDER_NO,
+            )
+            conn.commit()
 
     try:
         with TestClient(app) as client:
@@ -160,7 +162,7 @@ def signed_notify_params(
 
 
 def wallet_snapshot(db_path: Path, user_id: str = "user_1") -> tuple[int, int, int]:
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         wallet = conn.execute(
             "SELECT available_credits, reserved_credits FROM wallets WHERE user_id = ?",
             (user_id,),
@@ -185,7 +187,7 @@ def test_valid_notify_credits_wallet_and_duplicate_notify_is_idempotent(
     assert second.status_code == 200
     assert second.text == "success"
     assert wallet_snapshot(payment_context.db_path) == (10, 0, 1)
-    with connect_database(payment_context.db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(payment_context.db_path)) as conn:
         order = conn.execute(
             """
             SELECT status, provider_trade_no, paid_at, notify_digest
@@ -299,7 +301,7 @@ def test_concurrent_duplicate_notifies_credit_once(payment_context: PaymentTestC
 def test_notify_returns_non_success_before_zpay_timeout_when_database_is_locked(
     payment_context: PaymentTestContext,
 ) -> None:
-    with connect_database(payment_context.db_path) as locker:
+    with BusinessConnection.sqlite(connect_database(payment_context.db_path)) as locker:
         locker.execute("BEGIN IMMEDIATE")
         started = time.monotonic()
         response = payment_context.client.get(
@@ -394,7 +396,7 @@ def test_control_sync_keeps_unpaid_order_pending(payment_context: PaymentTestCon
     assert response.json()["status"] == "PENDING"
     assert fake.calls == [ORDER_NO]
     assert wallet_snapshot(payment_context.db_path) == (0, 0, 0)
-    with connect_database(payment_context.db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(payment_context.db_path)) as conn:
         trade_no = conn.execute(
             "SELECT provider_trade_no FROM recharge_orders WHERE merchant_order_no = ?",
             (ORDER_NO,),

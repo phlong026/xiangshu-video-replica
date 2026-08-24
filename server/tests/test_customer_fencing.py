@@ -129,6 +129,7 @@ def route_state(fencing_dsn: str) -> Iterator[str]:
             "activation_code_deliveries, activation_code_exports, activation_codes, "
             "activation_code_batches, admin_write_idempotency, admin_sessions, "
             "wallet_transactions, recharge_orders, wallets, users, "
+            "projects, audit_logs, "
             "security_rate_limit_counters, security_auth_failures CASCADE"
         )
         conn.execute("SET session_replication_role = DEFAULT")
@@ -143,11 +144,34 @@ def route_state(fencing_dsn: str) -> Iterator[str]:
 @pytest.fixture()
 def customer_app(monkeypatch: pytest.MonkeyPatch, route_state: str) -> Iterator[FastAPI]:
     from app.activation_code_routes import router as activation_code_router
+    from app.analysis_routes import router as analysis_router
+    from app.character_reference_routes import router as character_reference_router
+    from app.character_routes import router as character_router
     from app.customer_session_routes import router as customer_session_router
+    from app.first_frame_routes import router as first_frame_router
+    from app.generation_routes import router as generation_router
+    from app.media_routes import router as media_router
+    from app.rbac_routes import router as rbac_router
+    from app.recharge_routes import router as recharge_router
+    from app.simple_character_routes import router as simple_character_router
+    from app.source_frame_routes import router as source_frame_router
 
     app = FastAPI()
-    app.include_router(activation_code_router)
-    app.include_router(customer_session_router)
+    for r in (
+        activation_code_router,
+        customer_session_router,
+        rbac_router,
+        media_router,
+        recharge_router,
+        analysis_router,
+        first_frame_router,
+        source_frame_router,
+        simple_character_router,
+        character_router,
+        character_reference_router,
+        generation_router,
+    ):
+        app.include_router(r)
     monkeypatch.setenv(DATABASE_URL_ENV, route_state)
     monkeypatch.delenv("VIDEO_REPLICA_CUSTOMER_PRODUCTION", raising=False)
     monkeypatch.setenv(ACTIVATION_CODE_HMAC_KEY_ENV, TEST_KEY)
@@ -161,6 +185,25 @@ def customer_app(monkeypatch: pytest.MonkeyPatch, route_state: str) -> Iterator[
     monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_ACTIVATE_CODE", "1000")
     monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_LOGIN_IP", "1000")
     monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_WINDOW_SECONDS", "300")
+
+    # The migrated write routes' storage/provider/extractor dependencies read
+    # get_database (a SQLite path) which is absent on the customer lane; the
+    # gate tests only exercise the session snapshot 401 (before the route body),
+    # so inert fakes are enough for dependency resolution.
+    from app.character_identity_routes import get_character_storage
+    from app.first_frame_routes import get_image_provider
+    from app.media_routes import get_media_storage, get_video_probe
+    from app.source_frame_routes import get_source_frame_extractor
+
+    for dep in (
+        get_media_storage,
+        get_image_provider,
+        get_character_storage,
+        get_source_frame_extractor,
+        get_video_probe,
+    ):
+        app.dependency_overrides[dep] = lambda: object()
+
     yield app
 
 
@@ -656,3 +699,243 @@ def test_code_status_gate_locks_the_code_through_establishment(
     with psycopg.connect(_fencing_dsn(), autocommit=True) as conn:
         row = conn.execute("SELECT status FROM activation_codes WHERE id = 'code-a'").fetchone()
     assert str(row[0]) == "ACTIVE"
+
+
+# ---------------------------------------------------------------------------
+# T21 wiring — the customer business write route (SES-04, plan C)
+# ---------------------------------------------------------------------------
+
+PROJECTS_PATH = "/api/projects"
+
+
+def _business_login(client: TestClient, customer: dict, key: str) -> str:
+    resp = client.post(
+        LOGIN_PATH,
+        json={},
+        headers={**_bearer(customer["device_token"]), IDEMPOTENCY_KEY_HEADER: key},
+    )
+    assert resp.status_code == 201, resp.text
+    return str(resp.json()["session_token"])
+
+
+def test_customer_creates_a_project_owned_by_them(client: TestClient) -> None:
+    """The migrated write route runs the customer's session through
+    fenced_pg_transaction and attributes the project to the session's user."""
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    token = _business_login(client, customer, "idem-login-a")
+    resp = client.post(PROJECTS_PATH, json={"name": "Customer Project"}, headers=_bearer(token))
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["owner_user_id"] == customer["user_id"]
+    with psycopg.connect(_fencing_dsn(), autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT owner_user_id FROM projects WHERE name = 'Customer Project'"
+        ).fetchone()
+    assert str(row[0]) == customer["user_id"]
+
+
+def test_other_customer_cannot_touch_a_foreign_project(client: TestClient) -> None:
+    """Two-code IDOR: B's fenced session cannot rename A's project — 403
+    PROJECT_FORBIDDEN inside the business write transaction."""
+    alice = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    bob = _activated_customer(client, code=SECOND_CODE, fingerprint="fp-b", suffix="b")
+    alice_token = _business_login(client, alice, "idem-login-alice")
+    created = client.post(
+        PROJECTS_PATH, json={"name": "Alice Project"}, headers=_bearer(alice_token)
+    )
+    assert created.status_code == 201, created.text
+    project_id = created.json()["id"]
+
+    bob_token = _business_login(client, bob, "idem-login-bob")
+    renamed = client.patch(
+        f"{PROJECTS_PATH}/{project_id}/name",
+        json={"name": "Hijack"},
+        headers=_bearer(bob_token),
+    )
+    assert renamed.status_code == 403, renamed.text
+    assert renamed.json()["detail"]["code"] == "PROJECT_FORBIDDEN"
+    with psycopg.connect(_fencing_dsn(), autocommit=True) as conn:
+        row = conn.execute("SELECT name FROM projects WHERE id = %s", (project_id,)).fetchone()
+    assert str(row[0]) == "Alice Project"
+
+
+def test_unknown_session_token_cannot_create_a_project(client: TestClient) -> None:
+    """The early snapshot gate 401s a session token that owns no live row, and
+    no project lands. (The snapshot-vs-transaction epoch race itself is locked
+    at the fenced_pg_transaction helper level.)"""
+    _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    resp = client.post(
+        PROJECTS_PATH,
+        json={"name": "Stale"},
+        headers=_bearer(secrets.token_urlsafe(32)),
+    )
+    assert resp.status_code == 401, resp.text
+    assert resp.json()["detail"]["code"] == "SESSION_REPLACED"
+    with psycopg.connect(_fencing_dsn(), autocommit=True) as conn:
+        row = conn.execute("SELECT count(*) FROM projects WHERE name = 'Stale'").fetchone()
+    assert int(row[0]) == 0
+
+
+# ---------------------------------------------------------------------------
+# SES-04 gate — every migrated write route answers 401 for a session token
+# that owns no live row (proves the route is wired through the fenced path)
+# ---------------------------------------------------------------------------
+
+_GARBAGE_TOKEN = "no-such-session-token"
+
+_GATED_WRITE_ROUTES: list[tuple[str, str, dict[str, object] | None]] = [
+    ("post", "/api/projects", {"name": "x"}),
+    ("patch", "/api/projects/p-nonexistent/name", {"name": "x"}),
+    (
+        "post",
+        "/api/assets/upload-intent",
+        {
+            "project_id": "p-nonexistent",
+            "filename": "a.mp4",
+            "content_type": "video/mp4",
+            "size_bytes": 1,
+        },
+    ),
+    ("post", "/api/assets/a-nonexistent/complete", None),
+    ("post", "/api/recharge-orders", {"amount_fen": 100}),
+    ("post", "/api/projects/p-nonexistent/analysis", {"asset_id": "a-nonexistent"}),
+    ("put", "/api/analysis/v-nonexistent/shots", {"shots": []}),
+    ("post", "/api/projects/p-nonexistent/first-frames/generate", {"model": "x", "quantity": 1}),
+    (
+        "post",
+        "/api/projects/p-nonexistent/first-frames/confirm",
+        {"first_frame_asset_id": "a-nonexistent"},
+    ),
+    ("post", "/api/projects/p-nonexistent/source-frames/extract", {"asset_id": "a-nonexistent"}),
+    (
+        "post",
+        "/api/projects/p-nonexistent/source-frames/confirm",
+        {"source_frame_asset_id": "a-nonexistent"},
+    ),
+    ("patch", "/api/simple-characters/identities/i-nonexistent/name", {"display_name": "x"}),
+    ("post", "/api/simple-characters/identities/i-nonexistent/regenerate-contact-sheet", None),
+    ("delete", "/api/simple-characters/identities/i-nonexistent", None),
+    (
+        "post",
+        "/api/projects/p-nonexistent/character-reference-selection",
+        {"selected_asset_ids": []},
+    ),
+    ("put", "/api/projects/p-nonexistent/main-character", {"character_id": "c-nonexistent"}),
+    ("post", "/api/projects/p-nonexistent/scripts", {"text": "x", "source": "custom"}),
+    ("post", "/api/projects/p-nonexistent/prompts/compile", {"script_version_id": "v-nonexistent"}),
+    ("post", "/api/projects/p-nonexistent/prompts/revise", {"text": "x"}),
+    ("post", "/api/projects/p-nonexistent/prompts/v-nonexistent/lock", None),
+    ("post", "/api/projects/p-nonexistent/generation-batches", None),
+    ("patch", "/api/generation-batches/b-nonexistent/name", {"display_name": "x"}),
+    ("delete", "/api/generation-batches/b-nonexistent", None),
+    ("post", "/api/generation-batches/b-nonexistent/regenerate", None),
+    ("post", "/api/generation-tasks/t-nonexistent/retry", None),
+    ("post", "/api/generation-tasks/t-nonexistent/regenerate", None),
+    ("post", "/api/generation-tasks/t-nonexistent/reconcile", None),
+]
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "body"),
+    _GATED_WRITE_ROUTES,
+    ids=[f"{m}-{p}" for m, p, _ in _GATED_WRITE_ROUTES],
+)
+def test_every_migrated_write_route_is_fenced(
+    client: TestClient, method: str, path: str, body: dict[str, object] | None
+) -> None:
+    """SES-04: a session token that owns no live row is refused 401 at the
+    snapshot gate on every migrated write route — none of them fall through to
+    the internal lane or reach their business logic."""
+    _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    kwargs: dict[str, object] = {"headers": _bearer(_GARBAGE_TOKEN)}
+    if body is not None:
+        kwargs["json"] = body
+    resp = client.request(method, path, **kwargs)
+    assert resp.status_code == 401, (method, path, resp.text)
+    code = resp.json()["detail"]["code"]
+    assert code in {"SESSION_REPLACED", "SESSION_TOKEN_REQUIRED"}, (method, path, code)
+
+
+# ---------------------------------------------------------------------------
+# T21 wiring — fenced_pg_transaction (SES-04)
+# ---------------------------------------------------------------------------
+
+
+def _snapshot_for(customer: dict) -> object:
+    """Build the early CustomerSessionSnapshot the route dependency would."""
+    from app.customer_fence import CustomerSessionSnapshot
+
+    device_id, session_id, epoch, lease = _session_row()
+    return CustomerSessionSnapshot(
+        token=customer["session_token"],
+        expected_user_id=customer["user_id"],
+        expected_device_id=device_id,
+        expected_session_id=session_id,
+        expected_session_epoch=epoch,
+        expected_lease_until=lease,
+    )
+
+
+def _count_projects() -> int:
+    with psycopg.connect(_fencing_dsn(), autocommit=True) as conn:
+        row = conn.execute("SELECT count(*) FROM projects").fetchone()
+    return int(row[0])
+
+
+def test_fenced_transaction_yields_the_context_and_commits(client: TestClient) -> None:
+    """SES-04 happy path: a valid snapshot passes the in-transaction
+    re-verification, the business write commits with the session context."""
+    from app.customer_fence import fenced_pg_transaction
+
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    snapshot = _snapshot_for(customer)
+    with fenced_pg_transaction(snapshot) as (conn, ctx):
+        assert ctx.user_id == customer["user_id"]
+        assert ctx.session_epoch == 1
+        conn.execute(
+            "INSERT INTO projects (id, owner_user_id, name) VALUES (%s, %s, %s)",
+            ("p-happy", customer["user_id"], "Happy Project"),
+        )
+    assert _count_projects() == 1
+
+
+def test_fenced_transaction_fences_a_stale_snapshot_and_leaves_no_write(
+    client: TestClient,
+) -> None:
+    """SES-04 §11.1: a request that passed the early snapshot but whose
+    session was switched before the business transaction is fenced 401
+    SESSION_REPLACED and its write never lands."""
+    from fastapi import HTTPException
+
+    from app.customer_fence import fenced_pg_transaction
+
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    snapshot = _snapshot_for(customer)
+    # The switch bumps the session epoch after the snapshot was taken.
+    with psycopg.connect(_fencing_dsn(), autocommit=True) as conn:
+        conn.execute("UPDATE customer_session_state SET session_epoch = session_epoch + 1")
+    with pytest.raises(HTTPException) as ei:
+        with fenced_pg_transaction(snapshot) as (conn, _ctx):
+            conn.execute(
+                "INSERT INTO projects (id, owner_user_id, name) VALUES (%s, %s, %s)",
+                ("p-stale", customer["user_id"], "Stale Project"),
+            )
+    assert ei.value.status_code == 401
+    assert ei.value.detail["code"] == "SESSION_REPLACED"
+    assert _count_projects() == 0
+
+
+def test_fenced_transaction_rolls_back_a_failed_business_write(client: TestClient) -> None:
+    """SES-04: a business error inside the fenced transaction rolls the whole
+    transaction back — no partial write survives."""
+    from app.customer_fence import fenced_pg_transaction
+
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    snapshot = _snapshot_for(customer)
+    with pytest.raises(RuntimeError):
+        with fenced_pg_transaction(snapshot) as (conn, _ctx):
+            conn.execute(
+                "INSERT INTO projects (id, owner_user_id, name) VALUES (%s, %s, %s)",
+                ("p-rollback", customer["user_id"], "Rollback Project"),
+            )
+            raise RuntimeError("boom")
+    assert _count_projects() == 0

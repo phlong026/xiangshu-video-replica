@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import sqlite3
 import time
 from pathlib import Path
 
@@ -21,6 +20,7 @@ from app.db_pg import (
     resolve_database_config,
     validate_customer_production,
 )
+from app.db_portable import BusinessConnection
 from app.generation import run_next_generation_task
 from app.media_routes import get_media_storage
 from app.storage import StorageAdapter
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 
 def run_worker_once(
-    conn: sqlite3.Connection,
+    conn: BusinessConnection,
     *,
     worker_id: str,
     storage: StorageAdapter,
@@ -79,7 +79,7 @@ def run_worker_once(
 def run_forever(*, db_path: Path, worker_id: str, idle_seconds: float) -> None:
     while True:
         try:
-            with connect_database(db_path) as conn:
+            with BusinessConnection.sqlite(connect_database(db_path)) as conn:
                 # 云端模式下所有需要持久保留的生成资产都进入 COS；
                 # 未配置 COS 的桌面开发环境仍由 get_media_storage 回退本地盘。
                 asset_storage = get_media_storage(conn)
@@ -149,7 +149,7 @@ def main() -> None:
     db_path = Path(db_path_value)
 
     if args.once:
-        with connect_database(db_path) as conn:
+        with BusinessConnection.sqlite(connect_database(db_path)) as conn:
             asset_storage = get_media_storage(conn)
             processed = run_worker_once(
                 conn,

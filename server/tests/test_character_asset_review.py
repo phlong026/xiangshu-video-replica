@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sqlite3
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +18,7 @@ from app.character_identity import (
 from app.character_identity_routes import get_character_storage
 from app.character_image_generation import deterministic_png
 from app.db import connect_database, initialize_database
+from app.db_portable import BusinessConnection
 from app.main import app
 from app.media_routes import get_media_storage
 from app.storage import FakeStorageAdapter, StorageBackendUnavailable
@@ -58,8 +58,8 @@ def storage() -> FakeStorageAdapter:
 
 @pytest.fixture()
 def client(db_path: Path, storage: FakeStorageAdapter) -> Iterator[TestClient]:
-    def database_override() -> Iterator[sqlite3.Connection]:
-        conn = connect_database(db_path)
+    def database_override() -> Iterator[BusinessConnection]:
+        conn = BusinessConnection.sqlite(connect_database(db_path))
         try:
             yield conn
         finally:
@@ -100,7 +100,7 @@ def seed_reviewing_version(
     )
     selected_by_view: dict[str, str] = {}
     generated_asset_by_view: dict[str, str] = {}
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.executemany(
             """
             INSERT INTO assets (
@@ -332,7 +332,7 @@ def test_admin_review_is_append_only_and_roles_fail_closed(
     assert approved.status_code == 201
     assert history.status_code == 200
     assert [review["decision"] for review in history.json()] == ["REJECTED", "APPROVED"]
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         asset_status = conn.execute(
             "SELECT review_status FROM character_assets WHERE id = ?",
             (asset_id,),
@@ -406,7 +406,7 @@ def test_publish_freezes_seven_approved_assets_and_is_idempotent(
         == "CHARACTER_VERSION_ALREADY_PUBLISHED_DIFFERENT_SELECTION"
     )
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         selected = conn.execute(
             """
             SELECT character_asset.view_type, character_asset.id,
@@ -498,7 +498,7 @@ def test_publish_rejects_incomplete_unapproved_active_or_revoked_state(
     assert unapproved.json()["detail"]["code"] == "CHARACTER_PUBLISH_SELECTION_NOT_APPROVED"
 
     approve_all(client, seeded)
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             """
             INSERT INTO character_generation_tasks (
@@ -521,7 +521,7 @@ def test_publish_rejects_incomplete_unapproved_active_or_revoked_state(
     assert active.status_code == 409
     assert active.json()["detail"]["code"] == "CHARACTER_PUBLISH_TASKS_ACTIVE"
 
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute("DELETE FROM character_generation_tasks WHERE id = 'active-task'")
         conn.execute(
             """
@@ -575,7 +575,7 @@ def test_publish_storage_failure_removes_partial_approved_objects(
     assert response.json()["detail"]["code"] == "CHARACTER_PUBLICATION_STORAGE_UNAVAILABLE"
     assert len(approved_keys) == 3
     assert all(storage.head_object(key) is None for key in approved_keys)
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         version = conn.execute(
             "SELECT status, publication_snapshot_json FROM character_versions WHERE id = ?",
             (seeded.version_id,),
@@ -599,7 +599,7 @@ def test_publish_rejects_non_png_candidate_before_copying(
 ) -> None:
     seeded = seed_reviewing_version(db_path, storage)
     approve_all(client, seeded)
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         conn.execute(
             "UPDATE assets SET content_type = 'application/octet-stream' WHERE id = ?",
             (seeded.generated_asset_by_view["FRONT_FACE"],),
@@ -638,7 +638,7 @@ def test_publish_revalidates_version_after_approved_object_copy(
         if "/approved/" in key:
             approved_keys.append(key)
             if len(approved_keys) == 1:
-                with connect_database(db_path) as conn:
+                with BusinessConnection.sqlite(connect_database(db_path)) as conn:
                     conn.execute(
                         "UPDATE character_versions SET status = 'ARCHIVED' WHERE id = ?",
                         (seeded.version_id,),
@@ -657,7 +657,7 @@ def test_publish_revalidates_version_after_approved_object_copy(
     assert response.json()["detail"]["code"] == "CHARACTER_VERSION_IMMUTABLE"
     assert len(approved_keys) == 7
     assert all(storage.head_object(key) is None for key in approved_keys)
-    with connect_database(db_path) as conn:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         version = conn.execute(
             "SELECT status, publication_snapshot_json FROM character_versions WHERE id = ?",
             (seeded.version_id,),
