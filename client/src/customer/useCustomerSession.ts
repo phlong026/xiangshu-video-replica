@@ -117,6 +117,12 @@ export function useCustomerSession(
   const [user, setUser] = useState<CustomerWorkspaceUser | null>(null);
   const sessionTokenRef = useRef<string | null>(null);
   const bootstrappedRef = useRef(false);
+  
+  // For the current activation attempt, retain this key until final outcome to
+  // enable retries when the response is lost/timed out. The server can recover
+  // by replaying the original key; a new key would reject the already-consumed
+  // activation code and leave the customer stranded.
+  const currentActivationIdempotencyKeyRef = useRef<string | null>(null);
 
   const establishSession = useCallback(
     async (deviceToken: string) => {
@@ -284,13 +290,23 @@ export function useCustomerSession(
       setError(null);
       setConflict(null);
       try {
+        // Generate or reuse the idempotency key for this activation attempt
+        const idempotencyKey = 
+          currentActivationIdempotencyKeyRef.current ?? newIdempotencyKey();
+        if (!currentActivationIdempotencyKeyRef.current) {
+          currentActivationIdempotencyKeyRef.current = idempotencyKey;
+        }
+        
         const response = await customerActivate({
           activationCode: input.activationCode,
           deviceFingerprint: await store.deviceInstanceId(),
           deviceName: input.deviceName,
           devicePlatform: store.devicePlatform(),
-          idempotencyKey: newIdempotencyKey(),
+          idempotencyKey,
         });
+        
+        // Clear the key only after successful activation completion
+        currentActivationIdempotencyKeyRef.current = null;
         try {
           await store.saveActivation(
             response.device_token,
@@ -328,7 +344,20 @@ export function useCustomerSession(
     setConflict(null);
     setIsBusy(true);
     try {
-      const deviceToken = await store.loadDeviceCredentialToken();
+      let deviceToken: string | null = null;
+      
+      try {
+        deviceToken = await store.loadDeviceCredentialToken();
+      } catch (loadCause) {
+        // Surface credential-load failures during manual login by transitioning
+        // to credential-missing state with a readable error, matching the boot
+        // path behavior. This avoids unhandled rejections with no recovery.
+        const storeError = credentialStoreError(loadCause);
+        setError(storeError);
+        dispatch({ type: "credential-missing" });
+        return;
+      }
+      
       if (deviceToken === null) {
         // The stored device credential vanished (vault cleared / I/O failure):
         // back to activation for recovery.
