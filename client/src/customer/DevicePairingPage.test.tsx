@@ -7,6 +7,29 @@ declare const window: Window & {
   fetch: typeof globalThis.fetch;
 };
 
+/** The transport reads response.headers (X-Idempotent-Replay) and parses the
+ * JSON body, so the fetch mock has to look like a real Response envelope. */
+function mockResponse(status: number, body: unknown) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: new Headers(),
+    json: vi.fn().mockResolvedValue(body),
+  };
+}
+
+function fillForm() {
+  fireEvent.change(screen.getByLabelText(/activation code/i), {
+    target: { value: "XS04-TESTCODE-CODECODE-CODECODE" },
+  });
+  fireEvent.change(screen.getByLabelText(/device fingerprint/i), {
+    target: { value: "Test Device •••• AB12" },
+  });
+  fireEvent.change(screen.getByLabelText(/device name/i), {
+    target: { value: "My Test Device" },
+  });
+}
+
 describe("DevicePairingPage (FE-03 / T30)", () => {
   const mockOnSuccess = vi.fn();
   const mockOnError = vi.fn();
@@ -36,13 +59,23 @@ describe("DevicePairingPage (FE-03 / T30)", () => {
     expect(screen.getByLabelText(/device name/i)).toBeInTheDocument();
   });
 
+  it("collects the activation code from the user instead of hardcoding it", () => {
+    renderWithProps();
+    expect(screen.getByLabelText(/activation code/i)).toHaveAttribute(
+      "required",
+    );
+  });
+
   it("validates required fields are not empty", () => {
     renderWithProps();
 
     // Try to submit without filling fields
     fireEvent.click(screen.getByRole("button", { name: /enroll device/i }));
 
-    // Both fields should be marked as required/error
+    // Every field should be marked as required
+    expect(screen.getByLabelText(/activation code/i)).toHaveAttribute(
+      "required",
+    );
     expect(screen.getByLabelText(/device fingerprint/i)).toHaveAttribute(
       "required",
     );
@@ -53,13 +86,7 @@ describe("DevicePairingPage (FE-03 / T30)", () => {
     const mockAsyncOnSuccess = vi.fn();
     renderWithProps({ onSuccess: mockAsyncOnSuccess });
 
-    // Fill in the form
-    fireEvent.change(screen.getByLabelText(/device fingerprint/i), {
-      target: { value: "Test Device •••• AB12" },
-    });
-    fireEvent.change(screen.getByLabelText(/device name/i), {
-      target: { value: "My Test Device" },
-    });
+    fillForm();
 
     // Click enroll before API call completes
     fireEvent.click(screen.getByRole("button", { name: /enroll device/i }));
@@ -71,39 +98,80 @@ describe("DevicePairingPage (FE-03 / T30)", () => {
     });
   });
 
-  it("calls onSuccess callback when enrollment completes successfully", async () => {
+  it("enrolls through the customer adapter with an Idempotency-Key and the user's activation code", async () => {
+    const mockSuccess = vi.fn();
+    const originalFetch = window.fetch;
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      mockResponse(202, {
+        pairing_request_id: "test-id",
+        status: "pending",
+        expires_at: new Date(Date.now() + 3600_000).toISOString(),
+      }),
+    );
+
+    try {
+      window.fetch = fetchMock as unknown as typeof window.fetch;
+
+      renderWithProps({ onSuccess: mockSuccess });
+      fillForm();
+      fireEvent.click(screen.getByRole("button", { name: /enroll device/i }));
+
+      await waitFor(
+        () => {
+          expect(mockSuccess).toHaveBeenCalledTimes(1);
+        },
+        { timeout: 1000 },
+      );
+
+      // The enroll route rejects any request without an Idempotency-Key.
+      const [, init] = fetchMock.mock.calls[0] as unknown as [
+        string,
+        RequestInit,
+      ];
+      const headers = init.headers as Headers;
+      expect(headers.get("Idempotency-Key")).toMatch(
+        /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/,
+      );
+      expect(headers.get("X-Request-Id")).toBeTruthy();
+
+      const requestBody = JSON.parse(init.body as string);
+      expect(requestBody).toMatchObject({
+        activation_code: "XS04-TESTCODE-CODECODE-CODECODE",
+        device_fingerprint: "Test Device •••• AB12",
+        device_name: "My Test Device",
+      });
+
+      // HTTP 202 maps to the pending pairing state.
+      expect(mockSuccess).toHaveBeenCalledWith({
+        status: "pending",
+        data: expect.objectContaining({ pairing_request_id: "test-id" }),
+      });
+    } finally {
+      window.fetch = originalFetch;
+    }
+  });
+
+  it("maps an immediate consume (HTTP 201) to the consumed state", async () => {
     const mockSuccess = vi.fn();
     const originalFetch = window.fetch;
 
     try {
-      // Mock fetch to return success response
-      window.fetch = vi.fn().mockResolvedValueOnce({
-        ok: true,
-        status: 202,
-        json: vi.fn().mockResolvedValueOnce({
-          pairing_request_id: "test-id",
-          status: "pending",
-          expires_at: new Date(Date.now() + 3600_000).toISOString(),
-        }),
-      });
+      window.fetch = vi
+        .fn()
+        .mockResolvedValueOnce(
+          mockResponse(201, { session_token: "consumed-body" }),
+        ) as unknown as typeof window.fetch;
 
       renderWithProps({ onSuccess: mockSuccess });
-
-      // Fill in the form
-      fireEvent.change(screen.getByLabelText(/device fingerprint/i), {
-        target: { value: "Test Device •••• AB12" },
-      });
-      fireEvent.change(screen.getByLabelText(/device name/i), {
-        target: { value: "My Test Device" },
-      });
-
-      // Submit
+      fillForm();
       fireEvent.click(screen.getByRole("button", { name: /enroll device/i }));
 
-      // Wait for async operation
       await waitFor(
         () => {
-          expect(mockSuccess).toHaveBeenCalled();
+          expect(mockSuccess).toHaveBeenCalledWith({
+            status: "consumed",
+            data: expect.objectContaining({ session_token: "consumed-body" }),
+          });
         },
         { timeout: 1000 },
       );
@@ -117,32 +185,19 @@ describe("DevicePairingPage (FE-03 / T30)", () => {
     const originalFetch = window.fetch;
 
     try {
-      // Mock fetch to return error response
-      window.fetch = vi.fn().mockResolvedValueOnce({
-        ok: false,
-        status: 400,
-        json: vi
-          .fn()
-          .mockResolvedValueOnce({ message: "Invalid activation code" }),
-      });
+      window.fetch = vi
+        .fn()
+        .mockResolvedValueOnce(
+          mockResponse(400, { message: "Invalid activation code" }),
+        ) as unknown as typeof window.fetch;
 
       renderWithProps({ onError: mockError });
-
-      // Fill in the form
-      fireEvent.change(screen.getByLabelText(/device fingerprint/i), {
-        target: { value: "Test Device •••• AB12" },
-      });
-      fireEvent.change(screen.getByLabelText(/device name/i), {
-        target: { value: "My Test Device" },
-      });
-
-      // Submit
+      fillForm();
       fireEvent.click(screen.getByRole("button", { name: /enroll device/i }));
 
-      // Wait for async operation and error handling
       await waitFor(
         () => {
-          expect(mockError).toHaveBeenCalled();
+          expect(mockError).toHaveBeenCalledTimes(1);
         },
         { timeout: 1000 },
       );

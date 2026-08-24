@@ -1,7 +1,10 @@
 import { useState } from "react";
+import { customerEnrollDevice } from "../api";
 
 /** Second-device pairing enrollment page (FE-03 / T30).
- * Collects device fingerprint and name, calls the enroll API.
+ * Collects the activation code, device fingerprint and name, and enrolls
+ * through the customer API adapter so the request carries the
+ * Idempotency-Key the server's enroll route requires (T17 / DEV-02).
  */
 export function DevicePairingPage({
   onSuccess,
@@ -16,38 +19,27 @@ export function DevicePairingPage({
   onCancel: () => void;
 }): React.JSX.Element {
   const [isBusy, setIsBusy] = useState(false);
+  const [activationCode, setActivationCode] = useState("");
   const [deviceFingerprint, setDeviceFingerprint] = useState("");
   const [deviceName, setDeviceName] = useState("");
 
   const handleEnroll = async () => {
     setIsBusy(true);
     try {
-      // In production this would call customerEnrollDevice()
-      const response = await fetch("/api/customer/devices/enroll", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          activation_code: "", // Would come from user input
-          device_fingerprint: deviceFingerprint,
-          device_name: deviceName,
-          device_platform: "web",
-        }),
+      const result = await customerEnrollDevice({
+        activationCode: activationCode.trim(),
+        deviceFingerprint: deviceFingerprint.trim(),
+        deviceName: deviceName.trim(),
+        devicePlatform: "web",
+        // Every enrollment attempt gets its own key; the transport adds the
+        // X-Request-Id correlation id.
+        idempotencyKey: crypto.randomUUID(),
       });
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({
-          message: "Failed to enroll device",
-        }));
-        throw new Error(errorData.message || "Failed to enroll device");
+      if (result.status === 202) {
+        onSuccess({ status: "pending", data: result.pending });
+      } else {
+        onSuccess({ status: "consumed", data: result.credential });
       }
-
-      const data = await response.json();
-      onSuccess({
-        status: data.status === "pending" ? "pending" : "consumed",
-        data,
-      });
     } catch (cause) {
       const error = cause instanceof Error ? cause : new Error(String(cause));
       onError(error);
@@ -67,6 +59,19 @@ export function DevicePairingPage({
 
       <form onSubmit={(e) => e.preventDefault()} className="pairing-form">
         <div className="form-group">
+          <label htmlFor="activation-code">Activation Code</label>
+          <input
+            type="text"
+            id="activation-code"
+            value={activationCode}
+            onChange={(e) => setActivationCode(e.target.value)}
+            placeholder="XS04-XXXXXXX-XXXXXXX-XXXXXXX-XXXXXXX"
+            autoComplete="off"
+            required
+            aria-required="true"
+          />
+        </div>
+        <div className="form-group">
           <label htmlFor="device-fingerprint">Device Fingerprint</label>
           <input
             type="text"
@@ -78,7 +83,6 @@ export function DevicePairingPage({
             aria-required="true"
           />
         </div>
-
         <div className="form-group">
           <label htmlFor="device-name">Device Name</label>
           <input
@@ -91,7 +95,6 @@ export function DevicePairingPage({
             aria-required="true"
           />
         </div>
-
         <div className="form-actions">
           <button
             type="button"
