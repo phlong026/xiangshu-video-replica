@@ -532,10 +532,11 @@ def customer_app(monkeypatch: pytest.MonkeyPatch, clean_state: str) -> Iterator[
     # Now import routers after env vars are set
     from app.activation_code_routes import router as activation_code_router
     from app.customer_session_routes import router as customer_session_router
+    from app.payment_routes import router as payment_router
     from app.recharge_routes import router as recharge_router
 
     app = FastAPI()
-    for r in (activation_code_router, customer_session_router, recharge_router):
+    for r in (activation_code_router, customer_session_router, recharge_router, payment_router):
         app.include_router(r)
 
     with psycopg.connect(clean_state) as conn:
@@ -760,3 +761,84 @@ def test_customer_recharge_order_status_requires_session(
     response = client.get("/api/customer/recharge-orders/any-order-no")
     assert response.status_code == 401, response.text
     assert response.json()["detail"]["code"] == "SESSION_TOKEN_REQUIRED"
+
+
+def _signed_notify_params(order_no: str, *, trade_no: str) -> dict[str, str]:
+    """ZPay callback query params signed with the fixture merchant secret."""
+    from app.zpay import sign_zpay_params
+
+    params = {
+        "pid": "merchant-123",
+        "name": "内部视频生成条数充值 10 条",
+        "money": "100.00",
+        "out_trade_no": order_no,
+        "trade_no": trade_no,
+        "trade_status": "TRADE_SUCCESS",
+        "type": "alipay",
+    }
+    params["sign"] = sign_zpay_params(params, "merchant-secret")
+    params["sign_type"] = "MD5"
+    return params
+
+
+def test_customer_recharge_zpay_notify_credits_wallet_on_pg_lane(
+    client: TestClient, clean_state: str, recharge_config_fixture
+) -> None:
+    """The paid top-up closes the loop: the ZPay callback runs on the
+    PostgreSQL lane (no VIDEO_REPLICA_DB_PATH) and credits the same wallet."""
+    code = generate_activation_code()
+    with psycopg.connect(clean_state) as conn:
+        _insert_code(conn, code_id="code-t22-notify", batch_id="batch-t22-notify", plaintext=code)
+
+    activation = _activate_customer(client, code, "fp-t22-notify", "key-t22-notify")
+    session_token = activation["session_token"]
+    user_id = activation["user_id"]
+
+    created = client.post(
+        "/api/customer/recharge-orders",
+        json={"amount_fen": 10000},
+        headers=_recharge_headers(session_token),
+    )
+    assert created.status_code == 201, created.text
+    order_no = created.json()["order_no"]
+
+    params = _signed_notify_params(order_no, trade_no="zpay-t22-trade-1")
+    notify = client.get("/api/payments/zpay/notify", params=params)
+    assert notify.status_code == 200, notify.text
+    assert notify.text == "success"
+
+    with psycopg.connect(clean_state) as conn:
+        order = conn.execute(
+            "SELECT status, provider_trade_no, paid_at FROM recharge_orders "
+            "WHERE merchant_order_no = %s",
+            (order_no,),
+        ).fetchone()
+        assert order is not None
+        assert order[0] == "PAID", "Callback must settle the order"
+        assert order[1] == "zpay-t22-trade-1"
+        assert order[2] is not None
+
+        wallet = conn.execute(
+            "SELECT available_credits FROM wallets WHERE user_id = %s", (user_id,)
+        ).fetchone()
+        charge = conn.execute(
+            "SELECT available_delta, idempotency_key FROM wallet_transactions "
+            "WHERE user_id = %s AND type = 'CHARGE' "
+            "AND idempotency_key LIKE 'zpay:charge:%%'",
+            (user_id,),
+        ).fetchone()
+    assert wallet is not None and int(wallet[0]) >= 10, "Wallet must gain the paid credits"
+    assert charge is not None and int(charge[0]) == 10
+
+    # Duplicate delivery stays idempotent: second notify succeeds, no double charge.
+    replay = client.get("/api/payments/zpay/notify", params=params)
+    assert replay.status_code == 200
+    assert replay.text == "success"
+    with psycopg.connect(clean_state) as conn:
+        charges = conn.execute(
+            "SELECT count(*) FROM wallet_transactions "
+            "WHERE user_id = %s AND type = 'CHARGE' "
+            "AND idempotency_key LIKE 'zpay:charge:%%'",
+            (user_id,),
+        ).fetchone()
+    assert charges is not None and int(charges[0]) == 1

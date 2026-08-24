@@ -4,6 +4,8 @@ import sqlite3
 from typing import Literal, TypedDict, cast
 from uuid import uuid4
 
+import psycopg
+
 from app.db_portable import BusinessConnection
 
 ZPAY_NOTIFY_BUSY_TIMEOUT_MS = 1000
@@ -186,7 +188,7 @@ def confirm_recharge_payment(
     except PaymentConfirmationError:
         conn.rollback()
         raise
-    except sqlite3.IntegrityError as exc:
+    except (sqlite3.IntegrityError, psycopg.errors.UniqueViolation) as exc:
         conn.rollback()
         raise PaymentConfirmationError(
             "ZPAY_SETTLEMENT_CONFLICT",

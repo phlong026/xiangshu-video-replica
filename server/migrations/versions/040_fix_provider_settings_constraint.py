@@ -15,11 +15,13 @@ This migration drops BOTH constraints (both provably exist at this point in
 the linear chain: 002 created the auto-named one, 018+023 the named one) and
 recreates a single named constraint admitting all five providers.
 
-Downgrade restores the pre-023 allowlist (no zpay) after deleting any zpay
-rows first — the 020-lineage protection: rebuilding a narrower constraint
-over surviving rows would violate it. It also re-creates the 002 auto-named
-constraint (four providers incl. oss) so the 040 -> 039 -> 040 round trip is
-symmetric.
+Downgrade restores the exact 039 shape (not some earlier one): after 023,
+the named constraint already admitted zpay — it coexisted with the 002
+auto-named constraint, which is what actually rejected zpay rows. So the
+downgrade rebuilds the named constraint WITH zpay, re-creates the 002
+auto-named constraint, and deletes any zpay rows first (020-lineage
+protection: the auto-named constraint would otherwise reject the
+surviving rows and abort the rollback transaction).
 """
 
 from __future__ import annotations
@@ -57,7 +59,7 @@ def downgrade() -> None:
         batch_op.drop_constraint("ck_provider_settings_supported_provider", type_="check")
         batch_op.create_check_constraint(
             "ck_provider_settings_supported_provider",
-            "provider IN ('apilio', 'metaso', 'cos', 'deepseek')",
+            "provider IN ('apilio', 'metaso', 'cos', 'deepseek', 'zpay')",
         )
         # Restore the 002 column-CHECK under its PostgreSQL auto-name so a
         # later re-upgrade of 040 finds the constraint it expects to drop.
