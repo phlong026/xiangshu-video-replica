@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "video-replica-desktop"
 version = "0.1.0"
 description = "Internal video replica desktop app"
@@ -15,7 +15,6 @@ default = ["local-sidecar"]
 # FastAPI sidecar exactly as before. A customer-cloud build compiles with
 # `--no-default-features` so the shipped app can never silently boot a local
 # business source of truth behind the customer's back.
-local-sidecar = []
 local-sidecar = []
 
 [build-dependencies]

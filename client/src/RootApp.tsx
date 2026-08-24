@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { AdminApp } from "./AdminApp";
 import { App, WorkspaceShell } from "./App";
 import type { CurrentUser } from "./api";
@@ -8,7 +9,6 @@ import {
   customerCredentialStore,
   useCustomerSession,
 } from "./customer/useCustomerSession";
-import { useMemo } from "react";
 
 export function RootApp({
   path = window.location.pathname,
