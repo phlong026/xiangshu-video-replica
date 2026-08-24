@@ -10,6 +10,7 @@ from typing import Annotated, Literal, cast
 from fastapi import Depends, Header, HTTPException
 
 from app.db import connect_database
+from app.db_pg import DATABASE_URL_ENV, pg_transaction
 from app.db_portable import BusinessConnection
 
 Role = Literal["employee", "admin", "auditor", "customer"]
@@ -29,6 +30,20 @@ class CurrentUser:
 
 
 def get_database() -> Iterator[BusinessConnection]:
+    """One request-scoped business connection.
+
+    Customer production sets only ``VIDEO_REPLICA_DATABASE_URL``: the
+    connection is a pooled PostgreSQL one owned by an explicit transaction
+    (payment callbacks ride this path — they have no customer session, so
+    the fenced writer does not apply; the pool's ``conn.transaction()``
+    commits on success and rolls back on error). The SQLite path serves the
+    internal/desktop lane.
+    """
+    if os.environ.get(DATABASE_URL_ENV, "").strip():
+        with pg_transaction() as pg_conn:
+            yield BusinessConnection.postgres(pg_conn)
+        return
+
     db_path = os.environ.get("VIDEO_REPLICA_DB_PATH")
     if not db_path:
         raise HTTPException(

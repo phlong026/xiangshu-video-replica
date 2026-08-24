@@ -6,6 +6,7 @@ import logging
 import sqlite3
 from typing import Annotated
 
+import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse
 
@@ -80,8 +81,8 @@ def zpay_notify(request: Request, conn: Database) -> PlainTextResponse:
     except PaymentConfirmationError as exc:
         logger.warning("ZPay callback rejected: %s", exc.code)
         return PlainTextResponse("failure", status_code=exc.status_code)
-    except sqlite3.OperationalError:
-        logger.warning("ZPay callback deferred because the payment database is busy")
+    except (sqlite3.OperationalError, psycopg.errors.OperationalError) as exc:
+        logger.warning("ZPay callback deferred because the payment database is busy: %s", exc)
         return PlainTextResponse("retry", status_code=503)
     return PlainTextResponse("success")
 

@@ -1,17 +1,41 @@
 from __future__ import annotations
 
 import sqlite3
-from typing import Literal
+from datetime import datetime, timedelta
+from typing import Literal, cast
 from uuid import uuid4
 
 import psycopg
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, ConfigDict, StrictInt
 
 from app.auth import AuthenticatedUser, Database
-from app.customer_fence import BusinessDbDep
+from app.customer_fence import (
+    BusinessDbDep,
+    customer_session_snapshot,
+    fenced_pg_transaction,
+)
+from app.customer_idempotency import (
+    EnvelopeRecord,
+    IdempotencyKeyError,
+    complete_envelope,
+    customer_aead_key,
+    envelope_aad,
+    highest_customer_aead_key,
+    idempotency_key_digest,
+    insert_envelope,
+    load_envelope,
+    open_response,
+    recovery_window_seconds,
+    request_hash,
+    seal_response,
+)
+from app.db_portable import BusinessConnection
+from app.security_rate_limit import _server_now
 from app.settings import SettingsRepository
 from app.zpay import (
+    ZPayDeploymentConfig,
+    ZPayMerchantConfig,
     build_zpay_payment_form,
     deployment_config_from_environment,
     generate_merchant_order_no,
@@ -21,6 +45,16 @@ from app.zpay_payments import read_recharge_order, serialize_recharge_order
 
 router = APIRouter(prefix="/api", tags=["recharge"])
 MAX_ORDER_NUMBER_ATTEMPTS = 3
+IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
+REPLAY_HEADER = "X-Idempotent-Replay"
+RECHARGE_OPERATION = "recharge:create"
+
+# ``recharge_orders.amount_fen`` is an int4 column (migration 022); a value
+# beyond this bound would surface as a PostgreSQL IntegerFieldOverflow 500
+# instead of a 422 - the same class of gap PR #54 closed for admin
+# adjustments (wallet int4 overflow). ``credits`` is bounded by the same
+# constant because ``credits = amount_fen // charged_unit_price_fen``.
+INT4_MAX_FEN = 2_147_483_647
 
 
 class CreateRechargeOrderRequest(BaseModel):
@@ -60,6 +94,105 @@ class RechargeOrderPage(BaseModel):
     offset: int
 
 
+# ---------------------------------------------------------------------------
+# Shared recharge-order creation core (T22 review: the customer route and the
+# internal route previously duplicated ~99 lines and the copy drifted - the
+# drift broke the collision retry on PostgreSQL twice over). Both routes now
+# share the staged helpers below and keep the transaction/retry shape
+# identical: the retry loop sits OUTSIDE ``db.write()`` so every attempt runs
+# in a fresh fenced transaction (a failed INSERT aborts the PG transaction,
+# an in-transaction retry would hit InFailedSqlTransaction).
+# ---------------------------------------------------------------------------
+
+
+def _stage_recharge_preconditions(
+    conn: BusinessConnection,
+    *,
+    amount_fen: int,
+) -> tuple[dict[str, int], ZPayMerchantConfig, ZPayDeploymentConfig]:
+    """Billing settings + amount validation + ZPay configuration, shared."""
+    settings_repo = SettingsRepository(conn)
+    billing = settings_repo.read_billing_settings()
+    validate_recharge_amount(amount_fen, billing)
+    try:
+        merchant = merchant_config_from_settings(settings_repo.load_zpay_config())
+        deployment = deployment_config_from_environment()
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "ZPAY_CONFIGURATION_INVALID", "message": str(exc)},
+        ) from exc
+    return billing, merchant, deployment
+
+
+def _insert_recharge_order(
+    conn: BusinessConnection,
+    *,
+    user_id: str,
+    amount_fen: int,
+    pricing_scope: Literal["INTERNAL", "CUSTOMER_STANDARD"],
+    merchant_order_no: str,
+    billing: dict[str, int],
+    merchant: ZPayMerchantConfig,
+    deployment: ZPayDeploymentConfig,
+) -> RechargeOrderResponse:
+    """Insert one PENDING recharge order and build its payment form."""
+    charged_unit_price_fen = billing["charged_unit_price_fen"]
+    credits = amount_fen // charged_unit_price_fen
+    form_fields = build_zpay_payment_form(
+        merchant_order_no=merchant_order_no,
+        amount_fen=amount_fen,
+        credits=credits,
+        merchant=merchant,
+        deployment=deployment,
+    )
+    with conn:
+        conn.execute(
+            "INSERT INTO recharge_orders (\n"
+            "    id, user_id, merchant_order_no, provider, provider_trade_no,\n"
+            "    channel, status, pricing_scope,\n"
+            "    base_unit_price_fen_snapshot, charged_unit_price_fen_snapshot,\n"
+            "    min_recharge_fen_snapshot, recharge_step_fen_snapshot,\n"
+            "    amount_fen, credits\n"
+            ") VALUES (%s, %s, %s, 'zpay', NULL, %s, 'PENDING', %s, "
+            "%s, %s, %s, %s, %s, %s)\n",
+            (
+                str(uuid4()),
+                user_id,
+                merchant_order_no,
+                merchant.channel,
+                pricing_scope,
+                billing["internal_base_unit_price_fen"],
+                charged_unit_price_fen,
+                billing["min_recharge_fen"],
+                billing["recharge_step_fen"],
+                amount_fen,
+                credits,
+            ),
+        )
+    return RechargeOrderResponse(
+        order_no=merchant_order_no,
+        status="PENDING",
+        amount_fen=amount_fen,
+        credits=credits,
+        gateway_url=deployment.gateway_url,
+        method="POST",
+        form_fields=form_fields,
+    )
+
+
+def _retryable_merchant_order_collision(exc: Exception) -> bool:
+    """True when the integrity failure is the retryable order-number draw.
+
+    Matches both dialect messages: SQLite spells it
+    ``UNIQUE constraint failed: recharge_orders.merchant_order_no`` while
+    PostgreSQL reports the constraint name
+    (``recharge_orders_merchant_order_key``) - the dotted form only exists on
+    SQLite, so the narrower match silently broke the PG retry (review P1).
+    """
+    return "merchant_order_no" in str(exc)
+
+
 @router.post(
     "/recharge-orders",
     response_model=RechargeOrderResponse,
@@ -73,64 +206,23 @@ def create_recharge_order(
         merchant_order_no = generate_merchant_order_no()
         try:
             with db.write() as (conn, user):
-                settings_repo = SettingsRepository(conn)
-                billing = settings_repo.read_billing_settings()
-                validate_recharge_amount(payload.amount_fen, billing)
-
-                try:
-                    merchant = merchant_config_from_settings(settings_repo.load_zpay_config())
-                    deployment = deployment_config_from_environment()
-                except ValueError as exc:
-                    raise HTTPException(
-                        status_code=503,
-                        detail={"code": "ZPAY_CONFIGURATION_INVALID", "message": str(exc)},
-                    ) from exc
-
-                charged_unit_price_fen = billing["charged_unit_price_fen"]
-                credits = payload.amount_fen // charged_unit_price_fen
-                form_fields = build_zpay_payment_form(
-                    merchant_order_no=merchant_order_no,
+                billing, merchant, deployment = _stage_recharge_preconditions(
+                    conn, amount_fen=payload.amount_fen
+                )
+                return _insert_recharge_order(
+                    conn,
+                    user_id=user.id,
                     amount_fen=payload.amount_fen,
-                    credits=credits,
+                    pricing_scope="INTERNAL",
+                    merchant_order_no=merchant_order_no,
+                    billing=billing,
                     merchant=merchant,
                     deployment=deployment,
-                )
-                with conn:
-                    conn.execute(
-                        "INSERT INTO recharge_orders (\n"
-                        "    id, user_id, merchant_order_no, provider, provider_trade_no,\n"
-                        "    channel, status, pricing_scope,\n"
-                        "    base_unit_price_fen_snapshot, charged_unit_price_fen_snapshot,\n"
-                        "    min_recharge_fen_snapshot, recharge_step_fen_snapshot,\n"
-                        "    amount_fen, credits\n"
-                        ") VALUES (%s, %s, %s, 'zpay', NULL, %s, 'PENDING', 'INTERNAL', "
-                        "%s, %s, %s, %s, %s, %s)\n",
-                        (
-                            str(uuid4()),
-                            user.id,
-                            merchant_order_no,
-                            merchant.channel,
-                            billing["internal_base_unit_price_fen"],
-                            charged_unit_price_fen,
-                            billing["min_recharge_fen"],
-                            billing["recharge_step_fen"],
-                            payload.amount_fen,
-                            credits,
-                        ),
-                    )
-                return RechargeOrderResponse(
-                    order_no=merchant_order_no,
-                    status="PENDING",
-                    amount_fen=payload.amount_fen,
-                    credits=credits,
-                    gateway_url=deployment.gateway_url,
-                    method="POST",
-                    form_fields=form_fields,
                 )
         except (sqlite3.IntegrityError, psycopg.errors.UniqueViolation) as exc:
             # The merchant-order-number collision is a retryable random draw; any
             # other integrity failure is a real bug and must surface.
-            if "merchant_order_no" in str(exc):
+            if _retryable_merchant_order_collision(exc):
                 continue
             raise
 
@@ -138,6 +230,233 @@ def create_recharge_order(
         status_code=503,
         detail={"code": "ORDER_NUMBER_UNAVAILABLE", "message": "Unable to allocate order number."},
     )
+
+
+# ============================================================================
+# T22 / BILL-01: Customer top-up route (session-authenticated recharge)
+# ============================================================================
+
+
+@router.post(
+    "/customer/recharge-orders",
+    response_model=RechargeOrderResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_customer_recharge_order(
+    payload: CreateRechargeOrderRequest,
+    request: Request,
+    response: Response,
+    db: BusinessDbDep,
+) -> RechargeOrderResponse:
+    """T22: Customer can reuse ZPay to top-up the same wallet under their session.
+
+    Key invariant guarantees (BILL-01):
+    - Recharge does NOT change main code, device slots, session or user concurrency
+    - Idempotency-Key envelope (T14 engine): a retry with the same key replays
+      the sealed response without creating a second order; a different request
+      under a spent key is a 409
+    - Credits enter the same customer wallet (not P0 internal wallet)
+    """
+    idempotency_key = request.headers.get(IDEMPOTENCY_KEY_HEADER, "").strip()
+    if not idempotency_key:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "IDEMPOTENCY_KEY_REQUIRED",
+                "message": "An Idempotency-Key header is required.",
+            },
+        )
+    key_digest = idempotency_key_digest(idempotency_key)
+    req_hash = request_hash({"amount_fen": str(payload.amount_fen)})
+    try:
+        aead_key_version, aead_key = highest_customer_aead_key()
+    except IdempotencyKeyError:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "IDEMPOTENCY_KEYS_UNAVAILABLE",
+                "message": "Idempotency keys are not configured; recharge is refused.",
+            },
+        ) from None
+
+    for _ in range(MAX_ORDER_NUMBER_ATTEMPTS):
+        merchant_order_no = generate_merchant_order_no()
+        try:
+            with db.write() as (conn, user):
+                scope = f"recharge:{user.id}"
+                record = load_envelope(
+                    _pg_conn(conn),
+                    operation=RECHARGE_OPERATION,
+                    scope=scope,
+                    key_digest=key_digest,
+                )
+                envelope_id: str | None = None
+                if record is None:
+                    envelope_id = insert_envelope(
+                        _pg_conn(conn),
+                        operation=RECHARGE_OPERATION,
+                        scope=scope,
+                        key_digest=key_digest,
+                        request_hash=req_hash,
+                    )
+                    if envelope_id is None:
+                        # Concurrent same-key writer won the placeholder insert;
+                        # load the committed envelope and treat it as a replay.
+                        record = load_envelope(
+                            _pg_conn(conn),
+                            operation=RECHARGE_OPERATION,
+                            scope=scope,
+                            key_digest=key_digest,
+                        )
+                if record is not None:
+                    _enforce_envelope_conflicts(record, req_hash=req_hash, conn=conn)
+                    replayed = _open_recharge_envelope(record, scope=scope, key_digest=key_digest)
+                    response.headers[REPLAY_HEADER] = "true"
+                    return RechargeOrderResponse.model_validate(replayed)
+
+                billing, merchant, deployment = _stage_recharge_preconditions(
+                    conn, amount_fen=payload.amount_fen
+                )
+                order = _insert_recharge_order(
+                    conn,
+                    user_id=user.id,
+                    amount_fen=payload.amount_fen,
+                    pricing_scope="CUSTOMER_STANDARD",
+                    merchant_order_no=merchant_order_no,
+                    billing=billing,
+                    merchant=merchant,
+                    deployment=deployment,
+                )
+                assert envelope_id is not None
+                recovery_expires_at = (
+                    (_server_now(_pg_conn(conn)) + timedelta(seconds=recovery_window_seconds()))
+                    .replace(microsecond=0)
+                    .isoformat()
+                )
+                sealed_ciphertext = seal_response(
+                    order.model_dump(),
+                    key=aead_key,
+                    aad=envelope_aad(RECHARGE_OPERATION, scope, key_digest),
+                )
+                complete_envelope(
+                    _pg_conn(conn),
+                    envelope_id,
+                    ciphertext=sealed_ciphertext,
+                    key_version=aead_key_version,
+                    recovery_expires_at=recovery_expires_at,
+                )
+                return order
+        except (sqlite3.IntegrityError, psycopg.errors.UniqueViolation) as exc:
+            if _retryable_merchant_order_collision(exc):
+                continue
+            raise
+
+    raise HTTPException(
+        status_code=503,
+        detail={"code": "ORDER_NUMBER_UNAVAILABLE", "message": "Unable to allocate order number."},
+    )
+
+
+def _pg_conn(conn: BusinessConnection) -> psycopg.Connection:
+    """Narrow the BusinessConnection backend to the PostgreSQL connection the
+    idempotency engine and the server clock operate on (customer lane only)."""
+    return cast(psycopg.Connection, conn.raw)
+
+
+def _enforce_envelope_conflicts(
+    record: EnvelopeRecord,
+    *,
+    req_hash: str,
+    conn: BusinessConnection,
+) -> None:
+    """The T14 replay contract: hash conflict / unrecoverable / expired -> 409."""
+    if record.request_hash != req_hash:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "IDEMPOTENCY_CONFLICT",
+                "message": "This idempotency key was already used for a different request.",
+            },
+        )
+    if record.ciphertext is None or record.key_version is None:
+        # Purged or never completed: the key is spent and the response is no
+        # longer recoverable (T14 / ACT-07 contract).
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "IDEMPOTENCY_CONFLICT",
+                "message": "This idempotency key is no longer recoverable.",
+            },
+        )
+    recovery_expires_at = record.recovery_expires_at
+    if recovery_expires_at is not None and (
+        datetime.fromisoformat(str(recovery_expires_at)) <= _server_now(_pg_conn(conn))
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "IDEMPOTENCY_CONFLICT",
+                "message": "The recovery window for this key has expired.",
+            },
+        )
+
+
+def _open_recharge_envelope(
+    record: EnvelopeRecord,
+    *,
+    scope: str,
+    key_digest: str,
+) -> dict[str, object]:
+    """Unseal a replayable response; an unopenable seal is unrecoverable."""
+    assert record.ciphertext is not None and record.key_version is not None
+    try:
+        return open_response(
+            record.ciphertext,
+            key=customer_aead_key(record.key_version),
+            aad=envelope_aad(RECHARGE_OPERATION, scope, key_digest),
+        )
+    except IdempotencyKeyError:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "IDEMPOTENCY_CONFLICT",
+                "message": "This idempotency key is no longer recoverable.",
+            },
+        ) from None
+
+
+@router.get(
+    "/customer/recharge-orders/{order_no}",
+    response_model=RechargeOrderStatusResponse,
+)
+def read_customer_recharge_order_status(
+    order_no: str,
+    request: Request,
+) -> RechargeOrderStatusResponse:
+    """Customer-lane order status: the session is re-verified inside the
+    fenced read transaction and another user's order number is a 404 (no
+    existence leak), mirroring the internal-lane route's ownership check."""
+    snapshot = customer_session_snapshot(request)
+    if snapshot is None:
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "code": "SESSION_REQUIRED",
+                "message": "A customer session token is required.",
+            },
+        )
+    with fenced_pg_transaction(snapshot) as (conn, ctx):
+        business_conn = BusinessConnection.postgres(conn)
+        order = read_recharge_order(business_conn, merchant_order_no=order_no)
+        if order is None or str(order["user_id"]) != ctx.user_id:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "code": "RECHARGE_ORDER_NOT_FOUND",
+                    "message": "Recharge order does not exist.",
+                },
+            )
+        return RechargeOrderStatusResponse(**serialize_recharge_order(order))
 
 
 @router.get("/recharge-orders", response_model=RechargeOrderPage)
@@ -196,6 +515,7 @@ def validate_recharge_amount(amount_fen: int, billing: dict[str, int]) -> None:
         amount_fen < billing["min_recharge_fen"]
         or amount_fen % billing["recharge_step_fen"] != 0
         or amount_fen % billing["charged_unit_price_fen"] != 0
+        or amount_fen > INT4_MAX_FEN
     ):
         raise HTTPException(
             status_code=422,

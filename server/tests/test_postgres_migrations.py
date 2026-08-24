@@ -149,7 +149,9 @@ def test_pg_full_upgrade_downgrade_reupgrade_and_indexes() -> None:
 
         with psycopg.connect(dsn) as conn:
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-            assert version == ("039_admin_adjustments"), f"unexpected head revision: {version}"
+            assert version == "040_fix_provider_settings_constraint", (
+                f"unexpected head revision: {version}"
+            )
 
             tables = {
                 row[0]
@@ -228,7 +230,7 @@ def test_pg_full_upgrade_downgrade_reupgrade_and_indexes() -> None:
         command.upgrade(_alembic_config(sqlalchemy_dsn), "head")
         with psycopg.connect(dsn) as conn:
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-            assert version == "039_admin_adjustments"
+            assert version == "040_fix_provider_settings_constraint"
     finally:
         _drop_database("t06_migrate_test")
 
@@ -350,7 +352,7 @@ def test_pg_wallet_downgrade_blocked_when_ledger_has_settled_rounds() -> None:
         # The database must be left exactly at head (no partial rollback).
         with psycopg.connect(dsn) as conn:
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-        assert version == "039_admin_adjustments"
+        assert version == "040_fix_provider_settings_constraint"
     finally:
         _drop_database(db_name)
 
@@ -647,7 +649,7 @@ def test_pg_billing_constraints_downgrade_guard() -> None:
             command.downgrade(_alembic_config(sqlalchemy_dsn), "025_postgres_runtime_compatibility")
         with psycopg.connect(dsn) as conn:
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-        assert version == "039_admin_adjustments"
+        assert version == "040_fix_provider_settings_constraint"
 
         # Remove the customer order (test data only — confirmed production rows
         # are never deleted, which is exactly why the guard exists) and the

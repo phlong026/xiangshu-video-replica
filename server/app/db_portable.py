@@ -255,6 +255,10 @@ def _is_begin_immediate(sql: str) -> bool:
     return sql.strip().upper() == "BEGIN IMMEDIATE"
 
 
+def _is_sqlite_pragma(sql: str) -> bool:
+    return sql.strip().upper().startswith("PRAGMA")
+
+
 class _NoopCursor:
     """The result of a swallowed SQLite-only statement on the PG lane."""
 
@@ -295,6 +299,10 @@ class BusinessConnection:
             # ``BEGIN IMMEDIATE`` (the SQLite idiom). On the customer lane the
             # fenced transaction is already open, so the statement must be a
             # no-op — forwarding it to psycopg is a syntax error (PR #56 P1).
+            return _NOOP_CURSOR
+        if isinstance(self._backend, PostgresBackend) and _is_sqlite_pragma(sql):
+            # SQLite tuning statements (busy_timeout & friends) carry no
+            # meaning on the PG lane — pool timeouts own that concern.
             return _NOOP_CURSOR
         return self._backend.execute(sql, params)
 
