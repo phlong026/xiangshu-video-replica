@@ -561,7 +561,7 @@ def generate_first_frame_candidates(
                     INSERT INTO assets (
                         id, project_id, kind, storage_uri, sha256, size_bytes, content_type,
                         created_by_user_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         candidate["asset_id"],
@@ -738,7 +738,7 @@ def effective_reference_asset_ids(
         FROM character_versions AS version
         JOIN character_personas AS persona ON persona.id = version.persona_id
         JOIN person_identities AS identity ON identity.id = persona.identity_id
-        WHERE version.id = ?
+        WHERE version.id = %s
         """,
         (character_version_id,),
     ).fetchone()
@@ -996,7 +996,7 @@ def read_character_reference_asset(
     row = conn.execute(
         """
         SELECT id, project_id, kind, storage_uri, sha256, size_bytes, content_type
-        FROM assets WHERE id = ?
+        FROM assets WHERE id = %s
         """,
         (asset_id,),
     ).fetchone()

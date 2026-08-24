@@ -288,7 +288,7 @@ def extract_source_frame_candidates(
                         id, project_id, kind, storage_uri, sha256, size_bytes, content_type,
                         created_by_user_id
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         candidate["asset_id"],
@@ -454,7 +454,7 @@ def latest_version(
         SELECT id, project_id, asset_id, kind, version_number, payload_json, created_by_user_id,
                created_at
         FROM versions
-        WHERE project_id = ? AND kind = ?
+        WHERE project_id = %s AND kind = %s
         ORDER BY version_number DESC
         LIMIT 1
         """,
