@@ -84,46 +84,47 @@ def payment_context(
     )
     monkeypatch.setenv("CONTROL_ADMIN_USER_ID", "admin_1")
 
-    with initialize_database(db_path) as conn:
-        admin = create_user(
-            conn,
-            username="internal_admin",
-            display_name="Internal Admin",
-            role="admin",
-            user_id="admin_1",
-        )
-        create_user(
-            conn,
-            username="operator_1",
-            display_name="Operator One",
-            user_id="user_1",
-        )
-        create_user(
-            conn,
-            username="operator_2",
-            display_name="Operator Two",
-            user_id="user_2",
-        )
-        user_token = issue_token(conn, user_id="user_1", raw_token="user-token")
-        other_token = issue_token(conn, user_id="user_2", raw_token="other-token")
-        SettingsRepository(conn).save_zpay_config(
-            {"pid": "merchant-123", "key": "merchant-secret", "enabled_channels": "alipay"},
-            actor_user_id=str(admin["user_id"]),
-        )
-        insert_pending_order(conn, order_id="order_1", user_id="user_1", order_no=ORDER_NO)
-        insert_pending_order(
-            conn,
-            order_id="order_2",
-            user_id="user_1",
-            order_no=SECOND_ORDER_NO,
-        )
-        insert_pending_order(
-            conn,
-            order_id="order_3",
-            user_id="user_2",
-            order_no=OTHER_ORDER_NO,
-        )
-        conn.commit()
+    with initialize_database(db_path) as raw:
+        with BusinessConnection.sqlite(raw) as conn:
+            admin = create_user(
+                conn,
+                username="internal_admin",
+                display_name="Internal Admin",
+                role="admin",
+                user_id="admin_1",
+            )
+            create_user(
+                conn,
+                username="operator_1",
+                display_name="Operator One",
+                user_id="user_1",
+            )
+            create_user(
+                conn,
+                username="operator_2",
+                display_name="Operator Two",
+                user_id="user_2",
+            )
+            user_token = issue_token(conn, user_id="user_1", raw_token="user-token")
+            other_token = issue_token(conn, user_id="user_2", raw_token="other-token")
+            SettingsRepository(conn).save_zpay_config(
+                {"pid": "merchant-123", "key": "merchant-secret", "enabled_channels": "alipay"},
+                actor_user_id=str(admin["user_id"]),
+            )
+            insert_pending_order(conn, order_id="order_1", user_id="user_1", order_no=ORDER_NO)
+            insert_pending_order(
+                conn,
+                order_id="order_2",
+                user_id="user_1",
+                order_no=SECOND_ORDER_NO,
+            )
+            insert_pending_order(
+                conn,
+                order_id="order_3",
+                user_id="user_2",
+                order_no=OTHER_ORDER_NO,
+            )
+            conn.commit()
 
     try:
         with TestClient(app) as client:

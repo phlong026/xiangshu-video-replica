@@ -178,7 +178,7 @@ def list_accounts(
          AND internal_access_tokens.revoked_at IS NULL
         GROUP BY users.id
         ORDER BY users.username, users.id
-        LIMIT ? OFFSET ?
+        LIMIT %s OFFSET %s
         """,
         (limit, offset),
     ).fetchall()
@@ -237,7 +237,7 @@ def list_recharge_orders(
         JOIN users ON users.id = orders.user_id
         {where}
         ORDER BY orders.created_at DESC, orders.id DESC
-        LIMIT ? OFFSET ?
+        LIMIT %s OFFSET %s
         """,  # noqa: S608
         (*params, limit, offset),
     ).fetchall()
@@ -282,7 +282,7 @@ def list_wallet_transactions(
         JOIN users ON users.id = tx.user_id
         {where}
         ORDER BY tx.created_at DESC, tx.id DESC
-        LIMIT ? OFFSET ?
+        LIMIT %s OFFSET %s
         """,  # noqa: S608
         (*params, limit, offset),
     ).fetchall()
@@ -441,7 +441,7 @@ def export_recharge_orders_csv(
         JOIN users ON users.id = orders.user_id
         {where}
         ORDER BY orders.created_at DESC, orders.id DESC
-        LIMIT ?
+        LIMIT %s
         """,  # noqa: S608
         (*params, limit),
     ).fetchall()
@@ -489,7 +489,7 @@ def export_wallet_transactions_csv(
         JOIN users ON users.id = tx.user_id
         {where}
         ORDER BY tx.created_at DESC, tx.id DESC
-        LIMIT ?
+        LIMIT %s
         """,  # noqa: S608
         (*params, limit),
     ).fetchall()
@@ -519,10 +519,10 @@ def _order_filters(
     clauses: list[str] = []
     params: list[str] = []
     if status is not None:
-        clauses.append("orders.status = ?")
+        clauses.append("orders.status = %s")
         params.append(status)
     if user_id is not None:
-        clauses.append("orders.user_id = ?")
+        clauses.append("orders.user_id = %s")
         params.append(user_id)
     return (f"WHERE {' AND '.join(clauses)}" if clauses else "", tuple(params))
 
@@ -535,10 +535,10 @@ def _transaction_filters(
     clauses: list[str] = []
     params: list[str] = []
     if user_id is not None:
-        clauses.append("tx.user_id = ?")
+        clauses.append("tx.user_id = %s")
         params.append(user_id)
     if transaction_type is not None:
-        clauses.append("tx.type = ?")
+        clauses.append("tx.type = %s")
         params.append(transaction_type)
     return (f"WHERE {' AND '.join(clauses)}" if clauses else "", tuple(params))
 

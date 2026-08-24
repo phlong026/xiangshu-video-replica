@@ -199,7 +199,7 @@ def test_provider_config_survives_database_reopen(
             actor_user_id="admin_1",
         )
 
-    with connect_database(db_path) as reopened:
+    with BusinessConnection.sqlite(connect_database(db_path)) as reopened:
         stored = SettingsRepository(reopened).load_provider_config("cos")
 
     assert settings_key
@@ -221,7 +221,7 @@ def test_provider_config_remains_encrypted_when_reopened_with_the_wrong_key(
             actor_user_id="admin_1",
         )
 
-    with connect_database(db_path) as reopened:
+    with BusinessConnection.sqlite(connect_database(db_path)) as reopened:
         with pytest.raises(SettingsDecryptError, match="cannot be decrypted"):
             SettingsRepository(reopened, fernet=Fernet(Fernet.generate_key())).load_provider_config(
                 "metaso"

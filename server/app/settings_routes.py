@@ -541,7 +541,7 @@ def download_settings_diagnostic(
         """
         SELECT metadata_json
         FROM audit_logs
-        WHERE entity_id = ? AND action = 'settings.diagnostic_test'
+        WHERE entity_id = %s AND action = 'settings.diagnostic_test'
         """,
         (report_id,),
     ).fetchone()
@@ -640,7 +640,7 @@ def write_audit_log(
                 entity_id,
                 metadata_json
             )
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s)
             """,
             (
                 str(uuid.uuid4()),

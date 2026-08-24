@@ -101,7 +101,7 @@ def authenticate_access_token(conn: BusinessConnection, token: str) -> CurrentUs
         """
         SELECT user_id
         FROM internal_access_tokens
-        WHERE token_digest = ? AND revoked_at IS NULL
+        WHERE token_digest = %s AND revoked_at IS NULL
         """,
         (digest_access_token(token),),
     ).fetchone()
@@ -135,7 +135,7 @@ def authenticate_user(conn: BusinessConnection, user_id: str | None) -> CurrentU
         """
         SELECT id, username, display_name, role
         FROM users
-        WHERE id = ? AND is_active = 1
+        WHERE id = %s AND is_active = 1
         """,
         (user_id,),
     ).fetchone()

@@ -165,9 +165,9 @@ def confirm_recharge_payment(
         wallet = conn.execute(
             """
             UPDATE wallets
-            SET available_credits = available_credits + ?,
+            SET available_credits = available_credits + %s,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE user_id = ?
+            WHERE user_id = %s
             """,
             (int(order["credits"]), str(order["user_id"])),
         )

@@ -44,75 +44,76 @@ def internal_admin_context(
         hashlib.sha256(CONTROL_TOKEN.encode()).hexdigest(),
     )
 
-    with initialize_database(db_path) as conn:
-        create_user(
-            conn,
-            user_id="admin_1",
-            username="internal-admin",
-            display_name="Internal Admin",
-            role="admin",
-        )
-        create_user(
-            conn,
-            user_id="user_1",
-            username="operator-1",
-            display_name="Operator One",
-        )
-        business_token = issue_token(
-            conn,
-            user_id="user_1",
-            raw_token="business-user-token",
-        )
-        SettingsRepository(conn).save_zpay_config(
-            {
-                "pid": "merchant-123",
-                "key": "merchant-secret",
-                "enabled_channels": "alipay,wxpay",
-            },
-            actor_user_id="admin_1",
-        )
-        conn.execute("UPDATE wallets SET available_credits = 10 WHERE user_id = 'user_1'")
-        conn.execute(
-            """
-            INSERT INTO recharge_orders (
-                id, user_id, merchant_order_no, channel, status,
-                provider_trade_no, pricing_scope,
-                base_unit_price_fen_snapshot, charged_unit_price_fen_snapshot,
-                min_recharge_fen_snapshot, recharge_step_fen_snapshot,
-                amount_fen, credits, paid_at
-            ) VALUES (
-                'order_paid', 'user_1', '202608190000000000000000000001',
-                'alipay', 'PAID', 'zpay-trade-1', 'INTERNAL',
-                1000, 1000, 10000, 1000, 10000, 10, CURRENT_TIMESTAMP
+    with initialize_database(db_path) as raw:
+        with BusinessConnection.sqlite(raw) as conn:
+            create_user(
+                conn,
+                user_id="admin_1",
+                username="internal-admin",
+                display_name="Internal Admin",
+                role="admin",
             )
-            """
-        )
-        conn.execute(
-            """
-            INSERT INTO wallet_transactions (
-                id, user_id, type, available_delta, reserved_delta,
-                recharge_order_id, idempotency_key
-            ) VALUES (
-                'charge_paid', 'user_1', 'CHARGE', 10, 0,
-                'order_paid', 'charge:order_paid'
+            create_user(
+                conn,
+                user_id="user_1",
+                username="operator-1",
+                display_name="Operator One",
             )
-            """
-        )
-        conn.execute(
-            """
-            INSERT INTO recharge_orders (
-                id, user_id, merchant_order_no, channel, status, pricing_scope,
-                base_unit_price_fen_snapshot, charged_unit_price_fen_snapshot,
-                min_recharge_fen_snapshot, recharge_step_fen_snapshot,
-                amount_fen, credits
-            ) VALUES (
-                'order_pending', 'user_1', '202608190000000000000000000002',
-                'wxpay', 'PENDING', 'INTERNAL',
-                1000, 1000, 10000, 1000, 20000, 20
+            business_token = issue_token(
+                conn,
+                user_id="user_1",
+                raw_token="business-user-token",
             )
-            """
-        )
-        conn.commit()
+            SettingsRepository(conn).save_zpay_config(
+                {
+                    "pid": "merchant-123",
+                    "key": "merchant-secret",
+                    "enabled_channels": "alipay,wxpay",
+                },
+                actor_user_id="admin_1",
+            )
+            conn.execute("UPDATE wallets SET available_credits = 10 WHERE user_id = 'user_1'")
+            conn.execute(
+                """
+                INSERT INTO recharge_orders (
+                    id, user_id, merchant_order_no, channel, status,
+                    provider_trade_no, pricing_scope,
+                    base_unit_price_fen_snapshot, charged_unit_price_fen_snapshot,
+                    min_recharge_fen_snapshot, recharge_step_fen_snapshot,
+                    amount_fen, credits, paid_at
+                ) VALUES (
+                    'order_paid', 'user_1', '202608190000000000000000000001',
+                    'alipay', 'PAID', 'zpay-trade-1', 'INTERNAL',
+                    1000, 1000, 10000, 1000, 10000, 10, CURRENT_TIMESTAMP
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO wallet_transactions (
+                    id, user_id, type, available_delta, reserved_delta,
+                    recharge_order_id, idempotency_key
+                ) VALUES (
+                    'charge_paid', 'user_1', 'CHARGE', 10, 0,
+                    'order_paid', 'charge:order_paid'
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO recharge_orders (
+                    id, user_id, merchant_order_no, channel, status, pricing_scope,
+                    base_unit_price_fen_snapshot, charged_unit_price_fen_snapshot,
+                    min_recharge_fen_snapshot, recharge_step_fen_snapshot,
+                    amount_fen, credits
+                ) VALUES (
+                    'order_pending', 'user_1', '202608190000000000000000000002',
+                    'wxpay', 'PENDING', 'INTERNAL',
+                    1000, 1000, 10000, 1000, 20000, 20
+                )
+                """
+            )
+            conn.commit()
 
     def override_database() -> Iterator[BusinessConnection]:
         with BusinessConnection.sqlite(connect_database(db_path)) as conn:

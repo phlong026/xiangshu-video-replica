@@ -21,10 +21,11 @@ from app.zpay import sign_zpay_params
 
 def test_zpay_provider_migration_is_reversible(tmp_path: Path) -> None:
     db_path = tmp_path / "zpay-migration.db"
-    with initialize_database(db_path) as conn:
-        assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == (
-            "039_admin_adjustments"
-        )
+    with initialize_database(db_path) as raw:
+        with BusinessConnection.sqlite(raw) as conn:
+            assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == (
+                "039_admin_adjustments"
+            )
 
     command.downgrade(alembic_config(db_path), "022_internal_billing")
     with BusinessConnection.sqlite(connect_database(db_path)) as conn:
@@ -56,22 +57,23 @@ def recharge_api(
     monkeypatch.setenv("PUBLIC_BASE_URL", "https://video.example")
     monkeypatch.setenv("ZPAY_GATEWAY_URL", "https://zpayz.cn/submit.php")
 
-    with initialize_database(db_path) as conn:
-        user = create_user(
-            conn,
-            username="operator_1",
-            display_name="Operator One",
-            user_id="user_1",
-        )
-        token = issue_token(conn, user_id=str(user["user_id"]), raw_token="test-token")
-        SettingsRepository(conn).save_zpay_config(
-            {
-                "pid": "merchant-123",
-                "key": "merchant-secret",
-                "enabled_channels": "alipay,wxpay",
-            },
-            actor_user_id=str(user["user_id"]),
-        )
+    with initialize_database(db_path) as raw:
+        with BusinessConnection.sqlite(raw) as conn:
+            user = create_user(
+                conn,
+                username="operator_1",
+                display_name="Operator One",
+                user_id="user_1",
+            )
+            token = issue_token(conn, user_id=str(user["user_id"]), raw_token="test-token")
+            SettingsRepository(conn).save_zpay_config(
+                {
+                    "pid": "merchant-123",
+                    "key": "merchant-secret",
+                    "enabled_channels": "alipay,wxpay",
+                },
+                actor_user_id=str(user["user_id"]),
+            )
 
     def override_database() -> Iterator[BusinessConnection]:
         with BusinessConnection.sqlite(connect_database(db_path)) as conn:
