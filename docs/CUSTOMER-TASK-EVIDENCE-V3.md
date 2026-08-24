@@ -709,3 +709,42 @@ Owner / Reviewer：后端（Agent 执行）/ CodeReview 子代理评审（0 P1/0
 未测试项：T33 管理页面（读端点已就绪）；真实 ZPay 续充与调账的联合对账（BILL-01/BILL-02 真实链路随 T35+）；STAGING/REAL_CHAIN/PRODUCTION
 Lore 提交 SHA：见 PR squash 合并 SHA
 ```
+
+## T28 — Customer API Adapter from the Regenerated OpenAPI Contract (FE-01)
+
+| Field | Value |
+| --- | --- |
+| **Task ID** | T28 / FE-01 |
+| **Owner / Reviewer** | Frontend (Agent) / CodeReview sub-agent pass (1 P1 + 3 P3: the P1 and two P3s substantively fixed with regression locks, one P3 confirmed no-change) + security self-review |
+| **Branch / Base SHA** | feat/customer-v3-t28-customer-api-adapter / base b3fe6d3 (main, PR #53 merged) |
+| **Date** | 2026-08-24 |
+| **Verified Implementation SHA** | PR squash merge result (see docs/evidence/T28-EVIDENCE.md) |
+| **Upstream Spec Sections** | Task list §6 T28, §12 FE-01, §10.1 (three lifecycle events); code checklist FE-01 file mapping; dev doc §6.1 API table, §6.3 idempotency, §7 security boundary (explicit credential passing), §3.3 (OTHER_DEVICE_ONLINE masked hint) |
+| **Failure Test or Regression Lock** | 22 cases: drift lock 1 (the eight customer schemas locked by typed literals — any regeneration that changes a field set fails `tsc -b`, so hand-written shapes cannot drift into integration) + request-shape 10 (activate carries the idempotency key and no bearer; login with the device credential reports the 200-renewed/201-established outcome; renew+replay reads X-Idempotent-Replay; switch rides the same lane; heartbeat sends the session credential and no idempotency key; logout with key; device listing; unbind; enroll surfaces both pairing outcomes 202-pending/201-consumed; approve with the first device's credential) + error-state 9 (the login conflict carries its masked device hint + slot + lease expiry; the idempotency conflict stays separate from the device conflict; the rate limit keeps its Retry-After seconds; 503 → service-unavailable; the 403 code-status gate; transport network/timeout — no status to derive from, decided at construction; a non-JSON body falls back to determinate unknown without hiding the status; the three 401 lifecycle outcomes dispatch their three dedicated events; a mere invalid credential dispatches nothing) + review locks 2 (the 400 anti-enumeration rejections ACTIVATION_UNAVAILABLE/PAIRING_UNAVAILABLE stay bad-request — never the outage state, the R1 P1 lock; USER_ALREADY_ACTIVATED/DEVICE_SLOTS_FULL group under determinate conflict) |
+| **Implementation Result** | The customer lane lands as the fourth transport lane in api.ts next to the three internal ones, every type cut from the regenerated generated/api.ts (194KB→291KB, 126 paths/130 schemas — the 2026-08-20 artifact predated T13/T17/T19/T20/T23, so none of the eight customer schemas existed). The server side fills the T17 enroll OpenAPI gap: DeviceEnrollPendingResponse (202) and DeviceEnrollConsumedResponse (201) declared through the responses= parameter for the client types only, while the route keeps its raw JSONResponse answers (the two bodies differ by design; the models never gate the runtime); three contract tests (enroll/sessions/activate) refuse a silent response_model drop. 401/403/409/429/idempotency errors all resolve to exactly one of the 18 CustomerApiErrorKind values (code-exact matches first, status fallback second; transport failures carry a private transportKind decided at construction) — the UI never parses a raw status line. OTHER_DEVICE_ONLINE carries the masked device hint + slot + lease expiry; RATE_LIMITED keeps Retry-After. The three §10.1 lifecycle events (expired/replaced/revoked) replace the internal lane's single SESSION_EXPIRED_EVENT so the workspace shows the sentence matching what actually happened; only lifecycle terminal states dispatch — a mere DEVICE_CREDENTIAL_INVALID never tears down the UI. Credentials travel as an explicit discriminated union ({kind:"device"}|{kind:"session"}) — no global plaintext variable (dev doc §7); desktop persistence is T29's Tauri layer. Idempotency per contract: activate/login/switch/logout/unbind/enroll carry Idempotency-Key, heartbeat (naturally idempotent) does not; X-Idempotent-Replay is read into a replayed flag; login surfaces 200-renewed vs 201-established; enroll returns the 202-pending/201-consumed discriminated union |
+| **Verification Command and Pass Count** | vitest src/customerApi.test.ts → 22 passed (20 red→green + 2 review locks); client full vitest → 346 passed (324 base + 22 new, zero regression); server PG three-file sweep (devices/sessions/activation) → 128 passed incl. the 3 new contract locks; full suite → 1026 passed (1023 base + 3 new, zero regression; the 2 warnings are the pre-existing environment artifacts); ruff check → all green; ruff format --check → 165 files already formatted; mypy app → success, 66 source files; npm run check → green (secret scan / client biome+tsc+vitest 346 / e2e / tauri cargo / server gates) |
+| **Evidence Level** | AUTOMATED_VERIFIED |
+| **Security and Observability** | credentials never land in a global variable or Web Storage (explicit arguments, dev doc §7; desktop persistence is T29's scope); the error envelope parser never hides the HTTP status (a non-JSON body still carries status into the determinate unknown state); the anti-enumeration 400s stay user-fixable (bad-request) instead of masquerading as outages — the R1 P1 fix with its regression lock; lifecycle events fire only on true session-terminal outcomes, so an input error never tears down the workspace; path parameters pass through encodeURIComponent (the R2 P3 fix); no secrets or credentials in logs or fixtures |
+| **Migration and Rollback** | No new migration (the enroll responses= declaration is OpenAPI-documentation-only; runtime behaviour unchanged); a rollback is a code revert |
+| **External Authorization Record** | None; no real ZPay/COS/paid provider/external codes/gray release/public launch |
+| **Untested Items** | Desktop credential persistence and restart recovery (T29); the second-device pairing/conflict/switch UI flows (T30); device management and heartbeat interactions (T31); the full browser E2E chain (T34); STAGING/REAL_CHAIN/PRODUCTION |
+| **Lore Commit SHA** | PR squash merge SHA |
+
+### T28 Section 14 Ledger Record
+
+```text
+任务/工作包：T28 / FE-01（客户前端）
+Owner / Reviewer：前端（Agent 执行）/ CodeReview 子代理评审（1 P1 + 3 P3：P1 与 2 P3 逐条实质修复含 2 例回归锁定，1 P3 确认无需修改——activate 的幂等重放整封 201 原样重放，无 login 200/201 或 enroll 202/201 那样的可区分结果，加标志会捏造服务器不存在的区分）+ 安全自评审
+分支 / 基线 SHA：feat/customer-v3-t28-customer-api-adapter / 基线 b3fe6d3（main，PR #53 合并后）
+上游规格段落：客户版任务清单 V3 §6 T28、§12 FE-01、§10.1（三事件拆分）；代码开发清单 V3 FE-01 文件映射；激活码开发文档 §6.1 API 表、§6.3 幂等、§7 安全边界（凭据显式传参，禁止全局明文变量模拟持久会话）、§3.3（OTHER_DEVICE_ONLINE 掩码提示）
+改动文件：client/src/generated/api.ts（再生成 194KB→291KB，126 paths/130 schemas，8 个 customer schema 进入契约）、client/src/api.ts（新增 customer 车道 ~500 行：CustomerCredential 判别联合+CustomerApiError 18 kind+三生命周期事件+requestCustomer 传输层+9 个 API 函数）、client/src/customerApi.test.ts（新增 22 用例）、server/app/customer_device_routes.py（enroll 双响应 OpenAPI 契约：responses= 参数文档化 202/201 双模型，运行时仍裸 JSONResponse）、server/tests/test_customer_devices.py / test_customer_sessions.py / test_customer_activation.py（3 个 OpenAPI 契约锁定测试）、docs/evidence/T28-EVIDENCE.md、任务与证据账本
+失败测试或回归锁定：先红后绿 20 例（漂移锁 1+请求形状 10+错误状态 9）+ 评审回归锁定 2 例（400 反枚举不进 outage 保持 bad-request；USER_ALREADY_ACTIVATED/DEVICE_SLOTS_FULL 归确定 conflict）
+实现结果：customer API/error/credential adapter 全部从再生成 OpenAPI 契约切出（漂移锁让字段漂移在 tsc 编译期失败）；enroll 补齐 202/201 双响应模型（T17 遗留 OpenAPI 空缺，运行时零变化）；401/403/409/429/幂等错误全部进入 18 个确定 CustomerApiErrorKind（UI 永不解析裸状态行）；三事件拆分（§10.1）仅生命周期终态派发；凭据显式判别联合传参（§7 红线）；幂等语义按契约逐端点执行，X-Idempotent-Replay 读为 replayed，login 200/201 与 enroll 202/201 双判别联合
+验证命令与通过数：client 专项 22 passed；client 全量 vitest 346 passed（324 基线+22 新增，零回归）；服务端 PG 三文件 128 passed（含 3 新契约锁）；全量 pytest 1026 passed（1023 基线+3 新增，零回归；2 警告为既有环境噪声）；ruff/format/mypy 全绿（165 files formatted，66 source files typed）；npm run check 全仓门禁绿（secret/client biome+tsc+vitest 346/e2e/tauri/server）
+证据层级：AUTOMATED_VERIFIED
+安全与可观测性：凭据永不落全局变量或 Web Storage（显式参数传递）；错误信封解析不吞 HTTP 状态；反枚举 400 保持用户可修正不误导为服务中断（P1 修复+回归锁定）；生命周期事件只在会话真正终态派发；路径参数 encodeURIComponent；无密钥/凭据入日志或夹具
+迁移与回滚：无新迁移（OpenAPI 文档面变更，运行时行为不变）；回滚即还原代码
+外部授权记录：无；未调用真实 ZPay/COS/付费 Provider/对外发码/灰度/公网发布
+未测试项：凭据桌面持久化与重启恢复（T29）；第二设备配对/冲突/切换 UI（T30）；设备管理/heartbeat 交互（T31）；浏览器全链路 E2E（T34）；STAGING/REAL_CHAIN/PRODUCTION
+Lore 提交 SHA：见 PR squash 合并 SHA
+```
