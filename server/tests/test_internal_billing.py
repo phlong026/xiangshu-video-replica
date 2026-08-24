@@ -11,7 +11,7 @@ from app.db import alembic_config, connect_database, initialize_database
 from app.db_portable import BusinessConnection
 from app.settings import SettingsRepository
 
-HEAD_REVISION = "039_admin_adjustments"
+HEAD_REVISION = "040_fix_provider_settings_constraint"
 
 
 def seed_subjects(conn: sqlite3.Connection) -> None:

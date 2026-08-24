@@ -5,7 +5,7 @@
 **Task**: T22 / BILL-01 — Customer session recharge (ZPay top-up)  
 **Status**: `AUTOMATED_VERIFIED` → Ready for `STAGING_VERIFIED` pending fake ZPay sandbox authorization  
 **Completion Date**: 2026-08-24  
-**PR Reference**: #57 (pending merge to main)  
+**PR Reference**: #59 (open, review fixes applied)  
 
 ---
 
@@ -25,6 +25,26 @@
 | Real ZPay payment flow (user authorized) | Business/Legal | ❌ Not Started | Production deployment requires external authorization |
 
 ---
+
+---
+
+## §1.5 PR #59 Review Fixes (2026-08-24)
+
+The connector review of PR #59 filed 12 findings (2 P0 / 2 P1 / 7 P2 / 1 P3); all code-side
+items were fixed in this branch before re-push:
+
+| # | Finding | Fix |
+|---|---------|-----|
+| P0 | 23 ruff errors blocked CI (E501 in tests) | All lint violations resolved; `ruff check`/`format` clean |
+| P0 | 11 test files still assert head `039_admin_adjustments` | All head assertions now `040_fix_provider_settings_constraint` (the T23 docstring keeps its historical `039` reference) |
+| P1 | PG retry dead twice: `merchant_order_no` substring matched only SQLite's message dialect; retry loop ran *inside* one aborted transaction (`InFailedSqlTransaction`) | Collision matcher widened to both dialects; retry loop moved outside `db.write()` so each attempt opens a fresh fenced transaction |
+| P1 | "Same order_id is idempotent" claim was false (TEST-09 asserted the opposite) | Order creation now rides the T14 idempotency envelope: same key replays the sealed response (`X-Idempotent-Replay: true`, no second row), key reuse with a different payload answers 409 `IDEMPOTENCY_CONFLICT`, missing key answers 400 |
+| P2 | `amount_fen` above the int4 ceiling would 500 | `validate_recharge_amount` caps at `2_147_483_647` → 422 |
+| P2 | No customer-lane order status endpoint | `GET /api/customer/recharge-orders/{order_no}` added (owner-only; other users 404, no session 401) |
+| P2 | ~99 duplicated lines between the two create endpoints | Shared `_stage_recharge_preconditions` / `_insert_recharge_order` helpers |
+| P2 | Migration 040 docstring mis-diagnosed 018; downgrade lacked lineage protection; bare `except` | Docstring states the truth (018 adds a narrow constraint; 002's auto-named one blocks deepseek/zpay); downgrade deletes `provider='zpay'` rows and restores both pre-040 constraints (round-trip verified symmetric); defensive `try/except` removed — the chain guarantees the constraints exist |
+| P2 | Evidence cited PR #57 instead of #59 | Corrected throughout this file |
+| P3 | INTERNAL pricing scope on a customer-facing route | Customer lane stamps `CUSTOMER_STANDARD`; the internal lane intentionally keeps `INTERNAL` |
 
 ## §2 Files Changed
 
@@ -54,7 +74,7 @@
 ### Test Suite
 - **File**: `server/tests/test_customer_recharge.py`
 - **Type**: Dedicated test module for T22 (BILL-01)
-- **Lines**: 577 lines total (9 passing tests, 1 skipped, 2 initial tests expanded)
+- **Lines**: expanded to 18 tests (15 passing on the PG fixture, incl. envelope replay/conflict, int4 ceiling, customer GET status ACL, expired-session fencing)
 - **Test Coverage**:
   1. `test_customer_session_recharge_preserves_all_state` - Core invariant proof
   2. `test_customer_recharge_invalid_amount_rejected` - Min/step validation
@@ -280,7 +300,7 @@ logger.info("wallet_credited", extra={
 
 ### For Repository Maintainers (Immediate Actions, Day 1)
 
-1. ✅ Review PR #57 for code quality and security posture
+1. ✅ Review PR #59 for code quality and security posture
 2. ✅ Squash-merge to main branch (preserve linear history)
 3. ✅ Update task list document: mark T22 as `[~] IN_PROGRESS` or `[x] AUTOMATED_VERIFIED`
 4. ✅ Add T22 entry to evidence ledger (`docs/CUSTOMER-TASK-EVIDENCE-V3.md`)
