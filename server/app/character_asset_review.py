@@ -111,7 +111,7 @@ def review_character_asset(
             INSERT INTO character_asset_reviews (
                 id, character_asset_id, reviewer_user_id,
                 decision, issue_codes_json, comment
-            ) VALUES (?, ?, ?, ?, ?, ?)
+            ) VALUES (%s, %s, %s, %s, %s, %s)
             """,
             (
                 review_id,
@@ -123,7 +123,7 @@ def review_character_asset(
             ),
         )
         conn.execute(
-            "UPDATE character_assets SET review_status = ? WHERE id = ?",
+            "UPDATE character_assets SET review_status = %s WHERE id = %s",
             (decision, character_asset_id),
         )
         insert_audit(
@@ -163,7 +163,7 @@ def list_character_asset_reviews(
     rows = conn.execute(
         """
         SELECT * FROM character_asset_reviews
-        WHERE character_asset_id = ?
+        WHERE character_asset_id = %s
         ORDER BY created_at, rowid
         """,
         (character_asset_id,),
@@ -254,7 +254,7 @@ def publish_character_version(
             """
             UPDATE character_assets
             SET is_published_selection = 0
-            WHERE character_version_id = ?
+            WHERE character_version_id = %s
             """,
             (version_id,),
         )
@@ -264,7 +264,7 @@ def publish_character_version(
                 INSERT INTO assets (
                     id, project_id, kind, storage_uri, sha256, size_bytes,
                     content_type, created_by_user_id, metadata_json
-                ) VALUES (?, NULL, 'character_approved_image', ?, ?, ?, ?, ?, ?)
+                ) VALUES (%s, NULL, 'character_approved_image', %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     item.approved_asset_id,
@@ -287,9 +287,9 @@ def publish_character_version(
             updated = conn.execute(
                 """
                 UPDATE character_assets
-                SET asset_id = ?, is_published_selection = 1
-                WHERE id = ? AND character_version_id = ?
-                  AND asset_id = ? AND review_status = 'APPROVED'
+                SET asset_id = %s, is_published_selection = 1
+                WHERE id = %s AND character_version_id = %s
+                  AND asset_id = %s AND review_status = 'APPROVED'
                 """,
                 (
                     item.approved_asset_id,
@@ -308,9 +308,9 @@ def publish_character_version(
         updated_version = conn.execute(
             """
             UPDATE character_versions
-            SET status = 'PUBLISHED', published_by = ?, published_at = ?,
-                publication_snapshot_json = ?, publication_hash = ?
-            WHERE id = ? AND status = 'REVIEWING'
+            SET status = 'PUBLISHED', published_by = %s, published_at = %s,
+                publication_snapshot_json = %s, publication_hash = %s
+            WHERE id = %s AND status = 'REVIEWING'
             """,
             (actor.id, published_at, snapshot_json, publication_hash, version_id),
         )
@@ -440,7 +440,7 @@ def load_selected_character_assets(
                    ) AS review_decision
             FROM character_assets AS character_asset
             LEFT JOIN assets AS asset ON asset.id = character_asset.asset_id
-            WHERE character_asset.id = ?
+            WHERE character_asset.id = %s
             """,
             (character_asset_id,),
         ).fetchone()
@@ -601,7 +601,7 @@ def require_published_selection_matches(
         """
         SELECT view_type, id
         FROM character_assets
-        WHERE character_version_id = ? AND is_published_selection = 1
+        WHERE character_version_id = %s AND is_published_selection = 1
         """,
         (version_id,),
     ).fetchall()
@@ -619,7 +619,7 @@ def require_no_active_character_tasks(conn: BusinessConnection, version_id: str)
     active = conn.execute(
         """
         SELECT 1 FROM character_generation_tasks
-        WHERE character_version_id = ? AND status IN ('PENDING', 'RUNNING')
+        WHERE character_version_id = %s AND status IN ('PENDING', 'RUNNING')
         LIMIT 1
         """,
         (version_id,),
@@ -655,7 +655,7 @@ def require_version_review_mutable(version: sqlite3.Row) -> None:
 
 def read_character_asset_row(conn: BusinessConnection, character_asset_id: str) -> sqlite3.Row:
     row = conn.execute(
-        "SELECT * FROM character_assets WHERE id = ?",
+        "SELECT * FROM character_assets WHERE id = %s",
         (character_asset_id,),
     ).fetchone()
     if row is None:
@@ -668,7 +668,7 @@ def get_character_asset_review(
     review_id: str,
 ) -> CharacterAssetReview:
     row = conn.execute(
-        "SELECT * FROM character_asset_reviews WHERE id = ?",
+        "SELECT * FROM character_asset_reviews WHERE id = %s",
         (review_id,),
     ).fetchone()
     if row is None:
@@ -729,7 +729,7 @@ def insert_audit(
         """
         INSERT INTO audit_logs (
             id, actor_user_id, action, entity_type, entity_id, metadata_json
-        ) VALUES (?, ?, ?, ?, ?, ?)
+        ) VALUES (%s, %s, %s, %s, %s, %s)
         """,
         (
             str(uuid4()),

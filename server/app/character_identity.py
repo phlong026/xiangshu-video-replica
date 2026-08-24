@@ -286,7 +286,7 @@ def create_person_identity(
                 authorization_scope, authorization_expires_at,
                 source_quality_status, status, created_by
             )
-            VALUES (?, ?, ?, 'PENDING', ?, ?, 'PENDING', 'DRAFT', ?)
+            VALUES (%s, %s, %s, 'PENDING', %s, %s, 'PENDING', 'DRAFT', %s)
             """,
             (
                 identity_id,
@@ -352,7 +352,7 @@ def update_person_identity(
     assignments: list[str] = []
     parameters: list[object] = []
     if "display_name" in updates:
-        assignments.append("display_name = ?")
+        assignments.append("display_name = %s")
         parameters.append(
             required_text(
                 cast(str, updates["display_name"]),
@@ -363,7 +363,7 @@ def update_person_identity(
     if "owner_user_id" in updates:
         owner = cast(str | None, updates["owner_user_id"]) or actor.id
         ensure_user_exists(conn, owner)
-        assignments.append("owner_user_id = ?")
+        assignments.append("owner_user_id = %s")
         parameters.append(owner)
     if "authorization_scope" in updates:
         raw_scope = updates["authorization_scope"]
@@ -380,10 +380,10 @@ def update_person_identity(
                 "IDENTITY_AUTHORIZATION_SCOPE_REQUIRED",
                 "至少填写一个肖像授权使用范围。",
             )
-        assignments.append("authorization_scope = ?")
+        assignments.append("authorization_scope = %s")
         parameters.append(encode_json(scope))
     if "authorization_expires_at" in updates:
-        assignments.append("authorization_expires_at = ?")
+        assignments.append("authorization_expires_at = %s")
         parameters.append(
             encode_datetime(cast(datetime | None, updates["authorization_expires_at"]))
         )
@@ -397,7 +397,7 @@ def update_person_identity(
         parameters.append(identity_id)
         with conn:
             conn.execute(
-                f"UPDATE person_identities SET {', '.join(assignments)} WHERE id = ?",
+                f"UPDATE person_identities SET {', '.join(assignments)} WHERE id = %s",
                 parameters,
             )
             refresh_identity_state(conn, identity_id)
@@ -477,7 +477,7 @@ def create_identity_upload_intent(
                 id, project_id, kind, storage_uri, sha256, size_bytes,
                 content_type, created_by_user_id, metadata_json
             )
-            VALUES (?, NULL, ?, ?, '', 0, ?, ?, ?)
+            VALUES (%s, NULL, %s, %s, '', 0, %s, %s, %s)
             """,
             (
                 asset_id,
@@ -575,9 +575,9 @@ def complete_authorization_upload(
             conn.execute(
                 """
                 UPDATE person_identities
-                SET authorization_asset_id = ?, authorization_status = ?, status = ?,
+                SET authorization_asset_id = %s, authorization_status = %s, status = %s,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
+                WHERE id = %s
                 """,
                 (asset_id, authorization_status, next_status, identity_id),
             )
@@ -688,9 +688,9 @@ def complete_source_upload(
             conn.execute(
                 """
                 UPDATE person_identities
-                SET source_asset_id = ?, source_quality_status = ?, status = ?,
+                SET source_asset_id = %s, source_quality_status = %s, status = %s,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
+                WHERE id = %s
                 """,
                 (
                     asset_id,
@@ -706,7 +706,7 @@ def complete_source_upload(
                 id, generation_task_id, provider, model, endpoint_name,
                 latency_ms, request_hash, error_code
             )
-            VALUES (?, NULL, ?, ?, 'source_image.inspect', ?, ?, NULL)
+            VALUES (%s, NULL, %s, %s, 'source_image.inspect', %s, %s, NULL)
             """,
             (
                 str(uuid4()),
@@ -785,7 +785,7 @@ def create_character_persona(
                 default_background, positive_prompt, negative_prompt,
                 usage_scope_json, created_by
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 persona_id,
@@ -823,7 +823,7 @@ def list_character_personas(
     if actor.role == "employee" and not effective_identity_is_active(identity):
         return []
     rows = conn.execute(
-        "SELECT * FROM character_personas WHERE identity_id = ? ORDER BY created_at, id",
+        "SELECT * FROM character_personas WHERE identity_id = %s ORDER BY created_at, id",
         (identity_id,),
     ).fetchall()
     if actor.role == "employee":
@@ -869,14 +869,14 @@ def update_character_persona(
     assignments: list[str] = []
     parameters: list[object] = []
     for key, value in normalized.items():
-        assignments.append(f"{key} = ?")
+        assignments.append(f"{key} = %s")
         parameters.append(encode_json(value) if key.endswith("_json") else value)
     if assignments:
         assignments.append("updated_at = CURRENT_TIMESTAMP")
         parameters.append(persona_id)
         with conn:
             conn.execute(
-                f"UPDATE character_personas SET {', '.join(assignments)} WHERE id = ?",
+                f"UPDATE character_personas SET {', '.join(assignments)} WHERE id = %s",
                 parameters,
             )
     write_audit(
@@ -905,7 +905,7 @@ def delete_character_persona(
     )
     read_persona_row(conn, persona_id)
     has_versions = conn.execute(
-        "SELECT 1 FROM character_versions WHERE persona_id = ? LIMIT 1",
+        "SELECT 1 FROM character_versions WHERE persona_id = %s LIMIT 1",
         (persona_id,),
     ).fetchone()
     if has_versions is not None:
@@ -915,7 +915,7 @@ def delete_character_persona(
             "已创建角色版本的人设不能删除；请保留其历史快照。",
         )
     with conn:
-        conn.execute("DELETE FROM character_personas WHERE id = ?", (persona_id,))
+        conn.execute("DELETE FROM character_personas WHERE id = %s", (persona_id,))
     write_audit(
         conn,
         actor=actor,
@@ -946,7 +946,7 @@ def create_character_version(
     require_identity_active(identity)
     source_asset_id = cast(str, identity["source_asset_id"])
     source_asset = conn.execute(
-        "SELECT sha256 FROM assets WHERE id = ?",
+        "SELECT sha256 FROM assets WHERE id = %s",
         (source_asset_id,),
     ).fetchone()
     if source_asset is None or not str(source_asset["sha256"]):
@@ -978,7 +978,7 @@ def create_character_version(
                     generation_params_json, template_version, template_hash,
                     required_view_types_json, created_by
                 )
-                VALUES (?, ?, ?, 'DRAFT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, 'DRAFT', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     version_id,
@@ -1027,7 +1027,7 @@ def list_character_versions(
         rows = conn.execute(
             """
             SELECT * FROM character_versions
-            WHERE persona_id = ? AND status = 'PUBLISHED'
+            WHERE persona_id = %s AND status = 'PUBLISHED'
             ORDER BY version_number
             """,
             (persona_id,),
@@ -1036,7 +1036,7 @@ def list_character_versions(
         rows = conn.execute(
             """
             SELECT * FROM character_versions
-            WHERE persona_id = ?
+            WHERE persona_id = %s
             ORDER BY version_number
             """,
             (persona_id,),
@@ -1076,7 +1076,7 @@ def archive_character_version(
     read_version_row(conn, version_id)
     with conn:
         conn.execute(
-            "UPDATE character_versions SET status = 'ARCHIVED' WHERE id = ?",
+            "UPDATE character_versions SET status = 'ARCHIVED' WHERE id = %s",
             (version_id,),
         )
     write_audit(
@@ -1265,7 +1265,7 @@ def evaluate_source_image_quality(
 
 def read_identity_row(conn: BusinessConnection, identity_id: str) -> sqlite3.Row:
     row = conn.execute(
-        "SELECT * FROM person_identities WHERE id = ?",
+        "SELECT * FROM person_identities WHERE id = %s",
         (identity_id,),
     ).fetchone()
     if row is None:
@@ -1275,7 +1275,7 @@ def read_identity_row(conn: BusinessConnection, identity_id: str) -> sqlite3.Row
 
 def read_persona_row(conn: BusinessConnection, persona_id: str) -> sqlite3.Row:
     row = conn.execute(
-        "SELECT * FROM character_personas WHERE id = ?",
+        "SELECT * FROM character_personas WHERE id = %s",
         (persona_id,),
     ).fetchone()
     if row is None:
@@ -1285,7 +1285,7 @@ def read_persona_row(conn: BusinessConnection, persona_id: str) -> sqlite3.Row:
 
 def read_version_row(conn: BusinessConnection, version_id: str) -> sqlite3.Row:
     row = conn.execute(
-        "SELECT * FROM character_versions WHERE id = ?",
+        "SELECT * FROM character_versions WHERE id = %s",
         (version_id,),
     ).fetchone()
     if row is None:
@@ -1447,7 +1447,7 @@ def identity_available_to_employee(conn: BusinessConnection, row: sqlite3.Row) -
             SELECT 1
             FROM character_versions AS version
             JOIN character_personas AS persona ON persona.id = version.persona_id
-            WHERE persona.identity_id = ? AND version.status = 'PUBLISHED'
+            WHERE persona.identity_id = %s AND version.status = 'PUBLISHED'
             LIMIT 1
             """,
             (str(row["id"]),),
@@ -1461,7 +1461,7 @@ def persona_has_published_version(conn: BusinessConnection, persona_id: str) -> 
         conn.execute(
             """
             SELECT 1 FROM character_versions
-            WHERE persona_id = ? AND status = 'PUBLISHED'
+            WHERE persona_id = %s AND status = 'PUBLISHED'
             LIMIT 1
             """,
             (persona_id,),
@@ -1478,8 +1478,8 @@ def refresh_identity_state(conn: BusinessConnection, identity_id: str) -> None:
     conn.execute(
         """
         UPDATE person_identities
-        SET authorization_status = ?, status = ?, updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?
+        SET authorization_status = %s, status = %s, updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s
         """,
         (authorization_status, status, identity_id),
     )
@@ -1493,7 +1493,7 @@ def read_uploaded_identity_asset(
     asset_id: str,
     purpose: IdentityAssetPurpose,
 ) -> tuple[sqlite3.Row, Any, bytes]:
-    asset = conn.execute("SELECT * FROM assets WHERE id = ?", (asset_id,)).fetchone()
+    asset = conn.execute("SELECT * FROM assets WHERE id = %s", (asset_id,)).fetchone()
     if asset is None:
         raise character_not_found("ASSET_NOT_FOUND", "上传记录不存在。")
     metadata = decode_object(asset["metadata_json"])
@@ -1603,8 +1603,8 @@ def update_completed_asset(
     conn.execute(
         """
         UPDATE assets
-        SET storage_uri = ?, sha256 = ?, size_bytes = ?, content_type = ?, metadata_json = ?
-        WHERE id = ?
+        SET storage_uri = %s, sha256 = %s, size_bytes = %s, content_type = %s, metadata_json = %s
+        WHERE id = %s
         """,
         (storage_uri, sha256, size_bytes, content_type, encode_json(metadata), asset_id),
     )
@@ -1645,9 +1645,9 @@ def persist_source_inspection_failure(
             conn.execute(
                 """
                 UPDATE person_identities
-                SET source_asset_id = ?, source_quality_status = 'PENDING', status = 'DRAFT',
+                SET source_asset_id = %s, source_quality_status = 'PENDING', status = 'DRAFT',
                     updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
+                WHERE id = %s
                 """,
                 (str(asset["id"]), identity_id),
             )
@@ -1659,8 +1659,8 @@ def persist_source_inspection_failure(
                 latency_ms, request_hash, error_code, error_message_redacted
             )
             VALUES (
-                ?, NULL, 'source-image-inspector', NULL, 'source_image.inspect',
-                ?, ?, 'SOURCE_IMAGE_INSPECTOR_UNAVAILABLE', 'source image inspection failed'
+                %s, NULL, 'source-image-inspector', NULL, 'source_image.inspect',
+                %s, %s, 'SOURCE_IMAGE_INSPECTOR_UNAVAILABLE', 'source image inspection failed'
             )
             """,
             (str(uuid4()), latency_ms, sha256),
@@ -1745,7 +1745,7 @@ def next_character_version_number(conn: BusinessConnection, persona_id: str) -> 
         """
         SELECT COALESCE(MAX(version_number), 0) + 1
         FROM character_versions
-        WHERE persona_id = ?
+        WHERE persona_id = %s
         """,
         (persona_id,),
     ).fetchone()
@@ -1805,7 +1805,7 @@ def normalize_string_list(values: list[str]) -> list[str]:
 
 
 def ensure_user_exists(conn: BusinessConnection, user_id: str) -> None:
-    row = conn.execute("SELECT 1 FROM users WHERE id = ? AND is_active = 1", (user_id,)).fetchone()
+    row = conn.execute("SELECT 1 FROM users WHERE id = %s AND is_active = 1", (user_id,)).fetchone()
     if row is None:
         raise character_error(422, "IDENTITY_OWNER_NOT_FOUND", "人物归属用户不存在或未启用。")
 

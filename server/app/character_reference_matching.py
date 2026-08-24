@@ -147,7 +147,7 @@ def create_character_reference_selection(
                 recommended_asset_ids_json, selected_asset_ids_json,
                 recommendation_reason_json, character_version_snapshot_json,
                 selected_by
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 selection_id,
@@ -461,7 +461,7 @@ def current_main_character_binding(
         """
         SELECT project_id, version_id, character_version_id
         FROM project_main_characters
-        WHERE project_id = ?
+        WHERE project_id = %s
         """,
         (project_id,),
     ).fetchone()
@@ -479,19 +479,19 @@ def load_character_context(
     version_id: str,
 ) -> tuple[sqlite3.Row, sqlite3.Row, sqlite3.Row]:
     version = conn.execute(
-        "SELECT * FROM character_versions WHERE id = ?",
+        "SELECT * FROM character_versions WHERE id = %s",
         (version_id,),
     ).fetchone()
     if version is None:
         raise reference_error(409, "CHARACTER_VERSION_REQUIRED", "项目人物版本不存在。")
     persona = conn.execute(
-        "SELECT * FROM character_personas WHERE id = ?",
+        "SELECT * FROM character_personas WHERE id = %s",
         (str(version["persona_id"]),),
     ).fetchone()
     if persona is None:
         raise reference_error(409, "CHARACTER_PERSONA_INVALID", "项目人物人设不存在。")
     identity = conn.execute(
-        "SELECT * FROM person_identities WHERE id = ?",
+        "SELECT * FROM person_identities WHERE id = %s",
         (str(persona["identity_id"]),),
     ).fetchone()
     if identity is None:
@@ -545,7 +545,7 @@ def load_published_reference_assets(
             asset.content_type
         FROM character_assets AS character_asset
         JOIN assets AS asset ON asset.id = character_asset.asset_id
-        WHERE character_asset.character_version_id = ?
+        WHERE character_asset.character_version_id = %s
           AND character_asset.is_published_selection = 1
         """,
         (version_id,),
@@ -634,7 +634,7 @@ def latest_character_reference_selection_row(
     row = conn.execute(
         """
         SELECT * FROM character_reference_selections
-        WHERE project_id = ?
+        WHERE project_id = %s
         ORDER BY selected_at DESC, rowid DESC
         LIMIT 1
         """,
@@ -649,7 +649,7 @@ def read_character_reference_selection_row(
     selection_id: str,
 ) -> sqlite3.Row:
     row = conn.execute(
-        "SELECT * FROM character_reference_selections WHERE id = ?",
+        "SELECT * FROM character_reference_selections WHERE id = %s",
         (selection_id,),
     ).fetchone()
     if row is None:
@@ -710,7 +710,7 @@ def insert_reference_audit(
         """
         INSERT INTO audit_logs (
             id, actor_user_id, action, entity_type, entity_id, metadata_json
-        ) VALUES (?, ?, 'character_reference.select', 'character_reference_selection', ?, ?)
+        ) VALUES (%s, %s, 'character_reference.select', 'character_reference_selection', %s, %s)
         """,
         (
             str(uuid4()),
