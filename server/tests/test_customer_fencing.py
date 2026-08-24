@@ -144,13 +144,34 @@ def route_state(fencing_dsn: str) -> Iterator[str]:
 @pytest.fixture()
 def customer_app(monkeypatch: pytest.MonkeyPatch, route_state: str) -> Iterator[FastAPI]:
     from app.activation_code_routes import router as activation_code_router
+    from app.analysis_routes import router as analysis_router
+    from app.character_reference_routes import router as character_reference_router
+    from app.character_routes import router as character_router
     from app.customer_session_routes import router as customer_session_router
+    from app.first_frame_routes import router as first_frame_router
+    from app.generation_routes import router as generation_router
+    from app.media_routes import router as media_router
     from app.rbac_routes import router as rbac_router
+    from app.recharge_routes import router as recharge_router
+    from app.simple_character_routes import router as simple_character_router
+    from app.source_frame_routes import router as source_frame_router
 
     app = FastAPI()
-    app.include_router(activation_code_router)
-    app.include_router(customer_session_router)
-    app.include_router(rbac_router)
+    for r in (
+        activation_code_router,
+        customer_session_router,
+        rbac_router,
+        media_router,
+        recharge_router,
+        analysis_router,
+        first_frame_router,
+        source_frame_router,
+        simple_character_router,
+        character_router,
+        character_reference_router,
+        generation_router,
+    ):
+        app.include_router(r)
     monkeypatch.setenv(DATABASE_URL_ENV, route_state)
     monkeypatch.delenv("VIDEO_REPLICA_CUSTOMER_PRODUCTION", raising=False)
     monkeypatch.setenv(ACTIVATION_CODE_HMAC_KEY_ENV, TEST_KEY)
@@ -164,6 +185,25 @@ def customer_app(monkeypatch: pytest.MonkeyPatch, route_state: str) -> Iterator[
     monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_ACTIVATE_CODE", "1000")
     monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_LOGIN_IP", "1000")
     monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_WINDOW_SECONDS", "300")
+
+    # The migrated write routes' storage/provider/extractor dependencies read
+    # get_database (a SQLite path) which is absent on the customer lane; the
+    # gate tests only exercise the session snapshot 401 (before the route body),
+    # so inert fakes are enough for dependency resolution.
+    from app.character_identity_routes import get_character_storage
+    from app.first_frame_routes import get_image_provider
+    from app.media_routes import get_media_storage, get_video_probe
+    from app.source_frame_routes import get_source_frame_extractor
+
+    for dep in (
+        get_media_storage,
+        get_image_provider,
+        get_character_storage,
+        get_source_frame_extractor,
+        get_video_probe,
+    ):
+        app.dependency_overrides[dep] = lambda: object()
+
     yield app
 
 
@@ -733,6 +773,86 @@ def test_unknown_session_token_cannot_create_a_project(client: TestClient) -> No
     with psycopg.connect(_fencing_dsn(), autocommit=True) as conn:
         row = conn.execute("SELECT count(*) FROM projects WHERE name = 'Stale'").fetchone()
     assert int(row[0]) == 0
+
+
+# ---------------------------------------------------------------------------
+# SES-04 gate — every migrated write route answers 401 for a session token
+# that owns no live row (proves the route is wired through the fenced path)
+# ---------------------------------------------------------------------------
+
+_GARBAGE_TOKEN = "no-such-session-token"
+
+_GATED_WRITE_ROUTES: list[tuple[str, str, dict[str, object] | None]] = [
+    ("post", "/api/projects", {"name": "x"}),
+    ("patch", "/api/projects/p-nonexistent/name", {"name": "x"}),
+    (
+        "post",
+        "/api/assets/upload-intent",
+        {
+            "project_id": "p-nonexistent",
+            "filename": "a.mp4",
+            "content_type": "video/mp4",
+            "size_bytes": 1,
+        },
+    ),
+    ("post", "/api/assets/a-nonexistent/complete", None),
+    ("post", "/api/recharge-orders", {"amount_fen": 100}),
+    ("post", "/api/projects/p-nonexistent/analysis", {"asset_id": "a-nonexistent"}),
+    ("put", "/api/analysis/v-nonexistent/shots", {"shots": []}),
+    ("post", "/api/projects/p-nonexistent/first-frames/generate", {"model": "x", "quantity": 1}),
+    (
+        "post",
+        "/api/projects/p-nonexistent/first-frames/confirm",
+        {"first_frame_asset_id": "a-nonexistent"},
+    ),
+    ("post", "/api/projects/p-nonexistent/source-frames/extract", {"asset_id": "a-nonexistent"}),
+    (
+        "post",
+        "/api/projects/p-nonexistent/source-frames/confirm",
+        {"source_frame_asset_id": "a-nonexistent"},
+    ),
+    ("patch", "/api/simple-characters/identities/i-nonexistent/name", {"display_name": "x"}),
+    ("post", "/api/simple-characters/identities/i-nonexistent/regenerate-contact-sheet", None),
+    ("delete", "/api/simple-characters/identities/i-nonexistent", None),
+    (
+        "post",
+        "/api/projects/p-nonexistent/character-reference-selection",
+        {"selected_asset_ids": []},
+    ),
+    ("put", "/api/projects/p-nonexistent/main-character", {"character_id": "c-nonexistent"}),
+    ("post", "/api/projects/p-nonexistent/scripts", {"text": "x", "source": "custom"}),
+    ("post", "/api/projects/p-nonexistent/prompts/compile", {"script_version_id": "v-nonexistent"}),
+    ("post", "/api/projects/p-nonexistent/prompts/revise", {"text": "x"}),
+    ("post", "/api/projects/p-nonexistent/prompts/v-nonexistent/lock", None),
+    ("post", "/api/projects/p-nonexistent/generation-batches", None),
+    ("patch", "/api/generation-batches/b-nonexistent/name", {"display_name": "x"}),
+    ("delete", "/api/generation-batches/b-nonexistent", None),
+    ("post", "/api/generation-batches/b-nonexistent/regenerate", None),
+    ("post", "/api/generation-tasks/t-nonexistent/retry", None),
+    ("post", "/api/generation-tasks/t-nonexistent/regenerate", None),
+    ("post", "/api/generation-tasks/t-nonexistent/reconcile", None),
+]
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "body"),
+    _GATED_WRITE_ROUTES,
+    ids=[f"{m}-{p}" for m, p, _ in _GATED_WRITE_ROUTES],
+)
+def test_every_migrated_write_route_is_fenced(
+    client: TestClient, method: str, path: str, body: dict[str, object] | None
+) -> None:
+    """SES-04: a session token that owns no live row is refused 401 at the
+    snapshot gate on every migrated write route — none of them fall through to
+    the internal lane or reach their business logic."""
+    _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    kwargs: dict[str, object] = {"headers": _bearer(_GARBAGE_TOKEN)}
+    if body is not None:
+        kwargs["json"] = body
+    resp = client.request(method, path, **kwargs)
+    assert resp.status_code == 401, (method, path, resp.text)
+    code = resp.json()["detail"]["code"]
+    assert code in {"SESSION_REPLACED", "SESSION_TOKEN_REQUIRED"}, (method, path, code)
 
 
 # ---------------------------------------------------------------------------
