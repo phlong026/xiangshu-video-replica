@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.auth import AuthenticatedUser, Database
-from app.customer_fence import BusinessDbDep
+from app.customer_fence import BusinessDbDep, BusinessReadConn
 from app.media import (
     MAX_UPLOAD_BYTES,
     FFprobeVideoProbe,
@@ -119,7 +119,7 @@ class CompleteUploadResponse(BaseModel):
     metadata: VideoMetadata
 
 
-def get_media_storage(conn: Database) -> StorageAdapter:
+def get_media_storage(conn: BusinessReadConn) -> StorageAdapter:
     """业务主存储：源参考视频（拆解需要 HTTPS URL）、人物图片、多视角
     图与首帧。配置了 COS 就上云；未配置退回本地盘（桌面单机场景）。"""
     try:

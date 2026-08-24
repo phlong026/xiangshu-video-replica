@@ -246,4 +246,36 @@ def get_business_db(request: Request) -> BusinessDb:
     )
 
 
+def get_business_read_conn() -> Iterator[BusinessConnection]:
+    """A mode-resolved request-scoped connection for read-side dependencies
+    (storage / image provider / character storage). On the customer lane the
+    fenced transaction's PostgreSQL connection is reused; on the internal lane
+    a SQLite connection from the env path. The storage/provider dependencies
+    must never resolve the legacy ``get_database`` independently — that opens
+    only the SQLite path and 503s on a PG-only production (PR #56 P1)."""
+    try:
+        get_pg_pool()
+    except (RuntimeError, ValueError):
+        db_path = os.environ.get("VIDEO_REPLICA_DB_PATH")
+        if not db_path:
+            raise HTTPException(
+                503,
+                detail={
+                    "code": "DATABASE_NOT_CONFIGURED",
+                    "message": "VIDEO_REPLICA_DB_PATH is required for API requests.",
+                },
+            )
+        raw = connect_database(Path(db_path))
+        try:
+            yield BusinessConnection.sqlite(raw)
+        finally:
+            raw.close()
+        return
+    with pg_transaction() as conn:
+        yield BusinessConnection.postgres(conn)
+
+
+BusinessReadConn = Annotated[BusinessConnection, Depends(get_business_read_conn)]
+
+
 BusinessDbDep = Annotated[BusinessDb, Depends(get_business_db)]

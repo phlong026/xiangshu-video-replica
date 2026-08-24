@@ -181,3 +181,37 @@ def test_postgres_commit_and_rollback_are_no_ops() -> None:
     conn.commit()
     conn.rollback()
     assert calls == []  # no-op on the PG backend: commit authority stays with the fenced tx
+
+
+def test_postgres_backend_swallows_begin_immediate() -> None:
+    """PR #56 P1: migrated write services still spell their write lock as
+    BEGIN IMMEDIATE; on the PG lane the fenced transaction is already open so
+    the statement must be a no-op (forwarding it to psycopg is a syntax error)."""
+    calls: list[str] = []
+
+    class _Result:
+        def fetchone(self) -> None:
+            return None
+
+        def fetchall(self) -> list[object]:
+            return []
+
+        @property
+        def rowcount(self) -> int:
+            return -1
+
+    class _StubPsycopg:
+        row_factory: object = None
+
+        def execute(self, sql: str, params: object = ()) -> _Result:
+            calls.append(sql)
+            return _Result()
+
+    from app.db_portable import BusinessConnection, PostgresBackend
+
+    conn = BusinessConnection(PostgresBackend(_StubPsycopg()))  # type: ignore[arg-type]
+    result = conn.execute("BEGIN IMMEDIATE")
+    assert calls == []  # swallowed on the PG lane
+    assert result.fetchone() is None
+    conn.execute("SELECT 1")
+    assert calls == ["SELECT 1"]

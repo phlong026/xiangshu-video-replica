@@ -251,6 +251,27 @@ def _named_row_factory(cursor: psycopg.Cursor) -> Callable[[Sequence[object]], _
 # ---------------------------------------------------------------------------
 
 
+def _is_begin_immediate(sql: str) -> bool:
+    return sql.strip().upper() == "BEGIN IMMEDIATE"
+
+
+class _NoopCursor:
+    """The result of a swallowed SQLite-only statement on the PG lane."""
+
+    def fetchone(self) -> None:
+        return None
+
+    def fetchall(self) -> list[Any]:
+        return []
+
+    @property
+    def rowcount(self) -> int:
+        return -1
+
+
+_NOOP_CURSOR = _NoopCursor()
+
+
 class BusinessConnection:
     """The uniform connection the business services see.
 
@@ -269,6 +290,12 @@ class BusinessConnection:
     # --- sqlite3-shaped surface ---
 
     def execute(self, sql: str, params: Sequence[object] = ()) -> _BusinessCursor:
+        if isinstance(self._backend, PostgresBackend) and _is_begin_immediate(sql):
+            # Migrated write services still spell their write lock as
+            # ``BEGIN IMMEDIATE`` (the SQLite idiom). On the customer lane the
+            # fenced transaction is already open, so the statement must be a
+            # no-op — forwarding it to psycopg is a syntax error (PR #56 P1).
+            return _NOOP_CURSOR
         return self._backend.execute(sql, params)
 
     def executemany(self, sql: str, seq: list[Sequence[object]]) -> None:

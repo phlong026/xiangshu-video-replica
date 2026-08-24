@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.auth import AuthenticatedUser, Database
-from app.customer_fence import BusinessDbDep
+from app.customer_fence import BusinessDbDep, BusinessReadConn
 from app.first_frames import (
     APILIO_DEFAULT_BASE_URL,
     FIRST_FRAME_SELECTION_KIND,
@@ -63,7 +63,7 @@ class VersionResponse(BaseModel):
     created_at: str
 
 
-def get_image_provider(conn: Database) -> ImageProvider:
+def get_image_provider(conn: BusinessReadConn) -> ImageProvider:
     has_saved_apilio_config = (
         conn.execute(
             "SELECT 1 FROM provider_settings WHERE provider = %s",

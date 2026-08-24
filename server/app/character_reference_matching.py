@@ -635,7 +635,7 @@ def latest_character_reference_selection_row(
         """
         SELECT * FROM character_reference_selections
         WHERE project_id = %s
-        ORDER BY selected_at DESC, rowid DESC
+        ORDER BY selected_at DESC, id DESC
         LIMIT 1
         """,
         (project_id,),

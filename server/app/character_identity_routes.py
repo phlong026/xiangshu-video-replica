@@ -34,6 +34,7 @@ from app.character_identity import (
     update_character_persona,
     update_person_identity,
 )
+from app.customer_fence import BusinessReadConn
 from app.media_routes import api_base_url, get_media_storage
 from app.permissions import require_role
 from app.settings import SettingsRepository, SettingsUnavailableError
@@ -112,7 +113,7 @@ class CharacterVersionCreateRequest(BaseModel):
     generation_params_json: dict[str, object] = Field(default_factory=dict)
 
 
-def get_character_storage(conn: Database) -> StorageAdapter:
+def get_character_storage(conn: BusinessReadConn) -> StorageAdapter:
     return get_media_storage(conn)
 
 
