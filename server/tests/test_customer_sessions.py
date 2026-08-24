@@ -396,6 +396,184 @@ def _second_device_row(
 
 def _bearer(token: str) -> dict[str, str]:
     return {AUTHORIZATION_HEADER: f"Bearer {token}"}
+def _second_device_login(
+    client: TestClient,
+    user_id: str,
+    device_id: str,
+    *,
+    suffix: str,
+) -> dict:
+    """Create a session on slot 2 (takeover scenario) for fencing tests.
+
+    This mirrors the test pattern used in test_login_second_device_takes_over_slot:
+    it inserts a second BOUND device directly and then logs in to trigger
+    epoch bumping. Returns the new session payload with epoch 2.
+    """
+    code = FIRST_CODE if suffix == "a" else SECOND_CODE
+    _seed_issuable_code(code, code_id=f"code-{suffix}", batch_id=f"batch-{suffix}")
+
+    # Insert second device directly (bypass T17 enroll).
+    second_token = _second_device_row(
+        user_id=user_id,
+        activation_code_id=f"code-{suffix}",
+        device_id=device_id,
+        slot_no=2,
+    )
+
+    # Login as second device triggers takeover and epoch bump.
+    response = client.post(
+        LOGIN_PATH,
+        json={},
+        headers={
+            **_bearer(second_token),
+            IDEMPOTENCY_KEY_HEADER: f"idem-second-login-{suffix}",
+        },
+    )
+    assert response.status_code in (200, 201), response.text
+    payload = response.json()
+    for field in ("user_id", "device_id", "session_token", "session_epoch"):
+        assert isinstance(payload.get(field), str if field != "session_epoch" else int), payload
+    return payload
+
+
+
+
+# ---------------------------------------------------------------------------
+# T22 / SES-06 — recharge fencing invariants (customer session top-up gates)
+# ---------------------------------------------------------------------------
+
+
+def test_recharge_requires_a_live_customer_session(client: TestClient) -> None:
+    """T22 core fence: without a live customer session, top-up is refused.
+
+    The recharge endpoint lives behind BusinessDbDep which takes a
+    CustomerSessionSnapshot via customer_session_snapshot() — when the
+    PostgreSQL runtime is configured, missing/invalid tokens answer 401
+    SESSION_TOKEN_REQUIRED/SESSION_REPLACED rather than leaking internal
+    identity paths.
+    """
+    # No Bearer header at all → SESSION_TOKEN_REQUIRED.
+    response = client.post(
+        "/api/recharge-orders",
+        json={"amount_fen": 10000},
+        headers={IDEMPOTENCY_KEY_HEADER: "idem-no-session-1"},
+    )
+    assert response.status_code == 401, response.text
+    assert response.json()["detail"]["code"] == "SESSION_TOKEN_REQUIRED"
+
+    # Create a valid customer but never establish a session.
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+
+    # Wrong token type (device instead of session) → SESSION_REPLACED.
+    response = client.post(
+        "/api/recharge-orders",
+        json={"amount_fen": 10000},
+        headers={
+            **_bearer(customer["device_token"]),
+            IDEMPOTENCY_KEY_HEADER: "idem-device-token-1",
+        },
+    )
+    assert response.status_code == 401, response.text
+    # Device tokens are not session tokens; the snapshot phase rejects them.
+    assert response.json()["detail"]["code"] == "SESSION_REPLACED"
+
+
+def test_recharge_fails_when_admin_revoked_the_session(client: TestClient) -> None:
+    """T22 core fence: admin suspend/revoke logs out the session and the
+    old session token can never revive for write operations including top-up.
+
+    This is the fencing boundary where SES-05 propagates to BILL-01:
+    the recharge order insert must fail with SESSION_EXPIRED once the
+    activation code is suspended or revoked by an admin actor.
+    """
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    session_token = customer["session_token"]
+    session_epoch_before = customer["session_epoch"]
+
+    # Recharge succeeds while session is live.
+    fresh = client.post(
+        "/api/recharge-orders",
+        json={"amount_fen": 10000},
+        headers={
+            **_bearer(session_token),
+            IDEMPOTENCY_KEY_HEADER: "idem-fresh-recharge",
+        },
+    )
+    assert fresh.status_code == 201, fresh.text
+    assert fresh.json()["amount_fen"] == 10000
+
+    # Admin suspends the code: this triggers LOGOUT with code_suspended reason.
+    suspended = _admin_code_action(client, "code-a", "suspend", reason="风控暂停")
+    assert suspended.status_code == 200, suspended.text
+
+    # Verify session event chain: ACTIVATED + LOGIN + HEARTBEAT + LOGOUT(code_suspended).
+    events = _session_events()
+    logout_rows = [e for e in events if e[0] == "LOGOUT"]
+    assert len(logout_rows) == 1
+    assert logout_rows[0][2] == "code_suspended"
+
+    # Recharge now fails with SESSION_EXPIRED: the lease was pulled into the past.
+    stale = client.post(
+        "/api/recharge-orders",
+        json={"amount_fen": 10000},
+        headers={
+            **_bearer(session_token),
+            IDEMPOTENCY_KEY_HEADER: "idem-stale-recharge",
+        },
+    )
+    assert stale.status_code == 401, stale.text
+    assert stale.json()["detail"]["code"] == "SESSION_EXPIRED"
+
+    # epoch remains unchanged (logout doesn't bump); only login changes epoch.
+    row_device, _, row_epoch, row_lease, _ = _session_row()
+    assert row_epoch == session_epoch_before
+    assert datetime.fromisoformat(row_lease) <= datetime.now(UTC) + timedelta(seconds=1)
+
+
+def test_recharge_fails_with_session_replaced_after_second_device_login(client: TestClient) -> None:
+    """T22 core fence: second device login takeovers the slot and bumps epoch;
+    the first device's session token becomes invalid for writes (including top-up).
+
+    This tests the SWITCH scenario from T20/SES-02 propagated to BILL-01:
+    the old session answers SESSION_REPLACED when attempting to create
+    a recharge order after being displaced by another device.
+    """
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    session_token_a = customer["session_token"]
+    session_epoch_a = customer["session_epoch"]
+
+    # First, establish second device session.
+    second = _second_device_login(client, customer["user_id"], "device-b", suffix="b")
+    session_token_b = second["session_token"]
+    session_epoch_b = second["session_epoch"]
+
+    # Verify epoch bumped: device A was epoch 1, device B took over with epoch 2.
+    assert session_epoch_b == session_epoch_a + 1
+
+    # Device A's session token is now REPLACED.
+    stale = client.post(
+        "/api/recharge-orders",
+        json={"amount_fen": 10000},
+        headers={
+            **_bearer(session_token_a),
+            IDEMPOTENCY_KEY_HEADER: "idem-old-recharge-after-switch",
+        },
+    )
+    assert stale.status_code == 401, stale.text
+    assert stale.json()["detail"]["code"] == "SESSION_REPLACED"
+
+    # Device B's session works correctly.
+    fresh = client.post(
+        "/api/recharge-orders",
+        json={"amount_fen": 20000},
+        headers={
+            **_bearer(session_token_b),
+            IDEMPOTENCY_KEY_HEADER: "idem-fresh-recharge-after-switch",
+        },
+    )
+    assert fresh.status_code == 201, fresh.text
+    assert fresh.json()["amount_fen"] == 20000
+
 
 
 def _session_row() -> tuple[str, str, int, str, str]:
