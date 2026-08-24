@@ -52,3 +52,5 @@ AGENTS_副本.md
 nohup.out
 .worktrees/
 worktree/
+# Ignore worktree folders (temporary dev directories)
+worktree/
