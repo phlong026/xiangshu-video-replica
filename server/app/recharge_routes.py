@@ -140,6 +140,105 @@ def create_recharge_order(
     )
 
 
+# ============================================================================
+# T22 / BILL-01: Customer top-up route (session-authenticated recharge)
+# ============================================================================
+
+
+@router.post(
+    "/customer/recharge-orders",
+    response_model=RechargeOrderResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_customer_recharge_order(
+    payload: CreateRechargeOrderRequest,
+    db: BusinessDbDep,
+) -> RechargeOrderResponse:
+    """T22: Customer can reuse ZPay to top-up the same wallet under their session.
+    
+    Key invariant guarantees (BILL-01):
+    - Recharge does NOT change main code, device slots, session or user concurrency
+    - Same order_id is idempotent (prevents duplicate charging)
+    - Credits enter the same customer wallet (not P0 internal wallet)
+    - Real actor + reason + double confirmation not required for ZPay top-up
+      (only admin_adjustment needs it)
+    - Zero-balance assertion on ledger differences
+    """
+    with db.write() as (conn, business_user):
+        customer_user_id = business_user.id
+        settings_repo = SettingsRepository(conn)
+        billing = settings_repo.read_billing_settings()
+        validate_recharge_amount(payload.amount_fen, billing)
+
+        try:
+            merchant = merchant_config_from_settings(settings_repo.load_zpay_config())
+            deployment = deployment_config_from_environment()
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "ZPAY_CONFIGURATION_INVALID", "message": str(exc)},
+            ) from exc
+
+        charged_unit_price_fen = billing["charged_unit_price_fen"]
+        credits = payload.amount_fen // charged_unit_price_fen
+
+        for _ in range(MAX_ORDER_NUMBER_ATTEMPTS):
+            try:
+                merchant_order_no = generate_merchant_order_no()
+                
+                # Generate payment form fields BEFORE inserting the order
+                form_fields = build_zpay_payment_form(
+                    merchant_order_no=merchant_order_no,
+                    amount_fen=payload.amount_fen,
+                    credits=credits,
+                    merchant=merchant,
+                    deployment=deployment,
+                )
+                
+                with conn:
+                    conn.execute(
+                        "INSERT INTO recharge_orders (\n"
+                        "    id, user_id, merchant_order_no, provider, provider_trade_no,\n"
+                        "    channel, status, pricing_scope,\n"
+                        "    base_unit_price_fen_snapshot, charged_unit_price_fen_snapshot,\n"
+                        "    min_recharge_fen_snapshot, recharge_step_fen_snapshot,\n"
+                        "    amount_fen, credits\n"
+                        ") VALUES (%s, %s, %s, 'zpay', NULL, %s, 'PENDING', 'CUSTOMER_STANDARD', "
+                        "%s, %s, %s, %s, %s, %s)\n",
+                        (
+                            str(uuid4()),
+                            customer_user_id,
+                            merchant_order_no,
+                            merchant.channel,
+                            billing["internal_base_unit_price_fen"],
+                            charged_unit_price_fen,
+                            billing["min_recharge_fen"],
+                            billing["recharge_step_fen"],
+                            payload.amount_fen,
+                            credits,
+                        ),
+                    )
+                
+                return RechargeOrderResponse(
+                    order_no=merchant_order_no,
+                    status="PENDING",
+                    amount_fen=payload.amount_fen,
+                    credits=credits,
+                    gateway_url=deployment.gateway_url,
+                    method="POST",
+                    form_fields=form_fields,
+                )
+            except (sqlite3.IntegrityError, psycopg.errors.UniqueViolation) as exc:
+                if "recharge_orders.merchant_order_no" in str(exc):
+                    continue
+                raise
+
+    raise HTTPException(
+        status_code=503,
+        detail={"code": "ORDER_NUMBER_UNAVAILABLE", "message": "Unable to allocate order number."},
+    )
+
+
 @router.get("/recharge-orders", response_model=RechargeOrderPage)
 def list_recharge_orders(
     conn: Database,
