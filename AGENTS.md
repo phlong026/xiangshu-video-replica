@@ -39,7 +39,7 @@
 
 ## 验证命令（分层：开发期快速反馈，任务收尾全量门禁）
 
-> **分层原则**：全量 pytest（约 21 分钟，958+ 用例）每任务只跑**一次**——收尾提交 PR 前。开发期每轮迭代只跑受影响专项（秒级），不要每次跑全量。**严禁两个全量 pytest 实例同时打同一个 PG fixture**（各 PG 测试文件有独立库，但 5 个文件共享 `customer_v3_test`，并发会互踩造成假性失败——2026-08-23 T19 实测教训）。
+> **分层原则**：全量 pytest（约 21 分钟，958+ 用例）每任务只跑**一次**——收尾提交 PR 前，由第 3 步的 `npm run check` 统一承载（其脚本末尾已包含服务端全量 pytest；不要在第 2 步再单独跑一遍全量，否则一次收尾 = 两次约 21 分钟的全量）。开发期每轮迭代只跑受影响专项（秒级）。**严禁两个全量 pytest 实例同时打同一个 PG fixture**（各 PG 测试文件有独立库，但 5 个文件共享 `customer_v3_test`，并发会互踩造成假性失败——2026-08-23 T19 实测教训）。
 
 ### 开发期（每任务每轮迭代，快）
 
@@ -55,11 +55,12 @@ uv run ruff check . && uv run ruff format --check . && uv run mypy app
 # 1) 先启动 PostgreSQL fixture（Docker PG16，端口 5433；脚本必须带子命令，无参数会打印 usage 并退出 1）
 scripts/pg-fixture.sh start
 
-# 2) 服务端全量验证（server/ 目录；fixture 未启动时 PG 套件按 skip 运行，不得声明 AUTOMATED_VERIFIED）
-uv run python -m pytest tests -q            # 全量 pytest，零回归（PG 套件默认连 localhost:5433 fixture）
+# 2) 服务端专项复验（server/ 目录；全量 pytest 不在这一步跑——它由第 3 步统一承载，避免双跑；
+#    fixture 未启动时 PG 套件按 skip 运行，不得声明 AUTOMATED_VERIFIED）
 uv run ruff check . && uv run ruff format --check . && uv run mypy app
 
-# 3) 全仓门禁（仓库根目录，等价于 CI Linux 质量门，覆盖前端/Tauri/服务端全套）
+# 3) 全仓门禁（仓库根目录，等价于 CI Linux 质量门，覆盖前端/Tauri/服务端全套；
+#    其脚本末尾含服务端全量 pytest——这是每任务唯一的一次全量）
 npm run check
 
 # 收尾：scripts/pg-fixture.sh stop；DSN 覆盖用环境变量 TEST_POSTGRESQL_URL
