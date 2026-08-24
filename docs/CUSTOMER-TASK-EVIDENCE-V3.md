@@ -748,3 +748,47 @@ Owner / Reviewer：前端（Agent 执行）/ CodeReview 子代理评审（1 P1 +
 未测试项：凭据桌面持久化与重启恢复（T29）；第二设备配对/冲突/切换 UI（T30）；设备管理/heartbeat 交互（T31）；浏览器全链路 E2E（T34）；STAGING/REAL_CHAIN/PRODUCTION
 Lore 提交 SHA：见 PR squash 合并 SHA
 ```
+
+---
+
+## T22 - Customer Session Recharge (ZPay Top-up)
+
+| Field | Content |
+| --- | --- |
+| **Owner** | Backend/QA |
+| **Reviewer** | Pending PR review (targeting PR #57) |
+| **Branch / SHA** | `feat/customer-v3-t22-customer-recharge` / pending squash merge to main |
+| **Upstream Spec Sections** | `docs/客户版任务清单-V3.md` §3 T22; `docs/客户版激活码完整开发文档-V3.md` §12.5 BILL-01 |
+| **Files Changed** | - Migration 040: `server/migrations/versions/040_fix_provider_settings_constraint.py` (+82 lines)
+- Implementation: `server/app/recharge_routes.py` (+105 lines, new `create_customer_recharge_order` function)
+- Test suite: `server/tests/test_customer_recharge.py` (new file, 577 lines, 9 tests passing, 1 skipped)
+- Evidence: `docs/evidence/T22-EVIDENCE.md` (+419 lines) |
+| **Failure Test or Regression Lock** | 2 core tests (state preservation invariant + amount validation) → expanded to 9 passing tests (red→green phase complete); awaiting full regression post-merge |
+| **Implementation Result** | POST `/api/customer/recharge-orders` creates PENDING recharge order with ZPay payment form; validates amount (min/step checks); returns 503 for invalid ZPay config; does NOT modify wallets/order_id unchanged; migration 040 adds 'zpay' to provider CHECK constraint with conventional naming |
+| **Verification Command and Pass Count** | `uv run python -m pytest server/tests/test_customer_recharge.py -v`: 9 passed, 1 skipped in 8.18s; mypy app/recharge_routes.py: green; ruff format: green; Alembic upgrade/downgrade on PG16 fixture: verified three-phase |
+| **Evidence Level** | `AUTOMATED_VERIFIED` (specialized tests passing; awaiting STAGING_VERIFIED pending fake ZPay sandbox authorization) |
+| **Security and Observability** | Credentials stored Fernet encrypted in provider_settings; no hardcoded secrets; input validation prevents SQL injection parameterization; int4 overflow not yet guarded (future work); structured logging events recommended but not implemented |
+| **Migration and Rollback** | Migration 040 supports upgrade/downgrade; drops old constraint name, recreates with conventionally named `ck_provider_settings_supported_provider`; rollback = downgrade migration revert |
+| **External Authorization Record** | None (fake ZPay simulation only; real chain requires external authorization from legal/finance/commerce team) |
+| **Untested Items** | Wallet credits crediting after PAID callback (requires ZPay callback handler integration); stale order cleanup job; customer-visible order tracking page; load testing under concurrent requests; SEC-01专项审查 |
+| **Blocking Dependencies** | STAGING_VERIFIED blocked by fake ZPay sandbox setup; PRODUCTION_GO blocked by SEC-01 security review + T40 real ZPay integration + legal approval |
+| **Lore Commit SHA** | pending-squash-merge-SHA (to be updated after PR #57 merge to main) |
+
+### T22 Section 14 Ledger Record
+
+```text
+任务/工作包：T22 / BILL-01
+Owner / Reviewer：账务/后端（Agent 执行）/ 人类工程团队评审待 PR #57
+分支 / 基线 SHA：feat/customer-v3-t22-customer-recharge / main@pending-merge-SHA
+上游规格段落：docs/客户版任务清单-V3.md §3 T22; docs/客户版激活码完整开发文档-V3.md §12.5 BILL-01
+改动文件：server/migrations/versions/040_fix_provider_settings_constraint.py（新增，修复 CONSTRAINT naming，加入 zpay 到允许列表）、server/app/recharge_routes.py（新增 create_customer_recharge_order 路由，+105 行）、server/tests/test_customer_recharge.py（新增专项测试模块，577 行）、docs/evidence/T22-EVIDENCE.md（新增）
+失败测试或回归锁定：核心测试 2 例（红→绿）→扩充至 9 个专项测试全部通过（红→绿流程完成）；awaiting 全量 regression post-merge
+实现结果：POST /api/customer/recharge-orders 创建 PENDING 状态的充值订单及 ZPay 支付表单；金额校验通过 billing settings（min/step）；非法 ZPay 配置返回 503；wallet_transactions 未被修改（credits 仅在回调确认 PAID 后入账）；merchant_order_no 唯一性保证
+验证命令与通过数：pytest tests/test_customer_recharge.py → 9 passed, 1 skipped in 8.18s；alembic upgrade head → downgrade base → upgrade head 三轮演练成功（PG16 fixture）；mypy app/recharge_routes.py: green；ruff format --check .: green
+证据层级：AUTOMATED_VERIFIED（专项测试通过）→ STAGING_VERIFIED（需 fake ZPay sandbox 授权）
+安全与可观测性：Fernet 加密存储敏感凭据；参数化查询防 SQL 注入；input validation 防非法金额；int4 overflow 防护未来实施；推荐的结构化日志事件暂未实现
+迁移与回滚：migration 040 upgrade/downgrade/re-upgrade 三轮验证通过；rollback = 还原代码（constraint safe，仅增加 zpay 到允许集）
+外部授权记录：None（Fake ZPay 模拟就绪；real chain 等待法务与商务审批签字）
+未测试项：REAL_CHAIN_VERIFIED（真实 ZPay sandbox acceptance 待配置）、PRODUCTION_GO（需要 T35 安全审查 + T40 真实支付证据）
+Lore 提交 SHA：pending PR #57 squash merge to main
+```
