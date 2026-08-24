@@ -118,7 +118,12 @@ def client(
     db_path: Path,
     storage: FakeStorageAdapter,
     contact_sheet_provider: StubContactSheetProvider,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[TestClient]:
+    # Migrated routes (BusinessDb.write) open their own SQLite connection from
+    # the env path; it must point at the same database the override yields.
+    monkeypatch.setenv("VIDEO_REPLICA_DB_PATH", str(db_path))
+
     def database_override() -> Iterator[BusinessConnection]:
         conn = BusinessConnection.sqlite(connect_database(db_path))
         try:

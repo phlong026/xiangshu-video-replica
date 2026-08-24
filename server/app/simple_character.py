@@ -237,7 +237,7 @@ def create_simple_character(
         # Build the snapshot from the stored row so it stays structurally
         # identical to the traditional flow's persona_snapshot contract.
         persona_row = conn.execute(
-            "SELECT * FROM character_personas WHERE id = ?",
+            "SELECT * FROM character_personas WHERE id = %s",
             (persona_id,),
         ).fetchone()
         if persona_row is None:  # pragma: no cover - inserted above
@@ -461,8 +461,8 @@ def rename_simple_character_identity(
         conn.execute(
             """
             UPDATE person_identities
-            SET display_name = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
+            SET display_name = %s, updated_at = CURRENT_TIMESTAMP
+            WHERE id = %s
             """,
             (clean_name, identity_id),
         )
@@ -520,7 +520,7 @@ def regenerate_simple_character_contact_sheet(
     source_asset_id = identity["source_asset_id"]
     source_asset = (
         conn.execute(
-            "SELECT storage_uri, content_type FROM assets WHERE id = ?",
+            "SELECT storage_uri, content_type FROM assets WHERE id = %s",
             (str(source_asset_id),),
         ).fetchone()
         if source_asset_id
@@ -535,7 +535,7 @@ def regenerate_simple_character_contact_sheet(
 
     persona = conn.execute(
         """
-        SELECT id FROM character_personas WHERE identity_id = ?
+        SELECT id FROM character_personas WHERE identity_id = %s
         ORDER BY created_at DESC, id LIMIT 1
         """,
         (identity_id,),
@@ -550,7 +550,7 @@ def regenerate_simple_character_contact_sheet(
     baseline = conn.execute(
         """
         SELECT id, persona_snapshot_json FROM character_versions
-        WHERE persona_id = ?
+        WHERE persona_id = %s
         ORDER BY version_number DESC LIMIT 1
         """,
         (persona_id,),
@@ -686,7 +686,7 @@ def regenerate_simple_character_contact_sheet(
 
 def _next_version_number(conn: BusinessConnection, *, persona_id: str) -> int:
     row = conn.execute(
-        "SELECT MAX(version_number) FROM character_versions WHERE persona_id = ?",
+        "SELECT MAX(version_number) FROM character_versions WHERE persona_id = %s",
         (persona_id,),
     ).fetchone()
     current = int(row[0]) if row is not None and row[0] is not None else 0
@@ -726,7 +726,7 @@ def delete_simple_character_identity(
         FROM character_generation_tasks AS task
         JOIN character_versions AS version ON version.id = task.character_version_id
         JOIN character_personas AS persona ON persona.id = version.persona_id
-        WHERE persona.identity_id = ?
+        WHERE persona.identity_id = %s
           AND task.status IN ('PENDING', 'RUNNING')
         LIMIT 1
         """,
@@ -747,7 +747,7 @@ def delete_simple_character_identity(
         FROM character_reference_selections AS selection
         JOIN character_versions AS version ON version.id = selection.character_version_id
         JOIN character_personas AS persona ON persona.id = version.persona_id
-        WHERE persona.identity_id = ?
+        WHERE persona.identity_id = %s
         LIMIT 1
         """,
         (identity_id,),
@@ -760,7 +760,7 @@ def delete_simple_character_identity(
         )
 
     asset_ids = _identity_asset_ids(conn, identity_id)
-    placeholders = ",".join("?" for _ in asset_ids)
+    placeholders = ",".join("%s" for _ in asset_ids)
     asset_rows = (
         conn.execute(
             f"SELECT id, storage_uri FROM assets WHERE id IN ({placeholders})",  # noqa: S608
@@ -786,7 +786,7 @@ def delete_simple_character_identity(
         SELECT version.id
         FROM character_versions AS version
         JOIN character_personas AS persona ON persona.id = version.persona_id
-        WHERE persona.identity_id = ?
+        WHERE persona.identity_id = %s
     """
     with conn:
         conn.execute(
@@ -802,7 +802,7 @@ def delete_simple_character_identity(
                 WHERE view.character_version_id IN (
                     SELECT version.id FROM character_versions AS version
                     JOIN character_personas AS persona ON persona.id = version.persona_id
-                    WHERE persona.identity_id = ?
+                    WHERE persona.identity_id = %s
                 )
             )
             """,
@@ -814,14 +814,14 @@ def delete_simple_character_identity(
         )
         conn.execute(
             "DELETE FROM character_versions WHERE persona_id IN "
-            "(SELECT id FROM character_personas WHERE identity_id = ?)",
+            "(SELECT id FROM character_personas WHERE identity_id = %s)",
             (identity_id,),
         )
         conn.execute(
-            "DELETE FROM character_personas WHERE identity_id = ?",
+            "DELETE FROM character_personas WHERE identity_id = %s",
             (identity_id,),
         )
-        conn.execute("DELETE FROM person_identities WHERE id = ?", (identity_id,))
+        conn.execute("DELETE FROM person_identities WHERE id = %s", (identity_id,))
         if asset_ids:
             conn.execute(
                 f"DELETE FROM assets WHERE id IN ({placeholders})",
@@ -851,7 +851,7 @@ def _identity_asset_ids(conn: BusinessConnection, identity_id: str) -> set[str]:
     identity = conn.execute(
         """
         SELECT authorization_asset_id, source_asset_id
-        FROM person_identities WHERE id = ?
+        FROM person_identities WHERE id = %s
         """,
         (identity_id,),
     ).fetchone()
@@ -868,7 +868,7 @@ def _identity_asset_ids(conn: BusinessConnection, identity_id: str) -> set[str]:
         FROM character_assets AS view
         JOIN character_versions AS version ON version.id = view.character_version_id
         JOIN character_personas AS persona ON persona.id = version.persona_id
-        WHERE persona.identity_id = ? AND view.asset_id IS NOT NULL
+        WHERE persona.identity_id = %s AND view.asset_id IS NOT NULL
         """,
         (identity_id,),
     ).fetchall():
@@ -879,7 +879,7 @@ def _identity_asset_ids(conn: BusinessConnection, identity_id: str) -> set[str]:
         SELECT version.publication_snapshot_json AS snapshot_json
         FROM character_versions AS version
         JOIN character_personas AS persona ON persona.id = version.persona_id
-        WHERE persona.identity_id = ?
+        WHERE persona.identity_id = %s
         """,
         (identity_id,),
     ).fetchall():
@@ -936,7 +936,7 @@ def _store_source_asset(
         INSERT INTO assets (
             id, project_id, kind, storage_uri, sha256, size_bytes,
             content_type, created_by_user_id, metadata_json
-        ) VALUES (?, NULL, 'character_source_image', ?, ?, ?, ?, ?, ?)
+        ) VALUES (%s, NULL, 'character_source_image', %s, %s, %s, %s, %s, %s)
         """,
         (
             asset_id,
@@ -974,7 +974,7 @@ def _insert_identity(
             authorization_asset_id, authorization_scope, authorization_expires_at,
             source_asset_id, source_quality_status, status, created_by,
             created_at, updated_at
-        ) VALUES (?, ?, ?, 'AUTHORIZED', ?, ?, NULL, ?, 'PASSED', 'ACTIVE', ?, ?, ?)
+        ) VALUES (%s, %s, %s, 'AUTHORIZED', %s, %s, NULL, %s, 'PASSED', 'ACTIVE', %s, %s, %s)
         """,
         (
             identity_id,
@@ -1004,7 +1004,7 @@ def _insert_persona(
         INSERT INTO character_personas (
             id, identity_id, name, usage_scope_json, created_by,
             created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s)
         """,
         (
             persona_id,
@@ -1035,8 +1035,8 @@ def _insert_version(
             persona_snapshot_json, provider, model, generation_params_json,
             template_version, template_hash, required_view_types_json,
             created_by, created_at, generation_mode
-        ) VALUES (?, ?, ?, 'REVIEWING', ?, 'local_simple_upload',
-                  'deterministic-v1', '{}', ?, ?, ?, ?, ?, 'simple_upload')
+        ) VALUES (%s, %s, %s, 'REVIEWING', %s, 'local_simple_upload',
+                  'deterministic-v1', '{}', %s, %s, %s, %s, %s, 'simple_upload')
         """,
         (
             version_id,
@@ -1432,7 +1432,7 @@ def _generate_and_approve_views(
             INSERT INTO assets (
                 id, project_id, kind, storage_uri, sha256, size_bytes,
                 content_type, created_by_user_id, metadata_json
-            ) VALUES (?, NULL, 'character_generated_image', ?, ?, ?, ?, ?, ?)
+            ) VALUES (%s, NULL, 'character_generated_image', %s, %s, %s, %s, %s, %s)
             """,
             (
                 generated_asset_id,
@@ -1458,7 +1458,7 @@ def _generate_and_approve_views(
             INSERT INTO character_assets (
                 id, character_version_id, asset_id, view_type, candidate_number,
                 auto_quality_json, review_status, is_published_selection, created_at
-            ) VALUES (?, ?, ?, ?, 1, '{}', 'APPROVED', 0, ?)
+            ) VALUES (%s, %s, %s, %s, 1, '{}', 'APPROVED', 0, %s)
             """,
             (character_asset_id, version_id, generated_asset_id, view_type, now_iso),
         )
@@ -1467,7 +1467,7 @@ def _generate_and_approve_views(
             INSERT INTO character_asset_reviews (
                 id, character_asset_id, reviewer_user_id, decision,
                 issue_codes_json, comment, created_at
-            ) VALUES (?, ?, ?, 'APPROVED', '[]', ?, ?)
+            ) VALUES (%s, %s, %s, 'APPROVED', '[]', %s, %s)
             """,
             (
                 review_id,
@@ -1521,7 +1521,7 @@ def _publish_views(
             INSERT INTO assets (
                 id, project_id, kind, storage_uri, sha256, size_bytes,
                 content_type, created_by_user_id, metadata_json
-            ) VALUES (?, NULL, 'character_approved_image', ?, ?, ?, ?, ?, ?)
+            ) VALUES (%s, NULL, 'character_approved_image', %s, %s, %s, %s, %s, %s)
             """,
             (
                 approved_asset_id,
@@ -1543,9 +1543,9 @@ def _publish_views(
         updated = conn.execute(
             """
             UPDATE character_assets
-            SET asset_id = ?, is_published_selection = 1
-            WHERE id = ? AND character_version_id = ?
-              AND asset_id = ? AND review_status = 'APPROVED'
+            SET asset_id = %s, is_published_selection = 1
+            WHERE id = %s AND character_version_id = %s
+              AND asset_id = %s AND review_status = 'APPROVED'
             """,
             (
                 approved_asset_id,
@@ -1587,9 +1587,9 @@ def _publish_views(
     updated_version = conn.execute(
         """
         UPDATE character_versions
-        SET status = 'PUBLISHED', published_by = ?, published_at = ?,
-            publication_snapshot_json = ?, publication_hash = ?
-        WHERE id = ? AND status = 'REVIEWING'
+        SET status = 'PUBLISHED', published_by = %s, published_at = %s,
+            publication_snapshot_json = %s, publication_hash = %s
+        WHERE id = %s AND status = 'REVIEWING'
         """,
         (actor.id, now_iso, snapshot_json, publication_hash, version_id),
     )
@@ -1687,7 +1687,7 @@ def _store_contact_sheet_asset(
         INSERT INTO assets (
             id, project_id, kind, storage_uri, sha256, size_bytes,
             content_type, created_by_user_id, metadata_json
-        ) VALUES (?, NULL, 'character_contact_sheet', ?, ?, ?, ?, ?, ?)
+        ) VALUES (%s, NULL, 'character_contact_sheet', %s, %s, %s, %s, %s, %s)
         """,
         (
             asset_id,
