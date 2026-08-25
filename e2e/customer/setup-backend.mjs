@@ -154,6 +154,7 @@ with psycopg.connect("${adminDsn}", autocommit=True) as c:
       "127.0.0.1",
       "--port",
       API_PORT,
+      "--no-proxy-headers",
     ],
     {
       env: apiEnv,

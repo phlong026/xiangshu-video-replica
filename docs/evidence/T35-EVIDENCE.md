@@ -20,7 +20,7 @@
 1. 首轮发现 1 个 Medium：客户 IP 限流直接依赖未验证的代理地址语义。
 2. 修复后复审发现 2 个 Medium：Uvicorn 误开 proxy-header parsing 时仍可能先改写 ASGI peer；`PUBLIC_BASE_URL` 可能与浏览器公网 origin 分叉。
 3. 第二轮修复后第三次复审确认上述问题全部实质关闭，当前 diff 无剩余 Critical、High 或 Medium。
-4. PR connector 随后发现 1 个 P1 可用性缺口：仓库启动命令没有真正传入 `--no-proxy-headers`，同机 Nginx 下合法请求会在应用自检前被改写并 403。四条现存 Uvicorn 启动路径已全部显式关闭代理头解析，并加入合同测试。
+4. PR connector 随后发现 1 个 P1 可用性缺口：仓库启动命令没有真正传入 `--no-proxy-headers`，同机 Nginx 下合法请求会在应用自检前被改写并 403。四条产品启动路径及浏览器 E2E harness 已全部显式关闭代理头解析，并加入合同测试；修复后独立复审仍为 0C/0H/0M。
 
 未发现需要改变业务状态机的认证绕过、IDOR、CSRF/RBAC、SQL 注入、命令注入、Provider URL 任意 scheme、明文凭据或 CSV 公式注入缺陷。
 
@@ -32,7 +32,7 @@
 - `Host` 必须精确匹配 `VIDEO_REPLICA_PUBLIC_ORIGIN`，`X-Forwarded-Proto` 必须是唯一的 `https`，`X-Forwarded-For` 必须是唯一且无逗号链的合法 IP。
 - 路由限流统一读取入口中间件验证后写入的 `request.state.client_ip`；激活、登录/切换、设备 enroll、管理端 session exchange 不再各自直接信任 `request.client.host`。
 - 若外层 Uvicorn `ProxyHeadersMiddleware` 已把 `request.client` 改写成单一转发地址，应用通过 `forwarded_ip == peer_ip` 识别原始 last-hop peer 已丢失，并以 `503 PROXY_HEADER_REWRITE_DETECTED` fail-closed。集成测试使用真实 Uvicorn middleware 复现误配。
-- systemd、npm 开发命令、Tauri POSIX 与 Windows sidecar 启动器四条现存 API 启动路径都显式传入 `--no-proxy-headers`；T36 新增多实例 service 模板必须沿用该合同。
+- systemd、npm 开发命令、Tauri POSIX 与 Windows sidecar 启动器四条产品 API 启动路径，以及浏览器 E2E harness 都显式传入 `--no-proxy-headers`；T36 新增多实例 service 模板必须沿用该合同。
 - 内部 P0 路径保持 loopback-only 行为，不扩大既有暴露面。
 
 ### 2.2 生产启动门与密钥
@@ -112,6 +112,7 @@ Bandit `-r app -ll -ii`：0 High；metrics 记录 44 Medium，输出结果为 B6
 - `package.json`
 - `client/src-tauri/resources/start-backend.sh`
 - `client/src-tauri/resources/start-backend.bat`
+- `e2e/customer/setup-backend.mjs`
 - `scripts/verify_no_secrets.sh`
 - `server/tests/test_internal_deployment.py`
 - `server/tests/test_build_contracts.py`
@@ -133,7 +134,7 @@ Bandit `-r app -ll -ii`：0 High；metrics 记录 44 Medium，输出结果为 B6
 Owner / Reviewer：安全/后端（Agent 执行）/ 独立 Security Reviewer（三轮；最终 0C/0H/0M）+ PR connector（1 P1，已实质修复并锁定）
 分支 / 基线 SHA：feat/customer-v3-t35-security-review / main@d15b3f9
 上游规格段落：客户版任务清单 V3 §7 T35、§12.7 SEC-01/SEC-02、§13–§15；代码开发清单 V3 §11.1/§13；测试与验收规格 V3 安全与证据分层
-改动文件：bootstrap/main/security_rate_limit 与四个 IP 消费路由；四条 Uvicorn 启动路径；admin/customer/deployment/build-contract tests；customer env；secret scan；T35 证据与账本
+改动文件：bootstrap/main/security_rate_limit 与四个 IP 消费路由；四条产品 Uvicorn 启动路径及浏览器 E2E harness；admin/customer/deployment/build-contract tests；customer env；secret scan；T35 证据与账本
 失败测试或回归锁定：生产密钥/origin/proxy 配置门 + 真实 ProxyHeadersMiddleware 改写 peer + Host/HTTPS/单一 XFF/CORS；先红后绿
 实现结果：客户生产入口建立可验证 trusted-proxy 边界；所有限流 IP 统一使用已验证地址；公网 origin 与 ZPay/签名 URL base 绑定；生产 HMAC/AEAD/Fernet 全量 fail-closed；runtime secret scan 扩面
 验证命令与通过数：admin auth 69；customer security 34；启动合同 19；全仓 client 513；server 1188 passed/3 skipped；Tauri/Ruff/mypy 全绿；pip/npm audit 0 已知漏洞；独立复审 0C/0H/0M；PR P1 已修复
