@@ -1,7 +1,7 @@
 import { BlockList, isIP } from "node:net";
 
 const message =
-  "VITE_API_BASE_URL must be a non-loopback HTTPS origin for the customer cloud build";
+  "VITE_API_BASE_URL must be a routable, non-loopback HTTPS origin for the customer cloud build";
 
 let url;
 try {
@@ -17,18 +17,21 @@ const hostname = url.hostname
   .replace(/\.$/, "")
   .toLowerCase();
 const addressFamily = isIP(hostname);
-const loopbackAddresses = new BlockList();
-loopbackAddresses.addSubnet("127.0.0.0", 8, "ipv4");
-loopbackAddresses.addAddress("::1", "ipv6");
+const nonDestinationAddresses = new BlockList();
+nonDestinationAddresses.addSubnet("127.0.0.0", 8, "ipv4");
+nonDestinationAddresses.addAddress("0.0.0.0", "ipv4");
+nonDestinationAddresses.addAddress("::", "ipv6");
+nonDestinationAddresses.addAddress("::1", "ipv6");
+nonDestinationAddresses.addAddress("::ffff:0:0", "ipv6");
 
-const isLoopbackAddress =
+const isNonDestinationAddress =
   addressFamily !== 0 &&
-  loopbackAddresses.check(hostname, addressFamily === 4 ? "ipv4" : "ipv6");
+  nonDestinationAddresses.check(hostname, addressFamily === 4 ? "ipv4" : "ipv6");
 const isLoopbackHostname = hostname === "localhost" || hostname.endsWith(".localhost");
 
 if (
   url.protocol !== "https:" ||
-  isLoopbackAddress ||
+  isNonDestinationAddress ||
   isLoopbackHostname ||
   url.username ||
   url.password ||

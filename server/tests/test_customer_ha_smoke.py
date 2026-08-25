@@ -475,7 +475,7 @@ def test_customer_desktop_build_is_an_explicit_no_sidecar_target() -> None:
     assert '"tauri:build:customer"' in package
     assert '"require:customer-api-base"' in package
     assert "--ci -- --no-default-features" in package
-    assert "VITE_API_BASE_URL must be a non-loopback HTTPS origin" in origin_guard
+    assert "VITE_API_BASE_URL must be a routable, non-loopback HTTPS origin" in origin_guard
     assert 'addSubnet("127.0.0.0", 8, "ipv4")' in origin_guard
     assert 'addAddress("::1", "ipv6")' in origin_guard
     assert "url.port" in origin_guard
@@ -511,10 +511,13 @@ def test_customer_desktop_build_is_an_explicit_no_sidecar_target() -> None:
         "https://[::1]",
         "https://[::ffff:127.0.0.1]",
         "https://[::ffff:7f00:1]",
+        "https://0.0.0.0",
+        "https://[::]",
+        "https://[::ffff:0.0.0.0]",
         "https://staging.example.invalid:8443",
     ],
 )
-def test_customer_cloud_build_rejects_the_full_loopback_space(origin: str) -> None:
+def test_customer_cloud_build_rejects_non_destination_origins(origin: str) -> None:
     env = os.environ.copy()
     env["VITE_API_BASE_URL"] = origin
     result = subprocess.run(
