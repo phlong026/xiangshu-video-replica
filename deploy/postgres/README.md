@@ -12,6 +12,10 @@ failover owned by the database layer.
   not expose PostgreSQL to the 公网.
 - Require TLS on the application DSN, restrict the security group/firewall to
   the API/Worker hosts, and use a dedicated least-privilege application role.
+  Customer production rejects a missing `sslmode` and the libpq downgrade-capable
+  `disable`, `allow` and `prefer` modes. Deploy the provider/private CA as a
+  read-only file and use `sslmode=verify-full&sslrootcert=...`, so both the
+  certificate chain and the HA endpoint hostname are verified.
 - Point every API and Worker at the same read/write primary endpoint. This
   application does not route reads to replicas.
 - Budget connections for two API processes, four Workers, maintenance and one

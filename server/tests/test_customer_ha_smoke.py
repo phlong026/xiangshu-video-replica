@@ -212,10 +212,14 @@ def test_nginx_contract_load_balances_two_apis_and_rewrites_forwarding_headers()
     assert "$proxy_add_x_forwarded_for" not in nginx
     assert "proxy_next_upstream_tries 2;" in nginx
     assert nginx.count("max_fails=1 fail_timeout=30s") == 2
+    live = nginx.split("location = /live", 1)[1].split("}", 1)[0]
+    assert "proxy_set_header X-Forwarded-For 127.0.0.2;" in live
     ready = nginx.split("location = /ready", 1)[1].split("}", 1)[0]
     assert "allow 127.0.0.1;" in ready
     assert "allow ::1;" in ready
     assert "deny all;" in ready
+    assert "proxy_set_header X-Forwarded-For 127.0.0.2;" in ready
+    assert "proxy_set_header X-Forwarded-For $remote_addr;" not in ready
     assert "proxy_next_upstream error timeout http_502 http_503 http_504;" in ready
 
 
@@ -251,6 +255,7 @@ def test_customer_deployment_docs_keep_evidence_levels_honest() -> None:
     runbook = _read("docs/客户版部署与灰度手册.md")
     evidence = _read("docs/客户版验收证据包模板.md")
     postgres = _read("deploy/postgres/README.md")
+    customer_env = _read("deploy/customer.env.example")
 
     for required in (
         "video-replica-api@8001",
@@ -275,6 +280,8 @@ def test_customer_deployment_docs_keep_evidence_levels_honest() -> None:
     assert "HA" in postgres
     assert "公网" in postgres
     assert "T38" in postgres
+    assert "sslmode=verify-full" in customer_env
+    assert "sslrootcert=" in customer_env
 
 
 def test_customer_desktop_build_is_an_explicit_no_sidecar_target() -> None:
@@ -301,8 +308,10 @@ def test_customer_desktop_build_is_an_explicit_no_sidecar_target() -> None:
     )
     assert "127.0.0.1:8000" not in customer_config["app"]["security"]["csp"]
     assert "npm run check:tauri:customer" in workflow
+    assert "npm run tauri:build -- --bundles nsis --no-sign --ci" in workflow
     assert "npm run tauri:build:customer" in workflow
     assert "VITE_API_BASE_URL: https://staging.example.invalid" in workflow
+    assert "unsigned-windows-nsis" in workflow
     assert "unsigned-customer-cloud-windows-nsis" in workflow
     assert "Verify customer installer excludes local launchers" in workflow
     assert "start-backend.bat" in workflow

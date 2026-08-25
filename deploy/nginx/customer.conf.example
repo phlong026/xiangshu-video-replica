@@ -46,7 +46,12 @@ server {
         proxy_set_header Connection "";
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header X-Forwarded-For $remote_addr;
+        # A same-host monitor's 127.0.0.1 client address otherwise equals the
+        # Nginx-to-Uvicorn peer and trips the application's fail-closed check
+        # for accidental Uvicorn proxy-header rewriting. This operational-only
+        # loopback sentinel keeps those two identities distinct; business
+        # routes must continue forwarding the real $remote_addr below.
+        proxy_set_header X-Forwarded-For 127.0.0.2;
         proxy_next_upstream error timeout http_502 http_503 http_504;
         proxy_next_upstream_tries 2;
     }
@@ -64,7 +69,8 @@ server {
         proxy_set_header Connection "";
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header X-Forwarded-For $remote_addr;
+        # Same operational-only loopback sentinel as /live above.
+        proxy_set_header X-Forwarded-For 127.0.0.2;
         proxy_next_upstream error timeout http_502 http_503 http_504;
         proxy_next_upstream_tries 2;
     }

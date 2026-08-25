@@ -46,14 +46,18 @@ LB 的限流桶证据。本任务不能标记 `STAGING_VERIFIED`，更不能提�
 - `/ready` 在 Nginx 仅向同机监控开放；`http_503` + `max_fails=1`
   使一次失败探测立即把对应 API 从普通 upstream 摘除 30 秒，
   upstream `zone` 使该失败状态在所有 Nginx worker 间共享，
-  避免用公网请求占满线程池，也不让已知不就绪节点继续接收业务。
+  避免用公网请求占满线程池，也不让已知不就绪节点继续接收业务。该 location
+  与 `/live` 使用 operational-only 的 `127.0.0.2` XFF 哨兵，避免同机监控的回环地址与
+  Nginx→Uvicorn peer 相等而被防重写门误拒；业务路由仍传真实客户端地址。
 
 ### 1.3 PostgreSQL 与运维边界
 
 - `deploy/postgres/migrate.sh` 要求 PG DSN、`set -euo pipefail`，并在唯一指定
   迁移主机使用 non-blocking `flock` 串行 Alembic `upgrade head`。
 - PostgreSQL 16 文档要求 HA 主端点、私网/TLS、最小权限、连接预算和禁止公网；
-  T38 前不宣称备份/PITR 已验证。
+  客户生产启动门拒绝缺失 `sslmode` 和可降级为明文的
+  `disable/allow/prefer`，模板固定 `verify-full` + CA/主机名校验；T38 前不宣称
+  备份/PITR 已验证。
 - 部署手册给出管理端同源静态部署、COS 启动前受控配置、ready/live、滚动发布、
   Worker 逐个替换和前向修复优先的回滚流程。
 
@@ -68,12 +72,13 @@ LB 的限流桶证据。本任务不能标记 `STAGING_VERIFIED`，更不能提�
   防止与内部版覆盖安装或串联升级。构建前要求
   `VITE_API_BASE_URL` 是无凭据、无 path/query/fragment、非 loopback 的 HTTPS
   origin，避免“没有 sidecar 但仍访问 localhost”的不可用假构建。
-- Windows CI 产物改名为
-  `unsigned-customer-cloud-windows-nsis-${{ github.sha }}`。CI 使用 `.invalid`
+- Windows CI 保留默认内部版 NSIS 构建与
+  `unsigned-windows-nsis-${{ github.sha }}` 产物，再隔离输出并构建客户版
+  `unsigned-customer-cloud-windows-nsis-${{ github.sha }}`。客户版使用 `.invalid`
   地址只验证合同，产物明确是 `UNSIGNED_INTERNAL_TEST`，不能用于 staging。
 - 本机真实 release/NSIS 构建成功；编译后的 app binary 不包含
   `VIDEO_REPLICA_BOOT_COMMAND`、`start-backend.bat` 或 `127.0.0.1:8000` 字符串。
-  Windows CI 进一步用 7-Zip 检查 NSIS payload，发现任一
+  Windows CI 进一步用 7-Zip 检查客户 NSIS payload，发现任一
   `start-backend.bat/.sh` 即失败。
 
 ## §2 失败测试与回归锁定
@@ -83,7 +88,7 @@ gate、Nginx/systemd/PG/docs 文件）。实现后扩展为 10 项：
 
 1. `/live` 与内部 `/ready` 契约；
 2. 缺 COS 时启动门失败；
-3. PG + COS 配置与只读 HEAD 成功；
+3. PG 强制 TLS + COS 配置与只读 HEAD 成功；
 4. `/ready` 503 不泄漏底层 DSN/secret；
 5. 直接客户 Worker 在 COS 不可用时不进入循环；
 6. Nginx 两 upstream、SPA、转发头覆盖与重试边界；
@@ -103,7 +108,8 @@ sidecar NSIS；T36 已有意把该 job 改成客户云目标，因此更新回�
 | T36 首轮失败基线 | 7 failed（预期红） |
 | T36 最终专项 | 10 passed |
 | build-contract + T36 复验 | 18 passed，0 skipped |
-| PR 评审修复回归 | 77 passed，19 skipped（本机未连 PG fixture 的预期跳过） |
+| PG 客户生产 TLS 启动门 | 13 passed（含 8 项 sslmode 配置锁 + 1 项真实 API lifespan 锁） |
+| PR 评审修复回归 | 94 passed，38 skipped（含同机监控哨兵；本机未连 PG fixture 的预期跳过） |
 | PG 连接/DSN 脱敏复验 | 11 passed（含 T36 专项） |
 | settings/storage/T36 相关回归 | 78 passed |
 | admin auth/customer security/T36 | 75 passed / 36 skipped（PG fixture 未启动的早期专项；后续全量已在 fixture 下覆盖） |
@@ -132,9 +138,10 @@ sidecar NSIS；T36 已有意把该 job 改成客户云目标，因此更新回�
   产品入口保持 `--no-proxy-headers`。
 - **COS**：readiness 仅执行 HEAD，不写/删对象；完整私有桶最小权限与归档链
   留到 T40 经授权执行。
-- **数据库迁移**：本任务没有新增 Alembic revision；部署脚本只串行执行既有
-  `upgrade head`。回滚优先上一应用 SHA/前向 schema 修复，不在新旧应用并写时
-  downgrade。
+- **数据库迁移**：本任务没有新增 Alembic revision；生产 PG DSN 必须选择
+  `require/verify-ca/verify-full` 之一，部署模板使用 `verify-full` + 只读 CA，避免
+  libpq `prefer` 降级明文；部署脚本只串行执行既有 `upgrade head`。回滚优先上一
+  应用 SHA/前向 schema 修复，不在新旧应用并写时 downgrade。
 - **桌面构建**：本地 unsigned `.invalid` artifact 仅作合同验证，不发布、不上传。
 
 ## §5 外部授权与未测试项
@@ -156,9 +163,9 @@ Owner / Reviewer：OPS/DB/后端/Tauri（Agent 执行）/ 独立 Code Reviewer�
 分支 / 基线 SHA：feat/customer-v3-t36-staging-topology / main@2a298470e20a4cd14d7fd39e83e701468e9978fb
 上游规格段落：客户版任务清单 V3 §7 T36、§12.5 COS-01/EXT-01、§12.6 DESK-02、§12.7 OPS-01、§13–§16；代码开发清单 V3 §11.1/§12；测试与验收规格 V3 §1/Gate B
 改动文件：bootstrap/main/generation_worker；test_customer_ha_smoke/test_build_contracts；customer env；Nginx、API/Worker systemd、PG migration/README；customer build scripts/CI；部署与证据模板；T36 证据/任务账本
-失败测试或回归锁定：7 项先红；最终 T36 10 项 + build-contract 合计 18/18；PR 评审修复切片 77 passed/19 PG-skipped；覆盖 COS HEAD/PG gate、ready/live、direct Worker、proxy/systemd/migration/docs/customer cloud build/NSIS payload 合同
-实现结果：仓库形成可部署的 LB+双 API+四 Worker 形状；API/Worker PG+私有 COS fail-closed；同源 Web/admin；可信代理覆盖头；单主迁移锁；客户云无 sidecar、无内部 launcher 且强制 HTTPS origin；滚动/回滚/证据手册就绪
-验证命令与通过数：client 513；T36 10；build+T36 18；评审回归 77 passed/19 skipped；settings/storage/T36 78；Ruff/format/mypy/Tauri pass；customer NSIS build pass + SHA256；server 单次全量 1200 pass/1 stale contract，修复后相关 18/18；独立复核 0C/0H/0M；PR connector 意见均已修复
+失败测试或回归锁定：7 项先红；最终 T36 10 项 + build-contract 合计 18/18；PR 评审修复切片 94 passed/38 PG-skipped；覆盖 PG TLS/COS HEAD gate、ready/live 同机哨兵、direct Worker、proxy/systemd/migration/docs、内部/客户双构建与客户 NSIS payload 合同
+实现结果：仓库形成可部署的 LB+双 API+四 Worker 形状；API/Worker PG（强制 TLS sslmode，模板 verify-full + CA）+私有 COS fail-closed；同源 Web/admin；可信代理覆盖头；单主迁移锁；客户云无 sidecar、无内部 launcher 且强制 HTTPS origin；滚动/回滚/证据手册就绪
+验证命令与通过数：client 513；T36 10；build+T36 18；PG 客户生产 TLS 门 13（8 项 sslmode 配置锁 + 1 项真实 API lifespan 锁）；评审回归 94 passed/38 skipped；settings/storage/T36 78；Ruff/format/mypy/Tauri pass；customer NSIS build pass + SHA256；server 单次全量 1200 pass/1 stale contract，修复后相关 18/18；独立复核 0C/0H/0M；PR connector 意见均已修复
 证据层级：AUTOMATED_VERIFIED；T36/OPS-01/COS-01 保持部分完成，不高于 AUTOMATED_VERIFIED；DESK-02 [x]
 安全与可观测性：无真实 secret；COS HEAD 只读；503/日志不泄漏底层错误；proxy overwrite-only；T37 结构化日志/指标/P1 告警尚未开始
 迁移与回滚：无新 revision；flock 单迁移主机执行既有 Alembic head；滚动 API/Worker 和应用回滚手册已写；真实恢复/PITR 属 T38

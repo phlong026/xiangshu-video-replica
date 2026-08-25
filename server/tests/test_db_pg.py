@@ -143,11 +143,54 @@ def test_production_rejects_leftover_db_path() -> None:
     with _env(
         **{
             "VIDEO_REPLICA_CUSTOMER_PRODUCTION": "true",
-            DATABASE_URL_ENV: "postgresql://u:p@host:5432/db",
+            DATABASE_URL_ENV: "postgresql://u:p@host:5432/db?sslmode=verify-full",
             "VIDEO_REPLICA_DB_PATH": "/leftover/app.db",
         }
     ):
         with pytest.raises(RuntimeError, match="VIDEO_REPLICA_DB_PATH"):
+            validate_customer_production(resolve_database_config())
+
+
+@pytest.mark.parametrize("sslmode", ["", "disable", "allow", "prefer"])
+def test_production_rejects_postgres_without_enforced_tls(sslmode: str) -> None:
+    dsn = "postgresql://u:secret@host:5432/db"
+    if sslmode:
+        dsn = f"{dsn}?sslmode={sslmode}"
+
+    with _env(
+        **{
+            "VIDEO_REPLICA_CUSTOMER_PRODUCTION": "true",
+            DATABASE_URL_ENV: dsn,
+            "VIDEO_REPLICA_DB_PATH": "",
+        }
+    ):
+        with pytest.raises(RuntimeError, match="must enforce TLS") as exc_info:
+            validate_customer_production(resolve_database_config())
+
+    assert "secret" not in str(exc_info.value)
+
+
+@pytest.mark.parametrize("sslmode", ["require", "verify-ca", "verify-full"])
+def test_production_accepts_postgres_tls_enforcing_modes(sslmode: str) -> None:
+    with _env(
+        **{
+            "VIDEO_REPLICA_CUSTOMER_PRODUCTION": "true",
+            DATABASE_URL_ENV: f"postgresql://u:p@host:5432/db?sslmode={sslmode}",
+            "VIDEO_REPLICA_DB_PATH": "",
+        }
+    ):
+        validate_customer_production(resolve_database_config())
+
+
+def test_production_rejects_ambiguous_postgres_sslmode() -> None:
+    with _env(
+        **{
+            "VIDEO_REPLICA_CUSTOMER_PRODUCTION": "true",
+            DATABASE_URL_ENV: ("postgresql://u:p@host:5432/db?sslmode=require&sslmode=disable"),
+            "VIDEO_REPLICA_DB_PATH": "",
+        }
+    ):
+        with pytest.raises(RuntimeError, match="must enforce TLS"):
             validate_customer_production(resolve_database_config())
 
 

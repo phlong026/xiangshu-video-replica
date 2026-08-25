@@ -159,6 +159,29 @@ def test_customer_ingress_accepts_only_trusted_single_forwarded_ip(
     assert response.json() == {"client_ip": "203.0.113.41"}
 
 
+def test_customer_ingress_accepts_operational_loopback_sentinel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Nginx /live and /ready locations use a distinct loopback XFF so
+    same-host monitoring does not look like an already-rewritten ASGI peer."""
+    monkeypatch.setenv("VIDEO_REPLICA_CUSTOMER_PRODUCTION", "true")
+    monkeypatch.setenv("VIDEO_REPLICA_PUBLIC_ORIGIN", "https://app.example.test")
+    monkeypatch.setenv("VIDEO_REPLICA_TRUSTED_PROXY_CIDRS", "127.0.0.1/32")
+
+    response = _customer_ingress_get(
+        _customer_ingress_app(),
+        peer="127.0.0.1",
+        headers=[
+            ("Host", "app.example.test"),
+            ("X-Forwarded-Proto", "https"),
+            ("X-Forwarded-For", "127.0.0.2"),
+        ],
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"client_ip": "127.0.0.2"}
+
+
 def test_customer_ingress_rejects_untrusted_peer_even_with_spoofed_headers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

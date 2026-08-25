@@ -83,7 +83,7 @@ def _clean_production_env() -> dict[str, str]:
     """Customer-production-shaped env with every dev/legacy knob removed."""
     return {
         "VIDEO_REPLICA_CUSTOMER_PRODUCTION": "true",
-        DATABASE_URL_ENV: "postgresql://u:p@db.example.com:5432/production",
+        DATABASE_URL_ENV: ("postgresql://u:p@db.example.com:5432/production?sslmode=verify-full"),
         ADMIN_SESSION_HMAC_KEY_ENV: TEST_KEY,
         "VIDEO_REPLICA_AUTH_MODE": "internal",
         "VIDEO_REPLICA_ALLOW_DEV_IDENTITY_HEADER": "0",
@@ -800,6 +800,19 @@ def test_api_lifespan_fails_closed_on_missing_dsn_in_customer_production() -> No
     env[DATABASE_URL_ENV] = ""
     with _env(**env):
         with pytest.raises(RuntimeError, match="customer production requires PostgreSQL"):
+            with TestClient(real_app):
+                pass
+
+
+def test_api_lifespan_fails_closed_on_postgres_without_tls_in_customer_production() -> None:
+    """A syntactically valid PG URL must not inherit libpq's plaintext-capable
+    ``sslmode=prefer`` default at the real customer API startup boundary."""
+    from app.main import app as real_app
+
+    env = _clean_production_env()
+    env[DATABASE_URL_ENV] = "postgresql://u:p@db.example.com:5432/production"
+    with _env(**env):
+        with pytest.raises(RuntimeError, match="must enforce TLS"):
             with TestClient(real_app):
                 pass
 
