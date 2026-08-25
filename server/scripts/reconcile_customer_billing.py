@@ -34,10 +34,10 @@ EXCLUDED_TABLES = frozenset({"alembic_version"})
 # idempotency envelopes, T13/ACT-05; the admin write idempotency ledger,
 # T12/ACT-04; the shared security rate-limit counters and the append-only
 # auth-failure audit, T15/ACT-08; the append-only admin device operations
-# audit, T18/DEV-03; the append-only audited admin adjustments, T23/BILL-02).
-# They have no SQLite counterpart in the T07 import source, so an empty such
-# table on the target is expected; a non-empty one is divergent state and must
-# fail closed.
+# audit, T18/DEV-03; the append-only audited admin adjustments, T23/BILL-02;
+# the per-user fair-queue cursors, T25/041). They have no SQLite counterpart
+# in the T07 import source, so an empty such table on the target is expected;
+# a non-empty one is divergent state and must fail closed.
 PG_ONLY_TABLES: frozenset[str] = frozenset(
     {
         "admin_sessions",
@@ -57,8 +57,18 @@ PG_ONLY_TABLES: frozenset[str] = frozenset(
         "admin_write_idempotency",
         "security_rate_limit_counters",
         "security_auth_failures",
+        "user_queue_cursors",
     }
 )
+
+# Shared tables may carry columns that exist only on the PostgreSQL lane
+# (T25/041 adds runtime_settings.fair_queue_enabled with a server default;
+# the desktop SQLite lane keeps its legacy schema). The column-set contract
+# below must exempt these, or the T07 import would fail closed on its own
+# published migrations.
+PG_ONLY_COLUMNS: dict[str, frozenset[str]] = {
+    "runtime_settings": frozenset({"fair_queue_enabled"}),
+}
 DEFAULT_DIGEST_BATCH_SIZE = 1000
 _DIGEST_MODULUS = 1 << 256
 _MAX_SAFE_MESSAGE_LENGTH = 600
@@ -533,7 +543,10 @@ def _table_reconciliation(
     issues: list[ReconciliationIssue] = []
     source_columns, source_pk = _sqlite_columns(sqlite_conn, table)
     target_columns, target_pk, target_types = _pg_columns(pg_conn, table)
-    if set(source_columns) != set(target_columns):
+    # Exempt the PG-only columns (041 runtime_settings.fair_queue_enabled):
+    # the target carries them, the T07 source never does.
+    pg_only = PG_ONLY_COLUMNS.get(table, frozenset())
+    if set(source_columns) != set(target_columns) - pg_only:
         issues.append(
             ReconciliationIssue(
                 code="table_column_mismatch",

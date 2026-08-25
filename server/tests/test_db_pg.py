@@ -326,16 +326,21 @@ def test_api_bootstrap_completes_in_pg_mode(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 @pytestmark_pg
-def test_worker_main_ready_check_in_pg_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The generation worker entry must complete the PG ready check and stop
-    before the SQLite task loop (fair-queue loop lands with T25) — loudly:
-    M0 review H1 requires a non-zero exit so Restart=on-failure supervision
-    never mistakes the unimplemented PG loop for a healthy idle worker.
+def test_worker_main_dispatches_to_pg_forever_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The generation worker entry must complete the PG ready check and hand
+    over to the T25 fair-queue loop (``run_forever_pg``) — never the SQLite
+    task loop.
+
+    M0 review H1 required a non-zero exit while the PG loop was still
+    unimplemented ("restart on failure must not mistake the unimplemented PG
+    lane for a healthy idle worker"). T25 landed the PG loop, so the worker
+    now stays in it; the supervisor's health signal is the loop's liveness,
+    not an exit code.
 
     Asserted by behaviour (not log output, which is vulnerable to global
     logging state left behind by other tests): neither the one-shot loop nor
-    the forever loop may run in PG mode, and the pool must be usable after
-    the worker released it.
+    the SQLite forever loop may run in PG mode, and the pool stays usable
+    once the worker releases it.
     """
     from app import generation_worker as worker_module
     from app.db_pg import get_pg_pool
@@ -344,6 +349,9 @@ def test_worker_main_ready_check_in_pg_mode(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setenv("VIDEO_REPLICA_DATABASE_URL", PG_DSN)
     monkeypatch.delenv("VIDEO_REPLICA_DB_PATH", raising=False)
     monkeypatch.setattr("sys.argv", ["generation_worker"])
+    monkeypatch.setattr(
+        worker_module, "run_forever_pg", lambda **kwargs: calls.append("run_forever_pg")
+    )
     monkeypatch.setattr(
         worker_module, "run_forever", lambda **kwargs: calls.append("run_forever"), raising=True
     )
@@ -354,13 +362,11 @@ def test_worker_main_ready_check_in_pg_mode(monkeypatch: pytest.MonkeyPatch) -> 
         raising=True,
     )
 
-    with pytest.raises(SystemExit) as excinfo:
-        worker_module.main()
+    worker_module.main()
 
-    assert excinfo.value.code != 0, "PG-mode worker must not exit 0 before T25"
-    assert calls == [], "SQLite task loop must not run in PG mode"
-    # The worker closes its pool before exiting; a fresh pool must still be
-    # creatable from the same configuration.
+    assert calls == ["run_forever_pg"], f"PG-mode worker must dispatch to the PG loop, got {calls}"
+    # The worker closes its pool after the loop returns; a fresh pool must
+    # still be creatable from the same configuration.
     assert not get_pg_pool().closed
 
 

@@ -93,6 +93,30 @@
 
 注:mypy strict 下 `tests/` 存在 972 个历史类型错误(40 文件,多为 psycopg `fetchone()[0]` 模式),非本次引入、非本项目门禁;`app/` 零错误。
 
+## 三.5 CI 门禁 P0:test_db_pg 过时测试导致 pytest 卡死(修复)
+
+**现象**:PR #61 的 Linux quality gate 在 pytest 全量 51%(test_db.py 完成后)卡死,连续两个 run(32805295363、32807178721)均 30 分钟 timeout。取消前 24 分钟无任何输出。
+
+**根因**(本地 Windows 直接复现:`test_db.py + test_db_pg.py` 90 秒内复现,排除 locale/pipe 假说):
+- `test_db_pg.py::test_worker_main_ready_check_in_pg_mode`(M4 时代,M0 review H1 语义)patch 了 `run_forever`/`run_worker_once`(SQLite 循环),期望 main() 在 PG 模式以非零码 SystemExit——当时 PG 循环未实现,不允许"空转 worker 被视为健康"
+- M5 T25 实现了 PG 循环:main() 现在调用 `run_forever_pg` —— 测试 patch 落空,真函数进入无限循环
+- 测试环境 storage settings 未配置 → 每轮 `get_media_storage` 抛 `STORAGE_SETTINGS_UNAVAILABLE` → ERROR 刷屏 + sleep(1.0) 自愈重试 → 永不返回 → pytest 卡死
+- 本地 M5 验证时 PG 未运行 → `@pytestmark_pg` skipif 跳过该测试 → 未暴露;CI 有 PG service → 真实执行 → 卡死
+
+**修复**:重写为 `test_worker_main_dispatches_to_pg_forever_loop` —— patch `run_forever_pg`,断言 main() 在 PG 模式调度到 T25 公平队列循环而非 SQLite 循环;保留 pool 生命周期断言。本地原卡死组合 47 passed 31s;M5 相关文件(worker/fair queue/10k/e2e)24+5 passed。
+
+**评审教训**:功能落地(T25)改变入口行为时,依赖旧行为的 gate 测试必须同步迁移;仅本地验证 skipif 路径会漏掉 CI 专属路径。
+
+## 三.6 CI 门禁 P1:T25 新表/新列未进 T07 导入契约(修复)
+
+**现象**:CI 卡死修复后(本地全量)暴露 `test_sqlite_to_postgres.py` 5 个失败,`MigrationSafetyError: source/target table contract differs`。
+
+**根因**:041 迁移在 PG 侧创建 `user_queue_cursors`(PG-only)并向共享表 `runtime_settings` 加 `fair_queue_enabled` 列;`scripts/reconcile_customer_billing.py` 的 `PG_ONLY_TABLES` 白名单和 `_validate_schema`/`_table_reconciliation` 的列集合比较未同步,把自有迁移的产物当成"目标侧非法差异" fail-closed。CI 卡死掩盖了它(该文件在字母序后段,CI 从未跑到)。
+
+**修复**:`PG_ONLY_TABLES` 加入 `user_queue_cursors`;新增 `PG_ONLY_COLUMNS = {"runtime_settings": {"fair_queue_enabled"}}` 豁免共享表的 PG-only 列,两处列比较统一豁免。本地 test_sqlite_to_postgres 30 ✓。
+
+**评审教训**:给既有表加 PG-only 列/新表时,必须同步 T07 导入契约(白名单 + 列豁免);这是 M5 评审未覆盖的脚本层契约。
+
 ## 四、follow-up 清单(不入代码,记录在案)
 
 - **P2-2 空游标轮转**:全部游标 0(无活跃任务)时轮转退化为首位用户;因 PG 领取有 SKIP LOCKED + 无任务即无行,无放大效应。如未来引入"用户级负载均衡"需求再处理。

@@ -32,6 +32,7 @@ from psycopg.types.json import Json, Jsonb
 
 from app.backup import SqliteSnapshot, create_readonly_snapshot, sha256_file
 from scripts.reconcile_customer_billing import (
+    PG_ONLY_COLUMNS,
     PG_ONLY_TABLES,
     ReconciliationIssue,
     ReconciliationReport,
@@ -214,7 +215,10 @@ def _validate_schema(
     for table in source_tables:
         source_columns, source_pk = _sqlite_columns(sqlite_conn, table)
         target_columns, target_pk, _ = _pg_columns(pg_conn, table)
-        if set(source_columns) != set(target_columns) or source_pk != target_pk:
+        # Exempt the PG-only columns (041 runtime_settings.fair_queue_enabled):
+        # the target carries them, the T07 source never does.
+        pg_only = PG_ONLY_COLUMNS.get(table, frozenset())
+        if set(source_columns) != set(target_columns) - pg_only or source_pk != target_pk:
             raise MigrationSafetyError(f"source/target schema differs for table {table!r}")
     return source_tables
 
