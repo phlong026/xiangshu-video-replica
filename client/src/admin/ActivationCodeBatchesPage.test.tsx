@@ -162,7 +162,7 @@ describe("ActivationCodeBatchesPage", () => {
         face_value_fen: 10000,
         credits: 100,
         quantity: 50,
-        activation_expires_at: "2026-12-31T15:59:00.000Z",
+        activation_expires_at: new Date("2026-12-31T23:59").toISOString(),
         confirm: true,
         reason: "首批渠道投放",
       }),
