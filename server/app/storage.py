@@ -111,6 +111,8 @@ class StorageAdapter(Protocol):
 
     def head_object(self, key: str) -> StoredObject | None: ...
 
+    def check_readiness(self) -> None: ...
+
     def archive_result(
         self,
         source: ArchiveSource,
@@ -309,6 +311,15 @@ class _BaseStorageAdapter:
 
     def head_object(self, key: str) -> StoredObject | None:
         raise NotImplementedError
+
+    def check_readiness(self) -> None:
+        """Confirm that the configured storage namespace is reachable.
+
+        Local/fake adapters can prove this with a harmless metadata lookup.
+        Cloud adapters override this with a bucket-level operation so a
+        missing bucket cannot be mistaken for a missing probe object.
+        """
+        self.head_object("health/readiness-probe")
 
     def _delete_object(self, key: str) -> None:
         raise NotImplementedError
@@ -557,6 +568,13 @@ class CloudStorageAdapter(_BaseStorageAdapter):
             sha256="",
             updated_at=datetime.now(UTC),
         )
+
+    def check_readiness(self) -> None:
+        """Verify the bucket itself exists and the credentials can reach it."""
+        try:
+            self._client.head_bucket(Bucket=self.bucket)
+        except Exception as exc:
+            raise StorageBackendUnavailable("cloud bucket readiness check failed") from exc
 
     def archive_result(
         self,

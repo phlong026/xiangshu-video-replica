@@ -124,10 +124,10 @@ def test_customer_runtime_dependency_gate_accepts_pg_and_cos(
     probes: list[str] = []
 
     class ReachableStorage:
-        def head_object(self, key: str) -> None:
+        def check_readiness(self) -> None:
             assert events == ["pg-enter", "pg-exit"]
-            events.append("cos-head")
-            probes.append(key)
+            events.append("cos-bucket-head")
+            probes.append("bucket")
 
     monkeypatch.setattr(
         bootstrap,
@@ -136,8 +136,8 @@ def test_customer_runtime_dependency_gate_accepts_pg_and_cos(
     )
 
     assert bootstrap.check_customer_production_runtime_dependencies() is ready
-    assert probes == ["health/readiness-probe"]
-    assert events == ["pg-enter", "pg-exit", "cos-head"]
+    assert probes == ["bucket"]
+    assert events == ["pg-enter", "pg-exit", "cos-bucket-head"]
 
 
 def test_customer_readiness_returns_generic_503_without_leaking_dependency(

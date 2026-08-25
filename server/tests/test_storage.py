@@ -46,6 +46,10 @@ class FakeCosClient:
         self.calls.append(("head", kwargs))
         return {"Content-Length": "5", "Content-Type": "video/mp4"}
 
+    def head_bucket(self, **kwargs: object) -> dict[str, str]:
+        self.calls.append(("head-bucket", kwargs))
+        return {}
+
     def delete_object(self, **kwargs: object) -> None:
         self.calls.append(("delete", kwargs))
 
@@ -65,6 +69,12 @@ class FakeCosNoSuchResourceClient(FakeCosClient):
     def head_object(self, **kwargs: object) -> dict[str, str]:
         del kwargs
         raise RuntimeError("NoSuchResource: The Resource You Head Not Exist")
+
+
+class FakeCosNoSuchBucketClient(FakeCosClient):
+    def head_bucket(self, **kwargs: object) -> dict[str, str]:
+        del kwargs
+        raise RuntimeError("NoSuchBucket: The specified bucket does not exist")
 
 
 def _flow(adapter: FakeStorageAdapter) -> tuple[str, str]:
@@ -213,6 +223,40 @@ def test_cos_head_maps_deleted_object_no_such_resource_to_none() -> None:
     )
 
     assert adapter.head_object("projects/p1/deleted.mp4") is None
+
+
+def test_cos_readiness_rejects_a_missing_bucket() -> None:
+    adapter = CloudStorageAdapter(
+        CloudStorageConfig(
+            provider="cos",
+            bucket="missing-bucket",
+            access_key_id="public-id",
+            secret_access_key="very-secret-key",
+            region="ap-shanghai",
+        ),
+        client=FakeCosNoSuchBucketClient(),
+    )
+
+    with pytest.raises(StorageBackendUnavailable, match="bucket readiness"):
+        adapter.check_readiness()
+
+
+def test_cos_readiness_uses_bucket_head_instead_of_object_head() -> None:
+    client = FakeCosClient()
+    adapter = CloudStorageAdapter(
+        CloudStorageConfig(
+            provider="cos",
+            bucket="private-bucket",
+            access_key_id="public-id",
+            secret_access_key="very-secret-key",
+            region="ap-shanghai",
+        ),
+        client=client,
+    )
+
+    adapter.check_readiness()
+
+    assert client.calls == [("head-bucket", {"Bucket": "private-bucket"})]
 
 
 def test_cloud_adapter_configures_sdk_timeouts(
