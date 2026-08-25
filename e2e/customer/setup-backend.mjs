@@ -7,9 +7,20 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..", "..");
 const serverDir = path.join(repoRoot, "server");
-const python = path.join(serverDir, ".venv", "Scripts", "python.exe");
+// The venv layout differs per platform: uv creates Scripts/python.exe on
+// Windows and bin/python on Linux/macOS (the CI Linux gate is the latter).
+const python =
+  process.platform === "win32"
+    ? path.join(serverDir, ".venv", "Scripts", "python.exe")
+    : path.join(serverDir, ".venv", "bin", "python");
 
-const PG_DEFAULT = "postgresql://testuser:testpass@localhost:5433";
+// Honor the repository's PostgreSQL fixture override (TEST_POSTGRESQL_URL is
+// what scripts/pg-fixture.sh and the CI postgres service both export); fall
+// back to the local default only when it is unset.
+const TEST_PG_URL =
+  process.env.TEST_POSTGRESQL_URL ??
+  "postgresql://testuser:testpass@localhost:5433/customer_v3_test";
+const PG_BASE = TEST_PG_URL.slice(0, TEST_PG_URL.lastIndexOf("/"));
 const E2E_DB = "customer_e2e";
 const API_PORT = process.env.CUSTOMER_E2E_API_PORT ?? "8765";
 const WEB_PORT = process.env.CUSTOMER_E2E_WEB_PORT ?? "5173";
@@ -66,8 +77,8 @@ async function waitForHealth(url, timeoutMs, what) {
 
 export async function setup() {
   const keys = testKeys();
-  const dsn = `${PG_DEFAULT}/${E2E_DB}`;
-  const adminDsn = `${PG_DEFAULT}/postgres`;
+  const dsn = `${PG_BASE}/${E2E_DB}`;
+  const adminDsn = `${PG_BASE}/postgres`;
 
   // 1. Fresh database.
   runSync(python, [
