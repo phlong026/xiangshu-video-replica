@@ -38,6 +38,8 @@ LB 的限流桶证据。本任务不能标记 `STAGING_VERIFIED`，更不能提�
   `%H-worker-%i`；不 `Requires`/`PartOf` API，API 重启不会连带杀 Worker。
 - Nginx upstream 包含两个 API，TLS 默认虚拟主机拒绝未知 SNI；客户 Web 与
   `/admin` 共用 `client/dist` 和 HTTPS origin，`/api/*` 转发到 API。
+- Nginx 对兼容 `/health` 使用 exact-match API 反代，避免 SPA fallback 返回
+  `index.html` 假装健康 JSON；其 trusted-header 合同与无依赖 `/live` 一致。
 - 公开 origin 固定标准 HTTPS 443，构建门和服务端同时拒绝非标准
   端口，避免 Nginx `$host` 与应用 authority 判定分叉。
 - 最后一跳覆盖 Host、`X-Forwarded-Proto=https` 与单值
@@ -56,11 +58,12 @@ LB 的限流桶证据。本任务不能标记 `STAGING_VERIFIED`，更不能提�
   迁移主机使用 non-blocking `flock` 串行 Alembic `upgrade head`；脚本先复用
   客户生产数据库门，SQLite、缺失 TLS sslmode 或可明文降级的 DSN 会在 Alembic
   触碰目标库前失败。
-- 对完整迁移后 `users` 仍为空的新库，提供显式确认的 one-shot 初始化命令：
-  在 SERIALIZABLE 事务和 PG advisory lock 下创建首位 admin/钱包、加密 COS 配置、
+- 对完整迁移后仍满足 pristine-state 合同的新库，提供显式确认的 one-shot 初始化
+  命令：在 SERIALIZABLE 事务和 PG advisory lock 下确认用户、钱包、Provider/COS、
+  审计与 runtime 默认值均未被业务写入，再创建首位 admin/钱包、加密 COS 配置、
   runtime 选择和无 secret 审计，并只输出 15 分钟单次 exchange credential；任一
-  用户已存在即拒绝，因此不能用作通用提权或设置覆盖入口。真实 PG16 空库迁移后
-  已验证该路径及第二次调用拒绝语义。
+  半初始化或已有用户状态均拒绝，因此不能用作通用提权或设置覆盖入口。真实 PG16
+  pristine 空库迁移后已验证该路径及第二次调用拒绝语义。
 - PostgreSQL 16 文档要求 HA 主端点、私网/TLS、最小权限、连接预算和禁止公网；
   客户生产启动门拒绝缺失 `sslmode` 和可降级为明文的
   `disable/allow/prefer`，模板固定 `verify-full` + CA/主机名校验；T38 前不宣称
@@ -79,6 +82,8 @@ LB 的限流桶证据。本任务不能标记 `STAGING_VERIFIED`，更不能提�
   防止与内部版覆盖安装或串联升级。构建前要求
   `VITE_API_BASE_URL` 是无凭据、无 path/query/fragment、非 loopback 的 HTTPS
   origin，避免“没有 sidecar 但仍访问 localhost”的不可用假构建。
+- 客户配置覆写完整主窗口并把启动 URL 固定为 `customer`，编译后 WebView 直接
+  进入 `/customer` 激活/设备登录车道，不会落到默认路径的内部工作台。
 - Windows CI 保留默认内部版 NSIS 构建与
   `unsigned-windows-nsis-${{ github.sha }}` 产物，再隔离输出并构建客户版
   `unsigned-customer-cloud-windows-nsis-${{ github.sha }}`。客户版使用 `.invalid`
@@ -110,6 +115,12 @@ PG/TLS 校验；空库 one-shot 必须原子初始化首位 admin 与加密 COS�
 拒绝；部署手册必须先迁移再初始化。另在独立临时数据库完成真实 PostgreSQL 16
 全迁移与 schema/约束/加密/二次调用回归，不以 mock 冒充可执行首装路径。
 
+最终发布合同复审又锁定客户桌面启动路由、兼容 `/health` exact proxy，以及
+`tauri.customer.conf.json`/`require_customer_api_base.mjs` 在冻结文件映射中的
+登记。两项合同测试先红后绿；项目锁定 Tauri 2.11.4 CLI 完成客户配置解析、Web
+构建和 `--no-default-features` 无打包桌面编译，生成 binary 中含客户 main-window
+`customer` URL 配置。
+
 全量门禁发现既有 `test_build_contracts.py` 仍断言 Windows job 必须构建默认
 sidecar NSIS；T36 已有意把该 job 改成客户云目标，因此更新回归合同，专项
 18/18 通过（Git Bash 下无 skip）。
@@ -128,6 +139,7 @@ sidecar NSIS；T36 已有意把该 job 改成客户云目标，因此更新回�
 | admin auth/customer security/T36 | 75 passed / 36 skipped（PG fixture 未启动的早期专项；后续全量已在 fixture 下覆盖） |
 | 最新评审修复切片 | 136 passed / 2 skipped（PG fixture 已启动；含 admin auth、customer security、T36、build contract 与真实空库首装） |
 | PG16 空库首装集成 | 1 passed：完整 Alembic head 后真实写入 admin/钱包/加密 COS/runtime/audit，第二次调用拒绝 |
+| 客户启动路由/health/冻结映射 | 29 passed / 2 skipped；项目锁定 Tauri 2.11.4 客户配置解析 + Web build + no-default-features app build passed |
 | 生成/设置/DB 相关专项 | 169 passed / 10 skipped；唯一 PG fixture 连接超时在 fixture 启动后单例复验通过，不是代码失败 |
 | Secret scan | Pass：无运行时硬编码凭据 |
 | Client | 47 files / 513 tests passed |
@@ -138,7 +150,7 @@ sidecar NSIS；T36 已有意把该 job 改成客户云目标，因此更新回�
 | Ruff / format / mypy | Pass；181 files formatted / 71 source files typed |
 | Server full pytest | 单次全量：1200 passed + 1 stale build-contract failed，16 warnings，1169.23s；失败断言修复后其所在两文件 18/18，按“全量只跑一次”规则未重复第二轮全量 |
 | Independent review | APPROVE，0 Critical / 0 High / 0 Medium |
-| PR connector review | 阻塞式 readiness、PG 事务边界、COS bucket 存活、客户 NSIS 资源/安装身份、origin 端口一致性、私有 ready/upstream 摘除、Alembic 前生产 DSN 校验与空库首装路径均已实质修复；最终复审由 PR 留痕 |
+| PR connector review | 阻塞式 readiness、PG 事务边界、COS bucket 存活、客户 NSIS 资源/安装身份/启动路由、origin 端口一致性、私有 ready/upstream 摘除、兼容 health exact proxy、冻结文件映射、Alembic 前生产 DSN 校验与空库首装路径均已实质修复；最终复审由 PR 留痕 |
 
 上述分段证据证明当前 1201 个收集项中的唯一失败已修复；PR CI
 负责最终的完整 Linux 质量门和 Windows NSIS payload 解包证据。本地
@@ -179,10 +191,10 @@ sidecar NSIS；T36 已有意把该 job 改成客户云目标，因此更新回�
 Owner / Reviewer：OPS/DB/后端/Tauri（Agent 执行）/ 独立 Code Reviewer（APPROVE，0C/0H/0M）
 分支 / 基线 SHA：feat/customer-v3-t36-staging-topology / main@2a298470e20a4cd14d7fd39e83e701468e9978fb
 上游规格段落：客户版任务清单 V3 §7 T36、§12.5 COS-01/EXT-01、§12.6 DESK-02、§12.7 OPS-01、§13–§16；代码开发清单 V3 §11.1/§12；测试与验收规格 V3 §1/Gate B
-改动文件：bootstrap/main/generation_worker；test_customer_ha_smoke/test_postgres_migrations/test_build_contracts；customer env；Nginx、API/Worker systemd、PG migration/README；customer build scripts/CI；部署与证据模板；T36 证据/任务账本
+改动文件：bootstrap/main/generation_worker；test_customer_ha_smoke/test_postgres_migrations/test_build_contracts；customer env；Nginx、API/Worker systemd、PG migration/README；customer Tauri config/build guard/CI；冻结文件映射、部署与证据模板；T36 证据/任务账本
 失败测试或回归锁定：7 项先红；T36 最新 23 项；build-contract + T36 基础合计 18/18；最新评审修复切片 136 passed/2 skipped；真实 PG16 空库首装 1 passed；覆盖 PG TLS/COS HEAD gate、ready/live 同机哨兵、direct Worker、proxy/systemd、Alembic 前生产 DSN 门、空库原子首装、半初始化库拒绝矩阵、内部/客户双构建与客户 NSIS payload 合同
-实现结果：仓库形成可部署的 LB+双 API+四 Worker 形状；API/Worker PG（强制 TLS sslmode，模板 verify-full + CA）+私有 COS fail-closed；同源 Web/admin；可信代理覆盖头；单主迁移锁且 Alembic 前校验目标；空库 one-shot 原子创建首 admin/钱包/加密 COS/runtime/audit 并拒绝非空库；客户云无 sidecar、无内部 launcher 且强制 HTTPS origin；滚动/回滚/证据手册就绪
-验证命令与通过数：client 513；T36 最新 23；build+T36 18；PG 客户生产 TLS 门 13（8 项 sslmode 配置锁 + 1 项真实 API lifespan 锁）；最新评审回归 136 passed/2 skipped；真实 PG16 空库首装 1 passed；settings/storage/T36 78；Ruff/format/mypy/Tauri pass；customer NSIS build pass + SHA256；server 单次全量 1200 pass/1 stale contract，修复后相关专项全绿；独立复核 0C/0H/0M；PR connector 意见均已修复
+实现结果：仓库形成可部署的 LB+双 API+四 Worker 形状；API/Worker PG（强制 TLS sslmode，模板 verify-full + CA）+私有 COS fail-closed；同源 Web/admin；可信代理覆盖头且 health 不落 SPA；单主迁移锁且 Alembic 前校验目标；空库 one-shot 原子创建首 admin/钱包/加密 COS/runtime/audit 并拒绝半初始化库；客户云无 sidecar、无内部 launcher、强制 HTTPS origin 且直接启动 `/customer`；滚动/回滚/证据手册就绪
+验证命令与通过数：client 513；T36 最新 23；build+T36 18；PG 客户生产 TLS 门 13（8 项 sslmode 配置锁 + 1 项真实 API lifespan 锁）；最新评审回归 136 passed/2 skipped；真实 PG16 空库首装 1 passed；客户启动/health/map 29 passed/2 skipped + 锁定 Tauri CLI app build pass；settings/storage/T36 78；Ruff/format/mypy/Tauri pass；customer NSIS build pass + SHA256；server 单次全量 1200 pass/1 stale contract，修复后相关专项全绿；独立复核 0C/0H/0M；PR connector 意见均已修复
 证据层级：AUTOMATED_VERIFIED；T36/OPS-01/COS-01 保持部分完成，不高于 AUTOMATED_VERIFIED；DESK-02 [x]
 安全与可观测性：无真实 secret；COS HEAD 只读；503/日志不泄漏底层错误；proxy overwrite-only；T37 结构化日志/指标/P1 告警尚未开始
 迁移与回滚：无新 revision；flock 单迁移主机在生产 PG/TLS 校验后执行既有 Alembic head；迁移后空库用拒绝非空目标的 one-shot 初始化；滚动 API/Worker 和应用回滚手册已写；真实恢复/PITR 属 T38

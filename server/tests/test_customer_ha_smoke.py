@@ -371,6 +371,7 @@ def test_nginx_contract_load_balances_two_apis_and_rewrites_forwarding_headers()
     assert "server 127.0.0.1:8001" in nginx
     assert "server 127.0.0.1:8002" in nginx
     assert "zone video_replica_customer_api 64k;" in nginx
+    assert "location = /health" in nginx
     assert "location = /live" in nginx
     assert "location = /ready" in nginx
     assert "location ^~ /api/" in nginx
@@ -383,6 +384,9 @@ def test_nginx_contract_load_balances_two_apis_and_rewrites_forwarding_headers()
     assert nginx.count("max_fails=1 fail_timeout=30s") == 2
     live = nginx.split("location = /live", 1)[1].split("}", 1)[0]
     assert "proxy_set_header X-Forwarded-For 127.0.0.2;" in live
+    health = nginx.split("location = /health", 1)[1].split("}", 1)[0]
+    assert "proxy_pass http://video_replica_customer_api;" in health
+    assert "proxy_set_header X-Forwarded-For 127.0.0.2;" in health
     ready = nginx.split("location = /ready", 1)[1].split("}", 1)[0]
     assert "allow 127.0.0.1;" in ready
     assert "allow ::1;" in ready
@@ -460,6 +464,7 @@ def test_customer_desktop_build_is_an_explicit_no_sidecar_target() -> None:
     package = _read("package.json")
     workflow = _read(".github/workflows/ci.yml")
     origin_guard = _read("scripts/require_customer_api_base.mjs")
+    frozen_map = _read("docs/客户版代码开发清单-V3.md")
     customer_config = json.loads(_read("client/src-tauri/tauri.customer.conf.json"))
 
     assert '"check:tauri:customer"' in package
@@ -473,6 +478,7 @@ def test_customer_desktop_build_is_an_explicit_no_sidecar_target() -> None:
     assert "--config src-tauri/tauri.customer.conf.json" in package
     assert customer_config["productName"] == "短视频复刻客户云工作台"
     assert customer_config["identifier"] == "com.xiangshu.video-replica.customer"
+    assert customer_config["app"]["windows"][0]["url"] == "customer"
     assert customer_config["bundle"]["resources"] == []
     assert customer_config["bundle"]["publisher"] == "Xiangshu Video Replica"
     assert (
@@ -488,6 +494,8 @@ def test_customer_desktop_build_is_an_explicit_no_sidecar_target() -> None:
     assert "Verify customer installer excludes local launchers" in workflow
     assert "start-backend.bat" in workflow
     assert "start-backend.sh" in workflow
+    assert "client/src-tauri/tauri.customer.conf.json" in frozen_map
+    assert "scripts/require_customer_api_base.mjs" in frozen_map
 
 
 @pytest.mark.parametrize(
