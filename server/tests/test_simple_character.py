@@ -551,6 +551,55 @@ def test_approved_character_view_can_use_local_cache(
     assert cached.headers["content-type"].startswith("image/png")
 
 
+def test_customer_character_cache_is_shared_across_api_replicas(
+    client: TestClient,
+    storage: FakeStorageAdapter,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    created = generate_global(client).json()
+    asset_id = created["contact_sheet_asset_id"]
+    shared_cache = FakeStorageAdapter(provider="cos", bucket="private-customer-cache")
+    first_replica_home = tmp_path / "api-1"
+    second_replica_home = tmp_path / "api-2"
+    monkeypatch.setenv("VIDEO_REPLICA_HOME", str(first_replica_home))
+    monkeypatch.setenv("VIDEO_REPLICA_SETTINGS_KEY", Fernet.generate_key().decode("ascii"))
+    monkeypatch.setattr(rbac_routes, "is_customer_production", lambda: True)
+    monkeypatch.setattr(rbac_routes, "storage_for_asset", lambda conn, storage_uri: storage)
+    monkeypatch.setattr(
+        rbac_routes,
+        "_customer_character_cache_storage",
+        lambda conn: shared_cache,
+    )
+    monkeypatch.setattr(
+        rbac_routes,
+        "_load_customer_character_cache_storage",
+        lambda: shared_cache,
+    )
+
+    response = client.post(
+        f"/api/assets/{asset_id}/cached-url",
+        headers=headers("employee_1"),
+    )
+
+    assert response.status_code == 200, response.text
+    parsed = urlsplit(response.json()["url"])
+    cache_key = f"character-cache/{Path(parsed.path).name}"
+    assert shared_cache.head_object(cache_key) is not None
+    assert not first_replica_home.exists()
+
+    monkeypatch.setenv("VIDEO_REPLICA_HOME", str(second_replica_home))
+    with rbac_routes.CHARACTER_CACHE_LOCKS_GUARD:
+        rbac_routes.CHARACTER_CACHE_LOCKS.clear()
+
+    cached = client.get(f"{parsed.path}?{parsed.query}")
+
+    assert cached.status_code == 200, cached.text
+    assert cached.content == b"contact-sheet-image"
+    assert cached.headers["content-type"].startswith("image/png")
+    assert not second_replica_home.exists()
+
+
 def test_character_cache_rejects_source_with_wrong_hash(
     client: TestClient,
     storage: FakeStorageAdapter,

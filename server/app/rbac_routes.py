@@ -25,7 +25,9 @@ from app.auth import (
     authenticate_request,
     identity_source,
 )
+from app.bootstrap import is_customer_production
 from app.customer_fence import BusinessDbDep
+from app.db_pg import pg_transaction
 from app.db_portable import BusinessConnection
 from app.media import storage_key_from_uri
 from app.media_routes import api_base_url
@@ -135,9 +137,14 @@ def _character_cache_identity(row: sqlite3.Row) -> tuple[str, str]:
 
 
 def _character_cache_path(cache_name: str) -> Path:
+    _character_cache_object_key(cache_name)
+    return _character_cache_root() / cache_name
+
+
+def _character_cache_object_key(cache_name: str) -> str:
     if CHARACTER_CACHE_NAME.fullmatch(cache_name) is None:
         raise HTTPException(status_code=404, detail={"code": "CHARACTER_CACHE_NOT_FOUND"})
-    return _character_cache_root() / cache_name
+    return f"character-cache/{cache_name}"
 
 
 def _character_cache_lock(cache_name: str) -> LockType:
@@ -145,11 +152,95 @@ def _character_cache_lock(cache_name: str) -> LockType:
         return CHARACTER_CACHE_LOCKS.setdefault(cache_name, Lock())
 
 
+def _customer_character_cache_storage(conn: BusinessConnection) -> StorageAdapter:
+    try:
+        repo = SettingsRepository(conn)
+        runtime = repo.read_runtime_settings()
+        if runtime.get("active_storage_provider") != "cos":
+            raise StorageBackendUnavailable("customer character cache requires COS")
+        config = repo.load_provider_config("cos")
+        return create_storage_adapter(cloud_storage_config_from_settings("cos", config))
+    except (SettingsUnavailableError, ValueError) as exc:
+        raise StorageBackendUnavailable("customer character cache storage unavailable") from exc
+
+
+def _load_customer_character_cache_storage() -> StorageAdapter:
+    with pg_transaction() as raw_conn:
+        return _customer_character_cache_storage(BusinessConnection.postgres(raw_conn))
+
+
+def _read_verified_character_cache_source(
+    conn: BusinessConnection,
+    row: sqlite3.Row,
+) -> bytes:
+    storage_uri = str(row["storage_uri"])
+    object_key = storage_key_from_uri(storage_uri)
+    try:
+        content = storage_for_asset(conn, storage_uri).get_object(object_key)
+    except (KeyError, OSError, StorageBackendUnavailable) as exc:
+        logger.error(
+            "character cache source read failed for asset %s: %s",
+            row["id"],
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "CHARACTER_CACHE_UNAVAILABLE"},
+        ) from exc
+
+    expected_sha256 = str(row["sha256"] or "").lower()
+    if expected_sha256 and not hmac.compare_digest(
+        hashlib.sha256(content).hexdigest(),
+        expected_sha256,
+    ):
+        logger.error("character cache source hash mismatch for asset %s", row["id"])
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "CHARACTER_CACHE_UNAVAILABLE"},
+        )
+    return content
+
+
 def _populate_character_cache(
     conn: BusinessConnection,
     row: sqlite3.Row,
 ) -> tuple[str, str]:
     cache_name, content_type = _character_cache_identity(row)
+    if is_customer_production():
+        cache_key = _character_cache_object_key(cache_name)
+        try:
+            shared_storage = _customer_character_cache_storage(conn)
+        except StorageBackendUnavailable as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "CHARACTER_CACHE_UNAVAILABLE"},
+            ) from exc
+        with _character_cache_lock(cache_name):
+            try:
+                if shared_storage.head_object(cache_key) is not None:
+                    return cache_name, content_type
+            except StorageBackendUnavailable as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail={"code": "CHARACTER_CACHE_UNAVAILABLE"},
+                ) from exc
+            content = _read_verified_character_cache_source(conn, row)
+            try:
+                # The deterministic key makes concurrent writes from separate
+                # API replicas idempotent; the shared COS object is the cache.
+                shared_storage.put_object(cache_key, content, content_type=content_type)
+            except StorageBackendUnavailable as exc:
+                logger.error(
+                    "shared character cache write failed for asset %s: %s",
+                    row["id"],
+                    type(exc).__name__,
+                )
+                raise HTTPException(
+                    status_code=503,
+                    detail={"code": "CHARACTER_CACHE_UNAVAILABLE"},
+                ) from exc
+        return cache_name, content_type
+
     try:
         cache_path = _character_cache_path(cache_name)
     except StorageBackendUnavailable as exc:
@@ -161,31 +252,7 @@ def _populate_character_cache(
         if cache_path.is_file():
             return cache_name, content_type
 
-        storage_uri = str(row["storage_uri"])
-        object_key = storage_key_from_uri(storage_uri)
-        try:
-            content = storage_for_asset(conn, storage_uri).get_object(object_key)
-        except (KeyError, OSError, StorageBackendUnavailable) as exc:
-            logger.error(
-                "character cache source read failed for asset %s: %s",
-                row["id"],
-                type(exc).__name__,
-            )
-            raise HTTPException(
-                status_code=503,
-                detail={"code": "CHARACTER_CACHE_UNAVAILABLE"},
-            ) from exc
-
-        expected_sha256 = str(row["sha256"] or "").lower()
-        if expected_sha256 and not hmac.compare_digest(
-            hashlib.sha256(content).hexdigest(),
-            expected_sha256,
-        ):
-            logger.error("character cache source hash mismatch for asset %s", row["id"])
-            raise HTTPException(
-                status_code=503,
-                detail={"code": "CHARACTER_CACHE_UNAVAILABLE"},
-            )
+        content = _read_verified_character_cache_source(conn, row)
 
         temporary_path = cache_path.with_name(f".{cache_path.name}.{uuid4().hex}.tmp")
         try:
@@ -800,6 +867,28 @@ def read_cached_character_asset(cache_name: str, request: Request) -> Response:
         raise HTTPException(
             status_code=403,
             detail={"code": "CHARACTER_CACHE_FORBIDDEN"},
+        )
+    if is_customer_production():
+        cache_key = _character_cache_object_key(cache_name)
+        try:
+            # Load encrypted settings inside a short PG transaction, then
+            # release the connection before the shared COS network read.
+            shared_storage = _load_customer_character_cache_storage()
+            content = shared_storage.get_object(cache_key)
+        except (KeyError, OSError, StorageBackendUnavailable) as exc:
+            logger.error(
+                "shared character cache read failed for file %s: %s",
+                cache_name,
+                type(exc).__name__,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "CHARACTER_CACHE_UNAVAILABLE"},
+            ) from exc
+        return Response(
+            content=content,
+            media_type=CHARACTER_CACHE_CONTENT_TYPES[Path(cache_name).suffix],
+            headers={"Cache-Control": "private, max-age=900"},
         )
     try:
         cache_path = _character_cache_path(cache_name)

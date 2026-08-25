@@ -96,7 +96,10 @@ server {
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-Proto https;
         proxy_set_header X-Forwarded-For $remote_addr;
-        proxy_next_upstream error timeout http_502 http_503 http_504;
+        # Business handlers legitimately return 502/503/504 for provider or
+        # storage failures. Only transport failures prove this API process is
+        # unhealthy; dependency status removal belongs to /ready above.
+        proxy_next_upstream error timeout;
         proxy_next_upstream_tries 2;
         proxy_request_buffering off;
         proxy_read_timeout 300s;
@@ -111,4 +114,6 @@ server {
 
 # Nginx does not retry POST/PATCH/PUT requests unless `non_idempotent` is
 # explicitly added above. Do not add it: paid-provider submissions rely on
-# application idempotency and must never be replayed by the proxy.
+# application idempotency and must never be replayed by the proxy. Do not add
+# application HTTP statuses to the /api retry list: route-level provider 503s
+# must not quarantine otherwise healthy API processes.

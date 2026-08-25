@@ -394,6 +394,11 @@ def test_nginx_contract_load_balances_two_apis_and_rewrites_forwarding_headers()
     assert "proxy_set_header X-Forwarded-For 127.0.0.2;" in ready
     assert "proxy_set_header X-Forwarded-For $remote_addr;" not in ready
     assert "proxy_next_upstream error timeout http_502 http_503 http_504;" in ready
+    api = nginx.split("location ^~ /api/", 1)[1].split("}", 1)[0]
+    assert "proxy_next_upstream error timeout;" in api
+    assert "http_502" not in api
+    assert "http_503" not in api
+    assert "http_504" not in api
 
 
 def test_systemd_contract_has_two_api_ports_and_four_independent_workers() -> None:
