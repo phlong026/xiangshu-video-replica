@@ -9,6 +9,7 @@ import re
 import sqlite3
 import time
 from _thread import LockType
+from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from threading import Lock
@@ -116,6 +117,17 @@ class DownloadUrlResponse(BaseModel):
     url: str
 
 
+@dataclass(frozen=True)
+class CustomerCharacterCachePlan:
+    asset_id: str
+    cache_name: str
+    content_type: str
+    source_object_key: str
+    expected_sha256: str
+    source_storage: StorageAdapter
+    shared_storage: StorageAdapter
+
+
 def _character_cache_root() -> Path:
     home = os.environ.get("VIDEO_REPLICA_HOME", "").strip()
     if home:
@@ -170,17 +182,18 @@ def _load_customer_character_cache_storage() -> StorageAdapter:
 
 
 def _read_verified_character_cache_source(
-    conn: BusinessConnection,
-    row: sqlite3.Row,
+    *,
+    source_storage: StorageAdapter,
+    source_object_key: str,
+    expected_sha256: str,
+    asset_id: str,
 ) -> bytes:
-    storage_uri = str(row["storage_uri"])
-    object_key = storage_key_from_uri(storage_uri)
     try:
-        content = storage_for_asset(conn, storage_uri).get_object(object_key)
+        content = source_storage.get_object(source_object_key)
     except (KeyError, OSError, StorageBackendUnavailable) as exc:
         logger.error(
             "character cache source read failed for asset %s: %s",
-            row["id"],
+            asset_id,
             type(exc).__name__,
         )
         raise HTTPException(
@@ -188,12 +201,11 @@ def _read_verified_character_cache_source(
             detail={"code": "CHARACTER_CACHE_UNAVAILABLE"},
         ) from exc
 
-    expected_sha256 = str(row["sha256"] or "").lower()
     if expected_sha256 and not hmac.compare_digest(
         hashlib.sha256(content).hexdigest(),
         expected_sha256,
     ):
-        logger.error("character cache source hash mismatch for asset %s", row["id"])
+        logger.error("character cache source hash mismatch for asset %s", asset_id)
         raise HTTPException(
             status_code=503,
             detail={"code": "CHARACTER_CACHE_UNAVAILABLE"},
@@ -201,46 +213,75 @@ def _read_verified_character_cache_source(
     return content
 
 
-def _populate_character_cache(
+def _prepare_customer_character_cache(
     conn: BusinessConnection,
     row: sqlite3.Row,
-) -> tuple[str, str]:
+) -> CustomerCharacterCachePlan:
     cache_name, content_type = _character_cache_identity(row)
-    if is_customer_production():
-        cache_key = _character_cache_object_key(cache_name)
+    storage_uri = str(row["storage_uri"])
+    try:
+        shared_storage = _customer_character_cache_storage(conn)
+    except StorageBackendUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "CHARACTER_CACHE_UNAVAILABLE"},
+        ) from exc
+    return CustomerCharacterCachePlan(
+        asset_id=str(row["id"]),
+        cache_name=cache_name,
+        content_type=content_type,
+        source_object_key=storage_key_from_uri(storage_uri),
+        expected_sha256=str(row["sha256"] or "").lower(),
+        source_storage=storage_for_asset(conn, storage_uri),
+        shared_storage=shared_storage,
+    )
+
+
+def _populate_customer_character_cache(
+    plan: CustomerCharacterCachePlan,
+) -> tuple[str, str]:
+    cache_key = _character_cache_object_key(plan.cache_name)
+    with _character_cache_lock(plan.cache_name):
         try:
-            shared_storage = _customer_character_cache_storage(conn)
+            if plan.shared_storage.head_object(cache_key) is not None:
+                return plan.cache_name, plan.content_type
         except StorageBackendUnavailable as exc:
             raise HTTPException(
                 status_code=503,
                 detail={"code": "CHARACTER_CACHE_UNAVAILABLE"},
             ) from exc
-        with _character_cache_lock(cache_name):
-            try:
-                if shared_storage.head_object(cache_key) is not None:
-                    return cache_name, content_type
-            except StorageBackendUnavailable as exc:
-                raise HTTPException(
-                    status_code=503,
-                    detail={"code": "CHARACTER_CACHE_UNAVAILABLE"},
-                ) from exc
-            content = _read_verified_character_cache_source(conn, row)
-            try:
-                # The deterministic key makes concurrent writes from separate
-                # API replicas idempotent; the shared COS object is the cache.
-                shared_storage.put_object(cache_key, content, content_type=content_type)
-            except StorageBackendUnavailable as exc:
-                logger.error(
-                    "shared character cache write failed for asset %s: %s",
-                    row["id"],
-                    type(exc).__name__,
-                )
-                raise HTTPException(
-                    status_code=503,
-                    detail={"code": "CHARACTER_CACHE_UNAVAILABLE"},
-                ) from exc
-        return cache_name, content_type
+        content = _read_verified_character_cache_source(
+            source_storage=plan.source_storage,
+            source_object_key=plan.source_object_key,
+            expected_sha256=plan.expected_sha256,
+            asset_id=plan.asset_id,
+        )
+        try:
+            # The deterministic key makes concurrent writes from separate
+            # API replicas idempotent; the shared COS object is the cache.
+            plan.shared_storage.put_object(
+                cache_key,
+                content,
+                content_type=plan.content_type,
+            )
+        except StorageBackendUnavailable as exc:
+            logger.error(
+                "shared character cache write failed for asset %s: %s",
+                plan.asset_id,
+                type(exc).__name__,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "CHARACTER_CACHE_UNAVAILABLE"},
+            ) from exc
+    return plan.cache_name, plan.content_type
 
+
+def _populate_character_cache(
+    conn: BusinessConnection,
+    row: sqlite3.Row,
+) -> tuple[str, str]:
+    cache_name, content_type = _character_cache_identity(row)
     try:
         cache_path = _character_cache_path(cache_name)
     except StorageBackendUnavailable as exc:
@@ -252,7 +293,13 @@ def _populate_character_cache(
         if cache_path.is_file():
             return cache_name, content_type
 
-        content = _read_verified_character_cache_source(conn, row)
+        storage_uri = str(row["storage_uri"])
+        content = _read_verified_character_cache_source(
+            source_storage=storage_for_asset(conn, storage_uri),
+            source_object_key=storage_key_from_uri(storage_uri),
+            expected_sha256=str(row["sha256"] or "").lower(),
+            asset_id=str(row["id"]),
+        )
 
         temporary_path = cache_path.with_name(f".{cache_path.name}.{uuid4().hex}.tmp")
         try:
@@ -819,16 +866,30 @@ def create_download_url(
 @router.post("/assets/{asset_id}/cached-url", response_model=DownloadUrlResponse)
 def create_cached_character_url(
     asset_id: str,
-    conn: Database,
-    actor: AuthenticatedUser,
+    db: BusinessDbDep,
 ) -> DownloadUrlResponse:
-    row = require_asset_access(
-        conn,
-        actor=actor,
-        asset_id=asset_id,
-        action="asset.character_cache.read",
-    )
-    cache_name, _ = _populate_character_cache(conn, row)
+    if is_customer_production():
+        # Authorize the asset and load both encrypted storage configurations in
+        # the fenced PG transaction, then release the pooled connection before
+        # any COS HEAD/GET/PUT network operation.
+        with db.write() as (conn, actor):
+            row = require_asset_access(
+                conn,
+                actor=actor,
+                asset_id=asset_id,
+                action="asset.character_cache.read",
+            )
+            plan = _prepare_customer_character_cache(conn, row)
+        cache_name, _ = _populate_customer_character_cache(plan)
+    else:
+        with db.write() as (conn, actor):
+            row = require_asset_access(
+                conn,
+                actor=actor,
+                asset_id=asset_id,
+                action="asset.character_cache.read",
+            )
+            cache_name, _ = _populate_character_cache(conn, row)
     expires_at = str(int(time.time()) + int(DOWNLOAD_URL_EXPIRES_IN.total_seconds()))
     signed_key = f"character-cache/{cache_name}"
     signature = local_download_signature(
