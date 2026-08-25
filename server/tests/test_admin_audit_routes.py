@@ -267,9 +267,7 @@ def test_list_audit_log_returns_adjustments(client: TestClient, route_state: str
 
 
 @pytest.mark.pg
-def test_list_audit_log_filters_by_actor_and_paginates(
-    client: TestClient, route_state: str
-):
+def test_list_audit_log_filters_by_actor_and_paginates(client: TestClient, route_state: str):
     """actor_user_id filter and limit/offset pagination."""
     _admin_session(client, "admin_u")
     with psycopg.connect(_t34_dsn(), autocommit=True) as conn:

@@ -20,9 +20,7 @@ router = APIRouter(prefix="/api/control", tags=["admin-sessions"])
 DEFAULT_LIST_LIMIT = 20
 MAX_LIST_LIMIT = 100
 SESSION_SERVICE_UNAVAILABLE = "SESSION_SERVICE_UNAVAILABLE"
-SESSION_SERVICE_UNAVAILABLE_MESSAGE = (
-    "Session management requires the PostgreSQL runtime."
-)
+SESSION_SERVICE_UNAVAILABLE_MESSAGE = "Session management requires the PostgreSQL runtime."
 
 
 def _http(status: int, code: str, message: str) -> HTTPException:

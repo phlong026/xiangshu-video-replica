@@ -123,8 +123,10 @@ def test_timestamptz_parameter_cast_stays_stripped() -> None:
         == "WHERE datetime(recovery_expires_at) <= datetime(?)"
     )
     assert (
-        translate_to_sqlite("SET lease_until = GREATEST(%s::timestamptz, "
-                            "created_at::timestamptz + interval '1 microsecond')")
+        translate_to_sqlite(
+            "SET lease_until = GREATEST(%s::timestamptz, "
+            "created_at::timestamptz + interval '1 microsecond')"
+        )
         == "SET lease_until = GREATEST(datetime(?), datetime(created_at) "
         "+ interval '1 microsecond')"
     )
@@ -134,8 +136,9 @@ def test_bare_now_becomes_datetime_now() -> None:
     """T25: a bare ``now()`` (no interval) must not reach SQLite as an
     undefined function; datetime('now') is the UTC wall-clock text."""
     assert (
-        translate_to_sqlite("UPDATE user_queue_cursors SET last_dispatched_at = now() "
-                            "WHERE user_id = %s")
+        translate_to_sqlite(
+            "UPDATE user_queue_cursors SET last_dispatched_at = now() WHERE user_id = %s"
+        )
         == "UPDATE user_queue_cursors SET last_dispatched_at = datetime('now') "
         "WHERE user_id = ?"
     )

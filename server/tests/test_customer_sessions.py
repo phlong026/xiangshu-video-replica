@@ -115,9 +115,11 @@ FAILURES_TABLE = "security_auth_failures"
 # encrypt the ZPay provider row seeded in route_state, and the app fixture
 # must expose the same key (the test_customer_recharge precedent).
 TEST_SETTINGS_FERNET_KEY = Fernet.generate_key()
-TEST_ZPAY_ENCRYPTED_CONFIG = Fernet(TEST_SETTINGS_FERNET_KEY).encrypt(
-    b'{"pid":"merchant-123","key":"merchant-secret","enabled_channels":"alipay,wxpay"}'
-).decode("ascii")
+TEST_ZPAY_ENCRYPTED_CONFIG = (
+    Fernet(TEST_SETTINGS_FERNET_KEY)
+    .encrypt(b'{"pid":"merchant-123","key":"merchant-secret","enabled_channels":"alipay,wxpay"}')
+    .decode("ascii")
+)
 
 
 def _pg_dsn() -> str:
@@ -310,9 +312,7 @@ def customer_app(monkeypatch: pytest.MonkeyPatch, route_state: str) -> Iterator[
     # conftest disables the local keystore; the recharge write path (T22)
     # decrypts runtime settings, so the module-stable Fernet key that also
     # encrypted the seeded ZPay provider row must ride this app too.
-    monkeypatch.setenv(
-        "VIDEO_REPLICA_SETTINGS_KEY", TEST_SETTINGS_FERNET_KEY.decode("ascii")
-    )
+    monkeypatch.setenv("VIDEO_REPLICA_SETTINGS_KEY", TEST_SETTINGS_FERNET_KEY.decode("ascii"))
     monkeypatch.setenv("ZPAY_GATEWAY_URL", "https://zpayz.cn/submit.php")
     monkeypatch.setenv("PUBLIC_BASE_URL", "https://callback.example.com")
     monkeypatch.setenv(
@@ -422,6 +422,8 @@ def _second_device_row(
 
 def _bearer(token: str) -> dict[str, str]:
     return {AUTHORIZATION_HEADER: f"Bearer {token}"}
+
+
 def _second_device_login(
     client: TestClient,
     user_id: str,
@@ -460,8 +462,6 @@ def _second_device_login(
     for field in ("user_id", "device_id", "session_token", "session_epoch"):
         assert isinstance(payload.get(field), str if field != "session_epoch" else int), payload
     return payload
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -600,7 +600,6 @@ def test_recharge_fails_with_session_replaced_after_second_device_login(client: 
     )
     assert fresh.status_code == 201, fresh.text
     assert fresh.json()["amount_fen"] == 20000
-
 
 
 def _session_row() -> tuple[str, str, int, str, str]:
