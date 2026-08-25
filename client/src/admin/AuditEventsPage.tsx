@@ -1,10 +1,6 @@
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 
-import {
-  AdminAuditError,
-  type AuditLogItem,
-  listAuditLog,
-} from "../api.admin";
+import { AdminAuditError, type AuditLogItem, listAuditLog } from "../api.admin";
 
 /**
  * T34 / ADM-02 — audit event log view.
@@ -114,7 +110,11 @@ export function AuditEventsPage() {
           <tbody>
             {items.map((item) => (
               <tr key={item.event_id}>
-                <td>{item.created_at ? new Date(item.created_at).toLocaleString() : "—"}</td>
+                <td>
+                  {item.created_at
+                    ? new Date(item.created_at).toLocaleString()
+                    : "—"}
+                </td>
                 <td>{item.event_type}</td>
                 <td>{item.actor_username || item.actor_user_id}</td>
                 <td>{item.target_user_id}</td>
@@ -130,7 +130,7 @@ export function AuditEventsPage() {
       )}
 
       {totalPages > 1 ? (
-        <div className="pagination" aria-label="审计分页">
+        <nav className="pagination" aria-label="审计分页">
           <button
             type="button"
             className="btn-secondary"
@@ -140,7 +140,8 @@ export function AuditEventsPage() {
             ← 上一页
           </button>
           <span>
-            第 {Math.floor(offset / pageSize) + 1} / {totalPages} 页（共 {total} 条）
+            第 {Math.floor(offset / pageSize) + 1} / {totalPages} 页（共 {total}{" "}
+            条）
           </span>
           <button
             type="button"
@@ -150,7 +151,7 @@ export function AuditEventsPage() {
           >
             下一页 →
           </button>
-        </div>
+        </nav>
       ) : null}
     </section>
   );

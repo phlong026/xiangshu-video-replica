@@ -1,16 +1,19 @@
 import { useCallback, useEffect, useState } from "react";
+import { WorkspaceShell } from "../App";
 import {
-  type CustomerDeviceListResponse,
   CustomerApiError,
+  type CustomerDeviceListResponse,
   customerApproveDevicePairing,
   customerListDevices,
   customerUnbindDevice,
 } from "../api";
-import { WorkspaceShell } from "../App";
 import { customerToCurrentUser } from "../RootApp";
 import { DeviceManagementPage } from "./DeviceManagementPage";
 import { PairingApprovalCard } from "./PairingApprovalCard";
-import type { CustomerCredentialStore, CustomerWorkspaceUser } from "./useCustomerSession";
+import type {
+  CustomerCredentialStore,
+  CustomerWorkspaceUser,
+} from "./useCustomerSession";
 
 /**
  * T31 / FE-04 — the customer workspace: the shared generation shell plus the
@@ -55,7 +58,9 @@ export function CustomerWorkspace({
         return;
       }
       setDeviceError(
-        cause instanceof Error && cause.message ? cause.message : "设备列表加载失败",
+        cause instanceof Error && cause.message
+          ? cause.message
+          : "设备列表加载失败",
       );
     }
   }, [store, onSessionExpired]);
@@ -71,11 +76,9 @@ export function CustomerWorkspace({
       return;
     }
     try {
-      await customerUnbindDevice(
-        { kind: "device", token },
-        deviceId,
-        { idempotencyKey: crypto.randomUUID() },
-      );
+      await customerUnbindDevice({ kind: "device", token }, deviceId, {
+        idempotencyKey: crypto.randomUUID(),
+      });
       await loadDevices();
     } catch (cause) {
       if (cause instanceof CustomerApiError && cause.status === 401) {
@@ -83,7 +86,9 @@ export function CustomerWorkspace({
         return;
       }
       setDeviceError(
-        cause instanceof Error && cause.message ? cause.message : "解绑设备失败",
+        cause instanceof Error && cause.message
+          ? cause.message
+          : "解绑设备失败",
       );
     }
   }
@@ -95,10 +100,7 @@ export function CustomerWorkspace({
       return;
     }
     try {
-      await customerApproveDevicePairing(
-        { kind: "device", token },
-        pairingId,
-      );
+      await customerApproveDevicePairing({ kind: "device", token }, pairingId);
       await loadDevices();
     } catch (cause) {
       if (cause instanceof CustomerApiError && cause.status === 401) {
@@ -106,7 +108,9 @@ export function CustomerWorkspace({
         return;
       }
       setDeviceError(
-        cause instanceof Error && cause.message ? cause.message : "审批配对失败",
+        cause instanceof Error && cause.message
+          ? cause.message
+          : "审批配对失败",
       );
     }
   }

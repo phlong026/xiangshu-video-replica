@@ -4,8 +4,8 @@ import {
   type AdjustmentWriteInput,
   AdminAdjustmentError,
   AdminSessionError,
-  createCustomerAdjustment,
   type CustomerSessionListItem,
+  createCustomerAdjustment,
   listCustomerSessions,
 } from "../api.admin";
 
@@ -22,11 +22,9 @@ import {
 export function SessionsPage({
   userId,
   readOnly = false,
-  onSessionExpired,
 }: {
   userId?: string;
   readOnly?: boolean;
-  onSessionExpired?: () => void;
 }) {
   const [queryUserId, setQueryUserId] = useState(userId ?? "");
   const [items, setItems] = useState<CustomerSessionListItem[]>([]);
@@ -35,7 +33,9 @@ export function SessionsPage({
   const [error, setError] = useState("");
   // The customer the adjustment form targets: set once a query succeeds,
   // so the T23 write entry is reachable from the sessions tab.
-  const [activeUserId, setActiveUserId] = useState<string | null>(userId ?? null);
+  const [activeUserId, setActiveUserId] = useState<string | null>(
+    userId ?? null,
+  );
 
   // Adjustment write state (T23 / BILL-02): one idempotency key per logical
   // write, preserved across ambiguous retries like the other admin pages.
@@ -106,7 +106,12 @@ export function SessionsPage({
     const key = adjustKey ?? crypto.randomUUID();
     setAdjustKey(key);
     try {
-      const result = await createCustomerAdjustment(activeUserId, input, reason.trim(), key);
+      const result = await createCustomerAdjustment(
+        activeUserId,
+        input,
+        reason.trim(),
+        key,
+      );
       setWriteNotice(
         `调账成功（request id: ${result.request_id}），余额 ${result.wallet_balance_after} 积分`,
       );
@@ -174,7 +179,10 @@ export function SessionsPage({
                 <span>槽位 #{item.slot_no}</span>
                 <span>状态 {item.device_status}</span>
                 <span>
-                  租约到期 {item.lease_until ? new Date(item.lease_until).toLocaleString() : "—"}
+                  租约到期{" "}
+                  {item.lease_until
+                    ? new Date(item.lease_until).toLocaleString()
+                    : "—"}
                 </span>
               </div>
             </li>
@@ -182,7 +190,9 @@ export function SessionsPage({
         </ul>
       )}
       {total > items.length ? (
-        <p className="wallet-notice">共 {total} 条，当前显示 {items.length} 条。</p>
+        <p className="wallet-notice">
+          共 {total} 条，当前显示 {items.length} 条。
+        </p>
       ) : null}
 
       {activeUserId && !readOnly ? (

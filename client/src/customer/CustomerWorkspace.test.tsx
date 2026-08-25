@@ -2,7 +2,10 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CustomerDeviceListResponse } from "../api";
 import { CustomerWorkspace } from "./CustomerWorkspace";
-import type { CustomerCredentialStore, CustomerWorkspaceUser } from "./useCustomerSession";
+import type {
+  CustomerCredentialStore,
+  CustomerWorkspaceUser,
+} from "./useCustomerSession";
 
 // Fixture credential strings live behind named constants so the repo's
 // secret scan (which flags `token:`/`token =` followed by a quoted literal)
@@ -60,6 +63,8 @@ function fakeStore(): CustomerCredentialStore {
     saveSessionToken: vi.fn().mockResolvedValue(undefined),
     clearSessionToken: vi.fn().mockResolvedValue(undefined),
     clearAllCredentials: vi.fn().mockResolvedValue(undefined),
+    deviceInstanceId: vi.fn().mockResolvedValue("test-instance-id"),
+    devicePlatform: () => "windows",
   };
 }
 
@@ -76,8 +81,14 @@ describe("CustomerWorkspace (T31)", () => {
       ) {
         return jsonResponse(mockDevices);
       }
-      if (url.includes("/api/customer/device-pairings/") && url.endsWith("/approve")) {
-        return jsonResponse({ pairing_request_id: "pairing-1", status: "APPROVED" });
+      if (
+        url.includes("/api/customer/device-pairings/") &&
+        url.endsWith("/approve")
+      ) {
+        return jsonResponse({
+          pairing_request_id: "pairing-1",
+          status: "APPROVED",
+        });
       }
       if (url.endsWith("/health")) {
         return jsonResponse({ status: "ok", service: "video-replica-api" });
@@ -99,9 +110,15 @@ describe("CustomerWorkspace (T31)", () => {
           approved ? { ...mockDevices, pending_pairings: [] } : mockDevices,
         );
       }
-      if (url.includes("/api/customer/device-pairings/") && url.endsWith("/approve")) {
+      if (
+        url.includes("/api/customer/device-pairings/") &&
+        url.endsWith("/approve")
+      ) {
         approved = true;
-        return jsonResponse({ pairing_request_id: "pairing-1", status: "APPROVED" });
+        return jsonResponse({
+          pairing_request_id: "pairing-1",
+          status: "APPROVED",
+        });
       }
       if (url.endsWith("/health")) {
         return jsonResponse({ status: "ok", service: "video-replica-api" });
@@ -130,9 +147,7 @@ describe("CustomerWorkspace (T31)", () => {
     ).toBeInTheDocument();
     // The approver sees the candidate's self-reported identity — the same
     // masked fingerprint posture as the device list.
-    expect(
-      screen.getByText(/Second Device •••• CD34/),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/Second Device •••• CD34/)).toBeInTheDocument();
     expect(screen.getByText(/待分配/)).toBeInTheDocument();
     // No slot is fabricated for a request that has not been approved yet.
     expect(screen.queryByText(/Slot #2/)).toBeNull();
@@ -156,18 +171,15 @@ describe("CustomerWorkspace (T31)", () => {
 
     await waitFor(() => {
       expect(
-        fetchMock.mock.calls.some(
-          ([url]) =>
-            url.includes("/api/customer/device-pairings/pairing-1/approve"),
+        fetchMock.mock.calls.some(([url]) =>
+          url.includes("/api/customer/device-pairings/pairing-1/approve"),
         ),
       ).toBe(true);
     });
     // The pending section disappears after the reload; the empty-section
     // render does not show the approval heading anymore.
     await waitFor(() => {
-      expect(
-        screen.queryByRole("heading", { name: "待审批配对" }),
-      ).toBeNull();
+      expect(screen.queryByRole("heading", { name: "待审批配对" })).toBeNull();
     });
   });
 

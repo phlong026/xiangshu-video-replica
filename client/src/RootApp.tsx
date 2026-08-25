@@ -175,7 +175,9 @@ function CustomerTerminalScreen({
   );
 }
 
-export function customerToCurrentUser(user: CustomerWorkspaceUser): CurrentUser {
+export function customerToCurrentUser(
+  user: CustomerWorkspaceUser,
+): CurrentUser {
   return {
     id: user.userId,
     username: user.username ?? "customer",

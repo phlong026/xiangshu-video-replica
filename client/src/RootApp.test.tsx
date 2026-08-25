@@ -41,7 +41,10 @@ function stubCustomerWorkspaceFetch() {
     }
     if (url.endsWith("/api/customer/devices")) {
       return jsonResponse({
-        slots: [{ slot_no: 1, device: null }, { slot_no: 2, device: null }],
+        slots: [
+          { slot_no: 1, device: null },
+          { slot_no: 2, device: null },
+        ],
         history: [],
         pending_pairings: [],
       });

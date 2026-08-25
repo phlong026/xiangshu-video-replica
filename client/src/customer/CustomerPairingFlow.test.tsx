@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CustomerPairingFlow } from "./CustomerPairingFlow";
 import type { CustomerCredentialStore } from "./useCustomerSession";
@@ -30,6 +30,8 @@ function fakeStore(overrides?: {
     saveSessionToken: vi.fn().mockResolvedValue(undefined),
     clearSessionToken: vi.fn().mockResolvedValue(undefined),
     clearAllCredentials: vi.fn().mockResolvedValue(undefined),
+    deviceInstanceId: vi.fn().mockResolvedValue("test-instance-id"),
+    devicePlatform: () => "windows",
   };
 }
 
@@ -64,9 +66,7 @@ describe("CustomerPairingFlow (FE-03 / T30)", () => {
       ),
     );
 
-    render(
-      <CustomerPairingFlow store={fakeStore()} onPaired={vi.fn()} />,
-    );
+    render(<CustomerPairingFlow store={fakeStore()} onPaired={vi.fn()} />);
     fillForm();
 
     expect(
@@ -109,9 +109,7 @@ describe("CustomerPairingFlow (FE-03 / T30)", () => {
   });
 
   it("surfaces a vault write failure instead of claiming success", async () => {
-    const saveActivation = vi
-      .fn()
-      .mockRejectedValue(new Error("vault locked"));
+    const saveActivation = vi.fn().mockRejectedValue(new Error("vault locked"));
     vi.stubGlobal(
       "fetch",
       vi.fn(() =>
@@ -125,7 +123,10 @@ describe("CustomerPairingFlow (FE-03 / T30)", () => {
     );
 
     render(
-      <CustomerPairingFlow store={fakeStore({ saveActivation })} onPaired={vi.fn()} />,
+      <CustomerPairingFlow
+        store={fakeStore({ saveActivation })}
+        onPaired={vi.fn()}
+      />,
     );
     fillForm();
 
