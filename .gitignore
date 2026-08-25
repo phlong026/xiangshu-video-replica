@@ -54,3 +54,7 @@ nohup.out
 worktree/
 # Ignore worktree folders (temporary dev directories)
 worktree/
+# Playwright customer E2E artifacts
+test-results/
+playwright-report/
+e2e/customer/run/

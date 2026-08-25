@@ -69,6 +69,15 @@ export function CustomerWorkspace({
     void loadDevices();
   }, [loadDevices]);
 
+  // Entering the device view re-fetches: a second device's enroll may have
+  // landed a PENDING pairing after the workspace first loaded, and the
+  // approval list must show it (T30 / FE-03 approval reachability).
+  useEffect(() => {
+    if (view === "devices") {
+      void loadDevices();
+    }
+  }, [view, loadDevices]);
+
   async function handleUnbind(deviceId: string) {
     const token = await store.loadDeviceCredentialToken();
     if (token === null) {

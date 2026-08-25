@@ -21,7 +21,8 @@
     "tauri:dev": "npm run tauri --workspace client -- dev",
     "test": "npm run test --workspace client && uv --cache-dir .uv-cache run --project server --locked python -m pytest --rootdir server server/tests",
     "test:e2e": "npm run test --workspace client -- e2e_contract.test.tsx && uv --cache-dir .uv-cache run --project server --locked python -m pytest --rootdir server server/tests/test_e2e_fake_provider.py",
-    "test:gate1": "uv --cache-dir .uv-cache run --project server --locked python -m app.gate1_e2e"
+    "test:gate1": "uv --cache-dir .uv-cache run --project server --locked python -m app.gate1_e2e",
+    "test:customer-e2e": "playwright test --config e2e/customer/playwright.config.mjs"
   },
   "engines": {
     "node": ">=24"
