@@ -47,61 +47,22 @@ export type CurrentUser = {
   role: UserRole;
 };
 
-export type WalletSnapshot = {
-  available_credits: number;
-  reserved_credits: number;
-  internal_unit_price_fen: number;
-  min_recharge_fen: number;
-  recharge_step_fen: number;
-};
-
-export type WalletTransaction = {
-  id: string;
-  user_id: string;
-  type: "CHARGE" | "RESERVE" | "SETTLE" | "RELEASE";
-  available_delta: number;
-  reserved_delta: number;
-  recharge_order_id: string | null;
-  task_id: string | null;
-  billing_round: number | null;
-  created_at: string;
-};
-
-export type WalletTransactionPage = {
-  items: WalletTransaction[];
-  total: number;
-  limit: number;
-  offset: number;
-};
-
-export type RechargeOrderStatus = "PENDING" | "PAID" | "FAILED" | "CLOSED";
-
-export type RechargeOrder = {
-  order_no: string;
-  status: RechargeOrderStatus;
-  amount_fen: number;
-  credits: number;
-  channel: string;
-  created_at: string;
-  paid_at: string | null;
-};
-
-export type RechargeOrderPage = {
-  items: RechargeOrder[];
-  total: number;
-  limit: number;
-  offset: number;
-};
-
-export type CreatedRechargeOrder = {
-  order_no: string;
-  status: "PENDING";
-  amount_fen: number;
-  credits: number;
-  gateway_url: string;
-  method: "POST";
-  form_fields: Record<string, string>;
-};
+// Task #7 / PR #65 (Codex P1): the wallet and recharge adapter types derive
+// from the regenerated OpenAPI contract instead of handwritten shapes, so the
+// schema-drift gate (tsc) catches a later server response change. The internal
+// and customer lanes share these aliases; the Control* views extend them.
+export type WalletSnapshot = components["schemas"]["WalletResponse"];
+export type WalletTransaction =
+  components["schemas"]["WalletTransactionResponse"];
+export type WalletTransactionPage =
+  components["schemas"]["WalletTransactionPage"];
+export type RechargeOrderStatus =
+  components["schemas"]["RechargeOrderStatusResponse"]["status"];
+export type RechargeOrder =
+  components["schemas"]["RechargeOrderStatusResponse"];
+export type RechargeOrderPage = components["schemas"]["RechargeOrderPage"];
+export type CreatedRechargeOrder =
+  components["schemas"]["RechargeOrderResponse"];
 
 export type ControlAccount = {
   id: string;

@@ -729,6 +729,89 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/control/customers": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List Customers
+     * @description Every activated customer for operators and auditors (ADM-02 read path).
+     *
+     *     A customer is the activation fact (one code, one user): the list carries
+     *     display metadata only — masked code, username, activation time and the
+     *     code status. The identity fields live on users / activation_codes; the
+     *     data model has no customer email, so the T33 contract uses username.
+     */
+    get: operations["list_customers_api_control_customers_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/customers/{user_id}/sessions": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List Customer Sessions
+     * @description List the live session state for a target customer.
+     *
+     *     The 029 model keeps exactly one session row per user
+     *     (``customer_session_state``, primary key *is* ``user_id``) so the list is
+     *     at most one row; device columns come from the bound ``customer_devices``
+     *     row and ``status`` filters on the device status (BOUND/UNBOUND/REVOKED).
+     *     Both admin and auditor roles can read (read-only).
+     *
+     *     "Live" is judged on the PostgreSQL clock: logout, revocation and natural
+     *     lease expiry keep the row (the lease is pulled into the past, the T16/T19
+     *     pattern) rather than deleting it, so a row's existence alone is not a
+     *     live session.
+     */
+    get: operations["list_customer_sessions_api_control_customers__user_id__sessions_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/audit-log": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List Audit Log
+     * @description List all audit events with pagination.
+     *
+     *     Currently aggregates:
+     *     - ADMIN_ADJUSTMENT: admin adjustments from admin_adjustments table
+     *
+     *     Future event types can be added (device unbind, session revoke, etc.)
+     *
+     *     Both admin and auditor roles can access this endpoint (read-only).
+     */
+    get: operations["list_audit_log_api_control_audit_log_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/customer/activate": {
     parameters: {
       query?: never;
@@ -758,7 +841,8 @@ export interface paths {
     };
     /**
      * List Devices
-     * @description The two-slot status view: current bindings plus unbind history.
+     * @description The two-slot status view: current bindings plus unbind history, and
+     *     any PENDING second-device pairing awaiting this account's approval.
      */
     get: operations["list_devices_api_customer_devices_get"];
     put?: never;
@@ -1223,6 +1307,101 @@ export interface paths {
     put?: never;
     /** Create Recharge Order */
     post: operations["create_recharge_order_api_recharge_orders_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/customer/recharge-orders": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List Customer Recharge Orders
+     * @description Customer-lane order list: only this session's orders, ownership-checked
+     *     inside the fenced read transaction.
+     */
+    get: operations["list_customer_recharge_orders_api_customer_recharge_orders_get"];
+    put?: never;
+    /**
+     * Create Customer Recharge Order
+     * @description T22: Customer can reuse ZPay to top-up the same wallet under their session.
+     *
+     *     Key invariant guarantees (BILL-01):
+     *     - Recharge does NOT change main code, device slots, session or user concurrency
+     *     - Idempotency-Key envelope (T14 engine): a retry with the same key replays
+     *       the sealed response without creating a second order; a different request
+     *       under a spent key is a 409
+     *     - Credits enter the same customer wallet (not P0 internal wallet)
+     */
+    post: operations["create_customer_recharge_order_api_customer_recharge_orders_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/customer/recharge-orders/{order_no}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Read Customer Recharge Order Status
+     * @description Customer-lane order status: the session is re-verified inside the
+     *     fenced read transaction and another user's order number is a 404 (no
+     *     existence leak), mirroring the internal-lane route's ownership check.
+     */
+    get: operations["read_customer_recharge_order_status_api_customer_recharge_orders__order_no__get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/customer/wallet": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Read Customer Wallet
+     * @description Customer-lane wallet read: balance + billing under the fenced session.
+     *
+     *     Mirrors the internal /api/wallet read but re-verifies the customer session
+     *     inside the transaction (BILL-01: credits live in the same customer wallet
+     *     the activation grant funded).
+     */
+    get: operations["read_customer_wallet_api_customer_wallet_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/customer/wallet/transactions": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List Customer Wallet Transactions */
+    get: operations["list_customer_wallet_transactions_api_customer_wallet_transactions_get"];
+    put?: never;
+    post?: never;
     delete?: never;
     options?: never;
     head?: never;
@@ -2190,14 +2369,7 @@ export interface paths {
     };
     get?: never;
     put?: never;
-    /**
-     * Generate Global Simple Character
-     * @description Global one-click character creation (人物库精简流程，无项目上下文).
-     *
-     *     Mirrors the project-scoped endpoint but skips ``require_project_access``:
-     *     the character library page has no project context, and the creator's
-     *     identity ownership is recorded for later renames.
-     */
+    /** Generate Global Simple Character */
     post: operations["generate_global_simple_character_api_simple_characters_generate_post"];
     delete?: never;
     options?: never;
@@ -2238,10 +2410,7 @@ export interface paths {
     delete?: never;
     options?: never;
     head?: never;
-    /**
-     * Rename Identity
-     * @description Rename a character identity (owner or admin only).
-     */
+    /** Rename Identity */
     patch: operations["rename_identity_api_simple_characters_identities__identity_id__name_patch"];
     trace?: never;
   };
@@ -2254,15 +2423,7 @@ export interface paths {
     };
     get?: never;
     put?: never;
-    /**
-     * Regenerate Contact Sheet
-     * @description Re-run the five-view contact sheet from the original source photo.
-     *
-     *     Reuses the identity's stored authorization photo with the same
-     *     identity-preserve prompt, publishes the result as the next character
-     *     version, and keeps the previous published version untouched so projects
-     *     already bound to it continue to work.
-     */
+    /** Regenerate Contact Sheet */
     post: operations["regenerate_contact_sheet_api_simple_characters_identities__identity_id__regenerate_contact_sheet_post"];
     delete?: never;
     options?: never;
@@ -2280,10 +2441,7 @@ export interface paths {
     get?: never;
     put?: never;
     post?: never;
-    /**
-     * Delete Identity
-     * @description Delete a character identity with all derived assets (owner or admin).
-     */
+    /** Delete Identity */
     delete: operations["delete_identity_api_simple_characters_identities__identity_id__delete"];
     options?: never;
     head?: never;
@@ -2299,16 +2457,7 @@ export interface paths {
     };
     get?: never;
     put?: never;
-    /**
-     * Generate Simple Character
-     * @description Upload one authorization image and publish a seven-view character.
-     *
-     *     The image is stored as both the authorization proof and the source asset,
-     *     a single seven-view contact sheet plus the seven standard views are
-     *     generated, auto-approved, and the resulting character version is
-     *     published so it immediately appears in the project's available character
-     *     version list.
-     */
+    /** Generate Simple Character */
     post: operations["generate_simple_character_api_simple_characters__project_id__generate_post"];
     delete?: never;
     options?: never;
@@ -2349,7 +2498,7 @@ export interface components {
        * Role
        * @enum {string}
        */
-      role: "employee" | "admin" | "auditor";
+      role: "employee" | "admin" | "auditor" | "customer";
       /** Is Active */
       is_active: boolean;
       /** Available Credits */
@@ -3328,25 +3477,17 @@ export interface components {
       slots: components["schemas"]["DeviceSlotView"][];
       /** History */
       history: components["schemas"]["DeviceView"][];
-      /** Pending Pairings */
-      pending_pairings?: components["schemas"]["PendingPairingView"][];
+      /**
+       * Pending Pairings
+       * @default []
+       */
+      pending_pairings: components["schemas"]["PendingPairingView"][];
     };
     /** DeviceSlotView */
     DeviceSlotView: {
       /** Slot No */
       slot_no: number;
       device: components["schemas"]["DeviceView"] | null;
-    };
-    /** PendingPairingView */
-    PendingPairingView: {
-      /** Pairing Request Id */
-      pairing_request_id: string;
-      /** Display Name */
-      display_name: string;
-      /** Platform */
-      platform: string;
-      /** Created At */
-      created_at: string;
     };
     /** DeviceView */
     DeviceView: {
@@ -3672,6 +3813,22 @@ export interface components {
       pairing_request_id: string;
       /** Status */
       status: string;
+    };
+    /**
+     * PendingPairingView
+     * @description A PENDING second-device pairing awaiting the first device's approval
+     *     (T17 / DEV-02). The candidate's self-reported identity is shown to the
+     *     approver; the keyed fingerprint digest never leaves the server.
+     */
+    PendingPairingView: {
+      /** Pairing Request Id */
+      pairing_request_id: string;
+      /** Display Name */
+      display_name: string;
+      /** Platform */
+      platform: string;
+      /** Created At */
+      created_at: string;
     };
     /** PersonIdentity */
     PersonIdentity: {
@@ -4496,10 +4653,7 @@ export interface operations {
   create_project_script_api_projects__project_id__scripts_post: {
     parameters: {
       query?: never;
-      header?: {
-        "X-Dev-User-Id"?: string | null;
-        Authorization?: string | null;
-      };
+      header?: never;
       path: {
         project_id: string;
       };
@@ -4534,10 +4688,7 @@ export interface operations {
   rewrite_project_script_api_projects__project_id__script_rewrite_post: {
     parameters: {
       query?: never;
-      header?: {
-        "X-Dev-User-Id"?: string | null;
-        Authorization?: string | null;
-      };
+      header?: never;
       path: {
         project_id: string;
       };
@@ -4606,10 +4757,7 @@ export interface operations {
   compile_project_prompt_api_projects__project_id__prompts_compile_post: {
     parameters: {
       query?: never;
-      header?: {
-        "X-Dev-User-Id"?: string | null;
-        Authorization?: string | null;
-      };
+      header?: never;
       path: {
         project_id: string;
       };
@@ -4682,10 +4830,7 @@ export interface operations {
   revise_project_prompt_api_projects__project_id__prompts_revise_post: {
     parameters: {
       query?: never;
-      header?: {
-        "X-Dev-User-Id"?: string | null;
-        Authorization?: string | null;
-      };
+      header?: never;
       path: {
         project_id: string;
       };
@@ -4754,10 +4899,7 @@ export interface operations {
   lock_project_prompt_api_projects__project_id__prompts__prompt_version_id__lock_post: {
     parameters: {
       query?: never;
-      header?: {
-        "X-Dev-User-Id"?: string | null;
-        Authorization?: string | null;
-      };
+      header?: never;
       path: {
         project_id: string;
         prompt_version_id: string;
@@ -4789,10 +4931,7 @@ export interface operations {
   create_project_generation_batch_api_projects__project_id__generation_batches_post: {
     parameters: {
       query?: never;
-      header?: {
-        "X-Dev-User-Id"?: string | null;
-        Authorization?: string | null;
-      };
+      header?: never;
       path: {
         project_id: string;
       };
@@ -4910,10 +5049,7 @@ export interface operations {
   delete_generation_batch_record_api_generation_batches__batch_id__delete: {
     parameters: {
       query?: never;
-      header?: {
-        "X-Dev-User-Id"?: string | null;
-        Authorization?: string | null;
-      };
+      header?: never;
       path: {
         batch_id: string;
       };
@@ -4942,10 +5078,7 @@ export interface operations {
   rename_generation_batch_record_api_generation_batches__batch_id__name_patch: {
     parameters: {
       query?: never;
-      header?: {
-        "X-Dev-User-Id"?: string | null;
-        Authorization?: string | null;
-      };
+      header?: never;
       path: {
         batch_id: string;
       };
@@ -4980,10 +5113,7 @@ export interface operations {
   regenerate_batch_api_generation_batches__batch_id__regenerate_post: {
     parameters: {
       query?: never;
-      header?: {
-        "X-Dev-User-Id"?: string | null;
-        Authorization?: string | null;
-      };
+      header?: never;
       path: {
         batch_id: string;
       };
@@ -5052,10 +5182,7 @@ export interface operations {
   retry_task_api_generation_tasks__task_id__retry_post: {
     parameters: {
       query?: never;
-      header?: {
-        "X-Dev-User-Id"?: string | null;
-        Authorization?: string | null;
-      };
+      header?: never;
       path: {
         task_id: string;
       };
@@ -5092,10 +5219,7 @@ export interface operations {
   regenerate_task_api_generation_tasks__task_id__regenerate_post: {
     parameters: {
       query?: never;
-      header?: {
-        "X-Dev-User-Id"?: string | null;
-        Authorization?: string | null;
-      };
+      header?: never;
       path: {
         task_id: string;
       };
@@ -5132,10 +5256,7 @@ export interface operations {
   confirm_task_not_charged_api_generation_tasks__task_id__confirm_not_charged_post: {
     parameters: {
       query?: never;
-      header?: {
-        "X-Dev-User-Id"?: string | null;
-        Authorization?: string | null;
-      };
+      header?: never;
       path: {
         task_id: string;
       };
@@ -5172,10 +5293,7 @@ export interface operations {
   reconcile_uncertain_task_api_generation_tasks__task_id__reconcile_post: {
     parameters: {
       query?: never;
-      header?: {
-        "X-Dev-User-Id"?: string | null;
-        Authorization?: string | null;
-      };
+      header?: never;
       path: {
         task_id: string;
       };
@@ -5276,10 +5394,7 @@ export interface operations {
   create_project_api_projects_post: {
     parameters: {
       query?: never;
-      header?: {
-        "X-Dev-User-Id"?: string | null;
-        Authorization?: string | null;
-      };
+      header?: never;
       path?: never;
       cookie?: never;
     };
@@ -5312,10 +5427,7 @@ export interface operations {
   rename_project_api_projects__project_id__name_patch: {
     parameters: {
       query?: never;
-      header?: {
-        "X-Dev-User-Id"?: string | null;
-        Authorization?: string | null;
-      };
+      header?: never;
       path: {
         project_id: string;
       };
@@ -6083,6 +6195,114 @@ export interface operations {
     responses: {
       /** @description Successful Response */
       201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  list_customers_api_control_customers_get: {
+    parameters: {
+      query?: {
+        page?: number;
+        page_size?: number;
+        username?: string;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  list_customer_sessions_api_control_customers__user_id__sessions_get: {
+    parameters: {
+      query?: {
+        status?: string | null;
+        limit?: number;
+        offset?: number;
+      };
+      header?: never;
+      path: {
+        user_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  list_audit_log_api_control_audit_log_get: {
+    parameters: {
+      query?: {
+        event_type?: string | null;
+        actor_user_id?: string | null;
+        limit?: number;
+        offset?: number;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
         headers: {
           [name: string]: unknown;
         };
@@ -6892,10 +7112,7 @@ export interface operations {
   create_recharge_order_api_recharge_orders_post: {
     parameters: {
       query?: never;
-      header?: {
-        "X-Dev-User-Id"?: string | null;
-        Authorization?: string | null;
-      };
+      header?: never;
       path?: never;
       cookie?: never;
     };
@@ -6912,6 +7129,154 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["RechargeOrderResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  list_customer_recharge_orders_api_customer_recharge_orders_get: {
+    parameters: {
+      query?: {
+        limit?: number;
+        offset?: number;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["RechargeOrderPage"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  create_customer_recharge_order_api_customer_recharge_orders_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["CreateRechargeOrderRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["RechargeOrderResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_customer_recharge_order_status_api_customer_recharge_orders__order_no__get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        order_no: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["RechargeOrderStatusResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_customer_wallet_api_customer_wallet_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["WalletResponse"];
+        };
+      };
+    };
+  };
+  list_customer_wallet_transactions_api_customer_wallet_transactions_get: {
+    parameters: {
+      query?: {
+        limit?: number;
+        offset?: number;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["WalletTransactionPage"];
         };
       };
       /** @description Validation Error */
@@ -7313,10 +7678,7 @@ export interface operations {
   create_asset_upload_intent_api_assets_upload_intent_post: {
     parameters: {
       query?: never;
-      header?: {
-        "X-Dev-User-Id"?: string | null;
-        Authorization?: string | null;
-      };
+      header?: never;
       path?: never;
       cookie?: never;
     };
@@ -7349,10 +7711,7 @@ export interface operations {
   complete_asset_upload_api_assets__asset_id__complete_post: {
     parameters: {
       query?: never;
-      header?: {
-        "X-Dev-User-Id"?: string | null;
-        Authorization?: string | null;
-      };
+      header?: never;
       path: {
         asset_id: string;
       };
@@ -7448,10 +7807,7 @@ export interface operations {
   create_project_analysis_api_projects__project_id__analysis_post: {
     parameters: {
       query?: never;
-      header?: {
-        "X-Dev-User-Id"?: string | null;
-        Authorization?: string | null;
-      };
+      header?: never;
       path: {
         project_id: string;
       };
@@ -7588,10 +7944,7 @@ export interface operations {
   update_analysis_shots_api_analysis__analysis_id__shots_put: {
     parameters: {
       query?: never;
-      header?: {
-        "X-Dev-User-Id"?: string | null;
-        Authorization?: string | null;
-      };
+      header?: never;
       path: {
         analysis_id: string;
       };
@@ -7662,10 +8015,7 @@ export interface operations {
   choose_main_character_route_api_projects__project_id__main_character_put: {
     parameters: {
       query?: never;
-      header?: {
-        "X-Dev-User-Id"?: string | null;
-        Authorization?: string | null;
-      };
+      header?: never;
       path: {
         project_id: string;
       };
@@ -8806,10 +9156,7 @@ export interface operations {
   select_character_references_api_projects__project_id__character_reference_selection_post: {
     parameters: {
       query?: never;
-      header?: {
-        "X-Dev-User-Id"?: string | null;
-        Authorization?: string | null;
-      };
+      header?: never;
       path: {
         project_id: string;
       };
@@ -8880,10 +9227,7 @@ export interface operations {
   extract_project_source_frames_api_projects__project_id__source_frames_extract_post: {
     parameters: {
       query?: never;
-      header?: {
-        "X-Dev-User-Id"?: string | null;
-        Authorization?: string | null;
-      };
+      header?: never;
       path: {
         project_id: string;
       };
@@ -8952,10 +9296,7 @@ export interface operations {
   confirm_project_source_frame_api_projects__project_id__source_frames_confirm_post: {
     parameters: {
       query?: never;
-      header?: {
-        "X-Dev-User-Id"?: string | null;
-        Authorization?: string | null;
-      };
+      header?: never;
       path: {
         project_id: string;
       };
@@ -9024,10 +9365,7 @@ export interface operations {
   generate_project_first_frames_api_projects__project_id__first_frames_generate_post: {
     parameters: {
       query?: never;
-      header?: {
-        "X-Dev-User-Id"?: string | null;
-        Authorization?: string | null;
-      };
+      header?: never;
       path: {
         project_id: string;
       };
@@ -9130,10 +9468,7 @@ export interface operations {
   confirm_project_first_frame_api_projects__project_id__first_frames_confirm_post: {
     parameters: {
       query?: never;
-      header?: {
-        "X-Dev-User-Id"?: string | null;
-        Authorization?: string | null;
-      };
+      header?: never;
       path: {
         project_id: string;
       };
@@ -9234,10 +9569,7 @@ export interface operations {
   generate_global_simple_character_api_simple_characters_generate_post: {
     parameters: {
       query?: never;
-      header?: {
-        "X-Dev-User-Id"?: string | null;
-        Authorization?: string | null;
-      };
+      header?: never;
       path?: never;
       cookie?: never;
     };
@@ -9302,10 +9634,7 @@ export interface operations {
   rename_identity_api_simple_characters_identities__identity_id__name_patch: {
     parameters: {
       query?: never;
-      header?: {
-        "X-Dev-User-Id"?: string | null;
-        Authorization?: string | null;
-      };
+      header?: never;
       path: {
         identity_id: string;
       };
@@ -9340,10 +9669,7 @@ export interface operations {
   regenerate_contact_sheet_api_simple_characters_identities__identity_id__regenerate_contact_sheet_post: {
     parameters: {
       query?: never;
-      header?: {
-        "X-Dev-User-Id"?: string | null;
-        Authorization?: string | null;
-      };
+      header?: never;
       path: {
         identity_id: string;
       };
@@ -9374,10 +9700,7 @@ export interface operations {
   delete_identity_api_simple_characters_identities__identity_id__delete: {
     parameters: {
       query?: never;
-      header?: {
-        "X-Dev-User-Id"?: string | null;
-        Authorization?: string | null;
-      };
+      header?: never;
       path: {
         identity_id: string;
       };
@@ -9406,10 +9729,7 @@ export interface operations {
   generate_simple_character_api_simple_characters__project_id__generate_post: {
     parameters: {
       query?: never;
-      header?: {
-        "X-Dev-User-Id"?: string | null;
-        Authorization?: string | null;
-      };
+      header?: never;
       path: {
         project_id: string;
       };

@@ -133,6 +133,62 @@ describe("CustomerWalletPanel", () => {
     expect(createCall?.[1]?.body).toBe(JSON.stringify({ amount_fen: 20000 }));
   });
 
+  it("resumes polling an outstanding pending payment after a remount", async () => {
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/api/customer/wallet")) {
+        return jsonResponse(wallet);
+      }
+      if (url.endsWith("/api/customer/wallet/transactions")) {
+        return jsonResponse({ items: [], total: 0, limit: 20, offset: 0 });
+      }
+      if (url.endsWith("/api/customer/recharge-orders/202608190001")) {
+        // Still pending: the poll parks and schedules the next check.
+        return jsonResponse({
+          order_no: "202608190001",
+          status: "PENDING",
+          amount_fen: 20000,
+          credits: 20,
+          channel: "alipay",
+          created_at: "2026-08-19 10:00:00",
+          paid_at: null,
+        });
+      }
+      if (url.endsWith("/api/customer/recharge-orders")) {
+        return jsonResponse({
+          items: [
+            {
+              order_no: "202608190001",
+              status: "PENDING",
+              amount_fen: 20000,
+              credits: 20,
+              channel: "alipay",
+              created_at: "2026-08-19 10:00:00",
+              paid_at: null,
+            },
+          ],
+          total: 1,
+          limit: 20,
+          offset: 0,
+        });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <CustomerWalletPanel store={fakeStore()} onSessionExpired={vi.fn()} />,
+    );
+
+    // The pending order is derived from the fetched list on load, so the
+    // component restarts its status poll without the user re-creating it.
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/customer/recharge-orders/202608190001"),
+        expect.objectContaining({ method: "GET" }),
+      ),
+    );
+  });
+
   it("rejects a custom amount that is not an integer 10-yuan step", async () => {
     const fetchMock = vi.fn((url: string, _options?: RequestInit) => {
       if (url.endsWith("/api/customer/wallet")) {

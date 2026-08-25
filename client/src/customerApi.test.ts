@@ -77,6 +77,7 @@ describe("customer API contract drift guards", () => {
         { slot_no: 2, device: null },
       ],
       history: [],
+      pending_pairings: [],
     };
     const approval: components["schemas"]["PairingApproveResponse"] = {
       pairing_request_id: "pairing-1",

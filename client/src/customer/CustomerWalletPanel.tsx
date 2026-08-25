@@ -63,6 +63,15 @@ export function CustomerWalletPanel({
     setWallet(nextWallet);
     setTransactions(transactionPage.items);
     setOrders(orderPage.items);
+    // Codex P2 (PR #65): the pending order number lives only in component
+    // state, so reopening/remounting the wallet (or exhausting the poll
+    // window) would never resume tracking an outstanding payment. Derive the
+    // most recent still-pending order from the fetched list and restart the
+    // status poll — unless one is already being tracked.
+    const pending = orderPage.items.find((order) => order.status === "PENDING");
+    if (pending) {
+      setPendingOrderNo((current) => current ?? pending.order_no);
+    }
   }, [loadSession]);
 
   useEffect(() => {

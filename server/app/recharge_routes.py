@@ -486,9 +486,7 @@ def read_customer_wallet(request: Request) -> WalletResponse:
                 status_code=404,
                 detail={"code": "WALLET_NOT_FOUND", "message": "Wallet does not exist."},
             )
-        billing = SettingsRepository(
-            BusinessConnection.postgres(conn)
-        ).read_billing_settings()
+        billing = SettingsRepository(BusinessConnection.postgres(conn)).read_billing_settings()
         return WalletResponse(
             available_credits=int(row[0]),
             reserved_credits=int(row[1]),
@@ -570,13 +568,19 @@ def list_customer_recharge_orders(
             },
         )
     with fenced_pg_transaction(snapshot) as (conn, ctx):
-        total_row = conn.execute(
+        # Codex P1 (PR #65): serialize_recharge_order reads named columns, so
+        # the rows must come from a connection with the named-row factory
+        # installed. BusinessConnection.postgres() sets it; a raw pooled
+        # psycopg connection returns plain tuples and would 500 on a fresh
+        # connection that no earlier request had already mutated.
+        business_conn = BusinessConnection.postgres(conn)
+        total_row = business_conn.execute(
             "SELECT COUNT(*) FROM recharge_orders WHERE user_id = %s",
             (ctx.user_id,),
         ).fetchone()
         assert total_row is not None
         total = int(total_row[0])
-        rows = conn.execute(
+        rows = business_conn.execute(
             """
             SELECT id, user_id, merchant_order_no, provider, provider_trade_no,
                    channel, status, amount_fen, credits, notify_digest, created_at, paid_at
@@ -589,9 +593,7 @@ def list_customer_recharge_orders(
         ).fetchall()
         return RechargeOrderPage(
             items=[
-                RechargeOrderStatusResponse(
-                    **serialize_recharge_order(cast(sqlite3.Row, row))
-                )
+                RechargeOrderStatusResponse(**serialize_recharge_order(cast(sqlite3.Row, row)))
                 for row in rows
             ],
             total=total,

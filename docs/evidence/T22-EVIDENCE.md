@@ -46,6 +46,34 @@ items were fixed in this branch before re-push:
 | P2 | Evidence cited PR #57 instead of #59 | Corrected throughout this file |
 | P3 | INTERNAL pricing scope on a customer-facing route | Customer lane stamps `CUSTOMER_STANDARD`; the internal lane intentionally keeps `INTERNAL` |
 
+## §1.6 Task #7 Customer Wallet View Extension (PR #65, 2026-08-25)
+
+After the T22 recharge backend shipped, a real E2E gap surfaced (task #7): the customer
+workspace's "余额与充值" wallet view called the **internal** wallet API (`/api/wallet`),
+which requires an internal Bearer token — a customer session got **401**. The customer API
+adapter (T28, 9 functions) had no wallet/recharge reads.
+
+**Fix (PR #65, branch `feat/customer-wallet`):**
+
+| Layer | Change |
+|-------|--------|
+| Backend | 4 customer-lane read endpoints in `server/app/recharge_routes.py`, all re-verifying the fenced session in-transaction: `GET /api/customer/wallet` (balance + billing via `SettingsRepository.read_billing_settings`), `GET /api/customer/wallet/transactions`, `GET /api/customer/recharge-orders` (list, owner-isolated), and the existing `GET /api/customer/recharge-orders/{order_no}` |
+| Frontend | `CustomerWalletPanel.tsx` (balance / recharge presets + custom amount / order table / ledger), wired into the workspace only when the route is `page === "wallet"` and the credential is a customer session; api.ts customer lane +5 functions |
+| Contract | `client/src/generated/api.ts` regenerated from the live server OpenAPI (133 paths; the stale committed artifact was missing the customer wallet + admin audit paths). Wallet/recharge adapter types now derive from `components["schemas"]` instead of handwritten shapes, so the tsc schema-drift gate catches a later server response change (Codex P1) |
+
+**PR #65 Codex review findings and fixes:**
+
+| # | Finding | Fix |
+|---|---------|-----|
+| P1 | `GET /api/customer/recharge-orders` 500s on a fresh pooled PG connection (plain tuple rows; `cast(sqlite3.Row, row)` is type-only and `serialize_recharge_order` reads `row["merchant_order_no"]`) — masked only because an earlier request had mutated the shared connection's row factory | The route installs the named-row factory itself via `BusinessConnection.postgres(conn)`; regression test forces the shared pool connection back to `psycopg.rows.tuple_row` right before the call and asserts 200 (red without the fix, green with it) |
+| P1 | New customer endpoints absent from the generated OpenAPI contract; adapters reused handwritten shapes → drift gate blind | Regenerated `generated/api.ts`; wallet/recharge adapter types derived from `components["schemas"]` |
+| P2 | `pendingOrderNo` lives only in component state; reopening/remounting the wallet never resumes polling an outstanding pending payment | On load, the panel derives the most recent still-`PENDING` order from the fetched list and restarts the status poll (regression test added) |
+| P1 | Evidence ledgers not updated for the T22 extension | This file + `docs/CUSTOMER-TASK-EVIDENCE-V3.md` §T22 + task ledger updated |
+
+**Verification:** `pytest server/tests/test_customer_recharge.py` → **18 passed** (incl. the fresh-connection regression lock); client `npx vitest run` → **513 passed**; `npx tsc -b` clean; ruff/format/biome clean.
+
+---
+
 ## §2 Files Changed
 
 ### Database Schema Migrations

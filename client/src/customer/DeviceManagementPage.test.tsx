@@ -24,6 +24,7 @@ describe("DeviceManagementPage (FE-04 / T31)", () => {
       { slot_no: 2, device: null },
     ],
     history: [],
+    pending_pairings: [],
   };
 
   const mockOnUnbind = vi.fn();
