@@ -11,7 +11,7 @@ WorkingDirectory=/opt/video-replica/app
 EnvironmentFile=/etc/video-replica/internal-p0.env
 Environment=PYTHONUNBUFFERED=1
 ExecStartPre=/opt/video-replica/app/server/.venv/bin/python -m app.bootstrap
-ExecStart=/opt/video-replica/app/server/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+ExecStart=/opt/video-replica/app/server/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-proxy-headers
 Restart=on-failure
 RestartSec=3
 UMask=0077

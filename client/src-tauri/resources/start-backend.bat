@@ -33,7 +33,7 @@ if errorlevel 1 exit /b 1
 rem PyInstaller 等分发形态下,用 BOOTSTRAP_CMD / SERVER_CMD / WORKER_CMD
 rem 分别指向不依赖开发目录的打包产物。
 if "%VIDEO_REPLICA_SERVER_CMD%"=="" (
-  set VIDEO_REPLICA_SERVER_CMD=uv --cache-dir .uv-cache run --project server --locked python -m uvicorn app.main:app --app-dir server --host 127.0.0.1 --port 8000
+  set VIDEO_REPLICA_SERVER_CMD=uv --cache-dir .uv-cache run --project server --locked python -m uvicorn app.main:app --app-dir server --host 127.0.0.1 --port 8000 --no-proxy-headers
 )
 if "%VIDEO_REPLICA_WORKER_CMD%"=="" (
   set VIDEO_REPLICA_WORKER_CMD=uv --cache-dir .uv-cache run --project server --locked python -m app.generation_worker

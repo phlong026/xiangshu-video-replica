@@ -31,6 +31,7 @@ def test_single_host_services_share_one_database_and_keep_api_on_loopback() -> N
     assert environment_file in worker
     assert "python -m app.bootstrap" in api
     assert "python -m uvicorn app.main:app --host 127.0.0.1 --port 8000" in api
+    assert "--no-proxy-headers" in api
     assert "Requires=video-replica-api.service" in worker
     assert "python -m app.generation_worker" in worker
     assert "ProtectSystem=strict" in api

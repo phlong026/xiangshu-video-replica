@@ -34,7 +34,8 @@ start_server() {
     exec sh -c "$VIDEO_REPLICA_SERVER_CMD"
   fi
   exec uv --cache-dir .uv-cache run --project server --locked \
-    python -m uvicorn app.main:app --app-dir server --host 127.0.0.1 --port 8000
+    python -m uvicorn app.main:app --app-dir server --host 127.0.0.1 --port 8000 \
+    --no-proxy-headers
 }
 
 start_worker() {
