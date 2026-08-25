@@ -4,6 +4,28 @@
 >
 > **Evidence location (M0 review M8 unification, 2026-08-21)**: per-task evidence documents live under `docs/evidence/` (T02–T06 evidence files moved from the repository root; run-fix evidence under `docs/evidence/m0-review-fixes/`). Historical self-references inside those documents to their original root paths are preserved as record snapshots.
 
+## T36 — Customer Staging Topology (OPS-01 / COS-01 / DESK-02)
+
+| Field | Content |
+| --- | --- |
+| **Owner / Reviewer** | OPS/DB/Backend/Tauri (Agent) / independent Code Reviewer, APPROVE, 0 Critical / 0 High / 0 Medium |
+| **Branch / Base SHA** | `feat/customer-v3-t36-staging-topology` / `main@2a298470e20a4cd14d7fd39e83e701468e9978fb` |
+| **Upstream Spec Sections** | Task list §7 T36, §12.5 EXT-01/COS-01, §12.6 DESK-02, §12.7 OPS-01, §13–§16; code checklist §11.1/§12; acceptance spec Gate B |
+| **Files Changed** | API/Worker runtime gate and probes; T36 HA contracts; customer env; Nginx/API/Worker/PG deploy assets; customer cloud build + CI; deployment/evidence manuals; task/evidence ledgers |
+| **Failure Test or Regression Lock** | 7 red tests before implementation; final T36 10 + build-contract combined 18/18 covering PG/COS HEAD gate, live/ready, direct Worker, proxy/systemd/migration/docs/customer build |
+| **Implementation Result** | Deployable LB + two API + four Worker repository shape; PG/private COS fail-closed readiness/startup; same-origin Web/admin; single-host migration lock; customer NSIS compiles without local-sidecar and rejects missing/loopback/non-HTTPS API origin |
+| **Verification Command and Pass Count** | Client 513; T36 10; build+T36 18; settings/storage/T36 78; Ruff/format/mypy/default+customer Tauri pass; real unsigned customer NSIS built, SHA256 recorded; server single full 1200 pass/1 stale contract then failed slice 18/18; independent review 0C/0H/0M |
+| **Evidence Level** | Repository `AUTOMATED_VERIFIED`; T36/OPS-01/COS-01 remain `[~]`; DESK-02 `[x]`; no staging/real-chain/production claim |
+| **Security and Observability** | No real credentials; COS readiness HEAD is read-only; generic 503/type-only logs; forwarding headers overwrite-only; T37 external observability remains pending |
+| **Migration and Rollback** | No new revision; designated migration host runs existing Alembic head under non-blocking `flock`; rolling/rollback runbook added; PITR belongs to T38 |
+| **External Authorization Record** | None; no real server/TLS/COS/ZPay/Provider, external code issuance, gray release or public launch |
+| **Untested Items** | Real LB/two API/four Worker failure domains; PG HA failover; private COS full operation/minimum permission; node replacement; distinct real client IP buckets; signed Windows staging build |
+| **Lore Commit SHA** | See task PR squash SHA |
+
+Full §14 record and artifact hash: `docs/evidence/T36-EVIDENCE.md`.
+
+---
+
 ## T35 — Customer Security Review (SEC-01 / SEC-02)
 
 | Field | Content |

@@ -20,6 +20,7 @@ from app.admin_runtime_routes import router as admin_runtime_router
 from app.admin_session_routes import router as admin_session_router
 from app.analysis_routes import router as analysis_router
 from app.bootstrap import (
+    check_customer_production_runtime_dependencies,
     customer_public_origin,
     is_customer_production,
     trusted_proxy_networks,
@@ -54,6 +55,13 @@ logger = logging.getLogger(__name__)
 class HealthResponse(BaseModel):
     status: Literal["ok"]
     service: str
+
+
+class ReadinessResponse(BaseModel):
+    status: Literal["ready"]
+    service: str
+    database: Literal["internal", "postgresql"]
+    storage: Literal["local", "cos"]
 
 
 class VideoReplicaAPI(FastAPI):
@@ -100,6 +108,8 @@ async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
         _database_config = None
     if _database_config is not None:
         validate_customer_production(_database_config)
+    if is_customer_production():
+        check_customer_production_runtime_dependencies()
     yield
     # M0 review M2: release the PG pool on shutdown so pooled connections
     # don't outlive the process. No-op on the SQLite lane (the pool is never
@@ -319,3 +329,39 @@ app.include_router(character_simple_router)
 @app.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
     return HealthResponse(status="ok", service="video-replica-api")
+
+
+@app.get("/live", response_model=HealthResponse)
+async def live() -> HealthResponse:
+    """Process liveness only; dependency failures belong to ``/ready``."""
+    return HealthResponse(status="ok", service="video-replica-api")
+
+
+@app.get("/ready", response_model=None)
+async def ready() -> ReadinessResponse | JSONResponse:
+    """Return ready only while every customer runtime dependency is usable."""
+    if not is_customer_production():
+        return ReadinessResponse(
+            status="ready",
+            service="video-replica-api",
+            database="internal",
+            storage="local",
+        )
+    try:
+        check_customer_production_runtime_dependencies()
+    except Exception as exc:
+        logger.error("Runtime readiness check failed: %s", type(exc).__name__)
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "not_ready",
+                "service": "video-replica-api",
+                "code": "RUNTIME_DEPENDENCY_UNAVAILABLE",
+            },
+        )
+    return ReadinessResponse(
+        status="ready",
+        service="video-replica-api",
+        database="postgresql",
+        storage="cos",
+    )

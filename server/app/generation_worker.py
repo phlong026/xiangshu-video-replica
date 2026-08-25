@@ -232,6 +232,13 @@ def main() -> None:
     # before any SQLite file is touched.
     config = resolve_database_config()
     validate_customer_production(config)
+    from app.bootstrap import (
+        assert_customer_production_security,
+        check_customer_production_runtime_dependencies,
+        is_customer_production,
+    )
+
+    assert_customer_production_security()
     if config.mode is DatabaseMode.POSTGRESQL:
         # PG worker runtime (T25/T26): prove readiness (pool + server round-trip),
         # then run the fair-queue task loop. Each task runs in the two-phase
@@ -240,7 +247,12 @@ def main() -> None:
         # claim does NOT roll the lease back — the expiry sweeper moves the
         # task to SUBMISSION_UNCERTAIN (a manual reconciliation gate) and a
         # paid provider call is never silently re-fired.
-        ready = check_pg_ready()
+        if is_customer_production():
+            ready = check_customer_production_runtime_dependencies()
+        else:
+            ready = check_pg_ready()
+        if ready is None:  # pragma: no cover - customer gate always returns PG info
+            raise RuntimeError("PostgreSQL worker readiness check returned no result")
         logger.info(
             "PostgreSQL worker runtime ready (pool_max=%d, server_now=%s)",
             ready.pool_size,

@@ -15,8 +15,10 @@ from app.db import initialize_database
 from app.db_pg import (
     CUSTOMER_PRODUCTION_ENV,
     DatabaseMode,
+    PgReadyInfo,
     check_pg_ready,
     close_pg_pool,
+    pg_transaction,
     resolve_database_config,
     validate_customer_production,
 )
@@ -28,7 +30,9 @@ from app.settings import (
     SettingsRepository,
     SettingsUnavailableError,
     settings_encryption_key,
+    validate_provider_config,
 )
+from app.storage import cloud_storage_config_from_settings, create_storage_adapter
 
 logger = logging.getLogger(__name__)
 
@@ -337,6 +341,38 @@ def bootstrap_runtime(db_path: str | Path) -> None:
         persist_local_settings_key(key)
 
 
+def check_customer_production_runtime_dependencies() -> PgReadyInfo | None:
+    """Prove the shared database and private object store are usable.
+
+    Customer API and Worker processes call this gate before advertising
+    readiness or entering their work loops.  The internal SQLite lane stays
+    unchanged and therefore returns ``None``.
+    """
+    if not is_customer_production():
+        return None
+
+    ready = check_pg_ready()
+    try:
+        with pg_transaction() as raw_conn:
+            repo = SettingsRepository(BusinessConnection.postgres(raw_conn))
+            runtime = repo.read_runtime_settings()
+            if runtime.get("active_storage_provider") != "cos":
+                raise ValueError("active storage provider must be cos")
+            cos_config = repo.load_provider_config("cos")
+            validate_provider_config("cos", cos_config)
+            storage = create_storage_adapter(cloud_storage_config_from_settings("cos", cos_config))
+            # A HEAD on a deliberately absent key is read-only. A 404 still
+            # proves the private bucket is reachable; auth, network and bucket
+            # failures surface as StorageBackendUnavailable and fail closed.
+            storage.head_object("health/readiness-probe")
+    except Exception as exc:
+        logger.error("Customer private COS readiness check failed: %s", type(exc).__name__)
+        raise RuntimeError(
+            "customer production requires a configured private COS storage provider"
+        ) from exc
+    return ready
+
+
 def main() -> None:
     # T05: resolve the database mode first so customer production fails closed
     # before any SQLite file is touched. T09: the security gate then rejects
@@ -350,7 +386,13 @@ def main() -> None:
         # PG runtime: warm the pool and verify the server round-trip. Alembic
         # migrations against PG are executed once T06 lands; the ready check
         # itself is the API bootstrap contract for the PG lane.
-        ready = check_pg_ready()
+        ready = (
+            check_customer_production_runtime_dependencies()
+            if is_customer_production()
+            else check_pg_ready()
+        )
+        if ready is None:  # pragma: no cover - guarded by the branch above
+            raise RuntimeError("PostgreSQL readiness check returned no result")
         logging.getLogger(__name__).info(
             "PostgreSQL runtime ready (pool_max=%d, server_now=%s)",
             ready.pool_size,

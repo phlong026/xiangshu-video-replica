@@ -139,15 +139,21 @@ jobs:
         run: npm ci
       - name: Check Tauri project
         run: npm run check:tauri
-      - name: Build unsigned NSIS installer
-        run: npm run tauri:build -- --bundles nsis --no-sign --ci
-      - name: Record installer SHA256
+      - name: Check customer cloud target without local sidecar
+        run: npm run check:tauri:customer
+      - name: Build unsigned customer cloud NSIS installer
+        run: npm run tauri:build:customer
+        env:
+          # Contract-only unsigned artifact. Release builds replace this
+          # non-routable origin with the approved staging/production origin.
+          VITE_API_BASE_URL: https://staging.example.invalid
+      - name: Record customer cloud installer SHA256
         shell: pwsh
         run: Get-FileHash .cargo-target/release/bundle/nsis/*.exe -Algorithm SHA256
-      - name: Upload unsigned NSIS installer
+      - name: Upload unsigned customer cloud NSIS installer
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: unsigned-windows-nsis-${{ github.sha }}
+          name: unsigned-customer-cloud-windows-nsis-${{ github.sha }}
           path: .cargo-target/release/bundle/nsis/*.exe
           if-no-files-found: error
           retention-days: 7
