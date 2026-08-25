@@ -3,6 +3,10 @@
 # application verifies this Nginx peer and parses the single rewritten client IP.
 
 upstream video_replica_customer_api {
+    # Share peer health state across all Nginx workers; without a zone,
+    # max_fails/fail_timeout removal is worker-local and another worker can
+    # keep selecting a backend that /ready already proved unavailable.
+    zone video_replica_customer_api 64k;
     least_conn;
     # Open-source Nginx passive health removal: /ready's configured http_503
     # is an unsuccessful attempt, so one failed probe removes that process

@@ -45,6 +45,7 @@ LB 的限流桶证据。本任务不能标记 `STAGING_VERIFIED`，更不能提�
   `non_idempotent` 重试，代理不会重放付费 POST/PATCH/PUT。
 - `/ready` 在 Nginx 仅向同机监控开放；`http_503` + `max_fails=1`
   使一次失败探测立即把对应 API 从普通 upstream 摘除 30 秒，
+  upstream `zone` 使该失败状态在所有 Nginx worker 间共享，
   避免用公网请求占满线程池，也不让已知不就绪节点继续接收业务。
 
 ### 1.3 PostgreSQL 与运维边界

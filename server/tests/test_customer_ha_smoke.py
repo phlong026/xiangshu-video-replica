@@ -201,6 +201,7 @@ def test_nginx_contract_load_balances_two_apis_and_rewrites_forwarding_headers()
 
     assert "server 127.0.0.1:8001" in nginx
     assert "server 127.0.0.1:8002" in nginx
+    assert "zone video_replica_customer_api 64k;" in nginx
     assert "location = /live" in nginx
     assert "location = /ready" in nginx
     assert "location ^~ /api/" in nginx
