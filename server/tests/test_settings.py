@@ -609,6 +609,36 @@ def test_admin_can_update_runtime_limits(client: TestClient) -> None:
     }
 
 
+def test_runtime_fair_queue_switch_rejected_on_sqlite_lane(client: TestClient) -> None:
+    """M4/M5 review M2: ``fair_queue_enabled`` is PostgreSQL-only (migration
+    041); the desktop SQLite lane keeps its legacy global FIFO, so a provided
+    value answers 422 instead of silently no-op'ing. Omitting the field stays
+    a normal limits update."""
+    rejected = client.patch(
+        "/api/admin/settings/runtime",
+        headers=admin_headers(),
+        json={
+            "max_generation_count_per_batch": 6,
+            "max_concurrent_h3_tasks": 4,
+            "fair_queue_enabled": True,
+        },
+    )
+    assert rejected.status_code == 422
+    assert rejected.json()["detail"]["code"] == "INVALID_SETTINGS"
+    assert "PostgreSQL" in rejected.json()["detail"]["message"]
+
+    accepted = client.patch(
+        "/api/admin/settings/runtime",
+        headers=admin_headers(),
+        json={
+            "max_generation_count_per_batch": 6,
+            "max_concurrent_h3_tasks": 4,
+        },
+    )
+    assert accepted.status_code == 200
+    assert "fair_queue_enabled" not in accepted.json()
+
+
 def test_admin_can_read_and_update_internal_billing_settings(client: TestClient) -> None:
     initial = client.get("/api/admin/settings", headers=admin_headers())
     updated = client.patch(

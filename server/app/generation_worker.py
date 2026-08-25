@@ -233,10 +233,13 @@ def main() -> None:
     config = resolve_database_config()
     validate_customer_production(config)
     if config.mode is DatabaseMode.POSTGRESQL:
-        # PG worker runtime (T25): prove readiness (pool + server round-trip),
-        # then run the fair-queue task loop. Every task executes in its own
-        # fenced transaction, so a crash between the lease and the result
-        # write rolls the lease back — nothing leaks, nothing double-pays.
+        # PG worker runtime (T25/T26): prove readiness (pool + server round-trip),
+        # then run the fair-queue task loop. Each task runs in the two-phase
+        # claim/work shape of run_pg_worker_once (M5 review P1-1): the claim
+        # transaction COMMITS the SUBMITTING transition, so a crash after the
+        # claim does NOT roll the lease back — the expiry sweeper moves the
+        # task to SUBMISSION_UNCERTAIN (a manual reconciliation gate) and a
+        # paid provider call is never silently re-fired.
         ready = check_pg_ready()
         logger.info(
             "PostgreSQL worker runtime ready (pool_max=%d, server_now=%s)",

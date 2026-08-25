@@ -183,12 +183,21 @@ class SettingsRepository:
         max_concurrent_h3_tasks: int,
         active_storage_provider: str,
         actor_user_id: str,
-    ) -> dict[str, int | str]:
+        fair_queue_enabled: bool | None = None,
+    ) -> dict[str, int | str | bool]:
         validate_runtime_settings(
             max_generation_count_per_batch=max_generation_count_per_batch,
             max_concurrent_h3_tasks=max_concurrent_h3_tasks,
             active_storage_provider=active_storage_provider,
         )
+        # M4/M5 review M2: the fair-queue rollout switch (revised ADR §4)
+        # gets an audited write path instead of ad-hoc SQL. The column only
+        # exists on PostgreSQL (migration 041); the desktop SQLite lane keeps
+        # its legacy global FIFO, so a provided value there is a caller error.
+        # ``getattr`` rather than ``is_postgres`` because unit tests inject a
+        # raw sqlite3 connection, which is by definition not the PG lane.
+        if fair_queue_enabled is not None and not getattr(self.conn, "is_postgres", False):
+            raise ValueError("fair_queue_enabled is only available on the PostgreSQL lane")
         with self.conn:
             self.conn.execute(
                 """
@@ -216,23 +225,48 @@ class SettingsRepository:
                     actor_user_id,
                 ),
             )
+            if fair_queue_enabled is not None:
+                # The upsert above guarantees the id=1 row; flip the switch in
+                # the same transaction so limits and the queue mode commit
+                # (or roll back) together.
+                self.conn.execute(
+                    """
+                    UPDATE runtime_settings
+                    SET fair_queue_enabled = %s, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = 1
+                    """,
+                    (fair_queue_enabled,),
+                )
         return self.read_runtime_settings()
 
-    def read_runtime_settings(self) -> dict[str, int | str]:
+    def read_runtime_settings(self) -> dict[str, int | str | bool]:
+        include_fair_queue = getattr(self.conn, "is_postgres", False)
+        columns = "max_generation_count_per_batch, max_concurrent_h3_tasks, active_storage_provider"
+        if include_fair_queue:
+            columns += ", fair_queue_enabled"
         row = self.conn.execute(
-            """
-            SELECT max_generation_count_per_batch, max_concurrent_h3_tasks, active_storage_provider
+            f"""
+            SELECT {columns}
             FROM runtime_settings
             WHERE id = 1
             """
         ).fetchone()
         if row is None:
-            return dict(DEFAULT_RUNTIME_SETTINGS)
-        return {
-            "max_generation_count_per_batch": int(row["max_generation_count_per_batch"]),
-            "max_concurrent_h3_tasks": int(row["max_concurrent_h3_tasks"]),
-            "active_storage_provider": str(row["active_storage_provider"]),
-        }
+            result: dict[str, int | str | bool] = dict(DEFAULT_RUNTIME_SETTINGS)
+        else:
+            result = {
+                "max_generation_count_per_batch": int(row["max_generation_count_per_batch"]),
+                "max_concurrent_h3_tasks": int(row["max_concurrent_h3_tasks"]),
+                "active_storage_provider": str(row["active_storage_provider"]),
+            }
+        if include_fair_queue:
+            # The switch is "off" when the row (or a pre-041 database) has no
+            # value — mirroring ``_fair_queue_enabled``'s documented
+            # missing-column-is-feature-off semantics.
+            result["fair_queue_enabled"] = (
+                bool(row["fair_queue_enabled"]) if row is not None else False
+            )
+        return result
 
     def save_billing_settings(
         self,

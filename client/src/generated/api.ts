@@ -4153,6 +4153,8 @@ export interface components {
       max_concurrent_h3_tasks: number;
       /** Active Storage Provider */
       active_storage_provider?: ("cos" | "local") | null;
+      /** Fair Queue Enabled */
+      fair_queue_enabled?: boolean | null;
     };
     /** ScriptRequest */
     ScriptRequest: {
@@ -7488,7 +7490,7 @@ export interface operations {
         };
         content: {
           "application/json": {
-            [key: string]: number | string;
+            [key: string]: number | string | boolean;
           };
         };
       };

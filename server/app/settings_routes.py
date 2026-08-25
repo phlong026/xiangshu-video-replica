@@ -39,6 +39,10 @@ class RuntimeSettingsRequest(BaseModel):
     max_generation_count_per_batch: int
     max_concurrent_h3_tasks: int
     active_storage_provider: Literal["cos", "local"] | None = None
+    # M4/M5 review M2: the fair-queue rollout switch (revised ADR §4) gets an
+    # audited write path — None leaves it unchanged; PostgreSQL-only (the
+    # desktop SQLite lane keeps its legacy global FIFO and answers 422).
+    fair_queue_enabled: bool | None = None
 
 
 class BillingSettingsRequest(BaseModel):
@@ -322,7 +326,7 @@ def update_runtime_settings(
     payload: RuntimeSettingsRequest,
     conn: Database,
     admin: SettingsAdmin,
-) -> dict[str, int | str]:
+) -> dict[str, int | str | bool]:
     repo = SettingsRepository(conn)
     try:
         current = repo.read_runtime_settings()
@@ -333,6 +337,7 @@ def update_runtime_settings(
                 payload.active_storage_provider or current["active_storage_provider"]
             ),
             actor_user_id=admin.id,
+            fair_queue_enabled=payload.fair_queue_enabled,
         )
     except ValueError as exc:
         raise HTTPException(
@@ -340,13 +345,18 @@ def update_runtime_settings(
             detail={"code": "INVALID_SETTINGS", "message": str(exc)},
         ) from exc
 
+    # The queue mode is a production rollout decision (revised ADR §4) —
+    # record it in the audit metadata, not just the generic limits label.
+    audit_metadata: dict[str, object] = {"setting": "runtime_limits"}
+    if payload.fair_queue_enabled is not None:
+        audit_metadata["fair_queue_enabled"] = payload.fair_queue_enabled
     write_audit_log(
         conn,
         actor_user_id=admin.id,
         action="runtime_settings.update",
         entity_type="runtime_settings",
         entity_id="1",
-        metadata_json='{"setting":"runtime_limits"}',
+        metadata_json=json.dumps(audit_metadata, sort_keys=True),
     )
     return result
 

@@ -495,3 +495,50 @@ def test_idle_cursor_cleanup(fair_state: str) -> None:
         conn = BusinessConnection.postgres(raw)
         rows = conn.execute("SELECT user_id FROM user_queue_cursors").fetchall()
         assert [str(row[0]) for row in rows] == ["u2"]
+
+
+def test_runtime_settings_write_flips_fair_queue_switch(fair_state: str) -> None:
+    """M4/M5 review M2: the fair-queue rollout switch flips through the
+    audited SettingsRepository write path (what PATCH /api/admin/settings/
+    runtime calls behind SettingsAdmin), not ad-hoc SQL. Omitting the field
+    leaves the current mode alone; the flip is visible to the queue's own
+    gate and echoed by read_runtime_settings."""
+    from cryptography.fernet import Fernet
+
+    from app.generation import _fair_queue_enabled
+    from app.settings import SettingsRepository
+
+    _seed(fair_state, user_ids=["u1"], tasks_per_user=0, fair_queue_enabled=False)
+
+    def _save(fair_queue_enabled: bool | None) -> dict[str, int | str | bool]:
+        with pg_transaction() as raw:
+            # Runtime settings never touch encrypted provider config; a
+            # throwaway key satisfies the constructor (this module sets no
+            # VIDEO_REPLICA_SETTINGS_KEY).
+            repo = SettingsRepository(
+                BusinessConnection.postgres(raw), fernet=Fernet(Fernet.generate_key())
+            )
+            return repo.save_runtime_settings(
+                max_generation_count_per_batch=4,
+                max_concurrent_h3_tasks=100,
+                active_storage_provider="local",
+                actor_user_id="u1",
+                fair_queue_enabled=fair_queue_enabled,
+            )
+
+    # Seed starts FALSE; the audited write flips it on.
+    with pg_transaction() as raw:
+        assert _fair_queue_enabled(BusinessConnection.postgres(raw)) is False
+    assert _save(True)["fair_queue_enabled"] is True
+    with pg_transaction() as raw:
+        assert _fair_queue_enabled(BusinessConnection.postgres(raw)) is True
+
+    # Omitting the field (None) keeps the switch where it is.
+    assert _save(None)["fair_queue_enabled"] is True
+    with pg_transaction() as raw:
+        assert _fair_queue_enabled(BusinessConnection.postgres(raw)) is True
+
+    # And back off through the same path.
+    assert _save(False)["fair_queue_enabled"] is False
+    with pg_transaction() as raw:
+        assert _fair_queue_enabled(BusinessConnection.postgres(raw)) is False

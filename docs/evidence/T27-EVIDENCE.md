@@ -6,7 +6,7 @@
 **状态**: `AUTOMATED_VERIFIED`  
 **完成日期**: 2026-08-25  
 **前置**: T25（公平队列）、T26（崩溃恢复/不确定路径）  
-**DB**: `t27_queue_load_test`（专属 fixture 库,`alembic upgrade head` 到 revision-040,用完即删）
+**DB**: `t27_queue_load_test`（专属 fixture 库,`alembic upgrade head` 到 revision-041,用完即删）
 
 ---
 

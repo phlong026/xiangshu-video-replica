@@ -205,6 +205,10 @@ export type RuntimeSettings = {
   max_generation_count_per_batch: number;
   max_concurrent_h3_tasks: number;
   active_storage_provider: "cos" | "local";
+  /** M4/M5 review M2: PostgreSQL-only rollout switch (SQLite lane keeps the
+   * legacy global FIFO and rejects a provided value with 422). Absent on the
+   * desktop lane and when the caller leaves it unchanged. */
+  fair_queue_enabled?: boolean;
 };
 
 export type SettingsSnapshot = {
