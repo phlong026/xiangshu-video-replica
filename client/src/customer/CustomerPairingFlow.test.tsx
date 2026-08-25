@@ -51,6 +51,7 @@ function fillForm() {
 describe("CustomerPairingFlow (FE-03 / T30)", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
   it("parks on the waiting screen when the primary device must approve (202)", async () => {
@@ -65,6 +66,12 @@ describe("CustomerPairingFlow (FE-03 / T30)", () => {
         }),
       ),
     );
+
+    // Pin toLocaleString so the expiry assertion is locale-independent: the CI
+    // en-US Intl formats 2026-08-26T12:00:00Z as "8/26/2026, ..." while a
+    // zh-CN locale produces "2026/8/26 ...", and the test regex wants the
+    // year-first shape.
+    vi.spyOn(Date.prototype, "toLocaleString").mockReturnValue("2026/8/26 12:00:00");
 
     render(<CustomerPairingFlow store={fakeStore()} onPaired={vi.fn()} />);
     fillForm();
