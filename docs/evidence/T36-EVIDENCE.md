@@ -63,7 +63,8 @@ LB 的限流桶证据。本任务不能标记 `STAGING_VERIFIED`，更不能提�
   审计与 runtime 默认值均未被业务写入，再创建首位 admin/钱包、加密 COS 配置、
   runtime 选择和无 secret 审计，并只输出 15 分钟单次 exchange credential；任一
   半初始化或已有用户状态均拒绝，因此不能用作通用提权或设置覆盖入口。真实 PG16
-  pristine 空库迁移后已验证该路径及第二次调用拒绝语义。
+  pristine 空库迁移后已验证该路径及第二次调用拒绝语义；手册在输出重定向前显式
+  创建 `0700 root:root` 的 `/run/video-replica`，不依赖重启后已消失的临时目录。
 - PostgreSQL 16 文档要求 HA 主端点、私网/TLS、最小权限、连接预算和禁止公网；
   客户生产启动门拒绝缺失 `sslmode` 和可降级为明文的
   `disable/allow/prefer`，模板固定 `verify-full` + CA/主机名校验；T38 前不宣称
@@ -150,7 +151,7 @@ sidecar NSIS；T36 已有意把该 job 改成客户云目标，因此更新回�
 | Ruff / format / mypy | Pass；181 files formatted / 71 source files typed |
 | Server full pytest | 单次全量：1200 passed + 1 stale build-contract failed，16 warnings，1169.23s；失败断言修复后其所在两文件 18/18，按“全量只跑一次”规则未重复第二轮全量 |
 | Independent review | APPROVE，0 Critical / 0 High / 0 Medium |
-| PR connector review | 阻塞式 readiness、PG 事务边界、COS bucket 存活、客户 NSIS 资源/安装身份/启动路由、origin 端口一致性、私有 ready/upstream 摘除、兼容 health exact proxy、冻结文件映射、Alembic 前生产 DSN 校验与空库首装路径均已实质修复；最终复审由 PR 留痕 |
+| PR connector review | 阻塞式 readiness、PG 事务边界、COS bucket 存活、客户 NSIS 资源/安装身份/启动路由、origin 端口一致性、私有 ready/upstream 摘除、兼容 health exact proxy、冻结文件映射、Alembic 前生产 DSN 校验、空库首装路径及 ephemeral `/run` 输出目录均已实质修复；最终复审由 PR 留痕 |
 
 上述分段证据证明当前 1201 个收集项中的唯一失败已修复；PR CI
 负责最终的完整 Linux 质量门和 Windows NSIS payload 解包证据。本地

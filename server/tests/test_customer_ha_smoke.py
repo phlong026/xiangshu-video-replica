@@ -458,6 +458,10 @@ def test_customer_deployment_docs_keep_evidence_levels_honest() -> None:
     assert "sslmode=verify-full" in customer_env
     assert "sslrootcert=" in customer_env
     assert runbook.index("deploy/postgres/migrate.sh") < runbook.index("provision-empty-customer")
+    runtime_dir = "install -d -m 0700 -o root -g root /run/video-replica"
+    credential_output = "> /run/video-replica/first-admin-exchange.json"
+    assert runtime_dir in runbook
+    assert runbook.index(runtime_dir) < runbook.index(credential_output)
 
 
 def test_customer_desktop_build_is_an_explicit_no_sidecar_target() -> None:
