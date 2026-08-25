@@ -3328,12 +3328,25 @@ export interface components {
       slots: components["schemas"]["DeviceSlotView"][];
       /** History */
       history: components["schemas"]["DeviceView"][];
+      /** Pending Pairings */
+      pending_pairings?: components["schemas"]["PendingPairingView"][];
     };
     /** DeviceSlotView */
     DeviceSlotView: {
       /** Slot No */
       slot_no: number;
       device: components["schemas"]["DeviceView"] | null;
+    };
+    /** PendingPairingView */
+    PendingPairingView: {
+      /** Pairing Request Id */
+      pairing_request_id: string;
+      /** Display Name */
+      display_name: string;
+      /** Platform */
+      platform: string;
+      /** Created At */
+      created_at: string;
     };
     /** DeviceView */
     DeviceView: {

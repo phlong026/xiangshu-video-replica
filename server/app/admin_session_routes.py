@@ -42,11 +42,25 @@ def list_customer_sessions(
     at most one row; device columns come from the bound ``customer_devices``
     row and ``status`` filters on the device status (BOUND/UNBOUND/REVOKED).
     Both admin and auditor roles can read (read-only).
+
+    "Live" is judged on the PostgreSQL clock: logout, revocation and natural
+    lease expiry keep the row (the lease is pulled into the past, the T16/T19
+    pattern) rather than deleting it, so a row's existence alone is not a
+    live session.
     """
     bounded_limit = max(0, min(limit, MAX_LIST_LIMIT))
     bounded_offset = max(0, offset)
 
-    clauses: list[str] = ["css.user_id = %s"]
+    clauses: list[str] = [
+        "css.user_id = %s",
+        # Logout/revocation/expiry pull lease_until into the past instead of
+        # deleting the row; without this predicate administrators would see
+        # a supposedly live session indefinitely. The column is text holding
+        # mixed ISO / PG-text timestamps, so compare on the cast (the 029
+        # CHECK ``lease_until::timestamptz > created_at::timestamptz``
+        # guarantees every stored value parses) against the PostgreSQL clock.
+        "css.lease_until::timestamptz > clock_timestamp()",
+    ]
     params: list[object] = [user_id]
 
     if status:

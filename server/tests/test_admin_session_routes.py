@@ -275,3 +275,30 @@ def test_auditor_can_list_sessions(client: TestClient):
     response = client.get(SESSIONS_PATH.format(user_id="customer_u"))
     assert response.status_code == 200
     assert response.json()["total"] == 1
+
+
+@pytest.mark.pg
+def test_list_customer_sessions_filters_out_expired_lease(client: TestClient):
+    """Logout/revocation/expiry keep the row but pull the lease into the
+    past; the endpoint must not report it as a live session (Codex review
+    P2 on the admin session API).
+
+    The seeded row is created at runtime, so the UPDATE also rewinds
+    created_at to keep the 029 ``lease_after_created`` CHECK satisfied —
+    the real logout path uses GREATEST(now, created_at+1us) for the same
+    reason."""
+    _admin_session(client)
+    with psycopg.connect(_t34_dsn(), autocommit=True) as conn:
+        conn.execute(
+            "UPDATE customer_session_state "
+            "SET lease_until = to_char(now() - interval '1 hour', "
+            "  'YYYY-MM-DD\"T\"HH24:MI:SS\"+00:00\"'), "
+            "created_at = to_char(now() - interval '2 hour', "
+            "  'YYYY-MM-DD\"T\"HH24:MI:SS\"+00:00\"') "
+            "WHERE user_id = 'customer_u'"
+        )
+    response = client.get(SESSIONS_PATH.format(user_id="customer_u"))
+    assert response.status_code == 200
+    data = response.json()
+    assert data["items"] == []
+    assert data["total"] == 0

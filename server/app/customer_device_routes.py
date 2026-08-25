@@ -236,11 +236,25 @@ class DeviceSlotView(BaseModel):
     device: DeviceView | None
 
 
+class PendingPairingView(BaseModel):
+    """A PENDING second-device pairing awaiting the first device's approval
+    (T17 / DEV-02). The candidate's self-reported identity is shown to the
+    approver; the keyed fingerprint digest never leaves the server."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    pairing_request_id: str
+    display_name: str
+    platform: str
+    created_at: str
+
+
 class DeviceListResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     slots: list[DeviceSlotView]
     history: list[DeviceView]
+    pending_pairings: list[PendingPairingView] = []
 
 
 # ---------------------------------------------------------------------------
@@ -325,7 +339,9 @@ def _request_id(request: Request) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _snapshot_response(snapshot: DeviceSlotsSnapshot) -> DeviceListResponse:
+def _snapshot_response(
+    snapshot: DeviceSlotsSnapshot, pending_pairings: list[PendingPairingView]
+) -> DeviceListResponse:
     return DeviceListResponse(
         slots=[
             DeviceSlotView(
@@ -337,18 +353,36 @@ def _snapshot_response(snapshot: DeviceSlotsSnapshot) -> DeviceListResponse:
             for slot in snapshot.slots
         ],
         history=[DeviceView.model_validate(entry) for entry in snapshot.history],
+        pending_pairings=pending_pairings,
     )
 
 
 @router.get("/devices", response_model=DeviceListResponse)
 def list_devices(request: Request) -> DeviceListResponse:
-    """The two-slot status view: current bindings plus unbind history."""
+    """The two-slot status view: current bindings plus unbind history, and
+    any PENDING second-device pairing awaiting this account's approval."""
     _require_pg()
     token = _bearer_token(request)
     with pg_transaction() as conn:
         device = _authenticate(conn, token)
         snapshot = list_device_slots(conn, user_id=device.user_id, current_device_id=device.id)
-    return _snapshot_response(snapshot)
+        pairing_rows = conn.execute(
+            "SELECT id, display_name, platform, created_at "
+            "FROM device_pairing_requests "
+            "WHERE activation_code_id = %s AND status = 'PENDING' "
+            "ORDER BY created_at, id",
+            (device.activation_code_id,),
+        ).fetchall()
+    pending_pairings = [
+        PendingPairingView(
+            pairing_request_id=str(row[0]),
+            display_name=str(row[1]),
+            platform=str(row[2]),
+            created_at=str(row[3]) if row[3] is not None else "",
+        )
+        for row in pairing_rows
+    ]
+    return _snapshot_response(snapshot, pending_pairings)
 
 
 def _replay_unbind_response(

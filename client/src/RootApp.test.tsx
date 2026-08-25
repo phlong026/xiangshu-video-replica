@@ -32,11 +32,19 @@ const customerActivationBody = {
 /** Fetch stub for the customer lane: the activation succeeds and the
  * workspace shell's internal-lane probes (health, projects) resolve benignly
  * so the workspace can mount — the customer business APIs arrive in later
- * tasks (T34+), not T29. */
+ * tasks (T34+), not T29. The device list resolves to an empty two-slot
+ * contract so the T31 device view can mount. */
 function stubCustomerWorkspaceFetch() {
   return vi.fn((url: string) => {
     if (url.endsWith("/api/customer/activate")) {
       return jsonResponse(customerActivationBody, 201);
+    }
+    if (url.endsWith("/api/customer/devices")) {
+      return jsonResponse({
+        slots: [{ slot_no: 1, device: null }, { slot_no: 2, device: null }],
+        history: [],
+        pending_pairings: [],
+      });
     }
     if (url.endsWith("/health")) {
       return jsonResponse({ status: "ok", service: "video-replica-api" });
@@ -91,6 +99,23 @@ describe("RootApp", () => {
       await screen.findByRole("heading", { name: "项目" }),
     ).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "内部运营管理" })).toBeNull();
+  });
+
+  it("routes /customer/pairing to the second-device enrollment form, not the state machine", async () => {
+    vi.stubGlobal("fetch", stubCustomerWorkspaceFetch());
+
+    render(<RootApp path="/customer/pairing" />);
+
+    // T30: the pairing entry renders even when this browser holds no
+    // credential — it collects the activation code for the primary device.
+    expect(
+      await screen.findByRole("heading", { name: "Pair New Device" }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText(/activation code/i)).toBeInTheDocument();
+    // The seven-screen state machine must not intercept the pairing route.
+    expect(
+      screen.queryByRole("heading", { name: "激活短视频复刻工作台" }),
+    ).toBeNull();
   });
 
   it("routes /customer to the activation screen without any internal-token field", async () => {

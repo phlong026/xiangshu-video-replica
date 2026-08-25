@@ -704,3 +704,193 @@ export async function listAdminAdjustments(
 
   return response.json() as Promise<AdjustmentListResponse>;
 }
+
+// ---------------------------------------------------------------------------
+// T34 — Customer session API (ADM-02)
+// ---------------------------------------------------------------------------
+
+export class AdminSessionError extends Error {
+  readonly status: number | undefined;
+  readonly code: string | undefined;
+
+  constructor(message: string, status?: number, code?: string) {
+    super(message);
+    this.name = "AdminSessionError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
+export interface CustomerSessionListItem {
+  session_id: string;
+  user_id: string;
+  username: string;
+  device_id: string;
+  session_epoch: number;
+  lease_until: string;
+  last_heartbeat_at: string;
+  created_at: string;
+  updated_at: string;
+  device_name: string;
+  platform: string;
+  slot_no: number;
+  device_status: string;
+}
+
+export interface CustomerSessionListResponse {
+  items: CustomerSessionListItem[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface CustomerSessionListOptions {
+  status?: string;
+  limit?: number;
+  offset?: number;
+}
+
+/**
+ * Fetch the live customer session state (the 029 one-row-per-user model).
+ *
+ * GET /api/control/customers/{user_id}/sessions?status=&limit=&offset=
+ */
+export async function listCustomerSessions(
+  userId: string,
+  options: CustomerSessionListOptions = {},
+): Promise<CustomerSessionListResponse> {
+  const params = new URLSearchParams();
+  if (options.status) params.set("status", options.status);
+  if (options.limit !== undefined) params.set("limit", String(options.limit));
+  if (options.offset !== undefined)
+    params.set("offset", String(options.offset));
+
+  const response = await requestControl(
+    `/api/control/customers/${encodeURIComponent(userId)}/sessions?${params.toString()}`,
+    { method: "GET" },
+  );
+
+  if (!response.ok) {
+    throw await parseActivationError(response, "读取客户会话失败");
+  }
+
+  return response.json() as Promise<CustomerSessionListResponse>;
+}
+
+// ---------------------------------------------------------------------------
+// T34 — Audit log API (ADM-02)
+// ---------------------------------------------------------------------------
+
+export class AdminAuditError extends Error {
+  readonly status: number | undefined;
+  readonly code: string | undefined;
+
+  constructor(message: string, status?: number, code?: string) {
+    super(message);
+    this.name = "AdminAuditError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
+export interface AuditLogItem {
+  event_id: string;
+  event_type: string;
+  actor_user_id: string;
+  actor_username: string;
+  target_user_id: string;
+  source_document_type: string;
+  source_document_ref: string;
+  reason: string;
+  request_id: string;
+  created_at: string;
+}
+
+export interface AuditLogResponse {
+  items: AuditLogItem[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface AuditLogOptions {
+  eventType?: string;
+  actorUserId?: string;
+  limit?: number;
+  offset?: number;
+}
+
+/**
+ * Fetch the aggregated audit log with pagination.
+ *
+ * GET /api/control/audit-log?event_type=&actor_user_id=&limit=&offset=
+ */
+export async function listAuditLog(
+  options: AuditLogOptions = {},
+): Promise<AuditLogResponse> {
+  const params = new URLSearchParams();
+  if (options.eventType) params.set("event_type", options.eventType);
+  if (options.actorUserId) params.set("actor_user_id", options.actorUserId);
+  if (options.limit !== undefined) params.set("limit", String(options.limit));
+  if (options.offset !== undefined)
+    params.set("offset", String(options.offset));
+
+  const response = await requestControl(
+    `/api/control/audit-log?${params.toString()}`,
+    { method: "GET" },
+  );
+
+  if (!response.ok) {
+    throw await parseActivationError(response, "读取审计日志失败");
+  }
+
+  return response.json() as Promise<AuditLogResponse>;
+}
+
+// ---------------------------------------------------------------------------
+// T23 — Admin adjustment write (ADM-02)
+// ---------------------------------------------------------------------------
+
+export interface AdjustmentWriteInput {
+  sourceDocumentType: string;
+  sourceDocumentRef: string;
+  credits: number;
+}
+
+export interface AdjustmentWriteResult {
+  adjustment_id: string;
+  order_id: string;
+  credits: string;
+  amount_fen: string;
+  pricing_scope: string;
+  wallet_balance_after: number;
+  source_document_type: string;
+  source_document_ref: string;
+  request_id: string;
+}
+
+/**
+ * Create an admin adjustment: PAID order + CHARGE + wallet + audit row.
+ * The write contract (confirm + reason + idempotency key) rides the shared
+ * adminWrite path, and the key is preserved across ambiguous retries.
+ *
+ * POST /api/control/customers/{user_id}/adjustments
+ */
+export async function createCustomerAdjustment(
+  userId: string,
+  input: AdjustmentWriteInput,
+  reason: string,
+  idempotencyKey?: string,
+): Promise<AdjustmentWriteResult> {
+  return adminWrite<AdjustmentWriteResult>(
+    `/api/control/customers/${encodeURIComponent(userId)}/adjustments`,
+    {
+      source_document_type: input.sourceDocumentType,
+      source_document_ref: input.sourceDocumentRef,
+      credits: input.credits,
+    },
+    reason,
+    "创建后台调账失败",
+    idempotencyKey,
+  );
+}

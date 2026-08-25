@@ -1,8 +1,10 @@
 import { useMemo } from "react";
 import { AdminApp } from "./AdminApp";
-import { App, WorkspaceShell } from "./App";
+import { App } from "./App";
 import type { CurrentUser } from "./api";
 import { ActivationPage } from "./customer/ActivationPage";
+import { CustomerPairingFlow } from "./customer/CustomerPairingFlow";
+import { CustomerWorkspace } from "./customer/CustomerWorkspace";
 import { LoginPage } from "./customer/LoginPage";
 import { SessionConflictDialog } from "./customer/SessionConflictDialog";
 import {
@@ -16,6 +18,12 @@ export function RootApp({
 }: {
   path?: string;
 }) {
+  if (path === "/customer/pairing") {
+    // The pairing entry (T30) sits outside the seven-screen state machine:
+    // it only ever needs the vault, and must render even when this browser
+    // holds no credential yet (that is exactly the second-device scenario).
+    return <CustomerPairingRoute />;
+  }
   if (path === "/customer" || path.startsWith("/customer/")) {
     return <CustomerShell />;
   }
@@ -23,6 +31,20 @@ export function RootApp({
     <AdminApp />
   ) : (
     <App />
+  );
+}
+
+/** The pairing route owns its store (same stable-identity pattern as the
+ * shell) and bounces back to /customer once the device credential is saved. */
+function CustomerPairingRoute() {
+  const store = useMemo(customerCredentialStore, []);
+  return (
+    <CustomerPairingFlow
+      store={store}
+      onPaired={() => {
+        window.location.assign("/customer");
+      }}
+    />
   );
 }
 
@@ -79,16 +101,21 @@ function CustomerShell() {
         <SessionConflictDialog
           conflict={session.conflict}
           onCancel={session.cancelSessionSwitch}
-          onSwitch={() => {
-            void session.switchSession();
-          }}
+          // Return the switch promise: the dialog awaits onSwitch to keep
+          // its buttons disabled, so a discarded promise would let a second
+          // click start another switch with a new idempotency key.
+          onSwitch={() => session.switchSession()}
         />
       );
     case "workspace":
       // The workspace screen is only reachable after activate/login set the
       // identity; the checking fallback below is unreachable in practice.
       return session.user === null ? null : (
-        <WorkspaceShell currentUser={customerToCurrentUser(session.user)} />
+        <CustomerWorkspace
+          user={session.user}
+          store={store}
+          onSessionExpired={session.restartAfterExpiry}
+        />
       );
     case "session-expired":
       return (
@@ -148,7 +175,7 @@ function CustomerTerminalScreen({
   );
 }
 
-function customerToCurrentUser(user: CustomerWorkspaceUser): CurrentUser {
+export function customerToCurrentUser(user: CustomerWorkspaceUser): CurrentUser {
   return {
     id: user.userId,
     username: user.username ?? "customer",

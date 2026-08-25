@@ -9,7 +9,9 @@ export function PairingApprovalCard({
   pairing: {
     id: string;
     deviceFingerprint: string;
-    slotNo: number;
+    /** The slot is assigned at approval time, so a pending request (which
+     * carries no slot yet) renders "待分配" instead of a fabricated number. */
+    slotNo?: number;
     createdAt: string;
   };
   onApprove: (pairingId: string) => void;
@@ -32,7 +34,11 @@ export function PairingApprovalCard({
         <span className="fingerprint-value">{pairing.deviceFingerprint}</span>
 
         <p className="slot-label">Slot:</p>
-        <p className="slot-value">Slot #{pairing.slotNo}</p>
+        <p className="slot-value">
+          {pairing.slotNo === undefined
+            ? "待分配 (审批时确定)"
+            : `Slot #${pairing.slotNo}`}
+        </p>
 
         <p className="request-time">
           Requested at: {new Date(pairing.createdAt).toLocaleString()}

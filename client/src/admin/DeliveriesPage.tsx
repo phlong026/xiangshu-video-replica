@@ -4,6 +4,7 @@ import {
   type ActivationDeliverResult,
   AdminActivationError,
   adminActivationErrorMessage,
+  createIdempotencyKey,
   deliverActivationCode,
 } from "../api.admin";
 
@@ -29,8 +30,11 @@ export function DeliveriesPage({
   const [reason, setReason] = useState("");
   const [confirmed, setConfirmed] = useState(false);
   const [result, setResult] = useState<ActivationDeliverResult | null>(null);
-  // One idempotency key per logical delivery.
-  const [_deliverKey, _setDeliverKey] = useState<string | null>(null);
+  // One idempotency key per logical delivery, preserved across ambiguous
+  // retries: if the server committed GENERATED→ISSUED but the response
+  // timed out, retrying with the same key replays the successful result
+  // instead of minting a fresh key that answers a transition error.
+  const [deliverKey, setDeliverKey] = useState<string | null>(null);
 
   async function submitDeliver(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -52,14 +56,22 @@ export function DeliveriesPage({
       return;
     }
     setBusy(true);
+    const key = deliverKey ?? createIdempotencyKey();
+    setDeliverKey(key);
     try {
-      const delivered = await deliverActivationCode(codeId.trim(), {
-        channel: channel.trim(),
-        external_order_ref: externalOrderRef.trim() || undefined,
-        recipient_ref: recipientRef.trim() || undefined,
-        reason: reason.trim(),
-      });
+      const delivered = await deliverActivationCode(
+        codeId.trim(),
+        {
+          channel: channel.trim(),
+          external_order_ref: externalOrderRef.trim() || undefined,
+          recipient_ref: recipientRef.trim() || undefined,
+          reason: reason.trim(),
+        },
+        key,
+      );
       setResult(delivered);
+      // The logical delivery finished: the next submission is a new one.
+      setDeliverKey(null);
     } catch (cause) {
       if (cause instanceof AdminActivationError && cause.status === 401) {
         setError("会话已失效，请重新登录");
