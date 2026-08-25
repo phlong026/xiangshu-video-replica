@@ -1,7 +1,7 @@
 """T27 — 10k-task queue load, hot-index and connection-pool evidence (PG lane).
 
 The fixture database is migrated with ``alembic upgrade head`` (the T25
-precedent) so every query runs against the real revision-040 schema. The
+precedent) so every query runs against the real revision-041 schema. The
 tests drive the actual business functions on the PostgreSQL lane the way the
 PG worker loop does: every logical operation inside its own fenced
 ``pg_transaction`` (T25).

@@ -10,6 +10,7 @@ from fastapi import HTTPException
 
 from app.character_image_generation import (
     CharacterImageProvider,
+    acquire_character_generation_task,
     run_next_character_generation_task,
 )
 from app.db import connect_database
@@ -22,7 +23,7 @@ from app.db_pg import (
     validate_customer_production,
 )
 from app.db_portable import BusinessConnection
-from app.generation import run_next_generation_task
+from app.generation import acquire_generation_task_lease, run_next_generation_task
 from app.media_routes import get_media_storage
 from app.storage import StorageAdapter
 
@@ -88,11 +89,25 @@ def run_pg_worker_once(
 ) -> int:
     """Process all currently eligible tasks on the PostgreSQL lane.
 
-    Each task runs inside its own fenced transaction (``pg_transaction``):
-    the fair-queue lease, the paid provider call, the result write and the
-    slot release commit together; any failure rolls the whole round back to
-    the pre-lease state (T25 / revised ADR §6 — the queue invariant survives
-    worker crashes because the lease itself was never committed).
+    Two-phase per task (M5 review P1-1 — the earlier single fenced
+    transaction rolling the lease, the paid provider call, the result write
+    and the release into one commit could lose the whole round on a crash
+    mid-poll: the task fell back to PENDING and the next worker re-sent the
+    paid POST; it also blinded the global concurrency gate until the round
+    ended):
+
+    1. Claim — a short fenced transaction: ``acquire_generation_task_lease``
+       commits the SUBMITTING transition, the per-user slot increment and the
+       global concurrency count immediately. A crash after this point leaves
+       the task SUBMITTING; the expiry sweeper moves it to
+       SUBMISSION_UNCERTAIN (a manual reconciliation gate), so a provider
+       call is never silently double-fired.
+    2. Work — a second fenced transaction: the provider poll, the terminal
+       write and the slot release. The claim's durability makes this a
+       crash-and-recover boundary, not a retry.
+
+    This mirrors the SQLite lane's per-block commit shape and the T27 drain
+    worker's two-transaction shape.
     """
     if max_tasks is not None and max_tasks < 1:
         raise ValueError("max_tasks must be at least 1")
@@ -101,35 +116,45 @@ def run_pg_worker_once(
         processed_round = False
         with pg_transaction() as raw_conn:
             conn = BusinessConnection.postgres(raw_conn)
-            if (
-                run_next_generation_task(
-                    conn,
-                    worker_id=worker_id,
-                    provider=None,
-                    storage=generation_storage or storage,
-                    first_frame_storage=first_frame_storage or storage,
-                )
-                is not None
-            ):
-                processed += 1
-                processed_round = True
-                if max_tasks is not None and processed >= max_tasks:
-                    return processed
+            lease = acquire_generation_task_lease(conn, worker_id=worker_id)
+        if lease is not None:
+            with pg_transaction() as raw_conn:
+                conn = BusinessConnection.postgres(raw_conn)
+                if (
+                    run_next_generation_task(
+                        conn,
+                        worker_id=worker_id,
+                        provider=None,
+                        storage=generation_storage or storage,
+                        first_frame_storage=first_frame_storage or storage,
+                        lease=lease,
+                    )
+                    is not None
+                ):
+                    processed += 1
+                    processed_round = True
+                    if max_tasks is not None and processed >= max_tasks:
+                        return processed
         with pg_transaction() as raw_conn:
             conn = BusinessConnection.postgres(raw_conn)
-            if (
-                run_next_character_generation_task(
-                    conn,
-                    worker_id=worker_id,
-                    provider=character_provider,
-                    storage=storage,
-                )
-                is not None
-            ):
-                processed += 1
-                processed_round = True
-                if max_tasks is not None and processed >= max_tasks:
-                    return processed
+            char_lease = acquire_character_generation_task(conn, worker_id=worker_id)
+        if char_lease is not None:
+            with pg_transaction() as raw_conn:
+                conn = BusinessConnection.postgres(raw_conn)
+                if (
+                    run_next_character_generation_task(
+                        conn,
+                        worker_id=worker_id,
+                        provider=character_provider,
+                        storage=storage,
+                        lease=char_lease,
+                    )
+                    is not None
+                ):
+                    processed += 1
+                    processed_round = True
+                    if max_tasks is not None and processed >= max_tasks:
+                        return processed
         if not processed_round:
             break
     return processed

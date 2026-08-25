@@ -1,31 +1,41 @@
 """T26 — worker crash recovery and provider-submission uncertainty (PG lane).
 
 The fixture database is migrated with ``alembic upgrade head`` (the T25
-precedent) so every query runs against the real revision-040 schema. The
+precedent) so every query runs against the real revision-041 schema. The
 tests drive the actual business functions on the PostgreSQL lane the way the
 PG worker loop does: every logical operation inside its own fenced
 ``pg_transaction`` (T25).
 
 Test matrix (T26 ADR §6 / BILL-03):
-- crash inside the fenced transaction rolls the whole round back: the lease
-  UPDATE, the cursor counter and the wallet RESERVE all disappear, the task
-  is PENDING again and another worker can claim it — no double pay;
+- the two-phase claim: a worker dying after the claim transaction leaves the
+  task durably SUBMITTING (never silently re-submitted); expiry recovery moves
+  it to SUBMISSION_UNCERTAIN and releases the slot;
 - an expired lease is taken over defensively with a worker-owned audit row
   (actor_user_id NULL) and the per-user slot released, for both the
   SUBMISSION_UNCERTAIN branch and the archive-retry branch;
+- concurrent expiry sweepers: only the winner's UPDATE…RETURNING audits and
+  releases (no double audit, no release of a replacement task's slot);
+- the live uncertain transition releases the slot (P1-2), and reconciling an
+  already-released task never releases the replacement's slot (P1-5);
 - reconciliation on the PG lane settles exactly one terminal billing row
   (never a second), and a cancelled provider release is equally one-shot;
 - reconciliation refuses to guess when the provider task id is unknown
   (SUBMISSION_REQUIRES_MANUAL_CONFIRMATION keeps the charge human-verified);
-- BILL-03: dangling RESERVE rows of terminal tasks are detected.
+- BILL-03: dangling RESERVE rows of terminal tasks are detected;
+- the production worker loop (run_pg_worker_once) claims, processes and
+  drains with the two-phase shape and a max_tasks bound;
+- the FIFO double-claim race is closed by FOR UPDATE SKIP LOCKED.
 """
 
 from __future__ import annotations
 
 import os
+import threading
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
+from uuid import uuid4
 
 # Set HMAC key before importing app modules (audit writers require it).
 os.environ.setdefault(
@@ -37,14 +47,18 @@ import psycopg
 import pytest
 from fastapi import HTTPException
 
+from app.auth import CurrentUser
 from app.db_pg import DATABASE_URL_ENV, close_pg_pool, pg_transaction
 from app.db_portable import BusinessConnection
 from app.generation import (
     MetasoH3Provider,
+    ReconcileReservation,
     acquire_generation_task_lease,
     mark_expired_active_leases_needing_attention,
+    mark_task_submission_uncertain,
     reconcile_submission_uncertain_task,
 )
+from app.generation_worker import run_pg_worker_once
 from app.internal_billing import (
     find_dangling_billing_reservations,
     reserve_internal_billing,
@@ -63,7 +77,7 @@ _FAIR_TABLES = (
     "runtime_settings, users"
 )
 
-_REQUEST_SNAPSHOT = '{"output_duration_seconds": 3, "resolution": "480p"}'
+_REQUEST_SNAPSHOT = '{"output_duration_seconds": 10, "resolution": "768P"}'
 _PROMPT_SNAPSHOT = '{"prompt_text": "a cat", "first_frame_uri": "cos://bucket/ff.jpg"}'
 
 
@@ -264,16 +278,26 @@ def fair_state(fair_dsn: str, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
 # ---------------------------------------------------------------------------
 
 
-def test_crash_inside_fenced_transaction_rolls_back_everything(fair_state: str) -> None:
-    """A worker dying between the lease and the paid call must leave no trace:
-    task back to PENDING, cursor 0, no wallet RESERVE, re-claimable."""
+def test_crash_after_claim_leaves_durable_submitting(fair_state: str) -> None:
+    """A worker dying after the claim transaction but before the work
+    transaction: the SUBMITTING lease, the wallet untouched and the slot stay
+    committed; the task is never silently re-claimed, and expiry recovery
+    moves it to SUBMISSION_UNCERTAIN (a manual reconciliation gate).
+
+    This is the two-phase production shape (M5 review P1-1): the old single
+    fenced transaction rolled the whole round back on a crash, returning the
+    task to PENDING and letting the next worker re-send the paid POST.
+    """
     _seed(fair_state, user_ids=["u1"], tasks_per_user=2, wallet_credits=1000)
+    # Phase 1 — durable claim: committed in its own fenced transaction.
+    lease = _acquire(fair_state, "w1")
+    assert lease is not None
+    assert str(lease["id"]) == "task-u1-0"
+    # Phase 2 crashes before anything is written: the work transaction rolls
+    # back, but the claim survives.
     with pytest.raises(RuntimeError, match="simulated crash"):
         with pg_transaction() as raw:
             conn = BusinessConnection.postgres(raw)
-            lease = acquire_generation_task_lease(conn, worker_id="w1")
-            assert lease is not None
-            assert str(lease["id"]) == "task-u1-0"
             reserve_internal_billing(conn, user_id="u1", task_id=str(lease["id"]), billing_round=1)
             raise RuntimeError("simulated crash")
 
@@ -285,18 +309,38 @@ def test_crash_inside_fenced_transaction_rolls_back_everything(fair_state: str) 
         wallet = conn.execute(
             "SELECT available_credits, reserved_credits FROM wallets WHERE user_id = 'u1'"
         ).fetchone()
-        audit_count = conn.execute("SELECT COUNT(*) FROM audit_logs").fetchone()[0]
-    assert task["status"] == "PENDING"
-    assert task["locked_by"] is None
-    assert task["locked_until"] is None
+    assert task["status"] == "SUBMITTING"  # the claim is durable
+    assert task["locked_by"] == "w1"
+    assert task["locked_until"] is not None
     assert int(wallet["available_credits"]) == 1000
     assert int(wallet["reserved_credits"]) == 0
     assert _billing_rows(fair_state, "task-u1-0") == []
-    assert int(audit_count) == 0  # even the defensive-takeover scan wrote nothing
+    assert _cursor_count(fair_state, "u1") == 1  # the slot is held by the claim
+
+    # The expired claim is taken over defensively: SUBMISSION_UNCERTAIN +
+    # slot released — the next worker claims the user's NEXT task, never a
+    # re-send of the same one.
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        conn.execute(
+            "UPDATE generation_tasks SET locked_until = now() - interval '5 minutes' WHERE id = %s",
+            (str(lease["id"]),),
+        )
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        mark_expired_active_leases_needing_attention(conn)
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        task = conn.execute(
+            "SELECT status, error_code FROM generation_tasks WHERE id = %s",
+            (str(lease["id"]),),
+        ).fetchone()
+    assert task["status"] == "SUBMISSION_UNCERTAIN"
+    assert task["error_code"] == "LEASE_EXPIRED_NEEDS_ATTENTION"
     assert _cursor_count(fair_state, "u1") == 0
     lease2 = _acquire(fair_state, "w2")
-    assert lease2 is not None  # the same task is claimable again, no double pay
-    assert str(lease2["id"]) == "task-u1-0"
+    assert lease2 is not None
+    assert str(lease2["id"]) == "task-u1-1"  # the next task, not a re-send
 
 
 # ---------------------------------------------------------------------------
@@ -396,6 +440,19 @@ class _ReconcileCancelledProvider(MetasoH3Provider):
 
 
 def _reconcile(fair_state: str, task_id: str, provider: MetasoH3Provider) -> object:
+    """Reconcile the way the API route does: create the RECONCILE operation
+    row, then hand its reservation to the business function (M5 review P1-5
+    — the reservation marks the reconciliation path, which must NOT release
+    the concurrency slot of the user's replacement task)."""
+    operation_id = f"op-{uuid4()}"
+    with psycopg.connect(fair_state, autocommit=True) as pg:
+        pg.execute(
+            "INSERT INTO generation_task_operations ("
+            " id, task_id, actor_user_id, action, idempotency_key, "
+            " request_hash, result_task_id, result_status"
+            ") VALUES (%s, %s, 'proj-owner', 'RECONCILE', %s, %s, %s, 'PENDING')",
+            (operation_id, task_id, f"ik-{operation_id}", f"rh-{operation_id}", task_id),
+        )
     with pg_transaction() as raw:
         conn = BusinessConnection.postgres(raw)
         return reconcile_submission_uncertain_task(
@@ -406,6 +463,16 @@ def _reconcile(fair_state: str, task_id: str, provider: MetasoH3Provider) -> obj
             created_by_user_id="u1",
             storage_factory=lambda: FakeStorageAdapter(provider="cos", bucket="generation-results"),
             provider=provider,
+            reconcile_reservation=ReconcileReservation(
+                id=operation_id,
+                actor=CurrentUser(
+                    id="proj-owner",
+                    username="proj_owner",
+                    display_name="Project Owner",
+                    role="employee",
+                ),
+                idempotency_key=f"ik-{operation_id}",
+            ),
         )
 
 
@@ -512,6 +579,232 @@ def test_reconcile_refuses_without_provider_task_id(fair_state: str) -> None:
         ).fetchone()
     assert int(wallet["available_credits"]) == 999
     assert int(wallet["reserved_credits"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# M5 review regressions: slot ownership, sweeper races, FIFO claim race
+# ---------------------------------------------------------------------------
+
+
+def test_live_submission_uncertain_releases_slot(fair_state: str) -> None:
+    """P1-2: a provider POST timeout on the LIVE path (not the expiry sweeper)
+    moves the task to SUBMISSION_UNCERTAIN and releases the per-user slot with
+    the transition — the task is no longer runnable and has no lease left for
+    the sweeper to find, so the slot must not stay pinned at 1."""
+    _seed(fair_state, user_ids=["u1"], tasks_per_user=2, wallet_credits=1000)
+    lease = _acquire(fair_state, "w1")
+    assert lease is not None
+    assert str(lease["id"]) == "task-u1-0"
+    assert _cursor_count(fair_state, "u1") == 1
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        mark_task_submission_uncertain(
+            conn,
+            task_id=str(lease["id"]),
+            message="POST timed out",
+            provider_task_id="pt-1",
+        )
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        task = conn.execute(
+            "SELECT status, locked_by, locked_until, provider_task_id "
+            "FROM generation_tasks WHERE id = %s",
+            (str(lease["id"]),),
+        ).fetchone()
+    assert task["status"] == "SUBMISSION_UNCERTAIN"
+    assert task["provider_task_id"] == "pt-1"  # the observed id survives
+    assert task["locked_by"] is None
+    assert _cursor_count(fair_state, "u1") == 0  # released with the transition
+    lease2 = _acquire(fair_state, "w2")
+    assert lease2 is not None
+    assert str(lease2["id"]) == "task-u1-1"  # the user's next task runs
+
+
+def test_uncertain_then_reconcile_failed_keeps_slot_free(fair_state: str) -> None:
+    """P1-2 follow-on: after the live uncertain transition released the slot,
+    the later reconcile-failed terminalization must not re-enter the slot
+    accounting — the cursor stays 0 and the user's next task is claimable."""
+    _seed(fair_state, user_ids=["u1"], tasks_per_user=2, wallet_credits=1000)
+    lease = _acquire(fair_state, "w1")
+    assert lease is not None
+    assert str(lease["id"]) == "task-u1-0"
+    assert _cursor_count(fair_state, "u1") == 1
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        mark_task_submission_uncertain(
+            conn, task_id=str(lease["id"]), message="POST timed out", provider_task_id="pt-1"
+        )
+    assert _cursor_count(fair_state, "u1") == 0
+    _seed_reserved(fair_state, task_id=str(lease["id"]), available_credits=999, reserved_credits=1)
+    result = _reconcile(
+        fair_state, str(lease["id"]), _ReconcileCancelledProvider(api_key="test-key")
+    )
+    assert result is not None
+    assert _cursor_count(fair_state, "u1") == 0
+    lease2 = _acquire(fair_state, "w2")
+    assert lease2 is not None
+    assert str(lease2["id"]) == "task-u1-1"
+
+
+def test_reconcile_does_not_release_replacement_slot(
+    fair_state: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P1-5: the expired takeover already released the slot, which the user's
+    replacement task now holds. Reconciling the old task as succeeded must not
+    release again — that would zero the replacement's slot and let a third
+    task run concurrently."""
+    monkeypatch.setattr("app.generation._require_public_https_host", lambda _host: None)
+    _seed(fair_state, user_ids=["u1"], tasks_per_user=2, wallet_credits=1000)
+    # X expires mid-call → SUBMISSION_UNCERTAIN + slot released.
+    lease_x = _acquire(fair_state, "w1")
+    assert lease_x is not None
+    assert str(lease_x["id"]) == "task-u1-0"
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        conn.execute(
+            "UPDATE generation_tasks SET locked_until = now() - interval '5 minutes' WHERE id = %s",
+            (str(lease_x["id"]),),
+        )
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        mark_expired_active_leases_needing_attention(conn)
+    assert _cursor_count(fair_state, "u1") == 0
+    # Y is claimed for the same user; the slot is now Y's.
+    lease_y = _acquire(fair_state, "w2")
+    assert lease_y is not None
+    assert str(lease_y["id"]) == "task-u1-1"
+    assert _cursor_count(fair_state, "u1") == 1
+    # X is reconciled as succeeded: archive + terminal billing row, and Y's
+    # slot must stay at 1 (the pre-fix unconditional release dropped it to 0).
+    with psycopg.connect(fair_state, autocommit=True) as pg:
+        pg.execute(
+            "UPDATE generation_tasks SET provider_task_id = 'pt-x' WHERE id = %s",
+            (str(lease_x["id"]),),
+        )
+    _seed_reserved(
+        fair_state,
+        task_id=str(lease_x["id"]),
+        available_credits=999,
+        reserved_credits=1,
+    )
+    result = _reconcile(
+        fair_state, str(lease_x["id"]), _ReconcileSucceededProvider(api_key="test-key")
+    )
+    assert result is not None
+    assert _cursor_count(fair_state, "u1") == 1  # Y's slot untouched
+
+
+def test_concurrent_expiry_sweepers_audit_once(fair_state: str) -> None:
+    """P2-1: two sweepers racing over the same expired lease — only the
+    winner's UPDATE…RETURNING produces an audit row and a release; the loser
+    sees zero rows and must not re-audit or release the slot a replacement
+    task may hold."""
+    _seed(fair_state, user_ids=["u1"], tasks_per_user=1, wallet_credits=1000)
+    lease = _acquire(fair_state, "w1")
+    assert lease is not None
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        conn.execute(
+            "UPDATE generation_tasks SET locked_until = now() - interval '5 minutes' WHERE id = %s",
+            (str(lease["id"]),),
+        )
+    barrier = threading.Barrier(2)
+    errors: list[BaseException] = []
+
+    def sweep() -> None:
+        try:
+            barrier.wait(timeout=10)
+            with pg_transaction() as raw:
+                conn = BusinessConnection.postgres(raw)
+                mark_expired_active_leases_needing_attention(conn)
+        except BaseException as exc:  # pragma: no cover - failure path
+            errors.append(exc)
+
+    threads = [threading.Thread(target=sweep), threading.Thread(target=sweep)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == []
+    assert _audit_actions(fair_state) == [
+        ("generation_task.lease_expired_uncertain", None, str(lease["id"]))
+    ]
+    assert _cursor_count(fair_state, "u1") == 0
+
+
+def test_fifo_double_claim_race_skips_locked_head(fair_state: str) -> None:
+    """P1-6: two workers racing for the FIFO head — the second must skip the
+    row the first holds (FOR UPDATE SKIP LOCKED in the subquery) instead of
+    blocking and then re-matching it after the winner commits, which double
+    claimed the paid task. The race window is reproduced deterministically:
+    worker 1 holds the head row locked inside an open transaction while
+    worker 2 runs the real acquire path."""
+    _seed(fair_state, user_ids=["u1"], tasks_per_user=1, wallet_credits=1000)
+    with psycopg.connect(fair_state, autocommit=True) as pg:
+        pg.execute("UPDATE runtime_settings SET fair_queue_enabled = false WHERE id = 1")
+    holder_lock_until = (datetime.now(UTC) + timedelta(seconds=60)).isoformat()
+    holder = psycopg.connect(fair_state, autocommit=False)
+    try:
+        with holder.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE generation_tasks
+                SET status = 'SUBMITTING', locked_by = 'w1', locked_until = %s,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = (
+                    SELECT id FROM generation_tasks
+                    WHERE status IN ('PENDING', 'QUEUED')
+                      AND (locked_until IS NULL OR locked_until::timestamptz <= now())
+                    ORDER BY created_at, id
+                    LIMIT 1
+                    FOR UPDATE SKIP LOCKED
+                )
+                RETURNING id
+                """,
+                (holder_lock_until,),
+            )
+            held = cur.fetchone()
+        assert held is not None and held[0] == "task-u1-0"
+        # Worker 2 races on a separate connection: with SKIP LOCKED it picks
+        # nothing (the only task is locked). Without it the subquery would
+        # match task-u1-0 and the UPDATE would block until the holder rolls
+        # back, then re-claim the same task — the double-claim bug.
+        with pg_transaction() as raw:
+            conn = BusinessConnection.postgres(raw)
+            lease = acquire_generation_task_lease(conn, worker_id="w2")
+        assert lease is None
+    finally:
+        holder.rollback()
+        holder.close()
+
+
+def test_pg_worker_once_loop_claims_processes_and_drains(fair_state: str) -> None:
+    """The production worker loop: claim commits in its own fenced
+    transaction, work in a second; max_tasks bounds a round; an empty round
+    exits. Tasks use the fake_h3 provider so the full paid-call path runs.
+    (P3 — the loop previously had zero direct tests; this is also the shape
+    the T27 drain worker now mirrors exactly.)"""
+    _seed(fair_state, user_ids=["u1", "u2"], tasks_per_user=2, wallet_credits=1000)
+    with psycopg.connect(fair_state, autocommit=True) as pg:
+        pg.execute("UPDATE generation_tasks SET provider = 'fake_h3'")
+    storage = FakeStorageAdapter(provider="cos", bucket="bucket")
+    for _ in range(4):
+        processed = run_pg_worker_once(worker_id="w-loop", storage=storage, max_tasks=1)
+        assert processed == 1
+    # Drained: an empty round exits with zero.
+    assert run_pg_worker_once(worker_id="w-loop", storage=storage) == 0
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        rows = conn.execute(
+            "SELECT status, archive_status, result_asset_id FROM generation_tasks ORDER BY id"
+        ).fetchall()
+    assert len(rows) == 4
+    for row in rows:
+        assert row["status"] == "SUCCEEDED"
+        assert row["archive_status"] == "ARCHIVED"
+        assert row["result_asset_id"] is not None
+    assert _cursor_count(fair_state, "u1") == 0
+    assert _cursor_count(fair_state, "u2") == 0
 
 
 # ---------------------------------------------------------------------------

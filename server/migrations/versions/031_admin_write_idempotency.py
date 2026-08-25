@@ -2,15 +2,17 @@
 
 The code checklist §3.1 freezes migration *themes* with suggested numbers
 025–030, and the AGENTS.md / task-list red line freezes those exact file
-names — ``028_customer_devices_and_activations`` through
-``030_user_fair_queue`` are reserved for the T16/T20/T25 themes. The
+names — ``028_customer_devices_and_activations`` through ``030_user_fair_queue``
+are reserved for the T16/T20/T25 themes. The
 admin-write idempotency table is an inserted theme with no frozen number of
 its own (dev doc §11.3 only fixes the invariant "管理写幂等键按 actor、
 canonical route 和 key digest 唯一"), so this revision lands as **031** to
 keep the 028–030 suggested-number window free for the frozen themes (PR #43
 review P1; the revision is still part of this unpublished PR, so renaming is
-allowed under the append-only rule). The device/session/queue revisions will
-chain off the then-current head and keep their frozen file names.
+allowed under the append-only rule). The device/session revisions chain off
+the then-current head and keep their frozen file names; the T25 queue theme
+lands as **041_user_fair_queue** on the released head (P1-3: re-pointing the
+published 032 would silently skip the queue schema on stamped databases).
 
 ``admin_write_idempotency`` snapshots one admin write per
 (actor, canonical route, idempotency key digest):

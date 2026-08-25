@@ -362,6 +362,13 @@ class BusinessConnection:
             self._backend.raw.rollback()
 
     @property
+    def is_postgres(self) -> bool:
+        """Lane probe for services that must behave by backend (the fair-queue
+        cursor maintenance runs unconditionally on PostgreSQL but has no table
+        on the desktop SQLite lane)."""
+        return isinstance(self._backend, PostgresBackend)
+
+    @property
     def in_transaction(self) -> bool:
         """The sqlite3-shaped transaction-state probe the services use.
 

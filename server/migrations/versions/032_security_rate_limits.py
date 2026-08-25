@@ -28,9 +28,12 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "032_security_rate_limits"
-# Re-pointed to 030_user_fair_queue: the T25 revision chains off 029, and this
-# link keeps the graph linear (pure topology fix — no DDL change here).
-down_revision = "030_user_fair_queue"
+# Restored to the published link (029): the M5 revision originally re-pointed
+# this to 030_user_fair_queue, which would silently skip the fair-queue schema
+# on databases already stamped 032–040 (P1-3). The T25 revision now lands as
+# 041_user_fair_queue descending from 040; this file is unchanged from the
+# published base.
+down_revision = "029_customer_sessions_and_idempotency"
 branch_labels = None
 depends_on = None
 

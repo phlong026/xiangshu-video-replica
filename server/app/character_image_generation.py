@@ -496,6 +496,7 @@ def acquire_character_generation_task(
                   )
                 ORDER BY created_at, id
                 LIMIT 1
+                FOR UPDATE SKIP LOCKED
             )
             RETURNING *
             """,
@@ -564,8 +565,12 @@ def run_next_character_generation_task(
     worker_id: str,
     storage: StorageAdapter,
     provider: CharacterImageProvider | None = None,
+    lease: sqlite3.Row | None = None,
 ) -> CharacterGenerationTask | None:
-    task = acquire_character_generation_task(conn, worker_id=worker_id)
+    if lease is None:
+        task = acquire_character_generation_task(conn, worker_id=worker_id)
+    else:
+        task = lease
     if task is None:
         return None
     started = time.monotonic()

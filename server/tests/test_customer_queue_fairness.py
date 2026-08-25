@@ -1,7 +1,7 @@
 """T25 — user fair queue tests (per-user concurrency 1, round-robin rotation).
 
 The fixture database is migrated with ``alembic upgrade head`` (the T23/T34
-precedent) so every query runs against the real revision-040 schema where
+precedent) so every query runs against the real revision-041 schema where
 ``user_queue_cursors`` and ``runtime_settings.fair_queue_enabled`` exist.
 The tests drive the actual business functions on the PostgreSQL lane
 (``acquire_generation_task_lease``, ``release_user_queue_slot_for_task``,
@@ -329,6 +329,35 @@ def test_round_robin_rotates_across_users(fair_state: str) -> None:
         seen.append(str(lease["created_by_user_id"]))
         _complete_and_release(fair_state, lease)
     assert seen == ["u1", "u2", "u3", "u4"]
+
+
+def test_rotation_skips_user_whose_task_is_locked(fair_state: str) -> None:
+    """P3: a user whose only eligible task is locked by another worker must
+    not stall the rotation — the acquirer advances past them (dispatcher
+    timestamp bumped so they rejoin at the tail) and serves the next idle
+    user instead of returning None. The lock holder reproduces the window
+    where worker 1 has claimed the task row but not yet committed."""
+    _seed(
+        fair_state,
+        user_ids=["u1", "u2"],
+        tasks_per_user=1,
+        cursor_age_hours={"u1": 10, "u2": 1},
+    )
+    holder = psycopg.connect(fair_state, autocommit=False)
+    try:
+        with holder.cursor() as cur:
+            cur.execute("SELECT id FROM generation_tasks WHERE id = 'task-u1-0' FOR UPDATE")
+            assert cur.fetchone() is not None
+            lease = _acquire(fair_state, "w2")
+    finally:
+        holder.rollback()
+        holder.close()
+    assert lease is not None
+    assert str(lease["id"]) == "task-u2-0"  # rotation advanced past u1
+    # Once the holder lets go, u1's task is schedulable again.
+    lease2 = _acquire(fair_state, "w3")
+    assert lease2 is not None
+    assert str(lease2["id"]) == "task-u1-0"
 
 
 def test_concurrent_workers_do_not_double_claim(fair_state: str) -> None:

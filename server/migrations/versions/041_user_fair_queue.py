@@ -1,15 +1,18 @@
 """T25 — user fair queue (per-user concurrency 1, round-robin rotation).
 
-The revised T24 ADR (docs/adr/adr-user-fair-queue-v1.md + the pseudo-SQL
-companion) freezes this file name — ``030_user_fair_queue`` — for the T25
-theme (AGENTS.md / task-list red line; the 031 comment documents the 028–030
-frozen window). The revision chains off 029 (the then-current head when the
-T25 lane starts) and **032_security_rate_limits re-points its down_revision
-to this revision**: a pure topology link fix (no DDL change to 032) that
-keeps the migration graph linear instead of forking, which ``upgrade head``
-would refuse. Databases already upgraded past 030 are unaffected — 030 sits
-on the ancestor path of every later revision, so ``upgrade head`` is a no-op
-for them.
+This revision was originally named ``030_user_fair_queue`` chaining off 029,
+with 032 re-pointed to keep the graph linear. M5 review (P1-3) found that
+re-pointing a published revision breaks upgrades of databases already stamped
+032–040: 030 would never be applied there (it is not on their ancestor path),
+so the fair-queue schema silently stays absent while the runtime queries it.
+The fix is append-only (031's comment documents the precedent): 032 is
+restored to chain off 029 exactly as published, and this revision moves to
+the tail as **041_user_fair_queue** descending from 040 (the released head).
+The frozen 030 file-name slot (AGENTS.md / task-list red line) is left empty;
+the revision id is renamed because the file is still part of this unpublished
+branch. Existing databases now apply 041 as a normal upgrade; fresh databases
+apply it after 040. The DDL is unchanged from the 029-based design — it only
+depends on tables created well before 040.
 
 Design (revised ADR §1, §2):
 - ``user_queue_cursors`` holds one row per user; ``running_tasks_count`` is
@@ -40,8 +43,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = "030_user_fair_queue"
-down_revision = "029_customer_sessions_and_idempotency"
+revision = "041_user_fair_queue"
+down_revision = "040_fix_provider_settings_constraint"
 branch_labels = None
 depends_on = None
 
@@ -154,8 +157,7 @@ def downgrade() -> None:
     bind = op.get_bind()
     if bind.dialect.name != "postgresql":
         return
-    op.execute("DROP TRIGGER IF EXISTS trg_user_queue_cursors_updated_at "
-               "ON user_queue_cursors")
+    op.execute("DROP TRIGGER IF EXISTS trg_user_queue_cursors_updated_at ON user_queue_cursors")
     op.execute("DROP FUNCTION IF EXISTS update_updated_at_column()")
     op.drop_index("idx_user_queue_cursors_rotation", table_name="user_queue_cursors")
     op.drop_table("user_queue_cursors")
