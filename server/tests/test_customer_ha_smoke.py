@@ -8,8 +8,10 @@ staging hosts.
 
 from __future__ import annotations
 
-import asyncio
+import inspect
 import json
+import os
+import subprocess
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -90,9 +92,15 @@ def test_customer_runtime_dependency_gate_accepts_pg_and_cos(
     ready = SimpleNamespace(pool_size=4)
     monkeypatch.setattr(bootstrap, "check_pg_ready", lambda: ready)
 
+    events: list[str] = []
+
     @contextmanager
     def fake_transaction() -> Any:
-        yield SimpleNamespace(row_factory=None)
+        events.append("pg-enter")
+        try:
+            yield SimpleNamespace(row_factory=None)
+        finally:
+            events.append("pg-exit")
 
     class ConfiguredCosRepository:
         def __init__(self, _: object) -> None:
@@ -117,6 +125,8 @@ def test_customer_runtime_dependency_gate_accepts_pg_and_cos(
 
     class ReachableStorage:
         def head_object(self, key: str) -> None:
+            assert events == ["pg-enter", "pg-exit"]
+            events.append("cos-head")
             probes.append(key)
 
     monkeypatch.setattr(
@@ -127,6 +137,7 @@ def test_customer_runtime_dependency_gate_accepts_pg_and_cos(
 
     assert bootstrap.check_customer_production_runtime_dependencies() is ready
     assert probes == ["health/readiness-probe"]
+    assert events == ["pg-enter", "pg-exit", "cos-head"]
 
 
 def test_customer_readiness_returns_generic_503_without_leaking_dependency(
@@ -140,7 +151,8 @@ def test_customer_readiness_returns_generic_503_without_leaking_dependency(
         raise RuntimeError("postgresql://user:secret@db/private")
 
     monkeypatch.setattr(main, "check_customer_production_runtime_dependencies", unavailable)
-    response = asyncio.run(main.ready())
+    assert not inspect.iscoroutinefunction(main.ready)
+    response = main.ready()
 
     assert response.status_code == 503
     assert json.loads(response.body) == {
@@ -261,13 +273,58 @@ def test_customer_deployment_docs_keep_evidence_levels_honest() -> None:
 def test_customer_desktop_build_is_an_explicit_no_sidecar_target() -> None:
     package = _read("package.json")
     workflow = _read(".github/workflows/ci.yml")
+    origin_guard = _read("scripts/require_customer_api_base.mjs")
 
     assert '"check:tauri:customer"' in package
     assert '"tauri:build:customer"' in package
     assert '"require:customer-api-base"' in package
     assert "--ci -- --no-default-features" in package
-    assert "VITE_API_BASE_URL must be a non-loopback HTTPS origin" in package
+    assert "VITE_API_BASE_URL must be a non-loopback HTTPS origin" in origin_guard
+    assert 'addSubnet("127.0.0.0", 8, "ipv4")' in origin_guard
+    assert 'addAddress("::1", "ipv6")' in origin_guard
     assert "npm run check:tauri:customer" in workflow
     assert "npm run tauri:build:customer" in workflow
     assert "VITE_API_BASE_URL: https://staging.example.invalid" in workflow
     assert "unsigned-customer-cloud-windows-nsis" in workflow
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "https://127.0.0.2",
+        "https://localhost.",
+        "https://api.localhost",
+        "https://[::1]",
+        "https://[::ffff:127.0.0.1]",
+        "https://[::ffff:7f00:1]",
+    ],
+)
+def test_customer_cloud_build_rejects_the_full_loopback_space(origin: str) -> None:
+    env = os.environ.copy()
+    env["VITE_API_BASE_URL"] = origin
+    result = subprocess.run(
+        ["node", "scripts/require_customer_api_base.mjs"],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "non-loopback HTTPS origin" in result.stderr
+
+
+def test_customer_cloud_build_accepts_a_remote_https_origin() -> None:
+    env = os.environ.copy()
+    env["VITE_API_BASE_URL"] = "https://staging.example.invalid"
+    result = subprocess.run(
+        ["node", "scripts/require_customer_api_base.mjs"],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr

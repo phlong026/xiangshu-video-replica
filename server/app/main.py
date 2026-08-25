@@ -338,8 +338,13 @@ async def live() -> HealthResponse:
 
 
 @app.get("/ready", response_model=None)
-async def ready() -> ReadinessResponse | JSONResponse:
-    """Return ready only while every customer runtime dependency is usable."""
+def ready() -> ReadinessResponse | JSONResponse:
+    """Return ready only while every customer runtime dependency is usable.
+
+    This is deliberately synchronous: FastAPI runs it in its worker thread
+    pool, so a slow PostgreSQL/COS probe cannot block the ASGI event loop or
+    prevent the dependency-free liveness endpoint from responding.
+    """
     if not is_customer_production():
         return ReadinessResponse(
             status="ready",

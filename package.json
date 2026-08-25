@@ -17,7 +17,7 @@
     "dev:worker": "uv --cache-dir .uv-cache run --project server --locked python -m app.bootstrap && uv --cache-dir .uv-cache run --project server --locked python -m app.generation_worker",
     "format": "npm run format --workspace client && uv --cache-dir .uv-cache run --project server --locked ruff format server",
     "generate:api": "npm run generate:api --workspace client",
-    "require:customer-api-base": "node -e \"const raw=process.env.VITE_API_BASE_URL;let url;try{url=new URL(raw)}catch{};const loopback=url&&['localhost','127.0.0.1','[::1]'].includes(url.hostname);if(!url||url.protocol!=='https:'||loopback||url.username||url.password||url.pathname!=='/'||url.search||url.hash){console.error('VITE_API_BASE_URL must be a non-loopback HTTPS origin for the customer cloud build');process.exit(1)}\"",
+    "require:customer-api-base": "node scripts/require_customer_api_base.mjs",
     "tauri": "npm run tauri --workspace client --",
     "tauri:build": "npm run tauri --workspace client -- build",
     "tauri:build:customer": "npm run require:customer-api-base && npm run tauri --workspace client -- build --bundles nsis --no-sign --ci -- --no-default-features",

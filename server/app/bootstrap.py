@@ -360,11 +360,14 @@ def check_customer_production_runtime_dependencies() -> PgReadyInfo | None:
                 raise ValueError("active storage provider must be cos")
             cos_config = repo.load_provider_config("cos")
             validate_provider_config("cos", cos_config)
-            storage = create_storage_adapter(cloud_storage_config_from_settings("cos", cos_config))
-            # A HEAD on a deliberately absent key is read-only. A 404 still
-            # proves the private bucket is reachable; auth, network and bucket
-            # failures surface as StorageBackendUnavailable and fail closed.
-            storage.head_object("health/readiness-probe")
+        # Release the pooled PG connection before starting an external network
+        # call. A slow COS probe must not consume the database pool and turn a
+        # storage incident into a database outage.
+        storage = create_storage_adapter(cloud_storage_config_from_settings("cos", cos_config))
+        # A HEAD on a deliberately absent key is read-only. A 404 still proves
+        # the private bucket is reachable; auth, network and bucket failures
+        # surface as StorageBackendUnavailable and fail closed.
+        storage.head_object("health/readiness-probe")
     except Exception as exc:
         logger.error("Customer private COS readiness check failed: %s", type(exc).__name__)
         raise RuntimeError(
