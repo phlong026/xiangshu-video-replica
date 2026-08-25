@@ -221,6 +221,46 @@ def test_check_pg_ready_uses_pool_and_server_time() -> None:
     assert ready.pool_size >= 1
 
 
+def test_check_pg_ready_rejects_a_read_only_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import db_pg
+
+    statements: list[str] = []
+
+    class ScalarCursor:
+        def __init__(self, value: object) -> None:
+            self._value = value
+
+        def fetchone(self) -> tuple[object]:
+            return (self._value,)
+
+    class ReadOnlyConnection:
+        def execute(self, sql: str) -> ScalarCursor:
+            statements.append(sql)
+            values: dict[str, object] = {
+                "SELECT now()": datetime.now(),
+                "SELECT 1": 1,
+                "SHOW transaction_read_only": "on",
+            }
+            return ScalarCursor(values[sql])
+
+    class ReadOnlyPool:
+        max_size = 4
+
+        @contextmanager
+        def connection(self) -> Iterator[ReadOnlyConnection]:
+            yield ReadOnlyConnection()
+
+    monkeypatch.setenv(DATABASE_URL_ENV, "postgresql://app@pg-ha/customer")
+    monkeypatch.setattr(db_pg, "get_pg_pool", lambda: ReadOnlyPool())
+
+    with pytest.raises(RuntimeError, match="read-only"):
+        db_pg.check_pg_ready()
+
+    assert "SHOW transaction_read_only" in statements
+
+
 @pytestmark_pg
 def test_pg_transaction_commits() -> None:
     with _env(**{DATABASE_URL_ENV: PG_DSN}):
@@ -365,7 +405,7 @@ def test_api_bootstrap_completes_in_pg_mode(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setenv("VIDEO_REPLICA_DATABASE_URL", PG_DSN)
     monkeypatch.delenv("VIDEO_REPLICA_DB_PATH", raising=False)
     monkeypatch.delenv("VIDEO_REPLICA_CUSTOMER_PRODUCTION", raising=False)
-    bootstrap_module.main()  # must return cleanly after check_pg_ready()
+    bootstrap_module.main([])  # must return cleanly after check_pg_ready()
 
 
 @pytestmark_pg

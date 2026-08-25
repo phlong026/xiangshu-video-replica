@@ -316,11 +316,18 @@ def redact_postgres_dsn(dsn: str) -> str:
 
 
 def check_pg_ready() -> PgReadyInfo:
-    """Ready check for API/Worker startup: pool warm-up + server round-trip."""
+    """Ready check for API/Worker startup: writable endpoint + round-trip."""
     config = resolve_database_config()
     validate_customer_production(config)
     pool = get_pg_pool()
     with pool.connection() as conn:
+        transaction_read_only = (
+            str(_fetch_scalar(conn, "SHOW transaction_read_only")).strip().lower()
+        )
+        if transaction_read_only != "off":
+            raise RuntimeError(
+                "PostgreSQL endpoint is read-only; a read-write primary endpoint is required"
+            )
         server_now = _as_datetime(_fetch_scalar(conn, "SELECT now()"))
         _fetch_scalar(conn, "SELECT 1")
     # PgReadyInfo.dsn carries no credentials: once serialized into a log line
