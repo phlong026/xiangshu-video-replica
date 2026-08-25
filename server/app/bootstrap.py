@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import argparse
 import base64
 import binascii
 import ipaddress
+import json
 import logging
 import os
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 from cryptography.fernet import Fernet
 
@@ -25,10 +29,13 @@ from app.db_pg import (
 from app.db_portable import BusinessConnection
 from app.local_settings_key import LocalSettingsKeyStoreError, persist_local_settings_key
 from app.settings import (
+    DEFAULT_BILLING_SETTINGS,
+    DEFAULT_RUNTIME_SETTINGS,
     LOCAL_KEYSTORE_DISABLED_ENV,
     SETTINGS_KEY_ENV,
     SettingsRepository,
     SettingsUnavailableError,
+    normalize_config,
     settings_encryption_key,
     validate_provider_config,
 )
@@ -55,6 +62,30 @@ _AEAD_KEY_BYTES = 32
 _MAX_KEY_VERSION = 64
 _LEGACY_CONTROL_ENVS = ("CONTROL_PROXY_TOKEN_DIGEST", "CONTROL_ADMIN_USER_ID")
 _DEV_AUTH_MODES = {"desktop", "development"}
+_EMPTY_CUSTOMER_BOOTSTRAP_LOCK_ID = 836_036
+_FIRST_ADMIN_CREDENTIAL_TTL_SECONDS = 15 * 60
+
+
+@dataclass(frozen=True)
+class EmptyCustomerProvisionResult:
+    admin_user_id: str
+    exchange_credential: str
+
+
+def issue_exchange_credential(
+    actor_user_id: str,
+    *,
+    ttl_seconds: int,
+    key_version: int,
+) -> str:
+    """Mint without importing the FastAPI route layer during normal bootstrap."""
+    from app.admin_auth_routes import issue_exchange_credential as mint_credential
+
+    return mint_credential(
+        actor_user_id,
+        ttl_seconds=ttl_seconds,
+        key_version=key_version,
+    )
 
 
 def is_customer_production(*, environ: Mapping[str, str] | None = None) -> bool:
@@ -327,6 +358,160 @@ def assert_customer_production_security() -> None:
         )
 
 
+def _latest_admin_key_version() -> int:
+    versions: list[int] = []
+    for name, _value in _configured_admin_session_keys(os.environ):
+        if name == _ADMIN_SESSION_HMAC_KEY_ENV:
+            versions.append(1)
+        else:
+            versions.append(int(name.removeprefix(_ADMIN_KEY_VERSION_PREFIX)))
+    if not versions:
+        raise RuntimeError("customer production admin session HMAC key is not configured")
+    return max(versions)
+
+
+def provision_empty_customer(
+    *,
+    admin_username: str,
+    admin_display_name: str,
+    cos_config: dict[str, object],
+    confirm_empty_database: bool,
+) -> EmptyCustomerProvisionResult:
+    """Atomically seed the first operator and encrypted COS settings.
+
+    This is the one-shot path for a freshly migrated customer database. It
+    deliberately accepts only the pristine state left by a complete migration
+    so it cannot become a general-purpose privilege escalation or settings
+    override tool.
+    The returned exchange credential is shown once and is never stored.
+    """
+    if not confirm_empty_database:
+        raise RuntimeError("empty customer bootstrap requires explicit confirmation")
+    if not is_customer_production():
+        raise RuntimeError("empty customer bootstrap is only available in customer production")
+
+    config = resolve_database_config()
+    validate_customer_production(config)
+    assert_customer_production_security()
+
+    username = admin_username.strip()
+    display_name = admin_display_name.strip()
+    if not username or not display_name:
+        raise ValueError("first-admin username and display name are required")
+    normalized_cos = normalize_config(cos_config)
+    validate_provider_config("cos", normalized_cos)
+
+    admin_user_id = str(uuid4())
+
+    with pg_transaction(isolation="SERIALIZABLE") as raw_conn:
+        conn = BusinessConnection.postgres(raw_conn)
+        # Serialize the pristine-state check across independent migration
+        # hosts. The database—not operator timing—owns the one-shot guarantee.
+        conn.execute("SELECT pg_advisory_xact_lock(%s)", (_EMPTY_CUSTOMER_BOOTSTRAP_LOCK_ID,))
+        bootstrap_state = conn.execute(
+            """
+            SELECT
+                EXISTS (SELECT 1 FROM users) AS has_users,
+                EXISTS (SELECT 1 FROM provider_settings) AS has_provider_settings,
+                EXISTS (SELECT 1 FROM audit_logs) AS has_audit_logs,
+                (
+                    SELECT COUNT(*) = 1
+                    FROM runtime_settings
+                    WHERE id = 1
+                      AND max_generation_count_per_batch = %s
+                      AND max_concurrent_h3_tasks = %s
+                      AND active_storage_provider = %s
+                      AND internal_base_unit_price_fen = %s
+                      AND min_recharge_fen = %s
+                      AND recharge_step_fen = %s
+                      AND fair_queue_enabled = FALSE
+                      AND updated_by_user_id IS NULL
+                ) AS runtime_is_pristine
+            """,
+            (
+                DEFAULT_RUNTIME_SETTINGS["max_generation_count_per_batch"],
+                DEFAULT_RUNTIME_SETTINGS["max_concurrent_h3_tasks"],
+                DEFAULT_RUNTIME_SETTINGS["active_storage_provider"],
+                DEFAULT_BILLING_SETTINGS["internal_base_unit_price_fen"],
+                DEFAULT_BILLING_SETTINGS["min_recharge_fen"],
+                DEFAULT_BILLING_SETTINGS["recharge_step_fen"],
+            ),
+        ).fetchone()
+        state_values = tuple(bootstrap_state) if bootstrap_state is not None else ()
+        if state_values != (False, False, False, True):
+            raise RuntimeError(
+                "first-admin provisioning requires a pristine, fully migrated PostgreSQL "
+                "database; use the existing administrator or restore a clean target"
+            )
+
+        # Mint before writing so any key/configuration failure rolls back the
+        # transaction, but only after the serialized emptiness check so a
+        # rejected invocation never creates a stray operator credential.
+        exchange_credential = issue_exchange_credential(
+            admin_user_id,
+            ttl_seconds=_FIRST_ADMIN_CREDENTIAL_TTL_SECONDS,
+            key_version=_latest_admin_key_version(),
+        )
+
+        conn.execute(
+            """
+            INSERT INTO users (id, username, display_name, role)
+            VALUES (%s, %s, %s, 'admin')
+            """,
+            (admin_user_id, username, display_name),
+        )
+        conn.execute("INSERT INTO wallets (user_id) VALUES (%s)", (admin_user_id,))
+        SettingsRepository(conn).save_provider_config(
+            "cos",
+            normalized_cos,
+            actor_user_id=admin_user_id,
+        )
+        updated = conn.execute(
+            """
+            UPDATE runtime_settings
+            SET active_storage_provider = 'cos',
+                updated_by_user_id = %s,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = 1
+            """,
+            (admin_user_id,),
+        )
+        if updated.rowcount != 1:
+            raise RuntimeError(
+                "runtime_settings is missing; run the complete Alembic migration before bootstrap"
+            )
+        conn.execute(
+            """
+            INSERT INTO audit_logs (
+                id, actor_user_id, action, entity_type, entity_id, metadata_json
+            ) VALUES (%s, %s, 'customer_bootstrap.provision', 'user', %s, %s)
+            """,
+            (
+                str(uuid4()),
+                admin_user_id,
+                admin_user_id,
+                json.dumps({"cos_configured": True, "source": "empty_customer_bootstrap"}),
+            ),
+        )
+
+    return EmptyCustomerProvisionResult(
+        admin_user_id=admin_user_id,
+        exchange_credential=exchange_credential,
+    )
+
+
+def _load_cos_bootstrap_config(path: Path) -> dict[str, object]:
+    try:
+        decoded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            "COS bootstrap config file is missing, unreadable, or invalid JSON"
+        ) from exc
+    if not isinstance(decoded, dict):
+        raise RuntimeError("COS bootstrap config file must contain one JSON object")
+    return {str(key): value for key, value in decoded.items()}
+
+
 def bootstrap_runtime(db_path: str | Path) -> None:
     key = settings_encryption_key()
     with BusinessConnection.sqlite(initialize_database(Path(db_path))) as conn:
@@ -376,7 +561,7 @@ def check_customer_production_runtime_dependencies() -> PgReadyInfo | None:
     return ready
 
 
-def main() -> None:
+def _run_runtime_bootstrap() -> None:
     # T05: resolve the database mode first so customer production fails closed
     # before any SQLite file is touched. T09: the security gate then rejects
     # legacy single-admin mappings, dev identities, local assets and missing
@@ -418,6 +603,48 @@ def main() -> None:
         raise SystemExit(
             "Local settings are still stored, but the encryption key is unavailable or invalid."
         ) from exc
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Validate or provision the Video Replica runtime")
+    commands = parser.add_subparsers(dest="command")
+    provision = commands.add_parser(
+        "provision-empty-customer",
+        help="one-shot first-admin and COS provisioning for a migrated empty customer database",
+    )
+    provision.add_argument("--admin-username", required=True)
+    provision.add_argument("--admin-display-name", required=True)
+    provision.add_argument("--cos-config-file", required=True, type=Path)
+    provision.add_argument("--confirm-empty-database", action="store_true")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = _build_parser().parse_args(argv)
+    if args.command == "provision-empty-customer":
+        try:
+            result = provision_empty_customer(
+                admin_username=args.admin_username,
+                admin_display_name=args.admin_display_name,
+                cos_config=_load_cos_bootstrap_config(args.cos_config_file),
+                confirm_empty_database=bool(args.confirm_empty_database),
+            )
+            # The exchange credential is intentionally returned once and is
+            # never logged or stored. The runbook requires a root-only output
+            # file rather than terminal scrollback.
+            print(
+                json.dumps(
+                    {
+                        "admin_user_id": result.admin_user_id,
+                        "exchange_credential": result.exchange_credential,
+                    },
+                    sort_keys=True,
+                )
+            )
+        finally:
+            close_pg_pool()
+        return
+    _run_runtime_bootstrap()
 
 
 if __name__ == "__main__":

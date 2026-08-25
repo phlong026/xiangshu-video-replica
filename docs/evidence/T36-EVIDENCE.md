@@ -53,7 +53,14 @@ LB 的限流桶证据。本任务不能标记 `STAGING_VERIFIED`，更不能提�
 ### 1.3 PostgreSQL 与运维边界
 
 - `deploy/postgres/migrate.sh` 要求 PG DSN、`set -euo pipefail`，并在唯一指定
-  迁移主机使用 non-blocking `flock` 串行 Alembic `upgrade head`。
+  迁移主机使用 non-blocking `flock` 串行 Alembic `upgrade head`；脚本先复用
+  客户生产数据库门，SQLite、缺失 TLS sslmode 或可明文降级的 DSN 会在 Alembic
+  触碰目标库前失败。
+- 对完整迁移后 `users` 仍为空的新库，提供显式确认的 one-shot 初始化命令：
+  在 SERIALIZABLE 事务和 PG advisory lock 下创建首位 admin/钱包、加密 COS 配置、
+  runtime 选择和无 secret 审计，并只输出 15 分钟单次 exchange credential；任一
+  用户已存在即拒绝，因此不能用作通用提权或设置覆盖入口。真实 PG16 空库迁移后
+  已验证该路径及第二次调用拒绝语义。
 - PostgreSQL 16 文档要求 HA 主端点、私网/TLS、最小权限、连接预算和禁止公网；
   客户生产启动门拒绝缺失 `sslmode` 和可降级为明文的
   `disable/allow/prefer`，模板固定 `verify-full` + CA/主机名校验；T38 前不宣称
@@ -84,7 +91,8 @@ LB 的限流桶证据。本任务不能标记 `STAGING_VERIFIED`，更不能提�
 ## §2 失败测试与回归锁定
 
 先提交 `test_customer_ha_smoke.py`，首轮 7 项全部失败（缺 endpoints、PG/COS
-gate、Nginx/systemd/PG/docs 文件）。实现后扩展为 10 项：
+gate、Nginx/systemd/PG/docs 文件）。实现与评审修复后扩展为 23 项，其中基础
+交付的 10 项为：
 
 1. `/live` 与内部 `/ready` 契约；
 2. 缺 COS 时启动门失败；
@@ -97,6 +105,11 @@ gate、Nginx/systemd/PG/docs 文件）。实现后扩展为 10 项：
 9. 部署/证据/PG HA 文档分级；
 10. 客户云 no-sidecar、HTTPS origin 与 CI artifact 合同。
 
+PR connector 最后两项 P1 另以红测试锁定：迁移脚本必须在 Alembic 前执行生产
+PG/TLS 校验；空库 one-shot 必须原子初始化首位 admin 与加密 COS、已有用户时
+拒绝；部署手册必须先迁移再初始化。另在独立临时数据库完成真实 PostgreSQL 16
+全迁移与 schema/约束/加密/二次调用回归，不以 mock 冒充可执行首装路径。
+
 全量门禁发现既有 `test_build_contracts.py` 仍断言 Windows job 必须构建默认
 sidecar NSIS；T36 已有意把该 job 改成客户云目标，因此更新回归合同，专项
 18/18 通过（Git Bash 下无 skip）。
@@ -106,13 +119,15 @@ sidecar NSIS；T36 已有意把该 job 改成客户云目标，因此更新回�
 | 门禁 | 结果 |
 | --- | --- |
 | T36 首轮失败基线 | 7 failed（预期红） |
-| T36 最终专项 | 10 passed |
+| T36 最新专项 | 23 passed |
 | build-contract + T36 复验 | 18 passed，0 skipped |
 | PG 客户生产 TLS 启动门 | 13 passed（含 8 项 sslmode 配置锁 + 1 项真实 API lifespan 锁） |
 | PR 评审修复回归 | 94 passed，38 skipped（含同机监控哨兵；本机未连 PG fixture 的预期跳过） |
 | PG 连接/DSN 脱敏复验 | 11 passed（含 T36 专项） |
 | settings/storage/T36 相关回归 | 78 passed |
 | admin auth/customer security/T36 | 75 passed / 36 skipped（PG fixture 未启动的早期专项；后续全量已在 fixture 下覆盖） |
+| 最新评审修复切片 | 136 passed / 2 skipped（PG fixture 已启动；含 admin auth、customer security、T36、build contract 与真实空库首装） |
+| PG16 空库首装集成 | 1 passed：完整 Alembic head 后真实写入 admin/钱包/加密 COS/runtime/audit，第二次调用拒绝 |
 | 生成/设置/DB 相关专项 | 169 passed / 10 skipped；唯一 PG fixture 连接超时在 fixture 启动后单例复验通过，不是代码失败 |
 | Secret scan | Pass：无运行时硬编码凭据 |
 | Client | 47 files / 513 tests passed |
@@ -123,7 +138,7 @@ sidecar NSIS；T36 已有意把该 job 改成客户云目标，因此更新回�
 | Ruff / format / mypy | Pass；181 files formatted / 71 source files typed |
 | Server full pytest | 单次全量：1200 passed + 1 stale build-contract failed，16 warnings，1169.23s；失败断言修复后其所在两文件 18/18，按“全量只跑一次”规则未重复第二轮全量 |
 | Independent review | APPROVE，0 Critical / 0 High / 0 Medium |
-| PR connector review | 阻塞式 readiness、PG 事务边界、COS bucket 存活、客户 NSIS 资源/安装身份、origin 端口一致性、私有 ready 与 upstream 失败摘除意见均已实质修复；最终复审由 PR 留痕 |
+| PR connector review | 阻塞式 readiness、PG 事务边界、COS bucket 存活、客户 NSIS 资源/安装身份、origin 端口一致性、私有 ready/upstream 摘除、Alembic 前生产 DSN 校验与空库首装路径均已实质修复；最终复审由 PR 留痕 |
 
 上述分段证据证明当前 1201 个收集项中的唯一失败已修复；PR CI
 负责最终的完整 Linux 质量门和 Windows NSIS payload 解包证据。本地
@@ -138,9 +153,11 @@ sidecar NSIS；T36 已有意把该 job 改成客户云目标，因此更新回�
   产品入口保持 `--no-proxy-headers`。
 - **COS**：readiness 仅执行 HEAD，不写/删对象；完整私有桶最小权限与归档链
   留到 T40 经授权执行。
-- **数据库迁移**：本任务没有新增 Alembic revision；生产 PG DSN 必须选择
+- **数据库迁移**：本任务没有新增 Alembic revision；迁移脚本在 Alembic 前调用
+  与运行时相同的生产数据库校验，生产 PG DSN 必须选择
   `require/verify-ca/verify-full` 之一，部署模板使用 `verify-full` + 只读 CA，避免
-  libpq `prefer` 降级明文；部署脚本只串行执行既有 `upgrade head`。回滚优先上一
+  libpq `prefer` 降级明文；部署脚本只串行执行既有 `upgrade head`。空库首装输入
+  与一次性输出按 root-only 临时文件处置，不进参数、日志或仓库。回滚优先上一
   应用 SHA/前向 schema 修复，不在新旧应用并写时 downgrade。
 - **桌面构建**：本地 unsigned `.invalid` artifact 仅作合同验证，不发布、不上传。
 
@@ -162,13 +179,13 @@ sidecar NSIS；T36 已有意把该 job 改成客户云目标，因此更新回�
 Owner / Reviewer：OPS/DB/后端/Tauri（Agent 执行）/ 独立 Code Reviewer（APPROVE，0C/0H/0M）
 分支 / 基线 SHA：feat/customer-v3-t36-staging-topology / main@2a298470e20a4cd14d7fd39e83e701468e9978fb
 上游规格段落：客户版任务清单 V3 §7 T36、§12.5 COS-01/EXT-01、§12.6 DESK-02、§12.7 OPS-01、§13–§16；代码开发清单 V3 §11.1/§12；测试与验收规格 V3 §1/Gate B
-改动文件：bootstrap/main/generation_worker；test_customer_ha_smoke/test_build_contracts；customer env；Nginx、API/Worker systemd、PG migration/README；customer build scripts/CI；部署与证据模板；T36 证据/任务账本
-失败测试或回归锁定：7 项先红；最终 T36 10 项 + build-contract 合计 18/18；PR 评审修复切片 94 passed/38 PG-skipped；覆盖 PG TLS/COS HEAD gate、ready/live 同机哨兵、direct Worker、proxy/systemd/migration/docs、内部/客户双构建与客户 NSIS payload 合同
-实现结果：仓库形成可部署的 LB+双 API+四 Worker 形状；API/Worker PG（强制 TLS sslmode，模板 verify-full + CA）+私有 COS fail-closed；同源 Web/admin；可信代理覆盖头；单主迁移锁；客户云无 sidecar、无内部 launcher 且强制 HTTPS origin；滚动/回滚/证据手册就绪
-验证命令与通过数：client 513；T36 10；build+T36 18；PG 客户生产 TLS 门 13（8 项 sslmode 配置锁 + 1 项真实 API lifespan 锁）；评审回归 94 passed/38 skipped；settings/storage/T36 78；Ruff/format/mypy/Tauri pass；customer NSIS build pass + SHA256；server 单次全量 1200 pass/1 stale contract，修复后相关 18/18；独立复核 0C/0H/0M；PR connector 意见均已修复
+改动文件：bootstrap/main/generation_worker；test_customer_ha_smoke/test_postgres_migrations/test_build_contracts；customer env；Nginx、API/Worker systemd、PG migration/README；customer build scripts/CI；部署与证据模板；T36 证据/任务账本
+失败测试或回归锁定：7 项先红；T36 最新 23 项；build-contract + T36 基础合计 18/18；最新评审修复切片 136 passed/2 skipped；真实 PG16 空库首装 1 passed；覆盖 PG TLS/COS HEAD gate、ready/live 同机哨兵、direct Worker、proxy/systemd、Alembic 前生产 DSN 门、空库原子首装、半初始化库拒绝矩阵、内部/客户双构建与客户 NSIS payload 合同
+实现结果：仓库形成可部署的 LB+双 API+四 Worker 形状；API/Worker PG（强制 TLS sslmode，模板 verify-full + CA）+私有 COS fail-closed；同源 Web/admin；可信代理覆盖头；单主迁移锁且 Alembic 前校验目标；空库 one-shot 原子创建首 admin/钱包/加密 COS/runtime/audit 并拒绝非空库；客户云无 sidecar、无内部 launcher 且强制 HTTPS origin；滚动/回滚/证据手册就绪
+验证命令与通过数：client 513；T36 最新 23；build+T36 18；PG 客户生产 TLS 门 13（8 项 sslmode 配置锁 + 1 项真实 API lifespan 锁）；最新评审回归 136 passed/2 skipped；真实 PG16 空库首装 1 passed；settings/storage/T36 78；Ruff/format/mypy/Tauri pass；customer NSIS build pass + SHA256；server 单次全量 1200 pass/1 stale contract，修复后相关专项全绿；独立复核 0C/0H/0M；PR connector 意见均已修复
 证据层级：AUTOMATED_VERIFIED；T36/OPS-01/COS-01 保持部分完成，不高于 AUTOMATED_VERIFIED；DESK-02 [x]
 安全与可观测性：无真实 secret；COS HEAD 只读；503/日志不泄漏底层错误；proxy overwrite-only；T37 结构化日志/指标/P1 告警尚未开始
-迁移与回滚：无新 revision；flock 单迁移主机执行既有 Alembic head；滚动 API/Worker 和应用回滚手册已写；真实恢复/PITR 属 T38
+迁移与回滚：无新 revision；flock 单迁移主机在生产 PG/TLS 校验后执行既有 Alembic head；迁移后空库用拒绝非空目标的 one-shot 初始化；滚动 API/Worker 和应用回滚手册已写；真实恢复/PITR 属 T38
 外部授权记录：无；未调用真实 COS/ZPay/Provider，未部署公网，未发码/灰度
 未测试项：真实 TLS/LB/双 API/四 Worker/PG HA/COS/节点替换/客户端 IP 桶；真实 Windows staging origin/签名/实机
 Lore 提交 SHA：见本任务 PR squash SHA

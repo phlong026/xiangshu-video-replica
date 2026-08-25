@@ -140,6 +140,175 @@ def test_customer_runtime_dependency_gate_accepts_pg_and_cos(
     assert events == ["pg-enter", "pg-exit", "cos-bucket-head"]
 
 
+def test_empty_customer_bootstrap_provisions_first_admin_and_cos_atomically(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import bootstrap
+
+    monkeypatch.setenv("VIDEO_REPLICA_CUSTOMER_PRODUCTION", "true")
+    monkeypatch.setenv(
+        "VIDEO_REPLICA_DATABASE_URL",
+        "postgresql://u:p@db.example.test/customer?sslmode=verify-full",
+    )
+    monkeypatch.setenv("VIDEO_REPLICA_ADMIN_SESSION_HMAC_KEY_V2", "k" * 64)
+    monkeypatch.delenv("VIDEO_REPLICA_DB_PATH", raising=False)
+    monkeypatch.setattr(bootstrap, "assert_customer_production_security", lambda: None)
+    monkeypatch.setattr(
+        bootstrap,
+        "issue_exchange_credential",
+        lambda actor_id, **_: f"credential-for-{actor_id}",
+    )
+
+    events: list[tuple[str, tuple[object, ...]]] = []
+
+    class Cursor:
+        def __init__(self, *, row: tuple[object, ...] | None = None, rowcount: int = 1) -> None:
+            self._row = row
+            self.rowcount = rowcount
+
+        def fetchone(self) -> tuple[object, ...] | None:
+            return self._row
+
+    class FakeBusinessConnection:
+        def execute(self, sql: str, params: tuple[object, ...] = ()) -> Cursor:
+            normalized = " ".join(sql.split())
+            events.append((normalized, params))
+            if "AS has_users" in normalized:
+                return Cursor(row=(False, False, False, True))
+            return Cursor()
+
+    fake_conn = FakeBusinessConnection()
+
+    @contextmanager
+    def fake_transaction(**_: object) -> Any:
+        yield object()
+
+    monkeypatch.setattr(bootstrap, "pg_transaction", fake_transaction)
+    monkeypatch.setattr(
+        bootstrap,
+        "BusinessConnection",
+        SimpleNamespace(postgres=lambda _: fake_conn),
+    )
+
+    saved: list[tuple[dict[str, str], str]] = []
+
+    class FakeSettingsRepository:
+        def __init__(self, conn: object) -> None:
+            assert conn is fake_conn
+
+        def save_provider_config(
+            self,
+            provider: str,
+            config: dict[str, str],
+            *,
+            actor_user_id: str,
+        ) -> dict[str, object]:
+            assert provider == "cos"
+            saved.append((config, actor_user_id))
+            return {"provider": "cos", "configured": True}
+
+    monkeypatch.setattr(bootstrap, "SettingsRepository", FakeSettingsRepository)
+
+    result = bootstrap.provision_empty_customer(
+        admin_username="first-admin",
+        admin_display_name="First Admin",
+        cos_config={
+            "access_key_id": "placeholder-access-id",
+            "secret_access_key": "placeholder-secret",
+            "bucket": "private-staging-bucket",
+            "region": "ap-shanghai",
+        },
+        confirm_empty_database=True,
+    )
+
+    assert result.admin_user_id
+    assert result.exchange_credential == f"credential-for-{result.admin_user_id}"
+    assert saved == [
+        (
+            {
+                "access_key_id": "placeholder-access-id",
+                "secret_access_key": "placeholder-secret",
+                "bucket": "private-staging-bucket",
+                "region": "ap-shanghai",
+            },
+            result.admin_user_id,
+        )
+    ]
+    assert any("pg_advisory_xact_lock" in sql for sql, _ in events)
+    assert any("INSERT INTO users" in sql for sql, _ in events)
+    assert any("INSERT INTO wallets" in sql for sql, _ in events)
+    assert any("UPDATE runtime_settings" in sql for sql, _ in events)
+    audit_params = next(params for sql, params in events if "INSERT INTO audit_logs" in sql)
+    assert "placeholder-secret" not in repr(audit_params)
+
+
+@pytest.mark.parametrize(
+    "bootstrap_state",
+    [
+        (True, False, False, True),
+        (False, True, False, True),
+        (False, False, True, True),
+        (False, False, False, False),
+    ],
+)
+def test_empty_customer_bootstrap_refuses_a_nonpristine_database(
+    monkeypatch: pytest.MonkeyPatch,
+    bootstrap_state: tuple[object, ...],
+) -> None:
+    from app import bootstrap
+
+    monkeypatch.setenv("VIDEO_REPLICA_CUSTOMER_PRODUCTION", "true")
+    monkeypatch.setenv(
+        "VIDEO_REPLICA_DATABASE_URL",
+        "postgresql://u:p@db.example.test/customer?sslmode=verify-full",
+    )
+    monkeypatch.setenv("VIDEO_REPLICA_ADMIN_SESSION_HMAC_KEY_V2", "k" * 64)
+    monkeypatch.delenv("VIDEO_REPLICA_DB_PATH", raising=False)
+    monkeypatch.setattr(bootstrap, "assert_customer_production_security", lambda: None)
+
+    minted: list[str] = []
+    monkeypatch.setattr(
+        bootstrap,
+        "issue_exchange_credential",
+        lambda actor_id, **_kwargs: minted.append(actor_id) or "secret",
+    )
+
+    class ExistingCursor:
+        rowcount = 1
+
+        def fetchone(self) -> tuple[object, ...]:
+            return bootstrap_state
+
+    class ExistingConnection:
+        def execute(self, _sql: str, _params: tuple[object, ...] = ()) -> ExistingCursor:
+            return ExistingCursor()
+
+    @contextmanager
+    def fake_transaction(**_: object) -> Any:
+        yield object()
+
+    monkeypatch.setattr(bootstrap, "pg_transaction", fake_transaction)
+    monkeypatch.setattr(
+        bootstrap,
+        "BusinessConnection",
+        SimpleNamespace(postgres=lambda _: ExistingConnection()),
+    )
+
+    with pytest.raises(RuntimeError, match="pristine, fully migrated PostgreSQL database"):
+        bootstrap.provision_empty_customer(
+            admin_username="first-admin",
+            admin_display_name="First Admin",
+            cos_config={
+                "access_key_id": "placeholder-access-id",
+                "secret_access_key": "placeholder-secret",
+                "bucket": "private-staging-bucket",
+                "region": "ap-shanghai",
+            },
+            confirm_empty_database=True,
+        )
+    assert minted == []
+
+
 def test_customer_readiness_returns_generic_503_without_leaking_dependency(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -248,6 +417,8 @@ def test_maintenance_and_pg_migration_are_single_owner_fail_closed_jobs() -> Non
     assert "flock -n" in migration
     assert "alembic upgrade head" in migration
     assert "VIDEO_REPLICA_DATABASE_URL" in migration
+    assert "VIDEO_REPLICA_CUSTOMER_PRODUCTION" in migration
+    assert migration.index("validate_customer_production") < migration.index("alembic upgrade head")
     assert "set -euo pipefail" in migration
 
 
@@ -282,6 +453,7 @@ def test_customer_deployment_docs_keep_evidence_levels_honest() -> None:
     assert "T38" in postgres
     assert "sslmode=verify-full" in customer_env
     assert "sslrootcert=" in customer_env
+    assert runbook.index("deploy/postgres/migrate.sh") < runbook.index("provision-empty-customer")
 
 
 def test_customer_desktop_build_is_an_explicit_no_sidecar_target() -> None:

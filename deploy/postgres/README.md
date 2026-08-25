@@ -23,7 +23,13 @@ failover owned by the database layer.
   total remains below the service connection limit with failover headroom.
 - Run `deploy/postgres/migrate.sh` from one designated migration host before
   rolling application processes. Its `flock` is host-local and is not a
-  distributed migration lock.
+  distributed migration lock. The script runs the customer PostgreSQL/TLS
+  validator before Alembic can touch the target.
+- After the complete migration, a truly empty database may use the guarded
+  `app.bootstrap provision-empty-customer` one-shot command to atomically seed
+  its first administrator and encrypted COS settings. The command refuses any
+  target with users, provider settings, audit history, or a previously updated
+  runtime-settings row; never use it as an operator or settings update path.
 - Never place a real DSN, password, snapshot URL or database dump in Git or CI
   logs.
 

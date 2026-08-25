@@ -11,6 +11,7 @@ tests always run in CI (M0 review H2).
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from collections.abc import Callable, Coroutine
 from pathlib import Path
@@ -118,6 +119,96 @@ def _rehearsal_dsn() -> str:
 def _drop_database(db_name: str) -> None:
     with psycopg.connect(_admin_dsn(), autocommit=True) as conn:
         conn.execute(f'DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)')
+
+
+def test_empty_customer_bootstrap_runs_on_a_fresh_migrated_database(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T36: prove the documented first-install path against the real PG schema."""
+    from alembic import command
+    from cryptography.fernet import Fernet
+
+    from app import bootstrap
+
+    database_name = "t36_empty_customer_bootstrap_test"
+    dsn = _pg_dsn().rsplit("/", 1)[0] + f"/{database_name}"
+    sqlalchemy_dsn = dsn.replace("postgresql://", "postgresql+psycopg://")
+    settings_key = Fernet.generate_key().decode("ascii")
+    _drop_database(database_name)
+    with psycopg.connect(_admin_dsn(), autocommit=True) as conn:
+        conn.execute(f'CREATE DATABASE "{database_name}"')
+
+    command.upgrade(_alembic_config(sqlalchemy_dsn), "head")
+    monkeypatch.setenv("VIDEO_REPLICA_CUSTOMER_PRODUCTION", "true")
+    monkeypatch.setenv("VIDEO_REPLICA_DATABASE_URL", dsn)
+    monkeypatch.setenv("VIDEO_REPLICA_SETTINGS_KEY", settings_key)
+    monkeypatch.setenv("VIDEO_REPLICA_ADMIN_SESSION_HMAC_KEY_V2", "k" * 64)
+    monkeypatch.delenv("VIDEO_REPLICA_DB_PATH", raising=False)
+    # The disposable postgres:16 fixture has no server certificate. Dedicated
+    # db_pg tests cover the production TLS validator; this integration case
+    # keeps the real schema, pool and transaction while bypassing only TLS.
+    monkeypatch.setattr(bootstrap, "validate_customer_production", lambda _config: None)
+    monkeypatch.setattr(bootstrap, "assert_customer_production_security", lambda: None)
+
+    try:
+        result = bootstrap.provision_empty_customer(
+            admin_username="first-admin",
+            admin_display_name="First Admin",
+            cos_config={
+                "access_key_id": "placeholder-access-id",
+                "secret_access_key": "placeholder-secret",
+                "bucket": "private-staging-bucket",
+                "region": "ap-shanghai",
+            },
+            confirm_empty_database=True,
+        )
+
+        with psycopg.connect(dsn) as conn:
+            user = conn.execute(
+                "SELECT username, display_name, role, is_active FROM users WHERE id = %s",
+                (result.admin_user_id,),
+            ).fetchone()
+            assert user == ("first-admin", "First Admin", "admin", 1)
+            assert conn.execute(
+                "SELECT available_credits, reserved_credits FROM wallets WHERE user_id = %s",
+                (result.admin_user_id,),
+            ).fetchone() == (0, 0)
+            encrypted_cos = conn.execute(
+                "SELECT encrypted_config FROM provider_settings WHERE provider = 'cos'"
+            ).fetchone()[0]
+            assert "placeholder-secret" not in encrypted_cos
+            decrypted_cos = Fernet(settings_key.encode("ascii")).decrypt(
+                encrypted_cos.encode("ascii")
+            )
+            assert json.loads(decrypted_cos) == {
+                "access_key_id": "placeholder-access-id",
+                "bucket": "private-staging-bucket",
+                "region": "ap-shanghai",
+                "secret_access_key": "placeholder-secret",
+            }
+            assert conn.execute(
+                "SELECT active_storage_provider FROM runtime_settings WHERE id = 1"
+            ).fetchone() == ("cos",)
+            audit = conn.execute(
+                "SELECT metadata_json FROM audit_logs WHERE action = 'customer_bootstrap.provision'"
+            ).fetchone()[0]
+            assert "placeholder-secret" not in audit
+
+        with pytest.raises(RuntimeError, match="pristine, fully migrated PostgreSQL database"):
+            bootstrap.provision_empty_customer(
+                admin_username="second-admin",
+                admin_display_name="Second Admin",
+                cos_config={
+                    "access_key_id": "other-access-id",
+                    "secret_access_key": "other-secret",
+                    "bucket": "other-private-bucket",
+                    "region": "ap-shanghai",
+                },
+                confirm_empty_database=True,
+            )
+    finally:
+        bootstrap.close_pg_pool()
+        _drop_database(database_name)
 
 
 def _alembic_config(dsn: str):  # type: ignore[no-untyped-def]
