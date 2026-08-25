@@ -125,6 +125,10 @@ def test_pull_requests_run_linux_quality_and_windows_nsis_gates() -> None:
     assert "npm run tauri:build:customer" in workflow
     assert "VITE_API_BASE_URL: https://staging.example.invalid" in workflow
     assert "unsigned-customer-cloud-windows-nsis" in workflow
+    assert "Verify customer installer excludes local launchers" in workflow
+    assert "7-Zip\\7z.exe" in workflow
+    assert "start-backend.bat" in workflow
+    assert "start-backend.sh" in workflow
     assert workflow.count("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1") == 3
     assert workflow.count("actions/setup-node@820762786026740c76f36085b0efc47a31fe5020") == 3
     assert "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97" in workflow

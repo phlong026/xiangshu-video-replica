@@ -274,6 +274,7 @@ def test_customer_desktop_build_is_an_explicit_no_sidecar_target() -> None:
     package = _read("package.json")
     workflow = _read(".github/workflows/ci.yml")
     origin_guard = _read("scripts/require_customer_api_base.mjs")
+    customer_config = json.loads(_read("client/src-tauri/tauri.customer.conf.json"))
 
     assert '"check:tauri:customer"' in package
     assert '"tauri:build:customer"' in package
@@ -282,10 +283,16 @@ def test_customer_desktop_build_is_an_explicit_no_sidecar_target() -> None:
     assert "VITE_API_BASE_URL must be a non-loopback HTTPS origin" in origin_guard
     assert 'addSubnet("127.0.0.0", 8, "ipv4")' in origin_guard
     assert 'addAddress("::1", "ipv6")' in origin_guard
+    assert "--config src-tauri/tauri.customer.conf.json" in package
+    assert customer_config["bundle"]["resources"] == []
+    assert "127.0.0.1:8000" not in customer_config["app"]["security"]["csp"]
     assert "npm run check:tauri:customer" in workflow
     assert "npm run tauri:build:customer" in workflow
     assert "VITE_API_BASE_URL: https://staging.example.invalid" in workflow
     assert "unsigned-customer-cloud-windows-nsis" in workflow
+    assert "Verify customer installer excludes local launchers" in workflow
+    assert "start-backend.bat" in workflow
+    assert "start-backend.sh" in workflow
 
 
 @pytest.mark.parametrize(

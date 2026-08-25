@@ -147,6 +147,27 @@ jobs:
           # Contract-only unsigned artifact. Release builds replace this
           # non-routable origin with the approved staging/production origin.
           VITE_API_BASE_URL: https://staging.example.invalid
+      - name: Verify customer installer excludes local launchers
+        shell: pwsh
+        run: |
+          $sevenZip = Join-Path $env:ProgramFiles '7-Zip\7z.exe'
+          if (-not (Test-Path -LiteralPath $sevenZip)) {
+            throw '7-Zip is required to inspect the NSIS payload'
+          }
+          $installer = Get-ChildItem -LiteralPath '.cargo-target/release/bundle/nsis' -Filter '*.exe' | Select-Object -First 1
+          if ($null -eq $installer) {
+            throw 'customer NSIS installer was not produced'
+          }
+          $extractRoot = Join-Path $env:RUNNER_TEMP 'customer-nsis-payload'
+          & $sevenZip x $installer.FullName "-o$extractRoot" -y
+          if ($LASTEXITCODE -ne 0) {
+            throw 'customer NSIS installer could not be inspected'
+          }
+          $forbidden = Get-ChildItem -LiteralPath $extractRoot -Recurse -File |
+            Where-Object { $_.Name -in @('start-backend.bat', 'start-backend.sh') }
+          if ($forbidden) {
+            throw "customer installer contains local launchers: $($forbidden.FullName -join ', ')"
+          }
       - name: Record customer cloud installer SHA256
         shell: pwsh
         run: Get-FileHash .cargo-target/release/bundle/nsis/*.exe -Algorithm SHA256

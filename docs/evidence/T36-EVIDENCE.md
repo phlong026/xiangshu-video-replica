@@ -55,7 +55,9 @@ LB 的限流桶证据。本任务不能标记 `STAGING_VERIFIED`，更不能提�
 
 - 内部默认构建继续启用 `local-sidecar`。
 - 客户目标同时执行 `cargo check --no-default-features` 与
-  `tauri build ... -- --no-default-features`，并在构建前要求
+  `tauri build --config src-tauri/tauri.customer.conf.json ... -- --no-default-features`；
+  客户专用配置把 `bundle.resources` 清空，不打包内部版的
+  `start-backend.bat/.sh`，并移除 CSP 中的本地 API origin。构建前要求
   `VITE_API_BASE_URL` 是无凭据、无 path/query/fragment、非 loopback 的 HTTPS
   origin，避免“没有 sidecar 但仍访问 localhost”的不可用假构建。
 - Windows CI 产物改名为
@@ -63,6 +65,8 @@ LB 的限流桶证据。本任务不能标记 `STAGING_VERIFIED`，更不能提�
   地址只验证合同，产物明确是 `UNSIGNED_INTERNAL_TEST`，不能用于 staging。
 - 本机真实 release/NSIS 构建成功；编译后的 app binary 不包含
   `VIDEO_REPLICA_BOOT_COMMAND`、`start-backend.bat` 或 `127.0.0.1:8000` 字符串。
+  Windows CI 进一步用 7-Zip 检查 NSIS payload，发现任一
+  `start-backend.bat/.sh` 即失败。
 
 ## §2 失败测试与回归锁定
 
@@ -91,6 +95,7 @@ sidecar NSIS；T36 已有意把该 job 改成客户云目标，因此更新回�
 | T36 首轮失败基线 | 7 failed（预期红） |
 | T36 最终专项 | 10 passed |
 | build-contract + T36 复验 | 18 passed，0 skipped |
+| PR 评审修复回归 | 23 passed，2 skipped（本机未连 PG fixture 的预期跳过） |
 | PG 连接/DSN 脱敏复验 | 11 passed（含 T36 专项） |
 | settings/storage/T36 相关回归 | 78 passed |
 | admin auth/customer security/T36 | 75 passed / 36 skipped（PG fixture 未启动的早期专项；后续全量已在 fixture 下覆盖） |
@@ -100,13 +105,16 @@ sidecar NSIS；T36 已有意把该 job 改成客户云目标，因此更新回�
 | E2E Biome | 14 files passed |
 | Default Tauri check | Pass |
 | Customer Tauri check | Pass：`--no-default-features` |
-| Customer unsigned NSIS | Pass：1,221,282 bytes；SHA256 `A3937DC97F4FC44C5196E256E1C636EB12D161C81048096CA8E0F2E2959527D8`；`.invalid` 合同产物，未提交 |
+| Customer unsigned NSIS | Pass：1,219,945 bytes；SHA256 `30195807168D4C351433EDA0ABD0CC44FBD05256305570B6B25C2104FBE37614`；客户配置排除内部 launcher 后重建；`.invalid` 合同产物，未提交 |
 | Ruff / format / mypy | Pass；181 files formatted / 71 source files typed |
 | Server full pytest | 单次全量：1200 passed + 1 stale build-contract failed，16 warnings，1169.23s；失败断言修复后其所在两文件 18/18，按“全量只跑一次”规则未重复第二轮全量 |
 | Independent review | APPROVE，0 Critical / 0 High / 0 Medium |
+| PR connector review | 阻塞式 readiness、PG 事务边界、COS bucket 存活检查和客户 NSIS 资源边界意见均已实质修复；最终复审由 PR 留痕 |
 
-上述分段证据证明当前 1201 个收集项中的唯一失败已修复；最终 PR CI 仍需给出
-一次干净的完整 Linux 质量门结果。本地没有用分段结果冒充真实 staging。
+上述分段证据证明当前 1201 个收集项中的唯一失败已修复；PR CI
+负责最终的完整 Linux 质量门和 Windows NSIS payload 解包证据。本地
+缺少 7-Zip，因此只记录真实 NSIS 构建与哈希，不用静态合同冒充解包证据，
+也不用仓库级结果冒充真实 staging。
 
 ## §4 安全、迁移与回滚
 
@@ -140,9 +148,9 @@ Owner / Reviewer：OPS/DB/后端/Tauri（Agent 执行）/ 独立 Code Reviewer�
 分支 / 基线 SHA：feat/customer-v3-t36-staging-topology / main@2a298470e20a4cd14d7fd39e83e701468e9978fb
 上游规格段落：客户版任务清单 V3 §7 T36、§12.5 COS-01/EXT-01、§12.6 DESK-02、§12.7 OPS-01、§13–§16；代码开发清单 V3 §11.1/§12；测试与验收规格 V3 §1/Gate B
 改动文件：bootstrap/main/generation_worker；test_customer_ha_smoke/test_build_contracts；customer env；Nginx、API/Worker systemd、PG migration/README；customer build scripts/CI；部署与证据模板；T36 证据/任务账本
-失败测试或回归锁定：7 项先红；最终 T36 10 项 + build-contract 合计 18/18；覆盖 COS HEAD/PG gate、ready/live、direct Worker、proxy/systemd/migration/docs/customer cloud build
-实现结果：仓库形成可部署的 LB+双 API+四 Worker 形状；API/Worker PG+私有 COS fail-closed；同源 Web/admin；可信代理覆盖头；单主迁移锁；客户云无 sidecar 且强制 HTTPS origin；滚动/回滚/证据手册就绪
-验证命令与通过数：client 513；T36 10；build+T36 18；settings/storage/T36 78；Ruff/format/mypy/Tauri pass；customer NSIS build pass + SHA256；server 单次全量 1200 pass/1 stale contract，修复后相关 18/18；独立复核 0C/0H/0M
+失败测试或回归锁定：7 项先红；最终 T36 10 项 + build-contract 合计 18/18；PR 评审修复切片 23 passed/2 PG-skipped；覆盖 COS HEAD/PG gate、ready/live、direct Worker、proxy/systemd/migration/docs/customer cloud build/NSIS payload 合同
+实现结果：仓库形成可部署的 LB+双 API+四 Worker 形状；API/Worker PG+私有 COS fail-closed；同源 Web/admin；可信代理覆盖头；单主迁移锁；客户云无 sidecar、无内部 launcher 且强制 HTTPS origin；滚动/回滚/证据手册就绪
+验证命令与通过数：client 513；T36 10；build+T36 18；评审回归 23 passed/2 skipped；settings/storage/T36 78；Ruff/format/mypy/Tauri pass；customer NSIS build pass + SHA256；server 单次全量 1200 pass/1 stale contract，修复后相关 18/18；独立复核 0C/0H/0M；PR connector 意见均已修复
 证据层级：AUTOMATED_VERIFIED；T36/OPS-01/COS-01 保持部分完成，不高于 AUTOMATED_VERIFIED；DESK-02 [x]
 安全与可观测性：无真实 secret；COS HEAD 只读；503/日志不泄漏底层错误；proxy overwrite-only；T37 结构化日志/指标/P1 告警尚未开始
 迁移与回滚：无新 revision；flock 单迁移主机执行既有 Alembic head；滚动 API/Worker 和应用回滚手册已写；真实恢复/PITR 属 T38

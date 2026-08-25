@@ -20,7 +20,7 @@
     "require:customer-api-base": "node scripts/require_customer_api_base.mjs",
     "tauri": "npm run tauri --workspace client --",
     "tauri:build": "npm run tauri --workspace client -- build",
-    "tauri:build:customer": "npm run require:customer-api-base && npm run tauri --workspace client -- build --bundles nsis --no-sign --ci -- --no-default-features",
+    "tauri:build:customer": "npm run require:customer-api-base && npm run tauri --workspace client -- build --config src-tauri/tauri.customer.conf.json --bundles nsis --no-sign --ci -- --no-default-features",
     "tauri:dev": "npm run tauri --workspace client -- dev",
     "test": "npm run test --workspace client && uv --cache-dir .uv-cache run --project server --locked python -m pytest --rootdir server server/tests",
     "test:e2e": "npm run test --workspace client -- e2e_contract.test.tsx && uv --cache-dir .uv-cache run --project server --locked python -m pytest --rootdir server server/tests/test_e2e_fake_provider.py",
