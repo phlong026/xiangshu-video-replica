@@ -24,9 +24,7 @@ router = APIRouter(prefix="/api/control", tags=["admin-audit"])
 DEFAULT_LIST_LIMIT = 20
 MAX_LIST_LIMIT = 100
 AUDIT_SERVICE_UNAVAILABLE = "AUDIT_SERVICE_UNAVAILABLE"
-AUDIT_SERVICE_UNAVAILABLE_MESSAGE = (
-    "Audit log requires the PostgreSQL runtime."
-)
+AUDIT_SERVICE_UNAVAILABLE_MESSAGE = "Audit log requires the PostgreSQL runtime."
 
 
 def _http(status: int, code: str, message: str) -> HTTPException:
@@ -42,12 +40,12 @@ def list_audit_log(
     offset: int = 0,
 ) -> dict[str, object]:
     """List all audit events with pagination.
-    
+
     Currently aggregates:
     - ADMIN_ADJUSTMENT: admin adjustments from admin_adjustments table
-    
+
     Future event types can be added (device unbind, session revoke, etc.)
-    
+
     Both admin and auditor roles can access this endpoint (read-only).
     """
     bounded_limit = max(0, min(limit, MAX_LIST_LIMIT))
@@ -65,9 +63,9 @@ def list_audit_log(
     if actor_user_id:
         clauses.append("aa.admin_user_id = %s")
         params.append(actor_user_id)
-    
+
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-    
+
     try:
         with pg_transaction() as conn:
             # Query admin adjustments as audit events; the acting
@@ -86,7 +84,7 @@ def list_audit_log(
                 """,
                 (*params, bounded_limit, bounded_offset),
             ).fetchall()
-            
+
             total_row = conn.execute(
                 f"SELECT COUNT(*) FROM admin_adjustments aa {where}",
                 tuple(params),
@@ -97,7 +95,7 @@ def list_audit_log(
             AUDIT_SERVICE_UNAVAILABLE,
             AUDIT_SERVICE_UNAVAILABLE_MESSAGE,
         ) from exc
-    
+
     items = [
         {
             "event_id": str(row[0]),
@@ -113,9 +111,9 @@ def list_audit_log(
         }
         for row in rows
     ]
-    
+
     total = int(total_row[0]) if total_row is not None else 0
-    
+
     return {
         "items": items,
         "total": total,

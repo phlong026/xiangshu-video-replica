@@ -1121,15 +1121,11 @@ def test_list_customers_supports_pagination_and_username_filter(
 ) -> None:
     admin = _admin_session(client)
     # The username filter matches the seeded customer.
-    response = client.get(
-        "/api/control/customers", params={"username": "customer"}, headers=admin
-    )
+    response = client.get("/api/control/customers", params={"username": "customer"}, headers=admin)
     assert response.status_code == 200, response.text
     assert response.json()["total"] == 1
     # A filter that matches nothing returns an empty, well-formed page.
-    response = client.get(
-        "/api/control/customers", params={"username": "nobody"}, headers=admin
-    )
+    response = client.get("/api/control/customers", params={"username": "nobody"}, headers=admin)
     assert response.status_code == 200, response.text
     assert response.json()["total"] == 0
     assert response.json()["customers"] == []

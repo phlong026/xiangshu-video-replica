@@ -259,15 +259,11 @@ def test_list_customer_sessions_returns_empty_for_unknown_user(client: TestClien
 def test_list_customer_sessions_filters_by_device_status(client: TestClient):
     """status filters on the bound device status (BOUND/UNBOUND/REVOKED)."""
     _admin_session(client)
-    bound = client.get(
-        SESSIONS_PATH.format(user_id="customer_u"), params={"status": "BOUND"}
-    )
+    bound = client.get(SESSIONS_PATH.format(user_id="customer_u"), params={"status": "BOUND"})
     assert bound.status_code == 200
     assert bound.json()["total"] == 1
 
-    revoked = client.get(
-        SESSIONS_PATH.format(user_id="customer_u"), params={"status": "REVOKED"}
-    )
+    revoked = client.get(SESSIONS_PATH.format(user_id="customer_u"), params={"status": "REVOKED"})
     assert revoked.status_code == 200
     assert revoked.json()["total"] == 0
 
