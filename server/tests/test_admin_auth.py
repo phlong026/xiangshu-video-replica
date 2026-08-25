@@ -253,6 +253,13 @@ def test_security_gate_skipped_outside_customer_production() -> None:
             {"VIDEO_REPLICA_PUBLIC_ORIGIN": "https://app.example.test/customer"},
             "PUBLIC_ORIGIN",
         ),
+        (
+            {
+                "VIDEO_REPLICA_PUBLIC_ORIGIN": "https://app.example.test:8443",
+                "PUBLIC_BASE_URL": "https://app.example.test:8443",
+            },
+            "PUBLIC_ORIGIN",
+        ),
         ({"PUBLIC_BASE_URL": ""}, "PUBLIC_BASE_URL"),
         ({"PUBLIC_BASE_URL": "https://payments.example.test"}, "PUBLIC_BASE_URL"),
         ({"VIDEO_REPLICA_TRUSTED_PROXY_CIDRS": ""}, "TRUSTED_PROXY_CIDRS"),

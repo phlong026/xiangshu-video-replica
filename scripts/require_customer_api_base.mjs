@@ -32,6 +32,7 @@ if (
   isLoopbackHostname ||
   url.username ||
   url.password ||
+  url.port ||
   url.pathname !== "/" ||
   url.search ||
   url.hash

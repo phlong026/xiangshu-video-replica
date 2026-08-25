@@ -210,6 +210,12 @@ def test_nginx_contract_load_balances_two_apis_and_rewrites_forwarding_headers()
     assert "proxy_set_header Host $host;" in nginx
     assert "$proxy_add_x_forwarded_for" not in nginx
     assert "proxy_next_upstream_tries 2;" in nginx
+    assert nginx.count("max_fails=1 fail_timeout=30s") == 2
+    ready = nginx.split("location = /ready", 1)[1].split("}", 1)[0]
+    assert "allow 127.0.0.1;" in ready
+    assert "allow ::1;" in ready
+    assert "deny all;" in ready
+    assert "proxy_next_upstream error timeout http_502 http_503 http_504;" in ready
 
 
 def test_systemd_contract_has_two_api_ports_and_four_independent_workers() -> None:
@@ -283,6 +289,7 @@ def test_customer_desktop_build_is_an_explicit_no_sidecar_target() -> None:
     assert "VITE_API_BASE_URL must be a non-loopback HTTPS origin" in origin_guard
     assert 'addSubnet("127.0.0.0", 8, "ipv4")' in origin_guard
     assert 'addAddress("::1", "ipv6")' in origin_guard
+    assert "url.port" in origin_guard
     assert "--config src-tauri/tauri.customer.conf.json" in package
     assert customer_config["productName"] == "短视频复刻客户云工作台"
     assert customer_config["identifier"] == "com.xiangshu.video-replica.customer"
@@ -310,6 +317,7 @@ def test_customer_desktop_build_is_an_explicit_no_sidecar_target() -> None:
         "https://[::1]",
         "https://[::ffff:127.0.0.1]",
         "https://[::ffff:7f00:1]",
+        "https://staging.example.invalid:8443",
     ],
 )
 def test_customer_cloud_build_rejects_the_full_loopback_space(origin: str) -> None:

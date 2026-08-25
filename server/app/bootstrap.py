@@ -92,13 +92,13 @@ def customer_public_origin(*, environ: Mapping[str, str] | None = None) -> str:
         port = parsed.port
     except ValueError as exc:
         raise ValueError(f"{CUSTOMER_PUBLIC_ORIGIN_ENV} has an invalid port") from exc
+    if port not in (None, 443):
+        raise ValueError(f"{CUSTOMER_PUBLIC_ORIGIN_ENV} must use the standard HTTPS port 443")
     try:
         hostname = parsed_hostname.encode("idna").decode("ascii").lower()
     except UnicodeError as exc:
         raise ValueError(f"{CUSTOMER_PUBLIC_ORIGIN_ENV} has an invalid hostname") from exc
     authority = f"[{hostname}]" if ":" in hostname else hostname
-    if port not in (None, 443):
-        authority = f"{authority}:{port}"
     return f"https://{authority}"
 
 
