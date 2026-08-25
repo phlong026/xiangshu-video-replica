@@ -10,6 +10,8 @@ import {
   setInternalAccessToken,
 } from "./api";
 import { CharacterLibrary } from "./CharacterLibrary";
+import { CustomerWalletPanel } from "./customer/CustomerWalletPanel";
+import type { CustomerCredentialStore } from "./customer/useCustomerSession";
 import { ProjectDetailFlow } from "./ProjectDetailFlow";
 import { ProjectsPage } from "./ProjectsPage";
 import { SettingsPanel } from "./SettingsPanel";
@@ -126,8 +128,19 @@ export function App() {
 /** The shared workspace shell (§10.1): the sidebar, the stage, and the page
  * routing reused by both lanes. It owns the workspace navigation state; the
  * entry component (the internal App or the customer shell in RootApp) owns
- * the identity and the session. */
-export function WorkspaceShell({ currentUser }: { currentUser: CurrentUser }) {
+ * the identity and the session. When a customer wallet store is supplied the
+ * wallet page renders the customer-lane wallet (task #7) instead of the
+ * internal one, which 401'd for a customer session. */
+export function WorkspaceShell({
+  currentUser,
+  customerWallet,
+}: {
+  currentUser: CurrentUser;
+  customerWallet?: {
+    store: CustomerCredentialStore;
+    onSessionExpired: () => void;
+  };
+}) {
   const [page, setPage] = useState<WorkspacePage>(() =>
     workspacePageFromHash(currentUser),
   );
@@ -378,7 +391,16 @@ export function WorkspaceShell({ currentUser }: { currentUser: CurrentUser }) {
               userRole={currentUser.role}
             />
           ) : null}
-          {page === "wallet" ? <WalletPanel /> : null}
+          {page === "wallet" ? (
+            customerWallet ? (
+              <CustomerWalletPanel
+                store={customerWallet.store}
+                onSessionExpired={customerWallet.onSessionExpired}
+              />
+            ) : (
+              <WalletPanel />
+            )
+          ) : null}
         </div>
       </section>
     </main>

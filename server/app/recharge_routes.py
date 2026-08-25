@@ -33,6 +33,7 @@ from app.customer_idempotency import (
 from app.db_portable import BusinessConnection
 from app.security_rate_limit import _server_now
 from app.settings import SettingsRepository
+from app.wallet_routes import WalletResponse, WalletTransactionPage, WalletTransactionResponse
 from app.zpay import (
     ZPayDeploymentConfig,
     ZPayMerchantConfig,
@@ -457,6 +458,146 @@ def read_customer_recharge_order_status(
                 },
             )
         return RechargeOrderStatusResponse(**serialize_recharge_order(order))
+
+
+@router.get("/customer/wallet", response_model=WalletResponse)
+def read_customer_wallet(request: Request) -> WalletResponse:
+    """Customer-lane wallet read: balance + billing under the fenced session.
+
+    Mirrors the internal /api/wallet read but re-verifies the customer session
+    inside the transaction (BILL-01: credits live in the same customer wallet
+    the activation grant funded)."""
+    snapshot = customer_session_snapshot(request)
+    if snapshot is None:
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "code": "SESSION_REQUIRED",
+                "message": "A customer session token is required.",
+            },
+        )
+    with fenced_pg_transaction(snapshot) as (conn, ctx):
+        row = conn.execute(
+            "SELECT available_credits, reserved_credits FROM wallets WHERE user_id = %s",
+            (ctx.user_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "WALLET_NOT_FOUND", "message": "Wallet does not exist."},
+            )
+        billing = SettingsRepository(
+            BusinessConnection.postgres(conn)
+        ).read_billing_settings()
+        return WalletResponse(
+            available_credits=int(row[0]),
+            reserved_credits=int(row[1]),
+            internal_unit_price_fen=billing["internal_base_unit_price_fen"],
+            min_recharge_fen=billing["min_recharge_fen"],
+            recharge_step_fen=billing["recharge_step_fen"],
+        )
+
+
+@router.get("/customer/wallet/transactions", response_model=WalletTransactionPage)
+def list_customer_wallet_transactions(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+) -> WalletTransactionPage:
+    snapshot = customer_session_snapshot(request)
+    if snapshot is None:
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "code": "SESSION_REQUIRED",
+                "message": "A customer session token is required.",
+            },
+        )
+    with fenced_pg_transaction(snapshot) as (conn, ctx):
+        total_row = conn.execute(
+            "SELECT COUNT(*) FROM wallet_transactions WHERE user_id = %s",
+            (ctx.user_id,),
+        ).fetchone()
+        assert total_row is not None
+        total = int(total_row[0])
+        rows = conn.execute(
+            """
+            SELECT id, user_id, type, available_delta, reserved_delta,
+                   recharge_order_id, task_id, billing_round, created_at
+            FROM wallet_transactions
+            WHERE user_id = %s
+            ORDER BY created_at DESC, id DESC
+            LIMIT %s OFFSET %s
+            """,
+            (ctx.user_id, limit, offset),
+        ).fetchall()
+        return WalletTransactionPage(
+            items=[
+                WalletTransactionResponse(
+                    id=str(row[0]),
+                    user_id=str(row[1]),
+                    type=row[2],
+                    available_delta=int(row[3]),
+                    reserved_delta=int(row[4]),
+                    recharge_order_id=str(row[5]) if row[5] is not None else None,
+                    task_id=str(row[6]) if row[6] is not None else None,
+                    billing_round=int(row[7]) if row[7] is not None else None,
+                    created_at=str(row[8]),
+                )
+                for row in rows
+            ],
+            total=total,
+            limit=limit,
+            offset=offset,
+        )
+
+
+@router.get("/customer/recharge-orders", response_model=RechargeOrderPage)
+def list_customer_recharge_orders(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+) -> RechargeOrderPage:
+    """Customer-lane order list: only this session's orders, ownership-checked
+    inside the fenced read transaction."""
+    snapshot = customer_session_snapshot(request)
+    if snapshot is None:
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "code": "SESSION_REQUIRED",
+                "message": "A customer session token is required.",
+            },
+        )
+    with fenced_pg_transaction(snapshot) as (conn, ctx):
+        total_row = conn.execute(
+            "SELECT COUNT(*) FROM recharge_orders WHERE user_id = %s",
+            (ctx.user_id,),
+        ).fetchone()
+        assert total_row is not None
+        total = int(total_row[0])
+        rows = conn.execute(
+            """
+            SELECT id, user_id, merchant_order_no, provider, provider_trade_no,
+                   channel, status, amount_fen, credits, notify_digest, created_at, paid_at
+            FROM recharge_orders
+            WHERE user_id = %s
+            ORDER BY created_at DESC, id DESC
+            LIMIT %s OFFSET %s
+            """,
+            (ctx.user_id, limit, offset),
+        ).fetchall()
+        return RechargeOrderPage(
+            items=[
+                RechargeOrderStatusResponse(
+                    **serialize_recharge_order(cast(sqlite3.Row, row))
+                )
+                for row in rows
+            ],
+            total=total,
+            limit=limit,
+            offset=offset,
+        )
 
 
 @router.get("/recharge-orders", response_model=RechargeOrderPage)

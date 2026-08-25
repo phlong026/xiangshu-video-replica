@@ -3061,3 +3061,68 @@ export async function customerApproveDevicePairing(
   );
   return body;
 }
+
+/** The customer's wallet balance + billing (GET /api/customer/wallet). */
+export async function customerGetWallet(
+  credential: CustomerSessionCredential,
+): Promise<WalletSnapshot> {
+  const { body } = await customerJson<WalletSnapshot>("/api/customer/wallet", {
+    credential,
+  });
+  return body;
+}
+
+/** The customer's wallet transaction ledger (GET /api/customer/wallet/transactions). */
+export async function customerListWalletTransactions(
+  credential: CustomerSessionCredential,
+): Promise<WalletTransactionPage> {
+  const { body } = await customerJson<WalletTransactionPage>(
+    "/api/customer/wallet/transactions",
+    { credential },
+  );
+  return body;
+}
+
+/** The customer's own recharge orders (GET /api/customer/recharge-orders). */
+export async function customerListRechargeOrders(
+  credential: CustomerSessionCredential,
+): Promise<RechargeOrderPage> {
+  const { body } = await customerJson<RechargeOrderPage>(
+    "/api/customer/recharge-orders",
+    { credential },
+  );
+  return body;
+}
+
+/** Create a customer recharge order
+ * (POST /api/customer/recharge-orders → 201 PENDING + ZPay payment form). */
+export async function customerCreateRechargeOrder(
+  credential: CustomerSessionCredential,
+  amountFen: number,
+  options: { idempotencyKey: string; requestId?: string },
+): Promise<CreatedRechargeOrder> {
+  const { body } = await customerJson<CreatedRechargeOrder>(
+    "/api/customer/recharge-orders",
+    {
+      method: "POST",
+      credential,
+      body: { amount_fen: amountFen },
+      idempotencyKey: options.idempotencyKey,
+      requestId: options.requestId,
+    },
+  );
+  return body;
+}
+
+/** Poll a customer recharge order
+ * (GET /api/customer/recharge-orders/{order_no}). */
+export async function customerGetRechargeOrder(
+  credential: CustomerSessionCredential,
+  orderNo: string,
+): Promise<RechargeOrder> {
+  const { body } = await customerJson<RechargeOrder>(
+    `/api/customer/recharge-orders/${encodeURIComponent(orderNo)}`,
+    { credential },
+  );
+  return body;
+}

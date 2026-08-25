@@ -201,7 +201,10 @@ export function CustomerWorkspace({
           </button>
         </div>
       </header>
-      <WorkspaceShell currentUser={customerToCurrentUser(user)} />
+      <WorkspaceShell
+        currentUser={customerToCurrentUser(user)}
+        customerWallet={{ store, onSessionExpired }}
+      />
     </div>
   );
 }
