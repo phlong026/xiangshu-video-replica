@@ -293,6 +293,12 @@ def test_runtime_bootstrap_upgrades_an_existing_database_before_startup(
         check=False,
         capture_output=True,
         text=True,
+        # The bootstrap logs Chinese messages; the default locale decoding
+        # (C/POSIX on CI runners) crashes the reader thread, whose death
+        # stalls the pipe and deadlocks the subprocess. Decode UTF-8 with
+        # replacement instead.
+        encoding="utf-8",
+        errors="replace",
     )
 
     assert result.returncode == 0, result.stderr
