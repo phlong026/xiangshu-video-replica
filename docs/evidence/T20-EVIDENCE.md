@@ -99,6 +99,6 @@ Owner / Reviewer：后端（Agent 执行）/ PR #52 chatgpt-codex-connector 评�
 安全与可观测性：switch/登录同一码状态门（停用账户不建立会话）；SWITCH/LOGOUT 事件记录 actor 与 reason（撤销传播可审计）；revoke_session 通用化后 T16/T18 设备解绑/撤销与 T20 码停用/撤销共用一条原子吊销核心；fencing 校验器行锁串行化 switch/接管/撤销写入，expected_* 二次比对拦截过期期望（epoch 回跳不可能）；token 只以 keyed digest 过库，CustomerSessionContext 永不携带凭据；租约与吊销判定全部用事务内 PG 时钟（SES-01）；错误码稳定（401 SESSION_REPLACED/EXPIRED、403 CODE_SUSPENDED/REVOKED、409 OTHER_DEVICE_ONLINE、429、503 fail-closed）
 迁移与回滚：无新迁移（029 已预留全部结构）；回滚=还原代码（会话行可保留，租约到期自然释放）
 外部授权记录：无；未调用真实 ZPay/COS/付费 Provider/对外发码/灰度/公网发布
-未测试项：fencing 校验器接入业务写路由（T21 SES-04/SES-05）；客户端 switch 确认流程与 OpenAPI 重新生成（T30/T28 前端门禁）；多 API 实例同 switch 竞态的进程级证明（PG 行锁语义覆盖，T13 100 并发先例）；STAGING/REAL_CHAIN/PRODUCTION
+未测试项：fencing 校验器接入业务写路由（T21 SES-04/SES-05）；客户端 switch 确认流程与 OpenAPI 重新生成（T30/T28 前端门禁）；多 API 实例同 switch 竞态的进程级证明（PG 行锁语义覆盖，T13 100 并发先例；M3 评审已补 login 维度的 100 并发同构测试——`test_customer_sessions.py` 两条 100 线程 barrier，switch 维度同形状可复用）；STAGING/REAL_CHAIN/PRODUCTION
 Lore 提交 SHA：见 PR squash 合并 SHA
 ```

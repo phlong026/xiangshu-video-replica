@@ -196,6 +196,10 @@ sqlite3 "$env:VIDEO_REPLICA_DB_PATH" `
   "select 'projects', count(*) from projects union all select 'generation_tasks', count(*) from generation_tasks union all select 'versions', count(*) from versions union all select 'audit_logs', count(*) from audit_logs;"
 ```
 
+### 5.1 客户生产（PostgreSQL）迁移回滚注意事项
+
+客户生产库（`VIDEO_REPLICA_DATABASE_URL`）的 Alembic 回滚与内部 SQLite 车道不同：037/038/039 的 downgrade 在目标表有任何审计行时**拒绝执行**（血统保护），而 **040 的 downgrade 会直接 `DELETE provider_settings WHERE provider = 'zpay'`**（恢复 002 旧约束的必要前提，M3 评审 M4）——回滚前必须先将 ZPay 商户配置导出，否则回滚后 ZPay 支付配置丢失且需重新录入。
+
 ## 6. 卸载验证
 
 卸载只验证程序目录和快捷方式被移除。业务数据目录默认保留，除非公司数据策略要求额外清理。

@@ -112,6 +112,6 @@ Owner / Reviewer：后端（Agent 执行）/ Qoder CodeReview 子代理独立评
 安全与可观测性：session token 只以 keyed digest 过库（跨版本探测）；409 冲突设备名脱敏（首两字符+**，空名返回空）不泄露全名；TIMEOUT 系统事件无 actor 而 LOGIN/HEARTBEAT/LOGOUT 记录 actor_user_id（用户驱动与系统事件审计可区分）；事件表 append-only（029 触发器拒 UPDATE/DELETE）且测试锁定无明文凭据；信封 AEAD 密文（AAD 绑定 operation/scope/key_digest）+request_hash 用 sha256 替代避免明文 secret 入哈希；三路由租约判定/写入时间戳/信封 recovery 窗口共用事务内 PG 时钟（SES-01 唯一可信时钟，客户端本地时间非真源，评审 P1 修复；信封 recovery 过期判定同样用信封读取事务内采样的 PG 时钟而非进程时钟——PR #51 connector P2 修复，应用时钟偏移不影响重放判定）；完全校验通过的幂等重放零限流预算消耗（合法网络重试不烧 login:ip，激活先例）；伪造与被替换 token 统一 401 无预言机；设备域密钥/AEAD/PG 配置故障一律 503 fail-closed 不误报 401（§13.2 客户端擦除凭据合同）
 迁移与回滚：无新迁移（029 已预留全部结构）；回滚=还原代码（会话状态表数据可保留，租约到期自然释放）
 外部授权记录：无；未调用真实 ZPay/COS/付费 Provider/对外发码/灰度/公网发布
-未测试项：显式原子 switch 与 epoch fencing（T20 SES-02/SES-03）；业务写路由事务内 fencing（T21 SES-04/SES-05）；客户端 30 秒心跳合同与 OpenAPI 重新生成（T28 前端门禁）；多 API 实例同租约竞态的进程级证明（PG 行锁语义覆盖，同 T13 100 并发先例）；STAGING/REAL_CHAIN/PRODUCTION
+未测试项：显式原子 switch 与 epoch fencing（T20 SES-02/SES-03）；业务写路由事务内 fencing（T21 SES-04/SES-05）；客户端 30 秒心跳合同与 OpenAPI 重新生成（T28 前端门禁）；~~多 API 实例同租约竞态的进程级证明（PG 行锁语义覆盖，同 T13 100 并发先例）~~（M3 评审已补：`test_hundred_concurrent_second_device_logins_all_409_while_first_online` + `test_hundred_concurrent_logins_at_lease_expiry_leave_one_current_device`，100 线程 barrier 实打同库，全 409 零库变更/过期态单当前设备）；STAGING/REAL_CHAIN/PRODUCTION
 Lore 提交 SHA：见 PR squash 合并 SHA
 ```

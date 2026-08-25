@@ -124,6 +124,9 @@ def confirm_recharge_payment(
                 "ZPay trade number does not match the stored recharge order.",
             )
         if str(order["status"]) == "PAID":
+            # Idempotent replay: the order is already settled. The rollback
+            # abandons this read-only transaction (a no-op on the PG lane,
+            # where the outer pg_transaction owns commit authority).
             conn.rollback()
             return order
         if str(order["status"]) != "PENDING":
@@ -169,15 +172,27 @@ def confirm_recharge_payment(
             UPDATE wallets
             SET available_credits = available_credits + %s,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE user_id = %s
+            WHERE user_id = %s AND available_credits <= 2147483647 - %s
             """,
-            (int(order["credits"]), str(order["user_id"])),
+            (int(order["credits"]), str(order["user_id"]), int(order["credits"])),
         )
         if wallet.rowcount != 1:
+            # Either the wallet is missing or the credit would overflow int4
+            # (the T23 admin-adjustment bound, M3 review LOW). Distinguish so
+            # the callback answers a final 409 instead of a retried 500.
+            exists = conn.execute(
+                "SELECT 1 FROM wallets WHERE user_id = %s", (str(order["user_id"]),)
+            ).fetchone()
+            if exists is None:
+                raise PaymentConfirmationError(
+                    "WALLET_NOT_FOUND",
+                    "Wallet record is missing for the recharge order owner.",
+                    status_code=500,
+                )
             raise PaymentConfirmationError(
-                "WALLET_NOT_FOUND",
-                "Wallet record is missing for the recharge order owner.",
-                status_code=500,
+                "WALLET_CREDIT_OVERFLOW",
+                "Wallet credit balance would overflow; settle manually.",
+                status_code=409,
             )
 
         conn.commit()
