@@ -766,12 +766,12 @@ Lore 提交 SHA：见 PR squash 合并 SHA
 - Evidence: `docs/evidence/T22-EVIDENCE.md` |
 | **Failure Test or Regression Lock** | 2 core tests (state preservation + amount validation) → 18 recharge tests (red→green); fresh pooled PG connection tuple-row 500 regression lock (Codex P1); pending-payment poll resume test (Codex P2); client 513 tests all green |
 | **Implementation Result** | Customer-session recharge (T22) + wallet view (task #7): POST `/api/customer/recharge-orders` creates PENDING order with ZPay payment form; credits enter the same wallet only after PAID callback; customer-lane read endpoints answer balance/billing, ledger and order list under the fenced session (internal wallet API 401'd a customer session — root cause of the task #7 defect); front-end CustomerWalletPanel shows balance/recharge/orders/ledger without a second main-code entry |
-| **Verification Command and Pass Count** | `pytest server/tests/test_customer_recharge.py`: 18 passed in ~15s; `pytest` full server suite: green; `cd client && npx vitest run`: 513 passed; `npx tsc -b`: clean; ruff format/check: clean; biome: clean; generated/api.ts regenerated from live `app.openapi()` (133 paths) |
+| **Verification Command and Pass Count** | `pytest server/tests/test_customer_recharge.py`: 18 passed in ~15s; `pytest` full server suite: green; `cd client && npx vitest run`: 513 passed; `npx tsc -b`: clean; ruff format/check: clean; biome: clean; generated/api.ts regenerated from live `app.openapi()` (133 paths); `npm run test:customer-e2e`: 4 passed (activation×2, pairing, recharge — PR #66) |
 | **Evidence Level** | `AUTOMATED_VERIFIED` (specialized + contract-drift-locked tests passing; awaiting STAGING_VERIFIED pending fake ZPay sandbox authorization) |
 | **Security and Observability** | Credentials Fernet encrypted; no hardcoded secrets; parameterized SQL; customer reads owner-isolated (another user's order 404, no session 401); fenced session re-verified in-transaction; named-row factory installed by the route itself (fresh-connection safe) |
 | **Migration and Rollback** | Migration 040 upgrade/downgrade/re-upgrade three-phase verified; wallet extension adds no migration |
 | **External Authorization Record** | None (fake ZPay simulation only; real chain requires external authorization) |
-| **Untested Items** | Real ZPay sandbox callback E2E (STAGING); browser recharge E2E pending ZPay seed env; stale order cleanup; load testing; SEC-01专项审查 |
+| **Untested Items** | Real ZPay sandbox callback E2E (STAGING); browser conflict/switch UI E2E (needs Tauri vault, covered by unit + backend chain instead); stale order cleanup; load testing; SEC-01专项审查 |
 | **Blocking Dependencies** | STAGING_VERIFIED blocked by fake ZPay sandbox; PRODUCTION_GO blocked by SEC-01 + T40 real ZPay + legal approval |
 | **Lore Commit SHA** | `5e6373d` (PR #65 feat/customer-wallet) |
 
@@ -790,6 +790,6 @@ Owner / Reviewer：账务/后端（Agent 执行）/ Codex + connector 评审（P
 安全与可观测性：fenced session 事务内重验；owner 隔离读（他人单 404）；命名行工厂路由自装；参数化查询；Fernet 加密
 迁移与回滚：无新迁移（040 已三阶段验证）；wallet 扩展零 schema 变更
 外部授权记录：None（real chain 待法务/商务授权）
-未测试项：REAL_CHAIN_VERIFIED、PRODUCTION_GO（T35 + T40）、浏览器续充 E2E（ZPay seed env）
+未测试项：REAL_CHAIN_VERIFIED、PRODUCTION_GO（T35 + T40）、浏览器冲突/切换 UI E2E（需 Tauri vault；续充浏览器 E2E 已交付 PR #66，`npm run test:customer-e2e` 4 用例）
 Lore 提交 SHA：5e6373d（PR #65 feat/customer-wallet）
 ```

@@ -70,7 +70,7 @@ adapter (T28, 9 functions) had no wallet/recharge reads.
 | P2 | `pendingOrderNo` lives only in component state; reopening/remounting the wallet never resumes polling an outstanding pending payment | On load, the panel derives the most recent still-`PENDING` order from the fetched list and restarts the status poll (regression test added) |
 | P1 | Evidence ledgers not updated for the T22 extension | This file + `docs/CUSTOMER-TASK-EVIDENCE-V3.md` §T22 + task ledger updated |
 
-**Verification:** `pytest server/tests/test_customer_recharge.py` → **18 passed** (incl. the fresh-connection regression lock); client `npx vitest run` → **513 passed**; `npx tsc -b` clean; ruff/format/biome clean.
+**Verification:** `pytest server/tests/test_customer_recharge.py` → **18 passed** (incl. the fresh-connection regression lock); client `npx vitest run` → **513 passed**; `npx tsc -b` clean; ruff/format/biome clean. Browser recharge E2E (PR #66): `npm run test:customer-e2e` → **4 passed** (activation×2, pairing, recharge) — activates, opens 余额与充值, creates a PENDING order shown as 待支付, and asserts the balance is unchanged before the PAID callback.
 
 ---
 

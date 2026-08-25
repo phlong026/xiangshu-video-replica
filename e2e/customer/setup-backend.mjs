@@ -107,27 +107,22 @@ with psycopg.connect("${adminDsn}", autocommit=True) as c:
     serverDir,
   );
 
-  // 3. Seed admin + activation codes.
-  runSync(python, [path.join(__dirname, "seed_codes.py")], {
+  // 3. Seed admin + activation codes + a throwaway ZPay merchant config (the
+  // wallet recharge route reads it; seed_codes.py prints the Fernet key the
+  // config was encrypted with, and the API process must use the same key to
+  // decrypt it — mirrors test_customer_recharge.recharge_config_fixture).
+  const seedOutput = runSync(python, [path.join(__dirname, "seed_codes.py")], {
     CUSTOMER_E2E_DATABASE_URL: dsn,
     VIDEO_REPLICA_ACTIVATION_CODE_HMAC_KEY: keys.ACTIVATION,
     PYTHONPATH: serverDir,
   });
-
-  // 3b. Seed a throwaway ZPay merchant config so the customer wallet recharge
-  // route (POST /api/customer/recharge-orders) can build its payment form
-  // instead of answering 503 ZPAY_CONFIGURATION_INVALID. The script prints the
-  // Fernet key it encrypted the config with; the API process must use the same
-  // key to decrypt it (mirrors test_customer_recharge.recharge_config_fixture).
-  const zpaySeed = runSync(python, [path.join(__dirname, "seed_zpay.py")], {
-    CUSTOMER_E2E_DATABASE_URL: dsn,
-    CUSTOMER_E2E_ADMIN_USER: "admin_e2e",
-    PYTHONPATH: serverDir,
-  });
-  const settingsKey = (zpaySeed.match(/VIDEO_REPLICA_SETTINGS_KEY=(.+)\s*$/) ??
-    [])[1];
+  const settingsKey = (seedOutput.match(
+    /VIDEO_REPLICA_SETTINGS_KEY=(.+)\s*$/,
+  ) ?? [])[1];
   if (!settingsKey) {
-    throw new Error(`seed_zpay.py did not print a settings key:\n${zpaySeed}`);
+    throw new Error(
+      `seed_codes.py did not print a settings key:\n${seedOutput}`,
+    );
   }
 
   // 4. Start the API.
