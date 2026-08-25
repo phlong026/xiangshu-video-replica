@@ -33,6 +33,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 
 from app.db_pg import pg_transaction
+from app.security_rate_limit import client_ip_from_request
 
 logger = logging.getLogger(__name__)
 
@@ -267,7 +268,7 @@ def create_admin_session(
     ttl_seconds = resolve_admin_session_ttl_seconds()
     session_token = secrets.token_urlsafe(32)
     csrf_token = secrets.token_urlsafe(32)
-    client_ip = request.client.host if request.client is not None else ""
+    client_ip = client_ip_from_request(request)
     user_agent = request.headers.get("user-agent", "")
 
     with pg_transaction() as conn:

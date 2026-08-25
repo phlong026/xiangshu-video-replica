@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import base64
+import binascii
+import ipaddress
 import logging
 import os
 from collections.abc import Mapping
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from cryptography.fernet import Fernet
 
@@ -32,15 +36,144 @@ logger = logging.getLogger(__name__)
 _TRUTHY = {"1", "true", "yes", "on"}
 _ADMIN_SESSION_HMAC_KEY_ENV = "VIDEO_REPLICA_ADMIN_SESSION_HMAC_KEY"
 _ADMIN_KEY_VERSION_PREFIX = f"{_ADMIN_SESSION_HMAC_KEY_ENV}_V"
+CUSTOMER_PUBLIC_ORIGIN_ENV = "VIDEO_REPLICA_PUBLIC_ORIGIN"
+PUBLIC_BASE_URL_ENV = "PUBLIC_BASE_URL"
+TRUSTED_PROXY_CIDRS_ENV = "VIDEO_REPLICA_TRUSTED_PROXY_CIDRS"
+_ACTIVATION_CODE_HMAC_KEY_ENV = "VIDEO_REPLICA_ACTIVATION_CODE_HMAC_KEY"
+_ACTIVATION_EXPORT_AEAD_KEY_ENV = "VIDEO_REPLICA_ACTIVATION_EXPORT_AEAD_KEY"
+_DEVICE_FINGERPRINT_HMAC_KEY_ENV = "VIDEO_REPLICA_DEVICE_FINGERPRINT_HMAC_KEY"
+_CUSTOMER_IDEMPOTENCY_AEAD_KEY_ENV = "VIDEO_REPLICA_CUSTOMER_IDEMPOTENCY_AEAD_KEY"
 # Keep in sync with admin_auth_routes.MIN_HMAC_KEY_BYTES; importing the route
 # module here would drag the FastAPI dependency chain into bootstrap.
 _MIN_ADMIN_KEY_BYTES = 32
+_MIN_HMAC_KEY_BYTES = 32
+_AEAD_KEY_BYTES = 32
+_MAX_KEY_VERSION = 64
 _LEGACY_CONTROL_ENVS = ("CONTROL_PROXY_TOKEN_DIGEST", "CONTROL_ADMIN_USER_ID")
 _DEV_AUTH_MODES = {"desktop", "development"}
 
 
-def _is_customer_production() -> bool:
-    return os.environ.get(CUSTOMER_PRODUCTION_ENV, "").strip().lower() in _TRUTHY
+def is_customer_production(*, environ: Mapping[str, str] | None = None) -> bool:
+    source = os.environ if environ is None else environ
+    return source.get(CUSTOMER_PRODUCTION_ENV, "").strip().lower() in _TRUTHY
+
+
+def customer_public_origin(*, environ: Mapping[str, str] | None = None) -> str:
+    """Return the canonical HTTPS browser origin for the customer deployment."""
+    source = os.environ if environ is None else environ
+    raw = source.get(CUSTOMER_PUBLIC_ORIGIN_ENV, "").strip()
+    if not raw:
+        raise ValueError(f"{CUSTOMER_PUBLIC_ORIGIN_ENV} is required")
+    if any(character.isspace() for character in raw):
+        raise ValueError(f"{CUSTOMER_PUBLIC_ORIGIN_ENV} must not contain whitespace")
+    try:
+        parsed = urlsplit(raw)
+        parsed_hostname = parsed.hostname
+    except ValueError as exc:
+        raise ValueError(f"{CUSTOMER_PUBLIC_ORIGIN_ENV} is not a valid origin") from exc
+    if (
+        parsed.scheme.lower() != "https"
+        or not parsed_hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(
+            f"{CUSTOMER_PUBLIC_ORIGIN_ENV} must be an HTTPS origin without credentials, "
+            "path, query or fragment"
+        )
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError(f"{CUSTOMER_PUBLIC_ORIGIN_ENV} has an invalid port") from exc
+    try:
+        hostname = parsed_hostname.encode("idna").decode("ascii").lower()
+    except UnicodeError as exc:
+        raise ValueError(f"{CUSTOMER_PUBLIC_ORIGIN_ENV} has an invalid hostname") from exc
+    authority = f"[{hostname}]" if ":" in hostname else hostname
+    if port not in (None, 443):
+        authority = f"{authority}:{port}"
+    return f"https://{authority}"
+
+
+def trusted_proxy_networks(
+    *, environ: Mapping[str, str] | None = None
+) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
+    """Parse the exact proxy/LB networks allowed to assert forwarding headers."""
+    source = os.environ if environ is None else environ
+    raw = source.get(TRUSTED_PROXY_CIDRS_ENV, "").strip()
+    if not raw:
+        raise ValueError(f"{TRUSTED_PROXY_CIDRS_ENV} is required")
+    values = [item.strip() for item in raw.split(",")]
+    if not values or any(not item for item in values):
+        raise ValueError(f"{TRUSTED_PROXY_CIDRS_ENV} contains an empty entry")
+    networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+    for value in values:
+        try:
+            network = ipaddress.ip_network(value, strict=True)
+        except ValueError as exc:
+            raise ValueError(
+                f"{TRUSTED_PROXY_CIDRS_ENV} contains an invalid canonical CIDR: {value}"
+            ) from exc
+        if network.prefixlen == 0:
+            raise ValueError(f"{TRUSTED_PROXY_CIDRS_ENV} must not trust the entire internet")
+        networks.append(network)
+    return tuple(networks)
+
+
+def _configured_versioned_values(
+    environ: Mapping[str, str], base_env: str
+) -> list[tuple[str, str]]:
+    """Resolve configured rotation values with explicit ``_V1`` precedence."""
+    values: dict[int, tuple[str, str]] = {}
+    base_value = environ.get(base_env, "").strip()
+    if base_value:
+        values[1] = (base_env, base_value)
+    prefix = f"{base_env}_V"
+    for name in sorted(environ):
+        if not name.startswith(prefix):
+            continue
+        suffix = name[len(prefix) :]
+        value = environ[name].strip()
+        if (
+            value
+            and suffix.isdigit()
+            and 1 <= int(suffix) <= _MAX_KEY_VERSION
+            and not suffix.startswith("0")
+        ):
+            values[int(suffix)] = (name, value)
+    return [values[version] for version in sorted(values)]
+
+
+def _append_raw_hmac_key_violations(
+    violations: list[str], environ: Mapping[str, str], base_env: str
+) -> None:
+    configured = _configured_versioned_values(environ, base_env)
+    if not configured:
+        violations.append(f"{base_env} is missing: configure at least one key version")
+        return
+    for name, value in configured:
+        if len(value.encode("utf-8")) < _MIN_HMAC_KEY_BYTES:
+            violations.append(f"{name} must be at least {_MIN_HMAC_KEY_BYTES} bytes")
+
+
+def _append_aead_key_violations(
+    violations: list[str], environ: Mapping[str, str], base_env: str
+) -> None:
+    configured = _configured_versioned_values(environ, base_env)
+    if not configured:
+        violations.append(f"{base_env} is missing: configure at least one key version")
+        return
+    for name, value in configured:
+        try:
+            decoded = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+        except (ValueError, binascii.Error):
+            violations.append(f"{name} must be valid urlsafe base64")
+            continue
+        if len(decoded) != _AEAD_KEY_BYTES:
+            violations.append(f"{name} must decode to exactly {_AEAD_KEY_BYTES} bytes")
 
 
 def _configured_admin_session_keys(
@@ -75,7 +208,7 @@ def customer_production_security_violations() -> list[str]:
     No-op outside customer production so internal P0 deployments keep their
     dev identity, local assets and legacy control proxy token.
     """
-    if not _is_customer_production():
+    if not is_customer_production():
         return []
     violations: list[str] = []
     legacy = [name for name in _LEGACY_CONTROL_ENVS if os.environ.get(name, "").strip()]
@@ -103,6 +236,43 @@ def customer_production_security_violations() -> list[str]:
             "persistent local assets (VIDEO_REPLICA_STORAGE_ROOT) are forbidden in "
             "customer production: configure the private COS storage provider instead"
         )
+    public_origin: str | None = None
+    try:
+        public_origin = customer_public_origin()
+    except ValueError as exc:
+        violations.append(str(exc))
+    public_base_url = os.environ.get(PUBLIC_BASE_URL_ENV, "").strip()
+    if not public_base_url:
+        violations.append(
+            f"{PUBLIC_BASE_URL_ENV} is required in customer production and must equal "
+            f"{CUSTOMER_PUBLIC_ORIGIN_ENV}"
+        )
+    elif public_origin is not None and public_base_url != public_origin:
+        violations.append(
+            f"{PUBLIC_BASE_URL_ENV} must exactly equal {CUSTOMER_PUBLIC_ORIGIN_ENV} "
+            "so browser ingress, signed asset URLs and payment callbacks share one origin"
+        )
+    try:
+        trusted_proxy_networks()
+    except ValueError as exc:
+        violations.append(str(exc))
+
+    _append_raw_hmac_key_violations(violations, os.environ, _ACTIVATION_CODE_HMAC_KEY_ENV)
+    _append_aead_key_violations(violations, os.environ, _ACTIVATION_EXPORT_AEAD_KEY_ENV)
+    _append_raw_hmac_key_violations(violations, os.environ, _DEVICE_FINGERPRINT_HMAC_KEY_ENV)
+    _append_aead_key_violations(violations, os.environ, _CUSTOMER_IDEMPOTENCY_AEAD_KEY_ENV)
+    settings_key = os.environ.get(SETTINGS_KEY_ENV, "").strip()
+    if not settings_key:
+        violations.append(
+            f"{SETTINGS_KEY_ENV} is required in customer production; an app-local OS "
+            "keystore is not a shared multi-instance secret source"
+        )
+    else:
+        try:
+            Fernet(settings_key.encode("ascii"))
+        except (UnicodeEncodeError, ValueError):
+            violations.append(f"{SETTINGS_KEY_ENV} must be a valid Fernet key")
+
     configured_keys = _configured_admin_session_keys(os.environ)
     if not configured_keys:
         violations.append(

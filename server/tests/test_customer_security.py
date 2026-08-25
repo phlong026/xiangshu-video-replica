@@ -28,6 +28,7 @@ Contract under test (task list §3 T15 / §12.2 ACT-08; acceptance spec §6):
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import os
 import secrets
@@ -36,11 +37,14 @@ from collections.abc import Iterator
 from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import psycopg
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient, Response
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app.activation_code_service import (
     ACTIVATION_CODE_HMAC_KEY_ENV,
@@ -98,6 +102,178 @@ def _pg_available(dsn: str) -> bool:
 # Module-level units (no database) — these always run (T14 fixture-skip
 # precedent: a machine without the fixture must not report vacuous green).
 # ---------------------------------------------------------------------------
+
+
+def _customer_ingress_app() -> FastAPI:
+    from app.main import require_loopback_client
+    from app.security_rate_limit import client_ip_from_request
+
+    ingress_app = FastAPI()
+    ingress_app.middleware("http")(require_loopback_client)
+
+    @ingress_app.get("/probe")
+    async def probe(request: Request) -> dict[str, str]:
+        return {"client_ip": client_ip_from_request(request)}
+
+    return ingress_app
+
+
+def _customer_ingress_get(
+    app: Any,
+    *,
+    peer: str,
+    headers: list[tuple[str, str]] | None = None,
+) -> Response:
+    async def request() -> Response:
+        transport = ASGITransport(app=app, client=(peer, 443))
+        async with AsyncClient(
+            transport=transport,
+            base_url="https://app.example.test",
+        ) as client:
+            return await client.get("/probe", headers=headers)
+
+    return asyncio.run(request())
+
+
+def _configure_customer_ingress(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VIDEO_REPLICA_CUSTOMER_PRODUCTION", "true")
+    monkeypatch.setenv("VIDEO_REPLICA_PUBLIC_ORIGIN", "https://app.example.test")
+    monkeypatch.setenv("VIDEO_REPLICA_TRUSTED_PROXY_CIDRS", "10.20.0.0/24")
+
+
+def test_customer_ingress_accepts_only_trusted_single_forwarded_ip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_customer_ingress(monkeypatch)
+    response = _customer_ingress_get(
+        _customer_ingress_app(),
+        peer="10.20.0.8",
+        headers=[
+            ("Host", "app.example.test"),
+            ("X-Forwarded-Proto", "https"),
+            ("X-Forwarded-For", "203.0.113.41"),
+        ],
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"client_ip": "203.0.113.41"}
+
+
+def test_customer_ingress_rejects_untrusted_peer_even_with_spoofed_headers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_customer_ingress(monkeypatch)
+    response = _customer_ingress_get(
+        _customer_ingress_app(),
+        peer="203.0.113.99",
+        headers=[
+            ("Host", "app.example.test"),
+            ("X-Forwarded-Proto", "https"),
+            ("X-Forwarded-For", "198.51.100.7"),
+        ],
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "UNTRUSTED_PROXY"
+
+
+def test_customer_ingress_rejects_already_rewritten_asgi_peer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail closed if an outer Uvicorn proxy middleware rewrote the raw peer."""
+    _configure_customer_ingress(monkeypatch)
+    app = ProxyHeadersMiddleware(_customer_ingress_app(), trusted_hosts="*")
+
+    response = _customer_ingress_get(
+        app,
+        peer="203.0.113.99",
+        headers=[
+            ("Host", "app.example.test"),
+            ("X-Forwarded-Proto", "https"),
+            ("X-Forwarded-For", "10.20.0.8"),
+        ],
+    )
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "PROXY_HEADER_REWRITE_DETECTED"
+
+
+@pytest.mark.parametrize(
+    "forwarded_for",
+    [None, "not-an-ip", "203.0.113.1, 198.51.100.2"],
+)
+def test_customer_ingress_rejects_missing_malformed_or_chained_forwarded_ip(
+    monkeypatch: pytest.MonkeyPatch,
+    forwarded_for: str | None,
+) -> None:
+    _configure_customer_ingress(monkeypatch)
+    headers = [
+        ("Host", "app.example.test"),
+        ("X-Forwarded-Proto", "https"),
+    ]
+    if forwarded_for is not None:
+        headers.append(("X-Forwarded-For", forwarded_for))
+
+    response = _customer_ingress_get(
+        _customer_ingress_app(),
+        peer="10.20.0.8",
+        headers=headers,
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "FORWARDED_CLIENT_INVALID"
+
+
+@pytest.mark.parametrize(
+    ("headers", "status", "code"),
+    [
+        (
+            [
+                ("Host", "evil.example.test"),
+                ("X-Forwarded-Proto", "https"),
+                ("X-Forwarded-For", "203.0.113.41"),
+            ],
+            421,
+            "HOST_NOT_ALLOWED",
+        ),
+        (
+            [
+                ("Host", "app.example.test"),
+                ("X-Forwarded-Proto", "http"),
+                ("X-Forwarded-For", "203.0.113.41"),
+            ],
+            400,
+            "HTTPS_REQUIRED",
+        ),
+    ],
+)
+def test_customer_ingress_rejects_wrong_host_or_forwarded_scheme(
+    monkeypatch: pytest.MonkeyPatch,
+    headers: list[tuple[str, str]],
+    status: int,
+    code: str,
+) -> None:
+    _configure_customer_ingress(monkeypatch)
+    response = _customer_ingress_get(
+        _customer_ingress_app(),
+        peer="10.20.0.8",
+        headers=headers,
+    )
+
+    assert response.status_code == status
+    assert response.json()["code"] == code
+
+
+def test_customer_public_origin_joins_exact_cors_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.main import _cors_origins
+
+    _configure_customer_ingress(monkeypatch)
+
+    origins = _cors_origins()
+    assert "https://app.example.test" in origins
+    assert "https://*.example.test" not in origins
 
 
 def test_bucket_key_joins_dimension_and_identifier() -> None:

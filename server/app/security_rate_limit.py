@@ -47,6 +47,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import psycopg
+from fastapi import Request
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +93,21 @@ class RateLimitDecision:
     allowed: bool
     retry_after_seconds: int
     hit_count: int
+
+
+def client_ip_from_request(request: Request) -> str:
+    """Return only the client address established by the ingress boundary.
+
+    Customer production middleware writes ``request.state.client_ip`` after
+    verifying the raw proxy peer and a single overwritten X-Forwarded-For
+    value. Route code must never read forwarding headers itself. Small route-
+    only test apps and the internal desktop lane retain the raw ASGI peer as a
+    safe fallback.
+    """
+    resolved = getattr(request.state, "client_ip", None)
+    if isinstance(resolved, str) and resolved:
+        return resolved
+    return request.client.host if request.client is not None else "unknown"
 
 
 # ---------------------------------------------------------------------------

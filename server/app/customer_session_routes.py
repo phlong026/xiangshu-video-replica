@@ -105,6 +105,7 @@ from app.customer_session_service import (
 from app.db_pg import get_pg_pool, pg_transaction
 from app.security_rate_limit import (
     DIMENSION_LOGIN_IP,
+    client_ip_from_request,
     consume_rate_limit,
     login_ip_limit,
     rate_limit_window_seconds,
@@ -458,7 +459,7 @@ def _establish_session_route(
     # the spent budget is never refunded). Login and switch draw the *same*
     # login:ip budget: a switch is a login-shaped attempt, and the limiter
     # must not be bypassable by switching instead.
-    client_ip = request.client.host if request.client is not None else "unknown"
+    client_ip = client_ip_from_request(request)
     with pg_transaction() as conn:
         decision = consume_rate_limit(
             conn,

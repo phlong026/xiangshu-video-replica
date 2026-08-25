@@ -19,6 +19,11 @@ from app.admin_device_routes import router as admin_device_router
 from app.admin_runtime_routes import router as admin_runtime_router
 from app.admin_session_routes import router as admin_session_router
 from app.analysis_routes import router as analysis_router
+from app.bootstrap import (
+    customer_public_origin,
+    is_customer_production,
+    trusted_proxy_networks,
+)
 from app.character_contracts import character_domain_openapi_schemas
 from app.character_generation_routes import router as character_generation_router
 from app.character_identity_routes import router as character_identity_router
@@ -128,14 +133,108 @@ async def settings_unavailable_handler(
 async def require_loopback_client(
     request: Request, call_next: Callable[[Request], Awaitable[Response]]
 ) -> Response:
-    """Reject requests that did not originate from this machine.
+    """Enforce the internal loopback or customer trusted-proxy boundary.
 
     Loopback is one layer of the desktop threat model, not an authentication
     mechanism. Release requests use the server-configured desktop identity;
     X-Dev-User-Id is accepted only when development identity mode is explicitly
-    enabled. Any non-loopback caller gets 403 before identity or business logic.
+    enabled. Customer production instead requires a raw peer in the configured
+    proxy CIDRs, an exact public Host, HTTPS, and one proxy-overwritten client IP.
+    Uvicorn must keep proxy-header parsing disabled so ``request.client`` remains
+    the raw peer used to enforce this trust boundary.
     """
     host = request.client.host if request.client is not None else ""
+    if is_customer_production():
+        try:
+            peer_ip = ipaddress.ip_address(host)
+        except ValueError:
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "code": "UNTRUSTED_PROXY",
+                    "message": "The request did not arrive through a trusted proxy.",
+                },
+            )
+        try:
+            proxy_networks = trusted_proxy_networks()
+            public_origin = customer_public_origin()
+        except ValueError:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "code": "INGRESS_CONFIGURATION_INVALID",
+                    "message": "Customer ingress security is not configured correctly.",
+                },
+            )
+        if not any(peer_ip in network for network in proxy_networks):
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "code": "UNTRUSTED_PROXY",
+                    "message": "The request did not arrive through a trusted proxy.",
+                },
+            )
+
+        expected_host = public_origin.removeprefix("https://")
+        host_values = request.headers.getlist("host")
+        if len(host_values) != 1 or host_values[0].strip().casefold() != expected_host.casefold():
+            return JSONResponse(
+                status_code=421,
+                content={
+                    "code": "HOST_NOT_ALLOWED",
+                    "message": "The request Host is not configured for this service.",
+                },
+            )
+
+        proto_values = request.headers.getlist("x-forwarded-proto")
+        if len(proto_values) != 1 or proto_values[0].strip().casefold() != "https":
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "code": "HTTPS_REQUIRED",
+                    "message": "Customer requests must arrive through HTTPS.",
+                },
+            )
+
+        forwarded_values = request.headers.getlist("x-forwarded-for")
+        forwarded = forwarded_values[0].strip() if len(forwarded_values) == 1 else ""
+        if not forwarded or "," in forwarded:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "code": "FORWARDED_CLIENT_INVALID",
+                    "message": "The trusted proxy must provide exactly one client IP.",
+                },
+            )
+        try:
+            forwarded_ip = ipaddress.ip_address(forwarded)
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "code": "FORWARDED_CLIENT_INVALID",
+                    "message": "The trusted proxy must provide exactly one client IP.",
+                },
+            )
+        if forwarded_ip == peer_ip:
+            # Uvicorn's ProxyHeadersMiddleware replaces scope["client"] with
+            # the single X-Forwarded-For address. Equality therefore proves
+            # that the raw last-hop peer was lost before this boundary ran.
+            # Fail closed even when the forged/re-written address happens to
+            # land inside the trusted proxy CIDR.
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "code": "PROXY_HEADER_REWRITE_DETECTED",
+                    "message": (
+                        "The ASGI server rewrote the proxy peer; disable proxy-header "
+                        "parsing for customer production."
+                    ),
+                },
+            )
+        request.state.client_ip = str(forwarded_ip)
+        return await call_next(request)
+
     try:
         allowed = ipaddress.ip_address(host).is_loopback or host in LOOPBACK_ALIASES
     except ValueError:
@@ -145,17 +244,30 @@ async def require_loopback_client(
             status_code=403,
             content={"code": "LOOPBACK_ONLY", "message": "API 仅允许本机访问。"},
         )
+    request.state.client_ip = host
     return await call_next(request)
 
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
+def _cors_origins() -> list[str]:
+    origins = [
         "http://127.0.0.1:5173",
         "http://localhost:5173",
         "http://tauri.localhost",
         "tauri://localhost",
-    ],
+    ]
+    if is_customer_production():
+        try:
+            origins.append(customer_public_origin())
+        except ValueError:
+            # The lifespan gate aborts startup with the actionable error. Keep
+            # module import deterministic so tooling can still load OpenAPI.
+            pass
+    return origins
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins(),
     allow_credentials=False,
     allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
     # PR #44 review P1: first activation is called from the WebView/browser

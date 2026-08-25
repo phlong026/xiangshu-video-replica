@@ -4,6 +4,28 @@
 >
 > **Evidence location (M0 review M8 unification, 2026-08-21)**: per-task evidence documents live under `docs/evidence/` (T02–T06 evidence files moved from the repository root; run-fix evidence under `docs/evidence/m0-review-fixes/`). Historical self-references inside those documents to their original root paths are preserved as record snapshots.
 
+## T35 — Customer Security Review (SEC-01 / SEC-02)
+
+| Field | Content |
+| --- | --- |
+| **Owner / Reviewer** | Security/Backend (Agent) / independent Security Reviewer, three rounds; final 0 Critical / 0 High / 0 Medium |
+| **Branch / Base SHA** | `feat/customer-v3-t35-security-review` / `main@d15b3f9` |
+| **Upstream Spec Sections** | Task list §7 T35, §12.7 SEC-01/SEC-02, §13–§15; code checklist §11.1/§13 |
+| **Files Changed** | `server/app/bootstrap.py`, `main.py`, `security_rate_limit.py`, four IP-consuming route modules; `test_admin_auth.py`, `test_customer_security.py`; customer env, fail-closed secret scan, task/evidence ledgers |
+| **Failure Test or Regression Lock** | Production HMAC/AEAD/Fernet/origin/proxy startup gates; exact Host/HTTPS/single XFF/CORS; real Uvicorn `ProxyHeadersMiddleware` rewrite must return 503; missing/mismatched `PUBLIC_BASE_URL` must abort startup |
+| **Implementation Result** | Verifiable trusted-proxy boundary; route rate limits consume only verified IP; browser/signed-asset/ZPay origins cannot split; all customer-production domain keys fail closed; runtime activation-code/signed-URL scan covers tracked and untracked files |
+| **Verification Command and Pass Count** | Admin auth 69; customer security 34; client 513; server full 1188 passed / 3 skipped; Ruff/format/mypy/Tauri pass; pip/npm audit 0 known vulnerabilities; independent review 0C/0H/0M |
+| **Evidence Level** | SEC-01/SEC-02 `AUTOMATED_VERIFIED`; T35 parent remains `[~]`, no staging/real-chain/production claim |
+| **Security and Observability** | Bandit 0 High; B608/B310 Medium rules manually classified and retained visibly; secret, credential, signed URL, redaction and CSV-injection gates pass |
+| **Migration and Rollback** | No migration; code revert only, but ingress/secret gates must not be independently removed from a public deployment |
+| **External Authorization Record** | None; real ZPay/COS/paid Provider, external code issuance, gray release and public launch not executed |
+| **Untested Items** | T36 real LB/two-API/four-worker staging; BILL-01/BILL-02 real ZPay reconciliation; T40–T42 real chain, gray release and Go/No-Go |
+| **Lore Commit SHA** | See task PR squash SHA |
+
+Full §14 record and scan classification: `docs/evidence/T35-EVIDENCE.md`.
+
+---
+
 ## T01 — Freeze V3 Main Specifications
 
 | Field | Content |

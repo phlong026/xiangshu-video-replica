@@ -12,6 +12,7 @@ implements the application layer on top of it.
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import os
 import secrets
@@ -42,6 +43,7 @@ from app.db_pg import DATABASE_URL_ENV
 DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 PG_DSN = os.environ.get("TEST_POSTGRESQL_URL", DEFAULT_DSN)
 TEST_KEY = secrets.token_urlsafe(48)  # ≥ 32 bytes, never a real secret
+TEST_AEAD_KEY = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("ascii")
 
 
 def _pg_available(dsn: str) -> bool:
@@ -90,6 +92,14 @@ def _clean_production_env() -> dict[str, str]:
         "VIDEO_REPLICA_DB_PATH": "",
         "CONTROL_PROXY_TOKEN_DIGEST": "",
         "CONTROL_ADMIN_USER_ID": "",
+        "VIDEO_REPLICA_PUBLIC_ORIGIN": "https://app.example.test",
+        "PUBLIC_BASE_URL": "https://app.example.test",
+        "VIDEO_REPLICA_TRUSTED_PROXY_CIDRS": "127.0.0.1/32,::1/128",
+        "VIDEO_REPLICA_ACTIVATION_CODE_HMAC_KEY": TEST_KEY,
+        "VIDEO_REPLICA_ACTIVATION_EXPORT_AEAD_KEY": TEST_AEAD_KEY,
+        "VIDEO_REPLICA_DEVICE_FINGERPRINT_HMAC_KEY": TEST_KEY,
+        "VIDEO_REPLICA_CUSTOMER_IDEMPOTENCY_AEAD_KEY": TEST_AEAD_KEY,
+        "VIDEO_REPLICA_SETTINGS_KEY": TEST_AEAD_KEY,
     }
 
 
@@ -237,6 +247,36 @@ def test_security_gate_skipped_outside_customer_production() -> None:
         ({"VIDEO_REPLICA_DESKTOP_USER_ID": "admin_1"}, "DESKTOP_USER_ID"),
         ({"VIDEO_REPLICA_STORAGE_ROOT": "/var/lib/assets"}, "STORAGE_ROOT"),
         ({ADMIN_SESSION_HMAC_KEY_ENV: ""}, "ADMIN_SESSION_HMAC_KEY"),
+        ({"VIDEO_REPLICA_PUBLIC_ORIGIN": ""}, "PUBLIC_ORIGIN"),
+        ({"VIDEO_REPLICA_PUBLIC_ORIGIN": "http://app.example.test"}, "PUBLIC_ORIGIN"),
+        (
+            {"VIDEO_REPLICA_PUBLIC_ORIGIN": "https://app.example.test/customer"},
+            "PUBLIC_ORIGIN",
+        ),
+        ({"PUBLIC_BASE_URL": ""}, "PUBLIC_BASE_URL"),
+        ({"PUBLIC_BASE_URL": "https://payments.example.test"}, "PUBLIC_BASE_URL"),
+        ({"VIDEO_REPLICA_TRUSTED_PROXY_CIDRS": ""}, "TRUSTED_PROXY_CIDRS"),
+        ({"VIDEO_REPLICA_TRUSTED_PROXY_CIDRS": "not-a-cidr"}, "TRUSTED_PROXY_CIDRS"),
+        ({"VIDEO_REPLICA_TRUSTED_PROXY_CIDRS": "0.0.0.0/0"}, "TRUSTED_PROXY_CIDRS"),
+        ({"VIDEO_REPLICA_ACTIVATION_CODE_HMAC_KEY": ""}, "ACTIVATION_CODE_HMAC_KEY"),
+        ({"VIDEO_REPLICA_ACTIVATION_CODE_HMAC_KEY": "short"}, "ACTIVATION_CODE_HMAC_KEY"),
+        ({"VIDEO_REPLICA_ACTIVATION_EXPORT_AEAD_KEY": ""}, "ACTIVATION_EXPORT_AEAD_KEY"),
+        (
+            {"VIDEO_REPLICA_ACTIVATION_EXPORT_AEAD_KEY": "not-a-32-byte-key"},
+            "ACTIVATION_EXPORT_AEAD_KEY",
+        ),
+        ({"VIDEO_REPLICA_DEVICE_FINGERPRINT_HMAC_KEY": ""}, "DEVICE_FINGERPRINT_HMAC_KEY"),
+        ({"VIDEO_REPLICA_DEVICE_FINGERPRINT_HMAC_KEY": "short"}, "DEVICE_FINGERPRINT_HMAC_KEY"),
+        (
+            {"VIDEO_REPLICA_CUSTOMER_IDEMPOTENCY_AEAD_KEY": ""},
+            "CUSTOMER_IDEMPOTENCY_AEAD_KEY",
+        ),
+        (
+            {"VIDEO_REPLICA_CUSTOMER_IDEMPOTENCY_AEAD_KEY": "not-a-32-byte-key"},
+            "CUSTOMER_IDEMPOTENCY_AEAD_KEY",
+        ),
+        ({"VIDEO_REPLICA_SETTINGS_KEY": ""}, "SETTINGS_KEY"),
+        ({"VIDEO_REPLICA_SETTINGS_KEY": "not-a-fernet-key"}, "SETTINGS_KEY"),
         (
             {"VIDEO_REPLICA_ADMIN_SESSION_TTL_SECONDS": str(24 * 3600 + 1)},
             "ADMIN_SESSION_TTL_SECONDS",
@@ -288,6 +328,25 @@ def test_security_gate_allows_startup_with_only_rotated_v2_key() -> None:
     env[ADMIN_SESSION_HMAC_KEY_ENV] = ""
     env[f"{ADMIN_SESSION_HMAC_KEY_ENV}_V1"] = ""
     env[f"{ADMIN_SESSION_HMAC_KEY_ENV}_V2"] = TEST_KEY
+    with _env(**env):
+        assert_customer_production_security()  # must not raise
+
+
+def test_security_gate_allows_only_rotated_v2_for_every_customer_key() -> None:
+    """T35: retiring all V1 aliases must not break a valid V2-only boot."""
+    env = _clean_production_env()
+    for base_env in (
+        "VIDEO_REPLICA_ACTIVATION_CODE_HMAC_KEY",
+        "VIDEO_REPLICA_ACTIVATION_EXPORT_AEAD_KEY",
+        "VIDEO_REPLICA_DEVICE_FINGERPRINT_HMAC_KEY",
+        "VIDEO_REPLICA_CUSTOMER_IDEMPOTENCY_AEAD_KEY",
+    ):
+        env[base_env] = ""
+    env["VIDEO_REPLICA_ACTIVATION_CODE_HMAC_KEY_V2"] = TEST_KEY
+    env["VIDEO_REPLICA_ACTIVATION_EXPORT_AEAD_KEY_V2"] = TEST_AEAD_KEY
+    env["VIDEO_REPLICA_DEVICE_FINGERPRINT_HMAC_KEY_V2"] = TEST_KEY
+    env["VIDEO_REPLICA_CUSTOMER_IDEMPOTENCY_AEAD_KEY_V2"] = TEST_AEAD_KEY
+
     with _env(**env):
         assert_customer_production_security()  # must not raise
 

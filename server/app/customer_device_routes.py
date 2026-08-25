@@ -171,6 +171,7 @@ from app.security_rate_limit import (
     activation_code_limit,
     activation_ip_limit,
     apply_anti_enumeration_delay,
+    client_ip_from_request,
     consume_rate_limit,
     failure_alert_active,
     failure_alert_threshold,
@@ -897,7 +898,7 @@ def enroll_second_device(body: DeviceEnrollRequest, request: Request) -> Respons
     # The shared limiter — the enroll accepts a plaintext code exactly like
     # the activation route, so it draws from the same IP and code budgets
     # (ACT-08: one enumeration attack surface, one budget per dimension).
-    client_ip = request.client.host if request.client is not None else "unknown"
+    client_ip = client_ip_from_request(request)
     _window_seconds = rate_limit_window_seconds()
     with pg_transaction() as conn:
         ip_decision = consume_rate_limit(
