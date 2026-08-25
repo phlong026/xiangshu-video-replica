@@ -292,9 +292,9 @@ def test_list_customer_sessions_filters_out_expired_lease(client: TestClient):
         conn.execute(
             "UPDATE customer_session_state "
             "SET lease_until = to_char(now() - interval '1 hour', "
-            "  'YYYY-MM-DD\"T\"HH24:MI:SS\"+00:00\"'), "
+            '  \'YYYY-MM-DD"T"HH24:MI:SS"+00:00"\'), '
             "created_at = to_char(now() - interval '2 hour', "
-            "  'YYYY-MM-DD\"T\"HH24:MI:SS\"+00:00\"') "
+            '  \'YYYY-MM-DD"T"HH24:MI:SS"+00:00"\') '
             "WHERE user_id = 'customer_u'"
         )
     response = client.get(SESSIONS_PATH.format(user_id="customer_u"))

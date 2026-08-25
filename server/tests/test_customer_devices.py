@@ -431,9 +431,7 @@ def test_list_devices_returns_pending_pairings_for_approval(client: TestClient) 
     """The first device sees PENDING pairings in the devices view so the
     approval flow is reachable (T30 UI wiring: the pending list drives the
     approval card)."""
-    customer = _activated_customer(
-        client, code=FIRST_CODE, fingerprint="fp-dvp-1", suffix="dvp1"
-    )
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-dvp-1", suffix="dvp1")
     enroll = _enroll(client, code=FIRST_CODE, fingerprint="fp-dvp-1-second", key="idem-dvp1")
     assert enroll.status_code == 202, enroll.text
     pairing_id = enroll.json()["pairing_request_id"]
