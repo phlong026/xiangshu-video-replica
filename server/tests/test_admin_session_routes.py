@@ -179,11 +179,13 @@ def route_state(sessions_dsn: str) -> Iterator[str]:
 @pytest.fixture()
 def admin_app(monkeypatch: pytest.MonkeyPatch, route_state: str) -> Iterator[FastAPI]:
     from app.admin_auth_routes import router as admin_auth_router
+    from app.admin_runtime_routes import router as admin_runtime_router
     from app.admin_session_routes import router as admin_session_router
 
     app = FastAPI()
     app.include_router(admin_auth_router)
     app.include_router(admin_session_router)
+    app.include_router(admin_runtime_router)
     monkeypatch.setenv(DATABASE_URL_ENV, route_state)
     monkeypatch.delenv("VIDEO_REPLICA_CUSTOMER_PRODUCTION", raising=False)
     monkeypatch.setenv(ADMIN_SESSION_HMAC_KEY_ENV, TEST_ADMIN_SESSION_KEY)
@@ -302,3 +304,71 @@ def test_list_customer_sessions_filters_out_expired_lease(client: TestClient):
     data = response.json()
     assert data["items"] == []
     assert data["total"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Queue-mode switch (M4/M5 review M2 follow-up, PR #68 Codex P1): the
+# production control-plane write path for fair_queue_enabled.
+# ---------------------------------------------------------------------------
+
+QUEUE_MODE_PATH = "/api/control/settings/queue-mode"
+
+
+@pytest.mark.pg
+def test_queue_mode_requires_admin_session(client: TestClient):
+    """Unauthenticated requests must be rejected — no legacy identity path."""
+    assert client.get(QUEUE_MODE_PATH).status_code == 401
+    assert client.patch(QUEUE_MODE_PATH, json={"fair_queue_enabled": True}).status_code == 401
+
+
+@pytest.mark.pg
+def test_admin_reads_and_flips_queue_mode_with_audit(client: TestClient):
+    """A cookie+CSRF admin flips the switch through the audited route; the
+    runtime_settings row, the queue gate's own probe and the audit log all
+    agree on the outcome."""
+    from app.db_pg import pg_transaction
+    from app.db_portable import BusinessConnection
+    from app.generation import _fair_queue_enabled
+
+    headers = _admin_session(client)
+    initial = client.get(QUEUE_MODE_PATH, headers=headers)
+    assert initial.status_code == 200, initial.text
+    assert initial.json() == {"fair_queue_enabled": False}
+
+    flipped = client.patch(QUEUE_MODE_PATH, headers=headers, json={"fair_queue_enabled": True})
+    assert flipped.status_code == 200, flipped.text
+    assert flipped.json() == {"fair_queue_enabled": True}
+
+    # The stored row, the queue's own gate probe and the audit log all agree.
+    with psycopg.connect(_t34_dsn()) as conn:
+        stored = conn.execute(
+            "SELECT fair_queue_enabled FROM runtime_settings WHERE id = 1"
+        ).fetchone()
+        assert stored is not None and bool(stored[0]) is True
+        audit_rows = conn.execute(
+            "SELECT actor_user_id, action, metadata_json FROM audit_logs "
+            "WHERE action = 'runtime_settings.update' AND entity_id = '1' "
+            "ORDER BY created_at DESC LIMIT 1"
+        ).fetchall()
+        assert audit_rows and audit_rows[0][0] == "admin_u"
+        assert '"fair_queue_enabled": true' in str(audit_rows[0][2])
+
+    # admin_app has DATABASE_URL_ENV pointed at this fixture database, so the
+    # pool-backed probe reads the same switch the queue will.
+    with pg_transaction() as raw:
+        assert _fair_queue_enabled(BusinessConnection.postgres(raw)) is True
+
+    # Back off through the same audited path (the rollout rollback path).
+    off = client.patch(QUEUE_MODE_PATH, headers=headers, json={"fair_queue_enabled": False})
+    assert off.status_code == 200
+    assert off.json() == {"fair_queue_enabled": False}
+
+
+@pytest.mark.pg
+def test_auditor_cannot_flip_queue_mode(client: TestClient):
+    """Auditors are strictly read-only on the control plane."""
+    headers = _admin_session(client, "auditor_u")
+    assert client.get(QUEUE_MODE_PATH, headers=headers).status_code == 200
+    denied = client.patch(QUEUE_MODE_PATH, headers=headers, json={"fair_queue_enabled": True})
+    assert denied.status_code == 403
+    assert denied.json()["detail"]["code"] == "AUDITOR_READ_ONLY"

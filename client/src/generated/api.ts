@@ -785,6 +785,37 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/control/settings/queue-mode": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Read Queue Mode
+     * @description The current queue mode for the admin UI (revised ADR §4).
+     */
+    get: operations["read_queue_mode_api_control_settings_queue_mode_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    /**
+     * Update Queue Mode
+     * @description Flip the fair-queue rollout switch as an audited admin write.
+     *
+     *     Uses the runtime_settings row's queue-mode column directly (not the
+     *     internal ``save_runtime_settings`` limits upsert): the switch-only write
+     *     must not require restating unrelated runtime limits, and the limits
+     *     themselves stay on the internal settings lane. When the settings row does
+     *     not exist yet (a fresh database whose limits were never configured), the
+     *     documented defaults seed it so the switch always lands on a real row.
+     */
+    patch: operations["update_queue_mode_api_control_settings_queue_mode_patch"];
+    trace?: never;
+  };
   "/api/control/audit-log": {
     parameters: {
       query?: never;
@@ -4066,6 +4097,16 @@ export interface components {
       /** Test Kind */
       test_kind: string;
     };
+    /** QueueModeResponse */
+    QueueModeResponse: {
+      /** Fair Queue Enabled */
+      fair_queue_enabled: boolean;
+    };
+    /** QueueModeUpdateRequest */
+    QueueModeUpdateRequest: {
+      /** Fair Queue Enabled */
+      fair_queue_enabled: boolean;
+    };
     /** RechargeOrderPage */
     RechargeOrderPage: {
       /** Items */
@@ -6289,6 +6330,59 @@ export interface operations {
       };
     };
   };
+  read_queue_mode_api_control_settings_queue_mode_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["QueueModeResponse"];
+        };
+      };
+    };
+  };
+  update_queue_mode_api_control_settings_queue_mode_patch: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["QueueModeUpdateRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["QueueModeResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   list_audit_log_api_control_audit_log_get: {
     parameters: {
       query?: {
@@ -7490,7 +7584,7 @@ export interface operations {
         };
         content: {
           "application/json": {
-            [key: string]: number | string | boolean;
+            [key: string]: number | string;
           };
         };
       };

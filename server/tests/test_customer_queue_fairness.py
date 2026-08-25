@@ -501,8 +501,10 @@ def test_runtime_settings_write_flips_fair_queue_switch(fair_state: str) -> None
     """M4/M5 review M2: the fair-queue rollout switch flips through the
     audited SettingsRepository write path (what PATCH /api/admin/settings/
     runtime calls behind SettingsAdmin), not ad-hoc SQL. Omitting the field
-    leaves the current mode alone; the flip is visible to the queue's own
-    gate and echoed by read_runtime_settings."""
+    leaves the current mode alone, and the flip is visible to the queue's own
+    gate and to read_fair_queue_enabled (the save deliberately does NOT echo
+    the switch — PR #68 Codex P2: an echoed flag would let a stale settings
+    panel round-trip it back off on an unrelated limits save)."""
     from cryptography.fernet import Fernet
 
     from app.generation import _fair_queue_enabled
@@ -510,7 +512,7 @@ def test_runtime_settings_write_flips_fair_queue_switch(fair_state: str) -> None
 
     _seed(fair_state, user_ids=["u1"], tasks_per_user=0, fair_queue_enabled=False)
 
-    def _save(fair_queue_enabled: bool | None) -> dict[str, int | str | bool]:
+    def _save(fair_queue_enabled: bool | None) -> None:
         with pg_transaction() as raw:
             # Runtime settings never touch encrypted provider config; a
             # throwaway key satisfies the constructor (this module sets no
@@ -518,27 +520,36 @@ def test_runtime_settings_write_flips_fair_queue_switch(fair_state: str) -> None
             repo = SettingsRepository(
                 BusinessConnection.postgres(raw), fernet=Fernet(Fernet.generate_key())
             )
-            return repo.save_runtime_settings(
+            result = repo.save_runtime_settings(
                 max_generation_count_per_batch=4,
                 max_concurrent_h3_tasks=100,
                 active_storage_provider="local",
                 actor_user_id="u1",
                 fair_queue_enabled=fair_queue_enabled,
             )
+            # The limits response never carries the switch (no echo).
+            assert "fair_queue_enabled" not in result
+
+    def _mode() -> bool:
+        from cryptography.fernet import Fernet
+
+        with pg_transaction() as raw:
+            conn = BusinessConnection.postgres(raw)
+            repo = SettingsRepository(conn, fernet=Fernet(Fernet.generate_key()))
+            mode = repo.read_fair_queue_enabled()
+            # The queue's own gate and the repository read must agree.
+            assert _fair_queue_enabled(conn) is mode
+            return mode
 
     # Seed starts FALSE; the audited write flips it on.
-    with pg_transaction() as raw:
-        assert _fair_queue_enabled(BusinessConnection.postgres(raw)) is False
-    assert _save(True)["fair_queue_enabled"] is True
-    with pg_transaction() as raw:
-        assert _fair_queue_enabled(BusinessConnection.postgres(raw)) is True
+    assert _mode() is False
+    _save(True)
+    assert _mode() is True
 
     # Omitting the field (None) keeps the switch where it is.
-    assert _save(None)["fair_queue_enabled"] is True
-    with pg_transaction() as raw:
-        assert _fair_queue_enabled(BusinessConnection.postgres(raw)) is True
+    _save(None)
+    assert _mode() is True
 
     # And back off through the same path.
-    assert _save(False)["fair_queue_enabled"] is False
-    with pg_transaction() as raw:
-        assert _fair_queue_enabled(BusinessConnection.postgres(raw)) is False
+    _save(False)
+    assert _mode() is False

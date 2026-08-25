@@ -894,3 +894,33 @@ export async function createCustomerAdjustment(
     idempotencyKey,
   );
 }
+
+// ---------------------------------------------------------------------------
+// Queue-mode switch (M4/M5 review M2 follow-up, PR #68 Codex P1): the
+// production control-plane read/write for the fair-queue rollout switch.
+// ---------------------------------------------------------------------------
+
+export async function fetchQueueMode(): Promise<boolean> {
+  const response = await requestControl("/api/control/settings/queue-mode", {
+    method: "GET",
+  });
+  if (!response.ok) {
+    throw await parseActivationError(response, "读取队列模式失败");
+  }
+  const payload = (await response.json()) as { fair_queue_enabled: boolean };
+  return payload.fair_queue_enabled;
+}
+
+export async function updateQueueMode(enabled: boolean): Promise<boolean> {
+  const csrf = requireCsrfToken();
+  const response = await requestControl("/api/control/settings/queue-mode", {
+    method: "PATCH",
+    headers: { [CSRF_HEADER]: csrf },
+    body: JSON.stringify({ fair_queue_enabled: enabled }),
+  });
+  if (!response.ok) {
+    throw await parseActivationError(response, "切换队列模式失败");
+  }
+  const payload = (await response.json()) as { fair_queue_enabled: boolean };
+  return payload.fair_queue_enabled;
+}

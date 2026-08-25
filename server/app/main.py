@@ -16,6 +16,7 @@ from app.admin_audit_routes import router as admin_audit_router
 from app.admin_auth_routes import router as admin_auth_router
 from app.admin_customer_routes import router as admin_customer_router
 from app.admin_device_routes import router as admin_device_router
+from app.admin_runtime_routes import router as admin_runtime_router
 from app.admin_session_routes import router as admin_session_router
 from app.analysis_routes import router as analysis_router
 from app.character_contracts import character_domain_openapi_schemas
@@ -182,6 +183,7 @@ app.include_router(control_router)
 app.include_router(admin_auth_router)
 app.include_router(admin_customer_router)
 app.include_router(admin_session_router)
+app.include_router(admin_runtime_router)
 app.include_router(admin_audit_router)
 app.include_router(customer_activation_router)
 app.include_router(customer_device_router)

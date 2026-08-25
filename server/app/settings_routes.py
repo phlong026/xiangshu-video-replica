@@ -326,7 +326,7 @@ def update_runtime_settings(
     payload: RuntimeSettingsRequest,
     conn: Database,
     admin: SettingsAdmin,
-) -> dict[str, int | str | bool]:
+) -> dict[str, int | str]:
     repo = SettingsRepository(conn)
     try:
         current = repo.read_runtime_settings()
