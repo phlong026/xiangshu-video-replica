@@ -3974,12 +3974,40 @@ def mark_task_first_frame_url_sign_failed(
         release_user_queue_slot_for_task(conn, task_id=task_id)
 
 
+def _insert_worker_audit(
+    conn: BusinessConnection,
+    *,
+    action: str,
+    entity_type: str,
+    entity_id: str,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Audit row written by the worker itself when no user session exists.
+
+    ``actor_user_id`` stays NULL: the FK is ON DELETE SET NULL (migration
+    001), so worker-owned rows must never reference a user id.
+    """
+    conn.execute(
+        """
+        INSERT INTO audit_logs (id, actor_user_id, action, entity_type, entity_id, metadata_json)
+        VALUES (%s, NULL, %s, %s, %s, %s)
+        """,
+        (
+            str(uuid4()),
+            action,
+            entity_type,
+            entity_id,
+            json.dumps(metadata or {}, ensure_ascii=True, sort_keys=True),
+        ),
+    )
+
+
 def mark_expired_active_leases_needing_attention(conn: BusinessConnection) -> None:
     """Do not resubmit work when a worker died after a provider call may have started."""
     with conn:
         rows = conn.execute(
             """
-            SELECT id, batch_id
+            SELECT id, batch_id, archive_status, provider_result_url
             FROM generation_tasks
             WHERE status IN ('SUBMITTING', 'RUNNING', 'ARCHIVING')
               AND locked_until IS NOT NULL
@@ -4028,8 +4056,23 @@ def mark_expired_active_leases_needing_attention(conn: BusinessConnection) -> No
         # Every expired lease leaves the per-user concurrency slot occupied
         # (revised ADR §2.2 Step 2): release it. Archive-retry backoffs and
         # SUBMISSION_UNCERTAIN tasks both stop consuming a running slot here;
-        # the former re-acquires one when a worker picks the retry up.
+        # the former re-acquires one when a worker picks the retry up. Each
+        # takeover is audited with a worker-owned row (no actor session).
         for row in rows:
+            if (
+                str(row["archive_status"]) == "ARCHIVE_FAILED"
+                and row["provider_result_url"] is not None
+            ):
+                audit_action = "generation_task.lease_expired_archive_retry"
+            else:
+                audit_action = "generation_task.lease_expired_uncertain"
+            _insert_worker_audit(
+                conn,
+                action=audit_action,
+                entity_type="generation_task",
+                entity_id=str(row["id"]),
+                metadata={"batch_id": str(row["batch_id"])},
+            )
             release_user_queue_slot_for_task(conn, task_id=str(row["id"]))
     for row in rows:
         refresh_batch_status(conn, batch_id=str(row["batch_id"]))
