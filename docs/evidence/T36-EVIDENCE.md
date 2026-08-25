@@ -57,7 +57,9 @@ LB 的限流桶证据。本任务不能标记 `STAGING_VERIFIED`，更不能提�
 - 客户目标同时执行 `cargo check --no-default-features` 与
   `tauri build --config src-tauri/tauri.customer.conf.json ... -- --no-default-features`；
   客户专用配置把 `bundle.resources` 清空，不打包内部版的
-  `start-backend.bat/.sh`，并移除 CSP 中的本地 API origin。构建前要求
+  `start-backend.bat/.sh`，移除 CSP 中的本地 API origin，并为客户版
+  单独冻结 product name、application identifier、publisher 和开始菜单目录，
+  防止与内部版覆盖安装或串联升级。构建前要求
   `VITE_API_BASE_URL` 是无凭据、无 path/query/fragment、非 loopback 的 HTTPS
   origin，避免“没有 sidecar 但仍访问 localhost”的不可用假构建。
 - Windows CI 产物改名为
@@ -105,7 +107,7 @@ sidecar NSIS；T36 已有意把该 job 改成客户云目标，因此更新回�
 | E2E Biome | 14 files passed |
 | Default Tauri check | Pass |
 | Customer Tauri check | Pass：`--no-default-features` |
-| Customer unsigned NSIS | Pass：1,219,945 bytes；SHA256 `30195807168D4C351433EDA0ABD0CC44FBD05256305570B6B25C2104FBE37614`；客户配置排除内部 launcher 后重建；`.invalid` 合同产物，未提交 |
+| Customer unsigned NSIS | Pass：`短视频复刻客户云工作台_0.1.0_x64-setup.exe`，1,219,752 bytes；SHA256 `5CEBDAFC4F64DB49A6DCD74C818B422F5D51D3484F656156379A62C9BEA8B6E8`；客户配置排除内部 launcher 并分离应用身份后重建；`.invalid` 合同产物，未提交 |
 | Ruff / format / mypy | Pass；181 files formatted / 71 source files typed |
 | Server full pytest | 单次全量：1200 passed + 1 stale build-contract failed，16 warnings，1169.23s；失败断言修复后其所在两文件 18/18，按“全量只跑一次”规则未重复第二轮全量 |
 | Independent review | APPROVE，0 Critical / 0 High / 0 Medium |

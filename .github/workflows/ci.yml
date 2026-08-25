@@ -150,7 +150,12 @@ jobs:
       - name: Verify customer installer excludes local launchers
         shell: pwsh
         run: |
-          $sevenZip = Join-Path $env:ProgramFiles '7-Zip\7z.exe'
+          $sevenZipCommand = Get-Command 7z.exe -ErrorAction SilentlyContinue
+          $sevenZip = if ($null -ne $sevenZipCommand) {
+            $sevenZipCommand.Source
+          } else {
+            Join-Path $env:ProgramFiles '7-Zip\7z.exe'
+          }
           if (-not (Test-Path -LiteralPath $sevenZip)) {
             throw '7-Zip is required to inspect the NSIS payload'
           }

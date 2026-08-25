@@ -284,7 +284,13 @@ def test_customer_desktop_build_is_an_explicit_no_sidecar_target() -> None:
     assert 'addSubnet("127.0.0.0", 8, "ipv4")' in origin_guard
     assert 'addAddress("::1", "ipv6")' in origin_guard
     assert "--config src-tauri/tauri.customer.conf.json" in package
+    assert customer_config["productName"] == "短视频复刻客户云工作台"
+    assert customer_config["identifier"] == "com.xiangshu.video-replica.customer"
     assert customer_config["bundle"]["resources"] == []
+    assert customer_config["bundle"]["publisher"] == "Xiangshu Video Replica"
+    assert (
+        customer_config["bundle"]["windows"]["nsis"]["startMenuFolder"] == "短视频复刻客户云工作台"
+    )
     assert "127.0.0.1:8000" not in customer_config["app"]["security"]["csp"]
     assert "npm run check:tauri:customer" in workflow
     assert "npm run tauri:build:customer" in workflow
