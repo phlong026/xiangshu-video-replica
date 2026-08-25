@@ -10,6 +10,7 @@ from fastapi import HTTPException
 
 from app.character_image_generation import (
     CharacterImageProvider,
+    acquire_character_generation_task,
     run_next_character_generation_task,
 )
 from app.db import connect_database
@@ -17,11 +18,12 @@ from app.db_pg import (
     DatabaseMode,
     check_pg_ready,
     close_pg_pool,
+    pg_transaction,
     resolve_database_config,
     validate_customer_production,
 )
 from app.db_portable import BusinessConnection
-from app.generation import run_next_generation_task
+from app.generation import acquire_generation_task_lease, run_next_generation_task
 from app.media_routes import get_media_storage
 from app.storage import StorageAdapter
 
@@ -76,6 +78,88 @@ def run_worker_once(
     return processed
 
 
+def run_pg_worker_once(
+    *,
+    worker_id: str,
+    storage: StorageAdapter,
+    generation_storage: StorageAdapter | None = None,
+    first_frame_storage: StorageAdapter | None = None,
+    character_provider: CharacterImageProvider | None = None,
+    max_tasks: int | None = None,
+) -> int:
+    """Process all currently eligible tasks on the PostgreSQL lane.
+
+    Two-phase per task (M5 review P1-1 — the earlier single fenced
+    transaction rolling the lease, the paid provider call, the result write
+    and the release into one commit could lose the whole round on a crash
+    mid-poll: the task fell back to PENDING and the next worker re-sent the
+    paid POST; it also blinded the global concurrency gate until the round
+    ended):
+
+    1. Claim — a short fenced transaction: ``acquire_generation_task_lease``
+       commits the SUBMITTING transition, the per-user slot increment and the
+       global concurrency count immediately. A crash after this point leaves
+       the task SUBMITTING; the expiry sweeper moves it to
+       SUBMISSION_UNCERTAIN (a manual reconciliation gate), so a provider
+       call is never silently double-fired.
+    2. Work — a second fenced transaction: the provider poll, the terminal
+       write and the slot release. The claim's durability makes this a
+       crash-and-recover boundary, not a retry.
+
+    This mirrors the SQLite lane's per-block commit shape and the T27 drain
+    worker's two-transaction shape.
+    """
+    if max_tasks is not None and max_tasks < 1:
+        raise ValueError("max_tasks must be at least 1")
+    processed = 0
+    while True:
+        processed_round = False
+        with pg_transaction() as raw_conn:
+            conn = BusinessConnection.postgres(raw_conn)
+            lease = acquire_generation_task_lease(conn, worker_id=worker_id)
+        if lease is not None:
+            with pg_transaction() as raw_conn:
+                conn = BusinessConnection.postgres(raw_conn)
+                if (
+                    run_next_generation_task(
+                        conn,
+                        worker_id=worker_id,
+                        provider=None,
+                        storage=generation_storage or storage,
+                        first_frame_storage=first_frame_storage or storage,
+                        lease=lease,
+                    )
+                    is not None
+                ):
+                    processed += 1
+                    processed_round = True
+                    if max_tasks is not None and processed >= max_tasks:
+                        return processed
+        with pg_transaction() as raw_conn:
+            conn = BusinessConnection.postgres(raw_conn)
+            char_lease = acquire_character_generation_task(conn, worker_id=worker_id)
+        if char_lease is not None:
+            with pg_transaction() as raw_conn:
+                conn = BusinessConnection.postgres(raw_conn)
+                if (
+                    run_next_character_generation_task(
+                        conn,
+                        worker_id=worker_id,
+                        provider=character_provider,
+                        storage=storage,
+                        lease=char_lease,
+                    )
+                    is not None
+                ):
+                    processed += 1
+                    processed_round = True
+                    if max_tasks is not None and processed >= max_tasks:
+                        return processed
+        if not processed_round:
+            break
+    return processed
+
+
 def run_forever(*, db_path: Path, worker_id: str, idle_seconds: float) -> None:
     while True:
         try:
@@ -90,6 +174,31 @@ def run_forever(*, db_path: Path, worker_id: str, idle_seconds: float) -> None:
                     generation_storage=asset_storage,
                     first_frame_storage=asset_storage,
                 )
+        except HTTPException as exc:
+            code = exc.detail.get("code") if isinstance(exc.detail, dict) else exc.detail
+            logger.error("generation worker configuration unavailable: %s", code)
+            processed = 0
+        except Exception:
+            logger.exception("generation worker iteration failed")
+            processed = 0
+        if processed == 0:
+            time.sleep(idle_seconds)
+
+
+def run_forever_pg(*, worker_id: str, idle_seconds: float) -> None:
+    while True:
+        try:
+            # The media-storage configuration lives in the business database;
+            # read it once per round inside a short fenced transaction.
+            with pg_transaction() as raw_conn:
+                conn = BusinessConnection.postgres(raw_conn)
+                asset_storage = get_media_storage(conn)
+            processed = run_pg_worker_once(
+                worker_id=worker_id,
+                storage=asset_storage,
+                generation_storage=asset_storage,
+                first_frame_storage=asset_storage,
+            )
         except HTTPException as exc:
             code = exc.detail.get("code") if isinstance(exc.detail, dict) else exc.detail
             logger.error("generation worker configuration unavailable: %s", code)
@@ -124,24 +233,37 @@ def main() -> None:
     config = resolve_database_config()
     validate_customer_production(config)
     if config.mode is DatabaseMode.POSTGRESQL:
-        # PG worker runtime: prove readiness (pool + server round-trip). The
-        # fair-queue task loop moves onto PG with T24/T25 (Lane C); until then
-        # the PG mode intentionally stops after the ready check — but loudly:
-        # exiting 0 would look healthy to systemd's Restart=on-failure and
-        # silently drop the worker (M0 review H1 fail-open).
+        # PG worker runtime (T25): prove readiness (pool + server round-trip),
+        # then run the fair-queue task loop. Every task executes in its own
+        # fenced transaction, so a crash between the lease and the result
+        # write rolls the lease back — nothing leaks, nothing double-pays.
         ready = check_pg_ready()
         logger.info(
-            "PostgreSQL worker runtime ready (pool_max=%d, server_now=%s); "
-            "PG task loop lands with the fair-queue lane (T25)",
+            "PostgreSQL worker runtime ready (pool_max=%d, server_now=%s)",
             ready.pool_size,
             ready.server_now.isoformat(),
         )
-        close_pg_pool()
-        raise SystemExit(
-            "PostgreSQL worker task loop is not implemented until T25 (fair-queue "
-            "lane); exiting with failure so process supervision does not mistake "
-            "this for a healthy idle worker"
-        )
+        if args.once:
+            try:
+                with pg_transaction() as raw_conn:
+                    conn = BusinessConnection.postgres(raw_conn)
+                    asset_storage = get_media_storage(conn)
+                processed = run_pg_worker_once(
+                    worker_id=args.worker_id,
+                    storage=asset_storage,
+                    generation_storage=asset_storage,
+                    first_frame_storage=asset_storage,
+                    max_tasks=args.max_tasks,
+                )
+            finally:
+                close_pg_pool()
+            logger.info("PostgreSQL worker processed %s task(s)", processed)
+            return
+        try:
+            run_forever_pg(worker_id=args.worker_id, idle_seconds=args.idle_seconds)
+        finally:
+            close_pg_pool()
+        return
 
     db_path_value = config.sqlite_path
     if not db_path_value:

@@ -130,6 +130,52 @@ def _alembic_config(dsn: str):  # type: ignore[no-untyped-def]
     return config
 
 
+def test_pg_upgrade_from_published_040_head_applies_fair_queue() -> None:
+    """M5 review P1-3: a database already stamped at the published 040 head
+    (the pre-M5 chain, where 032 descends from 029) must APPLY the fair-queue
+    revision on ``upgrade head`` — the earlier 032 re-pointing made 030 an
+    ancestor of 032 and silently skipped the schema on such databases."""
+    from alembic import command
+
+    dsn = _rehearsal_dsn()
+    sqlalchemy_dsn = dsn.replace("postgresql://", "postgresql+psycopg://")
+    _drop_database("t06_migrate_test")
+    with psycopg.connect(_admin_dsn(), autocommit=True) as conn:
+        conn.execute('CREATE DATABASE "t06_migrate_test"')
+
+    try:
+        # Stage 1: bring the database to the released 040 head — the exact
+        # state of a production DB upgraded before the M5 branch landed.
+        command.upgrade(_alembic_config(sqlalchemy_dsn), "040_fix_provider_settings_constraint")
+        with psycopg.connect(dsn) as conn:
+            version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+            assert version == "040_fix_provider_settings_constraint"
+            fair_queue_column = conn.execute(
+                "SELECT COUNT(*) FROM information_schema.columns "
+                "WHERE table_name = 'runtime_settings' AND column_name = 'fair_queue_enabled'"
+            ).fetchone()[0]
+            assert int(fair_queue_column) == 0  # no fair-queue schema yet
+
+        # Stage 2: upgrade head — the 041 revision must run (it sits at the
+        # tail, so it is not on the stamped database's ancestor path).
+        command.upgrade(_alembic_config(sqlalchemy_dsn), "head")
+        with psycopg.connect(dsn) as conn:
+            version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+            assert version == "041_user_fair_queue"
+            fair_queue_column = conn.execute(
+                "SELECT COUNT(*) FROM information_schema.columns "
+                "WHERE table_name = 'runtime_settings' AND column_name = 'fair_queue_enabled'"
+            ).fetchone()[0]
+            assert int(fair_queue_column) == 1
+            cursor_table = conn.execute(
+                "SELECT COUNT(*) FROM information_schema.tables "
+                "WHERE table_name = 'user_queue_cursors'"
+            ).fetchone()[0]
+            assert int(cursor_table) == 1
+    finally:
+        _drop_database("t06_migrate_test")
+
+
 def test_pg_full_upgrade_downgrade_reupgrade_and_indexes() -> None:
     """DB-04 rehearsal: empty PG database, upgrade to head, verify key tables/
     constraints, downgrade to base, then re-upgrade to head. Historical
@@ -149,9 +195,7 @@ def test_pg_full_upgrade_downgrade_reupgrade_and_indexes() -> None:
 
         with psycopg.connect(dsn) as conn:
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-            assert version == "040_fix_provider_settings_constraint", (
-                f"unexpected head revision: {version}"
-            )
+            assert version == "041_user_fair_queue", f"unexpected head revision: {version}"
 
             tables = {
                 row[0]
@@ -230,7 +274,7 @@ def test_pg_full_upgrade_downgrade_reupgrade_and_indexes() -> None:
         command.upgrade(_alembic_config(sqlalchemy_dsn), "head")
         with psycopg.connect(dsn) as conn:
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-            assert version == "040_fix_provider_settings_constraint"
+            assert version == "041_user_fair_queue"
     finally:
         _drop_database("t06_migrate_test")
 
@@ -352,7 +396,7 @@ def test_pg_wallet_downgrade_blocked_when_ledger_has_settled_rounds() -> None:
         # The database must be left exactly at head (no partial rollback).
         with psycopg.connect(dsn) as conn:
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-        assert version == "040_fix_provider_settings_constraint"
+        assert version == "041_user_fair_queue"
     finally:
         _drop_database(db_name)
 
@@ -649,7 +693,7 @@ def test_pg_billing_constraints_downgrade_guard() -> None:
             command.downgrade(_alembic_config(sqlalchemy_dsn), "025_postgres_runtime_compatibility")
         with psycopg.connect(dsn) as conn:
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-        assert version == "040_fix_provider_settings_constraint"
+        assert version == "041_user_fair_queue"
 
         # Remove the customer order (test data only — confirmed production rows
         # are never deleted, which is exactly why the guard exists) and the

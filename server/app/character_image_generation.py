@@ -476,7 +476,7 @@ def acquire_character_generation_task(
             UPDATE character_generation_tasks
             SET status = 'RUNNING', attempt = attempt + 1,
                 locked_by = %s, locked_until = %s, next_poll_at = NULL,
-                started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
+                started_at = COALESCE(started_at::timestamptz, CURRENT_TIMESTAMP),
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = (
                 SELECT id FROM character_generation_tasks
@@ -485,17 +485,18 @@ def acquire_character_generation_task(
                     OR (
                         status = 'RUNNING'
                         AND locked_until IS NOT NULL
-                        AND datetime(locked_until) <= CURRENT_TIMESTAMP
+                        AND locked_until::timestamptz <= now()
                     )
                 )
                   AND attempt < max_attempts
-                  AND (next_poll_at IS NULL OR datetime(next_poll_at) <= CURRENT_TIMESTAMP)
+                  AND (next_poll_at IS NULL OR next_poll_at::timestamptz <= now())
                   AND (
                       locked_until IS NULL
-                      OR datetime(locked_until) <= CURRENT_TIMESTAMP
+                      OR locked_until::timestamptz <= now()
                   )
                 ORDER BY created_at, id
                 LIMIT 1
+                FOR UPDATE SKIP LOCKED
             )
             RETURNING *
             """,
@@ -515,7 +516,7 @@ def finalize_expired_character_generation_leases(conn: BusinessConnection) -> No
         WHERE status = 'RUNNING'
           AND attempt >= max_attempts
           AND locked_until IS NOT NULL
-          AND datetime(locked_until) <= CURRENT_TIMESTAMP
+          AND locked_until::timestamptz <= now()
         ORDER BY created_at, id
         """
     ).fetchall()
@@ -564,8 +565,12 @@ def run_next_character_generation_task(
     worker_id: str,
     storage: StorageAdapter,
     provider: CharacterImageProvider | None = None,
+    lease: sqlite3.Row | None = None,
 ) -> CharacterGenerationTask | None:
-    task = acquire_character_generation_task(conn, worker_id=worker_id)
+    if lease is None:
+        task = acquire_character_generation_task(conn, worker_id=worker_id)
+    else:
+        task = lease
     if task is None:
         return None
     started = time.monotonic()

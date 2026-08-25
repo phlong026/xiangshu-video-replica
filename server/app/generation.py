@@ -1604,6 +1604,9 @@ def create_generation_batch(
                 user_id=actor.id,
                 task_id=task_id,
             )
+        # Pattern D: this batch makes the user a queue participant; the cursor
+        # row is upserted in the same transaction so rotation can serve them.
+        ensure_user_queue_cursor(conn, user_id=actor.id)
         conn.commit()
     except sqlite3.IntegrityError:
         conn.rollback()
@@ -1803,6 +1806,9 @@ def regenerate_generation_batch(
                 "idempotency_key_hash": content_hash(request.idempotency_key),
             },
         )
+        # Pattern D: regeneration also makes the user a queue participant
+        # (same-transaction upsert; rotation serves them on the next round).
+        ensure_user_queue_cursor(conn, user_id=actor.id)
         conn.commit()
     except Exception:
         conn.rollback()
@@ -1992,6 +1998,9 @@ def regenerate_generation_task(
                 "idempotency_key_hash": content_hash(request.idempotency_key),
             },
         )
+        # Pattern D: the replacement makes the user a queue participant
+        # (same-transaction upsert; rotation serves them on the next round).
+        ensure_user_queue_cursor(conn, user_id=actor.id)
         conn.commit()
     except Exception:
         conn.rollback()
@@ -2224,8 +2233,10 @@ def run_next_generation_task(
     provider: H3Provider | None,
     storage: StorageAdapter,
     first_frame_storage: StorageAdapter | None = None,
+    lease: dict[str, Any] | None = None,
 ) -> TaskResult | None:
-    lease = acquire_generation_task_lease(conn, worker_id=worker_id)
+    if lease is None:
+        lease = acquire_generation_task_lease(conn, worker_id=worker_id)
     if lease is None:
         return None
 
@@ -2399,7 +2410,7 @@ def run_next_generation_task(
                     provider_result_url = %s,
                     error_code = %s,
                     error_message_redacted = %s,
-                    submitted_at = COALESCE(submitted_at, CURRENT_TIMESTAMP),
+                    submitted_at = COALESCE(submitted_at::timestamptz, CURRENT_TIMESTAMP),
                     completed_at = CURRENT_TIMESTAMP,
                     locked_by = NULL,
                     locked_until = NULL,
@@ -2447,6 +2458,10 @@ def run_next_generation_task(
             if archive_status == "ARCHIVED":
                 finalize_internal_billing(conn, task_id=task_id, outcome="success")
             _refresh_batch_status_in_transaction(conn, batch_id=str(lease["batch_id"]))
+            # Pattern B: the task left the running set; release the owner's
+            # concurrency slot (also for ARCHIVE_FAILED — the retry re-acquires
+            # one when a worker picks it up).
+            release_user_queue_slot_for_task(conn, task_id=task_id)
     except Exception:
         if stored is not None:
             try:
@@ -2550,6 +2565,14 @@ def _store_and_finalize_archive(
                 raise _reconcile_reservation_lost()
             finalize_internal_billing(conn, task_id=task_id, outcome="success")
             _refresh_batch_status_in_transaction(conn, batch_id=batch_id)
+            if reconcile_reservation is None:
+                # Archive-retry path: the task holds its lease, so the slot is
+                # released here. Reconciliation must NOT release: the expired
+                # lease takeover already released the slot, which the user's
+                # replacement task now holds — releasing again would zero the
+                # replacement's slot and let a third task run concurrently
+                # (M5 review P1-5).
+                release_user_queue_slot_for_task(conn, task_id=task_id)
             result = get_task_result(conn, task_id)
             if reconcile_reservation is not None:
                 _complete_reconcile_operation_in_transaction(
@@ -2702,13 +2725,18 @@ def _release_stale_reconcile_reservation(
     actor: CurrentUser,
 ) -> None:
     row = conn.execute(
-        """
+        # The reservation window is a module constant, so it is spelled as a
+        # literal interval in the SQL (PG-canonical; the SQLite translator
+        # rewrites it to datetime('now', '-<n> seconds')). A parameterised
+        # SQLite modifier would carry opposite signs on the two lanes.
+        f"""
         SELECT id, idempotency_key
         FROM generation_task_operations
         WHERE task_id = %s AND action = 'RECONCILE' AND result_status = 'PENDING'
-          AND datetime(updated_at) <= datetime('now', %s)
+          AND updated_at::timestamptz <=
+              now() - interval '{RECONCILIATION_RESERVATION_SECONDS} seconds'
         """,
-        (task_id, f"-{RECONCILIATION_RESERVATION_SECONDS} seconds"),
+        (task_id,),
     ).fetchone()
     if row is None:
         return
@@ -3491,6 +3519,7 @@ def _release_archive_retry(conn: BusinessConnection, *, task_id: str, batch_id: 
             )
             finalize_internal_billing(conn, task_id=task_id, outcome="failed")
             _refresh_batch_status_in_transaction(conn, batch_id=batch_id)
+            release_user_queue_slot_for_task(conn, task_id=task_id)
             return
         conn.execute(
             """
@@ -3501,12 +3530,302 @@ def _release_archive_retry(conn: BusinessConnection, *, task_id: str, batch_id: 
                 archive_retry_count = %s,
                 locked_by = NULL,
                 locked_until = NULL,
-                next_poll_at = datetime('now', '+60 seconds'),
+                next_poll_at = now() + interval '60 seconds',
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = %s
             """,
             (next_count, task_id),
         )
+        # The retry is no longer running; the slot is free until a worker
+        # picks the archive retry up again.
+        release_user_queue_slot_for_task(conn, task_id=task_id)
+
+
+# ---------------------------------------------------------------------------
+# T25 fair queue — patterns A-E of the revised T24 ADR (pseudo-SQL §2)
+# ---------------------------------------------------------------------------
+
+# Per-user queue-empty retry budget: when the first idle user has no eligible
+# task (their only one is locked by another worker), rotate to the next idle
+# user instead of giving up (pseudo-SQL §2 Pattern A, outer loop).
+_FAIR_QUEUE_MAX_ROUNDS = 8
+
+
+def _fair_queue_enabled(conn: BusinessConnection) -> bool:
+    """Pattern A gate: the runtime_settings.fair_queue_enabled switch.
+
+    The 030 migration is PostgreSQL-only, so the desktop SQLite lane has no
+    such column and keeps the legacy global FIFO — the absence of the switch
+    is the feature being off (revised ADR §4), not a degraded state.
+    """
+    try:
+        row = conn.execute(
+            "SELECT fair_queue_enabled FROM runtime_settings WHERE id = 1"
+        ).fetchone()
+    except Exception as exc:
+        # Missing column is the documented "feature off" state (the desktop
+        # SQLite lane has no such column; a PG database that never ran 041).
+        # Any other failure is a real fault and must fail loudly instead of
+        # silently degrading to global FIFO (M5 review P1-7).
+        message = f"{type(exc).__name__}: {exc}"
+        if "column" in message and ("does not exist" in message or "no such column" in message):
+            return False
+        logger.warning("fair_queue_enabled probe failed: %s", message)
+        raise
+    return bool(row[0]) if row is not None else False
+
+
+def ensure_user_queue_cursor(conn: BusinessConnection, *, user_id: str) -> None:
+    """Pattern D: cold start — make a user schedulable when they create work.
+
+    Idempotent by ON CONFLICT DO NOTHING; called inside the same transaction
+    as the task creation (race guard: two creators never duplicate the row).
+
+    Runs on PostgreSQL regardless of the fair_queue_enabled switch: cursor
+    rows must exist and stay accurate before the rollout flag is flipped, or
+    users who queued work during the observation window stay invisible when
+    the switch turns on (M5 review P1-4). The SQLite lane has no such table.
+    """
+    if not conn.is_postgres:
+        return
+    conn.execute(
+        """
+        INSERT INTO user_queue_cursors (user_id, last_dispatched_at, running_tasks_count)
+        VALUES (%s, now(), 0)
+        ON CONFLICT (user_id) DO NOTHING
+        """,
+        (user_id,),
+    )
+
+
+def release_user_queue_slot_for_task(conn: BusinessConnection, *, task_id: str) -> None:
+    """Pattern B/C: release the task owner's concurrency slot at a terminal
+    state (SUCCEEDED / FAILED / expired-lease takeover / archive-retry backoff).
+
+    Per-user concurrency is 1, so at most one slot is held per user; the
+    GREATEST guard makes a double release a no-op instead of a negative count
+    (revised ADR §2 Pattern C: a FAILED task must release, or the user starves).
+
+    Like ensure_user_queue_cursor this runs on PostgreSQL regardless of the
+    switch: tasks finished under legacy FIFO must settle the seeded counts
+    before the rollout flip (M5 review P1-4). The SQLite lane has no table.
+    """
+    if not conn.is_postgres:
+        return
+    conn.execute(
+        """
+        UPDATE user_queue_cursors uqc
+        SET running_tasks_count = GREATEST(running_tasks_count - 1, 0),
+            last_dispatched_at = now()
+        WHERE uqc.user_id = (
+            SELECT b.created_by_user_id
+            FROM generation_tasks t
+            JOIN generation_batches b ON b.id = t.batch_id
+            WHERE t.id = %s
+        )
+        """,
+        (task_id,),
+    )
+
+
+def cleanup_idle_queue_cursors(conn: BusinessConnection, *, idle_days: int) -> int:
+    """Pattern E: remove cursors of long-idle users (maintenance job, run in a
+    low-traffic window; the caller schedules the cadence).
+
+    A removed cursor is rebuilt by ensure_user_queue_cursor the next time the
+    user creates work, so over-cleanup costs at most one re-insert (revised
+    ADR §2 Pattern E: conservative timeout + batch limit). Runs on PostgreSQL
+    regardless of the switch, like the other cursor-maintenance points
+    (M5 review P1-4); the SQLite lane has no table.
+    """
+    if not conn.is_postgres:
+        return 0
+    deleted = conn.execute(
+        """
+        DELETE FROM user_queue_cursors
+        WHERE user_id IN (
+            SELECT user_id
+            FROM user_queue_cursors
+            WHERE running_tasks_count = 0
+              AND last_dispatched_at < now() - make_interval(days => %s)
+            LIMIT 1000
+            FOR UPDATE SKIP LOCKED
+        )
+        RETURNING user_id
+        """,
+        (idle_days,),
+    ).fetchall()
+    return len(deleted)
+
+
+def _acquire_fair_queue_lease(
+    conn: BusinessConnection,
+    *,
+    worker_id: str,
+) -> dict[str, Any] | None:
+    """Pattern A: user candidate check + task lease acquisition.
+
+    Lock order is cursor row first, then task row (ADR lock-order chapter):
+    the idle-user scan takes ``FOR UPDATE SKIP LOCKED`` on the cursor, the
+    per-user task pick takes ``FOR UPDATE SKIP LOCKED`` inside the UPDATE's
+    subquery (against generation_tasks only — the ownership EXISTS lookup
+    never locks batch rows), and the cursor counter update re-locks the
+    already-held cursor row. A user whose queue is empty, or whose only task
+    is locked by another worker, ends the round and rotates to the next idle
+    user (PostgreSQL: the same transaction keeps running, SKIP LOCKED skips
+    the held cursor; the commit calls are no-ops there). This function runs
+    only on the PostgreSQL lane — the desktop SQLite lane has no
+    fair_queue_enabled column and always takes the global FIFO below.
+    """
+    locked_until = (datetime.now(UTC) + timedelta(seconds=GENERATION_LEASE_SECONDS)).isoformat()
+    for _ in range(_FAIR_QUEUE_MAX_ROUNDS):
+        cursor_row = conn.execute(
+            """
+            SELECT user_id
+            FROM user_queue_cursors
+            WHERE running_tasks_count = 0
+            ORDER BY last_dispatched_at ASC
+            LIMIT 1
+            FOR UPDATE SKIP LOCKED
+            """
+        ).fetchone()
+        if cursor_row is None:
+            # No idle user at all — the whole queue is busy.
+            conn.commit()
+            return None
+        user_id = str(cursor_row["user_id"])
+        task_row = conn.execute(
+            """
+            UPDATE generation_tasks
+            SET
+                attempt = attempt + CASE WHEN status IN ('PENDING', 'QUEUED') THEN 1 ELSE 0 END,
+                status = 'SUBMITTING',
+                locked_by = %s,
+                locked_until = %s,
+                submitted_at = CASE
+                    WHEN status IN ('PENDING', 'QUEUED')
+                    THEN COALESCE(submitted_at::timestamptz, CURRENT_TIMESTAMP)
+                    ELSE submitted_at::timestamptz
+                END,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = (
+                SELECT t.id
+                FROM generation_tasks t
+                WHERE
+                    (
+                        t.status IN ('PENDING', 'QUEUED')
+                        OR (
+                            t.status = 'SUCCEEDED'
+                            AND t.archive_status = 'ARCHIVE_FAILED'
+                            AND t.provider_result_url IS NOT NULL
+                            AND t.provider_result_url != ''
+                        )
+                    )
+                    AND (t.locked_until IS NULL OR t.locked_until::timestamptz <= now())
+                    AND (t.next_poll_at IS NULL OR t.next_poll_at::timestamptz <= now())
+                    AND EXISTS (
+                        SELECT 1
+                        FROM generation_batches b
+                        WHERE b.id = t.batch_id
+                          AND b.created_by_user_id = %s
+                    )
+                ORDER BY t.created_at, t.id
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+            )
+            RETURNING id
+            """,
+            (worker_id, locked_until, user_id),
+        ).fetchone()
+        if task_row is None:
+            # This user's queue is empty, or their only task is locked by
+            # another worker. Either way nothing is schedulable for them right
+            # now — advance the dispatcher timestamp so the rotation moves to
+            # the next idle user instead of pinning this one at the head of
+            # the line and starving everyone behind them (the empty user
+            # re-enters the rotation at the tail).
+            conn.execute(
+                """
+                UPDATE user_queue_cursors
+                SET last_dispatched_at = now()
+                WHERE user_id = %s
+                """,
+                (user_id,),
+            )
+            conn.commit()
+            continue
+        conn.execute(
+            """
+            UPDATE user_queue_cursors
+            SET running_tasks_count = running_tasks_count + 1,
+                last_dispatched_at = now()
+            WHERE user_id = %s
+            """,
+            (user_id,),
+        )
+        conn.commit()
+        return load_worker_task(conn, str(task_row["id"]))
+    return None
+
+
+def _acquire_global_fifo_lease(
+    conn: BusinessConnection,
+    *,
+    worker_id: str,
+) -> dict[str, Any] | None:
+    """Legacy global FIFO acquisition (fair_queue_enabled = FALSE).
+
+    The revised ADR §4 keeps this path as the migration-safe default: the
+    switch stays off until the queue rollout is observed. The SQL is the same
+    as before with the SQLite-only ``datetime()`` predicates replaced by the
+    portable ``::timestamptz <= now()`` form (the translator parses both sides
+    on the SQLite lane).
+    """
+    locked_until = (datetime.now(UTC) + timedelta(seconds=GENERATION_LEASE_SECONDS)).isoformat()
+    row = conn.execute(
+        """
+        UPDATE generation_tasks
+        SET
+            attempt = attempt + CASE WHEN status IN ('PENDING', 'QUEUED') THEN 1 ELSE 0 END,
+            status = 'SUBMITTING',
+            locked_by = %s,
+            locked_until = %s,
+            submitted_at = CASE
+                WHEN status IN ('PENDING', 'QUEUED')
+                THEN COALESCE(submitted_at::timestamptz, CURRENT_TIMESTAMP)
+                ELSE submitted_at::timestamptz
+            END,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = (
+            SELECT id
+            FROM generation_tasks
+            WHERE
+                (
+                    status IN ('PENDING', 'QUEUED')
+                    OR (
+                        status = 'SUCCEEDED'
+                        AND archive_status = 'ARCHIVE_FAILED'
+                        AND provider_result_url IS NOT NULL
+                        AND provider_result_url != ''
+                    )
+                )
+                AND (
+                    locked_until IS NULL
+                    OR locked_until::timestamptz <= now()
+                )
+                AND (next_poll_at IS NULL OR next_poll_at::timestamptz <= now())
+            ORDER BY created_at, id
+            LIMIT 1
+            FOR UPDATE SKIP LOCKED
+        )
+        RETURNING id
+        """,
+        (worker_id, locked_until),
+    ).fetchone()
+    conn.commit()
+    if row is None:
+        return None
+    return load_worker_task(conn, str(row["id"]))
 
 
 def acquire_generation_task_lease(
@@ -3515,7 +3834,6 @@ def acquire_generation_task_lease(
     worker_id: str,
 ) -> dict[str, Any] | None:
     mark_expired_active_leases_needing_attention(conn)
-    locked_until = (datetime.now(UTC) + timedelta(seconds=GENERATION_LEASE_SECONDS)).isoformat()
     try:
         conn.execute("BEGIN IMMEDIATE")
         runtime = read_runtime_limits(conn)
@@ -3529,53 +3847,12 @@ def acquire_generation_task_lease(
         if int(active_count) >= runtime["max_concurrent_h3_tasks"]:
             conn.commit()
             return None
-
-        row = conn.execute(
-            """
-            UPDATE generation_tasks
-            SET
-                attempt = attempt + CASE WHEN status IN ('PENDING', 'QUEUED') THEN 1 ELSE 0 END,
-                status = 'SUBMITTING',
-                locked_by = %s,
-                locked_until = %s,
-                submitted_at = CASE
-                    WHEN status IN ('PENDING', 'QUEUED')
-                    THEN COALESCE(submitted_at, CURRENT_TIMESTAMP)
-                    ELSE submitted_at
-                END,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = (
-                SELECT id
-                FROM generation_tasks
-                WHERE
-                    (
-                        status IN ('PENDING', 'QUEUED')
-                        OR (
-                            status = 'SUCCEEDED'
-                            AND archive_status = 'ARCHIVE_FAILED'
-                            AND provider_result_url IS NOT NULL
-                            AND provider_result_url != ''
-                        )
-                    )
-                    AND (
-                        locked_until IS NULL
-                        OR datetime(locked_until) <= CURRENT_TIMESTAMP
-                    )
-                    AND (next_poll_at IS NULL OR next_poll_at <= CURRENT_TIMESTAMP)
-                ORDER BY created_at, id
-                LIMIT 1
-            )
-            RETURNING id
-            """,
-            (worker_id, locked_until),
-        ).fetchone()
-        conn.commit()
+        if _fair_queue_enabled(conn):
+            return _acquire_fair_queue_lease(conn, worker_id=worker_id)
+        return _acquire_global_fifo_lease(conn, worker_id=worker_id)
     except Exception:
         conn.rollback()
         raise
-    if row is None:
-        return None
-    return load_worker_task(conn, str(row["id"]))
 
 
 def load_worker_task(conn: BusinessConnection, task_id: str) -> dict[str, Any]:
@@ -3637,6 +3914,11 @@ def mark_task_submission_uncertain(
             """,
             (provider_task_id, message, task_id),
         )
+        # The task leaves the runnable/running states here; its concurrency
+        # slot must be released with the transition, or the user's cursor
+        # stays pinned at 1 and no later task of theirs ever runs (M5 review
+        # P1-2 — the expiry sweeper cannot reach it: no lease remains).
+        release_user_queue_slot_for_task(conn, task_id=task_id)
         if row is not None:
             _refresh_batch_status_in_transaction(conn, batch_id=str(row["batch_id"]))
 
@@ -3665,6 +3947,7 @@ def mark_task_provider_settings_unavailable(
         )
         finalize_internal_billing(conn, task_id=task_id, outcome="failed")
         _refresh_batch_status_in_transaction(conn, batch_id=batch_id)
+        release_user_queue_slot_for_task(conn, task_id=task_id)
 
 
 def mark_task_provider_failed(
@@ -3693,6 +3976,7 @@ def mark_task_provider_failed(
         )
         finalize_internal_billing(conn, task_id=task_id, outcome="failed")
         _refresh_batch_status_in_transaction(conn, batch_id=batch_id)
+        release_user_queue_slot_for_task(conn, task_id=task_id)
 
 
 def mark_task_first_frame_url_sign_failed(
@@ -3720,25 +4004,49 @@ def mark_task_first_frame_url_sign_failed(
         )
         finalize_internal_billing(conn, task_id=task_id, outcome="failed")
         _refresh_batch_status_in_transaction(conn, batch_id=batch_id)
+        # Terminal failure: the per-user concurrency slot is free again.
+        release_user_queue_slot_for_task(conn, task_id=task_id)
+
+
+def _insert_worker_audit(
+    conn: BusinessConnection,
+    *,
+    action: str,
+    entity_type: str,
+    entity_id: str,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Audit row written by the worker itself when no user session exists.
+
+    ``actor_user_id`` stays NULL: the FK is ON DELETE SET NULL (migration
+    001), so worker-owned rows must never reference a user id.
+    """
+    conn.execute(
+        """
+        INSERT INTO audit_logs (id, actor_user_id, action, entity_type, entity_id, metadata_json)
+        VALUES (%s, NULL, %s, %s, %s, %s)
+        """,
+        (
+            str(uuid4()),
+            action,
+            entity_type,
+            entity_id,
+            json.dumps(metadata or {}, ensure_ascii=True, sort_keys=True),
+        ),
+    )
 
 
 def mark_expired_active_leases_needing_attention(conn: BusinessConnection) -> None:
     """Do not resubmit work when a worker died after a provider call may have started."""
     with conn:
-        rows = conn.execute(
-            """
-            SELECT id, batch_id
-            FROM generation_tasks
-            WHERE status IN ('SUBMITTING', 'RUNNING', 'ARCHIVING')
-              AND locked_until IS NOT NULL
-              AND datetime(locked_until) <= CURRENT_TIMESTAMP
-            """
-        ).fetchall()
-        if not rows:
-            return
         # Archive retries never start a paid call; an expired lease is safe to
         # reset so another worker can re-download and re-archive the result.
-        conn.execute(
+        # Both updates drive audit and slot release from RETURNING so a
+        # concurrent sweeper's loser only ever sees the rows its own update
+        # transitioned (M5 review P2-1: the former SELECT-then-update snapshot
+        # let the loser audit the takeover twice and release a slot the winner
+        # had already handed to the user's replacement task).
+        archive_rows = conn.execute(
             """
             UPDATE generation_tasks
             SET
@@ -3746,16 +4054,17 @@ def mark_expired_active_leases_needing_attention(conn: BusinessConnection) -> No
                 archive_status = 'ARCHIVE_FAILED',
                 locked_by = NULL,
                 locked_until = NULL,
-                next_poll_at = datetime('now', '+60 seconds'),
+                next_poll_at = now() + interval '60 seconds',
                 updated_at = CURRENT_TIMESTAMP
             WHERE status IN ('SUBMITTING', 'RUNNING', 'ARCHIVING')
               AND archive_status = 'ARCHIVE_FAILED'
               AND provider_result_url IS NOT NULL
               AND locked_until IS NOT NULL
-              AND datetime(locked_until) <= CURRENT_TIMESTAMP
+              AND locked_until::timestamptz <= now()
+            RETURNING id, batch_id
             """
-        )
-        conn.execute(
+        ).fetchall()
+        uncertain_rows = conn.execute(
             """
             UPDATE generation_tasks
             SET
@@ -3770,11 +4079,38 @@ def mark_expired_active_leases_needing_attention(conn: BusinessConnection) -> No
                   archive_status = 'ARCHIVE_FAILED' AND provider_result_url IS NOT NULL
               )
               AND locked_until IS NOT NULL
-              AND datetime(locked_until) <= CURRENT_TIMESTAMP
+              AND locked_until::timestamptz <= now()
+            RETURNING id, batch_id
             """
-        )
-    for row in rows:
-        refresh_batch_status(conn, batch_id=str(row["batch_id"]))
+        ).fetchall()
+        # Every expired lease leaves the per-user concurrency slot occupied
+        # (revised ADR §2.2 Step 2): release it. Archive-retry backoffs and
+        # SUBMISSION_UNCERTAIN tasks both stop consuming a running slot here;
+        # the former re-acquires one when a worker picks the retry up. Each
+        # takeover is audited with a worker-owned row (no actor session).
+        for row in archive_rows:
+            _insert_worker_audit(
+                conn,
+                action="generation_task.lease_expired_archive_retry",
+                entity_type="generation_task",
+                entity_id=str(row["id"]),
+                metadata={"batch_id": str(row["batch_id"])},
+            )
+            release_user_queue_slot_for_task(conn, task_id=str(row["id"]))
+        for row in uncertain_rows:
+            _insert_worker_audit(
+                conn,
+                action="generation_task.lease_expired_uncertain",
+                entity_type="generation_task",
+                entity_id=str(row["id"]),
+                metadata={"batch_id": str(row["batch_id"])},
+            )
+            release_user_queue_slot_for_task(conn, task_id=str(row["id"]))
+    batch_ids = {str(row["batch_id"]) for row in archive_rows} | {
+        str(row["batch_id"]) for row in uncertain_rows
+    }
+    for batch_id in batch_ids:
+        refresh_batch_status(conn, batch_id=batch_id)
 
 
 def refresh_batch_status(conn: BusinessConnection, *, batch_id: str) -> None:

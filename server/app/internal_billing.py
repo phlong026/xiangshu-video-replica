@@ -29,6 +29,65 @@ class BillingFinalization:
     transaction_type: TerminalTransactionType | None
 
 
+@dataclass(frozen=True)
+class DanglingBillingReservation:
+    task_id: str
+    user_id: str
+    billing_round: int
+    reservation_id: str
+
+
+def find_dangling_billing_reservations(
+    conn: BusinessConnection,
+    *,
+    limit: int = 100,
+) -> list[DanglingBillingReservation]:
+    """RESERVE rows whose task reached a terminal state without a terminal row.
+
+    BILL-03: a dangling RESERVE holds one credit of the user's wallet
+    reserved forever. The task is already terminal (archived success or
+    failed/cancelled), so finalization is safe; the terminal write was lost
+    when a fenced worker transaction rolled back after the task UPDATE was
+    visible. SUBMISSION_UNCERTAIN and un-archived tasks are NOT terminal and
+    must keep their reservation until reconciliation decides.
+    """
+    rows = conn.execute(
+        """
+        SELECT
+            wt.id AS reservation_id,
+            wt.task_id,
+            wt.user_id,
+            wt.billing_round
+        FROM wallet_transactions AS wt
+        JOIN generation_tasks AS task ON task.id = wt.task_id
+        WHERE wt.type = 'RESERVE'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM wallet_transactions AS terminal
+              WHERE terminal.task_id = wt.task_id
+                AND terminal.billing_round = wt.billing_round
+                AND terminal.type IN ('SETTLE', 'RELEASE')
+          )
+          AND (
+              (task.status = 'SUCCEEDED' AND task.archive_status = 'ARCHIVED')
+              OR task.status IN ('FAILED', 'CANCELLED')
+          )
+        ORDER BY wt.created_at
+        LIMIT %s
+        """,
+        (limit,),
+    ).fetchall()
+    return [
+        DanglingBillingReservation(
+            task_id=str(row["task_id"]),
+            user_id=str(row["user_id"]),
+            billing_round=int(row["billing_round"]),
+            reservation_id=str(row["reservation_id"]),
+        )
+        for row in rows
+    ]
+
+
 def reserve_internal_billing(
     conn: BusinessConnection,
     *,

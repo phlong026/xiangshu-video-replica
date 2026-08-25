@@ -96,7 +96,52 @@ def test_pg_cast_is_stripped() -> None:
         translate_to_sqlite("SELECT lease_until::text FROM customer_session_state")
         == "SELECT lease_until FROM customer_session_state"
     )
-    assert translate_to_sqlite("WHERE created_at::timestamptz >= %s") == "WHERE created_at >= ?"
+    assert translate_to_sqlite("WHERE created_at::timestamptz >= %s") == (
+        "WHERE datetime(created_at) >= ?"
+    )
+
+
+def test_timestamptz_identifier_becomes_datetime_parse() -> None:
+    """T25: a bare ``ident::timestamptz`` comparison parses the TEXT column
+    with datetime() on SQLite — format-independent, matching the PG cast."""
+    assert (
+        translate_to_sqlite("WHERE locked_until::timestamptz <= now()")
+        == "WHERE datetime(locked_until) <= datetime('now')"
+    )
+    assert (
+        translate_to_sqlite("WHERE next_poll_at::timestamptz <= now() - interval '60 seconds'")
+        == "WHERE datetime(next_poll_at) <= datetime('now', '-60 seconds')"
+    )
+
+
+def test_timestamptz_parameter_cast_stays_stripped() -> None:
+    """A ``%s::timestamptz`` parameter is parsed with datetime() on the SQLite
+    lane (``datetime(?)`` accepts the ISO-8601 parameter) so both sides of a
+    comparison are parsed — the same semantics as the PG cast."""
+    assert (
+        translate_to_sqlite("WHERE recovery_expires_at::timestamptz <= %s::timestamptz")
+        == "WHERE datetime(recovery_expires_at) <= datetime(?)"
+    )
+    assert (
+        translate_to_sqlite(
+            "SET lease_until = GREATEST(%s::timestamptz, "
+            "created_at::timestamptz + interval '1 microsecond')"
+        )
+        == "SET lease_until = GREATEST(datetime(?), datetime(created_at) "
+        "+ interval '1 microsecond')"
+    )
+
+
+def test_bare_now_becomes_datetime_now() -> None:
+    """T25: a bare ``now()`` (no interval) must not reach SQLite as an
+    undefined function; datetime('now') is the UTC wall-clock text."""
+    assert (
+        translate_to_sqlite(
+            "UPDATE user_queue_cursors SET last_dispatched_at = now() WHERE user_id = %s"
+        )
+        == "UPDATE user_queue_cursors SET last_dispatched_at = datetime('now') "
+        "WHERE user_id = ?"
+    )
 
 
 def test_unhandled_cast_fails_closed() -> None:

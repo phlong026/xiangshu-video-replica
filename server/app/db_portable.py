@@ -46,6 +46,24 @@ def _translate_interval(match: re.Match[str]) -> str:
     return f"datetime('now', '{sign}{body}')"
 
 
+def _consume_trailing_identifier(out: list[str]) -> str | None:
+    """Pop the identifier at the tail of the translated output.
+
+    The streaming translator appends each identifier character as its own
+    element, so the tail of ``out`` is the identifier's characters in order.
+    Used by the ``::timestamptz`` rule to wrap a bare column reference with
+    SQLite's ``datetime()`` (see ``translate_to_sqlite``). Returns None when
+    the tail is not a plain identifier (a ``?`` parameter or an expression),
+    in which case the cast is simply dropped as before.
+    """
+    chars: list[str] = []
+    while out and out[-1] and (out[-1].isalnum() or out[-1] == "_"):
+        chars.append(out.pop())
+    if not chars:
+        return None
+    return "".join(reversed(chars))
+
+
 def translate_to_sqlite(sql: str) -> str:
     """Translate PG-canonical SQL to SQLite over the bounded dialect set.
 
@@ -124,6 +142,22 @@ def translate_to_sqlite(sql: str) -> str:
             # plain cast and must never be silently dropped.
             if i + m.end() < n and sql[i + m.end()] == "(":
                 raise ValueError(f"unhandled parameterised cast in SQL near {sql[i : i + 16]!r}")
+            if m.group() == "::timestamptz":
+                # ident::timestamptz → datetime(ident), and %s::timestamptz →
+                # datetime(?): SQLite has no casts and the ISO-8601 text lives
+                # in TEXT columns, so a timestamp comparison must parse both
+                # sides — datetime() accepts every storage format (SQLite
+                # ``datetime('now', ...)`` output and Python ``.isoformat()``),
+                # matching the PG cast semantics regardless of which writer
+                # produced the column (T25 fair queue; the desktop lane
+                # compares by parsing, never by string order).
+                ident = _consume_trailing_identifier(out)
+                if ident is not None:
+                    out.append(f"datetime({ident})")
+                elif out and out[-1] == "?":
+                    out[-1] = "datetime(?)"
+                i += m.end()
+                continue
             i += m.end()
             continue
         if sql[i : i + 10].upper() == "FOR UPDATE":
@@ -143,6 +177,13 @@ def translate_to_sqlite(sql: str) -> str:
             if m:
                 out.append(_translate_interval(m))
                 i += m.end()
+                continue
+            if sql[i + 3 : i + 5] == "()":
+                # Bare ``now()`` (no interval): SQLite has no now() function;
+                # datetime('now') is the UTC current time in the same textual
+                # shape every SQLite timestamp writer produces (T25).
+                out.append("datetime('now')")
+                i += 5
                 continue
         out.append(ch)
         i += 1
@@ -319,6 +360,13 @@ class BusinessConnection:
     def rollback(self) -> None:
         if isinstance(self._backend, SQLiteBackend):
             self._backend.raw.rollback()
+
+    @property
+    def is_postgres(self) -> bool:
+        """Lane probe for services that must behave by backend (the fair-queue
+        cursor maintenance runs unconditionally on PostgreSQL but has no table
+        on the desktop SQLite lane)."""
+        return isinstance(self._backend, PostgresBackend)
 
     @property
     def in_transaction(self) -> bool:
