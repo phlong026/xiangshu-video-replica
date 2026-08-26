@@ -133,6 +133,13 @@ def test_queue_starvation_filters_for_waiting_work_before_candidate_limit() -> N
     assert normalized.index("exists (") < normalized.index("limit %s")
 
 
+def test_wallet_mismatch_filters_anomalies_before_candidate_limit() -> None:
+    from scripts.check_ops_alerts import ALERT_QUERIES
+
+    normalized = " ".join(ALERT_QUERIES["wallet_balance_mismatch"].lower().split())
+    assert normalized.index("where wallet.available_credits") < normalized.index("limit %s")
+
+
 def test_transition_engine_emits_only_fired_and_resolved_edges() -> None:
     from scripts.check_ops_alerts import AlertObservation, transition_alerts
 
@@ -267,7 +274,9 @@ def test_all_cluster_queries_execute_on_a_fresh_pg16_database(tmp_path: Path) ->
             conn.execute(
                 "INSERT INTO users (id, username, display_name) VALUES "
                 "('idle-cursor-t37', 'idle-cursor-t37', 'Idle cursor'), "
-                "('starved-user-t37', 'starved-user-t37', 'Starved user')"
+                "('starved-user-t37', 'starved-user-t37', 'Starved user'), "
+                "('recent-wallet-t37', 'recent-wallet-t37', 'Recent wallet'), "
+                "('old-bad-wallet-t37', 'old-bad-wallet-t37', 'Old bad wallet')"
             )
             conn.execute(
                 "INSERT INTO projects (id, owner_user_id, name) "
@@ -292,6 +301,13 @@ def test_all_cluster_queries_execute_on_a_fresh_pg16_database(tmp_path: Path) ->
                 "('starved-task-t37', 'starved-batch-t37', 'fake_h3', 'MiniMax-H3', "
                 "'PENDING', (clock_timestamp() - interval '1 hour')::text)"
             )
+            conn.execute(
+                "INSERT INTO wallets "
+                "(user_id, available_credits, reserved_credits, updated_at) VALUES "
+                "('recent-wallet-t37', 0, 0, clock_timestamp()::text), "
+                "('old-bad-wallet-t37', 1, 0, "
+                "(clock_timestamp() - interval '2 hours')::text)"
+            )
             conn.commit()
             capped = alerts.collect_observations(
                 conn,
@@ -299,6 +315,12 @@ def test_all_cluster_queries_execute_on_a_fresh_pg16_database(tmp_path: Path) ->
             )
             assert (
                 next(item for item in capped if item.name == "queue_starvation").observed_count == 1
+            )
+            assert (
+                next(
+                    item for item in capped if item.name == "wallet_balance_mismatch"
+                ).observed_count
+                == 1
             )
             conn.execute(
                 "INSERT INTO security_auth_failures "

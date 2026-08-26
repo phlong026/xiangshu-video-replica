@@ -77,10 +77,10 @@ class AlertTransition:
 
 
 # Each query returns a single count over a capped anomaly subquery. The
-# application role needs no pg_monitor / pg_stat_* privilege. Candidate
-# wallets are capped before their correlated checks. Queue cursors use an
-# index-backed existence check before the cap so idle cursors cannot hide a
-# truly starved user.
+# application role needs no pg_monitor / pg_stat_* privilege. Wallet and queue
+# correlated checks happen before the anomaly cap so healthy or idle rows
+# cannot hide a real P1 condition; supporting indexes keep those scans on
+# application-table access paths.
 ALERT_QUERIES: dict[str, str] = {
     "double_online": """
         SELECT count(*) FROM (
@@ -141,15 +141,9 @@ ALERT_QUERIES: dict[str, str] = {
         ) AS anomalies
     """,
     "wallet_balance_mismatch": """
-        WITH candidate_wallets AS MATERIALIZED (
-            SELECT user_id, available_credits, reserved_credits
-            FROM wallets
-            ORDER BY updated_at DESC, user_id
-            LIMIT %s
-        )
         SELECT count(*) FROM (
             SELECT wallet.user_id
-            FROM candidate_wallets AS wallet
+            FROM wallets AS wallet
             LEFT JOIN LATERAL (
                 SELECT
                     COALESCE(sum(tx.available_delta), 0) AS available_total,
@@ -159,6 +153,7 @@ ALERT_QUERIES: dict[str, str] = {
             ) AS ledger ON true
             WHERE wallet.available_credits <> ledger.available_total
                OR wallet.reserved_credits <> ledger.reserved_total
+            ORDER BY wallet.updated_at DESC, wallet.user_id
             LIMIT %s
         ) AS anomalies
     """,
@@ -281,7 +276,7 @@ def collect_observations(
         "duplicate_provider_trade_no": (config.row_limit,),
         "paid_without_charge": (config.row_limit,),
         "charge_without_paid_source": (config.row_limit,),
-        "wallet_balance_mismatch": (config.row_limit, config.row_limit),
+        "wallet_balance_mismatch": (config.row_limit,),
         "fencing_rejected": (
             _security_cutoff(current, config.fencing_window_seconds),
             config.row_limit,
