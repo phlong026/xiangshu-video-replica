@@ -14,15 +14,37 @@
 | **Upstream Spec Sections** | Task list §7 T38, §12.7 OPS-03; code map §3.2/§3.3/§12; deployment runbook §5; PostgreSQL 16 continuous-archiving/PITR contract |
 | **Failure Test or Regression Lock** | Red→green contracts: exact 100 cross-domain facts and session-epoch mismatch refusal; fewer than 100 refused; a post-base-backup sample boundary preserved; timeline `.history` WAL naming accepted; manifest is non-overwriting and Linux 0600; no `pg_dump`; physical base backup/WAL/preflight/archive/restore configuration required; staging-only confirmation; backup service must load only `pitr.env`, never application `customer.env`; frozen-map and runbook registration. The initial red runs exposed missing artifacts, Windows-only `fchmod` failure, absent timeline-history allowance, and application-DSN inheritance by the backup service; each has a regression lock. |
 | **Implementation Result** | Separate libpq backup identity, explicit PG16/WAL/archive preflight and forced-WAL external-read check; `pg_basebackup --wal-method=stream` plus SHA-256 manifest/`pg_verifybackup`; root-owned archive-helper boundary for encrypted immutable off-site base/WAL handling; isolated staging restore gated by exact environment confirmation, bounded recovery root and dedicated port; `recovery.signal`/`restore_command`/PITR target setup; 100 post-base synthetic activation→order→CHARGE→session-epoch facts captured to a 0600 atomic manifest and rechecked one by one after promotion; PostgreSQL base-backup timer that does not inherit app DSN or app secrets. |
-| **Verification Command and Pass Count** | `uv run python -m pytest tests/test_customer_pitr.py -q` → 9 passed; `ruff check`, `ruff format --check`, and `mypy app scripts/pitr_recovery_facts.py` passed; Git Bash `bash -n` passed for all four PITR scripts. |
+| **Verification Command and Pass Count** | `uv run python -m pytest tests/test_customer_pitr.py -q` → 11 passed; T38 + HA contracts → 46 passed; `ruff check`, `ruff format --check`, and `mypy app scripts/pitr_recovery_facts.py` passed; Git Bash `bash -n` passed for all four PITR scripts; PR #74 Secret scan, Linux quality gate and Windows Tauri/NSIS all passed. |
 | **Evidence Level** | Repository-side `AUTOMATED_VERIFIED`; T38/OPS-03 remain `[~]`, not `STAGING_VERIFIED` |
 | **Security and Observability** | App DSN/keys never enter the PITR systemd service; password source/archive credentials/helper are out-of-repo protected files; scripts do not print IDs, secrets or object URLs; manifest only contains the restricted recovery facts and digest; recovery can only delete a same-label directory under a non-root staging recovery root. |
 | **Migration and Rollback** | No Alembic revision. Rollback is a code/config reversion; do not delete historical external backups. The legacy SQLite timer remains explicitly internal-only. |
 | **External Authorization Record** | None; no real PostgreSQL archive, off-site copy, server, COS, ZPay, paid Provider, external code issuance, gray release or public launch. |
 | **Untested Items** | Provisioned PostgreSQL 16 archive command/library and helper; independent off-site `assert-wal`/`assert-base` retrieval; isolated staging restore with 100 synthetic post-base records; recorded RPO/RTO; PG HA failover/fault drill (T39); real business chain (T40+) |
-| **Lore Commit SHA** | Pending task PR squash SHA |
+| **Lore Commit SHA** | `3245c6fae9fa87a31181ed5f4273d1ac194d742a` (PR #74 squash) |
 
 Full §14 record and staging evidence checklist: `docs/evidence/T38-EVIDENCE.md`.
+
+---
+
+## T39 — Staging Fault Drills
+
+| Field | Value |
+| --- | --- |
+| **Task ID** | T39 / OPS-04 (partial) |
+| **Owner / Reviewer** | QA/OPS (Agent); staging verifier pending |
+| **Branch / Base SHA** | `feat/customer-v3-t39-fault-drills` / `main@3245c6f` |
+| **Upstream Spec Sections** | Task list §7 T39 and §12.7 OPS-04; test spec §8.2; deployment runbook §6.1 |
+| **Failure Test or Regression Lock** | Red→green runbook contract requires a same-SHA staging window, two API services, four Worker services, controlled `systemctl kill` faults, post-failover 100-fact verification, controlled stub-only dependency faults that retain the same idempotency key, RTO/RPO recording, and a prohibition on real ZPay/COS/paid-Provider calls. |
+| **Implementation Result** | A staging-only fault-drill operation card with explicit No-Go/rollback conditions, evidence template and implementation-independent regression lock. It does not inject faults from CI or a developer machine. |
+| **Verification Command and Pass Count** | `uv run python -m pytest tests/test_customer_ha_smoke.py -q` → 36 passed; `ruff check` and `ruff format --check` for the changed test passed. |
+| **Evidence Level** | Repository-side `AUTOMATED_VERIFIED`; T39/OPS-04 remain `[~]`, not `STAGING_VERIFIED` |
+| **Security and Observability** | No credentials, customer records, object URLs or external endpoints are stored. Only controlled stubs are permitted; T37 fired/resolved delivery must be evidenced in staging. |
+| **Migration and Rollback** | No migration. Any invariant breach is a No-Go: remove changed members from LB, stop expansion, preserve audit facts and use the deployment rollback procedure; never amend wallet or ledger rows directly. |
+| **External Authorization Record** | None; no live staging action or real ZPay/COS/paid-Provider request has occurred. |
+| **Untested Items** | Actual two-API/four-Worker failure domains, PostgreSQL HA failover, controlled dependency fault injection, RTO/RPO and external alert delivery all need an authorized staging window. |
+| **Lore Commit SHA** | Pending task PR squash SHA |
+
+Full §14 record and staging checklist: `docs/evidence/T39-EVIDENCE.md`.
 
 ---
 

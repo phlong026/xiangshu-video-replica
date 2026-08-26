@@ -512,6 +512,35 @@ def test_customer_deployment_docs_keep_evidence_levels_honest() -> None:
     assert runbook.index(runtime_dir) < runbook.index(credential_output)
 
 
+def test_t39_fault_drill_runbook_requires_staging_guards_and_business_proof() -> None:
+    runbook = _read("docs/客户版部署与灰度手册.md")
+    ledger = _read("docs/客户版任务清单-V3.md")
+    evidence = _read("docs/evidence/T39-EVIDENCE.md")
+
+    for required in (
+        "T39 staging 故障演练",
+        "同一候选 SHA",
+        "video-replica-api@8001",
+        "video-replica-api@8002",
+        "video-replica-worker@1",
+        "video-replica-worker@4",
+        "systemctl kill",
+        "pitr_recovery_facts verify",
+        "100 条",
+        "受控 stub",
+        "幂等键",
+        "RTO <= 5 分钟",
+        "RPO=0",
+        "不得执行真实",
+        "ZPay、COS 或付费 Provider",
+    ):
+        assert required in runbook
+    assert "| [~] | T39 |" in ledger
+    assert "AUTOMATED_VERIFIED" in evidence
+    assert "STAGING_VERIFIED" in evidence
+    assert "未执行" in evidence
+
+
 def test_customer_desktop_build_is_an_explicit_no_sidecar_target() -> None:
     package = _read("package.json")
     workflow = _read(".github/workflows/ci.yml")
