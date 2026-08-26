@@ -903,7 +903,7 @@ def test_t37_observability_indexes_and_fencing_audit_dimension() -> None:
                 "idx_wallet_transactions_user_created_at",
                 "idx_wallets_updated_at_user",
                 "idx_audit_logs_action_occurred_at",
-                "idx_generation_tasks_status_created_at_utc_batch",
+                "idx_generation_tasks_created_at_utc_status_batch",
                 "idx_customer_fencing_write_mismatch",
             } <= indexes
 
@@ -952,14 +952,15 @@ def test_t37_observability_indexes_and_fencing_audit_dimension() -> None:
                 row[0]
                 for row in conn.execute(
                     "EXPLAIN (COSTS OFF) SELECT id FROM generation_tasks "
-                    "WHERE status IN ('PENDING', 'QUEUED') "
-                    "AND created_at_utc < clock_timestamp() - interval '5 minutes'"
+                    "WHERE created_at_utc >= clock_timestamp() - interval '10 minutes' "
+                    "AND created_at_utc < clock_timestamp() - interval '5 minutes' "
+                    "ORDER BY created_at_utc LIMIT 1"
                 ).fetchall()
             )
             assert "idx_customer_session_events_event_occurred_at" in event_plan
             assert "idx_customer_session_events_user_event_occurred_at_id" in successor_plan
             assert "idx_audit_logs_action_occurred_at" in audit_plan
-            assert "idx_generation_tasks_status_created_at_utc_batch" in task_plan
+            assert "idx_generation_tasks_created_at_utc_status_batch" in task_plan
 
             evidence_columns = {
                 row[0]

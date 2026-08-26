@@ -83,9 +83,9 @@ def upgrade() -> None:
         ["action", "occurred_at", "id"],
     )
     op.create_index(
-        "idx_generation_tasks_status_created_at_utc_batch",
+        "idx_generation_tasks_created_at_utc_status_batch",
         "generation_tasks",
-        ["status", "created_at_utc", "batch_id"],
+        ["created_at_utc", "status", "batch_id"],
     )
     _create_t37_evidence_schema()
 
@@ -325,7 +325,7 @@ def downgrade() -> None:
     op.drop_table("customer_authorization_evidence")
     op.drop_table("ops_alert_state")
     op.drop_index(
-        "idx_generation_tasks_status_created_at_utc_batch",
+        "idx_generation_tasks_created_at_utc_status_batch",
         table_name="generation_tasks",
     )
     op.drop_index("idx_audit_logs_action_occurred_at", table_name="audit_logs")
