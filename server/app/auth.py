@@ -40,8 +40,15 @@ def get_database() -> Iterator[BusinessConnection]:
     internal/desktop lane.
     """
     if os.environ.get(DATABASE_URL_ENV, "").strip():
-        with pg_transaction() as pg_conn:
-            yield BusinessConnection.postgres(pg_conn)
+        from app.permissions import AuditedSecurityDenial, persist_security_denial
+
+        try:
+            with pg_transaction() as pg_conn:
+                yield BusinessConnection.postgres(pg_conn)
+        except AuditedSecurityDenial as exc:
+            # pg_transaction has rolled the denied business request back.
+            persist_security_denial(exc)
+            raise
         return
 
     db_path = os.environ.get("VIDEO_REPLICA_DB_PATH")

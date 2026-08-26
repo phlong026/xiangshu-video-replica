@@ -43,7 +43,7 @@ from pathlib import Path
 
 import psycopg
 import pytest
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
 from app.activation_code_service import (
@@ -51,6 +51,7 @@ from app.activation_code_service import (
     compute_code_digest,
 )
 from app.db_pg import DATABASE_URL_ENV, close_pg_pool
+from app.db_portable import BusinessConnection
 
 DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 SKIP_REASON = "PostgreSQL fixture not reachable; start it via scripts/pg-fixture.sh start"
@@ -131,7 +132,7 @@ def route_state(fencing_dsn: str) -> Iterator[str]:
             "activation_code_deliveries, activation_code_exports, activation_codes, "
             "activation_code_batches, admin_write_idempotency, admin_sessions, "
             "wallet_transactions, recharge_orders, wallets, users, "
-            "projects, audit_logs, "
+            "projects, audit_logs, customer_fencing_write_evidence, "
             "security_rate_limit_counters, security_auth_failures CASCADE"
         )
         conn.execute("SET session_replication_role = DEFAULT")
@@ -757,7 +758,61 @@ def test_other_customer_cannot_touch_a_foreign_project(client: TestClient) -> No
     assert renamed.json()["detail"]["code"] == "PROJECT_FORBIDDEN"
     with psycopg.connect(_fencing_dsn(), autocommit=True) as conn:
         row = conn.execute("SELECT name FROM projects WHERE id = %s", (project_id,)).fetchone()
+        denial = conn.execute(
+            "SELECT actor_user_id, entity_id, metadata_json FROM audit_logs "
+            "WHERE action = 'security.project_denied'"
+        ).fetchone()
     assert str(row[0]) == "Alice Project"
+    assert denial is not None
+    assert (str(denial[0]), str(denial[1])) == (bob["user_id"], project_id)
+    assert json.loads(str(denial[2])) == {"attempted_action": "project.rename"}
+
+
+def test_request_scoped_pg_reads_persist_denials_after_dependency_rollback(
+    client: TestClient,
+) -> None:
+    from app.auth import CurrentUser, get_database
+    from app.permissions import require_project_access
+
+    alice = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    bob = _activated_customer(client, code=SECOND_CODE, fingerprint="fp-b", suffix="b")
+    with psycopg.connect(_fencing_dsn(), autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO projects (id, owner_user_id, name) VALUES (%s, %s, %s)",
+            ("project-read-denial", alice["user_id"], "Alice Read Boundary"),
+        )
+
+    app = FastAPI()
+
+    @app.get("/denied-read")
+    def denied_read(
+        conn: BusinessConnection = Depends(get_database),
+    ) -> None:
+        require_project_access(
+            conn,
+            actor=CurrentUser(
+                id=bob["user_id"],
+                username=bob["user_id"],
+                display_name="Bob",
+                role="customer",
+            ),
+            project_id="project-read-denial",
+            action="project.read",
+        )
+
+    with TestClient(app) as read_client:
+        response = read_client.get("/denied-read")
+
+    assert response.status_code == 403
+    with psycopg.connect(_fencing_dsn(), autocommit=True) as conn:
+        denial_count = int(
+            conn.execute(
+                "SELECT count(*) FROM audit_logs "
+                "WHERE action = 'security.project_denied' "
+                "AND entity_id = 'project-read-denial'"
+            ).fetchone()[0]
+        )
+    assert denial_count == 1
 
 
 def test_unknown_session_token_cannot_create_a_project(client: TestClient) -> None:
@@ -913,7 +968,7 @@ def test_successful_fenced_write_commits_expected_and_verified_epoch_evidence(
         method="POST",
         route="/api/projects",
     ):
-        with fenced_pg_transaction(snapshot) as (conn, _ctx):
+        with fenced_pg_transaction(snapshot, record_write_evidence=True) as (conn, _ctx):
             conn.execute(
                 "INSERT INTO projects (id, owner_user_id, name) VALUES (%s, %s, %s)",
                 ("p-evidence-match", customer["user_id"], "Evidence Match"),
@@ -934,6 +989,26 @@ def test_successful_fenced_write_commits_expected_and_verified_epoch_evidence(
     )
 
 
+def test_successful_fenced_read_does_not_record_committed_write_evidence(
+    client: TestClient,
+) -> None:
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    token = _business_login(client, customer, "idem-login-evidence-read")
+
+    with psycopg.connect(_fencing_dsn(), autocommit=True) as conn:
+        before = int(
+            conn.execute("SELECT count(*) FROM customer_fencing_write_evidence").fetchone()[0]
+        )
+    response = client.get("/api/customer/recharge-orders", headers=_bearer(token))
+    with psycopg.connect(_fencing_dsn(), autocommit=True) as conn:
+        after = int(
+            conn.execute("SELECT count(*) FROM customer_fencing_write_evidence").fetchone()[0]
+        )
+
+    assert response.status_code == 200, response.text
+    assert after == before
+
+
 def test_fencing_evidence_failure_rolls_back_the_business_write(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -952,7 +1027,10 @@ def test_fencing_evidence_failure_rolls_back_the_business_write(
         evidence_unavailable,
     )
     with pytest.raises(RuntimeError, match="evidence unavailable"):
-        with customer_fence.fenced_pg_transaction(snapshot) as (conn, _ctx):
+        with customer_fence.fenced_pg_transaction(
+            snapshot,
+            record_write_evidence=True,
+        ) as (conn, _ctx):
             conn.execute(
                 "INSERT INTO projects (id, owner_user_id, name) VALUES (%s, %s, %s)",
                 ("p-evidence-failure", customer["user_id"], "Evidence Failure"),
@@ -984,7 +1062,10 @@ def test_regressed_verifier_leaves_a_durable_committed_stale_write_fact(
         method="POST",
         route="/api/projects",
     ):
-        with customer_fence.fenced_pg_transaction(snapshot) as (conn, _ctx):
+        with customer_fence.fenced_pg_transaction(
+            snapshot,
+            record_write_evidence=True,
+        ) as (conn, _ctx):
             conn.execute(
                 "INSERT INTO projects (id, owner_user_id, name) VALUES (%s, %s, %s)",
                 ("p-evidence-mismatch", customer["user_id"], "Evidence Mismatch"),

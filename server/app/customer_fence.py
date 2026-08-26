@@ -11,13 +11,14 @@ route uses:
   dependency alone never closes the task). Returns ``None`` when no
   PostgreSQL runtime is configured — the internal/desktop lane has no
   customer sessions and authenticates through ``AuthenticatedUser`` instead.
-- ``fenced_pg_transaction`` — the only customer business-write transaction
-  entry: opens ``pg_transaction()``, re-verifies the session under the row
+- ``fenced_pg_transaction`` — the customer session-verification transaction
+  primitive: opens ``pg_transaction()``, re-verifies the session under the row
   lock inside it (epoch/device/session/lease re-compared, code/device status
   re-checked, lease judged on ``clock_timestamp()``), and yields ``(conn,
-  ctx)`` for the business write. Any business exception rolls the whole
-  transaction back; a ``SessionFencingError`` answers 401 — a request that
-  passed the snapshot can never commit a write after a switch.
+  ctx)``. Business writes opt into same-transaction commit evidence; read-only
+  callers do not. Any business exception rolls the whole transaction back; a
+  ``SessionFencingError`` answers 401 — a request that passed the snapshot can
+  never commit a write after a switch.
 """
 
 from __future__ import annotations
@@ -49,6 +50,7 @@ from app.customer_device_service import _token_digests
 from app.db import connect_database
 from app.db_pg import IsolationLevel, get_pg_pool, pg_transaction
 from app.db_portable import BusinessConnection
+from app.permissions import AuditedSecurityDenial, persist_security_denial
 from app.security_rate_limit import record_auth_failure
 
 AUTHORIZATION_HEADER = "Authorization"
@@ -159,15 +161,16 @@ def fenced_pg_transaction(
     snapshot: CustomerSessionSnapshot,
     *,
     isolation: IsolationLevel | None = None,
+    record_write_evidence: bool = False,
 ) -> Iterator[tuple[psycopg.Connection, CustomerSessionContext]]:
-    """The customer business-write transaction entry (SES-04).
+    """A customer fenced transaction; write callers opt into commit evidence.
 
     Opens the PostgreSQL transaction, runs ``verify_session_context`` under the
     session-row lock inside it (the full §12.4 re-comparison plus the code and
     device status re-check and the ``clock_timestamp()`` lease verdict), then
-    yields ``(conn, ctx)`` for the business write. A business exception rolls
-    the transaction back; a ``SessionFencingError`` raises 401 — so a request
-    that passed the early snapshot can never commit a write after a switch.
+    yields ``(conn, ctx)``. A business exception rolls the transaction back;
+    a ``SessionFencingError`` raises 401. Business-write owners must pass
+    ``record_write_evidence=True``; read-only routes leave it false.
     """
     ops_metrics.set_current_trace_fields(
         user_id=snapshot.expected_user_id,
@@ -189,7 +192,13 @@ def fenced_pg_transaction(
             )
             _observe_fencing_lock_wait(time.perf_counter() - started)
             yield conn, ctx
-            _record_fencing_commit_evidence(conn, snapshot, ctx)
+            if record_write_evidence:
+                _record_fencing_commit_evidence(conn, snapshot, ctx)
+    except AuditedSecurityDenial as exc:
+        # The pg_transaction context has already rolled back the business
+        # transaction. Persist the denial separately so the P1 probe sees it.
+        persist_security_denial(exc)
+        raise
     except SessionFencingError as exc:
         lock_wait_seconds = time.perf_counter() - started
         _record_fencing_reject(exc.code, lock_wait_seconds)
@@ -336,7 +345,11 @@ class BusinessDb:
     ) -> Iterator[tuple[BusinessConnection, CurrentUser]]:
         """One customer business-write transaction + its acting user."""
         if self.snapshot is not None:
-            with fenced_pg_transaction(self.snapshot, isolation=isolation) as (conn, ctx):
+            with fenced_pg_transaction(
+                self.snapshot,
+                isolation=isolation,
+                record_write_evidence=True,
+            ) as (conn, ctx):
                 bc = BusinessConnection.postgres(conn)
                 bc.ctx = ctx
                 actor = CurrentUser(
