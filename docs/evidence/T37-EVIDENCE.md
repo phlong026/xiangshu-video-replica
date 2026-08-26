@@ -59,10 +59,15 @@ fired/resolved 通知演练，也没有验证 PG 复制/慢查询/备份指标�
   摘要和 epoch，不含 user/device/session 明文，且禁止 UPDATE/DELETE/TRUNCATE。
   只有显式业务写事务启用该事实；成功的 wallet/recharge 只读事务不会写表或误报。
 - 双在线按 `(user_id, session_epoch)` 分组，合法 switch 前后的旧/新 epoch 不会
-  被误报；跨用户信号只统计既有 `security.project_denied` / `security.asset_denied`
-  审计事实，不读取 entity/metadata，也不把标识输出到告警。PG 权限拒绝先回滚
-  被拒绝的业务事务，再以预分配幂等 id 在独立事务持久化审计，因此真实 403 不会
-  随业务回滚消失；审计不可用仍不改变公开 403。
+  被误报；跨用户信号合并近期 `security.project_denied` / `security.asset_denied`
+  独立审计和 append-only `customer_authorization_evidence` 中已提交的
+  `actor_digest <> owner_digest`。每个 PostgreSQL 项目及其归属资产的非管理 owner
+  判定会在受保护事务内先写入域隔离 SHA-256 actor/owner 摘要对：正常拒绝随业务
+  回滚，正常 owner 成功按资源类型/摘要对去重，若 owner 判定回归而误放行则不相等
+  摘要与业务写同生共死并持续触发 `cross_user_access`；不存 raw user id、不读
+  entity/metadata、也不把标识输出到告警。PG 权限拒绝先回滚被拒绝的业务事务，再以
+  预分配幂等 id 在独立事务持久化审计，因此真实 403 不会随业务回滚消失；审计
+  不可用仍不改变公开 403。
 - 共享状态只允许固定 11 个 alert 名；journal 只输出状态边沿 `fired` / `resolved`，
   内容只有固定 alert 名、P1、检查时间和数量。全部边沿输出成功后才确认共享状态；
   通知或状态提交失败则由下一次重试。驱动异常只输出固定事件和异常类型，不输出
@@ -73,13 +78,14 @@ fired/resolved 通知演练，也没有验证 PG 复制/慢查询/备份指标�
 - revision 042 为 session event、recharge status、wallet transaction、wallet cursor
   与 audit action/time 增加探针入口索引；扩展安全事实维度为
   `admin:exchange:ip` 与 `session:fencing`，并增加跨主机告警状态、成功写事务 epoch
-  去重证据表及 mismatch 部分索引。
+  去重证据表及 mismatch 部分索引、`customer_authorization_evidence` 摘要对表及其
+  actor/owner mismatch 部分索引。
 - 管理员一次性 exchange credential 在解析前先消费 PostgreSQL 共享 IP 摘要预算；
   多 API 共用限制，原始 IP 不入审计，失败与 429 均留 append-only 事实。
 - 旧 session 的写事务被 fencing 拒绝时追加摘要化安全事实。该审计 hook 或本地
   metrics/log 失败都不能覆盖原 401，也不会输出底层异常消息。
-- 042 downgrade 在上述新维度或成功写事务表已有 append-only 证据时拒绝，避免
-  丢失审计事实；无证据时按逆序删除表/索引并恢复旧约束。SQLite→PG 导入/对账
+- 042 downgrade 在上述新维度、成功写事务表或授权摘要表已有 append-only 证据时
+  拒绝，避免丢失审计事实；无证据时按逆序删除表/索引并恢复旧约束。SQLite→PG 导入/对账
   把该表登记为 PG-only：空表允许，非空即视为目标已有分歧状态并 fail closed。
 
 ## §2 失败测试与回归锁定
@@ -108,16 +114,21 @@ passed。PR #72 connector 首轮 2 P1 + 2 P2 也已先红后绿修复：任意 4
 组合 134、alerts/042 15、customer security 36、health 6、SQLite→PG 35 passed，
 mypy 全绿。第五轮 1 P2 指出 transaction advisory lock 只覆盖重叠执行，无法阻止
 第二 OPS 主机错峰使用自己的状态文件重复发边；现已用 session lock + PG 共享状态
-修复，shared-state/alerts/042/SQLite→PG 51 + ops metrics 20 passed；connector
-最终复审与 PR CI 仍待完成，不在本证据中提前声明通过。
+修复，shared-state/alerts/042/SQLite→PG 51 + ops metrics 20 passed。第六轮 1 P1
+指出只统计拒绝会漏掉 owner 判定回归后实际成功的越权；现以 append-only
+授权摘要对记录每个受保护 PG owner 判定，成功的 actor≠owner 事实与业务事务同生
+共死，并由 `cross_user_access` 合并近期拒绝审计。真实 PG16 alerts/fencing/RBAC/
+migration/reconcile 组合 150 passed；connector 最终复审与该提交 PR CI 仍待完成，
+不在本证据中提前声明通过。
 
 ## §3 当前验证证据
 
 | 门禁 | 结果 |
 | --- | --- |
 | T37 ops metrics | 20 passed（含未匹配路径/未知方法低基数锁及真实业务结果码） |
-| T37 cluster alerts + migration slice | 15 passed（真实 PG16 fixture；含 11 类告警、成功旧写持久事实、通知后状态推进与 append-only 锁） |
-| customer fencing + RBAC | 100 passed（真实 PG16 fixture；fenced write 与 request-scoped read 两类事务回滚后的独立拒绝审计、写/读证据边界、fencing 日志路由模板、SQLite 权限回归） |
+| T37 cluster alerts + migration slice | 15 passed（真实 PG16 fixture；含 11 类告警、成功旧写持久事实、成功越权摘要/拒绝审计合并、通知后状态推进与 append-only 锁） |
+| customer fencing + RBAC | 100 passed（真实 PG16 fixture；fenced write 与 request-scoped read 两类事务回滚后的独立拒绝审计、成功 owner 判定摘要提交、写/读证据边界、fencing 日志路由模板、SQLite 权限回归） |
+| 当前 PG 关联组合 | 150 passed（alerts、fencing、RBAC、042 migration、SQLite→PG/reconcile） |
 | customer security / health | 36 / 6 passed |
 | SQLite→PG 导入与对账 | 35 passed（新增 PG-only 表空/非空边界） |
 | 管理员 exchange 共享限流 | `test_admin_auth.py` 72 passed |
@@ -126,7 +137,7 @@ mypy 全绿。第五轮 1 P2 指出 transaction advisory lock 只覆盖重叠执
 | Secret / client / E2E / Tauri | Pass；client 47 files / 513 tests；E2E Biome 14 files；Cargo fmt/check pass |
 | Ruff / format / mypy | Pass；186 files formatted；72 source files typed |
 | 全仓 `npm run check` | Pass；server 1273 passed / 16 existing warnings，1013.27s；这是本任务唯一一次完整 pytest |
-| 复审 | 独立复审 `APPROVE`：首轮 0C/0H/1M，修复后 0C/0H/0M；PR #72 connector 五轮共 6 P1 + 6 P2 均已回归锁定并修复，最终复审待新提交触发 |
+| 复审 | 独立复审 `APPROVE`：首轮 0C/0H/1M，修复后 0C/0H/0M；PR #72 connector 六轮共 7 P1 + 6 P2 均已回归锁定并修复，最终复审待新提交触发 |
 
 ## §4 安全与可观测边界
 
@@ -153,16 +164,16 @@ mypy 全绿。第五轮 1 P2 指出 transaction advisory lock 只覆盖重叠执
 
 ```text
 任务/工作包：T37（仓库侧）/ OPS-02（部分）/ EXT-02（部分）
-Owner / Reviewer：OPS/后端（Agent 执行）/ 独立复审 APPROVE（首轮 0C/0H/1M；Medium 修复后 0C/0H/0M）+ PR #72 connector（五轮共 6 P1/6 P2，均已先红后绿修复；最终复审待触发）
+Owner / Reviewer：OPS/后端（Agent 执行）/ 独立复审 APPROVE（首轮 0C/0H/1M；Medium 修复后 0C/0H/0M）+ PR #72 connector（六轮共 7 P1/6 P2，均已先红后绿修复；最终复审待触发）
 分支 / 基线 SHA：feat/customer-v3-t37-observability / main@bb545ca
 上游规格段落：客户版任务清单 V3 §7 T37、§12.6 EXT-02、§12.7 OPS-02；测试与验收规格 V3 §8.3；代码开发清单 V3 §3.1–§3.3/§12
 改动文件：server/app/ops_metrics.py、main.py、customer_fence.py、permissions.py、admin_auth/customer session/device/activation/recharge routes、security_rate_limit.py；server/scripts/check_ops_alerts.py、reconcile_customer_billing.py；migration 042 + Alembic logger fix；T37/关联回归测试；customer env、Nginx、ops-alert systemd；部署手册、冻结文件映射与任务/证据账本
-失败测试或回归锁定：request id/structured fields/result code/secret redaction/private metrics；任意未匹配路径统一 `UNMATCHED`、任意扩展 HTTP 方法统一 `OTHER`；legacy/入口拒绝真实业务码；fencing metrics+durable audit+hook failure isolation+匹配路由模板；fencing ISO `T` 事实与截止时间同序比较；仅显式成功写事务记录 expected/verified epoch 同事务事实，只读零事实；PG 跨用户 403 先回滚业务再独立幂等提交审计；11 类 cluster anomaly query、epoch anti-false-positive、cross-user denial source、钱包不一致与队列超时任务均在输出上限前完成异常过滤、bounded/app-table-only SQL、session advisory owner+PG shared state 覆盖并发/错峰主机、通知失败不推进状态；admin exchange PG-shared rate budget；042 index/shared-state/append-only/downgrade guard；fresh PG16 head execution
-实现结果：HTTP 单行结构化日志和安全字段白名单；双 API 私有 Prometheus exporter；fencing reject/wait 指标；单所有者 PG anomaly probe + fired/resolved 共享状态，session lock 覆盖查询提交→通知→共享状态确认，且仅在成功输出所有边后推进状态；P1 面覆盖双在线/资金/账本/旧写拒绝与实际提交/持久越权拒绝/队列/悬挂 reserve；admin exchange 多实例共享限流；部署与接收器演练手册
-验证命令与通过数：ops metrics 20；ops alerts 14；alerts+042 slice 15（真实 PG16 fixture）；shared-state/alerts/042/SQLite→PG 51；customer fencing+RBAC 100；ops metrics/alerts/fencing/RBAC 组合 134；customer security 36；health 6；SQLite→PG 35；admin auth 72（含复审修复）；admin related 93；受影响组合 255；client 513；Cargo pass；ruff/format/mypy pass（186/72）；唯一全量本地 server 1273 passed/16 existing warnings（最终复审锁定前）；独立复审最终 APPROVE、0C/0H/0M；PR #72 connector 五轮 6 P1/6 P2 均已修复，最终复审待触发
+失败测试或回归锁定：request id/structured fields/result code/secret redaction/private metrics；任意未匹配路径统一 `UNMATCHED`、任意扩展 HTTP 方法统一 `OTHER`；legacy/入口拒绝真实业务码；fencing metrics+durable audit+hook failure isolation+匹配路由模板；fencing ISO `T` 事实与截止时间同序比较；仅显式成功写事务记录 expected/verified epoch 同事务事实，只读零事实；PG 跨用户 403 先回滚业务再独立幂等提交审计；PG owner 判定在同事务写入域隔离 actor/owner 摘要，正常拒绝回滚、正常 owner 对去重、任何成功 actor≠owner 成为 append-only P1 事实；11 类 cluster anomaly query、epoch anti-false-positive、cross-user success/denial source、钱包不一致与队列超时任务均在输出上限前完成异常过滤、bounded/app-table-only SQL、session advisory owner+PG shared state 覆盖并发/错峰主机、通知失败不推进状态；admin exchange PG-shared rate budget；042 index/shared-state/append-only/downgrade guard；fresh PG16 head execution
+实现结果：HTTP 单行结构化日志和安全字段白名单；双 API 私有 Prometheus exporter；fencing reject/wait 指标；单所有者 PG anomaly probe + fired/resolved 共享状态，session lock 覆盖查询提交→通知→共享状态确认，且仅在成功输出所有边后推进状态；P1 面覆盖双在线/资金/账本/旧写拒绝与实际提交/成功越权摘要或持久拒绝/队列/悬挂 reserve；admin exchange 多实例共享限流；部署与接收器演练手册
+验证命令与通过数：ops metrics 20；ops alerts 14；alerts+042 slice 15（真实 PG16 fixture）；shared-state/alerts/042/SQLite→PG 51；customer fencing+RBAC 100；ops metrics/alerts/fencing/RBAC 组合 134；当前 alerts/fencing/RBAC/042/SQLite→PG 组合 150；customer security 36；health 6；SQLite→PG 35；admin auth 72（含复审修复）；admin related 93；受影响组合 255；client 513；Cargo pass；ruff/format/mypy pass（186/72）；唯一全量本地 server 1273 passed/16 existing warnings（最终复审锁定前）；独立复审最终 APPROVE、0C/0H/0M；PR #72 connector 六轮 7 P1/6 P2 均已修复，最终复审待触发
 证据层级：AUTOMATED_VERIFIED（仓库侧）；T37/OPS-02/EXT-02 [~]，不得提升 STAGING
 安全与可观测性：日志白名单且无请求体/credential/provider payload；metrics Bearer file + loopback；PG session advisory single owner + shared alert state；counts-only P1 output；真实集中平台/接收器/PG监控/外部费用链未冒充完成
-迁移与回滚：042 PG-only 追加索引、共享告警状态、安全维度与成功写事务 epoch 去重事实；存在新 append-only security/write evidence 时 downgrade fail closed，否则删除临时告警状态并逆序回退；T07 导入对账登记 PG-only 表；应用回滚优先前向修复并保留审计事实
+迁移与回滚：042 PG-only 追加索引、共享告警状态、安全维度、成功写事务 epoch 去重事实与 authorization 摘要对；存在新 append-only security/authorization/write evidence 时 downgrade fail closed，否则删除临时告警状态并逆序回退；T07 导入对账登记 PG-only 表；应用回滚优先前向修复并保留审计事实
 外部授权记录：无；未调用真实 COS/ZPay/Provider，未公网部署/发码/灰度
 未测试项：集中平台与 fired/resolved 演练；PG connection/slow/replication/backup；真实外部调用 task id/费用；staging/real-chain/production
 Lore 提交 SHA：见本任务 PR squash SHA

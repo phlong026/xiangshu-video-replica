@@ -721,19 +721,60 @@ def _business_login(client: TestClient, customer: dict, key: str) -> str:
     return str(resp.json()["session_token"])
 
 
-def test_customer_creates_a_project_owned_by_them(client: TestClient) -> None:
-    """The migrated write route runs the customer's session through
-    fenced_pg_transaction and attributes the project to the session's user."""
+def test_successful_project_owner_authorization_persists_digest_evidence(
+    client: TestClient,
+) -> None:
+    """A successful protected owner operation commits only a bounded digest pair."""
+    from app.auth import CurrentUser, get_database
+    from app.permissions import require_project_access
+
     customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
     token = _business_login(client, customer, "idem-login-a")
     resp = client.post(PROJECTS_PATH, json={"name": "Customer Project"}, headers=_bearer(token))
     assert resp.status_code == 201, resp.text
     assert resp.json()["owner_user_id"] == customer["user_id"]
+    project_id = str(resp.json()["id"])
+
+    app = FastAPI()
+
+    @app.post("/authorized-write")
+    def authorized_write(
+        conn: BusinessConnection = Depends(get_database),
+    ) -> None:
+        require_project_access(
+            conn,
+            actor=CurrentUser(
+                id=customer["user_id"],
+                username=customer["user_id"],
+                display_name="Customer",
+                role="customer",
+            ),
+            project_id=project_id,
+            action="project.rename",
+        )
+        conn.execute(
+            "UPDATE projects SET name = %s WHERE id = %s",
+            ("Customer Project Renamed", project_id),
+        )
+
+    with TestClient(app) as authorized_client:
+        authorized = authorized_client.post("/authorized-write")
+    assert authorized.status_code == 200, authorized.text
     with psycopg.connect(_fencing_dsn(), autocommit=True) as conn:
         row = conn.execute(
-            "SELECT owner_user_id FROM projects WHERE name = 'Customer Project'"
+            "SELECT owner_user_id, name FROM projects WHERE id = %s",
+            (project_id,),
+        ).fetchone()
+        evidence = conn.execute(
+            "SELECT resource_type, actor_digest, owner_digest "
+            "FROM customer_authorization_evidence WHERE resource_type = 'project'"
         ).fetchone()
     assert str(row[0]) == customer["user_id"]
+    assert str(row[1]) == "Customer Project Renamed"
+    assert evidence is not None
+    assert str(evidence[0]) == "project"
+    assert str(evidence[1]) == str(evidence[2])
+    assert customer["user_id"] not in repr(evidence)
 
 
 def test_other_customer_cannot_touch_a_foreign_project(client: TestClient) -> None:

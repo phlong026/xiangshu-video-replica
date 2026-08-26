@@ -1,4 +1,4 @@
-"""T37 — bounded observability indexes and fencing evidence.
+"""T37 — bounded observability indexes plus fencing and authorization evidence.
 
 The cluster-global anomaly probe runs from one session-lock-protected timer,
 not from each API process. Shared ``ops_alert_state`` makes fired/resolved
@@ -88,10 +88,66 @@ def upgrade() -> None:
             "'double_online', 'duplicate_charge', 'duplicate_provider_trade_no', "
             "'paid_without_charge', 'charge_without_paid_source', "
             "'wallet_balance_mismatch', 'fencing_rejected', "
-            "'stale_write_committed', 'cross_user_access_denied', "
+            "'stale_write_committed', 'cross_user_access', "
             "'queue_starvation', 'dangling_reserve')",
             name="ck_ops_alert_state_name",
         ),
+    )
+    op.create_table(
+        "customer_authorization_evidence",
+        sa.Column("id", sa.Text(), primary_key=True),
+        sa.Column("request_id", sa.Text(), nullable=False),
+        sa.Column("resource_type", sa.Text(), nullable=False),
+        sa.Column("actor_digest", sa.Text(), nullable=False),
+        sa.Column("owner_digest", sa.Text(), nullable=False),
+        sa.Column(
+            "observed_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.text("clock_timestamp()"),
+        ),
+        sa.CheckConstraint(
+            "char_length(request_id) BETWEEN 1 AND 128",
+            name="ck_customer_authorization_request_id",
+        ),
+        sa.CheckConstraint(
+            "resource_type IN ('project', 'asset')",
+            name="ck_customer_authorization_resource_type",
+        ),
+        sa.CheckConstraint(
+            "actor_digest ~ '^[0-9a-f]{64}$' AND owner_digest ~ '^[0-9a-f]{64}$'",
+            name="ck_customer_authorization_digests",
+        ),
+        sa.UniqueConstraint(
+            "resource_type",
+            "actor_digest",
+            "owner_digest",
+            name="uq_customer_authorization_digest_pair",
+        ),
+    )
+    op.create_index(
+        "idx_customer_authorization_mismatch",
+        "customer_authorization_evidence",
+        ["observed_at", "id"],
+        postgresql_where=sa.text("actor_digest <> owner_digest"),
+    )
+    op.execute(
+        """
+        CREATE FUNCTION customer_authorization_evidence_refuse_rewrite()
+        RETURNS trigger AS $refuse$
+        BEGIN
+            RAISE EXCEPTION 'customer_authorization_evidence is append-only';
+        END;
+        $refuse$ LANGUAGE plpgsql;
+
+        CREATE TRIGGER trg_customer_authorization_evidence_append_only
+        BEFORE UPDATE OR DELETE ON customer_authorization_evidence
+        FOR EACH ROW EXECUTE FUNCTION customer_authorization_evidence_refuse_rewrite();
+
+        CREATE TRIGGER trg_customer_authorization_evidence_no_truncate
+        BEFORE TRUNCATE ON customer_authorization_evidence
+        FOR EACH STATEMENT EXECUTE FUNCTION refuse_truncate_of_audit_tables();
+        """
     )
     op.create_table(
         "customer_fencing_write_evidence",
@@ -161,13 +217,14 @@ def downgrade() -> None:
             "SELECT EXISTS ("
             "SELECT 1 FROM security_auth_failures "
             "WHERE dimension IN ('admin:exchange:ip', 'session:fencing') LIMIT 1) "
-            "OR EXISTS (SELECT 1 FROM customer_fencing_write_evidence LIMIT 1)"
+            "OR EXISTS (SELECT 1 FROM customer_fencing_write_evidence LIMIT 1) "
+            "OR EXISTS (SELECT 1 FROM customer_authorization_evidence LIMIT 1)"
         )
     ).scalar()
     if has_t37_evidence:
         raise RuntimeError(
             "cannot downgrade 042_t37_observability_indexes: append-only "
-            "T37 security or committed-write evidence exists and the prior "
+            "T37 security, authorization, or committed-write evidence exists and the prior "
             "schema cannot represent it. Keep revision 042 or export and retain "
             "the security audit trail before a manually supervised rollback."
         )
@@ -186,6 +243,20 @@ def downgrade() -> None:
         table_name="customer_fencing_write_evidence",
     )
     op.drop_table("customer_fencing_write_evidence")
+    op.execute(
+        "DROP TRIGGER IF EXISTS trg_customer_authorization_evidence_no_truncate "
+        "ON customer_authorization_evidence"
+    )
+    op.execute(
+        "DROP TRIGGER IF EXISTS trg_customer_authorization_evidence_append_only "
+        "ON customer_authorization_evidence"
+    )
+    op.execute("DROP FUNCTION IF EXISTS customer_authorization_evidence_refuse_rewrite()")
+    op.drop_index(
+        "idx_customer_authorization_mismatch",
+        table_name="customer_authorization_evidence",
+    )
+    op.drop_table("customer_authorization_evidence")
     op.drop_table("ops_alert_state")
     op.drop_index("idx_audit_logs_action_created_at", table_name="audit_logs")
     op.drop_index("idx_wallets_updated_at_user", table_name="wallets")

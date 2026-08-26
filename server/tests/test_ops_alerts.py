@@ -39,7 +39,7 @@ def test_cluster_probe_covers_the_frozen_alert_surface(
         "wallet_balance_mismatch": 6,
         "fencing_rejected": 7,
         "stale_write_committed": 8,
-        "cross_user_access_denied": 9,
+        "cross_user_access": 9,
         "queue_starvation": 10,
         "dangling_reserve": 11,
     }
@@ -87,11 +87,13 @@ def test_double_online_groups_by_session_epoch_to_avoid_switch_false_positives()
     assert "group by user_id, session_epoch" in normalized
 
 
-def test_cross_user_alert_uses_only_durable_denial_audit_facts() -> None:
+def test_cross_user_alert_combines_success_mismatches_and_durable_denials() -> None:
     from scripts.check_ops_alerts import ALERT_QUERIES
 
-    normalized = " ".join(ALERT_QUERIES["cross_user_access_denied"].lower().split())
+    normalized = " ".join(ALERT_QUERIES["cross_user_access"].lower().split())
     assert "from audit_logs" in normalized
+    assert "from customer_authorization_evidence" in normalized
+    assert "actor_digest \u003c\u003e owner_digest" in normalized
     assert "security.project_denied" in normalized
     assert "security.asset_denied" in normalized
     assert "metadata_json" not in normalized
@@ -408,6 +410,13 @@ def test_all_cluster_queries_execute_on_a_fresh_pg16_database(tmp_path: Path) ->
                 "VALUES ('cross-user-t37', NULL, 'security.project_denied', "
                 "'project', 'redacted-by-alert-query', '{}', clock_timestamp()::text)"
             )
+            conn.execute(
+                "INSERT INTO customer_authorization_evidence "
+                "(id, request_id, resource_type, actor_digest, owner_digest) "
+                "VALUES ('cross-user-success-t37', 'cross-user-success-request-t37', "
+                "'project', %s, %s)",
+                ("c" * 64, "d" * 64),
+            )
             conn.commit()
 
         emitted: list[str] = []
@@ -423,14 +432,14 @@ def test_all_cluster_queries_execute_on_a_fresh_pg16_database(tmp_path: Path) ->
             for item in payloads
         )
         assert any(
-            item["alert"] == "cross_user_access_denied" and item["transition"] == "fired"
+            item["alert"] == "cross_user_access" and item["transition"] == "fired"
             for item in payloads
         )
         with psycopg.connect(dsn) as conn:
             shared_state = alerts.load_state(conn)
             assert shared_state["fencing_rejected"] is True
             assert shared_state["stale_write_committed"] is True
-            assert shared_state["cross_user_access_denied"] is True
+            assert shared_state["cross_user_access"] is True
             staggered: list[str] = []
             assert alerts.run_owned_probe(conn, emit=staggered.append) == ()
             assert staggered == []

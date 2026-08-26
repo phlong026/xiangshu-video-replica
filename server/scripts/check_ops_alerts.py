@@ -180,13 +180,24 @@ ALERT_QUERIES: dict[str, str] = {
             LIMIT %s
         ) AS anomalies
     """,
-    "cross_user_access_denied": """
+    "cross_user_access": """
         SELECT count(*) FROM (
-            SELECT id
-            FROM audit_logs
-            WHERE action IN ('security.project_denied', 'security.asset_denied')
-              AND created_at >= %s
-            ORDER BY created_at DESC, id
+            SELECT id FROM (
+                SELECT id
+                FROM customer_authorization_evidence
+                WHERE actor_digest <> owner_digest
+                ORDER BY observed_at, id
+                LIMIT %s
+            ) AS successful_mismatches
+            UNION ALL
+            SELECT id FROM (
+                SELECT id
+                FROM audit_logs
+                WHERE action IN ('security.project_denied', 'security.asset_denied')
+                  AND created_at >= %s
+                ORDER BY created_at DESC, id
+                LIMIT %s
+            ) AS denied_attempts
             LIMIT %s
         ) AS anomalies
     """,
@@ -296,8 +307,10 @@ def collect_observations(
             config.row_limit,
         ),
         "stale_write_committed": (config.row_limit,),
-        "cross_user_access_denied": (
+        "cross_user_access": (
+            config.row_limit,
             _cutoff(current, config.security_window_seconds),
+            config.row_limit,
             config.row_limit,
         ),
         "queue_starvation": (

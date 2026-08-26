@@ -939,6 +939,36 @@ def test_t37_observability_indexes_and_fencing_audit_dimension() -> None:
                     "VALUES ('unbounded_dynamic_name', true)"
                 )
 
+            authorization_columns = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = 'public' "
+                    "AND table_name = 'customer_authorization_evidence'"
+                ).fetchall()
+            }
+            assert {
+                "id",
+                "request_id",
+                "resource_type",
+                "actor_digest",
+                "owner_digest",
+                "observed_at",
+            } <= authorization_columns
+            conn.execute(
+                "INSERT INTO customer_authorization_evidence "
+                "(id, request_id, resource_type, actor_digest, owner_digest) "
+                "VALUES ('authz-evidence-t37', 'authz-request-t37', 'asset', %s, %s)",
+                ("a" * 64, "b" * 64),
+            )
+            for mutation in (
+                "UPDATE customer_authorization_evidence SET owner_digest = actor_digest",
+                "DELETE FROM customer_authorization_evidence",
+                "TRUNCATE customer_authorization_evidence",
+            ):
+                with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
+                    conn.execute(mutation)
+
             conn.execute(
                 "INSERT INTO customer_fencing_write_evidence "
                 "(id, request_id, subject_digest, expected_session_epoch, "
