@@ -462,6 +462,15 @@ def _safe_log_request(
         logger.warning("request log emission failed (%s)", type(log_error).__name__)
 
 
+async def unhandled_exception_response(request: Request, _: Exception) -> Response:
+    """Return FastAPI's redacted 500 body while preserving correlation."""
+    response = PlainTextResponse("Internal Server Error", status_code=500)
+    request_id = request.headers.get(REQUEST_ID_HEADER, "").strip()
+    if _is_valid_request_id(request_id):
+        response.headers[REQUEST_ID_HEADER] = request_id
+    return response
+
+
 async def request_observability_middleware(
     request: Request,
     call_next: Callable[[Request], Awaitable[Response]],

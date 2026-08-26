@@ -42,6 +42,7 @@ from app.ops_metrics import (
     metrics_response,
     request_observability_middleware,
     set_current_result_code,
+    unhandled_exception_response,
 )
 from app.payment_routes import router as payment_router
 from app.rbac_routes import router as rbac_router
@@ -131,6 +132,7 @@ async def _business_http_exception_dispatch(request: Request, error: Exception) 
 
 app = VideoReplicaAPI(title="Video Replica API", version="0.1.0", lifespan=_lifespan)
 app.add_exception_handler(HTTPException, _business_http_exception_dispatch)
+app.add_exception_handler(Exception, unhandled_exception_response)
 
 
 def _business_error_response(*, status_code: int, code: str, message: str) -> JSONResponse:

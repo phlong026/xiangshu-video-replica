@@ -19,6 +19,7 @@ from app.ops_metrics import (
     reset_metrics_for_tests,
     set_current_result_code,
     set_current_trace_fields,
+    unhandled_exception_response,
 )
 
 
@@ -31,6 +32,7 @@ def clean_metrics_registry() -> Iterator[None]:
 
 def _ops_app(*, ready: bool = True) -> FastAPI:
     app = FastAPI()
+    app.add_exception_handler(Exception, unhandled_exception_response)
     app.middleware("http")(request_observability_middleware)
 
     @app.get("/echo")
@@ -85,6 +87,10 @@ def _ops_app(*, ready: bool = True) -> FastAPI:
     @app.get("/metrics")
     def metrics(request: Request) -> JSONResponse:
         return metrics_response(request, readiness_check=lambda: ready)
+
+    @app.get("/unhandled")
+    async def unhandled() -> None:
+        raise RuntimeError("test failure")
 
     return app
 
@@ -169,6 +175,21 @@ def test_cors_preflight_is_observed_like_every_other_http_request(
     assert payload["route"] == "UNMATCHED"
     metrics = render_metrics_document_for_tests(is_ready=True)
     assert 'method="OPTIONS"' in metrics
+
+
+def test_unhandled_500_keeps_the_request_id_for_log_correlation(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    app = _ops_app()
+    with caplog.at_level(logging.INFO, logger="app.ops_metrics"):
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.get("/unhandled", headers={REQUEST_ID_HEADER: "req-unhandled"})
+
+    assert response.status_code == 500
+    assert response.headers[REQUEST_ID_HEADER] == "req-unhandled"
+    payload = _last_log_payload(caplog)
+    assert payload["request_id"] == "req-unhandled"
+    assert payload["result_code"] == "UNHANDLED_EXCEPTION"
 
 
 def test_shared_permission_denials_publish_the_business_result_code(

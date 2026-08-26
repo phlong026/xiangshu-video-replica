@@ -846,6 +846,52 @@ def test_real_pg_import_reconcile_repeat_and_rollback(tmp_path: Path) -> None:
 
 
 @pg_only
+def test_real_pg_import_preserves_t37_typed_companion_timestamps(tmp_path: Path) -> None:
+    import psycopg
+
+    source = tmp_path / "source.db"
+    _create_head_source(source)
+    with sqlite3.connect(source) as conn:
+        conn.execute(
+            "UPDATE generation_tasks SET created_at = ? WHERE id = ?",
+            ("2024-01-02 03:04:05", "t-t07"),
+        )
+        conn.execute(
+            """
+            INSERT INTO audit_logs (
+                id, actor_user_id, action, entity_type, entity_id, metadata_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "old-denial-t07",
+                "u-t07",
+                "security.project_denied",
+                "project",
+                "p-t07",
+                "{}",
+                "2024-01-02 03:04:05",
+            ),
+        )
+    snapshot = create_readonly_snapshot(source, tmp_path / "snapshot.db")
+    name = "t07_t37_timestamps"
+    dsn = _create_database(name)
+    try:
+        _upgrade_pg(dsn)
+        assert migrate_snapshot(snapshot, dsn).reconciliation.ok
+        with psycopg.connect(dsn) as conn:
+            audit_at = conn.execute(
+                "SELECT occurred_at FROM audit_logs WHERE id = 'old-denial-t07'"
+            ).fetchone()[0]
+            task_at = conn.execute(
+                "SELECT created_at_utc FROM generation_tasks WHERE id = 't-t07'"
+            ).fetchone()[0]
+        assert audit_at.isoformat() == "2024-01-02T03:04:05+00:00"
+        assert task_at.isoformat() == "2024-01-02T03:04:05+00:00"
+    finally:
+        _drop_database(name)
+
+
+@pg_only
 def test_real_pg_divergent_target_and_revision_mismatch_fail_closed(tmp_path: Path) -> None:
     import psycopg
 

@@ -49,6 +49,14 @@ ImportStatus = Literal["imported", "already_reconciled"]
 SERVER_DIR = Path(__file__).resolve().parent.parent
 SEED_TABLES = frozenset({"runtime_settings"})
 MIGRATION_ADVISORY_LOCK_KEYS = (0x543037, 0x44423035)
+# 042 materializes UTC timestamps for two shared tables. T07 runs before the
+# customer-production line opens, but its testable cutover contract permits an
+# import into the current PG head. Keep these companions equal to their legacy
+# source facts instead of letting the PG default make old work look recent.
+PG_DERIVED_IMPORT_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
+    "audit_logs": (("occurred_at", "created_at"),),
+    "generation_tasks": (("created_at_utc", "created_at"),),
+}
 
 
 class MigrationSafetyError(RuntimeError):
@@ -331,6 +339,17 @@ def _convert_value(value: object, target_type: str) -> object:
     return value
 
 
+def _legacy_timestamp_as_utc(value: object) -> datetime:
+    """Interpret offset-free SQLite timestamps as UTC under the T07 contract."""
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError as error:
+        raise MigrationSafetyError("invalid legacy timestamp in SQLite source") from error
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
 def _sqlite_row_batches(
     sqlite_conn: sqlite3.Connection,
     table: str,
@@ -357,16 +376,18 @@ def _insert_table_rows(
     *,
     batch_size: int = 1000,
 ) -> int:
-    placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in columns)
+    derived_columns = PG_DERIVED_IMPORT_COLUMNS.get(table, ())
+    insert_columns = tuple(columns) + tuple(column for column, _source in derived_columns)
+    placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in insert_columns)
     base = sql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
         sql.Identifier(table),
-        sql.SQL(", ").join(sql.Identifier(column) for column in columns),
+        sql.SQL(", ").join(sql.Identifier(column) for column in insert_columns),
         placeholders,
     )
     if table in SEED_TABLES:
         if not primary_key:
             raise MigrationSafetyError(f"seed table {table!r} has no primary key")
-        update_columns = [column for column in columns if column not in primary_key]
+        update_columns = [column for column in insert_columns if column not in primary_key]
         if update_columns:
             updates = sql.SQL(", ").join(
                 sql.SQL("{} = EXCLUDED.{}").format(sql.Identifier(column), sql.Identifier(column))
@@ -386,6 +407,9 @@ def _insert_table_rows(
         for rows in _sqlite_row_batches(sqlite_conn, table, columns, batch_size):
             parameters = [
                 tuple(_convert_value(row[column], target_types[column]) for column in columns)
+                + tuple(
+                    _legacy_timestamp_as_utc(row[source]) for _column, source in derived_columns
+                )
                 for row in rows
             ]
             cursor.executemany(query, parameters)
