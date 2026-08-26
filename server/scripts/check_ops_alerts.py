@@ -17,19 +17,15 @@ import argparse
 import json
 import os
 import sys
-import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Literal
 
 import psycopg
 
 from app.db_pg import DatabaseMode, resolve_database_config, validate_customer_production
 
-DEFAULT_STATE_FILE = Path("/var/lib/video-replica/ops-alerts-state.json")
-STATE_FILE_ENV = "VIDEO_REPLICA_OPS_ALERT_STATE_FILE"
 ADVISORY_LOCK_KEY = 0x56525433374F5053  # "VRT37OPS", signed-int64 safe.
 
 
@@ -341,43 +337,24 @@ def transition_alerts(
     return tuple(transitions), current
 
 
-def load_state(path: Path) -> dict[str, bool]:
-    if not path.exists():
-        return {}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise RuntimeError("ops alert state file is invalid") from exc
-    if not isinstance(payload, dict) or any(
-        not isinstance(key, str) or not isinstance(value, bool) for key, value in payload.items()
-    ):
-        raise RuntimeError("ops alert state file is invalid")
-    return dict(payload)
+def load_state(conn: psycopg.Connection[object]) -> dict[str, bool]:
+    rows = conn.execute(
+        "SELECT alert_name, active FROM ops_alert_state ORDER BY alert_name"
+    ).fetchall()
+    return {str(row[0]): bool(row[1]) for row in rows}
 
 
-def save_state(path: Path, state: dict[str, bool]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as handle:
-            temporary_path = Path(handle.name)
-            json.dump(state, handle, sort_keys=True, separators=(",", ":"))
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(temporary_path, 0o600)
-        os.replace(temporary_path, path)
-        os.chmod(path, 0o600)
-    finally:
-        if temporary_path is not None and temporary_path.exists():
-            temporary_path.unlink()
+def save_state(conn: psycopg.Connection[object], state: dict[str, bool]) -> None:
+    for name, active in sorted(state.items()):
+        if name not in ALERT_QUERIES:
+            raise RuntimeError("ops alert state contains an unknown alert")
+        conn.execute(
+            "INSERT INTO ops_alert_state (alert_name, active, updated_at) "
+            "VALUES (%s, %s, clock_timestamp()) "
+            "ON CONFLICT (alert_name) DO UPDATE "
+            "SET active = EXCLUDED.active, updated_at = EXCLUDED.updated_at",
+            (name, active),
+        )
 
 
 def render_transition(transition: AlertTransition, *, checked_at: datetime) -> str:
@@ -393,9 +370,9 @@ def render_transition(transition: AlertTransition, *, checked_at: datetime) -> s
 
 
 def publish_probe_result(
+    conn: psycopg.Connection[object],
     result: ProbeResult,
     *,
-    state_file: Path,
     emit: Callable[[str], None],
 ) -> None:
     """Publish every edge before acknowledging it in the durable state.
@@ -407,24 +384,21 @@ def publish_probe_result(
     for line in result.lines:
         emit(line)
     if result.next_state is not None:
-        save_state(state_file, result.next_state)
+        save_state(conn, result.next_state)
+        conn.commit()
 
 
 def run_probe(
     conn: psycopg.Connection[object],
     *,
-    state_file: Path,
     config: ProbeConfig | None = None,
 ) -> ProbeResult:
     config = config or ProbeConfig()
-    lock_row = conn.execute("SELECT pg_try_advisory_xact_lock(%s)", (ADVISORY_LOCK_KEY,)).fetchone()
-    if lock_row is None or not bool(lock_row[0]):
-        return ProbeResult(lines=(), next_state=None)
     conn.execute(
         "SELECT set_config('statement_timeout', %s, true)",
         (f"{config.statement_timeout_ms}ms",),
     )
-    previous = load_state(state_file)
+    previous = load_state(conn)
     observations = collect_observations(conn, config)
     transitions, current = transition_alerts(previous, observations)
     checked_at = _server_now(conn)
@@ -432,6 +406,42 @@ def run_probe(
         lines=tuple(render_transition(item, checked_at=checked_at) for item in transitions),
         next_state=current,
     )
+
+
+def run_owned_probe(
+    conn: psycopg.Connection[object],
+    *,
+    emit: Callable[[str], None],
+    config: ProbeConfig | None = None,
+) -> tuple[str, ...]:
+    """Hold one cluster owner across query commit, publication and state ack."""
+    lock_row = conn.execute(
+        "SELECT pg_try_advisory_lock(%s)",
+        (ADVISORY_LOCK_KEY,),
+    ).fetchone()
+    if lock_row is None or not bool(lock_row[0]):
+        return ()
+
+    failed = False
+    try:
+        result = run_probe(conn, config=config)
+        # Prove all reads completed and the connection can commit before an
+        # edge becomes externally visible. The session lock survives commit.
+        conn.commit()
+        publish_probe_result(conn, result, emit=emit)
+        return result.lines
+    except Exception:
+        failed = True
+        conn.rollback()
+        raise
+    finally:
+        try:
+            conn.execute("SELECT pg_advisory_unlock(%s)", (ADVISORY_LOCK_KEY,))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            if not failed:
+                raise
 
 
 def _positive_int_env(name: str, default: int) -> int:
@@ -462,28 +472,22 @@ def config_from_env() -> ProbeConfig:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the T37 cluster anomaly probe")
-    parser.add_argument(
-        "--state-file",
-        type=Path,
-        default=Path(os.environ.get(STATE_FILE_ENV, str(DEFAULT_STATE_FILE))),
-    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+    _parser().parse_args(argv)
     try:
         database = resolve_database_config()
         validate_customer_production(database)
         if database.mode is not DatabaseMode.POSTGRESQL or database.dsn is None:
             raise RuntimeError("ops alert probe requires PostgreSQL")
         with psycopg.connect(database.dsn) as conn:
-            result = run_probe(conn, state_file=args.state_file, config=config_from_env())
-        publish_probe_result(
-            result,
-            state_file=args.state_file,
-            emit=lambda line: print(line, flush=True),
-        )
+            run_owned_probe(
+                conn,
+                config=config_from_env(),
+                emit=lambda line: print(line, flush=True),
+            )
         return 0
     except Exception as exc:
         # Driver messages may contain DSN fragments or business values. Emit

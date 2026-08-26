@@ -922,6 +922,23 @@ def test_t37_observability_indexes_and_fencing_audit_dimension() -> None:
                 "committed_at",
             } <= evidence_columns
 
+            alert_state_columns = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = 'public' AND table_name = 'ops_alert_state'"
+                ).fetchall()
+            }
+            assert {"alert_name", "active", "updated_at"} <= alert_state_columns
+            conn.execute(
+                "INSERT INTO ops_alert_state (alert_name, active) VALUES ('double_online', false)"
+            )
+            with pytest.raises(psycopg.errors.CheckViolation):
+                conn.execute(
+                    "INSERT INTO ops_alert_state (alert_name, active) "
+                    "VALUES ('unbounded_dynamic_name', true)"
+                )
+
             conn.execute(
                 "INSERT INTO customer_fencing_write_evidence "
                 "(id, request_id, subject_digest, expected_session_epoch, "

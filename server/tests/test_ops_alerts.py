@@ -175,31 +175,58 @@ def test_transition_engine_emits_only_fired_and_resolved_edges() -> None:
     assert state == {"double_online": False, "fencing_rejected": True}
 
 
-def test_state_file_is_atomic_private_and_rejects_corruption(tmp_path: Path) -> None:
+def test_alert_state_is_loaded_and_saved_in_shared_postgresql() -> None:
     from scripts.check_ops_alerts import load_state, save_state
 
-    target = tmp_path / "ops-alerts.json"
-    save_state(target, {"double_online": True, "wallet_balance_mismatch": False})
+    calls: list[tuple[str, tuple[object, ...]]] = []
 
-    assert load_state(target) == {
+    class _Cursor:
+        def fetchall(self) -> list[tuple[str, bool]]:
+            return [("double_online", True), ("wallet_balance_mismatch", False)]
+
+    class _Connection:
+        def execute(self, query: str, parameters: tuple[object, ...] = ()) -> _Cursor:
+            calls.append((" ".join(query.split()), parameters))
+            return _Cursor()
+
+    conn = _Connection()
+    assert load_state(conn) == {
         "double_online": True,
         "wallet_balance_mismatch": False,
     }
-    if os.name != "nt":
-        assert target.stat().st_mode & 0o777 == 0o600
-    assert not list(tmp_path.glob("*.tmp"))
+    save_state(conn, {"double_online": False, "fencing_rejected": True})
 
-    target.write_text("{not-json", encoding="utf-8")
-    with pytest.raises(RuntimeError, match="state file is invalid"):
-        load_state(target)
+    assert "FROM ops_alert_state" in calls[0][0]
+    writes = calls[1:]
+    assert len(writes) == 2
+    assert all("INSERT INTO ops_alert_state" in query for query, _ in writes)
+    assert all("ON CONFLICT (alert_name) DO UPDATE" in query for query, _ in writes)
+    assert {parameters for _, parameters in writes} == {
+        ("double_online", False),
+        ("fencing_rejected", True),
+    }
 
 
-def test_alert_state_advances_only_after_every_transition_is_published(tmp_path: Path) -> None:
-    from scripts.check_ops_alerts import ProbeResult, load_state, publish_probe_result, save_state
+def test_alert_state_advances_only_after_every_transition_is_published(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import check_ops_alerts as alerts
 
-    target = tmp_path / "ops-alerts.json"
-    save_state(target, {"double_online": False})
-    result = ProbeResult(
+    saved: list[dict[str, bool]] = []
+    monkeypatch.setattr(
+        alerts,
+        "save_state",
+        lambda _conn, state: saved.append(dict(state)),
+    )
+
+    class _Connection:
+        commits = 0
+
+        def commit(self) -> None:
+            self.commits += 1
+
+    conn = _Connection()
+    result = alerts.ProbeResult(
         lines=("first-transition", "second-transition"),
         next_state={"double_online": True},
     )
@@ -211,13 +238,15 @@ def test_alert_state_advances_only_after_every_transition_is_published(tmp_path:
             raise RuntimeError("receiver unavailable")
 
     with pytest.raises(RuntimeError, match="receiver unavailable"):
-        publish_probe_result(result, state_file=target, emit=fail_during_publish)
+        alerts.publish_probe_result(conn, result, emit=fail_during_publish)
 
     assert emitted == ["first-transition", "second-transition"]
-    assert load_state(target) == {"double_online": False}
+    assert saved == []
+    assert conn.commits == 0
 
-    publish_probe_result(result, state_file=target, emit=lambda _line: None)
-    assert load_state(target) == {"double_online": True}
+    alerts.publish_probe_result(conn, result, emit=lambda _line: None)
+    assert saved == [{"double_online": True}]
+    assert conn.commits == 1
 
 
 def test_transition_output_never_contains_subjects_or_connection_details() -> None:
@@ -246,11 +275,10 @@ def test_transition_output_never_contains_subjects_or_connection_details() -> No
         assert forbidden not in rendered
 
 
-def test_advisory_lock_loss_skips_without_mutating_state(tmp_path: Path) -> None:
+def test_advisory_lock_loss_skips_without_collecting_or_publishing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from scripts import check_ops_alerts as alerts
-
-    state_file = tmp_path / "ops-alerts.json"
-    alerts.save_state(state_file, {"double_online": True})
 
     class _Cursor:
         def fetchone(self) -> tuple[bool]:
@@ -260,10 +288,12 @@ def test_advisory_lock_loss_skips_without_mutating_state(tmp_path: Path) -> None
         def execute(self, _query: str, _parameters: tuple[object, ...]) -> _Cursor:
             return _Cursor()
 
-    result = alerts.run_probe(_Connection(), state_file=state_file)
-    assert result.lines == ()
-    assert result.next_state is None
-    assert alerts.load_state(state_file) == {"double_online": True}
+    monkeypatch.setattr(
+        alerts,
+        "run_probe",
+        lambda *_args, **_kwargs: pytest.fail("non-owner must not collect observations"),
+    )
+    assert alerts.run_owned_probe(_Connection(), emit=lambda _line: None) == ()
 
 
 def test_all_cluster_queries_execute_on_a_fresh_pg16_database(tmp_path: Path) -> None:
@@ -380,11 +410,9 @@ def test_all_cluster_queries_execute_on_a_fresh_pg16_database(tmp_path: Path) ->
             )
             conn.commit()
 
-        state_file = tmp_path / "ops-alerts.json"
-        with psycopg.connect(dsn) as conn:
-            result = alerts.run_probe(conn, state_file=state_file)
         emitted: list[str] = []
-        alerts.publish_probe_result(result, state_file=state_file, emit=emitted.append)
+        with psycopg.connect(dsn) as conn:
+            assert alerts.run_owned_probe(conn, emit=emitted.append) == tuple(emitted)
         payloads = [json.loads(line) for line in emitted]
         assert any(
             item["alert"] == "fencing_rejected" and item["transition"] == "fired"
@@ -398,9 +426,14 @@ def test_all_cluster_queries_execute_on_a_fresh_pg16_database(tmp_path: Path) ->
             item["alert"] == "cross_user_access_denied" and item["transition"] == "fired"
             for item in payloads
         )
-        assert alerts.load_state(state_file)["fencing_rejected"] is True
-        assert alerts.load_state(state_file)["stale_write_committed"] is True
-        assert alerts.load_state(state_file)["cross_user_access_denied"] is True
+        with psycopg.connect(dsn) as conn:
+            shared_state = alerts.load_state(conn)
+            assert shared_state["fencing_rejected"] is True
+            assert shared_state["stale_write_committed"] is True
+            assert shared_state["cross_user_access_denied"] is True
+            staggered: list[str] = []
+            assert alerts.run_owned_probe(conn, emit=staggered.append) == ()
+            assert staggered == []
     finally:
         with psycopg.connect(admin_dsn, autocommit=True) as admin:
             admin.execute(f'DROP DATABASE IF EXISTS "{database_name}" WITH (FORCE)')

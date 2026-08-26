@@ -1,9 +1,11 @@
 """T37 — bounded observability indexes and fencing evidence.
 
-The cluster-global anomaly probe runs from one advisory-lock-protected timer,
-not from each API process. This revision gives its application-table queries
-index-backed entry points and extends the existing append-only
-``security_auth_failures`` fact stream with ``session:fencing``. A compact,
+The cluster-global anomaly probe runs from one session-lock-protected timer,
+not from each API process. Shared ``ops_alert_state`` makes fired/resolved
+edges consistent even if two OPS hosts run at different times. This revision
+also gives its application-table queries index-backed entry points and extends
+the existing append-only ``security_auth_failures`` fact stream with
+``session:fencing``. A compact,
 append-only fencing-write table keeps one expected/verified epoch fact per
 session tuple so the probe can detect a stale write that actually committed.
 No ``pg_monitor`` or ``pg_stat_*`` privilege is required.
@@ -70,6 +72,26 @@ def upgrade() -> None:
         "idx_audit_logs_action_created_at",
         "audit_logs",
         ["action", "created_at"],
+    )
+    op.create_table(
+        "ops_alert_state",
+        sa.Column("alert_name", sa.Text(), primary_key=True),
+        sa.Column("active", sa.Boolean(), nullable=False),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.text("clock_timestamp()"),
+        ),
+        sa.CheckConstraint(
+            "alert_name IN ("
+            "'double_online', 'duplicate_charge', 'duplicate_provider_trade_no', "
+            "'paid_without_charge', 'charge_without_paid_source', "
+            "'wallet_balance_mismatch', 'fencing_rejected', "
+            "'stale_write_committed', 'cross_user_access_denied', "
+            "'queue_starvation', 'dangling_reserve')",
+            name="ck_ops_alert_state_name",
+        ),
     )
     op.create_table(
         "customer_fencing_write_evidence",
@@ -164,6 +186,7 @@ def downgrade() -> None:
         table_name="customer_fencing_write_evidence",
     )
     op.drop_table("customer_fencing_write_evidence")
+    op.drop_table("ops_alert_state")
     op.drop_index("idx_audit_logs_action_created_at", table_name="audit_logs")
     op.drop_index("idx_wallets_updated_at_user", table_name="wallets")
     op.drop_index(

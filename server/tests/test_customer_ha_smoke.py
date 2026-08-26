@@ -451,12 +451,14 @@ def test_t37_metrics_and_cluster_alert_jobs_are_private_single_owner_contracts()
 
     assert "VIDEO_REPLICA_METRICS_TOKEN_FILE=/etc/video-replica/metrics.token" in environment
     assert "EnvironmentFile=/etc/video-replica/customer.env" in service
-    assert "StateDirectory=video-replica" in service
     assert "python -m scripts.check_ops_alerts" in service
-    assert "--state-file /var/lib/video-replica/ops-alerts-state.json" in service
+    assert "StateDirectory=" not in service
+    assert "--state-file" not in service
     assert "OnUnitActiveSec=60s" in timer
     assert "RandomizedDelaySec" not in timer
-    assert "pg_try_advisory_xact_lock" in probe
+    assert "pg_try_advisory_lock" in probe
+    assert "pg_try_advisory_xact_lock" not in probe
+    assert "ops_alert_state" in probe
     assert "FROM pg_stat" not in probe
     assert "JOIN pg_stat" not in probe
 

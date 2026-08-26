@@ -45,8 +45,9 @@ fired/resolved 通知演练，也没有验证 PG 复制/慢查询/备份指标�
 
 ### 1.3 单所有者 P1 异常探针
 
-- systemd timer 每分钟在一个 OPS 主机运行；PostgreSQL transaction advisory lock
-  拒绝误启的第二所有者。每条查询均有 statement timeout、row limit，并只读取
+- systemd timer 每分钟在一个 OPS 主机运行；PostgreSQL session advisory lock 覆盖
+  查询提交、通知与共享状态确认，`ops_alert_state` 让误启的第二主机无论并发还是
+  错峰都复用同一边沿状态。每条查询均有 statement timeout、row limit，并只读取
   应用表，不要求 `pg_monitor` / `pg_stat_*` 权限。
 - 覆盖：同一 epoch 双设备 heartbeat、重复 CHARGE、重复 provider trade no、
   PAID 无 CHARGE、CHARGE 来源/金额/用户不一致、钱包与流水不一致、旧 session
@@ -62,16 +63,17 @@ fired/resolved 通知演练，也没有验证 PG 复制/慢查询/备份指标�
   审计事实，不读取 entity/metadata，也不把标识输出到告警。PG 权限拒绝先回滚
   被拒绝的业务事务，再以预分配幂等 id 在独立事务持久化审计，因此真实 403 不会
   随业务回滚消失；审计不可用仍不改变公开 403。
-- 状态文件原子替换且权限私有；journal 只输出状态边沿 `fired` / `resolved`，内容
-  只有固定 alert 名、P1、检查时间和数量。驱动异常只输出固定事件和异常类型，
-  不输出 DSN/查询值。
+- 共享状态只允许固定 11 个 alert 名；journal 只输出状态边沿 `fired` / `resolved`，
+  内容只有固定 alert 名、P1、检查时间和数量。全部边沿输出成功后才确认共享状态；
+  通知或状态提交失败则由下一次重试。驱动异常只输出固定事件和异常类型，不输出
+  DSN/查询值。
 
 ### 1.4 迁移与管理员入口加固
 
 - revision 042 为 session event、recharge status、wallet transaction、wallet cursor
   与 audit action/time 增加探针入口索引；扩展安全事实维度为
-  `admin:exchange:ip` 与 `session:fencing`，并增加成功写事务 epoch 去重证据表及
-  mismatch 部分索引。
+  `admin:exchange:ip` 与 `session:fencing`，并增加跨主机告警状态、成功写事务 epoch
+  去重证据表及 mismatch 部分索引。
 - 管理员一次性 exchange credential 在解析前先消费 PostgreSQL 共享 IP 摘要预算；
   多 API 共用限制，原始 IP 不入审计，失败与 429 均留 append-only 事实。
 - 旧 session 的写事务被 fencing 拒绝时追加摘要化安全事实。该审计 hook 或本地
@@ -87,8 +89,8 @@ fired/resolved 通知演练，也没有验证 PG 复制/慢查询/备份指标�
 `UNMATCHED` 路径与 `OTHER` HTTP 方法标签、双实例私有 Nginx/systemd 合同、
 fencing 指标/日志/持久事实、observability hook 故障不改变业务 401、探针查询面、
 成功旧写与 epoch mismatch 事实同事务提交、双在线 epoch 防误报、跨用户拒绝只读
-固定审计字段、transition-only 状态机、私有原子状态文件、告警输出脱敏、advisory
-lock 丢失零副作用、全查询在真实 PG16 fresh head 执行、管理员共享 IP 预算以及
+固定审计字段、transition-only 状态机、PG 共享状态、session advisory lock 并发/
+错峰单所有者与丢失零副作用、告警输出脱敏、全查询在真实 PG16 fresh head 执行、管理员共享 IP 预算以及
 042 upgrade/append-only/downgrade guard。
 
 开发期组合回归完成 253 passed；随后增加的 request-state 白名单、无效重放
@@ -104,7 +106,10 @@ passed。PR #72 connector 首轮 2 P1 + 2 P2 也已先红后绿修复：任意 4
 随业务事务回滚、只读 fenced 请求误写成功写事实。第四轮 1 P1 + 1 P2 修复通知
 失败却提前推进告警状态，以及 fencing 专用日志使用原始对象路径。最新 ops metrics/alerts/fencing/RBAC
 组合 134、alerts/042 15、customer security 36、health 6、SQLite→PG 35 passed，
-mypy 全绿；connector 最终复审与 PR CI 仍待完成，不在本证据中提前声明通过。
+mypy 全绿。第五轮 1 P2 指出 transaction advisory lock 只覆盖重叠执行，无法阻止
+第二 OPS 主机错峰使用自己的状态文件重复发边；现已用 session lock + PG 共享状态
+修复，shared-state/alerts/042/SQLite→PG 51 + ops metrics 20 passed；connector
+最终复审与 PR CI 仍待完成，不在本证据中提前声明通过。
 
 ## §3 当前验证证据
 
@@ -121,7 +126,7 @@ mypy 全绿；connector 最终复审与 PR CI 仍待完成，不在本证据中�
 | Secret / client / E2E / Tauri | Pass；client 47 files / 513 tests；E2E Biome 14 files；Cargo fmt/check pass |
 | Ruff / format / mypy | Pass；186 files formatted；72 source files typed |
 | 全仓 `npm run check` | Pass；server 1273 passed / 16 existing warnings，1013.27s；这是本任务唯一一次完整 pytest |
-| 复审 | 独立复审 `APPROVE`：首轮 0C/0H/1M，修复后 0C/0H/0M；PR #72 connector 四轮共 6 P1 + 5 P2 均已回归锁定并修复，最终复审待新提交触发 |
+| 复审 | 独立复审 `APPROVE`：首轮 0C/0H/1M，修复后 0C/0H/0M；PR #72 connector 五轮共 6 P1 + 6 P2 均已回归锁定并修复，最终复审待新提交触发 |
 
 ## §4 安全与可观测边界
 
@@ -129,8 +134,9 @@ mypy 全绿；connector 最终复审与 PR CI 仍待完成，不在本证据中�
   DSN、Provider payload 不进入仓库或日志；指标没有用户级高基数标签。
 - 管理员 exchange 按摘要化 ingress client IP 共用 PG budget；应用信任的 client IP
   仍来自 T35/T36 已验证的代理边界，不直接解析任意 XFF。
-- anomaly probe 的 counts 是告警信号，不是账务修复器；它不修改钱包、订单、队列
-  或 session。钱包/队列候选扫描为有界抽样，完整逐笔恢复/对账属于 T38/T39。
+- anomaly probe 的 counts 是告警信号，不是账务修复器；它只更新固定 11 项共享
+  `ops_alert_state`，不修改钱包、订单、队列或 session。钱包/队列候选扫描为有界
+  抽样，完整逐笔恢复/对账属于 T38/T39。
 - 当前没有外部告警接收器。只有 journal 时不得开放灰度；真实 fired/resolved、
   unit failure 和 timer missed-run 通知必须在候选环境留证。
 
@@ -147,16 +153,16 @@ mypy 全绿；connector 最终复审与 PR CI 仍待完成，不在本证据中�
 
 ```text
 任务/工作包：T37（仓库侧）/ OPS-02（部分）/ EXT-02（部分）
-Owner / Reviewer：OPS/后端（Agent 执行）/ 独立复审 APPROVE（首轮 0C/0H/1M；Medium 修复后 0C/0H/0M）+ PR #72 connector（四轮共 6 P1/5 P2，均已先红后绿修复；最终复审待触发）
+Owner / Reviewer：OPS/后端（Agent 执行）/ 独立复审 APPROVE（首轮 0C/0H/1M；Medium 修复后 0C/0H/0M）+ PR #72 connector（五轮共 6 P1/6 P2，均已先红后绿修复；最终复审待触发）
 分支 / 基线 SHA：feat/customer-v3-t37-observability / main@bb545ca
 上游规格段落：客户版任务清单 V3 §7 T37、§12.6 EXT-02、§12.7 OPS-02；测试与验收规格 V3 §8.3；代码开发清单 V3 §3.1–§3.3/§12
 改动文件：server/app/ops_metrics.py、main.py、customer_fence.py、permissions.py、admin_auth/customer session/device/activation/recharge routes、security_rate_limit.py；server/scripts/check_ops_alerts.py、reconcile_customer_billing.py；migration 042 + Alembic logger fix；T37/关联回归测试；customer env、Nginx、ops-alert systemd；部署手册、冻结文件映射与任务/证据账本
-失败测试或回归锁定：request id/structured fields/result code/secret redaction/private metrics；任意未匹配路径统一 `UNMATCHED`、任意扩展 HTTP 方法统一 `OTHER`；legacy/入口拒绝真实业务码；fencing metrics+durable audit+hook failure isolation+匹配路由模板；fencing ISO `T` 事实与截止时间同序比较；仅显式成功写事务记录 expected/verified epoch 同事务事实，只读零事实；PG 跨用户 403 先回滚业务再独立幂等提交审计；11 类 cluster anomaly query、epoch anti-false-positive、cross-user denial source、钱包不一致与队列超时任务均在输出上限前完成异常过滤、bounded/app-table-only SQL、transition state/state-file/advisory owner、通知失败不推进状态；admin exchange PG-shared rate budget；042 index/append-only/downgrade guard；fresh PG16 head execution
-实现结果：HTTP 单行结构化日志和安全字段白名单；双 API 私有 Prometheus exporter；fencing reject/wait 指标；单所有者 PG anomaly probe + fired/resolved 私有状态，且仅在事务提交并成功输出所有边后推进状态；P1 面覆盖双在线/资金/账本/旧写拒绝与实际提交/持久越权拒绝/队列/悬挂 reserve；admin exchange 多实例共享限流；部署与接收器演练手册
-验证命令与通过数：ops metrics 20；ops alerts 14；alerts+042 slice 15（真实 PG16 fixture）；customer fencing+RBAC 100；最新 ops metrics/alerts/fencing/RBAC 组合 134；customer security 36；health 6；SQLite→PG 35；admin auth 72（含复审修复）；admin related 93；受影响组合 255；client 513；Cargo pass；ruff/format/mypy pass（186/72）；唯一全量本地 server 1273 passed/16 existing warnings（最终两例复审锁定前）；独立复审最终 APPROVE、0C/0H/0M；PR #72 connector 四轮 6 P1/5 P2 均已修复，最终复审待触发
+失败测试或回归锁定：request id/structured fields/result code/secret redaction/private metrics；任意未匹配路径统一 `UNMATCHED`、任意扩展 HTTP 方法统一 `OTHER`；legacy/入口拒绝真实业务码；fencing metrics+durable audit+hook failure isolation+匹配路由模板；fencing ISO `T` 事实与截止时间同序比较；仅显式成功写事务记录 expected/verified epoch 同事务事实，只读零事实；PG 跨用户 403 先回滚业务再独立幂等提交审计；11 类 cluster anomaly query、epoch anti-false-positive、cross-user denial source、钱包不一致与队列超时任务均在输出上限前完成异常过滤、bounded/app-table-only SQL、session advisory owner+PG shared state 覆盖并发/错峰主机、通知失败不推进状态；admin exchange PG-shared rate budget；042 index/shared-state/append-only/downgrade guard；fresh PG16 head execution
+实现结果：HTTP 单行结构化日志和安全字段白名单；双 API 私有 Prometheus exporter；fencing reject/wait 指标；单所有者 PG anomaly probe + fired/resolved 共享状态，session lock 覆盖查询提交→通知→共享状态确认，且仅在成功输出所有边后推进状态；P1 面覆盖双在线/资金/账本/旧写拒绝与实际提交/持久越权拒绝/队列/悬挂 reserve；admin exchange 多实例共享限流；部署与接收器演练手册
+验证命令与通过数：ops metrics 20；ops alerts 14；alerts+042 slice 15（真实 PG16 fixture）；shared-state/alerts/042/SQLite→PG 51；customer fencing+RBAC 100；ops metrics/alerts/fencing/RBAC 组合 134；customer security 36；health 6；SQLite→PG 35；admin auth 72（含复审修复）；admin related 93；受影响组合 255；client 513；Cargo pass；ruff/format/mypy pass（186/72）；唯一全量本地 server 1273 passed/16 existing warnings（最终复审锁定前）；独立复审最终 APPROVE、0C/0H/0M；PR #72 connector 五轮 6 P1/6 P2 均已修复，最终复审待触发
 证据层级：AUTOMATED_VERIFIED（仓库侧）；T37/OPS-02/EXT-02 [~]，不得提升 STAGING
-安全与可观测性：日志白名单且无请求体/credential/provider payload；metrics Bearer file + loopback；PG advisory single owner；counts-only P1 output；真实集中平台/接收器/PG监控/外部费用链未冒充完成
-迁移与回滚：042 PG-only 追加索引、安全维度与成功写事务 epoch 去重事实；存在新 append-only security/write evidence 时 downgrade fail closed，否则逆序回退；T07 导入对账登记 PG-only 表；应用回滚优先前向修复并保留审计事实
+安全与可观测性：日志白名单且无请求体/credential/provider payload；metrics Bearer file + loopback；PG session advisory single owner + shared alert state；counts-only P1 output；真实集中平台/接收器/PG监控/外部费用链未冒充完成
+迁移与回滚：042 PG-only 追加索引、共享告警状态、安全维度与成功写事务 epoch 去重事实；存在新 append-only security/write evidence 时 downgrade fail closed，否则删除临时告警状态并逆序回退；T07 导入对账登记 PG-only 表；应用回滚优先前向修复并保留审计事实
 外部授权记录：无；未调用真实 COS/ZPay/Provider，未公网部署/发码/灰度
 未测试项：集中平台与 fired/resolved 演练；PG connection/slow/replication/backup；真实外部调用 task id/费用；staging/real-chain/production
 Lore 提交 SHA：见本任务 PR squash SHA

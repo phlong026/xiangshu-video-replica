@@ -56,6 +56,7 @@ PG_ONLY_TABLES: frozenset[str] = frozenset(
         "customer_session_events",
         "customer_idempotency_envelopes",
         "customer_fencing_write_evidence",
+        "ops_alert_state",
         "admin_write_idempotency",
         "security_rate_limit_counters",
         "security_auth_failures",
