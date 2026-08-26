@@ -31,6 +31,7 @@ from app.customer_idempotency import (
     seal_response,
 )
 from app.db_portable import BusinessConnection
+from app.ops_metrics import set_current_trace_fields
 from app.security_rate_limit import _server_now
 from app.settings import SettingsRepository
 from app.wallet_routes import WalletResponse, WalletTransactionPage, WalletTransactionResponse
@@ -171,6 +172,7 @@ def _insert_recharge_order(
                 credits,
             ),
         )
+    set_current_trace_fields(user_id=user_id, order_id=merchant_order_no)
     return RechargeOrderResponse(
         order_no=merchant_order_no,
         status="PENDING",
@@ -312,8 +314,10 @@ def create_customer_recharge_order(
                 if record is not None:
                     _enforce_envelope_conflicts(record, req_hash=req_hash, conn=conn)
                     replayed = _open_recharge_envelope(record, scope=scope, key_digest=key_digest)
+                    replayed_order = RechargeOrderResponse.model_validate(replayed)
+                    set_current_trace_fields(user_id=user.id, order_id=replayed_order.order_no)
                     response.headers[REPLAY_HEADER] = "true"
-                    return RechargeOrderResponse.model_validate(replayed)
+                    return replayed_order
 
                 billing, merchant, deployment = _stage_recharge_preconditions(
                     conn, amount_fen=payload.amount_fen

@@ -32,6 +32,8 @@ Contract under test (task list §12.3 SES-03; dev doc §12.3 / §12.4):
 from __future__ import annotations
 
 import base64
+import json
+import logging
 import os
 import secrets
 import threading
@@ -939,3 +941,87 @@ def test_fenced_transaction_rolls_back_a_failed_business_write(client: TestClien
             )
             raise RuntimeError("boom")
     assert _count_projects() == 0
+
+
+def test_fenced_transaction_records_local_metrics_and_audit_log(
+    client: TestClient,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from fastapi import HTTPException
+
+    from app.customer_fence import fenced_pg_transaction
+    from app.ops_metrics import (
+        bind_request_context,
+        render_metrics_document_for_tests,
+        reset_metrics_for_tests,
+    )
+
+    # This assertion is about one rejected transaction, not the cumulative
+    # process total left by earlier fencing tests in the same worker.
+    reset_metrics_for_tests()
+
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    snapshot = _snapshot_for(customer)
+    with psycopg.connect(_fencing_dsn(), autocommit=True) as conn:
+        conn.execute("UPDATE customer_session_state SET session_epoch = session_epoch + 1")
+
+    with caplog.at_level(logging.INFO, logger="app.customer_fence"):
+        with pytest.raises(HTTPException) as ei:
+            with bind_request_context(
+                request_id="req-fenced",
+                method="POST",
+                route="/api/projects",
+            ):
+                with fenced_pg_transaction(snapshot) as (conn, _ctx):
+                    conn.execute(
+                        "INSERT INTO projects (id, owner_user_id, name) VALUES (%s, %s, %s)",
+                        ("p-never", customer["user_id"], "Never Commit"),
+                    )
+
+    assert ei.value.status_code == 401
+    assert ei.value.detail["code"] == "SESSION_REPLACED"
+    text = render_metrics_document_for_tests(is_ready=True)
+    assert 'video_replica_customer_fencing_rejects_total{code="SESSION_REPLACED"} 1' in text
+    assert "video_replica_fencing_lock_wait_seconds_count 1" in text
+    payload = json.loads(caplog.records[-1].getMessage())
+    assert payload["event"] == "customer_session_fenced"
+    assert payload["request_id"] == "req-fenced"
+    assert payload["route"] == "/api/projects"
+    assert payload["result_code"] == "SESSION_REPLACED"
+    assert isinstance(payload["lock_wait_ms"], int)
+    assert customer["session_token"] not in caplog.text
+
+
+def test_fenced_transaction_keeps_original_401_when_metrics_and_audit_fail(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from fastapi import HTTPException
+
+    import app.customer_fence as customer_fence
+
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    snapshot = _snapshot_for(customer)
+    with psycopg.connect(_fencing_dsn(), autocommit=True) as conn:
+        conn.execute("UPDATE customer_session_state SET session_epoch = session_epoch + 1")
+
+    def _boom(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("postgresql://operator:secret-password@db/private")
+
+    monkeypatch.setattr(customer_fence.ops_metrics, "record_fencing_reject", _boom)
+    monkeypatch.setattr(customer_fence, "_record_fencing_failure_audit", _boom)
+    monkeypatch.setattr(customer_fence, "_log_fencing_reject_audit", _boom)
+
+    with caplog.at_level(logging.WARNING, logger="app.customer_fence"):
+        with pytest.raises(HTTPException) as ei:
+            with customer_fence.fenced_pg_transaction(snapshot) as (conn, _ctx):
+                conn.execute(
+                    "INSERT INTO projects (id, owner_user_id, name) VALUES (%s, %s, %s)",
+                    ("p-mask", customer["user_id"], "Mask Failure"),
+                )
+
+    assert ei.value.status_code == 401
+    assert ei.value.detail["code"] == "SESSION_REPLACED"
+    assert "secret-password" not in caplog.text
+    assert "postgresql://" not in caplog.text

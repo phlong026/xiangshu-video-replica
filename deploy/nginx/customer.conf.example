@@ -89,6 +89,36 @@ server {
         proxy_next_upstream_tries 2;
     }
 
+    # T37 process-local metrics. A same-host collector scrapes both API
+    # processes independently; these paths never enter the public /api lane
+    # and a separate metrics hostname is deliberately not introduced (the
+    # application enforces the one canonical customer Host). The collector
+    # reads the Bearer token from /etc/video-replica/metrics.token and Nginx
+    # forwards it unchanged; this file never contains the token itself.
+    location = /internal/metrics/api-1 {
+        allow 127.0.0.1;
+        allow ::1;
+        deny all;
+        proxy_pass http://127.0.0.1:8001/metrics;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For 127.0.0.2;
+    }
+
+    location = /internal/metrics/api-2 {
+        allow 127.0.0.1;
+        allow ::1;
+        deny all;
+        proxy_pass http://127.0.0.1:8002/metrics;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For 127.0.0.2;
+    }
+
     location ^~ /api/ {
         proxy_pass http://video_replica_customer_api;
         proxy_http_version 1.1;

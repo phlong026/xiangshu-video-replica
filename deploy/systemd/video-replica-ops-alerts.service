@@ -1,0 +1,27 @@
+[Unit]
+Description=Video Replica single-owner cluster anomaly probe
+Documentation=file:/opt/video-replica/app/docs/evidence/T37-EVIDENCE.md
+Wants=network-online.target
+After=network-online.target
+
+# Install/enable this unit on exactly one designated OPS host. The PostgreSQL
+# advisory transaction lock in the probe is the second, fail-closed owner
+# gate if two hosts are accidentally enabled during replacement.
+
+[Service]
+Type=oneshot
+User=video-replica
+Group=video-replica
+WorkingDirectory=/opt/video-replica/app/server
+EnvironmentFile=/etc/video-replica/customer.env
+Environment=PYTHONUNBUFFERED=1
+StateDirectory=video-replica
+StateDirectoryMode=0700
+ExecStart=/opt/video-replica/app/server/.venv/bin/python -m scripts.check_ops_alerts --state-file /var/lib/video-replica/ops-alerts-state.json
+UMask=0077
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+RestrictSUIDSGID=true

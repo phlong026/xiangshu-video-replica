@@ -252,7 +252,7 @@ def test_pg_upgrade_from_published_040_head_applies_fair_queue() -> None:
         command.upgrade(_alembic_config(sqlalchemy_dsn), "head")
         with psycopg.connect(dsn) as conn:
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-            assert version == "041_user_fair_queue"
+            assert version == "042_t37_observability_indexes"
             fair_queue_column = conn.execute(
                 "SELECT COUNT(*) FROM information_schema.columns "
                 "WHERE table_name = 'runtime_settings' AND column_name = 'fair_queue_enabled'"
@@ -286,7 +286,9 @@ def test_pg_full_upgrade_downgrade_reupgrade_and_indexes() -> None:
 
         with psycopg.connect(dsn) as conn:
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-            assert version == "041_user_fair_queue", f"unexpected head revision: {version}"
+            assert version == "042_t37_observability_indexes", (
+                f"unexpected head revision: {version}"
+            )
 
             tables = {
                 row[0]
@@ -365,7 +367,7 @@ def test_pg_full_upgrade_downgrade_reupgrade_and_indexes() -> None:
         command.upgrade(_alembic_config(sqlalchemy_dsn), "head")
         with psycopg.connect(dsn) as conn:
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-            assert version == "041_user_fair_queue"
+            assert version == "042_t37_observability_indexes"
     finally:
         _drop_database("t06_migrate_test")
 
@@ -487,7 +489,7 @@ def test_pg_wallet_downgrade_blocked_when_ledger_has_settled_rounds() -> None:
         # The database must be left exactly at head (no partial rollback).
         with psycopg.connect(dsn) as conn:
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-        assert version == "041_user_fair_queue"
+        assert version == "042_t37_observability_indexes"
     finally:
         _drop_database(db_name)
 
@@ -784,7 +786,7 @@ def test_pg_billing_constraints_downgrade_guard() -> None:
             command.downgrade(_alembic_config(sqlalchemy_dsn), "025_postgres_runtime_compatibility")
         with psycopg.connect(dsn) as conn:
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-        assert version == "041_user_fair_queue"
+        assert version == "042_t37_observability_indexes"
 
         # Remove the customer order (test data only — confirmed production rows
         # are never deleted, which is exactly why the guard exists) and the
@@ -873,5 +875,69 @@ def test_pg_low_review_constraint_guards() -> None:
             ):
                 with pytest.raises(psycopg.errors.RaiseException):
                     conn.execute(f"TRUNCATE {table}")
+    finally:
+        _drop_database(db_name)
+
+
+def test_t37_observability_indexes_and_fencing_audit_dimension() -> None:
+    """T37's single-owner probe has index-backed facts and a durable,
+    append-only fencing-rejection source without granting pg_monitor."""
+    from alembic import command
+
+    db_name = "t37_observability_schema"
+    dsn = _t08_database(db_name)
+    try:
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+            assert version == "042_t37_observability_indexes"
+
+            indexes = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT indexname FROM pg_indexes WHERE schemaname = 'public'"
+                ).fetchall()
+            }
+            assert {
+                "idx_customer_session_events_event_created_at",
+                "idx_recharge_orders_status_paid_at",
+                "idx_wallet_transactions_user_created_at",
+                "idx_wallets_updated_at_user",
+                "idx_audit_logs_action_created_at",
+            } <= indexes
+
+            conn.execute(
+                "INSERT INTO security_auth_failures "
+                "(id, dimension, identifier, request_id, occurred_at) "
+                "VALUES ('t37-fence-1', 'session:fencing', 'sha256-digest', "
+                "'request-t37', '2026-08-26 12:00:00+00')"
+            )
+            conn.execute(
+                "INSERT INTO security_auth_failures "
+                "(id, dimension, identifier, request_id, occurred_at) "
+                "VALUES ('t37-admin-1', 'admin:exchange:ip', 'sha256-ip-digest', "
+                "'request-t37-admin', '2026-08-26 12:00:00+00')"
+            )
+            with pytest.raises(psycopg.errors.CheckViolation):
+                conn.execute(
+                    "INSERT INTO security_auth_failures "
+                    "(id, dimension, identifier, occurred_at) "
+                    "VALUES ('t37-invalid', 'unknown:dimension', 'digest', "
+                    "'2026-08-26 12:00:00+00')"
+                )
+
+        sqlalchemy_dsn = dsn.replace("postgresql://", "postgresql+psycopg://")
+        with pytest.raises(RuntimeError, match="cannot downgrade 042"):
+            command.downgrade(_alembic_config(sqlalchemy_dsn), "041_user_fair_queue")
+
+        # Transactional DDL leaves the database at head with all observability
+        # indexes intact when the append-only evidence guard refuses rollback.
+        with psycopg.connect(dsn) as conn:
+            version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+            assert version == "042_t37_observability_indexes"
+            index_count = conn.execute(
+                "SELECT count(*) FROM pg_indexes WHERE schemaname = 'public' "
+                "AND indexname = 'idx_wallets_updated_at_user'"
+            ).fetchone()[0]
+            assert int(index_count) == 1
     finally:
         _drop_database(db_name)

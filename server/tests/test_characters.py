@@ -143,7 +143,7 @@ def test_characters_migration_creates_library_tables(db_path: Path) -> None:
             ).fetchall()
         }
 
-    assert version == "041_user_fair_queue"
+    assert version == "042_t37_observability_indexes"
     assert {
         "characters",
         "project_main_characters",

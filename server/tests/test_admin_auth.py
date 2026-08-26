@@ -457,7 +457,12 @@ def clean_sessions(admin_pg_dsn: str) -> Iterator[str]:
 
     close_pg_pool()
     with psycopg.connect(admin_pg_dsn, autocommit=True) as conn:
-        conn.execute("TRUNCATE admin_sessions, audit_logs")
+        conn.execute("SET session_replication_role = replica")
+        conn.execute(
+            "TRUNCATE admin_sessions, audit_logs, security_rate_limit_counters, "
+            "security_auth_failures"
+        )
+        conn.execute("SET session_replication_role = DEFAULT")
     yield admin_pg_dsn
     close_pg_pool()
 
@@ -547,13 +552,18 @@ def test_exchange_issues_session_with_secure_cookie_shape(
         client.cookies.clear()
 
 
-def test_exchange_credential_single_use(client: TestClient) -> None:
+def test_exchange_credential_single_use(client: TestClient, clean_sessions: str) -> None:
     credential = _issue("admin_u")
     first = client.post("/api/control/admin/session/exchange", json={"credential": credential})
     assert first.status_code == 201
     replay = client.post("/api/control/admin/session/exchange", json={"credential": credential})
     assert replay.status_code == 401
     assert replay.json()["detail"]["code"] == "EXCHANGE_CREDENTIAL_REUSED"
+    with psycopg.connect(clean_sessions) as conn:
+        failure_count = conn.execute(
+            "SELECT count(*) FROM security_auth_failures WHERE dimension = 'admin:exchange:ip'"
+        ).fetchone()[0]
+    assert int(failure_count) == 1
 
 
 def test_exchange_rejects_expired_credential(client: TestClient) -> None:
@@ -565,12 +575,56 @@ def test_exchange_rejects_expired_credential(client: TestClient) -> None:
     assert response.json()["detail"]["code"] == "EXCHANGE_CREDENTIAL_INVALID"
 
 
-def test_exchange_rejects_employee_role(client: TestClient) -> None:
+def test_exchange_uses_the_shared_postgres_ip_budget(
+    client: TestClient,
+    clean_sessions: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VIDEO_REPLICA_RATE_LIMIT_ADMIN_EXCHANGE_IP", "2")
+
+    first = client.post(
+        "/api/control/admin/session/exchange",
+        json={"credential": "invalid-one"},
+    )
+    second = client.post(
+        "/api/control/admin/session/exchange",
+        json={"credential": "invalid-two"},
+    )
+    blocked = client.post(
+        "/api/control/admin/session/exchange",
+        json={"credential": "invalid-three"},
+    )
+
+    assert first.status_code == 401
+    assert second.status_code == 401
+    assert blocked.status_code == 429
+    assert blocked.json()["detail"]["code"] == "RATE_LIMITED"
+    assert int(blocked.headers["Retry-After"]) >= 1
+
+    with psycopg.connect(clean_sessions) as conn:
+        bucket = conn.execute(
+            "SELECT hit_count FROM security_rate_limit_counters "
+            "WHERE bucket_key LIKE 'admin:exchange:ip|%'"
+        ).fetchone()
+        failures = conn.execute(
+            "SELECT count(*), bool_and(length(identifier) = 64) "
+            "FROM security_auth_failures WHERE dimension = 'admin:exchange:ip'"
+        ).fetchone()
+    assert bucket is not None and int(bucket[0]) == 3
+    assert failures is not None and (int(failures[0]), bool(failures[1])) == (3, True)
+
+
+def test_exchange_rejects_employee_role(client: TestClient, clean_sessions: str) -> None:
     response = client.post(
         "/api/control/admin/session/exchange", json={"credential": _issue("employee_u")}
     )
     assert response.status_code == 403
     assert response.json()["detail"]["code"] == "ADMIN_ROLE_REQUIRED"
+    with psycopg.connect(clean_sessions) as conn:
+        failure_count = conn.execute(
+            "SELECT count(*) FROM security_auth_failures WHERE dimension = 'admin:exchange:ip'"
+        ).fetchone()[0]
+    assert int(failure_count) == 1
 
 
 def test_exchange_rejects_inactive_user(client: TestClient) -> None:

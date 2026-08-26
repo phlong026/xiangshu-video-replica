@@ -7,7 +7,7 @@ from typing import Any, Literal
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 
 from app.activation_code_routes import router as customer_activation_router
@@ -37,6 +37,7 @@ from app.db_pg import close_pg_pool
 from app.first_frame_routes import router as first_frame_router
 from app.generation_routes import router as generation_router
 from app.media_routes import router as media_router
+from app.ops_metrics import metrics_response, request_observability_middleware
 from app.payment_routes import router as payment_router
 from app.rbac_routes import router as rbac_router
 from app.recharge_routes import router as recharge_router
@@ -258,6 +259,9 @@ async def require_loopback_client(
     return await call_next(request)
 
 
+app.middleware("http")(request_observability_middleware)
+
+
 def _cors_origins() -> list[str]:
     origins = [
         "http://127.0.0.1:5173",
@@ -370,3 +374,18 @@ def ready() -> ReadinessResponse | JSONResponse:
         database="postgresql",
         storage="cos",
     )
+
+
+def _ready_status_for_metrics() -> bool:
+    if not is_customer_production():
+        return True
+    try:
+        check_customer_production_runtime_dependencies()
+    except Exception:
+        return False
+    return True
+
+
+@app.get("/metrics", include_in_schema=False, response_class=PlainTextResponse)
+def metrics(request: Request) -> PlainTextResponse:
+    return metrics_response(request, readiness_check=_ready_status_for_metrics)

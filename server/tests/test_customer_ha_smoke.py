@@ -431,6 +431,47 @@ def test_maintenance_and_pg_migration_are_single_owner_fail_closed_jobs() -> Non
     assert "set -euo pipefail" in migration
 
 
+def test_t37_metrics_and_cluster_alert_jobs_are_private_single_owner_contracts() -> None:
+    nginx = _read("deploy/nginx/customer.conf.example")
+    service = _read("deploy/systemd/video-replica-ops-alerts.service")
+    timer = _read("deploy/systemd/video-replica-ops-alerts.timer")
+    environment = _read("deploy/customer.env.example")
+    frozen_map = _read("docs/客户版代码开发清单-V3.md")
+    probe = _read("server/scripts/check_ops_alerts.py")
+
+    for instance, port in (("api-1", "8001"), ("api-2", "8002")):
+        block = nginx.split(f"location = /internal/metrics/{instance}", 1)[1].split("}", 1)[0]
+        assert f"proxy_pass http://127.0.0.1:{port}/metrics;" in block
+        assert "allow 127.0.0.1;" in block
+        assert "allow ::1;" in block
+        assert "deny all;" in block
+        assert "proxy_set_header Host $host;" in block
+        assert "proxy_set_header X-Forwarded-Proto https;" in block
+        assert "proxy_set_header X-Forwarded-For 127.0.0.2;" in block
+
+    assert "VIDEO_REPLICA_METRICS_TOKEN_FILE=/etc/video-replica/metrics.token" in environment
+    assert "EnvironmentFile=/etc/video-replica/customer.env" in service
+    assert "StateDirectory=video-replica" in service
+    assert "python -m scripts.check_ops_alerts" in service
+    assert "--state-file /var/lib/video-replica/ops-alerts-state.json" in service
+    assert "OnUnitActiveSec=60s" in timer
+    assert "RandomizedDelaySec" not in timer
+    assert "pg_try_advisory_xact_lock" in probe
+    assert "FROM pg_stat" not in probe
+    assert "JOIN pg_stat" not in probe
+
+    for registered in (
+        "server/app/ops_metrics.py",
+        "server/scripts/check_ops_alerts.py",
+        "server/tests/test_ops_metrics.py",
+        "server/tests/test_ops_alerts.py",
+        "server/migrations/versions/042_t37_observability_indexes.py",
+        "deploy/systemd/video-replica-ops-alerts.service",
+        "deploy/systemd/video-replica-ops-alerts.timer",
+    ):
+        assert registered in frozen_map
+
+
 def test_customer_deployment_docs_keep_evidence_levels_honest() -> None:
     runbook = _read("docs/客户版部署与灰度手册.md")
     evidence = _read("docs/客户版验收证据包模板.md")

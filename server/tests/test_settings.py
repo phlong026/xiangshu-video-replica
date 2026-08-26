@@ -123,7 +123,7 @@ def test_settings_migration_creates_tables_and_defaults(tmp_path: Path, settings
             """
         ).fetchone()
 
-    assert version == "041_user_fair_queue"
+    assert version == "042_t37_observability_indexes"
     assert {"provider_settings", "runtime_settings"}.issubset(tables)
     assert dict(runtime) == {
         "max_generation_count_per_batch": 4,

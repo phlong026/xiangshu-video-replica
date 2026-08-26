@@ -137,7 +137,8 @@ def clean_state(activation_pg_dsn: str) -> Iterator[str]:
             "customer_devices, "
             "activation_code_events, activation_code_activations, "
             "activation_code_deliveries, activation_code_exports, activation_codes, "
-            "activation_code_batches, admin_write_idempotency, admin_sessions"
+            "activation_code_batches, admin_write_idempotency, admin_sessions, "
+            "security_rate_limit_counters, security_auth_failures"
         )
         conn.execute("SET session_replication_role = DEFAULT")
     yield activation_pg_dsn
@@ -349,6 +350,40 @@ def test_create_batch_success(
             (body["batch_id"],),
         )
     assert row == ("首波", "OPEN", "admin_u")
+
+
+def test_request_id_is_shared_by_response_and_admin_audit(
+    client: TestClient,
+    admin_headers: dict[str, str],
+    clean_state: str,
+) -> None:
+    request_id = "req-t37-admin-correlation"
+    headers = _write_headers(admin_headers, key="key-t37-request-id")
+    headers[REQUEST_ID_HEADER] = request_id
+
+    response = client.post(
+        "/api/control/activation-code-batches",
+        json={
+            "name": "T37 correlation",
+            "face_value_fen": 1500,
+            "credits": 100,
+            "quantity": 1,
+            "activation_expires_at": "2099-01-01T00:00:00+00:00",
+            "confirm": True,
+            "reason": "request id correlation",
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.headers[REQUEST_ID_HEADER] == request_id
+    assert response.json()["request_id"] == request_id
+    with psycopg.connect(clean_state) as conn:
+        persisted = conn.execute(
+            "SELECT creation_request_id FROM activation_code_batches WHERE id = %s",
+            (response.json()["batch_id"],),
+        ).fetchone()[0]
+    assert persisted == request_id
 
 
 def test_create_batch_idempotent_replay(

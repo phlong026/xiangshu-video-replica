@@ -11,7 +11,7 @@ from app.db import alembic_config, connect_database, initialize_database
 from app.db_portable import BusinessConnection
 from app.settings import SettingsRepository
 
-HEAD_REVISION = "041_user_fair_queue"
+HEAD_REVISION = "042_t37_observability_indexes"
 
 
 def seed_subjects(conn: sqlite3.Connection) -> None:

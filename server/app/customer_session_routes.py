@@ -60,7 +60,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -103,6 +102,7 @@ from app.customer_session_service import (
     switch_session,
 )
 from app.db_pg import get_pg_pool, pg_transaction
+from app.ops_metrics import get_or_create_request_id, set_current_result_code
 from app.security_rate_limit import (
     DIMENSION_LOGIN_IP,
     client_ip_from_request,
@@ -132,6 +132,7 @@ router = APIRouter(prefix="/api/customer/sessions", tags=["customer-sessions"])
 
 
 def _http(status: int, code: str, message: str, **extra: object) -> HTTPException:
+    set_current_result_code(code)
     detail: dict[str, object] = {"code": code, "message": message}
     detail.update(extra)
     return HTTPException(status_code=status, detail=detail)
@@ -189,7 +190,7 @@ def _bearer_token(request: Request) -> str | None:
 
 
 def _request_id(request: Request) -> str:
-    return request.headers.get(REQUEST_ID_HEADER, "").strip() or str(uuid.uuid4())
+    return get_or_create_request_id(request)
 
 
 def _require_pg() -> None:

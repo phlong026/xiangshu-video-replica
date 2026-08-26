@@ -22,7 +22,11 @@ route uses:
 
 from __future__ import annotations
 
+import hashlib
+import json
+import logging
 import os
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -32,6 +36,7 @@ from typing import Annotated
 import psycopg
 from fastapi import Depends, HTTPException, Request
 
+from app import ops_metrics
 from app.activation_code_service import ActivationKeyError
 from app.auth import CurrentUser, authenticate_request
 from app.customer_auth import (
@@ -43,9 +48,12 @@ from app.customer_device_service import _token_digests
 from app.db import connect_database
 from app.db_pg import IsolationLevel, get_pg_pool, pg_transaction
 from app.db_portable import BusinessConnection
+from app.security_rate_limit import record_auth_failure
 
 AUTHORIZATION_HEADER = "Authorization"
 BEARER_SCHEME = "bearer"
+FENCING_FAILURE_DIMENSION = "session:fencing"
+logger = logging.getLogger(__name__)
 
 
 def _bearer_token(request: Request) -> str | None:
@@ -129,6 +137,12 @@ def customer_session_snapshot(request: Request) -> CustomerSessionSnapshot | Non
                 "message": "This session token no longer owns a live session.",
             },
         )
+    ops_metrics.set_current_trace_fields(
+        user_id=str(row[0]),
+        device_id=str(row[1]),
+        session_id=str(row[2]),
+        session_epoch=int(row[3]),
+    )
     return CustomerSessionSnapshot(
         token=token,
         expected_user_id=str(row[0]),
@@ -154,6 +168,13 @@ def fenced_pg_transaction(
     the transaction back; a ``SessionFencingError`` raises 401 — so a request
     that passed the early snapshot can never commit a write after a switch.
     """
+    ops_metrics.set_current_trace_fields(
+        user_id=snapshot.expected_user_id,
+        device_id=snapshot.expected_device_id,
+        session_id=snapshot.expected_session_id,
+        session_epoch=snapshot.expected_session_epoch,
+    )
+    started = time.perf_counter()
     try:
         with pg_transaction(isolation=isolation) as conn:
             ctx = verify_session_context(
@@ -165,12 +186,99 @@ def fenced_pg_transaction(
                 expected_session_epoch=snapshot.expected_session_epoch,
                 expected_lease_until=snapshot.expected_lease_until,
             )
+            _observe_fencing_lock_wait(time.perf_counter() - started)
             yield conn, ctx
     except SessionFencingError as exc:
+        lock_wait_seconds = time.perf_counter() - started
+        _record_fencing_reject(exc.code, lock_wait_seconds)
+        ops_metrics.set_current_result_code(exc.code)
+        try:
+            _record_fencing_failure_audit(snapshot)
+        except Exception as audit_error:
+            logger.warning(
+                "fencing failure audit hook unavailable (%s)",
+                type(audit_error).__name__,
+            )
+        try:
+            _log_fencing_reject_audit(exc.code, lock_wait_seconds)
+        except Exception as audit_error:
+            logger.warning(
+                "fencing reject audit hook unavailable (%s)",
+                type(audit_error).__name__,
+            )
         raise HTTPException(
             401,
             detail={"code": exc.code, "message": exc.message},
         ) from None
+
+
+def _observe_fencing_lock_wait(lock_wait_seconds: float) -> None:
+    try:
+        ops_metrics.observe_fencing_lock_wait(lock_wait_seconds=lock_wait_seconds)
+    except Exception as metrics_error:
+        logger.warning(
+            "fencing lock wait metrics unavailable (%s)",
+            type(metrics_error).__name__,
+        )
+
+
+def _record_fencing_reject(code: str, lock_wait_seconds: float) -> None:
+    try:
+        ops_metrics.record_fencing_reject(code=code, lock_wait_seconds=lock_wait_seconds)
+    except Exception as metrics_error:
+        logger.warning(
+            "fencing reject metrics unavailable (%s)",
+            type(metrics_error).__name__,
+        )
+
+
+def _log_fencing_reject_audit(code: str, lock_wait_seconds: float) -> None:
+    context = ops_metrics.current_request_context()
+    payload = {
+        "event": "customer_session_fenced",
+        "request_id": context.request_id if context is not None else "-",
+        "method": context.method if context is not None else "-",
+        "route": context.route if context is not None else "-",
+        "result_code": code,
+        "lock_wait_ms": max(int(lock_wait_seconds * 1000), 0),
+    }
+    try:
+        logger.info(json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True))
+    except Exception as audit_error:
+        logger.warning(
+            "fencing reject audit unavailable (%s)",
+            type(audit_error).__name__,
+        )
+
+
+def _record_fencing_failure_audit(snapshot: CustomerSessionSnapshot) -> None:
+    context = ops_metrics.current_request_context()
+    request_id = context.request_id if context is not None else None
+    try:
+        with pg_transaction() as conn:
+            record_auth_failure(
+                conn,
+                dimension=FENCING_FAILURE_DIMENSION,
+                identifier=_fencing_failure_identifier(snapshot),
+                request_id=request_id,
+            )
+    except Exception as audit_error:
+        logger.warning(
+            "fencing failure audit row unavailable (%s)",
+            type(audit_error).__name__,
+        )
+
+
+def _fencing_failure_identifier(snapshot: CustomerSessionSnapshot) -> str:
+    payload = "|".join(
+        (
+            snapshot.expected_user_id,
+            snapshot.expected_device_id,
+            snapshot.expected_session_id,
+            str(snapshot.expected_session_epoch),
+        )
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)

@@ -109,7 +109,8 @@ def route_state(audit_dsn: str) -> Iterator[str]:
             "customer_devices, activation_code_events, activation_code_activations, "
             "activation_code_deliveries, activation_code_exports, activation_codes, "
             "activation_code_batches, admin_write_idempotency, admin_sessions, "
-            "wallet_transactions, recharge_orders, wallets, users CASCADE"
+            "wallet_transactions, recharge_orders, wallets, users, "
+            "security_rate_limit_counters, security_auth_failures CASCADE"
         )
         conn.execute("SET session_replication_role = DEFAULT")
         conn.execute(

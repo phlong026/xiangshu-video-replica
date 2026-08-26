@@ -4,6 +4,28 @@
 >
 > **Evidence location (M0 review M8 unification, 2026-08-21)**: per-task evidence documents live under `docs/evidence/` (T02–T06 evidence files moved from the repository root; run-fix evidence under `docs/evidence/m0-review-fixes/`). Historical self-references inside those documents to their original root paths are preserved as record snapshots.
 
+## T37 — Structured Logging, Metrics and P1 Alerts
+
+| Field | Value |
+| --- | --- |
+| **Task ID** | T37 / OPS-02 (partial) / EXT-02 (partial) |
+| **Owner / Reviewer** | OPS/Backend (Agent); independent review `APPROVE` — first pass 0C/0H/1M, final after the regression-locked fix 0C/0H/0M |
+| **Branch / Base SHA** | `feat/customer-v3-t37-observability` / `main@bb545ca` |
+| **Upstream Spec Sections** | Task list §7 T37, §12.6 EXT-02, §12.7 OPS-02; test spec §8.3; code map §3/§12 |
+| **Failure Test or Regression Lock** | Structured request-id/field/result/secret contracts; private per-process metrics; fencing rejection/wait evidence and failure isolation; bounded single-owner cluster alert queries, epoch false-positive lock, cross-user denial source, transition/state/advisory-lock contracts; PG16 fresh-head execution; admin exchange shared-PG budget; revision 042 index/dimension/downgrade guard |
+| **Implementation Result** | Single-line structured HTTP completion logs with an explicit non-secret business-field allowlist; two privately scraped API metric endpoints; local fencing reject/wait metrics; advisory-lock single-owner PostgreSQL anomaly probe emitting count-only fired/resolved edges for double-online, billing/ledger, stale writes, authorization denials, queue starvation and dangling reserve; shared administrator-exchange rate limit; deployment/runbook contracts |
+| **Verification Command and Pass Count** | Ops metrics 16; alerts + 042 slice 10; admin auth 72 (including review fix); related admin 93; customer security + 042 36; affected aggregate 253; client 513; Cargo pass; Ruff/format/mypy pass (186/72); single full server run 1273 passed / 16 existing warnings; independent review final `APPROVE`, 0C/0H/0M |
+| **Evidence Level** | Repository-side `AUTOMATED_VERIFIED`; T37/OPS-02/EXT-02 remain partial, not `STAGING_VERIFIED` |
+| **Security and Observability** | No arbitrary payload logging, credential/URL/DSN exposure or high-cardinality metric labels; metrics require a token file and loopback ingress; anomaly output contains fixed alert names and counts only; real collector/receiver and database/external-provider monitoring remain explicitly unverified |
+| **Migration and Rollback** | PG-only revision 042 adds hot indexes and the `admin:exchange:ip` / `session:fencing` evidence vocabulary; downgrade refuses once new append-only evidence exists, otherwise restores 041 shape |
+| **External Authorization Record** | None; no real server, COS, ZPay, paid Provider, external code issuance, gray release or public launch |
+| **Untested Items** | Central log/metrics ingestion; external P1 fired/resolved and missed-timer drill; PG connection/slow-query/replication/backup metrics; complete Provider/COS/ZPay provider-task/cost/error chain; staging/real-chain/production |
+| **Lore Commit SHA** | See task PR squash SHA |
+
+See `docs/evidence/T37-EVIDENCE.md` for the full §14 record and evidence-level boundary.
+
+---
+
 ## T36 — Customer Staging Topology (OPS-01 / COS-01 / DESK-02)
 
 | Field | Content |

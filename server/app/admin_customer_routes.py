@@ -50,6 +50,7 @@ from pydantic import BaseModel
 from app.admin_activation_routes import _canonical_route, _idempotency_key_digest, _request_hash
 from app.admin_auth_routes import AdminActor, AdminReader, AdminWriter
 from app.db_pg import MissingDatabaseConfigError, pg_transaction
+from app.ops_metrics import get_or_create_request_id, set_current_result_code
 
 router = APIRouter(prefix="/api/control", tags=["admin-customers"])
 
@@ -63,6 +64,7 @@ SOURCE_DOCUMENT_TYPES = (
 
 
 def _http(status: int, code: str, message: str) -> HTTPException:
+    set_current_result_code(code)
     return HTTPException(status_code=status, detail={"code": code, "message": message})
 
 
@@ -240,7 +242,7 @@ def _write_with_idempotency(
     route = _canonical_route(request)
     request_hash = _request_hash(route, dict(request.path_params), body)
 
-    request_id = str(uuid.uuid4())
+    request_id = get_or_create_request_id(request)
     try:
         with pg_transaction() as conn:
             placeholder = _begin_idempotent_write(

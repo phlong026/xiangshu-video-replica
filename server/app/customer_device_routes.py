@@ -103,7 +103,6 @@ routes fail closed with 503 (the SQLite lane keeps its internal P0 shape).
 from __future__ import annotations
 
 import logging
-import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -164,6 +163,7 @@ from app.customer_idempotency import (
     request_hash as compute_request_hash,
 )
 from app.db_pg import get_pg_pool, pg_transaction
+from app.ops_metrics import get_or_create_request_id, set_current_result_code
 from app.security_rate_limit import (
     DIMENSION_ACTIVATE_CODE,
     DIMENSION_ACTIVATE_IP,
@@ -203,6 +203,7 @@ router = APIRouter(prefix="/api/customer", tags=["customer-devices"])
 
 
 def _http(status: int, code: str, message: str) -> HTTPException:
+    set_current_result_code(code)
     return HTTPException(status_code=status, detail={"code": code, "message": message})
 
 
@@ -332,7 +333,7 @@ def _require_pg() -> None:
 
 
 def _request_id(request: Request) -> str:
-    return request.headers.get(REQUEST_ID_HEADER, "").strip() or str(uuid.uuid4())
+    return get_or_create_request_id(request)
 
 
 # ---------------------------------------------------------------------------

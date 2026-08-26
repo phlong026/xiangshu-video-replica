@@ -10,7 +10,12 @@ from sqlalchemy import engine_from_config, pool, text
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # Alembic is normally a separate process, but tests and administrative
+    # tooling also invoke it in-process after application modules have already
+    # created their loggers.  The logging module's default would disable every
+    # existing non-Alembic logger, silently suppressing request/fencing audit
+    # events for the rest of that process.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = None
 

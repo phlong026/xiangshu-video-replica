@@ -68,6 +68,7 @@ from app.customer_session_service import (
     revoke_session,
 )
 from app.db_pg import pg_transaction
+from app.ops_metrics import get_or_create_request_id, set_current_result_code
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +90,7 @@ router = APIRouter(prefix="/api/control", tags=["admin-activation"])
 
 
 def _http(status: int, code: str, message: str) -> HTTPException:
+    set_current_result_code(code)
     return HTTPException(status_code=status, detail={"code": code, "message": message})
 
 
@@ -291,7 +293,7 @@ def _write_with_idempotency(
     idempotency_key, _reason = _require_write_contract(request, body)
     route = _canonical_route(request)
     request_hash = _request_hash(route, dict(request.path_params), body)
-    request_id = str(uuid.uuid4())
+    request_id = get_or_create_request_id(request)
     try:
         with pg_transaction() as conn:
             placeholder = _begin_idempotent_write(
@@ -606,7 +608,7 @@ def download_activation_code_export(
     + request id land in the durable export audit columns (PR #43 review P1).
     """
     _key, reason = _require_write_contract(request, body)
-    request_id = str(uuid.uuid4())
+    request_id = get_or_create_request_id(request)
     try:
         aead_keys = configured_export_aead_keys()
         with pg_transaction() as conn:

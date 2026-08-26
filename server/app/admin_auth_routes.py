@@ -33,7 +33,20 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 
 from app.db_pg import pg_transaction
-from app.security_rate_limit import client_ip_from_request
+from app.ops_metrics import (
+    get_or_create_request_id,
+    set_current_result_code,
+    set_current_trace_fields,
+)
+from app.security_rate_limit import (
+    DIMENSION_ADMIN_EXCHANGE_IP,
+    RateLimitDecision,
+    admin_exchange_ip_limit,
+    client_ip_from_request,
+    consume_rate_limit,
+    rate_limit_window_seconds,
+    record_auth_failure,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -253,7 +266,54 @@ class AdminActor:
 
 
 def _http(status: int, code: str, message: str) -> HTTPException:
+    set_current_result_code(code)
     return HTTPException(status_code=status, detail={"code": code, "message": message})
+
+
+def _admin_exchange_identifier(request: Request) -> str:
+    """Stable per-client digest; the raw address never enters audit storage."""
+    return _sha256_hex(client_ip_from_request(request))
+
+
+def _spend_admin_exchange_budget(
+    request: Request,
+    *,
+    request_id: str,
+) -> RateLimitDecision:
+    with pg_transaction() as conn:
+        decision = consume_rate_limit(
+            conn,
+            dimension=DIMENSION_ADMIN_EXCHANGE_IP,
+            identifier=_admin_exchange_identifier(request),
+            limit=admin_exchange_ip_limit(),
+            window_seconds=rate_limit_window_seconds(),
+        )
+        if not decision.allowed:
+            record_auth_failure(
+                conn,
+                dimension=DIMENSION_ADMIN_EXCHANGE_IP,
+                identifier=_admin_exchange_identifier(request),
+                request_id=request_id,
+            )
+    return decision
+
+
+def _record_admin_exchange_failure(request: Request, *, request_id: str) -> None:
+    try:
+        with pg_transaction() as conn:
+            record_auth_failure(
+                conn,
+                dimension=DIMENSION_ADMIN_EXCHANGE_IP,
+                identifier=_admin_exchange_identifier(request),
+                request_id=request_id,
+            )
+    except Exception as audit_error:
+        # Authentication semantics must not depend on the diagnostic sink and
+        # driver messages may contain connection details.
+        logger.warning(
+            "admin exchange failure audit unavailable (%s)",
+            type(audit_error).__name__,
+        )
 
 
 def create_admin_session(
@@ -423,6 +483,11 @@ def get_admin_actor(request: Request) -> AdminActor:
             "ADMIN_SESSIONS_UNAVAILABLE",
             "Admin sessions require the PostgreSQL runtime.",
         ) from exc
+    set_current_trace_fields(
+        actor_id=actor.user_id,
+        user_id=actor.user_id,
+        session_id=actor.session_id,
+    )
     if request.method.upper() in _WRITE_METHODS:
         supplied = request.headers.get(ADMIN_CSRF_HEADER, "")
         if not supplied:
@@ -480,21 +545,53 @@ router = APIRouter(prefix="/api/control/admin", tags=["admin-auth"])
 def exchange_admin_session(
     body: ExchangeRequest, request: Request, response: Response
 ) -> ExchangeResponse:
+    request_id = get_or_create_request_id(request)
+    try:
+        rate_decision = _spend_admin_exchange_budget(request, request_id=request_id)
+    except (RuntimeError, ValueError) as exc:
+        raise _http(
+            503,
+            "ADMIN_SESSIONS_UNAVAILABLE",
+            "Admin sessions require the PostgreSQL runtime.",
+        ) from exc
+    if not rate_decision.allowed:
+        set_current_result_code("RATE_LIMITED")
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "code": "RATE_LIMITED",
+                "message": "Too many administrator sign-in attempts. Try again later.",
+            },
+            headers={"Retry-After": str(rate_decision.retry_after_seconds)},
+        )
     try:
         payload = parse_and_verify_exchange_credential(body.credential)
     except ExchangeCredentialError as exc:
+        _record_admin_exchange_failure(request, request_id=request_id)
         logger.info("admin exchange credential rejected: %s", type(exc).__name__)
         raise _http(
             401, "EXCHANGE_CREDENTIAL_INVALID", "Exchange credential is invalid or expired."
         ) from exc
     try:
         actor, session_token, csrf_token, ttl_seconds = create_admin_session(payload, request)
+    except HTTPException:
+        # Parsing succeeded, but the authoritative actor/session checks can
+        # still reject inactive/unknown actors, non-admin roles, or a reused
+        # one-shot nonce. Every rejected exchange belongs in the same durable
+        # security failure stream as malformed and rate-limited attempts.
+        _record_admin_exchange_failure(request, request_id=request_id)
+        raise
     except RuntimeError as exc:
         raise _http(
             503,
             "ADMIN_SESSIONS_UNAVAILABLE",
             "Admin sessions require the PostgreSQL runtime.",
         ) from exc
+    set_current_trace_fields(
+        actor_id=actor.user_id,
+        user_id=actor.user_id,
+        session_id=actor.session_id,
+    )
     response.set_cookie(
         ADMIN_SESSION_COOKIE,
         session_token,

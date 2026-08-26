@@ -308,6 +308,19 @@ def test_bucket_key_joins_dimension_and_identifier() -> None:
     assert bucket_key("activate:ip", "a") != bucket_key("activate:ip", "b")
 
 
+def test_fencing_audit_dimension_cannot_be_spent_as_a_rate_limit_bucket() -> None:
+    from app.security_rate_limit import DIMENSION_SESSION_FENCING, consume_rate_limit
+
+    with pytest.raises(ValueError, match="unknown rate-limit dimension"):
+        consume_rate_limit(
+            object(),  # type: ignore[arg-type]
+            dimension=DIMENSION_SESSION_FENCING,
+            identifier="digest",
+            limit=1,
+            window_seconds=60,
+        )
+
+
 def test_rate_limit_env_overrides_and_fallbacks(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.security_rate_limit import (
         DEFAULT_ACTIVATE_CODE_LIMIT,
@@ -1043,7 +1056,7 @@ def test_downgrade_refuses_once_failures_exist(security_dsn: str) -> None:
     # The refusal left the schema untouched at head.
     with psycopg.connect(_t15_dsn()) as conn:
         version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-    assert version == "041_user_fair_queue"
+    assert version == "042_t37_observability_indexes"
 
     # TRUNCATE only bypasses the row-level append-only trigger (it fires on
     # UPDATE/DELETE); 036 added a statement-level TRUNCATE guard, so the
@@ -1070,7 +1083,7 @@ def test_downgrade_refuses_once_failures_exist(security_dsn: str) -> None:
     command.upgrade(config, "head")
     with psycopg.connect(_t15_dsn()) as conn:
         version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-    assert version == "041_user_fair_queue"
+    assert version == "042_t37_observability_indexes"
 
 
 # ---------------------------------------------------------------------------

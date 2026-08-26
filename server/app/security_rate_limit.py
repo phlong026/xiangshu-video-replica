@@ -9,14 +9,18 @@ the same remaining budget (ACT-08 red line: in-process rate limiting is
 not a multi-API answer; Redis and message-queue frameworks are banned by
 the repository's architecture red lines, PostgreSQL is the shared truth).
 
-Dimensions (frozen vocabulary, CHECK-constrained in 032):
+Dimensions (CHECK-constrained in 032 and extended by 042):
 
 - ``activate:ip``    — client address redeeming activation codes;
 - ``activate:code``  — keyed digest of the normalized activation code
   (never the plaintext: a hammering attacker must burn the code budget
   without the failure audit ever storing the code itself);
 - ``login:ip`` / ``login:account`` — reserved for the T19 login lane so
-  the same engine, tables and thresholds carry over unchanged.
+  the same engine, tables and thresholds carry over unchanged;
+- ``admin:exchange:ip`` — a digest of the client address presenting the
+  one-shot administrator exchange credential (added by revision 042/T37).
+- ``session:fencing`` — durable old-session write rejects (added by
+  revision 042/T37; audit-only, never consumed as a rate-limit bucket).
 
 Failure auditing: every code-side rejection is appended to
 ``security_auth_failures`` (append-only trigger) with the dimension, the
@@ -58,22 +62,34 @@ DIMENSION_ACTIVATE_IP = "activate:ip"
 DIMENSION_ACTIVATE_CODE = "activate:code"
 DIMENSION_LOGIN_IP = "login:ip"
 DIMENSION_LOGIN_ACCOUNT = "login:account"
-DIMENSIONS = (
+DIMENSION_ADMIN_EXCHANGE_IP = "admin:exchange:ip"
+DIMENSION_SESSION_FENCING = "session:fencing"
+RATE_LIMIT_DIMENSIONS = (
     DIMENSION_ACTIVATE_IP,
     DIMENSION_ACTIVATE_CODE,
     DIMENSION_LOGIN_IP,
     DIMENSION_LOGIN_ACCOUNT,
+    DIMENSION_ADMIN_EXCHANGE_IP,
 )
+AUDIT_DIMENSIONS = (
+    *RATE_LIMIT_DIMENSIONS,
+    DIMENSION_SESSION_FENCING,
+)
+# Backward-compatible public vocabulary for callers/tests that inspect all
+# durable security dimensions. Spending a bucket uses RATE_LIMIT_DIMENSIONS.
+DIMENSIONS = AUDIT_DIMENSIONS
 
 RATE_LIMIT_ACTIVATE_IP_ENV = "VIDEO_REPLICA_RATE_LIMIT_ACTIVATE_IP"
 RATE_LIMIT_ACTIVATE_CODE_ENV = "VIDEO_REPLICA_RATE_LIMIT_ACTIVATE_CODE"
 RATE_LIMIT_LOGIN_IP_ENV = "VIDEO_REPLICA_RATE_LIMIT_LOGIN_IP"
+RATE_LIMIT_ADMIN_EXCHANGE_IP_ENV = "VIDEO_REPLICA_RATE_LIMIT_ADMIN_EXCHANGE_IP"
 RATE_LIMIT_WINDOW_ENV = "VIDEO_REPLICA_RATE_LIMIT_WINDOW_SECONDS"
 RATE_LIMIT_FAILURE_ALERT_ENV = "VIDEO_REPLICA_RATE_LIMIT_FAILURE_ALERT_THRESHOLD"
 
 DEFAULT_ACTIVATE_IP_LIMIT = 10
 DEFAULT_ACTIVATE_CODE_LIMIT = 5
 DEFAULT_LOGIN_IP_LIMIT = 10
+DEFAULT_ADMIN_EXCHANGE_IP_LIMIT = 10
 DEFAULT_WINDOW_SECONDS = 300
 DEFAULT_FAILURE_ALERT_THRESHOLD = 20
 
@@ -141,6 +157,14 @@ def login_ip_limit() -> int:
     return _positive_int_env(RATE_LIMIT_LOGIN_IP_ENV, DEFAULT_LOGIN_IP_LIMIT)
 
 
+def admin_exchange_ip_limit() -> int:
+    """Shared brute-force budget for one-shot admin credential exchange."""
+    return _positive_int_env(
+        RATE_LIMIT_ADMIN_EXCHANGE_IP_ENV,
+        DEFAULT_ADMIN_EXCHANGE_IP_LIMIT,
+    )
+
+
 def rate_limit_window_seconds() -> int:
     return _positive_int_env(RATE_LIMIT_WINDOW_ENV, DEFAULT_WINDOW_SECONDS)
 
@@ -191,7 +215,7 @@ def consume_rate_limit(
     so the shared budget can never be exceeded by landing on different
     processes (the ACT-08 red line).
     """
-    if dimension not in DIMENSIONS:
+    if dimension not in RATE_LIMIT_DIMENSIONS:
         raise ValueError(f"unknown rate-limit dimension {dimension!r}")
     if limit <= 0:
         raise ValueError("limit must be positive")
@@ -256,12 +280,12 @@ def record_auth_failure(
     request_id: str | None,
     now: datetime | None = None,
 ) -> None:
-    """Append one code-side rejection event for metrics and alerting.
+    """Append one security rejection event for metrics and alerting.
 
     The identifier for the code dimension is the keyed digest computed by
     the caller — the plaintext activation code never reaches this table.
     """
-    if dimension not in DIMENSIONS:
+    if dimension not in AUDIT_DIMENSIONS:
         raise ValueError(f"unknown failure dimension {dimension!r}")
     current = now if now is not None else _server_now(conn)
     current = current.astimezone(UTC).replace(microsecond=0)
@@ -280,7 +304,7 @@ def failure_metrics(
     now: datetime | None = None,
 ) -> int:
     """Count the dimension's failure events inside the trailing window."""
-    if dimension not in DIMENSIONS:
+    if dimension not in AUDIT_DIMENSIONS:
         raise ValueError(f"unknown failure dimension {dimension!r}")
     current = now if now is not None else _server_now(conn)
     current = current.astimezone(UTC).replace(microsecond=0)

@@ -10,6 +10,7 @@ from fastapi import HTTPException
 from app.auth import CurrentUser, Role
 from app.character_policy import identity_values_are_current
 from app.db_portable import BusinessConnection
+from app.ops_metrics import set_current_result_code
 
 
 def insert_audit(
@@ -302,4 +303,5 @@ def project_id_for_task(conn: BusinessConnection, task_id: str) -> str:
 
 
 def forbidden(code: str, message: str) -> HTTPException:
+    set_current_result_code(code)
     return HTTPException(status_code=403, detail={"code": code, "message": message})

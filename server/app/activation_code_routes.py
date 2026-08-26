@@ -58,6 +58,7 @@ from app.activation_code_service import (
     ActivationKeyError,
     InvalidActivationCodeError,
     iter_code_digests,
+    mask_activation_code,
     normalize_activation_code,
 )
 from app.customer_idempotency import (
@@ -78,6 +79,11 @@ from app.customer_idempotency import (
     request_hash as compute_request_hash,
 )
 from app.db_pg import get_pg_pool, pg_transaction
+from app.ops_metrics import (
+    get_or_create_request_id,
+    set_current_result_code,
+    set_current_trace_fields,
+)
 from app.security_rate_limit import (
     DIMENSION_ACTIVATE_CODE,
     DIMENSION_ACTIVATE_IP,
@@ -120,6 +126,7 @@ router = APIRouter(prefix="/api/customer", tags=["customer-activation"])
 
 
 def _http(status: int, code: str, message: str) -> HTTPException:
+    set_current_result_code(code)
     return HTTPException(status_code=status, detail={"code": code, "message": message})
 
 
@@ -654,7 +661,7 @@ def activate_first_device(
             "device_platform": device_platform,
         }
     )
-    request_id = request.headers.get(REQUEST_ID_HEADER, "").strip() or str(uuid.uuid4())
+    request_id = get_or_create_request_id(request)
 
     # Session review P2 (T15 / ACT-08): a legitimate idempotent retry — the
     # client lost the response of an already-successful activation — must
@@ -673,6 +680,12 @@ def activate_first_device(
             response=response,
         )
     if replayed_response is not None:
+        set_current_trace_fields(
+            user_id=replayed_response.user_id,
+            device_id=replayed_response.device_id,
+            session_epoch=replayed_response.session_epoch,
+            code_mask=mask_activation_code(canonical_code) if canonical_code is not None else None,
+        )
         return replayed_response
 
     # T15 / ACT-08: the shared PG-backed rate limiter. The IP dimension is
@@ -733,7 +746,7 @@ def activate_first_device(
         # "malformed" identifier keeps the failure countable).
         _audit_code_rejection(
             code_identifier="malformed",
-            request_id=request.headers.get(REQUEST_ID_HEADER, "").strip() or str(uuid.uuid4()),
+            request_id=get_or_create_request_id(request),
         )
         raise _unavailable() from None
     assert canonical_code is not None  # the malformed branch above returned
@@ -914,6 +927,14 @@ def activate_first_device(
         raise
 
     response.headers[REQUEST_ID_HEADER] = request_id
+    set_current_trace_fields(
+        user_id=str(payload["user_id"]),
+        device_id=str(payload["device_id"]),
+        session_epoch=(
+            payload["session_epoch"] if isinstance(payload["session_epoch"], int) else None
+        ),
+        code_mask=mask_activation_code(canonical_code),
+    )
     # Plaintext code / tokens never reach the logs — only opaque identifiers.
     logger.info(
         "customer activation completed: user=%s device=%s request=%s",
