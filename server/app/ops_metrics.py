@@ -365,6 +365,16 @@ def _resolve_route_label(request: Request) -> str:
     return UNMATCHED_ROUTE_LABEL
 
 
+def current_route_label() -> str:
+    """Resolve the matched route for logs emitted before middleware unwinds."""
+    context = current_request_context()
+    if context is None:
+        return "-"
+    if context.request is not None:
+        return _resolve_route_label(context.request)
+    return context.route
+
+
 def _default_result_code(status_code: int) -> str:
     return "OK" if status_code < 400 else f"HTTP_{status_code}"
 

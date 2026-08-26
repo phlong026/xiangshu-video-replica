@@ -101,8 +101,9 @@ passed。PR #72 connector 首轮 2 P1 + 2 P2 也已先红后绿修复：任意 4
 迁移切片 13 passed。第二轮 2 P1 + 1 P2 已继续先红后绿修复：未知 HTTP 方法固定
 归入 `OTHER`、成功旧写产生持久 mismatch 事实并由第 11 类 P1 查询消费、legacy
 异常和入口直接响应记录真实业务码。第三轮 1 P1 + 1 P2 继续修复跨用户拒绝审计
-随业务事务回滚，以及只读 fenced 请求误写成功写事实。最新 ops 20、alerts/042
-14、fencing+RBAC 99、customer security 36、health 6、SQLite→PG 35 passed，
+随业务事务回滚、只读 fenced 请求误写成功写事实。第四轮 1 P1 + 1 P2 修复通知
+失败却提前推进告警状态，以及 fencing 专用日志使用原始对象路径。最新 ops metrics/alerts/fencing/RBAC
+组合 134、alerts/042 15、customer security 36、health 6、SQLite→PG 35 passed，
 mypy 全绿；connector 最终复审与 PR CI 仍待完成，不在本证据中提前声明通过。
 
 ## §3 当前验证证据
@@ -110,17 +111,17 @@ mypy 全绿；connector 最终复审与 PR CI 仍待完成，不在本证据中�
 | 门禁 | 结果 |
 | --- | --- |
 | T37 ops metrics | 20 passed（含未匹配路径/未知方法低基数锁及真实业务结果码） |
-| T37 cluster alerts + migration slice | 14 passed（真实 PG16 fixture；含 11 类告警、成功旧写持久事实与 append-only 锁） |
-| customer fencing + RBAC | 99 passed（真实 PG16 fixture；fenced write 与 request-scoped read 两类事务回滚后的独立拒绝审计、写/读证据边界、SQLite 权限回归） |
+| T37 cluster alerts + migration slice | 15 passed（真实 PG16 fixture；含 11 类告警、成功旧写持久事实、通知后状态推进与 append-only 锁） |
+| customer fencing + RBAC | 100 passed（真实 PG16 fixture；fenced write 与 request-scoped read 两类事务回滚后的独立拒绝审计、写/读证据边界、fencing 日志路由模板、SQLite 权限回归） |
 | customer security / health | 36 / 6 passed |
 | SQLite→PG 导入与对账 | 35 passed（新增 PG-only 表空/非空边界） |
 | 管理员 exchange 共享限流 | `test_admin_auth.py` 72 passed |
 | admin 关联回归 | 93 passed（既有 marker warning，不是失败） |
-| 激活/设备/充值/管理/T37 组合 | 253 passed |
+| 激活/设备/充值/管理/T37 组合 | 255 passed |
 | Secret / client / E2E / Tauri | Pass；client 47 files / 513 tests；E2E Biome 14 files；Cargo fmt/check pass |
 | Ruff / format / mypy | Pass；186 files formatted；72 source files typed |
 | 全仓 `npm run check` | Pass；server 1273 passed / 16 existing warnings，1013.27s；这是本任务唯一一次完整 pytest |
-| 复审 | 独立复审 `APPROVE`：首轮 0C/0H/1M，修复后 0C/0H/0M；PR #72 connector 三轮共 5 P1 + 4 P2 均已回归锁定并修复，最终复审待新提交触发 |
+| 复审 | 独立复审 `APPROVE`：首轮 0C/0H/1M，修复后 0C/0H/0M；PR #72 connector 四轮共 6 P1 + 5 P2 均已回归锁定并修复，最终复审待新提交触发 |
 
 ## §4 安全与可观测边界
 
@@ -146,13 +147,13 @@ mypy 全绿；connector 最终复审与 PR CI 仍待完成，不在本证据中�
 
 ```text
 任务/工作包：T37（仓库侧）/ OPS-02（部分）/ EXT-02（部分）
-Owner / Reviewer：OPS/后端（Agent 执行）/ 独立复审 APPROVE（首轮 0C/0H/1M；Medium 修复后 0C/0H/0M）+ PR #72 connector（三轮共 5 P1/4 P2，均已先红后绿修复；最终复审待触发）
+Owner / Reviewer：OPS/后端（Agent 执行）/ 独立复审 APPROVE（首轮 0C/0H/1M；Medium 修复后 0C/0H/0M）+ PR #72 connector（四轮共 6 P1/5 P2，均已先红后绿修复；最终复审待触发）
 分支 / 基线 SHA：feat/customer-v3-t37-observability / main@bb545ca
 上游规格段落：客户版任务清单 V3 §7 T37、§12.6 EXT-02、§12.7 OPS-02；测试与验收规格 V3 §8.3；代码开发清单 V3 §3.1–§3.3/§12
 改动文件：server/app/ops_metrics.py、main.py、customer_fence.py、permissions.py、admin_auth/customer session/device/activation/recharge routes、security_rate_limit.py；server/scripts/check_ops_alerts.py、reconcile_customer_billing.py；migration 042 + Alembic logger fix；T37/关联回归测试；customer env、Nginx、ops-alert systemd；部署手册、冻结文件映射与任务/证据账本
-失败测试或回归锁定：request id/structured fields/result code/secret redaction/private metrics；任意未匹配路径统一 `UNMATCHED`、任意扩展 HTTP 方法统一 `OTHER`；legacy/入口拒绝真实业务码；fencing metrics+durable audit+hook failure isolation；fencing ISO `T` 事实与截止时间同序比较；仅显式成功写事务记录 expected/verified epoch 同事务事实，只读零事实；PG 跨用户 403 先回滚业务再独立幂等提交审计；11 类 cluster anomaly query、epoch anti-false-positive、cross-user denial source、钱包不一致与队列超时任务均在输出上限前完成异常过滤、bounded/app-table-only SQL、transition state/state-file/advisory owner；admin exchange PG-shared rate budget；042 index/append-only/downgrade guard；fresh PG16 head execution
-实现结果：HTTP 单行结构化日志和安全字段白名单；双 API 私有 Prometheus exporter；fencing reject/wait 指标；单所有者 PG anomaly probe + fired/resolved 私有状态；P1 面覆盖双在线/资金/账本/旧写拒绝与实际提交/持久越权拒绝/队列/悬挂 reserve；admin exchange 多实例共享限流；部署与接收器演练手册
-验证命令与通过数：T37 ops 20；alerts+042 slice 14（真实 PG16 fixture）；customer fencing+RBAC 99；customer security 36；health 6；SQLite→PG 35；admin auth 72（含复审修复）；admin related 93；受影响组合 253；client 513；Cargo pass；ruff/format/mypy pass（186/72）；唯一全量 server 1273 passed/16 existing warnings；独立复审最终 APPROVE、0C/0H/0M；PR #72 connector 三轮 5 P1/4 P2 均已修复，最终复审待触发
+失败测试或回归锁定：request id/structured fields/result code/secret redaction/private metrics；任意未匹配路径统一 `UNMATCHED`、任意扩展 HTTP 方法统一 `OTHER`；legacy/入口拒绝真实业务码；fencing metrics+durable audit+hook failure isolation+匹配路由模板；fencing ISO `T` 事实与截止时间同序比较；仅显式成功写事务记录 expected/verified epoch 同事务事实，只读零事实；PG 跨用户 403 先回滚业务再独立幂等提交审计；11 类 cluster anomaly query、epoch anti-false-positive、cross-user denial source、钱包不一致与队列超时任务均在输出上限前完成异常过滤、bounded/app-table-only SQL、transition state/state-file/advisory owner、通知失败不推进状态；admin exchange PG-shared rate budget；042 index/append-only/downgrade guard；fresh PG16 head execution
+实现结果：HTTP 单行结构化日志和安全字段白名单；双 API 私有 Prometheus exporter；fencing reject/wait 指标；单所有者 PG anomaly probe + fired/resolved 私有状态，且仅在事务提交并成功输出所有边后推进状态；P1 面覆盖双在线/资金/账本/旧写拒绝与实际提交/持久越权拒绝/队列/悬挂 reserve；admin exchange 多实例共享限流；部署与接收器演练手册
+验证命令与通过数：ops metrics 20；ops alerts 14；alerts+042 slice 15（真实 PG16 fixture）；customer fencing+RBAC 100；最新 ops metrics/alerts/fencing/RBAC 组合 134；customer security 36；health 6；SQLite→PG 35；admin auth 72（含复审修复）；admin related 93；受影响组合 255；client 513；Cargo pass；ruff/format/mypy pass（186/72）；唯一全量本地 server 1273 passed/16 existing warnings（最终两例复审锁定前）；独立复审最终 APPROVE、0C/0H/0M；PR #72 connector 四轮 6 P1/5 P2 均已修复，最终复审待触发
 证据层级：AUTOMATED_VERIFIED（仓库侧）；T37/OPS-02/EXT-02 [~]，不得提升 STAGING
 安全与可观测性：日志白名单且无请求体/credential/provider payload；metrics Bearer file + loopback；PG advisory single owner；counts-only P1 output；真实集中平台/接收器/PG监控/外部费用链未冒充完成
 迁移与回滚：042 PG-only 追加索引、安全维度与成功写事务 epoch 去重事实；存在新 append-only security/write evidence 时 downgrade fail closed，否则逆序回退；T07 导入对账登记 PG-only 表；应用回滚优先前向修复并保留审计事实

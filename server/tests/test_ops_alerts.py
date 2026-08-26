@@ -194,6 +194,32 @@ def test_state_file_is_atomic_private_and_rejects_corruption(tmp_path: Path) -> 
         load_state(target)
 
 
+def test_alert_state_advances_only_after_every_transition_is_published(tmp_path: Path) -> None:
+    from scripts.check_ops_alerts import ProbeResult, load_state, publish_probe_result, save_state
+
+    target = tmp_path / "ops-alerts.json"
+    save_state(target, {"double_online": False})
+    result = ProbeResult(
+        lines=("first-transition", "second-transition"),
+        next_state={"double_online": True},
+    )
+    emitted: list[str] = []
+
+    def fail_during_publish(line: str) -> None:
+        emitted.append(line)
+        if line == "second-transition":
+            raise RuntimeError("receiver unavailable")
+
+    with pytest.raises(RuntimeError, match="receiver unavailable"):
+        publish_probe_result(result, state_file=target, emit=fail_during_publish)
+
+    assert emitted == ["first-transition", "second-transition"]
+    assert load_state(target) == {"double_online": False}
+
+    publish_probe_result(result, state_file=target, emit=lambda _line: None)
+    assert load_state(target) == {"double_online": True}
+
+
 def test_transition_output_never_contains_subjects_or_connection_details() -> None:
     from scripts.check_ops_alerts import AlertObservation, render_transition, transition_alerts
 
@@ -234,7 +260,9 @@ def test_advisory_lock_loss_skips_without_mutating_state(tmp_path: Path) -> None
         def execute(self, _query: str, _parameters: tuple[object, ...]) -> _Cursor:
             return _Cursor()
 
-    assert alerts.run_probe(_Connection(), state_file=state_file) == ()
+    result = alerts.run_probe(_Connection(), state_file=state_file)
+    assert result.lines == ()
+    assert result.next_state is None
     assert alerts.load_state(state_file) == {"double_online": True}
 
 
@@ -354,7 +382,9 @@ def test_all_cluster_queries_execute_on_a_fresh_pg16_database(tmp_path: Path) ->
 
         state_file = tmp_path / "ops-alerts.json"
         with psycopg.connect(dsn) as conn:
-            emitted = alerts.run_probe(conn, state_file=state_file)
+            result = alerts.run_probe(conn, state_file=state_file)
+        emitted: list[str] = []
+        alerts.publish_probe_result(result, state_file=state_file, emit=emitted.append)
         payloads = [json.loads(line) for line in emitted]
         assert any(
             item["alert"] == "fencing_rejected" and item["transition"] == "fired"

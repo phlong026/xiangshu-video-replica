@@ -249,7 +249,7 @@ def _log_fencing_reject_audit(code: str, lock_wait_seconds: float) -> None:
         "event": "customer_session_fenced",
         "request_id": context.request_id if context is not None else "-",
         "method": context.method if context is not None else "-",
-        "route": context.route if context is not None else "-",
+        "route": ops_metrics.current_route_label(),
         "result_code": code,
         "lock_wait_ms": max(int(lock_wait_seconds * 1000), 0),
     }

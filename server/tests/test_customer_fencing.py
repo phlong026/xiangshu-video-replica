@@ -43,7 +43,7 @@ from pathlib import Path
 
 import psycopg
 import pytest
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
 from fastapi.testclient import TestClient
 
 from app.activation_code_service import (
@@ -1174,6 +1174,39 @@ def test_fenced_transaction_records_local_metrics_and_audit_log(
     assert payload["result_code"] == "SESSION_REPLACED"
     assert isinstance(payload["lock_wait_ms"], int)
     assert customer["session_token"] not in caplog.text
+
+
+def test_fencing_audit_uses_the_matched_route_template(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from types import SimpleNamespace
+
+    from app.customer_fence import _log_fencing_reject_audit
+    from app.ops_metrics import bind_request_context
+
+    raw_path = "/api/projects/attacker-controlled-object/scripts"
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": raw_path,
+            "headers": [],
+            "route": SimpleNamespace(path="/api/projects/{project_id}/scripts"),
+        }
+    )
+
+    with caplog.at_level(logging.INFO, logger="app.customer_fence"):
+        with bind_request_context(
+            request_id="req-route-template",
+            method="POST",
+            route=raw_path,
+            request=request,
+        ):
+            _log_fencing_reject_audit("SESSION_REPLACED", 0.001)
+
+    payload = json.loads(caplog.records[-1].getMessage())
+    assert payload["route"] == "/api/projects/{project_id}/scripts"
+    assert "attacker-controlled-object" not in caplog.text
 
 
 def test_fenced_transaction_keeps_original_401_when_metrics_and_audit_fail(

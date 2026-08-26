@@ -18,6 +18,7 @@ import json
 import os
 import sys
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -74,6 +75,14 @@ class AlertTransition:
     transition: Literal["fired", "resolved"]
     active: bool
     observed_count: int
+
+
+@dataclass(frozen=True)
+class ProbeResult:
+    """Transitions and the state that may advance only after publication."""
+
+    lines: tuple[str, ...]
+    next_state: dict[str, bool] | None
 
 
 # Each query returns a single count over a capped anomaly subquery. The
@@ -383,16 +392,34 @@ def render_transition(transition: AlertTransition, *, checked_at: datetime) -> s
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
+def publish_probe_result(
+    result: ProbeResult,
+    *,
+    state_file: Path,
+    emit: Callable[[str], None],
+) -> None:
+    """Publish every edge before acknowledging it in the durable state.
+
+    A failed emitter leaves the previous state untouched, so the next probe
+    retries the P1 transition. Duplicates are safer than permanently losing
+    the only fired/resolved notification.
+    """
+    for line in result.lines:
+        emit(line)
+    if result.next_state is not None:
+        save_state(state_file, result.next_state)
+
+
 def run_probe(
     conn: psycopg.Connection[object],
     *,
     state_file: Path,
     config: ProbeConfig | None = None,
-) -> tuple[str, ...]:
+) -> ProbeResult:
     config = config or ProbeConfig()
     lock_row = conn.execute("SELECT pg_try_advisory_xact_lock(%s)", (ADVISORY_LOCK_KEY,)).fetchone()
     if lock_row is None or not bool(lock_row[0]):
-        return ()
+        return ProbeResult(lines=(), next_state=None)
     conn.execute(
         "SELECT set_config('statement_timeout', %s, true)",
         (f"{config.statement_timeout_ms}ms",),
@@ -401,8 +428,10 @@ def run_probe(
     observations = collect_observations(conn, config)
     transitions, current = transition_alerts(previous, observations)
     checked_at = _server_now(conn)
-    save_state(state_file, current)
-    return tuple(render_transition(item, checked_at=checked_at) for item in transitions)
+    return ProbeResult(
+        lines=tuple(render_transition(item, checked_at=checked_at) for item in transitions),
+        next_state=current,
+    )
 
 
 def _positive_int_env(name: str, default: int) -> int:
@@ -449,9 +478,12 @@ def main(argv: list[str] | None = None) -> int:
         if database.mode is not DatabaseMode.POSTGRESQL or database.dsn is None:
             raise RuntimeError("ops alert probe requires PostgreSQL")
         with psycopg.connect(database.dsn) as conn:
-            lines = run_probe(conn, state_file=args.state_file, config=config_from_env())
-        for line in lines:
-            print(line)
+            result = run_probe(conn, state_file=args.state_file, config=config_from_env())
+        publish_probe_result(
+            result,
+            state_file=args.state_file,
+            emit=lambda line: print(line, flush=True),
+        )
         return 0
     except Exception as exc:
         # Driver messages may contain DSN fragments or business values. Emit
