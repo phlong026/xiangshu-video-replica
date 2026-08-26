@@ -80,14 +80,16 @@ def test_every_cluster_query_is_bounded_and_uses_only_application_tables() -> No
         assert "information_schema" not in normalized, name
 
 
-def test_double_online_compares_same_epoch_and_post_successor_heartbeats_as_instants() -> None:
+def test_double_online_uses_indexed_typed_event_timestamps() -> None:
     from scripts.check_ops_alerts import ALERT_QUERIES
 
     normalized = " ".join(ALERT_QUERIES["double_online"].lower().split())
     assert "group by user_id, session_epoch" in normalized
     assert "latest_login.session_epoch > heartbeat.session_epoch" in normalized
     assert "login.event = 'login'" in normalized
-    assert "created_at::timestamptz" in normalized
+    assert "heartbeat.occurred_at" in normalized
+    assert "login.occurred_at" in normalized
+    assert "created_at::timestamptz" not in normalized
 
 
 def test_cross_user_alert_combines_success_mismatches_and_durable_denials() -> None:
@@ -101,7 +103,8 @@ def test_cross_user_alert_combines_success_mismatches_and_durable_denials() -> N
     assert "security.asset_denied" in normalized
     assert "metadata_json" not in normalized
     assert "entity_id" not in normalized
-    assert "created_at::timestamptz" in normalized
+    assert "occurred_at >= %s" in normalized
+    assert "created_at::timestamptz" not in normalized
 
 
 def test_probe_uses_typed_cutoffs_for_legacy_timestamp_columns(
@@ -148,7 +151,8 @@ def test_queue_starvation_starts_from_waiting_work_and_keeps_missing_cursors() -
     assert "left join user_queue_cursors" in normalized
     assert "cursor.user_id is null" in normalized
     assert normalized.index("task.status in ('pending', 'queued')") < normalized.index("limit %s")
-    assert "task.created_at::timestamptz" in normalized
+    assert "task.created_at_utc" in normalized
+    assert "task.created_at::timestamptz" not in normalized
 
 
 def test_wallet_mismatch_filters_anomalies_before_candidate_limit() -> None:
@@ -373,9 +377,10 @@ def test_all_cluster_queries_execute_on_a_fresh_pg16_database(tmp_path: Path) ->
             )
             conn.execute(
                 "INSERT INTO generation_tasks "
-                "(id, batch_id, provider, model, status, created_at) VALUES "
+                "(id, batch_id, provider, model, status, created_at, created_at_utc) VALUES "
                 "('starved-task-t37', 'starved-batch-t37', 'fake_h3', 'MiniMax-H3', "
-                "'PENDING', (clock_timestamp() - interval '1 hour')::text)"
+                "'PENDING', (clock_timestamp() - interval '1 hour')::text, "
+                "clock_timestamp() - interval '1 hour')"
             )
             conn.execute(
                 "INSERT INTO wallets "
@@ -417,10 +422,11 @@ def test_all_cluster_queries_execute_on_a_fresh_pg16_database(tmp_path: Path) ->
             )
             conn.execute(
                 "INSERT INTO generation_tasks "
-                "(id, batch_id, provider, model, status, created_at) VALUES "
+                "(id, batch_id, provider, model, status, created_at, created_at_utc) VALUES "
                 "('missing-cursor-task-t37', 'missing-cursor-batch-t37', "
                 "'fake_h3', 'MiniMax-H3', 'PENDING', "
-                "(clock_timestamp() - interval '1 hour')::text)"
+                "(clock_timestamp() - interval '1 hour')::text, "
+                "clock_timestamp() - interval '1 hour')"
             )
             conn.commit()
             missing_cursor = alerts.collect_observations(

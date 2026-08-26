@@ -215,8 +215,8 @@ def _validate_schema(
     for table in source_tables:
         source_columns, source_pk = _sqlite_columns(sqlite_conn, table)
         target_columns, target_pk, _ = _pg_columns(pg_conn, table)
-        # Exempt the PG-only columns (041 runtime_settings.fair_queue_enabled):
-        # the target carries them, the T07 source never does.
+        # Exempt PG-only columns (the 041 fair-queue setting and 042 typed
+        # probe timestamps): the target carries them, the T07 source never does.
         pg_only = PG_ONLY_COLUMNS.get(table, frozenset())
         if set(source_columns) != set(target_columns) - pg_only or source_pk != target_pk:
             raise MigrationSafetyError(f"source/target schema differs for table {table!r}")

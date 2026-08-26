@@ -140,6 +140,37 @@ def test_request_middleware_preserves_request_id_and_custom_result_code(
     assert payload["result_code"] == "CUSTOM_RESULT"
 
 
+def test_cors_preflight_is_observed_like_every_other_http_request(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CORS must not short-circuit request-id, metrics, or completion logs."""
+    from app.main import app as main_app
+
+    monkeypatch.delenv("VIDEO_REPLICA_CUSTOMER_PRODUCTION", raising=False)
+    with caplog.at_level(logging.INFO, logger="app.ops_metrics"):
+        with TestClient(main_app) as client:
+            response = client.options(
+                "/api/customer/activate",
+                headers={
+                    "Origin": "http://localhost:5173",
+                    "Access-Control-Request-Method": "POST",
+                    "Access-Control-Request-Headers": "idempotency-key, x-request-id",
+                },
+            )
+
+    assert response.status_code == 200, response.text
+    request_id = response.headers.get(REQUEST_ID_HEADER)
+    assert request_id
+    payload = _last_log_payload(caplog)
+    assert payload["request_id"] == request_id
+    assert payload["method"] == "OPTIONS"
+    assert payload["status"] == 200
+    assert payload["route"] == "UNMATCHED"
+    metrics = render_metrics_document_for_tests(is_ready=True)
+    assert 'method="OPTIONS"' in metrics
+
+
 def test_shared_permission_denials_publish_the_business_result_code(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

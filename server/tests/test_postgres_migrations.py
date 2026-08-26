@@ -897,14 +897,69 @@ def test_t37_observability_indexes_and_fencing_audit_dimension() -> None:
                 ).fetchall()
             }
             assert {
-                "idx_customer_session_events_event_created_at",
-                "idx_customer_session_events_user_event_created_at",
+                "idx_customer_session_events_event_occurred_at",
+                "idx_customer_session_events_user_event_occurred_at_id",
                 "idx_recharge_orders_status_paid_at",
                 "idx_wallet_transactions_user_created_at",
                 "idx_wallets_updated_at_user",
-                "idx_audit_logs_action_created_at",
+                "idx_audit_logs_action_occurred_at",
+                "idx_generation_tasks_status_created_at_utc_batch",
                 "idx_customer_fencing_write_mismatch",
             } <= indexes
+
+            for table_name, expected_column in (
+                ("customer_session_events", "occurred_at"),
+                ("audit_logs", "occurred_at"),
+                ("generation_tasks", "created_at_utc"),
+            ):
+                columns = {
+                    row[0]
+                    for row in conn.execute(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_schema = 'public' AND table_name = %s",
+                        (table_name,),
+                    ).fetchall()
+                }
+                assert expected_column in columns
+
+            conn.execute("SET enable_seqscan TO off")
+            event_plan = "\n".join(
+                row[0]
+                for row in conn.execute(
+                    "EXPLAIN (COSTS OFF) SELECT user_id FROM customer_session_events "
+                    "WHERE event = 'HEARTBEAT' "
+                    "AND occurred_at >= clock_timestamp() - interval '2 minutes'"
+                ).fetchall()
+            )
+            successor_plan = "\n".join(
+                row[0]
+                for row in conn.execute(
+                    "EXPLAIN (COSTS OFF) SELECT session_epoch FROM customer_session_events "
+                    "WHERE user_id = 'missing' AND event = 'LOGIN' "
+                    "AND occurred_at <= clock_timestamp() "
+                    "ORDER BY occurred_at DESC, id DESC LIMIT 1"
+                ).fetchall()
+            )
+            audit_plan = "\n".join(
+                row[0]
+                for row in conn.execute(
+                    "EXPLAIN (COSTS OFF) SELECT id FROM audit_logs "
+                    "WHERE action = 'security.project_denied' "
+                    "AND occurred_at >= clock_timestamp() - interval '5 minutes'"
+                ).fetchall()
+            )
+            task_plan = "\n".join(
+                row[0]
+                for row in conn.execute(
+                    "EXPLAIN (COSTS OFF) SELECT id FROM generation_tasks "
+                    "WHERE status IN ('PENDING', 'QUEUED') "
+                    "AND created_at_utc < clock_timestamp() - interval '5 minutes'"
+                ).fetchall()
+            )
+            assert "idx_customer_session_events_event_occurred_at" in event_plan
+            assert "idx_customer_session_events_user_event_occurred_at_id" in successor_plan
+            assert "idx_audit_logs_action_occurred_at" in audit_plan
+            assert "idx_generation_tasks_status_created_at_utc_batch" in task_plan
 
             evidence_columns = {
                 row[0]

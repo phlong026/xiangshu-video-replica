@@ -51,15 +51,16 @@ def upgrade() -> None:
         "security_auth_failures",
         _NEW_DIMENSIONS,
     )
+    _add_indexed_probe_timestamps()
     op.create_index(
-        "idx_customer_session_events_event_created_at",
+        "idx_customer_session_events_event_occurred_at",
         "customer_session_events",
-        ["event", "created_at"],
+        ["event", "occurred_at"],
     )
     op.create_index(
-        "idx_customer_session_events_user_event_created_at",
+        "idx_customer_session_events_user_event_occurred_at_id",
         "customer_session_events",
-        ["user_id", "event", "created_at"],
+        ["user_id", "event", "occurred_at", "id"],
     )
     op.create_index(
         "idx_recharge_orders_status_paid_at",
@@ -77,10 +78,67 @@ def upgrade() -> None:
         ["updated_at", "user_id"],
     )
     op.create_index(
-        "idx_audit_logs_action_created_at",
+        "idx_audit_logs_action_occurred_at",
         "audit_logs",
-        ["action", "created_at"],
+        ["action", "occurred_at", "id"],
     )
+    op.create_index(
+        "idx_generation_tasks_status_created_at_utc_batch",
+        "generation_tasks",
+        ["status", "created_at_utc", "batch_id"],
+    )
+    _create_t37_evidence_schema()
+
+
+def _add_indexed_probe_timestamps() -> None:
+    """Materialize absolute instants without rewriting legacy TEXT facts.
+
+    The old columns are immutable user-visible audit history, but their
+    CURRENT_TIMESTAMP rendering includes the writer session's timezone. A
+    typed companion lets the bounded T37 queries use btree indexes without
+    lexical timezone errors. Offset-free historical SQLite values are UTC by
+    the T07 import contract, so the migration pins that interpretation only
+    while backfilling.
+    """
+    timestamp = sa.DateTime(timezone=True)
+    op.add_column(
+        "customer_session_events",
+        sa.Column("occurred_at", timestamp, nullable=True),
+    )
+    op.add_column("audit_logs", sa.Column("occurred_at", timestamp, nullable=True))
+    op.add_column(
+        "generation_tasks",
+        sa.Column("created_at_utc", timestamp, nullable=True),
+    )
+    op.execute("SET LOCAL TIME ZONE 'UTC'")
+    # customer_session_events is append-only. The migration derives a new
+    # column from the original fact under a transactional, temporary trigger
+    # suspension; it never changes created_at or any business value.
+    op.execute(
+        "ALTER TABLE customer_session_events "
+        "DISABLE TRIGGER trg_customer_session_events_append_only"
+    )
+    op.execute("UPDATE customer_session_events SET occurred_at = created_at::timestamptz")
+    op.execute(
+        "ALTER TABLE customer_session_events ENABLE TRIGGER trg_customer_session_events_append_only"
+    )
+    op.execute("UPDATE audit_logs SET occurred_at = created_at::timestamptz")
+    op.execute("UPDATE generation_tasks SET created_at_utc = created_at::timestamptz")
+    for table_name, column_name in (
+        ("customer_session_events", "occurred_at"),
+        ("audit_logs", "occurred_at"),
+        ("generation_tasks", "created_at_utc"),
+    ):
+        op.alter_column(
+            table_name,
+            column_name,
+            existing_type=timestamp,
+            nullable=False,
+            server_default=sa.text("clock_timestamp()"),
+        )
+
+
+def _create_t37_evidence_schema() -> None:
     op.create_table(
         "ops_alert_state",
         sa.Column("alert_name", sa.Text(), primary_key=True),
@@ -266,7 +324,11 @@ def downgrade() -> None:
     )
     op.drop_table("customer_authorization_evidence")
     op.drop_table("ops_alert_state")
-    op.drop_index("idx_audit_logs_action_created_at", table_name="audit_logs")
+    op.drop_index(
+        "idx_generation_tasks_status_created_at_utc_batch",
+        table_name="generation_tasks",
+    )
+    op.drop_index("idx_audit_logs_action_occurred_at", table_name="audit_logs")
     op.drop_index("idx_wallets_updated_at_user", table_name="wallets")
     op.drop_index(
         "idx_wallet_transactions_user_created_at",
@@ -277,13 +339,16 @@ def downgrade() -> None:
         table_name="recharge_orders",
     )
     op.drop_index(
-        "idx_customer_session_events_event_created_at",
+        "idx_customer_session_events_event_occurred_at",
         table_name="customer_session_events",
     )
     op.drop_index(
-        "idx_customer_session_events_user_event_created_at",
+        "idx_customer_session_events_user_event_occurred_at_id",
         table_name="customer_session_events",
     )
+    op.drop_column("generation_tasks", "created_at_utc")
+    op.drop_column("audit_logs", "occurred_at")
+    op.drop_column("customer_session_events", "occurred_at")
     op.drop_constraint(
         "ck_security_auth_failures_dimension",
         "security_auth_failures",

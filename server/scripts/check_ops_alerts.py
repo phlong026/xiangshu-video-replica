@@ -94,7 +94,7 @@ ALERT_QUERIES: dict[str, str] = {
             SELECT user_id FROM (
                 SELECT user_id, session_epoch
                 FROM customer_session_events
-                WHERE event = 'HEARTBEAT' AND created_at::timestamptz >= %s
+                WHERE event = 'HEARTBEAT' AND occurred_at >= %s
                 GROUP BY user_id, session_epoch
                 HAVING count(DISTINCT device_id) > 1
                 LIMIT %s
@@ -108,15 +108,14 @@ ALERT_QUERIES: dict[str, str] = {
                     FROM customer_session_events AS login
                     WHERE login.user_id = heartbeat.user_id
                       AND login.event = 'LOGIN'
-                      AND login.created_at::timestamptz
-                          <= heartbeat.created_at::timestamptz
-                    ORDER BY login.created_at::timestamptz DESC, login.id DESC
+                      AND login.occurred_at <= heartbeat.occurred_at
+                    ORDER BY login.occurred_at DESC, login.id DESC
                     LIMIT 1
                 ) AS latest_login ON true
                 WHERE heartbeat.event = 'HEARTBEAT'
-                  AND heartbeat.created_at::timestamptz >= %s
+                  AND heartbeat.occurred_at >= %s
                   AND latest_login.session_epoch > heartbeat.session_epoch
-                ORDER BY heartbeat.created_at::timestamptz, heartbeat.id
+                ORDER BY heartbeat.occurred_at, heartbeat.id
                 LIMIT %s
             ) AS displaced_epoch_heartbeats
             LIMIT %s
@@ -219,8 +218,8 @@ ALERT_QUERIES: dict[str, str] = {
                 SELECT id
                 FROM audit_logs
                 WHERE action IN ('security.project_denied', 'security.asset_denied')
-                  AND created_at::timestamptz >= %s
-                ORDER BY created_at::timestamptz DESC, id
+                  AND occurred_at >= %s
+                ORDER BY occurred_at DESC, id
                 LIMIT %s
             ) AS denied_attempts
             LIMIT %s
@@ -230,11 +229,11 @@ ALERT_QUERIES: dict[str, str] = {
         WITH waiting_users AS MATERIALIZED (
             SELECT
                 batch.created_by_user_id AS user_id,
-                min(task.created_at::timestamptz) AS oldest_pending_at
+                min(task.created_at_utc) AS oldest_pending_at
             FROM generation_batches AS batch
             JOIN generation_tasks AS task ON task.batch_id = batch.id
             WHERE task.status IN ('PENDING', 'QUEUED')
-              AND task.created_at::timestamptz < %s
+              AND task.created_at_utc < %s
             GROUP BY batch.created_by_user_id
         ), candidate_users AS MATERIALIZED (
             SELECT waiting.user_id

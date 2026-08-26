@@ -265,9 +265,6 @@ async def require_loopback_client(
     return await call_next(request)
 
 
-app.middleware("http")(request_observability_middleware)
-
-
 def _cors_origins() -> list[str]:
     origins = [
         "http://127.0.0.1:5173",
@@ -308,6 +305,10 @@ app.add_middleware(
     # keeps burning the (shared, PG-backed) abuse budget.
     expose_headers=["X-Request-Id", "X-Idempotent-Replay", "Retry-After"],
 )
+# Starlette applies the last registered middleware first. Keep observability
+# outside CORS so direct OPTIONS responses also receive a request id, log and
+# bounded HTTP metric instead of being silently short-circuited.
+app.middleware("http")(request_observability_middleware)
 app.include_router(generation_router)
 app.include_router(rbac_router)
 app.include_router(payment_router)
