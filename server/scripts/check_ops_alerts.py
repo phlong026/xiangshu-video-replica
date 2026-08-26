@@ -89,11 +89,33 @@ class ProbeResult:
 ALERT_QUERIES: dict[str, str] = {
     "double_online": """
         SELECT count(*) FROM (
-            SELECT user_id, session_epoch
-            FROM customer_session_events
-            WHERE event = 'HEARTBEAT' AND created_at >= %s
-            GROUP BY user_id, session_epoch
-            HAVING count(DISTINCT device_id) > 1
+            SELECT user_id FROM (
+                SELECT user_id, session_epoch
+                FROM customer_session_events
+                WHERE event = 'HEARTBEAT' AND created_at >= %s
+                GROUP BY user_id, session_epoch
+                HAVING count(DISTINCT device_id) > 1
+                LIMIT %s
+            ) AS same_epoch_devices
+            UNION ALL
+            SELECT user_id FROM (
+                SELECT heartbeat.user_id
+                FROM customer_session_events AS heartbeat
+                JOIN LATERAL (
+                    SELECT login.session_epoch
+                    FROM customer_session_events AS login
+                    WHERE login.user_id = heartbeat.user_id
+                      AND login.event = 'LOGIN'
+                      AND login.created_at <= heartbeat.created_at
+                    ORDER BY login.created_at DESC, login.id DESC
+                    LIMIT 1
+                ) AS latest_login ON true
+                WHERE heartbeat.event = 'HEARTBEAT'
+                  AND heartbeat.created_at >= %s
+                  AND latest_login.session_epoch > heartbeat.session_epoch
+                ORDER BY heartbeat.created_at, heartbeat.id
+                LIMIT %s
+            ) AS displaced_epoch_heartbeats
             LIMIT %s
         ) AS anomalies
     """,
@@ -296,7 +318,13 @@ def collect_observations(
     config = config or ProbeConfig()
     current = _server_now(conn)
     parameters: dict[str, tuple[object, ...]] = {
-        "double_online": (_cutoff(current, config.session_window_seconds), config.row_limit),
+        "double_online": (
+            _cutoff(current, config.session_window_seconds),
+            config.row_limit,
+            _cutoff(current, config.session_window_seconds),
+            config.row_limit,
+            config.row_limit,
+        ),
         "duplicate_charge": (config.row_limit,),
         "duplicate_provider_trade_no": (config.row_limit,),
         "paid_without_charge": (config.row_limit,),

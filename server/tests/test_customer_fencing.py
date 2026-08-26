@@ -809,6 +809,61 @@ def test_other_customer_cannot_touch_a_foreign_project(client: TestClient) -> No
     assert json.loads(str(denial[2])) == {"attempted_action": "project.rename"}
 
 
+def test_cluster_probe_detects_heartbeat_from_a_displaced_session_epoch(
+    client: TestClient,
+) -> None:
+    """A heartbeat that commits after a newer session epoch is a P1 even
+    though its old epoch has only one device event."""
+    from scripts import check_ops_alerts as alerts
+
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    old_device_id, old_session_id, old_epoch, _ = _session_row()
+    second_token = _second_device_row(
+        user_id=customer["user_id"],
+        activation_code_id="code-a",
+        device_id="device-b",
+        slot_no=2,
+    )
+    with psycopg.connect(_fencing_dsn(), autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO customer_session_events "
+            "(id, event, user_id, activation_code_id, device_id, session_id, "
+            "session_epoch, actor_user_id, request_id) "
+            "VALUES ('heartbeat-before-switch-t37', 'HEARTBEAT', %s, 'code-a', %s, %s, %s, %s, "
+            "'heartbeat-before-switch-t37')",
+            (customer["user_id"], old_device_id, old_session_id, old_epoch, customer["user_id"]),
+        )
+
+    switched = client.post(
+        SWITCH_PATH,
+        json={},
+        headers={
+            **_bearer(second_token),
+            IDEMPOTENCY_KEY_HEADER: "idem-displaced-heartbeat-switch",
+        },
+    )
+    assert switched.status_code == 201, switched.text
+    assert switched.json()["session_epoch"] == old_epoch + 1
+
+    with psycopg.connect(_fencing_dsn(), autocommit=True) as conn:
+        before_regression = alerts.collect_observations(conn)
+        assert (
+            next(item for item in before_regression if item.name == "double_online").observed_count
+            == 0
+        )
+        conn.execute(
+            "INSERT INTO customer_session_events "
+            "(id, event, user_id, activation_code_id, device_id, session_id, "
+            "session_epoch, actor_user_id, request_id) "
+            "VALUES ('heartbeat-after-switch-t37', 'HEARTBEAT', %s, 'code-a', %s, %s, %s, %s, "
+            "'heartbeat-after-switch-t37')",
+            (customer["user_id"], old_device_id, old_session_id, old_epoch, customer["user_id"]),
+        )
+        observations = alerts.collect_observations(conn)
+
+    assert next(item for item in observations if item.name == "double_online").observed_count == 1
+
+
 def test_request_scoped_pg_reads_persist_denials_after_dependency_rollback(
     client: TestClient,
 ) -> None:

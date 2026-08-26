@@ -80,11 +80,13 @@ def test_every_cluster_query_is_bounded_and_uses_only_application_tables() -> No
         assert "information_schema" not in normalized, name
 
 
-def test_double_online_groups_by_session_epoch_to_avoid_switch_false_positives() -> None:
+def test_double_online_detects_same_epoch_and_post_successor_heartbeats() -> None:
     from scripts.check_ops_alerts import ALERT_QUERIES
 
     normalized = " ".join(ALERT_QUERIES["double_online"].lower().split())
     assert "group by user_id, session_epoch" in normalized
+    assert "latest_login.session_epoch > heartbeat.session_epoch" in normalized
+    assert "login.event = 'login'" in normalized
 
 
 def test_cross_user_alert_combines_success_mismatches_and_durable_denials() -> None:

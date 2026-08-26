@@ -898,6 +898,7 @@ def test_t37_observability_indexes_and_fencing_audit_dimension() -> None:
             }
             assert {
                 "idx_customer_session_events_event_created_at",
+                "idx_customer_session_events_user_event_created_at",
                 "idx_recharge_orders_status_paid_at",
                 "idx_wallet_transactions_user_created_at",
                 "idx_wallets_updated_at_user",

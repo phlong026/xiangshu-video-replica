@@ -8,6 +8,9 @@ the existing append-only ``security_auth_failures`` fact stream with
 ``session:fencing``. A compact,
 append-only fencing-write table keeps one expected/verified epoch fact per
 session tuple so the probe can detect a stale write that actually committed.
+The session-event indexes also let the probe detect a heartbeat from a
+displaced epoch after a newer session LOGIN without treating pre-switch
+heartbeats as concurrent devices.
 No ``pg_monitor`` or ``pg_stat_*`` privilege is required.
 
 Revision ID: 042_t37_observability_indexes
@@ -52,6 +55,11 @@ def upgrade() -> None:
         "idx_customer_session_events_event_created_at",
         "customer_session_events",
         ["event", "created_at"],
+    )
+    op.create_index(
+        "idx_customer_session_events_user_event_created_at",
+        "customer_session_events",
+        ["user_id", "event", "created_at"],
     )
     op.create_index(
         "idx_recharge_orders_status_paid_at",
@@ -270,6 +278,10 @@ def downgrade() -> None:
     )
     op.drop_index(
         "idx_customer_session_events_event_created_at",
+        table_name="customer_session_events",
+    )
+    op.drop_index(
+        "idx_customer_session_events_user_event_created_at",
         table_name="customer_session_events",
     )
     op.drop_constraint(
