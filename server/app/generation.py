@@ -3633,8 +3633,8 @@ def cleanup_idle_queue_cursors(conn: BusinessConnection, *, idle_days: int) -> i
     low-traffic window; the caller schedules the cadence).
 
     A removed cursor is rebuilt by ensure_user_queue_cursor the next time the
-    user creates work, so over-cleanup costs at most one re-insert (revised
-    ADR §2 Pattern E: conservative timeout + batch limit). Runs on PostgreSQL
+    user creates work. Existing pending work is never considered idle: without
+    its cursor the fair worker cannot schedule it again. Runs on PostgreSQL
     regardless of the switch, like the other cursor-maintenance points
     (M5 review P1-4); the SQLite lane has no table.
     """
@@ -3648,6 +3648,13 @@ def cleanup_idle_queue_cursors(conn: BusinessConnection, *, idle_days: int) -> i
             FROM user_queue_cursors
             WHERE running_tasks_count = 0
               AND last_dispatched_at < now() - make_interval(days => %s)
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM generation_batches AS batch
+                  JOIN generation_tasks AS task ON task.batch_id = batch.id
+                  WHERE batch.created_by_user_id = user_queue_cursors.user_id
+                    AND task.status IN ('PENDING', 'QUEUED')
+              )
             LIMIT 1000
             FOR UPDATE SKIP LOCKED
         )

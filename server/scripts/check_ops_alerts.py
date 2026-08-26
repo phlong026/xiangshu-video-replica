@@ -84,15 +84,17 @@ class ProbeResult:
 # Each query returns a single count over a capped anomaly subquery. The
 # application role needs no pg_monitor / pg_stat_* privilege. Wallet and queue
 # correlated checks happen before the anomaly cap so healthy or idle rows
-# cannot hide a real P1 condition; supporting indexes keep those scans on
-# application-table access paths.
+# cannot hide a real P1 condition. Legacy event timestamps are TEXT, so every
+# time comparison below coerces them to ``timestamptz``: PostgreSQL renders a
+# TEXT ``CURRENT_TIMESTAMP`` in each writer session's timezone and lexical
+# ordering would otherwise silently hide recent events from another offset.
 ALERT_QUERIES: dict[str, str] = {
     "double_online": """
         SELECT count(*) FROM (
             SELECT user_id FROM (
                 SELECT user_id, session_epoch
                 FROM customer_session_events
-                WHERE event = 'HEARTBEAT' AND created_at >= %s
+                WHERE event = 'HEARTBEAT' AND created_at::timestamptz >= %s
                 GROUP BY user_id, session_epoch
                 HAVING count(DISTINCT device_id) > 1
                 LIMIT %s
@@ -106,14 +108,15 @@ ALERT_QUERIES: dict[str, str] = {
                     FROM customer_session_events AS login
                     WHERE login.user_id = heartbeat.user_id
                       AND login.event = 'LOGIN'
-                      AND login.created_at <= heartbeat.created_at
-                    ORDER BY login.created_at DESC, login.id DESC
+                      AND login.created_at::timestamptz
+                          <= heartbeat.created_at::timestamptz
+                    ORDER BY login.created_at::timestamptz DESC, login.id DESC
                     LIMIT 1
                 ) AS latest_login ON true
                 WHERE heartbeat.event = 'HEARTBEAT'
-                  AND heartbeat.created_at >= %s
+                  AND heartbeat.created_at::timestamptz >= %s
                   AND latest_login.session_epoch > heartbeat.session_epoch
-                ORDER BY heartbeat.created_at, heartbeat.id
+                ORDER BY heartbeat.created_at::timestamptz, heartbeat.id
                 LIMIT %s
             ) AS displaced_epoch_heartbeats
             LIMIT %s
@@ -216,33 +219,36 @@ ALERT_QUERIES: dict[str, str] = {
                 SELECT id
                 FROM audit_logs
                 WHERE action IN ('security.project_denied', 'security.asset_denied')
-                  AND created_at >= %s
-                ORDER BY created_at DESC, id
+                  AND created_at::timestamptz >= %s
+                ORDER BY created_at::timestamptz DESC, id
                 LIMIT %s
             ) AS denied_attempts
             LIMIT %s
         ) AS anomalies
     """,
     "queue_starvation": """
-        WITH candidate_cursors AS MATERIALIZED (
-            SELECT cursor.user_id
-            FROM user_queue_cursors AS cursor
-            WHERE cursor.running_tasks_count = 0
-              AND EXISTS (
-                SELECT 1
-                FROM generation_batches AS batch
-                JOIN generation_tasks AS task ON task.batch_id = batch.id
-                WHERE batch.created_by_user_id = cursor.user_id
-                  AND task.status IN ('PENDING', 'QUEUED')
-                  AND task.created_at < %s
-                LIMIT 1
-            )
-            ORDER BY cursor.last_dispatched_at, cursor.user_id
+        WITH waiting_users AS MATERIALIZED (
+            SELECT
+                batch.created_by_user_id AS user_id,
+                min(task.created_at::timestamptz) AS oldest_pending_at
+            FROM generation_batches AS batch
+            JOIN generation_tasks AS task ON task.batch_id = batch.id
+            WHERE task.status IN ('PENDING', 'QUEUED')
+              AND task.created_at::timestamptz < %s
+            GROUP BY batch.created_by_user_id
+        ), candidate_users AS MATERIALIZED (
+            SELECT waiting.user_id
+            FROM waiting_users AS waiting
+            LEFT JOIN user_queue_cursors AS cursor ON cursor.user_id = waiting.user_id
+            WHERE cursor.user_id IS NULL OR cursor.running_tasks_count = 0
+            ORDER BY
+                COALESCE(cursor.last_dispatched_at, waiting.oldest_pending_at),
+                waiting.user_id
             LIMIT %s
         )
         SELECT count(*) FROM (
             SELECT user_id
-            FROM candidate_cursors
+            FROM candidate_users
             LIMIT %s
         ) AS anomalies
     """,
@@ -298,11 +304,9 @@ def _count_query(
     return count
 
 
-def _cutoff(current: datetime, seconds: int) -> str:
-    # Legacy timestamp columns are TEXT populated by PostgreSQL's
-    # CURRENT_TIMESTAMP. ``str(datetime)`` keeps the same space separator so
-    # the composite text indexes remain usable without a non-immutable cast.
-    return str(current - timedelta(seconds=seconds))
+def _cutoff(current: datetime, seconds: int) -> datetime:
+    """Return an aware cutoff for typed comparison with legacy TEXT facts."""
+    return current - timedelta(seconds=seconds)
 
 
 def _security_cutoff(current: datetime, seconds: int) -> str:

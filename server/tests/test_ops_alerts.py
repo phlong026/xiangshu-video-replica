@@ -80,13 +80,14 @@ def test_every_cluster_query_is_bounded_and_uses_only_application_tables() -> No
         assert "information_schema" not in normalized, name
 
 
-def test_double_online_detects_same_epoch_and_post_successor_heartbeats() -> None:
+def test_double_online_compares_same_epoch_and_post_successor_heartbeats_as_instants() -> None:
     from scripts.check_ops_alerts import ALERT_QUERIES
 
     normalized = " ".join(ALERT_QUERIES["double_online"].lower().split())
     assert "group by user_id, session_epoch" in normalized
     assert "latest_login.session_epoch > heartbeat.session_epoch" in normalized
     assert "login.event = 'login'" in normalized
+    assert "created_at::timestamptz" in normalized
 
 
 def test_cross_user_alert_combines_success_mismatches_and_durable_denials() -> None:
@@ -100,9 +101,10 @@ def test_cross_user_alert_combines_success_mismatches_and_durable_denials() -> N
     assert "security.asset_denied" in normalized
     assert "metadata_json" not in normalized
     assert "entity_id" not in normalized
+    assert "created_at::timestamptz" in normalized
 
 
-def test_fencing_cutoff_matches_the_isoformat_security_fact_separator(
+def test_probe_uses_typed_cutoffs_for_legacy_timestamp_columns(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from scripts import check_ops_alerts as alerts
@@ -128,7 +130,7 @@ def test_fencing_cutoff_matches_the_isoformat_security_fact_separator(
     alerts.collect_observations(object(), alerts.ProbeConfig(fencing_window_seconds=300))
 
     assert observed_parameters["fencing_rejected"][0] == "2026-08-26T11:55:00+00:00"
-    assert observed_parameters["double_online"][0] == "2026-08-26 11:58:00+00:00"
+    assert observed_parameters["double_online"][0] == datetime(2026, 8, 26, 11, 58, tzinfo=UTC)
 
 
 def test_committed_stale_write_alert_uses_durable_epoch_evidence() -> None:
@@ -139,11 +141,14 @@ def test_committed_stale_write_alert_uses_durable_epoch_evidence() -> None:
     assert "expected_session_epoch <> verified_session_epoch" in normalized
 
 
-def test_queue_starvation_filters_for_waiting_work_before_candidate_limit() -> None:
+def test_queue_starvation_starts_from_waiting_work_and_keeps_missing_cursors() -> None:
     from scripts.check_ops_alerts import ALERT_QUERIES
 
     normalized = " ".join(ALERT_QUERIES["queue_starvation"].lower().split())
-    assert normalized.index("exists (") < normalized.index("limit %s")
+    assert "left join user_queue_cursors" in normalized
+    assert "cursor.user_id is null" in normalized
+    assert normalized.index("task.status in ('pending', 'queued')") < normalized.index("limit %s")
+    assert "task.created_at::timestamptz" in normalized
 
 
 def test_wallet_mismatch_filters_anomalies_before_candidate_limit() -> None:
@@ -392,6 +397,41 @@ def test_all_cluster_queries_execute_on_a_fresh_pg16_database(tmp_path: Path) ->
                     item for item in capped if item.name == "wallet_balance_mismatch"
                 ).observed_count
                 == 1
+            )
+            conn.execute(
+                "INSERT INTO users (id, username, display_name) VALUES "
+                "('missing-cursor-t37', 'missing-cursor-t37', 'Missing cursor')"
+            )
+            conn.execute(
+                "INSERT INTO projects (id, owner_user_id, name) VALUES "
+                "('missing-cursor-project-t37', 'missing-cursor-t37', "
+                "'Missing cursor starvation probe')"
+            )
+            conn.execute(
+                "INSERT INTO generation_batches "
+                "(id, project_id, created_by_user_id, idempotency_key, request_hash, "
+                "request_snapshot_json, status) VALUES "
+                "('missing-cursor-batch-t37', 'missing-cursor-project-t37', "
+                "'missing-cursor-t37', 'missing-cursor-key-t37', "
+                "'missing-cursor-hash-t37', '{}', 'QUEUED')"
+            )
+            conn.execute(
+                "INSERT INTO generation_tasks "
+                "(id, batch_id, provider, model, status, created_at) VALUES "
+                "('missing-cursor-task-t37', 'missing-cursor-batch-t37', "
+                "'fake_h3', 'MiniMax-H3', 'PENDING', "
+                "(clock_timestamp() - interval '1 hour')::text)"
+            )
+            conn.commit()
+            missing_cursor = alerts.collect_observations(
+                conn,
+                alerts.ProbeConfig(row_limit=2, starvation_seconds=300),
+            )
+            assert (
+                next(
+                    item for item in missing_cursor if item.name == "queue_starvation"
+                ).observed_count
+                == 2
             )
             conn.execute(
                 "INSERT INTO security_auth_failures "

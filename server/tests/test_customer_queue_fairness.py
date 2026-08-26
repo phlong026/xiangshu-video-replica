@@ -477,15 +477,21 @@ def test_new_user_gets_cursor_on_batch_creation(fair_state: str) -> None:
     assert lease2["created_by_user_id"] == "u2"
 
 
-def test_idle_cursor_cleanup(fair_state: str) -> None:
-    """Pattern E: maintenance deletes only long-idle cursors; recent activity
-    survives and the deletion is counted."""
+def test_idle_cursor_cleanup_preserves_users_with_pending_work(fair_state: str) -> None:
+    """Pattern E never removes an old cursor when its user still has work.
+
+    Otherwise the fair worker cannot discover that pending work again, because
+    it selects candidates from the cursor table.
+    """
     _seed(fair_state, user_ids=["u1", "u2"], tasks_per_user=1)
     with pg_transaction() as raw:
         conn = BusinessConnection.postgres(raw)
         conn.execute(
-            "UPDATE user_queue_cursors SET last_dispatched_at = "
-            "now() - interval '40 days' WHERE user_id = 'u1'"
+            "UPDATE user_queue_cursors SET last_dispatched_at = now() - interval '40 days'"
+        )
+        conn.execute(
+            "DELETE FROM generation_tasks WHERE batch_id IN ("
+            "SELECT id FROM generation_batches WHERE created_by_user_id = 'u2')"
         )
     with pg_transaction() as raw:
         conn = BusinessConnection.postgres(raw)
@@ -493,8 +499,8 @@ def test_idle_cursor_cleanup(fair_state: str) -> None:
         assert deleted == 1
     with pg_transaction() as raw:
         conn = BusinessConnection.postgres(raw)
-        rows = conn.execute("SELECT user_id FROM user_queue_cursors").fetchall()
-        assert [str(row[0]) for row in rows] == ["u2"]
+        rows = conn.execute("SELECT user_id FROM user_queue_cursors ORDER BY user_id").fetchall()
+        assert [str(row[0]) for row in rows] == ["u1"]
 
 
 def test_runtime_settings_write_flips_fair_queue_switch(fair_state: str) -> None:

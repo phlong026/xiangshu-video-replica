@@ -851,6 +851,10 @@ def test_cluster_probe_detects_heartbeat_from_a_displaced_session_epoch(
             next(item for item in before_regression if item.name == "double_online").observed_count
             == 0
         )
+        # ``CURRENT_TIMESTAMP`` is rendered as TEXT in the connection's local
+        # timezone. The probe must compare it as an instant, not lexically
+        # against a UTC cutoff.
+        conn.execute("SET TIME ZONE 'America/Los_Angeles'")
         conn.execute(
             "INSERT INTO customer_session_events "
             "(id, event, user_id, activation_code_id, device_id, session_id, "
