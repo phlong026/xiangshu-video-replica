@@ -1,3 +1,4 @@
+# Internal P0 SQLite only. Customer PostgreSQL uses video-replica-pitr-backup.
 [Unit]
 Description=Run the Video Replica SQLite backup every day
 

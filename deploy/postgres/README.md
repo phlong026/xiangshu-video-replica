@@ -33,6 +33,53 @@ failover owned by the database layer.
 - Never place a real DSN, password, snapshot URL or database dump in Git or CI
   logs.
 
-Backup restore evidence, RPO/RTO measurement and point-in-time recovery belong
-to T38. Until that drill is complete, the database may satisfy T36 staging HA
-topology but must not be described as recovery-verified or `PRODUCTION_GO`.
+## T38 physical backup and point-in-time recovery
+
+Customer production uses physical PostgreSQL base backups plus a continuous,
+externally retrievable WAL archive. `pg_dump` and application-managed exports
+are not recovery inputs for this task. The designated database owner must first
+enable `wal_level=replica` (or `logical`), `archive_mode=on` (or `always`) and
+an `archive_command` or `archive_library`, then prove a forced WAL segment is
+retrievable before taking the first base backup.
+
+`pitr-preflight.sh` and `pitr-backup.sh` use a separate libpq service file:
+
+- `/etc/video-replica/backup.pg_service.conf` and its referenced password
+  source are root/postgres controlled and never appear in `customer.env`, Git,
+  process arguments or logs.
+- The backup identity is distinct from `VIDEO_REPLICA_DATABASE_URL`; give it
+  only the PostgreSQL backup/monitor permissions required by the managed
+  service. Do not grant the application role physical backup privileges.
+- The local backup and recovery roots are `0700` and owned by `postgres`.
+  `video-replica-pitr-backup.service` runs as that account with `UMask=0077`.
+
+The operator supplies one root-owned executable at
+`VIDEO_REPLICA_PG_PITR_ARCHIVE_HELPER`. It is deliberately outside this
+repository so the selected backup platform retains its own encryption keys,
+immutable-object controls, and cross-region credentials. Its fixed contract is:
+
+```text
+assert-wal WAL
+put-wal POSTGRESQL_SOURCE_PATH WAL
+put-base LABEL LOCAL_DIRECTORY
+assert-base LABEL
+get-base LABEL EMPTY_LOCAL_DIRECTORY
+get-wal WAL POSTGRESQL_DESTINATION
+```
+
+`assert-*` must fail until the object is independently readable from the
+designated off-site archive. `get-wal` must write only the destination provided
+by PostgreSQL and return nonzero on absence or integrity failure. The helper
+must never print credentials, DSNs, object URLs, or raw customer records.
+Configure the database-side archive command (or its equivalent archive
+library) to call `put-wal` with PostgreSQL's quoted `%p` and `%f` placeholders;
+the helper must preserve the WAL filename, including eight-hex-digit timeline
+`.history` files.
+
+Run the daily base backup only through
+`video-replica-pitr-backup.timer`; the legacy
+`video-replica-backup.timer` is internal SQLite P0 tooling and must not be
+installed for customer PostgreSQL. The staging recovery procedure and its exact
+100-fact verifier are in `docs/客户版部署与灰度手册.md`. Until that controlled
+drill succeeds and its timing/evidence is recorded, T38 remains
+`AUTOMATED_VERIFIED`, not `STAGING_VERIFIED` or `PRODUCTION_GO`.

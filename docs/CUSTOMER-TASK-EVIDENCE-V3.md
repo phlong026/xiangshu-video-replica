@@ -4,6 +4,28 @@
 >
 > **Evidence location (M0 review M8 unification, 2026-08-21)**: per-task evidence documents live under `docs/evidence/` (T02–T06 evidence files moved from the repository root; run-fix evidence under `docs/evidence/m0-review-fixes/`). Historical self-references inside those documents to their original root paths are preserved as record snapshots.
 
+## T38 — PostgreSQL PITR and Recovery Drill
+
+| Field | Value |
+| --- | --- |
+| **Task ID** | T38 / OPS-03 (partial) |
+| **Owner / Reviewer** | OPS/DB (Agent); repository self-review |
+| **Branch / Base SHA** | `feat/customer-v3-t38-pitr-recovery` / `main@3362ad9` |
+| **Upstream Spec Sections** | Task list §7 T38, §12.7 OPS-03; code map §3.2/§3.3/§12; deployment runbook §5; PostgreSQL 16 continuous-archiving/PITR contract |
+| **Failure Test or Regression Lock** | Red→green contracts: exact 100 cross-domain facts and session-epoch mismatch refusal; fewer than 100 refused; a post-base-backup sample boundary preserved; timeline `.history` WAL naming accepted; manifest is non-overwriting and Linux 0600; no `pg_dump`; physical base backup/WAL/preflight/archive/restore configuration required; staging-only confirmation; backup service must load only `pitr.env`, never application `customer.env`; frozen-map and runbook registration. The initial red runs exposed missing artifacts, Windows-only `fchmod` failure, absent timeline-history allowance, and application-DSN inheritance by the backup service; each has a regression lock. |
+| **Implementation Result** | Separate libpq backup identity, explicit PG16/WAL/archive preflight and forced-WAL external-read check; `pg_basebackup --wal-method=stream` plus SHA-256 manifest/`pg_verifybackup`; root-owned archive-helper boundary for encrypted immutable off-site base/WAL handling; isolated staging restore gated by exact environment confirmation, bounded recovery root and dedicated port; `recovery.signal`/`restore_command`/PITR target setup; 100 post-base synthetic activation→order→CHARGE→session-epoch facts captured to a 0600 atomic manifest and rechecked one by one after promotion; PostgreSQL base-backup timer that does not inherit app DSN or app secrets. |
+| **Verification Command and Pass Count** | `uv run python -m pytest tests/test_customer_pitr.py -q` → 9 passed; `ruff check`, `ruff format --check`, and `mypy app scripts/pitr_recovery_facts.py` passed; Git Bash `bash -n` passed for all four PITR scripts. |
+| **Evidence Level** | Repository-side `AUTOMATED_VERIFIED`; T38/OPS-03 remain `[~]`, not `STAGING_VERIFIED` |
+| **Security and Observability** | App DSN/keys never enter the PITR systemd service; password source/archive credentials/helper are out-of-repo protected files; scripts do not print IDs, secrets or object URLs; manifest only contains the restricted recovery facts and digest; recovery can only delete a same-label directory under a non-root staging recovery root. |
+| **Migration and Rollback** | No Alembic revision. Rollback is a code/config reversion; do not delete historical external backups. The legacy SQLite timer remains explicitly internal-only. |
+| **External Authorization Record** | None; no real PostgreSQL archive, off-site copy, server, COS, ZPay, paid Provider, external code issuance, gray release or public launch. |
+| **Untested Items** | Provisioned PostgreSQL 16 archive command/library and helper; independent off-site `assert-wal`/`assert-base` retrieval; isolated staging restore with 100 synthetic post-base records; recorded RPO/RTO; PG HA failover/fault drill (T39); real business chain (T40+) |
+| **Lore Commit SHA** | Pending task PR squash SHA |
+
+Full §14 record and staging evidence checklist: `docs/evidence/T38-EVIDENCE.md`.
+
+---
+
 ## T37 — Structured Logging, Metrics and P1 Alerts
 
 | Field | Value |
