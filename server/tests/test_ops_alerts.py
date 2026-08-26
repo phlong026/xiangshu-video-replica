@@ -38,9 +38,10 @@ def test_cluster_probe_covers_the_frozen_alert_surface(
         "charge_without_paid_source": 5,
         "wallet_balance_mismatch": 6,
         "fencing_rejected": 7,
-        "cross_user_access_denied": 8,
-        "queue_starvation": 9,
-        "dangling_reserve": 10,
+        "stale_write_committed": 8,
+        "cross_user_access_denied": 9,
+        "queue_starvation": 10,
+        "dangling_reserve": 11,
     }
     observed_queries: list[tuple[str, tuple[object, ...]]] = []
 
@@ -124,6 +125,14 @@ def test_fencing_cutoff_matches_the_isoformat_security_fact_separator(
 
     assert observed_parameters["fencing_rejected"][0] == "2026-08-26T11:55:00+00:00"
     assert observed_parameters["double_online"][0] == "2026-08-26 11:58:00+00:00"
+
+
+def test_committed_stale_write_alert_uses_durable_epoch_evidence() -> None:
+    from scripts.check_ops_alerts import ALERT_QUERIES
+
+    normalized = " ".join(ALERT_QUERIES["stale_write_committed"].lower().split())
+    assert "from customer_fencing_write_evidence" in normalized
+    assert "expected_session_epoch <> verified_session_epoch" in normalized
 
 
 def test_queue_starvation_filters_for_waiting_work_before_candidate_limit() -> None:
@@ -329,6 +338,13 @@ def test_all_cluster_queries_execute_on_a_fresh_pg16_database(tmp_path: Path) ->
                 "'request-t37', replace(clock_timestamp()::text, ' ', 'T'))"
             )
             conn.execute(
+                "INSERT INTO customer_fencing_write_evidence "
+                "(id, request_id, subject_digest, expected_session_epoch, "
+                "verified_session_epoch) VALUES "
+                "('stale-write-t37', 'stale-write-request-t37', %s, 1, 2)",
+                ("b" * 64,),
+            )
+            conn.execute(
                 "INSERT INTO audit_logs "
                 "(id, actor_user_id, action, entity_type, entity_id, metadata_json, created_at) "
                 "VALUES ('cross-user-t37', NULL, 'security.project_denied', "
@@ -345,10 +361,15 @@ def test_all_cluster_queries_execute_on_a_fresh_pg16_database(tmp_path: Path) ->
             for item in payloads
         )
         assert any(
+            item["alert"] == "stale_write_committed" and item["transition"] == "fired"
+            for item in payloads
+        )
+        assert any(
             item["alert"] == "cross_user_access_denied" and item["transition"] == "fired"
             for item in payloads
         )
         assert alerts.load_state(state_file)["fencing_rejected"] is True
+        assert alerts.load_state(state_file)["stale_write_committed"] is True
         assert alerts.load_state(state_file)["cross_user_access_denied"] is True
     finally:
         with psycopg.connect(admin_dsn, autocommit=True) as admin:

@@ -6,7 +6,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
@@ -158,6 +158,50 @@ def test_shared_permission_denials_publish_the_business_result_code(
 
     assert response.status_code == 403
     assert _last_log_payload(caplog)["result_code"] == "PROJECT_FORBIDDEN"
+
+
+def test_shared_http_exception_handler_publishes_legacy_business_codes(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from app.ops_metrics import business_http_exception_handler
+
+    app = FastAPI()
+    app.add_exception_handler(HTTPException, business_http_exception_handler)
+    app.middleware("http")(request_observability_middleware)
+
+    @app.get("/legacy-error")
+    async def legacy_error() -> None:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "LEGACY_BUSINESS_CONFLICT", "message": "conflict"},
+        )
+
+    with caplog.at_level(logging.INFO, logger="app.ops_metrics"):
+        with TestClient(app) as client:
+            response = client.get("/legacy-error")
+
+    assert response.status_code == 409
+    assert _last_log_payload(caplog)["result_code"] == "LEGACY_BUSINESS_CONFLICT"
+
+
+def test_direct_ingress_rejections_publish_the_business_result_code(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from app.main import require_loopback_client
+
+    monkeypatch.setenv("VIDEO_REPLICA_CUSTOMER_PRODUCTION", "true")
+    app = FastAPI()
+    app.middleware("http")(require_loopback_client)
+    app.middleware("http")(request_observability_middleware)
+
+    with caplog.at_level(logging.INFO, logger="app.ops_metrics"):
+        with TestClient(app) as client:
+            response = client.get("/probe")
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "UNTRUSTED_PROXY"
+    assert _last_log_payload(caplog)["result_code"] == "UNTRUSTED_PROXY"
 
 
 def test_request_middleware_logs_only_the_explicit_trace_identifiers(
@@ -334,6 +378,7 @@ def test_metrics_auth_failure_never_executes_collector(
 def test_main_metrics_auth_precedes_readiness_probe(
     tmp_path: pytest.TempPathFactory,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     token_file = tmp_path / "metrics.token"
     token_file.write_text("metrics-secret\n", encoding="utf-8")
@@ -350,14 +395,16 @@ def test_main_metrics_auth_precedes_readiness_probe(
         raise AssertionError("unauthorized scrapes must not probe PostgreSQL/COS")
 
     monkeypatch.setattr(main, "_ready_status_for_metrics", forbidden_readiness_probe)
-    with TestClient(main.app, raise_server_exceptions=False) as client:
-        response = client.get(
-            "/metrics",
-            headers={"Authorization": "Bearer wrong-secret"},
-        )
+    with caplog.at_level(logging.INFO, logger="app.ops_metrics"):
+        with TestClient(main.app, raise_server_exceptions=False) as client:
+            response = client.get(
+                "/metrics",
+                headers={"Authorization": "Bearer wrong-secret"},
+            )
 
     assert response.status_code == 401
     assert called is False
+    assert _last_log_payload(caplog)["result_code"] == "METRICS_UNAUTHORIZED"
 
 
 def test_metrics_require_exact_bearer_and_export_local_only_counters(
@@ -414,6 +461,28 @@ def test_unmatched_paths_share_one_bounded_metric_label(
     )
     assert "attacker-value-a" not in metrics
     assert "attacker-value-b" not in metrics
+
+
+def test_extension_methods_share_one_bounded_metric_label(
+    tmp_path: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token_file = tmp_path / "metrics.token"
+    token_file.write_text("metrics-secret\n", encoding="utf-8")
+    monkeypatch.setenv(METRICS_TOKEN_FILE_ENV, str(token_file))
+
+    app = _ops_app()
+    with TestClient(app) as client:
+        assert client.request("ATTACK1", "/echo").status_code == 405
+        assert client.request("ATTACK2", "/echo").status_code == 405
+        metrics = client.get(
+            "/metrics",
+            headers={"Authorization": "Bearer metrics-secret"},
+        ).text
+
+    assert 'method="OTHER"' in metrics
+    assert "ATTACK1" not in metrics
+    assert "ATTACK2" not in metrics
 
 
 def test_rendered_metrics_can_report_not_ready() -> None:

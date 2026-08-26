@@ -1,10 +1,12 @@
-"""T37 — bounded observability indexes and fencing audit vocabulary.
+"""T37 — bounded observability indexes and fencing evidence.
 
 The cluster-global anomaly probe runs from one advisory-lock-protected timer,
 not from each API process. This revision gives its application-table queries
 index-backed entry points and extends the existing append-only
-``security_auth_failures`` fact stream with ``session:fencing``. No
-``pg_monitor`` or ``pg_stat_*`` privilege is required.
+``security_auth_failures`` fact stream with ``session:fencing``. A compact,
+append-only fencing-write table keeps one expected/verified epoch fact per
+session tuple so the probe can detect a stale write that actually committed.
+No ``pg_monitor`` or ``pg_stat_*`` privilege is required.
 
 Revision ID: 042_t37_observability_indexes
 Revises: 041_user_fair_queue
@@ -69,6 +71,62 @@ def upgrade() -> None:
         "audit_logs",
         ["action", "created_at"],
     )
+    op.create_table(
+        "customer_fencing_write_evidence",
+        sa.Column("id", sa.Text(), primary_key=True),
+        sa.Column("request_id", sa.Text(), nullable=False),
+        sa.Column("subject_digest", sa.Text(), nullable=False),
+        sa.Column("expected_session_epoch", sa.BigInteger(), nullable=False),
+        sa.Column("verified_session_epoch", sa.BigInteger(), nullable=False),
+        sa.Column(
+            "committed_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.text("clock_timestamp()"),
+        ),
+        sa.CheckConstraint(
+            "char_length(request_id) BETWEEN 1 AND 128",
+            name="ck_customer_fencing_write_request_id",
+        ),
+        sa.CheckConstraint(
+            "subject_digest ~ '^[0-9a-f]{64}$'",
+            name="ck_customer_fencing_write_subject_digest",
+        ),
+        sa.CheckConstraint(
+            "expected_session_epoch >= 1 AND verified_session_epoch >= 1",
+            name="ck_customer_fencing_write_epochs",
+        ),
+        sa.UniqueConstraint(
+            "subject_digest",
+            "expected_session_epoch",
+            "verified_session_epoch",
+            name="uq_customer_fencing_write_epoch_fact",
+        ),
+    )
+    op.create_index(
+        "idx_customer_fencing_write_mismatch",
+        "customer_fencing_write_evidence",
+        ["committed_at", "id"],
+        postgresql_where=sa.text("expected_session_epoch <> verified_session_epoch"),
+    )
+    op.execute(
+        """
+        CREATE FUNCTION customer_fencing_write_evidence_refuse_rewrite()
+        RETURNS trigger AS $refuse$
+        BEGIN
+            RAISE EXCEPTION 'customer_fencing_write_evidence is append-only';
+        END;
+        $refuse$ LANGUAGE plpgsql;
+
+        CREATE TRIGGER trg_customer_fencing_write_evidence_append_only
+        BEFORE UPDATE OR DELETE ON customer_fencing_write_evidence
+        FOR EACH ROW EXECUTE FUNCTION customer_fencing_write_evidence_refuse_rewrite();
+
+        CREATE TRIGGER trg_customer_fencing_write_evidence_no_truncate
+        BEFORE TRUNCATE ON customer_fencing_write_evidence
+        FOR EACH STATEMENT EXECUTE FUNCTION refuse_truncate_of_audit_tables();
+        """
+    )
 
 
 def downgrade() -> None:
@@ -80,17 +138,32 @@ def downgrade() -> None:
         sa.text(
             "SELECT EXISTS ("
             "SELECT 1 FROM security_auth_failures "
-            "WHERE dimension IN ('admin:exchange:ip', 'session:fencing') LIMIT 1)"
+            "WHERE dimension IN ('admin:exchange:ip', 'session:fencing') LIMIT 1) "
+            "OR EXISTS (SELECT 1 FROM customer_fencing_write_evidence LIMIT 1)"
         )
     ).scalar()
     if has_t37_evidence:
         raise RuntimeError(
             "cannot downgrade 042_t37_observability_indexes: append-only "
-            "T37 security evidence exists and the prior dimension constraint "
-            "cannot represent it. Keep revision 042 or export and retain the "
-            "security audit trail before a manually supervised rollback."
+            "T37 security or committed-write evidence exists and the prior "
+            "schema cannot represent it. Keep revision 042 or export and retain "
+            "the security audit trail before a manually supervised rollback."
         )
 
+    op.execute(
+        "DROP TRIGGER IF EXISTS trg_customer_fencing_write_evidence_no_truncate "
+        "ON customer_fencing_write_evidence"
+    )
+    op.execute(
+        "DROP TRIGGER IF EXISTS trg_customer_fencing_write_evidence_append_only "
+        "ON customer_fencing_write_evidence"
+    )
+    op.execute("DROP FUNCTION IF EXISTS customer_fencing_write_evidence_refuse_rewrite()")
+    op.drop_index(
+        "idx_customer_fencing_write_mismatch",
+        table_name="customer_fencing_write_evidence",
+    )
+    op.drop_table("customer_fencing_write_evidence")
     op.drop_index("idx_audit_logs_action_created_at", table_name="audit_logs")
     op.drop_index("idx_wallets_updated_at_user", table_name="wallets")
     op.drop_index(

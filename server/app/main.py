@@ -4,7 +4,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any, Literal
 
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -37,7 +37,12 @@ from app.db_pg import close_pg_pool
 from app.first_frame_routes import router as first_frame_router
 from app.generation_routes import router as generation_router
 from app.media_routes import router as media_router
-from app.ops_metrics import metrics_response, request_observability_middleware
+from app.ops_metrics import (
+    business_http_exception_handler,
+    metrics_response,
+    request_observability_middleware,
+    set_current_result_code,
+)
 from app.payment_routes import router as payment_router
 from app.rbac_routes import router as rbac_router
 from app.recharge_routes import router as recharge_router
@@ -118,7 +123,22 @@ async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
     close_pg_pool()
 
 
+async def _business_http_exception_dispatch(request: Request, error: Exception) -> Response:
+    if not isinstance(error, HTTPException):
+        raise error
+    return await business_http_exception_handler(request, error)
+
+
 app = VideoReplicaAPI(title="Video Replica API", version="0.1.0", lifespan=_lifespan)
+app.add_exception_handler(HTTPException, _business_http_exception_dispatch)
+
+
+def _business_error_response(*, status_code: int, code: str, message: str) -> JSONResponse:
+    set_current_result_code(code)
+    return JSONResponse(
+        status_code=status_code,
+        content={"code": code, "message": message},
+    )
 
 
 @app.exception_handler(SettingsUnavailableError)
@@ -127,6 +147,7 @@ async def settings_unavailable_handler(
     error: SettingsUnavailableError,
 ) -> JSONResponse:
     logger.error("Local settings are unavailable: %s", type(error).__name__)
+    set_current_result_code("SETTINGS_CONFIGURATION_UNAVAILABLE")
     return JSONResponse(
         status_code=503,
         content={
@@ -159,73 +180,59 @@ async def require_loopback_client(
         try:
             peer_ip = ipaddress.ip_address(host)
         except ValueError:
-            return JSONResponse(
+            return _business_error_response(
                 status_code=403,
-                content={
-                    "code": "UNTRUSTED_PROXY",
-                    "message": "The request did not arrive through a trusted proxy.",
-                },
+                code="UNTRUSTED_PROXY",
+                message="The request did not arrive through a trusted proxy.",
             )
         try:
             proxy_networks = trusted_proxy_networks()
             public_origin = customer_public_origin()
         except ValueError:
-            return JSONResponse(
+            return _business_error_response(
                 status_code=503,
-                content={
-                    "code": "INGRESS_CONFIGURATION_INVALID",
-                    "message": "Customer ingress security is not configured correctly.",
-                },
+                code="INGRESS_CONFIGURATION_INVALID",
+                message="Customer ingress security is not configured correctly.",
             )
         if not any(peer_ip in network for network in proxy_networks):
-            return JSONResponse(
+            return _business_error_response(
                 status_code=403,
-                content={
-                    "code": "UNTRUSTED_PROXY",
-                    "message": "The request did not arrive through a trusted proxy.",
-                },
+                code="UNTRUSTED_PROXY",
+                message="The request did not arrive through a trusted proxy.",
             )
 
         expected_host = public_origin.removeprefix("https://")
         host_values = request.headers.getlist("host")
         if len(host_values) != 1 or host_values[0].strip().casefold() != expected_host.casefold():
-            return JSONResponse(
+            return _business_error_response(
                 status_code=421,
-                content={
-                    "code": "HOST_NOT_ALLOWED",
-                    "message": "The request Host is not configured for this service.",
-                },
+                code="HOST_NOT_ALLOWED",
+                message="The request Host is not configured for this service.",
             )
 
         proto_values = request.headers.getlist("x-forwarded-proto")
         if len(proto_values) != 1 or proto_values[0].strip().casefold() != "https":
-            return JSONResponse(
+            return _business_error_response(
                 status_code=400,
-                content={
-                    "code": "HTTPS_REQUIRED",
-                    "message": "Customer requests must arrive through HTTPS.",
-                },
+                code="HTTPS_REQUIRED",
+                message="Customer requests must arrive through HTTPS.",
             )
 
         forwarded_values = request.headers.getlist("x-forwarded-for")
         forwarded = forwarded_values[0].strip() if len(forwarded_values) == 1 else ""
         if not forwarded or "," in forwarded:
-            return JSONResponse(
+            return _business_error_response(
                 status_code=400,
-                content={
-                    "code": "FORWARDED_CLIENT_INVALID",
-                    "message": "The trusted proxy must provide exactly one client IP.",
-                },
+                code="FORWARDED_CLIENT_INVALID",
+                message="The trusted proxy must provide exactly one client IP.",
             )
         try:
             forwarded_ip = ipaddress.ip_address(forwarded)
         except ValueError:
-            return JSONResponse(
+            return _business_error_response(
                 status_code=400,
-                content={
-                    "code": "FORWARDED_CLIENT_INVALID",
-                    "message": "The trusted proxy must provide exactly one client IP.",
-                },
+                code="FORWARDED_CLIENT_INVALID",
+                message="The trusted proxy must provide exactly one client IP.",
             )
         if forwarded_ip == peer_ip:
             # Uvicorn's ProxyHeadersMiddleware replaces scope["client"] with
@@ -233,15 +240,13 @@ async def require_loopback_client(
             # that the raw last-hop peer was lost before this boundary ran.
             # Fail closed even when the forged/re-written address happens to
             # land inside the trusted proxy CIDR.
-            return JSONResponse(
+            return _business_error_response(
                 status_code=503,
-                content={
-                    "code": "PROXY_HEADER_REWRITE_DETECTED",
-                    "message": (
-                        "The ASGI server rewrote the proxy peer; disable proxy-header "
-                        "parsing for customer production."
-                    ),
-                },
+                code="PROXY_HEADER_REWRITE_DETECTED",
+                message=(
+                    "The ASGI server rewrote the proxy peer; disable proxy-header "
+                    "parsing for customer production."
+                ),
             )
         request.state.client_ip = str(forwarded_ip)
         return await call_next(request)
@@ -251,9 +256,10 @@ async def require_loopback_client(
     except ValueError:
         allowed = host in LOOPBACK_ALIASES
     if not allowed:
-        return JSONResponse(
+        return _business_error_response(
             status_code=403,
-            content={"code": "LOOPBACK_ONLY", "message": "API 仅允许本机访问。"},
+            code="LOOPBACK_ONLY",
+            message="API 仅允许本机访问。",
         )
     request.state.client_ip = host
     return await call_next(request)
@@ -360,6 +366,7 @@ def ready() -> ReadinessResponse | JSONResponse:
         check_customer_production_runtime_dependencies()
     except Exception as exc:
         logger.error("Runtime readiness check failed: %s", type(exc).__name__)
+        set_current_result_code("RUNTIME_DEPENDENCY_UNAVAILABLE")
         return JSONResponse(
             status_code=503,
             content={

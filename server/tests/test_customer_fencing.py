@@ -900,6 +900,109 @@ def test_fenced_transaction_yields_the_context_and_commits(client: TestClient) -
     assert _count_projects() == 1
 
 
+def test_successful_fenced_write_commits_expected_and_verified_epoch_evidence(
+    client: TestClient,
+) -> None:
+    from app.customer_fence import fenced_pg_transaction
+    from app.ops_metrics import bind_request_context
+
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    snapshot = _snapshot_for(customer)
+    with bind_request_context(
+        request_id="req-fencing-evidence-match",
+        method="POST",
+        route="/api/projects",
+    ):
+        with fenced_pg_transaction(snapshot) as (conn, _ctx):
+            conn.execute(
+                "INSERT INTO projects (id, owner_user_id, name) VALUES (%s, %s, %s)",
+                ("p-evidence-match", customer["user_id"], "Evidence Match"),
+            )
+
+    with psycopg.connect(_fencing_dsn()) as conn:
+        row = conn.execute(
+            "SELECT request_id, length(subject_digest), expected_session_epoch, "
+            "verified_session_epoch FROM customer_fencing_write_evidence "
+            "WHERE request_id = 'req-fencing-evidence-match'"
+        ).fetchone()
+    assert row is not None
+    assert (str(row[0]), int(row[1]), int(row[2]), int(row[3])) == (
+        "req-fencing-evidence-match",
+        64,
+        1,
+        1,
+    )
+
+
+def test_fencing_evidence_failure_rolls_back_the_business_write(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import customer_fence
+
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    snapshot = _snapshot_for(customer)
+
+    def evidence_unavailable(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("evidence unavailable")
+
+    monkeypatch.setattr(
+        customer_fence,
+        "_record_fencing_commit_evidence",
+        evidence_unavailable,
+    )
+    with pytest.raises(RuntimeError, match="evidence unavailable"):
+        with customer_fence.fenced_pg_transaction(snapshot) as (conn, _ctx):
+            conn.execute(
+                "INSERT INTO projects (id, owner_user_id, name) VALUES (%s, %s, %s)",
+                ("p-evidence-failure", customer["user_id"], "Evidence Failure"),
+            )
+
+    assert _count_projects() == 0
+
+
+def test_regressed_verifier_leaves_a_durable_committed_stale_write_fact(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dataclasses import replace
+
+    from app import customer_fence
+    from app.ops_metrics import bind_request_context
+
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    snapshot = _snapshot_for(customer)
+    real_verify = customer_fence.verify_session_context
+
+    def regressed_verify(conn: psycopg.Connection, **kwargs: object) -> object:
+        verified = real_verify(conn, **kwargs)
+        return replace(verified, session_epoch=verified.session_epoch + 1)
+
+    monkeypatch.setattr(customer_fence, "verify_session_context", regressed_verify)
+    with bind_request_context(
+        request_id="req-fencing-evidence-mismatch",
+        method="POST",
+        route="/api/projects",
+    ):
+        with customer_fence.fenced_pg_transaction(snapshot) as (conn, _ctx):
+            conn.execute(
+                "INSERT INTO projects (id, owner_user_id, name) VALUES (%s, %s, %s)",
+                ("p-evidence-mismatch", customer["user_id"], "Evidence Mismatch"),
+            )
+
+    with psycopg.connect(_fencing_dsn()) as conn:
+        row = conn.execute(
+            "SELECT expected_session_epoch, verified_session_epoch "
+            "FROM customer_fencing_write_evidence "
+            "WHERE request_id = 'req-fencing-evidence-mismatch'"
+        ).fetchone()
+        project_count = conn.execute(
+            "SELECT count(*) FROM projects WHERE id = 'p-evidence-mismatch'"
+        ).fetchone()[0]
+    assert row is not None and (int(row[0]), int(row[1])) == (1, 2)
+    assert int(project_count) == 1
+
+
 def test_fenced_transaction_fences_a_stale_snapshot_and_leaves_no_write(
     client: TestClient,
 ) -> None:

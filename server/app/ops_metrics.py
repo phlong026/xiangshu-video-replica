@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from fastapi import HTTPException, Request, Response
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import PlainTextResponse
 
 REQUEST_ID_HEADER = "X-Request-Id"
@@ -23,6 +24,10 @@ METRICS_TOKEN_FILE_ENV = "VIDEO_REPLICA_METRICS_TOKEN_FILE"
 PROMETHEUS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
 MAX_REQUEST_ID_LENGTH = 128
 UNMATCHED_ROUTE_LABEL = "UNMATCHED"
+OTHER_HTTP_METHOD_LABEL = "OTHER"
+APPROVED_HTTP_METHOD_LABELS = frozenset(
+    {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}
+)
 APPROVED_TRACE_FIELDS = frozenset(
     {
         "actor_id",
@@ -338,11 +343,18 @@ def observe_fencing_lock_wait(*, lock_wait_seconds: float) -> None:
 
 def _record_http_request(*, method: str, route: str, status: int, duration_seconds: float) -> None:
     _REGISTRY.record_http_request(
-        method=method,
+        method=_metric_method_label(method),
         route=route,
         status=status,
         duration_seconds=duration_seconds,
     )
+
+
+def _metric_method_label(method: str) -> str:
+    normalized = method.upper()
+    if normalized in APPROVED_HTTP_METHOD_LABELS:
+        return normalized
+    return OTHER_HTTP_METHOD_LABEL
 
 
 def _resolve_route_label(request: Request) -> str:
@@ -355,6 +367,19 @@ def _resolve_route_label(request: Request) -> str:
 
 def _default_result_code(status_code: int) -> str:
     return "OK" if status_code < 400 else f"HTTP_{status_code}"
+
+
+async def business_http_exception_handler(
+    request: Request,
+    error: HTTPException,
+) -> Response:
+    """Preserve stable business codes from legacy HTTPException helpers."""
+    detail = error.detail
+    if isinstance(detail, dict):
+        code = detail.get("code")
+        if isinstance(code, str) and code:
+            set_current_result_code(code)
+    return await http_exception_handler(request, error)
 
 
 def _attach_route_trace_fields(request: Request) -> None:

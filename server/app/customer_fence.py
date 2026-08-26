@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -188,6 +189,7 @@ def fenced_pg_transaction(
             )
             _observe_fencing_lock_wait(time.perf_counter() - started)
             yield conn, ctx
+            _record_fencing_commit_evidence(conn, snapshot, ctx)
     except SessionFencingError as exc:
         lock_wait_seconds = time.perf_counter() - started
         _record_fencing_reject(exc.code, lock_wait_seconds)
@@ -279,6 +281,36 @@ def _fencing_failure_identifier(snapshot: CustomerSessionSnapshot) -> str:
         )
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _record_fencing_commit_evidence(
+    conn: psycopg.Connection,
+    snapshot: CustomerSessionSnapshot,
+    verified: CustomerSessionContext,
+) -> None:
+    """Persist one bounded epoch-pair fact only when the business write commits.
+
+    The row is inserted after the route body succeeds but before the outer PG
+    transaction commits. A route error or commit failure rolls it back with the
+    business write. Repeated writes in one session pair deduplicate, while a
+    regressed verifier returning a different epoch creates a durable P1 fact.
+    """
+    context = ops_metrics.current_request_context()
+    request_id = context.request_id if context is not None else str(uuid.uuid4())
+    conn.execute(
+        "INSERT INTO customer_fencing_write_evidence "
+        "(id, request_id, subject_digest, expected_session_epoch, "
+        "verified_session_epoch) VALUES (%s, %s, %s, %s, %s) "
+        "ON CONFLICT (subject_digest, expected_session_epoch, verified_session_epoch) "
+        "DO NOTHING",
+        (
+            str(uuid.uuid4()),
+            request_id,
+            _fencing_failure_identifier(snapshot),
+            snapshot.expected_session_epoch,
+            verified.session_epoch,
+        ),
+    )
 
 
 @dataclass(frozen=True)

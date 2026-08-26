@@ -880,8 +880,7 @@ def test_pg_low_review_constraint_guards() -> None:
 
 
 def test_t37_observability_indexes_and_fencing_audit_dimension() -> None:
-    """T37's single-owner probe has index-backed facts and a durable,
-    append-only fencing-rejection source without granting pg_monitor."""
+    """T37's probe has index-backed, append-only rejection and committed-write facts."""
     from alembic import command
 
     db_name = "t37_observability_schema"
@@ -903,7 +902,40 @@ def test_t37_observability_indexes_and_fencing_audit_dimension() -> None:
                 "idx_wallet_transactions_user_created_at",
                 "idx_wallets_updated_at_user",
                 "idx_audit_logs_action_created_at",
+                "idx_customer_fencing_write_mismatch",
             } <= indexes
+
+            evidence_columns = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = 'public' "
+                    "AND table_name = 'customer_fencing_write_evidence'"
+                ).fetchall()
+            }
+            assert {
+                "id",
+                "request_id",
+                "subject_digest",
+                "expected_session_epoch",
+                "verified_session_epoch",
+                "committed_at",
+            } <= evidence_columns
+
+            conn.execute(
+                "INSERT INTO customer_fencing_write_evidence "
+                "(id, request_id, subject_digest, expected_session_epoch, "
+                "verified_session_epoch) VALUES "
+                "('t37-write-1', 'request-write-t37', %s, 1, 2)",
+                ("a" * 64,),
+            )
+            for mutation in (
+                "UPDATE customer_fencing_write_evidence SET verified_session_epoch = 1",
+                "DELETE FROM customer_fencing_write_evidence",
+                "TRUNCATE customer_fencing_write_evidence",
+            ):
+                with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
+                    conn.execute(mutation)
 
             conn.execute(
                 "INSERT INTO security_auth_failures "

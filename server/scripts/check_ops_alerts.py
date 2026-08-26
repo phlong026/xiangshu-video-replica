@@ -166,6 +166,15 @@ ALERT_QUERIES: dict[str, str] = {
             LIMIT %s
         ) AS anomalies
     """,
+    "stale_write_committed": """
+        SELECT count(*) FROM (
+            SELECT id
+            FROM customer_fencing_write_evidence
+            WHERE expected_session_epoch <> verified_session_epoch
+            ORDER BY committed_at, id
+            LIMIT %s
+        ) AS anomalies
+    """,
     "cross_user_access_denied": """
         SELECT count(*) FROM (
             SELECT id
@@ -281,6 +290,7 @@ def collect_observations(
             _security_cutoff(current, config.fencing_window_seconds),
             config.row_limit,
         ),
+        "stale_write_committed": (config.row_limit,),
         "cross_user_access_denied": (
             _cutoff(current, config.security_window_seconds),
             config.row_limit,
