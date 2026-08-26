@@ -8,6 +8,7 @@ storage, restore hardware, and the staging drill remain evidence-driven work.
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 from stat import S_IMODE
 
@@ -16,6 +17,7 @@ import pytest
 from scripts.pitr_recovery_facts import (
     RecoveryFact,
     RecoveryManifestError,
+    _connect,
     _normalized_wal_name,
     build_manifest,
     read_manifest,
@@ -139,6 +141,49 @@ def test_recovery_manifest_is_0600_and_never_overwrites_a_prior_drill(
     assert read_manifest(manifest_path) == manifest
     with pytest.raises(RecoveryManifestError, match="already exists"):
         write_manifest(manifest_path, manifest)
+
+
+def test_default_recovery_facts_connection_uses_the_dedicated_backup_service(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    service_file = tmp_path / "backup.pg_service.conf"
+    service_file.write_text("[pitr-backup]\n", encoding="utf-8")
+    observed: list[str] = []
+
+    def fake_connect(conninfo: str) -> object:
+        observed.append(conninfo)
+        return object()
+
+    monkeypatch.setenv("VIDEO_REPLICA_PG_BACKUP_SERVICE_FILE", str(service_file))
+    monkeypatch.setenv("VIDEO_REPLICA_PG_BACKUP_SERVICE", "pitr-backup")
+    monkeypatch.setenv("PGSERVICEFILE", "/incorrect-service-file")
+    monkeypatch.setenv("PGSERVICE", "incorrect-service")
+    monkeypatch.setattr("scripts.pitr_recovery_facts.psycopg.connect", fake_connect)
+
+    _connect(None)
+
+    assert observed == [""]
+    assert os.environ["PGSERVICEFILE"] == str(service_file)
+    assert os.environ["PGSERVICE"] == "pitr-backup"
+
+
+def test_pitr_shell_entry_points_are_committed_as_executables() -> None:
+    artifacts = (
+        "deploy/postgres/pitr-preflight.sh",
+        "deploy/postgres/pitr-backup.sh",
+        "deploy/postgres/pitr-fetch-wal.sh",
+        "deploy/postgres/pitr-restore-drill.sh",
+    )
+    completed = subprocess.run(
+        ["git", "ls-files", "--stage", "--", *artifacts],
+        check=True,
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    modes = [line.split(maxsplit=1)[0] for line in completed.stdout.splitlines()]
+
+    assert modes == ["100755"] * len(artifacts)
 
 
 def test_t38_uses_physical_base_backups_and_continuous_wal_not_pg_dump() -> None:

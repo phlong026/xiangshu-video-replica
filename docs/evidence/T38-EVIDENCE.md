@@ -63,7 +63,9 @@
 先有恢复事实/脚本合同测试。首轮因文件尚未实现失败；实现后文档与环境登记缺失继续
 红。后续锁定依次暴露并修复：Windows 没有 `os.fchmod` 导致临时 manifest 无法清理、
 PostgreSQL timeline `.history` 文件名未被允许、以及 PITR service 错误加载应用
-`customer.env`（会把应用 DSN 传给备份进程）。最终 9 项覆盖：
+`customer.env`（会把应用 DSN 传给备份进程）。评审回归又锁定两项 P1：四个 shell
+入口必须以 Git 可执行位交付，且 facts CLI 的默认连接必须自行配置专用 libpq service，
+不能依赖独立 preflight 进程的 export。最终 11 项覆盖：
 
 1. 恰好 100 条关联事实通过，session epoch 位移逐笔失败；
 2. 少于 100 条拒绝；
@@ -74,12 +76,14 @@ PostgreSQL timeline `.history` 文件名未被允许、以及 PITR service 错�
 7. `pg_basebackup`/streamed WAL/manifest 校验/WAL archive/restore 命令而非 SQL dump；
 8. staging-only 显式确认、专用 backup identity、PITR-only env 与 timer；
 9. 冻结文件映射与部署演练手册登记。
+10. 无 `--conninfo` 的 facts CLI 强制使用受控 backup service，而非继承连接默认值；
+11. 四个 PITR shell 入口以 Git `100755` 模式交付，供 systemd/PostgreSQL 直接执行。
 
 ## §3 验证证据
 
 | 门禁 | 结果 |
 | --- | --- |
-| T38 专项 | `uv run python -m pytest tests/test_customer_pitr.py -q` → 9 passed |
+| T38 专项 | `uv run python -m pytest tests/test_customer_pitr.py -q` → 11 passed |
 | Python 静态 | `ruff check` + `ruff format --check`（两文件）→ pass；`mypy app scripts/pitr_recovery_facts.py` → 73 source files 无问题 |
 | Shell 语法 | Git Bash `bash -n`：preflight、backup、fetch-wal、restore-drill 全部通过 |
 | 真实 archive/base/restore | 未运行；无目标服务器、受保护 helper 或外部授权，不能以 mock 宣称通过 |

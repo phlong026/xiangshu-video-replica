@@ -26,6 +26,7 @@ import psycopg
 MANIFEST_VERSION = 1
 DEFAULT_REQUIRED_COUNT = 100
 _WAL_NAME = re.compile(r"^(?:[0-9A-F]{24}|[0-9A-F]{8}\.history)$")
+_BACKUP_SERVICE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 _SAMPLE_FACTS_QUERY_TEMPLATE = """
 SELECT
@@ -338,9 +339,26 @@ def verify_recovered_database(
     return verify_manifest_facts(manifest, tuple(recovered))
 
 
+def _configure_backup_service_connection() -> None:
+    """Make an implicit connection use the dedicated, protected libpq service."""
+    service_file_value = os.environ.get("VIDEO_REPLICA_PG_BACKUP_SERVICE_FILE", "")
+    service_name = os.environ.get("VIDEO_REPLICA_PG_BACKUP_SERVICE", "")
+    service_file = Path(service_file_value)
+    if not service_file_value or not service_file.is_absolute() or not service_file.is_file():
+        raise RecoveryManifestError("protected backup libpq service file is unavailable")
+    if not _BACKUP_SERVICE_NAME.fullmatch(service_name):
+        raise RecoveryManifestError("protected backup libpq service name is invalid")
+
+    # `pitr-preflight.sh` is a separate process, so its exports cannot configure
+    # this CLI invocation. Override any inherited libpq defaults to preserve the
+    # dedicated backup identity without placing credentials in argv or the manifest.
+    os.environ["PGSERVICEFILE"] = str(service_file)
+    os.environ["PGSERVICE"] = service_name
+
+
 def _connect(conninfo: str | None) -> psycopg.Connection[Any]:
-    # An empty conninfo deliberately delegates to the protected libpq service
-    # file configured by pitr-preflight.sh; credentials never appear in argv.
+    if not conninfo:
+        _configure_backup_service_connection()
     return psycopg.connect(conninfo or "")
 
 
