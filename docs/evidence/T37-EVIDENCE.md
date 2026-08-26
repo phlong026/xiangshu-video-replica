@@ -77,17 +77,20 @@ fencing 指标/日志/持久事实、observability hook 故障不改变业务 40
 原子状态文件、告警输出脱敏、advisory lock 丢失零副作用、全查询在真实 PG16
 fresh head 执行、管理员共享 IP 预算以及 042 upgrade/downgrade guard。
 
-开发期组合回归完成 253 passed；随后增加的 request-state 白名单与无效重放
-request-id 两项安全锁使 ops 专项增至 16 passed。收尾唯一一次全仓门禁完成
-1273 passed；独立复审发现的 1 个 Medium（已验证凭据被角色/nonce 检查拒绝时
-失败事实低报）已先红后绿修复，完整 admin auth 72 passed、mypy 全绿。
+开发期组合回归完成 253 passed；随后增加的 request-state 白名单、无效重放
+request-id 与未匹配路由固定标签三项安全锁使 ops 专项增至 17 passed。收尾
+唯一一次全仓门禁完成 1273 passed；独立复审发现的 1 个 Medium（已验证凭据被
+角色/nonce 检查拒绝时失败事实低报）已先红后绿修复，完整 admin auth 72
+passed。PR #72 connector 首轮 1 P1 + 2 P2 也已先红后绿修复：任意 404 路径不再
+扩张指标标签、fencing TEXT 截止时间与 ISO 事实统一使用 `T` 分隔符、队列候选在
+数量上限前先确认存在超时任务；相关告警与迁移切片 12 passed，mypy 全绿。
 
 ## §3 当前验证证据
 
 | 门禁 | 结果 |
 | --- | --- |
-| T37 ops metrics | 16 passed |
-| T37 cluster alerts + migration slice | 10 passed（真实 PG16 fixture） |
+| T37 ops metrics | 17 passed（含 PR #72 未匹配路由低基数锁） |
+| T37 cluster alerts + migration slice | 12 passed（真实 PG16 fixture；含 ISO 截止时间与队列截断顺序锁） |
 | 管理员 exchange 共享限流 | `test_admin_auth.py` 72 passed |
 | admin 关联回归 | 93 passed（既有 marker warning，不是失败） |
 | customer security + 042 migration | 36 passed |
@@ -95,7 +98,7 @@ request-id 两项安全锁使 ops 专项增至 16 passed。收尾唯一一次全
 | Secret / client / E2E / Tauri | Pass；client 47 files / 513 tests；E2E Biome 14 files；Cargo fmt/check pass |
 | Ruff / format / mypy | Pass；186 files formatted；72 source files typed |
 | 全仓 `npm run check` | Pass；server 1273 passed / 16 existing warnings，1013.27s；这是本任务唯一一次完整 pytest |
-| 独立复审 | `APPROVE`；首轮 0C/0H/1M，该 Medium 修复后复核为 0C/0H/0M（0 P0/P1/P2/P3） |
+| 复审 | 独立复审 `APPROVE`：首轮 0C/0H/1M，修复后 0C/0H/0M；PR #72 connector 首轮 1 P1 + 2 P2 均已回归锁定并修复 |
 
 ## §4 安全与可观测边界
 
@@ -121,13 +124,13 @@ request-id 两项安全锁使 ops 专项增至 16 passed。收尾唯一一次全
 
 ```text
 任务/工作包：T37（仓库侧）/ OPS-02（部分）/ EXT-02（部分）
-Owner / Reviewer：OPS/后端（Agent 执行）/ 独立复审 APPROVE（首轮 0C/0H/1M；Medium 修复后 0C/0H/0M）
+Owner / Reviewer：OPS/后端（Agent 执行）/ 独立复审 APPROVE（首轮 0C/0H/1M；Medium 修复后 0C/0H/0M）+ PR #72 connector（首轮 1 P1/2 P2，均已先红后绿修复）
 分支 / 基线 SHA：feat/customer-v3-t37-observability / main@bb545ca
 上游规格段落：客户版任务清单 V3 §7 T37、§12.6 EXT-02、§12.7 OPS-02；测试与验收规格 V3 §8.3；代码开发清单 V3 §3.1–§3.3/§12
 改动文件：server/app/ops_metrics.py、main.py、customer_fence.py、permissions.py、admin_auth/customer session/device/activation/recharge routes、security_rate_limit.py；server/scripts/check_ops_alerts.py；migration 042 + Alembic logger fix；T37/关联回归测试；customer env、Nginx、ops-alert systemd；部署手册、冻结文件映射与任务/证据账本
-失败测试或回归锁定：request id/structured fields/result code/secret redaction/private metrics；fencing metrics+durable audit+hook failure isolation；10 类 cluster anomaly query、epoch anti-false-positive、cross-user denial source、bounded/app-table-only SQL、transition state/state-file/advisory owner；admin exchange PG-shared rate budget；042 index/dimension/downgrade guard；fresh PG16 head execution
+失败测试或回归锁定：request id/structured fields/result code/secret redaction/private metrics；任意未匹配路径统一 `UNMATCHED` 低基数标签；fencing metrics+durable audit+hook failure isolation；fencing ISO `T` 事实与截止时间同序比较；10 类 cluster anomaly query、epoch anti-false-positive、cross-user denial source、队列在候选上限前先过滤超时任务、bounded/app-table-only SQL、transition state/state-file/advisory owner；admin exchange PG-shared rate budget；042 index/dimension/downgrade guard；fresh PG16 head execution
 实现结果：HTTP 单行结构化日志和安全字段白名单；双 API 私有 Prometheus exporter；fencing reject/wait 指标；单所有者 PG anomaly probe + fired/resolved 私有状态；P1 面覆盖双在线/资金/账本/旧写/越权拒绝/队列/悬挂 reserve；admin exchange 多实例共享限流；部署与接收器演练手册
-验证命令与通过数：T37 ops 16；alerts+042 slice 10；admin auth 72（含复审修复）；admin related 93；customer security+042 36；受影响组合 253；client 513；Cargo pass；ruff/format/mypy pass（186/72）；唯一全量 server 1273 passed/16 existing warnings；独立复审最终 APPROVE、0C/0H/0M
+验证命令与通过数：T37 ops 17；alerts+042 slice 12（真实 PG16 fixture）；admin auth 72（含复审修复）；admin related 93；customer security+042 36；受影响组合 253；client 513；Cargo pass；ruff/format/mypy pass（186/72）；唯一全量 server 1273 passed/16 existing warnings；独立复审最终 APPROVE、0C/0H/0M；PR #72 connector 首轮 1 P1/2 P2 均已修复
 证据层级：AUTOMATED_VERIFIED（仓库侧）；T37/OPS-02/EXT-02 [~]，不得提升 STAGING
 安全与可观测性：日志白名单且无请求体/credential/provider payload；metrics Bearer file + loopback；PG advisory single owner；counts-only P1 output；真实集中平台/接收器/PG监控/外部费用链未冒充完成
 迁移与回滚：042 PG-only 追加索引与安全维度；存在新 append-only security evidence 时 downgrade fail closed，否则逆序回退；应用回滚优先前向修复并保留审计事实

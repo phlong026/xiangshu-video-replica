@@ -97,6 +97,42 @@ def test_cross_user_alert_uses_only_durable_denial_audit_facts() -> None:
     assert "entity_id" not in normalized
 
 
+def test_fencing_cutoff_matches_the_isoformat_security_fact_separator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import check_ops_alerts as alerts
+
+    observed_parameters: dict[str, tuple[object, ...]] = {}
+
+    def fake_count(
+        _conn: object,
+        name: str,
+        _query: str,
+        parameters: tuple[object, ...],
+    ) -> int:
+        observed_parameters[name] = parameters
+        return 0
+
+    monkeypatch.setattr(alerts, "_count_query", fake_count)
+    monkeypatch.setattr(
+        alerts,
+        "_server_now",
+        lambda _conn: datetime(2026, 8, 26, 12, 0, tzinfo=UTC),
+    )
+
+    alerts.collect_observations(object(), alerts.ProbeConfig(fencing_window_seconds=300))
+
+    assert observed_parameters["fencing_rejected"][0] == "2026-08-26T11:55:00+00:00"
+    assert observed_parameters["double_online"][0] == "2026-08-26 11:58:00+00:00"
+
+
+def test_queue_starvation_filters_for_waiting_work_before_candidate_limit() -> None:
+    from scripts.check_ops_alerts import ALERT_QUERIES
+
+    normalized = " ".join(ALERT_QUERIES["queue_starvation"].lower().split())
+    assert normalized.index("exists (") < normalized.index("limit %s")
+
+
 def test_transition_engine_emits_only_fired_and_resolved_edges() -> None:
     from scripts.check_ops_alerts import AlertObservation, transition_alerts
 
@@ -218,8 +254,57 @@ def test_all_cluster_queries_execute_on_a_fresh_pg16_database(tmp_path: Path) ->
             conn.execute(
                 "INSERT INTO security_auth_failures "
                 "(id, dimension, identifier, request_id, occurred_at) "
+                "VALUES ('old-fence-t37', 'session:fencing', 'old-digest', "
+                "'old-request-t37', replace((clock_timestamp() - interval '1 hour')::text, "
+                "' ', 'T'))"
+            )
+            conn.commit()
+            expired = alerts.collect_observations(conn)
+            assert (
+                next(item for item in expired if item.name == "fencing_rejected").observed_count
+                == 0
+            )
+            conn.execute(
+                "INSERT INTO users (id, username, display_name) VALUES "
+                "('idle-cursor-t37', 'idle-cursor-t37', 'Idle cursor'), "
+                "('starved-user-t37', 'starved-user-t37', 'Starved user')"
+            )
+            conn.execute(
+                "INSERT INTO projects (id, owner_user_id, name) "
+                "VALUES ('starved-project-t37', 'starved-user-t37', 'Starvation probe')"
+            )
+            conn.execute(
+                "INSERT INTO user_queue_cursors "
+                "(user_id, last_dispatched_at, running_tasks_count) VALUES "
+                "('idle-cursor-t37', clock_timestamp() - interval '2 hours', 0), "
+                "('starved-user-t37', clock_timestamp() - interval '1 hour', 0)"
+            )
+            conn.execute(
+                "INSERT INTO generation_batches "
+                "(id, project_id, created_by_user_id, idempotency_key, request_hash, "
+                "request_snapshot_json, status) VALUES "
+                "('starved-batch-t37', 'starved-project-t37', 'starved-user-t37', "
+                "'starved-key-t37', 'starved-hash-t37', '{}', 'QUEUED')"
+            )
+            conn.execute(
+                "INSERT INTO generation_tasks "
+                "(id, batch_id, provider, model, status, created_at) VALUES "
+                "('starved-task-t37', 'starved-batch-t37', 'fake_h3', 'MiniMax-H3', "
+                "'PENDING', (clock_timestamp() - interval '1 hour')::text)"
+            )
+            conn.commit()
+            capped = alerts.collect_observations(
+                conn,
+                alerts.ProbeConfig(row_limit=1, starvation_seconds=300),
+            )
+            assert (
+                next(item for item in capped if item.name == "queue_starvation").observed_count == 1
+            )
+            conn.execute(
+                "INSERT INTO security_auth_failures "
+                "(id, dimension, identifier, request_id, occurred_at) "
                 "VALUES ('fence-t37', 'session:fencing', 'digest', "
-                "'request-t37', clock_timestamp()::text)"
+                "'request-t37', replace(clock_timestamp()::text, ' ', 'T'))"
             )
             conn.execute(
                 "INSERT INTO audit_logs "

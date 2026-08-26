@@ -78,8 +78,9 @@ class AlertTransition:
 
 # Each query returns a single count over a capped anomaly subquery. The
 # application role needs no pg_monitor / pg_stat_* privilege. Candidate
-# wallets and queue cursors are capped before their correlated checks, so a
-# quiet system cannot turn a missing anomaly into an unbounded table walk.
+# wallets are capped before their correlated checks. Queue cursors use an
+# index-backed existence check before the cap so idle cursors cannot hide a
+# truly starved user.
 ALERT_QUERIES: dict[str, str] = {
     "double_online": """
         SELECT count(*) FROM (
@@ -182,16 +183,10 @@ ALERT_QUERIES: dict[str, str] = {
     """,
     "queue_starvation": """
         WITH candidate_cursors AS MATERIALIZED (
-            SELECT user_id
-            FROM user_queue_cursors
-            WHERE running_tasks_count = 0
-            ORDER BY last_dispatched_at, user_id
-            LIMIT %s
-        )
-        SELECT count(*) FROM (
             SELECT cursor.user_id
-            FROM candidate_cursors AS cursor
-            WHERE EXISTS (
+            FROM user_queue_cursors AS cursor
+            WHERE cursor.running_tasks_count = 0
+              AND EXISTS (
                 SELECT 1
                 FROM generation_batches AS batch
                 JOIN generation_tasks AS task ON task.batch_id = batch.id
@@ -200,6 +195,12 @@ ALERT_QUERIES: dict[str, str] = {
                   AND task.created_at < %s
                 LIMIT 1
             )
+            ORDER BY cursor.last_dispatched_at, cursor.user_id
+            LIMIT %s
+        )
+        SELECT count(*) FROM (
+            SELECT user_id
+            FROM candidate_cursors
             LIMIT %s
         ) AS anomalies
     """,
@@ -262,6 +263,12 @@ def _cutoff(current: datetime, seconds: int) -> str:
     return str(current - timedelta(seconds=seconds))
 
 
+def _security_cutoff(current: datetime, seconds: int) -> str:
+    # security_auth_failures facts are written with datetime.isoformat(), so
+    # TEXT comparisons must retain the same ``T`` separator.
+    return (current - timedelta(seconds=seconds)).isoformat()
+
+
 def collect_observations(
     conn: psycopg.Connection[object],
     config: ProbeConfig | None = None,
@@ -275,14 +282,17 @@ def collect_observations(
         "paid_without_charge": (config.row_limit,),
         "charge_without_paid_source": (config.row_limit,),
         "wallet_balance_mismatch": (config.row_limit, config.row_limit),
-        "fencing_rejected": (_cutoff(current, config.fencing_window_seconds), config.row_limit),
+        "fencing_rejected": (
+            _security_cutoff(current, config.fencing_window_seconds),
+            config.row_limit,
+        ),
         "cross_user_access_denied": (
             _cutoff(current, config.security_window_seconds),
             config.row_limit,
         ),
         "queue_starvation": (
-            config.row_limit,
             _cutoff(current, config.starvation_seconds),
+            config.row_limit,
             config.row_limit,
         ),
         "dangling_reserve": (config.row_limit,),

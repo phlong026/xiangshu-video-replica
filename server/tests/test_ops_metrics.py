@@ -391,6 +391,31 @@ def test_metrics_require_exact_bearer_and_export_local_only_counters(
     assert "req-metrics" not in text
 
 
+def test_unmatched_paths_share_one_bounded_metric_label(
+    tmp_path: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token_file = tmp_path / "metrics.token"
+    token_file.write_text("metrics-secret\n", encoding="utf-8")
+    monkeypatch.setenv(METRICS_TOKEN_FILE_ENV, str(token_file))
+
+    app = _ops_app()
+    with TestClient(app) as client:
+        assert client.get("/missing/attacker-value-a").status_code == 404
+        assert client.get("/missing/attacker-value-b").status_code == 404
+        metrics = client.get(
+            "/metrics",
+            headers={"Authorization": "Bearer metrics-secret"},
+        ).text
+
+    assert (
+        'video_replica_http_requests_total{method="GET",route="UNMATCHED",status="404"} 2'
+        in metrics
+    )
+    assert "attacker-value-a" not in metrics
+    assert "attacker-value-b" not in metrics
+
+
 def test_rendered_metrics_can_report_not_ready() -> None:
     text = render_metrics_document_for_tests(is_ready=False)
     assert 'video_replica_ready{service="video-replica-api"} 0' in text

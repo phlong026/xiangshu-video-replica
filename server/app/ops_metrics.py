@@ -22,6 +22,7 @@ AUTHORIZATION_HEADER = "Authorization"
 METRICS_TOKEN_FILE_ENV = "VIDEO_REPLICA_METRICS_TOKEN_FILE"
 PROMETHEUS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
 MAX_REQUEST_ID_LENGTH = 128
+UNMATCHED_ROUTE_LABEL = "UNMATCHED"
 APPROVED_TRACE_FIELDS = frozenset(
     {
         "actor_id",
@@ -349,7 +350,7 @@ def _resolve_route_label(request: Request) -> str:
     path = getattr(route, "path", None)
     if isinstance(path, str) and path:
         return path
-    return request.url.path or "/"
+    return UNMATCHED_ROUTE_LABEL
 
 
 def _default_result_code(status_code: int) -> str:
