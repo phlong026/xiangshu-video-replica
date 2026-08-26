@@ -40,7 +40,8 @@ Worker、PG HA 或受控依赖 stub，故所有实际演练均为**未执行**�
   application DSN。
 - **验证命令**：`uv run python -m pytest tests/test_customer_ha_smoke.py -q` → 36
   passed；`uv run python -m pytest tests/test_customer_pitr.py tests/test_customer_ha_smoke.py -q`
-  → 47 passed；变更测试 Ruff/format 与 `mypy app` 通过。远端全仓三门验证待本 PR 完成。
+  → 47 passed；变更测试 Ruff/format 与 `mypy app` 通过。PR #75 的 Secret scan、Linux
+  quality gate 与 Windows Tauri/NSIS 均通过。
 - **安全与可观测性**：不记录 service file 内容、DSN、账号、对象 URL、任务原始数据或
   Provider 响应；pitr service 的路径与名称不是凭据。故障时要保存 T37 的脱敏
   fired/resolved 接收时间与不变量摘要，而非令牌或请求体。
@@ -51,7 +52,7 @@ Worker、PG HA 或受控依赖 stub，故所有实际演练均为**未执行**�
   Provider。
 - **未测试项**：实际双 API/四 Worker/PG HA/stub 故障、RTO/RPO 与外部告警接收仍需
   经授权的 staging 窗口。
-- **Lore Commit SHA**：待 T39 PR squash 后回填。
+- **Lore Commit SHA**：`ecf84c392675c4db97dd5d9847173783fcee7df2`（PR #75 squash）。
 
 ## CODE_PRESENT
 

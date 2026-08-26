@@ -36,13 +36,13 @@ Full §14 record and staging evidence checklist: `docs/evidence/T38-EVIDENCE.md`
 | **Upstream Spec Sections** | Task list §7 T39 and §12.7 OPS-04; test spec §8.2; deployment runbook §6.1 |
 | **Failure Test or Regression Lock** | Red→green runbook contract requires a same-SHA staging window, two API services, four Worker services, controlled `systemctl kill` faults, a post-claim crash that leaves the original task in `SUBMISSION_UNCERTAIN` for manual reconciliation while replacement Workers run later work only, post-failover 100-fact verification with the protected libpq service, controlled stub-only dependency faults that retain the same idempotency key, RTO/RPO recording, and a prohibition on real ZPay/COS/paid-Provider calls. |
 | **Implementation Result** | A staging-only fault-drill operation card with explicit No-Go/rollback conditions, a complete §14 evidence template and implementation-independent regression lock. It does not inject faults from CI or a developer machine. |
-| **Verification Command and Pass Count** | `uv run python -m pytest tests/test_customer_ha_smoke.py -q` → 36 passed; `ruff check` and `ruff format --check` for the changed test passed. |
+| **Verification Command and Pass Count** | `uv run python -m pytest tests/test_customer_ha_smoke.py -q` → 36 passed; T38 + HA contracts → 47 passed; `ruff check`, `ruff format --check` and `mypy app` passed; PR #75 Secret scan, Linux quality gate and Windows Tauri/NSIS all passed. |
 | **Evidence Level** | Repository-side `AUTOMATED_VERIFIED`; T39/OPS-04 remain `[~]`, not `STAGING_VERIFIED` |
 | **Security and Observability** | No credentials, customer records, object URLs or external endpoints are stored. Only controlled stubs are permitted; T37 fired/resolved delivery must be evidenced in staging. |
 | **Migration and Rollback** | No migration. Any invariant breach is a No-Go: remove changed members from LB, stop expansion, preserve audit facts and use the deployment rollback procedure; never amend wallet or ledger rows directly. |
 | **External Authorization Record** | None; no live staging action or real ZPay/COS/paid-Provider request has occurred. |
 | **Untested Items** | Actual two-API/four-Worker failure domains, PostgreSQL HA failover, controlled dependency fault injection, RTO/RPO and external alert delivery all need an authorized staging window. |
-| **Lore Commit SHA** | Pending task PR squash SHA |
+| **Lore Commit SHA** | `ecf84c392675c4db97dd5d9847173783fcee7df2` (PR #75 squash) |
 
 Full §14 record and staging checklist: `docs/evidence/T39-EVIDENCE.md`.
 
