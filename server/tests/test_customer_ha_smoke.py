@@ -526,7 +526,12 @@ def test_t39_fault_drill_runbook_requires_staging_guards_and_business_proof() ->
         "video-replica-worker@4",
         "systemctl kill",
         "pitr_recovery_facts verify",
+        "VIDEO_REPLICA_PG_BACKUP_SERVICE_FILE",
+        "VIDEO_REPLICA_PG_BACKUP_SERVICE",
         "100 条",
+        "SUBMISSION_UNCERTAIN",
+        "人工对账",
+        "后续任务",
         "受控 stub",
         "幂等键",
         "RTO <= 5 分钟",
@@ -539,6 +544,16 @@ def test_t39_fault_drill_runbook_requires_staging_guards_and_business_proof() ->
     assert "AUTOMATED_VERIFIED" in evidence
     assert "STAGING_VERIFIED" in evidence
     assert "未执行" in evidence
+    for required in (
+        "上游规格",
+        "变更文件",
+        "实现结果",
+        "验证命令",
+        "安全与可观测性",
+        "迁移与回滚",
+        "Lore Commit SHA",
+    ):
+        assert required in evidence
 
 
 def test_customer_desktop_build_is_an_explicit_no_sidecar_target() -> None:
