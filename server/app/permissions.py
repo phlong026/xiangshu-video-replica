@@ -16,6 +16,9 @@ from app.db_portable import BusinessConnection
 from app.ops_metrics import set_current_result_code
 
 logger = logging.getLogger(__name__)
+ASSET_FORBIDDEN_MESSAGE = (
+    "Employee access is limited to published assets with current portrait authorization."
+)
 
 
 @dataclass(frozen=True)
@@ -299,7 +302,7 @@ def require_asset_access(
         entity_id=asset_id,
         metadata={"attempted_action": action},
         code="ASSET_FORBIDDEN",
-        message="Employee access requires a published asset with current portrait authorization.",
+        message=ASSET_FORBIDDEN_MESSAGE,
     )
 
 
