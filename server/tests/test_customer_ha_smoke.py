@@ -53,6 +53,11 @@ def test_customer_runtime_dependency_gate_requires_private_cos(
     from app import bootstrap
 
     monkeypatch.setenv("VIDEO_REPLICA_CUSTOMER_PRODUCTION", "true")
+    monkeypatch.setattr(
+        bootstrap.shutil,
+        "which",
+        lambda command: "/usr/bin/ffprobe" if command == "ffprobe" else None,
+    )
     ready = SimpleNamespace(pool_size=4)
     monkeypatch.setattr(bootstrap, "check_pg_ready", lambda: ready)
 
@@ -89,6 +94,11 @@ def test_customer_runtime_dependency_gate_accepts_pg_and_cos(
     from app import bootstrap
 
     monkeypatch.setenv("VIDEO_REPLICA_CUSTOMER_PRODUCTION", "true")
+    monkeypatch.setattr(
+        bootstrap.shutil,
+        "which",
+        lambda command: "/usr/bin/ffprobe" if command == "ffprobe" else None,
+    )
     ready = SimpleNamespace(pool_size=4)
     monkeypatch.setattr(bootstrap, "check_pg_ready", lambda: ready)
 
@@ -138,6 +148,23 @@ def test_customer_runtime_dependency_gate_accepts_pg_and_cos(
     assert bootstrap.check_customer_production_runtime_dependencies() is ready
     assert probes == ["bucket"]
     assert events == ["pg-enter", "pg-exit", "cos-bucket-head"]
+
+
+def test_customer_runtime_dependency_gate_requires_ffprobe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import bootstrap
+
+    monkeypatch.setenv("VIDEO_REPLICA_CUSTOMER_PRODUCTION", "true")
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda _: None)
+
+    def unexpected_pg_probe() -> None:
+        raise AssertionError("PostgreSQL must not be probed without ffprobe")
+
+    monkeypatch.setattr(bootstrap, "check_pg_ready", unexpected_pg_probe)
+
+    with pytest.raises(RuntimeError, match="requires ffprobe"):
+        bootstrap.check_customer_production_runtime_dependencies()
 
 
 def test_empty_customer_bootstrap_provisions_first_admin_and_cos_atomically(
