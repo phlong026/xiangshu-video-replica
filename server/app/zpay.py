@@ -15,20 +15,15 @@ from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 PUBLIC_BASE_URL_ENV = "PUBLIC_BASE_URL"
-ZPAY_GATEWAY_URL_ENV = "ZPAY_GATEWAY_URL"
-ALLOWED_ZPAY_GATEWAYS = frozenset(
-    {
-        "https://zpayz.cn/submit.php",
-        "https://z-pay.cn/submit.php",
-    }
-)
+ZPAY_GATEWAY_URL = "https://zpayz.cn/submit.php"
+ZPAY_API_PAYMENT_URL = "https://zpayz.cn/mapi.php"
+ZPAY_QUERY_URL = "https://zpayz.cn/api.php"
+ZPAY_NOTIFY_PATH = "/api/payments/zpay/notify"
+ZPAY_RETURN_PATH = "/api/payments/zpay/return"
 ALLOWED_ZPAY_CHANNELS = frozenset({"alipay", "wxpay"})
-ZPAY_QUERY_URLS = {
-    "https://zpayz.cn/submit.php": "https://zpayz.cn/api.php",
-    "https://z-pay.cn/submit.php": "https://z-pay.cn/api.php",
-}
 ZPAY_QUERY_TIMEOUT_SECONDS = 3.0
 MAX_ZPAY_QUERY_RESPONSE_BYTES = 64 * 1024
+MAX_ZPAY_PAYMENT_RESPONSE_BYTES = 64 * 1024
 logger = logging.getLogger(__name__)
 
 
@@ -55,6 +50,19 @@ class ZPayOrderQueryResult:
     amount_fen: int | None
     channel: str | None
     response_digest: str
+
+
+@dataclass(frozen=True)
+class ZPayPaymentCodeResult:
+    qr_image_url: str
+    payment_url: str
+    provider_order_no: str | None
+
+
+class ZPayPaymentCodeError(RuntimeError):
+    def __init__(self, message: str, *, status_code: int = 502) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class ZPayOrderQueryError(RuntimeError):
@@ -117,10 +125,6 @@ def parse_enabled_channels(value: str) -> tuple[str, ...]:
 
 
 def deployment_config_from_environment() -> ZPayDeploymentConfig:
-    gateway_url = os.environ.get(ZPAY_GATEWAY_URL_ENV, "").strip()
-    if gateway_url not in ALLOWED_ZPAY_GATEWAYS:
-        raise ValueError("ZPay gateway URL is missing or not allowlisted")
-
     public_base_url = os.environ.get(PUBLIC_BASE_URL_ENV, "").strip()
     parsed = urlsplit(public_base_url)
     if (
@@ -137,10 +141,10 @@ def deployment_config_from_environment() -> ZPayDeploymentConfig:
 
     origin = f"https://{parsed.netloc}"
     return ZPayDeploymentConfig(
-        gateway_url=gateway_url,
-        query_url=ZPAY_QUERY_URLS[gateway_url],
-        notify_url=f"{origin}/api/payments/zpay/notify",
-        return_url=f"{origin}/api/payments/zpay/return",
+        gateway_url=ZPAY_GATEWAY_URL,
+        query_url=ZPAY_QUERY_URL,
+        notify_url=f"{origin}{ZPAY_NOTIFY_PATH}",
+        return_url=f"{origin}{ZPAY_RETURN_PATH}",
     )
 
 
@@ -277,6 +281,99 @@ class ZPayOrderQueryClient:
             channel=channel,
             response_digest=response_digest,
         )
+
+
+class ZPayPaymentCodeClient:
+    """Create one desktop payment code without exposing merchant secrets.
+
+    The returned image URL is short-lived provider output intended only for an
+    ``img`` element. The customer API never returns the signed merchant fields
+    or provider name to the desktop.
+    """
+
+    def __init__(
+        self,
+        *,
+        opener: ZPayHTTPOpener | None = None,
+        timeout_seconds: float = ZPAY_QUERY_TIMEOUT_SECONDS,
+    ) -> None:
+        self._opener = opener or cast(ZPayHTTPOpener, urlopen)
+        self._timeout_seconds = timeout_seconds
+
+    def create_payment_code(
+        self,
+        *,
+        merchant: ZPayMerchantConfig,
+        deployment: ZPayDeploymentConfig,
+        merchant_order_no: str,
+        amount_fen: int,
+        credits: int,
+        client_ip: str,
+    ) -> ZPayPaymentCodeResult:
+        fields = {
+            "pid": merchant.pid,
+            "type": merchant.channel,
+            "out_trade_no": merchant_order_no,
+            "notify_url": deployment.notify_url,
+            "name": f"视频生成条数充值 {credits} 条",
+            "money": format_yuan(amount_fen),
+            "clientip": client_ip,
+            "device": "pc",
+        }
+        fields["sign"] = sign_zpay_params(fields, merchant.key)
+        fields["sign_type"] = "MD5"
+        request = Request(
+            ZPAY_API_PAYMENT_URL,
+            data=urlencode(fields).encode("utf-8"),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+        )
+        try:
+            with self._opener(request, timeout=self._timeout_seconds) as response:
+                body = response.read(MAX_ZPAY_PAYMENT_RESPONSE_BYTES + 1)
+        except HTTPError as exc:
+            logger.warning("Payment-code request returned HTTP %s", exc.code)
+            raise ZPayPaymentCodeError("payment-code request failed") from exc
+        except (TimeoutError, URLError, OSError) as exc:
+            logger.warning("Payment-code request failed: %s", type(exc).__name__)
+            raise ZPayPaymentCodeError(
+                "payment-code request timed out",
+                status_code=504,
+            ) from exc
+
+        if len(body) > MAX_ZPAY_PAYMENT_RESPONSE_BYTES:
+            raise ZPayPaymentCodeError("payment-code response is too large")
+        try:
+            decoded: object = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ZPayPaymentCodeError("payment-code response is invalid") from exc
+        if not isinstance(decoded, dict) or str(decoded.get("code", "")) != "1":
+            raise ZPayPaymentCodeError("payment-code request was rejected")
+
+        qr_image_url = _https_url_field(decoded, "img")
+        payment_url = _https_url_field(decoded, "payurl")
+        provider_order_no = str(decoded.get("O_id", "")).strip() or None
+        return ZPayPaymentCodeResult(
+            qr_image_url=qr_image_url,
+            payment_url=payment_url,
+            provider_order_no=provider_order_no,
+        )
+
+
+def _https_url_field(payload: Mapping[str, object], name: str) -> str:
+    value = str(payload.get(name, "")).strip()
+    try:
+        parsed = urlsplit(value)
+    except ValueError as exc:
+        raise ZPayPaymentCodeError("payment-code response URL is invalid") from exc
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise ZPayPaymentCodeError("payment-code response URL is invalid")
+    return value
 
 
 def _query_field(payload: Mapping[str, object], name: str) -> str:

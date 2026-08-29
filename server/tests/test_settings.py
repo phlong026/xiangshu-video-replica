@@ -16,6 +16,7 @@ from app.settings import (
     SettingsDecryptError,
     SettingsKeyMissing,
     SettingsRepository,
+    effective_customer_billing_settings,
     fernet_from_environment,
 )
 from app.settings_routes import (
@@ -104,6 +105,30 @@ def admin_headers(extra: dict[str, str] | None = None) -> dict[str, str]:
     return headers
 
 
+def test_acceptance_payment_override_is_user_scoped_and_capped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    billing = {
+        "internal_base_unit_price_fen": 500,
+        "charged_unit_price_fen": 500,
+        "min_recharge_fen": 10000,
+        "recharge_step_fen": 1000,
+    }
+    monkeypatch.setenv("VIDEO_REPLICA_ACCEPTANCE_PAYMENT_USER_ID", "customer-1")
+    monkeypatch.setenv("VIDEO_REPLICA_ACCEPTANCE_PAYMENT_AMOUNT_FEN", "500")
+
+    assert effective_customer_billing_settings(billing, user_id="customer-1") == {
+        **billing,
+        "min_recharge_fen": 500,
+        "recharge_step_fen": 500,
+    }
+    assert effective_customer_billing_settings(billing, user_id="customer-2") == billing
+
+    monkeypatch.setenv("VIDEO_REPLICA_ACCEPTANCE_PAYMENT_AMOUNT_FEN", "501")
+    with pytest.raises(ValueError, match="between 1 and 500"):
+        effective_customer_billing_settings(billing, user_id="customer-1")
+
+
 def test_settings_migration_creates_tables_and_defaults(tmp_path: Path, settings_key: str) -> None:
     db_path = tmp_path / "settings.db"
 
@@ -123,7 +148,7 @@ def test_settings_migration_creates_tables_and_defaults(tmp_path: Path, settings
             """
         ).fetchone()
 
-    assert version == "044_customer_unit_prices"
+    assert version == "045_async_analysis_tasks"
     assert {"provider_settings", "runtime_settings"}.issubset(tables)
     assert dict(runtime) == {
         "max_generation_count_per_batch": 4,

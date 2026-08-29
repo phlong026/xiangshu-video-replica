@@ -102,9 +102,11 @@ routes fail closed with 503 (the SQLite lane keeps its internal P0 shape).
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from uuid import uuid4
 
 import psycopg
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -115,7 +117,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.activation_code_service import (
     ActivationKeyError,
     InvalidActivationCodeError,
+    activation_code_hmac_key,
+    compute_code_digest,
+    generate_activation_code,
+    highest_code_hmac_key_version,
     iter_code_digests,
+    mask_activation_code,
     normalize_activation_code,
 )
 from app.customer_device_service import (
@@ -259,6 +266,15 @@ class DeviceListResponse(BaseModel):
     pending_pairings: list[PendingPairingView] = []
 
 
+class ActivationCodeResetResponse(BaseModel):
+    """The replacement plaintext exists only in this no-store response."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    activation_code: str
+    masked_code: str
+
+
 # ---------------------------------------------------------------------------
 # Bearer authentication (device credential layer)
 # ---------------------------------------------------------------------------
@@ -334,6 +350,35 @@ def _require_pg() -> None:
 
 def _request_id(request: Request) -> str:
     return get_or_create_request_id(request)
+
+
+def _insert_customer_device_audit(
+    conn: psycopg.Connection,
+    *,
+    actor_user_id: str,
+    action: str,
+    entity_type: str,
+    entity_id: str,
+    request_id: str,
+    metadata: dict[str, object] | None = None,
+) -> None:
+    conn.execute(
+        "INSERT INTO audit_logs "
+        "(id, actor_user_id, action, entity_type, entity_id, metadata_json) "
+        "VALUES (%s, %s, %s, %s, %s, %s)",
+        (
+            str(uuid4()),
+            actor_user_id,
+            action,
+            entity_type,
+            entity_id,
+            json.dumps(
+                {"request_id": request_id, **(metadata or {})},
+                ensure_ascii=True,
+                sort_keys=True,
+            ),
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1310,4 +1355,160 @@ def approve_device_pairing(pairing_id: str, request: Request) -> PairingApproveR
     return PairingApproveResponse(
         pairing_request_id=pairing_id,
         status=PAIRING_APPROVED,
+    )
+
+
+@router.delete(
+    "/device-pairings/{pairing_id}",
+    status_code=204,
+)
+def dismiss_device_pairing(pairing_id: str, request: Request) -> Response:
+    """Dismiss an invalid pending/approved pairing without deleting audit lineage."""
+    _require_pg()
+    token = _bearer_token(request)
+    request_id = _request_id(request)
+    with pg_transaction() as conn:
+        device = _authenticate(conn, token)
+        device_row = conn.execute(
+            "SELECT status FROM customer_devices WHERE id = %s FOR UPDATE",
+            (device.id,),
+        ).fetchone()
+        if device_row is None or str(device_row[0]) != "BOUND":
+            raise _http(401, "DEVICE_REVOKED", "This device credential has been revoked.")
+        pairing = conn.execute(
+            "SELECT status FROM device_pairing_requests "
+            "WHERE id = %s AND activation_code_id = %s FOR UPDATE",
+            (pairing_id, device.activation_code_id),
+        ).fetchone()
+        if pairing is None:
+            raise _http(
+                404,
+                "PAIRING_NOT_FOUND",
+                "No such pairing request for this device.",
+            )
+        pairing_status = str(pairing[0])
+        if pairing_status == "EXPIRED":
+            return Response(status_code=204)
+        if pairing_status == "CONSUMED":
+            raise _http(
+                409,
+                "PAIRING_ALREADY_CONSUMED",
+                "The pairing request has already been consumed.",
+            )
+        conn.execute(
+            "UPDATE device_pairing_requests SET status = 'EXPIRED' WHERE id = %s",
+            (pairing_id,),
+        )
+        _insert_customer_device_audit(
+            conn,
+            actor_user_id=device.user_id,
+            action="customer.device_pairing.dismissed",
+            entity_type="device_pairing_request",
+            entity_id=pairing_id,
+            request_id=request_id,
+            metadata={"previous_status": pairing_status},
+        )
+    logger.info(
+        "customer pairing dismissed: pairing=%s actor_device=%s request=%s",
+        pairing_id,
+        device.id,
+        request_id,
+    )
+    return Response(status_code=204)
+
+
+@router.post(
+    "/activation-code/reset",
+    response_model=ActivationCodeResetResponse,
+)
+def reset_customer_activation_code(
+    request: Request,
+    response: Response,
+) -> ActivationCodeResetResponse:
+    """Rotate the main activation code while preserving bound devices/session.
+
+    The old digest is replaced atomically. The replacement plaintext is not
+    persisted and is returned exactly once with a no-store cache directive.
+    Any unconsumed pairing created with the previous code is invalidated.
+    """
+    _require_pg()
+    token = _bearer_token(request)
+    request_id = _request_id(request)
+    with pg_transaction() as conn:
+        device = _authenticate(conn, token)
+        code_row = conn.execute(
+            "SELECT status FROM activation_codes WHERE id = %s FOR UPDATE",
+            (device.activation_code_id,),
+        ).fetchone()
+        if code_row is None or str(code_row[0]) != "ACTIVE":
+            raise _http(
+                409,
+                "ACTIVATION_CODE_NOT_ACTIVE",
+                "Only an active authorization can be reset.",
+            )
+        try:
+            key_version = highest_code_hmac_key_version()
+            hmac_key = activation_code_hmac_key(key_version)
+        except ActivationKeyError:
+            raise _http(
+                503,
+                "ACTIVATION_SERVICE_UNAVAILABLE",
+                "Activation-code keys are not configured.",
+            ) from None
+
+        replacement = ""
+        replacement_digest = ""
+        for _ in range(3):
+            candidate = generate_activation_code()
+            candidate_digest = compute_code_digest(candidate, key=hmac_key)
+            collision = conn.execute(
+                "SELECT 1 FROM activation_codes WHERE code_digest = %s",
+                (candidate_digest,),
+            ).fetchone()
+            if collision is None:
+                replacement = candidate
+                replacement_digest = candidate_digest
+                break
+        if not replacement:
+            raise _http(
+                503,
+                "ACTIVATION_CODE_GENERATION_FAILED",
+                "A replacement activation code could not be generated.",
+            )
+        masked = mask_activation_code(replacement)
+        conn.execute(
+            "UPDATE activation_codes "
+            "SET code_digest = %s, digest_key_version = %s, masked_code = %s "
+            "WHERE id = %s",
+            (
+                replacement_digest,
+                key_version,
+                masked,
+                device.activation_code_id,
+            ),
+        )
+        expired_pairings = conn.execute(
+            "UPDATE device_pairing_requests SET status = 'EXPIRED' "
+            "WHERE activation_code_id = %s AND status IN ('PENDING', 'APPROVED')",
+            (device.activation_code_id,),
+        ).rowcount
+        _insert_customer_device_audit(
+            conn,
+            actor_user_id=device.user_id,
+            action="customer.activation_code.rotated",
+            entity_type="activation_code",
+            entity_id=device.activation_code_id,
+            request_id=request_id,
+            metadata={"expired_pairing_count": expired_pairings},
+        )
+    response.headers["Cache-Control"] = "no-store"
+    logger.info(
+        "customer activation code rotated: code=%s actor_device=%s request=%s",
+        device.activation_code_id,
+        device.id,
+        request_id,
+    )
+    return ActivationCodeResetResponse(
+        activation_code=replacement,
+        masked_code=masked,
     )

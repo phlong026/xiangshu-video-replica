@@ -1,17 +1,19 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timedelta
-from typing import Literal, cast
+from typing import Annotated, Literal, cast
 from uuid import uuid4
 
 import psycopg
-from fastapi import APIRouter, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, ConfigDict, StrictInt
 
 from app.auth import AuthenticatedUser, Database
 from app.customer_fence import (
     BusinessDbDep,
+    CustomerSessionSnapshot,
     customer_session_snapshot,
     fenced_pg_transaction,
 )
@@ -32,12 +34,14 @@ from app.customer_idempotency import (
 )
 from app.db_portable import BusinessConnection
 from app.ops_metrics import set_current_trace_fields
-from app.security_rate_limit import _server_now
-from app.settings import SettingsRepository
+from app.security_rate_limit import _server_now, client_ip_from_request
+from app.settings import SettingsRepository, effective_customer_billing_settings
 from app.wallet_routes import WalletResponse, WalletTransactionPage, WalletTransactionResponse
 from app.zpay import (
     ZPayDeploymentConfig,
     ZPayMerchantConfig,
+    ZPayPaymentCodeClient,
+    ZPayPaymentCodeError,
     build_zpay_payment_form,
     deployment_config_from_environment,
     generate_merchant_order_no,
@@ -96,6 +100,46 @@ class RechargeOrderPage(BaseModel):
     offset: int
 
 
+class CustomerPaymentCodeResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    order_no: str
+    amount_fen: int
+    credits: int
+    qr_image_url: str
+    payment_url: str
+
+
+class CustomerProfileResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: str
+    username: str
+    display_name: str
+    joined_at: str
+    activation_code_masked: str | None
+    activation_status: str | None
+    activated_at: str | None
+    device_slots_used: int
+    device_slots_total: int
+
+
+class UpdateCustomerProfileRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str
+
+
+def get_zpay_payment_code_client() -> ZPayPaymentCodeClient:
+    return ZPayPaymentCodeClient()
+
+
+PaymentCodeClientDep = Annotated[
+    ZPayPaymentCodeClient,
+    Depends(get_zpay_payment_code_client),
+]
+
+
 # ---------------------------------------------------------------------------
 # Shared recharge-order creation core (T22 review: the customer route and the
 # internal route previously duplicated ~99 lines and the copy drifted - the
@@ -120,6 +164,20 @@ def _stage_recharge_preconditions(
         if customer_user_id is not None
         else settings_repo.read_billing_settings()
     )
+    if customer_user_id is not None:
+        try:
+            billing = effective_customer_billing_settings(
+                billing,
+                user_id=customer_user_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "ACCEPTANCE_PAYMENT_CONFIGURATION_INVALID",
+                    "message": "The controlled payment rehearsal is not configured safely.",
+                },
+            ) from exc
     validate_recharge_amount(amount_fen, billing)
     try:
         merchant = merchant_config_from_settings(settings_repo.load_zpay_config())
@@ -472,6 +530,268 @@ def read_customer_recharge_order_status(
         return RechargeOrderStatusResponse(**serialize_recharge_order(order))
 
 
+@router.delete(
+    "/customer/recharge-orders/{order_no}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def close_customer_recharge_order(order_no: str, request: Request) -> Response:
+    """Close an unpaid order without erasing its accounting lineage.
+
+    The UI calls this action "delete", while the database keeps the order as
+    CLOSED so callbacks, support and reconciliation retain one authoritative
+    record. Repeating the request is intentionally idempotent.
+    """
+    snapshot = _require_customer_snapshot(request)
+    with fenced_pg_transaction(snapshot) as (conn, ctx):
+        row = conn.execute(
+            "SELECT id, status FROM recharge_orders "
+            "WHERE merchant_order_no = %s AND user_id = %s FOR UPDATE",
+            (order_no, ctx.user_id),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "code": "RECHARGE_ORDER_NOT_FOUND",
+                    "message": "Recharge order does not exist.",
+                },
+            )
+        current_status = str(row[1])
+        if current_status == "CLOSED":
+            return Response(status_code=status.HTTP_204_NO_CONTENT)
+        if current_status != "PENDING":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "RECHARGE_ORDER_NOT_PENDING",
+                    "message": "Only an unpaid recharge order can be closed.",
+                },
+            )
+        conn.execute(
+            "UPDATE recharge_orders SET status = 'CLOSED' WHERE id = %s",
+            (str(row[0]),),
+        )
+        _insert_customer_audit(
+            conn,
+            user_id=ctx.user_id,
+            action="customer.recharge_order.closed",
+            entity_type="recharge_order",
+            entity_id=order_no,
+        )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/customer/recharge-orders/{order_no}/payment-code",
+    response_model=CustomerPaymentCodeResponse,
+)
+def create_customer_payment_code(
+    order_no: str,
+    request: Request,
+    payment_client: PaymentCodeClientDep,
+) -> CustomerPaymentCodeResponse:
+    """Return a display-ready QR image for one owned pending order.
+
+    Merchant credentials and signed protocol fields stay server-side. The
+    PostgreSQL connection is released before the external request so a slow
+    payment provider cannot consume the shared database pool.
+    """
+    snapshot = customer_session_snapshot(request)
+    if snapshot is None:
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "code": "SESSION_REQUIRED",
+                "message": "A customer session token is required.",
+            },
+        )
+    with fenced_pg_transaction(snapshot) as (conn, ctx):
+        business_conn = BusinessConnection.postgres(conn)
+        order = read_recharge_order(business_conn, merchant_order_no=order_no)
+        if order is None or str(order["user_id"]) != ctx.user_id:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "code": "RECHARGE_ORDER_NOT_FOUND",
+                    "message": "Recharge order does not exist.",
+                },
+            )
+        if str(order["status"]) != "PENDING":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "RECHARGE_ORDER_NOT_PENDING",
+                    "message": "This recharge order is no longer pending.",
+                },
+            )
+        try:
+            merchant = merchant_config_from_settings(
+                SettingsRepository(business_conn).load_zpay_config()
+            )
+            deployment = deployment_config_from_environment()
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "PAYMENT_CONFIGURATION_UNAVAILABLE",
+                    "message": "支付服务暂不可用，请稍后重试。",
+                },
+            ) from exc
+        amount_fen = int(order["amount_fen"])
+        credits = int(order["credits"])
+
+    try:
+        payment_code = payment_client.create_payment_code(
+            merchant=merchant,
+            deployment=deployment,
+            merchant_order_no=order_no,
+            amount_fen=amount_fen,
+            credits=credits,
+            client_ip=client_ip_from_request(request),
+        )
+    except ZPayPaymentCodeError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={
+                "code": "PAYMENT_CODE_UNAVAILABLE",
+                "message": "支付二维码暂时无法生成，请稍后重试。",
+            },
+        ) from exc
+    return CustomerPaymentCodeResponse(
+        order_no=order_no,
+        amount_fen=amount_fen,
+        credits=credits,
+        qr_image_url=payment_code.qr_image_url,
+        payment_url=payment_code.payment_url,
+    )
+
+
+def _customer_profile(conn: psycopg.Connection, *, user_id: str) -> CustomerProfileResponse:
+    row = conn.execute(
+        """
+        SELECT u.username, u.display_name, u.created_at,
+               code.masked_code, code.status, code.activated_at,
+               (
+                   SELECT COUNT(*)
+                   FROM customer_devices device
+                   WHERE device.user_id = u.id AND device.status = 'BOUND'
+               ) AS device_slots_used
+        FROM users u
+        LEFT JOIN LATERAL (
+            SELECT masked_code, status, activated_at
+            FROM activation_codes
+            WHERE bound_user_id = u.id
+            ORDER BY activated_at DESC NULLS LAST, id DESC
+            LIMIT 1
+        ) code ON TRUE
+        WHERE u.id = %s
+        """,
+        (user_id,),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "CUSTOMER_PROFILE_NOT_FOUND",
+                "message": "Customer profile does not exist.",
+            },
+        )
+    return CustomerProfileResponse(
+        user_id=user_id,
+        username=str(row[0]),
+        display_name=str(row[1]),
+        joined_at=str(row[2]),
+        activation_code_masked=str(row[3]) if row[3] is not None else None,
+        activation_status=str(row[4]) if row[4] is not None else None,
+        activated_at=str(row[5]) if row[5] is not None else None,
+        device_slots_used=int(row[6]),
+        device_slots_total=2,
+    )
+
+
+def _insert_customer_audit(
+    conn: psycopg.Connection,
+    *,
+    user_id: str,
+    action: str,
+    entity_type: str,
+    entity_id: str,
+    metadata: dict[str, object] | None = None,
+) -> None:
+    conn.execute(
+        "INSERT INTO audit_logs "
+        "(id, actor_user_id, action, entity_type, entity_id, metadata_json) "
+        "VALUES (%s, %s, %s, %s, %s, %s)",
+        (
+            str(uuid4()),
+            user_id,
+            action,
+            entity_type,
+            entity_id,
+            json.dumps(metadata or {}, ensure_ascii=True, sort_keys=True),
+        ),
+    )
+
+
+def _require_customer_snapshot(request: Request) -> CustomerSessionSnapshot:
+    snapshot = customer_session_snapshot(request)
+    if snapshot is None:
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "code": "SESSION_REQUIRED",
+                "message": "A customer session token is required.",
+            },
+        )
+    return snapshot
+
+
+@router.get("/customer/profile", response_model=CustomerProfileResponse)
+def read_customer_profile(request: Request) -> CustomerProfileResponse:
+    snapshot = _require_customer_snapshot(request)
+    with fenced_pg_transaction(snapshot) as (conn, ctx):
+        return _customer_profile(conn, user_id=ctx.user_id)
+
+
+@router.patch("/customer/profile", response_model=CustomerProfileResponse)
+def update_customer_profile(
+    payload: UpdateCustomerProfileRequest,
+    request: Request,
+) -> CustomerProfileResponse:
+    display_name = payload.display_name.strip()
+    if not display_name or len(display_name) > 50:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "INVALID_DISPLAY_NAME",
+                "message": "Display name must contain 1 to 50 characters.",
+            },
+        )
+    snapshot = _require_customer_snapshot(request)
+    with fenced_pg_transaction(snapshot) as (conn, ctx):
+        updated = conn.execute(
+            "UPDATE users SET display_name = %s WHERE id = %s AND role = 'customer'",
+            (display_name, ctx.user_id),
+        )
+        if updated.rowcount != 1:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "code": "CUSTOMER_PROFILE_NOT_FOUND",
+                    "message": "Customer profile does not exist.",
+                },
+            )
+        _insert_customer_audit(
+            conn,
+            user_id=ctx.user_id,
+            action="customer.profile.updated",
+            entity_type="user",
+            entity_id=ctx.user_id,
+            metadata={"display_name_length": len(display_name)},
+        )
+        return _customer_profile(conn, user_id=ctx.user_id)
+
+
 @router.get("/customer/wallet", response_model=WalletResponse)
 def read_customer_wallet(request: Request) -> WalletResponse:
     """Customer-lane wallet read: balance + billing under the fenced session.
@@ -501,11 +821,21 @@ def read_customer_wallet(request: Request) -> WalletResponse:
         billing = SettingsRepository(
             BusinessConnection.postgres(conn)
         ).read_customer_billing_settings(user_id=ctx.user_id)
+        try:
+            billing = effective_customer_billing_settings(billing, user_id=ctx.user_id)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "ACCEPTANCE_PAYMENT_CONFIGURATION_INVALID",
+                    "message": "The controlled payment rehearsal is not configured safely.",
+                },
+            ) from exc
         return WalletResponse(
             available_credits=int(row[0]),
             reserved_credits=int(row[1]),
-            # Preserve the desktop response field while exposing the customer's
-            # effective sale price on the customer-only route.
+            # Keep the legacy response field for desktop compatibility; on
+            # the customer lane it represents the effective sale price.
             internal_unit_price_fen=billing["charged_unit_price_fen"],
             min_recharge_fen=billing["min_recharge_fen"],
             recharge_step_fen=billing["recharge_step_fen"],

@@ -67,12 +67,12 @@ def seed_rbac_data(conn: sqlite3.Connection) -> None:
     conn.execute("UPDATE users SET is_active = 0 WHERE id = ?", ("inactive_1",))
     conn.executemany(
         """
-        INSERT INTO projects (id, owner_user_id, name)
-        VALUES (?, ?, ?)
+        INSERT INTO projects (id, owner_user_id, name, created_at)
+        VALUES (?, ?, ?, ?)
         """,
         [
-            ("project_owned", "employee_1", "Owned Project"),
-            ("project_other", "employee_2", "Other Project"),
+            ("project_owned", "employee_1", "Owned Project", "2026-01-01 00:00:00"),
+            ("project_other", "employee_2", "Other Project", "2026-01-01 00:00:01"),
         ],
     )
     conn.executemany(
@@ -402,6 +402,7 @@ def test_project_delete_removes_a_project_with_completed_work(
         "deleted_asset_count": 1,
         "deleted_versions_count": 0,
         "storage_cleanup_failed_count": 0,
+        "shared_storage_object_count": 0,
     }
 
 
@@ -605,6 +606,9 @@ def test_project_list_exposes_reference_video_state_for_upload_recovery(
         "reference_asset_id": "reference_pending",
         "reference_upload_status": "UPLOAD_PENDING",
         "analysis_status": "NOT_READY",
+        "analysis_task_id": None,
+        "analysis_error_message": None,
+        "analysis_retryable": False,
     }
     assert detail.json()["reference_asset_id"] == "reference_pending"
     assert detail.json()["reference_upload_status"] == "UPLOAD_PENDING"
@@ -620,9 +624,9 @@ def test_project_list_recognizes_legacy_reference_video_uploads(
             """
             INSERT INTO assets (
                 id, project_id, kind, storage_uri,
-                sha256, size_bytes, content_type, created_by_user_id
+                sha256, size_bytes, content_type, created_by_user_id, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 "legacy_reference",
@@ -633,6 +637,7 @@ def test_project_list_recognizes_legacy_reference_video_uploads(
                 1024,
                 "video/mp4",
                 "employee_1",
+                "2099-01-01 00:00:00",
             ),
         )
         conn.commit()
@@ -642,7 +647,7 @@ def test_project_list_recognizes_legacy_reference_video_uploads(
     assert response.status_code == 200
     assert response.json()["reference_asset_id"] == "legacy_reference"
     assert response.json()["reference_upload_status"] == "READY"
-    assert response.json()["analysis_status"] == "PENDING"
+    assert response.json()["analysis_status"] == "NOT_READY"
 
 
 def test_project_list_marks_existing_analysis_as_ready(
@@ -699,9 +704,9 @@ def test_project_list_marks_existing_analysis_as_ready(
             """
             INSERT INTO assets (
                 id, project_id, kind, storage_uri,
-                sha256, size_bytes, content_type, created_by_user_id
+                sha256, size_bytes, content_type, created_by_user_id, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 "reference_newer",
@@ -712,6 +717,7 @@ def test_project_list_marks_existing_analysis_as_ready(
                 2048,
                 "video/mp4",
                 "employee_1",
+                "2099-01-01 00:00:00",
             ),
         )
         conn.commit()
@@ -720,7 +726,7 @@ def test_project_list_marks_existing_analysis_as_ready(
 
     assert stale.status_code == 200
     assert stale.json()["reference_asset_id"] == "reference_newer"
-    assert stale.json()["analysis_status"] == "PENDING"
+    assert stale.json()["analysis_status"] == "NOT_READY"
 
 
 def test_auditor_cannot_generate_retry_or_download(client: TestClient) -> None:

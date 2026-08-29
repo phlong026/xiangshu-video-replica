@@ -372,6 +372,51 @@ def test_metaso_h3_provider_creates_polls_filters_and_downloads_result(
     assert download_body is None
 
 
+def test_metaso_h3_provider_submit_returns_task_id_without_polling() -> None:
+    transport = RecordedMetasoTransport(
+        [json.dumps({"task_id": "provider-task-submit-only"}).encode()]
+    )
+    provider = MetasoH3Provider(api_key="test-key", transport=transport)
+
+    provider_task_id = provider.submit_image_to_video(
+        build_h3_request(
+            prompt_text="a person walks through a studio",
+            first_frame_url="https://example.com/first-frame.jpg",
+            duration_seconds=5,
+            resolution="768P",
+        )
+    )
+
+    assert provider_task_id == "provider-task-submit-only"
+    assert len(transport.requests) == 1
+    assert transport.requests[0][0] == "POST"
+
+
+def test_metaso_h3_provider_query_reports_running_without_sleeping_or_downloading() -> None:
+    transport = RecordedMetasoTransport(
+        [
+            json.dumps(
+                {
+                    "items": [
+                        {
+                            "id": "provider-task-running",
+                            "status": "processing",
+                        }
+                    ]
+                }
+            ).encode()
+        ]
+    )
+    provider = MetasoH3Provider(api_key="test-key", transport=transport)
+
+    result = provider.query_image_to_video("provider-task-running")
+
+    assert result.status == "RUNNING"
+    assert result.result_url is None
+    assert len(transport.requests) == 1
+    assert transport.requests[0][0] == "GET"
+
+
 def test_metaso_h3_provider_refuses_to_treat_an_unrelated_list_item_as_its_result() -> None:
     transport = RecordedMetasoTransport(
         [
@@ -2911,6 +2956,8 @@ def test_generation_can_queue_metaso_after_its_key_is_saved(
 ) -> None:
     key = Fernet.generate_key().decode("ascii")
     monkeypatch.setenv(SETTINGS_KEY_ENV, key)
+    monkeypatch.setenv("VIDEO_REPLICA_ACCEPTANCE_GENERATION_USER_ID", "employee_1")
+    monkeypatch.setenv("VIDEO_REPLICA_ACCEPTANCE_PAID_GENERATION_LIMIT", "1")
     with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         repo = SettingsRepository(conn, fernet=Fernet(key.encode("ascii")))
         repo.save_provider_config(
@@ -2955,6 +3002,23 @@ def test_generation_can_queue_metaso_after_its_key_is_saved(
     assert response.status_code == 200
     assert response.json()["status"] == "QUEUED"
     assert response.json()["tasks"][0]["status"] == "PENDING"
+
+    second_prompt_id = create_locked_prompt(client)
+    blocked = client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json={
+            "quantity": 1,
+            "prompt_version_id": second_prompt_id,
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+            "idempotency_key": "metaso-acceptance-limit",
+            "provider": "metaso",
+        },
+    )
+    assert blocked.status_code == 409
+    assert blocked.json()["detail"]["code"] == "ACCEPTANCE_GENERATION_LIMIT_REACHED"
 
 
 def test_metaso_batch_rejects_non_cos_first_frame_even_when_settings_are_saved(

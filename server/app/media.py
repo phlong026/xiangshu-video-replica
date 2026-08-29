@@ -44,10 +44,11 @@ class CreatedUploadIntent:
     asset_id: str
     project_id: str
     storage_key: str
-    method: str
-    url: str
+    method: str | None
+    url: str | None
     headers: dict[str, str]
-    expires_at: str
+    expires_at: str | None
+    upload_required: bool
 
 
 @dataclass(frozen=True)
@@ -126,6 +127,7 @@ def create_upload_intent(
     filename: str,
     content_type: str,
     size_bytes: int,
+    sha256: str | None = None,
 ) -> CreatedUploadIntent:
     require_not_auditor(
         conn,
@@ -141,6 +143,18 @@ def create_upload_intent(
         action="asset.upload_intent.create",
     )
     validate_upload_request(filename=filename, content_type=content_type, size_bytes=size_bytes)
+
+    if sha256:
+        reused = reuse_owned_completed_upload(
+            conn,
+            actor=actor,
+            storage=storage,
+            project_id=project_id,
+            sha256=sha256,
+            size_bytes=size_bytes,
+        )
+        if reused is not None:
+            return reused
 
     asset_id = str(uuid4())
     storage_key = f"projects/{project_id}/uploads/{asset_id}/{Path(filename).name}"
@@ -194,6 +208,96 @@ def create_upload_intent(
         url=intent.url,
         headers=intent.headers,
         expires_at=intent.expires_at.isoformat(),
+        upload_required=True,
+    )
+
+
+def reuse_owned_completed_upload(
+    conn: BusinessConnection,
+    *,
+    actor: CurrentUser,
+    storage: StorageAdapter,
+    project_id: str,
+    sha256: str,
+    size_bytes: int,
+) -> CreatedUploadIntent | None:
+    source = conn.execute(
+        """
+        SELECT assets.*
+        FROM assets
+        JOIN projects ON projects.id = assets.project_id
+        WHERE projects.owner_user_id = %s
+          AND assets.kind = 'reference_video'
+          AND assets.sha256 = %s
+          AND assets.size_bytes = %s
+          AND assets.size_bytes > 0
+        ORDER BY assets.created_at DESC, assets.id DESC
+        LIMIT 1
+        """,
+        (actor.id, sha256, size_bytes),
+    ).fetchone()
+    if source is None:
+        return None
+    try:
+        reference = storage_object_ref_from_uri(str(source["storage_uri"]))
+    except ValueError:
+        return None
+    if reference.provider != storage.provider or reference.bucket != storage.bucket:
+        return None
+    stored = storage.head_object(reference.key)
+    if stored is None or stored.size != size_bytes:
+        # The database can outlive a manually removed/lifecycle-expired object.
+        # Only skip the transfer when the original bytes still exist.
+        return None
+
+    source_asset_id = str(source["id"])
+    asset_id = source_asset_id
+    if str(source["project_id"]) != project_id:
+        asset_id = str(uuid4())
+        conn.execute(
+            """
+            INSERT INTO assets (
+                id, project_id, kind, storage_uri, sha256, size_bytes,
+                content_type, metadata_json, created_by_user_id
+            ) VALUES (%s, %s, 'reference_video', %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                asset_id,
+                project_id,
+                str(source["storage_uri"]),
+                str(source["sha256"]),
+                int(source["size_bytes"]),
+                None if source["content_type"] is None else str(source["content_type"]),
+                str(source["metadata_json"]),
+                actor.id,
+            ),
+        )
+    conn.execute(
+        "UPDATE projects SET status = 'REFERENCE_READY', updated_at = CURRENT_TIMESTAMP "
+        "WHERE id = %s",
+        (project_id,),
+    )
+    write_audit(
+        conn,
+        actor=actor,
+        action="asset.upload_deduplicated",
+        entity_type="asset",
+        entity_id=asset_id,
+        metadata={
+            "project_id": project_id,
+            "source_asset_id": source_asset_id,
+            "sha256_prefix": sha256[:12],
+        },
+    )
+    return CreatedUploadIntent(
+        asset_id=asset_id,
+        project_id=project_id,
+        storage_key=reference.key,
+        method=None,
+        url=None,
+        headers={},
+        expires_at=None,
+        upload_required=False,
     )
 
 
@@ -326,7 +430,7 @@ def probe_video(probe: VideoProbe, content: bytes, *, filename: str) -> VideoMet
         raise media_error(
             503,
             "VIDEO_PROBE_UNAVAILABLE",
-            "ffprobe is required for video precheck.",
+            "视频检测服务暂不可用，请稍后重试。",
         ) from exc
     except VideoProbeFailed as exc:
         raise media_error(

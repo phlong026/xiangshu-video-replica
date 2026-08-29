@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict
 from starlette.concurrency import run_in_threadpool
 
 from app.auth import AuthenticatedUser, Database
+from app.character_asset_review import cleanup_publication_objects
 from app.character_contracts import PersonIdentity, RequiredCharacterViewType
 from app.character_identity import character_error
 from app.character_identity_routes import get_character_storage
@@ -29,11 +30,14 @@ from app.permissions import require_not_auditor, require_project_access
 from app.rbac_routes import storage_for_asset
 from app.simple_character import (
     SIMPLE_UPLOAD_MAX_BYTES,
+    PreparedSimpleCharacterPublication,
     create_simple_character,
     delete_simple_character_identity,
     list_simple_library,
+    prepare_simple_character_generation,
     regenerate_simple_character_contact_sheet,
     rename_simple_character_identity,
+    store_simple_character_publication,
 )
 from app.storage import StorageAdapter
 
@@ -142,16 +146,35 @@ async def generate_global_simple_character(
             entity_type="character_version",
             entity_id="collection",
         )
-        return await _run_simple_character_creation(
-            conn=conn,
-            actor=actor,
-            storage=storage,
-            provider=provider,
-            file=file,
-            display_name=display_name,
-            persona_name=persona_name,
-            project_id=None,
-        )
+    (
+        content,
+        content_type,
+        effective_persona_name,
+        prepared,
+    ) = await _prepare_simple_character_upload(
+        file=file,
+        display_name=display_name,
+        persona_name=persona_name,
+        provider=provider,
+        actor=actor,
+        storage=storage,
+    )
+    try:
+        with db.write() as (conn, actor):
+            return await _run_simple_character_creation(
+                conn=conn,
+                actor=actor,
+                storage=storage,
+                content=content,
+                content_type=content_type,
+                display_name=display_name,
+                persona_name=effective_persona_name,
+                project_id=None,
+                prepared_publication=prepared,
+            )
+    except Exception:
+        cleanup_publication_objects(storage, list(prepared.object_keys))
+        raise
 
 
 @router.get("/library", response_model=list[SimpleLibraryEntryResponse])
@@ -308,31 +331,48 @@ async def generate_simple_character(
             project_id=project_id,
             action="simple_character.create",
         )
-        return await _run_simple_character_creation(
-            conn=conn,
-            actor=actor,
-            storage=storage,
-            provider=provider,
-            file=file,
-            display_name=display_name,
-            persona_name=persona_name,
-            project_id=project_id,
-        )
+    (
+        content,
+        content_type,
+        effective_persona_name,
+        prepared,
+    ) = await _prepare_simple_character_upload(
+        file=file,
+        display_name=display_name,
+        persona_name=persona_name,
+        provider=provider,
+        actor=actor,
+        storage=storage,
+    )
+    try:
+        with db.write() as (conn, actor):
+            return await _run_simple_character_creation(
+                conn=conn,
+                actor=actor,
+                storage=storage,
+                content=content,
+                content_type=content_type,
+                display_name=display_name,
+                persona_name=effective_persona_name,
+                project_id=project_id,
+                prepared_publication=prepared,
+            )
+    except Exception:
+        cleanup_publication_objects(storage, list(prepared.object_keys))
+        raise
 
 
-async def _run_simple_character_creation(
+async def _prepare_simple_character_upload(
     *,
-    conn: Database,
-    actor: AuthenticatedUser,
-    storage: StorageAdapter,
-    provider: ImageProvider,
     file: UploadFile,
     display_name: str,
     persona_name: str,
-    project_id: str | None,
-) -> SimpleCharacterResponse:
-    """Shared body of the global and project-scoped generate endpoints."""
-    # Reject oversized uploads before reading the body into memory.
+    provider: ImageProvider,
+    actor: AuthenticatedUser,
+    storage: StorageAdapter,
+) -> tuple[bytes, str, str, PreparedSimpleCharacterPublication]:
+    """Render and archive every character object with no session row locked."""
+
     if file.size is not None and file.size > SIMPLE_UPLOAD_MAX_BYTES:
         raise character_error(
             422,
@@ -340,10 +380,43 @@ async def _run_simple_character_creation(
             "人物授权图片超过 10MB 限制。",
         )
     content = await file.read()
+    content_type = file.content_type or "application/octet-stream"
     effective_persona_name = persona_name.strip() or display_name.strip()
+    generation = await run_in_threadpool(
+        prepare_simple_character_generation,
+        source_content=content,
+        source_content_type=content_type,
+        display_name=display_name,
+        image_provider=provider,
+    )
+    prepared = await run_in_threadpool(
+        store_simple_character_publication,
+        actor=actor,
+        storage=storage,
+        source_content=content,
+        source_content_type=content_type,
+        display_name=display_name,
+        generation=generation,
+    )
+    return content, content_type, effective_persona_name, prepared
+
+
+async def _run_simple_character_creation(
+    *,
+    conn: Database,
+    actor: AuthenticatedUser,
+    storage: StorageAdapter,
+    content: bytes,
+    content_type: str,
+    display_name: str,
+    persona_name: str,
+    project_id: str | None,
+    prepared_publication: PreparedSimpleCharacterPublication,
+) -> SimpleCharacterResponse:
+    """Shared body of the global and project-scoped generate endpoints."""
     try:
-        # `create_simple_character` performs provider calls and image work, so
-        # keep the FastAPI event loop free by running it in a worker thread.
+        # Provider, image and object-storage work is already complete. Keep
+        # the short database publication off the FastAPI event loop as well.
         result = await run_in_threadpool(
             create_simple_character,
             conn,
@@ -351,10 +424,10 @@ async def _run_simple_character_creation(
             project_id=project_id,
             storage=storage,
             source_content=content,
-            source_content_type=file.content_type or "application/octet-stream",
+            source_content_type=content_type,
             display_name=display_name,
-            persona_name=effective_persona_name,
-            image_provider=provider,
+            persona_name=persona_name,
+            prepared_publication=prepared_publication,
         )
     except HTTPException:
         raise

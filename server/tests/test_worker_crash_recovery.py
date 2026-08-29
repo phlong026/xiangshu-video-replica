@@ -51,12 +51,14 @@ from app.auth import CurrentUser
 from app.db_pg import DATABASE_URL_ENV, close_pg_pool, pg_transaction
 from app.db_portable import BusinessConnection
 from app.generation import (
+    H3QueryResult,
     MetasoH3Provider,
     ReconcileReservation,
     acquire_generation_task_lease,
     mark_expired_active_leases_needing_attention,
     mark_task_submission_uncertain,
     reconcile_submission_uncertain_task,
+    reschedule_generation_poll,
 )
 from app.generation_worker import run_pg_worker_once
 from app.internal_billing import (
@@ -805,6 +807,188 @@ def test_pg_worker_once_loop_claims_processes_and_drains(fair_state: str) -> Non
         assert row["result_asset_id"] is not None
     assert _cursor_count(fair_state, "u1") == 0
     assert _cursor_count(fair_state, "u2") == 0
+
+
+class _StepwiseMetasoProvider(MetasoH3Provider):
+    def __init__(self) -> None:
+        super().__init__(api_key="test-key")
+        self.submit_count = 0
+        self.query_count = 0
+
+    def submit_image_to_video(self, request: dict[str, Any]) -> str:
+        self.submit_count += 1
+        provider_task_id = "provider-stepwise-1"
+        if self.task_created_observer is not None:
+            self.task_created_observer(provider_task_id)
+        return provider_task_id
+
+    def query_image_to_video(self, provider_task_id: str) -> H3QueryResult:
+        self.query_count += 1
+        if self.query_count == 1:
+            return H3QueryResult(status="RUNNING")
+        return H3QueryResult(
+            status="SUCCEEDED",
+            result_url="https://example.com/result.mp4",
+        )
+
+    def download_result(self, url: str) -> bytes:
+        return b"stepwise-provider-result"
+
+
+def test_pg_worker_persists_provider_id_and_resumes_without_resubmit(
+    fair_state: str,
+) -> None:
+    """A paid task crosses separate worker rounds as RUNNING/ARCHIVING.
+
+    The provider id is committed in the submission observer before the first
+    round returns. Later rounds query/download the same task and never call
+    submit a second time.
+    """
+
+    _seed(fair_state, user_ids=["u1"], tasks_per_user=1, wallet_credits=1000)
+    storage = FakeStorageAdapter(provider="cos", bucket="bucket")
+    provider = _StepwiseMetasoProvider()
+
+    assert (
+        run_pg_worker_once(
+            worker_id="w-step",
+            storage=storage,
+            generation_provider=provider,
+            max_tasks=1,
+        )
+        == 1
+    )
+    with psycopg.connect(fair_state, autocommit=True) as pg:
+        row = pg.execute(
+            "SELECT status, provider_task_id FROM generation_tasks WHERE id = 'task-u1-0'"
+        ).fetchone()
+        assert row == ("RUNNING", "provider-stepwise-1")
+        pg.execute("UPDATE generation_tasks SET next_poll_at = now() WHERE id = 'task-u1-0'")
+
+    assert (
+        run_pg_worker_once(
+            worker_id="w-step",
+            storage=storage,
+            generation_provider=provider,
+            max_tasks=1,
+        )
+        == 1
+    )
+    assert provider.submit_count == 1
+    assert provider.query_count == 1
+    with psycopg.connect(fair_state, autocommit=True) as pg:
+        pg.execute("UPDATE generation_tasks SET next_poll_at = now() WHERE id = 'task-u1-0'")
+
+    assert (
+        run_pg_worker_once(
+            worker_id="w-step",
+            storage=storage,
+            generation_provider=provider,
+            max_tasks=1,
+        )
+        == 1
+    )
+    assert provider.submit_count == 1
+    with psycopg.connect(fair_state, autocommit=True) as pg:
+        row = pg.execute(
+            "SELECT status, provider_result_url FROM generation_tasks WHERE id = 'task-u1-0'"
+        ).fetchone()
+        assert row == ("ARCHIVING", "https://example.com/result.mp4")
+
+    assert (
+        run_pg_worker_once(
+            worker_id="w-step",
+            storage=storage,
+            generation_provider=provider,
+            max_tasks=1,
+        )
+        == 1
+    )
+    assert provider.submit_count == 1
+    with psycopg.connect(fair_state, autocommit=True) as pg:
+        row = pg.execute(
+            "SELECT status, archive_status, result_asset_id "
+            "FROM generation_tasks WHERE id = 'task-u1-0'"
+        ).fetchone()
+    assert row is not None
+    assert row[0] == "SUCCEEDED"
+    assert row[1] == "ARCHIVED"
+    assert row[2] is not None
+
+
+def test_expired_running_lease_resumes_instead_of_becoming_uncertain(
+    fair_state: str,
+) -> None:
+    _seed(fair_state, user_ids=["u1"], tasks_per_user=1, wallet_credits=1000)
+    with psycopg.connect(fair_state, autocommit=True) as pg:
+        pg.execute(
+            "UPDATE generation_tasks SET status = 'RUNNING', "
+            "provider_task_id = 'provider-durable', locked_by = 'dead-worker', "
+            "locked_until = now() - interval '5 minutes' WHERE id = 'task-u1-0'"
+        )
+        pg.execute("UPDATE user_queue_cursors SET running_tasks_count = 1 WHERE user_id = 'u1'")
+    with pg_transaction() as raw:
+        mark_expired_active_leases_needing_attention(BusinessConnection.postgres(raw))
+    with psycopg.connect(fair_state, autocommit=True) as pg:
+        row = pg.execute(
+            "SELECT status, locked_by, next_poll_at FROM generation_tasks WHERE id = 'task-u1-0'"
+        ).fetchone()
+    assert row is not None
+    assert row[0] == "RUNNING"
+    assert row[1] is None
+    assert row[2] is not None
+    assert _cursor_count(fair_state, "u1") == 1
+    assert _audit_actions(fair_state) == [
+        ("generation_task.lease_expired_resumed", None, "task-u1-0")
+    ]
+
+
+def test_provider_poll_timeout_releases_slot_without_paid_resubmit(
+    fair_state: str,
+) -> None:
+    """A provider task missing for two hours becomes reconcilable attention.
+
+    The provider id is retained, the user's fair-queue slot is released and
+    the worker cannot silently submit the paid task again.
+    """
+
+    _seed(fair_state, user_ids=["u1"], tasks_per_user=1, wallet_credits=1000)
+    with psycopg.connect(fair_state, autocommit=True) as pg:
+        pg.execute(
+            "UPDATE generation_tasks SET status = 'RUNNING', "
+            "provider_task_id = 'provider-too-old', "
+            "submitted_at = now() - interval '3 hours', "
+            "started_at = now() - interval '3 hours', "
+            "locked_by = 'w-timeout', locked_until = now() + interval '1 minute' "
+            "WHERE id = 'task-u1-0'"
+        )
+        pg.execute("UPDATE user_queue_cursors SET running_tasks_count = 1 WHERE user_id = 'u1'")
+    lease = {
+        "id": "task-u1-0",
+        "batch_id": "batch-u1",
+        "provider_task_id": "provider-too-old",
+    }
+    with pg_transaction() as raw:
+        reschedule_generation_poll(
+            BusinessConnection.postgres(raw),
+            lease=lease,
+        )
+    with psycopg.connect(fair_state, autocommit=True) as pg:
+        row = pg.execute(
+            "SELECT status, error_code, provider_task_id, next_poll_at, locked_by "
+            "FROM generation_tasks WHERE id = 'task-u1-0'"
+        ).fetchone()
+    assert row == (
+        "SUBMISSION_UNCERTAIN",
+        "PROVIDER_POLL_TIMEOUT",
+        "provider-too-old",
+        None,
+        None,
+    )
+    assert _cursor_count(fair_state, "u1") == 0
+    assert _audit_actions(fair_state) == [
+        ("generation_task.provider_poll_timeout", None, "task-u1-0")
+    ]
 
 
 # ---------------------------------------------------------------------------

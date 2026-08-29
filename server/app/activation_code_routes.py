@@ -2,11 +2,11 @@
 
 ``POST /api/customer/activate`` redeems an ISSUED activation code and creates
 the whole customer identity chain in exactly one PostgreSQL transaction (dev
-doc §12.1): a server-generated ``customer`` user, the funded wallet, the
-activation fact, the slot-1 device with keyed credential digests, the PAID
-``provider=activation_code`` first-charge order priced by the frozen batch
-snapshot, the unique CHARGE ledger row, the ACTIVE code state and the
-epoch-1 session with a 90-second lease — all or nothing.
+doc §12.1). An empty code is the unattended reinstall-recovery signal: an
+already ACTIVE code is resolved through the same HMAC-protected machine
+fingerprint, then its device/session credentials rotate. Entering that same
+ACTIVE code on a new machine directly occupies the next free device slot and
+enters the existing account; no separate pairing or approval lane is required.
 
 Idempotency envelope (revision 029, ``customer_idempotency_envelopes``): the
 engine lives in ``app.customer_idempotency`` since T14 / ACT-07 so the later
@@ -23,11 +23,11 @@ business failure rolls the placeholder back with the transaction, so the key
 stays reusable.
 
 Anti-enumeration (ACT-08 groundwork): every code-side rejection — unknown,
-malformed, undelivered, expired, suspended, revoked or already active — is
-the single unified 400 ``ACTIVATION_UNAVAILABLE`` with a message that never
-distinguishes the sub-state. A device fingerprint already bound to a live
-customer answers 409 ``USER_ALREADY_ACTIVATED``; the concurrent race for one
-fingerprint is settled by the partial unique index
+malformed, undelivered, expired, suspended or revoked — is the single unified
+400 ``ACTIVATION_UNAVAILABLE`` with a
+message that never distinguishes the sub-state. A device fingerprint already
+bound to another live customer answers 409 ``USER_ALREADY_ACTIVATED``; the
+concurrent race for one fingerprint is settled by the partial unique index
 ``uq_customer_devices_fingerprint`` (§11.3).
 
 No-Go red lines: no plaintext activation code, device token or session token
@@ -78,6 +78,7 @@ from app.customer_idempotency import (
 from app.customer_idempotency import (
     request_hash as compute_request_hash,
 )
+from app.customer_session_service import LOGIN_CONFLICT, login_session
 from app.db_pg import get_pg_pool, pg_transaction
 from app.ops_metrics import (
     get_or_create_request_id,
@@ -314,7 +315,10 @@ def _keyed_digest(key: bytes, value: str) -> str:
 class CustomerActivationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    activation_code: str = Field(min_length=1, max_length=64)
+    # An empty code is the automatic same-machine recovery lane. The server
+    # resolves the active code from the HMAC-protected fingerprint binding;
+    # a first activation still requires a non-empty, valid code.
+    activation_code: str = Field(min_length=0, max_length=64)
     device_fingerprint: str = Field(min_length=1, max_length=512)
     device_name: str = Field(min_length=1, max_length=128)
     device_platform: str = Field(min_length=1, max_length=64)
@@ -385,10 +389,171 @@ def _insert_customer_user(conn: psycopg.Connection) -> tuple[str, str]:
     )
 
 
+def _recover_or_bind_active_device(
+    conn: psycopg.Connection,
+    *,
+    code_id: str,
+    bound_user_id: str | None,
+    fingerprint_digests: list[str],
+    fingerprint_key_version: int,
+    hmac_key: bytes,
+    device_name: str,
+    device_platform: str,
+    update_device_metadata: bool,
+    allow_new_binding: bool,
+    request_id: str,
+    server_now: datetime,
+) -> dict[str, object]:
+    """Restore a known machine or bind a free slot for one ACTIVE code.
+
+    The activation code is the customer's only login entry. A historical
+    fingerprint restores its original device row even after local credential
+    loss or an administrator-forced logout. Supplying the ACTIVE code on a new
+    machine binds the next free slot directly. Empty-code boot recovery remains
+    limited to a known fingerprint, and the two-device ceiling stays enforced.
+    """
+
+    if not bound_user_id:
+        raise _unavailable()
+    row = conn.execute(
+        "SELECT d.id, d.user_id, u.username, d.slot_no, d.status "
+        "FROM customer_devices d "
+        "JOIN users u ON u.id = d.user_id "
+        "WHERE d.activation_code_id = %s AND d.user_id = %s "
+        "AND (d.fingerprint_hmac = ANY(%s) OR d.fingerprint_canonical = %s) "
+        "AND d.status IN ('BOUND', 'UNBOUND', 'REVOKED') "
+        "AND u.role = 'customer' AND u.is_active = 1 "
+        "ORDER BY CASE WHEN d.status = 'BOUND' THEN 0 ELSE 1 END, "
+        "d.created_at DESC, d.id DESC LIMIT 1 FOR UPDATE OF d",
+        (code_id, bound_user_id, fingerprint_digests, fingerprint_digests[0]),
+    ).fetchone()
+    account = conn.execute(
+        "SELECT username FROM users WHERE id = %s AND role = 'customer' AND is_active = 1",
+        (bound_user_id,),
+    ).fetchone()
+    if account is None:
+        raise _unavailable()
+
+    occupied_rows = conn.execute(
+        "SELECT slot_no FROM customer_devices "
+        "WHERE activation_code_id = %s AND status = 'BOUND' FOR UPDATE",
+        (code_id,),
+    ).fetchall()
+    occupied_slots = {int(occupied[0]) for occupied in occupied_rows}
+
+    user_id = bound_user_id
+    username = str(account[0])
+    device_token = secrets.token_urlsafe(32)
+    token_digest = _keyed_digest(hmac_key, device_token)
+    now_iso = server_now.replace(microsecond=0).isoformat()
+
+    if row is None:
+        if not allow_new_binding:
+            # Unattended boot recovery never enrolls unknown hardware.
+            raise _unavailable()
+        free_slot = next((slot for slot in (1, 2) if slot not in occupied_slots), None)
+        if free_slot is None:
+            raise _http(
+                409,
+                "DEVICE_SLOTS_FULL",
+                "This activation code has reached its device limit.",
+            )
+        device_id = str(uuid.uuid4())
+        conn.execute(
+            "INSERT INTO customer_devices "
+            "(id, activation_code_id, user_id, slot_no, display_name, platform, "
+            " fingerprint_hmac, fingerprint_key_version, fingerprint_canonical, "
+            " token_digest, token_key_version, last_active_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (
+                device_id,
+                code_id,
+                user_id,
+                free_slot,
+                device_name,
+                device_platform,
+                fingerprint_digests[-1],
+                fingerprint_key_version,
+                fingerprint_digests[0],
+                token_digest,
+                fingerprint_key_version,
+                now_iso,
+            ),
+        )
+    else:
+        device_id = str(row[0])
+        previous_slot = int(row[3])
+        previous_status = str(row[4])
+        target_slot: int | None
+        if previous_status == "BOUND":
+            target_slot = previous_slot
+        else:
+            target_slot = (
+                previous_slot
+                if previous_slot not in occupied_slots
+                else next((slot for slot in (1, 2) if slot not in occupied_slots), None)
+            )
+            if target_slot is None:
+                raise _http(
+                    409,
+                    "DEVICE_SLOTS_FULL",
+                    "This activation code has reached its device limit.",
+                )
+
+        metadata_sql = "display_name = %s, platform = %s, " if update_device_metadata else ""
+        metadata_values: tuple[object, ...] = (
+            (device_name, device_platform) if update_device_metadata else ()
+        )
+        conn.execute(
+            "UPDATE customer_devices SET "
+            + metadata_sql
+            + "status = 'BOUND', slot_no = %s, bound_at = %s, "
+            "unbound_at = NULL, revoked_at = NULL, "
+            "fingerprint_hmac = %s, fingerprint_key_version = %s, "
+            "fingerprint_canonical = %s, token_digest = %s, token_key_version = %s, "
+            "last_active_at = %s WHERE id = %s",
+            metadata_values
+            + (
+                target_slot,
+                now_iso,
+                fingerprint_digests[-1],
+                fingerprint_key_version,
+                fingerprint_digests[0],
+                token_digest,
+                fingerprint_key_version,
+                now_iso,
+                device_id,
+            ),
+        )
+
+    session = login_session(
+        conn,
+        user_id=user_id,
+        activation_code_id=code_id,
+        device_id=device_id,
+        presentation_session_token=None,
+        request_id=request_id,
+        now=server_now,
+        takeover=True,
+    )
+    if session.outcome == LOGIN_CONFLICT or session.session_token is None:
+        raise _http(503, "ACTIVATION_SERVICE_UNAVAILABLE", "Unable to start the session.")
+
+    return {
+        "username": username,
+        "user_id": user_id,
+        "device_id": device_id,
+        "device_token": device_token,
+        "session_token": session.session_token,
+        "session_epoch": session.session_epoch,
+        "session_lease_expires_at": session.lease_until,
+        "request_id": request_id,
+    }
+
+
 def _run_activation(
     conn: psycopg.Connection,
     *,
-    canonical_code: str,
     code_digests: list[str],
     fingerprint_digests: list[str],
     fingerprint_key_version: int,
@@ -399,17 +564,35 @@ def _run_activation(
     server_now: datetime,
 ) -> dict[str, object]:
     unavailable = _unavailable()
-    # Lock the code row: 100 concurrent activations of one code serialize
-    # here and every loser observes the winner's ACTIVE state.
-    code_row = conn.execute(
-        "SELECT c.id, c.status, "
-        "b.unit_price_fen_snapshot, b.credits_snapshot, b.activation_expires_at "
-        "FROM activation_codes c "
-        "JOIN activation_code_batches b ON b.id = c.batch_id "
-        "WHERE c.code_digest = ANY(%s) "
-        "FOR UPDATE OF c",
-        (code_digests,),
-    ).fetchone()
+    if code_digests:
+        # Lock the code row: 100 concurrent first activations of one code
+        # serialize here and every loser observes the winner's ACTIVE state.
+        code_row = conn.execute(
+            "SELECT c.id, c.status, "
+            "b.unit_price_fen_snapshot, b.credits_snapshot, b.activation_expires_at, "
+            "c.bound_user_id "
+            "FROM activation_codes c "
+            "JOIN activation_code_batches b ON b.id = c.batch_id "
+            "WHERE c.code_digest = ANY(%s) "
+            "FOR UPDATE OF c",
+            (code_digests,),
+        ).fetchone()
+    else:
+        # No code means unattended desktop recovery. The opaque random
+        # machine fingerprint resolves its already ACTIVE binding; raw
+        # fingerprints never reach the database.
+        code_row = conn.execute(
+            "SELECT c.id, c.status, "
+            "b.unit_price_fen_snapshot, b.credits_snapshot, b.activation_expires_at, "
+            "c.bound_user_id "
+            "FROM customer_devices d "
+            "JOIN activation_codes c ON c.id = d.activation_code_id "
+            "JOIN activation_code_batches b ON b.id = c.batch_id "
+            "WHERE (d.fingerprint_hmac = ANY(%s) OR d.fingerprint_canonical = %s) "
+            "AND d.status IN ('BOUND', 'UNBOUND', 'REVOKED') AND c.status = 'ACTIVE' "
+            "ORDER BY d.created_at DESC, d.id DESC LIMIT 1 FOR UPDATE OF c, d",
+            (fingerprint_digests, fingerprint_digests[0]),
+        ).fetchone()
     if code_row is None:
         raise unavailable
     code_id = str(code_row[0])
@@ -417,9 +600,26 @@ def _run_activation(
     unit_price_fen = int(code_row[2])
     credits = int(code_row[3])
     batch_expiry = str(code_row[4])
+    bound_user_id = None if code_row[5] is None else str(code_row[5])
+    if code_status == "ACTIVE":
+        return _recover_or_bind_active_device(
+            conn,
+            code_id=code_id,
+            bound_user_id=bound_user_id,
+            fingerprint_digests=fingerprint_digests,
+            fingerprint_key_version=fingerprint_key_version,
+            hmac_key=hmac_key,
+            device_name=device_name,
+            device_platform=device_platform,
+            update_device_metadata=bool(code_digests),
+            allow_new_binding=bool(code_digests),
+            request_id=request_id,
+            server_now=server_now,
+        )
     if code_status != "ISSUED":
-        # GENERATED / ACTIVE / SUSPENDED / REVOKED / EXPIRED all answer the
-        # same unified rejection (anti-enumeration).
+        # GENERATED / SUSPENDED / REVOKED / EXPIRED all answer the same
+        # unified rejection (anti-enumeration). ACTIVE reaches the exact
+        # code+fingerprint recovery branch above.
         raise unavailable
     # T12 accepts naive batch-expiry timestamps (coerced to UTC in memory at
     # creation), so a naive stored string must be coerced the same way here —
@@ -585,7 +785,7 @@ def activate_first_device(
     request: Request,
     response: Response,
 ) -> CustomerActivationResponse:
-    """Redeem an activation code and create the whole customer chain atomically."""
+    """Create a first activation or recover its already-bound machine atomically."""
     idempotency_key = request.headers.get(IDEMPOTENCY_KEY_HEADER, "").strip()
     if not idempotency_key:
         raise _http(400, "IDEMPOTENCY_KEY_REQUIRED", "An Idempotency-Key header is required.")
@@ -595,10 +795,14 @@ def activate_first_device(
     # a malformed-code burst (format probing) cannot skirt the abuse budget.
     # The unified rejection (audit + constant delay) fires after the limiter.
     canonical_code: str | None
-    try:
-        canonical_code = normalize_activation_code(body.activation_code)
-    except InvalidActivationCodeError:
+    recover_by_fingerprint = not body.activation_code.strip()
+    if recover_by_fingerprint:
         canonical_code = None
+    else:
+        try:
+            canonical_code = normalize_activation_code(body.activation_code)
+        except InvalidActivationCodeError:
+            canonical_code = None
 
     fingerprint = body.device_fingerprint.strip()
     device_name = body.device_name.strip()
@@ -740,7 +944,7 @@ def activate_first_device(
         blocked.headers = {RETRY_AFTER_HEADER: str(retry_after)}
         raise blocked
 
-    if canonical_code is None:
+    if canonical_code is None and not recover_by_fingerprint:
         # T15 / ACT-08: the malformed rejection joins the unified audit and
         # constant-delay path (no valid digest exists for it — the fixed
         # "malformed" identifier keeps the failure countable).
@@ -749,7 +953,7 @@ def activate_first_device(
             request_id=get_or_create_request_id(request),
         )
         raise _unavailable() from None
-    assert canonical_code is not None  # the malformed branch above returned
+    assert canonical_code is not None or recover_by_fingerprint
 
     recovery_seconds = recovery_window_seconds()
 
@@ -872,7 +1076,6 @@ def activate_first_device(
             assert envelope_id is not None
             payload = _run_activation(
                 conn,
-                canonical_code=canonical_code,
                 code_digests=code_digests,
                 fingerprint_digests=fingerprint_digests,
                 fingerprint_key_version=fingerprint_key_version,
@@ -921,7 +1124,7 @@ def activate_first_device(
         # response body *and* one latency profile.
         if _is_unified_rejection(exc):
             _audit_code_rejection(
-                code_identifier=code_digests[0],
+                code_identifier=code_digests[0] if code_digests else fingerprint_hmac,
                 request_id=request_id,
             )
         raise
@@ -933,7 +1136,7 @@ def activate_first_device(
         session_epoch=(
             payload["session_epoch"] if isinstance(payload["session_epoch"], int) else None
         ),
-        code_mask=mask_activation_code(canonical_code),
+        code_mask=(mask_activation_code(canonical_code) if canonical_code is not None else None),
     )
     # Plaintext code / tokens never reach the logs — only opaque identifiers.
     logger.info(

@@ -68,6 +68,7 @@ from psycopg.errors import CheckViolation, UniqueViolation
 from app.activation_code_service import (
     ACTIVATION_CODE_HMAC_KEY_ENV,
     compute_code_digest,
+    mask_activation_code,
 )
 from app.admin_auth_routes import (
     ADMIN_CSRF_HEADER,
@@ -1007,6 +1008,10 @@ def _approve(client: TestClient, token: str, pairing_id: str) -> object:
     return client.post(f"{APPROVE_PATH}/{pairing_id}/approve", headers=_bearer(token))
 
 
+def _dismiss(client: TestClient, token: str, pairing_id: str) -> object:
+    return client.delete(f"{APPROVE_PATH}/{pairing_id}", headers=_bearer(token))
+
+
 def _pairing_row(conn: psycopg.Connection, pairing_id: str) -> tuple | None:
     return conn.execute(
         "SELECT status, candidate_fingerprint_hmac, expires_at, approved_at, "
@@ -1378,6 +1383,96 @@ def test_approve_happy_path_records_approver(client: TestClient) -> None:
     assert row[0] == "APPROVED"
     assert row[3] is not None
     assert row[4] is not None and str(row[4]) == customer["device_id"]
+
+
+def test_bound_device_can_dismiss_invalid_pairing_request(client: TestClient) -> None:
+    customer = _activated_customer(
+        client,
+        code=FIRST_CODE,
+        fingerprint="fp-pair-dismiss",
+        suffix="dismiss",
+    )
+    enroll = _enroll(
+        client,
+        code=FIRST_CODE,
+        fingerprint="fp-pair-dismiss-second",
+        key="idem-pair-dismiss",
+    )
+    assert enroll.status_code == 202, enroll.text
+    pairing_id = enroll.json()["pairing_request_id"]
+
+    response = _dismiss(client, customer["device_token"], pairing_id)
+
+    assert response.status_code == 204, response.text
+    assert _dismiss(client, customer["device_token"], pairing_id).status_code == 204
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        pairing = _pairing_row(conn, pairing_id)
+        audit = conn.execute(
+            "SELECT action, entity_id FROM audit_logs "
+            "WHERE actor_user_id = %s AND action = 'customer.device_pairing.dismissed'",
+            (customer["user_id"],),
+        ).fetchone()
+    assert pairing is not None and pairing[0] == "EXPIRED"
+    assert audit == ("customer.device_pairing.dismissed", pairing_id)
+
+
+def test_activation_code_reset_rotates_code_without_unbinding_current_device(
+    client: TestClient,
+) -> None:
+    customer = _activated_customer(
+        client,
+        code=FIRST_CODE,
+        fingerprint="fp-code-reset",
+        suffix="code-reset",
+    )
+    response = client.post(
+        "/api/customer/activation-code/reset",
+        headers=_bearer(customer["device_token"]),
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    new_code = payload["activation_code"]
+    assert new_code != FIRST_CODE
+    assert payload["masked_code"] == mask_activation_code(new_code)
+    assert response.headers["cache-control"] == "no-store"
+
+    # The current device remains authorized, while only the newly issued
+    # activation code can start a future pairing request.
+    devices = client.get(DEVICES_PATH, headers=_bearer(customer["device_token"]))
+    assert devices.status_code == 200, devices.text
+    old_attempt = _enroll(
+        client,
+        code=FIRST_CODE,
+        fingerprint="fp-code-reset-old",
+        key="idem-code-reset-old",
+    )
+    assert old_attempt.status_code == 400, old_attempt.text
+    new_attempt = _enroll(
+        client,
+        code=new_code,
+        fingerprint="fp-code-reset-new",
+        key="idem-code-reset-new",
+    )
+    assert new_attempt.status_code == 202, new_attempt.text
+
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        code_row = conn.execute(
+            "SELECT code_digest, masked_code, status FROM activation_codes "
+            "WHERE bound_user_id = %s",
+            (customer["user_id"],),
+        ).fetchone()
+        audit = conn.execute(
+            "SELECT action FROM audit_logs "
+            "WHERE actor_user_id = %s AND action = 'customer.activation_code.rotated'",
+            (customer["user_id"],),
+        ).fetchone()
+    assert code_row == (
+        compute_code_digest(new_code, key=TEST_KEY.encode()),
+        payload["masked_code"],
+        "ACTIVE",
+    )
+    assert audit == ("customer.activation_code.rotated",)
 
 
 def test_approve_missing_or_foreign_pairing_not_found(client: TestClient) -> None:
@@ -2430,7 +2525,7 @@ def test_admin_device_events_downgrade_guard(route_state: str) -> None:
         command.downgrade(config, "037_device_pairing_requests")
     with psycopg.connect(_t16_dsn()) as conn:
         version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-    assert version == "044_customer_unit_prices"
+    assert version == "045_async_analysis_tasks"
 
 
 # ---------------------------------------------------------------------------
@@ -2472,7 +2567,7 @@ def test_pairing_downgrade_refuses_once_rows_exist(route_state: str) -> None:
     # the version stays at the current head.
     with psycopg.connect(_t16_dsn()) as conn:
         version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-    assert version == "044_customer_unit_prices"
+    assert version == "045_async_analysis_tasks"
 
     # An emptied table downgrades symmetrically, and upgrading back restores
     # the schema for any rerun of this module. Revision 038 added the

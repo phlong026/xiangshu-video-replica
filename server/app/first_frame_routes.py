@@ -15,9 +15,14 @@ from app.first_frames import (
     ApilioImageProvider,
     FakeImageProvider,
     ImageProvider,
+    complete_first_frame_generation,
     confirm_first_frame,
     current_first_frame_candidates,
-    generate_first_frame_candidates,
+    delete_created_first_frames,
+    load_first_frame_generation_work,
+    perform_first_frame_generation,
+    prepare_first_frame_generation,
+    store_first_frame_generation,
 )
 from app.media_routes import get_media_storage
 from app.permissions import require_project_access
@@ -120,19 +125,39 @@ def generate_project_first_frames(
     db: BusinessDbDep,
 ) -> VersionResponse:
     with db.write() as (conn, actor):
-        row = generate_first_frame_candidates(
+        plan = prepare_first_frame_generation(
             conn,
             project_id=project_id,
             actor=actor,
-            storage=storage,
-            provider=provider,
             model=request.model,
             prompt=request.prompt,
             quantity=request.quantity,
             character_version_id=request.character_version_id,
             character_reference_selection_id=request.character_reference_selection_id,
         )
-        return version_response(row)
+    # COS reads, provider generation and COS writes routinely take 1–3
+    # minutes. They
+    # must run after the fenced customer transaction releases its session-row
+    # lock; otherwise every concurrent desktop request appears to be offline.
+    work = load_first_frame_generation_work(plan, storage=storage)
+    generated = perform_first_frame_generation(work, provider=provider)
+    stored = store_first_frame_generation(work, storage=storage, generated=generated)
+    try:
+        with db.write() as (conn, _actor):
+            row = complete_first_frame_generation(
+                conn,
+                work=work,
+                provider=provider,
+                stored=stored,
+            )
+    except Exception:
+        delete_created_first_frames(
+            storage,
+            stored.created_assets,
+            actor_id=work.actor.id,
+        )
+        raise
+    return version_response(row)
 
 
 @router.get("/projects/{project_id}/first-frames/latest", response_model=VersionResponse | None)

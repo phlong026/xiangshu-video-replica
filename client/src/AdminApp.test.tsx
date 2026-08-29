@@ -486,7 +486,7 @@ describe("AdminApp", () => {
     expect(await screen.findByLabelText("管理员账号")).toBeInTheDocument();
     expect(screen.getByLabelText("管理员密码")).toBeInTheDocument();
     expect(screen.queryByRole("navigation", { name: "管理端导航" })).toBeNull();
-    expect(screen.getByRole("alert")).toHaveTextContent(
+    expect(await screen.findByRole("alert")).toHaveTextContent(
       "会话已失效，请重新登录。",
     );
     expect(getAdminCsrfToken()).toBeNull();

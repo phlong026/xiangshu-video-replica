@@ -755,6 +755,15 @@ def test_expired_export_ciphertext_purged_but_audit_kept(
         aead_key=TEST_AEAD_KEY,
         now=now,
     )
+    # A usable activation code still needs to be viewable and copied again,
+    # so an old export must remain sealed while any code in the batch is
+    # non-terminal.
+    assert count_expired_export_ciphertexts(catalog_db, now=now, retention_seconds=3600) == 0
+    assert purge_expired_export_ciphertexts(catalog_db, now=now, retention_seconds=3600) == 0
+    catalog_db.execute(
+        "UPDATE activation_codes SET status = 'EXPIRED', expired_at = %s WHERE batch_id = %s",
+        (now.isoformat(), "batch-purge"),
+    )
     assert count_expired_export_ciphertexts(catalog_db, now=now, retention_seconds=3600) == 1
     assert purge_expired_export_ciphertexts(catalog_db, now=now, retention_seconds=3600) == 1
     row = catalog_db.execute(

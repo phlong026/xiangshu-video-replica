@@ -38,7 +38,7 @@ def test_initialize_database_applies_sqlite_pragmas_and_migrations(tmp_path: Pat
     assert journal_mode == "wal"
     assert foreign_keys == 1
     assert busy_timeout >= 5000
-    assert alembic_versions == ["044_customer_unit_prices"]
+    assert alembic_versions == ["045_async_analysis_tasks"]
     assert "schema_migrations" not in tables
     assert {
         "users",
@@ -59,6 +59,7 @@ def test_initialize_database_applies_sqlite_pragmas_and_migrations(tmp_path: Pat
         "character_generation_tasks",
         "character_reference_selections",
         "generation_task_operations",
+        "analysis_tasks",
     }.issubset(tables)
 
 
@@ -77,8 +78,14 @@ def test_alembic_upgrades_empty_database_to_head(tmp_path: Path) -> None:
             (row["from"], row["table"], row["to"])
             for row in conn.execute("PRAGMA foreign_key_list(generation_tasks)").fetchall()
         }
+        analysis_task_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(analysis_tasks)").fetchall()
+        }
+        analysis_task_indexes = {
+            row[1] for row in conn.execute("PRAGMA index_list(analysis_tasks)").fetchall()
+        }
 
-    assert version == "044_customer_unit_prices"
+    assert version == "045_async_analysis_tasks"
     assert {
         "locked_by",
         "locked_until",
@@ -89,6 +96,17 @@ def test_alembic_upgrades_empty_database_to_head(tmp_path: Path) -> None:
     }.issubset(task_columns)
     assert "idx_generation_tasks_prompt_version" in task_indexes
     assert ("prompt_version_id", "versions", "id") in task_foreign_keys
+    assert {
+        "project_id",
+        "asset_id",
+        "duration_seconds",
+        "status",
+        "locked_by",
+        "locked_until",
+        "result_version_id",
+        "retryable",
+    }.issubset(analysis_task_columns)
+    assert "uq_analysis_tasks_active_asset" in analysis_task_indexes
 
 
 def test_retry_lineage_revision_is_reversible(tmp_path: Path) -> None:
@@ -144,7 +162,7 @@ def test_retry_lineage_revision_is_reversible(tmp_path: Path) -> None:
 
     with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == (
-            "044_customer_unit_prices"
+            "045_async_analysis_tasks"
         )
 
 
@@ -200,7 +218,7 @@ def test_remove_oss_migration_purges_settings_and_selects_safe_fallback(
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute("UPDATE runtime_settings SET active_storage_provider = 'oss' WHERE id = 1")
 
-    assert version == "044_customer_unit_prices"
+    assert version == "045_async_analysis_tasks"
     assert "oss" not in providers
     assert active_provider == expected_provider
 
@@ -304,7 +322,7 @@ def test_runtime_bootstrap_upgrades_an_existing_database_before_startup(
     assert result.returncode == 0, result.stderr
     with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == (
-            "044_customer_unit_prices"
+            "045_async_analysis_tasks"
         )
         assert (
             conn.execute(

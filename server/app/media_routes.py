@@ -96,16 +96,18 @@ class UploadIntentRequest(BaseModel):
     filename: str = Field(min_length=1)
     content_type: str = Field(min_length=1)
     size_bytes: int = Field(ge=0)
+    sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 class UploadIntentResponse(BaseModel):
     asset_id: str
     project_id: str
     storage_key: str
-    method: str
-    url: str
+    method: str | None
+    url: str | None
     headers: dict[str, str]
-    expires_at: str
+    expires_at: str | None
+    upload_required: bool
 
 
 class CompleteUploadResponse(BaseModel):
@@ -158,9 +160,10 @@ def create_asset_upload_intent(
             filename=payload.filename,
             content_type=payload.content_type,
             size_bytes=payload.size_bytes,
+            sha256=payload.sha256,
         )
     upload_url = intent.url
-    if storage.provider == "local":
+    if intent.upload_required and storage.provider == "local":
         # The client cannot PUT to a `local://` scheme URL; route uploads through
         # the local server endpoint instead so the desktop app can upload files.
         upload_url = (
@@ -174,6 +177,7 @@ def create_asset_upload_intent(
         url=upload_url,
         headers=intent.headers,
         expires_at=intent.expires_at,
+        upload_required=intent.upload_required,
     )
 
 

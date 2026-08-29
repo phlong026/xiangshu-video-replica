@@ -36,8 +36,6 @@ from app.media import storage_key_from_uri
 from app.media_routes import get_media_storage
 from app.simple_character import (
     SIMPLE_CONTACT_SHEET_MODEL,
-    SimpleCharacterCreationResult,
-    SimpleCharacterView,
     _decode_png_rgb,
     contact_sheet_placeholder_png,
     crop_contact_sheet_views,
@@ -212,33 +210,46 @@ def test_simple_character_rejects_empty_name(client: TestClient) -> None:
 
 
 def test_simple_character_generation_runs_provider_work_off_the_event_loop(
-    db_path: Path,
     storage: FakeStorageAdapter,
     contact_sheet_provider: StubContactSheetProvider,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     event_loop_thread_id = threading.get_ident()
     provider_thread_id: int | None = None
+    storage_thread_ids: list[int] = []
+    original_edit = contact_sheet_provider.edit
+    original_put_object = storage.put_object
 
-    def observed_create_simple_character(
-        *args: object, **kwargs: object
-    ) -> SimpleCharacterCreationResult:
+    def observed_edit(
+        *,
+        model: str,
+        prompt: str,
+        source_image: object,
+        character_reference_images: list[object],
+        output_count: int,
+    ) -> list[GeneratedImage]:
         nonlocal provider_thread_id
         provider_thread_id = threading.get_ident()
-        return SimpleCharacterCreationResult(
-            identity_id="identity-1",
-            persona_id="persona-1",
-            character_version_id="version-1",
-            publication_hash="hash-1",
-            contact_sheet_asset_id="asset-1",
-            views=(SimpleCharacterView(view_type="FRONT_FACE", asset_id="asset-front"),),
+        return original_edit(
+            model=model,
+            prompt=prompt,
+            source_image=source_image,
+            character_reference_images=character_reference_images,
+            output_count=output_count,
         )
 
-    monkeypatch.setattr(
-        simple_character_routes,
-        "create_simple_character",
-        observed_create_simple_character,
-    )
+    monkeypatch.setattr(contact_sheet_provider, "edit", observed_edit)
+
+    def observed_put_object(
+        key: str,
+        content: bytes,
+        *,
+        content_type: str,
+    ):
+        storage_thread_ids.append(threading.get_ident())
+        return original_put_object(key, content, content_type=content_type)
+
+    monkeypatch.setattr(storage, "put_object", observed_put_object)
 
     class InMemoryUpload:
         size = 5
@@ -247,29 +258,32 @@ def test_simple_character_generation_runs_provider_work_off_the_event_loop(
         async def read(self) -> bytes:
             return b"image"
 
-    async def generate_character() -> simple_character_routes.SimpleCharacterResponse:
-        with BusinessConnection.sqlite(connect_database(db_path)) as conn:
-            return await simple_character_routes._run_simple_character_creation(
-                conn=conn,
-                actor=CurrentUser(
-                    id="employee_1",
-                    username="employee_1",
-                    display_name="Employee One",
-                    role="employee",
-                ),
-                storage=storage,
-                provider=contact_sheet_provider,
-                file=cast(UploadFile, InMemoryUpload()),
-                display_name="荣哥",
-                persona_name="",
-                project_id="project-owned",
-            )
+    async def prepare_character():
+        return await simple_character_routes._prepare_simple_character_upload(
+            file=cast(UploadFile, InMemoryUpload()),
+            display_name="荣哥",
+            persona_name="",
+            provider=contact_sheet_provider,
+            actor=CurrentUser(
+                id="employee_1",
+                username="employee_1",
+                display_name="Employee One",
+                role="employee",
+            ),
+            storage=storage,
+        )
 
-    response = asyncio.run(generate_character())
+    content, content_type, persona_name, prepared = asyncio.run(prepare_character())
 
-    assert response.character_version_id == "version-1"
+    assert content == b"image"
+    assert content_type == "image/png"
+    assert persona_name == "荣哥"
+    assert prepared.generation.contact_content == contact_sheet_provider.sheet_content
+    assert len(prepared.object_keys) == 16
     assert provider_thread_id is not None
     assert provider_thread_id != event_loop_thread_id
+    assert storage_thread_ids
+    assert all(thread_id != event_loop_thread_id for thread_id in storage_thread_ids)
 
 
 def test_auditor_cannot_generate(client: TestClient) -> None:
@@ -624,7 +638,10 @@ def test_customer_character_cache_is_shared_across_api_replicas(
 
     assert response.status_code == 200, response.text
     parsed = urlsplit(response.json()["url"])
-    cache_key = f"character-cache/{Path(parsed.path).name}"
+    # Production COS credentials are intentionally scoped to the existing
+    # projects/users namespaces. Keep the shared preview cache inside that
+    # allowlisted boundary instead of requiring a new bucket-root permission.
+    cache_key = f"projects/character-cache/{Path(parsed.path).name}"
     assert shared_cache.head_object(cache_key) is not None
     assert events[:5] == [
         "pg-enter",

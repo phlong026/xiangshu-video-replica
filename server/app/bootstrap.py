@@ -7,6 +7,7 @@ import ipaddress
 import json
 import logging
 import os
+import shutil
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -535,6 +536,10 @@ def check_customer_production_runtime_dependencies() -> PgReadyInfo | None:
     """
     if not is_customer_production():
         return None
+
+    if shutil.which("ffprobe") is None:
+        logger.error("Customer video precheck runtime is unavailable")
+        raise RuntimeError("customer production requires ffprobe from the ffmpeg runtime")
 
     ready = check_pg_ready()
     try:

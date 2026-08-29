@@ -491,12 +491,11 @@ def test_customer_session_recharge_idempotency_by_idempotency_key(
     assert _customer_recharge_count(clean_state) == orders_after_first + 1
 
 
-def test_customer_session_recharge_zpay_config_invalid_503(
+def test_customer_session_recharge_public_origin_missing_503(
     client: TestClient, clean_state: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Missing ZPay config returns 503 instead of 500."""
-    # Temporarily remove/disable ZPay config
-    monkeypatch.setenv("ZPAY_GATEWAY_URL", "")
+    """Missing callback origin returns 503 instead of 500."""
+    monkeypatch.setenv("PUBLIC_BASE_URL", "")
 
     code = generate_activation_code()
     with psycopg.connect(clean_state) as conn:
@@ -507,7 +506,7 @@ def test_customer_session_recharge_zpay_config_invalid_503(
     activation = _activate_customer(client, code, "fp-t22-zpay-inv", "key-t22-zpay-inv")
     session_token = activation["session_token"]
 
-    # Recharge without valid ZPay config should return 503
+    # Recharge without a callback origin should return 503.
     response = client.post(
         "/api/customer/recharge-orders",
         json={"amount_fen": 10000},
@@ -896,6 +895,185 @@ def test_customer_recharge_order_status_requires_session(
     response = client.get("/api/customer/recharge-orders/any-order-no")
     assert response.status_code == 401, response.text
     assert response.json()["detail"]["code"] == "SESSION_TOKEN_REQUIRED"
+
+
+def test_customer_profile_returns_masked_activation_and_device_summary(
+    client: TestClient, clean_state: str
+) -> None:
+    code = generate_activation_code()
+    with psycopg.connect(clean_state) as conn:
+        _insert_code(
+            conn,
+            code_id="code-profile-summary",
+            batch_id="batch-profile-summary",
+            plaintext=code,
+        )
+
+    activation = _activate_customer(client, code, "fp-profile-summary", "key-profile-summary")
+    response = client.get(
+        "/api/customer/profile",
+        headers={"Authorization": f"Bearer {activation['session_token']}"},
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["user_id"] == activation["user_id"]
+    assert payload["activation_code_masked"] == mask_activation_code(code)
+    assert payload["activation_status"] == "ACTIVE"
+    assert payload["device_slots_used"] == 1
+    assert payload["device_slots_total"] == 2
+    assert code not in response.text
+
+
+def test_customer_profile_display_name_can_be_updated_and_is_audited(
+    client: TestClient, clean_state: str
+) -> None:
+    code = generate_activation_code()
+    with psycopg.connect(clean_state) as conn:
+        _insert_code(
+            conn,
+            code_id="code-profile-rename",
+            batch_id="batch-profile-rename",
+            plaintext=code,
+        )
+    activation = _activate_customer(client, code, "fp-profile-rename", "key-profile-rename")
+    bearer = {"Authorization": f"Bearer {activation['session_token']}"}
+
+    response = client.patch(
+        "/api/customer/profile",
+        headers=bearer,
+        json={"display_name": "  李丽的视频工作台  "},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["display_name"] == "李丽的视频工作台"
+    assert response.json()["username"] == activation["username"]
+    with psycopg.connect(clean_state) as conn:
+        user = conn.execute(
+            "SELECT display_name FROM users WHERE id = %s",
+            (activation["user_id"],),
+        ).fetchone()
+        audit = conn.execute(
+            "SELECT action, entity_id FROM audit_logs "
+            "WHERE actor_user_id = %s ORDER BY created_at DESC LIMIT 1",
+            (activation["user_id"],),
+        ).fetchone()
+    assert user is not None and user[0] == "李丽的视频工作台"
+    assert audit == ("customer.profile.updated", activation["user_id"])
+
+
+def test_customer_can_close_pending_recharge_order_without_deleting_audit_row(
+    client: TestClient, clean_state: str, recharge_config_fixture
+) -> None:
+    code = generate_activation_code()
+    with psycopg.connect(clean_state) as conn:
+        _insert_code(
+            conn,
+            code_id="code-close-order",
+            batch_id="batch-close-order",
+            plaintext=code,
+        )
+    activation = _activate_customer(client, code, "fp-close-order", "key-close-order")
+    bearer = {"Authorization": f"Bearer {activation['session_token']}"}
+    created = client.post(
+        "/api/customer/recharge-orders",
+        headers=_recharge_headers(activation["session_token"]),
+        json={"amount_fen": 10000},
+    )
+    assert created.status_code == 201, created.text
+    order_no = created.json()["order_no"]
+
+    response = client.delete(
+        f"/api/customer/recharge-orders/{order_no}",
+        headers=bearer,
+    )
+
+    assert response.status_code == 204, response.text
+    read_back = client.get(
+        f"/api/customer/recharge-orders/{order_no}",
+        headers=bearer,
+    )
+    assert read_back.status_code == 200, read_back.text
+    assert read_back.json()["status"] == "CLOSED"
+    with psycopg.connect(clean_state) as conn:
+        rows = conn.execute(
+            "SELECT count(*) FROM recharge_orders WHERE merchant_order_no = %s",
+            (order_no,),
+        ).fetchone()
+        audit = conn.execute(
+            "SELECT action, entity_id FROM audit_logs "
+            "WHERE actor_user_id = %s AND action = 'customer.recharge_order.closed'",
+            (activation["user_id"],),
+        ).fetchone()
+    assert rows is not None and rows[0] == 1
+    assert audit == ("customer.recharge_order.closed", order_no)
+
+    # Repeated deletion is harmless and stays closed.
+    repeated = client.delete(
+        f"/api/customer/recharge-orders/{order_no}",
+        headers=bearer,
+    )
+    assert repeated.status_code == 204, repeated.text
+
+
+def test_customer_payment_code_is_generated_server_side_for_owned_order(
+    client: TestClient,
+    customer_app: FastAPI,
+    clean_state: str,
+    recharge_config_fixture,
+) -> None:
+    from app.recharge_routes import get_zpay_payment_code_client
+    from app.zpay import ZPayPaymentCodeResult
+
+    class FakePaymentCodeClient:
+        def __init__(self) -> None:
+            self.order_numbers: list[str] = []
+
+        def create_payment_code(self, **kwargs) -> ZPayPaymentCodeResult:
+            self.order_numbers.append(str(kwargs["merchant_order_no"]))
+            return ZPayPaymentCodeResult(
+                provider_order_no=str(kwargs["merchant_order_no"]),
+                qr_image_url="https://payment.example/qr.png",
+                payment_url="https://payment.example/pay",
+            )
+
+    code = generate_activation_code()
+    with psycopg.connect(clean_state) as conn:
+        _insert_code(
+            conn,
+            code_id="code-payment-code",
+            batch_id="batch-payment-code",
+            plaintext=code,
+        )
+    activation = _activate_customer(client, code, "fp-payment-code", "key-payment-code")
+    session_token = activation["session_token"]
+    created = client.post(
+        "/api/customer/recharge-orders",
+        json={"amount_fen": 10000},
+        headers=_recharge_headers(session_token),
+    )
+    assert created.status_code == 201, created.text
+    order_no = created.json()["order_no"]
+
+    fake_client = FakePaymentCodeClient()
+    customer_app.dependency_overrides[get_zpay_payment_code_client] = lambda: fake_client
+    try:
+        response = client.post(
+            f"/api/customer/recharge-orders/{order_no}/payment-code",
+            headers={"Authorization": f"Bearer {session_token}"},
+        )
+    finally:
+        customer_app.dependency_overrides.pop(get_zpay_payment_code_client, None)
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "order_no": order_no,
+        "amount_fen": 10000,
+        "credits": 10,
+        "qr_image_url": "https://payment.example/qr.png",
+        "payment_url": "https://payment.example/pay",
+    }
+    assert fake_client.order_numbers == [order_no]
 
 
 def _signed_notify_params(order_no: str, *, trade_no: str) -> dict[str, str]:

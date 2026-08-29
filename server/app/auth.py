@@ -5,7 +5,7 @@ import os
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Literal, cast
+from typing import Annotated, Any, Literal, cast
 
 from fastapi import Depends, Header, HTTPException
 
@@ -89,6 +89,18 @@ def authenticate_request(
     authorization: str | None,
     dev_user_id: str | None,
 ) -> CurrentUser:
+    # PostgreSQL is the customer-capable lane.  A customer desktop presents
+    # the same Bearer session token for the shared read routes that it uses for
+    # fenced writes; accepting only ``internal_access_tokens`` here made
+    # activation succeed while every GET in the workspace failed.  Preserve
+    # the internal-token path first, then reuse the existing session verifier
+    # for customer tokens inside this request's read transaction.
+    if authorization is not None and conn.is_postgres:
+        token = parse_bearer_token(authorization)
+        internal_user_id = internal_access_token_user_id(conn, token)
+        if internal_user_id is not None:
+            return authenticate_user(conn, internal_user_id)
+        return authenticate_customer_read_session(conn, token)
     if internal_auth_required():
         if authorization is not None:
             return authenticate_access_token(conn, parse_bearer_token(authorization))
@@ -100,6 +112,53 @@ def authenticate_request(
             },
         )
     return authenticate_user(conn, identity_user_id(dev_user_id))
+
+
+def internal_access_token_user_id(conn: BusinessConnection, token: str) -> str | None:
+    row = conn.execute(
+        """
+        SELECT user_id
+        FROM internal_access_tokens
+        WHERE token_digest = %s AND revoked_at IS NULL
+        """,
+        (digest_access_token(token),),
+    ).fetchone()
+    return None if row is None else str(row["user_id"])
+
+
+def authenticate_customer_read_session(
+    conn: BusinessConnection,
+    token: str,
+) -> CurrentUser:
+    """Resolve a live customer session for a read-only business route.
+
+    ``get_database`` already owns the PostgreSQL transaction used by the
+    route.  Reusing the established verifier here keeps code/device status,
+    lease and single-online-session semantics identical to fenced writes and
+    avoids a second identity implementation.
+    """
+    from app.activation_code_service import ActivationKeyError
+    from app.customer_auth import SessionFencingError, verify_session_context
+
+    try:
+        context = verify_session_context(
+            cast(Any, conn.raw),
+            presentation_session_token=token,
+        )
+    except ActivationKeyError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "SESSION_SERVICE_UNAVAILABLE",
+                "message": "Session keys are not configured; customer sessions are refused.",
+            },
+        ) from exc
+    except SessionFencingError as exc:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": exc.code, "message": exc.message},
+        ) from exc
+    return authenticate_user(conn, context.user_id)
 
 
 def parse_bearer_token(authorization: str) -> str:
@@ -119,17 +178,10 @@ def digest_access_token(token: str) -> str:
 
 
 def authenticate_access_token(conn: BusinessConnection, token: str) -> CurrentUser:
-    row = conn.execute(
-        """
-        SELECT user_id
-        FROM internal_access_tokens
-        WHERE token_digest = %s AND revoked_at IS NULL
-        """,
-        (digest_access_token(token),),
-    ).fetchone()
-    if row is None:
+    user_id = internal_access_token_user_id(conn, token)
+    if user_id is None:
         raise invalid_token_error()
-    return authenticate_user(conn, str(row["user_id"]))
+    return authenticate_user(conn, user_id)
 
 
 def invalid_token_error() -> HTTPException:

@@ -21,13 +21,14 @@ index insert (PostgreSQL waits on the conflicting transaction).
 The one-time download deliberately stays *outside* the snapshot layer: its
 response carries the plaintext codes, which must never persist anywhere
 (No-Go red line), and the ``downloaded_at`` one-shot constraint already
-makes a second download impossible.
+makes a second download impossible. An authenticated administrator may also
+recover codes on the list page by opening the retained AEAD envelope in
+memory; this does not add a plaintext database field or log record.
 
-No-Go red lines: plaintext activation codes live only in the one-time
-download response handed to the operator (T11 principle) — never in a
-column, event, idempotency snapshot or log record. Generation responses
-carry masked codes only; the export ciphertext stays sealed until the
-single audited download.
+No-Go red lines: plaintext activation codes are never stored in a column,
+event, idempotency snapshot or log record. Generation responses carry masked
+codes only; the export ciphertext is opened only in memory for the audited
+download or an authenticated administrator's detail view.
 """
 
 from __future__ import annotations
@@ -56,11 +57,13 @@ from app.activation_code_service import (
     assert_code_transition,
     configured_export_aead_keys,
     create_batch_export,
+    decrypt_code_package,
     export_aead_key,
     fetch_export_package,
     generate_batch_codes,
     highest_code_hmac_key_version,
     highest_export_aead_key_version,
+    iter_code_digests,
 )
 from app.admin_auth_routes import AdminReader, AdminWriter
 from app.customer_session_service import (
@@ -1013,15 +1016,56 @@ def revoke_activation_code(
 # ---------------------------------------------------------------------------
 
 
+def _recover_plaintext_codes(
+    conn: psycopg.Connection,
+    rows: list[tuple[object, ...]],
+) -> dict[str, str]:
+    """Map stored code digests to plaintext recovered from sealed exports.
+
+    Every export for the requested batches is considered because a batch may
+    be generated in more than one operation. Plaintext remains process-local
+    and is never written back to PostgreSQL or emitted to logs.
+    """
+    batch_ids = sorted({str(row[1]) for row in rows})
+    if not batch_ids:
+        return {}
+    aead_keys = configured_export_aead_keys()
+    export_rows = conn.execute(
+        "SELECT batch_id, ciphertext, key_version "
+        "FROM activation_code_exports "
+        "WHERE batch_id = ANY(%s) AND ciphertext IS NOT NULL "
+        "ORDER BY batch_id, created_at",
+        (batch_ids,),
+    ).fetchall()
+    recovered: dict[str, str] = {}
+    for export_batch_id, ciphertext, key_version in export_rows:
+        key = aead_keys.get(int(key_version))
+        if key is None:
+            raise ActivationKeyError(
+                f"activation export key version {key_version} is not configured"
+            )
+        codes = decrypt_code_package(
+            str(ciphertext),
+            key=key,
+            batch_id=str(export_batch_id),
+        )
+        for code in codes:
+            for digest, _version in iter_code_digests(code):
+                recovered[digest] = code
+    return recovered
+
+
 @router.get("/activation-codes")
 def list_activation_codes(
     actor: AdminReader,
+    response: Response,
     batch_id: str | None = None,
     status: str | None = None,
     limit: int = DEFAULT_LIST_LIMIT,
     offset: int = 0,
 ) -> dict[str, object]:
-    """List codes with masked display forms — digests never leave the store."""
+    """List codes; administrators may recover full values from sealed exports."""
+    response.headers["Cache-Control"] = "no-store"
     bounded_limit = max(0, min(limit, MAX_LIST_LIMIT))
     bounded_offset = max(0, offset)
     clauses: list[str] = []
@@ -1036,11 +1080,26 @@ def list_activation_codes(
     try:
         with pg_transaction() as conn:
             rows = conn.execute(
-                f"SELECT id, batch_id, masked_code, status, bound_user_id, issued_at "
+                f"SELECT id, batch_id, code_digest, masked_code, status, "
+                f"bound_user_id, issued_at "
                 f"FROM activation_codes {where} "
                 f"ORDER BY id LIMIT %s OFFSET %s",
                 (*params, bounded_limit, bounded_offset),
             ).fetchall()
+            plaintext_by_digest = (
+                _recover_plaintext_codes(conn, rows) if actor.role == "admin" else {}
+            )
+    except (ActivationKeyError, ActivationExportError) as exc:
+        logger.warning(
+            "activation code detail recovery unavailable: actor=%s error=%s",
+            actor.user_id,
+            type(exc).__name__,
+        )
+        raise _http(
+            503,
+            "ACTIVATION_DETAILS_UNAVAILABLE",
+            "Activation code details are temporarily unavailable.",
+        ) from exc
     except RuntimeError as exc:
         raise _http(
             503,
@@ -1051,10 +1110,11 @@ def list_activation_codes(
         {
             "code_id": str(row[0]),
             "batch_id": str(row[1]),
-            "masked_code": str(row[2]),
-            "status": str(row[3]),
-            "bound_user_id": row[4],
-            "issued_at": row[5],
+            "activation_code": plaintext_by_digest.get(str(row[2])),
+            "masked_code": str(row[3]),
+            "status": str(row[4]),
+            "bound_user_id": row[5],
+            "issued_at": row[6],
         }
         for row in rows
     ]

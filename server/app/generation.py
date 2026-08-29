@@ -132,11 +132,23 @@ SUPPORTED_RESOLUTIONS = {"768P", "2K"}
 # A real H3 request polls for up to five minutes. Leave headroom so another
 # worker never mistakes an active request for an abandoned lease.
 GENERATION_LEASE_SECONDS = 600
+# A durable provider task is polled in small worker steps.  Each step only
+# needs enough lease time for one bounded HTTP request; the task itself may
+# remain RUNNING for much longer without holding a database connection.
+GENERATION_STEP_LEASE_SECONDS = 120
+GENERATION_POLL_INTERVAL_SECONDS = 5
+# Production H3 normally finishes within ninety minutes.  Stop automatic
+# polling after two hours so a vendor task that vanished from the query API
+# cannot retain the user's only fair-queue slot forever.  The durable provider
+# id remains available for reconciliation, so this never causes a paid retry.
+GENERATION_MAX_POLL_AGE_SECONDS = 2 * 60 * 60
 # Reconciliation performs one provider query plus optional download/archive;
 # fifteen minutes exceeds those bounded calls while still recovering crashes.
 RECONCILIATION_RESERVATION_SECONDS = 900
 FAKE_H3_OUTCOME_ENV = "VIDEO_REPLICA_FAKE_H3_OUTCOME"
 FAKE_H3_RESULT_PATH_ENV = "VIDEO_REPLICA_FAKE_H3_RESULT_PATH"
+ACCEPTANCE_GENERATION_USER_ID_ENV = "VIDEO_REPLICA_ACCEPTANCE_GENERATION_USER_ID"
+ACCEPTANCE_PAID_GENERATION_LIMIT_ENV = "VIDEO_REPLICA_ACCEPTANCE_PAID_GENERATION_LIMIT"
 FIRST_FRAME_URL_EXPIRES_IN = timedelta(minutes=15)
 RESULT_DOWNLOAD_CHECK_EXPIRES_IN = timedelta(minutes=5)
 # Cap archive retries so a permanently expired provider URL does not keep the
@@ -250,6 +262,22 @@ class H3CreateResult(BaseModel):
     quality_issue_codes: list[str]
 
 
+class H3QueryResult(BaseModel):
+    """One non-blocking provider status observation.
+
+    The PostgreSQL worker persists the provider task id immediately after
+    submission and calls this method once per worker iteration.  Keeping the
+    query result separate from ``H3CreateResult`` prevents a status check from
+    accidentally downloading a large video while a database transaction is
+    open.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["RUNNING", "SUCCEEDED", "FAILED", "CANCELLED"]
+    result_url: str | None = None
+
+
 class SubmissionUncertain(RuntimeError):
     pass
 
@@ -278,7 +306,23 @@ class ReconcileReservation:
     idempotency_key: str
 
 
+@dataclass(frozen=True)
+class GenerationSubmissionWork:
+    provider: H3Provider
+    provider_request: dict[str, Any]
+    request_hash: str
+
+
 class H3Provider:
+    def submit_image_to_video(self, request: dict[str, Any]) -> str:
+        raise H3ProviderFailed("submit_image_to_video is not implemented for this provider")
+
+    def query_image_to_video(self, provider_task_id: str) -> H3QueryResult:
+        raise H3ProviderFailed(
+            "query_image_to_video is not implemented for this provider",
+            provider_task_id=provider_task_id,
+        )
+
     def create_image_to_video(self, request: dict[str, Any]) -> H3CreateResult:
         raise HTTPException(
             status_code=501,
@@ -364,6 +408,10 @@ class MetasoH3Provider(H3Provider):
         self.task_created_observer = task_created_observer
 
     def create_image_to_video(self, request: dict[str, Any]) -> H3CreateResult:
+        provider_task_id = self.submit_image_to_video(request)
+        return self._poll_for_result(provider_task_id)
+
+    def submit_image_to_video(self, request: dict[str, Any]) -> str:
         validate_h3_request(request)
         if not _h3_request_has_https_first_frame(request):
             raise H3ProviderFailed("METASO H3 requires an HTTPS first-frame URL")
@@ -388,35 +436,54 @@ class MetasoH3Provider(H3Provider):
             # Persist the paid provider task id before polling so a timeout or
             # crash can never lose a result that reconciliation could recover.
             self.task_created_observer(provider_task_id)
-        return self._poll_for_result(provider_task_id)
+        return provider_task_id
+
+    def query_image_to_video(self, provider_task_id: str) -> H3QueryResult:
+        try:
+            item = self._query_task(provider_task_id)
+        except H3ProviderFailed as exc:
+            if exc.provider_task_id is not None:
+                raise
+            raise H3ProviderFailed(str(exc), provider_task_id=provider_task_id) from exc
+
+        status = item.get("status")
+        if status == "succeeded":
+            return H3QueryResult(
+                status="SUCCEEDED",
+                result_url=_metaso_content_url(item, provider_task_id=provider_task_id),
+            )
+        if status == "failed":
+            return H3QueryResult(status="FAILED")
+        if status == "cancelled":
+            return H3QueryResult(status="CANCELLED")
+        return H3QueryResult(status="RUNNING")
 
     def _poll_for_result(self, provider_task_id: str) -> H3CreateResult:
         for attempt in range(self.max_poll_attempts):
-            try:
-                item = self._query_task(provider_task_id)
-            except H3ProviderFailed as exc:
-                if exc.provider_task_id is not None:
-                    raise
-                raise H3ProviderFailed(str(exc), provider_task_id=provider_task_id) from exc
-            status = item.get("status")
-            if status == "succeeded":
-                result_url = _metaso_content_url(item, provider_task_id=provider_task_id)
+            result = self.query_image_to_video(provider_task_id)
+            if result.status == "SUCCEEDED":
+                if result.result_url is None:
+                    raise H3ProviderFailed(
+                        "METASO succeeded task is missing a result URL",
+                        provider_task_id=provider_task_id,
+                        terminal=True,
+                    )
                 try:
-                    content = self.transport.request("GET", result_url, headers={})
+                    content = self.download_result(result.result_url)
                 except H3ProviderFailed as exc:
                     raise H3ProviderFailed(str(exc), provider_task_id=provider_task_id) from exc
                 audio_quality_status, quality_issue_codes = self.audio_quality_checker(content)
                 return H3CreateResult(
                     provider_task_id=provider_task_id,
                     status="SUCCEEDED",
-                    result_url=result_url,
+                    result_url=result.result_url,
                     result_content=content,
                     audio_quality_status=audio_quality_status,
                     quality_issue_codes=quality_issue_codes,
                 )
-            if status in {"failed", "cancelled"}:
+            if result.status in {"FAILED", "CANCELLED"}:
                 raise H3ProviderFailed(
-                    f"METASO task finished with status {status}",
+                    f"METASO task finished with status {result.status.lower()}",
                     provider_task_id=provider_task_id,
                     terminal=True,
                 )
@@ -1387,6 +1454,64 @@ def _reserve_generation_credit(
         ) from exc
 
 
+def _enforce_acceptance_generation_limit(
+    conn: BusinessConnection,
+    *,
+    user_id: str,
+    requested_quantity: int,
+) -> None:
+    """Cap the paid provider rehearsal to one task for one explicit customer.
+
+    Existing tasks count even when they failed or need attention because a
+    submission may already have incurred supplier cost. PostgreSQL locks the
+    customer row so concurrent batches cannot both pass the count.
+    """
+    configured_user_id = os.environ.get(ACCEPTANCE_GENERATION_USER_ID_ENV, "").strip()
+    raw_limit = os.environ.get(ACCEPTANCE_PAID_GENERATION_LIMIT_ENV, "").strip()
+    if not configured_user_id and not raw_limit:
+        return
+    if not configured_user_id or not raw_limit:
+        raise generation_error(
+            503,
+            "ACCEPTANCE_GENERATION_CONFIGURATION_INVALID",
+            "The controlled generation rehearsal is not configured safely.",
+        )
+    if user_id != configured_user_id:
+        return
+    try:
+        limit = int(raw_limit)
+    except ValueError as exc:
+        raise generation_error(
+            503,
+            "ACCEPTANCE_GENERATION_CONFIGURATION_INVALID",
+            "The controlled generation rehearsal is not configured safely.",
+        ) from exc
+    if limit != 1:
+        raise generation_error(
+            503,
+            "ACCEPTANCE_GENERATION_CONFIGURATION_INVALID",
+            "The controlled generation rehearsal is limited to one paid task.",
+        )
+    if conn.is_postgres:
+        conn.execute("SELECT id FROM users WHERE id = %s FOR UPDATE", (user_id,))
+    existing = conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM generation_tasks AS task
+        JOIN generation_batches AS batch ON batch.id = task.batch_id
+        WHERE batch.created_by_user_id = %s AND task.provider = 'metaso'
+        """,
+        (user_id,),
+    ).fetchone()
+    existing_count = int(existing[0]) if existing is not None else 0
+    if existing_count + requested_quantity > limit:
+        raise generation_error(
+            409,
+            "ACCEPTANCE_GENERATION_LIMIT_REACHED",
+            "The controlled generation rehearsal has already used its paid task.",
+        )
+
+
 def create_generation_batch(
     conn: BusinessConnection,
     *,
@@ -1451,6 +1576,13 @@ def create_generation_batch(
                 422,
                 "QUANTITY_EXCEEDS_LIMIT",
                 f"quantity must be less than or equal to {max_quantity}",
+            )
+
+        if request.provider == "metaso":
+            _enforce_acceptance_generation_limit(
+                conn,
+                user_id=actor.id,
+                requested_quantity=request.quantity,
             )
 
         # Mutable runtime/provider preflights apply only to a genuinely new
@@ -3862,6 +3994,47 @@ def acquire_generation_task_lease(
         raise
 
 
+def acquire_generation_continuation_lease(
+    conn: BusinessConnection,
+    *,
+    worker_id: str,
+) -> dict[str, Any] | None:
+    """Claim one durable provider-poll or archive step without a new slot."""
+
+    mark_expired_active_leases_needing_attention(conn)
+    locked_until = (
+        datetime.now(UTC) + timedelta(seconds=GENERATION_STEP_LEASE_SECONDS)
+    ).isoformat()
+    row = conn.execute(
+        """
+        UPDATE generation_tasks
+        SET locked_by = %s, locked_until = %s, updated_at = CURRENT_TIMESTAMP
+        WHERE id = (
+            SELECT id
+            FROM generation_tasks
+            WHERE (
+                    (status = 'RUNNING' AND provider_task_id IS NOT NULL)
+                    OR (
+                        status = 'ARCHIVING'
+                        AND provider_result_url IS NOT NULL
+                        AND provider_result_url != ''
+                    )
+                )
+              AND (locked_until IS NULL OR locked_until::timestamptz <= now())
+              AND (next_poll_at IS NULL OR next_poll_at::timestamptz <= now())
+            ORDER BY next_poll_at NULLS FIRST, created_at, id
+            LIMIT 1
+            FOR UPDATE SKIP LOCKED
+        )
+        RETURNING id
+        """,
+        (worker_id, locked_until),
+    ).fetchone()
+    if row is None:
+        return None
+    return load_worker_task(conn, str(row["id"]))
+
+
 def load_worker_task(conn: BusinessConnection, task_id: str) -> dict[str, Any]:
     row = conn.execute(
         """
@@ -3869,8 +4042,14 @@ def load_worker_task(conn: BusinessConnection, task_id: str) -> dict[str, Any]:
             generation_tasks.id,
             generation_tasks.batch_id,
             generation_tasks.provider,
+            generation_tasks.status,
             generation_tasks.archive_status,
+            generation_tasks.provider_task_id,
             generation_tasks.provider_result_url,
+            generation_tasks.provider_request_json,
+            generation_tasks.submitted_at,
+            generation_tasks.started_at,
+            generation_tasks.archive_retry_count,
             generation_batches.project_id,
             generation_batches.created_by_user_id,
             generation_batches.request_snapshot_json,
@@ -3892,6 +4071,299 @@ def load_worker_task(conn: BusinessConnection, task_id: str) -> dict[str, Any]:
     payload["output_duration_seconds"] = request_snapshot["output_duration_seconds"]
     payload["resolution"] = request_snapshot["resolution"]
     return payload
+
+
+def prepare_generation_submission(
+    conn: BusinessConnection,
+    *,
+    lease: dict[str, Any],
+    first_frame_storage: StorageAdapter,
+    provider: H3Provider | None = None,
+) -> GenerationSubmissionWork:
+    """Build a paid request while the caller owns only a short DB transaction."""
+
+    provider_name = str(lease["provider"])
+    if provider_name == "metaso" and first_frame_storage.provider != "cos":
+        raise H3ProviderSettingsUnavailable("METASO requires COS first-frame storage")
+    selected_provider = provider or h3_provider_for_task(conn, provider_name)
+    first_frame = storage_object_ref_from_uri(str(lease["first_frame_uri"]))
+    require_storage_match(first_frame_storage, first_frame)
+    first_frame_url = first_frame_storage.create_download_intent(
+        first_frame.key,
+        expires_in=FIRST_FRAME_URL_EXPIRES_IN,
+        can_read=True,
+    ).url
+    provider_request = build_h3_request(
+        prompt_text=str(lease["prompt_text"]),
+        first_frame_url=first_frame_url,
+        duration_seconds=int(lease["output_duration_seconds"]),
+        resolution=str(lease["resolution"]),
+    )
+    return GenerationSubmissionWork(
+        provider=selected_provider,
+        provider_request=provider_request,
+        request_hash=content_hash(json.dumps(provider_request, ensure_ascii=True, sort_keys=True)),
+    )
+
+
+def mark_generation_task_running(
+    conn: BusinessConnection,
+    *,
+    lease: dict[str, Any],
+    provider_task_id: str,
+    provider_request: dict[str, Any],
+    request_hash: str,
+) -> None:
+    """Durably record the paid provider id before any polling starts."""
+
+    task_id = str(lease["id"])
+    update = conn.execute(
+        """
+        UPDATE generation_tasks
+        SET
+            provider_task_id = %s,
+            provider_request_json = %s,
+            status = 'RUNNING',
+            error_code = NULL,
+            error_message_redacted = NULL,
+            started_at = COALESCE(started_at::timestamptz, CURRENT_TIMESTAMP),
+            next_poll_at = now() + interval '5 seconds',
+            locked_by = NULL,
+            locked_until = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s AND status = 'SUBMITTING'
+        """,
+        (
+            provider_task_id,
+            json.dumps(provider_request, ensure_ascii=True, sort_keys=True),
+            task_id,
+        ),
+    )
+    if update.rowcount != 1:
+        raise RuntimeError("generation submission lease was lost before task id persistence")
+    conn.execute(
+        """
+        INSERT INTO external_call_logs (
+            id, generation_task_id, provider, model, endpoint_name,
+            provider_request_id, http_status, request_hash
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (
+            str(uuid4()),
+            task_id,
+            str(lease["provider"]),
+            H3_MODEL,
+            "createImageToVideo",
+            provider_task_id,
+            200,
+            request_hash,
+        ),
+    )
+    _refresh_batch_status_in_transaction(conn, batch_id=str(lease["batch_id"]))
+
+
+def reschedule_generation_poll(
+    conn: BusinessConnection,
+    *,
+    lease: dict[str, Any],
+    delay_seconds: int = GENERATION_POLL_INTERVAL_SECONDS,
+) -> None:
+    if delay_seconds < 1:
+        raise ValueError("delay_seconds must be positive")
+    update = conn.execute(
+        """
+        WITH current_task AS (
+            SELECT
+                id,
+                batch_id,
+                COALESCE(
+                    submitted_at::timestamptz,
+                    started_at::timestamptz,
+                    created_at::timestamptz
+                ) <= now() - (%s * interval '1 second') AS timed_out
+            FROM generation_tasks
+            WHERE id = %s AND status = 'RUNNING'
+            FOR UPDATE
+        )
+        UPDATE generation_tasks AS task
+        SET
+            status = CASE
+                WHEN current_task.timed_out THEN 'SUBMISSION_UNCERTAIN'
+                ELSE task.status
+            END,
+            error_code = CASE
+                WHEN current_task.timed_out THEN 'PROVIDER_POLL_TIMEOUT'
+                ELSE task.error_code
+            END,
+            error_message_redacted = CASE
+                WHEN current_task.timed_out
+                THEN 'Provider task exceeded the automatic polling window.'
+                ELSE task.error_message_redacted
+            END,
+            next_poll_at = CASE
+                WHEN current_task.timed_out THEN NULL
+                ELSE now() + (%s * interval '1 second')
+            END,
+            locked_by = NULL,
+            locked_until = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        FROM current_task
+        WHERE task.id = current_task.id
+        RETURNING task.status, task.batch_id
+        """,
+        (
+            GENERATION_MAX_POLL_AGE_SECONDS,
+            str(lease["id"]),
+            delay_seconds,
+        ),
+    ).fetchone()
+    if update is None or str(update["status"]) != "SUBMISSION_UNCERTAIN":
+        return
+    task_id = str(lease["id"])
+    batch_id = str(update["batch_id"])
+    _insert_worker_audit(
+        conn,
+        action="generation_task.provider_poll_timeout",
+        entity_type="generation_task",
+        entity_id=task_id,
+        metadata={
+            "batch_id": batch_id,
+            "max_poll_age_seconds": GENERATION_MAX_POLL_AGE_SECONDS,
+            "provider_task_id_present": bool(lease.get("provider_task_id")),
+        },
+    )
+    release_user_queue_slot_for_task(conn, task_id=task_id)
+    _refresh_batch_status_in_transaction(conn, batch_id=batch_id)
+
+
+def mark_generation_task_archiving(
+    conn: BusinessConnection,
+    *,
+    lease: dict[str, Any],
+    result_url: str,
+) -> None:
+    update = conn.execute(
+        """
+        UPDATE generation_tasks
+        SET
+            status = 'ARCHIVING',
+            provider_result_url = %s,
+            next_poll_at = now(),
+            locked_by = NULL,
+            locked_until = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s AND status IN ('RUNNING', 'SUBMITTING')
+        """,
+        (result_url, str(lease["id"])),
+    )
+    if update.rowcount != 1:
+        raise RuntimeError("generation polling lease was lost before archiving")
+    _refresh_batch_status_in_transaction(conn, batch_id=str(lease["batch_id"]))
+
+
+def store_generation_result(
+    storage: StorageAdapter,
+    *,
+    task_id: str,
+    content: bytes,
+) -> StoredObject:
+    """Write and verify result bytes without any database transaction."""
+
+    stored: StoredObject | None = None
+    try:
+        stored = storage.put_object(
+            f"generation-results/{task_id}.mp4",
+            content,
+            content_type="video/mp4",
+        )
+        _verify_archived_result(storage, stored)
+        return stored
+    except Exception:
+        if stored is not None:
+            try:
+                storage.delete_object(stored.key, actor_id=None)
+            except Exception as cleanup_exc:
+                logger.warning(
+                    "generation archive cleanup failed for task %s: %s",
+                    task_id,
+                    type(cleanup_exc).__name__,
+                )
+        raise
+
+
+def finalize_generation_archive(
+    conn: BusinessConnection,
+    *,
+    lease: dict[str, Any],
+    stored: StoredObject,
+    audio_quality_status: Literal["AUDIO_OK", "AUDIO_QUALITY_FAILED"],
+    quality_issue_codes: list[str],
+) -> None:
+    """Commit the archived asset and billing in one short transaction."""
+
+    result_asset_id = str(uuid4())
+    task_id = str(lease["id"])
+    conn.execute(
+        """
+        INSERT INTO assets (
+            id, project_id, kind, storage_uri, sha256, size_bytes,
+            content_type, created_by_user_id
+        )
+        VALUES (%s, %s, 'video', %s, %s, %s, %s, %s)
+        """,
+        (
+            result_asset_id,
+            str(lease["project_id"]),
+            stored.uri,
+            stored.sha256,
+            stored.size,
+            stored.content_type,
+            str(lease["created_by_user_id"]),
+        ),
+    )
+    update = conn.execute(
+        """
+        UPDATE generation_tasks
+        SET
+            status = 'SUCCEEDED',
+            archive_status = 'ARCHIVED',
+            quality_status = %s,
+            quality_issue_codes = %s,
+            result_asset_id = %s,
+            error_code = NULL,
+            error_message_redacted = NULL,
+            next_poll_at = NULL,
+            locked_by = NULL,
+            locked_until = NULL,
+            completed_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s AND status = 'ARCHIVING'
+        """,
+        (
+            audio_quality_status,
+            json.dumps(quality_issue_codes, ensure_ascii=True),
+            result_asset_id,
+            task_id,
+        ),
+    )
+    if update.rowcount != 1:
+        raise RuntimeError("generation archive lease was lost before finalization")
+    finalize_internal_billing(conn, task_id=task_id, outcome="success")
+    _refresh_batch_status_in_transaction(conn, batch_id=str(lease["batch_id"]))
+    release_user_queue_slot_for_task(conn, task_id=task_id)
+
+
+def release_generation_archive_retry(
+    conn: BusinessConnection,
+    *,
+    lease: dict[str, Any],
+) -> None:
+    _release_archive_retry(
+        conn,
+        task_id=str(lease["id"]),
+        batch_id=str(lease["batch_id"]),
+    )
 
 
 def mark_task_submission_uncertain(
@@ -4044,8 +4516,33 @@ def _insert_worker_audit(
 
 
 def mark_expired_active_leases_needing_attention(conn: BusinessConnection) -> None:
-    """Do not resubmit work when a worker died after a provider call may have started."""
+    """Recover durable steps and quarantine only truly uncertain submissions."""
     with conn:
+        # Once the provider task id/result URL is durable, a crashed worker can
+        # safely resume the next step.  Keep the user's running slot occupied:
+        # the same paid task is still active and must not be double-submitted.
+        recoverable_rows = conn.execute(
+            """
+            UPDATE generation_tasks
+            SET
+                locked_by = NULL,
+                locked_until = NULL,
+                next_poll_at = now(),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE (
+                    (status = 'RUNNING' AND provider_task_id IS NOT NULL)
+                    OR (
+                        status = 'ARCHIVING'
+                        AND provider_result_url IS NOT NULL
+                        AND provider_result_url != ''
+                    )
+                )
+              AND archive_status != 'ARCHIVE_FAILED'
+              AND locked_until IS NOT NULL
+              AND locked_until::timestamptz <= now()
+            RETURNING id, batch_id, status
+            """
+        ).fetchall()
         # Archive retries never start a paid call; an expired lease is safe to
         # reset so another worker can re-download and re-archive the result.
         # Both updates drive audit and slot release from RETURNING so a
@@ -4085,12 +4582,29 @@ def mark_expired_active_leases_needing_attention(conn: BusinessConnection) -> No
               AND NOT (
                   archive_status = 'ARCHIVE_FAILED' AND provider_result_url IS NOT NULL
               )
+              AND NOT (status = 'RUNNING' AND provider_task_id IS NOT NULL)
+              AND NOT (
+                  status = 'ARCHIVING'
+                  AND provider_result_url IS NOT NULL
+                  AND provider_result_url != ''
+              )
               AND locked_until IS NOT NULL
               AND locked_until::timestamptz <= now()
             RETURNING id, batch_id
             """
         ).fetchall()
-        # Every expired lease leaves the per-user concurrency slot occupied
+        for row in recoverable_rows:
+            _insert_worker_audit(
+                conn,
+                action="generation_task.lease_expired_resumed",
+                entity_type="generation_task",
+                entity_id=str(row["id"]),
+                metadata={
+                    "batch_id": str(row["batch_id"]),
+                    "status": str(row["status"]),
+                },
+            )
+        # Every non-recoverable expired lease leaves the per-user concurrency slot occupied
         # (revised ADR §2.2 Step 2): release it. Archive-retry backoffs and
         # SUBMISSION_UNCERTAIN tasks both stop consuming a running slot here;
         # the former re-acquires one when a worker picks the retry up. Each
@@ -4113,9 +4627,11 @@ def mark_expired_active_leases_needing_attention(conn: BusinessConnection) -> No
                 metadata={"batch_id": str(row["batch_id"])},
             )
             release_user_queue_slot_for_task(conn, task_id=str(row["id"]))
-    batch_ids = {str(row["batch_id"]) for row in archive_rows} | {
-        str(row["batch_id"]) for row in uncertain_rows
-    }
+    batch_ids = (
+        {str(row["batch_id"]) for row in recoverable_rows}
+        | {str(row["batch_id"]) for row in archive_rows}
+        | {str(row["batch_id"]) for row in uncertain_rows}
+    )
     for batch_id in batch_ids:
         refresh_batch_status(conn, batch_id=batch_id)
 

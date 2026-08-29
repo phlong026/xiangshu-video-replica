@@ -1084,12 +1084,13 @@ def test_status_action_requires_write_contract(
 # ---------------------------------------------------------------------------
 
 
-def test_list_codes_filters_and_never_returns_digests(
+def test_list_codes_filters_returns_recoverable_plaintext_and_never_digests(
     client: TestClient, admin_headers: dict[str, str]
 ) -> None:
     batch_a = _create_batch(client, admin_headers, name="批次A", quantity=2).json()
     batch_b = _create_batch(client, admin_headers, name="批次B", quantity=1).json()
-    _generate(client, admin_headers, batch_a["batch_id"], quantity=2)
+    generated_a = _generate(client, admin_headers, batch_a["batch_id"], quantity=2).json()
+    plaintext_a = _download(client, admin_headers, generated_a["export_id"]).json()["codes"]
     generated_b = _generate(client, admin_headers, batch_b["batch_id"], quantity=1).json()
     _deliver(client, admin_headers, generated_b["codes"][0]["code_id"])
 
@@ -1099,6 +1100,7 @@ def test_list_codes_filters_and_never_returns_digests(
         headers=admin_headers,
     )
     assert filtered.status_code == 200
+    assert filtered.headers["Cache-Control"] == "no-store"
     items = filtered.json()["items"]
     assert len(items) == 2
     for item in items:
@@ -1106,7 +1108,10 @@ def test_list_codes_filters_and_never_returns_digests(
         assert item["status"] == "GENERATED"
         assert item["masked_code"].startswith("XS04-")
         assert "***" in item["masked_code"]
+        assert item["activation_code"] in plaintext_a
         assert "code_digest" not in item
+
+    assert {item["activation_code"] for item in items} == set(plaintext_a)
 
     issued = client.get(
         "/api/control/activation-codes",
@@ -1130,6 +1135,22 @@ def test_list_codes_requires_session_and_allows_auditor(
     response = client.get("/api/control/activation-codes", headers=fresh_headers)
     assert response.status_code == 200
     assert response.json()["items"] == []
+
+
+def test_list_codes_does_not_expose_bearer_code_to_auditor(
+    client: TestClient, admin_headers: dict[str, str]
+) -> None:
+    batch = _create_batch(client, admin_headers, quantity=1).json()
+    _generate(client, admin_headers, batch["batch_id"], quantity=1)
+
+    auditor_headers = _exchange(client, "auditor_u")
+    response = client.get("/api/control/activation-codes", headers=auditor_headers)
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["activation_code"] is None
+    assert "***" in item["masked_code"]
+    assert "code_digest" not in item
 
 
 # ---------------------------------------------------------------------------

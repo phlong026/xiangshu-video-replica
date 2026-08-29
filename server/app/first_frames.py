@@ -95,6 +95,42 @@ class FirstFrameCharacterInputs:
     reference_asset_roles: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class FirstFrameGenerationWork:
+    project_id: str
+    actor: CurrentUser
+    model: FirstFrameModel
+    quantity: int
+    source_frame_asset_id: str
+    source_frame_selection_version_id: str
+    character_inputs: FirstFrameCharacterInputs
+    source_image: ImageInput
+    reference_images: list[ImageInput]
+    effective_prompt: str
+
+
+@dataclass(frozen=True)
+class FirstFrameGenerationPlan:
+    """Authorized DB snapshot that can be hydrated after releasing the fence."""
+
+    project_id: str
+    actor: CurrentUser
+    model: FirstFrameModel
+    quantity: int
+    source_frame_asset_id: str
+    source_frame_selection_version_id: str
+    character_inputs: FirstFrameCharacterInputs
+    source_asset: dict[str, object]
+    reference_assets: list[dict[str, object]]
+    effective_prompt: str
+
+
+@dataclass(frozen=True)
+class StoredFirstFrameCandidates:
+    candidates: list[dict[str, object]]
+    created_assets: list[tuple[str, str]]
+
+
 class ImageProvider(Protocol):
     provider_name: str
 
@@ -426,19 +462,17 @@ def validate_provider_image_bytes(content: bytes, content_type: str) -> None:
         raise ImageProviderFailed("Apilio returned image bytes that do not match its content type")
 
 
-def generate_first_frame_candidates(
+def prepare_first_frame_generation(
     conn: BusinessConnection,
     *,
     project_id: str,
     actor: CurrentUser,
-    storage: StorageAdapter,
-    provider: ImageProvider,
     model: FirstFrameModel,
     prompt: str | None,
     quantity: int,
     character_version_id: str | None = None,
     character_reference_selection_id: str | None = None,
-) -> sqlite3.Row:
+) -> FirstFrameGenerationPlan:
     require_not_auditor(
         conn,
         actor=actor,
@@ -478,7 +512,6 @@ def generate_first_frame_candidates(
         expected_character_version_id=character_version_id,
         expected_reference_selection_id=character_reference_selection_id,
     )
-    source_image = read_asset_image(storage, source_frame)
     reference_assets = [
         read_character_reference_asset(
             conn,
@@ -488,22 +521,63 @@ def generate_first_frame_candidates(
         )
         for asset_id in character_inputs.reference_asset_ids
     ]
-    reference_images = [read_asset_image(storage, asset) for asset in reference_assets]
     effective_prompt = normalize_prompt(
         prompt,
         character_name=character_inputs.character_name,
         reference_roles=character_inputs.reference_asset_roles,
     )
 
+    return FirstFrameGenerationPlan(
+        project_id=project_id,
+        actor=actor,
+        model=model,
+        quantity=quantity,
+        source_frame_asset_id=source_frame_asset_id,
+        source_frame_selection_version_id=str(source_selection["id"]),
+        character_inputs=character_inputs,
+        source_asset=asset_snapshot(source_frame),
+        reference_assets=[asset_snapshot(asset) for asset in reference_assets],
+        effective_prompt=effective_prompt,
+    )
+
+
+def load_first_frame_generation_work(
+    plan: FirstFrameGenerationPlan,
+    *,
+    storage: StorageAdapter,
+) -> FirstFrameGenerationWork:
+    """Read COS inputs after the customer session transaction has committed."""
+
+    return FirstFrameGenerationWork(
+        project_id=plan.project_id,
+        actor=plan.actor,
+        model=plan.model,
+        quantity=plan.quantity,
+        source_frame_asset_id=plan.source_frame_asset_id,
+        source_frame_selection_version_id=plan.source_frame_selection_version_id,
+        character_inputs=plan.character_inputs,
+        source_image=read_asset_image(storage, plan.source_asset),
+        reference_images=[read_asset_image(storage, asset) for asset in plan.reference_assets],
+        effective_prompt=plan.effective_prompt,
+    )
+
+
+def perform_first_frame_generation(
+    work: FirstFrameGenerationWork,
+    *,
+    provider: ImageProvider,
+) -> list[GeneratedImage]:
+    """Run the slow image provider with no customer fence transaction open."""
+
     generated = edit_once_with_retry(
         provider,
-        model=model,
-        prompt=effective_prompt,
-        source_image=source_image,
-        character_reference_images=reference_images,
-        quantity=quantity,
+        model=work.model,
+        prompt=work.effective_prompt,
+        source_image=work.source_image,
+        character_reference_images=work.reference_images,
+        quantity=work.quantity,
     )
-    if len(generated) != quantity or any(
+    if len(generated) != work.quantity or any(
         not item.content or item.content_type not in FIRST_FRAME_IMAGE_CONTENT_TYPES
         for item in generated
     ):
@@ -512,15 +586,16 @@ def generate_first_frame_candidates(
             "FIRST_FRAME_PROVIDER_RESPONSE_INVALID",
             "The image provider did not return the requested candidates.",
         )
-    require_current_first_frame_inputs(
-        conn,
-        project_id=project_id,
-        source_frame_selection_version_id=str(source_selection["id"]),
-        main_character_version_id=character_inputs.main_character_version_id,
-        character_reference_selection_id=(character_inputs.character_reference_selection_id),
-        character_version_id=character_inputs.character_version_id,
-        require_usable_character=True,
-    )
+    return generated
+
+
+def store_first_frame_generation(
+    work: FirstFrameGenerationWork,
+    *,
+    storage: StorageAdapter,
+    generated: list[GeneratedImage],
+) -> StoredFirstFrameCandidates:
+    """Archive provider output without holding a database transaction."""
 
     created_assets: list[tuple[str, str]] = []
     try:
@@ -528,7 +603,7 @@ def generate_first_frame_candidates(
         for image in generated:
             extension = image_extension(image.content_type)
             asset_id = str(uuid4())
-            storage_key = f"projects/{project_id}/first-frames/{asset_id}.{extension}"
+            storage_key = f"projects/{work.project_id}/first-frames/{asset_id}.{extension}"
             created_assets.append((asset_id, storage_key))
             stored = storage.put_object(storage_key, image.content, content_type=image.content_type)
             candidates.append(
@@ -541,92 +616,145 @@ def generate_first_frame_candidates(
                     "content_type": image.content_type,
                 }
             )
-
-        with conn:
-            conn.execute("BEGIN IMMEDIATE")
-            require_current_first_frame_inputs(
-                conn,
-                project_id=project_id,
-                source_frame_selection_version_id=str(source_selection["id"]),
-                main_character_version_id=character_inputs.main_character_version_id,
-                character_reference_selection_id=(
-                    character_inputs.character_reference_selection_id
-                ),
-                character_version_id=character_inputs.character_version_id,
-                require_usable_character=True,
-            )
-            for candidate in candidates:
-                conn.execute(
-                    """
-                    INSERT INTO assets (
-                        id, project_id, kind, storage_uri, sha256, size_bytes, content_type,
-                        created_by_user_id
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (
-                        candidate["asset_id"],
-                        project_id,
-                        "first_frame",
-                        candidate["storage_uri"],
-                        candidate["sha256"],
-                        candidate["size_bytes"],
-                        candidate["content_type"],
-                        actor.id,
-                    ),
-                )
-            version_payload: dict[str, object] = {
-                "schema_version": FIRST_FRAME_SCHEMA_VERSION,
-                "source_frame_selection_version_id": str(source_selection["id"]),
-                "source_frame_asset_id": source_frame_asset_id,
-                "main_character_version_id": character_inputs.main_character_version_id,
-                "character_snapshot": character_inputs.character_snapshot,
-                "character_reference_asset_ids": character_inputs.reference_asset_ids,
-                "character_reference_asset_roles": character_inputs.reference_asset_roles,
-                "provider": provider.provider_name,
-                "model": model,
-                "prompt": effective_prompt,
-                "candidates": candidates,
-            }
-            if character_inputs.character_reference_selection_id is not None:
-                version_payload["character_reference_selection_id"] = (
-                    character_inputs.character_reference_selection_id
-                )
-                version_payload["character_version_id"] = character_inputs.character_version_id
-            row = insert_version(
-                conn,
-                project_id=project_id,
-                asset_id=source_frame_asset_id,
-                kind=FIRST_FRAME_CANDIDATES_KIND,
-                created_by_user_id=actor.id,
-                payload=version_payload,
-            )
-    except HTTPException:
-        delete_created_first_frames(storage, created_assets, actor_id=actor.id)
-        raise
-    except sqlite3.Error as exc:
-        delete_created_first_frames(storage, created_assets, actor_id=actor.id)
-        raise first_frame_error(
-            500,
-            "FIRST_FRAME_PERSIST_FAILED",
-            "First-frame candidates could not be saved. Generate them again.",
-        ) from exc
+        return StoredFirstFrameCandidates(
+            candidates=candidates,
+            created_assets=created_assets,
+        )
     except (OSError, StorageBackendUnavailable, ValueError) as exc:
-        delete_created_first_frames(storage, created_assets, actor_id=actor.id)
+        delete_created_first_frames(storage, created_assets, actor_id=work.actor.id)
         raise first_frame_error(
             503,
             "FIRST_FRAME_STORAGE_UNAVAILABLE",
             "First-frame storage is temporarily unavailable.",
         ) from exc
 
+
+def complete_first_frame_generation(
+    conn: BusinessConnection,
+    *,
+    work: FirstFrameGenerationWork,
+    provider: ImageProvider,
+    stored: StoredFirstFrameCandidates,
+) -> sqlite3.Row:
+    """Revalidate inputs and atomically publish the already-archived images."""
+
+    require_current_first_frame_inputs(
+        conn,
+        project_id=work.project_id,
+        source_frame_selection_version_id=work.source_frame_selection_version_id,
+        main_character_version_id=work.character_inputs.main_character_version_id,
+        character_reference_selection_id=(work.character_inputs.character_reference_selection_id),
+        character_version_id=work.character_inputs.character_version_id,
+        require_usable_character=True,
+    )
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        for candidate in stored.candidates:
+            conn.execute(
+                """
+                    INSERT INTO assets (
+                        id, project_id, kind, storage_uri, sha256, size_bytes, content_type,
+                        created_by_user_id
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                (
+                    candidate["asset_id"],
+                    work.project_id,
+                    "first_frame",
+                    candidate["storage_uri"],
+                    candidate["sha256"],
+                    candidate["size_bytes"],
+                    candidate["content_type"],
+                    work.actor.id,
+                ),
+            )
+        version_payload: dict[str, object] = {
+            "schema_version": FIRST_FRAME_SCHEMA_VERSION,
+            "source_frame_selection_version_id": work.source_frame_selection_version_id,
+            "source_frame_asset_id": work.source_frame_asset_id,
+            "main_character_version_id": work.character_inputs.main_character_version_id,
+            "character_snapshot": work.character_inputs.character_snapshot,
+            "character_reference_asset_ids": work.character_inputs.reference_asset_ids,
+            "character_reference_asset_roles": work.character_inputs.reference_asset_roles,
+            "provider": provider.provider_name,
+            "model": work.model,
+            "prompt": work.effective_prompt,
+            "candidates": stored.candidates,
+        }
+        if work.character_inputs.character_reference_selection_id is not None:
+            version_payload["character_reference_selection_id"] = (
+                work.character_inputs.character_reference_selection_id
+            )
+            version_payload["character_version_id"] = work.character_inputs.character_version_id
+        row = insert_version(
+            conn,
+            project_id=work.project_id,
+            asset_id=work.source_frame_asset_id,
+            kind=FIRST_FRAME_CANDIDATES_KIND,
+            created_by_user_id=work.actor.id,
+            payload=version_payload,
+        )
+
     write_audit(
         conn,
-        actor=actor,
+        actor=work.actor,
         action="first_frame.generate",
         entity_type="version",
         entity_id=str(row["id"]),
-        metadata={"project_id": project_id, "model": model, "quantity": quantity},
+        metadata={
+            "project_id": work.project_id,
+            "model": work.model,
+            "quantity": work.quantity,
+        },
     )
     return row
+
+
+def generate_first_frame_candidates(
+    conn: BusinessConnection,
+    *,
+    project_id: str,
+    actor: CurrentUser,
+    storage: StorageAdapter,
+    provider: ImageProvider,
+    model: FirstFrameModel,
+    prompt: str | None,
+    quantity: int,
+    character_version_id: str | None = None,
+    character_reference_selection_id: str | None = None,
+) -> sqlite3.Row:
+    """Compatibility wrapper for the internal SQLite lane and unit tests."""
+
+    plan = prepare_first_frame_generation(
+        conn,
+        project_id=project_id,
+        actor=actor,
+        model=model,
+        prompt=prompt,
+        quantity=quantity,
+        character_version_id=character_version_id,
+        character_reference_selection_id=character_reference_selection_id,
+    )
+    work = load_first_frame_generation_work(plan, storage=storage)
+    generated = perform_first_frame_generation(work, provider=provider)
+    stored = store_first_frame_generation(work, storage=storage, generated=generated)
+    try:
+        return complete_first_frame_generation(
+            conn,
+            work=work,
+            provider=provider,
+            stored=stored,
+        )
+    except HTTPException:
+        delete_created_first_frames(storage, stored.created_assets, actor_id=actor.id)
+        raise
+    except sqlite3.Error as exc:
+        delete_created_first_frames(storage, stored.created_assets, actor_id=actor.id)
+        raise first_frame_error(
+            500,
+            "FIRST_FRAME_PERSIST_FAILED",
+            "First-frame candidates could not be saved. Generate them again.",
+        ) from exc
 
 
 def confirm_first_frame(
@@ -1024,7 +1152,15 @@ def read_character_reference_asset(
     return cast(sqlite3.Row, row)
 
 
-def read_asset_image(storage: StorageAdapter, asset: sqlite3.Row) -> ImageInput:
+def asset_snapshot(asset: sqlite3.Row | Mapping[str, object]) -> dict[str, object]:
+    return {
+        "id": asset["id"],
+        "storage_uri": asset["storage_uri"],
+        "content_type": asset["content_type"],
+    }
+
+
+def read_asset_image(storage: StorageAdapter, asset: Mapping[str, object]) -> ImageInput:
     content_type = str(asset["content_type"])
     if content_type not in FIRST_FRAME_IMAGE_CONTENT_TYPES:
         raise first_frame_error(

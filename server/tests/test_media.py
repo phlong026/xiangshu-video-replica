@@ -198,6 +198,157 @@ def test_owner_can_upload_complete_and_query_video_asset(
     assert uploaded_asset["kind"] == "reference_video"
 
 
+def test_upload_intent_reuses_an_owned_completed_video_by_content_hash(
+    client: TestClient,
+    db_path: Path,
+    storage: FakeStorageAdapter,
+) -> None:
+    content = b"same-reference-video"
+    digest = hashlib.sha256(content).hexdigest()
+    first = create_upload_intent(client, size_bytes=len(content))
+    storage.put_object(
+        str(first["storage_key"]),
+        content,
+        content_type="video/mp4",
+    )
+    completed = client.post(
+        f"/api/assets/{first['asset_id']}/complete",
+        headers=auth_headers("employee_1"),
+    )
+    assert completed.status_code == 200
+    assert completed.json()["sha256"] == digest
+
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        conn.execute(
+            "INSERT INTO projects (id, owner_user_id, name) VALUES (?, ?, ?)",
+            ("project_second", "employee_1", "Second Project"),
+        )
+        conn.commit()
+
+    reused = client.post(
+        "/api/assets/upload-intent",
+        headers=auth_headers("employee_1"),
+        json={
+            "project_id": "project_second",
+            "filename": "same.mp4",
+            "content_type": "video/mp4",
+            "size_bytes": len(content),
+            "sha256": digest,
+        },
+    )
+
+    assert reused.status_code == 200
+    body = reused.json()
+    assert body["upload_required"] is False
+    assert body["url"] is None
+    assert body["asset_id"] != first["asset_id"]
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        cloned = conn.execute(
+            "SELECT project_id, storage_uri, sha256, size_bytes, metadata_json "
+            "FROM assets WHERE id = ?",
+            (body["asset_id"],),
+        ).fetchone()
+        original = conn.execute(
+            "SELECT storage_uri, metadata_json FROM assets WHERE id = ?",
+            (first["asset_id"],),
+        ).fetchone()
+    assert cloned is not None
+    assert original is not None
+    assert cloned["project_id"] == "project_second"
+    assert cloned["storage_uri"] == original["storage_uri"]
+    assert cloned["sha256"] == digest
+    assert int(cloned["size_bytes"]) == len(content)
+    assert cloned["metadata_json"] == original["metadata_json"]
+
+
+def test_upload_deduplication_never_reuses_another_users_private_asset(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    digest = "a" * 64
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        conn.execute(
+            """
+            INSERT INTO assets (
+                id, project_id, kind, storage_uri, sha256, size_bytes,
+                content_type, metadata_json, created_by_user_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "other-private-video",
+                "project_other",
+                "reference_video",
+                "fake://private-bucket/private/other.mp4",
+                digest,
+                123,
+                "video/mp4",
+                '{"duration_seconds":8}',
+                "employee_2",
+            ),
+        )
+        conn.commit()
+
+    response = client.post(
+        "/api/assets/upload-intent",
+        headers=auth_headers("employee_1"),
+        json={
+            "project_id": "project_owned",
+            "filename": "same.mp4",
+            "content_type": "video/mp4",
+            "size_bytes": 123,
+            "sha256": digest,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["upload_required"] is True
+    assert response.json()["url"]
+
+
+def test_upload_deduplication_does_not_reuse_a_missing_storage_object(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    digest = "b" * 64
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        conn.execute(
+            """
+            INSERT INTO assets (
+                id, project_id, kind, storage_uri, sha256, size_bytes,
+                content_type, metadata_json, created_by_user_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "missing-owned-video",
+                "project_owned",
+                "reference_video",
+                "fake://private-bucket/missing.mp4",
+                digest,
+                123,
+                "video/mp4",
+                '{"duration_seconds":8}',
+                "employee_1",
+            ),
+        )
+        conn.commit()
+
+    response = client.post(
+        "/api/assets/upload-intent",
+        headers=auth_headers("employee_1"),
+        json={
+            "project_id": "project_owned",
+            "filename": "same.mp4",
+            "content_type": "video/mp4",
+            "size_bytes": 123,
+            "sha256": digest,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["upload_required"] is True
+    assert response.json()["url"]
+
+
 def test_complete_upload_calculates_a_content_hash_when_storage_head_has_none(
     db_path: Path,
 ) -> None:
@@ -629,6 +780,8 @@ def test_default_probe_failure_does_not_mark_upload_complete(
     assert exc_info.value.status_code == 503
     assert isinstance(exc_info.value.detail, dict)
     assert exc_info.value.detail["code"] == "VIDEO_PROBE_UNAVAILABLE"
+    assert exc_info.value.detail["message"] == "视频检测服务暂不可用，请稍后重试。"
+    assert "ffprobe" not in exc_info.value.detail["message"]
     assert row is not None
     assert int(row["size_bytes"]) == 0
     assert str(row["sha256"]) == ""

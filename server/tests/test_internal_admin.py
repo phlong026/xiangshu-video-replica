@@ -235,7 +235,7 @@ def test_control_settings_mask_zpay_secret_and_keep_deployment_read_only(
     assert forbidden_field.status_code == 422
 
 
-def test_control_settings_remain_available_without_gateway_environment(
+def test_control_settings_use_documented_gateway_without_gateway_environment(
     internal_admin_context: tuple[TestClient, Path, dict[str, str], dict[str, str]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -246,9 +246,9 @@ def test_control_settings_remain_available_without_gateway_environment(
 
     assert snapshot.status_code == 200
     assert snapshot.json()["deployment"] == {
-        "gateway_url": "",
-        "notify_url": "",
-        "return_url": "",
+        "gateway_url": "https://zpayz.cn/submit.php",
+        "notify_url": "https://internal.example/api/payments/zpay/notify",
+        "return_url": "https://internal.example/api/payments/zpay/return",
     }
     assert snapshot.json()["providers"]["metaso"]["provider"] == "metaso"
 

@@ -647,12 +647,22 @@ def _export_retention_seconds(retention_seconds: int | None) -> int:
 def count_expired_export_ciphertexts(
     conn: psycopg.Connection, *, now: datetime, retention_seconds: int | None = None
 ) -> int:
-    """How many exports have lapsed their post-expiry retention window."""
+    """Count lapsed exports whose whole batch is no longer usable.
+
+    A retained envelope is the administrator's only reversible source for
+    viewing and copying a code again. It must therefore survive while any
+    code in the batch can still be issued, activated, resumed or revoked.
+    """
     row = conn.execute(
         "SELECT count(*) FROM activation_code_exports "
         "WHERE purged_at IS NULL "
         "AND ciphertext IS NOT NULL "
-        "AND (expires_at::timestamptz + make_interval(secs => %s)) <= %s::timestamptz",
+        "AND (expires_at::timestamptz + make_interval(secs => %s)) <= %s::timestamptz "
+        "AND NOT EXISTS ("
+        "SELECT 1 FROM activation_codes "
+        "WHERE activation_codes.batch_id = activation_code_exports.batch_id "
+        "AND activation_codes.status NOT IN ('REVOKED', 'EXPIRED')"
+        ")",
         (_export_retention_seconds(retention_seconds), _as_utc(now)),
     ).fetchone()
     return int(row[0]) if row is not None else 0
@@ -661,7 +671,7 @@ def count_expired_export_ciphertexts(
 def purge_expired_export_ciphertexts(
     conn: psycopg.Connection, *, now: datetime, retention_seconds: int | None = None
 ) -> int:
-    """Null the payload of every lapsed export; returns the purged count.
+    """Null every lapsed payload after all codes in its batch are terminal.
 
     The 035 CHECK coupling (``purged_at IS NULL OR ciphertext IS NULL
     AND ...``) forces the ciphertext, its digest and the key version to
@@ -676,7 +686,12 @@ def purge_expired_export_ciphertexts(
         "purged_at = %s "
         "WHERE purged_at IS NULL "
         "AND ciphertext IS NOT NULL "
-        "AND (expires_at::timestamptz + make_interval(secs => %s)) <= %s::timestamptz",
+        "AND (expires_at::timestamptz + make_interval(secs => %s)) <= %s::timestamptz "
+        "AND NOT EXISTS ("
+        "SELECT 1 FROM activation_codes "
+        "WHERE activation_codes.batch_id = activation_code_exports.batch_id "
+        "AND activation_codes.status NOT IN ('REVOKED', 'EXPIRED')"
+        ")",
         (
             _as_utc(now).isoformat(),
             _export_retention_seconds(retention_seconds),

@@ -67,8 +67,8 @@ def list_available_project_character_versions(
         JOIN character_personas AS persona ON persona.id = version.persona_id
         JOIN person_identities AS identity ON identity.id = persona.identity_id
         WHERE version.status = 'PUBLISHED'
-          AND (%s IS NULL OR version.id = %s)
-        ORDER BY identity.display_name COLLATE NOCASE, persona.id,
+          AND (%s::text IS NULL OR version.id = %s)
+        ORDER BY LOWER(identity.display_name), persona.id,
                  version.version_number DESC
         """,
         (character_version_id, character_version_id),
@@ -94,7 +94,7 @@ def list_available_project_character_versions(
         WHERE version.status = 'PUBLISHED'
           AND character_asset.review_status = 'APPROVED'
           AND character_asset.is_published_selection = 1
-          AND (%s IS NULL OR version.id = %s)
+          AND (%s::text IS NULL OR version.id = %s)
         """,
         (character_version_id, character_version_id),
     ).fetchall()

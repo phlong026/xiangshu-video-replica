@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -58,6 +59,10 @@ REQUEST_FAILURE_PHASE = "request"
 NETWORK_FAILURE_PHASE = "network"
 HTTP_FAILURE_PHASE = "http"
 RESPONSE_FAILURE_PHASE = "response"
+# Provider timelines are commonly rounded to 1–3 decimal places while ffprobe
+# reports microsecond precision.  A small frame-scale tolerance absorbs that
+# harmless representation drift without accepting materially invalid timelines.
+TIMELINE_ROUNDING_TOLERANCE_SECONDS = 0.05
 
 logger = logging.getLogger(__name__)
 
@@ -360,12 +365,26 @@ def analyze_video(
     try:
         analysis = parse_analysis_response(response.text, duration_seconds=video_duration_seconds)
     except (json.JSONDecodeError, ValidationError, ValueError) as exc:
-        repaired = provider.repair_json(invalid_json=response.text, error=str(exc))
+        logger.warning(
+            "Video analysis response validation failed before repair: %s",
+            _validation_diagnostic(exc),
+        )
+        repaired = provider.repair_json(
+            invalid_json=response.text,
+            error=(
+                f"verified duration_seconds={_canonical_duration_text(video_duration_seconds)}; "
+                f"{exc}"
+            ),
+        )
         try:
             analysis = parse_analysis_response(
                 repaired.text, duration_seconds=video_duration_seconds
             )
         except (json.JSONDecodeError, ValidationError, ValueError) as repair_exc:
+            logger.warning(
+                "Video analysis response validation failed after repair: %s",
+                _validation_diagnostic(repair_exc),
+            )
             raise AnalysisProviderFailed(
                 "Provider returned invalid JSON even after a repair attempt"
             ) from repair_exc
@@ -384,26 +403,88 @@ def parse_analysis_response(text: str, *, duration_seconds: float) -> VideoAnaly
     payload = json.loads(text)
     if not isinstance(payload, dict):
         raise ValueError("analysis response must be a JSON object")
+    _discard_invalid_optional_motion(payload)
+    _normalize_timeline_rounding(payload, duration_seconds=duration_seconds)
     payload["duration_seconds"] = duration_seconds
-    analysis = VideoAnalysis.model_validate(payload)
-    _require_motion_on_every_shot(analysis)
-    return analysis
+    return VideoAnalysis.model_validate(payload)
 
 
-def _require_motion_on_every_shot(analysis: VideoAnalysis) -> None:
-    """新分析必须逐镜头携带结构化运动描述。
+def _normalize_timeline_rounding(
+    payload: dict[str, Any],
+    *,
+    duration_seconds: float,
+) -> None:
+    """Snap harmless provider rounding to the ffprobe-canonical timeline.
 
-    缺失时抛 ValueError 走 repair_json 链路；修复后仍缺则整个分析失败
-    （fail-closed）：运动信息一旦静默丢失，生成的视频就会人物僵立原地。
-    手动保存的镜头卡不走这里，旧数据兼容性不受影响。
+    The prompt and ffprobe can represent the same instant with different
+    decimal precision (for example 12.067 versus 12.066667).  Only boundaries
+    within a small frame-scale window are adjusted; larger overlaps and overruns remain schema
+    errors so genuinely broken analyses still fail closed.
     """
-    missing = [shot.shot_id for shot in analysis.shots if shot.motion is None]
-    if missing:
-        raise ValueError(
-            "every shot must include a motion object with "
-            "subject_motion_state/subject_direction/subject_displacement/"
-            "hand_action/camera_motion/relative_motion; missing on shots: " + ", ".join(missing)
-        )
+    shots = payload.get("shots")
+    if not isinstance(shots, list) or not shots:
+        return
+
+    previous_end = 0.0
+    for index, shot in enumerate(shots):
+        if not isinstance(shot, dict):
+            continue
+        start_time = _finite_number(shot.get("start_time"))
+        if start_time is not None:
+            expected_start = 0.0 if index == 0 else previous_end
+            if abs(start_time - expected_start) <= TIMELINE_ROUNDING_TOLERANCE_SECONDS:
+                shot["start_time"] = expected_start
+        end_time = _finite_number(shot.get("end_time"))
+        if end_time is not None:
+            if index == len(shots) - 1 and (
+                abs(end_time - duration_seconds) <= TIMELINE_ROUNDING_TOLERANCE_SECONDS
+            ):
+                end_time = duration_seconds
+                shot["end_time"] = duration_seconds
+            previous_end = end_time
+
+
+def _finite_number(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+def _canonical_duration_text(duration_seconds: float) -> str:
+    return f"{duration_seconds:.6f}".rstrip("0").rstrip(".")
+
+
+def _validation_diagnostic(exc: Exception) -> str:
+    """Return field/type-only diagnostics without logging provider content."""
+    if isinstance(exc, ValidationError):
+        issues: list[str] = []
+        for item in exc.errors(include_url=False, include_input=False)[:8]:
+            location = ".".join(str(part) for part in item.get("loc", ())) or "root"
+            issues.append(f"{location}:{item.get('type', 'validation_error')}")
+        return "validation:" + ",".join(issues)
+    if isinstance(exc, json.JSONDecodeError):
+        return f"json_decode:line={exc.lineno}:column={exc.colno}"
+    return type(exc).__name__
+
+
+def _discard_invalid_optional_motion(payload: dict[str, Any]) -> None:
+    """Keep b2 responses usable when the provider omits or misshapes b3 motion data.
+
+    The motion extension improves video prompts but is not part of the proven legacy
+    analysis contract.  Invalid motion must therefore not trigger a second paid
+    provider request or discard an otherwise valid analysis response.
+    """
+    shots = payload.get("shots")
+    if not isinstance(shots, list):
+        return
+    for shot in shots:
+        if not isinstance(shot, dict) or "motion" not in shot:
+            continue
+        try:
+            ShotMotion.model_validate(shot["motion"])
+        except ValidationError:
+            shot.pop("motion", None)
 
 
 def is_https_video_url(value: str) -> bool:
@@ -412,6 +493,7 @@ def is_https_video_url(value: str) -> bool:
 
 
 def analysis_instruction(duration_seconds: float) -> str:
+    canonical_duration = _canonical_duration_text(duration_seconds)
     return (
         "分析这条参考短视频，只返回合法 JSON 对象，不要 markdown 代码块。\n"
         "JSON 结构：summary, aspect_ratio, resolution, fps, theme, visual_style, "
@@ -419,7 +501,8 @@ def analysis_instruction(duration_seconds: float) -> str:
         "shots 内每个镜头必须包含 shot_id, start_time, end_time, shot_type, "
         "composition, camera_motion, subject, action, scene, spoken_text, "
         "transition, motion。镜头时间覆盖全片且互不重叠。\n"
-        f"已验证的视频总时长为 {duration_seconds:.3f} 秒，不得虚构其他时长。\n"
+        f"已验证的视频总时长为 {canonical_duration} 秒；最后一个镜头的 end_time "
+        f"必须精确等于 {canonical_duration}。\n"
         "除 shot_id 和枚举值外，所有文本字段一律用中文填写。\n"
         "\n"
         "motion 是结构化运动描述，每个镜头都必须完整填写以下六个字段：\n"

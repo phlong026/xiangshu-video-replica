@@ -102,6 +102,9 @@ class ProjectResponse(BaseModel):
     reference_asset_id: str | None
     reference_upload_status: str
     analysis_status: str
+    analysis_task_id: str | None = None
+    analysis_error_message: str | None = None
+    analysis_retryable: bool = False
 
 
 class AssetResponse(BaseModel):
@@ -156,7 +159,7 @@ def _character_cache_path(cache_name: str) -> Path:
 def _character_cache_object_key(cache_name: str) -> str:
     if CHARACTER_CACHE_NAME.fullmatch(cache_name) is None:
         raise HTTPException(status_code=404, detail={"code": "CHARACTER_CACHE_NOT_FOUND"})
-    return f"character-cache/{cache_name}"
+    return f"projects/character-cache/{cache_name}"
 
 
 def _character_cache_lock(cache_name: str) -> LockType:
@@ -470,8 +473,14 @@ def list_projects(
                             AND versions.kind = 'analysis'
                             AND versions.asset_id = reference_assets.id
                     ) THEN 'READY'
-                    ELSE 'PENDING'
-                END AS analysis_status
+                    WHEN latest_analysis_task.status IN ('PENDING', 'RUNNING')
+                        THEN 'PENDING'
+                    WHEN latest_analysis_task.status = 'FAILED' THEN 'FAILED'
+                    ELSE 'NOT_READY'
+                END AS analysis_status,
+                latest_analysis_task.id AS analysis_task_id,
+                latest_analysis_task.error_message_redacted AS analysis_error_message,
+                COALESCE(latest_analysis_task.retryable, 0) AS analysis_retryable
             FROM projects
             LEFT JOIN assets AS reference_assets ON reference_assets.id = (
                 SELECT assets.id
@@ -481,13 +490,24 @@ def list_projects(
                         assets.kind = 'reference_video'
                         OR (
                             assets.kind = 'video'
-                            AND assets.storage_uri LIKE '%/projects/' || projects.id || '/uploads/%'
+                            AND assets.storage_uri LIKE (
+                                '%%/projects/' || projects.id || '/uploads/%%'
+                            )
                         )
                     )
-                ORDER BY assets.created_at DESC, assets.rowid DESC
+                ORDER BY assets.created_at DESC, assets.id DESC
                 LIMIT 1
             )
-            ORDER BY projects.created_at DESC, projects.rowid DESC
+            LEFT JOIN analysis_tasks AS latest_analysis_task
+                ON latest_analysis_task.id = (
+                    SELECT analysis_tasks.id
+                    FROM analysis_tasks
+                    WHERE analysis_tasks.project_id = projects.id
+                      AND analysis_tasks.asset_id = reference_assets.id
+                    ORDER BY analysis_tasks.created_at DESC, analysis_tasks.id DESC
+                    LIMIT 1
+                )
+            ORDER BY projects.created_at DESC, projects.id DESC
             """
         ).fetchall()
     else:
@@ -516,8 +536,14 @@ def list_projects(
                             AND versions.kind = 'analysis'
                             AND versions.asset_id = reference_assets.id
                     ) THEN 'READY'
-                    ELSE 'PENDING'
-                END AS analysis_status
+                    WHEN latest_analysis_task.status IN ('PENDING', 'RUNNING')
+                        THEN 'PENDING'
+                    WHEN latest_analysis_task.status = 'FAILED' THEN 'FAILED'
+                    ELSE 'NOT_READY'
+                END AS analysis_status,
+                latest_analysis_task.id AS analysis_task_id,
+                latest_analysis_task.error_message_redacted AS analysis_error_message,
+                COALESCE(latest_analysis_task.retryable, 0) AS analysis_retryable
             FROM projects
             LEFT JOIN assets AS reference_assets ON reference_assets.id = (
                 SELECT assets.id
@@ -527,14 +553,25 @@ def list_projects(
                         assets.kind = 'reference_video'
                         OR (
                             assets.kind = 'video'
-                            AND assets.storage_uri LIKE '%/projects/' || projects.id || '/uploads/%'
+                            AND assets.storage_uri LIKE (
+                                '%%/projects/' || projects.id || '/uploads/%%'
+                            )
                         )
                     )
-                ORDER BY assets.created_at DESC, assets.rowid DESC
+                ORDER BY assets.created_at DESC, assets.id DESC
                 LIMIT 1
             )
+            LEFT JOIN analysis_tasks AS latest_analysis_task
+                ON latest_analysis_task.id = (
+                    SELECT analysis_tasks.id
+                    FROM analysis_tasks
+                    WHERE analysis_tasks.project_id = projects.id
+                      AND analysis_tasks.asset_id = reference_assets.id
+                    ORDER BY analysis_tasks.created_at DESC, analysis_tasks.id DESC
+                    LIMIT 1
+                )
             WHERE projects.owner_user_id = %s
-            ORDER BY projects.created_at DESC, projects.rowid DESC
+            ORDER BY projects.created_at DESC, projects.id DESC
             """,
             (actor.id,),
         ).fetchall()
@@ -663,15 +700,22 @@ def delete_project(
     # operator to wait until they settle (succeed, fail, or supersede).
     has_active_tasks = conn.execute(
         """
-        SELECT 1
-        FROM generation_tasks
-        JOIN generation_batches ON generation_batches.id = generation_tasks.batch_id
-        WHERE generation_batches.project_id = %s
-          AND generation_tasks.status IN
-              ('PENDING', 'SUBMITTING', 'QUEUED', 'RUNNING', 'ARCHIVING')
+        SELECT 1 FROM (
+            SELECT generation_batches.project_id
+            FROM generation_tasks
+            JOIN generation_batches ON generation_batches.id = generation_tasks.batch_id
+            WHERE generation_batches.project_id = %s
+              AND generation_tasks.status IN
+                  ('PENDING', 'SUBMITTING', 'QUEUED', 'RUNNING', 'ARCHIVING')
+            UNION ALL
+            SELECT analysis_tasks.project_id
+            FROM analysis_tasks
+            WHERE analysis_tasks.project_id = %s
+              AND analysis_tasks.status IN ('PENDING', 'RUNNING')
+        ) AS active_project_tasks
         LIMIT 1
         """,
-        (project_id,),
+        (project_id, project_id),
     ).fetchone()
     if has_active_tasks:
         raise HTTPException(
@@ -701,7 +745,15 @@ def delete_project(
     # so an unavailable backend (e.g. cloud credentials removed) must not block
     # the delete. Failures are counted and surfaced through the audit log.
     storage_cleanup_failed_count = 0
+    shared_storage_object_count = 0
     for asset in assets:
+        shared_reference = conn.execute(
+            "SELECT 1 FROM assets WHERE storage_uri = %s AND project_id <> %s LIMIT 1",
+            (str(asset["storage_uri"]), project_id),
+        ).fetchone()
+        if shared_reference is not None:
+            shared_storage_object_count += 1
+            continue
         try:
             storage = storage_for_asset(conn, str(asset["storage_uri"]))
             storage.delete_object(
@@ -728,6 +780,7 @@ def delete_project(
             "deleted_asset_count": len(assets),
             "deleted_versions_count": versions_count,
             "storage_cleanup_failed_count": storage_cleanup_failed_count,
+            "shared_storage_object_count": shared_storage_object_count,
         },
     )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -777,8 +830,14 @@ def project_detail_row(
                         AND versions.kind = 'analysis'
                         AND versions.asset_id = reference_assets.id
                 ) THEN 'READY'
-                ELSE 'PENDING'
-            END AS analysis_status
+                WHEN latest_analysis_task.status IN ('PENDING', 'RUNNING')
+                    THEN 'PENDING'
+                WHEN latest_analysis_task.status = 'FAILED' THEN 'FAILED'
+                ELSE 'NOT_READY'
+            END AS analysis_status,
+            latest_analysis_task.id AS analysis_task_id,
+            latest_analysis_task.error_message_redacted AS analysis_error_message,
+            COALESCE(latest_analysis_task.retryable, 0) AS analysis_retryable
         FROM projects
         LEFT JOIN assets AS reference_assets ON reference_assets.id = (
             SELECT assets.id
@@ -788,12 +847,21 @@ def project_detail_row(
                     assets.kind = 'reference_video'
                     OR (
                         assets.kind = 'video'
-                        AND assets.storage_uri LIKE '%/projects/' || projects.id || '/uploads/%'
+                        AND assets.storage_uri LIKE '%%/projects/' || projects.id || '/uploads/%%'
                     )
                 )
-            ORDER BY assets.created_at DESC, assets.rowid DESC
+            ORDER BY assets.created_at DESC, assets.id DESC
             LIMIT 1
         )
+        LEFT JOIN analysis_tasks AS latest_analysis_task
+            ON latest_analysis_task.id = (
+                SELECT analysis_tasks.id
+                FROM analysis_tasks
+                WHERE analysis_tasks.project_id = projects.id
+                  AND analysis_tasks.asset_id = reference_assets.id
+                ORDER BY analysis_tasks.created_at DESC, analysis_tasks.id DESC
+                LIMIT 1
+            )
         WHERE projects.id = %s
         """,
             (project_id,),
@@ -1030,6 +1098,19 @@ def project_response(row: sqlite3.Row) -> ProjectResponse:
     analysis_status = (
         "NOT_READY" if "analysis_status" not in row.keys() else str(row["analysis_status"])
     )
+    analysis_task_id = (
+        None
+        if "analysis_task_id" not in row.keys() or row["analysis_task_id"] is None
+        else str(row["analysis_task_id"])
+    )
+    analysis_error_message = (
+        None
+        if "analysis_error_message" not in row.keys() or row["analysis_error_message"] is None
+        else str(row["analysis_error_message"])
+    )
+    analysis_retryable = (
+        False if "analysis_retryable" not in row.keys() else bool(row["analysis_retryable"])
+    )
     return ProjectResponse(
         id=str(row["id"]),
         owner_user_id=str(row["owner_user_id"]),
@@ -1038,6 +1119,9 @@ def project_response(row: sqlite3.Row) -> ProjectResponse:
         reference_asset_id=reference_asset_id,
         reference_upload_status=reference_upload_status,
         analysis_status=analysis_status,
+        analysis_task_id=analysis_task_id,
+        analysis_error_message=analysis_error_message,
+        analysis_retryable=analysis_retryable,
     )
 
 

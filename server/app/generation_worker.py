@@ -5,9 +5,18 @@ import logging
 import os
 import time
 from pathlib import Path
+from typing import Any
 
 from fastapi import HTTPException
 
+from app.analysis import VideoAnalysisProvider
+from app.analysis_routes import (
+    acquire_analysis_task,
+    complete_analysis_task,
+    fail_analysis_task,
+    perform_analysis_task,
+    prepare_analysis_task,
+)
 from app.character_image_generation import (
     CharacterImageProvider,
     acquire_character_generation_task,
@@ -23,9 +32,35 @@ from app.db_pg import (
     validate_customer_production,
 )
 from app.db_portable import BusinessConnection
-from app.generation import acquire_generation_task_lease, run_next_generation_task
+from app.generation import (
+    H3Provider,
+    H3ProviderFailed,
+    H3ProviderSettingsUnavailable,
+    MetasoH3Provider,
+    SubmissionUncertain,
+    acquire_generation_continuation_lease,
+    acquire_generation_task_lease,
+    finalize_generation_archive,
+    h3_audio_quality,
+    h3_provider_for_task,
+    mark_generation_task_archiving,
+    mark_generation_task_running,
+    mark_task_first_frame_url_sign_failed,
+    mark_task_provider_failed,
+    mark_task_provider_settings_unavailable,
+    mark_task_submission_uncertain,
+    prepare_generation_submission,
+    release_generation_archive_retry,
+    reschedule_generation_poll,
+    run_next_generation_task,
+    store_generation_result,
+)
 from app.media_routes import get_media_storage
-from app.storage import StorageAdapter
+from app.storage import (
+    StorageAdapter,
+    StorageBackendUnavailable,
+    StoragePermissionError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +73,7 @@ def run_worker_once(
     generation_storage: StorageAdapter | None = None,
     first_frame_storage: StorageAdapter | None = None,
     character_provider: CharacterImageProvider | None = None,
+    analysis_provider: VideoAnalysisProvider | None = None,
     max_tasks: int | None = None,
 ) -> int:
     """Process all currently eligible tasks, then return so SQLite connections stay short-lived."""
@@ -73,9 +109,300 @@ def run_worker_once(
             processed_round = True
             if max_tasks is not None and processed >= max_tasks:
                 return processed
+        analysis_lease = acquire_analysis_task(conn, worker_id=worker_id)
+        if analysis_lease is not None:
+            try:
+                analysis_work = prepare_analysis_task(
+                    conn,
+                    lease=analysis_lease,
+                    storage=storage,
+                    provider=analysis_provider,
+                )
+                analysis_result = perform_analysis_task(analysis_work)
+                complete_analysis_task(conn, work=analysis_work, result=analysis_result)
+            except Exception as exc:
+                fail_analysis_task(conn, lease=analysis_lease, cause=exc)
+            processed += 1
+            processed_round = True
+            if max_tasks is not None and processed >= max_tasks:
+                return processed
         if not processed_round:
             break
     return processed
+
+
+def _run_pg_generation_step(
+    *,
+    lease: dict[str, Any],
+    storage: StorageAdapter,
+    first_frame_storage: StorageAdapter,
+    provider_override: H3Provider | None = None,
+) -> None:
+    """Run exactly one recoverable generation state transition.
+
+    Every database mutation is fenced by its own short ``pg_transaction``.
+    Provider POST/query/download and object storage calls deliberately happen
+    between those transactions, so a slow vendor can never exhaust the API
+    connection pool or make the desktop appear offline.
+    """
+
+    task_id = str(lease["id"])
+    batch_id = str(lease["batch_id"])
+    status = str(lease["status"])
+
+    # Legacy archive-retry rows are claimed as SUBMITTING by the shared queue
+    # acquisition SQL.  They already have a paid result URL, so move directly
+    # to ARCHIVING and never issue another create call.
+    if (
+        status == "SUBMITTING"
+        and lease.get("archive_status") == "ARCHIVE_FAILED"
+        and lease.get("provider_result_url")
+    ):
+        try:
+            with pg_transaction() as raw_conn:
+                conn = BusinessConnection.postgres(raw_conn)
+                provider = provider_override or h3_provider_for_task(conn, str(lease["provider"]))
+                mark_generation_task_archiving(
+                    conn,
+                    lease=lease,
+                    result_url=str(lease["provider_result_url"]),
+                )
+        except H3ProviderSettingsUnavailable:
+            with pg_transaction() as raw_conn:
+                release_generation_archive_retry(BusinessConnection.postgres(raw_conn), lease=lease)
+            return
+        status = "ARCHIVING"
+    elif status == "SUBMITTING":
+        try:
+            with pg_transaction() as raw_conn:
+                conn = BusinessConnection.postgres(raw_conn)
+                work = prepare_generation_submission(
+                    conn,
+                    lease=lease,
+                    first_frame_storage=first_frame_storage,
+                    provider=provider_override,
+                )
+        except H3ProviderSettingsUnavailable:
+            with pg_transaction() as raw_conn:
+                mark_task_provider_settings_unavailable(
+                    BusinessConnection.postgres(raw_conn),
+                    task_id=task_id,
+                    batch_id=batch_id,
+                )
+            return
+        except (StorageBackendUnavailable, StoragePermissionError, ValueError):
+            with pg_transaction() as raw_conn:
+                mark_task_first_frame_url_sign_failed(
+                    BusinessConnection.postgres(raw_conn),
+                    task_id=task_id,
+                    batch_id=batch_id,
+                )
+            return
+
+        if isinstance(work.provider, MetasoH3Provider):
+            created_task_ids: list[str] = []
+
+            def persist_created_task(provider_task_id: str) -> None:
+                created_task_ids.append(provider_task_id)
+                with pg_transaction() as raw_conn:
+                    mark_generation_task_running(
+                        BusinessConnection.postgres(raw_conn),
+                        lease=lease,
+                        provider_task_id=provider_task_id,
+                        provider_request=work.provider_request,
+                        request_hash=work.request_hash,
+                    )
+
+            work.provider.task_created_observer = persist_created_task
+            try:
+                work.provider.submit_image_to_video(work.provider_request)
+            except SubmissionUncertain as exc:
+                with pg_transaction() as raw_conn:
+                    mark_task_submission_uncertain(
+                        BusinessConnection.postgres(raw_conn),
+                        task_id=task_id,
+                        message=str(exc),
+                        provider_task_id=created_task_ids[-1] if created_task_ids else None,
+                    )
+            except H3ProviderFailed as exc:
+                with pg_transaction() as raw_conn:
+                    conn = BusinessConnection.postgres(raw_conn)
+                    if exc.provider_task_id is not None and not exc.terminal:
+                        mark_task_submission_uncertain(
+                            conn,
+                            task_id=task_id,
+                            message="Provider submission needs reconciliation.",
+                            provider_task_id=exc.provider_task_id,
+                        )
+                    else:
+                        mark_task_provider_failed(
+                            conn,
+                            task_id=task_id,
+                            batch_id=batch_id,
+                            provider_task_id=exc.provider_task_id,
+                        )
+            except Exception:
+                # If the provider id was observed but its persistence callback
+                # failed, quarantine with that id.  A later reconciliation may
+                # recover it, while an automatic paid resubmit is forbidden.
+                if created_task_ids:
+                    with pg_transaction() as raw_conn:
+                        mark_task_submission_uncertain(
+                            BusinessConnection.postgres(raw_conn),
+                            task_id=task_id,
+                            message="Provider task was created but persistence failed.",
+                            provider_task_id=created_task_ids[-1],
+                        )
+                    return
+                raise
+            return
+
+        # Fake/test providers remain synchronous, but all provider and storage
+        # I/O is still outside PostgreSQL transactions.
+        try:
+            result = work.provider.create_image_to_video(work.provider_request)
+        except SubmissionUncertain as exc:
+            with pg_transaction() as raw_conn:
+                mark_task_submission_uncertain(
+                    BusinessConnection.postgres(raw_conn),
+                    task_id=task_id,
+                    message=str(exc),
+                )
+            return
+        except H3ProviderFailed as exc:
+            with pg_transaction() as raw_conn:
+                mark_task_provider_failed(
+                    BusinessConnection.postgres(raw_conn),
+                    task_id=task_id,
+                    batch_id=batch_id,
+                    provider_task_id=exc.provider_task_id,
+                )
+            return
+        with pg_transaction() as raw_conn:
+            conn = BusinessConnection.postgres(raw_conn)
+            mark_generation_task_running(
+                conn,
+                lease=lease,
+                provider_task_id=result.provider_task_id,
+                provider_request=work.provider_request,
+                request_hash=work.request_hash,
+            )
+            mark_generation_task_archiving(
+                conn,
+                lease=lease,
+                result_url=result.result_url,
+            )
+        try:
+            stored = store_generation_result(
+                storage,
+                task_id=task_id,
+                content=result.result_content,
+            )
+        except (StorageBackendUnavailable, StoragePermissionError, ValueError):
+            with pg_transaction() as raw_conn:
+                release_generation_archive_retry(BusinessConnection.postgres(raw_conn), lease=lease)
+            return
+        try:
+            with pg_transaction() as raw_conn:
+                finalize_generation_archive(
+                    BusinessConnection.postgres(raw_conn),
+                    lease=lease,
+                    stored=stored,
+                    audio_quality_status=result.audio_quality_status,
+                    quality_issue_codes=result.quality_issue_codes,
+                )
+        except Exception:
+            storage.delete_object(stored.key, actor_id=None)
+            raise
+        return
+
+    if status == "RUNNING":
+        provider_task_id = str(lease["provider_task_id"])
+        try:
+            with pg_transaction() as raw_conn:
+                conn = BusinessConnection.postgres(raw_conn)
+                provider = provider_override or h3_provider_for_task(conn, str(lease["provider"]))
+        except H3ProviderSettingsUnavailable:
+            with pg_transaction() as raw_conn:
+                reschedule_generation_poll(
+                    BusinessConnection.postgres(raw_conn),
+                    lease=lease,
+                    delay_seconds=60,
+                )
+            return
+        try:
+            query = provider.query_image_to_video(provider_task_id)
+        except H3ProviderFailed as exc:
+            with pg_transaction() as raw_conn:
+                conn = BusinessConnection.postgres(raw_conn)
+                if exc.terminal:
+                    mark_task_provider_failed(
+                        conn,
+                        task_id=task_id,
+                        batch_id=batch_id,
+                        provider_task_id=provider_task_id,
+                    )
+                else:
+                    reschedule_generation_poll(conn, lease=lease, delay_seconds=15)
+            return
+        if query.status == "RUNNING":
+            with pg_transaction() as raw_conn:
+                reschedule_generation_poll(BusinessConnection.postgres(raw_conn), lease=lease)
+            return
+        if query.status in {"FAILED", "CANCELLED"}:
+            with pg_transaction() as raw_conn:
+                mark_task_provider_failed(
+                    BusinessConnection.postgres(raw_conn),
+                    task_id=task_id,
+                    batch_id=batch_id,
+                    provider_task_id=provider_task_id,
+                )
+            return
+        if query.result_url is None:
+            with pg_transaction() as raw_conn:
+                reschedule_generation_poll(
+                    BusinessConnection.postgres(raw_conn),
+                    lease=lease,
+                    delay_seconds=15,
+                )
+            return
+        with pg_transaction() as raw_conn:
+            mark_generation_task_archiving(
+                BusinessConnection.postgres(raw_conn),
+                lease=lease,
+                result_url=query.result_url,
+            )
+        return
+
+    if status == "ARCHIVING":
+        try:
+            with pg_transaction() as raw_conn:
+                conn = BusinessConnection.postgres(raw_conn)
+                provider = provider_override or h3_provider_for_task(conn, str(lease["provider"]))
+        except H3ProviderSettingsUnavailable:
+            with pg_transaction() as raw_conn:
+                release_generation_archive_retry(BusinessConnection.postgres(raw_conn), lease=lease)
+            return
+        try:
+            content = provider.download_result(str(lease["provider_result_url"]))
+            audio_quality_status, quality_issue_codes = h3_audio_quality(content)
+            stored = store_generation_result(storage, task_id=task_id, content=content)
+        except (H3ProviderFailed, StorageBackendUnavailable, StoragePermissionError, ValueError):
+            with pg_transaction() as raw_conn:
+                release_generation_archive_retry(BusinessConnection.postgres(raw_conn), lease=lease)
+            return
+        try:
+            with pg_transaction() as raw_conn:
+                finalize_generation_archive(
+                    BusinessConnection.postgres(raw_conn),
+                    lease=lease,
+                    stored=stored,
+                    audio_quality_status=audio_quality_status,
+                    quality_issue_codes=quality_issue_codes,
+                )
+        except Exception:
+            storage.delete_object(stored.key, actor_id=None)
+            raise
 
 
 def run_pg_worker_once(
@@ -85,29 +412,17 @@ def run_pg_worker_once(
     generation_storage: StorageAdapter | None = None,
     first_frame_storage: StorageAdapter | None = None,
     character_provider: CharacterImageProvider | None = None,
+    analysis_provider: VideoAnalysisProvider | None = None,
+    generation_provider: H3Provider | None = None,
     max_tasks: int | None = None,
 ) -> int:
     """Process all currently eligible tasks on the PostgreSQL lane.
 
-    Two-phase per task (M5 review P1-1 — the earlier single fenced
-    transaction rolling the lease, the paid provider call, the result write
-    and the release into one commit could lose the whole round on a crash
-    mid-poll: the task fell back to PENDING and the next worker re-sent the
-    paid POST; it also blinded the global concurrency gate until the round
-    ended):
-
-    1. Claim — a short fenced transaction: ``acquire_generation_task_lease``
-       commits the SUBMITTING transition, the per-user slot increment and the
-       global concurrency count immediately. A crash after this point leaves
-       the task SUBMITTING; the expiry sweeper moves it to
-       SUBMISSION_UNCERTAIN (a manual reconciliation gate), so a provider
-       call is never silently double-fired.
-    2. Work — a second fenced transaction: the provider poll, the terminal
-       write and the slot release. The claim's durability makes this a
-       crash-and-recover boundary, not a retry.
-
-    This mirrors the SQLite lane's per-block commit shape and the T27 drain
-    worker's two-transaction shape.
+    PostgreSQL generation is a durable multi-step state machine.  Claim and
+    state writes use short fenced transactions; paid submit, one status poll,
+    result download and archive each run with no database transaction open.
+    Existing RUNNING/ARCHIVING work is always resumed before a new task, so a
+    worker crash cannot turn a known provider task into a second paid POST.
     """
     if max_tasks is not None and max_tasks < 1:
         raise ValueError("max_tasks must be at least 1")
@@ -116,25 +431,20 @@ def run_pg_worker_once(
         processed_round = False
         with pg_transaction() as raw_conn:
             conn = BusinessConnection.postgres(raw_conn)
-            lease = acquire_generation_task_lease(conn, worker_id=worker_id)
+            lease = acquire_generation_continuation_lease(conn, worker_id=worker_id)
+            if lease is None:
+                lease = acquire_generation_task_lease(conn, worker_id=worker_id)
         if lease is not None:
-            with pg_transaction() as raw_conn:
-                conn = BusinessConnection.postgres(raw_conn)
-                if (
-                    run_next_generation_task(
-                        conn,
-                        worker_id=worker_id,
-                        provider=None,
-                        storage=generation_storage or storage,
-                        first_frame_storage=first_frame_storage or storage,
-                        lease=lease,
-                    )
-                    is not None
-                ):
-                    processed += 1
-                    processed_round = True
-                    if max_tasks is not None and processed >= max_tasks:
-                        return processed
+            _run_pg_generation_step(
+                lease=lease,
+                storage=generation_storage or storage,
+                first_frame_storage=first_frame_storage or storage,
+                provider_override=generation_provider,
+            )
+            processed += 1
+            processed_round = True
+            if max_tasks is not None and processed >= max_tasks:
+                return processed
         with pg_transaction() as raw_conn:
             conn = BusinessConnection.postgres(raw_conn)
             char_lease = acquire_character_generation_task(conn, worker_id=worker_id)
@@ -155,6 +465,38 @@ def run_pg_worker_once(
                     processed_round = True
                     if max_tasks is not None and processed >= max_tasks:
                         return processed
+        with pg_transaction() as raw_conn:
+            conn = BusinessConnection.postgres(raw_conn)
+            analysis_lease = acquire_analysis_task(conn, worker_id=worker_id)
+        if analysis_lease is not None:
+            try:
+                # Preparation only reads settings/asset state and creates the
+                # short-lived signed URL.  The paid provider call below runs
+                # after this transaction has committed.
+                with pg_transaction() as raw_conn:
+                    conn = BusinessConnection.postgres(raw_conn)
+                    analysis_work = prepare_analysis_task(
+                        conn,
+                        lease=analysis_lease,
+                        storage=storage,
+                        provider=analysis_provider,
+                    )
+                analysis_result = perform_analysis_task(analysis_work)
+                with pg_transaction() as raw_conn:
+                    conn = BusinessConnection.postgres(raw_conn)
+                    complete_analysis_task(
+                        conn,
+                        work=analysis_work,
+                        result=analysis_result,
+                    )
+            except Exception as exc:
+                with pg_transaction() as raw_conn:
+                    conn = BusinessConnection.postgres(raw_conn)
+                    fail_analysis_task(conn, lease=analysis_lease, cause=exc)
+            processed += 1
+            processed_round = True
+            if max_tasks is not None and processed >= max_tasks:
+                return processed
         if not processed_round:
             break
     return processed

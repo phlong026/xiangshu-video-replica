@@ -4,6 +4,7 @@ import json
 import sqlite3
 import threading
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 
@@ -23,13 +24,19 @@ from app.analysis import (
     FakeGemini,
     ProviderResponse,
     UrllibApilioChatTransport,
+    analysis_instruction,
     analyze_video,
     parse_analysis_response,
 )
-from app.analysis_routes import get_video_analysis_provider, signed_video_url_for_provider
+from app.analysis_routes import (
+    acquire_analysis_task,
+    get_video_analysis_provider,
+    signed_video_url_for_provider,
+)
 from app.auth import get_database
 from app.db import connect_database, initialize_database
 from app.db_portable import BusinessConnection
+from app.generation_worker import run_worker_once
 from app.main import app
 from app.settings import SETTINGS_KEY_ENV, SettingsRepository
 from app.storage import FakeStorageAdapter
@@ -208,8 +215,8 @@ def test_fake_gemini_analysis_repairs_invalid_json_once() -> None:
     assert "video_uri" not in result.provider_response_ref["raw"]
 
 
-def test_analysis_rejects_shots_without_motion_and_repairs_once() -> None:
-    """缺 motion 的拆解结果必须触发 repair；修复后仍缺则整体失败。"""
+def test_analysis_accepts_legacy_shots_without_motion_without_paid_repair() -> None:
+    """旧版 b2 结果没有 motion，也必须直接完成，不能触发第二次供应商调用。"""
     payload_without_motion = valid_analysis_payload()
     for shot in payload_without_motion["shots"]:
         del shot["motion"]
@@ -224,19 +231,100 @@ def test_analysis_rejects_shots_without_motion_and_repairs_once() -> None:
         provider=provider,
     )
 
-    assert provider.repair_calls == 1
-    assert all(shot.motion is not None for shot in result.analysis.shots)
+    assert provider.repair_calls == 0
+    assert all(shot.motion is None for shot in result.analysis.shots)
 
-    provider_still_missing = FakeGemini(
-        analysis_json=json.dumps(payload_without_motion),
-        repair_json=json.dumps(payload_without_motion),
+
+def test_analysis_ignores_only_invalid_optional_motion_without_paid_repair() -> None:
+    """供应商把可选 motion 返回成旧格式时，保留主体拆解并保留其他有效 motion。"""
+    payload = valid_analysis_payload()
+    payload["shots"][0]["motion"] = {
+        "subject_motion_state": "行走",
+        "camera_motion": "跟拍",
+    }
+    expected_valid_motion = payload["shots"][1]["motion"]
+    provider = FakeGemini(
+        analysis_json=json.dumps(payload),
+        repair_json='{"must_not_be_called": true}',
     )
-    with pytest.raises(AnalysisProviderFailed, match="even after a repair attempt"):
-        analyze_video(
-            video_uri="local://owned.mp4",
-            video_duration_seconds=10,
-            provider=provider_still_missing,
-        )
+
+    result = analyze_video(
+        video_uri="local://owned.mp4",
+        video_duration_seconds=10,
+        provider=provider,
+    )
+
+    assert provider.repair_calls == 0
+    assert result.analysis.shots[0].motion is None
+    assert result.analysis.shots[1].motion is not None
+    assert result.analysis.shots[1].motion.model_dump() == expected_valid_motion
+
+
+def test_analysis_preserves_precise_duration_and_snaps_last_shot_rounding() -> None:
+    """供应商按提示词舍入时长时，不应为亚帧级误差再次付费或丢弃结果。"""
+    measured_duration = 12.066667
+    rounded_duration = 12.067
+    payload = valid_analysis_payload()
+    shots = payload["shots"]
+    assert isinstance(shots, list)
+    shots[0]["end_time"] = 6.0335
+    shots[1]["start_time"] = 6.0335
+    shots[1]["end_time"] = rounded_duration
+    provider = FakeGemini(
+        analysis_json=json.dumps(payload),
+        repair_json='{"must_not_be_called": true}',
+    )
+
+    result = analyze_video(
+        video_uri="local://owned.mp4",
+        video_duration_seconds=measured_duration,
+        provider=provider,
+    )
+
+    assert provider.repair_calls == 0
+    assert result.analysis.duration_seconds == measured_duration
+    assert result.analysis.shots[-1].end_time == measured_duration
+    assert f"{measured_duration:.6f}" in analysis_instruction(measured_duration)
+
+
+def test_analysis_still_rejects_a_material_timeline_overrun() -> None:
+    payload = valid_analysis_payload()
+    shots = payload["shots"]
+    assert isinstance(shots, list)
+    shots[-1]["end_time"] = 12.2
+
+    with pytest.raises(ValidationError, match="shot end_time must not exceed"):
+        parse_analysis_response(json.dumps(payload), duration_seconds=12.066667)
+
+
+def test_analysis_repair_receives_precise_duration_and_logs_no_provider_content(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class RecordingRepairProvider(FakeGemini):
+        repair_error: str | None = None
+
+        def repair_json(self, *, invalid_json: str, error: str) -> ProviderResponse:
+            self.repair_error = error
+            return super().repair_json(invalid_json=invalid_json, error=error)
+
+    invalid_payload = valid_analysis_payload()
+    invalid_payload["unexpected"] = "private-customer-content"
+    provider = RecordingRepairProvider(
+        analysis_json=json.dumps(invalid_payload),
+        repair_json=json.dumps(valid_analysis_payload()),
+    )
+
+    result = analyze_video(
+        video_uri="local://owned.mp4",
+        video_duration_seconds=12.066667,
+        provider=provider,
+    )
+
+    assert result.analysis.duration_seconds == 12.066667
+    assert provider.repair_error is not None
+    assert "verified duration_seconds=12.066667" in provider.repair_error
+    assert "private-customer-content" not in caplog.text
+    assert "validation:" in caplog.text
 
 
 class RecordedApilioTransport:
@@ -851,3 +939,222 @@ def test_analysis_maps_upstream_rate_limiting_to_a_retryable_error(
     assert detail["code"] == "ANALYSIS_PROVIDER_RATE_LIMITED"
     assert detail["retryable"] is True
     assert detail["message"].strip()
+
+
+def test_analysis_task_is_queued_without_calling_the_provider_and_worker_completes_it(
+    client: TestClient,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def provider_must_not_run_in_api(_conn: object) -> FakeGemini:
+        raise AssertionError("the API request must only enqueue analysis work")
+
+    monkeypatch.setattr(
+        "app.analysis_routes.get_video_analysis_provider",
+        provider_must_not_run_in_api,
+    )
+    queued = client.post(
+        "/api/projects/project_owned/analysis-tasks",
+        json={"asset_id": "asset_owned", "duration_seconds": 10},
+        headers=auth_headers("employee_1"),
+    )
+
+    assert queued.status_code == 202
+    task = queued.json()
+    assert task["status"] == "PENDING"
+    assert task["result_version_id"] is None
+    duplicate = client.post(
+        "/api/projects/project_owned/analysis-tasks",
+        json={"asset_id": "asset_owned", "duration_seconds": 10},
+        headers=auth_headers("employee_1"),
+    )
+    assert duplicate.status_code == 202
+    assert duplicate.json()["id"] == task["id"]
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM versions WHERE project_id = ? AND kind = 'analysis'",
+                ("project_owned",),
+            ).fetchone()[0]
+            == 0
+        )
+
+        class TransactionProbeProvider(FakeGemini):
+            def analyze(self, *, video_uri: str, duration_seconds: float) -> ProviderResponse:
+                assert conn.in_transaction is False
+                return super().analyze(
+                    video_uri=video_uri,
+                    duration_seconds=duration_seconds,
+                )
+
+        processed = run_worker_once(
+            conn,
+            worker_id="analysis-worker",
+            storage=FakeStorageAdapter(provider="fake", bucket="analysis"),
+            analysis_provider=TransactionProbeProvider(),
+            max_tasks=1,
+        )
+
+    assert processed == 1
+    completed = client.get(
+        f"/api/analysis-tasks/{task['id']}",
+        headers=auth_headers("employee_1"),
+    )
+    assert completed.status_code == 200
+    assert completed.json()["status"] == "SUCCEEDED"
+    assert completed.json()["result_version_id"]
+    latest = client.get(
+        "/api/projects/project_owned/analysis/latest",
+        headers=auth_headers("employee_1"),
+    )
+    assert latest.status_code == 200
+    assert latest.json()["payload"]["analysis"]["summary"].startswith("FakeGemini")
+
+
+def test_analysis_task_lease_covers_two_provider_attempts(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    queued = client.post(
+        "/api/projects/project_owned/analysis-tasks",
+        json={"asset_id": "asset_owned", "duration_seconds": 10},
+        headers=auth_headers("employee_1"),
+    )
+    assert queued.status_code == 202
+
+    acquired_after = datetime.now(UTC)
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        lease = acquire_analysis_task(conn, worker_id="analysis-worker-lease")
+        assert lease is not None
+        row = conn.execute(
+            "SELECT locked_until FROM analysis_tasks WHERE id = ?",
+            (lease.id,),
+        ).fetchone()
+
+    assert row is not None
+    locked_until = datetime.strptime(str(row["locked_until"]), "%Y-%m-%d %H:%M:%S").replace(
+        tzinfo=UTC
+    )
+    assert locked_until >= acquired_after + timedelta(minutes=9)
+
+
+def test_failed_analysis_task_can_be_enqueued_again_and_succeed(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    queued = client.post(
+        "/api/projects/project_owned/analysis-tasks",
+        json={"asset_id": "asset_owned", "duration_seconds": 10},
+        headers=auth_headers("employee_1"),
+    )
+    assert queued.status_code == 202
+
+    failure = AnalysisProviderFailed(
+        "provider returned invalid output",
+        failure_phase=RESPONSE_FAILURE_PHASE,
+        retryable=False,
+    )
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        assert (
+            run_worker_once(
+                conn,
+                worker_id="analysis-worker-failed",
+                storage=FakeStorageAdapter(provider="fake", bucket="analysis"),
+                analysis_provider=FailingProvider(failure),
+                max_tasks=1,
+            )
+            == 1
+        )
+
+    failed = client.get(
+        f"/api/analysis-tasks/{queued.json()['id']}",
+        headers=auth_headers("employee_1"),
+    )
+    assert failed.status_code == 200
+    assert failed.json()["status"] == "FAILED"
+    assert failed.json()["error_code"] == "ANALYSIS_PROVIDER_FAILED"
+    assert "provider returned" not in failed.text
+
+    retried = client.post(
+        "/api/projects/project_owned/analysis-tasks",
+        json={"asset_id": "asset_owned", "duration_seconds": 10},
+        headers=auth_headers("employee_1"),
+    )
+    assert retried.status_code == 202
+    assert retried.json()["id"] != queued.json()["id"]
+    assert retried.json()["status"] == "PENDING"
+
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        assert (
+            run_worker_once(
+                conn,
+                worker_id="analysis-worker-retry",
+                storage=FakeStorageAdapter(provider="fake", bucket="analysis"),
+                analysis_provider=FakeGemini(),
+                max_tasks=1,
+            )
+            == 1
+        )
+
+    completed = client.get(
+        f"/api/analysis-tasks/{retried.json()['id']}",
+        headers=auth_headers("employee_1"),
+    )
+    assert completed.status_code == 200
+    assert completed.json()["status"] == "SUCCEEDED"
+
+
+def test_async_analysis_worker_accepts_a_rounded_provider_timeline(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    measured_duration = 12.066667
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        conn.execute(
+            "UPDATE assets SET metadata_json = %s WHERE id = %s",
+            (json.dumps({"duration_seconds": measured_duration}), "asset_owned"),
+        )
+        conn.commit()
+
+    queued = client.post(
+        "/api/projects/project_owned/analysis-tasks",
+        json={"asset_id": "asset_owned", "duration_seconds": measured_duration},
+        headers=auth_headers("employee_1"),
+    )
+    assert queued.status_code == 202
+
+    rounded_payload = valid_analysis_payload()
+    shots = rounded_payload["shots"]
+    assert isinstance(shots, list)
+    shots[0]["end_time"] = 6.0335
+    shots[1]["start_time"] = 6.0335
+    shots[1]["end_time"] = 12.067
+    provider = FakeGemini(
+        analysis_json=json.dumps(rounded_payload),
+        repair_json='{"must_not_be_called": true}',
+    )
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        processed = run_worker_once(
+            conn,
+            worker_id="analysis-worker-rounded-duration",
+            storage=FakeStorageAdapter(provider="fake", bucket="analysis"),
+            analysis_provider=provider,
+            max_tasks=1,
+        )
+
+    assert processed == 1
+    assert provider.repair_calls == 0
+    completed = client.get(
+        f"/api/analysis-tasks/{queued.json()['id']}",
+        headers=auth_headers("employee_1"),
+    )
+    assert completed.status_code == 200
+    assert completed.json()["status"] == "SUCCEEDED"
+    latest = client.get(
+        "/api/projects/project_owned/analysis/latest",
+        headers=auth_headers("employee_1"),
+    )
+    assert latest.status_code == 200
+    analysis = latest.json()["payload"]["analysis"]
+    assert analysis["duration_seconds"] == measured_duration
+    assert analysis["shots"][-1]["end_time"] == measured_duration

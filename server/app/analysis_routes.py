@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import timedelta
-from typing import Any
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from typing import Any, cast
+from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.analysis import (
@@ -14,6 +16,7 @@ from app.analysis import (
     NETWORK_FAILURE_PHASE,
     SHOT_CARD_KIND,
     AnalysisProviderFailed,
+    AnalysisResult,
     ApilioGemini,
     FakeGemini,
     VideoAnalysisProvider,
@@ -25,7 +28,7 @@ from app.analysis import (
     get_version,
     validate_shot_cards,
 )
-from app.auth import AuthenticatedUser, Database
+from app.auth import AuthenticatedUser, CurrentUser, Database, Role
 from app.customer_fence import BusinessDbDep
 from app.db_portable import BusinessConnection
 from app.media import (
@@ -53,6 +56,7 @@ router = APIRouter(prefix="/api", tags=["analysis"])
 # Must track the upload precheck: a video that passed upload at 15.05s has to stay
 # analysable instead of being rejected as an invalid request.
 MAX_ANALYSIS_DURATION_SECONDS = MAX_DURATION_SECONDS + DURATION_ROUNDING_TOLERANCE_SECONDS
+ANALYSIS_TASK_LEASE_MINUTES = 10
 
 
 def get_video_analysis_provider(conn: Database) -> VideoAnalysisProvider:
@@ -139,6 +143,43 @@ class VersionResponse(BaseModel):
     payload: dict[str, Any]
     created_by_user_id: str | None
     created_at: str
+
+
+class AnalysisTaskResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    project_id: str
+    asset_id: str
+    status: str
+    attempt: int
+    result_version_id: str | None
+    error_code: str | None
+    error_message: str | None
+    failure_phase: str | None
+    retryable: bool
+    created_at: str
+    updated_at: str
+    started_at: str | None
+    completed_at: str | None
+
+
+@dataclass(frozen=True)
+class AnalysisTaskLease:
+    id: str
+    project_id: str
+    asset_id: str
+    created_by_user_id: str
+    duration_seconds: float
+    worker_id: str
+
+
+@dataclass(frozen=True)
+class AnalysisTaskWork:
+    lease: AnalysisTaskLease
+    provider: VideoAnalysisProvider
+    video_uri: str
+    asset_uri: str
 
 
 @router.post("/projects/{project_id}/analysis", response_model=VersionResponse)
@@ -280,6 +321,112 @@ def create_project_analysis(
         return version_response(row)
 
 
+@router.post(
+    "/projects/{project_id}/analysis-tasks",
+    response_model=AnalysisTaskResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def create_project_analysis_task(
+    project_id: str,
+    request: CreateAnalysisRequest,
+    db: BusinessDbDep,
+) -> AnalysisTaskResponse:
+    """Validate quickly and persist work for the generation worker.
+
+    No provider or storage-network call is allowed in this request.  Customer
+    session fencing therefore protects only the enqueue commit and can never
+    block the heartbeat for the lifetime of a model request.
+    """
+    with db.write() as (conn, actor):
+        asset, measured_duration = validate_analysis_enqueue(
+            conn,
+            actor=actor,
+            project_id=project_id,
+            request=request,
+        )
+        existing_task = conn.execute(
+            """
+            SELECT * FROM analysis_tasks
+            WHERE project_id = %s AND asset_id = %s
+              AND status IN ('PENDING', 'RUNNING')
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """,
+            (project_id, request.asset_id),
+        ).fetchone()
+        if existing_task is not None:
+            return analysis_task_response(existing_task)
+
+        task_id = str(uuid4())
+        conn.execute(
+            """
+            INSERT INTO analysis_tasks (
+                id, project_id, asset_id, created_by_user_id,
+                duration_seconds, status
+            ) VALUES (%s, %s, %s, %s, %s, 'PENDING')
+            ON CONFLICT DO NOTHING
+            """,
+            (task_id, project_id, request.asset_id, actor.id, measured_duration),
+        )
+        inserted_task = conn.execute(
+            "SELECT * FROM analysis_tasks WHERE id = %s",
+            (task_id,),
+        ).fetchone()
+        if inserted_task is None:
+            # A concurrent request won the partial unique index. Return that
+            # durable task instead of surfacing a transient 500 to the client.
+            concurrent_task = conn.execute(
+                """
+                SELECT * FROM analysis_tasks
+                WHERE project_id = %s AND asset_id = %s
+                  AND status IN ('PENDING', 'RUNNING')
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """,
+                (project_id, request.asset_id),
+            ).fetchone()
+            if concurrent_task is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "ANALYSIS_TASK_ENQUEUE_CONFLICT",
+                        "message": "拆解任务状态已变化，请重新提交。",
+                        "retryable": True,
+                    },
+                )
+            return analysis_task_response(concurrent_task)
+        write_audit(
+            conn,
+            actor=actor,
+            action="analysis.task_enqueued",
+            entity_type="analysis_task",
+            entity_id=task_id,
+            metadata={
+                "project_id": project_id,
+                "asset_id": request.asset_id,
+                "asset_sha256": str(asset["sha256"]),
+            },
+        )
+        row = load_analysis_task(conn, task_id)
+        return analysis_task_response(row)
+
+
+@router.get("/analysis-tasks/{task_id}", response_model=AnalysisTaskResponse)
+def read_analysis_task(
+    task_id: str,
+    conn: Database,
+    actor: AuthenticatedUser,
+) -> AnalysisTaskResponse:
+    row = load_analysis_task(conn, task_id)
+    require_project_access(
+        conn,
+        actor=actor,
+        project_id=str(row["project_id"]),
+        action="analysis.task.read",
+    )
+    return analysis_task_response(row)
+
+
 @router.get("/analysis/{analysis_id}", response_model=VersionResponse)
 def read_analysis(
     analysis_id: str,
@@ -393,6 +540,378 @@ def update_analysis_shots(
             metadata={"source_analysis_version_id": analysis_id},
         )
         return version_response(shot_card)
+
+
+def validate_analysis_enqueue(
+    conn: BusinessConnection,
+    *,
+    actor: CurrentUser,
+    project_id: str,
+    request: CreateAnalysisRequest,
+) -> tuple[sqlite3.Row, float]:
+    require_not_auditor(
+        conn,
+        actor=actor,
+        action="analysis.task.create",
+        entity_type="project",
+        entity_id=project_id,
+    )
+    require_project_access(
+        conn,
+        actor=actor,
+        project_id=project_id,
+        action="analysis.task.create",
+    )
+    asset = require_asset_access(
+        conn,
+        actor=actor,
+        asset_id=request.asset_id,
+        action="analysis.task.create",
+    )
+    if str(asset["project_id"]) != project_id:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "ASSET_PROJECT_MISMATCH",
+                "message": "Asset does not belong to the requested project.",
+            },
+        )
+    if not is_reference_video_asset(asset):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "ANALYSIS_ASSET_NOT_REFERENCE_VIDEO",
+                "message": "Analysis requires a reference video asset.",
+            },
+        )
+    if not str(asset["sha256"]) or int(asset["size_bytes"]) <= 0:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "REFERENCE_VIDEO_NOT_READY",
+                "message": "Reference video upload is not ready for analysis.",
+            },
+        )
+    return asset, analysis_duration_for_asset(
+        conn,
+        asset_id=request.asset_id,
+        requested_duration=request.duration_seconds,
+    )
+
+
+def analysis_duration_for_asset(
+    conn: BusinessConnection,
+    *,
+    asset_id: str,
+    requested_duration: float | None,
+) -> float:
+    metadata_row = conn.execute(
+        "SELECT metadata_json FROM assets WHERE id = %s", (asset_id,)
+    ).fetchone()
+    measured_duration: float | None = None
+    if metadata_row is not None:
+        metadata = json.loads(str(metadata_row["metadata_json"]))
+        stored_duration = metadata.get("duration_seconds")
+        if isinstance(stored_duration, int | float):
+            measured_duration = float(stored_duration)
+    if measured_duration is None:
+        measured_duration = requested_duration
+    if measured_duration is None:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "ANALYSIS_DURATION_UNAVAILABLE",
+                "message": "Reference video duration is unavailable; upload it again.",
+            },
+        )
+    if requested_duration is not None and abs(measured_duration - requested_duration) > 1.0:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "ANALYSIS_DURATION_MISMATCH",
+                "message": "Requested duration does not match the reference video.",
+            },
+        )
+    return measured_duration
+
+
+def acquire_analysis_task(
+    conn: BusinessConnection,
+    *,
+    worker_id: str,
+) -> AnalysisTaskLease | None:
+    now = datetime.now(UTC)
+    now_text = now.strftime("%Y-%m-%d %H:%M:%S")
+    # One analysis can use the primary 240-second request plus one 240-second
+    # structural repair request. Keep the lease longer than both attempts so a
+    # second worker cannot mark a still-running paid request as interrupted.
+    locked_until = (now + timedelta(minutes=ANALYSIS_TASK_LEASE_MINUTES)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    try:
+        conn.execute(
+            """
+            UPDATE analysis_tasks
+            SET status = 'FAILED',
+                error_code = 'ANALYSIS_WORKER_INTERRUPTED',
+                error_message_redacted = '拆解任务执行中断，请重新拆解。',
+                retryable = 1,
+                locked_by = NULL,
+                locked_until = NULL,
+                completed_at = %s,
+                updated_at = %s
+            WHERE status = 'RUNNING' AND locked_until IS NOT NULL AND locked_until <= %s
+            """,
+            (now_text, now_text, now_text),
+        )
+        row = conn.execute(
+            """
+            UPDATE analysis_tasks
+            SET status = 'RUNNING',
+                attempt = attempt + 1,
+                locked_by = %s,
+                locked_until = %s,
+                started_at = COALESCE(started_at, %s),
+                updated_at = %s,
+                error_code = NULL,
+                error_message_redacted = NULL,
+                failure_phase = NULL,
+                retryable = 0
+            WHERE id = (
+                SELECT id FROM analysis_tasks
+                WHERE status = 'PENDING'
+                ORDER BY created_at, id
+                LIMIT 1
+            ) AND status = 'PENDING'
+            RETURNING *
+            """,
+            (worker_id, locked_until, now_text, now_text),
+        ).fetchone()
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    if row is None:
+        return None
+    return AnalysisTaskLease(
+        id=str(row["id"]),
+        project_id=str(row["project_id"]),
+        asset_id=str(row["asset_id"]),
+        created_by_user_id=str(row["created_by_user_id"]),
+        duration_seconds=float(row["duration_seconds"]),
+        worker_id=worker_id,
+    )
+
+
+def prepare_analysis_task(
+    conn: BusinessConnection,
+    *,
+    lease: AnalysisTaskLease,
+    storage: StorageAdapter,
+    provider: VideoAnalysisProvider | None = None,
+) -> AnalysisTaskWork:
+    row = conn.execute(
+        """
+        SELECT task.status, task.locked_by, asset.project_id,
+               asset.storage_uri, asset.sha256, asset.size_bytes
+        FROM analysis_tasks AS task
+        JOIN assets AS asset ON asset.id = task.asset_id
+        WHERE task.id = %s
+        """,
+        (lease.id,),
+    ).fetchone()
+    if (
+        row is None
+        or str(row["status"]) != "RUNNING"
+        or str(row["locked_by"]) != lease.worker_id
+        or str(row["project_id"]) != lease.project_id
+        or not str(row["sha256"])
+        or int(row["size_bytes"]) <= 0
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "ANALYSIS_TASK_INPUT_UNAVAILABLE",
+                "message": "参考视频状态已变化，请重新上传或重新拆解。",
+                "retryable": True,
+            },
+        )
+    resolved_provider = provider or get_video_analysis_provider(conn)
+    asset_uri = str(row["storage_uri"])
+    video_uri = asset_uri
+    if resolved_provider.requires_https_video_url:
+        video_uri = signed_video_url_for_provider(storage, asset_uri=asset_uri)
+    conn.commit()
+    return AnalysisTaskWork(
+        lease=lease,
+        provider=resolved_provider,
+        video_uri=video_uri,
+        asset_uri=asset_uri,
+    )
+
+
+def perform_analysis_task(work: AnalysisTaskWork) -> AnalysisResult:
+    return analyze_video(
+        video_uri=work.video_uri,
+        video_duration_seconds=work.lease.duration_seconds,
+        provider=work.provider,
+    )
+
+
+def complete_analysis_task(
+    conn: BusinessConnection,
+    *,
+    work: AnalysisTaskWork,
+    result: AnalysisResult,
+) -> None:
+    task = conn.execute(
+        "SELECT status, locked_by FROM analysis_tasks WHERE id = %s",
+        (work.lease.id,),
+    ).fetchone()
+    if (
+        task is None
+        or str(task["status"]) != "RUNNING"
+        or str(task["locked_by"]) != work.lease.worker_id
+    ):
+        conn.rollback()
+        return
+    row, created = create_or_recover_analysis_version(
+        conn,
+        project_id=work.lease.project_id,
+        asset_id=work.lease.asset_id,
+        asset_uri=work.asset_uri,
+        created_by_user_id=work.lease.created_by_user_id,
+        result=result,
+    )
+    now_text = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute(
+        """
+        UPDATE analysis_tasks
+        SET status = 'SUCCEEDED', result_version_id = %s,
+            error_code = NULL, error_message_redacted = NULL,
+            failure_phase = NULL, retryable = 0,
+            locked_by = NULL, locked_until = NULL,
+            completed_at = %s, updated_at = %s
+        WHERE id = %s AND status = 'RUNNING' AND locked_by = %s
+        """,
+        (str(row["id"]), now_text, now_text, work.lease.id, work.lease.worker_id),
+    )
+    write_audit(
+        conn,
+        actor=load_task_actor(conn, work.lease.created_by_user_id),
+        action="analysis.task_succeeded" if created else "analysis.task_recovered",
+        entity_type="analysis_task",
+        entity_id=work.lease.id,
+        metadata={
+            "project_id": work.lease.project_id,
+            "asset_id": work.lease.asset_id,
+            "version_id": str(row["id"]),
+        },
+    )
+    conn.commit()
+
+
+def fail_analysis_task(
+    conn: BusinessConnection,
+    *,
+    lease: AnalysisTaskLease,
+    cause: Exception,
+) -> None:
+    code = "ANALYSIS_WORKER_FAILED"
+    message = "视频拆解失败，请稍后重新拆解。"
+    retryable = True
+    failure_phase: str | None = None
+    if isinstance(cause, AnalysisProviderFailed):
+        mapped = analysis_provider_error(cause)
+        detail: dict[str, Any] = mapped.detail if isinstance(mapped.detail, dict) else {}
+        code = str(detail.get("code") or code)
+        message = str(detail.get("message") or message)
+        retryable = bool(detail.get("retryable", cause.retryable))
+        failure_phase = cause.failure_phase
+    elif isinstance(cause, HTTPException) and isinstance(cause.detail, dict):
+        code = str(cause.detail.get("code") or code)
+        message = str(cause.detail.get("message") or message)
+        retryable = bool(cause.detail.get("retryable", True))
+    now_text = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute(
+        """
+        UPDATE analysis_tasks
+        SET status = 'FAILED', error_code = %s,
+            error_message_redacted = %s, failure_phase = %s,
+            retryable = %s, locked_by = NULL, locked_until = NULL,
+            completed_at = %s, updated_at = %s
+        WHERE id = %s AND status = 'RUNNING' AND locked_by = %s
+        """,
+        (
+            code,
+            message,
+            failure_phase,
+            1 if retryable else 0,
+            now_text,
+            now_text,
+            lease.id,
+            lease.worker_id,
+        ),
+    )
+    write_audit(
+        conn,
+        actor=load_task_actor(conn, lease.created_by_user_id),
+        action="analysis.task_failed",
+        entity_type="analysis_task",
+        entity_id=lease.id,
+        metadata={
+            "project_id": lease.project_id,
+            "asset_id": lease.asset_id,
+            "error_code": code,
+            "retryable": retryable,
+        },
+    )
+    conn.commit()
+
+
+def load_task_actor(conn: BusinessConnection, user_id: str) -> CurrentUser:
+    row = conn.execute(
+        "SELECT id, username, display_name, role FROM users WHERE id = %s",
+        (user_id,),
+    ).fetchone()
+    if row is None:
+        raise RuntimeError("analysis task actor is unavailable")
+    return CurrentUser(
+        id=str(row["id"]),
+        username=str(row["username"]),
+        display_name=str(row["display_name"]),
+        role=cast(Role, str(row["role"])),
+    )
+
+
+def load_analysis_task(conn: BusinessConnection, task_id: str) -> sqlite3.Row:
+    row = conn.execute("SELECT * FROM analysis_tasks WHERE id = %s", (task_id,)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail={"code": "ANALYSIS_TASK_NOT_FOUND"})
+    return cast(sqlite3.Row, row)
+
+
+def analysis_task_response(row: sqlite3.Row) -> AnalysisTaskResponse:
+    return AnalysisTaskResponse(
+        id=str(row["id"]),
+        project_id=str(row["project_id"]),
+        asset_id=str(row["asset_id"]),
+        status=str(row["status"]),
+        attempt=int(row["attempt"]),
+        result_version_id=(
+            None if row["result_version_id"] is None else str(row["result_version_id"])
+        ),
+        error_code=None if row["error_code"] is None else str(row["error_code"]),
+        error_message=(
+            None if row["error_message_redacted"] is None else str(row["error_message_redacted"])
+        ),
+        failure_phase=None if row["failure_phase"] is None else str(row["failure_phase"]),
+        retryable=bool(row["retryable"]),
+        created_at=str(row["created_at"]),
+        updated_at=str(row["updated_at"]),
+        started_at=None if row["started_at"] is None else str(row["started_at"]),
+        completed_at=None if row["completed_at"] is None else str(row["completed_at"]),
+    )
 
 
 def analysis_provider_error(failure: AnalysisProviderFailed) -> HTTPException:

@@ -73,6 +73,37 @@ def headers(user_id: str) -> dict[str, str]:
     return {"X-Dev-User-Id": user_id}
 
 
+def test_available_versions_query_uses_postgres_compatible_casefold_order() -> None:
+    executed_sql: list[str] = []
+
+    class _EmptyResult:
+        def fetchall(self) -> list[object]:
+            return []
+
+    class _PostgresLikeRawConnection:
+        row_factory: object = None
+
+        def execute(self, sql: str, params: object = ()) -> _EmptyResult:
+            executed_sql.append(sql)
+            if "COLLATE NOCASE" in sql.upper():
+                raise RuntimeError("PostgreSQL has no built-in NOCASE collation")
+            if "%s IS NULL" in sql:
+                raise RuntimeError("PostgreSQL cannot infer an untyped NULL parameter")
+            return _EmptyResult()
+
+    conn = BusinessConnection.postgres(_PostgresLikeRawConnection())  # type: ignore[arg-type]
+
+    assert (
+        project_character_selection.list_available_project_character_versions(
+            conn,
+            project_id="project-owned",
+        )
+        == []
+    )
+    assert "LOWER(identity.display_name)" in executed_sql[0]
+    assert "%s::text IS NULL" in executed_sql[0]
+
+
 def seed_version(
     db_path: Path,
     *,

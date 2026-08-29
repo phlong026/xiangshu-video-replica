@@ -9,7 +9,6 @@ PG-dependent cases skip automatically when the fixture is not reachable.
 
 from __future__ import annotations
 
-import asyncio
 import os
 import sqlite3
 import subprocess
@@ -39,12 +38,11 @@ DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 
 def _pg_available(dsn: str) -> bool:
     try:
-
-        async def probe() -> None:
-            conn = await asyncio.get_event_loop().run_in_executor(None, psycopg.connect, dsn)
-            conn.close()
-
-        asyncio.run(asyncio.wait_for(probe(), timeout=3))
+        # ``asyncio.wait_for(run_in_executor(...))`` cannot cancel a blocked
+        # libpq thread, so an unavailable fixture delayed collection by the
+        # driver's full default timeout. Bound the connection itself instead.
+        with psycopg.connect(dsn, connect_timeout=3):
+            pass
     except Exception:
         return False
     return True
@@ -548,6 +546,10 @@ def test_pool_min_is_capped_at_the_hard_ceiling() -> None:
     assert (pool_min, pool_max) == (64, 64)
 
 
+@pytest.mark.skipif(
+    not _pg_available(PG_DSN),
+    reason="PostgreSQL fixture not available",
+)
 def test_check_pg_ready_redacts_dsn_credentials() -> None:
     """PgReadyInfo.dsn must never carry the password (M1 review LOW)."""
     with _env(**{DATABASE_URL_ENV: PG_DSN}):
