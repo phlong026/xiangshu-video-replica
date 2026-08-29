@@ -124,7 +124,7 @@ def test_managed_processes_stop_children_when_body_fails(tmp_path: Path) -> None
                 name="sleeper",
                 command=[sys.executable, "-c", "import time; time.sleep(60)"],
                 cwd=tmp_path,
-                env={},
+                env=_isolated_child_env(),
                 log_path=tmp_path / "sleeper.log",
             )
             assert process.poll() is None
@@ -143,14 +143,14 @@ def test_managed_processes_continue_cleanup_after_one_stop_error(
         name="first",
         command=[sys.executable, "-c", "import time; time.sleep(60)"],
         cwd=tmp_path,
-        env={},
+        env=_isolated_child_env(),
         log_path=tmp_path / "first.log",
     )
     second = processes.start(
         name="second",
         command=[sys.executable, "-c", "import time; time.sleep(60)"],
         cwd=tmp_path,
-        env={},
+        env=_isolated_child_env(),
         log_path=tmp_path / "second.log",
     )
     original_stop = gate1_e2e._stop_process_tree
@@ -182,7 +182,7 @@ def test_managed_processes_retains_ownership_when_explicit_stop_fails(
         name="retained",
         command=[sys.executable, "-c", "import time; time.sleep(60)"],
         cwd=tmp_path,
-        env={},
+        env=_isolated_child_env(),
         log_path=tmp_path / "retained.log",
     )
     original_stop = gate1_e2e._stop_process_tree
