@@ -104,6 +104,10 @@ def test_local_start_commands_upgrade_the_database_before_api_or_worker() -> Non
 
 def test_pull_requests_run_linux_quality_and_windows_nsis_gates() -> None:
     workflow_path = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+    fork_pr_guard = (
+        "github.event_name != 'pull_request' || "
+        "github.event.pull_request.head.repo.full_name == github.repository"
+    )
 
     assert workflow_path.exists()
     workflow = workflow_path.read_text(encoding="utf-8")
@@ -113,20 +117,29 @@ def test_pull_requests_run_linux_quality_and_windows_nsis_gates() -> None:
     assert "pull_request_target:" not in workflow
     assert "permissions:\n  contents: read" in workflow
     assert workflow.count("persist-credentials: false") == 3
-    assert "runs-on: ubuntu-24.04" in workflow
+    assert "secret-scan:" in workflow
+    assert "name: Secret scan" in workflow
+    assert "quality-linux:" in workflow
+    assert "name: Linux quality gate" in workflow
+    assert "windows-nsis:" in workflow
+    assert "name: Windows Tauri and NSIS" in workflow
+    assert workflow.count(f"if: {fork_pr_guard}") == 3
+    assert workflow.count("runs-on: [self-hosted, Linux, X64, ci-linux]") == 2
+    assert workflow.count("runs-on: [self-hosted, Windows, X64, ci-windows]") == 1
     assert "npm run check:security" in workflow
     assert "run: npm run check\n" in workflow
     assert "npm run build" in workflow
     assert "npm audit --audit-level=high" in workflow
     assert "cargo test --manifest-path client/src-tauri/Cargo.toml --locked" in workflow
-    assert "runs-on: windows-2025" in workflow
     assert "npm run check:tauri" in workflow
     assert "npm run check:tauri:customer" in workflow
     assert "npm run tauri:build -- --bundles nsis --no-sign --ci" in workflow
     assert "npm run tauri:build:customer" in workflow
     assert "VITE_API_BASE_URL: https://staging.example.invalid" in workflow
-    assert "unsigned-windows-nsis" in workflow
-    assert "unsigned-customer-cloud-windows-nsis" in workflow
+    assert "Archive unsigned internal NSIS installer locally" in workflow
+    assert "Archive unsigned customer cloud NSIS installer locally" in workflow
+    assert workflow.count("LOCAL_ARTIFACT_ROOT") == 6
+    assert workflow.count("SHA256SUMS.txt") == 2
     assert "Verify customer installer excludes local launchers" in workflow
     assert "7-Zip\\7z.exe" in workflow
     assert "start-backend.bat" in workflow
@@ -134,7 +147,7 @@ def test_pull_requests_run_linux_quality_and_windows_nsis_gates() -> None:
     assert workflow.count("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1") == 3
     assert workflow.count("actions/setup-node@820762786026740c76f36085b0efc47a31fe5020") == 3
     assert "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97" in workflow
-    assert workflow.count("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a") == 2
+    assert "actions/upload-artifact@" not in workflow
     assert ".cargo-target/release/bundle/nsis/*.exe" in workflow
 
 
