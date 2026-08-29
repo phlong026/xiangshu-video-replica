@@ -28,10 +28,25 @@ from app.gate1_e2e import (
 def _isolated_child_env() -> dict[str, str]:
     # A Windows child that opens sockets dies with Winsock WinError 10106
     # when SystemRoot is missing from its environment, so keep the platform
-    # minimum; an empty environment is fine everywhere else.
+    # minimum. Linux still needs the loader path that setup-python wires up
+    # for the runner's CPython, otherwise sys.executable cannot start.
     if sys.platform == "win32":
         return {"SystemRoot": os.environ["SystemRoot"]}
-    return {}
+    environment: dict[str, str] = {}
+    ld_library_path = os.environ.get("LD_LIBRARY_PATH")
+    if ld_library_path:
+        environment["LD_LIBRARY_PATH"] = ld_library_path
+    return environment
+
+
+def test_isolated_child_env_preserves_linux_loader_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    loader_path = "/opt/actions-runner-linux/_work/_tool/Python/3.12.14/x64/lib"
+    monkeypatch.setenv("LD_LIBRARY_PATH", loader_path)
+
+    environment = _isolated_child_env()
+
+    assert environment == {"LD_LIBRARY_PATH": loader_path}
 
 
 class _HealthHandler(BaseHTTPRequestHandler):

@@ -585,8 +585,10 @@ def test_customer_desktop_build_is_an_explicit_no_sidecar_target() -> None:
     assert "npm run tauri:build -- --bundles nsis --no-sign --ci" in workflow
     assert "npm run tauri:build:customer" in workflow
     assert "VITE_API_BASE_URL: https://staging.example.invalid" in workflow
-    assert "unsigned-windows-nsis" in workflow
-    assert "unsigned-customer-cloud-windows-nsis" in workflow
+    assert "Archive unsigned internal NSIS installer locally" in workflow
+    assert "Archive unsigned customer cloud NSIS installer locally" in workflow
+    assert "LOCAL_ARTIFACT_ROOT" in workflow
+    assert "SHA256SUMS.txt" in workflow
     assert "Verify customer installer excludes local launchers" in workflow
     assert "start-backend.bat" in workflow
     assert "start-backend.sh" in workflow
