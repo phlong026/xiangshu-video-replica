@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AdminApp } from "./AdminApp";
+import { getAdminCsrfToken, SESSION_EXPIRED_EVENT } from "./api";
 
 const SERVICE_KEY_TEXT = ["service", "key"].join("-");
 const MASKED_SERVICE_KEY = ["********", "cret"].join("");
@@ -373,13 +374,20 @@ describe("AdminApp", () => {
         String(url).endsWith("/api/control/settings/zpay") &&
         options?.method === "PATCH",
     );
+    const zpayRequest = zpayCall?.[1] as RequestInit | undefined;
+    expect(zpayRequest).toBeTruthy();
     expect(zpayCall?.[1]?.body).toBe(
       JSON.stringify({
         pid: "merchant-2",
         key: "",
         enabled_channels: ["alipay", "wxpay"],
+        confirm: true,
+        reason: "更新 ZPay 支付配置",
       }),
     );
+    expect(
+      new Headers(zpayRequest?.headers).get("Idempotency-Key"),
+    ).toBeTruthy();
     expect(String(zpayCall?.[1]?.body)).not.toContain("gateway_url");
     expect(String(zpayCall?.[1]?.body)).not.toContain("notify_url");
     expect(String(zpayCall?.[1]?.body)).not.toContain("return_url");
@@ -416,9 +424,18 @@ describe("AdminApp", () => {
         String(url).endsWith("/api/control/settings/providers/metaso") &&
         options?.method === "PUT",
     );
+    const saveRequest = saveCall?.[1] as RequestInit | undefined;
+    expect(saveRequest).toBeTruthy();
     expect(saveCall?.[1]?.body).toBe(
-      JSON.stringify({ config: { api_key: SERVICE_KEY_TEXT } }),
+      JSON.stringify({
+        config: { api_key: SERVICE_KEY_TEXT },
+        confirm: true,
+        reason: "更新 metaso 服务配置",
+      }),
     );
+    expect(
+      new Headers(saveRequest?.headers).get("Idempotency-Key"),
+    ).toBeTruthy();
     expect(screen.queryByText(/metaso|minimax|cos/i)).toBeNull();
   });
 
@@ -444,6 +461,48 @@ describe("AdminApp", () => {
     ).toBeInTheDocument();
     expect(screen.queryByLabelText("管理员密码")).toBeNull();
     expect(screen.getAllByText("管理员一号").length).toBeGreaterThan(0);
+  });
+
+  it("returns to the login gate and clears admin session state when a control 401 emits the shared expiry event", async () => {
+    installFetch({ session: "valid" });
+
+    render(<AdminApp />);
+
+    expect(
+      await screen.findByRole("navigation", { name: "管理端导航" }),
+    ).toBeInTheDocument();
+    expect(getAdminCsrfToken()).toBe(CSRF_TOKEN_TEXT);
+
+    window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT));
+
+    expect(await screen.findByLabelText("管理员账号")).toBeInTheDocument();
+    expect(screen.getByLabelText("管理员密码")).toBeInTheDocument();
+    expect(screen.queryByRole("navigation", { name: "管理端导航" })).toBeNull();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "会话已失效，请重新登录。",
+    );
+    expect(getAdminCsrfToken()).toBeNull();
+  });
+
+  it("removes the shared expiry listener when the admin shell unmounts", async () => {
+    installFetch({ session: "valid" });
+    const addSpy = vi.spyOn(window, "addEventListener");
+    const removeSpy = vi.spyOn(window, "removeEventListener");
+
+    const { unmount } = render(<AdminApp />);
+
+    await screen.findByRole("navigation", { name: "管理端导航" });
+    const sessionListener = addSpy.mock.calls.find(
+      ([name]) => name === SESSION_EXPIRED_EVENT,
+    )?.[1];
+    expect(sessionListener).toBeTypeOf("function");
+
+    unmount();
+
+    expect(removeSpy).toHaveBeenCalledWith(
+      SESSION_EXPIRED_EVENT,
+      sessionListener,
+    );
   });
 
   it("uses a one-time credential only to set or recover the password", async () => {

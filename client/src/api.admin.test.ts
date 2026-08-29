@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { updateControlBillingSettings } from "./api";
+import {
+  getControlAccounts,
+  SESSION_EXPIRED_EVENT,
+  updateControlBillingSettings,
+} from "./api";
 import {
   AdminActivationError,
   clearAdminActivationSession,
@@ -89,6 +93,25 @@ describe("admin activation API adapter", () => {
     expect(result.actor.role).toBe("admin");
     // No-Go red line: the CSRF token must never reach persistent storage.
     expect(setItem).not.toHaveBeenCalled();
+  });
+
+  it("emits the shared expiry event when a control-plane request returns 401", async () => {
+    const onSessionExpired = vi.fn();
+    window.addEventListener(SESSION_EXPIRED_EVENT, onSessionExpired);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        jsonResponse(
+          { detail: { code: "SESSION_EXPIRED", message: "expired" } },
+          401,
+        ),
+      ),
+    );
+
+    await expect(getControlAccounts()).rejects.toThrow("读取内部账号失败");
+    expect(onSessionExpired).toHaveBeenCalledOnce();
+
+    window.removeEventListener(SESSION_EXPIRED_EVENT, onSessionExpired);
   });
 
   it("logs in with an account and password, then uses recovery only to replace it", async () => {
@@ -222,9 +245,18 @@ describe("admin activation API adapter", () => {
     expect(request).toEqual(
       expect.objectContaining({ method: "PATCH", credentials: "include" }),
     );
-    expect(
-      new Headers((request as RequestInit).headers).get("X-Admin-CSRF"),
-    ).toBe(CSRF_TOKEN_TEXT);
+    const headers = new Headers((request as RequestInit).headers);
+    expect(headers.get("X-Admin-CSRF")).toBe(CSRF_TOKEN_TEXT);
+    expect(headers.get("Idempotency-Key")).toBeTruthy();
+    expect(request?.body).toBe(
+      JSON.stringify({
+        internal_base_unit_price_fen: 100,
+        min_recharge_fen: 100,
+        recharge_step_fen: 100,
+        confirm: true,
+        reason: "更新后台计费配置",
+      }),
+    );
   });
 
   it("mints a fresh idempotency key per write call", async () => {

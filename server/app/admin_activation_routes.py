@@ -40,6 +40,7 @@ import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Protocol
 
 import psycopg
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -61,7 +62,7 @@ from app.activation_code_service import (
     highest_code_hmac_key_version,
     highest_export_aead_key_version,
 )
-from app.admin_auth_routes import AdminActor, AdminReader, AdminWriter
+from app.admin_auth_routes import AdminReader, AdminWriter
 from app.customer_session_service import (
     REASON_CODE_REVOKED,
     REASON_CODE_SUSPENDED,
@@ -120,6 +121,13 @@ class AdminWriteContract(BaseModel):
 
     confirm: bool = False
     reason: str = ""
+
+
+class _AdminWriteActor(Protocol):
+    """Minimal actor shape required by the shared idempotency envelope."""
+
+    @property
+    def user_id(self) -> str: ...
 
 
 def _require_write_contract(request: Request, body: AdminWriteContract) -> tuple[str, str]:
@@ -271,7 +279,7 @@ class DeferredHTTPWriteError(Exception):
 def _write_with_idempotency(
     request: Request,
     response: Response,
-    actor: AdminActor,
+    actor: _AdminWriteActor,
     body: AdminWriteContract,
     business: Callable[[psycopg.Connection, str], dict[str, object]],
     *,

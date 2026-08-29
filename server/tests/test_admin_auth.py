@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import json
 import os
 import secrets
 from collections.abc import Iterator
@@ -1031,6 +1032,143 @@ def test_customer_production_control_routes_keep_auditors_read_only(
     )
     assert blocked.status_code == 403
     assert blocked.json()["detail"]["code"] == "AUDITOR_READ_ONLY"
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "payload"),
+    [
+        (
+            "PATCH",
+            "/api/control/settings/runtime",
+            {
+                "max_generation_count_per_batch": 4,
+                "max_concurrent_h3_tasks": 2,
+                "active_storage_provider": "cos",
+            },
+        ),
+        (
+            "PATCH",
+            "/api/control/settings/zpay",
+            {
+                "pid": "merchant-1",
+                "key": "merchant-secret",
+                "enabled_channels": ["alipay"],
+            },
+        ),
+        (
+            "PATCH",
+            "/api/control/settings/billing",
+            {
+                "internal_base_unit_price_fen": 1000,
+                "min_recharge_fen": 10000,
+                "recharge_step_fen": 1000,
+            },
+        ),
+        (
+            "PUT",
+            "/api/control/settings/providers/metaso",
+            {"config": {"api_key": "metaso-secret"}},
+        ),
+    ],
+)
+@pytestmark_pg
+def test_customer_production_control_settings_writes_require_admin_write_contract(
+    customer_production_control_client: TestClient,
+    method: str,
+    path: str,
+    payload: dict[str, object],
+) -> None:
+    client = customer_production_control_client
+    exchange = client.post(
+        "/api/control/admin/session/exchange", json={"credential": _issue("admin_u")}
+    )
+    assert exchange.status_code == 201, exchange.text
+    headers = {ADMIN_CSRF_HEADER: exchange.json()["csrf_token"]}
+
+    missing_key = client.request(
+        method,
+        path,
+        headers=headers,
+        json={**payload, "confirm": True, "reason": "生产控制台更新"},
+    )
+    assert missing_key.status_code == 400
+    assert missing_key.json()["detail"]["code"] == "IDEMPOTENCY_KEY_REQUIRED"
+
+    missing_confirm = client.request(
+        method,
+        path,
+        headers={**headers, "Idempotency-Key": f"missing-confirm-{method}-{path}"},
+        json={**payload, "reason": "生产控制台更新"},
+    )
+    assert missing_confirm.status_code == 400
+    assert missing_confirm.json()["detail"]["code"] == "CONFIRMATION_REQUIRED"
+
+    blank_reason = client.request(
+        method,
+        path,
+        headers={**headers, "Idempotency-Key": f"blank-reason-{method}-{path}"},
+        json={**payload, "confirm": True, "reason": "   "},
+    )
+    assert blank_reason.status_code == 400
+    assert blank_reason.json()["detail"]["code"] == "REASON_REQUIRED"
+
+
+@pytestmark_pg
+def test_customer_production_control_runtime_write_replays_and_conflicts_by_idempotency_key(
+    customer_production_control_client: TestClient,
+    clean_sessions: str,
+) -> None:
+    client = customer_production_control_client
+    exchange = client.post(
+        "/api/control/admin/session/exchange", json={"credential": _issue("admin_u")}
+    )
+    assert exchange.status_code == 201, exchange.text
+    headers = {
+        ADMIN_CSRF_HEADER: exchange.json()["csrf_token"],
+        "Idempotency-Key": "control-runtime-idem-1",
+    }
+    payload = {
+        "max_generation_count_per_batch": 4,
+        "max_concurrent_h3_tasks": 2,
+        "active_storage_provider": "cos",
+        "confirm": True,
+        "reason": "收紧生产并发",
+    }
+
+    first = client.patch("/api/control/settings/runtime", headers=headers, json=payload)
+    replay = client.patch("/api/control/settings/runtime", headers=headers, json=payload)
+    conflict = client.patch(
+        "/api/control/settings/runtime",
+        headers=headers,
+        json={**payload, "max_concurrent_h3_tasks": 1},
+    )
+
+    assert first.status_code == 200, first.text
+    assert first.json() == {
+        "max_generation_count_per_batch": 4,
+        "max_concurrent_h3_tasks": 2,
+        "active_storage_provider": "cos",
+    }
+    assert replay.status_code == 200, replay.text
+    assert replay.json() == first.json()
+    assert replay.headers["X-Idempotent-Replay"] == "true"
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"]["code"] == "IDEMPOTENCY_CONFLICT"
+
+    with psycopg.connect(clean_sessions) as conn:
+        snapshots = conn.execute(
+            "SELECT count(*) FROM admin_write_idempotency "
+            "WHERE actor_user_id = 'admin_u' AND route = 'PATCH /api/control/settings/runtime'"
+        ).fetchone()
+        audits = conn.execute(
+            "SELECT count(*), max(metadata_json) FROM audit_logs "
+            "WHERE actor_user_id = 'admin_u' AND action = 'runtime_settings.update'"
+        ).fetchone()
+    assert snapshots is not None and int(snapshots[0]) == 1
+    assert audits is not None and int(audits[0]) == 1
+    audit_metadata = json.loads(str(audits[1]))
+    assert audit_metadata["reason"] == "收紧生产并发"
+    assert audit_metadata["request_id"]
 
 
 def test_secure_cookie_in_customer_production(

@@ -670,6 +670,32 @@ export async function getControlSettings(): Promise<ControlSettings> {
   );
 }
 
+function newControlWriteIdempotencyKey(): string {
+  const cryptoRef = globalThis.crypto;
+  if (cryptoRef && typeof cryptoRef.randomUUID === "function") {
+    return cryptoRef.randomUUID();
+  }
+  return `control-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 14)}`;
+}
+
+function controlWriteInit(
+  method: "PATCH" | "PUT",
+  body: Record<string, unknown>,
+  reason: string,
+): RequestInit {
+  return {
+    method,
+    headers: {
+      "Idempotency-Key": newControlWriteIdempotencyKey(),
+    },
+    body: JSON.stringify({
+      ...body,
+      confirm: true,
+      reason,
+    }),
+  };
+}
+
 export async function updateControlZPaySettings(input: {
   pid: string;
   key: string;
@@ -678,7 +704,7 @@ export async function updateControlZPaySettings(input: {
   return requestControlJson<ControlSettings["zpay"]>(
     "/api/control/settings/zpay",
     "保存 ZPay 设置失败",
-    { method: "PATCH", body: JSON.stringify(input) },
+    controlWriteInit("PATCH", input, "更新 ZPay 支付配置"),
   );
 }
 
@@ -690,7 +716,7 @@ export async function updateControlBillingSettings(input: {
   return requestControlJson<BillingSettings>(
     "/api/control/settings/billing",
     "保存内部价格失败",
-    { method: "PATCH", body: JSON.stringify(input) },
+    controlWriteInit("PATCH", input, "更新后台计费配置"),
   );
 }
 
@@ -701,7 +727,7 @@ export async function updateControlProviderSettings(
   return requestControlJson<ProviderSettings>(
     `/api/control/settings/providers/${provider}`,
     "保存服务设置失败",
-    { method: "PUT", body: JSON.stringify({ config }) },
+    controlWriteInit("PUT", { config }, `更新 ${provider} 服务配置`),
   );
 }
 
@@ -722,7 +748,7 @@ export async function updateControlRuntimeSettings(
   return requestControlJson<RuntimeSettings>(
     "/api/control/settings/runtime",
     "保存运行设置失败",
-    { method: "PATCH", body: JSON.stringify(runtime) },
+    controlWriteInit("PATCH", runtime, "更新后台运行参数"),
   );
 }
 
@@ -2375,12 +2401,16 @@ async function requestControl(
     }
   }
   try {
-    return await fetch(`${apiBaseUrl()}${path}`, {
+    const response = await fetch(`${apiBaseUrl()}${path}`, {
       ...init,
       headers,
       credentials: "include",
       signal: controller.signal,
     });
+    if (response.status === 401) {
+      emitSessionExpired();
+    }
+    return response;
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") {
       throw new Error("请求超时，请重试");

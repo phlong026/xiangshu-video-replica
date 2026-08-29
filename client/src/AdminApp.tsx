@@ -18,6 +18,7 @@ import {
   getControlReconciliation,
   getControlSettings,
   getControlWalletTransactions,
+  SESSION_EXPIRED_EVENT,
   syncControlRechargeOrder,
   updateControlBillingSettings,
   updateControlZPaySettings,
@@ -143,6 +144,26 @@ export function AdminApp() {
       : true,
   );
 
+  const handleSessionExpired = useCallback(
+    (message = "会话已失效，请重新登录。") => {
+      clearAdminActivationSession();
+      setActor(null);
+      setAuthPhase("anonymous");
+      setActiveTab("accounts");
+      setLoginPassword("");
+      setRecoveryCredential("");
+      setNewPassword("");
+      setConfirmPassword("");
+      setIsNavigationOpen(
+        typeof window !== "undefined" &&
+          window.innerWidth >= compactNavigationBreakpoint,
+      );
+      setNotice("");
+      setError(message);
+    },
+    [],
+  );
+
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -173,6 +194,16 @@ export function AdminApp() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    const onSessionExpired = () => {
+      handleSessionExpired();
+    };
+    window.addEventListener(SESSION_EXPIRED_EVENT, onSessionExpired);
+    return () => {
+      window.removeEventListener(SESSION_EXPIRED_EVENT, onSessionExpired);
+    };
+  }, [handleSessionExpired]);
 
   useEffect(() => {
     const syncNavigationMode = () => {
@@ -382,28 +413,15 @@ export function AdminApp() {
     }
   }
 
-  const handleSessionExpired = useCallback(() => {
-    clearAdminActivationSession();
-    setActor(null);
-    setAuthPhase("anonymous");
-    setActiveTab("accounts");
-    setError("会话已失效，请重新登录。");
-  }, []);
-
   const signOut = useCallback(async () => {
     try {
       await deleteAdminSession();
     } catch {
       // A revoked or expired server session is already logged out in practice.
     } finally {
-      clearAdminActivationSession();
-      setActor(null);
-      setAuthPhase("anonymous");
-      setActiveTab("accounts");
-      setError("");
-      setNotice("");
+      handleSessionExpired("");
     }
-  }, []);
+  }, [handleSessionExpired]);
 
   function toggleChannel(channel: "alipay" | "wxpay") {
     setChannels((current) =>

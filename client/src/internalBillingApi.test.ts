@@ -105,6 +105,8 @@ describe("internal billing API", () => {
     });
 
     expect(snapshot.zpay.config.key).toBe("********cret");
+    const zpayRequest = fetchMock.mock.calls[1]?.[1] as RequestInit | undefined;
+    expect(zpayRequest).toBeTruthy();
     expect(fetchMock.mock.calls[1]?.[1]).toEqual(
       expect.objectContaining({
         method: "PATCH",
@@ -112,9 +114,14 @@ describe("internal billing API", () => {
           pid: "merchant",
           key: "",
           enabled_channels: ["alipay", "wxpay"],
+          confirm: true,
+          reason: "更新 ZPay 支付配置",
         }),
       }),
     );
+    expect(
+      new Headers(zpayRequest?.headers).get("Idempotency-Key"),
+    ).toBeTruthy();
   });
 
   it("downloads read-only control CSV exports through the protected proxy", async () => {
