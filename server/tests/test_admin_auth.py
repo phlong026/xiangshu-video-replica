@@ -542,6 +542,7 @@ def customer_production_control_client(
     monkeypatch.setenv(DATABASE_URL_ENV, clean_sessions)
     monkeypatch.setenv("VIDEO_REPLICA_CUSTOMER_PRODUCTION", "true")
     monkeypatch.setenv(ADMIN_SESSION_HMAC_KEY_ENV, TEST_KEY)
+    monkeypatch.setenv("VIDEO_REPLICA_SETTINGS_KEY", TEST_AEAD_KEY)
     monkeypatch.delenv("VIDEO_REPLICA_AUTH_MODE", raising=False)
     monkeypatch.delenv("VIDEO_REPLICA_ALLOW_DEV_IDENTITY_HEADER", raising=False)
     with TestClient(app, base_url="https://testserver") as test_client:
