@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AdminApp } from "./AdminApp";
@@ -473,7 +479,9 @@ describe("AdminApp", () => {
     ).toBeInTheDocument();
     expect(getAdminCsrfToken()).toBe(CSRF_TOKEN_TEXT);
 
-    window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT));
+    act(() => {
+      window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT));
+    });
 
     expect(await screen.findByLabelText("管理员账号")).toBeInTheDocument();
     expect(screen.getByLabelText("管理员密码")).toBeInTheDocument();
