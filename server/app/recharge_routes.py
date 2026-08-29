@@ -111,10 +111,15 @@ def _stage_recharge_preconditions(
     conn: BusinessConnection,
     *,
     amount_fen: int,
+    customer_user_id: str | None = None,
 ) -> tuple[dict[str, int], ZPayMerchantConfig, ZPayDeploymentConfig]:
     """Billing settings + amount validation + ZPay configuration, shared."""
     settings_repo = SettingsRepository(conn)
-    billing = settings_repo.read_billing_settings()
+    billing = (
+        settings_repo.read_customer_billing_settings(user_id=customer_user_id)
+        if customer_user_id is not None
+        else settings_repo.read_billing_settings()
+    )
     validate_recharge_amount(amount_fen, billing)
     try:
         merchant = merchant_config_from_settings(settings_repo.load_zpay_config())
@@ -210,7 +215,8 @@ def create_recharge_order(
         try:
             with db.write() as (conn, user):
                 billing, merchant, deployment = _stage_recharge_preconditions(
-                    conn, amount_fen=payload.amount_fen
+                    conn,
+                    amount_fen=payload.amount_fen,
                 )
                 return _insert_recharge_order(
                     conn,
@@ -320,7 +326,9 @@ def create_customer_recharge_order(
                     return replayed_order
 
                 billing, merchant, deployment = _stage_recharge_preconditions(
-                    conn, amount_fen=payload.amount_fen
+                    conn,
+                    amount_fen=payload.amount_fen,
+                    customer_user_id=user.id,
                 )
                 order = _insert_recharge_order(
                     conn,
@@ -490,11 +498,15 @@ def read_customer_wallet(request: Request) -> WalletResponse:
                 status_code=404,
                 detail={"code": "WALLET_NOT_FOUND", "message": "Wallet does not exist."},
             )
-        billing = SettingsRepository(BusinessConnection.postgres(conn)).read_billing_settings()
+        billing = SettingsRepository(
+            BusinessConnection.postgres(conn)
+        ).read_customer_billing_settings(user_id=ctx.user_id)
         return WalletResponse(
             available_credits=int(row[0]),
             reserved_credits=int(row[1]),
-            internal_unit_price_fen=billing["internal_base_unit_price_fen"],
+            # Preserve the desktop response field while exposing the customer's
+            # effective sale price on the customer-only route.
+            internal_unit_price_fen=billing["charged_unit_price_fen"],
             min_recharge_fen=billing["min_recharge_fen"],
             recharge_step_fen=billing["recharge_step_fen"],
         )

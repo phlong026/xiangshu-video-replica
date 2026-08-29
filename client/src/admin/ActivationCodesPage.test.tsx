@@ -114,7 +114,7 @@ describe("ActivationCodesPage", () => {
     clearAdminActivationSession();
   });
 
-  it("loads the code list on mount with masked codes only", async () => {
+  it("shows masked activation codes without reopening the one-time export", async () => {
     const fetchMock = installFetch();
 
     render(<ActivationCodesPage />);
@@ -130,7 +130,7 @@ describe("ActivationCodesPage", () => {
     expect(String(listCall?.[0])).toBe(
       "http://127.0.0.1:8000/api/control/activation-codes?limit=50&offset=0",
     );
-    expect(screen.queryByText(/XS-[A-Z]{4}/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /复制激活码/ })).toBeNull();
   });
 
   it("filters the list by batch id and status", async () => {

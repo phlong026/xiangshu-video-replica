@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { updateControlBillingSettings } from "./api";
 import {
   AdminActivationError,
   clearAdminActivationSession,
@@ -9,11 +10,17 @@ import {
   downloadActivationCodeExport,
   exchangeAdminSession,
   fetchAdminSession,
+  fetchCustomerUnitPrice,
   generateActivationCodes,
   listActivationCodes,
+  loginAdminWithPassword,
+  recoverAdminPassword,
   resumeActivationCode,
   revokeActivationCode,
+  revokeDeviceCredential,
   suspendActivationCode,
+  unbindDevice,
+  updateCustomerUnitPrice,
 } from "./api.admin";
 
 function jsonResponse(payload: unknown, status = 200) {
@@ -44,6 +51,7 @@ const sessionPayload = {
   session_id: "session-1",
   expires_at: "2026-08-23T20:00:00+00:00",
   last_activity_at: "2026-08-23T12:00:00+00:00",
+  csrf_token: CSRF_TOKEN_TEXT,
   actor: exchangePayload.actor,
 };
 
@@ -81,6 +89,40 @@ describe("admin activation API adapter", () => {
     expect(result.actor.role).toBe("admin");
     // No-Go red line: the CSRF token must never reach persistent storage.
     expect(setItem).not.toHaveBeenCalled();
+  });
+
+  it("logs in with an account and password, then uses recovery only to replace it", async () => {
+    const password = ["Admin", "Passphrase", "2026!"].join(" ");
+    const fetchMock = vi
+      .fn()
+      .mockImplementationOnce(() => jsonResponse(exchangePayload, 201))
+      .mockImplementationOnce(() => jsonResponse(undefined, 204));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await loginAdminWithPassword("admin", password);
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "http://127.0.0.1:8000/api/control/admin/session/password",
+      expect.objectContaining({
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify({ username: "admin", password }),
+      }),
+    );
+
+    await recoverAdminPassword(password);
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "http://127.0.0.1:8000/api/control/admin/password",
+      expect.objectContaining({
+        method: "PUT",
+        credentials: "include",
+        headers: expect.objectContaining({
+          "X-Admin-CSRF": CSRF_TOKEN_TEXT,
+        }),
+        body: JSON.stringify({ password }),
+      }),
+    );
   });
 
   it("rejects writes before any request when no CSRF token is held in memory", async () => {
@@ -156,6 +198,35 @@ describe("admin activation API adapter", () => {
     expect(result.request_id).toBe("req-batch-1");
   });
 
+  it("shares the transient CSRF token with production control writes", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    await signIn(fetchMock);
+    fetchMock.mockImplementationOnce(() =>
+      jsonResponse({
+        internal_base_unit_price_fen: 100,
+        charged_unit_price_fen: 100,
+        min_recharge_fen: 100,
+        recharge_step_fen: 100,
+      }),
+    );
+
+    await updateControlBillingSettings({
+      internal_base_unit_price_fen: 100,
+      min_recharge_fen: 100,
+      recharge_step_fen: 100,
+    });
+
+    const [url, request] = fetchMock.mock.calls.at(-1) ?? [];
+    expect(url).toBe("http://127.0.0.1:8000/api/control/settings/billing");
+    expect(request).toEqual(
+      expect.objectContaining({ method: "PATCH", credentials: "include" }),
+    );
+    expect(
+      new Headers((request as RequestInit).headers).get("X-Admin-CSRF"),
+    ).toBe(CSRF_TOKEN_TEXT);
+  });
+
   it("mints a fresh idempotency key per write call", async () => {
     const fetchMock = vi.fn().mockImplementation(() =>
       jsonResponse({
@@ -181,6 +252,46 @@ describe("admin activation API adapter", () => {
     expect(keys).toHaveLength(2);
     expect(keys[0]).toBeTruthy();
     expect(keys[0]).not.toBe(keys[1]);
+  });
+
+  it("sends audited device unbind and credential revocation writes", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    await signIn(fetchMock);
+    fetchMock
+      .mockImplementationOnce(() =>
+        jsonResponse({
+          device_id: "device-1",
+          status: "UNBOUND",
+          outcome: "UNBOUND",
+          request_id: "request-unbind-1",
+        }),
+      )
+      .mockImplementationOnce(() =>
+        jsonResponse({
+          device_id: "device-2",
+          status: "REVOKED",
+          outcome: "REVOKED",
+          request_id: "request-revoke-1",
+        }),
+      );
+
+    await unbindDevice("device-1", "客户要求设备下线");
+    await revokeDeviceCredential("device-2", "设备凭据疑似泄露");
+
+    expect(fetchMock.mock.calls.slice(-2).map(([url]) => url)).toEqual([
+      "http://127.0.0.1:8000/api/control/devices/device-1/unbind",
+      "http://127.0.0.1:8000/api/control/devices/device-2/revoke-credential",
+    ]);
+    for (const [, options] of fetchMock.mock.calls.slice(-2)) {
+      const request = options as RequestInit;
+      expect(request.method).toBe("POST");
+      expect(request.body).toContain('"confirm":true');
+      expect(new Headers(request.headers).get("X-Admin-CSRF")).toBe(
+        CSRF_TOKEN_TEXT,
+      );
+      expect(new Headers(request.headers).get("Idempotency-Key")).toBeTruthy();
+    }
   });
 
   it("generates codes for a batch and downloads the one-time export", async () => {
@@ -391,7 +502,6 @@ describe("admin activation API adapter", () => {
     const fetchMock = vi
       .fn()
       .mockImplementationOnce(() => jsonResponse(sessionPayload))
-      .mockImplementationOnce(() => jsonResponse(exchangePayload))
       .mockImplementationOnce(() => jsonResponse(undefined, 204));
     vi.stubGlobal("fetch", fetchMock);
 
@@ -406,7 +516,6 @@ describe("admin activation API adapter", () => {
     );
     expect(session.actor.display_name).toBe("管理员一号");
 
-    await signIn(fetchMock);
     await deleteAdminSession();
     expect(fetchMock).toHaveBeenLastCalledWith(
       "http://127.0.0.1:8000/api/control/admin/session",
@@ -414,6 +523,58 @@ describe("admin activation API adapter", () => {
         method: "DELETE",
         credentials: "include",
         headers: expect.objectContaining({ "X-Admin-CSRF": "csrf-token-1" }),
+      }),
+    );
+  });
+
+  it("reads and updates a customer's API-controlled unit price", async () => {
+    const pricing = {
+      user_id: "customer-1",
+      unit_price_fen: 500,
+      custom_unit_price_fen: 500,
+      default_unit_price_fen: 1000,
+      min_recharge_fen: 10000,
+      recharge_step_fen: 500,
+      updated_at: "2026-08-27T18:00:00+08:00",
+      request_id: "req-price-1",
+    };
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    await signIn(fetchMock);
+    fetchMock
+      .mockImplementationOnce(() => jsonResponse(pricing))
+      .mockImplementationOnce(() => jsonResponse(pricing));
+
+    expect((await fetchCustomerUnitPrice("customer-1")).unit_price_fen).toBe(
+      500,
+    );
+    await updateCustomerUnitPrice(
+      "customer-1",
+      500,
+      "客户合同价",
+      "price-idem-1",
+    );
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "http://127.0.0.1:8000/api/control/customers/customer-1/unit-price",
+      expect.objectContaining({ method: "GET", credentials: "include" }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      "http://127.0.0.1:8000/api/control/customers/customer-1/unit-price",
+      expect.objectContaining({
+        method: "PUT",
+        credentials: "include",
+        headers: expect.objectContaining({
+          "X-Admin-CSRF": CSRF_TOKEN_TEXT,
+          "Idempotency-Key": "price-idem-1",
+        }),
+        body: JSON.stringify({
+          confirm: true,
+          reason: "客户合同价",
+          unit_price_fen: 500,
+        }),
       }),
     );
   });

@@ -1,16 +1,26 @@
 import { type FormEvent, useEffect, useRef, useState } from "react";
 
 import {
+  getControlSettings,
   getSettings,
   type ProviderName,
   type ProviderSettings,
   type ProviderTestResult,
   type RuntimeSettings,
   type SettingsSnapshot,
+  testControlProviderConnection,
   testProviderConnection,
+  updateControlProviderSettings,
+  updateControlRuntimeSettings,
   updateProviderSettings,
   updateRuntimeSettings,
 } from "./api";
+
+function visibleErrorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error && error.message.trim()
+    ? error.message
+    : fallback;
+}
 
 type ProviderField = {
   name: string;
@@ -62,13 +72,19 @@ const PROVIDER_FORMS: Record<ProviderName, ProviderFormSpec> = {
 
 const PROVIDER_ORDER: ProviderName[] = ["metaso", "apilio", "cos", "deepseek"];
 
-export function SettingsPanel() {
+export function SettingsPanel({
+  source = "workspace",
+  readOnly = false,
+}: {
+  source?: "workspace" | "control";
+  readOnly?: boolean;
+}) {
   const [settings, setSettings] = useState<SettingsSnapshot | null>(null);
   const [loadError, setLoadError] = useState("");
 
   useEffect(() => {
     let isMounted = true;
-    getSettings()
+    (source === "control" ? getControlSettings() : getSettings())
       .then((snapshot) => {
         if (isMounted) {
           setSettings(snapshot);
@@ -78,9 +94,10 @@ export function SettingsPanel() {
       .catch((error: unknown) => {
         if (isMounted) {
           setLoadError(
-            error instanceof Error
-              ? error.message
-              : "无法读取设置。请确认本地服务已启动且当前身份具有管理员权限。",
+            visibleErrorMessage(
+              error,
+              "无法读取设置。请确认本地服务已启动且当前身份具有管理员权限。",
+            ),
           );
         }
       });
@@ -88,7 +105,7 @@ export function SettingsPanel() {
     return () => {
       isMounted = false;
     };
-  }, []);
+  }, [source]);
 
   async function saveProvider(
     provider: ProviderName,
@@ -96,7 +113,9 @@ export function SettingsPanel() {
   ) {
     const finalConfig =
       provider === "cos" ? { ...config, region: COS_REGION } : config;
-    const updated = await updateProviderSettings(provider, finalConfig);
+    const updated = await (source === "control"
+      ? updateControlProviderSettings(provider, finalConfig)
+      : updateProviderSettings(provider, finalConfig));
     setSettings((current) =>
       current
         ? {
@@ -108,7 +127,9 @@ export function SettingsPanel() {
   }
 
   async function saveRuntime(runtime: RuntimeSettings) {
-    const updated = await updateRuntimeSettings(runtime);
+    const updated = await (source === "control"
+      ? updateControlRuntimeSettings(runtime)
+      : updateRuntimeSettings(runtime));
     setSettings((current) =>
       current ? { ...current, runtime: updated } : current,
     );
@@ -133,28 +154,42 @@ export function SettingsPanel() {
           <ProviderForm
             key={provider}
             provider={provider}
+            readOnly={readOnly}
             settings={settings.providers[provider]}
             onSave={saveProvider}
+            onTest={
+              source === "control"
+                ? testControlProviderConnection
+                : testProviderConnection
+            }
           />
         ))}
       </div>
 
-      <RuntimeForm runtime={settings.runtime} onSave={saveRuntime} />
+      <RuntimeForm
+        readOnly={readOnly}
+        runtime={settings.runtime}
+        onSave={saveRuntime}
+      />
     </section>
   );
 }
 
 function ProviderForm({
   provider,
+  readOnly,
   settings,
   onSave,
+  onTest,
 }: {
   provider: ProviderName;
+  readOnly: boolean;
   settings: ProviderSettings;
   onSave: (
     provider: ProviderName,
     config: Record<string, string>,
   ) => Promise<void>;
+  onTest: (provider: ProviderName) => Promise<ProviderTestResult>;
 }) {
   const form = PROVIDER_FORMS[provider];
   const [values, setValues] = useState<Record<string, string>>(() =>
@@ -204,14 +239,12 @@ function ProviderForm({
     setIsTesting(true);
     setStatus("");
     try {
-      const result = await testProviderConnection(provider);
+      const result = await onTest(provider);
       setStatus(testResultLabel(result));
       setStatusTone(result.status === "not_configured" ? "error" : "ok");
     } catch (error) {
       setStatus(
-        error instanceof Error
-          ? error.message
-          : "测试失败，请检查网络与管理员权限后重试。",
+        visibleErrorMessage(error, "测试失败，请检查网络与管理员权限后重试。"),
       );
       setStatusTone("error");
     } finally {
@@ -242,6 +275,7 @@ function ProviderForm({
               {field.label}
               <span className={field.secret ? "secret-field" : undefined}>
                 <input
+                  disabled={readOnly}
                   type={field.secret && !isVisible ? "password" : "text"}
                   value={values[field.name] ?? ""}
                   placeholder={
@@ -258,6 +292,7 @@ function ProviderForm({
                 />
                 {field.secret ? (
                   <button
+                    disabled={readOnly}
                     type="button"
                     className="secret-toggle"
                     aria-label={
@@ -275,14 +310,14 @@ function ProviderForm({
         })}
       </div>
       <div className="form-actions">
-        <button type="submit" disabled={isSaving || isTesting}>
+        <button type="submit" disabled={readOnly || isSaving || isTesting}>
           {isSaving ? "正在保存" : "保存"}
         </button>
         <button
           type="button"
           className="secondary-button"
           onClick={handleTest}
-          disabled={isSaving || isTesting}
+          disabled={readOnly || isSaving || isTesting}
         >
           {isTesting ? "正在测试" : "测试连接"}
         </button>
@@ -303,9 +338,11 @@ function ProviderForm({
 
 function RuntimeForm({
   runtime,
+  readOnly,
   onSave,
 }: {
   runtime: RuntimeSettings;
+  readOnly: boolean;
   onSave: (runtime: RuntimeSettings) => Promise<void>;
 }) {
   const [values, setValues] = useState(runtime);
@@ -354,7 +391,7 @@ function RuntimeForm({
         <label>
           单次生成数量上限
           <input
-            disabled={isSaving}
+            disabled={readOnly || isSaving}
             type="number"
             min="1"
             value={values.max_generation_count_per_batch}
@@ -369,7 +406,7 @@ function RuntimeForm({
         <label>
           视频生成并发数
           <input
-            disabled={isSaving}
+            disabled={readOnly || isSaving}
             type="number"
             min="1"
             value={values.max_concurrent_h3_tasks}
@@ -387,7 +424,7 @@ function RuntimeForm({
         PUT/GET/HEAD，否则上传失败）；生成的成片仅保存在本机。
       </p>
       <div className="form-actions">
-        <button disabled={isSaving} type="submit">
+        <button disabled={readOnly || isSaving} type="submit">
           {isSaving ? "正在保存" : "保存"}
         </button>
         {status ? <span role="status">{status}</span> : null}

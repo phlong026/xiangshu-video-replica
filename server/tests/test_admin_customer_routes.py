@@ -311,6 +311,10 @@ def _adjustment_path(user_id: str) -> str:
     return ADJUSTMENTS_PATH.format(user_id=user_id)
 
 
+def _unit_price_path(user_id: str = CUSTOMER_USER_ID) -> str:
+    return f"/api/control/customers/{user_id}/unit-price"
+
+
 def _create_adjustment(
     client: TestClient,
     admin_headers: dict[str, str],
@@ -1026,6 +1030,7 @@ def test_missing_pg_runtime_fails_closed(monkeypatch: pytest.MonkeyPatch, route_
         username="admin_u",
         display_name="Admin User",
         role="admin",
+        auth_method="password",
         session_id="sess-nopg",
         session_expires_at="2099-01-01T00:00:00+00:00",
         last_activity_at="2026-01-01T00:00:00+00:00",
@@ -1115,6 +1120,58 @@ def test_list_customers_returns_activated_customers(client: TestClient) -> None:
     assert customer["activation_code"] == "XS04-****"
     assert customer["status"] == "ACTIVE"
     assert customer["created_at"]
+    assert customer["generation_total"] == 0
+    assert customer["generation_succeeded"] == 0
+    assert customer["generation_failed"] == 0
+    assert customer["generation_in_progress"] == 0
+    assert customer["generation_attention"] == 0
+    assert customer["credits_spent"] == 0
+
+
+def test_list_customers_aggregates_generation_usage_and_settled_credits(
+    client: TestClient,
+) -> None:
+    with psycopg.connect(_t23_dsn(), autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO projects (id, owner_user_id, name) "
+            "VALUES ('usage-project', %s, 'Usage Project')",
+            (CUSTOMER_USER_ID,),
+        )
+        conn.execute(
+            "INSERT INTO generation_batches ("
+            "id, project_id, created_by_user_id, idempotency_key, request_hash, "
+            "request_snapshot_json) VALUES ("
+            "'usage-batch', 'usage-project', %s, 'usage-key', 'usage-hash', '{}')",
+            (CUSTOMER_USER_ID,),
+        )
+        conn.execute(
+            "INSERT INTO generation_tasks (id, batch_id, provider, model, status, archive_status) "
+            "VALUES "
+            "('usage-success', 'usage-batch', 'metaso', 'h3', 'SUCCEEDED', 'ARCHIVED'), "
+            "('usage-failed', 'usage-batch', 'metaso', 'h3', 'FAILED', 'PENDING'), "
+            "('usage-running', 'usage-batch', 'metaso', 'h3', 'RUNNING', 'PENDING'), "
+            "('usage-attention', 'usage-batch', 'metaso', 'h3', "
+            " 'SUBMISSION_UNCERTAIN', 'PENDING')"
+        )
+        conn.execute(
+            "INSERT INTO wallet_transactions ("
+            "id, user_id, type, available_delta, reserved_delta, task_id, "
+            "billing_round, idempotency_key) VALUES ("
+            "'usage-settle', %s, 'SETTLE', 0, -1, 'usage-success', 1, 'usage-settle')",
+            (CUSTOMER_USER_ID,),
+        )
+
+    admin = _admin_session(client)
+    response = client.get("/api/control/customers", headers=admin)
+
+    assert response.status_code == 200, response.text
+    customer = response.json()["customers"][0]
+    assert customer["generation_total"] == 4
+    assert customer["generation_succeeded"] == 1
+    assert customer["generation_failed"] == 1
+    assert customer["generation_in_progress"] == 1
+    assert customer["generation_attention"] == 1
+    assert customer["credits_spent"] == 1
 
 
 def test_list_customers_supports_pagination_and_username_filter(
@@ -1148,3 +1205,109 @@ def test_list_customers_is_auditor_readable(client: TestClient) -> None:
 def test_list_customers_rejects_anonymous(client: TestClient) -> None:
     response = client.get("/api/control/customers")
     assert response.status_code == 401
+
+
+def test_admin_can_set_read_and_reset_customer_unit_price(client: TestClient) -> None:
+    admin = _admin_session(client)
+
+    initial = client.get(_unit_price_path(), headers=admin)
+    assert initial.status_code == 200, initial.text
+    assert initial.json()["unit_price_fen"] == BASE_UNIT_PRICE_FEN
+    assert initial.json()["custom_unit_price_fen"] is None
+
+    update = client.put(
+        _unit_price_path(),
+        headers={**admin, IDEMPOTENCY_KEY_HEADER: "price-set-500"},
+        json={
+            "confirm": True,
+            "reason": "客户合同约定价格",
+            "unit_price_fen": 500,
+        },
+    )
+    assert update.status_code == 200, update.text
+    assert update.json()["unit_price_fen"] == 500
+    assert update.json()["custom_unit_price_fen"] == 500
+    assert update.json()["default_unit_price_fen"] == BASE_UNIT_PRICE_FEN
+    assert update.json()["min_recharge_fen"] == MIN_RECHARGE_FEN
+    assert update.json()["recharge_step_fen"] == 500
+
+    stored = _fetch_one(
+        "SELECT unit_price_fen, updated_by_user_id FROM customer_unit_prices WHERE user_id = %s",
+        (CUSTOMER_USER_ID,),
+    )
+    assert stored == (500, "admin_u")
+
+    reset = client.put(
+        _unit_price_path(),
+        headers={**admin, IDEMPOTENCY_KEY_HEADER: "price-reset-default"},
+        json={
+            "confirm": True,
+            "reason": "恢复系统默认价格",
+            "unit_price_fen": None,
+        },
+    )
+    assert reset.status_code == 200, reset.text
+    assert reset.json()["unit_price_fen"] == BASE_UNIT_PRICE_FEN
+    assert reset.json()["custom_unit_price_fen"] is None
+    assert (
+        _fetch_one(
+            "SELECT unit_price_fen FROM customer_unit_prices WHERE user_id = %s",
+            (CUSTOMER_USER_ID,),
+        )
+        is None
+    )
+
+
+def test_customer_unit_price_controls_adjustment_order_snapshot(client: TestClient) -> None:
+    admin = _admin_session(client)
+    update = client.put(
+        _unit_price_path(),
+        headers={**admin, IDEMPOTENCY_KEY_HEADER: "price-adjustment-500"},
+        json={
+            "confirm": True,
+            "reason": "客户合同约定价格",
+            "unit_price_fen": 500,
+        },
+    )
+    assert update.status_code == 200, update.text
+
+    adjustment = _create_adjustment(client, admin, credits=2)
+    assert adjustment.status_code == 201, adjustment.text
+    order = _order_row(adjustment.json()["order_id"])
+    assert order[4] == BASE_UNIT_PRICE_FEN
+    assert order[5] == 500
+    assert order[7] == 500
+    assert order[8] == 1000
+
+
+@pytest.mark.parametrize("unit_price_fen", [0, -1, True, "500", 2_147_483_648])
+def test_customer_unit_price_rejects_invalid_values(
+    client: TestClient,
+    unit_price_fen: object,
+) -> None:
+    admin = _admin_session(client)
+    response = client.put(
+        _unit_price_path(),
+        headers={**admin, IDEMPOTENCY_KEY_HEADER: f"invalid-price-{unit_price_fen}"},
+        json={
+            "confirm": True,
+            "reason": "非法价格测试",
+            "unit_price_fen": unit_price_fen,
+        },
+    )
+    assert response.status_code in {400, 422}
+
+
+def test_customer_unit_price_requires_an_activated_customer(client: TestClient) -> None:
+    admin = _admin_session(client)
+    response = client.put(
+        _unit_price_path(INTERNAL_USER_ID),
+        headers={**admin, IDEMPOTENCY_KEY_HEADER: "price-internal-user"},
+        json={
+            "confirm": True,
+            "reason": "内部账号不能设置客户价",
+            "unit_price_fen": 500,
+        },
+    )
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "CUSTOMER_NOT_FOUND"

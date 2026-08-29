@@ -2,18 +2,22 @@
 //
 // The customer V3 control plane lives behind the T09 admin session
 // (HttpOnly `admin_session` cookie on /api/control) plus the per-session CSRF
-// token returned once by the exchange response. The CSRF token is held in a
-// module-level variable only: it must never reach localStorage, sessionStorage
-// or any other browser persistence (ADM-01 No-Go red line) — after a page
-// refresh the cookie still authorises reads, while writes require a fresh
-// exchange.
+// token returned by the login/session response. The CSRF token is held in a
+// module-level variable only: it never reaches localStorage, sessionStorage,
+// or any other browser persistence. The server can deterministically restore
+// it from the HttpOnly session cookie after a page refresh.
 //
 // Every write goes out with the dev-doc §15 admin write contract:
 // `confirm: true`, a non-blank `reason`, and a unique `Idempotency-Key`
 // header, alongside the `X-Admin-CSRF` header; responses carry the audit
 // `request_id` that the pages surface to the operator.
 
-import { resolveApiBaseUrl } from "./api";
+import {
+  clearAdminCsrfToken,
+  getAdminCsrfToken,
+  resolveApiBaseUrl,
+  setAdminCsrfToken,
+} from "./api";
 
 const DEFAULT_TIMEOUT_MS = 5_000;
 const CSRF_HEADER = "X-Admin-CSRF";
@@ -31,22 +35,21 @@ export class AdminActivationError extends Error {
   }
 }
 
-let adminCsrfToken: string | null = null;
-
 /** Drop the in-memory session state (logout, expiry, tests). */
 export function clearAdminActivationSession(): void {
-  adminCsrfToken = null;
+  clearAdminCsrfToken();
 }
 
 function requireCsrfToken(): string {
-  if (!adminCsrfToken) {
+  const token = getAdminCsrfToken();
+  if (!token) {
     throw new AdminActivationError(
       "管理登录令牌缺失，请重新登录后再执行写操作",
       401,
       "ADMIN_CSRF_UNAVAILABLE",
     );
   }
-  return adminCsrfToken;
+  return token;
 }
 
 function newIdempotencyKey(): string {
@@ -182,8 +185,25 @@ export type AdminSessionInfo = {
   session_id: string;
   expires_at: string;
   last_activity_at: string;
+  csrf_token: string | null;
   actor: AdminActorInfo;
 };
+
+export async function loginAdminWithPassword(
+  username: string,
+  password: string,
+): Promise<AdminExchangeResult> {
+  const response = await requestControl("/api/control/admin/session/password", {
+    method: "POST",
+    body: JSON.stringify({ username, password }),
+  });
+  if (!response.ok) {
+    throw await parseActivationError(response, "后台登录失败");
+  }
+  const payload = (await response.json()) as AdminExchangeResult;
+  setAdminCsrfToken(payload.csrf_token);
+  return payload;
+}
 
 export async function exchangeAdminSession(
   credential: string,
@@ -197,7 +217,7 @@ export async function exchangeAdminSession(
   }
   const payload = (await response.json()) as AdminExchangeResult;
   // Memory only — never persisted (No-Go red line).
-  adminCsrfToken = payload.csrf_token;
+  setAdminCsrfToken(payload.csrf_token);
   return payload;
 }
 
@@ -208,7 +228,26 @@ export async function fetchAdminSession(): Promise<AdminSessionInfo> {
   if (!response.ok) {
     throw await parseActivationError(response, "读取管理会话失败");
   }
-  return (await response.json()) as AdminSessionInfo;
+  const payload = (await response.json()) as AdminSessionInfo;
+  if (payload.csrf_token) {
+    setAdminCsrfToken(payload.csrf_token);
+  } else {
+    clearAdminCsrfToken();
+  }
+  return payload;
+}
+
+export async function recoverAdminPassword(password: string): Promise<void> {
+  const csrf = requireCsrfToken();
+  const response = await requestControl("/api/control/admin/password", {
+    method: "PUT",
+    headers: { [CSRF_HEADER]: csrf },
+    body: JSON.stringify({ password }),
+  });
+  if (!response.ok) {
+    throw await parseActivationError(response, "设置管理员密码失败");
+  }
+  clearAdminCsrfToken();
 }
 
 export async function deleteAdminSession(): Promise<void> {
@@ -220,7 +259,7 @@ export async function deleteAdminSession(): Promise<void> {
   if (!response.ok) {
     throw await parseActivationError(response, "退出管理登录失败");
   }
-  adminCsrfToken = null;
+  clearAdminCsrfToken();
 }
 
 // ---------------------------------------------------------------------------
@@ -315,10 +354,11 @@ export async function generateActivationCodes(
   quantity: number,
   reason: string,
   idempotencyKey?: string,
+  autoIssue = false,
 ): Promise<ActivationGenerateResult> {
   return adminWrite<ActivationGenerateResult>(
     `/api/control/activation-code-batches/${encodeURIComponent(batchId)}/generate`,
-    { quantity },
+    autoIssue ? { quantity, auto_issue: true } : { quantity },
     reason,
     "生成激活码失败",
     idempotencyKey,
@@ -443,6 +483,9 @@ const CODE_MESSAGES: Record<string, string> = {
   EXCHANGE_CREDENTIAL_REUSED: "交换凭据已被使用，请重新获取",
   ADMIN_ACTOR_INVALID: "操作员账号不可用",
   ADMIN_ROLE_REQUIRED: "仅管理员或审计员可登录管理端",
+  ADMIN_LOGIN_INVALID: "管理员账号或密码错误",
+  ADMIN_PASSWORD_INVALID: "密码需为 12 至 128 个字符",
+  ADMIN_PASSWORD_RECOVERY_REQUIRED: "请先使用一次性恢复凭据验证身份",
   ADMIN_SESSION_INVALID: "会话已失效，请重新登录",
   ADMIN_SESSION_EXPIRED: "会话已过期，请重新登录",
   ADMIN_SESSIONS_UNAVAILABLE: "管理会话服务暂不可用，请稍后重试",
@@ -459,6 +502,7 @@ const CODE_MESSAGES: Record<string, string> = {
   BATCH_NOT_OPEN: "批次已关闭，无法生成激活码",
   BATCH_BUDGET_EXCEEDED: "生成数量超出批次预算",
   ACTIVATION_KEYS_UNAVAILABLE: "激活码密钥未配置，请联系运维",
+  ACTIVATION_DETAILS_UNAVAILABLE: "激活码详情暂时无法读取，请稍后重试",
   ACTIVATION_SERVICE_UNAVAILABLE: "激活码服务暂不可用，请稍后重试",
   EXPORT_NOT_FOUND: "导出包不存在",
   EXPORT_ALREADY_DOWNLOADED: "该导出包已被下载过，无法再次下载",
@@ -510,6 +554,12 @@ export interface CustomerListItem {
   created_at: string;
   activation_code: string;
   status: string;
+  generation_total?: number;
+  generation_succeeded?: number;
+  generation_failed?: number;
+  generation_in_progress?: number;
+  generation_attention?: number;
+  credits_spent?: number;
 }
 
 export interface CustomerListResponse {
@@ -552,6 +602,63 @@ export async function listCustomers(
   }
 
   return response.json() as Promise<CustomerListResponse>;
+}
+
+export interface CustomerUnitPrice {
+  user_id: string;
+  unit_price_fen: number;
+  custom_unit_price_fen: number | null;
+  default_unit_price_fen: number;
+  min_recharge_fen: number;
+  recharge_step_fen: number;
+  updated_at: string | null;
+  request_id: string | null;
+}
+
+/** Read the effective sale price for one activated customer. */
+export async function fetchCustomerUnitPrice(
+  userId: string,
+): Promise<CustomerUnitPrice> {
+  const response = await requestControl(
+    `/api/control/customers/${encodeURIComponent(userId)}/unit-price`,
+    { method: "GET" },
+  );
+  if (!response.ok) {
+    throw await parseActivationError(response, "读取客户单价失败");
+  }
+  return response.json() as Promise<CustomerUnitPrice>;
+}
+
+/**
+ * Set a customer's sale price in fen, or pass null to restore the global
+ * default. The internal cost/base price is deliberately not consulted.
+ */
+export async function updateCustomerUnitPrice(
+  userId: string,
+  unitPriceFen: number | null,
+  reason: string,
+  idempotencyKey: string = newIdempotencyKey(),
+): Promise<CustomerUnitPrice> {
+  const csrf = requireCsrfToken();
+  const response = await requestControl(
+    `/api/control/customers/${encodeURIComponent(userId)}/unit-price`,
+    {
+      method: "PUT",
+      headers: {
+        [CSRF_HEADER]: csrf,
+        [IDEMPOTENCY_KEY_HEADER]: idempotencyKey,
+      },
+      body: JSON.stringify({
+        confirm: true,
+        reason,
+        unit_price_fen: unitPriceFen,
+      }),
+    },
+  );
+  if (!response.ok) {
+    throw await parseActivationError(response, "保存客户单价失败");
+  }
+  return response.json() as Promise<CustomerUnitPrice>;
 }
 
 // ---------------------------------------------------------------------------
@@ -619,6 +726,37 @@ export async function listDevices(
   }
 
   return response.json() as Promise<DeviceListResponse>;
+}
+
+export interface DeviceOperationResult {
+  device_id: string;
+  status: "UNBOUND" | "REVOKED";
+  outcome: string;
+  request_id: string;
+}
+
+export async function unbindDevice(
+  deviceId: string,
+  reason: string,
+): Promise<DeviceOperationResult> {
+  return adminWrite<DeviceOperationResult>(
+    `/api/control/devices/${encodeURIComponent(deviceId)}/unbind`,
+    {},
+    reason,
+    "设备下线失败",
+  );
+}
+
+export async function revokeDeviceCredential(
+  deviceId: string,
+  reason: string,
+): Promise<DeviceOperationResult> {
+  return adminWrite<DeviceOperationResult>(
+    `/api/control/devices/${encodeURIComponent(deviceId)}/revoke-credential`,
+    {},
+    reason,
+    "撤销设备凭据失败",
+  );
 }
 
 // ---------------------------------------------------------------------------

@@ -30,10 +30,10 @@ const STATUS_LABELS: Record<string, string> = {
 /**
  * T32 — activation code listing with the suspend / resume / revoke writes.
  *
- * The list always shows masked codes only; each transition demands a reason
- * plus an explicit confirmation and reports the audit `request_id`, matching
- * the T12 write contract. Auditors (and refreshed read-only sessions) get the
- * same list without any write control.
+ * Administrators see recoverable full codes and can copy them repeatedly;
+ * each server-side transition still demands a reason plus an explicit
+ * confirmation and reports the audit `request_id`, matching the T12 write
+ * contract. Read-only sessions get the list without mutation controls.
  */
 export function ActivationCodesPage({
   readOnly = false,
@@ -223,7 +223,7 @@ export function ActivationCodesPage({
           <thead>
             <tr>
               <th>码 ID</th>
-              <th>掩码码</th>
+              <th>激活码</th>
               <th>状态</th>
               <th>绑定用户</th>
               <th>发放时间</th>
@@ -234,7 +234,9 @@ export function ActivationCodesPage({
             {items.map((item) => (
               <tr key={item.code_id}>
                 <td>{item.code_id}</td>
-                <td>{item.masked_code}</td>
+                <td>
+                  <code>{item.masked_code}</code>
+                </td>
                 <td>{statusLabel(item.status)}</td>
                 <td>{item.bound_user_id ?? "—"}</td>
                 <td>{item.issued_at ?? "—"}</td>

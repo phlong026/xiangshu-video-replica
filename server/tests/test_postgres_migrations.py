@@ -252,7 +252,7 @@ def test_pg_upgrade_from_published_040_head_applies_fair_queue() -> None:
         command.upgrade(_alembic_config(sqlalchemy_dsn), "head")
         with psycopg.connect(dsn) as conn:
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-            assert version == "042_t37_observability_indexes"
+            assert version == "044_customer_unit_prices"
             fair_queue_column = conn.execute(
                 "SELECT COUNT(*) FROM information_schema.columns "
                 "WHERE table_name = 'runtime_settings' AND column_name = 'fair_queue_enabled'"
@@ -286,9 +286,7 @@ def test_pg_full_upgrade_downgrade_reupgrade_and_indexes() -> None:
 
         with psycopg.connect(dsn) as conn:
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-            assert version == "042_t37_observability_indexes", (
-                f"unexpected head revision: {version}"
-            )
+            assert version == "044_customer_unit_prices", f"unexpected head revision: {version}"
 
             tables = {
                 row[0]
@@ -367,7 +365,7 @@ def test_pg_full_upgrade_downgrade_reupgrade_and_indexes() -> None:
         command.upgrade(_alembic_config(sqlalchemy_dsn), "head")
         with psycopg.connect(dsn) as conn:
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-            assert version == "042_t37_observability_indexes"
+            assert version == "044_customer_unit_prices"
     finally:
         _drop_database("t06_migrate_test")
 
@@ -489,7 +487,7 @@ def test_pg_wallet_downgrade_blocked_when_ledger_has_settled_rounds() -> None:
         # The database must be left exactly at head (no partial rollback).
         with psycopg.connect(dsn) as conn:
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-        assert version == "042_t37_observability_indexes"
+        assert version == "044_customer_unit_prices"
     finally:
         _drop_database(db_name)
 
@@ -657,17 +655,46 @@ def test_pg_billing_provider_shapes_accepted_and_rejected() -> None:
             )  # a paid ZPay order must carry its provider trade number
             rejected(22, provider_trade_no="ZPAY-SQUAT")  # a non-PAID ZPay order must not
             #   reserve a globally unique third-party trade number (review P2)
-            rejected(
+            _insert_t08_order(
+                conn,
                 17,
                 pricing_scope="CUSTOMER_STANDARD",
                 charged_unit_price_fen_snapshot=500,
-                amount_fen=5000,
-                credits=10,
-            )  # customer price must never undercut the internal base price
+                amount_fen=10000,
+                credits=20,
+            )  # customer sale price is independent from the internal base snapshot
             rejected(18, amount_fen=9000, credits=9)  # zpay: below min recharge
             rejected(19, amount_fen=10500)  # zpay: off the recharge step ladder
             rejected(20, credits=9)  # credits * price != amount (all providers)
             rejected(21, status="REFUNDED")  # unknown status (022 regression)
+    finally:
+        _drop_database(db_name)
+
+
+def test_pg_customer_unit_price_schema_and_constraints() -> None:
+    db_name = "customer_unit_prices"
+    dsn = _t08_database(db_name)
+    try:
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            conn.execute(
+                "INSERT INTO users (id, username, display_name, role) "
+                "VALUES ('admin-price', 'admin-price', 'Pricing Admin', 'admin')"
+            )
+            conn.execute(
+                "INSERT INTO customer_unit_prices "
+                "(user_id, unit_price_fen, updated_by_user_id) "
+                "VALUES ('u-t08', 500, 'admin-price')"
+            )
+            row = conn.execute(
+                "SELECT unit_price_fen, updated_by_user_id "
+                "FROM customer_unit_prices WHERE user_id = 'u-t08'"
+            ).fetchone()
+            assert row == (500, "admin-price")
+
+            with pytest.raises(psycopg.errors.CheckViolation):
+                conn.execute(
+                    "UPDATE customer_unit_prices SET unit_price_fen = 0 WHERE user_id = 'u-t08'"
+                )
     finally:
         _drop_database(db_name)
 
@@ -786,7 +813,7 @@ def test_pg_billing_constraints_downgrade_guard() -> None:
             command.downgrade(_alembic_config(sqlalchemy_dsn), "025_postgres_runtime_compatibility")
         with psycopg.connect(dsn) as conn:
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-        assert version == "042_t37_observability_indexes"
+        assert version == "044_customer_unit_prices"
 
         # Remove the customer order (test data only — confirmed production rows
         # are never deleted, which is exactly why the guard exists) and the
@@ -888,7 +915,7 @@ def test_t37_observability_indexes_and_fencing_audit_dimension() -> None:
     try:
         with psycopg.connect(dsn, autocommit=True) as conn:
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-            assert version == "042_t37_observability_indexes"
+            assert version == "044_customer_unit_prices"
 
             indexes = {
                 row[0]
@@ -1069,7 +1096,7 @@ def test_t37_observability_indexes_and_fencing_audit_dimension() -> None:
         # indexes intact when the append-only evidence guard refuses rollback.
         with psycopg.connect(dsn) as conn:
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-            assert version == "042_t37_observability_indexes"
+            assert version == "044_customer_unit_prices"
             index_count = conn.execute(
                 "SELECT count(*) FROM pg_indexes WHERE schemaname = 'public' "
                 "AND indexname = 'idx_wallets_updated_at_user'"

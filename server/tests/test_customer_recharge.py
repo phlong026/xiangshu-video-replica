@@ -310,6 +310,55 @@ def test_customer_session_recharge_preserves_all_state_with_wallet_credit(
         )
 
 
+def test_customer_unit_price_override_controls_wallet_and_recharge_credits(
+    client: TestClient, clean_state: str, recharge_config_fixture
+) -> None:
+    code = generate_activation_code()
+    with psycopg.connect(clean_state) as conn:
+        _insert_code(
+            conn,
+            code_id="code-t22-custom-price",
+            batch_id="batch-t22-custom-price",
+            plaintext=code,
+        )
+
+    activation = _activate_customer(client, code, "fp-t22-custom-price", "unused")
+    session_token = activation["session_token"]
+    user_id = activation["user_id"]
+    with psycopg.connect(clean_state) as conn:
+        conn.execute(
+            "INSERT INTO customer_unit_prices "
+            "(user_id, unit_price_fen, updated_by_user_id) VALUES (%s, 500, 'admin_u')",
+            (user_id,),
+        )
+
+    wallet = client.get(
+        "/api/customer/wallet",
+        headers={"Authorization": f"Bearer {session_token}"},
+    )
+    assert wallet.status_code == 200, wallet.text
+    assert wallet.json()["internal_unit_price_fen"] == 500
+    assert wallet.json()["min_recharge_fen"] == 10000
+    assert wallet.json()["recharge_step_fen"] == 500
+
+    response = client.post(
+        "/api/customer/recharge-orders",
+        json={"amount_fen": 10000},
+        headers=_recharge_headers(session_token),
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["credits"] == 20
+
+    with psycopg.connect(clean_state) as conn:
+        snapshot = conn.execute(
+            "SELECT base_unit_price_fen_snapshot, charged_unit_price_fen_snapshot, "
+            "min_recharge_fen_snapshot, recharge_step_fen_snapshot "
+            "FROM recharge_orders WHERE merchant_order_no = %s",
+            (response.json()["order_no"],),
+        ).fetchone()
+    assert snapshot == (1000, 500, 10000, 500)
+
+
 def test_customer_wallet_reads_and_order_list(
     client: TestClient, clean_state: str, recharge_config_fixture
 ) -> None:

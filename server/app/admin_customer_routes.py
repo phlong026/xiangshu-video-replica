@@ -20,9 +20,9 @@ same-key retry replays the stored response (X-Idempotent-Replay: true); same key
 different params answers 409 IDEMPOTENCY_CONFLICT. Business failure rolls the placeholder
 back so the key stays reusable.
 
-Amount calculation: amount_fen = credits * internal_base_unit_price_fen frozen on the
-order. There is no lane where the operator types an arbitrary amount; PRICE-01 floor
-holds by construction (charged == base unit price × credits).
+Amount calculation: amount_fen = credits * the customer's effective unit price frozen
+on the order. The internal base price remains a separate reporting snapshot and does
+not constrain the customer sale price.
 
 Pricing scope inference: a target user bound to an activation code is CUSTOMER_STANDARD;
 an internal account stays INTERNAL (revision 026 pairing).
@@ -45,12 +45,13 @@ from datetime import UTC, datetime
 
 import psycopg
 from fastapi import APIRouter, HTTPException, Request, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, StrictInt
 
 from app.admin_activation_routes import _canonical_route, _idempotency_key_digest, _request_hash
 from app.admin_auth_routes import AdminActor, AdminReader, AdminWriter
 from app.db_pg import MissingDatabaseConfigError, pg_transaction
 from app.ops_metrics import get_or_create_request_id, set_current_result_code
+from app.settings import apply_customer_unit_price
 
 router = APIRouter(prefix="/api/control", tags=["admin-customers"])
 
@@ -80,17 +81,20 @@ def _transaction_now_iso(conn: psycopg.Connection) -> str:
 # ---------------------------------------------------------------------------
 
 
-class AdjustmentRequest(BaseModel):
-    """Shared request shape for every admin adjustment write."""
-
+class AdminWriteRequest(BaseModel):
     confirm: bool = False
     reason: str = ""
+
+
+class AdjustmentRequest(AdminWriteRequest):
+    """Shared request shape for every admin adjustment write."""
+
     credits: int = 0
     source_document_type: str = ""
     source_document_ref: str = ""
 
 
-def _require_write_contract(request: Request, body: AdjustmentRequest) -> tuple[str, str]:
+def _require_write_contract(request: Request, body: AdminWriteRequest) -> tuple[str, str]:
     """Validate the write contract; returns (idempotency_key, reason)."""
     from app.admin_activation_routes import IDEMPOTENCY_KEY_HEADER
 
@@ -222,7 +226,7 @@ def _write_with_idempotency(
     request: Request,
     response: Response,
     actor: AdminActor,
-    body: AdjustmentRequest,
+    body: AdminWriteRequest,
     business: Callable[[psycopg.Connection, str], dict[str, object]],
     *,
     success_status: int = 201,
@@ -305,6 +309,192 @@ def _write_with_idempotency(
 
 
 # ---------------------------------------------------------------------------
+# Per-customer unit price
+# ---------------------------------------------------------------------------
+
+
+class CustomerUnitPriceUpdateRequest(AdminWriteRequest):
+    model_config = ConfigDict(extra="forbid")
+
+    # ``null`` removes the override and returns the customer to the global
+    # default. StrictInt prevents booleans and numeric strings from silently
+    # becoming financial values.
+    unit_price_fen: StrictInt | None
+
+
+class CustomerUnitPriceResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: str
+    unit_price_fen: int
+    custom_unit_price_fen: int | None
+    default_unit_price_fen: int
+    min_recharge_fen: int
+    recharge_step_fen: int
+    updated_at: str | None
+    request_id: str | None = None
+
+
+def _customer_unit_price_payload(
+    conn: psycopg.Connection,
+    *,
+    user_id: str,
+    request_id: str | None = None,
+) -> dict[str, object]:
+    row = conn.execute(
+        """
+        SELECT u.id,
+               rs.internal_base_unit_price_fen,
+               rs.min_recharge_fen,
+               rs.recharge_step_fen,
+               cup.unit_price_fen,
+               cup.updated_at
+        FROM users u
+        CROSS JOIN runtime_settings rs
+        LEFT JOIN customer_unit_prices cup ON cup.user_id = u.id
+        WHERE u.id = %s
+          AND rs.id = 1
+          AND EXISTS (
+              SELECT 1
+              FROM activation_code_activations aca
+              JOIN activation_codes ac ON ac.id = aca.code_id
+              WHERE aca.user_id = u.id
+                AND ac.status IN ('ACTIVE', 'SUSPENDED')
+          )
+        """,
+        (user_id,),
+    ).fetchone()
+    if row is None:
+        raise _http(404, "CUSTOMER_NOT_FOUND", "Activated customer not found.")
+
+    default_unit_price_fen = int(row[1])
+    custom_unit_price_fen = None if row[4] is None else int(row[4])
+    billing = {
+        "internal_base_unit_price_fen": default_unit_price_fen,
+        "charged_unit_price_fen": default_unit_price_fen,
+        "min_recharge_fen": int(row[2]),
+        "recharge_step_fen": int(row[3]),
+    }
+    if custom_unit_price_fen is not None:
+        billing = apply_customer_unit_price(
+            billing,
+            unit_price_fen=custom_unit_price_fen,
+        )
+    return {
+        "user_id": str(row[0]),
+        "unit_price_fen": billing["charged_unit_price_fen"],
+        "custom_unit_price_fen": custom_unit_price_fen,
+        "default_unit_price_fen": default_unit_price_fen,
+        "min_recharge_fen": billing["min_recharge_fen"],
+        "recharge_step_fen": billing["recharge_step_fen"],
+        "updated_at": None if row[5] is None else str(row[5]),
+        "request_id": request_id,
+    }
+
+
+@router.get(
+    "/customers/{user_id}/unit-price",
+    response_model=CustomerUnitPriceResponse,
+)
+def read_customer_unit_price(
+    user_id: str,
+    actor: AdminReader,
+) -> dict[str, object]:
+    del actor
+    try:
+        with pg_transaction() as conn:
+            return _customer_unit_price_payload(conn, user_id=user_id)
+    except (RuntimeError, ValueError, MissingDatabaseConfigError) as exc:
+        raise _http(
+            503,
+            "CUSTOMER_PRICING_UNAVAILABLE",
+            "Customer pricing requires the PostgreSQL runtime.",
+        ) from exc
+
+
+@router.put(
+    "/customers/{user_id}/unit-price",
+    response_model=CustomerUnitPriceResponse,
+)
+def update_customer_unit_price(
+    user_id: str,
+    body: CustomerUnitPriceUpdateRequest,
+    request: Request,
+    response: Response,
+    actor: AdminWriter,
+) -> dict[str, object]:
+    """Set or clear a customer's sale price without applying a cost floor."""
+
+    def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
+        current = _customer_unit_price_payload(conn, user_id=user_id)
+        unit_price_fen = body.unit_price_fen
+        if unit_price_fen is not None and not 1 <= unit_price_fen <= 2_147_483_647:
+            raise _http(
+                400,
+                "CUSTOMER_PRICE_INVALID",
+                "unit_price_fen must be between 1 and 2147483647.",
+            )
+
+        if unit_price_fen is None:
+            conn.execute("DELETE FROM customer_unit_prices WHERE user_id = %s", (user_id,))
+            action = "customer_unit_price.reset"
+        else:
+            conn.execute(
+                """
+                INSERT INTO customer_unit_prices
+                    (user_id, unit_price_fen, updated_by_user_id)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (user_id) DO UPDATE
+                SET unit_price_fen = EXCLUDED.unit_price_fen,
+                    updated_by_user_id = EXCLUDED.updated_by_user_id,
+                    updated_at = clock_timestamp()
+                """,
+                (user_id, unit_price_fen, actor.user_id),
+            )
+            action = "customer_unit_price.update"
+
+        conn.execute(
+            """
+            INSERT INTO audit_logs
+                (id, actor_user_id, action, entity_type, entity_id, metadata_json)
+            VALUES (%s, %s, %s, 'customer_unit_price', %s, %s)
+            """,
+            (
+                str(uuid.uuid4()),
+                actor.user_id,
+                action,
+                user_id,
+                json.dumps(
+                    {
+                        "old_unit_price_fen": current["custom_unit_price_fen"],
+                        "new_unit_price_fen": unit_price_fen,
+                        "reason": body.reason.strip(),
+                        "request_id": request_id,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            ),
+        )
+        return _customer_unit_price_payload(
+            conn,
+            user_id=user_id,
+            request_id=request_id,
+        )
+
+    return _write_with_idempotency(
+        request,
+        response,
+        actor,
+        body,
+        business,
+        success_status=200,
+        unavailable_code="CUSTOMER_PRICING_UNAVAILABLE",
+        unavailable_message="Customer pricing requires the PostgreSQL runtime.",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Adjustment creation (happy path + validations)
 # ---------------------------------------------------------------------------
 
@@ -366,9 +556,26 @@ def create_admin_adjustment(
         if not snapshot:
             raise _http(503, "BILLING_SNAPSHOT_UNAVAILABLE", "Billing snapshot not configured.")
 
-        unit_price_fen = int(snapshot[0])
-        min_recharge_fen = int(snapshot[1])
-        recharge_step_fen = int(snapshot[2])
+        base_unit_price_fen = int(snapshot[0])
+        billing = {
+            "internal_base_unit_price_fen": base_unit_price_fen,
+            "charged_unit_price_fen": base_unit_price_fen,
+            "min_recharge_fen": int(snapshot[1]),
+            "recharge_step_fen": int(snapshot[2]),
+        }
+        if pricing_scope == "CUSTOMER_STANDARD":
+            custom_price = conn.execute(
+                "SELECT unit_price_fen FROM customer_unit_prices WHERE user_id = %s",
+                (user_id,),
+            ).fetchone()
+            if custom_price is not None:
+                billing = apply_customer_unit_price(
+                    billing,
+                    unit_price_fen=int(custom_price[0]),
+                )
+        unit_price_fen = billing["charged_unit_price_fen"]
+        min_recharge_fen = billing["min_recharge_fen"]
+        recharge_step_fen = billing["recharge_step_fen"]
 
         # Calculate amount from credits × unit price (frozen snapshot)
         credits = body.credits
@@ -412,8 +619,8 @@ def create_admin_adjustment(
                 user_id,
                 f"ADJ-{adjustment_id}",  # Local trade number format
                 pricing_scope,
-                unit_price_fen,  # base snapshot
-                unit_price_fen,  # charged (PRICE-01 floor holds)
+                base_unit_price_fen,
+                unit_price_fen,
                 min_recharge_fen,
                 recharge_step_fen,
                 amount_fen,
@@ -618,10 +825,40 @@ def list_customers(
         with pg_transaction() as conn:
             rows = conn.execute(
                 "SELECT aca.user_id, u.username, aca.activated_at, "
-                "ac.id, ac.masked_code, ac.status "
+                "ac.id, ac.masked_code, ac.status, "
+                "COALESCE(usage.generation_total, 0), "
+                "COALESCE(usage.generation_succeeded, 0), "
+                "COALESCE(usage.generation_failed, 0), "
+                "COALESCE(usage.generation_in_progress, 0), "
+                "COALESCE(usage.generation_attention, 0), "
+                "COALESCE(spend.credits_spent, 0) "
                 "FROM activation_code_activations aca "
                 "JOIN users u ON u.id = aca.user_id "
                 "JOIN activation_codes ac ON ac.id = aca.code_id "
+                "LEFT JOIN ("
+                "  SELECT gb.created_by_user_id AS user_id, "
+                "    COUNT(*) AS generation_total, "
+                "    COUNT(*) FILTER (WHERE gt.status = 'SUCCEEDED' "
+                "      AND gt.archive_status = 'ARCHIVED') AS generation_succeeded, "
+                "    COUNT(*) FILTER (WHERE gt.status IN ('FAILED', 'CANCELLED')) "
+                "      AS generation_failed, "
+                "    COUNT(*) FILTER (WHERE gt.status = 'SUBMISSION_UNCERTAIN' "
+                "      OR gt.archive_status = 'ARCHIVE_FAILED' "
+                "      OR gt.quality_status = 'AUDIO_QUALITY_FAILED') AS generation_attention, "
+                "    COUNT(*) FILTER (WHERE NOT ("
+                "      gt.status = 'SUCCEEDED' AND gt.archive_status = 'ARCHIVED'"
+                "    ) AND gt.status NOT IN ('FAILED', 'CANCELLED', 'SUBMISSION_UNCERTAIN') "
+                "      AND gt.archive_status != 'ARCHIVE_FAILED' "
+                "      AND gt.quality_status != 'AUDIO_QUALITY_FAILED') "
+                "      AS generation_in_progress "
+                "  FROM generation_batches gb "
+                "  JOIN generation_tasks gt ON gt.batch_id = gb.id "
+                "  GROUP BY gb.created_by_user_id"
+                ") usage ON usage.user_id = aca.user_id "
+                "LEFT JOIN ("
+                "  SELECT user_id, COUNT(*) AS credits_spent "
+                "  FROM wallet_transactions WHERE type = 'SETTLE' GROUP BY user_id"
+                ") spend ON spend.user_id = aca.user_id "
                 f"{where} "
                 "ORDER BY aca.activated_at, aca.id "
                 "LIMIT %s OFFSET %s",
@@ -648,6 +885,12 @@ def list_customers(
             "created_at": str(row[2]) if row[2] is not None else "",
             "activation_code": str(row[4]),
             "status": str(row[5]),
+            "generation_total": int(row[6]),
+            "generation_succeeded": int(row[7]),
+            "generation_failed": int(row[8]),
+            "generation_in_progress": int(row[9]),
+            "generation_attention": int(row[10]),
+            "credits_spent": int(row[11]),
         }
         for row in rows
     ]

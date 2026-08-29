@@ -231,11 +231,17 @@ def _generate(
     batch_id: str,
     *,
     quantity: int,
+    auto_issue: bool = False,
     key: str | None = None,
 ) -> object:
     return client.post(
         f"/api/control/activation-code-batches/{batch_id}/generate",
-        json={"quantity": quantity, "confirm": True, "reason": "生成批次码"},
+        json={
+            "quantity": quantity,
+            "auto_issue": auto_issue,
+            "confirm": True,
+            "reason": "生成批次码",
+        },
         headers=_write_headers(headers, key=key),
     )
 
@@ -492,6 +498,49 @@ def test_generate_creates_codes_and_export(
         if "XS04-" in record.getMessage() and "***" not in record.getMessage()
     ]
     assert plaintext_like == []
+
+
+def test_generate_can_auto_issue_codes_for_immediate_customer_activation(
+    client: TestClient,
+    admin_headers: dict[str, str],
+    clean_state: str,
+) -> None:
+    batch = _create_batch(client, admin_headers, quantity=2).json()
+    response = _generate(
+        client,
+        admin_headers,
+        batch["batch_id"],
+        quantity=2,
+        auto_issue=True,
+    )
+
+    assert response.status_code == 201, response.text
+    code_ids = [item["code_id"] for item in response.json()["codes"]]
+    with psycopg.connect(clean_state) as conn:
+        codes = conn.execute(
+            "SELECT status, issued_at FROM activation_codes WHERE id = ANY(%s) ORDER BY id",
+            (code_ids,),
+        ).fetchall()
+        deliveries = conn.execute(
+            "SELECT channel, delivered_by_user_id, note "
+            "FROM activation_code_deliveries WHERE code_id = ANY(%s)",
+            (code_ids,),
+        ).fetchall()
+        delivered_events = conn.execute(
+            "SELECT actor_user_id, reason, request_id "
+            "FROM activation_code_events "
+            "WHERE code_id = ANY(%s) AND event = 'DELIVERED'",
+            (code_ids,),
+        ).fetchall()
+
+    assert {row[0] for row in codes} == {"ISSUED"}
+    assert all(row[1] for row in codes)
+    assert len(deliveries) == 2
+    assert {row[0] for row in deliveries} == {"admin_console"}
+    assert all(row[1] == "admin_u" and row[2] == "生成批次码" for row in deliveries)
+    assert len(delivered_events) == 2
+    assert all(row[0] == "admin_u" and row[1] == "生成批次码" for row in delivered_events)
+    assert all(row[2] for row in delivered_events)
 
 
 def test_generate_rejects_budget_overrun(

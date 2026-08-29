@@ -5,14 +5,23 @@ import io
 import sqlite3
 from typing import Literal, cast
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 from app.auth import Database, Role
 from app.control_auth import ControlUser
 from app.permissions import write_audit
-from app.settings import SettingsRepository
+from app.settings import ProviderName, SettingsRepository
+from app.settings_routes import (
+    ProviderSettingsRequest,
+    ProviderTester,
+    ProviderTestResult,
+    apply_cos_lifecycle_rules,
+    get_provider_tester,
+    merge_provider_config,
+    require_supported_provider,
+)
 from app.zpay import deployment_config_from_environment
 
 router = APIRouter(prefix="/api/control", tags=["control"])
@@ -144,12 +153,57 @@ class DeploymentSettings(BaseModel):
     return_url: str
 
 
+class MaskedProviderSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: ProviderName
+    configured: bool
+    config: dict[str, str]
+
+
+class RuntimeSettingsSnapshot(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_generation_count_per_batch: int
+    max_concurrent_h3_tasks: int
+    active_storage_provider: Literal["cos", "local"]
+
+
+class RuntimeSettingsUpdate(RuntimeSettingsSnapshot):
+    pass
+
+
 class ControlSettingsSnapshot(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     billing: BillingSettingsSnapshot
     zpay: MaskedZPaySettings
     deployment: DeploymentSettings
+    providers: dict[ProviderName, MaskedProviderSettings]
+    runtime: RuntimeSettingsSnapshot
+
+
+def _runtime_settings_snapshot(settings: dict[str, int | str]) -> RuntimeSettingsSnapshot:
+    return RuntimeSettingsSnapshot(
+        max_generation_count_per_batch=int(settings["max_generation_count_per_batch"]),
+        max_concurrent_h3_tasks=int(settings["max_concurrent_h3_tasks"]),
+        active_storage_provider=cast(
+            Literal["cos", "local"],
+            str(settings["active_storage_provider"]),
+        ),
+    )
+
+
+def _deployment_settings_snapshot() -> DeploymentSettings:
+    try:
+        deployment = deployment_config_from_environment()
+    except ValueError:
+        return DeploymentSettings(gateway_url="", notify_url="", return_url="")
+    return DeploymentSettings(
+        gateway_url=deployment.gateway_url,
+        notify_url=deployment.notify_url,
+        return_url=deployment.return_url,
+    )
 
 
 @router.get("/accounts", response_model=AccountWalletPage)
@@ -176,7 +230,7 @@ def list_accounts(
         LEFT JOIN internal_access_tokens
           ON internal_access_tokens.user_id = users.id
          AND internal_access_tokens.revoked_at IS NULL
-        GROUP BY users.id
+        GROUP BY users.id, wallets.available_credits, wallets.reserved_credits
         ORDER BY users.username, users.id
         LIMIT %s OFFSET %s
         """,
@@ -337,17 +391,107 @@ def read_reconciliation(conn: Database, _actor: ControlUser) -> ReconciliationSu
 
 @router.get("/settings", response_model=ControlSettingsSnapshot)
 def read_control_settings(conn: Database, _actor: ControlUser) -> ControlSettingsSnapshot:
-    deployment = deployment_config_from_environment()
     repo = SettingsRepository(conn)
     return ControlSettingsSnapshot(
         billing=BillingSettingsSnapshot(**repo.read_billing_settings()),
         zpay=MaskedZPaySettings(**repo.read_zpay_config()),
-        deployment=DeploymentSettings(
-            gateway_url=deployment.gateway_url,
-            notify_url=deployment.notify_url,
-            return_url=deployment.return_url,
-        ),
+        deployment=_deployment_settings_snapshot(),
+        providers={
+            cast(ProviderName, provider): MaskedProviderSettings(**config)
+            for provider, config in repo.read_all_provider_configs().items()
+        },
+        runtime=_runtime_settings_snapshot(repo.read_runtime_settings()),
     )
+
+
+@router.put(
+    "/settings/providers/{provider}",
+    response_model=MaskedProviderSettings,
+)
+def update_control_provider_settings(
+    provider: str,
+    payload: ProviderSettingsRequest,
+    conn: Database,
+    actor: ControlUser,
+) -> MaskedProviderSettings:
+    provider_name = require_supported_provider(provider)
+    repo = SettingsRepository(conn)
+    try:
+        current = repo.load_provider_config(provider_name)
+        merged = merge_provider_config(current, payload.config)
+        saved = repo.save_provider_config(
+            provider_name,
+            merged,
+            actor_user_id=actor.id,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "INVALID_SERVICE_SETTINGS", "message": str(exc)},
+        ) from exc
+    write_audit(
+        conn,
+        actor=actor,
+        action="provider_settings.update",
+        entity_type="provider_settings",
+        entity_id=provider_name,
+        metadata={"provider": provider_name},
+    )
+    if provider_name == "cos":
+        lifecycle = apply_cos_lifecycle_rules(merged, actor_id=actor.id)
+        write_audit(
+            conn,
+            actor=actor,
+            action=f"cos_lifecycle.{lifecycle['status']}",
+            entity_type="provider_settings",
+            entity_id="cos",
+            metadata={"status": lifecycle["status"]},
+        )
+    return MaskedProviderSettings(**saved)
+
+
+@router.post(
+    "/settings/providers/{provider}/connection-test",
+    response_model=ProviderTestResult,
+)
+def test_control_provider_connection(
+    provider: str,
+    conn: Database,
+    _actor: ControlUser,
+    tester: ProviderTester = Depends(get_provider_tester),
+) -> ProviderTestResult:
+    provider_name = require_supported_provider(provider)
+    config = SettingsRepository(conn).load_provider_config(provider_name)
+    return tester.connection_test(provider_name, config)
+
+
+@router.patch("/settings/runtime", response_model=RuntimeSettingsSnapshot)
+def update_control_runtime_settings(
+    payload: RuntimeSettingsUpdate,
+    conn: Database,
+    actor: ControlUser,
+) -> RuntimeSettingsSnapshot:
+    try:
+        saved = SettingsRepository(conn).save_runtime_settings(
+            max_generation_count_per_batch=payload.max_generation_count_per_batch,
+            max_concurrent_h3_tasks=payload.max_concurrent_h3_tasks,
+            active_storage_provider=payload.active_storage_provider,
+            actor_user_id=actor.id,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "INVALID_RUNTIME_SETTINGS", "message": str(exc)},
+        ) from exc
+    write_audit(
+        conn,
+        actor=actor,
+        action="runtime_settings.update",
+        entity_type="runtime_settings",
+        entity_id="1",
+        metadata={"setting": "runtime_limits"},
+    )
+    return _runtime_settings_snapshot(saved)
 
 
 @router.patch("/settings/zpay", response_model=MaskedZPaySettings)

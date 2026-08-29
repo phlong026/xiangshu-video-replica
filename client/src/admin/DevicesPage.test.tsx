@@ -6,6 +6,8 @@ import { DevicesPage } from "./DevicesPage";
 // Mock the admin API module
 vi.mock("../api.admin", () => ({
   listDevices: vi.fn(),
+  unbindDevice: vi.fn(),
+  revokeDeviceCredential: vi.fn(),
   AdminDeviceError: class extends Error {
     constructor(message: string) {
       super(message);
@@ -69,6 +71,33 @@ describe("DevicesPage (ADM-02 / T33)", () => {
     render(<DevicesPage />);
 
     expect(screen.getByText("加载中...")).toBeInTheDocument();
+  });
+
+  it("hides device mutations for auditors", async () => {
+    vi.mocked(adminApi.listDevices).mockResolvedValue({
+      items: [
+        {
+          device_id: "device-1",
+          user_id: "user-1",
+          activation_code_id: "code-1",
+          slot_no: 1,
+          display_name: "审计设备",
+          platform: "windows",
+          status: "BOUND",
+          bound_at: "2026-08-24T10:00:00Z",
+          unbound_at: null,
+          revoked_at: null,
+        },
+      ],
+      limit: 20,
+      offset: 0,
+    });
+
+    render(<DevicesPage readOnly />);
+
+    expect(await screen.findByText("仅查看")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /下线设备/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /强制退出/ })).toBeNull();
   });
 
   it("handles API error gracefully", async () => {
@@ -156,7 +185,7 @@ describe("DevicesPage (ADM-02 / T33)", () => {
 
     await waitFor(() => {
       expect(screen.getByText("活跃")).toBeInTheDocument();
-      expect(screen.getByText("已作废")).toBeInTheDocument();
+      expect(screen.getAllByText("已退出").length).toBeGreaterThan(0);
     });
   });
 
@@ -214,5 +243,51 @@ describe("DevicesPage (ADM-02 / T33)", () => {
       expect(screen.getByText("iOS")).toBeInTheDocument();
       expect(screen.getByText("Android")).toBeInTheDocument();
     });
+  });
+
+  it("requires a reason and confirms device offline operations", async () => {
+    vi.mocked(adminApi.listDevices).mockResolvedValue({
+      items: [
+        {
+          device_id: "device-1",
+          activation_code_id: "code-1",
+          user_id: "user-1",
+          slot_no: 1,
+          display_name: "测试电脑",
+          platform: "windows",
+          status: "BOUND",
+          bound_at: "2026-08-24T10:00:00Z",
+          unbound_at: null,
+          revoked_at: null,
+        },
+      ],
+      limit: 20,
+      offset: 0,
+    });
+    vi.mocked(adminApi.unbindDevice).mockResolvedValue({
+      device_id: "device-1",
+      status: "UNBOUND",
+      outcome: "UNBOUND",
+      request_id: "request-1",
+    });
+
+    render(<DevicesPage />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "下线设备：测试电脑" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "确认下线" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("请填写操作原因");
+    fireEvent.change(screen.getByLabelText("操作原因"), {
+      target: { value: "客户要求更换电脑" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "确认下线" }));
+
+    await waitFor(() =>
+      expect(adminApi.unbindDevice).toHaveBeenCalledWith(
+        "device-1",
+        "客户要求更换电脑",
+      ),
+    );
+    expect(await screen.findByRole("status")).toHaveTextContent("设备已下线");
   });
 });

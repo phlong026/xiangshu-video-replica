@@ -235,6 +235,76 @@ def test_control_settings_mask_zpay_secret_and_keep_deployment_read_only(
     assert forbidden_field.status_code == 422
 
 
+def test_control_settings_remain_available_without_gateway_environment(
+    internal_admin_context: tuple[TestClient, Path, dict[str, str], dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _, control_headers, _ = internal_admin_context
+    monkeypatch.delenv("ZPAY_GATEWAY_URL")
+
+    snapshot = client.get("/api/control/settings", headers=control_headers)
+
+    assert snapshot.status_code == 200
+    assert snapshot.json()["deployment"] == {
+        "gateway_url": "",
+        "notify_url": "",
+        "return_url": "",
+    }
+    assert snapshot.json()["providers"]["metaso"]["provider"] == "metaso"
+
+
+def test_control_settings_manage_encrypted_service_configs_and_runtime(
+    internal_admin_context: tuple[TestClient, Path, dict[str, str], dict[str, str]],
+) -> None:
+    client, db_path, control_headers, _ = internal_admin_context
+
+    saved = client.put(
+        "/api/control/settings/providers/metaso",
+        headers=control_headers,
+        json={"config": {"api_key": "video-service-secret"}},
+    )
+    snapshot = client.get("/api/control/settings", headers=control_headers)
+    connection = client.post(
+        "/api/control/settings/providers/metaso/connection-test",
+        headers=control_headers,
+    )
+    runtime = client.patch(
+        "/api/control/settings/runtime",
+        headers=control_headers,
+        json={
+            "max_generation_count_per_batch": 2,
+            "max_concurrent_h3_tasks": 1,
+            "active_storage_provider": "cos",
+        },
+    )
+
+    assert saved.status_code == 200
+    assert saved.json() == {
+        "provider": "metaso",
+        "configured": True,
+        "config": {"api_key": "********cret"},
+    }
+    assert snapshot.status_code == 200
+    assert snapshot.json()["providers"]["metaso"] == saved.json()
+    assert "video-service-secret" not in snapshot.text
+    assert connection.status_code == 200
+    assert connection.json() == {
+        "status": "configured_only",
+        "provider": "metaso",
+        "test_kind": "connection",
+    }
+    assert runtime.status_code == 200
+    assert runtime.json() == {
+        "max_generation_count_per_batch": 2,
+        "max_concurrent_h3_tasks": 1,
+        "active_storage_provider": "cos",
+    }
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        assert SettingsRepository(conn).load_provider_config("metaso") == {
+            "api_key": "video-service-secret"
+        }
+
+
 def test_control_billing_settings_only_update_internal_price_rules(
     internal_admin_context: tuple[TestClient, Path, dict[str, str], dict[str, str]],
 ) -> None:
@@ -380,6 +450,9 @@ def test_control_routes_do_not_expose_a_wallet_mutation_endpoint() -> None:
         "/api/control/settings",
         "/api/control/settings/zpay",
         "/api/control/settings/billing",
+        "/api/control/settings/providers/{provider}",
+        "/api/control/settings/providers/{provider}/connection-test",
+        "/api/control/settings/runtime",
         "/api/control/recharge-orders.csv",
         "/api/control/wallet-transactions.csv",
     } <= openapi_paths

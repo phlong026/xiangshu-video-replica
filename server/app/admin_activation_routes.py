@@ -483,6 +483,7 @@ def create_activation_code_batch(
 
 class GenerateRequest(AdminWriteContract):
     quantity: int
+    auto_issue: bool = False
 
 
 def _resolve_generation_keys() -> tuple[int, bytes, int, bytes]:
@@ -557,6 +558,33 @@ def generate_activation_codes(
             aead_key=aead_key,
             request_id=request_id,
         )
+        if body.auto_issue:
+            issued_at = _transaction_now_iso(conn)
+            reason = body.reason.strip()
+            for code in generated:
+                conn.execute(
+                    "INSERT INTO activation_code_deliveries "
+                    "(id, code_id, channel, external_order_ref, recipient_ref, "
+                    " delivered_by_user_id, note) "
+                    "VALUES (%s, %s, 'admin_console', NULL, NULL, %s, %s)",
+                    (str(uuid.uuid4()), code.code_id, actor.user_id, reason),
+                )
+                conn.execute(
+                    "UPDATE activation_codes SET status = 'ISSUED', issued_at = %s WHERE id = %s",
+                    (issued_at, code.code_id),
+                )
+                conn.execute(
+                    "INSERT INTO activation_code_events "
+                    "(id, code_id, event, actor_user_id, reason, request_id) "
+                    "VALUES (%s, %s, 'DELIVERED', %s, %s, %s)",
+                    (
+                        str(uuid.uuid4()),
+                        code.code_id,
+                        actor.user_id,
+                        reason,
+                        request_id,
+                    ),
+                )
         expires_row = conn.execute(
             "SELECT expires_at FROM activation_code_exports WHERE id = %s",
             (export_id,),

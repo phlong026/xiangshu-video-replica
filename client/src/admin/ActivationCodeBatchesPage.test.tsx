@@ -15,8 +15,6 @@ function jsonResponse(payload: unknown, status = 200) {
   });
 }
 
-// The mock literal is indirect so the repo secret scan (which flags
-// `token:` followed by a quoted literal) stays quiet — the T29 precedent.
 const CSRF_TOKEN_TEXT = "csrf-token-1";
 
 const exchangePayload = {
@@ -33,12 +31,12 @@ const exchangePayload = {
 
 const batchCreated = {
   batch_id: "batch-1",
-  name: "首批渠道码",
-  face_value_fen: 10000,
-  unit_price_fen_snapshot: 10000,
-  credits_snapshot: 100,
-  quantity: 50,
-  activation_expires_at: "2026-12-31T23:59",
+  name: "200元激活码",
+  face_value_fen: 1000,
+  unit_price_fen_snapshot: 1000,
+  credits_snapshot: 20,
+  quantity: 2,
+  activation_expires_at: "2027-08-27T10:00:00.000Z",
   status: "OPEN",
   created_by_user_id: "admin-1",
   request_id: "req-batch-1",
@@ -47,16 +45,19 @@ const batchCreated = {
 const generatedPayload = {
   batch_id: "batch-1",
   export_id: "export-1",
-  expires_at: "2026-08-23T12:15:00+00:00",
-  codes: [{ code_id: "code-1", masked_code: "XS****01" }],
+  expires_at: "2026-08-27T10:15:00+00:00",
+  codes: [
+    { code_id: "code-1", masked_code: "XS****01" },
+    { code_id: "code-2", masked_code: "XS****02" },
+  ],
   request_id: "req-generate-1",
 };
 
 const downloadedPayload = {
   export_id: "export-1",
   batch_id: "batch-1",
-  codes: ["XS-AAAA-BBBB-01"],
-  downloaded_at: "2026-08-23T12:05:00+00:00",
+  codes: ["XS-AAAA-BBBB-01", "XS-CCCC-DDDD-02"],
+  downloaded_at: "2026-08-27T10:05:00+00:00",
   request_id: "req-download-1",
 };
 
@@ -111,158 +112,135 @@ function installFetch(options?: {
   return fetchMock;
 }
 
-async function fillCreateForm() {
-  fireEvent.change(screen.getByLabelText("批次名称"), {
-    target: { value: "首批渠道码" },
-  });
-  fireEvent.change(screen.getByLabelText("面值（分）"), {
-    target: { value: "10000" },
-  });
-  fireEvent.change(screen.getByLabelText("到账条数"), {
-    target: { value: "100" },
-  });
-  fireEvent.change(screen.getByLabelText("生成数量"), {
-    target: { value: "50" },
-  });
-  fireEvent.change(screen.getByLabelText("激活有效期至"), {
-    target: { value: "2026-12-31T23:59" },
-  });
-  fireEvent.change(screen.getByLabelText("创建原因"), {
-    target: { value: "首批渠道投放" },
-  });
-  fireEvent.click(screen.getByLabelText("我已确认创建"));
-}
-
 describe("ActivationCodeBatchesPage", () => {
   beforeEach(async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2026-08-27T10:00:00.000Z"));
     installFetch();
     await exchangeAdminSession("ASX1.body.signature");
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
     clearAdminActivationSession();
   });
 
-  it("creates a batch with the write contract and shows the request id", async () => {
+  it("replaces batch fields with fixed amounts and one custom option", () => {
+    render(<ActivationCodeBatchesPage unitPriceFen={1000} />);
+
+    expect(
+      screen.getByRole("heading", { name: "直接生成激活码" }),
+    ).toBeInTheDocument();
+    for (const amount of ["¥100", "¥200", "¥500", "¥1000"]) {
+      expect(screen.getByRole("button", { name: amount })).toBeInTheDocument();
+    }
+    expect(
+      screen.getByRole("button", { name: "自定义金额" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText("批次名称")).toBeNull();
+    expect(screen.queryByLabelText("批次 ID")).toBeNull();
+    expect(screen.queryByLabelText("创建原因")).toBeNull();
+    expect(screen.queryByLabelText("下载原因")).toBeNull();
+  });
+
+  it("creates the hidden batch, generates and reveals plaintext in one action", async () => {
     const fetchMock = installFetch();
+    render(<ActivationCodeBatchesPage unitPriceFen={1000} />);
 
-    render(<ActivationCodeBatchesPage />);
-    await fillCreateForm();
-    fireEvent.click(screen.getByRole("button", { name: "创建批次" }));
+    fireEvent.click(screen.getByRole("button", { name: "¥200" }));
+    fireEvent.change(screen.getByLabelText("生成数量"), {
+      target: { value: "2" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "生成 2 个 ¥200 激活码" }),
+    );
 
-    expect(await screen.findByText("req-batch-1")).toBeInTheDocument();
-    expect(screen.getByText("batch-1")).toBeInTheDocument();
+    expect(await screen.findByText("XS-AAAA-BBBB-01")).toBeInTheDocument();
+    expect(screen.getByText("XS-CCCC-DDDD-02")).toBeInTheDocument();
+    expect(screen.getByText("已生成 2 个 ¥200 激活码")).toBeInTheDocument();
+    expect(
+      screen.getByText(/明文激活码仅在本页显示这一次/),
+    ).toBeInTheDocument();
+
     const createCall = fetchMock.mock.calls.find(([url]) =>
       String(url).endsWith("/api/control/activation-code-batches"),
     );
-    expect(createCall?.[1]?.body).toBe(
-      JSON.stringify({
-        name: "首批渠道码",
-        face_value_fen: 10000,
-        credits: 100,
-        quantity: 50,
-        activation_expires_at: new Date("2026-12-31T23:59").toISOString(),
-        confirm: true,
-        reason: "首批渠道投放",
-      }),
-    );
-    expect(createCall?.[1]?.headers).toMatchObject({
-      "X-Admin-CSRF": "csrf-token-1",
-      "Idempotency-Key": expect.any(String),
+    expect(JSON.parse(String(createCall?.[1]?.body))).toMatchObject({
+      face_value_fen: 1000,
+      credits: 20,
+      quantity: 2,
+      activation_expires_at: "2027-08-27T10:00:00.000Z",
+      confirm: true,
     });
-  });
 
-  it("refuses to submit without a reason or confirmation", async () => {
-    const fetchMock = installFetch();
-
-    render(<ActivationCodeBatchesPage />);
-    fireEvent.change(screen.getByLabelText("批次名称"), {
-      target: { value: "首批渠道码" },
-    });
-    fireEvent.change(screen.getByLabelText("面值（分）"), {
-      target: { value: "10000" },
-    });
-    fireEvent.change(screen.getByLabelText("到账条数"), {
-      target: { value: "100" },
-    });
-    fireEvent.change(screen.getByLabelText("生成数量"), {
-      target: { value: "50" },
-    });
-    fireEvent.change(screen.getByLabelText("激活有效期至"), {
-      target: { value: "2026-12-31T23:59" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "创建批次" }));
-
-    expect(await screen.findByText("请填写创建原因")).toBeInTheDocument();
-    expect(fetchMock.mock.calls).toHaveLength(0); // validation refused the write
-  });
-
-  it("generates codes and reveals the one-time download panel", async () => {
-    const fetchMock = installFetch();
-
-    render(<ActivationCodeBatchesPage />);
-    fireEvent.change(screen.getByLabelText("批次 ID"), {
-      target: { value: "batch-1" },
-    });
-    fireEvent.change(screen.getByLabelText("本次生成数量"), {
-      target: { value: "20" },
-    });
-    fireEvent.change(screen.getByLabelText("生成原因"), {
-      target: { value: "渠道补货" },
-    });
-    fireEvent.click(screen.getByLabelText("我已确认生成"));
-    fireEvent.click(screen.getByRole("button", { name: "生成激活码" }));
-
-    expect(await screen.findByText("export-1")).toBeInTheDocument();
-    expect(screen.getByText("XS****01")).toBeInTheDocument();
-    expect(screen.getByText("req-generate-1")).toBeInTheDocument();
     const generateCall = fetchMock.mock.calls.find(([url]) =>
       String(url).endsWith("/activation-code-batches/batch-1/generate"),
     );
-    expect(generateCall?.[1]?.body).toBe(
-      JSON.stringify({ quantity: 20, confirm: true, reason: "渠道补货" }),
-    );
-
-    fireEvent.change(screen.getByLabelText("下载原因"), {
-      target: { value: "线下交付" },
+    expect(JSON.parse(String(generateCall?.[1]?.body))).toMatchObject({
+      quantity: 2,
+      auto_issue: true,
+      confirm: true,
     });
-    fireEvent.click(screen.getByLabelText("我已确认下载"));
-    fireEvent.click(screen.getByRole("button", { name: "下载明文码" }));
-
-    expect(await screen.findByText("XS-AAAA-BBBB-01")).toBeInTheDocument();
-    expect(screen.getByText(/仅此一次/)).toBeInTheDocument();
-    expect(screen.getByText("req-download-1")).toBeInTheDocument();
-    const downloadCall = fetchMock.mock.calls.find(([url]) =>
-      String(url).endsWith("/activation-code-exports/export-1/download"),
-    );
-    expect(downloadCall?.[1]?.body).toBe(
-      JSON.stringify({ confirm: true, reason: "线下交付" }),
-    );
+    expect(
+      fetchMock.mock.calls.some(([url]) =>
+        String(url).endsWith("/activation-code-exports/export-1/download"),
+      ),
+    ).toBe(true);
   });
 
-  it("surfaces a deterministic error when the export was already downloaded", async () => {
+  it("accepts a custom amount when it is an exact multiple of the unit price", async () => {
+    const fetchMock = installFetch();
+    render(<ActivationCodeBatchesPage unitPriceFen={1000} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "自定义金额" }));
+    fireEvent.change(screen.getByLabelText("自定义金额（元）"), {
+      target: { value: "30" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "生成 1 个 ¥30 激活码" }),
+    );
+
+    await screen.findByText("XS-AAAA-BBBB-01");
+    const createCall = fetchMock.mock.calls.find(([url]) =>
+      String(url).endsWith("/api/control/activation-code-batches"),
+    );
+    expect(JSON.parse(String(createCall?.[1]?.body))).toMatchObject({
+      face_value_fen: 1000,
+      credits: 3,
+      quantity: 1,
+    });
+  });
+
+  it("explains why an unsupported custom amount cannot be generated", async () => {
+    const fetchMock = installFetch();
+    render(<ActivationCodeBatchesPage unitPriceFen={1000} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "自定义金额" }));
+    fireEvent.change(screen.getByLabelText("自定义金额（元）"), {
+      target: { value: "35" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "生成 1 个 ¥35 激活码" }),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "金额需为 10 元的整数倍",
+    );
+    expect(
+      fetchMock.mock.calls.some(([url]) =>
+        String(url).endsWith("/api/control/activation-code-batches"),
+      ),
+    ).toBe(false);
+  });
+
+  it("surfaces a deterministic error when the one-time plaintext was consumed", async () => {
     installFetch({ download: "already" });
+    render(<ActivationCodeBatchesPage unitPriceFen={1000} />);
 
-    render(<ActivationCodeBatchesPage />);
-    fireEvent.change(screen.getByLabelText("批次 ID"), {
-      target: { value: "batch-1" },
-    });
-    fireEvent.change(screen.getByLabelText("本次生成数量"), {
-      target: { value: "20" },
-    });
-    fireEvent.change(screen.getByLabelText("生成原因"), {
-      target: { value: "渠道补货" },
-    });
-    fireEvent.click(screen.getByLabelText("我已确认生成"));
-    fireEvent.click(screen.getByRole("button", { name: "生成激活码" }));
-
-    await screen.findByText("export-1");
-    fireEvent.change(screen.getByLabelText("下载原因"), {
-      target: { value: "重复下载" },
-    });
-    fireEvent.click(screen.getByLabelText("我已确认下载"));
-    fireEvent.click(screen.getByRole("button", { name: "下载明文码" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "生成 1 个 ¥100 激活码" }),
+    );
 
     expect(
       await screen.findByText(/已被下载过，无法再次下载/),
@@ -273,10 +251,16 @@ describe("ActivationCodeBatchesPage", () => {
   it("reports the session as expired on a 401 write", async () => {
     installFetch({ createBatch: "unauthorized" });
     const onSessionExpired = vi.fn();
+    render(
+      <ActivationCodeBatchesPage
+        unitPriceFen={1000}
+        onSessionExpired={onSessionExpired}
+      />,
+    );
 
-    render(<ActivationCodeBatchesPage onSessionExpired={onSessionExpired} />);
-    await fillCreateForm();
-    fireEvent.click(screen.getByRole("button", { name: "创建批次" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "生成 1 个 ¥100 激活码" }),
+    );
 
     expect(
       await screen.findByText(/会话已失效，请重新登录/),
@@ -284,16 +268,21 @@ describe("ActivationCodeBatchesPage", () => {
     expect(onSessionExpired).toHaveBeenCalled();
   });
 
-  it("disables every write control in read-only mode", () => {
-    installFetch();
+  it("keeps activation creation unavailable for auditors", () => {
+    render(<ActivationCodeBatchesPage readOnly unitPriceFen={1000} />);
 
-    render(<ActivationCodeBatchesPage readOnly />);
-
-    expect(screen.getByRole("button", { name: "创建批次" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "生成激活码" })).toBeDisabled();
-    // The download form only exists after a generation, so in read-only mode
-    // there is simply no plaintext download control to abuse.
-    expect(screen.queryByRole("button", { name: "下载明文码" })).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "生成 1 个 ¥100 激活码" }),
+    ).toBeDisabled();
     expect(screen.getByText(/当前为只读模式/)).toBeInTheDocument();
+  });
+
+  it("waits for the configured unit price before allowing generation", () => {
+    render(<ActivationCodeBatchesPage unitPriceFen={null} />);
+
+    expect(screen.getByText("正在读取当前价格…")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "生成 1 个 ¥100 激活码" }),
+    ).toBeDisabled();
   });
 });

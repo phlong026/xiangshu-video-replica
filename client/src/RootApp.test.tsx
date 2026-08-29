@@ -73,7 +73,7 @@ describe("RootApp", () => {
       render(<RootApp path={path} />);
 
       expect(
-        screen.getByRole("heading", { name: "内部运营管理" }),
+        screen.getByRole("heading", { name: "运营管理后台" }),
       ).toBeInTheDocument();
       expect(screen.queryByRole("heading", { name: "镜序 Studio" })).toBeNull();
     },
@@ -101,7 +101,7 @@ describe("RootApp", () => {
     expect(
       await screen.findByRole("heading", { name: "项目" }),
     ).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "内部运营管理" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "运营管理后台" })).toBeNull();
   });
 
   it("routes /customer/pairing to the second-device enrollment form, not the state machine", async () => {

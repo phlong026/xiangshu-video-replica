@@ -33,11 +33,14 @@ from app.admin_auth_routes import (
     AdminWriter,
     ExchangeCredentialError,
     admin_hmac_key,
+    hash_admin_password,
     issue_exchange_credential,
     parse_and_verify_exchange_credential,
     resolve_admin_session_ttl_seconds,
+    verify_admin_password,
 )
 from app.bootstrap import assert_customer_production_security
+from app.control_auth import ControlUser
 from app.db_pg import DATABASE_URL_ENV
 
 DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
@@ -208,6 +211,29 @@ def test_admin_session_ttl_bounds_enforced() -> None:
         with _env(**{"VIDEO_REPLICA_ADMIN_SESSION_TTL_SECONDS": invalid}):
             with pytest.raises(ValueError):
                 resolve_admin_session_ttl_seconds()
+
+
+def test_admin_password_hash_is_memory_hard_salted_and_verifiable() -> None:
+    password = "correct horse battery staple"
+
+    first = hash_admin_password(password)
+    second = hash_admin_password(password)
+
+    assert first.startswith("scrypt$")
+    assert first != second
+    assert password not in first
+    assert verify_admin_password(password, first) is True
+    assert verify_admin_password("wrong password", first) is False
+    assert verify_admin_password(password, "malformed") is False
+
+
+@pytest.mark.parametrize(
+    "password",
+    ["short", " " * 20, "a" * 129],
+)
+def test_admin_password_policy_rejects_weak_or_oversized_values(password: str) -> None:
+    with pytest.raises(ValueError):
+        hash_admin_password(password)
 
 
 # ---------------------------------------------------------------------------
@@ -459,8 +485,8 @@ def clean_sessions(admin_pg_dsn: str) -> Iterator[str]:
     with psycopg.connect(admin_pg_dsn, autocommit=True) as conn:
         conn.execute("SET session_replication_role = replica")
         conn.execute(
-            "TRUNCATE admin_sessions, audit_logs, security_rate_limit_counters, "
-            "security_auth_failures"
+            "TRUNCATE admin_sessions, admin_password_credentials, audit_logs, "
+            "security_rate_limit_counters, security_auth_failures"
         )
         conn.execute("SET session_replication_role = DEFAULT")
     yield admin_pg_dsn
@@ -488,6 +514,36 @@ def client(monkeypatch: pytest.MonkeyPatch, clean_sessions: str) -> Iterator[Tes
     monkeypatch.delenv("VIDEO_REPLICA_AUTH_MODE", raising=False)
     monkeypatch.delenv("VIDEO_REPLICA_ALLOW_DEV_IDENTITY_HEADER", raising=False)
     with TestClient(app) as test_client:
+        yield test_client
+
+
+@pytest.fixture()
+def customer_production_control_client(
+    monkeypatch: pytest.MonkeyPatch, clean_sessions: str
+) -> Iterator[TestClient]:
+    """A production-shaped control plane with the real legacy route set mounted.
+
+    The route implementations remain shared with the internal product, but in
+    customer production they must resolve the current per-operator session,
+    never the retired proxy-token identity.
+    """
+    from app.admin_auth_routes import router as admin_router
+    from app.control_routes import router as control_router
+
+    app = FastAPI()
+    app.include_router(admin_router)
+    app.include_router(control_router)
+
+    @app.patch("/api/control/_test/control-write")
+    def control_write(actor: ControlUser) -> dict[str, str]:
+        return {"actor": actor.id}
+
+    monkeypatch.setenv(DATABASE_URL_ENV, clean_sessions)
+    monkeypatch.setenv("VIDEO_REPLICA_CUSTOMER_PRODUCTION", "true")
+    monkeypatch.setenv(ADMIN_SESSION_HMAC_KEY_ENV, TEST_KEY)
+    monkeypatch.delenv("VIDEO_REPLICA_AUTH_MODE", raising=False)
+    monkeypatch.delenv("VIDEO_REPLICA_ALLOW_DEV_IDENTITY_HEADER", raising=False)
+    with TestClient(app, base_url="https://testserver") as test_client:
         yield test_client
 
 
@@ -523,6 +579,7 @@ def test_exchange_issues_session_with_secure_cookie_shape(
         assert body["actor"]["user_id"] == actor
         assert body["csrf_token"]
         assert body["expires_at"]
+        assert response.headers["cache-control"] == "no-store"
 
         set_cookie = response.headers["set-cookie"]
         assert f"{ADMIN_SESSION_COOKIE}=" in set_cookie
@@ -564,6 +621,149 @@ def test_exchange_credential_single_use(client: TestClient, clean_sessions: str)
             "SELECT count(*) FROM security_auth_failures WHERE dimension = 'admin:exchange:ip'"
         ).fetchone()[0]
     assert int(failure_count) == 1
+
+
+def test_exchange_recovery_sets_password_then_password_login_survives_refresh(
+    client: TestClient,
+    clean_sessions: str,
+) -> None:
+    raw_password = "Admin Login Passphrase 2026!"
+    exchange = client.post(
+        "/api/control/admin/session/exchange",
+        json={"credential": _issue("admin_u")},
+    )
+    assert exchange.status_code == 201, exchange.text
+
+    configured = client.put(
+        "/api/control/admin/password",
+        headers={ADMIN_CSRF_HEADER: exchange.json()["csrf_token"]},
+        json={"password": raw_password},
+    )
+    assert configured.status_code == 204, configured.text
+    assert client.get("/api/control/admin/session").status_code == 401
+
+    with psycopg.connect(clean_sessions) as conn:
+        password_row = conn.execute(
+            "SELECT password_hash FROM admin_password_credentials WHERE user_id = 'admin_u'"
+        ).fetchone()
+        recovery_session = conn.execute(
+            "SELECT auth_method, revoked_at FROM admin_sessions WHERE id = %s",
+            (exchange.json()["session_id"],),
+        ).fetchone()
+        audit = conn.execute(
+            "SELECT action FROM audit_logs WHERE actor_user_id = 'admin_u' "
+            "AND action = 'admin_password.recover'"
+        ).fetchone()
+    assert password_row is not None
+    assert raw_password not in str(password_row[0])
+    assert verify_admin_password(raw_password, str(password_row[0])) is True
+    assert recovery_session is not None
+    assert (str(recovery_session[0]), recovery_session[1] is not None) == ("exchange", True)
+    assert audit is not None
+
+    login = client.post(
+        "/api/control/admin/session/password",
+        json={"username": "admin_u", "password": raw_password},
+    )
+    assert login.status_code == 201, login.text
+    assert login.json()["actor"]["username"] == "admin_u"
+    assert login.json()["csrf_token"]
+
+    refreshed = client.get("/api/control/admin/session")
+    assert refreshed.status_code == 200, refreshed.text
+    assert refreshed.headers["cache-control"] == "no-store"
+    assert refreshed.json()["csrf_token"] == login.json()["csrf_token"]
+    allowed = client.post(
+        "/api/control/_test/admin-write",
+        headers={ADMIN_CSRF_HEADER: refreshed.json()["csrf_token"]},
+    )
+    assert allowed.status_code == 200, allowed.text
+    with psycopg.connect(clean_sessions) as conn:
+        password_session = conn.execute(
+            "SELECT auth_method FROM admin_sessions WHERE id = %s",
+            (login.json()["session_id"],),
+        ).fetchone()
+    assert password_session is not None and str(password_session[0]) == "password"
+
+
+def test_password_login_has_unified_failure_and_shared_ip_account_budgets(
+    client: TestClient,
+    clean_sessions: str,
+) -> None:
+    exchange = client.post(
+        "/api/control/admin/session/exchange",
+        json={"credential": _issue("admin_u")},
+    )
+    assert exchange.status_code == 201
+    assert (
+        client.put(
+            "/api/control/admin/password",
+            headers={ADMIN_CSRF_HEADER: exchange.json()["csrf_token"]},
+            json={"password": "Another Admin Passphrase 2026!"},
+        ).status_code
+        == 204
+    )
+
+    wrong = client.post(
+        "/api/control/admin/session/password",
+        json={"username": "admin_u", "password": "Wrong Admin Passphrase!"},
+    )
+    unknown = client.post(
+        "/api/control/admin/session/password",
+        json={"username": "ghost_admin", "password": "Wrong Admin Passphrase!"},
+    )
+
+    assert wrong.status_code == unknown.status_code == 401
+    assert wrong.json() == unknown.json()
+    assert wrong.json()["detail"]["code"] == "ADMIN_LOGIN_INVALID"
+    with psycopg.connect(clean_sessions) as conn:
+        counters = conn.execute(
+            "SELECT bucket_key FROM security_rate_limit_counters "
+            "WHERE bucket_key LIKE 'login:%' ORDER BY bucket_key"
+        ).fetchall()
+        failures = conn.execute(
+            "SELECT dimension, identifier FROM security_auth_failures "
+            "WHERE dimension IN ('login:ip', 'login:account')"
+        ).fetchall()
+    assert {str(row[0]).split("|", 1)[0] for row in counters} == {
+        "login:account",
+        "login:ip",
+    }
+    assert len(failures) == 4
+    assert all(len(str(row[1])) == 64 for row in failures)
+    assert all("admin_u" not in str(row) and "ghost_admin" not in str(row) for row in failures)
+
+
+def test_password_session_cannot_reset_password_without_recovery_exchange(
+    client: TestClient,
+) -> None:
+    exchange = client.post(
+        "/api/control/admin/session/exchange",
+        json={"credential": _issue("admin_u")},
+    )
+    assert exchange.status_code == 201
+    assert (
+        client.put(
+            "/api/control/admin/password",
+            headers={ADMIN_CSRF_HEADER: exchange.json()["csrf_token"]},
+            json={"password": "Initial Admin Passphrase 2026!"},
+        ).status_code
+        == 204
+    )
+    login = client.post(
+        "/api/control/admin/session/password",
+        json={"username": "admin_u", "password": "Initial Admin Passphrase 2026!"},
+    )
+    assert login.status_code == 201
+
+    reset = client.put(
+        "/api/control/admin/password",
+        headers={ADMIN_CSRF_HEADER: login.json()["csrf_token"]},
+        json={"password": "Changed Admin Passphrase 2026!"},
+    )
+
+    assert reset.status_code == 403
+    assert reset.json()["detail"]["code"] == "ADMIN_PASSWORD_RECOVERY_REQUIRED"
 
 
 def test_exchange_rejects_expired_credential(client: TestClient) -> None:
@@ -775,6 +975,62 @@ def test_admin_writer_dependency_allows_admin(
     )
     assert response.status_code == 200, response.text
     assert response.json()["actor"] == "admin_u"
+
+
+@pytestmark_pg
+def test_customer_production_control_routes_use_operator_session(
+    customer_production_control_client: TestClient,
+) -> None:
+    """The original account/wallet screen must be usable after session login.
+
+    This locks the regression that sent the page through ``get_control_user``
+    and therefore rejected every customer-production request as legacy 403.
+    """
+    client = customer_production_control_client
+    exchange = client.post(
+        "/api/control/admin/session/exchange", json={"credential": _issue("admin_u")}
+    )
+    assert exchange.status_code == 201, exchange.text
+
+    accounts = client.get("/api/control/accounts")
+    assert accounts.status_code == 200, accounts.text
+
+    missing_csrf = client.patch("/api/control/_test/control-write")
+    assert missing_csrf.status_code == 403
+    assert missing_csrf.json()["detail"]["code"] == "ADMIN_CSRF_REQUIRED"
+
+    allowed = client.patch(
+        "/api/control/_test/control-write",
+        headers={ADMIN_CSRF_HEADER: exchange.json()["csrf_token"]},
+    )
+    assert allowed.status_code == 200, allowed.text
+    assert allowed.json() == {"actor": "admin_u"}
+
+    client.cookies.clear()
+    rejected = client.get(
+        "/api/control/accounts", headers={"X-Control-Proxy-Token": "legacy-token"}
+    )
+    assert rejected.status_code == 401
+    assert rejected.json()["detail"]["code"] == "ADMIN_SESSION_INVALID"
+
+
+@pytestmark_pg
+def test_customer_production_control_routes_keep_auditors_read_only(
+    customer_production_control_client: TestClient,
+) -> None:
+    client = customer_production_control_client
+    exchange = client.post(
+        "/api/control/admin/session/exchange", json={"credential": _issue("auditor_u")}
+    )
+    assert exchange.status_code == 201, exchange.text
+
+    assert client.get("/api/control/accounts").status_code == 200
+    blocked = client.patch(
+        "/api/control/_test/control-write",
+        headers={ADMIN_CSRF_HEADER: exchange.json()["csrf_token"]},
+    )
+    assert blocked.status_code == 403
+    assert blocked.json()["detail"]["code"] == "AUDITOR_READ_ONLY"
 
 
 def test_secure_cookie_in_customer_production(

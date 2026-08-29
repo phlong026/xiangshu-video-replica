@@ -11,6 +11,23 @@ const CLOUD_OP_TIMEOUT_MS = 60_000;
 const ANALYSIS_TIMEOUT_MS = 300_000;
 export const SESSION_EXPIRED_EVENT = "video-replica:session-expired";
 let internalAccessToken: string | null = null;
+// The customer-production admin session exchanges its CSRF value once and
+// keeps it in memory only.  Control-plane writes share this value so the
+// existing account/billing screens stay behind the same per-operator session
+// rather than a legacy proxy identity.  It is deliberately never persisted.
+let adminCsrfToken: string | null = null;
+
+export function setAdminCsrfToken(token: string): void {
+  adminCsrfToken = token;
+}
+
+export function getAdminCsrfToken(): string | null {
+  return adminCsrfToken;
+}
+
+export function clearAdminCsrfToken(): void {
+  adminCsrfToken = null;
+}
 
 type ApiRuntimeLocation = Pick<Location, "origin" | "protocol">;
 
@@ -116,6 +133,8 @@ export type BillingSettings = {
 };
 
 export type ControlSettings = {
+  providers: Record<ProviderName, ProviderSettings>;
+  runtime: RuntimeSettings;
   billing: BillingSettings;
   zpay: {
     provider: "zpay";
@@ -672,6 +691,38 @@ export async function updateControlBillingSettings(input: {
     "/api/control/settings/billing",
     "保存内部价格失败",
     { method: "PATCH", body: JSON.stringify(input) },
+  );
+}
+
+export async function updateControlProviderSettings(
+  provider: ProviderName,
+  config: Record<string, string>,
+): Promise<ProviderSettings> {
+  return requestControlJson<ProviderSettings>(
+    `/api/control/settings/providers/${provider}`,
+    "保存服务设置失败",
+    { method: "PUT", body: JSON.stringify({ config }) },
+  );
+}
+
+export async function testControlProviderConnection(
+  provider: ProviderName,
+): Promise<ProviderTestResult> {
+  return requestControlJson<ProviderTestResult>(
+    `/api/control/settings/providers/${provider}/connection-test`,
+    "连接测试失败",
+    { method: "POST" },
+    CLOUD_OP_TIMEOUT_MS,
+  );
+}
+
+export async function updateControlRuntimeSettings(
+  runtime: RuntimeSettings,
+): Promise<RuntimeSettings> {
+  return requestControlJson<RuntimeSettings>(
+    "/api/control/settings/runtime",
+    "保存运行设置失败",
+    { method: "PATCH", body: JSON.stringify(runtime) },
   );
 }
 
@@ -2313,10 +2364,21 @@ async function requestControl(
   if (init.body && !(init.body instanceof FormData)) {
     headers.set("Content-Type", "application/json");
   }
+  if (
+    init.method &&
+    ["POST", "PUT", "PATCH", "DELETE"].includes(init.method.toUpperCase()) &&
+    !headers.has("X-Admin-CSRF")
+  ) {
+    const csrf = getAdminCsrfToken();
+    if (csrf) {
+      headers.set("X-Admin-CSRF", csrf);
+    }
+  }
   try {
     return await fetch(`${apiBaseUrl()}${path}`, {
       ...init,
       headers,
+      credentials: "include",
       signal: controller.signal,
     });
   } catch (error) {

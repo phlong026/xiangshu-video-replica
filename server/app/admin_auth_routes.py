@@ -26,11 +26,12 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from functools import lru_cache
 from typing import Annotated
 
 import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.db_pg import pg_transaction
 from app.ops_metrics import (
@@ -40,10 +41,14 @@ from app.ops_metrics import (
 )
 from app.security_rate_limit import (
     DIMENSION_ADMIN_EXCHANGE_IP,
+    DIMENSION_LOGIN_ACCOUNT,
+    DIMENSION_LOGIN_IP,
     RateLimitDecision,
     admin_exchange_ip_limit,
     client_ip_from_request,
     consume_rate_limit,
+    login_account_limit,
+    login_ip_limit,
     rate_limit_window_seconds,
     record_auth_failure,
 )
@@ -64,6 +69,14 @@ EXCHANGE_CREDENTIAL_PREFIX = "ASX1"
 MAX_EXCHANGE_CREDENTIAL_LENGTH = 512
 NONCE_HEX_LENGTH = 32
 ADMIN_COOKIE_PATH = "/api/control"
+MIN_ADMIN_PASSWORD_LENGTH = 12
+MAX_ADMIN_PASSWORD_LENGTH = 128
+SCRYPT_N = 2**14
+SCRYPT_R = 8
+SCRYPT_P = 1
+SCRYPT_DKLEN = 32
+SCRYPT_SALT_BYTES = 16
+ADMIN_CSRF_CONTEXT = b"video-replica:admin-csrf:v1"
 
 _TRUTHY = {"1", "true", "yes", "on"}
 _WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
@@ -124,6 +137,93 @@ def _b64encode(data: bytes) -> str:
 
 def _b64decode(data: str) -> bytes:
     return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
+
+
+def _validate_admin_password(password: str) -> None:
+    if not MIN_ADMIN_PASSWORD_LENGTH <= len(password) <= MAX_ADMIN_PASSWORD_LENGTH:
+        raise ValueError(
+            f"administrator password must contain {MIN_ADMIN_PASSWORD_LENGTH} to "
+            f"{MAX_ADMIN_PASSWORD_LENGTH} characters"
+        )
+    if not password.strip():
+        raise ValueError("administrator password must not contain only whitespace")
+
+
+def _scrypt_digest(password: str, salt: bytes) -> bytes:
+    return hashlib.scrypt(
+        password.encode("utf-8"),
+        salt=salt,
+        n=SCRYPT_N,
+        r=SCRYPT_R,
+        p=SCRYPT_P,
+        dklen=SCRYPT_DKLEN,
+    )
+
+
+def hash_admin_password(password: str) -> str:
+    """Return a salted memory-hard password hash; plaintext is never retained."""
+    _validate_admin_password(password)
+    salt = secrets.token_bytes(SCRYPT_SALT_BYTES)
+    digest = _scrypt_digest(password, salt)
+    return "$".join(
+        (
+            "scrypt",
+            str(SCRYPT_N),
+            str(SCRYPT_R),
+            str(SCRYPT_P),
+            _b64encode(salt),
+            _b64encode(digest),
+        )
+    )
+
+
+def verify_admin_password(password: str, encoded: str) -> bool:
+    """Verify a stored password hash and fail closed on malformed encodings."""
+    try:
+        algorithm, n_text, r_text, p_text, salt_text, digest_text = encoded.split("$")
+        if algorithm != "scrypt":
+            return False
+        n, r, p = int(n_text), int(r_text), int(p_text)
+        if (n, r, p) != (SCRYPT_N, SCRYPT_R, SCRYPT_P):
+            return False
+        salt = _b64decode(salt_text)
+        expected = _b64decode(digest_text)
+        if len(salt) != SCRYPT_SALT_BYTES or len(expected) != SCRYPT_DKLEN:
+            return False
+        actual = hashlib.scrypt(
+            password.encode("utf-8"),
+            salt=salt,
+            n=n,
+            r=r,
+            p=p,
+            dklen=len(expected),
+        )
+    except (TypeError, ValueError):
+        return False
+    return hmac.compare_digest(actual, expected)
+
+
+@lru_cache(maxsize=1)
+def _dummy_admin_password_hash() -> str:
+    """Stable-cost fallback so unknown usernames share the password path."""
+    salt = hashlib.sha256(b"video-replica:admin-login:dummy-salt").digest()[:SCRYPT_SALT_BYTES]
+    digest = _scrypt_digest("not-a-real-administrator-password", salt)
+    return "$".join(
+        (
+            "scrypt",
+            str(SCRYPT_N),
+            str(SCRYPT_R),
+            str(SCRYPT_P),
+            _b64encode(salt),
+            _b64encode(digest),
+        )
+    )
+
+
+def _admin_csrf_token(session_token: str) -> str:
+    return _b64encode(
+        hmac.new(session_token.encode("utf-8"), ADMIN_CSRF_CONTEXT, hashlib.sha256).digest()
+    )
 
 
 def _credential_signature(key: bytes, prefix: str, body: str) -> bytes:
@@ -260,6 +360,7 @@ class AdminActor:
     username: str
     display_name: str
     role: str
+    auth_method: str
     session_id: str
     session_expires_at: str
     last_activity_at: str
@@ -316,25 +417,82 @@ def _record_admin_exchange_failure(request: Request, *, request_id: str) -> None
         )
 
 
-def create_admin_session(
-    payload: ExchangeCredentialPayload, request: Request
-) -> tuple[AdminActor, str, str, int]:
-    """Exchange a verified credential for an admin session row + cookie values.
+def _admin_login_identifiers(request: Request, username: str) -> tuple[str, str]:
+    return (
+        _sha256_hex(client_ip_from_request(request)),
+        _sha256_hex(username.strip()),
+    )
 
-    Returns (actor, session_token, csrf_token, ttl_seconds). The nonce digest is
-    the session id, so a replayed credential collides on the primary key and is
-    rejected as reused instead of minting a second session.
-    """
+
+def _spend_admin_password_budget(
+    request: Request,
+    *,
+    username: str,
+) -> tuple[RateLimitDecision, RateLimitDecision]:
+    ip_identifier, account_identifier = _admin_login_identifiers(request, username)
+    with pg_transaction() as conn:
+        ip_decision = consume_rate_limit(
+            conn,
+            dimension=DIMENSION_LOGIN_IP,
+            identifier=ip_identifier,
+            limit=login_ip_limit(),
+            window_seconds=rate_limit_window_seconds(),
+        )
+        account_decision = consume_rate_limit(
+            conn,
+            dimension=DIMENSION_LOGIN_ACCOUNT,
+            identifier=account_identifier,
+            limit=login_account_limit(),
+            window_seconds=rate_limit_window_seconds(),
+        )
+    return ip_decision, account_decision
+
+
+def _record_admin_password_failure(
+    request: Request,
+    *,
+    username: str,
+    request_id: str,
+) -> None:
+    ip_identifier, account_identifier = _admin_login_identifiers(request, username)
+    try:
+        with pg_transaction() as conn:
+            for dimension, identifier in (
+                (DIMENSION_LOGIN_IP, ip_identifier),
+                (DIMENSION_LOGIN_ACCOUNT, account_identifier),
+            ):
+                record_auth_failure(
+                    conn,
+                    dimension=dimension,
+                    identifier=identifier,
+                    request_id=request_id,
+                )
+    except Exception as audit_error:
+        logger.warning(
+            "admin password failure audit unavailable (%s)",
+            type(audit_error).__name__,
+        )
+
+
+def _create_admin_session_for_actor(
+    actor_user_id: str,
+    request: Request,
+    *,
+    session_id: str,
+    auth_method: str,
+    audit_action: str,
+    reject_duplicate_as_reused: bool = False,
+) -> tuple[AdminActor, str, str, int]:
     ttl_seconds = resolve_admin_session_ttl_seconds()
     session_token = secrets.token_urlsafe(32)
-    csrf_token = secrets.token_urlsafe(32)
+    csrf_token = _admin_csrf_token(session_token)
     client_ip = client_ip_from_request(request)
     user_agent = request.headers.get("user-agent", "")
 
     with pg_transaction() as conn:
         user_row = conn.execute(
             "SELECT id, username, display_name, role FROM users WHERE id = %s AND is_active = 1",
-            (payload.actor_user_id,),
+            (actor_user_id,),
         ).fetchone()
         if user_row is None:
             raise _http(401, "ADMIN_ACTOR_INVALID", "Operator is missing or inactive.")
@@ -350,10 +508,11 @@ def create_admin_session(
             conn.execute(
                 "INSERT INTO admin_sessions "
                 "(id, actor_user_id, session_digest, csrf_digest, created_at, "
-                " last_activity_at, expires_at, created_ip_digest, created_ua_digest) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                " last_activity_at, expires_at, created_ip_digest, created_ua_digest, "
+                " auth_method) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                 (
-                    _sha256_hex(payload.nonce),
+                    session_id,
                     str(user_row[0]),
                     _sha256_hex(session_token),
                     _sha256_hex(csrf_token),
@@ -362,20 +521,24 @@ def create_admin_session(
                     expires_at.isoformat(),
                     _sha256_hex(client_ip),
                     _sha256_hex(user_agent),
+                    auth_method,
                 ),
             )
         except psycopg.errors.UniqueViolation as exc:
-            raise _http(
-                401,
-                "EXCHANGE_CREDENTIAL_REUSED",
-                "This exchange credential has already been used.",
-            ) from exc
+            if reject_duplicate_as_reused:
+                raise _http(
+                    401,
+                    "EXCHANGE_CREDENTIAL_REUSED",
+                    "This exchange credential has already been used.",
+                ) from exc
+            raise RuntimeError("admin session id collision") from exc
         actor = AdminActor(
             user_id=str(user_row[0]),
             username=str(user_row[1]),
             display_name=str(user_row[2]),
             role=role,
-            session_id=_sha256_hex(payload.nonce),
+            auth_method=auth_method,
+            session_id=session_id,
             session_expires_at=expires_at.isoformat(),
             last_activity_at=db_now.isoformat(),
         )
@@ -385,15 +548,46 @@ def create_admin_session(
         conn.execute(
             "INSERT INTO audit_logs "
             "(id, actor_user_id, action, entity_type, entity_id, metadata_json) "
-            "VALUES (%s, %s, 'admin_session.exchange', 'admin_session', %s, %s)",
+            "VALUES (%s, %s, %s, 'admin_session', %s, %s)",
             (
                 str(uuid.uuid4()),
                 actor.user_id,
+                audit_action,
                 actor.session_id,
-                json.dumps({"ttl_seconds": ttl_seconds}),
+                json.dumps(
+                    {"ttl_seconds": ttl_seconds, "auth_method": auth_method},
+                    separators=(",", ":"),
+                ),
             ),
         )
     return actor, session_token, csrf_token, ttl_seconds
+
+
+def create_admin_session(
+    payload: ExchangeCredentialPayload, request: Request
+) -> tuple[AdminActor, str, str, int]:
+    """Exchange a verified one-time credential for a recovery session."""
+    return _create_admin_session_for_actor(
+        payload.actor_user_id,
+        request,
+        session_id=_sha256_hex(payload.nonce),
+        auth_method="exchange",
+        audit_action="admin_session.exchange",
+        reject_duplicate_as_reused=True,
+    )
+
+
+def create_password_admin_session(
+    actor_user_id: str, request: Request
+) -> tuple[AdminActor, str, str, int]:
+    """Create a routine administrator session after password verification."""
+    return _create_admin_session_for_actor(
+        actor_user_id,
+        request,
+        session_id=_sha256_hex(secrets.token_bytes(32)),
+        auth_method="password",
+        audit_action="admin_session.password_login",
+    )
 
 
 def load_admin_session(session_token: str) -> tuple[AdminActor, str]:
@@ -407,7 +601,8 @@ def load_admin_session(session_token: str) -> tuple[AdminActor, str]:
     with pg_transaction() as conn:
         row = conn.execute(
             "SELECT s.id, s.csrf_digest, s.expires_at, s.last_activity_at, "
-            "       s.actor_user_id, u.username, u.display_name, u.role, now() AS db_now "
+            "       s.auth_method, s.actor_user_id, u.username, u.display_name, u.role, "
+            "       now() AS db_now "
             "FROM admin_sessions s JOIN users u ON u.id = s.actor_user_id "
             "WHERE s.session_digest = %s AND s.revoked_at IS NULL AND u.is_active = 1",
             (_sha256_hex(session_token),),
@@ -416,11 +611,11 @@ def load_admin_session(session_token: str) -> tuple[AdminActor, str]:
             raise _http(
                 401, "ADMIN_SESSION_INVALID", "Admin session is missing, revoked or invalid."
             )
-        db_now = _as_datetime(row[8])
+        db_now = _as_datetime(row[9])
         expires_at = _as_datetime(row[2])
         if db_now >= expires_at:
             raise _http(401, "ADMIN_SESSION_EXPIRED", "Admin session has expired.")
-        role = str(row[7])
+        role = str(row[8])
         if role not in _ADMIN_ROLES:
             raise _http(
                 401, "ADMIN_SESSION_INVALID", "Operator role no longer permits admin access."
@@ -430,10 +625,11 @@ def load_admin_session(session_token: str) -> tuple[AdminActor, str]:
             (db_now.isoformat(), str(row[0])),
         )
         actor = AdminActor(
-            user_id=str(row[4]),
-            username=str(row[5]),
-            display_name=str(row[6]),
+            user_id=str(row[5]),
+            username=str(row[6]),
+            display_name=str(row[7]),
             role=role,
+            auth_method=str(row[4]),
             session_id=str(row[0]),
             session_expires_at=expires_at.isoformat(),
             last_activity_at=db_now.isoformat(),
@@ -488,6 +684,12 @@ def get_admin_actor(request: Request) -> AdminActor:
         user_id=actor.user_id,
         session_id=actor.session_id,
     )
+    refresh_csrf_token = _admin_csrf_token(token)
+    request.state.admin_csrf_token = (
+        refresh_csrf_token
+        if hmac.compare_digest(_sha256_hex(refresh_csrf_token), csrf_digest)
+        else None
+    )
     if request.method.upper() in _WRITE_METHODS:
         supplied = request.headers.get(ADMIN_CSRF_HEADER, "")
         if not supplied:
@@ -517,6 +719,15 @@ class ExchangeRequest(BaseModel):
     credential: str
 
 
+class PasswordLoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=128)
+    password: str = Field(max_length=MAX_ADMIN_PASSWORD_LENGTH)
+
+
+class PasswordRecoveryRequest(BaseModel):
+    password: str = Field(max_length=MAX_ADMIN_PASSWORD_LENGTH)
+
+
 class AdminActorInfo(BaseModel):
     user_id: str
     username: str
@@ -535,10 +746,63 @@ class AdminSessionInfo(BaseModel):
     session_id: str
     expires_at: str
     last_activity_at: str
+    csrf_token: str | None = None
     actor: AdminActorInfo
 
 
 router = APIRouter(prefix="/api/control/admin", tags=["admin-auth"])
+
+
+def _set_admin_session_cookie(response: Response, session_token: str, ttl_seconds: int) -> None:
+    response.headers["Cache-Control"] = "no-store"
+    response.set_cookie(
+        ADMIN_SESSION_COOKIE,
+        session_token,
+        max_age=ttl_seconds,
+        httponly=True,
+        samesite="strict",
+        path=ADMIN_COOKIE_PATH,
+        secure=is_customer_production(),
+    )
+
+
+def _exchange_response(actor: AdminActor, csrf_token: str) -> ExchangeResponse:
+    return ExchangeResponse(
+        session_id=actor.session_id,
+        expires_at=actor.session_expires_at,
+        csrf_token=csrf_token,
+        actor=AdminActorInfo(
+            user_id=actor.user_id,
+            username=actor.username,
+            display_name=actor.display_name,
+            role=actor.role,
+        ),
+    )
+
+
+def _authenticate_admin_password(username: str, password: str) -> str | None:
+    """Return an active admin actor id without exposing account existence."""
+    with pg_transaction() as conn:
+        row = conn.execute(
+            "SELECT u.id, u.role, u.is_active, c.password_hash "
+            "FROM users u LEFT JOIN admin_password_credentials c ON c.user_id = u.id "
+            "WHERE u.username = %s",
+            (username,),
+        ).fetchone()
+    if row is not None and row[3] is not None:
+        encoded = str(row[3])
+    else:
+        encoded = _dummy_admin_password_hash()
+    password_matches = verify_admin_password(password, encoded)
+    if (
+        row is None
+        or row[3] is None
+        or int(row[2]) != 1
+        or str(row[1]) not in _ADMIN_ROLES
+        or not password_matches
+    ):
+        return None
+    return str(row[0])
 
 
 @router.post("/session/exchange", response_model=ExchangeResponse, status_code=201)
@@ -592,35 +856,157 @@ def exchange_admin_session(
         user_id=actor.user_id,
         session_id=actor.session_id,
     )
-    response.set_cookie(
-        ADMIN_SESSION_COOKIE,
-        session_token,
-        max_age=ttl_seconds,
-        httponly=True,
-        samesite="strict",
-        path=ADMIN_COOKIE_PATH,
-        secure=is_customer_production(),
-    )
+    _set_admin_session_cookie(response, session_token, ttl_seconds)
     logger.info("admin session exchanged: actor=%s session=%s", actor.user_id, actor.session_id)
-    return ExchangeResponse(
+    return _exchange_response(actor, csrf_token)
+
+
+@router.post("/session/password", response_model=ExchangeResponse, status_code=201)
+def login_admin_with_password(
+    body: PasswordLoginRequest, request: Request, response: Response
+) -> ExchangeResponse:
+    request_id = get_or_create_request_id(request)
+    username = body.username.strip()
+    try:
+        ip_decision, account_decision = _spend_admin_password_budget(
+            request,
+            username=username,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise _http(
+            503,
+            "ADMIN_SESSIONS_UNAVAILABLE",
+            "Admin sessions require the PostgreSQL runtime.",
+        ) from exc
+    if not ip_decision.allowed or not account_decision.allowed:
+        retry_after = max(
+            ip_decision.retry_after_seconds,
+            account_decision.retry_after_seconds,
+        )
+        set_current_result_code("RATE_LIMITED")
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "code": "RATE_LIMITED",
+                "message": "Too many administrator sign-in attempts. Try again later.",
+            },
+            headers={"Retry-After": str(retry_after)},
+        )
+    try:
+        actor_user_id = _authenticate_admin_password(username, body.password)
+    except RuntimeError as exc:
+        raise _http(
+            503,
+            "ADMIN_SESSIONS_UNAVAILABLE",
+            "Admin sessions require the PostgreSQL runtime.",
+        ) from exc
+    if actor_user_id is None:
+        _record_admin_password_failure(
+            request,
+            username=username,
+            request_id=request_id,
+        )
+        raise _http(
+            401,
+            "ADMIN_LOGIN_INVALID",
+            "Administrator account or password is incorrect.",
+        )
+    try:
+        actor, session_token, csrf_token, ttl_seconds = create_password_admin_session(
+            actor_user_id,
+            request,
+        )
+    except RuntimeError as exc:
+        raise _http(
+            503,
+            "ADMIN_SESSIONS_UNAVAILABLE",
+            "Admin sessions require the PostgreSQL runtime.",
+        ) from exc
+    set_current_trace_fields(
+        actor_id=actor.user_id,
+        user_id=actor.user_id,
         session_id=actor.session_id,
-        expires_at=actor.session_expires_at,
-        csrf_token=csrf_token,
-        actor=AdminActorInfo(
-            user_id=actor.user_id,
-            username=actor.username,
-            display_name=actor.display_name,
-            role=actor.role,
-        ),
     )
+    _set_admin_session_cookie(response, session_token, ttl_seconds)
+    logger.info(
+        "admin password session created: actor=%s session=%s",
+        actor.user_id,
+        actor.session_id,
+    )
+    return _exchange_response(actor, csrf_token)
+
+
+@router.put("/password", status_code=204)
+def recover_admin_password(
+    body: PasswordRecoveryRequest,
+    actor: AdminWriter,
+    response: Response,
+) -> None:
+    if actor.auth_method != "exchange":
+        raise _http(
+            403,
+            "ADMIN_PASSWORD_RECOVERY_REQUIRED",
+            "A one-time recovery session is required to change the administrator password.",
+        )
+    try:
+        password_hash = hash_admin_password(body.password)
+    except ValueError as exc:
+        raise _http(
+            422,
+            "ADMIN_PASSWORD_INVALID",
+            f"Password must contain {MIN_ADMIN_PASSWORD_LENGTH} to "
+            f"{MAX_ADMIN_PASSWORD_LENGTH} characters.",
+        ) from exc
+    try:
+        with pg_transaction() as conn:
+            now_row = conn.execute("SELECT now()").fetchone()
+            if now_row is None:  # pragma: no cover - SELECT now() always returns a row
+                raise RuntimeError("database clock unavailable")
+            db_now = _as_datetime(now_row[0])
+            conn.execute(
+                "INSERT INTO admin_password_credentials "
+                "(user_id, password_hash, credential_version, password_changed_at) "
+                "VALUES (%s, %s, 1, %s) "
+                "ON CONFLICT (user_id) DO UPDATE SET "
+                "password_hash = EXCLUDED.password_hash, "
+                "credential_version = admin_password_credentials.credential_version + 1, "
+                "password_changed_at = EXCLUDED.password_changed_at",
+                (actor.user_id, password_hash, db_now.isoformat()),
+            )
+            conn.execute(
+                "UPDATE admin_sessions SET revoked_at = %s "
+                "WHERE actor_user_id = %s AND revoked_at IS NULL",
+                (db_now.isoformat(), actor.user_id),
+            )
+            conn.execute(
+                "INSERT INTO audit_logs "
+                "(id, actor_user_id, action, entity_type, entity_id, metadata_json) "
+                "VALUES (%s, %s, 'admin_password.recover', 'user', %s, '{}')",
+                (str(uuid.uuid4()), actor.user_id, actor.user_id),
+            )
+    except RuntimeError as exc:
+        raise _http(
+            503,
+            "ADMIN_SESSIONS_UNAVAILABLE",
+            "Admin sessions require the PostgreSQL runtime.",
+        ) from exc
+    response.delete_cookie(ADMIN_SESSION_COOKIE, path=ADMIN_COOKIE_PATH)
+    response.headers["Cache-Control"] = "no-store"
+    logger.info("admin password recovered: actor=%s", actor.user_id)
 
 
 @router.get("/session", response_model=AdminSessionInfo)
-def get_current_admin_session(actor: AdminReader) -> AdminSessionInfo:
+def get_current_admin_session(
+    request: Request,
+    response: Response,
+    actor: AdminReader,
+) -> AdminSessionInfo:
+    response.headers["Cache-Control"] = "no-store"
     return AdminSessionInfo(
         session_id=actor.session_id,
         expires_at=actor.session_expires_at,
         last_activity_at=actor.last_activity_at,
+        csrf_token=getattr(request.state, "admin_csrf_token", None),
         actor=AdminActorInfo(
             user_id=actor.user_id,
             username=actor.username,
@@ -641,4 +1027,5 @@ def logout_admin_session(actor: AdminReader, response: Response) -> None:
             "Admin sessions require the PostgreSQL runtime.",
         ) from exc
     response.delete_cookie(ADMIN_SESSION_COOKIE, path=ADMIN_COOKIE_PATH)
+    response.headers["Cache-Control"] = "no-store"
     logger.info("admin session revoked: actor=%s session=%s", actor.user_id, actor.session_id)

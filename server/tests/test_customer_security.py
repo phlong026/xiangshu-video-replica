@@ -1056,7 +1056,7 @@ def test_downgrade_refuses_once_failures_exist(security_dsn: str) -> None:
     # The refusal left the schema untouched at head.
     with psycopg.connect(_t15_dsn()) as conn:
         version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-    assert version == "042_t37_observability_indexes"
+    assert version == "045_async_analysis_tasks"
 
     # TRUNCATE only bypasses the row-level append-only trigger (it fires on
     # UPDATE/DELETE); 036 added a statement-level TRUNCATE guard, so the
@@ -1083,7 +1083,7 @@ def test_downgrade_refuses_once_failures_exist(security_dsn: str) -> None:
     command.upgrade(config, "head")
     with psycopg.connect(_t15_dsn()) as conn:
         version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-    assert version == "042_t37_observability_indexes"
+    assert version == "045_async_analysis_tasks"
 
 
 # ---------------------------------------------------------------------------

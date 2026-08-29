@@ -4,16 +4,17 @@ import hashlib
 import hmac
 import os
 import string
-from typing import Annotated
+from typing import Annotated, cast
 
-from fastapi import Depends, Header, HTTPException
+from fastapi import Depends, Header, HTTPException, Request
 
-from app.auth import CurrentUser, Database, authenticate_user
+from app.auth import CurrentUser, Database, Role, authenticate_user
 
 CONTROL_PROXY_TOKEN_DIGEST_ENV = "CONTROL_PROXY_TOKEN_DIGEST"
 CONTROL_ADMIN_USER_ID_ENV = "CONTROL_ADMIN_USER_ID"
 CUSTOMER_PRODUCTION_ENV = "VIDEO_REPLICA_CUSTOMER_PRODUCTION"
 _TRUTHY = {"1", "true", "yes", "on"}
+_WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 
 def _is_customer_production() -> bool:
@@ -69,6 +70,39 @@ def get_control_user(
     return actor
 
 
+def get_control_route_user(
+    request: Request,
+    conn: Database,
+    proxy_token: Annotated[str | None, Header(alias="X-Control-Proxy-Token")] = None,
+) -> CurrentUser:
+    """Resolve the control-plane actor for the route's deployment lane.
+
+    Internal P0 deployments retain their proxy-token boundary unchanged.  In
+    customer production the very same operational routes must instead use the
+    per-operator ``admin_session`` cookie established by the ASX1 exchange.
+    That preserves CSRF and auditor read-only enforcement for every legacy
+    account, billing and export endpoint without ever reviving the retired
+    shared control identity.
+    """
+    if not _is_customer_production():
+        return get_control_user(conn, proxy_token)
+
+    # Local import keeps the two compatibility modules acyclic: the session
+    # module documents the legacy identity, while this adapter only chooses it
+    # outside customer production.
+    from app.admin_auth_routes import get_admin_actor, get_admin_writer
+
+    admin_actor = get_admin_actor(request)
+    if request.method.upper() in _WRITE_METHODS:
+        get_admin_writer(admin_actor)
+    return CurrentUser(
+        id=admin_actor.user_id,
+        username=admin_actor.username,
+        display_name=admin_actor.display_name,
+        role=cast(Role, admin_actor.role),
+    )
+
+
 def control_auth_error() -> HTTPException:
     return HTTPException(
         status_code=401,
@@ -83,4 +117,4 @@ def _valid_sha256_digest(value: str) -> bool:
     return len(value) == 64 and all(character in string.hexdigits for character in value)
 
 
-ControlUser = Annotated[CurrentUser, Depends(get_control_user)]
+ControlUser = Annotated[CurrentUser, Depends(get_control_route_user)]

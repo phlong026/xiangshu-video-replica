@@ -12,55 +12,70 @@ import {
   generateActivationCodes,
 } from "../api.admin";
 
+const FIXED_AMOUNTS_YUAN = [100, 200, 500, 1000] as const;
+const MAX_CODES_PER_REQUEST = 100;
+
+type AmountChoice = (typeof FIXED_AMOUNTS_YUAN)[number] | "custom";
+type GenerationPhase = "idle" | "creating" | "generating" | "retrieving";
+
+type CompletedGeneration = {
+  amountYuan: number;
+  quantity: number;
+  credits: number;
+  result: ActivationDownloadResult;
+};
+
 /**
- * T32 — batch creation, code generation and the one-time plaintext export.
+ * A simple operator surface over the existing audited batch APIs.
  *
- * Every write follows the admin write contract: a non-blank reason, an
- * explicit confirmation checkbox and (via the adapter) the Idempotency-Key +
- * CSRF headers; each result surfaces the audit `request_id`. The plaintext
- * download is deliberately one-shot: it is rendered once in the page and never
- * persisted, mirroring the server-side `downloaded_at` constraint.
+ * Batches remain the durable server-side audit boundary, but they are an
+ * implementation detail here: one submission creates the hidden batch,
+ * generates its codes and retrieves the one-time plaintext export.
  */
 export function ActivationCodeBatchesPage({
+  unitPriceFen,
   readOnly = false,
   onSessionExpired,
 }: {
+  unitPriceFen: number | null;
   readOnly?: boolean;
   onSessionExpired?: () => void;
 }) {
+  const [amountChoice, setAmountChoice] = useState<AmountChoice>(100);
+  const [customAmountYuan, setCustomAmountYuan] = useState("");
+  const [quantity, setQuantity] = useState("1");
+  const [phase, setPhase] = useState<GenerationPhase>("idle");
   const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [copyNotice, setCopyNotice] = useState("");
+  const [completed, setCompleted] = useState<CompletedGeneration | null>(null);
 
-  const [name, setName] = useState("");
-  const [faceValueFen, setFaceValueFen] = useState("");
-  const [credits, setCredits] = useState("");
-  const [quantity, setQuantity] = useState("");
-  const [expiresAt, setExpiresAt] = useState("");
-  const [createReason, setCreateReason] = useState("");
-  const [createConfirmed, setCreateConfirmed] = useState(false);
-  const [createdBatch, setCreatedBatch] =
+  // Preserve each write key and intermediate result across uncertain network
+  // failures. A retry continues from the last confirmed stage instead of
+  // minting another hidden batch or another set of codes.
+  const [pendingBatch, setPendingBatch] =
     useState<ActivationBatchResult | null>(null);
-
-  const [batchId, setBatchId] = useState("");
-  const [generateQuantity, setGenerateQuantity] = useState("");
-  const [generateReason, setGenerateReason] = useState("");
-  const [generateConfirmed, setGenerateConfirmed] = useState(false);
-  const [generated, setGenerated] = useState<ActivationGenerateResult | null>(
-    null,
-  );
-
-  const [downloadReason, setDownloadReason] = useState("");
-  const [downloadConfirmed, setDownloadConfirmed] = useState(false);
-  const [downloaded, setDownloaded] = useState<ActivationDownloadResult | null>(
-    null,
-  );
-
-  // One idempotency key per logical submission: ambiguous failures (timeout /
-  // network) keep the key so a retry replays the T12 server snapshot instead
-  // of double-creating; definitive outcomes release it.
+  const [pendingExport, setPendingExport] =
+    useState<ActivationGenerateResult | null>(null);
   const [createKey, setCreateKey] = useState<string | null>(null);
   const [generateKey, setGenerateKey] = useState<string | null>(null);
   const [downloadKey, setDownloadKey] = useState<string | null>(null);
+
+  const amountYuan =
+    amountChoice === "custom" ? Number(customAmountYuan) : amountChoice;
+  const parsedQuantity = Number(quantity);
+  const amountLabel =
+    Number.isFinite(amountYuan) && amountYuan > 0
+      ? `¥${formatNumber(amountYuan)}`
+      : "";
+  const actionLabel = phaseLabel(phase, parsedQuantity, amountLabel);
+  const credits = calculateCredits(amountYuan, unitPriceFen);
+  const selectionLocked =
+    phase !== "idle" ||
+    pendingBatch !== null ||
+    pendingExport !== null ||
+    createKey !== null ||
+    generateKey !== null ||
+    downloadKey !== null;
 
   function handleFailure(cause: unknown, fallback: string) {
     if (cause instanceof AdminActivationError && cause.status === 401) {
@@ -71,148 +86,123 @@ export function ActivationCodeBatchesPage({
     setError(adminActivationErrorMessage(cause, fallback));
   }
 
-  async function submitCreate(event: FormEvent<HTMLFormElement>) {
+  async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError("");
-    if (!name.trim()) {
-      setError("请填写批次名称");
+    setCopyNotice("");
+
+    const validationError = validateGeneration(
+      amountYuan,
+      parsedQuantity,
+      unitPriceFen,
+    );
+    if (validationError) {
+      setError(validationError);
       return;
     }
-    if (!isPositiveInteger(faceValueFen)) {
-      setError("面值（分）必须是正整数");
-      return;
-    }
-    if (!isPositiveInteger(credits)) {
-      setError("到账条数必须是正整数");
-      return;
-    }
-    if (!isPositiveInteger(quantity)) {
-      setError("生成数量必须是正整数");
-      return;
-    }
-    if (!expiresAt) {
-      setError("请填写激活有效期");
-      return;
-    }
-    if (!createReason.trim()) {
-      setError("请填写创建原因");
-      return;
-    }
-    if (!createConfirmed) {
-      setError("请先勾选确认创建");
-      return;
-    }
-    setBusy(true);
-    const key = createKey ?? createIdempotencyKey();
-    setCreateKey(key);
+
+    // Validation above proves all three values are positive integers and the
+    // amount is exactly divisible by the configured unit price.
+    const priceFen = unitPriceFen as number;
+    const creditCount = (amountYuan * 100) / priceFen;
+    const reason = `后台直接生成：${parsedQuantity} 个 ${amountLabel} 激活码`;
+    let batch = pendingBatch;
+    let generated = pendingExport;
+    let currentPhase: GenerationPhase = "creating";
+
     try {
-      const result = await createActivationCodeBatch(
-        {
-          name: name.trim(),
-          face_value_fen: Number(faceValueFen),
-          credits: Number(credits),
-          quantity: Number(quantity),
-          // datetime-local yields a timezone-naive local wall-clock string; the
-          // server reads naive values as UTC, so normalise to an explicit
-          // instant before sending.
-          activation_expires_at: new Date(expiresAt).toISOString(),
-          reason: createReason.trim(),
-        },
-        key,
-      );
-      setCreatedBatch(result);
-      setCreateKey(null);
-    } catch (cause) {
-      handleFailure(cause, "创建激活码批次失败");
-      if (cause instanceof AdminActivationError && cause.status !== undefined) {
+      if (!batch) {
+        setPhase("creating");
+        const key = createKey ?? createIdempotencyKey();
+        setCreateKey(key);
+        batch = await createActivationCodeBatch(
+          {
+            name: createAutomaticBatchName(amountYuan),
+            // The current server contract stores the charged per-video price
+            // in this frozen field. Total code value is credits × unit price.
+            face_value_fen: priceFen,
+            credits: creditCount,
+            quantity: parsedQuantity,
+            activation_expires_at: oneYearFromNow(),
+            reason,
+          },
+          key,
+        );
+        setPendingBatch(batch);
         setCreateKey(null);
       }
-    } finally {
-      setBusy(false);
-    }
-  }
 
-  async function submitGenerate(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setError("");
-    if (!batchId.trim()) {
-      setError("请填写批次 ID");
-      return;
-    }
-    if (!generateReason.trim()) {
-      setError("请填写生成原因");
-      return;
-    }
-    if (!generateConfirmed) {
-      setError("请先勾选确认生成");
-      return;
-    }
-    setBusy(true);
-    const key = generateKey ?? createIdempotencyKey();
-    setGenerateKey(key);
-    try {
-      const result = await generateActivationCodes(
-        batchId.trim(),
-        Number(generateQuantity),
-        generateReason.trim(),
-        key,
-      );
-      setGenerated(result);
-      setGenerateKey(null);
-      setDownloaded(null);
-      setDownloadReason("");
-      setDownloadConfirmed(false);
-    } catch (cause) {
-      handleFailure(cause, "生成激活码失败");
-      if (cause instanceof AdminActivationError && cause.status !== undefined) {
+      currentPhase = "generating";
+      if (!generated) {
+        setPhase("generating");
+        const key = generateKey ?? createIdempotencyKey();
+        setGenerateKey(key);
+        generated = await generateActivationCodes(
+          batch.batch_id,
+          parsedQuantity,
+          reason,
+          key,
+          true,
+        );
+        setPendingExport(generated);
         setGenerateKey(null);
       }
-    } finally {
-      setBusy(false);
-    }
-  }
 
-  async function submitDownload(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!generated) {
-      return;
-    }
-    setError("");
-    if (!downloadReason.trim()) {
-      setError("请填写下载原因");
-      return;
-    }
-    if (!downloadConfirmed) {
-      setError("请先勾选确认下载");
-      return;
-    }
-    setBusy(true);
-    const key = downloadKey ?? createIdempotencyKey();
-    setDownloadKey(key);
-    try {
+      currentPhase = "retrieving";
+      setPhase("retrieving");
+      const key = downloadKey ?? createIdempotencyKey();
+      setDownloadKey(key);
       const result = await downloadActivationCodeExport(
         generated.export_id,
-        downloadReason.trim(),
+        reason,
         key,
       );
-      setDownloaded(result);
-      setGenerated(null);
+
+      setCompleted({
+        amountYuan,
+        quantity: parsedQuantity,
+        credits: creditCount,
+        result,
+      });
+      setPendingBatch(null);
+      setPendingExport(null);
+      setCreateKey(null);
+      setGenerateKey(null);
       setDownloadKey(null);
     } catch (cause) {
-      handleFailure(cause, "下载明文码失败");
+      handleFailure(cause, phaseErrorFallback(currentPhase));
       if (cause instanceof AdminActivationError && cause.status !== undefined) {
+        // A server response is definitive. Clear the pipeline so a corrected
+        // selection starts cleanly; only network/timeout failures retain the
+        // intermediate state and idempotency keys for a safe retry.
+        setPendingBatch(null);
+        setPendingExport(null);
+        setCreateKey(null);
+        setGenerateKey(null);
         setDownloadKey(null);
       }
     } finally {
-      setBusy(false);
+      setPhase("idle");
+    }
+  }
+
+  async function copyAllCodes() {
+    if (!completed) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(completed.result.codes.join("\n"));
+      setCopyNotice("全部激活码已复制");
+    } catch {
+      setCopyNotice("复制失败，请手动选择激活码");
     }
   }
 
   return (
-    <section className="admin-panel" aria-label="激活码批次">
+    <section className="activation-generator-page" aria-label="生成激活码">
       {readOnly ? (
         <p className="wallet-notice" role="status">
-          当前为只读模式，写操作不可用。
+          当前为只读模式，不能生成激活码。
         </p>
       ) : null}
       {error ? (
@@ -221,191 +211,240 @@ export function ActivationCodeBatchesPage({
         </p>
       ) : null}
 
-      <form className="admin-form" onSubmit={submitCreate}>
-        <h2>创建批次</h2>
-        <label>
-          批次名称
+      <form className="activation-generator" onSubmit={submit}>
+        <header className="activation-generator__header">
+          <div>
+            <p className="activation-generator__eyebrow">快速发码</p>
+            <h2>直接生成激活码</h2>
+          </div>
+          <p>选择金额和数量即可。批次、有效期和审计信息由系统自动处理。</p>
+        </header>
+
+        <fieldset className="activation-amount-picker">
+          <legend>每个激活码的金额</legend>
+          <div className="activation-amount-grid">
+            {FIXED_AMOUNTS_YUAN.map((amount) => (
+              <button
+                aria-pressed={amountChoice === amount}
+                className={
+                  amountChoice === amount
+                    ? "activation-amount-option is-active"
+                    : "activation-amount-option"
+                }
+                disabled={selectionLocked}
+                key={amount}
+                type="button"
+                onClick={() => setAmountChoice(amount)}
+              >
+                ¥{amount}
+              </button>
+            ))}
+            <button
+              aria-pressed={amountChoice === "custom"}
+              className={
+                amountChoice === "custom"
+                  ? "activation-amount-option is-active"
+                  : "activation-amount-option"
+              }
+              disabled={selectionLocked}
+              type="button"
+              onClick={() => setAmountChoice("custom")}
+            >
+              自定义金额
+            </button>
+          </div>
+        </fieldset>
+
+        {amountChoice === "custom" ? (
+          <div className="activation-generator__field">
+            <label htmlFor="activation-custom-amount">自定义金额（元）</label>
+            <input
+              aria-describedby="activation-custom-amount-hint"
+              id="activation-custom-amount"
+              inputMode="numeric"
+              min="1"
+              step="1"
+              type="number"
+              value={customAmountYuan}
+              disabled={selectionLocked}
+              onChange={(event) => setCustomAmountYuan(event.target.value)}
+            />
+            {unitPriceFen ? (
+              <span id="activation-custom-amount-hint">
+                金额需为 {formatFenAsYuan(unitPriceFen)} 元的整数倍
+              </span>
+            ) : null}
+          </div>
+        ) : null}
+
+        <div className="activation-generator__field">
+          <label htmlFor="activation-code-quantity">生成数量</label>
           <input
-            value={name}
-            onChange={(event) => setName(event.target.value)}
-          />
-        </label>
-        <label>
-          面值（分）
-          <input
+            aria-describedby="activation-code-quantity-hint"
+            id="activation-code-quantity"
             inputMode="numeric"
-            type="number"
-            value={faceValueFen}
-            onChange={(event) => setFaceValueFen(event.target.value)}
-          />
-        </label>
-        <label>
-          到账条数
-          <input
-            inputMode="numeric"
-            type="number"
-            value={credits}
-            onChange={(event) => setCredits(event.target.value)}
-          />
-        </label>
-        <label>
-          生成数量
-          <input
-            inputMode="numeric"
+            max={MAX_CODES_PER_REQUEST}
+            min="1"
+            step="1"
             type="number"
             value={quantity}
+            disabled={selectionLocked}
             onChange={(event) => setQuantity(event.target.value)}
           />
-        </label>
-        <label>
-          激活有效期至
-          <input
-            type="datetime-local"
-            value={expiresAt}
-            onChange={(event) => setExpiresAt(event.target.value)}
-          />
-        </label>
-        <label>
-          创建原因
-          <input
-            placeholder="例如：首批渠道投放"
-            value={createReason}
-            onChange={(event) => setCreateReason(event.target.value)}
-          />
-        </label>
-        <label>
-          <input
-            checked={createConfirmed}
-            type="checkbox"
-            onChange={(event) => setCreateConfirmed(event.target.checked)}
-          />
-          我已确认创建
-        </label>
-        <button disabled={readOnly || busy} type="submit">
-          创建批次
-        </button>
-      </form>
-
-      {createdBatch ? (
-        <div className="admin-result">
-          <h3>批次已创建</h3>
-          <p>
-            批次 ID：<code>{createdBatch.batch_id}</code>
-          </p>
-          <p>
-            状态：<code>{createdBatch.status}</code>
-          </p>
-          <p>
-            request id：<code>{createdBatch.request_id}</code>
-          </p>
+          <span id="activation-code-quantity-hint">
+            单次最多生成 {MAX_CODES_PER_REQUEST} 个
+          </span>
         </div>
-      ) : null}
 
-      <form className="admin-form" onSubmit={submitGenerate}>
-        <h2>生成激活码</h2>
-        <label>
-          批次 ID
-          <input
-            placeholder="例如：batch-1"
-            value={batchId}
-            onChange={(event) => setBatchId(event.target.value)}
-          />
-        </label>
-        <label>
-          本次生成数量
-          <input
-            inputMode="numeric"
-            type="number"
-            value={generateQuantity}
-            onChange={(event) => setGenerateQuantity(event.target.value)}
-          />
-        </label>
-        <label>
-          生成原因
-          <input
-            placeholder="例如：渠道补货"
-            value={generateReason}
-            onChange={(event) => setGenerateReason(event.target.value)}
-          />
-        </label>
-        <label>
-          <input
-            checked={generateConfirmed}
-            type="checkbox"
-            onChange={(event) => setGenerateConfirmed(event.target.checked)}
-          />
-          我已确认生成
-        </label>
-        <button disabled={readOnly || busy} type="submit">
-          生成激活码
+        <div className="activation-generator__summary" aria-live="polite">
+          {unitPriceFen === null ? (
+            <span>正在读取当前价格…</span>
+          ) : credits ? (
+            <>
+              <span>每个激活码</span>
+              <strong>{amountLabel}</strong>
+              <span>激活后可生成 {credits} 个视频 · 领取有效期 1 年</span>
+            </>
+          ) : (
+            <span>选择金额后显示到账次数</span>
+          )}
+        </div>
+
+        <button
+          className="activation-generator__submit"
+          disabled={readOnly || phase !== "idle" || unitPriceFen === null}
+          type="submit"
+        >
+          {actionLabel}
         </button>
       </form>
 
-      {generated ? (
-        <div className="admin-result">
-          <h3>生成结果</h3>
-          <p>
-            导出包 ID：<code>{generated.export_id}</code>
-          </p>
-          <p>
-            有效期至：<code>{generated.expires_at}</code>
-          </p>
-          <p>
-            request id：<code>{generated.request_id}</code>
-          </p>
-          <ul className="admin-code-list">
-            {generated.codes.map((code) => (
-              <li key={code.code_id}>{code.masked_code}</li>
-            ))}
-          </ul>
-          <form className="admin-form" onSubmit={submitDownload}>
-            <label>
-              下载原因
-              <input
-                placeholder="例如：线下交付"
-                value={downloadReason}
-                onChange={(event) => setDownloadReason(event.target.value)}
-              />
-            </label>
-            <label>
-              <input
-                checked={downloadConfirmed}
-                type="checkbox"
-                onChange={(event) => setDownloadConfirmed(event.target.checked)}
-              />
-              我已确认下载
-            </label>
-            <button disabled={readOnly || busy} type="submit">
-              下载明文码
+      {completed ? (
+        <section className="activation-code-result" aria-label="新生成的激活码">
+          <div className="activation-code-result__header">
+            <div>
+              <p className="activation-generator__eyebrow">生成成功</p>
+              <h3>
+                已生成 {completed.quantity} 个 ¥
+                {formatNumber(completed.amountYuan)} 激活码
+              </h3>
+            </div>
+            <button type="button" onClick={copyAllCodes}>
+              复制全部
             </button>
-          </form>
-        </div>
-      ) : null}
-
-      {downloaded ? (
-        <div className="admin-result">
-          <h3>明文码（仅此一次）</h3>
-          <p>明文码不会再显示，请立即妥善保存并安全交付。</p>
-          <ul className="admin-code-list">
-            {downloaded.codes.map((code) => (
+          </div>
+          <p className="activation-code-result__warning">
+            明文激活码仅在本页显示这一次，请立即复制并安全保存；列表页仅保留脱敏码。
+          </p>
+          <ul className="activation-code-result__list">
+            {completed.result.codes.map((code) => (
               <li key={code}>
                 <code>{code}</code>
               </li>
             ))}
           </ul>
-          <p>
-            下载时间：<code>{downloaded.downloaded_at}</code>
-          </p>
-          <p>
-            request id：<code>{downloaded.request_id}</code>
-          </p>
-        </div>
+          {copyNotice ? (
+            <p className="wallet-notice" role="status">
+              {copyNotice}
+            </p>
+          ) : null}
+        </section>
       ) : null}
     </section>
   );
 }
 
-function isPositiveInteger(value: string): boolean {
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed > 0;
+function calculateCredits(
+  amountYuan: number,
+  unitPriceFen: number | null,
+): number | null {
+  if (
+    !unitPriceFen ||
+    !Number.isInteger(unitPriceFen) ||
+    unitPriceFen <= 0 ||
+    !Number.isInteger(amountYuan) ||
+    amountYuan <= 0
+  ) {
+    return null;
+  }
+  const amountFen = amountYuan * 100;
+  if (amountFen % unitPriceFen !== 0) {
+    return null;
+  }
+  return amountFen / unitPriceFen;
+}
+
+function validateGeneration(
+  amountYuan: number,
+  quantity: number,
+  unitPriceFen: number | null,
+): string | null {
+  if (!unitPriceFen || !Number.isInteger(unitPriceFen) || unitPriceFen <= 0) {
+    return "当前价格尚未加载，请稍后重试";
+  }
+  if (!Number.isInteger(amountYuan) || amountYuan <= 0) {
+    return "请输入正整数金额";
+  }
+  if ((amountYuan * 100) % unitPriceFen !== 0) {
+    return `金额需为 ${formatFenAsYuan(unitPriceFen)} 元的整数倍`;
+  }
+  if (
+    !Number.isInteger(quantity) ||
+    quantity < 1 ||
+    quantity > MAX_CODES_PER_REQUEST
+  ) {
+    return `生成数量必须是 1 到 ${MAX_CODES_PER_REQUEST} 之间的整数`;
+  }
+  return null;
+}
+
+function oneYearFromNow(): string {
+  const expiresAt = new Date();
+  expiresAt.setUTCFullYear(expiresAt.getUTCFullYear() + 1);
+  return expiresAt.toISOString();
+}
+
+function createAutomaticBatchName(amountYuan: number): string {
+  const stamp = new Date().toISOString().replace(/[-:]/g, "").slice(0, 13);
+  return `${formatNumber(amountYuan)}元激活码-${stamp}`;
+}
+
+function phaseLabel(
+  phase: GenerationPhase,
+  quantity: number,
+  amountLabel: string,
+): string {
+  if (phase === "creating") {
+    return "正在准备…";
+  }
+  if (phase === "generating") {
+    return "正在生成…";
+  }
+  if (phase === "retrieving") {
+    return "正在取回激活码…";
+  }
+  const count = Number.isInteger(quantity) && quantity > 0 ? quantity : 1;
+  return amountLabel
+    ? `生成 ${count} 个 ${amountLabel} 激活码`
+    : `生成 ${count} 个激活码`;
+}
+
+function phaseErrorFallback(phase: GenerationPhase): string {
+  if (phase === "creating") {
+    return "准备激活码失败";
+  }
+  if (phase === "generating") {
+    return "生成激活码失败";
+  }
+  return "读取明文激活码失败";
+}
+
+function formatFenAsYuan(value: number): string {
+  return formatNumber(value / 100);
+}
+
+function formatNumber(value: number): string {
+  return new Intl.NumberFormat("zh-CN", {
+    maximumFractionDigits: 2,
+  }).format(value);
 }
