@@ -1689,7 +1689,9 @@ describe("AnalysisWorkspace workflow gates", () => {
     );
 
     expect(await screen.findByText("拆解完成")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "开始生成" }));
+    const startGeneration = screen.getByRole("button", { name: "开始生成" });
+    await waitFor(() => expect(startGeneration).toBeEnabled());
+    fireEvent.click(startGeneration);
 
     // 模态列出全部 7 类缺失，每项附「前往处理」。
     expect(
