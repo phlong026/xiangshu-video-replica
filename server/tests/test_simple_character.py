@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 
 import pytest
 from cryptography.fernet import Fernet
-from fastapi import UploadFile
+from fastapi import HTTPException, UploadFile
 from fastapi.testclient import TestClient
 
 import app.rbac_routes as rbac_routes
@@ -31,13 +31,19 @@ from app.db import connect_database, initialize_database
 from app.db_portable import BusinessConnection
 from app.first_frame_routes import get_image_provider
 from app.first_frames import GeneratedImage, ImageProviderFailed
+from app.generation_worker import run_worker_once
+from app.image_tasks import (
+    acquire_character_sheet_task,
+    complete_character_sheet_task,
+    perform_character_sheet_task,
+    prepare_character_sheet_task,
+)
 from app.main import app
 from app.media import storage_key_from_uri
 from app.media_routes import get_media_storage
 from app.simple_character import (
     SIMPLE_CONTACT_SHEET_MODEL,
     _decode_png_rgb,
-    contact_sheet_placeholder_png,
     crop_contact_sheet_views,
 )
 from app.storage import FakeStorageAdapter
@@ -176,9 +182,168 @@ def test_upload_intent_returns_direct_upload_contract(client: TestClient) -> Non
     assert response.status_code == 200
     payload = response.json()
     assert payload["method"].startswith("POST")
-    assert "generate" in payload["generate_url"]
+    assert payload["generate_url"] == "/api/simple-characters/tasks/generate"
     assert payload["max_size_bytes"] == 10 * 1024 * 1024
     assert "image/png" in payload["allowed_content_types"]
+    assert payload["required_form_fields"] == ["file", "display_name", "idempotency_key"]
+    assert payload["task_status_url_template"] == "/api/simple-characters/task-status/{task_id}"
+
+
+def test_character_sheet_task_is_idempotent_and_recovers_from_server_state(
+    client: TestClient,
+    db_path: Path,
+    storage: FakeStorageAdapter,
+    contact_sheet_provider: StubContactSheetProvider,
+) -> None:
+    data = {
+        "display_name": "荣哥",
+        "persona_name": "乡墅项目管理专家",
+        "idempotency_key": "character-sheet-task-1",
+    }
+    first = client.post(
+        "/api/simple-characters/tasks/generate",
+        headers=headers("employee_1"),
+        files=upload_files(),
+        data=data,
+    )
+    replay = client.post(
+        "/api/simple-characters/tasks/generate",
+        headers=headers("employee_1"),
+        files=upload_files(),
+        data=data,
+    )
+
+    assert first.status_code == 202
+    assert replay.status_code == 202
+    assert replay.json()["id"] == first.json()["id"]
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        assert (
+            run_worker_once(
+                conn,
+                worker_id="image-worker-test",
+                storage=storage,
+                image_provider=contact_sheet_provider,
+                max_tasks=1,
+            )
+            == 1
+        )
+
+    task = client.get(
+        f"/api/simple-characters/task-status/{first.json()['id']}",
+        headers=headers("employee_1"),
+    )
+    assert task.status_code == 200
+    assert task.json()["status"] == "SUCCEEDED"
+    assert task.json()["result_identity_id"]
+    assert task.json()["result"]["generation_source"] == "image_provider"
+
+
+def test_character_sheet_task_requires_auth_and_enforces_actual_upload_size(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unauthenticated = client.post(
+        "/api/simple-characters/tasks/generate",
+        files=upload_files(),
+        data={"display_name": "荣哥", "idempotency_key": "character-sheet-task-2"},
+    )
+    assert unauthenticated.status_code == 401
+
+    monkeypatch.setattr(simple_character_routes, "SIMPLE_UPLOAD_MAX_BYTES", 4)
+    oversized = client.post(
+        "/api/simple-characters/tasks/generate",
+        headers=headers("employee_1"),
+        files={"file": ("portrait.png", b"12345", "image/png")},
+        data={"display_name": "荣哥", "idempotency_key": "character-sheet-task-3"},
+    )
+    assert oversized.status_code == 422
+    assert oversized.json()["detail"]["code"] == "SIMPLE_CHARACTER_IMAGE_TOO_LARGE"
+
+
+def test_character_sheet_task_authorizes_before_persisting_upload(
+    client: TestClient,
+    storage: FakeStorageAdapter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writes: list[str] = []
+    original_put_object = storage.put_object
+
+    def observed_put_object(key: str, content: bytes, *, content_type: str):
+        writes.append(key)
+        return original_put_object(key, content, content_type=content_type)
+
+    monkeypatch.setattr(storage, "put_object", observed_put_object)
+    response = client.post(
+        "/api/simple-characters/tasks/project-owned/generate",
+        headers=headers("employee_2"),
+        files=upload_files(),
+        data={"display_name": "荣哥", "idempotency_key": "character-sheet-task-4"},
+    )
+
+    assert response.status_code == 403
+    assert writes == []
+
+
+def test_character_sheet_task_lease_loss_rolls_back_character_rows(
+    client: TestClient,
+    db_path: Path,
+    storage: FakeStorageAdapter,
+    contact_sheet_provider: StubContactSheetProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created = client.post(
+        "/api/simple-characters/tasks/generate",
+        headers=headers("employee_1"),
+        files=upload_files(),
+        data={
+            "display_name": "荣哥",
+            "idempotency_key": "character-sheet-lease-race-1",
+        },
+    )
+    assert created.status_code == 202
+
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        lease = acquire_character_sheet_task(conn, worker_id="image-worker-lease-test")
+        assert lease is not None
+        prepared = prepare_character_sheet_task(
+            conn,
+            lease=lease,
+            storage=storage,
+            provider=contact_sheet_provider,
+        )
+        generation = perform_character_sheet_task(prepared)
+        original_execute = conn.execute
+        raced = False
+
+        def race_lease(sql: str, params: tuple[object, ...] = ()):
+            nonlocal raced
+            if not raced and "INSERT INTO person_identities" in sql:
+                raced = True
+                original_execute(
+                    "UPDATE character_sheet_tasks SET locked_by = %s WHERE id = %s",
+                    ("stolen-worker", lease.id),
+                )
+            return original_execute(sql, params)
+
+        monkeypatch.setattr(conn, "execute", race_lease)
+        with pytest.raises(HTTPException) as exc_info:
+            complete_character_sheet_task(
+                conn,
+                prepared=prepared,
+                generation=generation,
+                storage=storage,
+            )
+        assert exc_info.value.status_code == 500
+
+        task = original_execute(
+            "SELECT locked_by, status FROM character_sheet_tasks WHERE id = %s",
+            (lease.id,),
+        ).fetchone()
+        assert task is not None
+        assert task["locked_by"] == lease.worker_id
+        assert task["status"] == "RUNNING"
+        assert original_execute("SELECT COUNT(*) FROM person_identities").fetchone()[0] == 0
+        assert original_execute("SELECT COUNT(*) FROM character_versions").fetchone()[0] == 0
 
 
 def test_simple_character_rejects_missing_project(client: TestClient) -> None:
@@ -421,6 +586,7 @@ def test_generate_creates_contact_sheet_asset(
     payload = response.json()
     contact_asset_id = payload["contact_sheet_asset_id"]
     assert contact_asset_id
+    assert payload["generation_source"] == "image_provider"
 
     # The provider was asked to render the single five-view sheet from the
     # uploaded photo with the identity-preserve prompt.
@@ -689,29 +855,37 @@ def test_character_cache_rejects_source_with_wrong_hash(
     assert not cache_root.exists() or not any(cache_root.iterdir())
 
 
-def test_contact_sheet_provider_failure_falls_back_to_placeholder(
+def test_contact_sheet_provider_failure_is_visible_and_does_not_publish(
     client: TestClient,
     db_path: Path,
 ) -> None:
     app.dependency_overrides[get_image_provider] = lambda: FailingContactSheetProvider()
     response = generate_global(client)
-    assert response.status_code == 201, response.text
-    payload = response.json()
-    assert payload["contact_sheet_asset_id"]
+    assert response.status_code == 502, response.text
+    assert response.json()["detail"]["code"] == "CONTACT_SHEET_PROVIDER_FAILED"
 
     with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        assert conn.execute("SELECT 1 FROM person_identities").fetchone() is None
+
+
+def test_unconfigured_local_provider_keeps_explicit_placeholder_path(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    app.dependency_overrides[get_image_provider] = lambda: None
+
+    response = generate_global(client)
+
+    assert response.status_code == 201, response.text
+    payload = response.json()
+    assert payload["generation_source"] == "local_placeholder"
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         row = conn.execute(
-            "SELECT kind, size_bytes, metadata_json FROM assets WHERE id = ?",
+            "SELECT metadata_json FROM assets WHERE id = ?",
             (payload["contact_sheet_asset_id"],),
         ).fetchone()
         assert row is not None
-        assert row["kind"] == "character_contact_sheet"
-        metadata = json.loads(str(row["metadata_json"]))
-        assert metadata["generation_source"] == "local_placeholder"
-        expected = contact_sheet_placeholder_png(
-            f"contact-sheet:{payload['character_version_id']}".encode()
-        )
-        assert row["size_bytes"] == len(expected)
+        assert json.loads(str(row["metadata_json"]))["generation_source"] == "local_placeholder"
 
 
 def test_contact_sheet_download_url_rejects_auditors(client: TestClient) -> None:
@@ -747,6 +921,7 @@ def test_library_lists_characters_with_published_views(
     assert entry["display_name"] == "荣哥"
     assert entry["status"] == "ACTIVE"
     assert entry["contact_sheet_asset_id"] == created["contact_sheet_asset_id"]
+    assert entry["generation_source"] == "image_provider"
     assert {view["view_type"] for view in entry["views"]} == set(REQUIRED_CHARACTER_VIEW_TYPES)
     assert {view["asset_id"] for view in entry["views"]} == {
         view["asset_id"] for view in created["views"]
@@ -766,6 +941,7 @@ def test_library_falls_back_to_views_when_snapshot_has_no_contact_sheet(
         ).fetchone()
         snapshot = json.loads(str(row["publication_snapshot_json"]))
         del snapshot["contact_sheet_asset_id"]
+        snapshot.pop("generation_source", None)
         conn.execute(
             "UPDATE character_versions SET publication_snapshot_json = ? WHERE id = ?",
             (json.dumps(snapshot), version_id),
@@ -779,6 +955,7 @@ def test_library_falls_back_to_views_when_snapshot_has_no_contact_sheet(
     assert len(matching) == 1
     entry = matching[0]
     assert entry["contact_sheet_asset_id"] is None
+    assert entry["generation_source"] is None
     assert len(entry["views"]) == len(REQUIRED_CHARACTER_VIEW_TYPES)
 
 

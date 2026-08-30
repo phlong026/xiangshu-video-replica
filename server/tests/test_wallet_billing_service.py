@@ -6,12 +6,14 @@ from pathlib import Path
 
 import pytest
 
+import app.internal_billing as internal_billing
 from app.db import connect_database, initialize_database
 from app.db_portable import BusinessConnection
 from app.internal_billing import (
     BillingInvariantError,
     InsufficientCreditsError,
     finalize_internal_billing,
+    reconcile_dangling_billing_reservations,
     reserve_internal_billing,
 )
 
@@ -245,6 +247,124 @@ def test_finalize_failure_or_cancellation_releases_credit_once(
             assert first.transaction_type == replay.transaction_type == "RELEASE"
             assert wallet_state(conn) == (1, 0)
             assert transaction_types(conn) == [("RELEASE", 1), ("RESERVE", 1)]
+
+
+def test_dangling_reservation_sweep_releases_terminal_failure_once(tmp_path: Path) -> None:
+    with initialize_database(tmp_path / "dangling-release.db") as raw:
+        with BusinessConnection.sqlite(raw) as conn:
+            seed_task(conn, available_credits=1)
+            with conn:
+                reserve_internal_billing(
+                    conn,
+                    user_id="user_1",
+                    task_id="task_1",
+                    billing_round=1,
+                )
+                conn.execute("UPDATE generation_tasks SET status = 'FAILED' WHERE id = 'task_1'")
+
+            with conn:
+                first = reconcile_dangling_billing_reservations(conn)
+            with conn:
+                replay = reconcile_dangling_billing_reservations(conn)
+
+            assert first.scanned == first.released == 1
+            assert first.settled == first.failed == 0
+            assert replay.scanned == replay.released == replay.settled == replay.failed == 0
+            assert wallet_state(conn) == (1, 0)
+            assert transaction_types(conn) == [("RELEASE", 1), ("RESERVE", 1)]
+
+
+def test_dangling_reservation_sweep_settles_only_archived_success(tmp_path: Path) -> None:
+    with initialize_database(tmp_path / "dangling-settle.db") as raw:
+        with BusinessConnection.sqlite(raw) as conn:
+            seed_task(conn)
+            with conn:
+                reserve_internal_billing(
+                    conn,
+                    user_id="user_1",
+                    task_id="task_1",
+                    billing_round=1,
+                )
+                conn.execute(
+                    """
+                    INSERT INTO assets (
+                        id, project_id, kind, storage_uri, sha256,
+                        size_bytes, content_type, created_by_user_id
+                    ) VALUES ('result_1', 'project_1', 'video',
+                              'cos://bucket/result.mp4', 'sha', 12,
+                              'video/mp4', 'user_1')
+                    """
+                )
+                conn.execute(
+                    """
+                    UPDATE generation_tasks
+                    SET status = 'SUCCEEDED', archive_status = 'ARCHIVED',
+                        result_asset_id = 'result_1'
+                    WHERE id = 'task_1'
+                    """
+                )
+
+            with conn:
+                result = reconcile_dangling_billing_reservations(conn)
+
+            assert result.scanned == result.settled == 1
+            assert result.released == result.failed == 0
+            assert wallet_state(conn) == (1, 0)
+            assert transaction_types(conn) == [("RESERVE", 1), ("SETTLE", 1)]
+
+
+def test_dangling_reservation_sweep_isolates_poisoned_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with initialize_database(tmp_path / "dangling-poison.db") as raw:
+        with BusinessConnection.sqlite(raw) as conn:
+            seed_task(conn, available_credits=2)
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO generation_tasks (
+                        id, batch_id, generation_mode, provider, model, status
+                    ) VALUES ('task_2', 'batch_1', 'I2V', 'fake_h3', 'MiniMax-H3', 'PENDING')
+                    """
+                )
+                reserve_internal_billing(conn, user_id="user_1", task_id="task_1", billing_round=1)
+                reserve_internal_billing(conn, user_id="user_1", task_id="task_2", billing_round=1)
+                conn.execute(
+                    "UPDATE generation_tasks SET status = 'FAILED' WHERE id IN ('task_1','task_2')"
+                )
+
+            original_finalize = internal_billing.finalize_internal_billing
+
+            def poison_first_candidate(
+                business_conn: BusinessConnection,
+                *,
+                task_id: str,
+                outcome: internal_billing.BillingOutcome,
+            ):
+                result = original_finalize(
+                    business_conn,
+                    task_id=task_id,
+                    outcome=outcome,
+                )
+                if task_id == "task_1":
+                    raise BillingInvariantError("poisoned candidate")
+                return result
+
+            monkeypatch.setattr(
+                internal_billing, "finalize_internal_billing", poison_first_candidate
+            )
+            with conn:
+                result = reconcile_dangling_billing_reservations(conn)
+
+            assert result.scanned == 2
+            assert result.released == result.failed == 1
+            assert result.settled == 0
+            assert wallet_state(conn) == (1, 1)
+            terminal_rows = conn.execute(
+                "SELECT task_id FROM wallet_transactions WHERE type = 'RELEASE' ORDER BY task_id"
+            ).fetchall()
+            assert [str(row[0]) for row in terminal_rows] == ["task_2"]
 
 
 def test_released_task_can_reserve_a_new_billing_round(tmp_path: Path) -> None:

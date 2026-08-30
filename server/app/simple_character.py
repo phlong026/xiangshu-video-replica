@@ -142,6 +142,7 @@ class SimpleCharacterCreationResult:
     character_version_id: str
     publication_hash: str
     contact_sheet_asset_id: str
+    generation_source: str
     views: tuple[SimpleCharacterView, ...]
 
 
@@ -154,6 +155,7 @@ class SimpleLibraryEntry:
     owner_user_id: str | None
     status: str
     contact_sheet_asset_id: str | None
+    generation_source: str | None
     views: tuple[SimpleCharacterView, ...]
 
 
@@ -368,6 +370,7 @@ def create_simple_character(
     image_provider: ImageProvider | None = None,
     prepared_generation: PreparedSimpleCharacterGeneration | None = None,
     prepared_publication: PreparedSimpleCharacterPublication | None = None,
+    before_commit: Callable[[SimpleCharacterCreationResult], None] | None = None,
 ) -> SimpleCharacterCreationResult:
     """Create and publish a character from a single uploaded image.
 
@@ -426,8 +429,10 @@ def create_simple_character(
         list(prepared_publication.object_keys) if prepared_publication is not None else []
     )
 
+    result: SimpleCharacterCreationResult
     try:
-        conn.execute("BEGIN IMMEDIATE")
+        if not conn.is_postgres:
+            conn.execute("BEGIN IMMEDIATE")
 
         source_asset_id = _store_source_asset(
             conn,
@@ -518,6 +523,7 @@ def create_simple_character(
             persona_snapshot_json=persona_snapshot_json,
             views=views,
             contact_sheet_asset_id=contact_sheet_asset_id,
+            generation_source=contact_source,
             now_iso=now_iso,
             attempted_keys=attempted_keys,
             prepared_views=(
@@ -538,15 +544,37 @@ def create_simple_character(
                 "contact_sheet_asset_id": contact_sheet_asset_id,
                 **({"project_id": project_id} if project_id else {}),
             },
+            commit=False,
         )
-        conn.commit()
+        result = SimpleCharacterCreationResult(
+            identity_id=identity_id,
+            persona_id=persona_id,
+            character_version_id=version_id,
+            publication_hash=publication_hash,
+            contact_sheet_asset_id=contact_sheet_asset_id,
+            generation_source=contact_source,
+            views=tuple(
+                SimpleCharacterView(
+                    view_type=view_type,
+                    asset_id=str(assets_by_view[view_type]["approved_asset_id"]),
+                )
+                for view_type in REQUIRED_CHARACTER_VIEW_TYPES
+                if view_type in assets_by_view
+            ),
+        )
+        if before_commit is not None:
+            before_commit(result)
+        if not conn.is_postgres:
+            conn.commit()
     except HTTPException:
-        conn.rollback()
+        if not conn.is_postgres:
+            conn.rollback()
         if prepared_publication is None:
             cleanup_publication_objects(storage, attempted_keys)
         raise
     except Exception as exc:  # pragma: no cover - defensive guard
-        conn.rollback()
+        if not conn.is_postgres:
+            conn.rollback()
         if prepared_publication is None:
             cleanup_publication_objects(storage, attempted_keys)
         raise character_error(
@@ -555,21 +583,7 @@ def create_simple_character(
             "一键生成人物失败，请稍后重试。",
         ) from exc
 
-    return SimpleCharacterCreationResult(
-        identity_id=identity_id,
-        persona_id=persona_id,
-        character_version_id=version_id,
-        publication_hash=publication_hash,
-        contact_sheet_asset_id=contact_sheet_asset_id,
-        views=tuple(
-            SimpleCharacterView(
-                view_type=view_type,
-                asset_id=str(assets_by_view[view_type]["approved_asset_id"]),
-            )
-            for view_type in REQUIRED_CHARACTER_VIEW_TYPES
-            if view_type in assets_by_view
-        ),
-    )
+    return result
 
 
 def list_simple_library(
@@ -635,6 +649,7 @@ def list_simple_library(
                 ),
                 status=str(identity_rows[0]["identity_status"]),
                 contact_sheet_asset_id=_snapshot_contact_sheet_asset_id(latest),
+                generation_source=_snapshot_generation_source(latest),
                 views=views,
             )
         )
@@ -657,6 +672,19 @@ def _snapshot_contact_sheet_asset_id(row: sqlite3.Row | None) -> str | None:
         return None
     value = snapshot.get("contact_sheet_asset_id")
     return value if isinstance(value, str) and value else None
+
+
+def _snapshot_generation_source(row: sqlite3.Row | None) -> str | None:
+    if row is None or row["snapshot_json"] is None:
+        return None
+    try:
+        snapshot = json.loads(str(row["snapshot_json"]))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(snapshot, dict):
+        return None
+    value = snapshot.get("generation_source")
+    return value if value in {"image_provider", "local_placeholder"} else None
 
 
 def _group_by_identity(rows: list[sqlite3.Row]) -> dict[str, list[sqlite3.Row]]:
@@ -722,6 +750,7 @@ class SimpleCharacterRegenerationResult:
     version_number: int
     publication_hash: str
     contact_sheet_asset_id: str
+    generation_source: str
     views: tuple[SimpleCharacterView, ...]
 
 
@@ -732,6 +761,9 @@ def regenerate_simple_character_contact_sheet(
     identity_id: str,
     storage: StorageAdapter,
     image_provider: ImageProvider | None = None,
+    prepared_generation: PreparedSimpleCharacterGeneration | None = None,
+    source_content_override: bytes | None = None,
+    before_commit: Callable[[SimpleCharacterRegenerationResult], None] | None = None,
 ) -> SimpleCharacterRegenerationResult:
     """Re-run the single-photo five-view generation and publish a new version.
 
@@ -803,30 +835,44 @@ def regenerate_simple_character_contact_sheet(
     # Read the photo and render the new sheet before opening the write
     # transaction (same policy as create_simple_character) so provider calls
     # never hold the SQLite lock.
-    try:
-        source_content = storage.get_object(storage_key_from_uri(str(source_asset["storage_uri"])))
-    except (StorageBackendUnavailable, OSError, ValueError, KeyError) as exc:
-        raise character_error(
-            503,
-            "SIMPLE_CHARACTER_SOURCE_UNAVAILABLE",
-            "原始授权照片读取失败，请稍后重试。",
-        ) from exc
+    if source_content_override is None:
+        try:
+            source_content = storage.get_object(
+                storage_key_from_uri(str(source_asset["storage_uri"]))
+            )
+        except (StorageBackendUnavailable, OSError, ValueError, KeyError) as exc:
+            raise character_error(
+                503,
+                "SIMPLE_CHARACTER_SOURCE_UNAVAILABLE",
+                "原始授权照片读取失败，请稍后重试。",
+            ) from exc
+    else:
+        source_content = source_content_override
     source_content_type = (
         str(source_asset["content_type"] or "image/png").split(";", 1)[0].strip().lower()
     )
 
-    version_id = str(uuid.uuid4())
-    now_iso = _utc_now_iso()
-    contact_content, contact_content_type, contact_source = _generate_contact_sheet_content(
-        image_provider,
-        source_content=source_content,
-        source_content_type=source_content_type,
-        version_id=version_id,
+    version_id = (
+        prepared_generation.version_id if prepared_generation is not None else str(uuid.uuid4())
     )
+    now_iso = _utc_now_iso()
+    if prepared_generation is None:
+        contact_content, contact_content_type, contact_source = _generate_contact_sheet_content(
+            image_provider,
+            source_content=source_content,
+            source_content_type=source_content_type,
+            version_id=version_id,
+        )
+    else:
+        contact_content = prepared_generation.contact_content
+        contact_content_type = prepared_generation.contact_content_type
+        contact_source = prepared_generation.contact_source
 
     attempted_keys: list[str] = []
+    result: SimpleCharacterRegenerationResult
     try:
-        conn.execute("BEGIN IMMEDIATE")
+        if not conn.is_postgres:
+            conn.execute("BEGIN IMMEDIATE")
         next_version_number = _next_version_number(conn, persona_id=persona_id)
         _insert_version(
             conn,
@@ -868,6 +914,7 @@ def regenerate_simple_character_contact_sheet(
             persona_snapshot_json=persona_snapshot_json,
             views=views,
             contact_sheet_asset_id=contact_sheet_asset_id,
+            generation_source=contact_source,
             now_iso=now_iso,
             attempted_keys=attempted_keys,
         )
@@ -886,14 +933,38 @@ def regenerate_simple_character_contact_sheet(
                 "publication_hash": publication_hash,
                 "contact_sheet_asset_id": contact_sheet_asset_id,
             },
+            commit=False,
         )
-        conn.commit()
+        result = SimpleCharacterRegenerationResult(
+            identity_id=identity_id,
+            persona_id=persona_id,
+            character_version_id=version_id,
+            previous_version_id=previous_version_id,
+            version_number=next_version_number,
+            publication_hash=publication_hash,
+            contact_sheet_asset_id=contact_sheet_asset_id,
+            generation_source=contact_source,
+            views=tuple(
+                SimpleCharacterView(
+                    view_type=view_type,
+                    asset_id=str(assets_by_view[view_type]["approved_asset_id"]),
+                )
+                for view_type in REQUIRED_CHARACTER_VIEW_TYPES
+                if view_type in assets_by_view
+            ),
+        )
+        if before_commit is not None:
+            before_commit(result)
+        if not conn.is_postgres:
+            conn.commit()
     except HTTPException:
-        conn.rollback()
+        if not conn.is_postgres:
+            conn.rollback()
         cleanup_publication_objects(storage, attempted_keys)
         raise
     except Exception as exc:  # pragma: no cover - defensive guard
-        conn.rollback()
+        if not conn.is_postgres:
+            conn.rollback()
         cleanup_publication_objects(storage, attempted_keys)
         raise character_error(
             500,
@@ -901,23 +972,7 @@ def regenerate_simple_character_contact_sheet(
             "重新生成多视图失败，请稍后重试。",
         ) from exc
 
-    return SimpleCharacterRegenerationResult(
-        identity_id=identity_id,
-        persona_id=persona_id,
-        character_version_id=version_id,
-        previous_version_id=previous_version_id,
-        version_number=next_version_number,
-        publication_hash=publication_hash,
-        contact_sheet_asset_id=contact_sheet_asset_id,
-        views=tuple(
-            SimpleCharacterView(
-                view_type=view_type,
-                asset_id=str(assets_by_view[view_type]["approved_asset_id"]),
-            )
-            for view_type in REQUIRED_CHARACTER_VIEW_TYPES
-            if view_type in assets_by_view
-        ),
-    )
+    return result
 
 
 def _next_version_number(conn: BusinessConnection, *, persona_id: str) -> int:
@@ -1754,6 +1809,7 @@ def _publish_views(
     persona_snapshot_json: str,
     views: list[_ApprovedView],
     contact_sheet_asset_id: str,
+    generation_source: str,
     now_iso: str,
     attempted_keys: list[str],
     prepared_views: tuple[PreparedSimpleCharacterViewStorage, ...] | None = None,
@@ -1841,6 +1897,7 @@ def _publish_views(
         "assets_by_view": assets_by_view,
         "character_version_id": version_id,
         "contact_sheet_asset_id": contact_sheet_asset_id,
+        "generation_source": generation_source,
         "persona_snapshot_hash": hashlib.sha256(persona_snapshot_json.encode()).hexdigest(),
         "published_at": now_iso,
         "required_view_types": list(REQUIRED_CHARACTER_VIEW_TYPES),
@@ -1881,11 +1938,17 @@ def _generate_contact_sheet_content(
 ) -> tuple[bytes, str, str]:
     """Render the single five-view contact sheet image.
 
-    Returns ``(content, content_type, generation_source)``. Whenever no
-    provider is configured, the provider call fails, or its output is not a
-    usable raster image, a locally composed placeholder is used instead so
-    uploads never block on image generation.
+    Returns ``(content, content_type, generation_source)``. An explicitly
+    unconfigured local runtime may use a deterministic placeholder. Once a
+    real provider is selected, failures and unusable output stay visible and
+    must never be published as a successful customer character.
     """
+    if provider is None or getattr(provider, "provider_name", "") == "fake":
+        return (
+            contact_sheet_placeholder_png(f"contact-sheet:{version_id}".encode()),
+            "image/png",
+            "local_placeholder",
+        )
     if provider is not None:
         extension = SIMPLE_CONTACT_SHEET_EXTENSIONS.get(source_content_type, ".png")
         try:
@@ -1901,19 +1964,23 @@ def _generate_contact_sheet_content(
                 output_count=1,
             )
         except ImageProviderFailed as exc:
-            logger.warning("Contact sheet provider failed, using placeholder: %s", exc)
+            raise character_error(
+                502,
+                "CONTACT_SHEET_PROVIDER_FAILED",
+                "人物多视图生成服务暂不可用，请稍后重试。",
+            ) from exc
         else:
             if generated:
                 image = generated[0]
                 content_type = image.content_type.split(";", 1)[0].strip().lower()
                 if image.content and content_type in SIMPLE_CONTACT_SHEET_EXTENSIONS:
                     return image.content, content_type, "image_provider"
-            logger.warning("Contact sheet provider returned no usable image, using placeholder")
-    return (
-        contact_sheet_placeholder_png(f"contact-sheet:{version_id}".encode()),
-        "image/png",
-        "local_placeholder",
-    )
+            raise character_error(
+                502,
+                "CONTACT_SHEET_PROVIDER_INVALID_OUTPUT",
+                "人物多视图生成服务返回了无效图片，请稍后重试。",
+            )
+    raise AssertionError("configured image provider path must return or raise")
 
 
 def _contact_sheet_asset_key(

@@ -138,6 +138,7 @@ def write_audit(
     entity_type: str,
     entity_id: str,
     metadata: dict[str, Any] | None = None,
+    commit: bool = True,
 ) -> None:
     insert_audit(
         conn,
@@ -147,7 +148,8 @@ def write_audit(
         entity_id=entity_id,
         metadata=metadata,
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def require_role(

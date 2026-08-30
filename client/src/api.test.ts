@@ -36,6 +36,8 @@ import {
   setInternalAccessToken,
   startVideoAnalysis,
   uploadReferenceVideo,
+  waitForCharacterSheetTask,
+  waitForFirstFrameTask,
 } from "./api";
 
 describe("API base URL resolution", () => {
@@ -545,12 +547,34 @@ describe("character reference and first-frame binding", () => {
   });
 
   it("maps a stale latest generation and sends the frozen binding on regeneration", async () => {
+    const generatedVersion = {
+      id: "first-frame-candidates-1",
+      project_id: "project-1",
+      asset_id: "source-1",
+      kind: "first_frame_candidates",
+      version_number: 1,
+      payload: { candidates: [] },
+      created_by_user_id: "employee-1",
+      created_at: "2030-01-01T00:00:00Z",
+    };
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce({ ok: false, status: 409 })
       .mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ id: "first-frame-candidates-1" }),
+        json: async () => ({ id: "first-frame-task-1" }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          id: "first-frame-task-1",
+          status: "SUCCEEDED",
+          result_version_id: generatedVersion.id,
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => generatedVersion,
       });
     vi.stubGlobal("fetch", fetchMock);
 
@@ -566,19 +590,74 @@ describe("character reference and first-frame binding", () => {
       character_reference_selection_id: "reference-selection-1",
     });
 
-    expect(fetchMock).toHaveBeenLastCalledWith(
-      "http://127.0.0.1:8000/api/projects/project-1/first-frames/generate",
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "http://127.0.0.1:8000/api/projects/project-1/first-frame-tasks",
       expect.objectContaining({
-        body: JSON.stringify({
-          model: "nano-banana-pro-2k",
-          prompt: "replace",
-          quantity: 1,
-          character_version_id: "character-version-1",
-          character_reference_selection_id: "reference-selection-1",
-        }),
         method: "POST",
       }),
     );
+    const submitted = JSON.parse(
+      String(fetchMock.mock.calls[1]?.[1]?.body),
+    ) as Record<string, unknown>;
+    expect(submitted).toMatchObject({
+      model: "nano-banana-pro-2k",
+      prompt: "replace",
+      quantity: 1,
+      character_version_id: "character-version-1",
+      character_reference_selection_id: "reference-selection-1",
+    });
+    expect(submitted.idempotency_key).toMatch(/^first-frame-/);
+  });
+
+  it("shares one character task poller across concurrent recovery callers", async () => {
+    vi.useFakeTimers();
+    const pending = { id: "character-task-shared", status: "RUNNING" };
+    const succeeded = {
+      id: "character-task-shared",
+      status: "SUCCEEDED",
+      result: { persona_id: "persona-1" },
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => pending })
+      .mockResolvedValueOnce({ ok: true, json: async () => succeeded });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const first = waitForCharacterSheetTask("character-task-shared");
+    const recovered = waitForCharacterSheetTask("character-task-shared");
+    await vi.advanceTimersByTimeAsync(1_500);
+
+    await expect(Promise.all([first, recovered])).resolves.toEqual([
+      succeeded,
+      succeeded,
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("shares one first-frame task poller across concurrent recovery callers", async () => {
+    vi.useFakeTimers();
+    const pending = { id: "first-frame-task-shared", status: "PENDING" };
+    const succeeded = {
+      id: "first-frame-task-shared",
+      status: "SUCCEEDED",
+      result_version_id: "version-shared",
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => pending })
+      .mockResolvedValueOnce({ ok: true, json: async () => succeeded });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const first = waitForFirstFrameTask("first-frame-task-shared");
+    const recovered = waitForFirstFrameTask("first-frame-task-shared");
+    await vi.advanceTimersByTimeAsync(1_500);
+
+    await expect(Promise.all([first, recovered])).resolves.toEqual([
+      succeeded,
+      succeeded,
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
 

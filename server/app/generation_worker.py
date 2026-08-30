@@ -32,6 +32,8 @@ from app.db_pg import (
     validate_customer_production,
 )
 from app.db_portable import BusinessConnection
+from app.first_frame_routes import get_image_provider
+from app.first_frames import ImageProvider
 from app.generation import (
     H3Provider,
     H3ProviderFailed,
@@ -55,6 +57,17 @@ from app.generation import (
     run_next_generation_task,
     store_generation_result,
 )
+from app.image_tasks import (
+    acquire_character_sheet_task,
+    acquire_first_frame_task,
+    complete_character_sheet_task,
+    complete_first_frame_task,
+    fail_image_task,
+    perform_character_sheet_task,
+    prepare_character_sheet_task,
+    prepare_first_frame_task,
+    run_first_frame_task_outside_transaction,
+)
 from app.media_routes import get_media_storage
 from app.storage import (
     StorageAdapter,
@@ -74,6 +87,7 @@ def run_worker_once(
     first_frame_storage: StorageAdapter | None = None,
     character_provider: CharacterImageProvider | None = None,
     analysis_provider: VideoAnalysisProvider | None = None,
+    image_provider: ImageProvider | None = None,
     max_tasks: int | None = None,
 ) -> int:
     """Process all currently eligible tasks, then return so SQLite connections stay short-lived."""
@@ -122,6 +136,83 @@ def run_worker_once(
                 complete_analysis_task(conn, work=analysis_work, result=analysis_result)
             except Exception as exc:
                 fail_analysis_task(conn, lease=analysis_lease, cause=exc)
+            processed += 1
+            processed_round = True
+            if max_tasks is not None and processed >= max_tasks:
+                return processed
+        first_frame_lease = acquire_first_frame_task(conn, worker_id=worker_id)
+        if first_frame_lease is not None:
+            submission_started = False
+            stored = None
+            work = None
+
+            def mark_submission_started() -> None:
+                nonlocal submission_started
+                submission_started = True
+
+            try:
+                prepared = prepare_first_frame_task(
+                    conn,
+                    lease=first_frame_lease,
+                    provider=image_provider or get_image_provider(conn),
+                )
+                work, stored = run_first_frame_task_outside_transaction(
+                    prepared,
+                    storage=first_frame_storage or storage,
+                    before_provider_call=mark_submission_started,
+                )
+                complete_first_frame_task(
+                    conn,
+                    prepared=prepared,
+                    work=work,
+                    stored=stored,
+                )
+            except Exception as exc:
+                if stored is not None and work is not None:
+                    from app.first_frames import delete_created_first_frames
+
+                    delete_created_first_frames(
+                        first_frame_storage or storage,
+                        stored.created_assets,
+                        actor_id=work.actor.id,
+                    )
+                fail_image_task(
+                    conn,
+                    table="first_frame_tasks",
+                    lease=first_frame_lease,
+                    cause=exc,
+                    submission_started=submission_started,
+                )
+            processed += 1
+            processed_round = True
+            if max_tasks is not None and processed >= max_tasks:
+                return processed
+        character_sheet_lease = acquire_character_sheet_task(conn, worker_id=worker_id)
+        if character_sheet_lease is not None:
+            submission_started = False
+            try:
+                prepared_sheet = prepare_character_sheet_task(
+                    conn,
+                    lease=character_sheet_lease,
+                    storage=storage,
+                    provider=image_provider or get_image_provider(conn),
+                )
+                submission_started = True
+                sheet_generation = perform_character_sheet_task(prepared_sheet)
+                complete_character_sheet_task(
+                    conn,
+                    prepared=prepared_sheet,
+                    generation=sheet_generation,
+                    storage=storage,
+                )
+            except Exception as exc:
+                fail_image_task(
+                    conn,
+                    table="character_sheet_tasks",
+                    lease=character_sheet_lease,
+                    cause=exc,
+                    submission_started=submission_started,
+                )
             processed += 1
             processed_round = True
             if max_tasks is not None and processed >= max_tasks:
@@ -414,6 +505,7 @@ def run_pg_worker_once(
     character_provider: CharacterImageProvider | None = None,
     analysis_provider: VideoAnalysisProvider | None = None,
     generation_provider: H3Provider | None = None,
+    image_provider: ImageProvider | None = None,
     max_tasks: int | None = None,
 ) -> int:
     """Process all currently eligible tasks on the PostgreSQL lane.
@@ -493,6 +585,97 @@ def run_pg_worker_once(
                 with pg_transaction() as raw_conn:
                     conn = BusinessConnection.postgres(raw_conn)
                     fail_analysis_task(conn, lease=analysis_lease, cause=exc)
+            processed += 1
+            processed_round = True
+            if max_tasks is not None and processed >= max_tasks:
+                return processed
+        with pg_transaction() as raw_conn:
+            first_frame_lease = acquire_first_frame_task(
+                BusinessConnection.postgres(raw_conn), worker_id=worker_id
+            )
+        if first_frame_lease is not None:
+            submission_started = False
+            stored = None
+            work = None
+
+            def mark_pg_submission_started() -> None:
+                nonlocal submission_started
+                submission_started = True
+
+            try:
+                with pg_transaction() as raw_conn:
+                    conn = BusinessConnection.postgres(raw_conn)
+                    prepared = prepare_first_frame_task(
+                        conn,
+                        lease=first_frame_lease,
+                        provider=image_provider or get_image_provider(conn),
+                    )
+                work, stored = run_first_frame_task_outside_transaction(
+                    prepared,
+                    storage=first_frame_storage or storage,
+                    before_provider_call=mark_pg_submission_started,
+                )
+                with pg_transaction() as raw_conn:
+                    complete_first_frame_task(
+                        BusinessConnection.postgres(raw_conn),
+                        prepared=prepared,
+                        work=work,
+                        stored=stored,
+                    )
+            except Exception as exc:
+                if stored is not None and work is not None:
+                    from app.first_frames import delete_created_first_frames
+
+                    delete_created_first_frames(
+                        first_frame_storage or storage,
+                        stored.created_assets,
+                        actor_id=work.actor.id,
+                    )
+                with pg_transaction() as raw_conn:
+                    fail_image_task(
+                        BusinessConnection.postgres(raw_conn),
+                        table="first_frame_tasks",
+                        lease=first_frame_lease,
+                        cause=exc,
+                        submission_started=submission_started,
+                    )
+            processed += 1
+            processed_round = True
+            if max_tasks is not None and processed >= max_tasks:
+                return processed
+        with pg_transaction() as raw_conn:
+            character_sheet_lease = acquire_character_sheet_task(
+                BusinessConnection.postgres(raw_conn), worker_id=worker_id
+            )
+        if character_sheet_lease is not None:
+            submission_started = False
+            try:
+                with pg_transaction() as raw_conn:
+                    conn = BusinessConnection.postgres(raw_conn)
+                    prepared_sheet = prepare_character_sheet_task(
+                        conn,
+                        lease=character_sheet_lease,
+                        storage=storage,
+                        provider=image_provider or get_image_provider(conn),
+                    )
+                submission_started = True
+                sheet_generation = perform_character_sheet_task(prepared_sheet)
+                with pg_transaction() as raw_conn:
+                    complete_character_sheet_task(
+                        BusinessConnection.postgres(raw_conn),
+                        prepared=prepared_sheet,
+                        generation=sheet_generation,
+                        storage=storage,
+                    )
+            except Exception as exc:
+                with pg_transaction() as raw_conn:
+                    fail_image_task(
+                        BusinessConnection.postgres(raw_conn),
+                        table="character_sheet_tasks",
+                        lease=character_sheet_lease,
+                        cause=exc,
+                        submission_started=submission_started,
+                    )
             processed += 1
             processed_round = True
             if max_tasks is not None and processed >= max_tasks:

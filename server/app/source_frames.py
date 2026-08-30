@@ -37,6 +37,26 @@ SOURCE_FRAME_TIMESTAMPS_SECONDS = (0.5, 1.5, 2.5)
 FFMPEG_TIMEOUT_SECONDS = 15
 
 
+def source_video_duration_seconds(asset: sqlite3.Row) -> float | None:
+    try:
+        metadata = json.loads(str(asset["metadata_json"] or "{}"))
+        duration = metadata.get("duration_seconds") if isinstance(metadata, dict) else None
+        if not isinstance(duration, (int, float, str)) or isinstance(duration, bool):
+            return None
+        value = float(duration)
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return value if value > 0 else None
+
+
+def adaptive_source_frame_timestamps(duration_seconds: float | None) -> tuple[float, ...]:
+    """Spread default candidates across the usable video instead of its intro."""
+
+    if duration_seconds is None or duration_seconds <= 0:
+        return SOURCE_FRAME_TIMESTAMPS_SECONDS
+    return tuple(round(duration_seconds * ratio, 3) for ratio in (0.2, 0.5, 0.8))
+
+
 @dataclass(frozen=True)
 class ExtractedSourceFrame:
     timestamp_seconds: float
@@ -181,7 +201,7 @@ def extract_source_frame_candidates(
     actor: CurrentUser,
     storage: StorageAdapter,
     extractor: SourceFrameExtractor,
-    timestamps_seconds: tuple[float, ...] = SOURCE_FRAME_TIMESTAMPS_SECONDS,
+    timestamps_seconds: tuple[float, ...] | None = None,
 ) -> sqlite3.Row:
     require_not_auditor(
         conn,
@@ -216,6 +236,17 @@ def extract_source_frame_candidates(
             "Reference video upload is not ready for source frame extraction.",
         )
 
+    duration_seconds = source_video_duration_seconds(asset)
+    requested_timestamps = timestamps_seconds or adaptive_source_frame_timestamps(duration_seconds)
+    if duration_seconds is not None and any(
+        timestamp >= duration_seconds for timestamp in requested_timestamps
+    ):
+        raise source_frame_error(
+            422,
+            "SOURCE_FRAME_TIMESTAMP_OUT_OF_RANGE",
+            "Source frame timestamps must be inside the reference video duration.",
+        )
+
     try:
         reference = storage_object_ref_from_uri(str(asset["storage_uri"]))
         require_storage_match(storage, reference)
@@ -231,7 +262,7 @@ def extract_source_frame_candidates(
         frames = extractor.extract(
             video,
             filename=Path(reference.key).name,
-            timestamps_seconds=timestamps_seconds,
+            timestamps_seconds=requested_timestamps,
         )
     except SourceFrameExtractorUnavailable as exc:
         raise source_frame_error(
@@ -310,7 +341,7 @@ def extract_source_frame_candidates(
                 payload={
                     "schema_version": SOURCE_FRAME_SCHEMA_VERSION,
                     "source_asset_id": asset_id,
-                    "requested_timestamps_seconds": list(timestamps_seconds),
+                    "requested_timestamps_seconds": list(requested_timestamps),
                     "candidates": candidates,
                 },
             )

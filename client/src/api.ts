@@ -450,6 +450,21 @@ export type FirstFrameModel = "gpt-image-2" | "nano-banana-pro-2k";
 export type GenerateFirstFramesInput =
   components["schemas"]["GenerateFirstFramesRequest"];
 
+export interface FirstFrameTask {
+  id: string;
+  project_id: string;
+  status: DurableImageTaskStatus;
+  attempt: number;
+  result_version_id: string | null;
+  error_code: string | null;
+  error_message: string | null;
+  retryable: boolean;
+  created_at: string;
+  updated_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
 export type FirstFrameCandidate = {
   asset_id: string;
   storage_key: string;
@@ -1555,6 +1570,7 @@ export interface SimpleCharacterResult {
   character_version_id: string;
   publication_hash: string;
   contact_sheet_asset_id: string;
+  generation_source: "image_provider" | "local_placeholder";
   views: SimpleCharacterView[];
 }
 
@@ -1564,8 +1580,53 @@ export interface SimpleLibraryEntry {
   owner_user_id: string | null;
   status: string;
   contact_sheet_asset_id: string | null;
+  generation_source: "image_provider" | "local_placeholder" | null;
   views: SimpleCharacterView[];
 }
+
+export type DurableImageTaskStatus =
+  | "PENDING"
+  | "RUNNING"
+  | "SUCCEEDED"
+  | "FAILED"
+  | "SUBMISSION_UNCERTAIN";
+
+export interface CharacterSheetTask {
+  id: string;
+  project_id: string | null;
+  identity_id: string | null;
+  operation: "CREATE" | "REGENERATE";
+  display_name: string;
+  status: DurableImageTaskStatus;
+  attempt: number;
+  result_identity_id: string | null;
+  result_version_id: string | null;
+  result: SimpleCharacterResult | SimpleCharacterRegenerationResult | null;
+  error_code: string | null;
+  error_message: string | null;
+  retryable: boolean;
+  created_at: string;
+  updated_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+function createRequestKey(prefix: string): string {
+  const suffix =
+    globalThis.crypto?.randomUUID?.() ??
+    `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return `${prefix}-${suffix}`;
+}
+
+function waitForPoll(delayMs = 1_500): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, delayMs));
+}
+
+const characterSheetTaskWaiters = new Map<
+  string,
+  Promise<CharacterSheetTask>
+>();
+const firstFrameTaskWaiters = new Map<string, Promise<FirstFrameTask>>();
 
 export async function uploadSimpleCharacter(
   projectId: string | null,
@@ -1579,17 +1640,20 @@ export async function uploadSimpleCharacter(
   if (personaName.trim()) {
     form.append("persona_name", personaName.trim());
   }
+  form.append("idempotency_key", createRequestKey("character-sheet"));
   const endpoint = projectId
-    ? `/api/simple-characters/${encodeURIComponent(projectId)}/generate`
-    : "/api/simple-characters/generate";
-  return requestApiJson<SimpleCharacterResult>(
+    ? `/api/simple-characters/tasks/${encodeURIComponent(projectId)}/generate`
+    : "/api/simple-characters/tasks/generate";
+  const task = await requestApiJson<CharacterSheetTask>(
     endpoint,
     "一键创建人物失败",
     { method: "POST", body: form },
-    // AI contact-sheet generation is a synchronous gpt-image edit that can
-    // take 1–3 minutes; use the provider-sized budget, not the 60s cloud one.
-    ANALYSIS_TIMEOUT_MS,
   );
+  const completed = await waitForCharacterSheetTask(task.id);
+  if (!completed.result || !("persona_id" in completed.result)) {
+    throw new Error("人物生成任务完成但结果不可用，请重新读取人物库。");
+  }
+  return completed.result as SimpleCharacterResult;
 }
 
 export async function renamePersonIdentity(
@@ -1625,6 +1689,7 @@ export interface SimpleCharacterRegenerationResult {
   version_number: number;
   publication_hash: string;
   contact_sheet_asset_id: string;
+  generation_source: "image_provider" | "local_placeholder";
   views: SimpleCharacterView[];
 }
 
@@ -1633,14 +1698,69 @@ export interface SimpleCharacterRegenerationResult {
 export async function regenerateContactSheet(
   identityId: string,
 ): Promise<SimpleCharacterRegenerationResult> {
-  return requestApiJson<SimpleCharacterRegenerationResult>(
-    `/api/simple-characters/identities/${encodeURIComponent(
-      identityId,
-    )}/regenerate-contact-sheet`,
+  const form = new FormData();
+  form.append("idempotency_key", createRequestKey("character-regenerate"));
+  const task = await requestApiJson<CharacterSheetTask>(
+    `/api/simple-characters/identities/${encodeURIComponent(identityId)}/regenerate-contact-sheet-task`,
     "重新生成多视图失败",
-    { method: "POST" },
-    ANALYSIS_TIMEOUT_MS,
+    { method: "POST", body: form },
   );
+  const completed = await waitForCharacterSheetTask(task.id);
+  if (!completed.result || !("previous_version_id" in completed.result)) {
+    throw new Error("人物重新生成任务完成但结果不可用，请重新读取人物库。");
+  }
+  return completed.result as SimpleCharacterRegenerationResult;
+}
+
+export async function getCharacterSheetTask(
+  taskId: string,
+): Promise<CharacterSheetTask> {
+  return requestApiJson<CharacterSheetTask>(
+    `/api/simple-characters/task-status/${encodeURIComponent(taskId)}`,
+    "读取人物生成任务失败",
+  );
+}
+
+export async function getLatestCharacterSheetTask(): Promise<CharacterSheetTask | null> {
+  return requestApiJson<CharacterSheetTask | null>(
+    "/api/simple-characters/tasks/active-or-latest",
+    "读取人物生成任务失败",
+  );
+}
+
+export async function waitForCharacterSheetTask(
+  taskId: string,
+): Promise<CharacterSheetTask> {
+  const existing = characterSheetTaskWaiters.get(taskId);
+  if (existing) {
+    return existing;
+  }
+  const waiter = pollCharacterSheetTask(taskId);
+  characterSheetTaskWaiters.set(taskId, waiter);
+  const clear = () => {
+    if (characterSheetTaskWaiters.get(taskId) === waiter) {
+      characterSheetTaskWaiters.delete(taskId);
+    }
+  };
+  void waiter.then(clear, clear);
+  return waiter;
+}
+
+async function pollCharacterSheetTask(
+  taskId: string,
+): Promise<CharacterSheetTask> {
+  const deadline = Date.now() + 20 * 60_000;
+  while (Date.now() < deadline) {
+    const task = await getCharacterSheetTask(taskId);
+    if (task.status === "SUCCEEDED") {
+      return task;
+    }
+    if (task.status === "FAILED" || task.status === "SUBMISSION_UNCERTAIN") {
+      throw new Error(task.error_message || "人物生成失败，请重新提交。");
+    }
+    await waitForPoll();
+  }
+  throw new Error("人物生成仍在后台进行，请稍后返回人物库查看。");
 }
 
 export async function listSimpleCharacterLibrary(): Promise<
@@ -1891,14 +2011,85 @@ export async function generateFirstFrames(
   projectId: string,
   input: GenerateFirstFramesInput,
 ): Promise<AnalysisVersion> {
-  // Image edits sit at 1–3 minutes (first_frames.py keeps a 240s per-call
-  // budget), so reuse the analysis-sized budget instead of the 5s default.
-  return requestApiJson<AnalysisVersion>(
-    `/api/projects/${encodeURIComponent(projectId)}/first-frames/generate`,
+  const task = await requestApiJson<FirstFrameTask>(
+    `/api/projects/${encodeURIComponent(projectId)}/first-frame-tasks`,
     "生成人物置换首帧失败",
-    { method: "POST", body: JSON.stringify(input) },
-    ANALYSIS_TIMEOUT_MS,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        ...input,
+        idempotency_key: createRequestKey("first-frame"),
+      }),
+    },
   );
+  return resumeFirstFrameGeneration(projectId, task.id);
+}
+
+export async function resumeFirstFrameGeneration(
+  projectId: string,
+  taskId: string,
+): Promise<AnalysisVersion> {
+  const completed = await waitForFirstFrameTask(taskId);
+  const latest = await getLatestProjectFirstFrames(projectId);
+  if (
+    !completed.result_version_id ||
+    !latest.version ||
+    latest.version.id !== completed.result_version_id
+  ) {
+    throw new Error("首帧任务已完成，但最新版本尚未同步，请重新读取项目。");
+  }
+  return latest.version;
+}
+
+export async function getFirstFrameTask(
+  taskId: string,
+): Promise<FirstFrameTask> {
+  return requestApiJson<FirstFrameTask>(
+    `/api/first-frame-tasks/${encodeURIComponent(taskId)}`,
+    "读取首帧生成任务失败",
+  );
+}
+
+export async function getLatestFirstFrameTask(
+  projectId: string,
+): Promise<FirstFrameTask | null> {
+  return requestApiJson<FirstFrameTask | null>(
+    `/api/projects/${encodeURIComponent(projectId)}/first-frame-tasks/active-or-latest`,
+    "读取首帧生成任务失败",
+  );
+}
+
+export async function waitForFirstFrameTask(
+  taskId: string,
+): Promise<FirstFrameTask> {
+  const existing = firstFrameTaskWaiters.get(taskId);
+  if (existing) {
+    return existing;
+  }
+  const waiter = pollFirstFrameTask(taskId);
+  firstFrameTaskWaiters.set(taskId, waiter);
+  const clear = () => {
+    if (firstFrameTaskWaiters.get(taskId) === waiter) {
+      firstFrameTaskWaiters.delete(taskId);
+    }
+  };
+  void waiter.then(clear, clear);
+  return waiter;
+}
+
+async function pollFirstFrameTask(taskId: string): Promise<FirstFrameTask> {
+  const deadline = Date.now() + 20 * 60_000;
+  while (Date.now() < deadline) {
+    const task = await getFirstFrameTask(taskId);
+    if (task.status === "SUCCEEDED") {
+      return task;
+    }
+    if (task.status === "FAILED" || task.status === "SUBMISSION_UNCERTAIN") {
+      throw new Error(task.error_message || "首帧生成失败，请重新提交。");
+    }
+    await waitForPoll();
+  }
+  throw new Error("首帧仍在后台生成，请稍后返回项目查看。");
 }
 
 export async function confirmFirstFrame(

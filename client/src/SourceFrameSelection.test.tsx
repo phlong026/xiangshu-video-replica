@@ -130,7 +130,7 @@ describe("SourceFrameSelection", () => {
     fireEvent.click(screen.getByRole("button", { name: "重新提取候选" }));
 
     expect(
-      await screen.findByText(/请输入 1–3 个首 3 秒内且不重复的时间点/),
+      await screen.findByText(/请输入 1–3 个视频时长范围内且不重复的时间点/),
     ).toBeInTheDocument();
     expect(extractSourceFrames).not.toHaveBeenCalled();
   });
@@ -361,6 +361,7 @@ describe("SourceFrameSelection", () => {
     vi.mocked(getLatestProjectSourceFrames).mockResolvedValueOnce(null);
     render(
       <SourceFrameSelection
+        videoDurationSeconds={12}
         projectId="project-1"
         referenceAssetId="reference-1"
       />,
@@ -370,7 +371,7 @@ describe("SourceFrameSelection", () => {
       expect(extractSourceFrames).toHaveBeenCalledWith(
         "project-1",
         "reference-1",
-        [0.5, 1.5, 2.5],
+        [2.4, 6, 9.6],
       ),
     );
     expect(await screen.findByAltText("候选源画面 1")).toBeInTheDocument();

@@ -15,7 +15,6 @@ from app.permissions import require_project_access
 from app.source_frames import (
     SOURCE_FRAME_CANDIDATES_KIND,
     SOURCE_FRAME_SELECTION_KIND,
-    SOURCE_FRAME_TIMESTAMPS_SECONDS,
     FFmpegSourceFrameExtractor,
     SourceFrameExtractor,
     confirm_source_frame,
@@ -38,10 +37,9 @@ class ExtractSourceFramesRequest(BaseModel):
         if self.timestamps_seconds is None:
             return self
         if any(
-            not math.isfinite(timestamp) or timestamp < 0 or timestamp > 3
-            for timestamp in self.timestamps_seconds
+            not math.isfinite(timestamp) or timestamp < 0 for timestamp in self.timestamps_seconds
         ):
-            raise ValueError("source frame timestamps must be within the first three seconds")
+            raise ValueError("source frame timestamps must be non-negative and finite")
         if len(set(self.timestamps_seconds)) != len(self.timestamps_seconds):
             raise ValueError("source frame timestamps must be unique")
         return self
@@ -100,7 +98,9 @@ def extract_project_source_frames(
             actor=actor,
             storage=storage,
             extractor=extractor,
-            timestamps_seconds=tuple(request.timestamps_seconds or SOURCE_FRAME_TIMESTAMPS_SECONDS),
+            timestamps_seconds=(
+                None if request.timestamps_seconds is None else tuple(request.timestamps_seconds)
+            ),
         )
         return version_response(row)
 

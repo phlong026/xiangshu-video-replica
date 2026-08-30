@@ -109,6 +109,42 @@ describe("CharacterSelection", () => {
     expect(onVersionChange).toHaveBeenLastCalledWith(selected);
   });
 
+  it("prompts the project to switch when the same character has a newer published version", async () => {
+    const olderOption: api.ProjectCharacterVersionOption = {
+      ...option,
+      character_version_id: "character-version-2",
+      version_number: 2,
+      published_at: "2029-01-01T00:00:00Z",
+    };
+    const olderSelection: api.ProjectMainCharacter = {
+      ...selected,
+      character_version_id: olderOption.character_version_id,
+      character_snapshot: {
+        ...selected.character_snapshot,
+        character_version_id: olderOption.character_version_id,
+        character_version_number: 2,
+      },
+    };
+    vi.mocked(api.getProjectMainCharacter).mockResolvedValue(olderSelection);
+    vi.mocked(api.listProjectCharacterVersions).mockResolvedValue([
+      olderOption,
+      option,
+    ]);
+
+    render(<CharacterSelection projectId="project-1" variant="inline" />);
+
+    expect(
+      await screen.findByText("人物库已有新版本 V3，当前项目仍使用 V2。"),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "切换到 V3" }));
+    await waitFor(() =>
+      expect(api.chooseProjectMainCharacterVersion).toHaveBeenCalledWith(
+        "project-1",
+        option.character_version_id,
+      ),
+    );
+  });
+
   it("shows only server-approved options with all seven published assets", async () => {
     render(<CharacterSelection projectId="project-1" />);
 

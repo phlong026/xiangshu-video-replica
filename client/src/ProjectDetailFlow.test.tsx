@@ -27,6 +27,7 @@ vi.mock("./api", async (importOriginal) => {
     getLatestProjectFirstFrameSelection: vi.fn(),
     getLatestProjectShotCards: vi.fn(),
     getLatestProjectFirstFrames: vi.fn(),
+    getLatestFirstFrameTask: vi.fn(),
     getLatestProjectSourceFrameSelection: vi.fn(),
     getLatestProjectSourceFrames: vi.fn(),
     getLatestScriptVersion: vi.fn(),
@@ -37,6 +38,7 @@ vi.mock("./api", async (importOriginal) => {
     lockGenerationPrompt: vi.fn(),
     previewGenerationPrompt: vi.fn(),
     reviseGenerationPrompt: vi.fn(),
+    resumeFirstFrameGeneration: vi.fn(),
     saveShotCards: vi.fn(),
     selectCharacterReferences: vi.fn(),
   };
@@ -252,6 +254,7 @@ describe("ProjectDetailFlow", () => {
       version: null,
       stale: false,
     });
+    vi.mocked(api.getLatestFirstFrameTask).mockResolvedValue(null);
     vi.mocked(api.getLatestProjectFirstFrameSelection).mockResolvedValue({
       version: null,
       stale: false,
@@ -313,17 +316,55 @@ describe("ProjectDetailFlow", () => {
     expect(await screen.findByLabelText("自定义文案")).toHaveValue(
       "乡下的房子真好。",
     );
+    expect(screen.getByText(/10 秒成片建议约 40–50 字/)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("自定义文案"), {
+      target: {
+        value:
+          "这是一段明显超过十秒成片承载范围的口播文案，用来验证提交前会明确提示用户缩短内容，避免画面和口播节奏严重不一致。",
+      },
+    });
+    expect(
+      screen.getByRole("alert", { name: "文案时长警告" }),
+    ).toHaveTextContent(/已超过建议上限/);
     expect(screen.queryByRole("button", { name: "AI 二创改写" })).toBeNull();
     expect(screen.queryByRole("button", { name: "使用原文案" })).toBeNull();
-    // 第二段区头是内联角色下拉，简化模式不渲染特征/模型/提示词表单。
+    // 第二段区头是内联角色下拉；人物特征必须显示并来自已确认源画面，
+    // 不能再用详情页硬编码默认值冒充人工确认。
     const roleSelect = await screen.findByLabelText("角色版本");
     expect(roleSelect).toHaveValue("cv-1");
     expect(
       screen.getByRole("option", { name: /林夏 · 田园博主 V1/ }),
     ).toBeInTheDocument();
-    expect(screen.queryByLabelText("人物朝向")).toBeNull();
-    expect(screen.queryByLabelText("首帧模型")).toBeNull();
+    expect(screen.getByLabelText("人物朝向")).toHaveValue("FRONT");
+    expect(screen.getByLabelText("人物景别")).toHaveValue("HALF_BODY");
+    expect(screen.getByLabelText("面部可见性")).toHaveValue("VISIBLE");
+    expect(screen.getByLabelText("身体完整度")).toHaveValue("UPPER_BODY");
+    expect(screen.queryByLabelText("首帧生成模式")).toBeNull();
     expect(screen.queryByLabelText("首帧编辑提示词")).toBeNull();
+  });
+
+  it("keeps source-frame timestamps on the full source duration when output is capped", async () => {
+    vi.mocked(api.getLatestProjectAnalysis).mockResolvedValue({
+      ...analysisVersion,
+      payload: {
+        analysis: {
+          ...(analysisVersion.payload.analysis as Record<string, unknown>),
+          duration_seconds: 60,
+        },
+      },
+    });
+
+    render(
+      <ProjectDetailFlow
+        onBack={vi.fn()}
+        onBatchCreated={vi.fn()}
+        project={project}
+        readOnly={false}
+      />,
+    );
+
+    expect(await screen.findByText(/当前视频约 60\.0 秒/)).toBeInTheDocument();
+    expect(screen.getByText(/15 秒成片建议约 60–75 字/)).toBeInTheDocument();
   });
 
   it("persists the character choice from the inline dropdown and re-matches references", async () => {
@@ -516,7 +557,9 @@ describe("ProjectDetailFlow", () => {
       },
       tasks: [],
     } as api.GenerationBatch;
-    vi.mocked(api.createGenerationBatch).mockResolvedValue(batch);
+    vi.mocked(api.createGenerationBatch)
+      .mockRejectedValueOnce(new Error("提交结果未知，请安全重试。"))
+      .mockResolvedValue(batch);
     const onBatchCreated = vi.fn();
 
     render(
@@ -567,7 +610,19 @@ describe("ProjectDetailFlow", () => {
       project.id,
       "prompt-compiled-custom-1",
     );
+    expect(
+      await screen.findByText("提交结果未知，请安全重试。"),
+    ).toBeInTheDocument();
+    const firstIdempotencyKey = vi.mocked(api.createGenerationBatch).mock
+      .calls[0]?.[1].idempotency_key;
+    fireEvent.click(
+      screen.getByRole("button", { name: "开始生成（1 个付费任务）" }),
+    );
     await waitFor(() => expect(onBatchCreated).toHaveBeenCalledWith(batch));
+    const secondIdempotencyKey = vi.mocked(api.createGenerationBatch).mock
+      .calls[1]?.[1].idempotency_key;
+    expect(firstIdempotencyKey).toBeTruthy();
+    expect(secondIdempotencyKey).toBe(firstIdempotencyKey);
   });
 
   it("keeps project navigation available while a first frame continues in the background", async () => {

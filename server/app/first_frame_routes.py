@@ -4,10 +4,11 @@ import json
 import sqlite3
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.auth import AuthenticatedUser, Database
+from app.bootstrap import is_customer_production
 from app.customer_fence import BusinessDbDep, BusinessReadConn
 from app.first_frames import (
     APILIO_DEFAULT_BASE_URL,
@@ -23,6 +24,12 @@ from app.first_frames import (
     perform_first_frame_generation,
     prepare_first_frame_generation,
     store_first_frame_generation,
+)
+from app.image_tasks import (
+    enqueue_first_frame_task,
+    latest_image_task,
+    load_image_task,
+    require_first_frame_task_access,
 )
 from app.media_routes import get_media_storage
 from app.permissions import require_project_access
@@ -47,6 +54,27 @@ class GenerateFirstFramesRequest(BaseModel):
         if (self.character_version_id is None) != (self.character_reference_selection_id is None):
             raise ValueError("character version and reference selection must be supplied together")
         return self
+
+
+class EnqueueFirstFramesRequest(GenerateFirstFramesRequest):
+    idempotency_key: str = Field(min_length=8, max_length=200)
+
+
+class FirstFrameTaskResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    project_id: str
+    status: str
+    attempt: int
+    result_version_id: str | None
+    error_code: str | None
+    error_message: str | None
+    retryable: bool
+    created_at: str
+    updated_at: str
+    started_at: str | None
+    completed_at: str | None
 
 
 class ConfirmFirstFrameRequest(BaseModel):
@@ -89,8 +117,24 @@ def get_image_provider(conn: BusinessReadConn) -> ImageProvider:
                     ),
                 },
             ) from exc
+        if is_customer_production():
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "APILIO_SETTINGS_REQUIRED",
+                    "message": "图像生成服务尚未配置，请联系管理员。",
+                },
+            ) from exc
         return FakeImageProvider()
     if not config:
+        if is_customer_production():
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "APILIO_SETTINGS_REQUIRED",
+                    "message": "图像生成服务尚未配置，请联系管理员。",
+                },
+            )
         return FakeImageProvider()
     api_key = config.get("api_key")
     if not api_key:
@@ -158,6 +202,63 @@ def generate_project_first_frames(
         )
         raise
     return version_response(row)
+
+
+@router.post(
+    "/projects/{project_id}/first-frame-tasks",
+    response_model=FirstFrameTaskResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def create_project_first_frame_task(
+    project_id: str,
+    request: EnqueueFirstFramesRequest,
+    db: BusinessDbDep,
+) -> FirstFrameTaskResponse:
+    """Persist an image request without holding the customer session open."""
+
+    with db.write() as (conn, actor):
+        row = enqueue_first_frame_task(
+            conn,
+            actor=actor,
+            project_id=project_id,
+            model=request.model,
+            prompt=request.prompt,
+            quantity=request.quantity,
+            character_version_id=request.character_version_id,
+            character_reference_selection_id=request.character_reference_selection_id,
+            idempotency_key=request.idempotency_key,
+        )
+        return first_frame_task_response(row)
+
+
+@router.get("/first-frame-tasks/{task_id}", response_model=FirstFrameTaskResponse)
+def read_first_frame_task(
+    task_id: str,
+    conn: Database,
+    actor: AuthenticatedUser,
+) -> FirstFrameTaskResponse:
+    row = load_image_task(conn, table="first_frame_tasks", task_id=task_id)
+    require_first_frame_task_access(conn, actor=actor, row=row)
+    return first_frame_task_response(row)
+
+
+@router.get(
+    "/projects/{project_id}/first-frame-tasks/active-or-latest",
+    response_model=FirstFrameTaskResponse | None,
+)
+def read_latest_first_frame_task(
+    project_id: str,
+    conn: Database,
+    actor: AuthenticatedUser,
+) -> FirstFrameTaskResponse | None:
+    require_project_access(conn, actor=actor, project_id=project_id, action="first_frame.task.read")
+    row = latest_image_task(
+        conn,
+        table="first_frame_tasks",
+        owner_column="project_id",
+        owner_id=project_id,
+    )
+    return None if row is None else first_frame_task_response(row)
 
 
 @router.get("/projects/{project_id}/first-frames/latest", response_model=VersionResponse | None)
@@ -265,4 +366,25 @@ def version_response(row: sqlite3.Row) -> VersionResponse:
         if row["created_by_user_id"] is None
         else str(row["created_by_user_id"]),
         created_at=str(row["created_at"]),
+    )
+
+
+def first_frame_task_response(row: sqlite3.Row) -> FirstFrameTaskResponse:
+    return FirstFrameTaskResponse(
+        id=str(row["id"]),
+        project_id=str(row["project_id"]),
+        status=str(row["status"]),
+        attempt=int(row["attempt"]),
+        result_version_id=(
+            None if row["result_version_id"] is None else str(row["result_version_id"])
+        ),
+        error_code=None if row["error_code"] is None else str(row["error_code"]),
+        error_message=(
+            None if row["error_message_redacted"] is None else str(row["error_message_redacted"])
+        ),
+        retryable=bool(row["retryable"]),
+        created_at=str(row["created_at"]),
+        updated_at=str(row["updated_at"]),
+        started_at=None if row["started_at"] is None else str(row["started_at"]),
+        completed_at=(None if row["completed_at"] is None else str(row["completed_at"])),
     )

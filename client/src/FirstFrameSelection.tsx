@@ -8,11 +8,13 @@ import {
   type FirstFrameModel,
   generateFirstFrames,
   getAssetDownloadUrl,
+  getLatestFirstFrameTask,
   getLatestProjectFirstFrameSelection,
   getLatestProjectFirstFrames,
   getProjectFirstFrameHistory,
   readFirstFrameCandidates,
   readFirstFrameSelectionPayload,
+  resumeFirstFrameGeneration,
 } from "./api";
 
 const DEFAULT_PROMPT =
@@ -22,31 +24,6 @@ type PendingFirstFrameGeneration = {
   promise: Promise<AnalysisVersion>;
   startedAt: number;
 };
-
-// 生成接口本身是一个长 HTTP 请求。把进行中的 Promise 放在页面组件之外，
-// 路由切换卸载组件时请求仍会继续；回到同一项目后只重新挂接，不重复付费调用。
-// 这不是跨应用重启的持久任务，关闭本地服务或刷新整个 WebView 仍会中断挂接。
-const pendingFirstFrameGenerations = new Map<
-  string,
-  PendingFirstFrameGeneration
->();
-
-function getOrStartFirstFrameGeneration(
-  projectId: string,
-  start: () => Promise<AnalysisVersion>,
-): PendingFirstFrameGeneration {
-  const existing = pendingFirstFrameGenerations.get(projectId);
-  if (existing) {
-    return existing;
-  }
-  const pending = { promise: start(), startedAt: Date.now() };
-  pendingFirstFrameGenerations.set(projectId, pending);
-  // Keep a resolved request attachable until a mounted page has loaded its
-  // result. A route/input refresh can invalidate the first watcher after the
-  // HTTP response but before React consumes it.
-  void pending.promise.catch(() => {});
-  return pending;
-}
 
 export function FirstFrameSelection({
   legacyCharacterSelected = false,
@@ -86,6 +63,7 @@ export function FirstFrameSelection({
   );
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const loadRequestId = useRef(0);
+  const previewRetryCounts = useRef(new Map<string, number>());
   const generationWatchId = useRef(0);
   const confirmationLifecycleId = useRef(0);
   const onBusyChangeRef = useRef(onBusyChange);
@@ -150,6 +128,7 @@ export function FirstFrameSelection({
         setHistory(versions);
         setVersion(displayVersion);
         setPreviewUrls({});
+        previewRetryCounts.current.clear();
         if (!displayVersion) {
           setSelectedAssetId("");
           setStatus(
@@ -199,10 +178,12 @@ export function FirstFrameSelection({
         if (latestState.stale || selection.stale) {
           setStatus("上游输入已更新，请重新生成人物置换首帧。");
         } else if (displayVersion.id !== latest?.id) {
-          setStatus("正在查看历史版本；仅最新候选可确认用于 H3。");
+          setStatus("正在查看历史版本；仅最新候选可确认用于视频生成。");
         } else if (currentSelection && typeof confirmedAssetId === "string") {
           setSelectedAssetId(confirmedAssetId);
-          setStatus("当前候选首帧已确认，将作为后续 H3 提示词的唯一首帧输入。");
+          setStatus(
+            "当前候选首帧已确认，将作为后续视频生成提示词的唯一首帧输入。",
+          );
         } else if (selection.version) {
           setStatus("已确认首帧与当前候选不一致，请重新确认最新候选。");
         } else if (canAutoSelect) {
@@ -274,21 +255,9 @@ export function FirstFrameSelection({
         }
         setStatus("候选首帧已更新，正在读取候选…");
         await load(generated, true);
-        if (
-          watchId === generationWatchId.current &&
-          pendingFirstFrameGenerations.get(projectId) === pending
-        ) {
-          pendingFirstFrameGenerations.delete(projectId);
-        }
       } catch (requestError) {
         if (watchId !== generationWatchId.current) {
           return;
-        }
-        if (pendingFirstFrameGenerations.get(projectId) === pending) {
-          // A mounted page has now consumed the background failure. Keeping a
-          // rejection only while nobody is mounted lets users see it on return
-          // without making every later retry reuse a rejected Promise.
-          pendingFirstFrameGenerations.delete(projectId);
         }
         setError(
           requestError instanceof Error
@@ -303,16 +272,41 @@ export function FirstFrameSelection({
         }
       }
     },
-    [load, projectId],
+    [load],
   );
 
   useEffect(() => {
-    void load();
     onBusyChangeRef.current?.(false);
-    const pending = pendingFirstFrameGenerations.get(projectId);
-    if (pending) {
-      void followGeneration(pending);
-    }
+    void (async () => {
+      await load();
+      try {
+        const task = await getLatestFirstFrameTask(projectId);
+        if (
+          task &&
+          (task.status === "PENDING" ||
+            task.status === "RUNNING" ||
+            task.status === "SUCCEEDED")
+        ) {
+          void followGeneration({
+            promise: resumeFirstFrameGeneration(projectId, task.id),
+            startedAt: Date.parse(task.started_at ?? task.created_at),
+          });
+        } else if (
+          task &&
+          (task.status === "FAILED" || task.status === "SUBMISSION_UNCERTAIN")
+        ) {
+          setError(
+            task.error_message ??
+              (task.status === "SUBMISSION_UNCERTAIN"
+                ? "云端任务状态需要确认，请重试。"
+                : "云端首帧生成失败，请重试。"),
+          );
+        }
+      } catch {
+        // The normal page load already reports API availability. A separate
+        // recovery probe must not replace valid candidate/history content.
+      }
+    })();
     return () => {
       loadRequestId.current += 1;
       generationWatchId.current += 1;
@@ -345,6 +339,25 @@ export function FirstFrameSelection({
   const isHistoryVersion = Boolean(version && version.id !== latestVersionId);
   const selectedPreview = previewUrls[selectedAssetId];
 
+  async function handlePreviewError(assetId: string) {
+    setPreviewUrls((current) =>
+      Object.fromEntries(
+        Object.entries(current).filter(([currentId]) => currentId !== assetId),
+      ),
+    );
+    const retries = previewRetryCounts.current.get(assetId) ?? 0;
+    if (retries >= 1) {
+      return;
+    }
+    previewRetryCounts.current.set(assetId, retries + 1);
+    try {
+      const download = await getAssetDownloadUrl(assetId);
+      setPreviewUrls((current) => ({ ...current, [assetId]: download.url }));
+    } catch {
+      // Leave the preview absent after the single bounded re-sign attempt.
+    }
+  }
+
   async function handleGenerate() {
     if (readOnly) {
       return;
@@ -363,14 +376,18 @@ export function FirstFrameSelection({
           character_reference_selection_id: referenceSelection.id,
         }
       : {};
-    const pending = getOrStartFirstFrameGeneration(projectId, () =>
-      generateFirstFrames(projectId, {
+    const pending: PendingFirstFrameGeneration = {
+      startedAt: Date.now(),
+      promise: generateFirstFrames(projectId, {
         model: simplified ? "gpt-image-2" : model,
-        prompt: simplified ? DEFAULT_PROMPT : prompt,
+        // In simplified mode the server owns the stable business template.
+        // Sending the UI placeholder here previously bypassed the stronger
+        // contact-sheet/reference-role prompt assembly on the server.
+        prompt: simplified ? undefined : prompt,
         quantity,
         ...binding,
       }),
-    );
+    };
     await followGeneration(pending);
   }
 
@@ -399,7 +416,7 @@ export function FirstFrameSelection({
         (candidate) => candidate.asset_id === selectedAssetId,
       );
       setStatus(
-        `已确认首帧候选 ${(selectedIndex ?? 0) + 1}。保存镜头卡片并锁定 H3 提示词后，才能创建视频批次。`,
+        `已确认首帧候选 ${(selectedIndex ?? 0) + 1}。保存镜头卡片并锁定视频生成提示词后，才能创建视频批次。`,
       );
       onSelectionChange?.(selection);
     } catch (requestError) {
@@ -435,17 +452,17 @@ export function FirstFrameSelection({
       {!simplified ? (
         <div className="first-frame-controls">
           <label>
-            首帧模型
+            首帧生成模式
             <select
-              aria-label="首帧模型"
+              aria-label="首帧生成模式"
               disabled={readOnly || isSubmitting || !canGenerate}
               onChange={(event) =>
                 setModel(event.target.value as FirstFrameModel)
               }
               value={model}
             >
-              <option value="gpt-image-2">GPT Image 2（默认）</option>
-              <option value="nano-banana-pro-2k">Nano Banana Pro 2K</option>
+              <option value="gpt-image-2">标准图像（默认）</option>
+              <option value="nano-banana-pro-2k">高清图像</option>
             </select>
           </label>
           <label>
@@ -494,7 +511,7 @@ export function FirstFrameSelection({
           onClick={handleConfirm}
           type="button"
         >
-          确认用于 H3 的首帧
+          确认用于视频生成的首帧
         </button>
       </div>
       {generationStartedAt !== null ? (
@@ -517,13 +534,13 @@ export function FirstFrameSelection({
         <>
           {!simplified ? (
             <p className="file-note">
-              当前模型：{modelLabel(payload.model)} ·{" "}
-              {payload.provider === "apilio" ? "Apilio" : payload.provider}
+              当前模式：{modelLabel(payload.model)} ·{" "}
+              {payload.provider === "fake" ? "测试模式" : "正式服务"}
             </p>
           ) : null}
           {payload.provider === "fake" ? (
             <p className="settings-error">
-              模拟输出：尚未调用 Apilio 真实模型。
+              模拟输出：尚未调用正式图像生成服务。
             </p>
           ) : null}
           {readOnly ? (
@@ -550,6 +567,9 @@ export function FirstFrameSelection({
                 index={index}
                 key={candidate.asset_id}
                 onSelect={() => setSelectedAssetId(candidate.asset_id)}
+                onPreviewError={() =>
+                  void handlePreviewError(candidate.asset_id)
+                }
                 previewUrl={previewUrls[candidate.asset_id]}
                 readOnly={readOnly}
               />
@@ -596,6 +616,7 @@ function FirstFrameOption({
   disabled,
   index,
   onSelect,
+  onPreviewError,
   previewUrl,
   readOnly,
 }: {
@@ -604,6 +625,7 @@ function FirstFrameOption({
   disabled: boolean;
   index: number;
   onSelect: () => void;
+  onPreviewError: () => void;
   previewUrl: string | undefined;
   readOnly: boolean;
 }) {
@@ -624,7 +646,11 @@ function FirstFrameOption({
         value={candidate.asset_id}
       />
       {previewUrl ? (
-        <img alt={`首帧候选 ${index + 1}`} src={previewUrl} />
+        <img
+          alt={`首帧候选 ${index + 1}`}
+          onError={onPreviewError}
+          src={previewUrl}
+        />
       ) : (
         <span className="source-frame-placeholder">
           {readOnly ? "预览不可用" : "预览加载失败，请重新生成"}
@@ -639,5 +665,5 @@ function FirstFrameOption({
 }
 
 function modelLabel(model: FirstFrameModel) {
-  return model === "gpt-image-2" ? "GPT Image 2" : "Nano Banana Pro 2K";
+  return model === "gpt-image-2" ? "标准图像" : "高清图像";
 }

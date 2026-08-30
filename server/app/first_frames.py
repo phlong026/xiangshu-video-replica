@@ -7,7 +7,7 @@ import json
 import logging
 import socket
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, cast
 from urllib.error import HTTPError, URLError
@@ -635,6 +635,7 @@ def complete_first_frame_generation(
     work: FirstFrameGenerationWork,
     provider: ImageProvider,
     stored: StoredFirstFrameCandidates,
+    before_commit: Callable[[sqlite3.Row], None] | None = None,
 ) -> sqlite3.Row:
     """Revalidate inputs and atomically publish the already-archived images."""
 
@@ -647,8 +648,9 @@ def complete_first_frame_generation(
         character_version_id=work.character_inputs.character_version_id,
         require_usable_character=True,
     )
-    with conn:
+    if not conn.is_postgres:
         conn.execute("BEGIN IMMEDIATE")
+    try:
         for candidate in stored.candidates:
             conn.execute(
                 """
@@ -693,20 +695,29 @@ def complete_first_frame_generation(
             kind=FIRST_FRAME_CANDIDATES_KIND,
             created_by_user_id=work.actor.id,
             payload=version_payload,
+            commit=False,
         )
-
-    write_audit(
-        conn,
-        actor=work.actor,
-        action="first_frame.generate",
-        entity_type="version",
-        entity_id=str(row["id"]),
-        metadata={
-            "project_id": work.project_id,
-            "model": work.model,
-            "quantity": work.quantity,
-        },
-    )
+        write_audit(
+            conn,
+            actor=work.actor,
+            action="first_frame.generate",
+            entity_type="version",
+            entity_id=str(row["id"]),
+            metadata={
+                "project_id": work.project_id,
+                "model": work.model,
+                "quantity": work.quantity,
+            },
+            commit=False,
+        )
+        if before_commit is not None:
+            before_commit(row)
+        if not conn.is_postgres:
+            conn.commit()
+    except BaseException:
+        if not conn.is_postgres:
+            conn.rollback()
+        raise
     return row
 
 
@@ -1226,13 +1237,9 @@ def normalize_prompt(
     reference_roles: list[str] | None = None,
 ) -> str:
     clean = (prompt or "").strip()
-    if clean:
-        # The effective prompt from a previous generation may already contain
-        # the server constraint. Remove that copy and append one fresh copy at
-        # the end so later caller text can never outrank it.
-        base_prompt = clean.replace(FIRST_FRAME_NO_TEXT_CONSTRAINT, "").strip()
-    elif reference_roles and "contact_sheet" in reference_roles:
-        base_prompt = (
+    clean = clean.replace(FIRST_FRAME_NO_TEXT_CONSTRAINT, "").strip()
+    if reference_roles and "contact_sheet" in reference_roles:
+        server_template = (
             f"把原视频中的人物身份替换为角色库人物“{character_name}”，严格保留原画面一切要素。\n"
             "第 1 张输入图是原视频源帧，是构图、机位、人物姿态、动作、场景、道具、"
             "光线与色调的唯一模板，不得改动。\n"
@@ -1242,6 +1249,11 @@ def normalize_prompt(
             "保持自然皮肤质感、正确肢体结构与真实透视；不得增加或删除画面主体；"
             "不得出现文字、水印或边框。"
         )
+        # Full mode may add user instructions, but it must not replace the
+        # stable reference-role contract owned by the server.
+        base_prompt = f"{server_template}\n\n用户补充要求：\n{clean}" if clean else server_template
+    elif clean:
+        base_prompt = clean
     else:
         base_prompt = (
             "保留原图的镜头位置、人物姿态、动作、场景、构图、道具、光线与色调，"

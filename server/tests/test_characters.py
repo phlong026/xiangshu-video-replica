@@ -143,7 +143,7 @@ def test_characters_migration_creates_library_tables(db_path: Path) -> None:
             ).fetchall()
         }
 
-    assert version == "045_async_analysis_tasks"
+    assert version == "046_async_image_tasks"
     assert {
         "characters",
         "project_main_characters",

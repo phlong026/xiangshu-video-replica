@@ -7,9 +7,15 @@ const ALLOWED_TYPES = ["image/png", "image/jpeg"];
 
 export function SimpleCharacterUpload({
   onCreated,
+  onGenerationFailed,
+  onGenerationProgress,
+  onGenerationStarted,
   projectId = null,
 }: {
   onCreated: (result: SimpleCharacterResult, displayName: string) => void;
+  onGenerationFailed?: (message: string) => void;
+  onGenerationProgress?: (progress: number, stage: string) => void;
+  onGenerationStarted?: (file: File, displayName: string) => void;
   projectId?: string | null;
 }) {
   const [busy, setBusy] = useState(false);
@@ -49,8 +55,25 @@ export function SimpleCharacterUpload({
     setBusy(true);
     setError("");
     setMessage("");
+    onGenerationStarted?.(file, name);
+    let progress = 8;
+    onGenerationProgress?.(progress, "正在上传授权图片");
+    const progressTimer = window.setInterval(() => {
+      progress = Math.min(
+        92,
+        progress + (progress < 56 ? 4 : progress < 78 ? 2 : 1),
+      );
+      const stage =
+        progress < 28
+          ? "正在上传授权图片"
+          : progress < 58
+            ? "正在分析人物特征"
+            : "正在生成多视角拼合图";
+      onGenerationProgress?.(progress, stage);
+    }, 3_000);
     try {
       const result = await uploadSimpleCharacter(projectId, file, name);
+      onGenerationProgress?.(100, "多视角拼合图已生成");
       setMessage(`人物“${name}”五视角拼合图已生成，可在下方预览与下载。`);
       setDisplayName("");
       setFileName("");
@@ -59,12 +82,14 @@ export function SimpleCharacterUpload({
       }
       onCreated(result, name);
     } catch (requestError) {
-      setError(
+      const requestMessage =
         requestError instanceof Error
           ? requestError.message
-          : "一键创建人物失败，请重试。",
-      );
+          : "一键创建人物失败，请重试。";
+      setError(requestMessage);
+      onGenerationFailed?.(requestMessage);
     } finally {
+      window.clearInterval(progressTimer);
       setBusy(false);
     }
   }

@@ -125,6 +125,51 @@ describe("CharacterReferenceSelection", () => {
     expect(onSelectionChange).toHaveBeenLastCalledWith(savedSelection);
   });
 
+  it("automatically confirms and locks reference choices for contact-sheet characters", async () => {
+    const contactSheetRecommendation = {
+      ...recommendation,
+      character_version_snapshot_json: {
+        ...recommendation.character_version_snapshot_json,
+        publication_snapshot_json: {
+          contact_sheet_asset_id: "contact-sheet-1",
+        },
+      },
+    };
+    vi.mocked(api.getCharacterReferenceRecommendation).mockResolvedValue(
+      contactSheetRecommendation,
+    );
+    vi.mocked(api.selectCharacterReferences).mockResolvedValue({
+      ...savedSelection,
+      character_version_snapshot_json:
+        contactSheetRecommendation.character_version_snapshot_json,
+    });
+    const onSelectionChange = vi.fn();
+
+    render(
+      <CharacterReferenceSelection
+        characterSelection={characterSelection}
+        onSelectionChange={onSelectionChange}
+        projectId="project-1"
+        sourceFrameSelection={sourceFrameSelection}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(api.selectCharacterReferences).toHaveBeenCalledWith("project-1", {
+        selected_asset_ids: recommendation.recommended_asset_ids_json,
+        source_frame_selection_version_id: "source-selection-1",
+        character_version_id: "character-version-3",
+      }),
+    );
+    expect(
+      await screen.findByText("已自动匹配人物参考，无需手动选择。"),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "确认人物参考" })).toBeNull();
+    for (const checkbox of screen.getAllByRole("checkbox")) {
+      expect(checkbox).toBeDisabled();
+    }
+  });
+
   it("restores only a selection bound to the current source and character versions", async () => {
     const onSelectionChange = vi.fn();
     vi.mocked(api.getLatestCharacterReferenceSelection).mockResolvedValue({
@@ -165,6 +210,39 @@ describe("CharacterReferenceSelection", () => {
     ).toBeInTheDocument();
     expect(api.getAssetDownloadUrl).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: "确认人物参考" })).toBeNull();
+  });
+
+  it("re-signs an expired preview once and then fails closed", async () => {
+    const calls = new Map<string, number>();
+    vi.mocked(api.getAssetDownloadUrl).mockImplementation(async (assetId) => {
+      const count = (calls.get(assetId) ?? 0) + 1;
+      calls.set(assetId, count);
+      return { url: `https://private.example/${assetId}-${count}.png` };
+    });
+
+    render(
+      <CharacterReferenceSelection
+        characterSelection={characterSelection}
+        projectId="project-1"
+        sourceFrameSelection={sourceFrameSelection}
+      />,
+    );
+
+    const preview = await screen.findByAltText("人物参考图 正脸近景");
+    expect(preview).toHaveAttribute(
+      "src",
+      "https://private.example/asset-FRONT_FACE-1.png",
+    );
+    fireEvent.error(preview);
+    await waitFor(() =>
+      expect(screen.getByAltText("人物参考图 正脸近景")).toHaveAttribute(
+        "src",
+        "https://private.example/asset-FRONT_FACE-2.png",
+      ),
+    );
+    fireEvent.error(screen.getByAltText("人物参考图 正脸近景"));
+    expect(await screen.findByText("预览加载失败")).toBeInTheDocument();
+    expect(calls.get("asset-FRONT_FACE")).toBe(2);
   });
 
   it("lets the user remove a recommended asset whose protected preview failed", async () => {

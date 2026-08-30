@@ -36,6 +36,9 @@ ExecStart=/opt/video-replica/app/server/.venv/bin/python -m scripts.purge_expire
 # consulted again — sweeping them keeps the table bounded (the append-only
 # failure table is the audit trail and is untouched).
 ExecStart=/opt/video-replica/app/server/.venv/bin/python -m scripts.purge_stale_rate_limit_counters
+# BILL-03: close only terminal generation reservations whose SETTLE/RELEASE
+# ledger row was lost. Active and SUBMISSION_UNCERTAIN tasks stay untouched.
+ExecStart=/opt/video-replica/app/server/.venv/bin/python -m scripts.reconcile_dangling_billing_reservations
 Restart=on-failure
 RestartSec=30
 UMask=0077

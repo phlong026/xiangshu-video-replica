@@ -35,6 +35,15 @@ class DanglingBillingReservation:
     user_id: str
     billing_round: int
     reservation_id: str
+    outcome: BillingOutcome
+
+
+@dataclass(frozen=True)
+class DanglingBillingReconciliation:
+    scanned: int
+    settled: int
+    released: int
+    failed: int
 
 
 def find_dangling_billing_reservations(
@@ -57,7 +66,8 @@ def find_dangling_billing_reservations(
             wt.id AS reservation_id,
             wt.task_id,
             wt.user_id,
-            wt.billing_round
+            wt.billing_round,
+            task.status
         FROM wallet_transactions AS wt
         JOIN generation_tasks AS task ON task.id = wt.task_id
         WHERE wt.type = 'RESERVE'
@@ -83,6 +93,13 @@ def find_dangling_billing_reservations(
             user_id=str(row["user_id"]),
             billing_round=int(row["billing_round"]),
             reservation_id=str(row["reservation_id"]),
+            outcome=(
+                "success"
+                if str(row["status"]) == "SUCCEEDED"
+                else "cancelled"
+                if str(row["status"]) == "CANCELLED"
+                else "failed"
+            ),
         )
         for row in rows
     ]
@@ -324,4 +341,46 @@ def finalize_internal_billing(
         task_id=task_id,
         billing_round=billing_round,
         transaction_type=transaction_type,
+    )
+
+
+def reconcile_dangling_billing_reservations(
+    conn: BusinessConnection,
+    *,
+    limit: int = 100,
+) -> DanglingBillingReconciliation:
+    """Finalize safe terminal reservations that lost their terminal ledger row.
+
+    The detector deliberately excludes active and ``SUBMISSION_UNCERTAIN``
+    tasks. Each candidate is revalidated by ``finalize_internal_billing`` in
+    the caller-owned transaction, so a stale sweep cannot settle an
+    unarchived result or release a non-terminal task.
+    """
+    candidates = find_dangling_billing_reservations(conn, limit=limit)
+    settled = 0
+    released = 0
+    failed = 0
+    for candidate in candidates:
+        conn.execute("SAVEPOINT billing_reconcile_item")
+        try:
+            result = finalize_internal_billing(
+                conn,
+                task_id=candidate.task_id,
+                outcome=candidate.outcome,
+            )
+        except Exception:
+            conn.execute("ROLLBACK TO SAVEPOINT billing_reconcile_item")
+            conn.execute("RELEASE SAVEPOINT billing_reconcile_item")
+            failed += 1
+            continue
+        conn.execute("RELEASE SAVEPOINT billing_reconcile_item")
+        if result.transaction_type == "SETTLE":
+            settled += 1
+        elif result.transaction_type == "RELEASE":
+            released += 1
+    return DanglingBillingReconciliation(
+        scanned=len(candidates),
+        settled=settled,
+        released=released,
+        failed=failed,
     )

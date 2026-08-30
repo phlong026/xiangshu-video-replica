@@ -449,7 +449,8 @@ def test_maintenance_and_pg_migration_are_single_owner_fail_closed_jobs() -> Non
 
     assert "Type=oneshot" in maintenance
     assert "EnvironmentFile=/etc/video-replica/customer.env" in maintenance
-    assert maintenance.count("ExecStart=") >= 3
+    assert maintenance.count("ExecStart=") >= 4
+    assert "python -m scripts.reconcile_dangling_billing_reservations" in maintenance
     assert "flock -n" in migration
     assert "alembic upgrade head" in migration
     assert "VIDEO_REPLICA_DATABASE_URL" in migration
@@ -494,7 +495,10 @@ def test_t37_metrics_and_cluster_alert_jobs_are_private_single_owner_contracts()
         "server/scripts/check_ops_alerts.py",
         "server/tests/test_ops_metrics.py",
         "server/tests/test_ops_alerts.py",
-        "server/migrations/versions/042_t37_observability_indexes.py",
+        "server/migrations/versions/043_admin_password_login.py",
+        "server/migrations/versions/044_customer_unit_prices.py",
+        "server/migrations/versions/045_async_analysis_tasks.py",
+        "server/migrations/versions/046_async_image_tasks.py",
         "deploy/systemd/video-replica-ops-alerts.service",
         "deploy/systemd/video-replica-ops-alerts.timer",
     ):

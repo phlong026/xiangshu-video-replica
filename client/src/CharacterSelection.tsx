@@ -306,6 +306,25 @@ export function CharacterSelection({
   const selectedOption = versions.find(
     (version) => version.character_version_id === selectedVersionId,
   );
+  const currentIdentityId = currentSelection?.character_snapshot.identity?.id;
+  const currentVersionNumber =
+    currentSelection?.character_snapshot.character_version_number;
+  const newerVersion =
+    currentIdentityId && typeof currentVersionNumber === "number"
+      ? versions
+          .filter(
+            (version) =>
+              version.identity_id === currentIdentityId &&
+              version.version_number > currentVersionNumber,
+          )
+          .reduce<ProjectCharacterVersionOption | null>(
+            (latest, version) =>
+              !latest || version.version_number > latest.version_number
+                ? version
+                : latest,
+            null,
+          )
+      : null;
 
   // 详情页第二段区头形态：一行「角色：<下拉>」，选择即生效。
   if (variant === "inline") {
@@ -349,6 +368,26 @@ export function CharacterSelection({
             ))}
           </select>
         </label>
+        {newerVersion && typeof currentVersionNumber === "number" ? (
+          <span className="character-version-update" role="status">
+            <span>
+              人物库已有新版本 V{newerVersion.version_number}，当前项目仍使用 V
+              {currentVersionNumber}。
+            </span>
+            {!readOnly ? (
+              <button
+                className="secondary-button"
+                disabled={isSaving || isAutoSelecting}
+                onClick={() =>
+                  void handleInlineChange(newerVersion.character_version_id)
+                }
+                type="button"
+              >
+                切换到 V{newerVersion.version_number}
+              </button>
+            ) : null}
+          </span>
+        ) : null}
         {error ? (
           <span className="settings-error" role="alert">
             {error}

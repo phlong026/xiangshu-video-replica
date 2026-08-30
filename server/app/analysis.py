@@ -677,6 +677,7 @@ def insert_version(
     kind: str,
     created_by_user_id: str,
     payload: dict[str, Any],
+    commit: bool = True,
 ) -> sqlite3.Row:
     row = _insert_version(
         conn,
@@ -686,7 +687,8 @@ def insert_version(
         created_by_user_id=created_by_user_id,
         payload=payload,
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return row
 
 

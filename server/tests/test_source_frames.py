@@ -40,7 +40,7 @@ class FakeSourceFrameExtractor:
             ExtractedSourceFrame(
                 timestamp_seconds=timestamp,
                 image=f"frame-{timestamp}".encode(),
-                technical_score=round(timestamp / 3, 3),
+                technical_score=round(timestamp / 12, 3),
             )
             for timestamp in timestamps_seconds
         ]
@@ -123,9 +123,9 @@ def seed_data(conn: sqlite3.Connection) -> None:
         """
         INSERT INTO assets (
             id, project_id, kind, storage_uri, sha256, size_bytes, content_type,
-            created_by_user_id
+            created_by_user_id, metadata_json
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             "reference_owned",
@@ -136,6 +136,7 @@ def seed_data(conn: sqlite3.Connection) -> None:
             len(b"reference-video"),
             "video/mp4",
             "employee_1",
+            '{"duration_seconds": 12.0}',
         ),
     )
     conn.commit()
@@ -167,8 +168,8 @@ def test_owner_can_extract_candidates_and_confirm_one(
     assert body["kind"] == "source_frame_candidates"
     assert body["version_number"] == 1
     candidates = body["payload"]["candidates"]
-    assert [candidate["timestamp_seconds"] for candidate in candidates] == [2.5, 1.5, 0.5]
-    assert [candidate["score"] for candidate in candidates] == [0.833, 0.5, 0.167]
+    assert [candidate["timestamp_seconds"] for candidate in candidates] == [9.6, 6.0, 2.4]
+    assert [candidate["score"] for candidate in candidates] == [0.8, 0.5, 0.2]
     assert all(candidate["asset_id"] for candidate in candidates)
     first_asset = candidates[0]["asset_id"]
     stored = storage.head_object(f"projects/project_owned/source-frames/{first_asset}.jpg")
@@ -297,7 +298,7 @@ def test_reextracting_source_frames_makes_the_previous_selection_stale(
     assert selection.json()["detail"]["code"] == "SOURCE_FRAME_SELECTION_STALE"
 
 
-def test_owner_can_reextract_manually_selected_timestamps_within_first_three_seconds(
+def test_owner_can_reextract_manually_selected_timestamps_across_the_full_video(
     client: TestClient,
     storage: FakeStorageAdapter,
 ) -> None:
@@ -309,22 +310,28 @@ def test_owner_can_reextract_manually_selected_timestamps_within_first_three_sec
 
     response = client.post(
         "/api/projects/project_owned/source-frames/extract",
-        json={"asset_id": "reference_owned", "timestamps_seconds": [0.2, 2.8]},
+        json={"asset_id": "reference_owned", "timestamps_seconds": [0.2, 8.8]},
         headers=auth_headers("employee_1"),
     )
 
     assert response.status_code == 200
     payload = response.json()["payload"]
-    assert payload["requested_timestamps_seconds"] == [0.2, 2.8]
-    assert [candidate["timestamp_seconds"] for candidate in payload["candidates"]] == [2.8, 0.2]
+    assert payload["requested_timestamps_seconds"] == [0.2, 8.8]
+    assert [candidate["timestamp_seconds"] for candidate in payload["candidates"]] == [8.8, 0.2]
 
 
-def test_manual_source_frame_timestamp_is_limited_to_the_first_three_seconds(
+def test_manual_source_frame_timestamp_must_be_inside_the_video_duration(
     client: TestClient,
+    storage: FakeStorageAdapter,
 ) -> None:
+    storage.put_object(
+        "projects/project_owned/uploads/reference_owned/reference.mp4",
+        b"reference-video",
+        content_type="video/mp4",
+    )
     response = client.post(
         "/api/projects/project_owned/source-frames/extract",
-        json={"asset_id": "reference_owned", "timestamps_seconds": [3.1]},
+        json={"asset_id": "reference_owned", "timestamps_seconds": [12.0]},
         headers=auth_headers("employee_1"),
     )
 

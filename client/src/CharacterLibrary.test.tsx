@@ -13,6 +13,8 @@ vi.mock("./api", async (importOriginal) => {
     renamePersonIdentity: vi.fn(),
     deleteSimpleCharacterIdentity: vi.fn(),
     uploadSimpleCharacter: vi.fn(),
+    getLatestCharacterSheetTask: vi.fn(),
+    waitForCharacterSheetTask: vi.fn(),
     getCachedCharacterAssetUrl: vi.fn(),
     downloadCharacterAsset: vi.fn(),
   };
@@ -41,6 +43,7 @@ const entry: api.SimpleLibraryEntry = {
   owner_user_id: "employee_1",
   status: "ACTIVE",
   contact_sheet_asset_id: null,
+  generation_source: "image_provider",
   views: viewsFor("asset"),
 };
 
@@ -65,6 +68,7 @@ describe("CharacterLibrary", () => {
     );
     vi.mocked(api.downloadCharacterAsset).mockResolvedValue(undefined);
     vi.mocked(api.deleteSimpleCharacterIdentity).mockResolvedValue(undefined);
+    vi.mocked(api.getLatestCharacterSheetTask).mockResolvedValue(null);
     vi.spyOn(window, "confirm").mockReturnValue(true);
   });
 
@@ -161,6 +165,7 @@ describe("CharacterLibrary", () => {
       character_version_id: "version-1",
       publication_hash: "publication-sha",
       contact_sheet_asset_id: "sheet-new",
+      generation_source: "image_provider",
       views: entry.views,
     });
 
@@ -187,6 +192,86 @@ describe("CharacterLibrary", () => {
     );
     expect(await screen.findByAltText("林夏 正脸近景")).toBeInTheDocument();
     expect(screen.getByText(/五视角拼合图已生成/)).toBeInTheDocument();
+  });
+
+  it("shows the source image and progress card while generation is running", async () => {
+    vi.mocked(api.listSimpleCharacterLibrary).mockResolvedValue([]);
+    let finishGeneration!: (result: api.SimpleCharacterResult) => void;
+    const generation = new Promise<api.SimpleCharacterResult>((resolve) => {
+      finishGeneration = resolve;
+    });
+    vi.mocked(api.uploadSimpleCharacter).mockReturnValue(generation);
+
+    render(<CharacterLibrary userRole="employee" userId="employee_1" />);
+
+    fireEvent.change(screen.getByLabelText("人物名称"), {
+      target: { value: "林夏" },
+    });
+    fireEvent.change(screen.getByLabelText("授权图片"), {
+      target: {
+        files: [new File(["png"], "source.png", { type: "image/png" })],
+      },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "一键生成五视角拼合图" }),
+    );
+
+    expect(
+      await screen.findByLabelText("人物 林夏 生成进度"),
+    ).toBeInTheDocument();
+    expect(screen.getByAltText("林夏 授权原图")).toBeInTheDocument();
+    expect(screen.getByLabelText("林夏 预计生成进度")).toHaveValue(8);
+    expect(screen.getByText(/可离开当前页面.*后台继续/)).toBeInTheDocument();
+
+    finishGeneration({
+      identity_id: entry.identity_id,
+      persona_id: "persona-1",
+      character_version_id: "version-1",
+      publication_hash: "publication-sha",
+      contact_sheet_asset_id: "sheet-new",
+      generation_source: "image_provider",
+      views: entry.views,
+    });
+
+    expect(await screen.findByAltText("林夏 正脸近景")).toBeInTheDocument();
+    expect(screen.queryByLabelText("人物 林夏 生成进度")).toBeNull();
+  });
+
+  it("marks non-provider placeholder publications explicitly", async () => {
+    vi.mocked(api.listSimpleCharacterLibrary).mockResolvedValue([
+      { ...entry, generation_source: "local_placeholder" },
+    ]);
+
+    render(<CharacterLibrary userRole="employee" userId="employee_1" />);
+
+    expect(await screen.findByText("本地占位结果")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {
+        name: "重新生成人物 林夏 的多视图",
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("shows a retry action instead of leaving a failed preview loading forever", async () => {
+    vi.mocked(api.listSimpleCharacterLibrary).mockResolvedValue([entry]);
+    const coverId = entry.views[0].asset_id;
+    let coverAttempts = 0;
+    vi.mocked(api.getCachedCharacterAssetUrl).mockImplementation(
+      async (assetId) => {
+        if (assetId === coverId && coverAttempts++ === 0) {
+          throw new Error("cache unavailable");
+        }
+        return { url: `http://127.0.0.1:8000/mock/${assetId}` };
+      },
+    );
+
+    render(<CharacterLibrary userRole="employee" userId="employee_1" />);
+
+    expect(await screen.findByText("预览加载失败")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "查看人物 林夏 大图" }));
+
+    expect(await screen.findByAltText("林夏 正脸近景")).toBeInTheDocument();
+    expect(coverAttempts).toBe(2);
   });
 
   it("downloads the five-view contact sheet", async () => {
@@ -402,6 +487,7 @@ describe("CharacterLibrary", () => {
       version_number: 2,
       publication_hash: "publication-sha-2",
       contact_sheet_asset_id: "sheet-new",
+      generation_source: "image_provider",
       views: viewsFor("new"),
     });
 

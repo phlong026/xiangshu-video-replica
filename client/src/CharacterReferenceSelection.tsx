@@ -48,6 +48,7 @@ export function CharacterReferenceSelection({
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const loadRequestId = useRef(0);
+  const previewRetryCounts = useRef(new Map<string, number>());
 
   const load = useCallback(async () => {
     const requestId = loadRequestId.current + 1;
@@ -58,6 +59,7 @@ export function CharacterReferenceSelection({
     setError("");
     setStatus("");
     setPreviewUrls({});
+    previewRetryCounts.current.clear();
     onSelectionChange?.(null);
     try {
       const [nextRecommendation, latestSelection] = await Promise.all([
@@ -80,6 +82,7 @@ export function CharacterReferenceSelection({
         return;
       }
       setRecommendation(nextRecommendation);
+      const automaticReference = usesContactSheet(nextRecommendation);
       const currentSelection = selectionMatchesRecommendation(
         latestSelection,
         nextRecommendation,
@@ -92,12 +95,52 @@ export function CharacterReferenceSelection({
           nextRecommendation.recommended_asset_ids_json,
       );
       if (currentSelection) {
-        setStatus("当前人物参考图已确认。");
+        setStatus(
+          automaticReference
+            ? "已自动匹配人物参考，无需手动选择。"
+            : "当前人物参考图已确认。",
+        );
         onSelectionChange?.(currentSelection);
       } else if (latestSelection) {
         setStatus(
           "已有选择与当前源画面或角色版本不一致，请重新确认人物参考图。",
         );
+      } else if (automaticReference && !readOnly) {
+        setIsSubmitting(true);
+        onBusyChange?.(true);
+        try {
+          const automaticSelection = await selectCharacterReferences(
+            projectId,
+            {
+              selected_asset_ids: nextRecommendation.recommended_asset_ids_json,
+              source_frame_selection_version_id:
+                nextRecommendation.source_frame_version_id,
+              character_version_id: nextRecommendation.character_version_id,
+            },
+          );
+          if (!isCurrentRequest()) {
+            return;
+          }
+          setStatus("已自动匹配人物参考，无需手动选择。");
+          onSelectionChange?.(automaticSelection);
+        } catch (requestError) {
+          if (!isCurrentRequest()) {
+            return;
+          }
+          setError(
+            requestError instanceof Error
+              ? requestError.message
+              : "自动匹配人物参考失败，请重新加载。",
+          );
+          return;
+        } finally {
+          if (isCurrentRequest()) {
+            setIsSubmitting(false);
+          }
+          onBusyChange?.(false);
+        }
+      } else if (automaticReference) {
+        setStatus("人物参考已按源画面自动匹配。");
       } else {
         setStatus("已按源画面特征给出推荐，请查看后手动确认。");
       }
@@ -137,6 +180,7 @@ export function CharacterReferenceSelection({
     }
   }, [
     characterSelection,
+    onBusyChange,
     onSelectionChange,
     projectId,
     readOnly,
@@ -150,7 +194,29 @@ export function CharacterReferenceSelection({
     };
   }, [load]);
 
+  async function handlePreviewError(assetId: string) {
+    setPreviewUrls((current) =>
+      Object.fromEntries(
+        Object.entries(current).filter(([currentId]) => currentId !== assetId),
+      ),
+    );
+    const retries = previewRetryCounts.current.get(assetId) ?? 0;
+    if (retries >= 1) {
+      return;
+    }
+    previewRetryCounts.current.set(assetId, retries + 1);
+    try {
+      const download = await getAssetDownloadUrl(assetId);
+      setPreviewUrls((current) => ({ ...current, [assetId]: download.url }));
+    } catch {
+      // Leave the preview absent after the single bounded re-sign attempt.
+    }
+  }
+
   function toggleAsset(assetId: string) {
+    if (recommendation && usesContactSheet(recommendation)) {
+      return;
+    }
     const isSelected = selectedAssetIds.includes(assetId);
     if (!isSelected && !previewUrls[assetId]) {
       setError("请先成功加载该人物参考图预览。");
@@ -214,6 +280,10 @@ export function CharacterReferenceSelection({
     }
   }
 
+  const automaticReference = recommendation
+    ? usesContactSheet(recommendation)
+    : false;
+
   return (
     <section
       className="character-reference-selection"
@@ -221,7 +291,11 @@ export function CharacterReferenceSelection({
     >
       <div>
         <h3 id="character-reference-title">人物参考图</h3>
-        <p>按源画面朝向与景别推荐，确认 1–4 张。</p>
+        <p>
+          {automaticReference
+            ? "已按源画面自动匹配，只读展示实际采用的参考视角。"
+            : "历史人物按源画面朝向与景别推荐，确认 1–4 张。"}
+        </p>
       </div>
       {isLoading ? <p className="status-note">正在读取人物参考图推荐</p> : null}
       {error ? <p className="settings-error">{error}</p> : null}
@@ -234,7 +308,9 @@ export function CharacterReferenceSelection({
           <legend>
             {readOnly
               ? "七视图选择记录（素材预览需要下载权限）"
-              : "推荐项已预选，但只有点击确认后才会进入首帧生成"}
+              : automaticReference
+                ? "系统自动匹配结果"
+                : "推荐项已预选，但只有点击确认后才会进入首帧生成"}
           </legend>
           {recommendation.candidate_assets.map((candidate) => {
             const checked = selectedAssetIds.includes(candidate.asset_id);
@@ -255,6 +331,7 @@ export function CharacterReferenceSelection({
                   checked={checked}
                   disabled={
                     readOnly ||
+                    automaticReference ||
                     isSubmitting ||
                     (!checked && !previewUrls[candidate.asset_id])
                   }
@@ -264,6 +341,7 @@ export function CharacterReferenceSelection({
                 {previewUrls[candidate.asset_id] ? (
                   <img
                     alt={`人物参考图 ${VIEW_LABELS[candidate.view_type]}`}
+                    onError={() => void handlePreviewError(candidate.asset_id)}
                     src={previewUrls[candidate.asset_id]}
                   />
                 ) : (
@@ -273,7 +351,15 @@ export function CharacterReferenceSelection({
                 )}
                 <span>
                   <strong>{VIEW_LABELS[candidate.view_type]}</strong>
-                  <small>{recommended ? "系统推荐" : "可选视图"}</small>
+                  <small>
+                    {recommended
+                      ? automaticReference
+                        ? "自动匹配"
+                        : "系统推荐"
+                      : automaticReference
+                        ? "参考候选"
+                        : "可选视图"}
+                  </small>
                 </span>
               </label>
             );
@@ -282,7 +368,7 @@ export function CharacterReferenceSelection({
       ) : null}
       {readOnly ? (
         <p className="status-note">只读身份不能更改人物参考图。</p>
-      ) : (
+      ) : automaticReference ? null : (
         <button
           className="source-frame-confirm"
           disabled={
@@ -313,6 +399,21 @@ function recommendationMatchesInputs(
       characterSelection.character_version_id &&
     recommendation.character_version_snapshot_json.main_character_version_id ===
       characterSelection.version_id
+  );
+}
+
+function usesContactSheet(
+  recommendation: CharacterReferenceRecommendation,
+): boolean {
+  const publication =
+    recommendation.character_version_snapshot_json.publication_snapshot_json;
+  if (!publication || typeof publication !== "object") {
+    return false;
+  }
+  const contactSheetAssetId = (publication as Record<string, unknown>)
+    .contact_sheet_asset_id;
+  return (
+    typeof contactSheetAssetId === "string" && contactSheetAssetId.length > 0
   );
 }
 

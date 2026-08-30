@@ -12,7 +12,20 @@ from app.auth import get_database
 from app.db import connect_database, initialize_database
 from app.db_portable import BusinessConnection
 from app.first_frame_routes import get_image_provider
-from app.first_frames import GeneratedImage, ImageInput, RetryableImageProviderFailed
+from app.first_frames import (
+    FIRST_FRAME_NO_TEXT_CONSTRAINT,
+    GeneratedImage,
+    ImageInput,
+    RetryableImageProviderFailed,
+    normalize_prompt,
+)
+from app.generation_worker import run_worker_once
+from app.image_tasks import (
+    acquire_first_frame_task,
+    complete_first_frame_task,
+    prepare_first_frame_task,
+    run_first_frame_task_outside_transaction,
+)
 from app.main import app
 from app.media_routes import get_media_storage
 from app.source_frame_routes import get_source_frame_extractor
@@ -89,6 +102,19 @@ class FakeSourceFrameExtractor:
             ExtractedSourceFrame(timestamp_seconds=timestamp, image=f"source-{timestamp}".encode())
             for timestamp in timestamps_seconds
         ]
+
+
+def test_contact_sheet_prompt_keeps_server_template_before_user_addition() -> None:
+    result = normalize_prompt(
+        "让人物手里拿一把红色雨伞",
+        character_name="林夏",
+        reference_roles=["contact_sheet", "source"],
+    )
+
+    assert "第 1 张输入图是原视频源帧" in result
+    assert "第 2 张输入图是该角色的五视图参考板" in result
+    assert "用户补充要求：\n让人物手里拿一把红色雨伞" in result
+    assert result.endswith(FIRST_FRAME_NO_TEXT_CONSTRAINT)
 
 
 @pytest.fixture()
@@ -237,6 +263,232 @@ def prepare_inputs(client: TestClient) -> str:
     )
     assert selected.status_code == 200
     return source_frame_asset_id
+
+
+def test_first_frame_task_is_idempotent_and_worker_publishes_result(
+    client: TestClient,
+    db_path: Path,
+    provider: RecordingImageProvider,
+    storage: FakeStorageAdapter,
+) -> None:
+    prepare_inputs(client)
+    request = {
+        "model": "nano-banana-pro-2k",
+        "quantity": 1,
+        "idempotency_key": "first-frame-task-1",
+    }
+    first = client.post(
+        "/api/projects/project_owned/first-frame-tasks",
+        json=request,
+        headers=headers("employee_1"),
+    )
+    replay = client.post(
+        "/api/projects/project_owned/first-frame-tasks",
+        json=request,
+        headers=headers("employee_1"),
+    )
+
+    assert first.status_code == 202
+    assert replay.status_code == 202
+    assert replay.json()["id"] == first.json()["id"]
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        assert (
+            run_worker_once(
+                conn,
+                worker_id="image-worker-test",
+                storage=storage,
+                first_frame_storage=storage,
+                image_provider=provider,
+                max_tasks=1,
+            )
+            == 1
+        )
+
+    task = client.get(
+        f"/api/first-frame-tasks/{first.json()['id']}",
+        headers=headers("employee_1"),
+    )
+    assert task.status_code == 200
+    assert task.json()["status"] == "SUCCEEDED"
+    assert task.json()["result_version_id"]
+    latest = client.get(
+        "/api/projects/project_owned/first-frames/latest",
+        headers=headers("employee_1"),
+    )
+    assert latest.status_code == 200
+    assert latest.json()["id"] == task.json()["result_version_id"]
+
+
+def test_first_frame_task_replay_survives_input_change_but_worker_fails_closed(
+    client: TestClient,
+    db_path: Path,
+    provider: RecordingImageProvider,
+    storage: FakeStorageAdapter,
+) -> None:
+    prepare_inputs(client)
+    request = {
+        "model": "nano-banana-pro-2k",
+        "quantity": 1,
+        "idempotency_key": "first-frame-task-stale-1",
+    }
+    first = client.post(
+        "/api/projects/project_owned/first-frame-tasks",
+        json=request,
+        headers=headers("employee_1"),
+    )
+    assert first.status_code == 202
+
+    refreshed = client.post(
+        "/api/projects/project_owned/source-frames/extract",
+        json={"asset_id": "reference_owned", "timestamps_seconds": [0.6]},
+        headers=headers("employee_1"),
+    )
+    assert refreshed.status_code == 200
+
+    replay = client.post(
+        "/api/projects/project_owned/first-frame-tasks",
+        json=request,
+        headers=headers("employee_1"),
+    )
+    assert replay.status_code == 202
+    assert replay.json()["id"] == first.json()["id"]
+
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        assert (
+            run_worker_once(
+                conn,
+                worker_id="image-worker-stale-test",
+                storage=storage,
+                first_frame_storage=storage,
+                image_provider=provider,
+                max_tasks=1,
+            )
+            == 1
+        )
+
+    task = client.get(
+        f"/api/first-frame-tasks/{first.json()['id']}",
+        headers=headers("employee_1"),
+    )
+    assert task.status_code == 200
+    assert task.json()["status"] == "FAILED"
+    assert task.json()["error_code"] == "FIRST_FRAME_TASK_INPUTS_CHANGED"
+    assert provider.calls == []
+
+
+def test_first_frame_task_storage_read_failure_is_retryable_before_provider_submit(
+    client: TestClient,
+    db_path: Path,
+    provider: RecordingImageProvider,
+    storage: FakeStorageAdapter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepare_inputs(client)
+    created = client.post(
+        "/api/projects/project_owned/first-frame-tasks",
+        json={
+            "model": "nano-banana-pro-2k",
+            "quantity": 1,
+            "idempotency_key": "first-frame-storage-down-1",
+        },
+        headers=headers("employee_1"),
+    )
+    assert created.status_code == 202
+
+    def fail_storage_read(_key: str) -> bytes:
+        raise OSError("storage unavailable")
+
+    monkeypatch.setattr(storage, "get_object", fail_storage_read)
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        assert (
+            run_worker_once(
+                conn,
+                worker_id="image-worker-storage-test",
+                storage=storage,
+                first_frame_storage=storage,
+                image_provider=provider,
+                max_tasks=1,
+            )
+            == 1
+        )
+
+    task = client.get(
+        f"/api/first-frame-tasks/{created.json()['id']}",
+        headers=headers("employee_1"),
+    )
+    assert task.status_code == 200
+    assert task.json()["status"] == "FAILED"
+    assert task.json()["error_code"] == "FIRST_FRAME_INPUT_STORAGE_UNAVAILABLE"
+    assert task.json()["retryable"] is True
+    assert provider.calls == []
+
+
+def test_first_frame_task_lease_loss_rolls_back_published_rows(
+    client: TestClient,
+    db_path: Path,
+    provider: RecordingImageProvider,
+    storage: FakeStorageAdapter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepare_inputs(client)
+    created = client.post(
+        "/api/projects/project_owned/first-frame-tasks",
+        json={
+            "model": "nano-banana-pro-2k",
+            "quantity": 1,
+            "idempotency_key": "first-frame-lease-race-1",
+        },
+        headers=headers("employee_1"),
+    )
+    assert created.status_code == 202
+
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        lease = acquire_first_frame_task(conn, worker_id="image-worker-lease-test")
+        assert lease is not None
+        prepared = prepare_first_frame_task(conn, lease=lease, provider=provider)
+        work, stored = run_first_frame_task_outside_transaction(
+            prepared,
+            storage=storage,
+        )
+        original_execute = conn.execute
+        raced = False
+
+        def race_lease(sql: str, params: tuple[object, ...] = ()):
+            nonlocal raced
+            if not raced and "INSERT INTO assets" in sql:
+                raced = True
+                original_execute(
+                    "UPDATE first_frame_tasks SET locked_by = %s WHERE id = %s",
+                    ("stolen-worker", lease.id),
+                )
+            return original_execute(sql, params)
+
+        monkeypatch.setattr(conn, "execute", race_lease)
+        with pytest.raises(RuntimeError, match="lease was lost"):
+            complete_first_frame_task(
+                conn,
+                prepared=prepared,
+                work=work,
+                stored=stored,
+            )
+
+        task = original_execute(
+            "SELECT locked_by, status FROM first_frame_tasks WHERE id = %s",
+            (lease.id,),
+        ).fetchone()
+        assert task is not None
+        assert task["locked_by"] == lease.worker_id
+        assert task["status"] == "RUNNING"
+        assert (
+            original_execute(
+                "SELECT COUNT(*) FROM versions WHERE kind = 'first_frame_candidates'"
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            original_execute("SELECT COUNT(*) FROM assets WHERE kind = 'first_frame'").fetchone()[0]
+            == 0
+        )
 
 
 def test_generate_candidates_archives_them_and_preserves_image_input_order(

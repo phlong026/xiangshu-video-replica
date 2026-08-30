@@ -1,16 +1,18 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   type CharacterViewType,
   deleteSimpleCharacterIdentity,
   downloadCharacterAsset,
   getCachedCharacterAssetUrl,
+  getLatestCharacterSheetTask,
   listSimpleCharacterLibrary,
   regenerateContactSheet,
   renamePersonIdentity,
   type SimpleCharacterView,
   type SimpleLibraryEntry,
   type UserRole,
+  waitForCharacterSheetTask,
 } from "./api";
 import { SimpleCharacterUpload } from "./SimpleCharacterUpload";
 
@@ -34,6 +36,16 @@ function entryAssetIds(entry: SimpleLibraryEntry): string[] {
     ...entry.views.map((view) => view.asset_id),
   ];
 }
+
+type PreviewStatus = "loading" | "ready" | "error";
+
+export type PendingCharacterState = {
+  displayName: string;
+  progress: number;
+  sourcePreviewUrl?: string;
+  stage: string;
+  status: "working" | "error";
+};
 
 // 卡片封面取正脸近景（辨识度最高）；没有正脸时退回首张视角图，
 // 视角全缺（理论上不该出现）才用拼合图裁切兜底。拼合全图在灯箱看。
@@ -63,6 +75,12 @@ export function CharacterLibrary({
   const canManage = userRole !== "auditor";
   const [entries, setEntries] = useState<SimpleLibraryEntry[]>([]);
   const [previewUrls, setPreviewUrls] = useState<Record<string, string>>({});
+  const [previewStatuses, setPreviewStatuses] = useState<
+    Record<string, PreviewStatus>
+  >({});
+  const [pendingCharacter, setPendingCharacter] =
+    useState<PendingCharacterState | null>(null);
+  const pendingPreviewUrlRef = useRef("");
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -74,21 +92,48 @@ export function CharacterLibrary({
   const [busyRegenerateId, setBusyRegenerateId] = useState("");
   const [lightboxId, setLightboxId] = useState("");
 
-  const loadPreviewUrls = useCallback(async (assetIds: string[]) => {
-    const results = await Promise.allSettled(
-      assetIds.map(async (assetId) => {
-        const download = await getCachedCharacterAssetUrl(assetId);
-        return [assetId, download.url] as const;
-      }),
-    );
-    setPreviewUrls((current) => ({
-      ...current,
-      ...Object.fromEntries(
-        results.flatMap((result) =>
-          result.status === "fulfilled" ? [result.value] : [],
+  const loadPreviewUrls = useCallback(
+    async (assetIds: string[], retry = false) => {
+      const uniqueAssetIds = [...new Set(assetIds)];
+      setPreviewStatuses((current) => ({
+        ...current,
+        ...Object.fromEntries(
+          uniqueAssetIds.map((assetId) => [assetId, "loading"]),
         ),
-      ),
-    }));
+      }));
+      const results = await Promise.allSettled(
+        uniqueAssetIds.map(async (assetId) => {
+          const download = await getCachedCharacterAssetUrl(assetId);
+          const retrySeparator = download.url.includes("?") ? "&" : "?";
+          return [
+            assetId,
+            retry
+              ? `${download.url}${retrySeparator}preview_retry=${Date.now()}`
+              : download.url,
+          ] as const;
+        }),
+      );
+      const fulfilled = results.flatMap((result) =>
+        result.status === "fulfilled" ? [result.value] : [],
+      );
+      const failedIds = results.flatMap((result, index) =>
+        result.status === "rejected" ? [uniqueAssetIds[index]] : [],
+      );
+      setPreviewUrls((current) => ({
+        ...current,
+        ...Object.fromEntries(fulfilled),
+      }));
+      setPreviewStatuses((current) => ({
+        ...current,
+        ...Object.fromEntries(fulfilled.map(([assetId]) => [assetId, "ready"])),
+        ...Object.fromEntries(failedIds.map((assetId) => [assetId, "error"])),
+      }));
+    },
+    [],
+  );
+
+  const markPreviewError = useCallback((assetId: string) => {
+    setPreviewStatuses((current) => ({ ...current, [assetId]: "error" }));
   }, []);
 
   const loadLibrary = useCallback(async () => {
@@ -105,12 +150,106 @@ export function CharacterLibrary({
     }
   }, [loadPreviewUrls]);
 
+  const releasePendingPreview = useCallback(() => {
+    if (pendingPreviewUrlRef.current) {
+      URL.revokeObjectURL(pendingPreviewUrlRef.current);
+      pendingPreviewUrlRef.current = "";
+    }
+  }, []);
+
+  const handleGenerationFailed = useCallback((generationError: string) => {
+    setPendingCharacter((current) =>
+      current
+        ? {
+            ...current,
+            stage: generationError,
+            status: "error",
+          }
+        : current,
+    );
+  }, []);
+
+  const clearPendingGeneration = useCallback(() => {
+    releasePendingPreview();
+    setPendingCharacter(null);
+  }, [releasePendingPreview]);
+
   useEffect(() => {
     void loadLibrary();
   }, [loadLibrary]);
 
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      try {
+        const task = await getLatestCharacterSheetTask();
+        if (
+          !active ||
+          !task ||
+          (task.status !== "PENDING" && task.status !== "RUNNING")
+        ) {
+          return;
+        }
+        setPendingCharacter({
+          displayName: task.display_name,
+          progress: task.status === "RUNNING" ? 58 : 18,
+          stage:
+            task.status === "RUNNING"
+              ? "正在云端生成多视角拼合图"
+              : "已进入云端生成队列",
+          status: "working",
+        });
+        await waitForCharacterSheetTask(task.id);
+        if (!active) {
+          return;
+        }
+        clearPendingGeneration();
+        setMessage(`人物“${task.display_name}”多视图已生成。`);
+        await loadLibrary();
+      } catch (recoveryError) {
+        if (active) {
+          handleGenerationFailed(
+            errorMessage(recoveryError, "人物生成失败，请重新提交。"),
+          );
+        }
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [clearPendingGeneration, handleGenerationFailed, loadLibrary]);
+
+  useEffect(
+    () => () => {
+      if (pendingPreviewUrlRef.current) {
+        URL.revokeObjectURL(pendingPreviewUrlRef.current);
+      }
+    },
+    [],
+  );
+
+  function handleGenerationStarted(file: File, displayName: string) {
+    releasePendingPreview();
+    const sourcePreviewUrl = URL.createObjectURL(file);
+    pendingPreviewUrlRef.current = sourcePreviewUrl;
+    setPendingCharacter({
+      displayName,
+      progress: 8,
+      sourcePreviewUrl,
+      stage: "正在上传授权图片",
+      status: "working",
+    });
+  }
+
+  function handleGenerationProgress(progress: number, stage: string) {
+    setPendingCharacter((current) =>
+      current ? { ...current, progress, stage, status: "working" } : current,
+    );
+  }
+
   // 上传成功后立刻把新人物置顶展示，无需等待整表刷新。
   function handleCreated(newEntry: SimpleLibraryEntry) {
+    clearPendingGeneration();
     setEntries((current) => [
       newEntry,
       ...current.filter((item) => item.identity_id !== newEntry.identity_id),
@@ -286,6 +425,9 @@ export function CharacterLibrary({
     <section aria-label="人物库" className="character-library-simple">
       {canManage ? (
         <SimpleCharacterUpload
+          onGenerationFailed={handleGenerationFailed}
+          onGenerationProgress={handleGenerationProgress}
+          onGenerationStarted={handleGenerationStarted}
           onCreated={(result, displayName) =>
             handleCreated({
               identity_id: result.identity_id,
@@ -293,6 +435,7 @@ export function CharacterLibrary({
               owner_user_id: userId,
               status: "ACTIVE",
               contact_sheet_asset_id: result.contact_sheet_asset_id,
+              generation_source: result.generation_source,
               views: result.views,
             })
           }
@@ -303,36 +446,68 @@ export function CharacterLibrary({
         </p>
       )}
       {error ? (
-        <p className="settings-error" role="alert">
-          {error}
-        </p>
+        <div className="inline-error-actions">
+          <p className="settings-error" role="alert">
+            {error}
+          </p>
+          <button
+            className="secondary-button"
+            disabled={isLoading}
+            onClick={() => void loadLibrary()}
+            type="button"
+          >
+            重新读取人物库
+          </button>
+        </div>
       ) : null}
       {message ? <p className="setup-success">{message}</p> : null}
-      {isLoading ? (
+      {isLoading && !pendingCharacter ? (
         <p className="status-note">正在读取人物库…</p>
-      ) : entries.length === 0 ? (
+      ) : entries.length === 0 && !pendingCharacter ? (
         <p className="status-note">还没有人物，上传一张图片开始创建。</p>
       ) : (
         <ul className="character-preview-list">
+          {pendingCharacter ? (
+            <PendingCharacterCard
+              character={pendingCharacter}
+              onClear={clearPendingGeneration}
+            />
+          ) : null}
           {entries.map((entry) => {
             const isEditing = editingId === entry.identity_id;
             const isRenaming = busyRenameId === entry.identity_id;
             const cover = coverAsset(entry);
             const coverUrl = cover ? previewUrls[cover.assetId] : undefined;
+            const coverStatus = cover
+              ? (previewStatuses[cover.assetId] ?? "loading")
+              : "error";
             return (
               <li className="character-preview-card" key={entry.identity_id}>
                 <button
                   aria-label={`查看人物 ${entry.display_name} 大图`}
                   className="character-preview-card__cover"
-                  onClick={() => setLightboxId(entry.identity_id)}
+                  disabled={coverStatus === "loading"}
+                  onClick={() => {
+                    if (cover && coverStatus === "error") {
+                      void loadPreviewUrls([cover.assetId], true);
+                      return;
+                    }
+                    setLightboxId(entry.identity_id);
+                  }}
                   type="button"
                 >
-                  {coverUrl && cover ? (
+                  {coverUrl && cover && coverStatus === "ready" ? (
                     <img
                       alt={`${entry.display_name} ${cover.label}`}
                       loading="lazy"
+                      onError={() => markPreviewError(cover.assetId)}
                       src={coverUrl}
                     />
+                  ) : coverStatus === "error" ? (
+                    <span className="source-frame-placeholder source-frame-placeholder--error">
+                      <strong>预览加载失败</strong>
+                      <small>点击重新加载</small>
+                    </span>
                   ) : (
                     <span className="source-frame-placeholder">
                       预览加载中…
@@ -372,6 +547,11 @@ export function CharacterLibrary({
                         </span>
                         {entry.status === "ARCHIVED" ? (
                           <span className="status-badge">已归档</span>
+                        ) : null}
+                        {entry.generation_source === "local_placeholder" ? (
+                          <span className="status-badge status-badge--warning">
+                            本地占位结果
+                          </span>
                         ) : null}
                       </div>
                       <div className="character-preview-card__actions">
@@ -432,6 +612,65 @@ export function CharacterLibrary({
         />
       ) : null}
     </section>
+  );
+}
+
+export function PendingCharacterCard({
+  character,
+  onClear,
+}: {
+  character: PendingCharacterState;
+  onClear: () => void;
+}) {
+  return (
+    <li
+      aria-label={`人物 ${character.displayName} 生成进度`}
+      className="character-preview-card character-preview-card--generating"
+    >
+      <div className="character-preview-card__cover character-generation-card__cover">
+        {character.sourcePreviewUrl ? (
+          <img
+            alt={`${character.displayName} 授权原图`}
+            src={character.sourcePreviewUrl}
+          />
+        ) : (
+          <span className="source-frame-placeholder">云端任务已恢复</span>
+        )}
+        <div className="character-generation-card__overlay">
+          <strong>
+            {character.status === "error"
+              ? "生成未完成"
+              : `${character.progress}%`}
+          </strong>
+          <span>{character.stage}</span>
+        </div>
+      </div>
+      <div className="character-preview-card__body">
+        <div className="character-preview-card__title">
+          <span className="character-preview-card__name">
+            {character.displayName}
+          </span>
+          <span className="status-badge">
+            {character.status === "error" ? "失败" : "生成中"}
+          </span>
+        </div>
+        <progress
+          aria-label={`${character.displayName} 预计生成进度`}
+          max={100}
+          value={character.progress}
+        />
+        <p className="character-generation-card__note">
+          {character.status === "error"
+            ? "请检查提示后重新提交。"
+            : "预计需要 1–3 分钟，可离开当前页面，任务会在后台继续。"}
+        </p>
+        {character.status === "error" ? (
+          <button className="secondary-button" onClick={onClear} type="button">
+            移除失败任务
+          </button>
+        ) : null}
+      </div>
+    </li>
   );
 }
 
