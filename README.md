@@ -29,7 +29,7 @@ $env:VIDEO_REPLICA_AUTH_MODE = "development"
 npm run dev:server
 ```
 
-另开一个终端启动生成 Worker；它与 API 使用同一个 SQLite 文件，并负责真实 H3 任务的提交、查询和结果归档：
+另开一个终端启动生成 Worker；它与 API 使用同一个数据库，并负责视频拆解、人物拼合图、人物置换首帧和 H3 视频任务的领取、Provider 调用、状态恢复与结果归档：
 
 ```powershell
 npm run dev:worker
