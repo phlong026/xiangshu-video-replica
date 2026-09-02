@@ -161,17 +161,22 @@ describe("CustomerPairingFlow (FE-03 / T30)", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     render(
-      <CustomerPairingFlow store={fakeStore()} onPaired={vi.fn()} pollIntervalMs={10} />,
+      <CustomerPairingFlow
+        store={fakeStore()}
+        onPaired={vi.fn()}
+        pollIntervalMs={10}
+      />,
     );
     await fillForm();
 
-    expect(await screen.findByRole("heading", { name: "配对成功" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "配对成功" }),
+    ).toBeInTheDocument();
     // Every waiting-stage poll carries the SAME Idempotency-Key: the
     // consumption seals the one-time credential under that key, so a poll
     // whose 201 response is lost replays it instead of burning the slot.
-    const keys = fetchMock.mock.calls.map(
-      ([, init]) =>
-        new Headers((init as RequestInit).headers).get("Idempotency-Key"),
+    const keys = fetchMock.mock.calls.map(([, init]) =>
+      new Headers((init as RequestInit).headers).get("Idempotency-Key"),
     );
     expect(keys[1]).toBeTruthy();
     expect(keys[2]).toBe(keys[1]);
@@ -189,11 +194,17 @@ describe("CustomerPairingFlow (FE-03 / T30)", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     render(
-      <CustomerPairingFlow store={fakeStore()} onPaired={vi.fn()} pollIntervalMs={10} />,
+      <CustomerPairingFlow
+        store={fakeStore()}
+        onPaired={vi.fn()}
+        pollIntervalMs={10}
+      />,
     );
     await fillForm();
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("配对请求已过期");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "配对请求已过期",
+    );
     // Ample time for a wrongly scheduled poll to fire: only the form's
     // enroll ever happened — an expired request must not silently mint a
     // new pending pairing.
@@ -226,11 +237,17 @@ describe("CustomerPairingFlow (FE-03 / T30)", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     render(
-      <CustomerPairingFlow store={fakeStore()} onPaired={vi.fn()} pollIntervalMs={10} />,
+      <CustomerPairingFlow
+        store={fakeStore()}
+        onPaired={vi.fn()}
+        pollIntervalMs={10}
+      />,
     );
     await fillForm();
 
-    expect(await screen.findByRole("heading", { name: "配对成功" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "配对成功" }),
+    ).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
