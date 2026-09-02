@@ -33,7 +33,8 @@ from app.first_frame_routes import get_image_provider
 from app.first_frames import ImageProvider
 from app.image_tasks import (
     enqueue_character_sheet_task,
-    latest_image_task,
+    latest_base_character_sheet_task,
+    latest_scene_look_task,
     load_image_task,
     require_character_sheet_task_access,
 )
@@ -462,6 +463,22 @@ def enqueue_scene_look(
         return character_sheet_task_response(row)
 
 
+@router.get(
+    "/identities/{identity_id}/scene-looks/tasks/active-or-latest",
+    response_model=CharacterSheetTaskResponse | None,
+)
+def read_latest_scene_look_task(
+    identity_id: str,
+    conn: Database,
+    actor: AuthenticatedUser,
+) -> CharacterSheetTaskResponse | None:
+    identity = read_identity_row(conn, identity_id)
+    if actor.role != "admin" and str(identity["owner_user_id"]) != actor.id:
+        raise character_error(404, "PERSON_IDENTITY_NOT_FOUND", "人物身份不存在或不可用。")
+    row = latest_scene_look_task(conn, actor=actor, identity_id=identity_id)
+    return None if row is None else character_sheet_task_response(row)
+
+
 @router.patch("/identities/{identity_id}/name")
 def rename_identity(
     identity_id: str,
@@ -607,12 +624,7 @@ def read_latest_character_sheet_task(
     conn: Database,
     actor: AuthenticatedUser,
 ) -> CharacterSheetTaskResponse | None:
-    row = latest_image_task(
-        conn,
-        table="character_sheet_tasks",
-        owner_column="created_by_user_id",
-        owner_id=actor.id,
-    )
+    row = latest_base_character_sheet_task(conn, owner_id=actor.id)
     return None if row is None else character_sheet_task_response(row)
 
 

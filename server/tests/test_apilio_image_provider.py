@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import socket
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
@@ -11,6 +12,7 @@ from app.first_frames import (
     ImageInput,
     ImageProviderFailed,
     image_aspect_ratio,
+    require_safe_provider_download_url,
     valid_provider_output_url,
 )
 
@@ -158,6 +160,22 @@ def test_provider_output_urls_require_https_and_jpeg_source_ratio_is_preserved()
         image_aspect_ratio(image(jpeg_with_dimensions(1024, 576), "image/jpeg", "source.jpg"))
         == "16:9"
     )
+
+
+def test_apilio_output_host_allows_proxy_fake_ip_without_weakening_other_hosts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("198.18.0.95", 443))
+        ],
+    )
+
+    require_safe_provider_download_url("https://files.closeai.fans/filesystem/output/generated.png")
+    with pytest.raises(ImageProviderFailed, match="public address"):
+        require_safe_provider_download_url("https://untrusted.example/generated.png")
 
 
 def png_with_dimensions(width: int, height: int) -> bytes:

@@ -1034,7 +1034,7 @@ def list_activation_codes(
     response.headers["Cache-Control"] = "no-store"
     bounded_limit = max(0, min(limit, MAX_LIST_LIMIT))
     bounded_offset = max(0, offset)
-    clauses: list[str] = []
+    clauses: list[str] = ["code.archived_at IS NULL"]
     params: list[object] = []
     # C7：默认隐藏已归档码；显式 opt-in 后可回看（归档只隐藏，不删史）。
     if not include_archived:

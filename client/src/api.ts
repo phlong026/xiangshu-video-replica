@@ -2110,6 +2110,15 @@ export async function getLatestCharacterSheetTask(): Promise<CharacterSheetTask 
   );
 }
 
+export async function getLatestSceneLookTask(
+  identityId: string,
+): Promise<CharacterSheetTask | null> {
+  return requestApiJson<CharacterSheetTask | null>(
+    `/api/simple-characters/identities/${encodeURIComponent(identityId)}/scene-looks/tasks/active-or-latest`,
+    "读取场景造型生成任务失败",
+  );
+}
+
 export async function waitForCharacterSheetTask(
   taskId: string,
 ): Promise<CharacterSheetTask> {

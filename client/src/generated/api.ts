@@ -3048,6 +3048,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/simple-characters/identities/{identity_id}/scene-looks/tasks/active-or-latest": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Latest Scene Look Task */
+    get: operations["read_latest_scene_look_task_api_simple_characters_identities__identity_id__scene_looks_tasks_active_or_latest_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/simple-characters/identities/{identity_id}/name": {
     parameters: {
       query?: never;
@@ -12187,6 +12204,42 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["CharacterSheetTaskResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_latest_scene_look_task_api_simple_characters_identities__identity_id__scene_looks_tasks_active_or_latest_get: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
+      };
+      path: {
+        identity_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json":
+            | components["schemas"]["CharacterSheetTaskResponse"]
+            | null;
         };
       };
       /** @description Validation Error */

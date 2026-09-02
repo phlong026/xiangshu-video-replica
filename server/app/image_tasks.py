@@ -25,24 +25,18 @@ from app.db_portable import BusinessConnection
 from app.first_frames import (
     FIRST_FRAME_IMAGE_CONTENT_TYPES,
     MAX_FIRST_FRAME_QUALITY_ATTEMPTS,
-    MAX_SCENE_CONTACT_SHEET_QUALITY_ATTEMPTS,
     FakeFirstFrameQualityInspector,
     FirstFrameGenerationPlan,
     FirstFrameGenerationWork,
     FirstFrameQualityInspector,
-    FirstFrameQualityInspectorFailed,
     FirstFrameQualityResult,
     GeneratedImage,
-    ImageInput,
     ImageProvider,
-    SceneContactSheetQualityResult,
     StoredFirstFrameCandidates,
     complete_first_frame_generation,
-    evaluate_scene_contact_sheet_quality,
     load_first_frame_generation_work,
     perform_first_frame_generation,
     prepare_first_frame_generation,
-    scene_contact_sheet_retry_prompt,
     store_first_frame_generation,
 )
 from app.permissions import require_not_auditor, require_project_access
@@ -107,7 +101,6 @@ class CharacterSheetTaskPrepared:
     source_content_type: str
     source_storage_key: str
     provider: ImageProvider
-    quality_inspector: FirstFrameQualityInspector
 
 
 def canonical_request_hash(payload: dict[str, Any]) -> str:
@@ -880,7 +873,6 @@ def prepare_character_sheet_task(
     lease: ImageTaskLease,
     storage: StorageAdapter,
     provider: ImageProvider,
-    quality_inspector: FirstFrameQualityInspector | None = None,
 ) -> CharacterSheetTaskPrepared:
     row = _require_owned_task(conn, "character_sheet_tasks", lease)
     payload = json.loads(str(row["request_json"]))
@@ -913,7 +905,6 @@ def prepare_character_sheet_task(
         source_content_type=str(row["source_content_type"]),
         source_storage_key=reference.key,
         provider=provider,
-        quality_inspector=quality_inspector or FakeFirstFrameQualityInspector(),
     )
 
 
@@ -931,76 +922,41 @@ def perform_character_sheet_task(
         )
     if prepared.scene_description is None or prepared.costume_description is None:
         raise _task_error(409, "SCENE_LOOK_INPUTS_MISSING", "场景造型参数不完整。")
-    source_image = ImageInput(
-        content=prepared.source_content,
-        content_type=prepared.source_content_type,
-        filename="character-source",
-    )
-    base_prompt = scene_contact_sheet_prompt(
+    return prepare_simple_character_generation(
+        source_content=prepared.source_content,
+        source_content_type=prepared.source_content_type,
+        display_name=prepared.display_name,
+        image_provider=prepared.provider,
         scene_description=prepared.scene_description,
         costume_description=prepared.costume_description,
-    )
-    issue_codes: list[str] = []
-    best: tuple[PreparedSimpleCharacterGeneration, SceneContactSheetQualityResult] | None = None
-    for attempt in range(1, MAX_SCENE_CONTACT_SHEET_QUALITY_ATTEMPTS + 1):
-        generation = prepare_simple_character_generation(
-            source_content=prepared.source_content,
-            source_content_type=prepared.source_content_type,
-            display_name=prepared.display_name,
-            image_provider=prepared.provider,
+        prompt_override=scene_contact_sheet_prompt(
             scene_description=prepared.scene_description,
             costume_description=prepared.costume_description,
-            prompt_override=scene_contact_sheet_retry_prompt(base_prompt, issue_codes, attempt),
-        )
-        try:
-            inspection = prepared.quality_inspector.inspect_scene_contact_sheet(
-                source_image=source_image,
-                contact_sheet=GeneratedImage(
-                    content=generation.contact_content,
-                    content_type=generation.contact_content_type,
-                ),
-                scene_description=prepared.scene_description,
-                costume_description=prepared.costume_description,
-            )
-        except FirstFrameQualityInspectorFailed as exc:
-            # 质检不可用不能销毁已付费的图：直接按“未质检”交付这一轮。
-            logger.warning(
-                "scene contact-sheet QC unavailable; delivering unreviewed sheet",
-                extra={"attempt": attempt, "error_type": type(exc).__name__},
-            )
-            if best is not None:
-                return best[0]
-            return generation
-        quality = evaluate_scene_contact_sheet_quality(inspection, attempt=attempt)
-        if quality.passed:
-            return replace(generation, scene_quality=quality)
-        logger.warning(
-            "scene contact-sheet failed auto QC; keeping the sheet as a labelled candidate",
-            extra={
-                "attempt": attempt,
-                "issue_codes": quality.issue_codes,
-                "identity_consistency_score": quality.inspection.identity_consistency_score,
-                "outfit_match_score": quality.inspection.outfit_match_score,
-                "scene_match_score": quality.inspection.scene_match_score,
-            },
-        )
-        if best is None or _scene_quality_rank(quality) > _scene_quality_rank(best[1]):
-            best = (replace(generation, scene_quality=quality), quality)
-        issue_codes = quality.issue_codes
-    # 轮次用完仍未通过：交付综合分最高的一轮，质检结论作为标注随版本发布。
-    assert best is not None
-    return best[0]
+        ),
+    )
 
 
-def _scene_quality_rank(quality: SceneContactSheetQualityResult) -> tuple[float, int]:
-    """Rank a failed round by its three scores, breaking ties with fewer issues."""
-
-    inspection = quality.inspection
-    return (
-        inspection.identity_consistency_score
-        + inspection.outfit_match_score
-        + inspection.scene_match_score,
-        -len(quality.issue_codes),
+def latest_scene_look_task(
+    conn: BusinessConnection,
+    *,
+    actor: CurrentUser,
+    identity_id: str,
+) -> sqlite3.Row | None:
+    owner_filter = "" if actor.role == "admin" else "AND created_by_user_id = %s"
+    params: tuple[object, ...] = (
+        (identity_id,) if actor.role == "admin" else (identity_id, actor.id)
+    )
+    return cast(
+        sqlite3.Row | None,
+        conn.execute(
+            f"""
+            SELECT * FROM character_sheet_tasks
+            WHERE identity_id = %s AND operation = 'SCENE' {owner_filter}
+            ORDER BY CASE WHEN status IN ('PENDING','RUNNING') THEN 0 ELSE 1 END,
+                     created_at DESC, id DESC LIMIT 1
+            """,
+            params,
+        ).fetchone(),
     )
 
 
@@ -1218,6 +1174,25 @@ def latest_image_task(
         conn.execute(
             f"""
             SELECT * FROM {table} WHERE {owner_column} = %s
+            ORDER BY CASE WHEN status IN ('PENDING','RUNNING') THEN 0 ELSE 1 END,
+                     created_at DESC, id DESC LIMIT 1
+            """,
+            (owner_id,),
+        ).fetchone(),
+    )
+
+
+def latest_base_character_sheet_task(
+    conn: BusinessConnection,
+    *,
+    owner_id: str,
+) -> sqlite3.Row | None:
+    return cast(
+        sqlite3.Row | None,
+        conn.execute(
+            """
+            SELECT * FROM character_sheet_tasks
+            WHERE created_by_user_id = %s AND operation IN ('CREATE','REGENERATE')
             ORDER BY CASE WHEN status IN ('PENDING','RUNNING') THEN 0 ELSE 1 END,
                      created_at DESC, id DESC LIMIT 1
             """,

@@ -22,6 +22,7 @@ vi.mock("./api", async (importOriginal) => {
     deleteSimpleCharacterIdentity: vi.fn(),
     uploadSimpleCharacter: vi.fn(),
     getLatestCharacterSheetTask: vi.fn(),
+    getLatestSceneLookTask: vi.fn(),
     waitForCharacterSheetTask: vi.fn(),
     getCachedCharacterAssetUrl: vi.fn(),
     downloadCharacterAsset: vi.fn(),
@@ -120,6 +121,7 @@ describe("CharacterLibrary", () => {
     vi.mocked(api.deleteSimpleCharacterIdentity).mockResolvedValue(undefined);
     vi.mocked(api.listCharacterSceneLooks).mockResolvedValue([]);
     vi.mocked(api.getLatestCharacterSheetTask).mockResolvedValue(null);
+    vi.mocked(api.getLatestSceneLookTask).mockResolvedValue(null);
     vi.spyOn(window, "confirm").mockReturnValue(true);
   });
 
@@ -177,6 +179,58 @@ describe("CharacterLibrary", () => {
     );
     expect(await screen.findByText("商务讲解")).toBeInTheDocument();
     expect(screen.queryByText("等待管理员审核")).toBeNull();
+  });
+
+  it("restores a scene task inside its identity scene tab", async () => {
+    vi.mocked(api.listSimpleCharacterLibrary).mockResolvedValue([entry]);
+    vi.mocked(api.listCharacterSceneLooks)
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([sceneLook]);
+    const running = characterTask("RUNNING", {
+      id: "scene-task-1",
+      identity_id: entry.identity_id,
+      operation: "SCENE",
+      display_name: entry.display_name,
+    });
+    vi.mocked(api.getLatestSceneLookTask).mockResolvedValue(running);
+    vi.mocked(api.waitForCharacterSheetTask).mockResolvedValue(
+      characterTask("SUCCEEDED", {
+        ...running,
+        status: "SUCCEEDED",
+        result_identity_id: entry.identity_id,
+        result_version_id: sceneLook.character_version_id,
+        result: sceneLook,
+      }),
+    );
+
+    render(<CharacterLibrary userRole="employee" userId="employee_1" />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "查看人物 林夏 大图" }),
+    );
+
+    expect(
+      await screen.findByRole("tab", { name: "场景造型" }),
+    ).toHaveAttribute("aria-selected", "true");
+    expect(await screen.findByText("工地巡检")).toBeInTheDocument();
+    expect(api.waitForCharacterSheetTask).toHaveBeenCalledWith("scene-task-1");
+    expect(api.listCharacterSceneLooks).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not render a scene task as a base-character generation card", async () => {
+    vi.mocked(api.listSimpleCharacterLibrary).mockResolvedValue([entry]);
+    vi.mocked(api.getLatestCharacterSheetTask).mockResolvedValue(
+      characterTask("RUNNING", {
+        identity_id: entry.identity_id,
+        operation: "SCENE",
+      }),
+    );
+
+    render(<CharacterLibrary userRole="employee" userId="employee_1" />);
+
+    await waitFor(() =>
+      expect(api.getLatestCharacterSheetTask).toHaveBeenCalledTimes(1),
+    );
+    expect(screen.queryByLabelText("人物 林夏 生成进度")).toBeNull();
   });
 
   afterEach(() => {

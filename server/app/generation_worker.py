@@ -522,9 +522,6 @@ def run_worker_once(
                     lease=character_sheet_lease,
                     storage=storage,
                     provider=image_provider or get_image_provider(conn),
-                    quality_inspector=(
-                        first_frame_quality_inspector or get_first_frame_quality_inspector(conn)
-                    ),
                 )
                 record_image_task_provider(
                     conn,
@@ -1168,9 +1165,6 @@ def run_pg_worker_once(
                         lease=character_sheet_lease,
                         storage=storage,
                         provider=image_provider or get_image_provider(conn),
-                        quality_inspector=(
-                            first_frame_quality_inspector or get_first_frame_quality_inspector(conn)
-                        ),
                     )
                     record_image_task_provider(
                         conn,

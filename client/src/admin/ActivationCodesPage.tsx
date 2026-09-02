@@ -123,14 +123,7 @@ export function ActivationCodesPage({
     return () => {
       cancelled = true;
     };
-  }, [
-    filterStatus,
-    search,
-    includeArchived,
-    offset,
-    handleFailure,
-    refreshToken,
-  ]);
+  }, [filterStatus, search, includeArchived, offset, handleFailure, refreshToken]);
 
   // 搜索（A9）已下沉到服务端：掩码码或绑定用户名匹配，跨全部页生效。
   const visibleItems = items;

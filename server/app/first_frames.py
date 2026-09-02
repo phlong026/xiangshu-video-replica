@@ -59,6 +59,8 @@ FIRST_FRAME_IMAGE_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp"}
 MAX_FIRST_FRAME_CANDIDATES = 3
 APILIO_DEFAULT_BASE_URL = "https://api.apilio.ai"
 APILIO_IMAGE_EDIT_PATH = "/v1/images/edits"
+APILIO_OUTPUT_HOSTS = frozenset({"files.closeai.fans"})
+APILIO_PROXY_FAKE_IP_NETWORK = ipaddress.ip_network("198.18.0.0/15")
 MAX_PROVIDER_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_QUALITY_IMAGE_BYTES = 12 * 1024 * 1024
 MAX_QUALITY_REQUEST_IMAGE_BYTES = 32 * 1024 * 1024
@@ -945,9 +947,8 @@ def build_apilio_edit_multipart(
     add_image(source_image)
     for image in character_reference_images:
         add_image(image)
-    # Inline base64 output avoids the download round-trip entirely: CDN
-    # domains used by Apilio resolve through carrier scheduling that can mix
-    # in non-global addresses, which the SSRF download guard must reject.
+    # Prefer inline output, while still accepting Apilio's URL fallback below.
+    # Some compatible gateways ignore this field and return a hosted image.
     add_field("response_format", "b64_json")
     add_field("n", str(output_count))
     if model == "gpt-image-2":
@@ -1032,9 +1033,11 @@ def require_safe_provider_download_url(value: str) -> None:
         raise ImageProviderFailed("Apilio output URL hostname could not be resolved") from exc
     if not addresses:
         raise ImageProviderFailed("Apilio output URL hostname could not be resolved")
+    trusted_output_host = hostname.lower() in APILIO_OUTPUT_HOSTS
     for address in addresses:
         ip = ipaddress.ip_address(address[4][0])
-        if not ip.is_global:
+        proxy_fake_ip = trusted_output_host and ip in APILIO_PROXY_FAKE_IP_NETWORK
+        if not ip.is_global and not proxy_fake_ip:
             raise ImageProviderFailed("Apilio output URL must resolve to a public address")
 
 

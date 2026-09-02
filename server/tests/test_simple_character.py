@@ -32,7 +32,6 @@ from app.db_portable import BusinessConnection
 from app.first_frame_routes import get_image_provider
 from app.first_frames import (
     FirstFrameCandidateInspection,
-    FirstFrameQualityInspectorFailed,
     FirstFrameSourceInspection,
     GeneratedImage,
     ImageInput,
@@ -1504,6 +1503,7 @@ def test_owner_generates_and_lists_a_direct_publish_scene_look(
     scene_quality = SequenceSceneLookQualityInspector(
         inspections=[
             scene_sheet_inspection(identity_score=0.2),
+            scene_sheet_inspection(identity_score=0.4),
             scene_sheet_inspection(),
         ]
     )
@@ -1520,6 +1520,27 @@ def test_owner_generates_and_lists_a_direct_publish_scene_look(
         },
     )
     assert queued.status_code == 202, queued.text
+
+    active = client.get(
+        f"/api/simple-characters/identities/{identity_id}/scene-looks/tasks/active-or-latest",
+        headers=headers("employee_1"),
+    )
+    assert active.status_code == 200, active.text
+    assert active.json()["id"] == queued.json()["id"]
+    assert active.json()["status"] == "PENDING"
+
+    foreign_active = client.get(
+        f"/api/simple-characters/identities/{identity_id}/scene-looks/tasks/active-or-latest",
+        headers=headers("employee_2"),
+    )
+    assert foreign_active.status_code == 404
+
+    latest_base_task = client.get(
+        "/api/simple-characters/tasks/active-or-latest",
+        headers=headers("employee_1"),
+    )
+    assert latest_base_task.status_code == 200, latest_base_task.text
+    assert latest_base_task.json() is None
 
     with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         assert (
@@ -1544,8 +1565,8 @@ def test_owner_generates_and_lists_a_direct_publish_scene_look(
     assert result["identity_id"] == identity_id
     assert result["scene_name"] == "工地巡检"
     assert len(result["views"]) == len(REQUIRED_CHARACTER_VIEW_TYPES)
-    assert scene_quality.calls == 2
-    assert len(contact_sheet_provider.calls) - provider_calls_before_scene == 2
+    assert scene_quality.calls == 0
+    assert len(contact_sheet_provider.calls) - provider_calls_before_scene == 1
 
     with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         source_asset_id = str(
@@ -1569,8 +1590,7 @@ def test_owner_generates_and_lists_a_direct_publish_scene_look(
         )
     assert reference_asset_ids == [result["contact_sheet_asset_id"], source_asset_id]
     assert reference_asset_roles == ["contact_sheet", "source_photo"]
-    assert publication["scene_quality"]["passed"] is True
-    assert publication["scene_quality"]["attempt"] == 2
+    assert "scene_quality" not in publication
 
     looks = client.get(
         f"/api/simple-characters/identities/{identity_id}/scene-looks",
@@ -1619,171 +1639,6 @@ def test_owner_generates_and_lists_a_direct_publish_scene_look(
     assert "乡村别墅施工现场" in prompt
     assert "黄色安全帽" in prompt
     assert "Do not change the person's identity or gender" in prompt
-
-
-def test_scene_look_publishes_best_attempt_when_all_rounds_fail_qc(
-    client: TestClient,
-    db_path: Path,
-    storage: FakeStorageAdapter,
-    contact_sheet_provider: StubContactSheetProvider,
-) -> None:
-    created = generate_global(client).json()
-    identity_id = created["identity_id"]
-    scene_quality = SequenceSceneLookQualityInspector(
-        inspections=[
-            scene_sheet_inspection(identity_score=0.4),
-            scene_sheet_inspection(identity_score=0.2),
-        ]
-    )
-
-    queued = client.post(
-        f"/api/simple-characters/identities/{identity_id}/scene-looks/tasks/generate",
-        headers=headers("employee_1"),
-        json={
-            "scene_name": "工地巡检",
-            "scene_description": "乡村别墅施工现场，白天自然光",
-            "costume_description": "黄色安全帽、深蓝色工装和反光背心",
-            "idempotency_key": "scene-look-all-rejected-1",
-        },
-    )
-    assert queued.status_code == 202, queued.text
-
-    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
-        assert (
-            run_worker_once(
-                conn,
-                worker_id="scene-look-all-rejected-worker",
-                storage=storage,
-                image_provider=contact_sheet_provider,
-                first_frame_quality_inspector=scene_quality,
-                max_tasks=1,
-            )
-            == 1
-        )
-        task = conn.execute(
-            "SELECT status, result_json FROM character_sheet_tasks WHERE id = %s",
-            (queued.json()["id"],),
-        ).fetchone()
-        assert task is not None
-        assert task["status"] == "SUCCEEDED"
-        result_payload = json.loads(str(task["result_json"]))
-        version_id = result_payload["character_version_id"]
-        publication = json.loads(
-            str(
-                conn.execute(
-                    "SELECT publication_snapshot_json FROM character_versions WHERE id = %s",
-                    (version_id,),
-                ).fetchone()["publication_snapshot_json"]
-            )
-        )
-
-    # 两轮都未通过：综合分最高的第 1 轮被交付，质检结论作为标注随版本发布。
-    assert result_payload["scene_name"] == "工地巡检"
-    assert publication["scene_quality"]["passed"] is False
-    assert publication["scene_quality"]["attempt"] == 1
-    assert publication["scene_quality"]["inspection"]["identity_consistency_score"] == 0.4
-
-    looks = client.get(
-        f"/api/simple-characters/identities/{identity_id}/scene-looks",
-        headers=headers("employee_1"),
-    )
-    assert looks.status_code == 200, looks.text
-    assert len(looks.json()) == 1
-    assert len(looks.json()[0]["views"]) == len(REQUIRED_CHARACTER_VIEW_TYPES)
-
-
-@dataclass
-class UnavailableSceneQualityInspector:
-    calls: int = 0
-
-    def inspect_source(self, source_image: ImageInput) -> FirstFrameSourceInspection:
-        raise AssertionError("source-frame inspection is not expected")
-
-    def inspect_candidate(
-        self,
-        *,
-        source_image: ImageInput,
-        character_reference_images: list[ImageInput],
-        candidate: GeneratedImage,
-        expected_outfit: str,
-    ) -> FirstFrameCandidateInspection:
-        raise AssertionError("first-frame inspection is not expected")
-
-    def inspect_scene_contact_sheet(
-        self,
-        *,
-        source_image: ImageInput,
-        contact_sheet: GeneratedImage,
-        scene_description: str,
-        costume_description: str,
-    ) -> SceneContactSheetInspection:
-        assert source_image.content
-        assert contact_sheet.content
-        self.calls += 1
-        raise FirstFrameQualityInspectorFailed("scene QC service is down")
-
-
-def test_scene_look_delivers_unreviewed_sheet_when_qc_is_unavailable(
-    client: TestClient,
-    db_path: Path,
-    storage: FakeStorageAdapter,
-    contact_sheet_provider: StubContactSheetProvider,
-) -> None:
-    created = generate_global(client).json()
-    identity_id = created["identity_id"]
-    scene_quality = UnavailableSceneQualityInspector()
-
-    queued = client.post(
-        f"/api/simple-characters/identities/{identity_id}/scene-looks/tasks/generate",
-        headers=headers("employee_1"),
-        json={
-            "scene_name": "工地巡检",
-            "scene_description": "乡村别墅施工现场，白天自然光",
-            "costume_description": "黄色安全帽、深蓝色工装和反光背心",
-            "idempotency_key": "scene-look-qc-down-1",
-        },
-    )
-    assert queued.status_code == 202, queued.text
-
-    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
-        assert (
-            run_worker_once(
-                conn,
-                worker_id="scene-look-qc-down-worker",
-                storage=storage,
-                image_provider=contact_sheet_provider,
-                first_frame_quality_inspector=scene_quality,
-                max_tasks=1,
-            )
-            == 1
-        )
-        task = conn.execute(
-            "SELECT status, result_json FROM character_sheet_tasks WHERE id = %s",
-            (queued.json()["id"],),
-        ).fetchone()
-        assert task is not None
-        assert task["status"] == "SUCCEEDED"
-        result_payload = json.loads(str(task["result_json"]))
-        version_id = result_payload["character_version_id"]
-        publication = json.loads(
-            str(
-                conn.execute(
-                    "SELECT publication_snapshot_json FROM character_versions WHERE id = %s",
-                    (version_id,),
-                ).fetchone()["publication_snapshot_json"]
-            )
-        )
-
-    # 质检不可用：交付“未质检”的拼版图而不是销毁，任务不进入 SUBMISSION_UNCERTAIN。
-    assert scene_quality.calls == 1
-    assert "scene_quality" not in publication
-
-    looks = client.get(
-        f"/api/simple-characters/identities/{identity_id}/scene-looks",
-        headers=headers("employee_1"),
-    )
-    assert looks.status_code == 200, looks.text
-    assert len(looks.json()) == 1
 
 
 def test_scene_looks_hide_foreign_identities_and_reject_auditors(
