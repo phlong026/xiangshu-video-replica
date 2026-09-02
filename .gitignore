@@ -57,4 +57,12 @@ worktree/
 # Playwright customer E2E artifacts
 test-results/
 playwright-report/
+# 本地工具链与发布工作区（2026-09-02 上线前整改：均不进版本库）
+.gstack/
+.tmp-tools/
+.release/
+artifacts/
+# 视觉 QA 临时记录与热修复快照
+design-qa.md
+/*.tar.gz
 e2e/customer/run/

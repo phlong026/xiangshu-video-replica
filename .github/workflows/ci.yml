@@ -35,7 +35,7 @@ jobs:
     name: Linux quality gate
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, Linux, X64, ci-linux]
-    # 2026-08-26: raised 30 -> 60 — the full pytest suite (~1150 tests, PG
+    # 2026-08-26: raised 30 -> 60 — the full pytest suite (~1450 tests, PG
     # service + 10k queue load) measures 9-27 minutes depending on the hosted
     # runner's performance; a slow runner previously hit the 30-minute cap at
     # ~92% and the gate was cancelled mid-run (not a test failure).
