@@ -313,9 +313,7 @@ def run_worker_once(
             # mid-flight and the late terminal write was discarded by
             # design — the lease left with the write, so this counts as a
             # processed task, not a worker fault.
-            logger.info(
-                "generation task superseded while running; late terminal write discarded"
-            )
+            logger.info("generation task superseded while running; late terminal write discarded")
             generation_handled = True
         if generation_handled:
             processed += 1

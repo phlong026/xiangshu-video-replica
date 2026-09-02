@@ -25,6 +25,7 @@ from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
+import psycopg
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -4413,11 +4414,22 @@ def _fair_queue_enabled(conn: BusinessConnection) -> bool:
         row = conn.execute(
             "SELECT fair_queue_enabled FROM runtime_settings WHERE id = 1"
         ).fetchone()
-    except Exception as exc:
+    except psycopg.errors.UndefinedColumn:
         # Missing column is the documented "feature off" state (the desktop
         # SQLite lane has no such column; a PG database that never ran 041).
-        # Any other failure is a real fault and must fail loudly instead of
+        return False
+    except sqlite3.OperationalError as exc:
+        # The SQLite lane reports a missing column as "no such column";
+        # anything else is a real fault and must fail loudly instead of
         # silently degrading to global FIFO (M5 review P1-7).
+        if "no such column" in str(exc):
+            return False
+        logger.warning("fair_queue_enabled probe failed: %s: %s", type(exc).__name__, exc)
+        raise
+    except Exception as exc:
+        # Any other failure is a real fault and must fail loudly instead of
+        # silently degrading to global FIFO (M5 review P1-7). The message
+        # sniff below only keeps translated driver wrappers honest.
         message = f"{type(exc).__name__}: {exc}"
         if "column" in message and ("does not exist" in message or "no such column" in message):
             return False
