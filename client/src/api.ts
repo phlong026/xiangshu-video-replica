@@ -919,10 +919,9 @@ export async function syncControlRechargeOrder(
   );
 }
 
-export async function downloadCustomersCsv(options: {
-  status?: string;
-  username?: string;
-} = {}): Promise<void> {
+export async function downloadCustomersCsv(
+  options: { status?: string; username?: string } = {},
+): Promise<void> {
   const query = new URLSearchParams();
   if (options.status) query.set("status", options.status);
   if (options.username) query.set("username", options.username);
