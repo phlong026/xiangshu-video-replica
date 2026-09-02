@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import logging
@@ -15,16 +16,26 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
-from app.admin_activation_routes import (
+from app.admin_write_contract import (
     AdminWriteContract,
-    _require_write_contract,
-    _write_with_idempotency,
+)
+from app.admin_write_contract import (
+    require_write_contract as _require_write_contract,
+)
+from app.admin_write_contract import (
+    write_with_idempotency as _write_with_idempotency,
 )
 from app.auth import Database, Role
 from app.control_auth import ControlUser
 from app.db_portable import BusinessConnection
 from app.ops_metrics import get_or_create_request_id
 from app.permissions import write_audit
+from app.security_rate_limit import (
+    DIMENSION_CONTROL_EXPORT_ACCOUNT,
+    consume_rate_limit,
+    control_export_account_limit,
+    rate_limit_window_seconds,
+)
 from app.settings import ProviderName, SettingsRepository
 from app.settings_routes import (
     ProviderTester,
@@ -891,7 +902,15 @@ def list_generation_records(
 
 
 @router.get("/billing-reconciliation", response_model=ReconciliationSummary)
-def read_reconciliation(conn: Database, _actor: ControlUser) -> ReconciliationSummary:
+def read_reconciliation(conn: Database, actor: ControlUser) -> ReconciliationSummary:
+    # 对账读也是账务敏感读：留痕（不占导出预算，随读频次走）。
+    write_audit(
+        conn,
+        actor=actor,
+        action="control.reconciliation.read",
+        entity_type="control_ledger",
+        entity_id="billing_reconciliation",
+    )
     row = conn.execute(
         """
         SELECT
@@ -1091,11 +1110,22 @@ def update_control_billing_settings(
 @router.get("/recharge-orders.csv")
 def export_recharge_orders_csv(
     conn: Database,
-    _actor: ControlUser,
+    actor: ControlUser,
     status: OrderStatus | None = None,
     user_id: str | None = None,
     limit: int = Query(default=5000, ge=1, le=5000),
 ) -> Response:
+    _guard_ledger_export(
+        conn,
+        actor,
+        kind="recharge_orders",
+        filters={
+            key: value
+            for key, value in (("status", status or ""), ("user_id", user_id or ""))
+            if value
+        },
+        row_limit=limit,
+    )
     where, params = _order_filters(status=status, user_id=user_id)
     rows = conn.execute(
         f"""
@@ -1139,11 +1169,25 @@ def export_recharge_orders_csv(
 @router.get("/wallet-transactions.csv")
 def export_wallet_transactions_csv(
     conn: Database,
-    _actor: ControlUser,
+    actor: ControlUser,
     user_id: str | None = None,
     type: TransactionType | None = None,
     limit: int = Query(default=5000, ge=1, le=5000),
 ) -> Response:
+    _guard_ledger_export(
+        conn,
+        actor,
+        kind="wallet_transactions",
+        filters={
+            key: value
+            for key, value in (
+                ("type", type or ""),
+                ("user_id", user_id or ""),
+            )
+            if value
+        },
+        row_limit=limit,
+    )
     where, params = _transaction_filters(user_id=user_id, transaction_type=type)
     rows = conn.execute(
         f"""
@@ -1181,6 +1225,51 @@ def export_wallet_transactions_csv(
             "created_at",
         ),
         rows=rows,
+    )
+
+
+def _guard_ledger_export(
+    conn: BusinessConnection,
+    actor: ControlUser,
+    *,
+    kind: str,
+    filters: dict[str, str],
+    row_limit: int,
+) -> None:
+    """Audit + rate-limit one control-plane ledger export (A2, 2026-09-02).
+
+    A one-shot dump of the whole ledger is the most sensitive read in the
+    system: it now lands an ``audit_logs`` row naming the operator and spends
+    one hit of a shared per-account budget (429 + Retry-After once exhausted).
+    The identifier is hashed like every other rate-limit bucket identity. The
+    budget is spent on the shared PostgreSQL limiter explicitly (the activation
+    precedent) so the SQLite internal lane simply skips it instead of pointing
+    the shared-window SQL at a non-PG clock.
+    """
+    if conn.is_postgres:
+        decision = consume_rate_limit(
+            cast(psycopg.Connection, conn.raw),
+            dimension=DIMENSION_CONTROL_EXPORT_ACCOUNT,
+            identifier=hashlib.sha256(actor.id.encode("utf-8")).hexdigest(),
+            limit=control_export_account_limit(),
+            window_seconds=rate_limit_window_seconds(),
+        )
+        if not decision.allowed:
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "code": "CONTROL_EXPORT_RATE_LIMITED",
+                    "message": "Too many ledger exports; retry after the cooldown.",
+                },
+                headers={"Retry-After": str(decision.retry_after_seconds)},
+            )
+    write_audit(
+        conn,
+        actor=actor,
+        action="control.export",
+        entity_type="control_ledger",
+        entity_id=kind,
+        metadata={"filters": filters, "limit": row_limit},
     )
 
 

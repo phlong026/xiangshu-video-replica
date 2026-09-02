@@ -438,7 +438,11 @@ def test_control_sync_keeps_unpaid_order_pending(payment_context: PaymentTestCon
 
     response = payment_context.client.post(
         f"/api/control/recharge-orders/{ORDER_NO}/sync",
-        headers=payment_context.control_headers,
+        headers={
+            **payment_context.control_headers,
+            "Idempotency-Key": "manual-sync-test-key",
+        },
+        json={"confirm": True, "reason": "手动查单对账"},
     )
 
     assert response.status_code == 200
@@ -481,7 +485,11 @@ def test_control_sync_paid_result_uses_the_same_credit_service(
 
     response = payment_context.client.post(
         f"/api/control/recharge-orders/{ORDER_NO}/sync",
-        headers=payment_context.control_headers,
+        headers={
+            **payment_context.control_headers,
+            "Idempotency-Key": "manual-sync-test-key",
+        },
+        json={"confirm": True, "reason": "手动查单对账"},
     )
 
     assert response.status_code == 200
@@ -523,7 +531,11 @@ def test_control_sync_surfaces_redacted_query_failure_without_crediting(
 
     response = payment_context.client.post(
         f"/api/control/recharge-orders/{ORDER_NO}/sync",
-        headers=payment_context.control_headers,
+        headers={
+            **payment_context.control_headers,
+            "Idempotency-Key": "manual-sync-test-key",
+        },
+        json={"confirm": True, "reason": "手动查单对账"},
     )
 
     assert response.status_code == 504
@@ -719,3 +731,41 @@ def test_zpay_payment_code_client_rejects_insecure_image_url() -> None:
             credits=10,
             client_ip="203.0.113.8",
         )
+
+
+def test_control_sync_requires_write_contract_and_audits_the_attempt(
+    payment_context: PaymentTestContext,
+) -> None:
+    """A4（2026-09-02 评估）：手动查单必须带 confirm/reason/幂等键并留审计."""
+    fake = FakeZPayQueryClient(ZPayOrderQueryResult(False, ORDER_NO, None, None, None, "c" * 64))
+    app.dependency_overrides[get_zpay_order_query_client] = lambda: fake
+
+    missing_reason = payment_context.client.post(
+        f"/api/control/recharge-orders/{ORDER_NO}/sync",
+        headers={
+            **payment_context.control_headers,
+            "Idempotency-Key": "sync-contract-key",
+        },
+        json={"confirm": True, "reason": "   "},
+    )
+    assert missing_reason.status_code == 400
+    assert missing_reason.json()["detail"]["code"] == "REASON_REQUIRED"
+    assert fake.calls == []
+
+    confirmed = payment_context.client.post(
+        f"/api/control/recharge-orders/{ORDER_NO}/sync",
+        headers={
+            **payment_context.control_headers,
+            "Idempotency-Key": "sync-contract-key",
+        },
+        json={"confirm": True, "reason": "手动查单对账"},
+    )
+    assert confirmed.status_code == 200, confirmed.text
+
+    with BusinessConnection.sqlite(connect_database(payment_context.db_path)) as conn:
+        audit = conn.execute(
+            "SELECT action, entity_id FROM audit_logs "
+            "WHERE action = 'payment.sync' AND entity_id = ?",
+            (ORDER_NO,),
+        ).fetchall()
+    assert len(audit) == 1

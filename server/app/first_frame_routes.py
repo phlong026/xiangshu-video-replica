@@ -98,6 +98,8 @@ class ConfirmFirstFrameRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     first_frame_asset_id: str = Field(min_length=1)
+    # 显式确认未通过自动质检的候选；标记会随确认版本留痕。
+    allow_unverified: bool = False
 
 
 class VersionResponse(BaseModel):
@@ -415,6 +417,7 @@ def confirm_project_first_frame(
                 project_id=project_id,
                 first_frame_asset_id=request.first_frame_asset_id,
                 actor=actor,
+                allow_unverified=request.allow_unverified,
             )
         )
 

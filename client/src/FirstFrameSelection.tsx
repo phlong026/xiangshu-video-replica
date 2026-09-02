@@ -66,6 +66,8 @@ export function FirstFrameSelection({
   const [generationTask, setGenerationTask] = useState<FirstFrameTask | null>(
     null,
   );
+  // 质检未通过的候选需要两次点击：第一次是“知情”，第二次才真正确认。
+  const [overrideArmed, setOverrideArmed] = useState(false);
   const loadRequestId = useRef(0);
   const previewRetryCounts = useRef(new Map<string, number>());
   const generationWatchId = useRef(0);
@@ -133,6 +135,8 @@ export function FirstFrameSelection({
         setVersion(displayVersion);
         setPreviewUrls({});
         previewRetryCounts.current.clear();
+        // 换版本后，未完成的两段式覆盖确认必须重新开始。
+        setOverrideArmed(false);
         if (!displayVersion) {
           setSelectedAssetId("");
           setStatus(
@@ -347,6 +351,9 @@ export function FirstFrameSelection({
   const payload = version ? readFirstFrameCandidates(version) : null;
   const isHistoryVersion = Boolean(version && version.id !== latestVersionId);
   const selectedPreview = previewUrls[selectedAssetId];
+  const selectedCandidate = payload?.candidates.find(
+    (candidate) => candidate.asset_id === selectedAssetId,
+  );
 
   async function handlePreviewError(assetId: string) {
     setPreviewUrls((current) =>
@@ -412,6 +419,14 @@ export function FirstFrameSelection({
       setError("请先加载并查看最新候选首帧预览，再进行确认。");
       return;
     }
+    const needsOverride = selectedCandidate?.quality?.passed !== true;
+    if (needsOverride && !overrideArmed) {
+      setOverrideArmed(true);
+      setStatus(
+        "该候选未通过自动质检。再次点击确认按钮，表示你已查看并接受此首帧。",
+      );
+      return;
+    }
     const submittedBindingKey = confirmationBindingKey;
     const submittedLifecycleId = confirmationLifecycleId.current;
     const isCurrentConfirmation = () =>
@@ -421,7 +436,11 @@ export function FirstFrameSelection({
     setIsSubmitting(true);
     setError("");
     try {
-      const selection = await confirmFirstFrame(projectId, selectedAssetId);
+      const selection = needsOverride
+        ? await confirmFirstFrame(projectId, selectedAssetId, {
+            allowUnverified: true,
+          })
+        : await confirmFirstFrame(projectId, selectedAssetId);
       if (!isCurrentConfirmation()) {
         return;
       }
@@ -528,7 +547,9 @@ export function FirstFrameSelection({
           onClick={handleConfirm}
           type="button"
         >
-          确认用于视频生成的首帧
+          {overrideArmed
+            ? "质检未通过，仍要使用此首帧"
+            : "确认用于视频生成的首帧"}
         </button>
       </div>
       {generationStartedAt !== null ? (
@@ -603,7 +624,11 @@ export function FirstFrameSelection({
                 }
                 index={index}
                 key={candidate.asset_id}
-                onSelect={() => setSelectedAssetId(candidate.asset_id)}
+                onSelect={() => {
+                  setSelectedAssetId(candidate.asset_id);
+                  // 换候选后，未完成的两段式覆盖确认必须重新开始。
+                  setOverrideArmed(false);
+                }}
                 onPreviewError={() =>
                   void handlePreviewError(candidate.asset_id)
                 }
@@ -723,6 +748,12 @@ function FirstFrameOption({
             {candidate.quality.attempt > 1
               ? ` · 自动修正 ${candidate.quality.attempt - 1} 次`
               : ""}
+          </small>
+        ) : null}
+        {candidate.quality && !candidate.quality.passed ? (
+          <small className="first-frame-quality-fail">
+            质检未通过：
+            {candidate.quality.issue_codes.join("、") || "详见任务记录"}
           </small>
         ) : null}
       </span>

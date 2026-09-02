@@ -87,11 +87,16 @@ const codesPage = {
       pending_pairings: [],
     },
   ],
+  total: 3,
   limit: 50,
   offset: 0,
 };
 
-function installFetch(options?: { list?: "ok" | "unauthorized" }) {
+function installFetch(options?: {
+  list?: "ok" | "unauthorized";
+  suspendCodeId?: string;
+  resumeCodeId?: string;
+}) {
   const fetchMock = vi.fn((url: string, init?: RequestInit) => {
     if (url.endsWith("/api/control/admin/session/exchange")) {
       return jsonResponse(exchangePayload);
@@ -129,6 +134,28 @@ function installFetch(options?: { list?: "ok" | "unauthorized" }) {
         code_id: "code-2",
         status: "REVOKED",
         request_id: "req-revoke-1",
+      });
+    }
+    if (
+      options?.suspendCodeId &&
+      url.endsWith(`/activation-codes/${options.suspendCodeId}/suspend`) &&
+      init?.method === "POST"
+    ) {
+      return jsonResponse({
+        code_id: options.suspendCodeId,
+        status: "SUSPENDED",
+        request_id: "req-suspend-1",
+      });
+    }
+    if (
+      options?.resumeCodeId &&
+      url.endsWith(`/activation-codes/${options.resumeCodeId}/resume`) &&
+      init?.method === "POST"
+    ) {
+      return jsonResponse({
+        code_id: options.resumeCodeId,
+        status: "ACTIVE",
+        request_id: "req-resume-1",
       });
     }
     if (
@@ -225,10 +252,11 @@ describe("ActivationCodesPage", () => {
     fireEvent.click(
       (await screen.findAllByRole("button", { name: "撤销激活码" }))[1],
     );
+    // 吊销走 reasonAndAck 级别：原因 + 我已知晓勾选都在对话框里。
     fireEvent.change(screen.getByLabelText("操作原因"), {
       target: { value: "客户申请停用" },
     });
-    fireEvent.click(screen.getByLabelText("我已确认操作"));
+    fireEvent.click(screen.getByLabelText("我已知晓该操作的影响"));
     fireEvent.click(screen.getByRole("button", { name: "确认执行" }));
 
     expect(await screen.findByText(/req-revoke-1/)).toBeInTheDocument();
@@ -241,14 +269,46 @@ describe("ActivationCodesPage", () => {
     );
   });
 
+  it("suspends and resumes a code through the new lifecycle buttons", async () => {
+    const fetchMock = installFetch({
+      suspendCodeId: "code-2",
+      resumeCodeId: "code-2",
+    });
+    render(<ActivationCodesPage />);
+
+    // ACTIVE 码出现"暂停"按钮。
+    fireEvent.click(await screen.findByRole("button", { name: "暂停" }));
+    fireEvent.change(screen.getByLabelText("操作原因"), {
+      target: { value: "客户欠费临时停用" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "确认执行" }));
+
+    expect(await screen.findByText(/req-suspend-1/)).toBeInTheDocument();
+
+    // SUSPENDED 码出现"恢复"按钮。
+    fireEvent.click(await screen.findByRole("button", { name: "恢复" }));
+    fireEvent.change(screen.getByLabelText("操作原因"), {
+      target: { value: "欠费结清恢复使用" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "确认执行" }));
+
+    expect(await screen.findByText(/req-resume-1/)).toBeInTheDocument();
+    const suspendCall = fetchMock.mock.calls.find(([url]) =>
+      String(url).endsWith("/activation-codes/code-2/suspend"),
+    );
+    expect(suspendCall?.[1]?.body).toBe(
+      JSON.stringify({ confirm: true, reason: "客户欠费临时停用" }),
+    );
+  });
+
   it("unbinds a device without revoking its activation code", async () => {
     render(<ActivationCodesPage />);
     fireEvent.click(await screen.findByRole("button", { name: "1 台设备" }));
     fireEvent.click(screen.getByRole("button", { name: "解绑设备" }));
+    // 解绑属中危：只需原因，不需要勾选。
     fireEvent.change(screen.getByLabelText("操作原因"), {
       target: { value: "客户更换电脑" },
     });
-    fireEvent.click(screen.getByLabelText("我已确认操作"));
     fireEvent.click(screen.getByRole("button", { name: "确认执行" }));
 
     expect(await screen.findByText(/req-unbind-1/)).toBeInTheDocument();
@@ -264,7 +324,7 @@ describe("ActivationCodesPage", () => {
     fireEvent.change(screen.getByLabelText("操作原因"), {
       target: { value: "清理已撤销测试码" },
     });
-    fireEvent.click(screen.getByLabelText("我已确认操作"));
+    fireEvent.click(screen.getByLabelText("我已知晓该操作的影响"));
     fireEvent.click(screen.getByRole("button", { name: "确认执行" }));
 
     expect(await screen.findByText(/req-archive-1/)).toBeInTheDocument();
@@ -287,7 +347,7 @@ describe("ActivationCodesPage", () => {
     fireEvent.change(screen.getByLabelText("操作原因"), {
       target: { value: "客户重装系统更换设备" },
     });
-    fireEvent.click(screen.getByLabelText("我已确认操作"));
+    fireEvent.click(screen.getByLabelText("我已知晓该操作的影响"));
     fireEvent.click(screen.getByRole("button", { name: "确认执行" }));
 
     expect(await screen.findByText(/req-replace-1/)).toBeInTheDocument();
@@ -304,17 +364,26 @@ describe("ActivationCodesPage", () => {
     );
   });
 
-  it("filters locally by account and requests the selected status", async () => {
+  it("searches server-side and requests the selected status", async () => {
     const fetchMock = installFetch();
     render(<ActivationCodesPage />);
     await screen.findByText("XS****01");
 
+    // A9：搜索在提交时下沉到服务端，不再客户端过滤当前页。
     fireEvent.change(screen.getByLabelText("搜索"), {
       target: { value: "customer_9" },
     });
-    expect(screen.queryByText("XS****01")).toBeNull();
-    expect(screen.getByText("XS****02")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "搜索" }));
 
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(([url]) =>
+          String(url).includes("search=customer_9"),
+        ),
+      ).toBe(true),
+    );
+
+    // 搜索词已应用，随后切换状态会带着同一检索词请求。
     fireEvent.change(screen.getByLabelText("状态"), {
       target: { value: "ACTIVE" },
     });
@@ -322,7 +391,7 @@ describe("ActivationCodesPage", () => {
       expect(
         fetchMock.mock.calls.some(([url]) =>
           String(url).endsWith(
-            "/api/control/activation-codes?status=ACTIVE&limit=50&offset=0",
+            "/api/control/activation-codes?status=ACTIVE&search=customer_9&limit=50&offset=0",
           ),
         ),
       ).toBe(true),

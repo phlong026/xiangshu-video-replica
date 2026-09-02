@@ -206,10 +206,10 @@ function installFetch(options?: { session?: "valid" | "missing" }) {
     }
     if (url.includes("/api/control/customers?")) {
       return jsonResponse({
-        customers: [],
+        items: [],
         total: 0,
-        page: 1,
-        page_size: 20,
+        limit: 20,
+        offset: 0,
       });
     }
     if (url.includes("/api/control/generation-records?")) {
@@ -272,6 +272,12 @@ function installFetch(options?: { session?: "valid" | "missing" }) {
     }
     if (url.endsWith("/api/control/settings/runtime")) {
       return jsonResponse(settings.runtime);
+    }
+    if (url.endsWith("/api/control/settings/queue-mode")) {
+      if (options?.method === "PATCH") {
+        return jsonResponse({ fair_queue_enabled: true });
+      }
+      return jsonResponse({ fair_queue_enabled: false });
     }
     if (url.endsWith("/api/control/recharge-orders/202608190001/sync")) {
       return jsonResponse({ ...ordersPage.items[0], status: "PAID" });
@@ -351,9 +357,15 @@ describe("AdminApp", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("已支付未入账 2")).toBeInTheDocument();
     expect(screen.getByText("入账但订单未支付 1")).toBeInTheDocument();
-    fireEvent.click(
-      await screen.findByRole("button", { name: "同步 202608190001" }),
-    );
+
+    // 查单同步先经"原因必填"确认（A4 写契约），再发请求。
+    fireEvent.click(await screen.findByRole("button", { name: "查单同步" }));
+    await screen.findByRole("dialog");
+    fireEvent.change(screen.getByLabelText("操作原因"), {
+      target: { value: "客服反馈未到账" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "确认查单" }));
+
     fireEvent.click(screen.getByRole("button", { name: "导出充值订单 CSV" }));
     fireEvent.click(screen.getByRole("button", { name: "导出账务流水 CSV" }));
 
@@ -480,13 +492,13 @@ describe("AdminApp", () => {
 
     render(<AdminApp />);
     await signInWithPassword();
-    fireEvent.click(screen.getByRole("button", { name: "激活码与设备" }));
+    fireEvent.click(screen.getByRole("button", { name: "激活码与发放" }));
 
     expect(
       await screen.findByRole("heading", { name: "直接生成激活码" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("heading", { level: 1, name: "激活码与设备" }),
+      screen.getByRole("heading", { level: 1, name: "激活码与发放" }),
     ).toBeInTheDocument();
   });
 
@@ -602,7 +614,7 @@ describe("AdminApp", () => {
     fireEvent.click(screen.getByRole("button", { name: "充值订单" }));
 
     expect(
-      await screen.findByRole("button", { name: "同步 202608190001" }),
+      await screen.findByRole("button", { name: "查单同步" }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "导出充值订单 CSV" }),

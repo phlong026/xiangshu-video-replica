@@ -224,10 +224,10 @@ def test_list_audit_log_requires_admin(client: TestClient):
 def test_list_audit_log_returns_empty(client: TestClient, route_state: str):
     """An empty audit log should return an empty list."""
     _admin_session(client)
-    response = client.get(AUDIT_PATH)
+    response = client.get(AUDIT_PATH, params={"event_type": "ADMIN_ADJUSTMENT"})
     assert response.status_code == 200
     data = response.json()
-    assert data["items"] == []
+    assert [i for i in data["items"] if i["event_type"] == "ADMIN_ADJUSTMENT"] == []
     assert data["total"] == 0
 
 
@@ -251,7 +251,7 @@ def test_list_audit_log_returns_adjustments(client: TestClient, route_state: str
             reason="退款",
         )
 
-    response = client.get(AUDIT_PATH)
+    response = client.get(AUDIT_PATH, params={"event_type": "ADMIN_ADJUSTMENT"})
     assert response.status_code == 200
     data = response.json()
     assert data["total"] == 2
@@ -282,12 +282,18 @@ def test_list_audit_log_filters_by_actor_and_paginates(client: TestClient, route
             conn, actor="auditor_u", target="customer_u", source_type="CS_TICKET", reason="r3"
         )
 
-    filtered = client.get(AUDIT_PATH, params={"actor_user_id": "admin_u"})
+    filtered = client.get(
+        AUDIT_PATH,
+        params={"event_type": "ADMIN_ADJUSTMENT", "actor_user_id": "admin_u"},
+    )
     assert filtered.status_code == 200
     filtered_data = filtered.json()
     assert filtered_data["total"] == 2
 
-    page = client.get(AUDIT_PATH, params={"limit": 1, "offset": 1})
+    page = client.get(
+        AUDIT_PATH,
+        params={"event_type": "ADMIN_ADJUSTMENT", "limit": 1, "offset": 1},
+    )
     assert page.status_code == 200
     page_data = page.json()
     assert page_data["total"] == 3
@@ -305,12 +311,159 @@ def test_auditor_can_list_audit_log(client: TestClient, route_state: str):
 
 
 @pytest.mark.pg
-def test_list_audit_log_rejects_unknown_event_type(client: TestClient, route_state: str):
-    """An unsupported event_type must answer 400, never silently the full log."""
-    _admin_session(client)
-    response = client.get(AUDIT_PATH, params={"event_type": "DEVICE_UNBIND"})
-    assert response.status_code == 400
-    assert response.json()["detail"]["code"] == "INVALID_EVENT_TYPE"
+def test_list_audit_log_event_type_filters_exact(client: TestClient, route_state: str):
+    """event_type is an exact-match filter on the unified trail (A10).
 
-    ok = client.get(AUDIT_PATH, params={"event_type": "ADMIN_ADJUSTMENT"})
-    assert ok.status_code == 200
+    The old single-table 400 guard is gone: the filter is genuinely applied to
+    the UNION, so an unknown value answers an empty (well-formed) page instead
+    of an error, and a known value narrows across every audited surface.
+    """
+    _admin_session(client, "admin_u")
+    with psycopg.connect(_t34_dsn(), autocommit=True) as conn:
+        _insert_adjustment(
+            conn,
+            actor="admin_u",
+            target="customer_u",
+            source_type="CS_TICKET",
+            reason="类型筛选",
+        )
+
+    unknown = client.get(AUDIT_PATH, params={"event_type": "NOT_A_TYPE"})
+    assert unknown.status_code == 200
+    assert unknown.json()["total"] == 0
+
+    seeded = client.get(AUDIT_PATH, params={"event_type": "ADMIN_ADJUSTMENT"})
+    assert seeded.status_code == 200
+    assert seeded.json()["total"] >= 1
+    assert {item["event_type"] for item in seeded.json()["items"]} == {"ADMIN_ADJUSTMENT"}
+
+
+def _insert_device_event(
+    conn: psycopg.Connection,
+    *,
+    actor: str,
+    target: str,
+) -> str:
+    """Seed one admin device event (needs a batch + code + device chain)."""
+    conn.execute(
+        "INSERT INTO activation_code_batches "
+        "(id, name, face_value_fen, unit_price_fen_snapshot, credits_snapshot, "
+        " quantity, activation_expires_at, status, created_by_user_id) "
+        "VALUES ('audit-batch', 'audit-batch', 1000, 1000, 1, 1, "
+        "'2099-01-01T00:00:00+00:00', 'OPEN', 'admin_u') "
+        "ON CONFLICT (id) DO NOTHING"
+    )
+    conn.execute(
+        "INSERT INTO activation_codes "
+        "(id, batch_id, code_digest, digest_key_version, masked_code, status, "
+        " issued_at, bound_user_id, activated_at) "
+        "VALUES ('audit-code', 'audit-batch', 'digest-audit', 1, 'XS04-****A', "
+        "'ACTIVE', '2026-01-01T00:00:00+00:00', 'customer_u', "
+        "'2026-01-01T00:00:00+00:00') "
+        "ON CONFLICT (id) DO NOTHING"
+    )
+    conn.execute(
+        "INSERT INTO customer_devices "
+        "(id, activation_code_id, user_id, slot_no, display_name, platform, "
+        " fingerprint_hmac, fingerprint_key_version, token_digest, "
+        " token_key_version, status, bound_at) "
+        "VALUES ('audit-device', 'audit-code', %s, 1, '审计设备', 'windows', "
+        "'audit-fp', 1, 'audit-token', 1, 'BOUND', "
+        "'2026-01-01T00:00:00+00:00') "
+        "ON CONFLICT (id) DO NOTHING",
+        (target,),
+    )
+    event_id = str(uuid.uuid4())
+    conn.execute(
+        "INSERT INTO admin_device_events "
+        "(id, event, admin_user_id, target_user_id, device_id, "
+        " activation_code_id, reason, request_id) "
+        "VALUES (%s, 'DEVICE_ADMIN_UNBOUND', %s, %s, 'audit-device', "
+        "'audit-code', %s, %s)",
+        (event_id, actor, target, "运维解绑", str(uuid.uuid4())),
+    )
+    conn.commit()
+    return event_id
+
+
+@pytest.mark.pg
+def test_list_audit_log_unions_all_audited_surfaces(client: TestClient, route_state: str):
+    """A10：一个查询看到调账、设备操作与通用审计行，不再只看一类."""
+    _admin_session(client, "admin_u")
+    with psycopg.connect(_t34_dsn(), autocommit=True) as conn:
+        _insert_adjustment(
+            conn,
+            actor="admin_u",
+            target="customer_u",
+            source_type="CS_TICKET",
+            reason="客户补偿",
+        )
+        _insert_device_event(conn, actor="admin_u", target="customer_u")
+        conn.execute(
+            "INSERT INTO audit_logs "
+            "(id, actor_user_id, action, entity_type, entity_id, metadata_json) "
+            "VALUES (%s, 'admin_u', 'runtime_settings.update', "
+            "'runtime_settings', '1', %s)",
+            (
+                str(uuid.uuid4()),
+                '{"reason": "灰度切换", "request_id": "req-rt-1"}',
+            ),
+        )
+        conn.commit()
+
+    response = client.get(AUDIT_PATH)
+    assert response.status_code == 200
+    data = response.json()
+    types = {item["event_type"] for item in data["items"]}
+    assert "ADMIN_ADJUSTMENT" in types
+    assert "ADMIN_DEVICE_DEVICE_ADMIN_UNBOUND" in types
+    assert "runtime_settings.update" in types
+
+    # 统一形状：每行都有操作者与 request id（可空的为空串）。
+    for item in data["items"]:
+        assert set(item) >= {
+            "event_id",
+            "event_type",
+            "actor_user_id",
+            "actor_username",
+            "target_user_id",
+            "reason",
+            "request_id",
+            "created_at",
+        }
+
+
+@pytest.mark.pg
+def test_list_audit_log_filters_by_target_and_time(client: TestClient, route_state: str):
+    """target_user_id 与时间范围筛选（A10）。"""
+    _admin_session(client, "admin_u")
+    with psycopg.connect(_t34_dsn(), autocommit=True) as conn:
+        _insert_adjustment(
+            conn,
+            actor="admin_u",
+            target="customer_u",
+            source_type="CS_TICKET",
+            reason="目标筛选",
+        )
+
+    by_target = client.get(AUDIT_PATH, params={"target_user_id": "customer_u"})
+    assert by_target.status_code == 200
+    assert by_target.json()["total"] >= 1
+
+    nobody = client.get(AUDIT_PATH, params={"target_user_id": "nobody_u"})
+    assert nobody.status_code == 200
+    assert nobody.json()["total"] == 0
+
+    ranged = client.get(
+        AUDIT_PATH,
+        params={"created_from": "2026-01-01", "created_to": "2099-01-01"},
+    )
+    assert ranged.status_code == 200
+    assert ranged.json()["total"] >= 1
+
+    past_only = client.get(
+        AUDIT_PATH,
+        params={"created_to": "2000-01-01"},
+    )
+    assert past_only.status_code == 200
+    assert past_only.json()["total"] == 0

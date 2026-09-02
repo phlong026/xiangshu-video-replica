@@ -160,7 +160,8 @@ describe("SettingsPanel", () => {
     expect(
       await metaso.findByText("保存失败，请检查必填项与管理员权限。"),
     ).toBeInTheDocument();
-    expect(metaso.getByRole("status")).toHaveTextContent("保存失败");
+    // 失败提示必须是 role="alert"（整改清单 评估登记 6：读屏即时播报）。
+    expect(metaso.getByRole("alert")).toHaveTextContent("保存失败");
   });
 
   it("runs the connection test and surfaces the ok result", async () => {

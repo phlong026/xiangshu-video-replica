@@ -95,9 +95,9 @@ describe("AuditEventsPage", () => {
     ).toBeInTheDocument();
 
     // 21 rows over a 20-row page size expose the pagination controls.
-    expect(screen.getByRole("navigation", { name: "审计分页" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "← 上一页" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "下一页 →" })).toBeEnabled();
+    expect(screen.getByRole("navigation", { name: "分页" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "上一页" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "下一页" })).toBeEnabled();
   });
 
   it("requests offset=20 when moving to the next page", async () => {
@@ -105,7 +105,7 @@ describe("AuditEventsPage", () => {
     render(<AuditEventsPage />);
 
     await screen.findByText("ADMIN_ADJUSTMENT");
-    fireEvent.click(screen.getByRole("button", { name: "下一页 →" }));
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
 
     await screen.findByText("CODE_REVEAL");
     await waitFor(() => {
@@ -116,21 +116,24 @@ describe("AuditEventsPage", () => {
       ).toBe(true);
     });
     expect(screen.getByText("req-audit-21")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "← 上一页" })).toBeEnabled();
-    expect(screen.getByText(/第 2 \/ 2 页/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "上一页" })).toBeEnabled();
+    expect(screen.getByText(/第 2 \/ 2 页（共 21 条）/)).toBeInTheDocument();
   });
 
-  it("sends the actor filter with the audit query", async () => {
+  it("sends the actor filter only on submit, not while typing", async () => {
+    // 整改清单 评估登记 5 的回归锁定：输入不触发请求，提交只发一次。
     const fetchMock = installFetch();
     render(<AuditEventsPage />);
 
     await screen.findByText("ADMIN_ADJUSTMENT");
+    const requestsAfterLoad = fetchMock.mock.calls.length;
+
     fireEvent.change(screen.getByLabelText("操作人 ID"), {
       target: { value: "admin_u" },
     });
-    // Typing already triggers an effect reload (button flips to 加载中…);
-    // wait for it to settle before submitting the filter explicitly.
-    fireEvent.click(await screen.findByRole("button", { name: "筛选" }));
+    expect(fetchMock.mock.calls.length).toBe(requestsAfterLoad);
+
+    fireEvent.click(screen.getByRole("button", { name: "筛选" }));
 
     await screen.findAllByText("admin_u");
     await waitFor(() => {

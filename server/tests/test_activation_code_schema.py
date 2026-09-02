@@ -28,7 +28,7 @@ EXPORTS_TABLE = "activation_code_exports"
 ACTIVATIONS_TABLE = "activation_code_activations"
 EVENTS_TABLE = "activation_code_events"
 
-_HEAD_REVISION = "053_activation_code_archive"
+_HEAD_REVISION = "054_admin_free_grant_adjustments"
 
 
 def _pg_dsn() -> str:

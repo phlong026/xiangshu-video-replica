@@ -624,6 +624,114 @@ def test_expired_export_rejected(catalog_db: psycopg.Connection) -> None:
     assert row is not None and row[0] is None
 
 
+def test_export_error_taxonomy_is_typed_not_text_matched(
+    catalog_db: psycopg.Connection,
+) -> None:
+    """A7（2026-09-02 评估）：路由层按异常类型分派状态码，禁止匹配消息文本.
+
+    服务层改一条错误文案不再可能把 404/409 静默变成 503。
+    """
+    from app.activation_code_service import (
+        ExportAlreadyDownloadedError,
+        ExportKeyUnavailableError,
+        ExportPackageNotFoundError,
+    )
+
+    with pytest.raises(ExportPackageNotFoundError):
+        fetch_export_package(
+            catalog_db,
+            "export-ghost",
+            downloaded_by_user_id="u-admin",
+            aead_keys={1: TEST_AEAD_KEY},
+            download_reason="渠道取件",
+            download_request_id="req-download-ghost",
+        )
+
+    _insert_batch(catalog_db, "batch-tax", quantity=2)
+    generated = generate_batch_codes(
+        catalog_db,
+        "batch-tax",
+        quantity=2,
+        key_version=1,
+        hmac_key=TEST_HMAC_KEY_V1.encode(),
+        actor_user_id="u-admin",
+    )
+    export_id = create_batch_export(
+        catalog_db,
+        "batch-tax",
+        generated,
+        requested_by_user_id="u-admin",
+        ttl_seconds=600,
+        key_version=1,
+        aead_key=TEST_AEAD_KEY,
+    )
+
+    # 密钥版本缺失 → 503 专属类型。
+    with pytest.raises(ExportKeyUnavailableError):
+        fetch_export_package(
+            catalog_db,
+            export_id,
+            downloaded_by_user_id="u-admin",
+            aead_keys={2: TEST_AEAD_KEY},
+            download_reason="渠道取件",
+            download_request_id="req-download-key",
+        )
+
+    # 已下载 → 409 专属类型。
+    fetch_export_package(
+        catalog_db,
+        export_id,
+        downloaded_by_user_id="u-admin",
+        aead_keys={1: TEST_AEAD_KEY},
+        download_reason="渠道取件",
+        download_request_id="req-download-first",
+    )
+    with pytest.raises(ExportAlreadyDownloadedError):
+        fetch_export_package(
+            catalog_db,
+            export_id,
+            downloaded_by_user_id="u-admin",
+            aead_keys={1: TEST_AEAD_KEY},
+            download_reason="渠道取件",
+            download_request_id="req-download-second",
+        )
+
+
+def test_expired_export_error_is_typed(catalog_db: psycopg.Connection) -> None:
+    from app.activation_code_service import ExportExpiredError
+
+    _insert_batch(catalog_db, "batch-exp", quantity=1)
+    generated = generate_batch_codes(
+        catalog_db,
+        "batch-exp",
+        quantity=1,
+        key_version=1,
+        hmac_key=TEST_HMAC_KEY_V1.encode(),
+        actor_user_id="u-admin",
+    )
+    now = datetime.now(UTC).replace(microsecond=0)
+    export_id = create_batch_export(
+        catalog_db,
+        "batch-exp",
+        generated,
+        requested_by_user_id="u-admin",
+        ttl_seconds=60,
+        key_version=1,
+        aead_key=TEST_AEAD_KEY,
+        now=now,
+    )
+    with pytest.raises(ExportExpiredError):
+        fetch_export_package(
+            catalog_db,
+            export_id,
+            downloaded_by_user_id="u-admin",
+            aead_keys={1: TEST_AEAD_KEY},
+            download_reason="渠道取件",
+            download_request_id="req-download-expired-typed",
+            now=now + timedelta(seconds=61),
+        )
+
+
 def test_export_events_recorded(catalog_db: psycopg.Connection) -> None:
     _insert_batch(catalog_db, "batch-1", quantity=3)
     generated = generate_batch_codes(

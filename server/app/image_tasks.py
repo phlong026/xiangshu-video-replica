@@ -30,10 +30,12 @@ from app.first_frames import (
     FirstFrameGenerationPlan,
     FirstFrameGenerationWork,
     FirstFrameQualityInspector,
+    FirstFrameQualityInspectorFailed,
     FirstFrameQualityResult,
     GeneratedImage,
     ImageInput,
     ImageProvider,
+    SceneContactSheetQualityResult,
     StoredFirstFrameCandidates,
     complete_first_frame_generation,
     evaluate_scene_contact_sheet_quality,
@@ -939,6 +941,7 @@ def perform_character_sheet_task(
         costume_description=prepared.costume_description,
     )
     issue_codes: list[str] = []
+    best: tuple[PreparedSimpleCharacterGeneration, SceneContactSheetQualityResult] | None = None
     for attempt in range(1, MAX_SCENE_CONTACT_SHEET_QUALITY_ATTEMPTS + 1):
         generation = prepare_simple_character_generation(
             source_content=prepared.source_content,
@@ -949,23 +952,55 @@ def perform_character_sheet_task(
             costume_description=prepared.costume_description,
             prompt_override=scene_contact_sheet_retry_prompt(base_prompt, issue_codes, attempt),
         )
-        inspection = prepared.quality_inspector.inspect_scene_contact_sheet(
-            source_image=source_image,
-            contact_sheet=GeneratedImage(
-                content=generation.contact_content,
-                content_type=generation.contact_content_type,
-            ),
-            scene_description=prepared.scene_description,
-            costume_description=prepared.costume_description,
-        )
+        try:
+            inspection = prepared.quality_inspector.inspect_scene_contact_sheet(
+                source_image=source_image,
+                contact_sheet=GeneratedImage(
+                    content=generation.contact_content,
+                    content_type=generation.contact_content_type,
+                ),
+                scene_description=prepared.scene_description,
+                costume_description=prepared.costume_description,
+            )
+        except FirstFrameQualityInspectorFailed as exc:
+            # 质检不可用不能销毁已付费的图：直接按“未质检”交付这一轮。
+            logger.warning(
+                "scene contact-sheet QC unavailable; delivering unreviewed sheet",
+                extra={"attempt": attempt, "error_type": type(exc).__name__},
+            )
+            if best is not None:
+                return best[0]
+            return generation
         quality = evaluate_scene_contact_sheet_quality(inspection, attempt=attempt)
         if quality.passed:
             return replace(generation, scene_quality=quality)
+        logger.warning(
+            "scene contact-sheet failed auto QC; keeping the sheet as a labelled candidate",
+            extra={
+                "attempt": attempt,
+                "issue_codes": quality.issue_codes,
+                "identity_consistency_score": quality.inspection.identity_consistency_score,
+                "outfit_match_score": quality.inspection.outfit_match_score,
+                "scene_match_score": quality.inspection.scene_match_score,
+            },
+        )
+        if best is None or _scene_quality_rank(quality) > _scene_quality_rank(best[1]):
+            best = (replace(generation, scene_quality=quality), quality)
         issue_codes = quality.issue_codes
-    raise _task_error(
-        422,
-        "SCENE_LOOK_QUALITY_REJECTED",
-        "场景五视图未通过自动质检，请调整描述后重试。",
+    # 轮次用完仍未通过：交付综合分最高的一轮，质检结论作为标注随版本发布。
+    assert best is not None
+    return best[0]
+
+
+def _scene_quality_rank(quality: SceneContactSheetQualityResult) -> tuple[float, int]:
+    """Rank a failed round by its three scores, breaking ties with fewer issues."""
+
+    inspection = quality.inspection
+    return (
+        inspection.identity_consistency_score
+        + inspection.outfit_match_score
+        + inspection.scene_match_score,
+        -len(quality.issue_codes),
     )
 
 

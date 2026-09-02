@@ -648,6 +648,140 @@ def test_adjustment_internal_scope_for_user_without_activation(
     assert len(_adjustment_audit_rows(INTERNAL_USER_ID)) == 1
 
 
+def test_free_grant_adjustment_records_zero_amount_and_full_ledger(
+    client: TestClient,
+) -> None:
+    """FREE_GRANT（054）：免费条数发放必须如实记 0 金额，但账务闭环完整.
+
+    钱包照增、CHARGE 台账照写、审计行落 FREE_GRANT；按面值计金额会虚构
+    收入，所以 order 的 amount_fen 必须为 0（约束放宽仅限 admin_adjustment）。
+    """
+    admin = _admin_session(client)
+    before_available, before_reserved = _wallet_balance(CUSTOMER_USER_ID)
+    response = _create_adjustment(
+        client,
+        admin,
+        credits=3,
+        source_document_type="FREE_GRANT",
+        source_document_ref="PROMO-2026-09-001",
+        reason="运营活动：新客免费生成条数",
+        key="adj-free-grant-1",
+    )
+    assert response.status_code == 201, response.text
+    payload = response.json()
+    assert int(payload["credits"]) == 3
+    assert int(payload["amount_fen"]) == 0
+    assert payload["source_document_type"] == "FREE_GRANT"
+    assert payload["source_document_ref"] == "PROMO-2026-09-001"
+    assert payload["wallet_balance_after"] == before_available + 3
+
+    order = _order_row(payload["order_id"])
+    assert order[0] == "admin_adjustment"
+    assert order[2] == "PAID"
+    assert order[8] == 0  # amount_fen：免费发放不虚构收入
+    assert order[9] == 3  # credits 照实记账
+
+    charges = _charge_rows(payload["order_id"])
+    assert len(charges) == 1
+    assert charges[0][0] == "CHARGE"
+    assert charges[0][1] == 3  # 钱包照增：免费条数走同一冻结/结算通道
+
+    audit = _adjustment_audit_rows(CUSTOMER_USER_ID)
+    assert len(audit) == 1
+    assert audit[0][4] == "FREE_GRANT"
+    assert audit[0][5] == "PROMO-2026-09-001"
+
+    after_available, after_reserved = _wallet_balance(CUSTOMER_USER_ID)
+    assert after_available == before_available + 3
+    assert after_reserved == before_reserved
+
+
+def test_free_grant_replay_does_not_double_charge(client: TestClient) -> None:
+    """同一幂等键重放 FREE_GRANT：返回原结果，钱包只加一次."""
+    admin = _admin_session(client)
+    before_available, _ = _wallet_balance(CUSTOMER_USER_ID)
+    first = _create_adjustment(
+        client,
+        admin,
+        credits=2,
+        source_document_type="FREE_GRANT",
+        source_document_ref="PROMO-2026-09-002",
+        reason="运营活动：补偿生成失败",
+        key="adj-free-grant-replay",
+    )
+    assert first.status_code == 201, first.text
+
+    replay = _create_adjustment(
+        client,
+        admin,
+        credits=2,
+        source_document_type="FREE_GRANT",
+        source_document_ref="PROMO-2026-09-002",
+        reason="运营活动：补偿生成失败",
+        key="adj-free-grant-replay",
+    )
+    assert replay.status_code == 201, replay.text
+    assert replay.headers.get(REPLAY_HEADER) == "true"
+    assert replay.json()["adjustment_id"] == first.json()["adjustment_id"]
+
+    after_available, _ = _wallet_balance(CUSTOMER_USER_ID)
+    assert after_available == before_available + 2
+
+
+def test_free_grant_still_requires_valid_source_document(client: TestClient) -> None:
+    """FREE_GRANT 不豁免任何写契约：来源单号、credits、原因照常校验."""
+    admin = _admin_session(client)
+    blank_ref = _create_adjustment(
+        client,
+        admin,
+        credits=1,
+        source_document_type="FREE_GRANT",
+        source_document_ref="   ",
+        reason="运营活动",
+        key="adj-free-grant-blank-ref",
+    )
+    assert blank_ref.status_code == 400
+    assert blank_ref.json()["detail"]["code"] == "ADJUSTMENT_VALIDATION_FAILED"
+
+    zero_credits = _create_adjustment(
+        client,
+        admin,
+        credits=0,
+        source_document_type="FREE_GRANT",
+        source_document_ref="PROMO-2026-09-003",
+        reason="运营活动",
+        key="adj-free-grant-zero",
+    )
+    assert zero_credits.status_code == 400
+    assert zero_credits.json()["detail"]["code"] == "ADJUSTMENT_VALIDATION_FAILED"
+
+
+def test_zero_amount_stays_forbidden_for_non_admin_providers(
+    adjustments_dsn: str,
+) -> None:
+    """054 的约束放宽只限 admin_adjustment：zpay 订单 0 金额仍被 DB 拒绝."""
+    with psycopg.connect(_t23_dsn(), autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO users (id, username, display_name, role) "
+            "VALUES ('zero_u', 'zero_u', 'Zero', 'user') ON CONFLICT DO NOTHING"
+        )
+        conn.execute(
+            "INSERT INTO wallets (user_id, available_credits, reserved_credits) "
+            "VALUES ('zero_u', 0, 0) ON CONFLICT DO NOTHING"
+        )
+        with pytest.raises(CheckViolation):
+            conn.execute(
+                "INSERT INTO recharge_orders "
+                "(id, user_id, merchant_order_no, provider, status, pricing_scope, "
+                " base_unit_price_fen_snapshot, charged_unit_price_fen_snapshot, "
+                " min_recharge_fen_snapshot, recharge_step_fen_snapshot, "
+                " amount_fen, credits, paid_at) "
+                "VALUES (%s, 'zero_u', %s, 'zpay', 'PENDING', 'INTERNAL', "
+                "1000, 1000, 10000, 1000, 0, 1, now())",
+                (str(uuid.uuid4()), f"ZP-{uuid.uuid4().hex}"),
+            )
+
+
 def test_admin_cannot_adjust_or_reprice_their_own_account(client: TestClient) -> None:
     admin = _admin_session(client)
 
@@ -999,8 +1133,9 @@ def test_half_committed_placeholder_answers_409_not_500(client: TestClient) -> N
     """A committed placeholder whose response snapshot never landed (the
     envelope's malformed state) must answer 409 on key reuse — never a
     TypeError-turned-500 (the PR review P3)."""
-    from app.admin_activation_routes import _idempotency_key_digest, _request_hash
     from app.admin_customer_routes import AdjustmentRequest
+    from app.admin_write_contract import idempotency_key_digest as _idempotency_key_digest
+    from app.admin_write_contract import request_hash as _request_hash
 
     admin = _admin_session(client)
     key = "adj-halfcommit-1"
@@ -1151,8 +1286,8 @@ def test_list_customers_returns_activated_customers(client: TestClient) -> None:
     assert response.status_code == 200, response.text
     payload = response.json()
     assert payload["total"] == 1
-    assert payload["page"] == 1 and payload["page_size"] == 20
-    customer = payload["customers"][0]
+    assert payload["limit"] == 20 and payload["offset"] == 0
+    customer = payload["items"][0]
     assert customer["user_id"] == CUSTOMER_USER_ID
     assert customer["username"] == "customer_u"
     assert customer["activation_code"] == "XS04-****"
@@ -1203,7 +1338,7 @@ def test_list_customers_aggregates_generation_usage_and_settled_credits(
     response = client.get("/api/control/customers", headers=admin)
 
     assert response.status_code == 200, response.text
-    customer = response.json()["customers"][0]
+    customer = response.json()["items"][0]
     assert customer["generation_total"] == 4
     assert customer["generation_succeeded"] == 1
     assert customer["generation_failed"] == 1
@@ -1224,13 +1359,13 @@ def test_list_customers_supports_pagination_and_username_filter(
     response = client.get("/api/control/customers", params={"username": "nobody"}, headers=admin)
     assert response.status_code == 200, response.text
     assert response.json()["total"] == 0
-    assert response.json()["customers"] == []
+    assert response.json()["items"] == []
     # A page beyond the data is empty but well-formed.
     response = client.get(
-        "/api/control/customers", params={"page": 3, "page_size": 20}, headers=admin
+        "/api/control/customers", params={"limit": 20, "offset": 40}, headers=admin
     )
     assert response.status_code == 200, response.text
-    assert response.json()["customers"] == []
+    assert response.json()["items"] == []
 
 
 def test_list_customers_is_auditor_readable(client: TestClient) -> None:
@@ -1243,6 +1378,76 @@ def test_list_customers_is_auditor_readable(client: TestClient) -> None:
 def test_list_customers_rejects_anonymous(client: TestClient) -> None:
     response = client.get("/api/control/customers")
     assert response.status_code == 401
+
+
+def test_username_filter_escapes_like_wildcards(
+    client: TestClient,
+    adjustments_dsn: str,
+) -> None:
+    """A12（2026-09-02 评估）：用户名筛选中的 %/_ 必须按字面量匹配."""
+    admin = _admin_session(client)
+    # 种一个带下划线的用户名：未转义时 "t_omer" 的 _ 会通配命中 customer_u。
+    with psycopg.connect(_t23_dsn(), autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO users (id, username, display_name, role) "
+            "VALUES ('cust_wild', 'cust_t_omer_x', '通配用户', 'customer') "
+            "ON CONFLICT DO NOTHING"
+        )
+        conn.execute(
+            "INSERT INTO recharge_orders "
+            "(id, user_id, merchant_order_no, provider, status, pricing_scope, "
+            " base_unit_price_fen_snapshot, charged_unit_price_fen_snapshot, "
+            " min_recharge_fen_snapshot, recharge_step_fen_snapshot, amount_fen, credits, paid_at) "
+            "VALUES ('dummy-wild-order', 'cust_wild', 'DUMMY-wild-order', "
+            "'admin_adjustment', 'PAID', 'CUSTOMER_STANDARD', "
+            "1000, 1000, 10000, 1000, 1000, 1, now())"
+        )
+        conn.execute(
+            "INSERT INTO activation_codes "
+            "(id, batch_id, code_digest, digest_key_version, masked_code, status, "
+            " issued_at, bound_user_id, activated_at) "
+            "VALUES ('code-wild', 'batch-cu', 'digest-wild', 1, 'XS04-****W', "
+            "'ACTIVE', '2026-01-01T00:00:00+00:00', 'cust_wild', "
+            "'2026-01-01T00:00:00+00:00')"
+        )
+        conn.execute(
+            "INSERT INTO activation_code_activations "
+            "(id, code_id, user_id, first_device_id, recharge_order_id) "
+            "VALUES ('act-wild', 'code-wild', 'cust_wild', NULL, "
+            "'dummy-wild-order')"
+        )
+
+    # 字面量 "t_omer" 只命中带下划线的用户名，不再通配到 customer_u。
+    response = client.get("/api/control/customers", params={"username": "t_omer"}, headers=admin)
+    assert response.status_code == 200, response.text
+    usernames = {row["username"] for row in response.json()["items"]}
+    assert usernames == {"cust_t_omer_x"}
+
+    # 普通子串匹配不受影响。
+    response = client.get("/api/control/customers", params={"username": "customer"}, headers=admin)
+    assert response.status_code == 200, response.text
+    usernames = {row["username"] for row in response.json()["items"]}
+    assert "customer_u" in usernames
+    assert "cust_t_omer_x" not in usernames
+
+
+def test_value_error_inside_write_is_not_masked_as_503(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A3（2026-09-02 评估）：业务层裸 ValueError 必须浮出为 500，不得伪装 503."""
+    import app.admin_write_contract as admin_write_contract_module
+
+    admin = _admin_session(client)
+
+    def _raise_value_error(*args: object, **kwargs: object) -> None:
+        raise ValueError("simulated business-layer bug")
+
+    # The envelope now lives in the shared contract module — patch its
+    # pg_transaction reference, not the route module's.
+    monkeypatch.setattr(admin_write_contract_module, "pg_transaction", _raise_value_error)
+    with pytest.raises(ValueError, match="simulated business-layer bug"):
+        _create_adjustment(client, admin, credits=1, key="adj-ve-1")
 
 
 def test_admin_can_set_read_and_reset_customer_unit_price(client: TestClient) -> None:
@@ -1349,3 +1554,28 @@ def test_customer_unit_price_requires_an_activated_customer(client: TestClient) 
     )
     assert response.status_code == 404
     assert response.json()["detail"]["code"] == "CUSTOMER_NOT_FOUND"
+
+
+def test_customers_csv_export_is_audited_and_filtered(client: TestClient) -> None:
+    """C6：客户列表导出走服务端，带 A2 审计与筛选."""
+    admin = _admin_session(client)
+    response = client.get(
+        "/api/control/customers.csv",
+        params={"username": "customer"},
+        headers=admin,
+    )
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].startswith("text/csv")
+    assert "username" in response.text
+    assert "customer_u" in response.text
+
+    audit = _fetch_one(
+        "SELECT COUNT(*) FROM audit_logs WHERE action = 'control.export' "
+        "AND entity_id = 'customers'"
+    )
+    assert audit is not None and int(audit[0]) == 1
+
+    # 审计员不可导出（AdminWriter 门）。
+    auditor = _admin_session(client, actor="auditor_u")
+    denied = client.get("/api/control/customers.csv", headers=auditor)
+    assert denied.status_code == 403

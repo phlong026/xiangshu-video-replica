@@ -35,12 +35,14 @@ from datetime import datetime
 import psycopg
 from fastapi import APIRouter, HTTPException, Request, Response
 
-from app.admin_activation_routes import (
+from app.admin_auth_routes import AdminReader, AdminWriter
+from app.admin_write_contract import (
     AdminWriteContract,
     DeferredHTTPWriteError,
-    _write_with_idempotency,
 )
-from app.admin_auth_routes import AdminReader, AdminWriter
+from app.admin_write_contract import (
+    write_with_idempotency as _write_with_idempotency,
+)
 from app.customer_device_service import (
     ADMIN_APPROVE_FIRST_DEVICE_AVAILABLE,
     APPROVE_ALREADY_CONSUMED,
@@ -113,6 +115,11 @@ def list_devices(
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     try:
         with pg_transaction() as conn:
+            total_row = conn.execute(
+                f"SELECT COUNT(*) FROM customer_devices {where}",
+                params,
+            ).fetchone()
+            total = int(total_row[0]) if total_row is not None else 0
             rows = conn.execute(
                 "SELECT id, activation_code_id, user_id, slot_no, display_name, platform, "
                 "status, bound_at, unbound_at, revoked_at "
@@ -137,7 +144,13 @@ def list_devices(
         }
         for row in rows
     ]
-    return {"items": items, "limit": bounded_limit, "offset": bounded_offset}
+    # A5：返回 total，前端不再用"取满一页"启发式翻页。
+    return {
+        "items": items,
+        "total": total,
+        "limit": bounded_limit,
+        "offset": bounded_offset,
+    }
 
 
 # ---------------------------------------------------------------------------

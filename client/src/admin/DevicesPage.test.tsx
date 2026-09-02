@@ -51,6 +51,7 @@ describe("DevicesPage (ADM-02 / T33)", () => {
 
     vi.mocked(adminApi.listDevices).mockResolvedValue({
       items: mockDevices,
+      total: 20,
       limit: 20,
       offset: 0,
     });
@@ -89,6 +90,7 @@ describe("DevicesPage (ADM-02 / T33)", () => {
           revoked_at: null,
         },
       ],
+      total: 2,
       limit: 20,
       offset: 0,
     });
@@ -128,14 +130,16 @@ describe("DevicesPage (ADM-02 / T33)", () => {
 
     vi.mocked(adminApi.listDevices).mockResolvedValue({
       items: mockDevices,
+      total: 41,
       limit: 20,
       offset: 0,
     });
 
     render(<DevicesPage />);
 
+    // A5：服务端返回 total，分页条显示真实页数。
     await waitFor(() => {
-      expect(screen.getByText(/偏移 0 起/)).toBeInTheDocument();
+      expect(screen.getByText("第 1 / 3 页（共 41 条）")).toBeInTheDocument();
     });
 
     const nextPageButton = screen.getByRole("button", { name: "下一页" });
@@ -156,7 +160,7 @@ describe("DevicesPage (ADM-02 / T33)", () => {
         slot_no: 1,
         display_name: "Active Device",
         platform: "ios",
-        status: "active",
+        status: "BOUND",
         bound_at: "2026-08-24T10:00:00Z",
         unbound_at: null,
         revoked_at: null,
@@ -168,7 +172,7 @@ describe("DevicesPage (ADM-02 / T33)", () => {
         slot_no: 2,
         display_name: "Revoked Device",
         platform: "ios",
-        status: "revoked",
+        status: "REVOKED",
         bound_at: "2026-08-24T09:00:00Z",
         unbound_at: null,
         revoked_at: "2026-08-24T10:00:00Z",
@@ -177,21 +181,25 @@ describe("DevicesPage (ADM-02 / T33)", () => {
 
     vi.mocked(adminApi.listDevices).mockResolvedValue({
       items: mockDevices,
+      total: 20,
       limit: 20,
       offset: 0,
     });
 
     render(<DevicesPage />);
 
+    // 设备 REVOKED 统一译作"已强制退出"（与操作动词一致），不再出现"已退出"。
     await waitFor(() => {
-      expect(screen.getByText("活跃")).toBeInTheDocument();
-      expect(screen.getAllByText("已退出").length).toBeGreaterThan(0);
+      expect(screen.getByText("已绑定")).toBeInTheDocument();
+      // 表格徽章与概览卡片各出现一次。
+      expect(screen.getAllByText("已强制退出").length).toBeGreaterThan(0);
     });
   });
 
   it("shows empty state when no devices exist", async () => {
     vi.mocked(adminApi.listDevices).mockResolvedValue({
       items: [],
+      total: 0,
       limit: 20,
       offset: 0,
     });
@@ -233,6 +241,7 @@ describe("DevicesPage (ADM-02 / T33)", () => {
 
     vi.mocked(adminApi.listDevices).mockResolvedValue({
       items: mockDevices,
+      total: 20,
       limit: 20,
       offset: 0,
     });
@@ -261,6 +270,7 @@ describe("DevicesPage (ADM-02 / T33)", () => {
           revoked_at: null,
         },
       ],
+      total: 2,
       limit: 20,
       offset: 0,
     });

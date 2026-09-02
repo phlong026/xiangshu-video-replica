@@ -106,6 +106,22 @@ class ActivationExportError(ActivationCodeError):
     """Raised when an export package cannot be read, was used or expired."""
 
 
+class ExportPackageNotFoundError(ActivationExportError):
+    """The export id does not exist (maps to 404 at the route layer)."""
+
+
+class ExportAlreadyDownloadedError(ActivationExportError):
+    """The one-time package was already downloaded (maps to 409)."""
+
+
+class ExportExpiredError(ActivationExportError):
+    """The package outlived its TTL (maps to 409)."""
+
+
+class ExportKeyUnavailableError(ActivationExportError):
+    """The AEAD key version for this package is not configured (maps to 503)."""
+
+
 @dataclass(frozen=True)
 class GeneratedCode:
     """One freshly minted code: plaintext only in memory, never persisted."""
@@ -534,16 +550,16 @@ def fetch_export_package(
         (export_id,),
     ).fetchone()
     if row is None:
-        raise ActivationExportError("unknown activation code export")
+        raise ExportPackageNotFoundError("unknown activation code export")
     batch_id, ciphertext, key_version, expires_at, downloaded_at = row
     if downloaded_at is not None:
-        raise ActivationExportError("export package was already downloaded")
+        raise ExportAlreadyDownloadedError("export package was already downloaded")
     current = now if now is not None else datetime.now(UTC)
     if datetime.fromisoformat(expires_at) <= current:
-        raise ActivationExportError("export package has expired")
+        raise ExportExpiredError("export package has expired")
     key = aead_keys.get(key_version)
     if key is None:
-        raise ActivationExportError(f"AEAD key for key version {key_version} is not available")
+        raise ExportKeyUnavailableError(f"AEAD key for key version {key_version} is not available")
     codes = decrypt_code_package(ciphertext, key=key, batch_id=batch_id)
     updated = conn.execute(
         "UPDATE activation_code_exports "
@@ -559,7 +575,7 @@ def fetch_export_package(
         ),
     ).rowcount
     if updated != 1:
-        raise ActivationExportError("export package was already downloaded")
+        raise ExportAlreadyDownloadedError("export package was already downloaded")
     return codes
 
 

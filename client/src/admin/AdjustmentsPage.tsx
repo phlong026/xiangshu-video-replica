@@ -1,10 +1,16 @@
 import { useCallback, useEffect, useState } from "react";
 
+import { type AdjustmentListItem, listAdminAdjustments } from "../api.admin";
+import { DataTable } from "./ui/DataTable";
+import { PageBanner } from "./ui/PageBanner";
+import { Pagination } from "./ui/Pagination";
+import { StatusBadge } from "./ui/StatusBadge";
 import {
-  type AdjustmentListItem,
-  AdminAdjustmentError,
-  listAdminAdjustments,
-} from "../api.admin";
+  ADJUSTMENT_SOURCE_LABELS,
+  formatDateTime,
+  formatFen,
+  labelFrom,
+} from "./ui/vocabulary";
 
 /**
  * T33 — adjustment history for a specific customer.
@@ -35,11 +41,11 @@ export function AdjustmentsPage({ userId }: { userId: string }) {
       setAdjustments(response.items);
       setTotal(response.total);
     } catch (err) {
-      if (err instanceof AdminAdjustmentError) {
-        setError(`加载失败：${err.message}`);
-      } else {
-        setError("加载失败：未知错误");
-      }
+      setError(
+        err instanceof Error && err.message
+          ? `加载失败：${err.message}`
+          : "加载失败：未知错误",
+      );
     } finally {
       setLoading(false);
     }
@@ -48,33 +54,6 @@ export function AdjustmentsPage({ userId }: { userId: string }) {
   useEffect(() => {
     loadAdjustments();
   }, [loadAdjustments]);
-
-  const handleNextPage = () => {
-    if (offset + pageSize < total) {
-      setOffset(offset + pageSize);
-    }
-  };
-
-  const handlePrevPage = () => {
-    if (offset > 0) {
-      setOffset(Math.max(0, offset - pageSize));
-    }
-  };
-
-  const totalPages = Math.ceil(total / pageSize);
-  const currentPage = Math.floor(offset / pageSize) + 1;
-
-  const sourceDocumentLabels: Record<string, string> = {
-    CS_TICKET: "客服工单",
-    REFUND_APPROVAL: "退款审批",
-    COMPENSATION_APPROVAL: "补偿审批",
-    LEDGER_CORRECTION: "账本更正",
-  };
-
-  const formatAmount = (amountFen: number): string => {
-    const yuan = amountFen / 100;
-    return `¥${yuan.toFixed(2)}`;
-  };
 
   return (
     <div className="adjustments-page">
@@ -85,7 +64,7 @@ export function AdjustmentsPage({ userId }: { userId: string }) {
 
       {loading && <div className="loading">加载中...</div>}
 
-      {error && <div className="error">{error}</div>}
+      {error ? <PageBanner tone="error">{error}</PageBanner> : null}
 
       {!loading && !error && adjustments.length === 0 && (
         <div className="empty-state">暂无调账记录</div>
@@ -93,59 +72,46 @@ export function AdjustmentsPage({ userId }: { userId: string }) {
 
       {!loading && !error && adjustments.length > 0 && (
         <>
-          <table className="adjustments-table">
-            <thead>
-              <tr>
+          <DataTable
+            ariaLabel="调账历史列表"
+            headers={
+              <>
                 <th>来源单类型</th>
                 <th>来源单编号</th>
                 <th>原因</th>
                 <th>金额</th>
-                <th>积分</th>
+                <th>条数</th>
                 <th>时间</th>
+              </>
+            }
+          >
+            {adjustments.map((adj) => (
+              <tr key={adj.adjustment_id}>
+                <td>
+                  <StatusBadge tone="info">
+                    {labelFrom(
+                      ADJUSTMENT_SOURCE_LABELS,
+                      adj.source_document_type,
+                    )}
+                  </StatusBadge>
+                </td>
+                <td>
+                  <code>{adj.source_document_ref}</code>
+                </td>
+                <td>{adj.reason}</td>
+                <td className="amount">{formatFen(adj.amount_fen)}</td>
+                <td>{adj.credits}</td>
+                <td>{formatDateTime(adj.created_at)}</td>
               </tr>
-            </thead>
-            <tbody>
-              {adjustments.map((adj) => (
-                <tr key={adj.adjustment_id}>
-                  <td>
-                    <span
-                      className={`source-badge source-${adj.source_document_type}`}
-                    >
-                      {sourceDocumentLabels[adj.source_document_type] ||
-                        adj.source_document_type}
-                    </span>
-                  </td>
-                  <td>
-                    <code>{adj.source_document_ref}</code>
-                  </td>
-                  <td>{adj.reason}</td>
-                  <td className="amount">{formatAmount(adj.amount_fen)}</td>
-                  <td>{adj.credits}</td>
-                  <td>{new Date(adj.created_at).toLocaleString("zh-CN")}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+            ))}
+          </DataTable>
 
-          <div className="pagination">
-            <button
-              type="button"
-              onClick={handlePrevPage}
-              disabled={offset === 0}
-            >
-              上一页
-            </button>
-            <span>
-              第 {currentPage} 页 / 共 {totalPages} 页（共 {total} 条记录）
-            </span>
-            <button
-              type="button"
-              onClick={handleNextPage}
-              disabled={offset + pageSize >= total}
-            >
-              下一页
-            </button>
-          </div>
+          <Pagination
+            limit={pageSize}
+            offset={offset}
+            total={total}
+            onPageChange={setOffset}
+          />
         </>
       )}
     </div>

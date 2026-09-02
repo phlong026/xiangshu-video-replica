@@ -35,6 +35,7 @@ describe("AdminActivationSection", () => {
     );
 
     expect(screen.getByText(/审计员只读/)).toBeInTheDocument();
-    expect(screen.getAllByText(/当前为只读模式/)).toHaveLength(2);
+    // 批次生成、码列表、发放登记三个子页面各显示一条只读提示。
+    expect(screen.getAllByText(/当前为只读模式/)).toHaveLength(3);
   });
 });

@@ -205,9 +205,16 @@ export function CharacterLibrary({
         if (!active || !task) {
           return;
         }
+        // 恢复接口不区分任务类型：场景造型任务产出的是场景五视图，
+        // 文案不能冒充人物基准多视图。
+        const taskNoun = task.operation === "SCENE" ? "场景造型" : "人物多视图";
         if (task.status === "SUCCEEDED") {
           clearPendingGeneration();
-          setMessage(`人物“${task.display_name}”多视图已生成。`);
+          setMessage(
+            task.operation === "SCENE"
+              ? `场景造型“${task.display_name}”已生成，请在人物卡片的“场景造型”页查看。`
+              : `人物“${task.display_name}”多视图已生成。`,
+          );
           // The first load may race the worker's final commit. Always reload after
           // observing SUCCEEDED so a completed character cannot stay invisible.
           await loadLibrary();
@@ -224,7 +231,7 @@ export function CharacterLibrary({
               task.error_message ??
               (task.status === "SUBMISSION_UNCERTAIN"
                 ? "云端提交结果暂时无法确认，请稍后重试。"
-                : "人物生成失败，请重新提交。"),
+                : `${taskNoun}生成失败，请重新提交。`),
             status: "error",
           });
           return;
@@ -234,7 +241,9 @@ export function CharacterLibrary({
           progress: task.status === "RUNNING" ? 58 : 18,
           stage:
             task.status === "RUNNING"
-              ? "正在云端生成多视角拼合图"
+              ? task.operation === "SCENE"
+                ? "正在云端生成场景造型五视图"
+                : "正在云端生成多视角拼合图"
               : "已进入云端生成队列",
           status: "working",
         });
@@ -243,7 +252,11 @@ export function CharacterLibrary({
           return;
         }
         clearPendingGeneration();
-        setMessage(`人物“${task.display_name}”多视图已生成。`);
+        setMessage(
+          task.operation === "SCENE"
+            ? `场景造型“${task.display_name}”已生成，请在人物卡片的“场景造型”页查看。`
+            : `人物“${task.display_name}”多视图已生成。`,
+        );
         await loadLibrary();
       } catch (recoveryError) {
         if (active) {

@@ -2,15 +2,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import secrets
 import subprocess
 import sys
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Annotated
 
+import psycopg
 import pytest
+from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
-from app.auth import get_database
+from app.auth import CurrentUser, get_current_user, get_database
 from app.db import connect_database, initialize_database
 from app.db_portable import BusinessConnection
 from app.main import app
@@ -193,3 +198,107 @@ def test_unset_auth_mode_fails_closed_even_when_legacy_identities_exist(
 
     assert response.status_code == 401
     assert response.json()["detail"]["code"] == "AUTH_TOKEN_REQUIRED"
+
+
+# ---------------------------------------------------------------------------
+# A1（2026-09-02 admin-console assessment）: customer-production lane must not
+# accept internal access tokens on business routes — otherwise one internal
+# Bearer walks past the /api/control admin-session + CSRF + auditor gates.
+# ---------------------------------------------------------------------------
+
+A1_DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
+A1_DB_NAME = "a1_internal_token_lane_test"
+A1_SKIP = "PostgreSQL fixture not reachable; start it via scripts/pg-fixture.sh start"
+
+
+def _a1_base_dsn() -> str:
+    return os.environ.get("TEST_POSTGRESQL_URL", A1_DEFAULT_DSN)
+
+
+def _a1_dsn() -> str:
+    return _a1_base_dsn().rsplit("/", 1)[0] + f"/{A1_DB_NAME}"
+
+
+@pytest.fixture(scope="module")
+def a1_dsn() -> Iterator[str]:
+    from alembic import command
+    from alembic.config import Config
+
+    try:
+        probe = psycopg.connect(_a1_base_dsn(), connect_timeout=3)
+        probe.close()
+    except Exception:
+        pytest.skip(A1_SKIP)
+    with psycopg.connect(_a1_base_dsn().rsplit("/", 1)[0] + "/postgres", autocommit=True) as conn:
+        conn.execute(f'DROP DATABASE IF EXISTS "{A1_DB_NAME}" WITH (FORCE)')
+        conn.execute(f'CREATE DATABASE "{A1_DB_NAME}"')
+    server_dir = Path(__file__).resolve().parent.parent
+    config = Config(str(server_dir / "alembic.ini"))
+    config.set_main_option("script_location", str(server_dir / "migrations"))
+    config.set_main_option(
+        "sqlalchemy.url", _a1_dsn().replace("postgresql://", "postgresql+psycopg://")
+    )
+    command.upgrade(config, "head")
+    try:
+        yield _a1_dsn()
+    finally:
+        with psycopg.connect(
+            _a1_base_dsn().rsplit("/", 1)[0] + "/postgres", autocommit=True
+        ) as conn:
+            conn.execute(f'DROP DATABASE IF EXISTS "{A1_DB_NAME}" WITH (FORCE)')
+
+
+def _a1_probe_app() -> FastAPI:
+    probe = FastAPI()
+
+    @probe.get("/whoami")
+    def whoami(user: Annotated[CurrentUser, Depends(get_current_user)]) -> dict[str, str]:
+        return {"id": user.id, "role": user.role}
+
+    return probe
+
+
+def _seed_internal_token(dsn: str) -> str:
+    raw_token = "a1-internal-token-" + secrets.token_urlsafe(24)
+    digest = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+    token_id = "a1-token-" + secrets.token_urlsafe(8)
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO users (id, username, display_name, role) "
+            "VALUES ('internal_admin_u', 'internal_admin_u', 'Internal Admin', 'admin') "
+            "ON CONFLICT (id) DO NOTHING"
+        )
+        conn.execute(
+            "INSERT INTO internal_access_tokens (id, user_id, token_digest) "
+            "VALUES (%s, 'internal_admin_u', %s) "
+            "ON CONFLICT (id) DO NOTHING",
+            (token_id, digest),
+        )
+    return raw_token
+
+
+@pytest.mark.parametrize("customer_production", ["true", "false"])
+def test_customer_production_lane_refuses_internal_bearer_on_business_routes(
+    a1_dsn: str,
+    monkeypatch: pytest.MonkeyPatch,
+    customer_production: str,
+) -> None:
+    monkeypatch.setenv("VIDEO_REPLICA_DATABASE_URL", a1_dsn)
+    monkeypatch.setenv("VIDEO_REPLICA_CUSTOMER_PRODUCTION", customer_production)
+
+    raw_token = _seed_internal_token(a1_dsn)
+    client = TestClient(_a1_probe_app())
+
+    response = client.get("/whoami", headers={"Authorization": f"Bearer {raw_token}"})
+
+    if customer_production == "true":
+        # 内部令牌不再能以 admin 身份走业务路由。测试环境未配客户会话密钥，
+        # 会话校验以 503 fail-closed；生产配齐密钥时同一拒绝是 401。两者都
+        # 不是"以 internal_admin_u 身份 200"。
+        assert response.status_code in (401, 503), response.text
+        body = response.json()
+        assert body.get("id") != "internal_admin_u", response.text
+    else:
+        # 非客户生产的 PG 通道（内部工具）保留内部令牌路径。
+        assert response.status_code == 200, response.text
+        assert response.json() == {"id": "internal_admin_u", "role": "admin"}

@@ -766,3 +766,42 @@ def _nginx_location(config: str, marker: str) -> str:
     start = config.index(marker)
     end = config.index("\n    }", start)
     return config[start:end]
+
+
+def test_control_ledger_exports_and_reconciliation_are_audited(
+    internal_admin_context: tuple[TestClient, Path, dict[str, str], dict[str, str]],
+) -> None:
+    """A2（2026-09-02 评估）：账务导出与对账读必须留下操作者审计行."""
+    client, db_path, control_headers, _ = internal_admin_context
+
+    summary = client.get("/api/control/billing-reconciliation", headers=control_headers)
+    orders_csv = client.get("/api/control/recharge-orders.csv", headers=control_headers)
+    ledger_csv = client.get("/api/control/wallet-transactions.csv", headers=control_headers)
+    assert summary.status_code == 200
+    assert orders_csv.status_code == 200
+    assert ledger_csv.status_code == 200
+
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        rows = conn.execute(
+            "SELECT action, entity_id FROM audit_logs "
+            "WHERE action IN ('control.export', 'control.reconciliation.read') "
+            "ORDER BY action, entity_id"
+        ).fetchall()
+
+    assert dict(rows).get("control.export") is not None
+    actions = [str(row[0]) for row in rows]
+    assert actions.count("control.export") == 2
+    assert actions.count("control.reconciliation.read") == 1
+    export_entities = sorted(str(row[1]) for row in rows if str(row[0]) == "control.export")
+    assert export_entities == ["recharge_orders", "wallet_transactions"]
+
+
+def test_control_ledger_export_rate_limit_dimension_is_registered() -> None:
+    from app.security_rate_limit import (
+        DIMENSION_CONTROL_EXPORT_ACCOUNT,
+        RATE_LIMIT_DIMENSIONS,
+        control_export_account_limit,
+    )
+
+    assert DIMENSION_CONTROL_EXPORT_ACCOUNT in RATE_LIMIT_DIMENSIONS
+    assert control_export_account_limit() >= 1

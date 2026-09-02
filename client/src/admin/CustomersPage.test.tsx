@@ -14,6 +14,7 @@ vi.mock("../api.admin", () => ({
   listCustomers: vi.fn(),
   fetchCustomerUnitPrice: vi.fn(),
   updateCustomerUnitPrice: vi.fn(),
+  createCustomerAdjustment: vi.fn(),
   listAdminAdjustments: vi.fn().mockResolvedValue({
     items: [],
     total: 0,
@@ -30,6 +31,14 @@ vi.mock("../api.admin", () => ({
     constructor(message: string) {
       super(message);
       this.name = "AdminAdjustmentError";
+    }
+  },
+  AdminActivationError: class extends Error {
+    readonly status: number | undefined;
+    constructor(message: string, status?: number) {
+      super(message);
+      this.name = "AdminActivationError";
+      this.status = status;
     }
   },
 }));
@@ -74,10 +83,10 @@ describe("CustomersPage (ADM-02 / T33)", () => {
     ];
 
     vi.mocked(adminApi.listCustomers).mockResolvedValue({
-      customers: mockCustomers,
+      items: mockCustomers,
       total: 2,
-      page: 1,
-      page_size: 20,
+      limit: 20,
+      offset: 0,
     });
 
     render(<CustomersPage />);
@@ -145,33 +154,33 @@ describe("CustomersPage (ADM-02 / T33)", () => {
     }));
 
     vi.mocked(adminApi.listCustomers).mockResolvedValue({
-      customers: mockCustomers,
+      items: mockCustomers,
       total: 50,
-      page: 1,
-      page_size: 20,
+      limit: 20,
+      offset: 0,
     });
 
     render(<CustomersPage />);
 
     await waitFor(() => {
-      expect(screen.getByText(/第 1 页/)).toBeInTheDocument();
+      expect(screen.getByText("第 1 / 3 页（共 50 位）")).toBeInTheDocument();
     });
 
     const nextPageButton = screen.getByRole("button", { name: "下一页" });
     fireEvent.click(nextPageButton);
 
     expect(adminApi.listCustomers).toHaveBeenCalledWith({
-      page: 2,
-      page_size: 20,
+      limit: 20,
+      offset: 20,
     });
   });
 
   it("supports filtering by username", async () => {
     vi.mocked(adminApi.listCustomers).mockResolvedValue({
-      customers: [],
+      items: [],
       total: 0,
-      page: 1,
-      page_size: 20,
+      limit: 20,
+      offset: 0,
     });
 
     render(<CustomersPage />);
@@ -181,15 +190,15 @@ describe("CustomersPage (ADM-02 / T33)", () => {
     fireEvent.click(screen.getByRole("button", { name: "筛选" }));
 
     expect(adminApi.listCustomers).toHaveBeenCalledWith({
-      page: 1,
-      page_size: 20,
+      limit: 20,
+      offset: 0,
       username_filter: "customer-1",
     });
   });
 
   it("opens the adjustment history for the selected customer", async () => {
     vi.mocked(adminApi.listCustomers).mockResolvedValue({
-      customers: [
+      items: [
         {
           user_id: "user-1",
           username: "customer-1",
@@ -199,8 +208,8 @@ describe("CustomersPage (ADM-02 / T33)", () => {
         },
       ],
       total: 1,
-      page: 1,
-      page_size: 20,
+      limit: 20,
+      offset: 0,
     });
 
     render(<CustomersPage />);
@@ -219,7 +228,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
 
   it("expands a customer row to reveal operational details and collapse again", async () => {
     vi.mocked(adminApi.listCustomers).mockResolvedValue({
-      customers: [
+      items: [
         {
           user_id: "user-1",
           username: "customer-1",
@@ -235,8 +244,8 @@ describe("CustomersPage (ADM-02 / T33)", () => {
         },
       ],
       total: 1,
-      page: 1,
-      page_size: 20,
+      limit: 20,
+      offset: 0,
     });
 
     render(<CustomersPage />);
@@ -282,7 +291,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
 
   it("loads and updates the customer's effective recharge price", async () => {
     vi.mocked(adminApi.listCustomers).mockResolvedValue({
-      customers: [
+      items: [
         {
           user_id: "user-1",
           username: "customer-1",
@@ -292,8 +301,8 @@ describe("CustomersPage (ADM-02 / T33)", () => {
         },
       ],
       total: 1,
-      page: 1,
-      page_size: 20,
+      limit: 20,
+      offset: 0,
     });
     vi.mocked(adminApi.updateCustomerUnitPrice).mockResolvedValue({
       user_id: "user-1",
@@ -309,14 +318,18 @@ describe("CustomersPage (ADM-02 / T33)", () => {
     render(<CustomersPage />);
     fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
 
-    expect(await screen.findByText(/当前 10.00 元\/条/)).toBeInTheDocument();
+    expect(await screen.findByText(/当前 ¥10.00 \/ 条/)).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("售价（元/条）"), {
       target: { value: "8.8" },
     });
-    fireEvent.change(screen.getByLabelText("修改原因"), {
+    fireEvent.click(screen.getByRole("button", { name: "保存客户售价" }));
+
+    // 改价确认对话框：原因必填，随写请求一起提交。
+    await screen.findByRole("dialog", { name: "修改客户售价" });
+    fireEvent.change(screen.getByLabelText("操作原因"), {
       target: { value: "客户合同价" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "保存客户售价" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认保存" }));
 
     await waitFor(() => {
       expect(adminApi.updateCustomerUnitPrice).toHaveBeenCalledWith(
@@ -328,9 +341,11 @@ describe("CustomersPage (ADM-02 / T33)", () => {
     expect(await screen.findByText("客户售价已保存")).toBeInTheDocument();
   });
 
-  it("keeps customer pricing read-only for auditors", async () => {
+  it("grants free credits through the audited FREE_GRANT adjustment", async () => {
+    // 免费条数发放（FREE_GRANT / 054）：来源单号必填，高危对话框确认，
+    // 服务端调用走 T23 调账闭环且 source_document_type 固定为 FREE_GRANT。
     vi.mocked(adminApi.listCustomers).mockResolvedValue({
-      customers: [
+      items: [
         {
           user_id: "user-1",
           username: "customer-1",
@@ -340,8 +355,75 @@ describe("CustomersPage (ADM-02 / T33)", () => {
         },
       ],
       total: 1,
-      page: 1,
-      page_size: 20,
+      limit: 20,
+      offset: 0,
+    });
+    vi.mocked(adminApi.createCustomerAdjustment).mockResolvedValue({
+      adjustment_id: "adj-free-1",
+      order_id: "order-free-1",
+      credits: "10",
+      amount_fen: "0",
+      pricing_scope: "CUSTOMER_STANDARD",
+      wallet_balance_after: 60,
+      source_document_type: "FREE_GRANT",
+      source_document_ref: "PROMO-2026-09-001",
+      request_id: "request-free-grant",
+    });
+
+    render(<CustomersPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+
+    fireEvent.change(await screen.findByLabelText("发放条数"), {
+      target: { value: "10" },
+    });
+    fireEvent.change(screen.getByLabelText("来源单号"), {
+      target: { value: "PROMO-2026-09-001" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发放免费条数" }));
+
+    // 高危对话框：原因必填 + 我已知晓勾选。
+    await screen.findByRole("dialog", { name: "发放免费条数" });
+    fireEvent.click(screen.getByRole("button", { name: "确认发放" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "请填写操作原因",
+    );
+    expect(adminApi.createCustomerAdjustment).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByLabelText("操作原因"), {
+      target: { value: "新客活动发放" },
+    });
+    fireEvent.click(screen.getByLabelText("我已知晓该操作的影响"));
+    fireEvent.click(screen.getByRole("button", { name: "确认发放" }));
+
+    await waitFor(() => {
+      expect(adminApi.createCustomerAdjustment).toHaveBeenCalledWith(
+        "user-1",
+        {
+          sourceDocumentType: "FREE_GRANT",
+          sourceDocumentRef: "PROMO-2026-09-001",
+          credits: 10,
+        },
+        "新客活动发放",
+        expect.any(String),
+      );
+    });
+    expect(await screen.findByText(/已发放 10 条免费条数/)).toBeInTheDocument();
+  });
+
+  it("keeps customer pricing read-only for auditors", async () => {
+    vi.mocked(adminApi.listCustomers).mockResolvedValue({
+      items: [
+        {
+          user_id: "user-1",
+          username: "customer-1",
+          created_at: "2026-08-24T10:00:00Z",
+          activation_code: "ABC-123",
+          status: "active",
+        },
+      ],
+      total: 1,
+      limit: 20,
+      offset: 0,
     });
 
     render(<CustomersPage readOnly />);
@@ -355,10 +437,10 @@ describe("CustomersPage (ADM-02 / T33)", () => {
 
   it("shows empty state when no customers exist", async () => {
     vi.mocked(adminApi.listCustomers).mockResolvedValue({
-      customers: [],
+      items: [],
       total: 0,
-      page: 1,
-      page_size: 20,
+      limit: 20,
+      offset: 0,
     });
 
     render(<CustomersPage />);
@@ -387,10 +469,10 @@ describe("CustomersPage (ADM-02 / T33)", () => {
     ];
 
     vi.mocked(adminApi.listCustomers).mockResolvedValue({
-      customers: mockCustomers,
+      items: mockCustomers,
       total: 2,
-      page: 1,
-      page_size: 20,
+      limit: 20,
+      offset: 0,
     });
 
     render(<CustomersPage />);

@@ -63,8 +63,10 @@ MAX_PROVIDER_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_QUALITY_IMAGE_BYTES = 12 * 1024 * 1024
 MAX_QUALITY_REQUEST_IMAGE_BYTES = 32 * 1024 * 1024
 SOURCE_FRAME_QUALITY_TIMEOUT_SECONDS = 8.0
-MAX_FIRST_FRAME_QUALITY_ATTEMPTS = 3
-MAX_SCENE_CONTACT_SHEET_QUALITY_ATTEMPTS = 3
+# 质检是标注不是闸门：先出图后质检，最多自动补做一轮；未通过的候选照样
+# 发布给用户，由人工确认环节决定是否使用。
+MAX_FIRST_FRAME_QUALITY_ATTEMPTS = 2
+MAX_SCENE_CONTACT_SHEET_QUALITY_ATTEMPTS = 2
 MIN_FIRST_FRAME_IDENTITY_SCORE = 0.78
 MIN_FIRST_FRAME_RECONSTRUCTION_SCORE = 0.75
 MIN_FIRST_FRAME_OUTFIT_SCORE = 0.7
@@ -1619,7 +1621,13 @@ def perform_first_frame_generation(
     archive_generated: Callable[[list[GeneratedImage], int], list[GeneratedImage]] | None = None,
     checkpoint_candidates: Callable[[list[GeneratedImage]], None] | None = None,
 ) -> list[GeneratedImage]:
-    """Generate, semantically verify and repair candidates outside the DB fence."""
+    """Generate candidates outside the DB fence and label them with quality verdicts.
+
+    Every generated candidate is returned — including ones that failed
+    inspection — so paid provider output always reaches archiving and
+    publication. Quality verdicts travel with each candidate as annotations;
+    the human confirmation step owns the final gate.
+    """
 
     inspector = quality_inspector or FakeFirstFrameQualityInspector()
     try:
@@ -1640,18 +1648,19 @@ def perform_first_frame_generation(
         )
 
     candidates = list(resumed_candidates or [])
-    accepted: list[GeneratedImage] = []
     retry_issue_codes: list[str] = []
     for quality_attempt in range(1, MAX_FIRST_FRAME_QUALITY_ATTEMPTS + 1):
         attempt_candidates = [
             candidate for candidate in candidates if candidate.quality_attempt == quality_attempt
         ]
-        for candidate in attempt_candidates:
-            if candidate.quality is not None and candidate.quality.passed:
-                accepted.append(candidate)
-        remaining = work.quantity - len(accepted)
+        passed_count = sum(
+            1
+            for candidate in candidates
+            if candidate.quality is not None and candidate.quality.passed
+        )
+        remaining = work.quantity - passed_count
         if remaining <= 0:
-            return accepted
+            return candidates
         if not attempt_candidates:
             prompt = quality_retry_prompt(
                 work.effective_prompt,
@@ -1725,16 +1734,12 @@ def perform_first_frame_generation(
             candidates[candidate_position] = inspected
             if checkpoint_candidates is not None:
                 checkpoint_candidates(candidates)
-            if quality.passed:
-                accepted.append(inspected)
-            else:
+            if not quality.passed:
                 retry_issue_codes.extend(quality.issue_codes)
 
-    raise first_frame_error(
-        422,
-        "FIRST_FRAME_QUALITY_REJECTED",
-        "候选首帧连续三轮未通过整身人物重构质检，已停止进入视频生成。",
-    )
+    # 轮次用完仍未凑满通过数量：返回全部候选而不是丢弃。图已付费，质检
+    # 结论作为标注随候选发布，是否采用由人工确认决定。
+    return candidates
 
 
 def store_first_frame_generation(
@@ -2019,6 +2024,7 @@ def confirm_first_frame(
     project_id: str,
     first_frame_asset_id: str,
     actor: CurrentUser,
+    allow_unverified: bool = False,
 ) -> sqlite3.Row:
     require_not_auditor(
         conn,
@@ -2048,11 +2054,14 @@ def confirm_first_frame(
             422, "FIRST_FRAME_CANDIDATE_NOT_FOUND", "Select a candidate from the latest set."
         )
     quality = candidate.get("quality")
-    if not isinstance(quality, dict) or quality.get("passed") is not True:
+    quality_passed = isinstance(quality, dict) and quality.get("passed") is True
+    if not quality_passed and not allow_unverified:
+        # 质检未通过或未质检的候选仍可确认，但必须显式携带覆盖标记——
+        # 人工决策要留下与自动质检同级的证据。
         raise first_frame_error(
             409,
             "FIRST_FRAME_QUALITY_NOT_VERIFIED",
-            "该首帧没有通过当前版本自动质检，请重新生成后再确认。",
+            "该首帧没有通过当前版本自动质检；如需采用，请在确认时显式覆盖。",
         )
     asset = require_asset_access(
         conn,
@@ -2065,17 +2074,20 @@ def confirm_first_frame(
             422, "FIRST_FRAME_CANDIDATE_NOT_FOUND", "The selected first frame is invalid."
         )
 
+    selection_payload: dict[str, object] = {
+        "schema_version": FIRST_FRAME_SCHEMA_VERSION,
+        "first_frame_candidates_version_id": str(candidate_version["id"]),
+        "first_frame_asset_id": first_frame_asset_id,
+    }
+    if not quality_passed:
+        selection_payload["quality_override"] = True
     row = insert_version(
         conn,
         project_id=project_id,
         asset_id=first_frame_asset_id,
         kind=FIRST_FRAME_SELECTION_KIND,
         created_by_user_id=actor.id,
-        payload={
-            "schema_version": FIRST_FRAME_SCHEMA_VERSION,
-            "first_frame_candidates_version_id": str(candidate_version["id"]),
-            "first_frame_asset_id": first_frame_asset_id,
-        },
+        payload=selection_payload,
     )
     write_audit(
         conn,

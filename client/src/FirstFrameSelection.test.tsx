@@ -167,6 +167,74 @@ describe("FirstFrameSelection", () => {
     ).toBeInTheDocument();
   });
 
+  it("requires a second explicit confirmation to use a failed-QC candidate", async () => {
+    const rejectedVersion = {
+      ...candidatesVersion,
+      id: "first-frame-candidates-rejected",
+      payload: {
+        ...candidatesVersion.payload,
+        candidates: [
+          {
+            asset_id: "first-rejected",
+            storage_key: "projects/project-1/first-rejected.png",
+            storage_uri: "local://first-rejected",
+            sha256: "hash-rejected",
+            size_bytes: 100,
+            content_type: "image/png",
+            quality: {
+              passed: false,
+              attempt: 2,
+              issue_codes: ["OUTFIT_MISMATCH"],
+              inspection: {},
+            },
+          },
+        ],
+      },
+    };
+    vi.mocked(getLatestProjectFirstFrames).mockResolvedValue({
+      version: rejectedVersion,
+      stale: false,
+    });
+    vi.mocked(getProjectFirstFrameHistory).mockResolvedValue([rejectedVersion]);
+
+    render(
+      <FirstFrameSelection
+        projectId="project-1"
+        referenceSelection={referenceSelection}
+        sourceFrameSelectionId="source-selection-1"
+      />,
+    );
+
+    expect(
+      await screen.findByText("质检未通过：OUTFIT_MISMATCH"),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("radio", { name: /首帧候选 1/ }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "确认用于视频生成的首帧" }),
+    );
+
+    // 第一次点击只是知情确认，不发起请求。
+    expect(confirmFirstFrame).not.toHaveBeenCalled();
+    expect(
+      await screen.findByText("质检未通过，仍要使用此首帧"),
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "质检未通过，仍要使用此首帧" }),
+    );
+
+    await waitFor(() =>
+      expect(confirmFirstFrame).toHaveBeenCalledWith(
+        "project-1",
+        "first-rejected",
+        {
+          allowUnverified: true,
+        },
+      ),
+    );
+  });
+
   it("re-signs an expired first-frame preview once and then disables it", async () => {
     let firstAssetCalls = 0;
     vi.mocked(getAssetDownloadUrl).mockImplementation(async (assetId) => {

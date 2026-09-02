@@ -24,15 +24,26 @@ const DEFAULT_TIMEOUT_MS = 5_000;
 const CSRF_HEADER = "X-Admin-CSRF";
 const IDEMPOTENCY_KEY_HEADER = "Idempotency-Key";
 
-export class AdminActivationError extends Error {
+// A8（2026-09-02 评估）：管理端错误类统一为一个实现。历史上五个域各复制
+// 了同一个类（AdminCustomerError / AdminDeviceError / AdminAdjustmentError /
+// AdminSessionError / AdminAuditError），语义完全相同；现在它们都是
+// AdminControlError 的别名，`instanceof` 在所有调用点继续成立。
+export class AdminControlError extends Error {
   readonly status: number | undefined;
   readonly code: string | undefined;
 
   constructor(message: string, status?: number, code?: string) {
     super(message);
-    this.name = "AdminActivationError";
+    this.name = "AdminControlError";
     this.status = status;
     this.code = code;
+  }
+}
+
+export class AdminActivationError extends AdminControlError {
+  constructor(message: string, status?: number, code?: string) {
+    super(message, status, code);
+    this.name = "AdminActivationError";
   }
 }
 
@@ -275,6 +286,7 @@ export type ActivationCodeListItem = {
   bound_user_id: string | null;
   bound_username: string | null;
   issued_at: string | null;
+  archived_at: string | null;
   devices: ActivationCodeDevice[];
   pending_pairings: ActivationCodePendingPairing[];
 };
@@ -302,6 +314,7 @@ export type ActivationCodeDevice = {
 
 export type ActivationCodePage = {
   items: ActivationCodeListItem[];
+  total: number;
   limit: number;
   offset: number;
 };
@@ -428,11 +441,17 @@ export async function downloadActivationCodeExport(
 export async function listActivationCodes({
   batch_id,
   status,
+  search,
+  include_archived,
   limit = 50,
   offset = 0,
 }: {
   batch_id?: string;
   status?: string;
+  /** 服务端搜索：匹配掩码码或绑定用户名（A9）。 */
+  search?: string;
+  /** C7：true 时回看已归档码（归档只隐藏，不删史）。 */
+  include_archived?: boolean;
   limit?: number;
   offset?: number;
 } = {}): Promise<ActivationCodePage> {
@@ -442,6 +461,12 @@ export async function listActivationCodes({
   }
   if (status) {
     query.set("status", status);
+  }
+  if (search) {
+    query.set("search", search);
+  }
+  if (include_archived) {
+    query.set("include_archived", "true");
   }
   query.set("limit", String(limit));
   query.set("offset", String(offset));
@@ -639,17 +664,7 @@ export function adminActivationErrorMessage(
 // T33 — Customer management APIs (ADM-02)
 // ---------------------------------------------------------------------------
 
-export class AdminCustomerError extends Error {
-  readonly status: number | undefined;
-  readonly code: string | undefined;
-
-  constructor(message: string, status?: number, code?: string) {
-    super(message);
-    this.name = "AdminCustomerError";
-    this.status = status;
-    this.code = code;
-  }
-}
+export const AdminCustomerError = AdminControlError;
 
 export interface CustomerListItem {
   user_id: string;
@@ -666,29 +681,30 @@ export interface CustomerListItem {
 }
 
 export interface CustomerListResponse {
-  customers: CustomerListItem[];
+  items: CustomerListItem[];
   total: number;
-  page: number;
-  page_size: number;
+  limit: number;
+  offset: number;
 }
 
 export interface CustomerListOptions {
-  page?: number;
-  page_size?: number;
+  limit?: number;
+  offset?: number;
   username_filter?: string;
 }
 
 /**
- * Fetch the customer list with pagination and optional username filtering.
+ * Fetch the customer list with the management-wide limit/offset contract (A5).
  *
- * GET /api/control/customers?page=&page_size=&username=
+ * GET /api/control/customers?limit=&offset=&username=
  */
 export async function listCustomers(
   options: CustomerListOptions = {},
 ): Promise<CustomerListResponse> {
   const params = new URLSearchParams();
-  if (options.page) params.set("page", String(options.page));
-  if (options.page_size) params.set("page_size", String(options.page_size));
+  if (options.limit !== undefined) params.set("limit", String(options.limit));
+  if (options.offset !== undefined)
+    params.set("offset", String(options.offset));
   if (options.username_filter) params.set("username", options.username_filter);
 
   const response = await requestControl(
@@ -697,11 +713,7 @@ export async function listCustomers(
   );
 
   if (!response.ok) {
-    const body = await response.text();
-    throw new AdminCustomerError(
-      body || `HTTP ${response.status}`,
-      response.status,
-    );
+    throw await parseActivationError(response, "读取客户列表失败");
   }
 
   return response.json() as Promise<CustomerListResponse>;
@@ -768,17 +780,7 @@ export async function updateCustomerUnitPrice(
 // T33 — Device management APIs (ADM-02)
 // ---------------------------------------------------------------------------
 
-export class AdminDeviceError extends Error {
-  readonly status: number | undefined;
-  readonly code: string | undefined;
-
-  constructor(message: string, status?: number, code?: string) {
-    super(message);
-    this.name = "AdminDeviceError";
-    this.status = status;
-    this.code = code;
-  }
-}
+export const AdminDeviceError = AdminControlError;
 
 export interface DeviceListItem {
   device_id: string;
@@ -795,6 +797,7 @@ export interface DeviceListItem {
 
 export interface DeviceListResponse {
   items: DeviceListItem[];
+  total: number;
   limit: number;
   offset: number;
 }
@@ -866,17 +869,7 @@ export async function revokeDeviceCredential(
 // T33 — Adjustment history APIs (ADM-02)
 // ---------------------------------------------------------------------------
 
-export class AdminAdjustmentError extends Error {
-  readonly status: number | undefined;
-  readonly code: string | undefined;
-
-  constructor(message: string, status?: number, code?: string) {
-    super(message);
-    this.name = "AdminAdjustmentError";
-    this.status = status;
-    this.code = code;
-  }
-}
+export const AdminAdjustmentError = AdminControlError;
 
 export interface AdjustmentListItem {
   adjustment_id: string;
@@ -950,17 +943,7 @@ export async function listAdminAdjustments(
 // T34 — Customer session API (ADM-02)
 // ---------------------------------------------------------------------------
 
-export class AdminSessionError extends Error {
-  readonly status: number | undefined;
-  readonly code: string | undefined;
-
-  constructor(message: string, status?: number, code?: string) {
-    super(message);
-    this.name = "AdminSessionError";
-    this.status = status;
-    this.code = code;
-  }
-}
+export const AdminSessionError = AdminControlError;
 
 export interface CustomerSessionListItem {
   session_id: string;
@@ -989,6 +972,31 @@ export interface CustomerSessionListOptions {
   status?: string;
   limit?: number;
   offset?: number;
+}
+
+/**
+ * Overview of every currently live customer session (A11).
+ *
+ * GET /api/control/customer-sessions/live?limit=&offset=
+ */
+export async function listLiveSessions(
+  options: { limit?: number; offset?: number } = {},
+): Promise<CustomerSessionListResponse> {
+  const params = new URLSearchParams();
+  if (options.limit !== undefined) params.set("limit", String(options.limit));
+  if (options.offset !== undefined)
+    params.set("offset", String(options.offset));
+
+  const response = await requestControl(
+    `/api/control/customer-sessions/live?${params.toString()}`,
+    { method: "GET" },
+  );
+
+  if (!response.ok) {
+    throw await parseActivationError(response, "读取在线会话失败");
+  }
+
+  return response.json() as Promise<CustomerSessionListResponse>;
 }
 
 /**
@@ -1022,17 +1030,7 @@ export async function listCustomerSessions(
 // T34 — Audit log API (ADM-02)
 // ---------------------------------------------------------------------------
 
-export class AdminAuditError extends Error {
-  readonly status: number | undefined;
-  readonly code: string | undefined;
-
-  constructor(message: string, status?: number, code?: string) {
-    super(message);
-    this.name = "AdminAuditError";
-    this.status = status;
-    this.code = code;
-  }
-}
+export const AdminAuditError = AdminControlError;
 
 export interface AuditLogItem {
   event_id: string;
@@ -1057,14 +1055,19 @@ export interface AuditLogResponse {
 export interface AuditLogOptions {
   eventType?: string;
   actorUserId?: string;
+  targetUserId?: string;
+  createdFrom?: string;
+  createdTo?: string;
   limit?: number;
   offset?: number;
 }
 
 /**
- * Fetch the aggregated audit log with pagination.
+ * Fetch the unified audit trail (A10: five audited surfaces UNIONed) with
+ * pagination and combined filters.
  *
- * GET /api/control/audit-log?event_type=&actor_user_id=&limit=&offset=
+ * GET /api/control/audit-log?event_type=&actor_user_id=&target_user_id=
+ *   &created_from=&created_to=&limit=&offset=
  */
 export async function listAuditLog(
   options: AuditLogOptions = {},
@@ -1072,6 +1075,9 @@ export async function listAuditLog(
   const params = new URLSearchParams();
   if (options.eventType) params.set("event_type", options.eventType);
   if (options.actorUserId) params.set("actor_user_id", options.actorUserId);
+  if (options.targetUserId) params.set("target_user_id", options.targetUserId);
+  if (options.createdFrom) params.set("created_from", options.createdFrom);
+  if (options.createdTo) params.set("created_to", options.createdTo);
   if (options.limit !== undefined) params.set("limit", String(options.limit));
   if (options.offset !== undefined)
     params.set("offset", String(options.offset));

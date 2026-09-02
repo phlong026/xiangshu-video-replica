@@ -1,6 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { setAdminCsrfToken } from "../api";
 import { SessionsPage } from "./SessionsPage";
 
 function jsonResponse(payload: unknown, status = 200) {
@@ -30,7 +31,10 @@ const sessionItem = {
   device_status: "ACTIVE",
 };
 
-function installFetch(options?: { sessionsStatus?: number }) {
+function installFetch(options?: {
+  sessionsStatus?: number;
+  adjustmentStatus?: number;
+}) {
   const fetchMock = vi.fn((url: string) => {
     if (
       String(url).includes(`/api/control/customers/${CUSTOMER_ID}/sessions`)
@@ -44,6 +48,24 @@ function installFetch(options?: { sessionsStatus?: number }) {
         limit: 50,
         offset: 0,
       });
+    }
+    if (
+      String(url).includes(`/api/control/customers/${CUSTOMER_ID}/adjustments`)
+    ) {
+      return jsonResponse(
+        {
+          adjustment_id: "adj-1",
+          order_id: "order-1",
+          credits: "10",
+          amount_fen: "10000",
+          pricing_scope: "CUSTOMER_STANDARD",
+          wallet_balance_after: 60,
+          source_document_type: "CS_TICKET",
+          source_document_ref: "manual-20260902-001",
+          request_id: "req-adj-1",
+        },
+        options?.adjustmentStatus ?? 201,
+      );
     }
     throw new Error(`unexpected request: ${url}`);
   });
@@ -127,9 +149,50 @@ describe("SessionsPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "执行后台加款" }));
 
     const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent("请输入大于 0 的加款积分");
+    expect(alert).toHaveTextContent("请输入大于 0 的加款条数");
     // Validation must reject the submission before any write request.
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("routes the adjustment through the high-risk confirmation dialog", async () => {
+    setAdminCsrfToken("csrf-token-1");
+    const fetchMock = installFetch({ adjustmentStatus: 201 });
+    render(<SessionsPage />);
+
+    await queryCustomerSessions();
+
+    fireEvent.change(screen.getByLabelText("加款条数"), {
+      target: { value: "10" },
+    });
+    fireEvent.change(screen.getByLabelText("来源单号"), {
+      target: { value: "manual-20260902-001" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "执行后台加款" }));
+
+    // 表单通过校验后打开高危确认对话框：原因必填 + 我已知晓勾选。
+    const dialog = await screen.findByRole("dialog", { name: "确认后台加款" });
+    expect(dialog).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "确认加款" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "请填写操作原因",
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    fireEvent.change(screen.getByLabelText("操作原因"), {
+      target: { value: "客服工单补发" },
+    });
+    fireEvent.click(screen.getByLabelText("我已知晓该操作的影响"));
+    fireEvent.click(screen.getByRole("button", { name: "确认加款" }));
+
+    expect(await screen.findByText(/调账成功/)).toBeInTheDocument();
+    // 会话查询 + 调账写入 + 加款成功后的会话刷新。
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const writeCall = fetchMock.mock.calls.find(([url]) =>
+      String(url).includes("/adjustments"),
+    );
+    expect(writeCall).toBeDefined();
   });
 
   it("stays read-only for auditors when mounted with a fixed user", () => {

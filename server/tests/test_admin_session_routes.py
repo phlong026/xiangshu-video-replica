@@ -373,3 +373,77 @@ def test_auditor_cannot_flip_queue_mode(client: TestClient):
     denied = client.patch(QUEUE_MODE_PATH, headers=headers, json={"fair_queue_enabled": True})
     assert denied.status_code == 403
     assert denied.json()["detail"]["code"] == "AUDITOR_READ_ONLY"
+
+
+@pytest.mark.pg
+def test_live_sessions_overview_lists_all_users_sessions(client: TestClient):
+    """A11：总览端点跨用户返回全部存活会话，且不返回过期租约."""
+    _admin_session(client)
+    # 再种第二个客户的存活会话（029 对 activation_code_id 唯一，需要独立链）。
+    with psycopg.connect(_t34_dsn(), autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO activation_codes "
+            "(id, batch_id, code_digest, digest_key_version, masked_code, status, "
+            " issued_at, bound_user_id, activated_at) "
+            "VALUES ('code-aud', 'batch-cu', 'digest-aud', 1, 'XS04-****B', "
+            "'ACTIVE', '2026-01-01T00:00:00+00:00', 'auditor_u', "
+            "'2026-01-01T00:00:00+00:00')"
+        )
+        conn.execute(
+            "INSERT INTO customer_devices "
+            "(id, activation_code_id, user_id, slot_no, display_name, platform, "
+            " fingerprint_hmac, fingerprint_key_version, token_digest, "
+            " token_key_version, status, bound_at) "
+            "VALUES ('device-2', 'code-aud', 'auditor_u', 1, '审计设备', 'macos', "
+            "'fp-hmac-2', 1, 'tok-digest-2', 1, 'BOUND', '2026-08-01T00:00:00+00:00')"
+        )
+        conn.execute(
+            "INSERT INTO customer_session_state "
+            "(user_id, activation_code_id, device_id, session_id, token_digest, "
+            " session_epoch, lease_until) "
+            "VALUES ('auditor_u', 'code-aud', 'device-2', 'session-2', "
+            "'session-tok-digest-2', 1, '2099-06-01T00:00:00+00:00')"
+        )
+        # 过期租约不得出现在总览里（第三条独立链）。
+        conn.execute(
+            "INSERT INTO activation_codes "
+            "(id, batch_id, code_digest, digest_key_version, masked_code, status, "
+            " issued_at, bound_user_id, activated_at) "
+            "VALUES ('code-exp', 'batch-cu', 'digest-exp', 1, 'XS04-****C', "
+            "'ACTIVE', '2026-01-01T00:00:00+00:00', 'admin_u', "
+            "'2026-01-01T00:00:00+00:00')"
+        )
+        conn.execute(
+            "INSERT INTO customer_devices "
+            "(id, activation_code_id, user_id, slot_no, display_name, platform, "
+            " fingerprint_hmac, fingerprint_key_version, token_digest, "
+            " token_key_version, status, bound_at) "
+            "VALUES ('device-3', 'code-exp', 'admin_u', 1, '过期设备', 'windows', "
+            "'fp-hmac-3', 1, 'tok-digest-3', 1, 'BOUND', '2026-08-01T00:00:00+00:00')"
+        )
+        conn.execute(
+            "INSERT INTO customer_session_state "
+            "(user_id, activation_code_id, device_id, session_id, token_digest, "
+            " session_epoch, created_at, lease_until) "
+            "VALUES ('admin_u', 'code-exp', 'device-3', 'session-expired', "
+            "'session-tok-digest-3', 1, '1999-01-01T00:00:00+00:00', "
+            "'2000-01-01T00:00:00+00:00')"
+        )
+        conn.commit()
+
+    response = client.get("/api/control/customer-sessions/live")
+    assert response.status_code == 200, response.text
+    data = response.json()
+    session_ids = {item["session_id"] for item in data["items"]}
+    assert session_ids == {"session-1", "session-2"}
+    assert data["total"] == 2
+
+    # 未登录（新 client、无会话 Cookie）一律 401，与单客户视图同一道门。
+    from fastapi import FastAPI as _FastAPI
+
+    from app.admin_session_routes import router as _session_router
+
+    bare = TestClient(_FastAPI())
+    bare.app.include_router(_session_router)  # type: ignore[attr-defined]
+    unauth = bare.get("/api/control/customer-sessions/live")
+    assert unauth.status_code in (401, 403)

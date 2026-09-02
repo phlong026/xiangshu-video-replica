@@ -4,17 +4,16 @@ import {
   type AdminGenerationRecord,
   getAdminGenerationRecords,
 } from "../api.admin";
+import { DataTable } from "./ui/DataTable";
+import { PageBanner } from "./ui/PageBanner";
+import { Pagination } from "./ui/Pagination";
+import {
+  formatDateTime,
+  GENERATION_RECORD_TYPE_LABELS,
+  labelFrom,
+} from "./ui/vocabulary";
 
 const PAGE_SIZE = 50;
-
-const recordTypeLabels: Record<AdminGenerationRecord["record_type"], string> = {
-  VIDEO: "视频生成",
-  FIRST_FRAME_IMAGE: "人物置换首帧",
-  CHARACTER_SHEET_IMAGE: "人物五视图",
-  CHARACTER_VIEW_IMAGE: "人物单视图",
-  SOURCE_FRAME_AI_SCORE: "源画面 AI 评分",
-  SOURCE_FRAME_PROCESS: "源画面处理",
-};
 
 export function GenerationRecordsPage() {
   const [items, setItems] = useState<AdminGenerationRecord[]>([]);
@@ -58,7 +57,7 @@ export function GenerationRecordsPage() {
   }, [loadRecords]);
 
   return (
-    <section className="admin-panel" aria-label="生成记录">
+    <section aria-label="生成记录" className="admin-panel">
       <div className="admin-actions">
         <button type="button" onClick={() => void loadRecords()}>
           {loading ? "刷新中…" : "刷新记录"}
@@ -71,78 +70,54 @@ export function GenerationRecordsPage() {
         评分调用。上游未返回精确成本时会明确标注，不以零成本代替。
       </p>
 
-      {error ? (
-        <p className="settings-error" role="alert">
-          {error}
-        </p>
-      ) : null}
+      {error ? <PageBanner tone="error">{error}</PageBanner> : null}
 
       {!loading && items.length === 0 ? (
-        <p className="wallet-notice">暂无生成记录。</p>
+        <PageBanner tone="notice">暂无生成记录。</PageBanner>
       ) : (
-        <div className="table-scroll">
-          <table className="internal-table" aria-label="用户生成记录列表">
-            <thead>
-              <tr>
-                <th>时间</th>
-                <th>用户</th>
-                <th>项目</th>
-                <th>生成类型</th>
-                <th>服务 / 模型</th>
-                <th>状态</th>
-                <th>扣减额度</th>
-                <th>上游成本</th>
-                <th>结果 / 错误</th>
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((item) => (
-                <tr key={`${item.record_type}-${item.record_id}`}>
-                  <td>{formatTime(item.created_at)}</td>
-                  <td>{item.username}</td>
-                  <td>{item.project_name ?? "—"}</td>
-                  <td>{recordTypeLabels[item.record_type]}</td>
-                  <td>{formatProvider(item)}</td>
-                  <td>{item.status}</td>
-                  <td>{item.charged_credits}</td>
-                  <td>{formatProviderCost(item)}</td>
-                  <td>{formatResult(item)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <DataTable
+          ariaLabel="用户生成记录列表"
+          headers={
+            <>
+              <th>时间</th>
+              <th>用户</th>
+              <th>项目</th>
+              <th>生成类型</th>
+              <th>服务 / 模型</th>
+              <th>状态</th>
+              <th>扣减条数</th>
+              <th>上游成本</th>
+              <th>结果 / 错误</th>
+            </>
+          }
+        >
+          {items.map((item) => (
+            <tr key={`${item.record_type}-${item.record_id}`}>
+              <td>{formatDateTime(item.created_at)}</td>
+              <td>{item.username}</td>
+              <td>{item.project_name ?? "—"}</td>
+              <td>
+                {labelFrom(GENERATION_RECORD_TYPE_LABELS, item.record_type)}
+              </td>
+              <td>{formatProvider(item)}</td>
+              <td>{item.status}</td>
+              <td>{item.charged_credits}</td>
+              <td>{formatProviderCost(item)}</td>
+              <td>{formatResult(item)}</td>
+            </tr>
+          ))}
+        </DataTable>
       )}
 
-      {total > PAGE_SIZE ? (
-        <nav className="pagination" aria-label="生成记录分页">
-          <button
-            disabled={offset === 0 || loading}
-            type="button"
-            onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
-          >
-            上一页
-          </button>
-          <span>
-            第 {Math.floor(offset / PAGE_SIZE) + 1} /{" "}
-            {Math.ceil(total / PAGE_SIZE)} 页
-          </span>
-          <button
-            disabled={offset + PAGE_SIZE >= total || loading}
-            type="button"
-            onClick={() => setOffset(offset + PAGE_SIZE)}
-          >
-            下一页
-          </button>
-        </nav>
-      ) : null}
+      <Pagination
+        disabled={loading}
+        limit={PAGE_SIZE}
+        offset={offset}
+        total={total}
+        onPageChange={setOffset}
+      />
     </section>
   );
-}
-
-function formatTime(value: string): string {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN");
 }
 
 function formatProvider(item: AdminGenerationRecord): string {

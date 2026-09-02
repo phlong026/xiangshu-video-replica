@@ -323,7 +323,7 @@ function ProviderForm({
         </button>
         {status ? (
           <span
-            role="status"
+            role={statusTone === "error" ? "alert" : "status"}
             className={
               statusTone === "error" ? "form-status--error" : undefined
             }

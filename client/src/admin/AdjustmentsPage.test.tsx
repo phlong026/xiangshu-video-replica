@@ -65,7 +65,8 @@ describe("AdjustmentsPage (ADM-02 / T33)", () => {
       expect(screen.getByText("退款")).toBeInTheDocument();
     });
 
-    expect(screen.getByText(/共 2 条记录/)).toBeInTheDocument();
+    // 单页数据不渲染分页条。
+    expect(screen.queryByRole("navigation")).toBeNull();
   });
 
   it("shows loading state while fetching adjustments", () => {
@@ -116,7 +117,7 @@ describe("AdjustmentsPage (ADM-02 / T33)", () => {
     render(<AdjustmentsPage userId="user-1" />);
 
     await waitFor(() => {
-      expect(screen.getByText(/第 1 页/)).toBeInTheDocument();
+      expect(screen.getByText("第 1 / 3 页（共 50 条）")).toBeInTheDocument();
     });
 
     const nextPageButton = screen.getByRole("button", { name: "下一页" });

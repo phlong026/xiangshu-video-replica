@@ -24,7 +24,7 @@ def test_zpay_provider_migration_is_reversible(tmp_path: Path) -> None:
     with initialize_database(db_path) as raw:
         with BusinessConnection.sqlite(raw) as conn:
             assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == (
-                "053_activation_code_archive"
+                "054_admin_free_grant_adjustments"
             )
 
     command.downgrade(alembic_config(db_path), "022_internal_billing")
@@ -40,7 +40,7 @@ def test_zpay_provider_migration_is_reversible(tmp_path: Path) -> None:
     command.upgrade(alembic_config(db_path), "head")
     with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == (
-            "053_activation_code_archive"
+            "054_admin_free_grant_adjustments"
         )
 
 

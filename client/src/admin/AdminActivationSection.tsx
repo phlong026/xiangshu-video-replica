@@ -3,6 +3,8 @@ import { useState } from "react";
 import type { AdminActorInfo } from "../api.admin";
 import { ActivationCodeBatchesPage } from "./ActivationCodeBatchesPage";
 import { ActivationCodesPage } from "./ActivationCodesPage";
+import { DeliveriesPage } from "./DeliveriesPage";
+import { PageBanner } from "./ui/PageBanner";
 
 type AdminActivationSectionProps = {
   actor: AdminActorInfo;
@@ -20,9 +22,9 @@ export function AdminActivationSection({
   return (
     <section className="admin-panel" aria-label="激活码管理">
       {readOnly ? (
-        <p className="wallet-notice" role="status">
+        <PageBanner tone="notice">
           审计员只读：仅可查看，不能执行写操作。
-        </p>
+        </PageBanner>
       ) : null}
 
       <ActivationCodeBatchesPage
@@ -35,6 +37,7 @@ export function AdminActivationSection({
         refreshToken={refreshToken}
         onSessionExpired={onSessionExpired}
       />
+      <DeliveriesPage readOnly={readOnly} onSessionExpired={onSessionExpired} />
     </section>
   );
 }

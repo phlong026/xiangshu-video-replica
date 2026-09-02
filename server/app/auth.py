@@ -19,6 +19,14 @@ DESKTOP_USER_ID_ENV = "VIDEO_REPLICA_DESKTOP_USER_ID"
 ALLOW_DEV_IDENTITY_HEADER_ENV = "VIDEO_REPLICA_ALLOW_DEV_IDENTITY_HEADER"
 AUTH_MODE_ENV = "VIDEO_REPLICA_AUTH_MODE"
 LEGACY_AUTH_MODES = {"desktop", "development"}
+# Same flag the rest of the control plane reads (control_auth / db_pg each
+# carry their own copy; auth.py follows that precedent to stay import-light).
+CUSTOMER_PRODUCTION_ENV = "VIDEO_REPLICA_CUSTOMER_PRODUCTION"
+_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def _customer_production_lane() -> bool:
+    return os.environ.get(CUSTOMER_PRODUCTION_ENV, "").strip().lower() in _TRUTHY
 
 
 @dataclass(frozen=True)
@@ -95,11 +103,21 @@ def authenticate_request(
     # activation succeed while every GET in the workspace failed.  Preserve
     # the internal-token path first, then reuse the existing session verifier
     # for customer tokens inside this request's read transaction.
+    #
+    # A1（2026-09-02 admin-console assessment）: on the customer-production
+    # lane business routes must NOT accept internal access tokens.  Otherwise
+    # any single internal Bearer would walk straight past the admin-session
+    # + CSRF + auditor-read-only gates that guard ``/api/control/*`` and read
+    # every project, wallet and audit row.  Internal operators keep their own
+    # channels (control plane via admin session, CLI via its own endpoints);
+    # non-production PG lanes (internal tooling on VIDEO_REPLICA_DATABASE_URL
+    # without the customer flag) keep the internal-token path unchanged.
     if authorization is not None and conn.is_postgres:
         token = parse_bearer_token(authorization)
-        internal_user_id = internal_access_token_user_id(conn, token)
-        if internal_user_id is not None:
-            return authenticate_user(conn, internal_user_id)
+        if not _customer_production_lane():
+            internal_user_id = internal_access_token_user_id(conn, token)
+            if internal_user_id is not None:
+                return authenticate_user(conn, internal_user_id)
         return authenticate_customer_read_session(conn, token)
     if internal_auth_required():
         if authorization is not None:

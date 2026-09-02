@@ -10,9 +10,13 @@ import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse
 
+from app.admin_write_contract import AdminWriteContract
+from app.admin_write_contract import require_write_contract as _require_write_contract
 from app.auth import Database
 from app.control_auth import ControlUser
 from app.db_portable import BusinessConnection
+from app.ops_metrics import get_or_create_request_id
+from app.permissions import write_audit
 from app.recharge_routes import RechargeOrderStatusResponse
 from app.settings import SettingsRepository
 from app.zpay import (
@@ -103,10 +107,30 @@ def zpay_return() -> HTMLResponse:
 )
 def sync_recharge_order_with_zpay(
     order_no: str,
+    body: AdminWriteContract,
+    request: Request,
     conn: Database,
     _actor: ControlUser,
     query_client: ZPayOrderQuery,
 ) -> RechargeOrderStatusResponse:
+    """Manual single-order query with the admin write contract (A4, A2).
+
+    The operator must send confirm + reason + an Idempotency-Key like every
+    other control-plane write, and the attempt lands an ``audit_logs`` row:
+    a manual sync can credit a wallet, so it must name who asked for it.
+    The query itself stays naturally idempotent (PAID orders replay, the
+    confirmed credit is unique-constrained), so no snapshot layer is needed.
+    """
+    _key, reason = _require_write_contract(request, body)
+    request_id = get_or_create_request_id(request)
+    write_audit(
+        conn,
+        actor=_actor,
+        action="payment.sync",
+        entity_type="recharge_order",
+        entity_id=order_no,
+        metadata={"reason": reason, "request_id": request_id},
+    )
     local_order = read_recharge_order(conn, merchant_order_no=order_no)
     if local_order is None:
         raise HTTPException(

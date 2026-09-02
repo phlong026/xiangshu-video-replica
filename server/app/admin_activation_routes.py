@@ -33,24 +33,23 @@ download or an authenticated administrator's detail view.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
 import uuid
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Protocol
 
 import psycopg
 from fastapi import APIRouter, HTTPException, Request, Response
-from pydantic import BaseModel
 
 from app.activation_code_service import (
     ActivationCodeError,
     ActivationExportError,
     ActivationKeyError,
+    ExportAlreadyDownloadedError,
+    ExportExpiredError,
+    ExportKeyUnavailableError,
+    ExportPackageNotFoundError,
     InvalidActivationCodeError,
     InvalidCodeTransitionError,
     activation_code_hmac_key,
@@ -66,19 +65,47 @@ from app.activation_code_service import (
     iter_code_digests,
 )
 from app.admin_auth_routes import AdminReader, AdminWriter
+from app.admin_write_contract import (
+    REPLAY_HEADER,
+    REQUEST_ID_HEADER,
+    AdminWriteContract,
+)
+from app.admin_write_contract import (
+    begin_idempotent_write as _begin_idempotent_write,
+)
+from app.admin_write_contract import (
+    canonical_route as _canonical_route,
+)
+from app.admin_write_contract import (
+    finish_idempotent_write as _finish_idempotent_write,
+)
+from app.admin_write_contract import (
+    http_error as _http,
+)
+from app.admin_write_contract import (
+    load_idempotent_snapshot as _load_idempotent_snapshot,
+)
+from app.admin_write_contract import (
+    request_hash as _request_hash,
+)
+from app.admin_write_contract import (
+    require_write_contract as _require_write_contract,
+)
+from app.admin_write_contract import (
+    transaction_now_iso as _transaction_now_iso,
+)
+from app.admin_write_contract import (
+    write_with_idempotency as _write_with_idempotency,
+)
 from app.customer_session_service import (
     REASON_CODE_REVOKED,
     REASON_CODE_SUSPENDED,
     revoke_session,
 )
 from app.db_pg import pg_transaction
-from app.ops_metrics import get_or_create_request_id, set_current_result_code
+from app.ops_metrics import get_or_create_request_id
 
 logger = logging.getLogger(__name__)
-
-IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
-REQUEST_ID_HEADER = "X-Request-Id"
-REPLAY_HEADER = "X-Idempotent-Replay"
 
 DEFAULT_EXPORT_TTL_SECONDS = 15 * 60
 DEFAULT_LIST_LIMIT = 100
@@ -93,284 +120,8 @@ BATCH_CREATION_ENV = "VIDEO_REPLICA_ALLOW_ACTIVATION_BATCH_CREATION"
 router = APIRouter(prefix="/api/control", tags=["admin-activation"])
 
 
-def _http(status: int, code: str, message: str) -> HTTPException:
-    set_current_result_code(code)
-    return HTTPException(status_code=status, detail={"code": code, "message": message})
-
-
 def _now_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat()
-
-
-def _transaction_now_iso(conn: psycopg.Connection) -> str:
-    """The trusted PostgreSQL clock on the caller's transaction (SES-01).
-
-    The T20 revocation propagation pulls a session lease into the past —
-    that judgement belongs to the same server-side clock the session routes
-    use, never the possibly skewed application clock.
-    """
-    row = conn.execute("SELECT now()").fetchone()
-    now = row[0] if row is not None else datetime.now(UTC)
-    return now.isoformat()
-
-
-# ---------------------------------------------------------------------------
-# The admin write contract (dev doc §15)
-# ---------------------------------------------------------------------------
-
-
-class AdminWriteContract(BaseModel):
-    """Shared write-contract fields for every admin activation mutation."""
-
-    confirm: bool = False
-    reason: str = ""
-
-
-class _AdminWriteActor(Protocol):
-    """Minimal actor shape required by the shared idempotency envelope."""
-
-    @property
-    def user_id(self) -> str: ...
-
-
-def _require_write_contract(request: Request, body: AdminWriteContract) -> tuple[str, str]:
-    """Validate the write contract; returns (idempotency_key, reason)."""
-    key = request.headers.get(IDEMPOTENCY_KEY_HEADER, "").strip()
-    if not key:
-        raise _http(400, "IDEMPOTENCY_KEY_REQUIRED", "An Idempotency-Key header is required.")
-    if not body.confirm:
-        raise _http(400, "CONFIRMATION_REQUIRED", "This write requires confirm=true.")
-    reason = body.reason.strip()
-    if not reason:
-        raise _http(400, "REASON_REQUIRED", "A non-blank reason is required.")
-    return key, reason
-
-
-def _canonical_route(request: Request) -> str:
-    """``METHOD /route/template`` — the route, never the concrete path."""
-    route = request.scope.get("route")
-    template = getattr(route, "path", request.url.path)
-    return f"{request.method.upper()} {template}"
-
-
-def _request_hash(route: str, path_params: Mapping[str, str], body: BaseModel) -> str:
-    """Freeze the canonical request for conflict checks.
-
-    The route *template* alone does not identify the target resource: the same
-    key with the same body against ``/activation-codes/{code_id}/revoke`` for
-    code A and code B would otherwise hash identically, so the second call
-    would wrongly replay the first response while B stays untouched (PR #43
-    review P2). The concrete path parameters are therefore part of the
-    fingerprint.
-    """
-    payload = json.dumps(
-        {
-            "route": route,
-            "path_params": {name: path_params[name] for name in sorted(path_params)},
-            "body": body.model_dump(),
-        },
-        separators=(",", ":"),
-        sort_keys=True,
-        ensure_ascii=False,
-    )
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
-# ---------------------------------------------------------------------------
-# Idempotency snapshot layer (revision 031)
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class _IdempotencySnapshot:
-    request_hash: str
-    response_status: int | None
-    response_body: str | None
-
-
-def _idempotency_key_digest(key: str) -> str:
-    return hashlib.sha256(key.encode("utf-8")).hexdigest()
-
-
-def _begin_idempotent_write(
-    conn: psycopg.Connection,
-    *,
-    actor_user_id: str,
-    route: str,
-    idempotency_key: str,
-    request_hash: str,
-) -> str | None:
-    """Insert the placeholder row; returns its id, or ``None`` on key reuse."""
-    row_id = str(uuid.uuid4())
-    inserted = conn.execute(
-        "INSERT INTO admin_write_idempotency "
-        "(id, actor_user_id, route, idempotency_key_digest, request_hash) "
-        "VALUES (%s, %s, %s, %s, %s) "
-        "ON CONFLICT (actor_user_id, route, idempotency_key_digest) DO NOTHING",
-        (
-            row_id,
-            actor_user_id,
-            route,
-            _idempotency_key_digest(idempotency_key),
-            request_hash,
-        ),
-    ).rowcount
-    return row_id if inserted == 1 else None
-
-
-def _load_idempotent_snapshot(
-    conn: psycopg.Connection,
-    *,
-    actor_user_id: str,
-    route: str,
-    idempotency_key: str,
-) -> _IdempotencySnapshot | None:
-    row = conn.execute(
-        "SELECT request_hash, response_status, response_body "
-        "FROM admin_write_idempotency "
-        "WHERE actor_user_id = %s AND route = %s AND idempotency_key_digest = %s",
-        (actor_user_id, route, _idempotency_key_digest(idempotency_key)),
-    ).fetchone()
-    if row is None:
-        return None
-    return _IdempotencySnapshot(
-        request_hash=str(row[0]),
-        response_status=row[1] if row[1] is None else int(row[1]),
-        response_body=None if row[2] is None else str(row[2]),
-    )
-
-
-def _finish_idempotent_write(
-    conn: psycopg.Connection,
-    placeholder_id: str,
-    *,
-    response_status: int,
-    response_body: dict[str, object],
-) -> None:
-    conn.execute(
-        "UPDATE admin_write_idempotency SET response_status = %s, response_body = %s WHERE id = %s",
-        (
-            response_status,
-            json.dumps(response_body, ensure_ascii=False, separators=(",", ":")),
-            placeholder_id,
-        ),
-    )
-
-
-class DeferredHTTPWriteError(Exception):
-    """A deterministic error outcome whose side effects must survive it.
-
-    The T18 admin pairing approval hit a shape the T12 lanes never had: the
-    ``expired`` outcome *writes* (the lazy PENDING/APPROVED → EXPIRED flip,
-    the T17 customer-lane semantic) before answering 409. A plain
-    ``HTTPException`` raised inside ``business`` would roll the transaction
-    back and silently drop that flip. Raising this subclass instead tells
-    ``_write_with_idempotency`` to snapshot the error response, commit the
-    side effects and re-raise the ``HTTPException`` *after* the commit — so
-    the replay of the same idempotency key returns the same error, and the
-    lazy flip survives exactly like the T17 route's raise-outside-the-``with``
-    pattern. Branches with no side effects keep raising ``HTTPException``
-    directly (rollback, the key stays free for a retry — the T12 precedent).
-    """
-
-    def __init__(self, status_code: int, code: str, message: str) -> None:
-        super().__init__(code)
-        self.status_code = status_code
-        self.body: dict[str, object] = {"detail": {"code": code, "message": message}}
-
-
-def _write_with_idempotency(
-    request: Request,
-    response: Response,
-    actor: _AdminWriteActor,
-    body: AdminWriteContract,
-    business: Callable[[psycopg.Connection, str], dict[str, object]],
-    *,
-    success_status: int,
-    unavailable_code: str = "ACTIVATION_SERVICE_UNAVAILABLE",
-    unavailable_message: str = "Activation code management requires the PostgreSQL runtime.",
-) -> dict[str, object]:
-    """Run one admin write behind the idempotency snapshot layer.
-
-    ``business`` receives the transaction connection and the request id and
-    returns the response payload; the payload is snapshotted before commit.
-    Callers keep plaintext codes out of it (No-Go red line) — the download
-    path bypasses this layer precisely because its response must not persist.
-
-    The 503 fail-closed code/message defaults to the activation lane; the
-    T18 device lane passes its own (``DEVICE_SERVICE_UNAVAILABLE``) so the
-    §13.2 client table stays unambiguous per domain.
-    """
-    idempotency_key, _reason = _require_write_contract(request, body)
-    route = _canonical_route(request)
-    request_hash = _request_hash(route, dict(request.path_params), body)
-    request_id = get_or_create_request_id(request)
-    try:
-        with pg_transaction() as conn:
-            placeholder = _begin_idempotent_write(
-                conn,
-                actor_user_id=actor.user_id,
-                route=route,
-                idempotency_key=idempotency_key,
-                request_hash=request_hash,
-            )
-            if placeholder is None:
-                snapshot = _load_idempotent_snapshot(
-                    conn,
-                    actor_user_id=actor.user_id,
-                    route=route,
-                    idempotency_key=idempotency_key,
-                )
-                if (
-                    snapshot is None
-                    or snapshot.request_hash != request_hash
-                    or snapshot.response_status is None
-                    or snapshot.response_body is None
-                ):
-                    raise _http(
-                        409,
-                        "IDEMPOTENCY_CONFLICT",
-                        "This idempotency key was already used for a different request.",
-                    )
-                replayed: dict[str, object] = json.loads(snapshot.response_body)
-                response.status_code = snapshot.response_status
-                response.headers[REPLAY_HEADER] = "true"
-                replay_request_id = replayed.get("request_id")
-                if isinstance(replay_request_id, str):
-                    response.headers[REQUEST_ID_HEADER] = replay_request_id
-                return replayed
-            deferred: DeferredHTTPWriteError | None = None
-            try:
-                payload = business(conn, request_id)
-            except DeferredHTTPWriteError as exc:
-                # Snapshot the error response and keep the transaction — the
-                # business side effects (the lazy EXPIRED flip) must survive
-                # the 409, and the replay must answer the same error.
-                deferred = exc
-                payload = exc.body
-            _finish_idempotent_write(
-                conn,
-                placeholder,
-                response_status=deferred.status_code if deferred is not None else success_status,
-                response_body=payload,
-            )
-            response.headers[REQUEST_ID_HEADER] = request_id
-            deferred_error = deferred
-    except (RuntimeError, ValueError) as exc:
-        # The PG runtime is unavailable (internal SQLite deployments) or the
-        # idempotency envelope state is malformed: fail closed instead of
-        # falling back to any legacy control identity (T13 catches both
-        # classes; M2 review LOW aligns this lane).
-        raise _http(503, unavailable_code, unavailable_message) from exc
-    if deferred_error is not None:
-        # Re-raised only after the commit: the HTTPException handler builds a
-        # fresh response, so the request-id header set above does not ride it
-        # (the plain-raise error paths behave the same way).
-        raise HTTPException(
-            status_code=deferred_error.status_code,
-            detail=deferred_error.body["detail"],
-        ) from deferred_error
-    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -672,26 +423,34 @@ def download_activation_code_export(
                     "EXPORT_PACKAGE_INVALID",
                     "The export package could not be decoded; generate a new one.",
                 ) from exc
-            except ActivationExportError as exc:
-                message = str(exc)
-                if "unknown" in message:
-                    raise _http(404, "EXPORT_NOT_FOUND", "Unknown export package.") from exc
-                if "already downloaded" in message:
-                    raise _http(
-                        409,
-                        "EXPORT_ALREADY_DOWNLOADED",
-                        "This export package was already downloaded exactly once.",
-                    ) from exc
-                if "expired" in message:
-                    raise _http(
-                        409,
-                        "EXPORT_EXPIRED",
-                        "This export package has expired; generate a new one.",
-                    ) from exc
+            except ExportPackageNotFoundError as exc:
+                raise _http(404, "EXPORT_NOT_FOUND", "Unknown export package.") from exc
+            except ExportAlreadyDownloadedError as exc:
+                raise _http(
+                    409,
+                    "EXPORT_ALREADY_DOWNLOADED",
+                    "This export package was already downloaded exactly once.",
+                ) from exc
+            except ExportExpiredError as exc:
+                raise _http(
+                    409,
+                    "EXPORT_EXPIRED",
+                    "This export package has expired; generate a new one.",
+                ) from exc
+            except ExportKeyUnavailableError as exc:
                 raise _http(
                     503,
                     "ACTIVATION_KEYS_UNAVAILABLE",
                     "The export key version is not configured; download is refused.",
+                ) from exc
+            except ActivationExportError as exc:
+                # Typed subclasses above carry the operator-facing statuses; a
+                # bare ActivationExportError here is an unexpected package
+                # failure and refuses closed rather than guessing from text.
+                raise _http(
+                    503,
+                    "ACTIVATION_KEYS_UNAVAILABLE",
+                    "The export package could not be read; download is refused.",
                 ) from exc
             audit_row = conn.execute(
                 "SELECT batch_id, downloaded_at FROM activation_code_exports WHERE id = %s",
@@ -1260,27 +1019,50 @@ def list_activation_codes(
     response: Response,
     batch_id: str | None = None,
     status: str | None = None,
+    search: str = "",
+    include_archived: bool = False,
     limit: int = DEFAULT_LIST_LIMIT,
     offset: int = 0,
 ) -> dict[str, object]:
-    """List masked code metadata without bulk-recovering plaintext values."""
+    """List masked code metadata without bulk-recovering plaintext values.
+
+    A5/A9（2026-09-02 评估）: the response carries ``total`` so the console
+    paginates honestly, and ``search`` matches the masked code or bound
+    username server-side (LIKE wildcards escaped) instead of the client
+    filtering a fixed first page.
+    """
     response.headers["Cache-Control"] = "no-store"
     bounded_limit = max(0, min(limit, MAX_LIST_LIMIT))
     bounded_offset = max(0, offset)
-    clauses: list[str] = ["code.archived_at IS NULL"]
+    clauses: list[str] = []
     params: list[object] = []
+    # C7：默认隐藏已归档码；显式 opt-in 后可回看（归档只隐藏，不删史）。
+    if not include_archived:
+        clauses.append("code.archived_at IS NULL")
     if batch_id:
         clauses.append("code.batch_id = %s")
         params.append(batch_id)
     if status:
         clauses.append("code.status = %s")
         params.append(status)
+    if search.strip():
+        literal = search.strip().replace("\\", "\\\\").replace("%", "\%").replace("_", "\_")
+        clauses.append("(code.masked_code ILIKE %s OR customer.username ILIKE %s)")
+        params.extend((f"%{literal}%", f"%{literal}%"))
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     try:
         with pg_transaction() as conn:
+            total_row = conn.execute(
+                f"SELECT COUNT(*) FROM activation_codes AS code "
+                f"LEFT JOIN users AS customer ON customer.id = code.bound_user_id "
+                f"{where}",
+                params,
+            ).fetchone()
+            total = int(total_row[0]) if total_row is not None else 0
             rows = conn.execute(
                 f"SELECT code.id, code.batch_id, code.masked_code, code.status, "
-                f"code.bound_user_id, code.issued_at, customer.username "
+                f"code.bound_user_id, code.issued_at, customer.username, "
+                f"code.archived_at "
                 f"FROM activation_codes AS code "
                 f"LEFT JOIN users AS customer ON customer.id = code.bound_user_id "
                 f"{where} ORDER BY code.id LIMIT %s OFFSET %s",
@@ -1353,9 +1135,15 @@ def list_activation_codes(
             "bound_user_id": row[4],
             "issued_at": row[5],
             "bound_username": row[6],
+            "archived_at": row[7],
             "devices": devices_by_code.get(str(row[0]), []),
             "pending_pairings": pairings_by_code.get(str(row[0]), []),
         }
         for row in rows
     ]
-    return {"items": items, "limit": bounded_limit, "offset": bounded_offset}
+    return {
+        "items": items,
+        "total": total,
+        "limit": bounded_limit,
+        "offset": bounded_offset,
+    }

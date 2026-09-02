@@ -2403,7 +2403,11 @@ def require_confirmed_first_frame(
             "Confirm a first-frame candidate from the latest candidate set before H3 generation.",
         )
     quality = selected_candidate.get("quality") if isinstance(selected_candidate, dict) else None
-    if not isinstance(quality, dict) or quality.get("passed") is not True:
+    quality_passed = isinstance(quality, dict) and quality.get("passed") is True
+    quality_override = (
+        isinstance(selection_payload, dict) and selection_payload.get("quality_override") is True
+    )
+    if not quality_passed and not quality_override:
         raise generation_error(
             409,
             "FIRST_FRAME_QUALITY_NOT_VERIFIED",

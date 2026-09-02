@@ -790,7 +790,7 @@ def test_final_retryable_provider_failure_stops_automatic_paid_retry(
     assert task.json()["retryable"] is False
 
 
-def test_first_frame_task_archives_paid_outputs_before_quality_rejection(
+def test_first_frame_task_publishes_rejected_candidates_with_quality_labels(
     client: TestClient,
     db_path: Path,
     provider: RecordingImageProvider,
@@ -802,7 +802,7 @@ def test_first_frame_task_archives_paid_outputs_before_quality_rejection(
         json={
             "model": "gpt-image-2",
             "quantity": 1,
-            "idempotency_key": "first-frame-checkpoint-rejected-1",
+            "idempotency_key": "first-frame-quality-labels-1",
         },
         headers=headers("employee_1"),
     )
@@ -819,35 +819,37 @@ def test_first_frame_task_archives_paid_outputs_before_quality_rejection(
         assert (
             run_worker_once(
                 conn,
-                worker_id="image-worker-checkpoint-rejected",
+                worker_id="image-worker-quality-labels",
                 storage=storage,
                 first_frame_storage=storage,
                 image_provider=provider,
                 first_frame_quality_inspector=SequenceFirstFrameQualityInspector(
-                    candidate_inspections=[rejected, rejected, rejected]
+                    candidate_inspections=[rejected, rejected]
                 ),
                 max_tasks=1,
             )
             == 1
         )
         task = conn.execute(
-            "SELECT status, error_code, result_json FROM first_frame_tasks WHERE id = %s",
+            "SELECT status, error_code, result_version_id FROM first_frame_tasks WHERE id = %s",
             (created.json()["id"],),
         ).fetchone()
+        assert task is not None
+        assert task["status"] == "SUCCEEDED"
+        assert task["result_version_id"] is not None
+        version = conn.execute(
+            "SELECT payload_json FROM versions WHERE id = %s",
+            (str(task["result_version_id"]),),
+        ).fetchone()
 
-    assert task is not None
-    assert task["status"] == "FAILED"
-    assert task["error_code"] == "FIRST_FRAME_QUALITY_REJECTED"
-    checkpoint = json.loads(str(task["result_json"]))["checkpoint"]
-    assert len(checkpoint["candidates"]) == 3
-    assert all(candidate["quality"]["passed"] is False for candidate in checkpoint["candidates"])
-    assert [
-        storage.get_object(candidate["storage_key"]) for candidate in checkpoint["candidates"]
-    ] == [
-        b"first-frame-0",
-        b"first-frame-0",
-        b"first-frame-0",
-    ]
+    assert version is not None
+    candidates = json.loads(str(version["payload_json"]))["candidates"]
+    assert len(candidates) == 2
+    assert all(candidate["quality"]["passed"] is False for candidate in candidates)
+    assert all(
+        "HEAD_ONLY_REPLACEMENT" in candidate["quality"]["issue_codes"] for candidate in candidates
+    )
+    assert len(provider.calls) == 2
 
 
 def test_first_frame_task_reuses_checkpoint_after_quality_service_recovers(
@@ -1482,9 +1484,11 @@ def test_quality_gate_retries_a_head_only_result_before_publishing(
     )
 
     assert response.status_code == 200
-    candidate = response.json()["payload"]["candidates"][0]
-    assert candidate["quality"]["passed"] is True
-    assert candidate["quality"]["attempt"] == 2
+    candidates = response.json()["payload"]["candidates"]
+    assert len(candidates) == 2
+    passed = [item for item in candidates if item["quality"]["passed"]]
+    assert len(passed) == 1
+    assert passed[0]["quality"]["attempt"] == 2
     assert len(provider.calls) == 2
     assert "自动质检未通过" in str(provider.calls[1]["prompt"])
     assert inspector.source_calls == 1
@@ -1738,6 +1742,71 @@ def test_uninspected_legacy_first_frame_candidate_cannot_be_confirmed(
 
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "FIRST_FRAME_QUALITY_NOT_VERIFIED"
+
+
+def test_unverified_first_frame_confirmation_requires_explicit_override(
+    client: TestClient,
+    db_path: Path,
+    provider: RecordingImageProvider,
+    storage: FakeStorageAdapter,
+) -> None:
+    prepare_inputs(client)
+    created = client.post(
+        "/api/projects/project_owned/first-frame-tasks",
+        json={
+            "model": "gpt-image-2",
+            "quantity": 1,
+            "idempotency_key": "first-frame-override-confirm-1",
+        },
+        headers=headers("employee_1"),
+    )
+    assert created.status_code == 202
+    rejected = passing_candidate_inspection().model_copy(update={"outfit_match_score": 0.1})
+
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        assert (
+            run_worker_once(
+                conn,
+                worker_id="image-worker-override-confirm",
+                storage=storage,
+                first_frame_storage=storage,
+                image_provider=provider,
+                first_frame_quality_inspector=SequenceFirstFrameQualityInspector(
+                    candidate_inspections=[rejected, rejected]
+                ),
+                max_tasks=1,
+            )
+            == 1
+        )
+        task = conn.execute(
+            "SELECT result_version_id FROM first_frame_tasks WHERE id = %s",
+            (created.json()["id"],),
+        ).fetchone()
+        assert task is not None
+        assert task["result_version_id"] is not None
+        version = conn.execute(
+            "SELECT payload_json FROM versions WHERE id = %s",
+            (str(task["result_version_id"]),),
+        ).fetchone()
+    assert version is not None
+    candidates = json.loads(str(version["payload_json"]))["candidates"]
+    asset_id = str(candidates[0]["asset_id"])
+
+    blocked = client.post(
+        "/api/projects/project_owned/first-frames/confirm",
+        json={"first_frame_asset_id": asset_id},
+        headers=headers("employee_1"),
+    )
+    assert blocked.status_code == 409
+    assert blocked.json()["detail"]["code"] == "FIRST_FRAME_QUALITY_NOT_VERIFIED"
+
+    overridden = client.post(
+        "/api/projects/project_owned/first-frames/confirm",
+        json={"first_frame_asset_id": asset_id, "allow_unverified": True},
+        headers=headers("employee_1"),
+    )
+    assert overridden.status_code == 200, overridden.text
+    assert overridden.json()["payload"]["quality_override"] is True
 
 
 def test_employee_can_view_newest_first_frame_candidate_versions(client: TestClient) -> None:

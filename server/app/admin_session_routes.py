@@ -27,6 +27,83 @@ def _http(status: int, code: str, message: str) -> HTTPException:
     return HTTPException(status_code=status, detail={"code": code, "message": message})
 
 
+@router.get("/customer-sessions/live")
+def list_live_sessions(
+    actor: AdminReader,
+    limit: int = DEFAULT_LIST_LIMIT,
+    offset: int = 0,
+) -> dict[str, object]:
+    """Overview of every currently live customer session (A11, 2026-09-02).
+
+    Same liveness semantics as the per-customer view (DB-clock lease check),
+    across all users instead of one — the console "今日概览/会话" entry point
+    so operators no longer need to know a customer id upfront.
+    """
+    bounded_limit = max(0, min(limit, MAX_LIST_LIMIT))
+    bounded_offset = max(0, offset)
+
+    try:
+        with pg_transaction() as conn:
+            rows = conn.execute(
+                """
+                SELECT css.session_id, css.user_id, u.username,
+                       css.device_id, css.session_epoch,
+                       css.lease_until, css.last_heartbeat_at,
+                       css.created_at, css.updated_at,
+                       cd.display_name, cd.platform, cd.slot_no, cd.status
+                FROM customer_session_state css
+                JOIN customer_devices cd ON cd.id = css.device_id
+                JOIN users u ON u.id = css.user_id
+                WHERE css.lease_until::timestamptz > clock_timestamp()
+                ORDER BY css.created_at DESC, css.session_id
+                LIMIT %s OFFSET %s
+                """,
+                (bounded_limit, bounded_offset),
+            ).fetchall()
+
+            total_row = conn.execute(
+                """
+                SELECT COUNT(*) FROM customer_session_state css
+                JOIN customer_devices cd ON cd.id = css.device_id
+                WHERE css.lease_until::timestamptz > clock_timestamp()
+                """
+            ).fetchone()
+    except (RuntimeError, MissingDatabaseConfigError) as exc:
+        raise _http(
+            503,
+            SESSION_SERVICE_UNAVAILABLE,
+            SESSION_SERVICE_UNAVAILABLE_MESSAGE,
+        ) from exc
+
+    items = [
+        {
+            "session_id": str(row[0]),
+            "user_id": str(row[1]),
+            "username": row[2],
+            "device_id": str(row[3]),
+            "session_epoch": int(row[4]),
+            "lease_until": str(row[5]) if row[5] is not None else "",
+            "last_heartbeat_at": str(row[6]) if row[6] is not None else "",
+            "created_at": str(row[7]) if row[7] is not None else "",
+            "updated_at": str(row[8]) if row[8] is not None else "",
+            "device_name": row[9],
+            "platform": str(row[10]),
+            "slot_no": int(row[11]),
+            "device_status": str(row[12]),
+        }
+        for row in rows
+    ]
+
+    total = int(total_row[0]) if total_row is not None else 0
+
+    return {
+        "items": items,
+        "total": total,
+        "limit": bounded_limit,
+        "offset": bounded_offset,
+    }
+
+
 @router.get("/customers/{user_id}/sessions")
 def list_customer_sessions(
     user_id: str,

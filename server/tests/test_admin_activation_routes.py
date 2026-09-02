@@ -1555,14 +1555,15 @@ def test_download_maps_corrupt_inner_payload_to_400(
     assert response.json()["detail"]["code"] == "EXPORT_PACKAGE_INVALID"
 
 
-def test_generate_maps_unexpected_value_error_to_503(
+def test_generate_lets_unexpected_value_error_surface_as_500(
     client: TestClient, admin_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An unexpected ValueError inside an idempotent write fails closed 503.
+    """A bare ValueError in the business closure surfaces as a 500, not a fake 503.
 
-    The write envelope only catches ``RuntimeError``; any ``ValueError`` from
-    the envelope or the business closure escapes as a raw 500. T13 already
-    catches both classes — this aligns the admin lane (M2 review LOW).
+    A3（2026-09-02 评估）: the envelope catches only RuntimeError and
+    MissingDatabaseConfigError (a missing runtime). Any other ValueError is a
+    real bug — masking it as "service unavailable" hid defects from operators,
+    so it now propagates and the global handler answers 500.
     """
     from app import admin_activation_routes
 
@@ -1571,9 +1572,8 @@ def test_generate_maps_unexpected_value_error_to_503(
     batch_id = batch_response.json()["batch_id"]
 
     def explode(*args: object, **kwargs: object) -> list[dict[str, object]]:
-        raise ValueError("injected malformed envelope state")
+        raise ValueError("injected business bug")
 
     monkeypatch.setattr(admin_activation_routes, "generate_batch_codes", explode)
-    response = _generate(client, admin_headers, batch_id, quantity=1)
-    assert response.status_code == 503, response.text
-    assert response.json()["detail"]["code"] == "ACTIVATION_SERVICE_UNAVAILABLE"
+    with pytest.raises(ValueError, match="injected business bug"):
+        _generate(client, admin_headers, batch_id, quantity=1)

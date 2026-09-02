@@ -832,7 +832,7 @@ function newControlWriteIdempotencyKey(): string {
 }
 
 function controlWriteInit(
-  method: "PATCH" | "PUT",
+  method: "PATCH" | "PUT" | "POST",
   body: Record<string, unknown>,
   reason: string,
 ): RequestInit {
@@ -907,12 +907,29 @@ export async function updateControlRuntimeSettings(
 
 export async function syncControlRechargeOrder(
   orderNo: string,
+  reason: string,
 ): Promise<RechargeOrder> {
+  // A4（2026-09-02 评估）：手动查单现在执行管理端写契约
+  // （confirm + reason + 幂等键），服务端会落一条 payment.sync 审计行。
   return requestControlJson<RechargeOrder>(
     `/api/control/recharge-orders/${encodeURIComponent(orderNo)}/sync`,
     "同步充值订单失败",
-    { method: "POST" },
+    controlWriteInit("POST", {}, reason),
     CLOUD_OP_TIMEOUT_MS,
+  );
+}
+
+export async function downloadCustomersCsv(options: {
+  status?: string;
+  username?: string;
+} = {}): Promise<void> {
+  const query = new URLSearchParams();
+  if (options.status) query.set("status", options.status);
+  if (options.username) query.set("username", options.username);
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  await downloadControlCsv(
+    `/api/control/customers.csv${suffix}`,
+    "customers.csv",
   );
 }
 
@@ -2115,7 +2132,8 @@ export async function waitForCharacterSheetTask(
 async function pollCharacterSheetTask(
   taskId: string,
 ): Promise<CharacterSheetTask> {
-  const deadline = Date.now() + 20 * 60_000;
+  // 场景造型最坏要两轮生成加质检（约 16 分钟），轮询死线留足余量。
+  const deadline = Date.now() + 30 * 60_000;
   while (Date.now() < deadline) {
     const task = await getCharacterSheetTask(taskId);
     if (task.status === "SUCCEEDED") {
@@ -2568,7 +2586,9 @@ async function pollFirstFrameTask(
   taskId: string,
   onTaskUpdate: FirstFrameTaskObserver,
 ): Promise<FirstFrameTask> {
-  const deadline = Date.now() + 20 * 60_000;
+  // 两轮生成加质检的最坏耗时约 30 分钟；超时后任务仍在云端继续，
+  // 重新进入项目会通过 active-or-latest 接上。
+  const deadline = Date.now() + 30 * 60_000;
   while (Date.now() < deadline) {
     const task = await getFirstFrameTask(taskId);
     onTaskUpdate(task);
@@ -2586,13 +2606,17 @@ async function pollFirstFrameTask(
 export async function confirmFirstFrame(
   projectId: string,
   firstFrameAssetId: string,
+  options?: { allowUnverified?: boolean },
 ): Promise<AnalysisVersion> {
   return requestApiJson<AnalysisVersion>(
     `/api/projects/${encodeURIComponent(projectId)}/first-frames/confirm`,
     "确认首帧失败",
     {
       method: "POST",
-      body: JSON.stringify({ first_frame_asset_id: firstFrameAssetId }),
+      body: JSON.stringify({
+        first_frame_asset_id: firstFrameAssetId,
+        ...(options?.allowUnverified ? { allow_unverified: true } : {}),
+      }),
     },
   );
 }

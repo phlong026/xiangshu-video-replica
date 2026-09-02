@@ -2574,6 +2574,74 @@ def test_prompt_compile_rejects_legacy_confirmation_without_quality_evidence(
     assert response.json()["detail"]["code"] == "FIRST_FRAME_QUALITY_NOT_VERIFIED"
 
 
+def test_prompt_compile_accepts_selection_with_explicit_quality_override(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM versions WHERE id = %s",
+            ("first_frame_candidates_v1",),
+        ).fetchone()
+        assert row is not None
+        payload = json.loads(str(row["payload_json"]))
+        payload["candidates"] = [{"asset_id": "first_frame_owned", "quality": {"passed": False}}]
+        conn.execute(
+            "UPDATE versions SET payload_json = %s WHERE id = %s",
+            (json.dumps(payload), "first_frame_candidates_v1"),
+        )
+        conn.execute(
+            """
+            INSERT INTO versions (
+                id, project_id, asset_id, kind, version_number, payload_json, created_by_user_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "first_frame_selection_override",
+                "project_owned",
+                "first_frame_owned",
+                "first_frame_selection",
+                2,
+                json.dumps(
+                    {
+                        "first_frame_candidates_version_id": "first_frame_candidates_v1",
+                        "first_frame_asset_id": "first_frame_owned",
+                        "quality_override": True,
+                    },
+                    ensure_ascii=True,
+                    sort_keys=True,
+                ),
+                "employee_1",
+            ),
+        )
+        conn.commit()
+
+    script = client.post(
+        "/api/projects/project_owned/scripts",
+        headers=auth_headers("employee_1"),
+        json={
+            "source": "custom",
+            "text": "第一句。第二句。",
+            "shot_card_version_id": "shot_card_v1",
+        },
+    ).json()
+    response = client.post(
+        "/api/projects/project_owned/prompts/compile",
+        headers=auth_headers("employee_1"),
+        json={
+            "script_version_id": script["id"],
+            "shot_card_version_id": "shot_card_v1",
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+        },
+    )
+
+    assert response.status_code == 200
+    compiled = response.json()["payload"]
+    assert compiled["first_frame_selection_version_id"] == "first_frame_selection_override"
+
+
 def test_prompt_must_be_locked_and_batch_keeps_locked_snapshot_without_provider_call(
     client: TestClient,
     db_path: Path,
