@@ -42,17 +42,27 @@ function withAuth(handler: FetchMock, user = employeeUser) {
 }
 
 async function enterWorkspace() {
-  // 启动即自动验证身份并直接进入工作台首页，无需点击“进入”；
-  // 用 microtask 刷新而非 findBy*，以兼容 fake timers 用例。身份请求和
-  // JSON 解析各跨一个 Promise 边界，不能假设单次刷新就完成渲染。
+  // 启动即自动验证身份并直接进入工作台首页，无需点击“进入”。
+  // 身份请求和 JSON 解析各跨一个 Promise 边界：fake timers 用例保持
+  // 固定 microtask 刷新（waitFor 在假时钟下不会推进）；真实时钟用例在
+  // 全量并发负载下可能再差若干事件循环轮次，用 waitFor 收敛而不是假设
+  // 固定轮次一定够（2026-09-02 全量门禁实测抖动）。
   await act(async () => {
     for (let step = 0; step < 5; step += 1) {
       await Promise.resolve();
     }
   });
-  expect(
-    screen.getByRole("heading", { level: 1, name: "项目" }),
-  ).toBeInTheDocument();
+  if (vi.isFakeTimers()) {
+    expect(
+      screen.getByRole("heading", { level: 1, name: "项目" }),
+    ).toBeInTheDocument();
+    return;
+  }
+  await waitFor(() => {
+    expect(
+      screen.getByRole("heading", { level: 1, name: "项目" }),
+    ).toBeInTheDocument();
+  });
 }
 
 function openTaskRecords() {
