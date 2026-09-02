@@ -159,10 +159,11 @@ async function adminWrite<T>(
   reason: string,
   fallback: string,
   idempotencyKey?: string,
+  method: "POST" | "PATCH" = "POST",
 ): Promise<T> {
   const csrf = requireCsrfToken();
   const response = await requestControl(path, {
-    method: "POST",
+    method,
     headers: {
       [CSRF_HEADER]: csrf,
       [IDEMPOTENCY_KEY_HEADER]: idempotencyKey ?? newIdempotencyKey(),
@@ -1185,16 +1186,18 @@ export async function fetchQueueMode(): Promise<boolean> {
   return payload.fair_queue_enabled;
 }
 
-export async function updateQueueMode(enabled: boolean): Promise<boolean> {
-  const csrf = requireCsrfToken();
-  const response = await requestControl("/api/control/settings/queue-mode", {
-    method: "PATCH",
-    headers: { [CSRF_HEADER]: csrf },
-    body: JSON.stringify({ fair_queue_enabled: enabled }),
-  });
-  if (!response.ok) {
-    throw await parseActivationError(response, "切换队列模式失败");
-  }
-  const payload = (await response.json()) as { fair_queue_enabled: boolean };
+export async function updateQueueMode(
+  enabled: boolean,
+  reason: string,
+  idempotencyKey?: string,
+): Promise<boolean> {
+  const payload = await adminWrite<{ fair_queue_enabled: boolean }>(
+    "/api/control/settings/queue-mode",
+    { fair_queue_enabled: enabled },
+    reason,
+    "切换队列模式失败",
+    idempotencyKey,
+    "PATCH",
+  );
   return payload.fair_queue_enabled;
 }

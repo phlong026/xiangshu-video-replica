@@ -309,24 +309,93 @@ def test_list_customer_sessions_filters_out_expired_lease(client: TestClient):
 
 # ---------------------------------------------------------------------------
 # Queue-mode switch (M4/M5 review M2 follow-up, PR #68 Codex P1): the
-# production control-plane write path for fair_queue_enabled.
+# production control-plane write path for fair_queue_enabled. PR #85 review
+# P2 moved the write behind the shared AdminWriteContract — idempotency key,
+# confirm and a non-blank operator reason — like every other admin mutation.
 # ---------------------------------------------------------------------------
 
 QUEUE_MODE_PATH = "/api/control/settings/queue-mode"
+
+
+def _queue_mode_write(
+    client: TestClient,
+    headers: dict[str, str],
+    enabled: bool,
+    *,
+    key: str = "queue-mode-key",
+    reason: str = "灰度切换演练",
+):
+    """One contract-complete queue-mode write (the client's adminWrite shape)."""
+    return client.patch(
+        QUEUE_MODE_PATH,
+        headers={**headers, "Idempotency-Key": key},
+        json={"fair_queue_enabled": enabled, "confirm": True, "reason": reason},
+    )
+
+
+def _queue_mode_audit_count(reason_fragment: str) -> int:
+    with psycopg.connect(_t34_dsn()) as conn:
+        row = conn.execute(
+            "SELECT count(*) FROM audit_logs "
+            "WHERE action = 'runtime_settings.update' "
+            "AND metadata_json::text LIKE %s",
+            (f"%{reason_fragment}%",),
+        ).fetchone()
+    return int(row[0])
 
 
 @pytest.mark.pg
 def test_queue_mode_requires_admin_session(client: TestClient):
     """Unauthenticated requests must be rejected — no legacy identity path."""
     assert client.get(QUEUE_MODE_PATH).status_code == 401
-    assert client.patch(QUEUE_MODE_PATH, json={"fair_queue_enabled": True}).status_code == 401
+    assert (
+        client.patch(
+            QUEUE_MODE_PATH,
+            headers={"Idempotency-Key": "queue-anon-1"},
+            json={"fair_queue_enabled": True, "confirm": True, "reason": "未登录尝试"},
+        ).status_code
+        == 401
+    )
+
+
+@pytest.mark.pg
+def test_queue_mode_write_requires_write_contract(client: TestClient):
+    """PR #85 review P2：开关是生产级管理写，必须满足共享写契约三要素。"""
+    headers = _admin_session(client)
+
+    missing_key = client.patch(
+        QUEUE_MODE_PATH,
+        headers=headers,
+        json={"fair_queue_enabled": True, "confirm": True, "reason": "契约校验-缺key"},
+    )
+    assert missing_key.status_code == 400
+    assert missing_key.json()["detail"]["code"] == "IDEMPOTENCY_KEY_REQUIRED"
+
+    no_confirm = client.patch(
+        QUEUE_MODE_PATH,
+        headers={**headers, "Idempotency-Key": "queue-contract-no-confirm"},
+        json={"fair_queue_enabled": True, "reason": "契约校验-缺confirm"},
+    )
+    assert no_confirm.status_code == 400
+    assert no_confirm.json()["detail"]["code"] == "CONFIRMATION_REQUIRED"
+
+    blank_reason = client.patch(
+        QUEUE_MODE_PATH,
+        headers={**headers, "Idempotency-Key": "queue-contract-blank-reason"},
+        json={"fair_queue_enabled": True, "confirm": True, "reason": "   "},
+    )
+    assert blank_reason.status_code == 400
+    assert blank_reason.json()["detail"]["code"] == "REASON_REQUIRED"
+
+    # 契约失败不落任何审计行。
+    assert _queue_mode_audit_count("契约校验") == 0
 
 
 @pytest.mark.pg
 def test_admin_reads_and_flips_queue_mode_with_audit(client: TestClient):
-    """A cookie+CSRF admin flips the switch through the audited route; the
-    runtime_settings row, the queue gate's own probe and the audit log all
-    agree on the outcome."""
+    """A cookie+CSRF admin flips the switch through the audited idempotent
+    route; the runtime_settings row, the queue gate's own probe and the audit
+    log (carrying the operator reason) all agree on the outcome."""
     from app.db_pg import pg_transaction
     from app.db_portable import BusinessConnection
     from app.generation import _fair_queue_enabled
@@ -336,7 +405,7 @@ def test_admin_reads_and_flips_queue_mode_with_audit(client: TestClient):
     assert initial.status_code == 200, initial.text
     assert initial.json() == {"fair_queue_enabled": False}
 
-    flipped = client.patch(QUEUE_MODE_PATH, headers=headers, json={"fair_queue_enabled": True})
+    flipped = _queue_mode_write(client, headers, True, key="queue-flip-on", reason="灰度开启演练")
     assert flipped.status_code == 200, flipped.text
     assert flipped.json() == {"fair_queue_enabled": True}
 
@@ -353,6 +422,7 @@ def test_admin_reads_and_flips_queue_mode_with_audit(client: TestClient):
         ).fetchall()
         assert audit_rows and audit_rows[0][0] == "admin_u"
         assert '"fair_queue_enabled": true' in str(audit_rows[0][2])
+        assert "灰度开启演练" in str(audit_rows[0][2])
 
     # admin_app has DATABASE_URL_ENV pointed at this fixture database, so the
     # pool-backed probe reads the same switch the queue will.
@@ -360,9 +430,32 @@ def test_admin_reads_and_flips_queue_mode_with_audit(client: TestClient):
         assert _fair_queue_enabled(BusinessConnection.postgres(raw)) is True
 
     # Back off through the same audited path (the rollout rollback path).
-    off = client.patch(QUEUE_MODE_PATH, headers=headers, json={"fair_queue_enabled": False})
+    off = _queue_mode_write(client, headers, False, key="queue-flip-off", reason="灰度回退演练")
     assert off.status_code == 200
     assert off.json() == {"fair_queue_enabled": False}
+
+
+@pytest.mark.pg
+def test_queue_mode_write_replays_idempotently(client: TestClient):
+    """同 key 重放返回快照响应且只落一条审计（PR #85 review P2 指出的重复
+    审计风险）；同 key 换 body 按指纹冲突拒绝。"""
+    headers = _admin_session(client)
+
+    first = _queue_mode_write(client, headers, True, key="queue-replay-1", reason="重放验证开启")
+    assert first.status_code == 200, first.text
+    assert first.headers.get("X-Idempotent-Replay") != "true"
+
+    replay = _queue_mode_write(client, headers, True, key="queue-replay-1", reason="重放验证开启")
+    assert replay.status_code == 200, replay.text
+    assert replay.headers.get("X-Idempotent-Replay") == "true"
+    assert replay.json() == {"fair_queue_enabled": True}
+    assert _queue_mode_audit_count("重放验证开启") == 1
+
+    conflict = _queue_mode_write(
+        client, headers, False, key="queue-replay-1", reason="重放验证冲突"
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"]["code"] == "IDEMPOTENCY_CONFLICT"
 
 
 @pytest.mark.pg
@@ -370,7 +463,7 @@ def test_auditor_cannot_flip_queue_mode(client: TestClient):
     """Auditors are strictly read-only on the control plane."""
     headers = _admin_session(client, "auditor_u")
     assert client.get(QUEUE_MODE_PATH, headers=headers).status_code == 200
-    denied = client.patch(QUEUE_MODE_PATH, headers=headers, json={"fair_queue_enabled": True})
+    denied = _queue_mode_write(client, headers, True)
     assert denied.status_code == 403
     assert denied.json()["detail"]["code"] == "AUDITOR_READ_ONLY"
 

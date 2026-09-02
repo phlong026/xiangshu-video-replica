@@ -56,7 +56,7 @@ describe("QueueModeSection", () => {
     ).toBeInTheDocument();
   });
 
-  it("switches the queue mode through a confirmation dialog", async () => {
+  it("switches the queue mode through the idempotent write contract", async () => {
     setAdminCsrfToken("csrf-token-1");
     const fetchMock = installFetch({ enabled: false });
     render(<QueueModeSection />);
@@ -65,8 +65,14 @@ describe("QueueModeSection", () => {
       await screen.findByRole("button", { name: "开启公平队列" }),
     );
 
-    // 说明性确认（服务端契约只收 fair_queue_enabled，无原因字段）。
+    // PR #85 review P2：生产开关纳入统一管理端写契约——原因必填。
     await screen.findByRole("dialog", { name: "开启公平队列" });
+    fireEvent.click(screen.getByRole("button", { name: "确认开启" }));
+    expect(await screen.findByText("请填写操作原因")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("操作原因"), {
+      target: { value: "灰度演练开启" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "确认开启" }));
 
     expect(await screen.findByText("公平队列已开启。")).toBeInTheDocument();
@@ -74,8 +80,17 @@ describe("QueueModeSection", () => {
       ([, init]) => (init as RequestInit | undefined)?.method === "PATCH",
     );
     expect(patchCall).toBeDefined();
-    expect(JSON.parse(String(patchCall?.[1]?.body))).toEqual({
+    const [, init] = patchCall ?? [];
+    const headers = ((init as RequestInit).headers ?? {}) as Record<
+      string,
+      string
+    >;
+    expect(headers["X-Admin-CSRF"]).toBe("csrf-token-1");
+    expect(headers["Idempotency-Key"]).toMatch(/^idem-|^[0-9a-f-]{36}$/);
+    expect(JSON.parse(String((init as RequestInit).body))).toEqual({
       fair_queue_enabled: true,
+      confirm: true,
+      reason: "灰度演练开启",
     });
   });
 

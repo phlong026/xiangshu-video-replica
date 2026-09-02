@@ -19,16 +19,24 @@ themselves require the PostgreSQL runtime and fail closed elsewhere.
 
 from __future__ import annotations
 
+import json
 import uuid
 
-from fastapi import APIRouter
+import psycopg
+from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel, ConfigDict
 
 from app.admin_auth_routes import AdminReader, AdminWriter
+from app.admin_write_contract import AdminWriteContract, write_with_idempotency
 from app.db_pg import pg_transaction
 from app.settings import DEFAULT_BILLING_SETTINGS, DEFAULT_RUNTIME_SETTINGS
 
 router = APIRouter(prefix="/api/control", tags=["admin-runtime"])
+
+RUNTIME_SETTINGS_SERVICE_UNAVAILABLE = "RUNTIME_SETTINGS_SERVICE_UNAVAILABLE"
+RUNTIME_SETTINGS_SERVICE_UNAVAILABLE_MESSAGE = (
+    "Runtime settings writes require the PostgreSQL runtime."
+)
 
 
 class QueueModeResponse(BaseModel):
@@ -37,7 +45,12 @@ class QueueModeResponse(BaseModel):
     fair_queue_enabled: bool
 
 
-class QueueModeUpdateRequest(BaseModel):
+class QueueModeUpdateRequest(AdminWriteContract):
+    """The production switch follows the shared admin write contract (PR #85
+    review P2): idempotency key header, ``confirm: true`` and a non-blank
+    operator reason, so audit rows name the operator's reason and ambiguous
+    retries replay the snapshotted outcome instead of duplicating audits."""
+
     model_config = ConfigDict(extra="forbid")
 
     fair_queue_enabled: bool
@@ -56,9 +69,12 @@ def read_queue_mode(_actor: AdminReader) -> QueueModeResponse:
 @router.patch("/settings/queue-mode", response_model=QueueModeResponse)
 def update_queue_mode(
     payload: QueueModeUpdateRequest,
+    request: Request,
+    response: Response,
     actor: AdminWriter,
-) -> QueueModeResponse:
-    """Flip the fair-queue rollout switch as an audited admin write.
+) -> dict[str, object]:
+    """Flip the fair-queue rollout switch as an audited, idempotent admin
+    write behind the shared write contract (PR #85 review P2).
 
     Uses the runtime_settings row's queue-mode column directly (not the
     internal ``save_runtime_settings`` limits upsert): the switch-only write
@@ -67,7 +83,8 @@ def update_queue_mode(
     not exist yet (a fresh database whose limits were never configured), the
     documented defaults seed it so the switch always lands on a real row.
     """
-    with pg_transaction() as conn:
+
+    def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
         updated = conn.execute(
             """
             UPDATE runtime_settings
@@ -109,11 +126,31 @@ def update_queue_mode(
             (
                 str(uuid.uuid4()),
                 actor.user_id,
-                '{"fair_queue_enabled": %s, "setting": "queue_mode"}'
-                % ("true" if payload.fair_queue_enabled else "false"),
+                json.dumps(
+                    {
+                        "fair_queue_enabled": payload.fair_queue_enabled,
+                        "reason": payload.reason.strip(),
+                        "request_id": request_id,
+                        "setting": "queue_mode",
+                    },
+                    ensure_ascii=False,
+                ),
             ),
         )
         row = conn.execute(
             "SELECT fair_queue_enabled FROM runtime_settings WHERE id = 1"
         ).fetchone()
-    return QueueModeResponse(fair_queue_enabled=bool(row[0]) if row is not None else False)
+        return QueueModeResponse(
+            fair_queue_enabled=bool(row[0]) if row is not None else False
+        ).model_dump()
+
+    return write_with_idempotency(
+        request,
+        response,
+        actor,
+        payload,
+        business,
+        success_status=200,
+        unavailable_code=RUNTIME_SETTINGS_SERVICE_UNAVAILABLE,
+        unavailable_message=RUNTIME_SETTINGS_SERVICE_UNAVAILABLE_MESSAGE,
+    )
