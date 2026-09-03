@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  type ActivationCodePage,
   clearAdminActivationSession,
   exchangeAdminSession,
 } from "../api.admin";
@@ -30,7 +31,7 @@ const exchangePayload = {
   },
 };
 
-const codesPage = {
+const codesPage: ActivationCodePage = {
   items: [
     {
       code_id: "code-1",
@@ -40,6 +41,7 @@ const codesPage = {
       bound_user_id: null,
       bound_username: null,
       issued_at: null,
+      archived_at: null,
       devices: [],
       pending_pairings: [],
     },
@@ -51,6 +53,7 @@ const codesPage = {
       bound_user_id: "user-9",
       bound_username: "customer_9",
       issued_at: "2026-08-20T10:00:00+00:00",
+      archived_at: null,
       devices: [
         {
           device_id: "device-1",
@@ -83,6 +86,7 @@ const codesPage = {
       bound_user_id: "user-10",
       bound_username: "customer_10",
       issued_at: "2026-08-19T10:00:00+00:00",
+      archived_at: null,
       devices: [],
       pending_pairings: [],
     },

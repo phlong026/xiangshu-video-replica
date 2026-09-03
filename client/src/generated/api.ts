@@ -958,6 +958,30 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/control/customers.csv": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Export Customers Csv
+     * @description Export the customer list as CSV (C6) — audited + rate limited (A2).
+     *
+     *     Replaces the console's client-side "current page only" export: the whole
+     *     (filtered) list leaves through one audited dump with the same columns the
+     *     operator saw in the table.
+     */
+    get: operations["export_customers_csv_api_control_customers_csv_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/control/customer-sessions/live": {
     parameters: {
       query?: never;
@@ -1032,7 +1056,8 @@ export interface paths {
     head?: never;
     /**
      * Update Queue Mode
-     * @description Flip the fair-queue rollout switch as an audited admin write.
+     * @description Flip the fair-queue rollout switch as an audited, idempotent admin
+     *     write behind the shared write contract (PR #85 review P2).
      *
      *     Uses the runtime_settings row's queue-mode column directly (not the
      *     internal ``save_runtime_settings`` limits upsert): the switch-only write
@@ -5257,8 +5282,24 @@ export interface components {
       /** Fair Queue Enabled */
       fair_queue_enabled: boolean;
     };
-    /** QueueModeUpdateRequest */
+    /**
+     * QueueModeUpdateRequest
+     * @description The production switch follows the shared admin write contract (PR #85
+     *     review P2): idempotency key header, ``confirm: true`` and a non-blank
+     *     operator reason, so audit rows name the operator's reason and ambiguous
+     *     retries replay the snapshotted outcome instead of duplicating audits.
+     */
     QueueModeUpdateRequest: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default
+       */
+      reason: string;
       /** Fair Queue Enabled */
       fair_queue_enabled: boolean;
     };
@@ -8027,6 +8068,39 @@ export interface operations {
       };
     };
   };
+  export_customers_csv_api_control_customers_csv_get: {
+    parameters: {
+      query?: {
+        status?: string | null;
+        username?: string;
+        limit?: number;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": unknown;
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   list_live_sessions_api_control_customer_sessions_live_get: {
     parameters: {
       query?: {
@@ -8853,6 +8927,7 @@ export interface operations {
         batch_id?: string | null;
         status?: string | null;
         search?: string;
+        include_archived?: boolean;
         limit?: number;
         offset?: number;
       };
