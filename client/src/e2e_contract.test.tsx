@@ -109,7 +109,7 @@ describe("Fake provider E2E contract", () => {
     expect(screen.getByText("任务已结束 2 / 2")).toBeInTheDocument();
     expect(screen.getByText("task-fake-1")).toBeInTheDocument();
     expect(screen.getByText("task-fake-2")).toBeInTheDocument();
-    expect(screen.getAllByText("阶段：已归档")).toHaveLength(2);
+    expect(screen.getAllByText("阶段：已完成")).toHaveLength(2);
     expect(screen.queryByText("需要处理")).not.toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: /^下载 MP4 / })).toHaveLength(
       2,

@@ -1,3 +1,6 @@
+import { invoke, isTauri } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+
 import type { components } from "./generated/api";
 
 const DEFAULT_API_BASE_URL = "http://127.0.0.1:8000";
@@ -1229,10 +1232,9 @@ export async function createGenerationTaskPreviewUrl(
 export async function downloadGenerationResult(
   assetId: string,
   filename: string,
-): Promise<void> {
-  const { url } = await getGenerationResultDownloadUrl(assetId);
-  downloadBlob(
-    await fetchGenerationResultBlob(url, "下载生成结果失败"),
+): Promise<VideoDownloadResult> {
+  return downloadVideoResult(
+    async () => (await getGenerationResultDownloadUrl(assetId)).url,
     filename,
   );
 }
@@ -1240,12 +1242,172 @@ export async function downloadGenerationResult(
 export async function downloadGenerationTaskResult(
   taskId: string,
   filename: string,
-): Promise<void> {
-  const url = await createGenerationTaskPreviewUrl(taskId);
-  downloadBlob(
-    await fetchGenerationResultBlob(url, "下载生成结果失败"),
+): Promise<VideoDownloadResult> {
+  return downloadVideoResult(
+    () => createGenerationTaskPreviewUrl(taskId),
     filename,
   );
+}
+
+export type VideoDownloadResult =
+  | { status: "saved"; downloadId: string; path: string }
+  | { status: "cancelled" }
+  | { status: "started" };
+
+export class VideoDownloadUnconfirmedError extends Error {
+  constructor() {
+    super("尚未确认保存结果，请先检查所选文件夹，避免重复下载。");
+    this.name = "VideoDownloadUnconfirmedError";
+  }
+}
+
+type NativeVideoDownload = { download_id: string; path: string };
+type NativeVideoDownloadFinished = {
+  download_id: string;
+  success: boolean;
+  path: string | null;
+  error: string | null;
+};
+
+export async function openVideoDownloadFolder(
+  downloadId: string,
+): Promise<void> {
+  try {
+    await invoke("open_video_download_folder", { downloadId });
+  } catch (error) {
+    throw new Error("无法打开文件夹，请按显示的保存路径查找视频。", {
+      cause: error,
+    });
+  }
+}
+
+async function downloadVideoResult(
+  getUrl: () => Promise<string>,
+  filename: string,
+): Promise<VideoDownloadResult> {
+  if (!isTauri()) {
+    downloadBlob(
+      await fetchGenerationResultBlob(await getUrl(), "下载生成结果失败"),
+      filename,
+    );
+    // 浏览器不会向页面确认用户是否保存了文件，不能声称已保存。
+    return { status: "started" };
+  }
+
+  let destination: NativeVideoDownload | null;
+  try {
+    destination = await invoke<NativeVideoDownload | null>(
+      "choose_video_download",
+      { filename },
+    );
+  } catch (error) {
+    throw new Error("无法选择保存位置，请检查桌面权限后重试。", {
+      cause: error,
+    });
+  }
+  if (!destination) return { status: "cancelled" };
+
+  let blobUrl: string | undefined;
+  let unlisten: (() => void) | undefined;
+  let timeout: number | undefined;
+  let statusTimer: number | undefined;
+  let finished = false;
+  let started = false;
+  try {
+    const blob = await fetchGenerationResultBlob(
+      await getUrl(),
+      "下载生成结果失败",
+    );
+    blobUrl = URL.createObjectURL(blob);
+    let resolveCompletion: (value: NativeVideoDownloadFinished) => void =
+      () => {};
+    const completion = new Promise<NativeVideoDownloadFinished>((resolve) => {
+      resolveCompletion = resolve;
+    });
+    const finish = (value: NativeVideoDownloadFinished) => {
+      if (finished || value.download_id !== destination.download_id) return;
+      finished = true;
+      resolveCompletion(value);
+    };
+    const unconfirmed = () =>
+      finish({
+        download_id: destination.download_id,
+        success: false,
+        path: null,
+        error: "COMPLETION_UNCONFIRMED",
+      });
+    unlisten = await listen<NativeVideoDownloadFinished>(
+      "video-download-finished",
+      ({ payload }) => {
+        if (payload.download_id === destination.download_id) finish(payload);
+      },
+    );
+    timeout = window.setTimeout(unconfirmed, 300_000);
+    await invoke("start_video_download", {
+      downloadId: destination.download_id,
+      url: blobUrl,
+    });
+    const anchor = document.createElement("a");
+    anchor.href = blobUrl;
+    anchor.download = filename;
+    document.body.append(anchor);
+    try {
+      anchor.click();
+      started = true;
+    } finally {
+      anchor.remove();
+    }
+    // 完成事件可能丢失；只查询本机已记录的结果，不重试下载或猜测成功。
+    const checkStatus = async () => {
+      try {
+        const result = await invoke<NativeVideoDownloadFinished | null>(
+          "get_video_download_status",
+          { downloadId: destination.download_id },
+        );
+        if (result) finish(result);
+      } catch {
+        unconfirmed();
+      }
+      if (!finished) statusTimer = window.setTimeout(checkStatus, 2_000);
+    };
+    statusTimer = window.setTimeout(checkStatus, 2_000);
+    const result = await completion;
+    if (result.error === "COMPLETION_UNCONFIRMED") {
+      throw new VideoDownloadUnconfirmedError();
+    }
+    if (!result.success || !result.path) {
+      throw new Error(
+        "保存视频失败或下载被中断，请检查磁盘空间和文件夹权限后重试。",
+      );
+    }
+    return {
+      status: "saved",
+      downloadId: destination.download_id,
+      path: result.path,
+    };
+  } catch (error) {
+    if (!started) {
+      try {
+        await invoke("cancel_video_download", {
+          downloadId: destination.download_id,
+        });
+      } catch (cleanupError) {
+        throw new Error(
+          "下载未完成且未能清理下载请求，请重新打开客户端后重试。",
+          {
+            cause: new AggregateError([error, cleanupError]),
+          },
+        );
+      }
+    }
+    throw error;
+  } finally {
+    finished = true;
+    window.clearTimeout(timeout);
+    window.clearTimeout(statusTimer);
+    unlisten?.();
+    if (blobUrl) URL.revokeObjectURL(blobUrl);
+  }
 }
 
 async function fetchGenerationResultBlob(

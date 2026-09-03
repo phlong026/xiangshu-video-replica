@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { GenerationBatch, GenerationTask } from "./api";
 import {
-  generationQualityDisplay,
+  generationBatchDisplayStatus,
   hasGenerationResultSource,
   VideoResultStage,
 } from "./VideoResultStage";
@@ -111,6 +111,28 @@ function renderStage(
 }
 
 describe("VideoResultStage", () => {
+  it("shows delivered legacy QC results as complete without post-processing copy", () => {
+    const delivered = task({
+      stage: "QUALITY_FAILED",
+      quality_status: "VISUAL_QUALITY_FAILED",
+      quality_issue_codes: ["VIDEO_IDENTITY_DRIFT"],
+      archive_status: "DIRECT",
+      result_asset_id: null,
+      direct_result_available: true,
+    });
+    renderStage({
+      batch: batch({ quantity: 1, tasks: [delivered] }),
+      previewUrls: { "task-ok": "https://preview.example/video.mp4" },
+    });
+    expect(
+      screen.queryByText(/质检|保存成片|需要处理/),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("已完成")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("list", { name: "生成阶段" }),
+    ).not.toBeInTheDocument();
+    expect(delivered.quality_status).toBe("VISUAL_QUALITY_FAILED");
+  });
   it("uses the same player controls and replays after the ended event", () => {
     renderStage({
       previewUrls: { "task-ok": "https://preview.example/result.mp4" },
@@ -162,10 +184,11 @@ describe("VideoResultStage", () => {
       batch: batch({ tasks: [visualTask] }),
       previewUrls: { "task-ok": "https://preview.example/result.mp4" },
     });
-    expect(screen.getAllByText(/画面质检未通过/)).toHaveLength(2);
-    expect(screen.getByText(/人物一致性变化/)).toBeInTheDocument();
-    expect(screen.getByText(/动作连续性问题/)).toBeInTheDocument();
-    expect(screen.getByText(/画面闪烁/)).toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        /画面质检未通过|人物一致性变化|动作连续性问题|画面闪烁/,
+      ),
+    ).not.toBeInTheDocument();
     expect(
       screen.queryByText(/音频质检未通过|建议再次生成/),
     ).not.toBeInTheDocument();
@@ -184,29 +207,57 @@ describe("VideoResultStage", () => {
       "unavailable",
     ],
     ["PENDING", [], "质检待完成", "pending"],
-  ])(
-    "maps %s without treating unavailable checks as failed media",
-    (status, codes, label, tone) => {
-      expect(
-        generationQualityDisplay(
-          task({
-            quality_status: status as string,
-            quality_issue_codes: codes as string[],
-          }),
-        ),
-      ).toMatchObject({ label, tone });
-    },
-  );
+  ])("does not show legacy %s checks on delivered media", (status, codes) => {
+    const result = task({
+      quality_status: status as string,
+      quality_issue_codes: codes as string[],
+    });
+    renderStage({ batch: batch({ quantity: 1, tasks: [result] }) });
+    expect(screen.queryByText(/质检/)).not.toBeInTheDocument();
+    expect(result.quality_status).toBe(status);
+    expect(result.quality_issue_codes).toEqual(codes);
+  });
 
-  it("preserves distinct unknown quality codes for diagnosis", () => {
+  it("does not normalize truncated snapshots or hide uncertain billing", () => {
+    expect(generationBatchDisplayStatus(batch({ quantity: 3 }))).toBe(
+      "NEEDS_ATTENTION",
+    );
     expect(
-      generationQualityDisplay(
-        task({
-          quality_status: "VISUAL_QUALITY_FAILED",
-          quality_issue_codes: ["VIDEO_NEW_CHECK_A", "VIDEO_NEW_CHECK_B"],
+      generationBatchDisplayStatus(
+        batch({
+          quantity: 1,
+          tasks: [task({ status: "SUBMISSION_UNCERTAIN" })],
         }),
-      ).issues,
-    ).toEqual(["VIDEO_NEW_CHECK_A", "VIDEO_NEW_CHECK_B"]);
+      ),
+    ).toBe("NEEDS_ATTENTION");
+    expect(
+      generationBatchDisplayStatus(
+        batch({
+          quantity: 1,
+          tasks: [task({ status: "FAILED", stage: "COMPLETED" })],
+        }),
+      ),
+    ).toBe("NEEDS_ATTENTION");
+  });
+
+  it("keeps submission uncertainty visible even when a legacy stage says completed", () => {
+    renderStage({
+      batch: batch({
+        quantity: 1,
+        tasks: [
+          task({
+            status: "SUBMISSION_UNCERTAIN",
+            stage: "COMPLETED",
+            result_asset_id: null,
+            direct_result_available: false,
+          }),
+        ],
+      }),
+    });
+    expect(
+      screen.getByText("需要处理", { selector: "strong" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("已完成")).not.toBeInTheDocument();
   });
 
   it("does not treat a failed archive asset placeholder as an available video", () => {
@@ -227,17 +278,16 @@ describe("VideoResultStage", () => {
         },
       }),
     });
-    expect(screen.getByText("任务已结束 1 / 1")).toBeInTheDocument();
-    expect(screen.getByText("生成成功 0 · 失败 1")).toBeInTheDocument();
+    expect(
+      screen.getByText("需要处理", { selector: "strong" }),
+    ).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "下载 MP4" }),
     ).not.toBeInTheDocument();
     expect(props.onRequestPreview).not.toHaveBeenCalled();
-    const steps = screen.getByRole("list", { name: "生成阶段" });
-    expect(steps.querySelector(".video-stage-step--active")).toBeNull();
-    expect(steps.querySelectorAll("li")[2]).toHaveClass(
-      "video-stage-step--done",
-    );
+    expect(
+      screen.queryByRole("list", { name: "生成阶段" }),
+    ).not.toBeInTheDocument();
     expect(hasGenerationResultSource(failedTask)).toBe(false);
     expect(
       hasGenerationResultSource({
@@ -338,9 +388,9 @@ describe("VideoResultStage", () => {
     expect(
       screen.getByRole("heading", { name: "结果信息" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("生成成功 2 · 失败 0")).toBeInTheDocument();
+    expect(screen.getByText("任务已结束 2 / 2")).toBeInTheDocument();
     expect(screen.queryByText(/MiniMax/i)).not.toBeInTheDocument();
-    expect(screen.getByText("音频质检通过")).toBeInTheDocument();
+    expect(screen.queryByText("音频质检通过")).not.toBeInTheDocument();
     expect(
       screen.getByText("生成通道 / 费用").nextElementSibling,
     ).toHaveTextContent("¥1.50");
@@ -471,10 +521,10 @@ describe("VideoResultStage", () => {
       screen.getByRole("button", { name: "查看结果 2：task-audio-failed" }),
     );
 
-    // 质检未过的结果仍可对比查看，并显示警示条。
+    // 历史检查结果不再影响结果展示。
     expect(
-      screen.getByText(/音频质检未通过：检查结果仅供参考/),
-    ).toBeInTheDocument();
+      screen.queryByText(/音频质检未通过：检查结果仅供参考/),
+    ).not.toBeInTheDocument();
     expect(onRequestPreview).toHaveBeenCalledWith(
       expect.objectContaining({ id: "task-audio-failed" }),
     );

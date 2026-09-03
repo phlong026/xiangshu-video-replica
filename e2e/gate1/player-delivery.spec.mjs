@@ -49,7 +49,7 @@ test.afterAll(async () => {
 
 test("@player direct video plays, replays, downloads and survives refresh", async ({
   page,
-}) => {
+}, testInfo) => {
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
   // 浏览器现场录制短 MP4，避免提交二进制样本或下载外部素材。
@@ -123,26 +123,44 @@ test("@player direct video plays, replays, downloads and survives refresh", asyn
     tasks: [task],
   };
   let previewRequests = 0;
+  let hidden = false;
+  let deleteRequests = 0;
   const unexpected = [];
   await page.route("https://api.example.test/**", async (route) => {
     const request = route.request();
     const pathname = new URL(request.url()).pathname;
-    const headers = { "Access-Control-Allow-Origin": origin };
-    if (request.method() !== "GET") {
+    const headers = {
+      "Access-Control-Allow-Origin": origin,
+      "Access-Control-Allow-Methods": "GET, DELETE, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    };
+    if (request.method() === "OPTIONS") {
+      await route.fulfill({ status: 204, headers });
+    } else if (
+      request.method() === "DELETE" &&
+      pathname === "/api/generation-batches/test-batch"
+    ) {
+      deleteRequests += 1;
+      hidden = true;
+      await route.fulfill({ status: 204, headers });
+    } else if (request.method() !== "GET") {
       unexpected.push(`${request.method()} ${pathname}`);
       await route.abort();
     } else if (pathname === "/api/generation-batches") {
       await route.fulfill({
         headers,
         json: {
-          items: [
-            {
-              ...detail,
-              status: "QUEUED",
-              project_name: "测试视频",
-              created_at: "2026-09-03 10:00:00",
-            },
-          ],
+          items: hidden
+            ? []
+            : [
+                {
+                  ...detail,
+                  created_by_user_id: "test-user",
+                  status: "QUEUED",
+                  project_name: "测试视频",
+                  created_at: "2026-09-03 10:00:00",
+                },
+              ],
           next_cursor: null,
         },
       });
@@ -194,8 +212,11 @@ test("@player direct video plays, replays, downloads and survives refresh", asyn
     .poll(() => video.evaluate((element) => element.paused))
     .toBe(true);
   await expect(page.getByText(/音频质检未通过/)).toHaveCount(0);
-  await expect(page.getByText(/画面质检未通过：/)).toBeVisible();
-  await expect(page.getByText("生成成功 1 · 失败 0")).toBeVisible();
+  await expect(page.getByText(/画面质检未通过：/)).toHaveCount(0);
+  await expect(page.getByText("保存成片", { exact: true })).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "打开批次 test-batch" }),
+  ).toContainText("已完成");
 
   const downloadEvent = page.waitForEvent("download");
   await page.getByRole("button", { name: "下载 MP4", exact: true }).click();
@@ -203,6 +224,9 @@ test("@player direct video plays, replays, downloads and survives refresh", asyn
   expect(download.suggestedFilename()).toBe("test-task.mp4");
   expect(await readFile(await download.path())).toEqual(bytes);
   expect(previewRequests).toBe(2);
+  await expect(
+    page.getByText("已交给浏览器下载，请查看浏览器下载列表。"),
+  ).toBeVisible();
 
   const element = await video.elementHandle();
   const time = await video.evaluate((current) => current.currentTime);
@@ -220,6 +244,40 @@ test("@player direct video plays, replays, downloads and survives refresh", asyn
   ).toBe(true);
   expect(await video.evaluate((current) => current.currentTime)).toBe(time);
   expect(previewRequests).toBe(2);
+  expect(unexpected).toEqual([]);
+  expect(errors).toEqual([]);
+  await page.screenshot({
+    path: testInfo.outputPath("task-records-completed.png"),
+    fullPage: true,
+  });
+  await page.setViewportSize({ width: 900, height: 1100 });
+  const fullscreen = page.getByRole("button", { name: "全屏", exact: true });
+  await expect(fullscreen).toBeVisible();
+  await fullscreen.scrollIntoViewIfNeeded();
+  const playerBounds = await video.boundingBox();
+  const controlBounds = await fullscreen.boundingBox();
+  expect(controlBounds.x + controlBounds.width).toBeLessThanOrEqual(
+    playerBounds.x + playerBounds.width + 1,
+  );
+  await page.screenshot({
+    path: testInfo.outputPath("task-records-narrow.png"),
+    fullPage: true,
+  });
+  page.once("dialog", async (dialog) => {
+    expect(dialog.message()).toContain("后台生成和费用记录保留");
+    await dialog.accept();
+  });
+  await page.getByRole("button", { name: "打开批次 test-batch" }).hover();
+  await page.getByRole("button", { name: "删除批次 测试视频" }).click();
+  await expect(
+    page.getByRole("button", { name: "打开批次 test-batch" }),
+  ).toHaveCount(0);
+  await page.getByRole("button", { name: "刷新", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "打开批次 test-batch" }),
+  ).toHaveCount(0);
+  expect(deleteRequests).toBe(1);
+  expect(detail.tasks).toHaveLength(1);
   expect(unexpected).toEqual([]);
   expect(errors).toEqual([]);
 });

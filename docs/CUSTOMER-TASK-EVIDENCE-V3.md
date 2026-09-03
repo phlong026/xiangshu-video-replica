@@ -1,5 +1,9 @@
 # Customer Edition Task Evidence Record V3
 
+## 视频直链交付与桌面下载反馈（2026-09-04，自动化验证完成）
+
+基于用户最新确认，取消生成视频后的媒体处理，保留授权/审计/结算；精简客户任务 UI，新增真实桌面保存反馈，并将客户删除改为账号级隐藏、管理端永久保留。最终全仓门禁为客户前端 715/715、服务端 1555 通过/1 项因本机无 `ffmpeg` 跳过，Tauri/Ruff/mypy/密钥扫描通过。证据记录：`docs/evidence/VIDEO-DIRECT-DELIVERY-DOWNLOAD-EVIDENCE.md`。当前仅为 `AUTOMATED_VERIFIED`，不宣称生产已更新或桌面安装包已验收。
+
 > Note: This file is the evidence ledger for `docs/客户版任务清单-V3.md`; each task closure must record details per Section 14 template. The task list remains the single source of truth for status.
 >
 > **Evidence location (M0 review M8 unification, 2026-08-21)**: per-task evidence documents live under `docs/evidence/` (T02–T06 evidence files moved from the repository root; run-fix evidence under `docs/evidence/m0-review-fixes/`). Historical self-references inside those documents to their original root paths are preserved as record snapshots.

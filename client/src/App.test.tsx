@@ -2262,7 +2262,7 @@ describe("App", () => {
       screen.getByText("结果交付失败，暂无可用播放地址"),
     ).toBeInTheDocument();
     expect(screen.getByText("task-running")).toBeInTheDocument();
-    expect(screen.getAllByText("需要处理")).toHaveLength(2);
+    expect(screen.getAllByText("需要处理")).toHaveLength(1);
     expect(window.localStorage.getItem("generation.batchId:employee_1")).toBe(
       "batch-1",
     );

@@ -3529,38 +3529,6 @@ button.history-version--active {
   line-height: 1.45;
 }
 
-.quality-summary {
-  border: 1px solid #28563d;
-  border-radius: 10px;
-  padding: 12px;
-  color: #8ce0b1;
-  background: #11251b;
-}
-
-.quality-summary--failed {
-  border-color: #6a4b24;
-  color: #ffcf8a;
-  background: #241a12;
-}
-
-.quality-summary--pending {
-  border-color: #454052;
-  color: #bcb5c9;
-  background: #18151d;
-}
-
-.quality-summary p {
-  margin: 5px 0 0;
-  color: inherit;
-  font-size: 13px;
-}
-
-.quality-summary span {
-  margin-top: 8px;
-  color: inherit;
-  font-size: 11px;
-}
-
 .task-result-actions {
   justify-content: flex-start;
   flex-wrap: wrap;
@@ -3727,6 +3695,7 @@ button.history-version--active {
   bottom: 0;
   left: 0;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
   padding: 10px 14px;
@@ -3753,15 +3722,33 @@ button.history-version--active {
 }
 
 .stage-video-player__seek {
-  flex: 1;
-  min-width: 72px;
+  flex: 1 0 100%;
+  order: -1;
+  min-width: 0;
+  width: 100%;
   accent-color: var(--accent);
 }
 
 .stage-video-player__volume {
-  flex: none;
-  width: 72px;
+  flex: 1 1 36px;
+  min-width: 0;
+  width: 36px;
+  max-width: 72px;
   accent-color: var(--accent);
+}
+
+.video-download-feedback {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  color: var(--text-muted);
+}
+
+.video-download-path {
+  overflow-wrap: anywhere;
+  min-width: 0;
 }
 
 .video-stage-player-note {
@@ -3769,21 +3756,6 @@ button.history-version--active {
   padding: 0 24px;
   color: var(--text-muted);
   font-size: 14px;
-  text-align: center;
-}
-
-.video-stage-quality-banner {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  z-index: 2;
-  margin: 0;
-  border-bottom: 1px solid #6a4b24;
-  padding: 8px 12px;
-  color: #ffcf8a;
-  background: rgba(36, 26, 18, 0.92);
-  font-size: 12px;
   text-align: center;
 }
 
@@ -4180,7 +4152,6 @@ button.history-version--active {
   color: var(--text);
 }
 
-.video-stage-cell__badge--quality_failed,
 .video-stage-cell__badge--failed {
   color: #ffb4be;
 }

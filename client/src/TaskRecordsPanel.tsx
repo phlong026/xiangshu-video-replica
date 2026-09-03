@@ -21,19 +21,23 @@ import {
   getGenerationBatch,
   getLatestGenerationReconcileOperation,
   listGenerationBatches,
+  openVideoDownloadFolder,
   reconcileUncertainTask,
   regenerateGenerationBatch,
   regenerateGenerationTask,
   renameGenerationBatch,
   retryGenerationTask,
   type UserRole,
+  VideoDownloadUnconfirmedError,
   waitForGenerationReconcileOperation,
 } from "./api";
 import {
-  generationQualityDisplay,
+  generationBatchDisplayStatus,
   hasGenerationResultSource,
   readSnapshotNumber,
   readSnapshotString,
+  type VideoDownloadFeedback,
+  VideoDownloadNotice,
   VideoResultStage,
 } from "./VideoResultStage";
 
@@ -85,6 +89,10 @@ export function TaskRecordsPanel({
   const [batchHistory, setBatchHistory] = useState<GenerationBatchListItem[]>(
     [],
   );
+  const batchHistoryRef = useRef(batchHistory);
+  batchHistoryRef.current = batchHistory;
+  const accountRef = useRef(currentUserId);
+  accountRef.current = currentUserId;
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [historyError, setHistoryError] = useState("");
   const [isHistoryLoading, setIsHistoryLoading] = useState(false);
@@ -100,6 +108,16 @@ export function TaskRecordsPanel({
   const isMountedRef = useRef(true);
   const [resultErrors, setResultErrors] = useState<Record<string, string>>({});
   const [activeResultAction, setActiveResultAction] = useState("");
+  const [downloadFeedback, setDownloadFeedback] = useState<
+    Record<string, VideoDownloadFeedback>
+  >({});
+  const pendingDownloadsRef = useRef(new Set<string>());
+  const downloadScope = JSON.stringify([currentUserId ?? "", activeBatchId]);
+  const scopedDownloadFeedback: Record<string, VideoDownloadFeedback> = {};
+  for (const task of batch?.tasks ?? []) {
+    const feedback = downloadFeedback[`${downloadScope}:${task.id}`];
+    if (feedback) scopedDownloadFeedback[task.id] = feedback;
+  }
   const [activeTaskAction, setActiveTaskAction] = useState("");
   const [taskActionReasons, setTaskActionReasons] = useState<
     Record<string, string>
@@ -430,12 +448,13 @@ export function TaskRecordsPanel({
     }
   }
 
-  // 删除是物理删除（批次+任务+云端产物），付费记录删除后不可恢复，
-  // confirm 文案必须明示；有进行中任务时服务端会以 409 拒绝。
+  // 服务端仅隐藏当前账号的列表记录，不能取消任务或删除后台财务证据。
   async function handleDeleteBatch(item: GenerationBatchListItem) {
+    if (!canOperate) return;
+    const accountAtStart = currentUserId;
     const displayName = batchDisplayName(item);
     const confirmed = window.confirm(
-      `删除批次「${displayName}」将同时删除其全部任务记录与素材库结果文件，已产生的付费记录删除后不可恢复。确定删除？`,
+      `将「${displayName}」仅从本账号任务列表移除，后台生成和费用记录保留，不会取消正在进行的任务。确定删除？`,
     );
     if (!confirmed) {
       return;
@@ -444,7 +463,15 @@ export function TaskRecordsPanel({
     setBatchActionError("");
     try {
       await deleteGenerationBatch(item.id);
-      const remaining = batchHistory.filter((entry) => entry.id !== item.id);
+      if (!isMountedRef.current || accountRef.current !== accountAtStart)
+        return;
+      // 丢弃删除前发出的列表响应，避免旧快照把已隐藏记录重新插回。
+      historyRequestRef.current += 1;
+      setIsHistoryLoading(false);
+      const remaining = batchHistoryRef.current.filter(
+        (entry) => entry.id !== item.id,
+      );
+      batchHistoryRef.current = remaining;
       setBatchHistory(remaining);
       if (activeBatchIdRef.current === item.id) {
         if (remaining[0]) {
@@ -460,11 +487,15 @@ export function TaskRecordsPanel({
         }
       }
     } catch (error) {
-      setBatchActionError(
-        error instanceof Error ? error.message : "删除批次失败，请重试。",
-      );
+      if (isMountedRef.current && accountRef.current === accountAtStart) {
+        setBatchActionError(
+          customerVisibleErrorMessage(error, "移除任务记录失败，请重试。"),
+        );
+      }
     } finally {
-      setDeletingBatchId("");
+      if (isMountedRef.current && accountRef.current === accountAtStart) {
+        setDeletingBatchId((current) => (current === item.id ? "" : current));
+      }
     }
   }
 
@@ -737,31 +768,70 @@ export function TaskRecordsPanel({
   }, []);
 
   async function handleDownload(task: GenerationTask) {
-    if (!canOperate || !hasGenerationResultSource(task)) {
+    if (
+      !canOperate ||
+      !hasGenerationResultSource(task) ||
+      (!task.direct_result_available && !task.result_asset_id)
+    ) {
       return;
     }
-    const batchIdAtStart = activeBatchIdRef.current;
-    const actionKey = `${task.id}:download`;
-    setActiveResultAction(actionKey);
-    setResultErrors((current) => ({ ...current, [task.id]: "" }));
+    const actionKey = `${downloadScope}:${task.id}`;
+    if (pendingDownloadsRef.current.has(actionKey)) return;
+    pendingDownloadsRef.current.add(actionKey);
+    setDownloadFeedback((current) => ({
+      ...current,
+      [actionKey]: { status: "pending" },
+    }));
     try {
-      if (task.direct_result_available) {
-        await downloadGenerationTaskResult(task.id, `${task.id}.mp4`);
-      } else if (task.result_asset_id) {
-        await downloadGenerationResult(task.result_asset_id, `${task.id}.mp4`);
+      const result = task.direct_result_available
+        ? await downloadGenerationTaskResult(task.id, `${task.id}.mp4`)
+        : await downloadGenerationResult(
+            task.result_asset_id ?? "",
+            `${task.id}.mp4`,
+          );
+      if (isMountedRef.current) {
+        setDownloadFeedback((current) => ({ ...current, [actionKey]: result }));
       }
-    } catch {
-      if (isMountedRef.current && activeBatchIdRef.current === batchIdAtStart) {
-        setResultErrors((current) => ({
+    } catch (error) {
+      if (isMountedRef.current) {
+        setDownloadFeedback((current) => ({
           ...current,
-          [task.id]: "下载失败，请重试。",
+          [actionKey]: {
+            status: "error",
+            message:
+              error instanceof VideoDownloadUnconfirmedError
+                ? "尚未确认保存结果，请先检查所选文件夹，避免重复下载。"
+                : "下载失败，请检查网络和保存位置后重试。",
+          },
         }));
       }
     } finally {
+      pendingDownloadsRef.current.delete(actionKey);
+    }
+  }
+
+  async function handleOpenDownloadFolder(
+    task: GenerationTask,
+    downloadId: string,
+  ) {
+    if (!canOperate) return;
+    const actionKey = `${downloadScope}:${task.id}`;
+    try {
+      await openVideoDownloadFolder(downloadId);
+    } catch {
       if (isMountedRef.current) {
-        setActiveResultAction((current) =>
-          current === actionKey ? "" : current,
-        );
+        setDownloadFeedback((current) => {
+          const saved = current[actionKey];
+          if (saved?.status !== "saved" || saved.downloadId !== downloadId)
+            return current;
+          return {
+            ...current,
+            [actionKey]: {
+              ...saved,
+              folderError: "无法打开文件夹，请按上方路径查看视频。",
+            },
+          };
+        });
       }
     }
   }
@@ -851,16 +921,15 @@ export function TaskRecordsPanel({
                         <span className="batch-history-card__title">
                           <strong>{displayName}</strong>
                           <span
-                            className={`batch-status batch-status--${item.status.toLowerCase()}`}
+                            className={`batch-status batch-status--${generationBatchDisplayStatus(item).toLowerCase()}`}
                           >
-                            {formatStatus(item.status)}
+                            {formatStatus(generationBatchDisplayStatus(item))}
                           </span>
                         </span>
                         <span className="batch-history-card__meta">
-                          {formatTimestamp(item.created_at)} · 任务已结束{" "}
+                          {formatTimestamp(item.created_at)} · 已结束{" "}
                           {item.progress.terminal_count} /{" "}
-                          {item.progress.total_count} · 生成成功{" "}
-                          {item.progress.counts.succeeded}
+                          {item.progress.total_count}
                           {item.progress.counts.failed > 0
                             ? ` · 失败 ${item.progress.counts.failed}`
                             : ""}
@@ -868,11 +937,6 @@ export function TaskRecordsPanel({
                             ? ` · 已取消 ${item.progress.counts.cancelled}`
                             : ""}
                         </span>
-                        {item.needs_attention_count ? (
-                          <span className="attention-tag">
-                            需处理 {item.needs_attention_count}
-                          </span>
-                        ) : null}
                       </button>
                       {canOperate ? (
                         <div className="batch-history-card__actions">
@@ -932,7 +996,10 @@ export function TaskRecordsPanel({
                   "视频生成批次"
                 }
                 canOperate={canOperate}
+                isCustomerView={userRole === "customer"}
                 onDownload={handleDownload}
+                downloadFeedback={scopedDownloadFeedback}
+                onOpenDownloadFolder={handleOpenDownloadFolder}
                 onOpenOpsDetail={() => setViewMode("ops")}
                 onPreviewSourceError={handlePreviewSourceError}
                 onRegenerate={handleRegenerateTask}
@@ -959,6 +1026,8 @@ export function TaskRecordsPanel({
                   </button>
                 </section>
                 <BatchPanel
+                  downloadFeedback={scopedDownloadFeedback}
+                  onOpenDownloadFolder={handleOpenDownloadFolder}
                   activeResultAction={activeResultAction}
                   activeTaskAction={activeTaskAction}
                   batch={batch}
@@ -1001,23 +1070,25 @@ export function TaskRecordsPanel({
             <EmptyBatchState hasHistory={batchHistory.length > 0} />
           )}
 
-          <details className="batch-compatibility-query">
-            <summary>兼容查询：通过 Batch ID 查找历史记录</summary>
-            <form className="batch-form" onSubmit={handleBatchSubmit}>
-              <label htmlFor="batch-id">Batch ID</label>
-              <div className="batch-input-row">
-                <input
-                  id="batch-id"
-                  value={batchIdInput}
-                  placeholder="粘贴 generation batch id"
-                  onChange={(event) => setBatchIdInput(event.target.value)}
-                />
-                <button type="submit" disabled={!batchIdInput.trim()}>
-                  查询任务记录
-                </button>
-              </div>
-            </form>
-          </details>
+          {userRole !== "customer" ? (
+            <details className="batch-compatibility-query">
+              <summary>兼容查询：通过 Batch ID 查找历史记录</summary>
+              <form className="batch-form" onSubmit={handleBatchSubmit}>
+                <label htmlFor="batch-id">Batch ID</label>
+                <div className="batch-input-row">
+                  <input
+                    id="batch-id"
+                    value={batchIdInput}
+                    placeholder="粘贴 generation batch id"
+                    onChange={(event) => setBatchIdInput(event.target.value)}
+                  />
+                  <button type="submit" disabled={!batchIdInput.trim()}>
+                    查询任务记录
+                  </button>
+                </div>
+              </form>
+            </details>
+          ) : null}
         </div>
       </div>
     </section>
@@ -1057,6 +1128,8 @@ function BatchStatusMessage({
 }
 
 function BatchPanel({
+  downloadFeedback,
+  onOpenDownloadFolder,
   activeResultAction,
   activeTaskAction,
   batch,
@@ -1081,6 +1154,8 @@ function BatchPanel({
   taskPaymentConfirmations,
   userRole,
 }: {
+  downloadFeedback: Record<string, VideoDownloadFeedback>;
+  onOpenDownloadFolder: (task: GenerationTask, downloadId: string) => void;
   activeResultAction: string;
   activeTaskAction: string;
   batch: GenerationBatch;
@@ -1105,12 +1180,14 @@ function BatchPanel({
   taskPaymentConfirmations: Record<string, boolean>;
   userRole: UserRole;
 }) {
-  const counts = batch.progress.counts;
+  const counts = {
+    ...batch.progress.counts,
+    needs_attention: batch.tasks.filter(taskNeedsAttention).length,
+  };
   const historicalCounts = batch.progress.historical_counts ?? {};
   const hasHistoricalFailures =
     (historicalCounts.failed ?? 0) > 0 ||
-    (historicalCounts.archive_failed ?? 0) > 0 ||
-    (historicalCounts.audio_quality_failed ?? 0) > 0;
+    (historicalCounts.archive_failed ?? 0) > 0;
   const batchActionBusy = Boolean(activeTaskAction);
   const batchReason = batchRegenerationReason.trim();
   // 状态摘要只保留非零项：全零时说明批次尚未产生状态变化，不再铺满 8 个空格子。
@@ -1125,9 +1202,9 @@ function BatchPanel({
     <div className="batch-panel">
       <div className="batch-overview">
         <span
-          className={`batch-status batch-status--${batch.status.toLowerCase()}`}
+          className={`batch-status batch-status--${generationBatchDisplayStatus(batch).toLowerCase()}`}
         >
-          {formatStatus(batch.status)}
+          {formatStatus(generationBatchDisplayStatus(batch))}
         </span>
         <span className="batch-overview__progress">
           {batch.progress.progress_percent}%
@@ -1173,8 +1250,7 @@ function BatchPanel({
           {hasHistoricalFailures ? (
             <p className="historical-failure-summary">
               历史事实：失败 {historicalCounts.failed ?? 0} · 归档失败{" "}
-              {historicalCounts.archive_failed ?? 0} · 音频质检失败{" "}
-              {historicalCounts.audio_quality_failed ?? 0} · 已替代{" "}
+              {historicalCounts.archive_failed ?? 0} · 已替代{" "}
               {historicalCounts.superseded ?? 0}
             </p>
           ) : null}
@@ -1241,6 +1317,8 @@ function BatchPanel({
       <ul className="task-list">
         {batch.tasks.map((task) => (
           <TaskItem
+            downloadFeedback={downloadFeedback[task.id]}
+            onOpenDownloadFolder={onOpenDownloadFolder}
             activeResultAction={activeResultAction}
             activeTaskAction={activeTaskAction}
             canOperate={canOperate}
@@ -1268,6 +1346,8 @@ function BatchPanel({
 }
 
 function TaskItem({
+  downloadFeedback,
+  onOpenDownloadFolder,
   activeResultAction,
   activeTaskAction,
   canOperate,
@@ -1287,6 +1367,8 @@ function TaskItem({
   taskPaymentConfirmed,
   userRole,
 }: {
+  downloadFeedback?: VideoDownloadFeedback;
+  onOpenDownloadFolder: (task: GenerationTask, downloadId: string) => void;
   activeResultAction: string;
   activeTaskAction: string;
   canOperate: boolean;
@@ -1307,10 +1389,8 @@ function TaskItem({
   userRole: UserRole;
 }) {
   const attentionNeeded = taskNeedsAttention(task);
-  const quality = generationQualityDisplay(task);
   const hasResult = hasGenerationResultSource(task);
   const previewAction = `${task.id}:preview`;
-  const downloadAction = `${task.id}:download`;
   const availableActions = task.available_actions ?? [];
   const canRetry = canOperate && availableActions.includes("RETRY");
   const canReconcile = canOperate && availableActions.includes("RECONCILE");
@@ -1343,28 +1423,14 @@ function TaskItem({
 
           {task.superseded_by_task_id ? (
             <p className="task-resolution-note">
-              已由任务 {task.superseded_by_task_id}{" "}
-              替代；本记录仅保留历史失败与质检事实。
+              已由任务 {task.superseded_by_task_id} 替代；本记录仅保留历史事实。
             </p>
           ) : null}
 
-          <div
-            className={
-              quality.tone === "failed"
-                ? "quality-summary quality-summary--failed"
-                : quality.tone === "passed"
-                  ? "quality-summary"
-                  : "quality-summary quality-summary--pending"
-            }
-          >
-            <strong>{quality.label}</strong>
-            <p>{quality.detail}</p>
-            {quality.issues.length > 0 ? (
-              <span>{quality.issues.join(" · ")}</span>
-            ) : null}
-          </div>
-
-          {task.error_message_redacted ? (
+          {task.error_message_redacted &&
+          (task.status !== "SUCCEEDED" ||
+            task.archive_status === "ARCHIVE_FAILED" ||
+            !hasResult) ? (
             <p className="task-error-summary">
               {customerVisibleErrorMessage(
                 task.error_message_redacted,
@@ -1392,11 +1458,13 @@ function TaskItem({
                     {previewUrl ? `刷新预览 ${task.id}` : `加载预览 ${task.id}`}
                   </button>
                   <button
-                    disabled={activeResultAction === downloadAction}
+                    disabled={downloadFeedback?.status === "pending"}
                     onClick={() => void onDownload(task)}
                     type="button"
                   >
-                    下载 MP4 {task.id}
+                    {downloadFeedback?.status === "pending"
+                      ? "正在下载…"
+                      : `下载 MP4 ${task.id}`}
                   </button>
                 </>
               ) : (
@@ -1437,6 +1505,12 @@ function TaskItem({
               {resultError}
             </p>
           ) : null}
+          <VideoDownloadNotice
+            feedback={downloadFeedback}
+            onOpenFolder={(downloadId) =>
+              onOpenDownloadFolder(task, downloadId)
+            }
+          />
 
           <dl className="task-facts">
             <div>
@@ -1552,7 +1626,7 @@ function TaskItem({
                 <div className="task-detail-ops__body">
                   <p>
                     只复用该任务的冻结 Prompt，新建一次付费视频生成；
-                    原失败或质检记录保留。金额快照：
+                    原记录保留。金额快照：
                     {formatCost(task.estimated_cost)}
                   </p>
                   <label>
@@ -1610,7 +1684,7 @@ function EmptyBatchState({ hasHistory }: { hasHistory: boolean }) {
       <p>
         {hasHistory
           ? "从左侧项目批次中选择记录查看详情。"
-          : "项目生成批次会自动出现在这里，也可使用下方 Batch ID 兼容查询。"}
+          : "生成的视频会显示在这里。"}
       </p>
     </div>
   );
@@ -1708,14 +1782,17 @@ function taskNeedsAttention(task: GenerationTask) {
   }
   return (
     task.status === "SUBMISSION_UNCERTAIN" ||
-    task.archive_status === "ARCHIVE_FAILED" ||
-    generationQualityDisplay(task).tone === "failed"
+    task.archive_status === "ARCHIVE_FAILED"
   );
 }
 
 function taskStage(task: GenerationTask) {
-  if (task.status === "SUCCEEDED" && task.archive_status === "DIRECT") {
-    return "已交付";
+  if (
+    task.status === "SUCCEEDED" &&
+    ["DIRECT", "ARCHIVED"].includes(task.archive_status) &&
+    hasGenerationResultSource(task)
+  ) {
+    return "已完成";
   }
   if (task.stage) {
     return formatStatus(task.stage);
@@ -1740,7 +1817,7 @@ function formatStatus(status: string) {
     FAILED: "失败",
     NEEDS_ATTENTION: "需要处理",
     PENDING: "等待中",
-    QUALITY_FAILED: "质检失败",
+    QUALITY_FAILED: "结果暂不可用",
     QUEUED: "排队中",
     RUNNING: "生成中",
     SUBMISSION_UNCERTAIN: "提交结果待确认",

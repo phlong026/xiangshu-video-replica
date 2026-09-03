@@ -4,6 +4,8 @@ import {
   customerVisibleErrorMessage,
   type GenerationBatch,
   type GenerationTask,
+  type GenerationTaskSummary,
+  type VideoDownloadResult,
 } from "./api";
 
 // 生成结果舞台 = 客户视角的结果消费视图：大预览框 + 真实进度叙事 +
@@ -16,19 +18,18 @@ import {
 const ESTIMATED_RENDER_SECONDS = 240;
 const SLOW_RENDER_WARNING_FACTOR = 1.5;
 const TICK_MS = 1_000;
-// 任务停留在渲染前阶段（已提交/排队中/提交中）超过该阈值即视为排队异常：
-// 大概率没有被本地生成进程领取（进程未运行或连错数据库）。
+// 超过此阈值提供排队提醒，不根据等待时间猜测服务端故障原因。
 const QUEUE_STUCK_SECONDS = 180;
 
-const STEP_LABELS = ["已提交", "排队中", "渲染中", "保存成片", "完成"] as const;
+const STEP_LABELS = ["已提交", "排队中", "生成中", "完成"] as const;
 
 const PHASE_MESSAGES: Record<string, string> = {
   PENDING: "正在准备你的生成任务…",
   SUBMITTING: "正在把首帧与 Prompt 提交给渲染引擎…",
   QUEUED: "已进入渲染队列，即将开始生成…",
   RUNNING: "AI 正在基于你的首帧渲染画面、动作与口型…",
-  ARCHIVING: "成片已生成，正在准备在线播放…",
-  SUCCEEDED: "成片已生成，正在更新检查结果…",
+  ARCHIVING: "视频已生成，正在获取播放地址…",
+  SUCCEEDED: "视频已生成，正在获取播放地址…",
 };
 
 const REGENERATION_REASONS = [
@@ -45,6 +46,7 @@ type VideoResultStageProps = {
   batch: GenerationBatch;
   batchTitle: string;
   canOperate: boolean;
+  isCustomerView?: boolean;
   onDownload: (task: GenerationTask) => void;
   onOpenOpsDetail: () => void;
   onPreviewSourceError: (task: GenerationTask) => void;
@@ -52,7 +54,51 @@ type VideoResultStageProps = {
   onRequestPreview: (task: GenerationTask) => void;
   previewUrls: Record<string, string>;
   resultErrors: Record<string, string>;
+  downloadFeedback?: Record<string, VideoDownloadFeedback>;
+  onOpenDownloadFolder?: (task: GenerationTask, downloadId: string) => void;
 };
+
+export type VideoDownloadFeedback = (
+  | VideoDownloadResult
+  | { status: "pending" }
+  | { status: "error"; message: string }
+) & { folderError?: string };
+
+export function VideoDownloadNotice({
+  feedback,
+  onOpenFolder,
+}: {
+  feedback?: VideoDownloadFeedback;
+  onOpenFolder: (downloadId: string) => void;
+}) {
+  if (!feedback) return null;
+  return (
+    <div className="video-download-feedback" role="status">
+      {feedback.status === "saved" ? (
+        <>
+          <strong>下载成功</strong>
+          <span className="video-download-path">{feedback.path}</span>
+          <button
+            className="secondary-button"
+            onClick={() => onOpenFolder(feedback.downloadId)}
+            type="button"
+          >
+            打开文件夹
+          </button>
+        </>
+      ) : feedback.status === "cancelled" ? (
+        "已取消下载"
+      ) : feedback.status === "started" ? (
+        "已交给浏览器下载，请查看浏览器下载列表。"
+      ) : feedback.status === "error" ? (
+        feedback.message
+      ) : (
+        "正在下载，请等待保存完成…"
+      )}
+      {feedback.folderError ? <span>{feedback.folderError}</span> : null}
+    </div>
+  );
+}
 
 export function VideoResultStage({
   activeResultAction,
@@ -60,6 +106,7 @@ export function VideoResultStage({
   batch,
   batchTitle,
   canOperate,
+  isCustomerView = false,
   onDownload,
   onOpenOpsDetail,
   onPreviewSourceError,
@@ -67,6 +114,8 @@ export function VideoResultStage({
   onRequestPreview,
   previewUrls,
   resultErrors,
+  downloadFeedback = {},
+  onOpenDownloadFolder,
 }: VideoResultStageProps) {
   const tasks = batch.tasks;
   const [activeTaskId, setActiveTaskId] = useState(() =>
@@ -85,7 +134,7 @@ export function VideoResultStage({
     (task) => taskOutcome(task) === "in_progress",
   );
 
-  // 本地秒级 tick：驱动进度插值与安抚文案轮换（轮询仍在父级 2s 一次）。
+  // 本地秒级 tick 只更新时间；任务阶段仍以后端轮询为准。
   const [nowMs, setNowMs] = useState(() => Date.now());
   useEffect(() => {
     if (!batchInProgress) {
@@ -136,7 +185,8 @@ export function VideoResultStage({
   }
 
   const outcome = taskOutcome(activeTask);
-  const quality = generationQualityDisplay(activeTask);
+  const downloadBusy = downloadFeedback[activeTask.id]?.status === "pending";
+  const visibleStatus = generationBatchDisplayStatus(batch);
   const stage = effectiveStage(activeTask);
   const stepIndex = stepIndexForStage(stage, outcome);
   const elapsed =
@@ -186,28 +236,28 @@ export function VideoResultStage({
               {batchTitle}
             </h2>
             <span
-              className={`batch-status batch-status--${batch.status.toLowerCase()}`}
+              className={`batch-status batch-status--${visibleStatus.toLowerCase()}`}
             >
-              {formatStatus(batch.status)}
+              {formatStatus(visibleStatus)}
             </span>
           </div>
-          <p className="video-stage-batch-note">
-            任务已结束 {batch.progress.terminal_count} /{" "}
-            {batch.progress.total_count}
-            {batch.source_batch_id ? " · 冻结输入重生成批次" : ""}
-          </p>
+          {tasks.length > 1 ? (
+            <p className="video-stage-batch-note">
+              任务已结束 {batch.progress.terminal_count} /{" "}
+              {batch.progress.total_count}
+              {batch.source_batch_id ? " · 冻结输入重生成批次" : ""}
+            </p>
+          ) : null}
         </div>
         <div className="video-stage-header__actions">
           {canOperate && hasPreviewSource ? (
             <button
               aria-label="下载 MP4"
-              disabled={activeResultAction === `${activeTask.id}:download`}
+              disabled={downloadBusy}
               onClick={() => onDownload(activeTask)}
               type="button"
             >
-              {activeResultAction === `${activeTask.id}:download`
-                ? "正在下载…"
-                : "下载视频"}
+              {downloadBusy ? "正在下载…" : "下载视频"}
             </button>
           ) : null}
           {canRegenerate ? (
@@ -228,20 +278,18 @@ export function VideoResultStage({
         </div>
       </header>
 
+      <VideoDownloadNotice
+        feedback={downloadFeedback[activeTask.id]}
+        onOpenFolder={(downloadId) =>
+          onOpenDownloadFolder?.(activeTask, downloadId)
+        }
+      />
+
       <div className="video-stage-result-grid">
         <div className="video-stage-player">
           {activeTask.provider === "fake_h3" ? (
             <p className="video-stage-provider-note" role="status">
               测试模式
-            </p>
-          ) : null}
-          {(quality.tone === "failed" || quality.tone === "unavailable") &&
-          hasPreviewSource ? (
-            <p className="video-stage-quality-banner" role="status">
-              {quality.label}：{quality.detail}
-              {quality.issues.length > 0
-                ? ` 检查项：${quality.issues.join("、")}。`
-                : ""}
             </p>
           ) : null}
           {previewUrl ? (
@@ -253,6 +301,7 @@ export function VideoResultStage({
           ) : showPlaybackRecovery ? (
             <StagePlaybackRecovery
               canDownload={canOperate && hasPreviewSource}
+              downloadBusy={downloadBusy}
               error={resultError}
               onDownload={() => onDownload(activeTask)}
               onOpenOpsDetail={onOpenOpsDetail}
@@ -265,7 +314,7 @@ export function VideoResultStage({
               onOpenOpsDetail={onOpenOpsDetail}
               phaseMessage={
                 queueStuck
-                  ? "任务仍在排队，尚未被渲染进程领取…"
+                  ? "任务仍在排队，请勿重复提交。"
                   : (PHASE_MESSAGES[stage] ?? "正在生成…")
               }
               queueStuck={queueStuck}
@@ -287,10 +336,12 @@ export function VideoResultStage({
           )}
         </div>
 
-        <StageSummary batch={batch} outcome={outcome} task={activeTask} />
+        <StageSummary outcome={outcome} task={activeTask} />
       </div>
 
-      <StageTimeline outcome={outcome} stepIndex={stepIndex} />
+      {outcome === "in_progress" ? (
+        <StageTimeline stepIndex={stepIndex} />
+      ) : null}
 
       {resultError && !showPlaybackRecovery ? (
         <p className="task-error-summary" role="status">
@@ -395,7 +446,14 @@ export function VideoResultStage({
         ) : null}
         <StageInfoBar
           batchId={batch.id}
-          canOperate={canOperate}
+          canOperate={
+            canOperate &&
+            (!isCustomerView ||
+              Boolean(activeTask.available_actions?.length) ||
+              outcome === "failed" ||
+              outcome === "needs_attention" ||
+              Boolean(resultError))
+          }
           onOpenOpsDetail={onOpenOpsDetail}
           task={activeTask}
         />
@@ -618,9 +676,7 @@ function StageProgressView({
       </p>
       {queueStuck ? (
         <div className="video-stage-stuck-note" role="status">
-          <p>
-            任务长时间停留在排队阶段，未被渲染进程领取。请检查本地任务处理进程是否运行、数据库配置是否一致。
-          </p>
+          <p>排队时间较长，可查看任务状态或联系管理员。</p>
           <button
             className="link-button"
             onClick={onOpenOpsDetail}
@@ -639,19 +695,12 @@ function StageProgressView({
   );
 }
 
-function StageTimeline({
-  outcome,
-  stepIndex,
-}: {
-  outcome: TaskOutcome;
-  stepIndex: number;
-}) {
-  const completeAll = outcome === "completed" || outcome === "quality_failed";
+function StageTimeline({ stepIndex }: { stepIndex: number }) {
   return (
     <ol aria-label="生成阶段" className="video-stage-steps">
       {STEP_LABELS.map((label, index) => {
-        const isDone = completeAll || index < stepIndex;
-        const isActive = outcome === "in_progress" && index === stepIndex;
+        const isDone = index < stepIndex;
+        const isActive = index === stepIndex;
         return (
           <li
             className={
@@ -674,6 +723,7 @@ function StageTimeline({
 
 function StagePlaybackRecovery({
   canDownload,
+  downloadBusy,
   error,
   onDownload,
   onOpenOpsDetail,
@@ -681,6 +731,7 @@ function StagePlaybackRecovery({
   retryBusy,
 }: {
   canDownload: boolean;
+  downloadBusy: boolean;
   error: string;
   onDownload: () => void;
   onOpenOpsDetail: () => void;
@@ -698,6 +749,7 @@ function StagePlaybackRecovery({
         {canDownload ? (
           <button
             className="secondary-button"
+            disabled={downloadBusy}
             onClick={onDownload}
             type="button"
           >
@@ -729,31 +781,18 @@ function StageOutcomeView({
 }
 
 function StageSummary({
-  batch,
   outcome,
   task,
 }: {
-  batch: GenerationBatch;
   outcome: TaskOutcome;
   task: GenerationTask;
 }) {
   const resolution = readSnapshotString(task, "resolution");
   const outputDuration = readSnapshotNumber(task, "output_duration_seconds");
-  const quality = generationQualityDisplay(task);
   return (
     <aside className="video-stage-summary" aria-label="结果信息">
       <h3>结果信息</h3>
       <dl>
-        <div>
-          <dt>任务统计</dt>
-          <dd>
-            生成成功 {batch.progress.counts.succeeded} · 失败{" "}
-            {batch.progress.counts.failed}
-            {batch.progress.counts.cancelled > 0
-              ? ` · 已取消 ${batch.progress.counts.cancelled}`
-              : ""}
-          </dd>
-        </div>
         <div>
           <dt>{outcome === "in_progress" ? "提交时间" : "完成时间"}</dt>
           <dd>
@@ -761,10 +800,6 @@ function StageSummary({
               outcome === "in_progress" ? task.submitted_at : task.completed_at,
             )}
           </dd>
-        </div>
-        <div>
-          <dt>质检</dt>
-          <dd>{quality.label}</dd>
         </div>
         {resolution || outputDuration !== null ? (
           <div>
@@ -839,7 +874,7 @@ function StageInfoBar({
           onClick={onOpenOpsDetail}
           type="button"
         >
-          处理与诊断
+          任务操作
         </button>
       ) : null}
     </div>
@@ -849,7 +884,6 @@ function StageInfoBar({
 type TaskOutcome =
   | "in_progress"
   | "completed"
-  | "quality_failed"
   | "failed"
   | "needs_attention"
   | "superseded";
@@ -866,82 +900,27 @@ export function hasGenerationResultSource(
   );
 }
 
-const QUALITY_ISSUE_LABELS: Record<string, string> = {
-  AUDIO_QUALITY_FAILED: "未检测到有效音轨",
-  AUDIO_VALIDATION_UNAVAILABLE: "音频检查服务暂不可用",
-  VISUAL_VALIDATION_UNAVAILABLE: "画面检查服务暂不可用",
-  VIDEO_IDENTITY_DRIFT: "人物一致性变化",
-  VIDEO_OUTFIT_DRIFT: "服装一致性变化",
-  VIDEO_MOTION_DISCONTINUITY: "动作连续性问题",
-  VIDEO_SEVERE_FLICKER: "画面闪烁",
-  VIDEO_SAMPLE_COUNT_INVALID: "画面采样数量异常",
-  VIDEO_ANATOMY_INVALID: "人物肢体结构异常",
-  VIDEO_EXTRA_PEOPLE_DETECTED: "出现额外人物",
-};
-
-export function generationQualityDisplay(task: GenerationTask): {
-  label: string;
-  detail: string;
-  issues: string[];
-  tone: "passed" | "failed" | "pending" | "unavailable";
-} {
-  const codes = task.quality_issue_codes ?? [];
-  const visualFailed =
-    task.quality_status === "VISUAL_QUALITY_FAILED" ||
-    codes.some((code) => code.startsWith("VIDEO_"));
-  const audioUnavailable =
-    codes.includes("AUDIO_VALIDATION_UNAVAILABLE") ||
-    task.quality_status === "AUDIO_VALIDATION_UNAVAILABLE";
-  const visualUnavailable =
-    task.quality_status === "VISUAL_VALIDATION_UNAVAILABLE" ||
-    codes.includes("VISUAL_VALIDATION_UNAVAILABLE");
-  const audioFailed =
-    !audioUnavailable &&
-    (task.quality_status === "AUDIO_QUALITY_FAILED" ||
-      codes.includes("AUDIO_QUALITY_FAILED"));
-  const issues = [
-    ...new Set(codes.map((code) => QUALITY_ISSUE_LABELS[code] ?? code)),
-  ];
-  if (visualFailed || audioFailed) {
-    return {
-      label:
-        visualFailed && audioFailed
-          ? "画面与音频质检未通过"
-          : visualFailed
-            ? "画面质检未通过"
-            : "音频质检未通过",
-      detail: "检查结果仅供参考，请观看后判断；不影响播放和下载。",
-      issues,
-      tone: "failed",
-    };
+// Legacy quality flags are audit facts, not failed deliveries. Only normalize
+// a complete task snapshot; a truncated history page must keep server status.
+export function generationBatchDisplayStatus(batch: {
+  status: string;
+  quantity: number;
+  tasks: GenerationTaskSummary[];
+}): string {
+  const tasks = batch.tasks.filter((task) => !task.superseded_by_task_id);
+  if (tasks.length !== batch.quantity || tasks.length === 0)
+    return batch.status;
+  if (
+    tasks.every(
+      (task) =>
+        task.status === "SUCCEEDED" &&
+        ["DIRECT", "ARCHIVED"].includes(task.archive_status) &&
+        hasGenerationResultSource(task),
+    )
+  ) {
+    return "SUCCEEDED";
   }
-  if (audioUnavailable || visualUnavailable) {
-    return {
-      label:
-        audioUnavailable && visualUnavailable
-          ? "质检暂不可用"
-          : audioUnavailable
-            ? "音频质检暂不可用"
-            : "画面质检暂不可用",
-      detail: "未能完成检查，不代表视频不合格；不影响播放和下载。",
-      issues,
-      tone: "unavailable",
-    };
-  }
-  if (task.quality_status === "AUDIO_OK") {
-    return {
-      label: "音频质检通过",
-      detail: "已检测到有效音轨。",
-      issues,
-      tone: "passed",
-    };
-  }
-  return {
-    label: "质检待完成",
-    detail: "检查结果尚未返回。",
-    issues,
-    tone: "pending",
-  };
+  return batch.status;
 }
 
 function taskOutcome(task: GenerationTask): TaskOutcome {
@@ -953,7 +932,7 @@ function taskOutcome(task: GenerationTask): TaskOutcome {
     return "completed";
   }
   if (stage === "QUALITY_FAILED") {
-    return "quality_failed";
+    return "needs_attention";
   }
   if (stage === "FAILED" || stage === "CANCELLED") {
     return "failed";
@@ -965,11 +944,21 @@ function taskOutcome(task: GenerationTask): TaskOutcome {
 }
 
 function effectiveStage(task: GenerationTask): string {
+  if (["FAILED", "CANCELLED", "SUBMISSION_UNCERTAIN"].includes(task.status)) {
+    return task.archive_status === "ARCHIVE_FAILED"
+      ? "ARCHIVE_FAILED"
+      : task.status;
+  }
+  if (task.archive_status === "ARCHIVE_FAILED") return "ARCHIVE_FAILED";
+  if (
+    task.status === "SUCCEEDED" &&
+    ["DIRECT", "ARCHIVED"].includes(task.archive_status) &&
+    hasGenerationResultSource(task)
+  ) {
+    return "COMPLETED";
+  }
   if (task.stage) {
     return task.stage;
-  }
-  if (task.archive_status === "ARCHIVE_FAILED") {
-    return "ARCHIVE_FAILED";
   }
   if (task.status === "SUCCEEDED" && task.archive_status === "ARCHIVED") {
     return "COMPLETED";
@@ -987,8 +976,8 @@ function pickDefaultTaskId(tasks: GenerationTask[]): string {
 }
 
 function stepIndexForStage(stage: string, outcome: TaskOutcome): number {
-  if (outcome === "completed" || outcome === "quality_failed") {
-    return 4;
+  if (outcome === "completed") {
+    return 3;
   }
   switch (stage) {
     case "PENDING":
@@ -1001,7 +990,7 @@ function stepIndexForStage(stage: string, outcome: TaskOutcome): number {
     case "ARCHIVING":
     case "SUCCEEDED":
     case "ARCHIVE_FAILED":
-      return 3;
+      return 2;
     case "FAILED":
     case "CANCELLED":
     case "SUBMISSION_UNCERTAIN":
@@ -1043,8 +1032,6 @@ function outcomeBadgeLabel(outcome: TaskOutcome): string {
   switch (outcome) {
     case "completed":
       return "完成";
-    case "quality_failed":
-      return "质检未过";
     case "failed":
       return "失败";
     case "needs_attention":
