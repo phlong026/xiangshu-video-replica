@@ -25,6 +25,89 @@ DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 SKIP_REASON = "PostgreSQL fixture not reachable; start it via scripts/pg-fixture.sh start"
 
 
+def test_customer_batch_visibility_migration_preserves_generation_and_billing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from alembic import command
+
+    monkeypatch.delenv("VIDEO_REPLICA_DATABASE_URL", raising=False)
+    db_name = "customer_batch_visibility_migration_test"
+    dsn = _pg_dsn().rsplit("/", 1)[0] + f"/{db_name}"
+    _drop_database(db_name)
+    with psycopg.connect(_admin_dsn(), autocommit=True) as conn:
+        conn.execute(f'CREATE DATABASE "{db_name}"')
+    config = _alembic_config(dsn.replace("postgresql://", "postgresql+psycopg://"))
+    tables = (
+        "users",
+        "projects",
+        "generation_batches",
+        "generation_tasks",
+        "wallets",
+        "wallet_transactions",
+    )
+    try:
+        command.upgrade(config, "054_admin_free_grant_adjustments")
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            conn.execute(
+                "INSERT INTO users (id, username, display_name) VALUES ('u1', 'u1', 'User')"
+            )
+            conn.execute(
+                "INSERT INTO projects (id, owner_user_id, name) VALUES ('p1', 'u1', 'Project')"
+            )
+            conn.execute(
+                "INSERT INTO generation_batches (id, project_id, created_by_user_id, "
+                "idempotency_key, request_hash, request_snapshot_json) "
+                "VALUES ('b1', 'p1', 'u1', 'key', 'hash', '{}')"
+            )
+            conn.execute(
+                "INSERT INTO generation_tasks (id, batch_id, provider, model) "
+                "VALUES ('t1', 'b1', 'apilio', 'h3')"
+            )
+            conn.execute(
+                "INSERT INTO wallets (user_id, available_credits, reserved_credits) "
+                "VALUES ('u1', 9, 1)"
+            )
+            conn.execute(
+                "INSERT INTO wallet_transactions (id, user_id, type, available_delta, "
+                "reserved_delta, task_id, billing_round, idempotency_key) "
+                "VALUES ('tx1', 'u1', 'RESERVE', -1, 1, 't1', 1, 'reserve:t1:1')"
+            )
+            before = {table: conn.execute(f"SELECT * FROM {table}").fetchall() for table in tables}
+        command.upgrade(config, "head")
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            conn.execute(
+                "INSERT INTO customer_batch_visibility (user_id, batch_id) VALUES ('u1', 'b1')"
+            )
+            assert conn.execute("SELECT hidden_at FROM customer_batch_visibility").fetchone()[0]
+            with pytest.raises(psycopg.errors.ForeignKeyViolation):
+                conn.execute(
+                    "INSERT INTO customer_batch_visibility (user_id, batch_id) "
+                    "VALUES ('missing', 'b1')"
+                )
+            with pytest.raises(psycopg.errors.ForeignKeyViolation):
+                conn.execute(
+                    "INSERT INTO customer_batch_visibility (user_id, batch_id) "
+                    "VALUES ('u1', 'missing')"
+                )
+        command.downgrade(config, "054_admin_free_grant_adjustments")
+        with psycopg.connect(dsn) as conn:
+            assert (
+                conn.execute("SELECT to_regclass('customer_batch_visibility')").fetchone()[0]
+                is None
+            )
+            assert {
+                table: conn.execute(f"SELECT * FROM {table}").fetchall() for table in tables
+            } == before
+        command.upgrade(config, "head")
+        with psycopg.connect(dsn) as conn:
+            assert conn.execute("SELECT count(*) FROM customer_batch_visibility").fetchone()[0] == 0
+            assert {
+                table: conn.execute(f"SELECT * FROM {table}").fetchall() for table in tables
+            } == before
+    finally:
+        _drop_database(db_name)
+
+
 def _pg_dsn() -> str:
     return os.environ.get("TEST_POSTGRESQL_URL", DEFAULT_DSN)
 
@@ -252,7 +335,7 @@ def test_pg_upgrade_from_published_040_head_applies_fair_queue() -> None:
         command.upgrade(_alembic_config(sqlalchemy_dsn), "head")
         with psycopg.connect(dsn) as conn:
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-            assert version == "054_admin_free_grant_adjustments"
+            assert version == "055_customer_batch_visibility"
             fair_queue_column = conn.execute(
                 "SELECT COUNT(*) FROM information_schema.columns "
                 "WHERE table_name = 'runtime_settings' AND column_name = 'fair_queue_enabled'"
@@ -286,7 +369,7 @@ def test_pg_full_upgrade_downgrade_reupgrade_and_indexes() -> None:
 
         with psycopg.connect(dsn) as conn:
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-            assert version == "054_admin_free_grant_adjustments", (
+            assert version == "055_customer_batch_visibility", (
                 f"unexpected head revision: {version}"
             )
 
@@ -403,7 +486,7 @@ def test_pg_full_upgrade_downgrade_reupgrade_and_indexes() -> None:
         command.upgrade(_alembic_config(sqlalchemy_dsn), "head")
         with psycopg.connect(dsn) as conn:
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-            assert version == "054_admin_free_grant_adjustments"
+            assert version == "055_customer_batch_visibility"
     finally:
         _drop_database("t06_migrate_test")
 
@@ -525,7 +608,7 @@ def test_pg_wallet_downgrade_blocked_when_ledger_has_settled_rounds() -> None:
         # The database must be left exactly at head (no partial rollback).
         with psycopg.connect(dsn) as conn:
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-        assert version == "054_admin_free_grant_adjustments"
+        assert version == "055_customer_batch_visibility"
     finally:
         _drop_database(db_name)
 
@@ -639,7 +722,7 @@ def test_pg_free_grant_downgrade_preserves_ledger(
 
         with psycopg.connect(dsn) as conn:
             assert conn.execute("SELECT version_num FROM alembic_version").fetchone() == (
-                "054_admin_free_grant_adjustments",
+                "055_customer_batch_visibility",
             )
             for table in tables:
                 assert conn.execute(f"SELECT * FROM {table}").fetchall() == before[table]
@@ -916,7 +999,7 @@ def test_pg_billing_constraints_downgrade_guard() -> None:
             command.downgrade(_alembic_config(sqlalchemy_dsn), "025_postgres_runtime_compatibility")
         with psycopg.connect(dsn) as conn:
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-        assert version == "054_admin_free_grant_adjustments"
+        assert version == "055_customer_batch_visibility"
 
         # Remove the customer order (test data only — confirmed production rows
         # are never deleted, which is exactly why the guard exists) and the
@@ -1018,7 +1101,7 @@ def test_t37_observability_indexes_and_fencing_audit_dimension() -> None:
     try:
         with psycopg.connect(dsn, autocommit=True) as conn:
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-            assert version == "054_admin_free_grant_adjustments"
+            assert version == "055_customer_batch_visibility"
 
             indexes = {
                 row[0]
@@ -1199,7 +1282,7 @@ def test_t37_observability_indexes_and_fencing_audit_dimension() -> None:
         # indexes intact when the append-only evidence guard refuses rollback.
         with psycopg.connect(dsn) as conn:
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-            assert version == "054_admin_free_grant_adjustments"
+            assert version == "055_customer_batch_visibility"
             index_count = conn.execute(
                 "SELECT count(*) FROM pg_indexes WHERE schemaname = 'public' "
                 "AND indexname = 'idx_wallets_updated_at_user'"
@@ -1371,7 +1454,7 @@ def test_t46_scene_task_constraint_and_downgrade_guard() -> None:
 
         with psycopg.connect(dsn, autocommit=True) as conn:
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-            assert version == "054_admin_free_grant_adjustments"
+            assert version == "055_customer_batch_visibility"
             conn.execute("DELETE FROM character_sheet_tasks WHERE id = 'scene-task-t46'")
 
         command.downgrade(

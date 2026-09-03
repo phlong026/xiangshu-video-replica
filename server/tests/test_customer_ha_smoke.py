@@ -508,6 +508,7 @@ def test_t37_metrics_and_cluster_alert_jobs_are_private_single_owner_contracts()
         "server/migrations/versions/051_identity_owner_backfill.py",
         "server/migrations/versions/053_activation_code_archive.py",
         "server/migrations/versions/054_admin_free_grant_adjustments.py",
+        "server/migrations/versions/055_customer_batch_visibility.py",
         "deploy/systemd/video-replica-ops-alerts.service",
         "deploy/systemd/video-replica-ops-alerts.timer",
     ):

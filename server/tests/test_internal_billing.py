@@ -11,7 +11,7 @@ from app.db import alembic_config, connect_database, initialize_database
 from app.db_portable import BusinessConnection
 from app.settings import SettingsRepository
 
-HEAD_REVISION = "054_admin_free_grant_adjustments"
+HEAD_REVISION = "055_customer_batch_visibility"
 
 
 def seed_subjects(conn: sqlite3.Connection) -> None:
