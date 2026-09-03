@@ -106,12 +106,14 @@ describe("Fake provider E2E contract", () => {
     fireEvent.click(await screen.findByRole("button", { name: "运维详情" }));
 
     expect(await screen.findByText("100%")).toBeInTheDocument();
-    expect(screen.getByText("已完成 2 / 2")).toBeInTheDocument();
+    expect(screen.getByText("任务已结束 2 / 2")).toBeInTheDocument();
     expect(screen.getByText("task-fake-1")).toBeInTheDocument();
     expect(screen.getByText("task-fake-2")).toBeInTheDocument();
     expect(screen.getAllByText("阶段：已归档")).toHaveLength(2);
     expect(screen.queryByText("需要处理")).not.toBeInTheDocument();
-    expect(screen.getAllByText("结果已归档")).toHaveLength(2);
+    expect(screen.getAllByRole("button", { name: /^下载 MP4 / })).toHaveLength(
+      2,
+    );
     expect(window.localStorage.getItem("generation.batchId:employee_1")).toBe(
       "batch-fake-e2e",
     );

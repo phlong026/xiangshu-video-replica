@@ -17,6 +17,7 @@ vi.mock("./api", async () => {
     createGenerationResultPreviewUrl: vi.fn(),
     createGenerationTaskPreviewUrl: vi.fn(),
     downloadGenerationResult: vi.fn(),
+    downloadGenerationTaskResult: vi.fn(),
     getGenerationBatch: vi.fn(),
     getLatestGenerationReconcileOperation: vi.fn(),
     listGenerationBatches: vi.fn(),
@@ -172,6 +173,7 @@ describe("TaskRecordsPanel", () => {
       async (taskId) => `https://provider-preview/${taskId}`,
     );
     vi.mocked(api.downloadGenerationResult).mockResolvedValue();
+    vi.mocked(api.downloadGenerationTaskResult).mockResolvedValue();
     vi.mocked(api.retryGenerationTask).mockImplementation(async (_taskId) =>
       task(),
     );
@@ -256,9 +258,9 @@ describe("TaskRecordsPanel", () => {
     expect(
       await screen.findByRole("button", { name: "刷新预览 task-ok" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("音频质检失败")).toBeInTheDocument();
+    expect(screen.getByText("音频质检未通过")).toBeInTheDocument();
     expect(
-      screen.getByText("该结果不能作为合格交付，后续只能重新生成视频。"),
+      screen.getByText("检查结果仅供参考，请观看后判断；不影响播放和下载。"),
     ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "刷新预览 task-ok" }));
     // 舞台卸载后旧 video 节点不再更新，改在运维视图内重新查询。
@@ -296,6 +298,254 @@ describe("TaskRecordsPanel", () => {
       expect(api.getGenerationBatch).toHaveBeenCalledWith("batch-user-a"),
     );
     expect(api.getGenerationBatch).not.toHaveBeenCalledWith("batch-user-b");
+  });
+
+  it("downloads a direct visual-review result and retries download without regenerating", async () => {
+    const direct = task({
+      archive_status: "DIRECT",
+      result_asset_id: null,
+      direct_result_available: true,
+      quality_status: "VISUAL_QUALITY_FAILED",
+      quality_issue_codes: ["VIDEO_IDENTITY_DRIFT"],
+      stage: "QUALITY_FAILED",
+    });
+    vi.mocked(api.getGenerationBatch).mockResolvedValue(
+      batch({ tasks: [direct] }),
+    );
+    vi.mocked(api.downloadGenerationTaskResult).mockRejectedValueOnce(
+      new Error("expired URL"),
+    );
+    render(
+      <TaskRecordsPanel
+        handoffBatch={null}
+        onHandoffConsumed={vi.fn()}
+        userRole="customer"
+      />,
+    );
+    const video = await screen.findByLabelText("结果预览 task-ok");
+    fireEvent.click(screen.getByRole("button", { name: "下载 MP4" }));
+    expect(await screen.findByText("下载失败，请重试。")).toBeInTheDocument();
+    expect(screen.getByLabelText("结果预览 task-ok")).toBe(video);
+    fireEvent.click(screen.getByRole("button", { name: "下载 MP4" }));
+    await waitFor(() =>
+      expect(api.downloadGenerationTaskResult).toHaveBeenCalledTimes(2),
+    );
+    expect(api.downloadGenerationTaskResult).toHaveBeenLastCalledWith(
+      "task-ok",
+      "task-ok.mp4",
+    );
+    expect(api.downloadGenerationResult).not.toHaveBeenCalled();
+    expect(api.regenerateGenerationTask).not.toHaveBeenCalled();
+    expect(api.regenerateGenerationBatch).not.toHaveBeenCalled();
+    await switchToOpsView();
+    expect(screen.getByText("画面质检未通过")).toBeInTheDocument();
+    expect(screen.queryByText("质检待完成")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "下载 MP4 task-ok" }));
+    await waitFor(() =>
+      expect(api.downloadGenerationTaskResult).toHaveBeenCalledTimes(3),
+    );
+  });
+
+  it("does not offer a failed archive record as a playable or downloadable result", async () => {
+    vi.mocked(api.getGenerationBatch).mockResolvedValue(
+      batch({
+        tasks: [
+          task({
+            status: "FAILED",
+            archive_status: "ARCHIVE_FAILED",
+            stage: "ARCHIVE_FAILED",
+          }),
+        ],
+        progress: {
+          ...batch().progress,
+          total_count: 1,
+          terminal_count: 1,
+          counts: {
+            ...batch().progress.counts,
+            succeeded: 0,
+            failed: 1,
+            needs_attention: 1,
+          },
+        },
+      }),
+    );
+    render(
+      <TaskRecordsPanel
+        handoffBatch={null}
+        onHandoffConsumed={vi.fn()}
+        userRole="customer"
+      />,
+    );
+    await screen.findByRole("heading", { name: "结果信息" });
+    expect(
+      screen.queryByRole("button", { name: "下载 MP4" }),
+    ).not.toBeInTheDocument();
+    expect(api.createGenerationResultPreviewUrl).not.toHaveBeenCalled();
+    await switchToOpsView();
+    expect(screen.queryByText("结果已归档")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "下载 MP4 task-ok" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("任务已结束 1 / 1")).toBeInTheDocument();
+  });
+
+  it("synchronizes list progress without remounting video or flashing during background polls", async () => {
+    vi.useFakeTimers();
+    const running = batch({
+      status: "RUNNING",
+      quantity: 1,
+      tasks: [
+        task({
+          status: "ARCHIVING",
+          stage: "ARCHIVING",
+          archive_status: "ARCHIVING",
+          result_asset_id: null,
+          direct_result_available: true,
+          quality_status: "PENDING",
+        }),
+      ],
+      progress: {
+        ...batch().progress,
+        total_count: 1,
+        terminal_count: 0,
+        progress_percent: 0,
+        counts: {
+          ...batch().progress.counts,
+          succeeded: 0,
+          archiving: 1,
+          needs_attention: 0,
+        },
+      },
+    });
+    const completed = batch({
+      status: "SUCCEEDED",
+      quantity: 1,
+      tasks: [
+        task({
+          archive_status: "DIRECT",
+          result_asset_id: null,
+          direct_result_available: true,
+        }),
+      ],
+      progress: {
+        ...batch().progress,
+        total_count: 1,
+        terminal_count: 1,
+        counts: {
+          ...batch().progress.counts,
+          succeeded: 1,
+          needs_attention: 0,
+        },
+      },
+    });
+    vi.mocked(api.listGenerationBatches).mockResolvedValue({
+      items: [listItem({ status: "QUEUED", progress: running.progress })],
+      next_cursor: null,
+    });
+    let completePoll: (value: api.GenerationBatch) => void = () => undefined;
+    const pendingPoll = new Promise<api.GenerationBatch>((resolve) => {
+      completePoll = resolve;
+    });
+    vi.mocked(api.getGenerationBatch)
+      .mockResolvedValue(completed)
+      .mockResolvedValueOnce(running)
+      .mockReturnValueOnce(pendingPoll);
+    render(
+      <TaskRecordsPanel
+        handoffBatch={null}
+        onHandoffConsumed={vi.fn()}
+        userRole="customer"
+      />,
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    const video = screen.getByLabelText("结果预览 task-ok") as HTMLVideoElement;
+    video.currentTime = 3;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    expect(screen.queryByText("正在刷新任务记录")).not.toBeInTheDocument();
+    await act(async () => {
+      completePoll(completed);
+      await pendingPoll;
+    });
+    const card = screen.getByRole("button", { name: "打开批次 batch-1" });
+    expect(card).not.toHaveTextContent("排队中");
+    expect(card).toHaveTextContent("生成成功 1");
+    expect(card).not.toHaveTextContent("需处理 1");
+    expect(screen.getByLabelText("结果预览 task-ok")).toBe(video);
+    expect(video.currentTime).toBe(3);
+    expect(api.createGenerationTaskPreviewUrl).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(card).not.toHaveTextContent("排队中");
+    expect(card).toHaveTextContent("生成成功 1");
+  });
+
+  it.each(["刷新", "打开批次 batch-1"])(
+    "refreshes terminal details through %s without replacing the player",
+    async (buttonName) => {
+      render(
+        <TaskRecordsPanel
+          handoffBatch={null}
+          onHandoffConsumed={vi.fn()}
+          userRole="employee"
+        />,
+      );
+      const video = (await screen.findByLabelText(
+        "结果预览 task-ok",
+      )) as HTMLVideoElement;
+      video.currentTime = 4;
+      const updated = batch({
+        status: "SUCCEEDED",
+        tasks: [task()],
+        progress: {
+          ...batch().progress,
+          counts: { ...batch().progress.counts, needs_attention: 0 },
+        },
+      });
+      vi.mocked(api.getGenerationBatch).mockResolvedValue(updated);
+      fireEvent.click(screen.getByRole("button", { name: buttonName }));
+      await waitFor(() =>
+        expect(api.getGenerationBatch).toHaveBeenCalledTimes(2),
+      );
+      expect(
+        screen.getByRole("button", { name: "打开批次 batch-1" }),
+      ).toHaveTextContent("已完成");
+      expect(screen.getByLabelText("结果预览 task-ok")).toBe(video);
+      expect(video.currentTime).toBe(4);
+      expect(api.createGenerationResultPreviewUrl).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("keeps direct-result download unavailable to an auditor", async () => {
+    vi.mocked(api.getGenerationBatch).mockResolvedValue(
+      batch({
+        tasks: [
+          task({
+            archive_status: "DIRECT",
+            result_asset_id: null,
+            direct_result_available: true,
+          }),
+        ],
+      }),
+    );
+    render(
+      <TaskRecordsPanel
+        handoffBatch={null}
+        onHandoffConsumed={vi.fn()}
+        userRole="auditor"
+      />,
+    );
+    await screen.findByRole("heading", { name: "结果信息" });
+    expect(
+      screen.queryByRole("button", { name: "下载 MP4" }),
+    ).not.toBeInTheDocument();
+    expect(api.downloadGenerationTaskResult).not.toHaveBeenCalled();
+    expect(api.createGenerationTaskPreviewUrl).not.toHaveBeenCalled();
   });
 
   it("keeps polling after repeated network failures and recovers automatically", async () => {
@@ -886,9 +1136,7 @@ describe("TaskRecordsPanel", () => {
     await switchToOpsView();
 
     expect(await screen.findByText("质检待完成")).toBeInTheDocument();
-    expect(
-      screen.getByText("结果归档后将自动执行音频质检。"),
-    ).toBeInTheDocument();
+    expect(screen.getByText("检查结果尚未返回。")).toBeInTheDocument();
     expect(
       screen.queryByText("音频正常，结果可进入人工确认。"),
     ).not.toBeInTheDocument();
@@ -1451,7 +1699,7 @@ describe("TaskRecordsPanel", () => {
 
     // 概览条：状态徽章、进度百分比与完成计数同层呈现。
     expect(await screen.findByText("100%")).toBeInTheDocument();
-    expect(screen.getByText("已完成 1 / 1")).toBeInTheDocument();
+    expect(screen.getByText("任务已结束 1 / 1")).toBeInTheDocument();
     expect(screen.getByText("成功 1")).toBeInTheDocument();
 
     // 左栏事实表：快照解析出的分辨率与成片时长与模型、费用并列。

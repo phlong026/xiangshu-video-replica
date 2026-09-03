@@ -1230,17 +1230,28 @@ export async function downloadGenerationResult(
   assetId: string,
   filename: string,
 ): Promise<void> {
+  const { url } = await getGenerationResultDownloadUrl(assetId);
   downloadBlob(
-    await fetchGenerationResultBlob(assetId, "下载生成结果失败"),
+    await fetchGenerationResultBlob(url, "下载生成结果失败"),
+    filename,
+  );
+}
+
+export async function downloadGenerationTaskResult(
+  taskId: string,
+  filename: string,
+): Promise<void> {
+  const url = await createGenerationTaskPreviewUrl(taskId);
+  downloadBlob(
+    await fetchGenerationResultBlob(url, "下载生成结果失败"),
     filename,
   );
 }
 
 async function fetchGenerationResultBlob(
-  assetId: string,
+  url: string,
   errorPrefix: string,
 ): Promise<Blob> {
-  const { url } = await getGenerationResultDownloadUrl(assetId);
   const controller = new AbortController();
   const timeout = window.setTimeout(
     () => controller.abort(),
@@ -1248,7 +1259,11 @@ async function fetchGenerationResultBlob(
   );
 
   try {
-    const response = await fetch(url, { signal: controller.signal });
+    // 任务权限由应用接口校验；下载文件时不向供应商传递会话凭据。
+    const response = await fetch(url, {
+      signal: controller.signal,
+      credentials: "omit",
+    });
     if (!response.ok) {
       throw new Error(`${errorPrefix}（${response.status}）`);
     }

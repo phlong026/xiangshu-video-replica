@@ -2254,11 +2254,13 @@ describe("App", () => {
     fireEvent.click(await screen.findByRole("button", { name: "运维详情" }));
 
     expect(await screen.findByText("50%")).toBeInTheDocument();
-    expect(screen.getByText("已完成 1 / 2")).toBeInTheDocument();
+    expect(screen.getByText("任务已结束 1 / 2")).toBeInTheDocument();
     expect(screen.getAllByText("需要处理 1")).toHaveLength(2);
     expect(screen.getByText("task-done")).toBeInTheDocument();
     expect(screen.getByText("阶段：归档失败")).toBeInTheDocument();
-    expect(screen.getByText("结果已归档")).toBeInTheDocument();
+    expect(
+      screen.getByText("结果交付失败，暂无可用播放地址"),
+    ).toBeInTheDocument();
     expect(screen.getByText("task-running")).toBeInTheDocument();
     expect(screen.getAllByText("需要处理")).toHaveLength(2);
     expect(window.localStorage.getItem("generation.batchId:employee_1")).toBe(
@@ -2374,7 +2376,7 @@ describe("App", () => {
     });
 
     expect(screen.getByText("100%")).toBeInTheDocument();
-    expect(screen.getByText("已完成 2 / 2")).toBeInTheDocument();
+    expect(screen.getByText("任务已结束 2 / 2")).toBeInTheDocument();
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(2_000);

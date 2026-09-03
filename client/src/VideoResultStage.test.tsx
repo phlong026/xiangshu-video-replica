@@ -2,7 +2,11 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { GenerationBatch, GenerationTask } from "./api";
-import { VideoResultStage } from "./VideoResultStage";
+import {
+  generationQualityDisplay,
+  hasGenerationResultSource,
+  VideoResultStage,
+} from "./VideoResultStage";
 
 function task(overrides: Partial<GenerationTask> = {}): GenerationTask {
   return {
@@ -107,6 +111,141 @@ function renderStage(
 }
 
 describe("VideoResultStage", () => {
+  it("uses the same player controls and replays after the ended event", () => {
+    renderStage({
+      previewUrls: { "task-ok": "https://preview.example/result.mp4" },
+    });
+    const video = screen.getByLabelText("结果预览 task-ok") as HTMLVideoElement;
+    let paused = true;
+    Object.defineProperty(video, "paused", { get: () => paused });
+    const play = vi.spyOn(video, "play").mockImplementation(async () => {
+      paused = false;
+      fireEvent.play(video);
+    });
+    const pause = vi.spyOn(video, "pause").mockImplementation(() => {
+      paused = true;
+      fireEvent.pause(video);
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "播放 结果预览 task-ok" }),
+    );
+    expect(play).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "暂停" }));
+    expect(pause).toHaveBeenCalledTimes(1);
+    fireEvent.click(video);
+    expect(play).toHaveBeenCalledTimes(2);
+    paused = true;
+    video.currentTime = 12;
+    Object.defineProperty(video, "ended", { value: true });
+    fireEvent.ended(video);
+    fireEvent.click(
+      screen.getByRole("button", { name: "播放 结果预览 task-ok" }),
+    );
+    expect(play).toHaveBeenCalledTimes(3);
+    expect(video.currentTime).toBe(0);
+  });
+
+  it("displays visual findings honestly without blocking direct preview or download", () => {
+    const visualTask = task({
+      archive_status: "DIRECT",
+      result_asset_id: null,
+      direct_result_available: true,
+      quality_status: "VISUAL_QUALITY_FAILED",
+      quality_issue_codes: [
+        "VIDEO_IDENTITY_DRIFT",
+        "VIDEO_MOTION_DISCONTINUITY",
+        "VIDEO_SEVERE_FLICKER",
+      ],
+      stage: "QUALITY_FAILED",
+    });
+    const props = renderStage({
+      batch: batch({ tasks: [visualTask] }),
+      previewUrls: { "task-ok": "https://preview.example/result.mp4" },
+    });
+    expect(screen.getAllByText(/画面质检未通过/)).toHaveLength(2);
+    expect(screen.getByText(/人物一致性变化/)).toBeInTheDocument();
+    expect(screen.getByText(/动作连续性问题/)).toBeInTheDocument();
+    expect(screen.getByText(/画面闪烁/)).toBeInTheDocument();
+    expect(
+      screen.queryByText(/音频质检未通过|建议再次生成/),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "下载 MP4" }));
+    expect(props.onDownload).toHaveBeenCalledWith(visualTask);
+  });
+
+  it.each([
+    ["AUDIO_OK", [], "音频质检通过", "passed"],
+    ["AUDIO_QUALITY_FAILED", [], "音频质检未通过", "failed"],
+    ["VISUAL_VALIDATION_UNAVAILABLE", [], "画面质检暂不可用", "unavailable"],
+    [
+      "AUDIO_QUALITY_FAILED",
+      ["AUDIO_VALIDATION_UNAVAILABLE"],
+      "音频质检暂不可用",
+      "unavailable",
+    ],
+    ["PENDING", [], "质检待完成", "pending"],
+  ])(
+    "maps %s without treating unavailable checks as failed media",
+    (status, codes, label, tone) => {
+      expect(
+        generationQualityDisplay(
+          task({
+            quality_status: status as string,
+            quality_issue_codes: codes as string[],
+          }),
+        ),
+      ).toMatchObject({ label, tone });
+    },
+  );
+
+  it("preserves distinct unknown quality codes for diagnosis", () => {
+    expect(
+      generationQualityDisplay(
+        task({
+          quality_status: "VISUAL_QUALITY_FAILED",
+          quality_issue_codes: ["VIDEO_NEW_CHECK_A", "VIDEO_NEW_CHECK_B"],
+        }),
+      ).issues,
+    ).toEqual(["VIDEO_NEW_CHECK_A", "VIDEO_NEW_CHECK_B"]);
+  });
+
+  it("does not treat a failed archive asset placeholder as an available video", () => {
+    const failedTask = task({
+      archive_status: "ARCHIVE_FAILED",
+      status: "FAILED",
+      stage: "ARCHIVE_FAILED",
+      quality_status: "VISUAL_VALIDATION_UNAVAILABLE",
+    });
+    const props = renderStage({
+      batch: batch({
+        tasks: [failedTask],
+        progress: {
+          ...batch().progress,
+          total_count: 1,
+          terminal_count: 1,
+          counts: { ...batch().progress.counts, succeeded: 0, failed: 1 },
+        },
+      }),
+    });
+    expect(screen.getByText("任务已结束 1 / 1")).toBeInTheDocument();
+    expect(screen.getByText("生成成功 0 · 失败 1")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "下载 MP4" }),
+    ).not.toBeInTheDocument();
+    expect(props.onRequestPreview).not.toHaveBeenCalled();
+    const steps = screen.getByRole("list", { name: "生成阶段" });
+    expect(steps.querySelector(".video-stage-step--active")).toBeNull();
+    expect(steps.querySelectorAll("li")[2]).toHaveClass(
+      "video-stage-step--done",
+    );
+    expect(hasGenerationResultSource(failedTask)).toBe(false);
+    expect(
+      hasGenerationResultSource({
+        ...failedTask,
+        direct_result_available: true,
+      }),
+    ).toBe(true);
+  });
   it("renders the stage progress narrative with reassurance while rendering", () => {
     renderStage({
       batch: batch({
@@ -199,7 +338,7 @@ describe("VideoResultStage", () => {
     expect(
       screen.getByRole("heading", { name: "结果信息" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("2 / 2 个结果")).toBeInTheDocument();
+    expect(screen.getByText("生成成功 2 · 失败 0")).toBeInTheDocument();
     expect(screen.queryByText(/MiniMax/i)).not.toBeInTheDocument();
     expect(screen.getByText("音频质检通过")).toBeInTheDocument();
     expect(
@@ -282,6 +421,43 @@ describe("VideoResultStage", () => {
     expect(onRequestPreview).toHaveBeenCalledTimes(1);
   });
 
+  it("offers direct download and preview recovery while background processing continues", () => {
+    const directTask = task({
+      status: "ARCHIVING",
+      stage: "ARCHIVING",
+      archive_status: "PENDING",
+      result_asset_id: null,
+      direct_result_available: true,
+    });
+    const props = renderStage({
+      batch: batch({ tasks: [directTask] }),
+      resultErrors: { "task-ok": "视频已生成，但播放地址暂时不可用。" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "下载原文件" }));
+    expect(props.onDownload).toHaveBeenCalledWith(directTask);
+    fireEvent.click(screen.getByRole("button", { name: "重新获取播放地址" }));
+    expect(props.onRequestPreview).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a direct result read-only for auditors", () => {
+    const props = renderStage({
+      canOperate: false,
+      batch: batch({
+        tasks: [
+          task({
+            archive_status: "DIRECT",
+            result_asset_id: null,
+            direct_result_available: true,
+          }),
+        ],
+      }),
+    });
+    expect(props.onRequestPreview).not.toHaveBeenCalled();
+    expect(
+      screen.queryByRole("button", { name: "下载 MP4" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("switches the active result from the filmstrip", () => {
     const onRequestPreview = vi.fn();
     renderStage({
@@ -297,7 +473,7 @@ describe("VideoResultStage", () => {
 
     // 质检未过的结果仍可对比查看，并显示警示条。
     expect(
-      screen.getByText("音频质检未通过：该结果仅供对比查看，建议再次生成。"),
+      screen.getByText(/音频质检未通过：检查结果仅供参考/),
     ).toBeInTheDocument();
     expect(onRequestPreview).toHaveBeenCalledWith(
       expect.objectContaining({ id: "task-audio-failed" }),

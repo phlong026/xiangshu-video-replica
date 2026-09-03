@@ -17,6 +17,7 @@ import {
   customerVisibleErrorMessage,
   downloadCharacterAsset,
   downloadGenerationResult,
+  downloadGenerationTaskResult,
   extractSourceFrames,
   generateFirstFrames,
   getCachedCharacterAssetUrl,
@@ -312,8 +313,113 @@ const generationVersion = {
 
 describe("generation workflow API", () => {
   afterEach(() => {
+    setCustomerSessionToken(null);
+    setInternalAccessToken(null);
     vi.unstubAllGlobals();
     vi.useRealTimers();
+  });
+
+  it("downloads a direct result using task authorization without forwarding credentials", async () => {
+    vi.useFakeTimers();
+    setCustomerSessionToken("test-customer-session");
+    const video = new Blob(["provider video"], { type: "video/mp4" });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ url: "https://provider.example/video.mp4" }),
+      })
+      .mockResolvedValueOnce({ ok: true, blob: async () => video });
+    const createObjectURL = vi.fn(() => "blob:direct-result");
+    const revokeObjectURL = vi.fn();
+    const click = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(function (this: HTMLAnchorElement) {
+        expect(this.download).toBe("direct-task.mp4");
+        expect(this.href).toBe("blob:direct-result");
+      });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("URL", { createObjectURL, revokeObjectURL });
+
+    await downloadGenerationTaskResult("task 1", "direct-task.mp4");
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "http://127.0.0.1:8000/api/generation-tasks/task%201/preview-url",
+    );
+    expect(
+      new Headers(fetchMock.mock.calls[0][1].headers).get("Authorization"),
+    ).toBe("Bearer test-customer-session");
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "https://provider.example/video.mp4",
+      {
+        signal: expect.any(AbortSignal),
+        credentials: "omit",
+      },
+    );
+    expect(createObjectURL).toHaveBeenCalledWith(video);
+    expect(click).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:direct-result");
+  });
+
+  it.each([403, 404, 409])(
+    "does not fetch a provider file when task authorization returns %i",
+    async (status) => {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: false,
+        status,
+        json: async () => ({ detail: { code: "RESULT_NOT_AVAILABLE" } }),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      await expect(
+        downloadGenerationTaskResult("task-other", "video.mp4"),
+      ).rejects.toThrow();
+      expect(fetchMock).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("does not save an unavailable provider response as an MP4", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ url: "https://provider.example/expired.mp4" }),
+      })
+      .mockResolvedValueOnce({ ok: false, status: 403 });
+    const click = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(() => undefined);
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(
+      downloadGenerationTaskResult("task-expired", "video.mp4"),
+    ).rejects.toThrow("403");
+    expect(click).not.toHaveBeenCalled();
+  });
+
+  it("times out a direct file download without retrying a paid generation", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ url: "https://provider.example/slow.mp4" }),
+      })
+      .mockImplementationOnce(
+        (_url, init: RequestInit) =>
+          new Promise((_resolve, reject) => {
+            init.signal?.addEventListener("abort", () =>
+              reject(new DOMException("Aborted", "AbortError")),
+            );
+          }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const download = expect(
+      downloadGenerationTaskResult("task-slow", "video.mp4"),
+    ).rejects.toThrow();
+    await vi.advanceTimersByTimeAsync(60_001);
+    await download;
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("downloads a signed cross-origin result through a local blob URL", async () => {

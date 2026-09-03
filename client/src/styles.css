@@ -3713,7 +3713,7 @@ button.history-version--active {
   color: var(--accent-strong);
   background: rgb(10 8 6 / 0.72);
   font-size: 26px;
-  transform: translate(-50%, -50%);
+  translate: -50% -50%;
   cursor: pointer;
 }
 

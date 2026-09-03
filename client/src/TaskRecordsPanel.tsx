@@ -13,6 +13,7 @@ import {
   customerVisibleErrorMessage,
   deleteGenerationBatch,
   downloadGenerationResult,
+  downloadGenerationTaskResult,
   type GenerationBatch,
   type GenerationBatchListItem,
   type GenerationReconcileOperation,
@@ -29,6 +30,8 @@ import {
   waitForGenerationReconcileOperation,
 } from "./api";
 import {
+  generationQualityDisplay,
+  hasGenerationResultSource,
   readSnapshotNumber,
   readSnapshotString,
   VideoResultStage,
@@ -70,6 +73,7 @@ export function TaskRecordsPanel({
   const requeuedTaskIdsRef = useRef<Set<string>>(new Set());
   const [pollingRevision, setPollingRevision] = useState(0);
   const [batch, setBatch] = useState<GenerationBatch | null>(handoffBatch);
+  const latestBatchRef = useRef<GenerationBatch | null>(handoffBatch);
   const [batchError, setBatchError] = useState("");
   const [isBatchLoading, setIsBatchLoading] = useState(false);
   // 客户默认只看结果舞台；对账/重试等低频能力由舞台底部的
@@ -108,6 +112,16 @@ export function TaskRecordsPanel({
   const taskOperationKeysRef = useRef<Record<string, string>>({});
   const canOperate = userRole !== "auditor";
 
+  const updateBatch = useCallback((nextBatch: GenerationBatch | null) => {
+    latestBatchRef.current = nextBatch;
+    setBatch(nextBatch);
+    if (nextBatch) {
+      setBatchHistory((current) =>
+        current.map((item) => mergeBatchSnapshot(item, nextBatch)),
+      );
+    }
+  }, []);
+
   // 切换/清空批次时只需丢弃本地 URL 缓存；切回后会重新自动签发。
   const releasePreviewUrls = useCallback(() => {
     setPreviewUrls({});
@@ -115,11 +129,19 @@ export function TaskRecordsPanel({
 
   const selectBatch = useCallback(
     (batchId: string, knownBatch?: GenerationBatch) => {
+      if (
+        activeBatchIdRef.current === batchId &&
+        latestBatchRef.current &&
+        !knownBatch
+      ) {
+        setPollingRevision((current) => current + 1);
+        return;
+      }
       releasePreviewUrls();
       activeBatchIdRef.current = batchId;
       setActiveBatchId(batchId);
       setBatchIdInput(batchId);
-      setBatch(knownBatch ?? null);
+      updateBatch(knownBatch ?? null);
       setBatchError("");
       setRetryDelaySeconds(null);
       setBatchRegenerationReason("");
@@ -129,7 +151,7 @@ export function TaskRecordsPanel({
       requeuedTaskIdsRef.current.clear();
       storeBatchId(storageKey, batchId);
     },
-    [releasePreviewUrls, storageKey],
+    [releasePreviewUrls, storageKey, updateBatch],
   );
 
   useEffect(() => {
@@ -152,7 +174,13 @@ export function TaskRecordsPanel({
         if (historyRequestRef.current !== requestId) {
           return;
         }
-        const items = Array.isArray(page.items) ? page.items : [];
+        // 列表响应可能比详情轮询更旧，保留当前批次刚收到的状态。
+        const items = (Array.isArray(page.items) ? page.items : []).map(
+          (item) =>
+            latestBatchRef.current
+              ? mergeBatchSnapshot(item, latestBatchRef.current)
+              : item,
+        );
         const pageCursor =
           typeof page.next_cursor === "string" ? page.next_cursor : null;
         setBatchHistory((current) =>
@@ -225,7 +253,7 @@ export function TaskRecordsPanel({
         if (!isActive) {
           return;
         }
-        setBatch(nextBatch);
+        updateBatch(nextBatch);
         setBatchError("");
         setRetryDelaySeconds(null);
         nextRetryDelayMs = POLL_INTERVAL_MS;
@@ -247,7 +275,7 @@ export function TaskRecordsPanel({
           clearStoredBatchId(storageKey);
           activeBatchIdRef.current = "";
           setActiveBatchId("");
-          setBatch(null);
+          updateBatch(null);
           return;
         }
         nextRetryDelayMs = Math.min(nextRetryDelayMs * 2, MAX_RETRY_DELAY_MS);
@@ -281,7 +309,7 @@ export function TaskRecordsPanel({
         window.clearTimeout(timeoutId);
       }
     };
-  }, [activeBatchId, pollingRevision, storageKey]);
+  }, [activeBatchId, pollingRevision, storageKey, updateBatch]);
 
   const reconcileRecoveryKey = (batch?.tasks ?? [])
     .filter((task) => task.status === "SUBMISSION_UNCERTAIN")
@@ -387,11 +415,10 @@ export function TaskRecordsPanel({
         ),
       );
       if (activeBatchIdRef.current === updated.id) {
-        setBatch((current) =>
-          current && current.id === updated.id
-            ? { ...current, display_name: updated.display_name }
-            : current,
-        );
+        const current = latestBatchRef.current;
+        if (current?.id === updated.id) {
+          updateBatch({ ...current, display_name: updated.display_name });
+        }
       }
       cancelBatchRename();
     } catch (error) {
@@ -427,7 +454,7 @@ export function TaskRecordsPanel({
           activeBatchIdRef.current = "";
           setActiveBatchId("");
           setBatchIdInput("");
-          setBatch(null);
+          updateBatch(null);
           setBatchError("");
           clearStoredBatchId(storageKey);
         }
@@ -469,7 +496,7 @@ export function TaskRecordsPanel({
       if (activeBatchIdRef.current !== batchIdAtStart) {
         return;
       }
-      setBatch(nextBatch);
+      updateBatch(nextBatch);
       setBatchError("");
       delete taskOperationKeysRef.current[actionKey];
     } catch (error) {
@@ -510,7 +537,7 @@ export function TaskRecordsPanel({
       if (activeBatchIdRef.current !== batchIdAtStart) {
         return;
       }
-      setBatch(nextBatch);
+      updateBatch(nextBatch);
       setBatchError("");
       delete taskOperationKeysRef.current[actionKey];
     } catch {
@@ -552,7 +579,7 @@ export function TaskRecordsPanel({
       if (activeBatchIdRef.current !== batchIdAtStart) {
         return;
       }
-      setBatch(nextBatch);
+      updateBatch(nextBatch);
       setBatchError("");
       delete taskOperationKeysRef.current[actionKey];
     } catch {
@@ -650,7 +677,7 @@ export function TaskRecordsPanel({
       if (!canOperate) {
         return;
       }
-      if (!task.result_asset_id && !task.direct_result_available) {
+      if (!hasGenerationResultSource(task)) {
         return;
       }
       const batchIdAtStart = activeBatchIdRef.current;
@@ -710,23 +737,32 @@ export function TaskRecordsPanel({
   }, []);
 
   async function handleDownload(task: GenerationTask) {
-    if (!canOperate || !task.result_asset_id) {
+    if (!canOperate || !hasGenerationResultSource(task)) {
       return;
     }
+    const batchIdAtStart = activeBatchIdRef.current;
     const actionKey = `${task.id}:download`;
     setActiveResultAction(actionKey);
     setResultErrors((current) => ({ ...current, [task.id]: "" }));
     try {
-      await downloadGenerationResult(task.result_asset_id, `${task.id}.mp4`);
+      if (task.direct_result_available) {
+        await downloadGenerationTaskResult(task.id, `${task.id}.mp4`);
+      } else if (task.result_asset_id) {
+        await downloadGenerationResult(task.result_asset_id, `${task.id}.mp4`);
+      }
     } catch {
-      setResultErrors((current) => ({
-        ...current,
-        [task.id]: "下载失败，请重试。",
-      }));
+      if (isMountedRef.current && activeBatchIdRef.current === batchIdAtStart) {
+        setResultErrors((current) => ({
+          ...current,
+          [task.id]: "下载失败，请重试。",
+        }));
+      }
     } finally {
-      setActiveResultAction((current) =>
-        current === actionKey ? "" : current,
-      );
+      if (isMountedRef.current) {
+        setActiveResultAction((current) =>
+          current === actionKey ? "" : current,
+        );
+      }
     }
   }
 
@@ -741,7 +777,10 @@ export function TaskRecordsPanel({
             <button
               className="secondary-button"
               disabled={isHistoryLoading}
-              onClick={() => void loadHistory()}
+              onClick={() => {
+                void loadHistory();
+                setPollingRevision((current) => current + 1);
+              }}
               type="button"
             >
               刷新
@@ -818,9 +857,16 @@ export function TaskRecordsPanel({
                           </span>
                         </span>
                         <span className="batch-history-card__meta">
-                          {formatTimestamp(item.created_at)} ·{" "}
+                          {formatTimestamp(item.created_at)} · 任务已结束{" "}
                           {item.progress.terminal_count} /{" "}
-                          {item.progress.total_count} 个结果
+                          {item.progress.total_count} · 生成成功{" "}
+                          {item.progress.counts.succeeded}
+                          {item.progress.counts.failed > 0
+                            ? ` · 失败 ${item.progress.counts.failed}`
+                            : ""}
+                          {item.progress.counts.cancelled > 0
+                            ? ` · 已取消 ${item.progress.counts.cancelled}`
+                            : ""}
                         </span>
                         {item.needs_attention_count ? (
                           <span className="attention-tag">
@@ -869,7 +915,7 @@ export function TaskRecordsPanel({
         <div className="batch-detail-column">
           <BatchStatusMessage
             error={batchError}
-            isLoading={isBatchLoading}
+            isLoading={isBatchLoading && !batch}
             onRetry={() => setPollingRevision((current) => current + 1)}
             retryDelaySeconds={retryDelaySeconds}
           />
@@ -1087,7 +1133,8 @@ function BatchPanel({
           {batch.progress.progress_percent}%
         </span>
         <span className="batch-overview__count">
-          已完成 {batch.progress.terminal_count} / {batch.progress.total_count}
+          任务已结束 {batch.progress.terminal_count} /{" "}
+          {batch.progress.total_count}
         </span>
         {countItems.length > 0 ? (
           <span className="batch-overview__chips">
@@ -1260,10 +1307,8 @@ function TaskItem({
   userRole: UserRole;
 }) {
   const attentionNeeded = taskNeedsAttention(task);
-  const audioFailed =
-    task.quality_status === "AUDIO_QUALITY_FAILED" ||
-    task.quality_issue_codes.includes("AUDIO_QUALITY_FAILED");
-  const qualityPassed = task.quality_status === "AUDIO_OK";
+  const quality = generationQualityDisplay(task);
+  const hasResult = hasGenerationResultSource(task);
   const previewAction = `${task.id}:preview`;
   const downloadAction = `${task.id}:download`;
   const availableActions = task.available_actions ?? [];
@@ -1305,25 +1350,17 @@ function TaskItem({
 
           <div
             className={
-              audioFailed
+              quality.tone === "failed"
                 ? "quality-summary quality-summary--failed"
-                : qualityPassed
+                : quality.tone === "passed"
                   ? "quality-summary"
                   : "quality-summary quality-summary--pending"
             }
           >
-            <strong>
-              {audioFailed ? "音频质检失败" : qualityLabel(task.quality_status)}
-            </strong>
-            <p>
-              {audioFailed
-                ? "该结果不能作为合格交付，后续只能重新生成视频。"
-                : qualityPassed
-                  ? "音频正常，结果可进入人工确认。"
-                  : "结果归档后将自动执行音频质检。"}
-            </p>
-            {task.quality_issue_codes.length > 0 ? (
-              <span>{task.quality_issue_codes.join(" · ")}</span>
+            <strong>{quality.label}</strong>
+            <p>{quality.detail}</p>
+            {quality.issues.length > 0 ? (
+              <span>{quality.issues.join(" · ")}</span>
             ) : null}
           </div>
 
@@ -1336,10 +1373,14 @@ function TaskItem({
             </p>
           ) : null}
 
-          {task.result_asset_id || task.direct_result_available ? (
+          {hasResult ? (
             <div className="task-result-actions">
               <span className="muted">
-                {task.direct_result_available ? "结果可在线播放" : "结果已归档"}
+                {previewUrl
+                  ? "已获取播放地址"
+                  : resultError
+                    ? "结果地址暂不可用"
+                    : "有结果记录，待确认播放地址"}
               </span>
               {canOperate ? (
                 <>
@@ -1350,25 +1391,26 @@ function TaskItem({
                   >
                     {previewUrl ? `刷新预览 ${task.id}` : `加载预览 ${task.id}`}
                   </button>
-                  {task.result_asset_id ? (
-                    <button
-                      disabled={activeResultAction === downloadAction}
-                      onClick={() => void onDownload(task)}
-                      type="button"
-                    >
-                      下载 MP4 {task.id}
-                    </button>
-                  ) : null}
+                  <button
+                    disabled={activeResultAction === downloadAction}
+                    onClick={() => void onDownload(task)}
+                    type="button"
+                  >
+                    下载 MP4 {task.id}
+                  </button>
                 </>
               ) : (
                 <span className="muted">审计只读，不可预览或下载结果</span>
               )}
             </div>
           ) : (
-            <span className="muted">等待成片返回</span>
+            <span className="muted">
+              {task.archive_status === "ARCHIVE_FAILED"
+                ? "结果交付失败，暂无可用播放地址"
+                : "等待成片返回"}
+            </span>
           )}
-          {(task.result_asset_id || task.direct_result_available) &&
-          canOperate ? (
+          {hasResult && canOperate ? (
             <section
               aria-label={`结果播放器 ${task.id}`}
               className="task-result-preview"
@@ -1582,6 +1624,23 @@ function appendUniqueBatches(
   return [...current, ...incoming.filter((item) => !existingIds.has(item.id))];
 }
 
+function mergeBatchSnapshot(
+  item: GenerationBatchListItem,
+  detail: GenerationBatch,
+): GenerationBatchListItem {
+  if (item.id !== detail.id) {
+    return item;
+  }
+  return {
+    ...item,
+    status: detail.status,
+    progress: detail.progress,
+    tasks: detail.tasks,
+    needs_attention_count: detail.progress.counts.needs_attention,
+    has_results: detail.tasks.some(hasGenerationResultSource),
+  };
+}
+
 function operationIdempotencyKey(
   keys: Record<string, string>,
   actionKey: string,
@@ -1623,6 +1682,7 @@ function hasRequeuedTaskStillProcessing(
 function isRequeuedTaskSettled(task: GenerationTask) {
   return (
     task.archive_status === "ARCHIVED" ||
+    task.archive_status === "DIRECT" ||
     task.status === "FAILED" ||
     task.status === "CANCELLED" ||
     task.status === "SUBMISSION_UNCERTAIN"
@@ -1649,8 +1709,7 @@ function taskNeedsAttention(task: GenerationTask) {
   return (
     task.status === "SUBMISSION_UNCERTAIN" ||
     task.archive_status === "ARCHIVE_FAILED" ||
-    task.quality_status === "AUDIO_QUALITY_FAILED" ||
-    task.quality_issue_codes.includes("AUDIO_QUALITY_FAILED")
+    ["failed", "unavailable"].includes(generationQualityDisplay(task).tone)
   );
 }
 
@@ -1689,10 +1748,6 @@ function formatStatus(status: string) {
     SUCCEEDED: "已完成",
   };
   return labels[status] ?? status;
-}
-
-function qualityLabel(status: string) {
-  return status === "AUDIO_OK" ? "音频质检通过" : "质检待完成";
 }
 
 function formatDuration(value: number | null | undefined) {

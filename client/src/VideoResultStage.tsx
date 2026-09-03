@@ -28,7 +28,7 @@ const PHASE_MESSAGES: Record<string, string> = {
   QUEUED: "已进入渲染队列，即将开始生成…",
   RUNNING: "AI 正在基于你的首帧渲染画面、动作与口型…",
   ARCHIVING: "成片已生成，正在准备在线播放…",
-  SUCCEEDED: "已生成，正在自动进行音频质检…",
+  SUCCEEDED: "成片已生成，正在更新检查结果…",
 };
 
 const REGENERATION_REASONS = [
@@ -100,7 +100,7 @@ export function VideoResultStage({
     ? activeResultAction === `${activeTask.id}:preview`
     : false;
   const hasPreviewSource = activeTask
-    ? Boolean(activeTask.result_asset_id || activeTask.direct_result_available)
+    ? hasGenerationResultSource(activeTask)
     : false;
 
   // 归档资产和直连结果都按任务归属取播放地址；直连 URL 不进入批次详情。
@@ -136,6 +136,7 @@ export function VideoResultStage({
   }
 
   const outcome = taskOutcome(activeTask);
+  const quality = generationQualityDisplay(activeTask);
   const stage = effectiveStage(activeTask);
   const stepIndex = stepIndexForStage(stage, outcome);
   const elapsed =
@@ -191,13 +192,13 @@ export function VideoResultStage({
             </span>
           </div>
           <p className="video-stage-batch-note">
-            {batch.progress.terminal_count} / {batch.progress.total_count}{" "}
-            个结果已完成
+            任务已结束 {batch.progress.terminal_count} /{" "}
+            {batch.progress.total_count}
             {batch.source_batch_id ? " · 冻结输入重生成批次" : ""}
           </p>
         </div>
         <div className="video-stage-header__actions">
-          {canOperate && activeTask.result_asset_id ? (
+          {canOperate && hasPreviewSource ? (
             <button
               aria-label="下载 MP4"
               disabled={activeResultAction === `${activeTask.id}:download`}
@@ -234,9 +235,13 @@ export function VideoResultStage({
               测试模式
             </p>
           ) : null}
-          {outcome === "quality_failed" && hasPreviewSource ? (
+          {(quality.tone === "failed" || quality.tone === "unavailable") &&
+          hasPreviewSource ? (
             <p className="video-stage-quality-banner" role="status">
-              音频质检未通过：该结果仅供对比查看，建议再次生成。
+              {quality.label}：{quality.detail}
+              {quality.issues.length > 0
+                ? ` 检查项：${quality.issues.join("、")}。`
+                : ""}
             </p>
           ) : null}
           {previewUrl ? (
@@ -244,6 +249,15 @@ export function VideoResultStage({
               onSourceError={() => onPreviewSourceError(activeTask)}
               src={previewUrl}
               taskLabel={`结果预览 ${activeTask.id}`}
+            />
+          ) : showPlaybackRecovery ? (
+            <StagePlaybackRecovery
+              canDownload={canOperate && hasPreviewSource}
+              error={resultError}
+              onDownload={() => onDownload(activeTask)}
+              onOpenOpsDetail={onOpenOpsDetail}
+              onRetry={() => onRequestPreview(activeTask)}
+              retryBusy={previewBusy}
             />
           ) : outcome === "in_progress" ? (
             <StageProgressView
@@ -259,15 +273,6 @@ export function VideoResultStage({
               remaining={remaining}
               showSlowWarning={showSlowWarning}
               stepIndex={stepIndex}
-            />
-          ) : showPlaybackRecovery ? (
-            <StagePlaybackRecovery
-              canDownload={canOperate && Boolean(activeTask.result_asset_id)}
-              error={resultError}
-              onDownload={() => onDownload(activeTask)}
-              onOpenOpsDetail={onOpenOpsDetail}
-              onRetry={() => onRequestPreview(activeTask)}
-              retryBusy={previewBusy}
             />
           ) : !canOperate && hasPreviewSource ? (
             <p className="video-stage-player-note">
@@ -426,6 +431,9 @@ function StageVideoPlayer({
       return;
     }
     if (video.paused) {
+      if (video.ended) {
+        video.currentTime = 0;
+      }
       void video.play().catch(() => {
         setIsPlaying(false);
         onSourceError();
@@ -488,6 +496,7 @@ function StageVideoPlayer({
         className="video-stage-video"
         onClick={togglePlay}
         onError={onSourceError}
+        onEnded={() => setIsPlaying(false)}
         onLoadedMetadata={(event) => {
           setDuration(event.currentTarget.duration || 0);
         }}
@@ -642,7 +651,7 @@ function StageTimeline({
     <ol aria-label="生成阶段" className="video-stage-steps">
       {STEP_LABELS.map((label, index) => {
         const isDone = completeAll || index < stepIndex;
-        const isActive = !completeAll && index === stepIndex;
+        const isActive = outcome === "in_progress" && index === stepIndex;
         return (
           <li
             className={
@@ -730,21 +739,19 @@ function StageSummary({
 }) {
   const resolution = readSnapshotString(task, "resolution");
   const outputDuration = readSnapshotNumber(task, "output_duration_seconds");
-  const quality =
-    task.quality_status === "AUDIO_OK"
-      ? "音频质检通过"
-      : task.quality_status === "AUDIO_QUALITY_FAILED"
-        ? "音频质检未通过"
-        : "质检待完成";
+  const quality = generationQualityDisplay(task);
   return (
     <aside className="video-stage-summary" aria-label="结果信息">
       <h3>结果信息</h3>
       <dl>
         <div>
-          <dt>完成情况</dt>
+          <dt>任务统计</dt>
           <dd>
-            {batch.progress.terminal_count} / {batch.progress.total_count}{" "}
-            个结果
+            生成成功 {batch.progress.counts.succeeded} · 失败{" "}
+            {batch.progress.counts.failed}
+            {batch.progress.counts.cancelled > 0
+              ? ` · 已取消 ${batch.progress.counts.cancelled}`
+              : ""}
           </dd>
         </div>
         <div>
@@ -757,7 +764,7 @@ function StageSummary({
         </div>
         <div>
           <dt>质检</dt>
-          <dd>{quality}</dd>
+          <dd>{quality.label}</dd>
         </div>
         {resolution || outputDuration !== null ? (
           <div>
@@ -847,6 +854,96 @@ type TaskOutcome =
   | "needs_attention"
   | "superseded";
 
+export function hasGenerationResultSource(
+  task: Pick<
+    GenerationTask,
+    "direct_result_available" | "result_asset_id" | "archive_status"
+  >,
+): boolean {
+  return Boolean(
+    task.direct_result_available ||
+      (task.result_asset_id && task.archive_status === "ARCHIVED"),
+  );
+}
+
+const QUALITY_ISSUE_LABELS: Record<string, string> = {
+  AUDIO_QUALITY_FAILED: "未检测到有效音轨",
+  AUDIO_VALIDATION_UNAVAILABLE: "音频检查服务暂不可用",
+  VISUAL_VALIDATION_UNAVAILABLE: "画面检查服务暂不可用",
+  VIDEO_IDENTITY_DRIFT: "人物一致性变化",
+  VIDEO_OUTFIT_DRIFT: "服装一致性变化",
+  VIDEO_MOTION_DISCONTINUITY: "动作连续性问题",
+  VIDEO_SEVERE_FLICKER: "画面闪烁",
+  VIDEO_SAMPLE_COUNT_INVALID: "画面采样数量异常",
+  VIDEO_ANATOMY_INVALID: "人物肢体结构异常",
+  VIDEO_EXTRA_PEOPLE_DETECTED: "出现额外人物",
+};
+
+export function generationQualityDisplay(task: GenerationTask): {
+  label: string;
+  detail: string;
+  issues: string[];
+  tone: "passed" | "failed" | "pending" | "unavailable";
+} {
+  const codes = task.quality_issue_codes ?? [];
+  const visualFailed =
+    task.quality_status === "VISUAL_QUALITY_FAILED" ||
+    codes.some((code) => code.startsWith("VIDEO_"));
+  const audioUnavailable =
+    codes.includes("AUDIO_VALIDATION_UNAVAILABLE") ||
+    task.quality_status === "AUDIO_VALIDATION_UNAVAILABLE";
+  const visualUnavailable =
+    task.quality_status === "VISUAL_VALIDATION_UNAVAILABLE" ||
+    codes.includes("VISUAL_VALIDATION_UNAVAILABLE");
+  const audioFailed =
+    !audioUnavailable &&
+    (task.quality_status === "AUDIO_QUALITY_FAILED" ||
+      codes.includes("AUDIO_QUALITY_FAILED"));
+  const issues = [
+    ...new Set(codes.map((code) => QUALITY_ISSUE_LABELS[code] ?? code)),
+  ];
+  if (visualFailed || audioFailed) {
+    return {
+      label:
+        visualFailed && audioFailed
+          ? "画面与音频质检未通过"
+          : visualFailed
+            ? "画面质检未通过"
+            : "音频质检未通过",
+      detail: "检查结果仅供参考，请观看后判断；不影响播放和下载。",
+      issues,
+      tone: "failed",
+    };
+  }
+  if (audioUnavailable || visualUnavailable) {
+    return {
+      label:
+        audioUnavailable && visualUnavailable
+          ? "质检暂不可用"
+          : audioUnavailable
+            ? "音频质检暂不可用"
+            : "画面质检暂不可用",
+      detail: "未能完成检查，不代表视频不合格；不影响播放和下载。",
+      issues,
+      tone: "unavailable",
+    };
+  }
+  if (task.quality_status === "AUDIO_OK") {
+    return {
+      label: "音频质检通过",
+      detail: "已检测到有效音轨。",
+      issues,
+      tone: "passed",
+    };
+  }
+  return {
+    label: "质检待完成",
+    detail: "检查结果尚未返回。",
+    issues,
+    tone: "pending",
+  };
+}
+
 function taskOutcome(task: GenerationTask): TaskOutcome {
   const stage = effectiveStage(task);
   if (task.superseded_by_task_id) {
@@ -885,7 +982,7 @@ function pickDefaultTaskId(tasks: GenerationTask[]): string {
   if (inProgress) {
     return inProgress.id;
   }
-  const viewable = tasks.find((task) => task.result_asset_id);
+  const viewable = tasks.find(hasGenerationResultSource);
   return (viewable ?? tasks[0])?.id ?? "";
 }
 
@@ -903,11 +1000,11 @@ function stepIndexForStage(stage: string, outcome: TaskOutcome): number {
       return 2;
     case "ARCHIVING":
     case "SUCCEEDED":
+    case "ARCHIVE_FAILED":
       return 3;
     case "FAILED":
     case "CANCELLED":
     case "SUBMISSION_UNCERTAIN":
-    case "ARCHIVE_FAILED":
       return 2;
     default:
       return 0;
