@@ -54,8 +54,6 @@ from app.generation import (
     version_result,
     version_state,
 )
-from app.media import storage_key_from_uri
-from app.media_routes import storage_for_asset
 from app.permissions import (
     require_not_auditor,
     require_project_access,
@@ -70,7 +68,6 @@ from app.script_rewrite import (
     load_script_rewrite_task,
     script_rewrite_task_result,
 )
-from app.storage import StorageBackendUnavailable
 
 router = APIRouter(prefix="/api", tags=["generation"])
 logger = logging.getLogger(__name__)
@@ -383,102 +380,39 @@ def delete_generation_batch_record(
                 detail={"code": "BATCH_NOT_FOUND"},
             )
 
-        # 付费 provider 调用仍在途时禁止删除（与项目删除同一约束），否则
-        # 任务的云端回写会丢失，费用对账失去依据。
-        has_active_tasks = conn.execute(
-            """
-            SELECT 1
-            FROM generation_tasks
-            WHERE batch_id = %s
-              AND status IN ('PENDING', 'SUBMITTING', 'QUEUED', 'RUNNING', 'ARCHIVING')
-            LIMIT 1
-            """,
-            (batch_id,),
-        ).fetchone()
-        if has_active_tasks:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "code": "BATCH_DELETE_HAS_ACTIVE_TASKS",
-                    "message": "批次存在进行中的生成任务，请等待任务结束或失败后再删除。",
-                },
-            )
-
-        has_billing_ledger = conn.execute(
-            """
-            SELECT 1
-            FROM wallet_transactions
-            JOIN generation_tasks ON generation_tasks.id = wallet_transactions.task_id
-            WHERE generation_tasks.batch_id = %s
-            LIMIT 1
-            """,
-            (batch_id,),
-        ).fetchone()
-        if has_billing_ledger:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "code": "BILLED_BATCH_IMMUTABLE",
-                    "message": "已产生钱包流水的批次必须保留，不能删除。",
-                },
-            )
-
-        result_assets = conn.execute(
-            """
-            SELECT assets.id, assets.storage_uri
-            FROM assets
-            JOIN generation_tasks ON generation_tasks.result_asset_id = assets.id
-            WHERE generation_tasks.batch_id = %s
-            """,
-            (batch_id,),
-        ).fetchall()
-        task_count = int(
-            conn.execute(
-                "SELECT COUNT(*) FROM generation_tasks WHERE batch_id = %s",
-                (batch_id,),
-            ).fetchone()[0]
-        )
-
-        # 未计费历史批次尽力清理云端产物；后端不可用不阻塞删除，失败数进审计。
-        storage_cleanup_failed_count = 0
-        for asset in result_assets:
-            try:
-                storage = storage_for_asset(conn, str(asset["storage_uri"]))
-                storage.delete_object(
-                    storage_key_from_uri(str(asset["storage_uri"])), actor_id=actor.id
-                )
-            except (HTTPException, StorageBackendUnavailable, OSError, ValueError):
-                storage_cleanup_failed_count += 1
-
-        # The inner transaction block commits the two deletes on the SQLite lane
-        # and is a no-op on PostgreSQL, where the fenced transaction owns the
-        # commit — exactly the BusinessConnection contract.
-        with conn:
-            # 结果资产行必须先于批次删除（任务级联删除后子查询会失效）。
-            conn.execute(
-                """
-                DELETE FROM assets
-                WHERE id IN (
-                    SELECT result_asset_id FROM generation_tasks
-                    WHERE batch_id = %s AND result_asset_id IS NOT NULL
-                )
-                """,
-                (batch_id,),
-            )
-            conn.execute("DELETE FROM generation_batches WHERE id = %s", (batch_id,))
-        write_audit(
+        require_not_auditor(
             conn,
             actor=actor,
-            action="generation_batch.delete",
+            action="generation_batch.hide",
             entity_type="generation_batch",
             entity_id=batch_id,
-            metadata={
-                "project_id": str(batch["project_id"]),
-                "deleted_task_count": task_count,
-                "deleted_asset_count": len(result_assets),
-                "storage_cleanup_failed_count": storage_cleanup_failed_count,
-            },
         )
+        require_project_access(
+            conn, actor=actor, project_id=str(batch["project_id"]), action="generation_batch.hide"
+        )
+        # List removal is an account preference, never cancellation or data erasure.
+        with conn:
+            inserted = conn.execute(
+                """
+                INSERT INTO customer_batch_visibility (user_id, batch_id)
+                VALUES (%s, %s)
+                ON CONFLICT (user_id, batch_id) DO NOTHING
+                """,
+                (actor.id, batch_id),
+            )
+            if inserted.rowcount == 1:
+                write_audit(
+                    conn,
+                    actor=actor,
+                    action="generation_batch.hide",
+                    entity_type="generation_batch",
+                    entity_id=batch_id,
+                    metadata={
+                        "project_id": str(batch["project_id"]),
+                        "hidden_for_user_id": actor.id,
+                    },
+                    commit=False,
+                )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

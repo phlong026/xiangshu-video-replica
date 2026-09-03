@@ -41,7 +41,6 @@ from app.first_frames import (
     bounded_source_frame_quality_inspector,
 )
 from app.generation import (
-    GeneratedVideoValidationUnavailable,
     GenerationTaskSupersededError,
     H3Provider,
     H3ProviderFailed,
@@ -53,9 +52,7 @@ from app.generation import (
     acquire_generation_task_lease,
     complete_generation_reconcile_operation,
     fail_generation_reconcile_operation,
-    final_generation_quality,
     finalize_generation_direct_result,
-    h3_audio_quality,
     h3_provider_for_task,
     mark_generation_task_archiving,
     mark_generation_task_running,
@@ -66,8 +63,6 @@ from app.generation import (
     perform_generation_reconcile_operation,
     prepare_generation_reconcile_operation,
     prepare_generation_submission,
-    release_generation_archive_retry,
-    release_generation_visual_validation_retry,
     reschedule_generation_poll,
     run_next_generation_task,
 )
@@ -561,7 +556,7 @@ def _run_pg_generation_step(
     """Run exactly one recoverable generation state transition.
 
     Every database mutation is fenced by its own short ``pg_transaction``.
-    Provider POST/query/download and object storage calls deliberately happen
+    Provider POST/query and input object storage calls deliberately happen
     between those transactions, so a slow vendor can never exhaust the API
     connection pool or make the desktop appear offline.
     """
@@ -578,19 +573,12 @@ def _run_pg_generation_step(
         and lease.get("archive_status") == "ARCHIVE_FAILED"
         and lease.get("provider_result_url")
     ):
-        try:
-            with pg_transaction() as raw_conn:
-                conn = BusinessConnection.postgres(raw_conn)
-                provider = provider_override or h3_provider_for_task(conn, str(lease["provider"]))
-                mark_generation_task_archiving(
-                    conn,
-                    lease=lease,
-                    result_url=str(lease["provider_result_url"]),
-                )
-        except H3ProviderSettingsUnavailable:
-            with pg_transaction() as raw_conn:
-                release_generation_archive_retry(BusinessConnection.postgres(raw_conn), lease=lease)
-            return
+        with pg_transaction() as raw_conn:
+            mark_generation_task_archiving(
+                BusinessConnection.postgres(raw_conn),
+                lease=lease,
+                result_url=str(lease["provider_result_url"]),
+            )
         status = "ARCHIVING"
     elif status == "SUBMITTING":
         try:
@@ -712,28 +700,12 @@ def _run_pg_generation_step(
                 lease=lease,
                 result_url=result.result_url,
             )
-        try:
-            quality_status, quality_issue_codes = final_generation_quality(
-                content=result.result_content,
-                first_frame_uri=str(lease["first_frame_uri"]),
-                first_frame_storage=first_frame_storage,
-                inspector=visual_quality_inspector,
-                audio_quality_status=result.audio_quality_status,
-                quality_issue_codes=result.quality_issue_codes,
-                frame_extractor=video_frame_extractor,
-            )
-        except GeneratedVideoValidationUnavailable:
-            with pg_transaction() as raw_conn:
-                release_generation_visual_validation_retry(
-                    BusinessConnection.postgres(raw_conn), lease=lease
-                )
-            return
         with pg_transaction() as raw_conn:
             finalize_generation_direct_result(
                 BusinessConnection.postgres(raw_conn),
                 lease=lease,
-                quality_status=quality_status,
-                quality_issue_codes=quality_issue_codes,
+                quality_status="NOT_REQUIRED",
+                quality_issue_codes=[],
             )
         return
 
@@ -788,50 +760,24 @@ def _run_pg_generation_step(
                 )
             return
         with pg_transaction() as raw_conn:
+            conn = BusinessConnection.postgres(raw_conn)
             mark_generation_task_archiving(
-                BusinessConnection.postgres(raw_conn),
+                conn,
                 lease=lease,
                 result_url=query.result_url,
+            )
+            finalize_generation_direct_result(
+                conn, lease=lease, quality_status="NOT_REQUIRED", quality_issue_codes=[]
             )
         return
 
     if status == "ARCHIVING":
-        try:
-            with pg_transaction() as raw_conn:
-                conn = BusinessConnection.postgres(raw_conn)
-                provider = provider_override or h3_provider_for_task(conn, str(lease["provider"]))
-        except H3ProviderSettingsUnavailable:
-            with pg_transaction() as raw_conn:
-                release_generation_archive_retry(BusinessConnection.postgres(raw_conn), lease=lease)
-            return
-        try:
-            content = provider.download_result(str(lease["provider_result_url"]))
-            audio_quality_status, quality_issue_codes = h3_audio_quality(content)
-            quality_status, quality_issue_codes = final_generation_quality(
-                content=content,
-                first_frame_uri=str(lease["first_frame_uri"]),
-                first_frame_storage=first_frame_storage,
-                inspector=visual_quality_inspector,
-                audio_quality_status=audio_quality_status,
-                quality_issue_codes=quality_issue_codes,
-                frame_extractor=video_frame_extractor,
-            )
-        except GeneratedVideoValidationUnavailable:
-            with pg_transaction() as raw_conn:
-                release_generation_visual_validation_retry(
-                    BusinessConnection.postgres(raw_conn), lease=lease
-                )
-            return
-        except (H3ProviderFailed, ValueError):
-            with pg_transaction() as raw_conn:
-                release_generation_archive_retry(BusinessConnection.postgres(raw_conn), lease=lease)
-            return
         with pg_transaction() as raw_conn:
             finalize_generation_direct_result(
                 BusinessConnection.postgres(raw_conn),
                 lease=lease,
-                quality_status=quality_status,
-                quality_issue_codes=quality_issue_codes,
+                quality_status="NOT_REQUIRED",
+                quality_issue_codes=[],
             )
 
 
@@ -855,7 +801,7 @@ def run_pg_worker_once(
 
     PostgreSQL generation is a durable multi-step state machine.  Claim and
     state writes use short fenced transactions; paid submit, one status poll,
-    result download and quality verification each run with no database transaction open.
+    provider calls run with no database transaction open; generated media is not processed.
     Existing RUNNING/ARCHIVING work is always resumed before a new task, so a
     worker crash cannot turn a known provider task into a second paid POST.
     """
@@ -1179,14 +1125,12 @@ def run_sqlite_worker_round(
             # 云端模式下所有需要持久保留的生成资产都进入 COS；
             # 未配置 COS 的桌面开发环境仍由 get_media_storage 回退本地盘。
             asset_storage = get_media_storage(conn)
-            quality_inspector = get_first_frame_quality_inspector(conn)
             return run_worker_once(
                 conn,
                 worker_id=worker_id,
                 storage=asset_storage,
                 generation_storage=asset_storage,
                 first_frame_storage=asset_storage,
-                first_frame_quality_inspector=quality_inspector,
                 max_tasks=max_tasks,
             )
     except HTTPException as exc:
@@ -1229,13 +1173,11 @@ def run_pg_worker_round(*, worker_id: str, max_tasks: int | None = None) -> int:
         with pg_transaction() as raw_conn:
             conn = BusinessConnection.postgres(raw_conn)
             asset_storage = get_media_storage(conn)
-            quality_inspector = get_first_frame_quality_inspector(conn)
         return run_pg_worker_once(
             worker_id=worker_id,
             storage=asset_storage,
             generation_storage=asset_storage,
             first_frame_storage=asset_storage,
-            first_frame_quality_inspector=quality_inspector,
             max_tasks=max_tasks,
         )
     except HTTPException as exc:

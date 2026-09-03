@@ -17,7 +17,8 @@ from fastapi import HTTPException
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
-from app.auth import get_database
+from app.auth import CurrentUser, get_database
+from app.control_routes import list_generation_records
 from app.db import connect_database, initialize_database
 from app.db_portable import BusinessConnection
 from app.first_frames import GeneratedVideoInspection, ImageInput
@@ -44,7 +45,7 @@ from app.generation import (
     run_next_generation_task,
 )
 from app.generation_routes import get_h3_provider
-from app.generation_worker import run_worker_once
+from app.generation_worker import run_sqlite_worker_round, run_worker_once
 from app.main import app
 from app.settings import SETTINGS_KEY_ENV, SettingsRepository
 from app.storage import FakeStorageAdapter, StorageBackendUnavailable, StoragePermissionError
@@ -366,7 +367,7 @@ def seed_data(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def test_metaso_h3_provider_creates_polls_filters_and_downloads_result(
+def test_metaso_h3_provider_creates_polls_and_returns_url_without_downloading(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("app.generation.socket.getaddrinfo", _fake_public_dns)
@@ -420,9 +421,9 @@ def test_metaso_h3_provider_creates_polls_filters_and_downloads_result(
 
     assert result.provider_task_id == provider_task_id
     assert result.result_url == result_url
-    assert result.result_content == b"generated-video-bytes"
-    assert result.audio_quality_status == "AUDIO_QUALITY_FAILED"
-    assert result.quality_issue_codes == ["AUDIO_QUALITY_FAILED"]
+    assert result.result_content == b""
+    assert result.audio_quality_status == "NOT_REQUIRED"
+    assert result.quality_issue_codes == []
     assert waits == [0.25]
     create_method, create_url, create_headers, create_body = transport.requests[0]
     assert create_method == "POST"
@@ -447,11 +448,8 @@ def test_metaso_h3_provider_creates_polls_filters_and_downloads_result(
     assert query_url.endswith("/api/minimax/v2/query/video_generation?task_id=task-real-1")
     assert query_headers["Authorization"] == "Bearer metaso-test-key"
     assert query_body is None
-    download_method, download_url, download_headers, download_body = transport.requests[-1]
-    assert download_method == "GET"
-    assert download_url == result_url
-    assert "Authorization" not in download_headers
-    assert download_body is None
+    assert len(transport.requests) == 3
+    assert transport.responses == [b"generated-video-bytes"]
 
 
 def test_metaso_h3_provider_submit_returns_task_id_without_polling() -> None:
@@ -1001,7 +999,14 @@ def test_task_paid_regeneration_supersedes_audio_failure_once_and_keeps_history(
             storage=FakeStorageAdapter(provider="fake", bucket="generation-results"),
         )
     assert result is not None
-    assert result.quality_status == "AUDIO_QUALITY_FAILED"
+    assert result.quality_status == "NOT_REQUIRED"
+    # Legacy QC-failed results retain their explicit paid-regeneration API.
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        conn.execute(
+            "UPDATE generation_tasks SET quality_status = 'AUDIO_QUALITY_FAILED', "
+            "quality_issue_codes = '[\"AUDIO_QUALITY_FAILED\"]' WHERE id = %s",
+            (source_task_id,),
+        )
 
     request = paid_regeneration_payload(
         "task-regenerate-key",
@@ -1077,7 +1082,7 @@ def test_task_paid_regeneration_supersedes_audio_failure_once_and_keeps_history(
         headers=auth_headers("employee_1"),
     )
     assert historical.status_code == 200
-    assert historical.json()["status"] == "COMPLETED_WITH_FAILURES"
+    assert historical.json()["status"] == "SUCCEEDED"
     assert historical.json()["progress"]["counts"]["needs_attention"] == 0
     assert historical.json()["progress"]["historical_counts"] == {
         "archive_failed": 0,
@@ -1103,15 +1108,21 @@ def test_task_paid_regeneration_supersedes_audio_failure_once_and_keeps_history(
         )
     assert completed is not None
     assert completed.id == replacement_task_id
-    assert completed.quality_status == "AUDIO_OK"
+    assert completed.quality_status == "NOT_REQUIRED"
     assert no_duplicate is None
     assert provider.create_calls == 1
 
 
-def test_visual_quality_failure_is_archived_and_allows_explicit_paid_regeneration(
+def test_generated_video_does_not_run_visual_quality_or_require_regeneration(
     db_path: Path,
     client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    def reject_processing(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("generated videos must not run media post-processing")
+
+    monkeypatch.setattr("app.generation.final_generation_quality", reject_processing)
+    monkeypatch.setattr("app.generation.h3_audio_quality", reject_processing)
     prompt_id = create_locked_prompt(client)
     created = client.post(
         "/api/projects/project_owned/generation-batches",
@@ -1149,17 +1160,31 @@ def test_visual_quality_failure_is_archived_and_allows_explicit_paid_regeneratio
     assert result is not None
     assert result.status == "SUCCEEDED"
     assert result.archive_status == "DIRECT"
-    assert result.quality_status == "VISUAL_QUALITY_FAILED"
-    assert result.quality_issue_codes == ["VIDEO_IDENTITY_DRIFT", "VIDEO_OUTFIT_DRIFT"]
+    assert result.quality_status == "NOT_REQUIRED"
+    assert result.quality_issue_codes == []
+    assert result.available_actions == ["REGENERATE"]
+    detail = client.get(
+        f"/api/generation-batches/{created.json()['id']}", headers=auth_headers("employee_1")
+    ).json()
+    assert detail["tasks"][0]["available_actions"] == ["REGENERATE"]
+    assert detail["progress"]["counts"]["needs_attention"] == 0
     regenerated = client.post(
         f"/api/generation-tasks/{task_id}/regenerate",
         headers=auth_headers("employee_1"),
         json=paid_regeneration_payload("visual-failure-regeneration"),
     )
     assert regenerated.status_code == 200
+    assert regenerated.json()["source_task_id"] == task_id
+    replay = client.post(
+        f"/api/generation-tasks/{task_id}/regenerate",
+        headers=auth_headers("employee_1"),
+        json=paid_regeneration_payload("visual-failure-regeneration"),
+    )
+    assert replay.status_code == 200
+    assert replay.json()["id"] == regenerated.json()["id"]
 
 
-def test_visual_validation_unavailable_keeps_paid_task_for_reconciliation(
+def test_visual_validation_unavailable_does_not_block_video_or_billing(
     db_path: Path,
     client: TestClient,
 ) -> None:
@@ -1210,13 +1235,50 @@ def test_visual_validation_unavailable_keeps_paid_task_for_reconciliation(
         ).fetchone()
 
     assert first is not None
-    assert first.status == "SUBMISSION_UNCERTAIN"
-    assert first.error_code == "VISUAL_VALIDATION_UNAVAILABLE"
-    assert first.available_actions == ["RECONCILE"]
+    assert first.status == "SUCCEEDED"
+    assert first.quality_status == "NOT_REQUIRED"
+    assert first.error_code is None
+    assert first.available_actions == ["REGENERATE"]
     assert second is None
     assert provider.create_calls == 1
     assert wallet is not None
-    assert int(wallet["reserved_credits"]) == 1
+    assert int(wallet["reserved_credits"]) == 0
+
+
+def test_video_worker_round_does_not_load_image_quality_credentials(
+    db_path: Path, client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prompt_id = create_locked_prompt(client)
+    created = client.post(
+        "/api/projects/project_owned/generation-batches",
+        headers=auth_headers("employee_1"),
+        json={
+            "quantity": 1,
+            "prompt_version_id": prompt_id,
+            "first_frame_asset_id": "first_frame_owned",
+            "output_duration_seconds": 10,
+            "resolution": "768P",
+            "idempotency_key": "video-without-image-qc-settings",
+        },
+    )
+    assert created.status_code == 200
+
+    def reject_quality_settings(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("video delivery must not require image QC credentials")
+
+    monkeypatch.setattr(
+        "app.generation_worker.get_first_frame_quality_inspector", reject_quality_settings
+    )
+    monkeypatch.setattr(
+        "app.generation_worker.get_media_storage",
+        lambda _: FakeStorageAdapter(provider="fake", bucket="generation-results"),
+    )
+    assert run_sqlite_worker_round(db_path=db_path, worker_id="no-qc-settings", max_tasks=1) == 1
+    completed = client.get(
+        f"/api/generation-batches/{created.json()['id']}",
+        headers=auth_headers("employee_1"),
+    )
+    assert completed.json()["tasks"][0]["quality_status"] == "NOT_REQUIRED"
 
 
 def test_task_paid_regeneration_accepts_a_failed_submitted_provider_call(
@@ -1494,7 +1556,7 @@ def test_retry_archive_failed_is_idempotent_and_never_creates_provider_task(
     assert operation_count == 1
     assert audit_count == 1
     assert provider.create_calls == 0
-    assert provider.download_calls == 1
+    assert provider.download_calls == 0
     assert result is not None
     assert result.archive_status == "DIRECT"
 
@@ -3328,17 +3390,17 @@ def test_generation_batch_list_filters_and_enforces_project_scope(
     assert forbidden_project.content == missing_project.content
     assert [item["id"] for item in attention.json()["items"]] == [
         "batch-owned-uncertain",
-        "batch-owned-quality-status-only",
     ]
     quality_status_only = next(
-        item
-        for item in attention.json()["items"]
-        if item["id"] == "batch-owned-quality-status-only"
+        item for item in normal.json()["items"] if item["id"] == "batch-owned-quality-status-only"
     )
-    assert quality_status_only["needs_attention_count"] == 1
-    assert quality_status_only["tasks"][0]["stage"] == "QUALITY_FAILED"
+    assert quality_status_only["needs_attention_count"] == 0
+    assert quality_status_only["status"] == "SUCCEEDED"
+    assert quality_status_only["tasks"][0]["stage"] == "COMPLETED"
+    assert quality_status_only["tasks"][0]["available_actions"] == ["REGENERATE"]
     assert [item["id"] for item in normal.json()["items"]] == [
         "batch-owned-superseded-quality",
+        "batch-owned-quality-status-only",
         "batch-owned-normal",
     ]
     superseded = normal.json()["items"][0]
@@ -3483,10 +3545,8 @@ def test_batch_progress_counts_archive_failed_and_audio_quality(
     assert progress["terminal_count"] == 2
     assert progress["progress_percent"] == 100
     assert progress["counts"]["succeeded"] == 2
-    assert progress["counts"]["needs_attention"] == 2
-    assert {task["quality_status"] for task in after_worker.json()["tasks"]} == {
-        "AUDIO_QUALITY_FAILED"
-    }
+    assert progress["counts"]["needs_attention"] == 0
+    assert {task["quality_status"] for task in after_worker.json()["tasks"]} == {"NOT_REQUIRED"}
 
 
 def test_generation_requires_owner_and_configured_real_provider(client: TestClient) -> None:
@@ -4278,7 +4338,7 @@ def test_worker_delivers_result_when_storage_is_unavailable(
         assert row["result_asset_id"] is None
 
 
-def test_archive_retry_download_failure_keeps_task_retryable(
+def test_archive_retry_finishes_without_downloading_media(
     db_path: Path, client: TestClient
 ) -> None:
     prompt_id = create_locked_prompt(client)
@@ -4332,12 +4392,12 @@ def test_archive_retry_download_failure_keeps_task_retryable(
         ).fetchone()
 
     assert row["status"] == "SUCCEEDED"
-    assert row["archive_status"] == "ARCHIVE_FAILED"
+    assert row["archive_status"] == "DIRECT"
     assert row["provider_result_url"] is not None
-    assert row["next_poll_at"] is not None
+    assert row["next_poll_at"] is None
 
 
-def test_archive_retry_with_missing_provider_settings_backs_off_not_fails(
+def test_archive_retry_does_not_require_provider_credentials(
     db_path: Path, client: TestClient
 ) -> None:
     prompt_id = create_locked_prompt(client)
@@ -4386,9 +4446,9 @@ def test_archive_retry_with_missing_provider_settings_backs_off_not_fails(
         ).fetchone()
 
     assert row["status"] == "SUCCEEDED"
-    assert row["archive_status"] == "ARCHIVE_FAILED"
+    assert row["archive_status"] == "DIRECT"
     assert row["provider_result_url"] is not None
-    assert row["next_poll_at"] is not None
+    assert row["next_poll_at"] is None
 
 
 def test_expired_archive_retry_lease_resets_to_retryable_not_uncertain(
@@ -4442,7 +4502,7 @@ class ReconcileSucceededProvider(MetasoH3Provider):
         }
 
     def download_result(self, url: str) -> bytes:
-        return b"reconciled-mp4-bytes"
+        raise AssertionError("reconciliation must return the URL without downloading media")
 
 
 class ReconcileRunningProvider(MetasoH3Provider):
@@ -4836,8 +4896,8 @@ def test_reconcile_lost_reservation_cannot_finalize_a_direct_result(
 ) -> None:
     replaced_reservation_ids: list[str] = []
 
-    class TakeoverDuringDownloadProvider(ReconcileSucceededProvider):
-        def download_result(self, url: str) -> bytes:
+    class TakeoverDuringQueryProvider(ReconcileSucceededProvider):
+        def _query_task(self, provider_task_id: str) -> dict[str, Any]:
             with connect_database(db_path) as takeover_conn:
                 replaced = takeover_conn.execute(
                     """
@@ -4877,7 +4937,7 @@ def test_reconcile_lost_reservation_cannot_finalize_a_direct_result(
                     ),
                 )
                 takeover_conn.commit()
-            return super().download_result(url)
+            return super()._query_task(provider_task_id)
 
     monkeypatch.setattr("app.generation.socket.getaddrinfo", _fake_public_dns)
     prompt_id = create_locked_prompt(client)
@@ -4919,7 +4979,7 @@ def test_reconcile_lost_reservation_cannot_finalize_a_direct_result(
                 conn,
                 worker_id="reconcile-takeover-worker",
                 storage=FakeStorageAdapter(provider="cos", bucket="generation-results"),
-                reconcile_provider=TakeoverDuringDownloadProvider(api_key="test-key"),
+                reconcile_provider=TakeoverDuringQueryProvider(api_key="test-key"),
                 max_tasks=1,
             )
             == 1
@@ -5198,7 +5258,9 @@ def test_metaso_batch_requires_cloud_storage(
     assert response.json()["detail"]["code"] == "METASO_REQUIRES_CLOUD_STORAGE"
 
 
-def test_archive_retry_exhausts_to_terminal_failure(db_path: Path, client: TestClient) -> None:
+def test_direct_delivery_does_not_exhaust_retries_on_download_failure(
+    db_path: Path, client: TestClient
+) -> None:
     prompt_id = create_locked_prompt(client)
     client.post(
         "/api/projects/project_owned/generation-batches",
@@ -5249,9 +5311,10 @@ def test_archive_retry_exhausts_to_terminal_failure(db_path: Path, client: TestC
             "SELECT status, archive_status, provider_result_url, error_code FROM generation_tasks"
         ).fetchone()
 
-    assert row["status"] == "FAILED"
-    assert row["error_code"] == "ARCHIVE_RETRY_EXHAUSTED"
-    assert row["provider_result_url"] is None
+    assert row["status"] == "SUCCEEDED"
+    assert row["archive_status"] == "DIRECT"
+    assert row["error_code"] is None
+    assert row["provider_result_url"] is not None
 
 
 def test_reconcile_route_guards_and_rejects_non_uncertain_task(
@@ -5396,7 +5459,7 @@ def test_generation_batch_rename_by_creator_or_admin_only(
     ]
 
 
-def test_generation_batch_delete_removes_tasks_and_result_assets(
+def test_generation_batch_delete_hides_record_and_preserves_tasks_and_assets(
     client: TestClient,
     db_path: Path,
 ) -> None:
@@ -5424,23 +5487,20 @@ def test_generation_batch_delete_removes_tasks_and_result_assets(
         ).fetchone()
         asset = conn.execute("SELECT id FROM assets WHERE id = ?", ("asset-del",)).fetchone()
         audit = conn.execute(
-            "SELECT metadata_json FROM audit_logs WHERE action = 'generation_batch.delete'"
+            "SELECT metadata_json FROM audit_logs WHERE action = 'generation_batch.hide'"
         ).fetchone()
-    assert batch is None
-    assert task is None
-    assert asset is None
+    assert batch is not None
+    assert task is not None
+    assert asset is not None
     assert audit is not None
     metadata = json.loads(str(audit["metadata_json"]))
     assert metadata == {
         "project_id": "project_owned",
-        "deleted_task_count": 1,
-        "deleted_asset_count": 1,
-        # fake:// 存储后端不可用，尽力清理失败但删除不被阻塞。
-        "storage_cleanup_failed_count": 1,
+        "hidden_for_user_id": "employee_1",
     }
 
 
-def test_generation_batch_delete_blocked_while_tasks_active(
+def test_generation_batch_delete_hides_active_tasks_without_cancelling(
     client: TestClient,
     db_path: Path,
 ) -> None:
@@ -5452,8 +5512,14 @@ def test_generation_batch_delete_blocked_while_tasks_active(
         "/api/generation-batches/batch-active", headers=auth_headers("employee_1")
     )
 
-    assert response.status_code == 409
-    assert response.json()["detail"]["code"] == "BATCH_DELETE_HAS_ACTIVE_TASKS"
+    assert response.status_code == 204
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        assert (
+            conn.execute(
+                "SELECT status FROM generation_tasks WHERE batch_id = %s", ("batch-active",)
+            ).fetchone()[0]
+            == "PENDING"
+        )
 
 
 def test_generation_batch_delete_hides_foreign_batch_from_non_creator_and_auditor(
@@ -5513,15 +5579,29 @@ def test_generation_batch_delete_preserves_append_only_billing_ledger(
             storage=FakeStorageAdapter(provider="cos", bucket="generation-results"),
             first_frame_storage=FakeStorageAdapter(provider="fake", bucket="generation-results"),
         )
+        preserved_tables = (
+            "generation_batches",
+            "generation_tasks",
+            "assets",
+            "wallets",
+            "wallet_transactions",
+        )
+        before = {
+            table: [dict(row) for row in conn.execute(f"SELECT * FROM {table}").fetchall()]
+            for table in preserved_tables
+        }
 
     response = client.delete(
         f"/api/generation-batches/{batch_id}",
         headers=auth_headers("employee_1"),
     )
 
-    assert response.status_code == 409
-    assert response.json()["detail"]["code"] == "BILLED_BATCH_IMMUTABLE"
+    assert response.status_code == 204
     with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        for table in preserved_tables:
+            assert [
+                dict(row) for row in conn.execute(f"SELECT * FROM {table}").fetchall()
+            ] == before[table]
         assert (
             conn.execute(
                 "SELECT COUNT(*) FROM generation_batches WHERE id = ?", (batch_id,)
@@ -5539,6 +5619,58 @@ def test_generation_batch_delete_preserves_append_only_billing_ledger(
             ).fetchone()[0]
             == 2
         )
+
+
+def test_hidden_batches_are_filtered_before_pagination_and_only_for_acting_account(
+    client: TestClient, db_path: Path
+) -> None:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        for index in range(1, 5):
+            insert_generation_history(conn, batch_id=f"batch-visible-0{index}")
+    for batch_id, actor_id in (
+        ("batch-visible-04", "employee_1"),
+        ("batch-visible-04", "employee_1"),
+        ("batch-visible-03", "employee_1"),
+        ("batch-visible-02", "admin_1"),
+    ):
+        response = client.delete(
+            f"/api/generation-batches/{batch_id}", headers=auth_headers(actor_id)
+        )
+        assert response.status_code == 204
+
+    page = client.get("/api/generation-batches?limit=1", headers=auth_headers("employee_1")).json()
+    assert [item["id"] for item in page["items"]] == ["batch-visible-02"]
+    assert page["next_cursor"] is not None
+    last = client.get(
+        "/api/generation-batches",
+        params={"limit": 1, "cursor": page["next_cursor"]},
+        headers=auth_headers("employee_1"),
+    ).json()
+    assert [item["id"] for item in last["items"]] == ["batch-visible-01"]
+    assert last["next_cursor"] is None
+    admin = client.get("/api/generation-batches", headers=auth_headers("admin_1")).json()
+    assert {item["id"] for item in admin["items"]} == {
+        "batch-visible-04",
+        "batch-visible-03",
+        "batch-visible-01",
+    }
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM customer_batch_visibility").fetchone()[0] == 3
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM audit_logs WHERE action = 'generation_batch.hide'"
+            ).fetchone()[0]
+            == 3
+        )
+        records = list_generation_records(
+            conn,
+            CurrentUser(id="admin_1", username="admin", display_name="Admin", role="admin"),
+            limit=100,
+            offset=0,
+        )
+        assert {record.record_id for record in records.items} == {
+            f"batch-visible-0{index}-task" for index in range(1, 5)
+        }
 
 
 def test_generation_rejects_metaso_without_cos_settings(

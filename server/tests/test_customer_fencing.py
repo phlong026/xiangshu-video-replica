@@ -1040,6 +1040,95 @@ def _snapshot_for(customer: dict) -> object:
     )
 
 
+@pytest.mark.parametrize("replace_session", [False, True])
+def test_batch_hide_preserves_active_task_and_honors_session_fence(
+    client: TestClient,
+    replace_session: bool,
+) -> None:
+    from fastapi import HTTPException
+
+    from app.customer_fence import BusinessDb
+    from app.generation_routes import delete_generation_batch_record
+
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    snapshot = _snapshot_for(customer)
+    with psycopg.connect(_fencing_dsn(), autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO projects (id, owner_user_id, name) VALUES ('p-hide', %s, 'Project')",
+            (customer["user_id"],),
+        )
+        conn.execute(
+            "INSERT INTO generation_batches (id, project_id, created_by_user_id, "
+            "idempotency_key, request_hash, request_snapshot_json) "
+            "VALUES ('b-hide', 'p-hide', %s, 'key', 'hash', '{}')",
+            (customer["user_id"],),
+        )
+        conn.execute(
+            "INSERT INTO generation_tasks (id, batch_id, provider, model, status) "
+            "VALUES ('t-hide', 'b-hide', 'apilio', 'h3', 'RUNNING')"
+        )
+        conn.execute(
+            "UPDATE wallets SET available_credits = 9, reserved_credits = 1 WHERE user_id = %s",
+            (customer["user_id"],),
+        )
+        conn.execute(
+            "INSERT INTO wallet_transactions (id, user_id, type, available_delta, "
+            "reserved_delta, task_id, billing_round, idempotency_key) "
+            "VALUES ('tx-hide', %s, 'RESERVE', -1, 1, 't-hide', 1, 'reserve:t-hide:1')",
+            (customer["user_id"],),
+        )
+        retained_tables = (
+            "generation_batches",
+            "generation_tasks",
+            "wallets",
+            "wallet_transactions",
+        )
+        before = {
+            table: conn.execute(f"SELECT * FROM {table}").fetchall() for table in retained_tables
+        }
+        if replace_session:
+            conn.execute("UPDATE customer_session_state SET session_epoch = session_epoch + 1")
+    db = BusinessDb(snapshot=snapshot, authorization=None, dev_user_id=None)
+    if replace_session:
+        with pytest.raises(HTTPException) as error:
+            delete_generation_batch_record("b-hide", db)
+        assert error.value.status_code == 401
+        assert error.value.detail["code"] == "SESSION_REPLACED"
+    else:
+        for _ in range(2):
+            response = client.delete(
+                "/api/generation-batches/b-hide", headers=_bearer(customer["session_token"])
+            )
+            assert response.status_code == 204, response.text
+        listed = client.get("/api/generation-batches", headers=_bearer(customer["session_token"]))
+        assert listed.status_code == 200, listed.text
+        assert listed.json()["items"] == []
+    with psycopg.connect(_fencing_dsn()) as conn:
+        assert {
+            table: conn.execute(f"SELECT * FROM {table}").fetchall() for table in retained_tables
+        } == before
+        assert (
+            conn.execute("SELECT status FROM generation_tasks WHERE id = 't-hide'").fetchone()[0]
+            == "RUNNING"
+        )
+        assert (
+            conn.execute("SELECT count(*) FROM generation_batches WHERE id = 'b-hide'").fetchone()[
+                0
+            ]
+            == 1
+        )
+        expected = 0 if replace_session else 1
+        assert (
+            conn.execute("SELECT count(*) FROM customer_batch_visibility").fetchone()[0] == expected
+        )
+        assert (
+            conn.execute(
+                "SELECT count(*) FROM audit_logs WHERE action = 'generation_batch.hide'"
+            ).fetchone()[0]
+            == expected
+        )
+
+
 def _count_projects() -> int:
     with psycopg.connect(_fencing_dsn(), autocommit=True) as conn:
         row = conn.execute("SELECT count(*) FROM projects").fetchone()

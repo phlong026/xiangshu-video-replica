@@ -270,7 +270,7 @@ class H3CreateResult(BaseModel):
     status: Literal["SUCCEEDED"]
     result_url: str
     result_content: bytes
-    audio_quality_status: Literal["AUDIO_OK", "AUDIO_QUALITY_FAILED"]
+    audio_quality_status: Literal["AUDIO_OK", "AUDIO_QUALITY_FAILED", "NOT_REQUIRED"]
     quality_issue_codes: list[str]
 
 
@@ -530,18 +530,13 @@ class MetasoH3Provider(H3Provider):
                         provider_task_id=provider_task_id,
                         terminal=True,
                     )
-                try:
-                    content = self.download_result(result.result_url)
-                except H3ProviderFailed as exc:
-                    raise H3ProviderFailed(str(exc), provider_task_id=provider_task_id) from exc
-                audio_quality_status, quality_issue_codes = self.audio_quality_checker(content)
                 return H3CreateResult(
                     provider_task_id=provider_task_id,
                     status="SUCCEEDED",
                     result_url=result.result_url,
-                    result_content=content,
-                    audio_quality_status=audio_quality_status,
-                    quality_issue_codes=quality_issue_codes,
+                    result_content=b"",
+                    audio_quality_status="NOT_REQUIRED",
+                    quality_issue_codes=[],
                 )
             if result.status in {"FAILED", "CANCELLED"}:
                 raise H3ProviderFailed(
@@ -2311,6 +2306,9 @@ def require_task_paid_regeneration_state(row: sqlite3.Row) -> None:
             "MUST_RECONCILE_SUBMISSION",
             "An uncertain submission must be reconciled before any paid regeneration.",
         )
+    if str(row["status"]) == "SUCCEEDED" and str(row["archive_status"]) in {"DIRECT", "ARCHIVED"}:
+        # A user's explicit paid retry is independent of optional historical QC.
+        return
     quality_issue_codes = parse_json_list(row["quality_issue_codes"])
     if generation_quality_failed(str(row["quality_status"]), quality_issue_codes):
         return
@@ -2323,7 +2321,7 @@ def require_task_paid_regeneration_state(row: sqlite3.Row) -> None:
     raise generation_error(
         409,
         "PAID_REGENERATION_NOT_ALLOWED",
-        "Only quality failures or failed submitted tasks can be regenerated with a new paid call.",
+        "Only completed results or failed submitted tasks can be regenerated with a new paid call.",
     )
 
 
@@ -2474,11 +2472,9 @@ def run_next_generation_task(
     archive_retry = bool(
         lease.get("archive_status") == "ARCHIVE_FAILED" and lease.get("provider_result_url")
     )
-    if (
-        str(lease["provider"]) == "metaso"
-        and not archive_retry
-        and source_storage.provider != "cos"
-    ):
+    if archive_retry:
+        return _retry_archive(conn, task_id=task_id, batch_id=batch_id)
+    if str(lease["provider"]) == "metaso" and source_storage.provider != "cos":
         mark_task_provider_settings_unavailable(
             conn,
             task_id=task_id,
@@ -2489,11 +2485,6 @@ def run_next_generation_task(
         try:
             provider = h3_provider_for_task(conn, str(lease["provider"]))
         except H3ProviderSettingsUnavailable:
-            if lease.get("archive_status") == "ARCHIVE_FAILED" and lease.get("provider_result_url"):
-                # Archive retry never starts a paid call; if the provider settings
-                # vanished, back off instead of failing the paid result forever.
-                _release_archive_retry(conn, task_id=task_id, batch_id=batch_id)
-                return get_task_result(conn, task_id)
             mark_task_provider_settings_unavailable(
                 conn,
                 task_id=task_id,
@@ -2513,17 +2504,6 @@ def run_next_generation_task(
             )
 
         provider.task_created_observer = _record_created_provider_task
-    if lease.get("archive_status") == "ARCHIVE_FAILED" and lease.get("provider_result_url"):
-        return _retry_archive(
-            conn,
-            task_id=task_id,
-            batch_id=batch_id,
-            storage=storage,
-            provider=provider,
-            first_frame_storage=source_storage,
-            visual_quality_inspector=visual_quality_inspector,
-            video_frame_extractor=video_frame_extractor,
-        )
     try:
         first_frame = storage_object_ref_from_uri(str(lease["first_frame_uri"]))
         require_storage_match(source_storage, first_frame)
@@ -2568,8 +2548,7 @@ def run_next_generation_task(
         )
         return get_task_result(conn, task_id)
 
-    # Persist the provider URL before quality work so a page refresh can start
-    # playback immediately instead of waiting for the remaining checks.
+    # Keep a durable URL checkpoint; recovery must never repeat the paid call.
     with conn:
         mark_generation_task_running(
             conn,
@@ -2580,32 +2559,12 @@ def run_next_generation_task(
         )
         mark_generation_task_archiving(conn, lease=lease, result_url=provider_result.result_url)
 
-    try:
-        quality_status, quality_issue_codes = final_generation_quality(
-            content=provider_result.result_content,
-            first_frame_uri=str(lease["first_frame_uri"]),
-            first_frame_storage=source_storage,
-            inspector=visual_quality_inspector,
-            audio_quality_status=provider_result.audio_quality_status,
-            quality_issue_codes=provider_result.quality_issue_codes,
-            frame_extractor=video_frame_extractor,
-        )
-    except GeneratedVideoValidationUnavailable:
-        mark_task_submission_uncertain(
-            conn,
-            task_id=task_id,
-            message="Generated video is awaiting visual validation.",
-            provider_task_id=provider_result.provider_task_id,
-            error_code="VISUAL_VALIDATION_UNAVAILABLE",
-        )
-        return get_task_result(conn, task_id)
-
     with conn:
         return finalize_generation_direct_result(
             conn,
             lease=lease,
-            quality_status=quality_status,
-            quality_issue_codes=quality_issue_codes,
+            quality_status="NOT_REQUIRED",
+            quality_issue_codes=[],
         )
 
 
@@ -2614,26 +2573,12 @@ def _retry_archive(
     *,
     task_id: str,
     batch_id: str,
-    storage: StorageAdapter,
-    provider: H3Provider,
-    first_frame_storage: StorageAdapter,
-    visual_quality_inspector: FirstFrameQualityInspector | None = None,
-    video_frame_extractor: Callable[[bytes], list[ImageInput]] | None = None,
 ) -> TaskResult:
-    """Re-check a paid H3 result whose earlier delivery attempt failed.
-
-    The result stays at the provider.  Downloading is only for the existing
-    quality checks; it must never turn into a second storage upload.
-    """
+    """Finish a saved paid result without downloading or processing its media."""
     row = conn.execute(
         """
-        SELECT
-            generation_tasks.provider_result_url,
-            generation_tasks.prompt_snapshot_json,
-            generation_batches.project_id,
-            generation_batches.created_by_user_id
+        SELECT generation_tasks.provider_result_url
         FROM generation_tasks
-        JOIN generation_batches ON generation_batches.id = generation_tasks.batch_id
         WHERE generation_tasks.id = %s
         """,
         (task_id,),
@@ -2641,36 +2586,6 @@ def _retry_archive(
     if row is None or not row["provider_result_url"]:
         return get_task_result(conn, task_id)
     result_url = str(row["provider_result_url"])
-    prompt_snapshot = json.loads(str(row["prompt_snapshot_json"]))
-    try:
-        content = provider.download_result(result_url)
-    except Exception as exc:
-        logger.warning(
-            "direct result retry download failed for task %s: %s", task_id, type(exc).__name__
-        )
-        _release_archive_retry(conn, task_id=task_id, batch_id=batch_id)
-        return get_task_result(conn, task_id)
-    try:
-        audio_quality_status, quality_issue_codes = h3_audio_quality(content)
-        quality_status, quality_issue_codes = final_generation_quality(
-            content=content,
-            first_frame_uri=str(prompt_snapshot["first_frame_uri"]),
-            first_frame_storage=first_frame_storage,
-            inspector=visual_quality_inspector,
-            audio_quality_status=audio_quality_status,
-            quality_issue_codes=quality_issue_codes,
-            frame_extractor=video_frame_extractor,
-        )
-    except GeneratedVideoValidationUnavailable:
-        _release_archive_retry(
-            conn,
-            task_id=task_id,
-            batch_id=batch_id,
-            quality_status="VISUAL_VALIDATION_UNAVAILABLE",
-            error_code="VISUAL_VALIDATION_UNAVAILABLE",
-            error_message="Generated video is awaiting visual validation.",
-        )
-        return get_task_result(conn, task_id)
     try:
         with conn:
             mark_generation_task_archiving(
@@ -2679,8 +2594,8 @@ def _retry_archive(
             return finalize_generation_direct_result(
                 conn,
                 lease={"id": task_id, "batch_id": batch_id},
-                quality_status=quality_status,
-                quality_issue_codes=quality_issue_codes,
+                quality_status="NOT_REQUIRED",
+                quality_issue_codes=[],
             )
     except Exception as exc:
         logger.warning(
@@ -3514,36 +3429,11 @@ def perform_generation_reconcile_operation(
             "PROVIDER_RESULT_URL_MISSING",
             "Provider reports success without a result URL.",
         )
-    try:
-        content = work.provider.download_result(query.result_url)
-    except Exception as exc:
-        raise generation_error(
-            503,
-            "RESULT_DOWNLOAD_FAILED",
-            "Result download failed; retry reconciliation.",
-        ) from exc
-    audio_quality_status, quality_issue_codes = h3_audio_quality(content)
-    try:
-        quality_status, quality_issue_codes = final_generation_quality(
-            content=content,
-            first_frame_uri=work.first_frame_uri,
-            first_frame_storage=first_frame_storage or storage,
-            inspector=visual_quality_inspector,
-            audio_quality_status=audio_quality_status,
-            quality_issue_codes=quality_issue_codes,
-            frame_extractor=video_frame_extractor,
-        )
-    except GeneratedVideoValidationUnavailable as exc:
-        raise generation_error(
-            503,
-            "VISUAL_VALIDATION_UNAVAILABLE",
-            "Generated video is awaiting visual validation; retry reconciliation.",
-        ) from exc
     return ReconcileOperationOutcome(
         status="SUCCEEDED",
         result_url=query.result_url,
-        audio_quality_status=quality_status,
-        quality_issue_codes=quality_issue_codes,
+        audio_quality_status="NOT_REQUIRED",
+        quality_issue_codes=[],
     )
 
 
@@ -3965,7 +3855,7 @@ def reconcile_submission_uncertain_task(
 ) -> TaskResult:
     """Reconcile a SUBMISSION_UNCERTAIN task against the provider.
 
-    If the provider task id is known, query it and archive the result when it
+    If the provider task id is known, query it and retain its URL when it
     succeeded, or mark it terminal on an explicit provider failure. When the
     create response was lost (no provider task id), refuse to guess: a human
     must first confirm the charge did not occur before any resubmission.
@@ -3999,14 +3889,7 @@ def reconcile_submission_uncertain_task(
     status = item.get("status")
     if status == "succeeded":
         result_url = _metaso_content_url(item, provider_task_id=str(provider_task_id))
-        try:
-            content = provider.download_result(result_url)
-        except Exception as exc:
-            raise generation_error(
-                503, "RESULT_DOWNLOAD_FAILED", "Result download failed; retry reconciliation."
-            ) from exc
         _renew_reconcile_reservation(conn, reservation=reconcile_reservation)
-        quality_status, quality_issue_codes = h3_audio_quality(content)
         task_state_guard = (
             "AND status = 'SUBMISSION_UNCERTAIN' AND result_asset_id IS NULL"
             if reconcile_reservation is not None
@@ -4039,8 +3922,8 @@ def reconcile_submission_uncertain_task(
                 """,
                 (
                     result_url,
-                    quality_status,
-                    json.dumps(quality_issue_codes, ensure_ascii=True),
+                    "NOT_REQUIRED",
+                    "[]",
                     task_id,
                 ),
             )
@@ -5261,8 +5144,11 @@ def list_generation_batches(
         None if cursor is None else decode_batch_list_cursor(cursor, filters_hash=filters_hash)
     )
 
-    clauses = ["1 = 1"]
-    parameters: list[object] = []
+    clauses = [
+        "NOT EXISTS (SELECT 1 FROM customer_batch_visibility AS visibility "
+        "WHERE visibility.user_id = %s AND visibility.batch_id = batch.id)"
+    ]
+    parameters: list[object] = [actor.id]
     if project_id is not None:
         clauses.append("batch.project_id = %s")
         parameters.append(project_id)
@@ -5287,13 +5173,6 @@ def list_generation_batches(
                   AND (
                     attention_task.status = 'SUBMISSION_UNCERTAIN'
                     OR attention_task.archive_status = 'ARCHIVE_FAILED'
-                    OR attention_task.quality_status IN (
-                        'AUDIO_QUALITY_FAILED', 'VISUAL_QUALITY_FAILED'
-                    )
-                    OR instr(
-                        COALESCE(attention_task.quality_issue_codes, ''),
-                        '"AUDIO_QUALITY_FAILED"'
-                    ) > 0
                   )
             )
             """
@@ -6230,8 +6109,6 @@ def calculate_progress(tasks: Sequence[TaskSummary]) -> BatchProgress:
             counts["pending"] += 1
         if status == "SUBMISSION_UNCERTAIN" or archive_status == "ARCHIVE_FAILED":
             needs_attention = True
-        if generation_quality_failed(task.quality_status, task.quality_issue_codes):
-            needs_attention = True
         if needs_attention and task.superseded_by_task_id is None:
             counts["needs_attention"] += 1
 
@@ -6248,15 +6125,14 @@ def calculate_progress(tasks: Sequence[TaskSummary]) -> BatchProgress:
 
 def batch_status(stored_status: str, progress: BatchProgress) -> str:
     if progress.total_count == progress.terminal_count:
-        # Even when every task is terminal, audio/archive quality failures must
-        # surface as NEEDS_ATTENTION instead of being masked by SUCCEEDED.
+        # Delivery or billing uncertainty still requires attention; historical
+        # optional quality checks no longer change a completed video's status.
         if progress.counts["needs_attention"]:
             return "NEEDS_ATTENTION"
         if (
             progress.counts["failed"]
             or progress.counts["cancelled"]
             or progress.historical_counts.get("archive_failed", 0)
-            or progress.historical_counts.get("audio_quality_failed", 0)
         ):
             return "COMPLETED_WITH_FAILURES"
         return "SUCCEEDED"
@@ -6331,7 +6207,6 @@ def generation_task_available_actions(
 ) -> list[Literal["RETRY", "RECONCILE", "CONFIRM_NOT_CHARGED", "REGENERATE"]]:
     status = str(row["status"])
     archive_status = str(row["archive_status"])
-    quality_status = str(row["quality_status"])
     provider_task_id = optional_text(row["provider_task_id"])
     provider_result_url = optional_text(row["provider_result_url"])
     error_code = optional_text(row["error_code"])
@@ -6348,7 +6223,7 @@ def generation_task_available_actions(
         return []
     if status == "SUBMISSION_UNCERTAIN":
         return ["RECONCILE"] if provider_task_id is not None else ["CONFIRM_NOT_CHARGED"]
-    if quality_status in {"AUDIO_QUALITY_FAILED", "VISUAL_QUALITY_FAILED"}:
+    if status == "SUCCEEDED" and archive_status in {"DIRECT", "ARCHIVED"}:
         return ["REGENERATE"]
     if status == "FAILED":
         if (
@@ -6375,8 +6250,6 @@ def generation_task_stage(
         return "SUBMISSION_UNCERTAIN"
     if archive_status == "ARCHIVE_FAILED":
         return "ARCHIVE_FAILED"
-    if generation_quality_failed(quality_status, quality_issue_codes):
-        return "QUALITY_FAILED"
     if status == "SUCCEEDED" and archive_status in {"ARCHIVED", "DIRECT"}:
         return "COMPLETED"
     return status

@@ -836,7 +836,7 @@ class _StepwiseMetasoProvider(MetasoH3Provider):
         )
 
     def download_result(self, url: str) -> bytes:
-        return b"stepwise-provider-result"
+        raise AssertionError("direct video delivery must not download generated media")
 
 
 def test_pg_worker_persists_provider_id_and_resumes_without_resubmit(
@@ -897,7 +897,7 @@ def test_pg_worker_persists_provider_id_and_resumes_without_resubmit(
         row = pg.execute(
             "SELECT status, provider_result_url FROM generation_tasks WHERE id = 'task-u1-0'"
         ).fetchone()
-        assert row == ("ARCHIVING", "https://example.com/result.mp4")
+        assert row == ("SUCCEEDED", "https://example.com/result.mp4")
 
     assert (
         run_pg_worker_once(
@@ -906,7 +906,7 @@ def test_pg_worker_persists_provider_id_and_resumes_without_resubmit(
             generation_provider=provider,
             max_tasks=1,
         )
-        == 1
+        == 0
     )
     assert provider.submit_count == 1
     with psycopg.connect(fair_state, autocommit=True) as pg:
@@ -919,6 +919,54 @@ def test_pg_worker_persists_provider_id_and_resumes_without_resubmit(
     assert row[1] == "DIRECT"
     assert row[2] is None
     assert row[3] == "https://example.com/result.mp4"
+    with psycopg.connect(fair_state, autocommit=True) as pg:
+        assert pg.execute(
+            "SELECT quality_status FROM generation_tasks WHERE id = 'task-u1-0'"
+        ).fetchone() == ("NOT_REQUIRED",)
+
+
+@pytest.mark.parametrize(
+    ("status", "archive_status"), [("ARCHIVING", "PENDING"), ("SUCCEEDED", "ARCHIVE_FAILED")]
+)
+def test_pg_saved_video_result_finishes_without_provider_or_quality_credentials(
+    fair_state: str, monkeypatch: pytest.MonkeyPatch, status: str, archive_status: str
+) -> None:
+    _seed(fair_state, user_ids=["u1"], tasks_per_user=1, wallet_credits=1000)
+    _seed_reserved(fair_state, task_id="task-u1-0", available_credits=999, reserved_credits=1)
+    with psycopg.connect(fair_state, autocommit=True) as pg:
+        pg.execute(
+            "UPDATE generation_tasks SET status = %s, archive_status = %s, "
+            "provider = 'metaso', provider_task_id = 'saved-paid-result', "
+            "provider_result_url = 'https://example.com/result.mp4', next_poll_at = now()",
+            (status, archive_status),
+        )
+
+    def reject_processing(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("saved video URLs require neither a provider nor media processing")
+
+    monkeypatch.setattr("app.generation_worker.h3_provider_for_task", reject_processing)
+    monkeypatch.setattr("app.generation.final_generation_quality", reject_processing)
+    monkeypatch.setattr("app.generation.h3_audio_quality", reject_processing)
+    assert (
+        run_pg_worker_once(
+            worker_id="saved-result",
+            storage=FakeStorageAdapter(provider="cos", bucket="bucket"),
+            max_tasks=1,
+        )
+        == 1
+    )
+    with psycopg.connect(fair_state, autocommit=True) as pg:
+        assert pg.execute(
+            "SELECT status, archive_status, quality_status, provider_result_url, result_asset_id "
+            "FROM generation_tasks WHERE id = 'task-u1-0'"
+        ).fetchone() == (
+            "SUCCEEDED",
+            "DIRECT",
+            "NOT_REQUIRED",
+            "https://example.com/result.mp4",
+            None,
+        )
+    assert _billing_rows(fair_state, "task-u1-0") == [("RESERVE", 1), ("SETTLE", 1)]
 
 
 def test_expired_running_lease_resumes_instead_of_becoming_uncertain(

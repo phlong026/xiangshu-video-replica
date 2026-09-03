@@ -316,7 +316,7 @@ def test_three_task_mixed_batch_surfaces_partial_failure_and_exposes_successful_
     )
     assert response.status_code == 200
     payload = response.json()
-    assert payload["status"] == "NEEDS_ATTENTION"
+    assert payload["status"] == "COMPLETED_WITH_FAILURES"
     assert payload["progress"] == {
         "total_count": 3,
         "terminal_count": 3,
@@ -330,28 +330,23 @@ def test_three_task_mixed_batch_surfaces_partial_failure_and_exposes_successful_
             "succeeded": 2,
             "failed": 1,
             "cancelled": 0,
-            "needs_attention": 1,
+            "needs_attention": 0,
         },
         "historical_counts": {
             "archive_failed": 0,
-            "audio_quality_failed": 1,
+            "audio_quality_failed": 0,
             "failed": 1,
             "superseded": 0,
         },
     }
     assert len(provider.requests) == 3
     assert {task["quality_status"] for task in payload["tasks"]} == {
-        "AUDIO_OK",
-        "AUDIO_QUALITY_FAILED",
+        "NOT_REQUIRED",
         "PENDING",
     }
     assert {task["status"] for task in payload["tasks"]} == {"SUCCEEDED", "FAILED"}
 
-    successful_task = next(
-        task
-        for task in payload["tasks"]
-        if task["status"] == "SUCCEEDED" and task["quality_status"] == "AUDIO_OK"
-    )
+    successful_task = next(task for task in payload["tasks"] if task["status"] == "SUCCEEDED")
     assert successful_task["archive_status"] == "DIRECT"
     assert successful_task["result_asset_id"] is None
     assert successful_task["direct_result_available"] is True
