@@ -130,7 +130,7 @@ async def _business_http_exception_dispatch(request: Request, error: Exception) 
     return await business_http_exception_handler(request, error)
 
 
-app = VideoReplicaAPI(title="Video Replica API", version="0.1.15", lifespan=_lifespan)
+app = VideoReplicaAPI(title="Video Replica API", version="0.1.16", lifespan=_lifespan)
 app.add_exception_handler(HTTPException, _business_http_exception_dispatch)
 app.add_exception_handler(Exception, unhandled_exception_response)
 
