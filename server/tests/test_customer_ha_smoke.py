@@ -622,17 +622,17 @@ def test_customer_desktop_build_is_an_explicit_no_sidecar_target() -> None:
     assert "url.port" in origin_guard
     assert "--config src-tauri/tauri.customer.conf.json" in package
     assert customer_config["productName"] == "短视频复刻客户云工作台"
-    assert customer_config["version"] == "0.1.13"
+    assert customer_config["version"] == "0.1.14"
     assert root_package["version"] == customer_config["version"]
     assert client_package["version"] == customer_config["version"]
     assert package_lock["version"] == customer_config["version"]
     assert package_lock["packages"][""]["version"] == customer_config["version"]
     assert package_lock["packages"]["client"]["version"] == customer_config["version"]
     assert internal_config["version"] == customer_config["version"]
-    assert 'name = "video-replica-desktop"\nversion = "0.1.13"' in cargo_lock
-    assert 'version = "0.1.13"' in cargo_toml.split("[lib]", maxsplit=1)[0]
-    assert 'version = "0.1.13"' in server_package.split("[project]", maxsplit=1)[1]
-    assert 'version="0.1.13"' in server_main
+    assert 'name = "video-replica-desktop"\nversion = "0.1.14"' in cargo_lock
+    assert 'version = "0.1.14"' in cargo_toml.split("[lib]", maxsplit=1)[0]
+    assert 'version = "0.1.14"' in server_package.split("[project]", maxsplit=1)[1]
+    assert 'version="0.1.14"' in server_main
     assert customer_config["identifier"] == "com.xiangshu.video-replica.customer"
     assert customer_config["app"]["windows"][0]["url"] == "customer"
     assert customer_config["bundle"]["resources"] == []
