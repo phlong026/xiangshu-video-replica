@@ -1252,6 +1252,19 @@ async function fetchGenerationResultBlob(
   url: string,
   errorPrefix: string,
 ): Promise<Blob> {
+  const inlinePrefix = "data:video/mp4;base64,";
+  if (url.startsWith(inlinePrefix)) {
+    // 测试成片已随授权接口返回，直接解码避免触发桌面端 connect-src 限制。
+    try {
+      const content = atob(url.slice(inlinePrefix.length));
+      const bytes = Uint8Array.from(content, (character) =>
+        character.charCodeAt(0),
+      );
+      return new Blob([bytes], { type: "video/mp4" });
+    } catch (error) {
+      throw new Error(`${errorPrefix}：内联视频数据无效。`, { cause: error });
+    }
+  }
   const controller = new AbortController();
   const timeout = window.setTimeout(
     () => controller.abort(),
