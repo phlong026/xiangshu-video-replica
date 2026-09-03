@@ -1,196 +1,147 @@
-# 短视频复刻工作台
+# 短视频复刻工作台（xiangshu-video-replica）
 
-内部员工使用的 Windows 桌面端。当前实现按 V1.3 任务清单逐项收口；本地质量、受保护主分支、人物领域契约和桌面身份/RBAC 已进入可验证状态，真实 Provider、签名和 Windows 实机打包仍需按门禁记录。
+AI 短视频复刻生产工作台：参考视频上传 → AI 拆解分镜 → 人物库与首帧 → Prompt/批次编排 → H3 视频生成 → 云存储归档质检 → 按条计费。业务后端 FastAPI，桌面端 Tauri 2，客户生产数据真源 PostgreSQL 16。当前版本 0.1.15（2026-09-03）。
+
+## 两条产品线
+
+| | 客户云版（当前主线） | 内部 P0 单机版（已收口） |
+| --- | --- | --- |
+| 数据真源 | PostgreSQL 16（客户生产唯一真源，fail-closed） | SQLite（仅本机磁盘） |
+| 部署形态 | LB + 双 API + 四 Worker + PG HA + 私有 COS（`deploy/` 模板与 systemd 单元） | 桌面端拉起同机 FastAPI + Worker sidecar |
+| 用户身份 | 激活码激活 + 两设备单在线会话 | 内部 Bearer Token / 桌面固定身份 |
+| 计费 | 零额度激活 + ZPay 续充 + 管理端调账审计 | 内部价钱包 + ZPay 充值 |
+| 桌面构建 | `npm run tauri:build:customer`（直连远程 HTTPS API，独立应用标识） | `npm run tauri:build`（随包 `start-backend` 脚本） |
+
+客户版 V3 主线（任务 T01–T45）：PostgreSQL 全量迁移、激活码与首充、两设备单在线、用户公平队列、多实例生产与灰度基座、安全纵深加固均已交付并达到 `AUTOMATED_VERIFIED`；真实 ZPay / COS / 付费 Provider 小流量验收（T40）、灰度放量（T41）与生产 Go/No-Go（T42）按红线要求待人工授权执行。任务状态以 `docs/客户版任务清单-V3.md` 账本为准。
+
+## 架构与技术栈
+
+- **`server/`** — Python 3.12 · FastAPI · Alembic · psycopg3（同步驱动，`%s` 占位符）· pytest · Ruff · mypy strict。
+- **`client/`** — React 19 · TypeScript 5.9 · Vite 8 · Biome · Vitest；API 类型由 FastAPI OpenAPI 生成（`npm run generate:api`，产物不手工修改）。业务工作台、客户端与管理端共用同一 React 构建。
+- **`client/src-tauri/`** — Tauri 2 / Rust 桌面端，内部版与客户云版双构建目标（`tauri.conf.json` / `tauri.customer.conf.json`）。
+- **存储** — 生产使用腾讯云 COS 私有桶（启动即校验，缺/错配置 fail-closed）；开发机可回退本地文件系统存储。
+- **外部 Provider** — 视频拆解（Gemini）、人物图片（GPT Image 2 / Nano Banana）、视频生成（Metaso H3）。开发联调可切 `fake_h3` 模拟链路，不触达付费接口。
+
+### 核心能力（客户版 V3）
+
+- **激活码体系**：批次/发放/暂停/作废/归档管理，CSPRNG 生成 + HMAC key version，掩码展示与受控明文揭示审计，私有 COS 密文导出，防枚举与多实例共享限流，AEAD 幂等恢复。
+- **钱包计费**：零额度激活，ZPay 续充回调原子入账，任务 `RESERVE → SETTLE/RELEASE` 终态原子结算，管理端双确认调账，append-only 账本与审计。
+- **设备与会话**：一码两设备、首设备批准配对，单在线切换（session epoch fencing），撤销传播与旧会话拒绝，配对/解绑全程审计。
+- **用户公平队列**：按用户轮转、每用户默认并发 1，Worker 崩溃恢复与 Provider 提交不确定人工核验；10k 任务四 Worker 压测恰好一次消费。
+- **管理端**：per-operator 账号密码 + CSRF，职责分离（管理员不可给自己调账/改价），auditor 只读合规审计，激活码/设备/充值/审计统一管理页。
+- **生产运维**：独立 `/health` `/live` `/ready` 探针，结构化请求日志与 request id，双实例私有 Prometheus 指标，11 类集群异常探针（fired/resolved），PG16 物理备份 + PITR 恢复演练脚本，滚动发布与失败回滚。
 
 ## 环境要求
 
-- Node.js 24+
-- Rust stable（Windows 使用 MSVC toolchain）
-- Python 3.12+
-- uv 0.11+
-- Gate 1 本地纵向验收另需系统 Chrome 与 ffmpeg
+- Node.js 24+、Rust stable（Windows 使用 MSVC toolchain）、Python 3.12+、uv。
+- Windows 桌面构建另需 Microsoft C++ Build Tools 与 WebView2（Tauri 2 官方要求）。
+- PG 集成测试需 Docker（`scripts/pg-fixture.sh`，PG16，固定端口 5433）；浏览器 E2E 另需系统 Chrome 与 ffmpeg。
 
-Windows 还需按照 Tauri 2 官方要求安装 Microsoft C++ Build Tools 和 WebView2。
+## 快速开始
 
-## 初始化
-
-```powershell
+```bash
 npm install
 uv sync --project server --locked
 ```
 
-## 本地开发
-
-开发身份 Header 默认关闭。先把服务端显式切到开发身份模式；`VITE_DEV_USER_ID` 必须对应当前 SQLite `users` 表中一个已启用的用户，未设置时客户端开发服务器默认使用 `employee_1`：
+本地开发默认使用 SQLite 与开发身份模式：
 
 ```powershell
 $env:VIDEO_REPLICA_ALLOW_DEV_IDENTITY_HEADER = "1"
 $env:VIDEO_REPLICA_AUTH_MODE = "development"
-npm run dev:server
+npm run dev:server   # 终端 1：FastAPI（127.0.0.1:8000，启动时自动执行 Alembic 迁移）
+npm run dev:worker   # 终端 2：生成 Worker（拆解/人物/首帧/H3 任务领取、Provider 调用与归档）
+
+$env:VITE_DEV_USER_ID = "employee_1"   # 必须对应 users 表中已启用的用户
+npm run tauri:dev    # 终端 3：桌面端
 ```
 
-另开一个终端启动生成 Worker；它与 API 使用同一个数据库，并负责视频拆解、人物拼合图、人物置换首帧和 H3 视频任务的领取、Provider 调用、状态恢复与结果归档：
+- 开发身份 Header 只在 Vite 开发构建中发送；生产构建即使误设 `VITE_DEV_USER_ID` 也会忽略。
+- 切换 PostgreSQL 模式时设置 `VIDEO_REPLICA_DATABASE_URL=postgresql://…`；客户生产（`VIDEO_REPLICA_CUSTOMER_PRODUCTION=true`）下使用 SQLite 或缺少 DSN 会直接拒绝启动。
+- 没有 COS 凭据时，设置 `VIDEO_REPLICA_STORAGE_ROOT` 并在管理设置中把 `active_storage_provider` 设为 `local`，即可走完整上传/归档流程（仅限开发/内测，生产只使用 COS）。
+- Provider API Key 与云存储凭据经 Fernet 加密写入数据库（Windows 下主密钥由当前用户 DPAPI 保护，macOS 使用钥匙串），启动时校验可解密；主密钥缺失不会覆盖已有配置。任何真实密钥不得进入代码、日志或 PR。
+- 只调试浏览器界面时运行 `npm run dev:client`；环境变量样例见 `.env.example`。
 
-```powershell
-npm run dev:worker
-```
+## 验证命令（分层，避免双跑全量）
 
-再启动桌面端：
-
-```powershell
-$env:VITE_DEV_USER_ID = "employee_1" # 调试设置页时改为现有 admin 用户 ID
-npm run tauri:dev
-```
-
-开发 Header 只在 Vite 开发构建中发送；生产构建即使误设 `VITE_DEV_USER_ID` 也会忽略它。桌面发布/内测运行必须由服务端设置 `VIDEO_REPLICA_AUTH_MODE=desktop` 和 `VIDEO_REPLICA_DESKTOP_USER_ID`，`/api/auth/me` 再从数据库读取显示名称和角色，客户端不能自行声明 admin 身份。
-
-### 内部云端 P0 身份
-
-内部云端模式使用受控 CLI 创建账号和钱包，并签发只显示一次的 Bearer Token。数据库只保存令牌 SHA-256 摘要：
-
-```powershell
-Set-Location server
-.venv\Scripts\python.exe -m app.internal_accounts --db-path C:\video-replica\data\app.db create-user --username operator_1 --display-name "运营一号"
-.venv\Scripts\python.exe -m app.internal_accounts --db-path C:\video-replica\data\app.db issue-token --user-id "上一步输出的 user_id"
-.venv\Scripts\python.exe -m app.internal_accounts --db-path C:\video-replica\data\app.db revoke-token --token-id "签发时输出的 token_id"
-```
-
-认证默认采用 fail-closed 的内部令牌模式；部署时仍应显式设置 `VIDEO_REPLICA_AUTH_MODE=internal`，并且不要设置 `VIDEO_REPLICA_DESKTOP_USER_ID` 或 `VIDEO_REPLICA_ALLOW_DEV_IDENTITY_HEADER`。该模式下业务 API 只接受 `Authorization: Bearer <token>`；令牌撤销后立即失效。只有显式设置 `desktop` 或 `development` 才会启用旧身份路径。原始令牌不会再次显示，应由客户端系统安全存储或受控 Secret 工具保管，不得写入仓库、日志或普通配置文件。
-
-### ZPay 内部充值下单
-
-`POST /api/recharge-orders` 只接收整数分 `amount_fen`，服务端根据当前内部价格计算条数并生成 ZPay 表单。商户号、商户密钥、支付渠道、商户订单号和回调地址都不接受客户端覆盖。
-
-部署只需设置不含路径和查询参数的 HTTPS `PUBLIC_BASE_URL`。支付网关固定使用说明文档中的 `https://zpayz.cn/submit.php`；异步通知和同步返回地址由服务端根据 `PUBLIC_BASE_URL` 自动生成，管理页面不提供地址输入框。ZPay `pid`/`key`/`enabled_channels` 使用现有 SettingsRepository 加密保存；不得通过 SQL 写入明文密钥。签名契约以 [ZPay 官方开发文档](https://api.z-pay.cn/doc.html) 为准。
-
-### ZPay 回调与手动查单
-
-`GET /api/payments/zpay/notify` 是唯一自动入账入口；它验签并核对商户、订单、金额、渠道和成功状态，在一个短 SQLite 事务内完成订单、`CHARGE` 流水和钱包更新。`return_url` 只显示确认提示，不会改余额。部署时由同机反向代理单独公开 notify/return 路径，FastAPI 端口仍只监听回环地址。
-
-管理端手动同步使用 `POST /api/control/recharge-orders/{order_no}/sync`。API 只保存 `CONTROL_PROXY_TOKEN_DIGEST`（原始高熵令牌的 SHA-256）和 `CONTROL_ADMIN_USER_ID`；反向代理必须移除外部传入的 `X-Control-Proxy-Token`，完成管理认证后再注入原始令牌。业务 Bearer Token 不能代替控制代理令牌。
-
-### 内部用户端与管理页
-
-业务工作台新增“余额与充值”：显示 10 元/条的当前内部价、可用/冻结条数、最近充值订单和追加式钱包流水；支持 100/200/500/1000 元快捷充值，以及不低于 100 元、按 10 元递增的自定义整数金额。待确认订单号只保存在浏览器本地，页面返回后每 2 秒查询一次本地订单；`PAID` 后刷新钱包，前端状态本身不触发入账。
-
-云端内部账号第一次打开业务工作台时，在登录页输入 CLI 签发的 Bearer Token。Token 只保存在当前页面内存，不写入 `localStorage`；页面刷新后需要重新输入。桌面开发模式可以留空，仍按既有服务端身份模式验证。
-
-同一份 React/Vite 构建在 `/admin` 渲染独立内部管理页，只提供账号与钱包只读列表、充值订单与查单、只读对账/CSV、ZPay 配置和内部价格设置。密钥只展示掩码，新密钥留空表示保留旧值；网关、异步回调和同步返回地址来自部署环境，只读不可提交。管理页没有手工改余额、补单或令牌签发入口。
-
-生产构建建议显式把 `VITE_API_BASE_URL` 设为与页面同源的 HTTPS 地址，便于发布审计；未设置时，HTTPS Web 生产页会安全回退到 `window.location.origin`，桌面端和开发构建仍使用本机 API。参考 `deploy/nginx/internal-p0.conf.example` 保护 `/admin` 和 `/api/control/*`：IP/VPN 白名单与 Basic Auth 必须同时通过，浏览器永远接触不到控制代理原始令牌。FastAPI 继续只监听 `127.0.0.1`；若 Nginx 前面还有负载均衡或 CDN，必须先按可信代理范围正确恢复客户端地址，否则不要直接复用样例中的 IP 白名单。
-
-Linux 单机部署的环境模板、systemd 单元、SQLite 检查/备份/恢复和验收命令统一见 `docs/内部运营P0单机部署与验收记录.md`。部署文件只覆盖一个 API、一个 Worker、一个本机 SQLite 文件和同机静态页；它们不代表真实 ZPay、COS 或 Provider 已验收。
-
-### 成片预览与下载接口
-
-`GET /api/generation-tasks/{task_id}/preview-url` 先校验任务所属项目，再返回 `{"url":"..."}`。真实供应商任务直接返回原结果链接，不重新生成、不上传云存储；链接仍受供应商有效期及跨域策略约束。
-
-仅在非客户生产环境，`fake_h3` 的 `fake://` 测试结果转换为 `data:video/mp4;base64,...`，便于浏览器播放和下载。API 与 Worker 应使用相同的 `VIDEO_REPLICA_FAKE_H3_RESULT_PATH`（可播放的短 MP4 测试文件）；未配置时仍使用 Fake Provider 的占位字节，不代表可播放视频。文件缺失、为空或客户生产禁止 Fake Provider 时返回 `503 / FAKE_RESULT_UNAVAILABLE`；越权仍按项目权限返回 404，不读取测试文件。该模式不用于生产成片存储。
-
-### 客户生产一键更新
-
-客户生产环境可用 `deploy/customer-git-rollout.sh` 从明确的 40 位提交拉取代码，再在服务器本机编译前端并滚动更新 API 与 Worker。默认使用公开 GitHub HTTPS 地址；私有仓库可设置只读 SSH 地址 `VIDEO_REPLICA_GIT_REPO_URL=git@github.com:phlong026/xiangshu-video-replica.git`，并由服务器上的只读 Deploy Key 提供访问。脚本不会读取或写入业务密钥；生产配置继续保留在 `/etc/video-replica/customer.env`。它会在改动 Compose、站点或数据库前检查 Git、Node.js 24、Docker、生产配置、磁盘、现网健康和当前镜像依赖是否兼容；然后备份 PostgreSQL 与静态站点。若运行中失败，脚本恢复旧镜像与静态站点，并保留数据库备份（迁移后的数据库不会自动降级）。
-
-首次在宝塔终端执行时，用待发布的合并提交替换 `<COMMIT_SHA>`，并从同一提交下载脚本：
+开发期每轮迭代只跑受影响专项（秒级）：
 
 ```bash
-curl -fsSLo /tmp/customer-git-rollout.sh "https://raw.githubusercontent.com/phlong026/xiangshu-video-replica/<COMMIT_SHA>/deploy/customer-git-rollout.sh"
-chmod 0755 /tmp/customer-git-rollout.sh
-bash /tmp/customer-git-rollout.sh --commit <COMMIT_SHA>
+# server/ 目录；PG fixture 未启动时 PG 专项按 skip 运行
+uv run python -m pytest tests/test_<受影响文件>.py -q
+uv run ruff check . && uv run ruff format --check . && uv run mypy app
 ```
 
-私有仓库不能匿名下载 Raw 脚本：先通过只读 Deploy Key 拉取该提交中的脚本，再在运行前导出 `VIDEO_REPLICA_GIT_REPO_URL`。这条路径要求服务器能访问 GitHub、已安装 Git、Docker、Python 3；前端构建复用 Docker 的 Node.js 24 镜像，宿主机不需要安装 Node.js 或 npm。首次运行会下载该构建镜像，之后复用 Docker 缓存。任一前置条件缺失时会在发布前退出，不会切换服务。实际 Python 依赖或锁定包变更仍必须走基础镜像发布流程；应用自身的版本元数据变更不会触发该门禁。
+任务收尾、提 PR 前跑一次全仓门禁（等价于 CI Linux 质量门）：
 
-### 内部钱包与按条计费
-
-`GET /api/wallet` 返回当前内部用户的可用条数和冻结条数；`GET /api/wallet/transactions` 用 `limit`、`offset` 分页返回当前用户自己的追加式流水。创建一条生成任务会在同一个 SQLite 事务内写入 `RESERVE`，并把 1 条从可用余额移到冻结余额；余额不足返回 `402 INSUFFICIENT_CREDITS`，批次、任务、Prompt 状态和钱包不会部分提交。
-
-所有任务终态只经过 `finalize_internal_billing(task_id, outcome)`：成片写入已配置的结果存储并通过对象元数据和下载签名检查后写 `SETTLE`；失败或取消写 `RELEASE`；Provider 已成功但归档失败时继续冻结，等待原任务归档重试。付费重生成会创建新任务并重新冻结，安全的原任务重试在上一轮已返还后进入下一计费轮次。请求中的旧字段 `payment_confirmed`、`payment_confirmation_version` 已被拒绝，不能代替服务端钱包校验。
-
-生成结果存储现在跟随业务主存储：内部云端配置 COS 后成片进入 COS；未配置 COS 时仅供本地开发回退本地盘。已产生钱包流水的批次为不可变账务记录，API 不允许删除。
-
-### 本地存储（无 COS 凭据的开发机）
-
-开发机没有 COS 凭据时，可将运行设置切换为本地文件系统存储，走完完整上传/归档流程：
-
-```powershell
-$env:VIDEO_REPLICA_STORAGE_ROOT = "C:\video-replica-storage"   # 本地存储根目录（必填）
+```bash
+scripts/pg-fixture.sh start   # Docker PG16 fixture（脚本必须带子命令）
+npm run check                 # secret 扫描 → 前端 Biome/tsc/vitest → Tauri cargo 检查 → 服务端 Ruff/mypy/全量 pytest
+scripts/pg-fixture.sh stop
 ```
 
-在管理员设置中将 `active_storage_provider` 设为 `local`。local 模式下上传不依赖云厂商签名 URL，而是经 `/api/assets/local-objects/...` 由服务端落盘到 `VIDEO_REPLICA_STORAGE_ROOT`：本地开发未设 `PUBLIC_BASE_URL` 时使用 `http://127.0.0.1:8000`，服务器设置合法 `PUBLIC_BASE_URL` 后使用该 HTTPS origin。该模式仅用于本地/内测，不应在生产启用（生产只使用腾讯云 COS）。
+- 服务端全量 pytest（约 1450 用例，21–30 分钟）每任务只跑一次，由 `npm run check` 统一承载，不要单独重复执行。
+- 严禁两个全量 pytest 实例同时打同一个 PG fixture（共享 `customer_v3_test` 库会互踩造成假性失败）。
+- `cargo test`、`npm audit`、客户浏览器 E2E 与 `npm run build` 只在 CI 三门禁执行，本地 `npm run check` 不含；涉及 Rust/构建/依赖变更以 CI 为准。
+- 当前测试规模（截至 2026-09）：服务端 1446 passed / 1 skipped、客户端 vitest 592、客户浏览器 E2E 4、Rust 4。
 
-### 管理员配置持久化
+## 构建与发布
 
-Provider API Key 和云存储凭证加密后写入 `VIDEO_REPLICA_DB_PATH` 指向的 SQLite，不写入浏览器 `localStorage`。启动前 `app.bootstrap` 会自动执行 Alembic 迁移并验证已保存配置可解密；失败时 API 和 Worker 不会启动，也不会覆盖原配置。
-
-从历史 OSS 版本升级时，若 `assets.storage_uri` 仍存在 `oss://` 对象，迁移会拒绝继续，保留 OSS 凭证和原数据。必须先将对象及 URI 迁移到 COS 或受控本地存储，再重新执行升级；不允许通过删除凭证来静默遗弃历史素材。
-
-- macOS 未显式设置 `VIDEO_REPLICA_SETTINGS_KEY` 时，主密钥自动创建并复用于当前用户钥匙串。
-- Windows 未显式设置该变量时，主密钥由当前用户 DPAPI 保护，密文保存在 `%LOCALAPPDATA%\VideoReplicaWorkbench\secrets\settings-key.dpapi`。
-- 服务器或集中部署可由安全的 Secret 注入机制显式提供 `VIDEO_REPLICA_SETTINGS_KEY`；桌面系统只会在该值成功解密当前数据库后将其导入系统密钥存储。不支持系统密钥存储的服务器每次启动必须复用同一值；主密钥不得写入仓库、启动脚本或日志。
-
-重启 API、Worker 或桌面端时必须继续使用同一个数据库路径和同一个系统用户。主密钥缺失或不匹配时，设置页会明确提示“配置仍在，未被覆盖”；数据库和系统密钥存储两者都需纳入备份/恢复验收。
-
-如只调试浏览器界面，可运行 `npm run dev:client`。
-
-## 检查与构建
-
-```powershell
-npm run check
-npm run build
-npm run tauri:build
+```bash
+npm run tauri:build            # 内部版 Windows NSIS 安装包（当前用户安装，未签名内测包）
+npm run tauri:build:customer   # 客户云版 NSIS（--no-default-features，强制非 loopback HTTPS API origin）
+npm run test:customer-e2e      # 客户浏览器 E2E（激活 / 设备配对 / 充值）
+npm run test:gate1             # 内部 FakeProvider 桌面纵向验收（隔离 API+Vite+Chrome，产物写 output/playwright/）
 ```
 
-`npm run check` 会依次运行前端格式检查、类型检查和测试，Tauri/Rust 格式与编译检查，以及服务端 Ruff、Mypy 和 Pytest。
+客户生产发布：
 
-公共仓库的 CI 使用 GitHub 托管的 `ubuntu-24.04` 和 `windows-2025` runner，执行密钥扫描、Linux 质量门及 Windows NSIS 门禁。Windows job 将两个未签名安装包暂存到 `${{ runner.temp }}/video-replica-artifacts` 并记录 SHA256；该目录随 job 清理，不是持久产物归档。客户 CI 包使用 `https://staging.example.invalid`，仅用于构建与打包契约核验；正式发布包须按发布流程使用批准的 API 地址另行构建、验收和归档。
+- `deploy/customer-git-rollout.sh` 从明确的 40 位提交拉取代码、本机构建前端并滚动更新 API 与 Worker，失败自动恢复旧镜像与静态站点；私有仓库经只读 Deploy Key + `VIDEO_REPLICA_GIT_REPO_URL` 访问。
+- 发布前必须运行 `scripts/customer_release_preflight.py` 且输出 `T45_PREFLIGHT_OK`；真实 ZPay / COS / Provider 联测未在同一 SHA 完成前一律 No-Go。
+- 部署模板见 `deploy/`（nginx / systemd / PG PITR 脚本 / `customer.env.example`），操作正本见 `docs/客户版部署与灰度手册.md`。
 
-### Gate 1 桌面 FakeProvider 纵向验收
+## CI 与分支模型
 
-```powershell
-npm run test:gate1
+- 三门禁 CI（`.github/workflows/ci.yml`）：Secret scan → Linux 质量门（含 PG16 service 的全量测试）→ Windows Tauri/NSIS。
+- `main` 受保护，仅接受 squash merge；任务分支从最新 main 切出，命名 `feat/customer-v3-tXX-短横线描述`，同一时间只开一个任务分支。
+- 一个 PR 只承载一个任务；评审评论逐条实质修复后 resolve；同一 PR 内更新任务账本与证据（`docs/客户版任务清单-V3.md`、`docs/CUSTOMER-TASK-EVIDENCE-V3.md`、`docs/evidence/TXX-EVIDENCE.md`）。
+
+## 红线（摘要）
+
+- 禁止引入 ORM、Redis、消息队列框架；禁止 SQLite/PG 双真源与双写。
+- Alembic 迁移文件名冻结（`025_postgres_runtime_compatibility` … `030_user_fair_queue`）；已发布 revision 只可追加修复，不得篡改。
+- 任何真实 API key、激活码明文、设备/session token 不得进入代码、日志、测试夹具或 PR。
+- 证据层级逐级推进：`CODE_PRESENT → AUTOMATED_VERIFIED → STAGING_VERIFIED → REAL_CHAIN_VERIFIED → PRODUCTION_GO`；未过真实链路不得标 `PRODUCTION_GO`。
+- 真实 ZPay、付费 Provider、生产 COS 变更、对外发码、灰度扩大、公网发布必须先取得用户明确授权。
+
+## 文档索引（正本优先）
+
+| 文档 | 用途 |
+| --- | --- |
+| `docs/客户版任务清单-V3.md` | 唯一任务状态账本（DoD、红线、§12 工作包、§14 证据模板） |
+| `docs/客户版代码开发清单-V3.md` | 唯一文件映射（新文件名已冻结，不得自创） |
+| `docs/客户版开发计划-V3.md` | 里程碑与禁止并行项 |
+| `docs/客户版激活码完整开发文档-V3.md` | 激活码业务与架构正本 |
+| `docs/客户版测试与验收规格-V3.md` | 测试与验收正本 |
+| `docs/客户版部署与灰度手册.md` | 客户生产部署、滚动更新与回滚 |
+| `docs/CUSTOMER-TASK-EVIDENCE-V3.md` | 证据账本 |
+| `docs/evidence/` | 各任务证据文件（含 §14 模板） |
+| `AGENTS.md` | AI 开发代理协作说明与验证命令 |
+| `CHANGELOG.md` | 版本更新日志 |
+
+内部 P0 运营（账号 CLI、钱包与 ZPay 计费、单机部署验收）见 `docs/内部运营P0单机部署与验收记录.md` 与 `docs/内部运营与ZPay计费管理文档-P0.md`。`docs/剩余开发工作清单.md`、`docs/Windows内测与运维手册.md` 等为历史快照，仅作参考，不得作为实施依据。
+
+## 仓库结构
+
 ```
-
-该命令要求开始和结束时均处于同一提交的干净 Git 工作树，从全新 Alembic 数据库启动隔离的 FastAPI 与 Vite，使用系统 Chrome 执行 Playwright，并在退出时清理本次 API/Vite 进程组。运行日志、临时媒体、截图、trace、录屏、下载产物和 SHA256 清单写入 `output/playwright/gate1/<run-id>/`，该目录不进入版本控制。只有不附加 Playwright 过滤参数的完整套件会在 manifest 中标记为 `passed`；`--grep` 等局部调试运行会记录参数并标记为 `diagnostic_passed`，不能作为正式 Gate 1 证据。它只证明 macOS 本地 FakeProvider 桌面链路，不替代 Windows WebView2、真实 Provider、云存储或生产灰度验收。
-
-Windows x64 内测安装包使用 Tauri NSIS：
-
-```powershell
-npm run tauri -- build --target x86_64-pc-windows-msvc --bundles nsis
+server/           FastAPI 业务后端
+  app/            路由与服务（客户 lane / 内部 lane）、生成 Worker、运维探针
+  migrations/     Alembic 迁移链（001 → 054）
+  tests/          服务端测试（含 PG 专项，pytest 标记 pg）
+client/           React 19 + Vite 工作台（业务工作台 / 客户端 / 管理端）
+  src-tauri/      Tauri 2 桌面端（内部版 / 客户云版双配置）
+e2e/              Playwright 套件（customer：激活/配对/充值；gate1：内部纵向验收）
+deploy/           部署模板（nginx / systemd / PG PITR / customer-git-rollout.sh）
+scripts/          PG fixture、secret 扫描、发布 preflight
+docs/             正本文档、任务账本、评审报告与证据
 ```
-
-当前 installer 配置见 `client/src-tauri/tauri.conf.json`：
-
-- 只生成 NSIS installer；
-- 默认当前用户安装，普通员工无需管理员权限；
-- 禁止安装旧版本覆盖新版本；
-- WebView2 使用下载引导器，离线内测机需预装 WebView2 Runtime；
-- 当前未配置签名证书，未签名前只能作为内部未签名测试包分发。
-
-Windows 内测、升级、卸载、SQLite 备份恢复和日志策略见 `docs/Windows内测与运维手册.md`。真实 Provider 证据记录见 `docs/真实Provider验收记录模板.md`。
-
-## Windows 内测运行目录
-
-服务端必须显式设置数据目录，避免升级时因工作目录变化造成数据丢失：
-
-```powershell
-$env:VIDEO_REPLICA_HOME = "$env:LOCALAPPDATA\VideoReplicaWorkbench"
-$env:VIDEO_REPLICA_DB_PATH = "$env:VIDEO_REPLICA_HOME\data\app.db"
-$env:VIDEO_REPLICA_LOG_DIR = "$env:VIDEO_REPLICA_HOME\logs"
-$env:VIDEO_REPLICA_AUTH_MODE = "desktop"
-$env:VIDEO_REPLICA_DESKTOP_USER_ID = "内部用户ID" # 必须对应 users 表中的已启用用户
-# 可选：仅安全部署系统注入；留空则由当前 Windows 用户 DPAPI 持久化
-# $env:VIDEO_REPLICA_SETTINGS_KEY = "<由 Secret 系统注入的稳定 Fernet 主密钥>"
-```
-
-SQLite 数据库只允许放本机磁盘，不放 COS、NAS、网盘同步或网络共享目录。升级前先用 `server/app/backup.py` 生成备份，升级后比对项目、任务、版本和审计计数；未完成 Windows 安装包测试、真实 Provider 验收和 10-20 个真实项目试跑前，只能标记为 `LOCALLY_VERIFIED` 或 `UNSIGNED_INTERNAL_TEST`。
-
-## API 类型同步
-
-服务端运行后执行：
-
-```powershell
-npm run generate:api
-```
-
-该命令从 FastAPI 的 `/openapi.json` 生成 `client/src/generated/api.ts`。生成文件由服务端契约派生，不手工修改。
