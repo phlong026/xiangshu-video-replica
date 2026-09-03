@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import socket
@@ -3093,6 +3094,7 @@ def test_generation_batch_list_paginates_and_returns_safe_task_summaries(
 def test_batch_detail_exposes_direct_result_availability_but_not_provider_url(
     client: TestClient,
     db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """列表不泄露直链；拥有任务的用户按需取得供应商结果 URL。"""
     with BusinessConnection.sqlite(connect_database(db_path)) as conn:
@@ -3120,7 +3122,16 @@ def test_batch_detail_exposes_direct_result_availability_but_not_provider_url(
             provider_result_url="fake://h3-results/task.mp4",
             result_asset_id="first_frame_owned",
         )
+        conn.execute(
+            "UPDATE generation_tasks SET provider = 'metaso' WHERE id = %s",
+            ("batch-direct-play-01-task",),
+        )
         conn.commit()
+
+    def unexpected_provider_load(*args: object) -> None:
+        pytest.fail("real result preview must not load a provider or fixture")
+
+    monkeypatch.setattr("app.generation_routes.h3_provider_for_task", unexpected_provider_load)
 
     detail = client.get(
         "/api/generation-batches/batch-direct-play-01",
@@ -3153,6 +3164,71 @@ def test_batch_detail_exposes_direct_result_availability_but_not_provider_url(
     assert summary.status_code == 200
     listed = next(item for item in summary.json()["items"] if item["id"] == "batch-direct-play-01")
     assert "provider_result_url" not in listed["tasks"][0]
+
+
+def test_fake_direct_preview_returns_fixture_bytes_after_authorization(
+    client: TestClient,
+    db_path: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    content = b"\x00\x00\x00\x18ftypisomlocal-test-video"
+    fixture = tmp_path / "result.mp4"
+    fixture.write_bytes(content)
+    monkeypatch.setenv("VIDEO_REPLICA_FAKE_H3_RESULT_PATH", str(fixture))
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        insert_generation_history(
+            conn,
+            batch_id="batch-fake-preview",
+            archive_status="DIRECT",
+            provider_result_url="fake://h3-results/test.mp4",
+        )
+        conn.commit()
+
+    url = "/api/generation-tasks/batch-fake-preview-task/preview-url"
+    response = client.get(url, headers=auth_headers("employee_1"))
+    assert response.status_code == 200
+    prefix, encoded = response.json()["url"].split(",", 1)
+    assert prefix == "data:video/mp4;base64"
+    assert base64.b64decode(encoded) == content
+
+    # A missing fixture would fail if read before the ownership check.
+    monkeypatch.setenv("VIDEO_REPLICA_FAKE_H3_RESULT_PATH", str(tmp_path / "missing.mp4"))
+    forbidden = client.get(url, headers=auth_headers("employee_2"))
+    assert forbidden.status_code == 404
+
+
+@pytest.mark.parametrize("failure", ["missing", "empty", "production"])
+def test_fake_direct_preview_rejects_unavailable_fixture_or_production(
+    client: TestClient,
+    db_path: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    fixture = tmp_path / "result.mp4"
+    if failure == "empty":
+        fixture.write_bytes(b"")
+    elif failure == "production":
+        fixture.write_bytes(b"\x00\x00\x00\x18ftypisomlocal-test-video")
+    monkeypatch.setenv("VIDEO_REPLICA_FAKE_H3_RESULT_PATH", str(fixture))
+    if failure == "production":
+        monkeypatch.setattr("app.generation.is_customer_production", lambda: True)
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        insert_generation_history(
+            conn,
+            batch_id="batch-fake-preview",
+            archive_status="DIRECT",
+            provider_result_url="fake://h3-results/test.mp4",
+        )
+        conn.commit()
+
+    response = client.get(
+        "/api/generation-tasks/batch-fake-preview-task/preview-url",
+        headers=auth_headers("employee_1"),
+    )
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "FAKE_RESULT_UNAVAILABLE"
 
 
 def test_generation_batch_list_filters_and_enforces_project_scope(

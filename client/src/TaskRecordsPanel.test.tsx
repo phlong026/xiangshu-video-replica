@@ -339,12 +339,87 @@ describe("TaskRecordsPanel", () => {
     expect(api.regenerateGenerationBatch).not.toHaveBeenCalled();
     await switchToOpsView();
     expect(screen.getByText("画面质检未通过")).toBeInTheDocument();
+    expect(screen.getByText("画面质检未通过").closest("li")).toHaveTextContent(
+      "需要处理",
+    );
     expect(screen.queryByText("质检待完成")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "下载 MP4 task-ok" }));
     await waitFor(() =>
       expect(api.downloadGenerationTaskResult).toHaveBeenCalledTimes(3),
     );
   });
+
+  it.each([
+    ["AUDIO_VALIDATION_UNAVAILABLE", "音频质检暂不可用"],
+    ["VISUAL_VALIDATION_UNAVAILABLE", "画面质检暂不可用"],
+  ])(
+    "keeps %s advisory without marking a completed result as needing attention",
+    async (code, label) => {
+      const direct = task({
+        archive_status: "DIRECT",
+        result_asset_id: null,
+        direct_result_available: true,
+        quality_status: "PENDING",
+        quality_issue_codes: [code],
+      });
+      const completed = batch({
+        status: "SUCCEEDED",
+        quantity: 1,
+        tasks: [direct],
+        progress: {
+          ...batch().progress,
+          total_count: 1,
+          terminal_count: 1,
+          counts: {
+            ...batch().progress.counts,
+            succeeded: 1,
+            needs_attention: 0,
+          },
+        },
+      });
+      vi.mocked(api.getGenerationBatch).mockResolvedValue(completed);
+      vi.mocked(api.listGenerationBatches).mockResolvedValue({
+        items: [
+          listItem({
+            status: completed.status,
+            quantity: completed.quantity,
+            tasks: completed.tasks,
+            progress: completed.progress,
+            needs_attention_count: 0,
+          }),
+        ],
+        next_cursor: null,
+      });
+      render(
+        <TaskRecordsPanel
+          handoffBatch={null}
+          onHandoffConsumed={vi.fn()}
+          userRole="customer"
+        />,
+      );
+      await screen.findByLabelText("结果预览 task-ok");
+      expect(screen.getAllByText(label).length).toBeGreaterThan(0);
+      expect(screen.queryByText(/需(?:要)?处理/)).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "下载 MP4" }));
+      await waitFor(() =>
+        expect(api.downloadGenerationTaskResult).toHaveBeenCalledWith(
+          "task-ok",
+          "task-ok.mp4",
+        ),
+      );
+      await switchToOpsView();
+      expect(screen.getByText(label)).toBeInTheDocument();
+      expect(
+        screen.getByText("未能完成检查，不代表视频不合格；不影响播放和下载。"),
+      ).toBeInTheDocument();
+      expect(screen.queryByText(/需(?:要)?处理/)).not.toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "下载 MP4 task-ok" }),
+      ).toBeEnabled();
+      expect(api.regenerateGenerationTask).not.toHaveBeenCalled();
+      expect(api.regenerateGenerationBatch).not.toHaveBeenCalled();
+    },
+  );
 
   it("does not offer a failed archive record as a playable or downloadable result", async () => {
     vi.mocked(api.getGenerationBatch).mockResolvedValue(

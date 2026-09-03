@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import logging
 import sqlite3
 from typing import cast
 from uuid import uuid4
@@ -20,6 +22,7 @@ from app.generation import (
     GenerationRuntimeLimits,
     GenerationTaskRetryRequest,
     H3Provider,
+    H3ProviderSettingsUnavailable,
     PaidRegenerationRequest,
     PromptCompileRequest,
     PromptPreviewRequest,
@@ -37,6 +40,7 @@ from app.generation import (
     enqueue_generation_reconcile_operation,
     generation_runtime_limits,
     get_generation_batch,
+    h3_provider_for_task,
     latest_generation_reconcile_operation,
     list_generation_batches,
     load_generation_reconcile_operation,
@@ -69,6 +73,7 @@ from app.script_rewrite import (
 from app.storage import StorageBackendUnavailable
 
 router = APIRouter(prefix="/api", tags=["generation"])
+logger = logging.getLogger(__name__)
 
 
 class ScriptRewriteTaskResponse(BaseModel):
@@ -557,7 +562,7 @@ def read_generation_task_preview_url(
 ) -> GenerationTaskPreviewUrlResponse:
     task = conn.execute(
         """
-        SELECT batch.project_id, task.provider_result_url
+        SELECT batch.project_id, task.provider, task.provider_result_url
         FROM generation_tasks AS task
         JOIN generation_batches AS batch ON batch.id = task.batch_id
         WHERE task.id = %s
@@ -576,6 +581,18 @@ def read_generation_task_preview_url(
     result_url = task["provider_result_url"]
     if not isinstance(result_url, str) or not result_url.strip():
         raise HTTPException(status_code=409, detail={"code": "RESULT_URL_NOT_READY"})
+    if task["provider"] == "fake_h3" and result_url.startswith("fake://"):
+        # Browsers cannot fetch fake://; only the internal fixture is embedded.
+        # The factory retains the production ban, and ownership was checked above.
+        try:
+            provider = h3_provider_for_task(conn, "fake_h3")
+            content = provider.download_result(result_url)
+        except H3ProviderSettingsUnavailable as exc:
+            logger.warning("fake result unavailable for task %s: %s", task_id, exc)
+            raise HTTPException(
+                status_code=503, detail={"code": "FAKE_RESULT_UNAVAILABLE"}
+            ) from exc
+        result_url = "data:video/mp4;base64," + base64.b64encode(content).decode("ascii")
     return GenerationTaskPreviewUrlResponse(url=result_url)
 
 

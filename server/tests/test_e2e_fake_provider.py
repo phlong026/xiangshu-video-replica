@@ -360,7 +360,7 @@ def test_three_task_mixed_batch_surfaces_partial_failure_and_exposes_successful_
         headers=auth_headers("employee_1"),
     )
     assert preview_url.status_code == 200
-    assert preview_url.json()["url"].startswith("fake://h3-results/fake-h3-")
+    assert preview_url.json()["url"].startswith("data:video/mp4;base64,")
 
 
 def create_batch(

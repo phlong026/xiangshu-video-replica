@@ -81,6 +81,12 @@ Set-Location server
 
 Linux 单机部署的环境模板、systemd 单元、SQLite 检查/备份/恢复和验收命令统一见 `docs/内部运营P0单机部署与验收记录.md`。部署文件只覆盖一个 API、一个 Worker、一个本机 SQLite 文件和同机静态页；它们不代表真实 ZPay、COS 或 Provider 已验收。
 
+### 成片预览与下载接口
+
+`GET /api/generation-tasks/{task_id}/preview-url` 先校验任务所属项目，再返回 `{"url":"..."}`。真实供应商任务直接返回原结果链接，不重新生成、不上传云存储；链接仍受供应商有效期及跨域策略约束。
+
+仅在非客户生产环境，`fake_h3` 的 `fake://` 测试结果转换为 `data:video/mp4;base64,...`，便于浏览器播放和下载。API 与 Worker 应使用相同的 `VIDEO_REPLICA_FAKE_H3_RESULT_PATH`（可播放的短 MP4 测试文件）；未配置时仍使用 Fake Provider 的占位字节，不代表可播放视频。文件缺失、为空或客户生产禁止 Fake Provider 时返回 `503 / FAKE_RESULT_UNAVAILABLE`；越权仍按项目权限返回 404，不读取测试文件。该模式不用于生产成片存储。
+
 ### 客户生产一键更新
 
 客户生产环境可用 `deploy/customer-git-rollout.sh` 从明确的 40 位提交拉取代码，再在服务器本机编译前端并滚动更新 API 与 Worker。默认使用公开 GitHub HTTPS 地址；私有仓库可设置只读 SSH 地址 `VIDEO_REPLICA_GIT_REPO_URL=git@github.com:phlong026/xiangshu-video-replica.git`，并由服务器上的只读 Deploy Key 提供访问。脚本不会读取或写入业务密钥；生产配置继续保留在 `/etc/video-replica/customer.env`。它会在改动 Compose、站点或数据库前检查 Git、Node.js 24、Docker、生产配置、磁盘、现网健康和当前镜像依赖是否兼容；然后备份 PostgreSQL 与静态站点。若运行中失败，脚本恢复旧镜像与静态站点，并保留数据库备份（迁移后的数据库不会自动降级）。

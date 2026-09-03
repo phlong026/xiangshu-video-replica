@@ -1709,7 +1709,7 @@ function taskNeedsAttention(task: GenerationTask) {
   return (
     task.status === "SUBMISSION_UNCERTAIN" ||
     task.archive_status === "ARCHIVE_FAILED" ||
-    ["failed", "unavailable"].includes(generationQualityDisplay(task).tone)
+    generationQualityDisplay(task).tone === "failed"
   );
 }
 
