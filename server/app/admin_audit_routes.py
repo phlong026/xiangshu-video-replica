@@ -22,6 +22,9 @@ table stores a real actor id; machine-only rows surface with an empty actor.
 
 from __future__ import annotations
 
+import re
+from datetime import datetime
+
 from fastapi import APIRouter, HTTPException
 
 from app.admin_auth_routes import AdminReader
@@ -34,6 +37,27 @@ MAX_LIST_LIMIT = 100
 AUDIT_SERVICE_UNAVAILABLE = "AUDIT_SERVICE_UNAVAILABLE"
 AUDIT_SERVICE_UNAVAILABLE_MESSAGE = "Audit log requires the PostgreSQL runtime."
 
+# PR #85 review P2: the sources write two text shapes — the Python lanes store
+# ISO ``T`` timestamps while the ``CURRENT_TIMESTAMP`` defaults store the
+# space-separated form — so every union arm is cast to timestamptz and the
+# date-only ``created_to`` bound is widened to the last microsecond of that
+# day; lexicographic ordering/paging on mixed formats grouped same-day events
+# by shape instead of time, and a bare date excluded everything after midnight.
+_DATE_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _inclusive_created_to(value: str) -> str:
+    """A date-only end bound covers the whole day (UTC), inclusive."""
+    if _DATE_ONLY.match(value):
+        return f"{value} 23:59:59.999999+00:00"
+    return value
+
+
+def _format_created_at(value: object) -> str:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value) if value is not None else ""
+
 
 def _http(status: int, code: str, message: str) -> HTTPException:
     return HTTPException(status_code=status, detail={"code": code, "message": message})
@@ -42,20 +66,20 @@ def _http(status: int, code: str, message: str) -> HTTPException:
 _UNION_SQL = """
     SELECT aa.id, 'ADMIN_ADJUSTMENT', aa.admin_user_id, u.username,
            aa.target_user_id, aa.source_document_type, aa.source_document_ref,
-           aa.reason, aa.request_id, aa.created_at
+           aa.reason, aa.request_id, aa.created_at::timestamptz
     FROM admin_adjustments aa
     JOIN users u ON u.id = aa.admin_user_id
     UNION ALL
     SELECT de.id, 'ADMIN_DEVICE_' || de.event, de.admin_user_id, u.username,
            de.target_user_id, 'DEVICE', COALESCE(de.device_id, ''),
-           de.reason, de.request_id, de.created_at
+           de.reason, de.request_id, de.created_at::timestamptz
     FROM admin_device_events de
     JOIN users u ON u.id = de.admin_user_id
     UNION ALL
     SELECT ae.id, 'ACTIVATION_CODE_' || ae.event,
            COALESCE(ae.actor_user_id, ''), COALESCE(u2.username, ''),
            COALESCE(code.bound_user_id, ''), 'ACTIVATION_CODE', ae.code_id,
-           COALESCE(ae.reason, ''), COALESCE(ae.request_id, ''), ae.created_at
+           COALESCE(ae.reason, ''), COALESCE(ae.request_id, ''), ae.created_at::timestamptz
     FROM activation_code_events ae
     LEFT JOIN users u2 ON u2.id = ae.actor_user_id
     LEFT JOIN activation_codes code ON code.id = ae.code_id
@@ -63,7 +87,7 @@ _UNION_SQL = """
     SELECT d.id, 'ACTIVATION_CODE_DELIVERED', d.delivered_by_user_id, u3.username,
            COALESCE(code.bound_user_id, ''), 'ACTIVATION_CODE_DELIVERY',
            COALESCE(d.external_order_ref, ''), COALESCE(d.note, ''),
-           '', d.delivered_at
+           '', d.delivered_at::timestamptz
     FROM activation_code_deliveries d
     JOIN users u3 ON u3.id = d.delivered_by_user_id
     LEFT JOIN activation_codes code ON code.id = d.code_id
@@ -74,7 +98,7 @@ _UNION_SQL = """
            al.entity_type, al.entity_id,
            COALESCE(al.metadata_json::json ->> 'reason', ''),
            COALESCE(al.metadata_json::json ->> 'request_id', ''),
-           al.created_at
+           al.created_at::timestamptz
     FROM audit_logs al
     LEFT JOIN users u4 ON u4.id = al.actor_user_id
 """
@@ -114,7 +138,7 @@ def list_audit_log(
         params.append(created_from)
     if created_to:
         clauses.append("ev.created_at <= %s")
-        params.append(created_to)
+        params.append(_inclusive_created_to(created_to))
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
 
     try:
@@ -165,7 +189,7 @@ def list_audit_log(
             "source_document_ref": str(row[6]),
             "reason": str(row[7]),
             "request_id": str(row[8]),
-            "created_at": str(row[9]) if row[9] is not None else "",
+            "created_at": _format_created_at(row[9]),
         }
         for row in rows
     ]

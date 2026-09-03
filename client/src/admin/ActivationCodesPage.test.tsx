@@ -96,6 +96,7 @@ function installFetch(options?: {
   list?: "ok" | "unauthorized";
   suspendCodeId?: string;
   resumeCodeId?: string;
+  items?: typeof codesPage.items;
 }) {
   const fetchMock = vi.fn((url: string, init?: RequestInit) => {
     if (url.endsWith("/api/control/admin/session/exchange")) {
@@ -113,7 +114,10 @@ function installFetch(options?: {
           401,
         );
       }
-      return jsonResponse(codesPage);
+      return jsonResponse({
+        ...codesPage,
+        items: options?.items ?? codesPage.items,
+      });
     }
     if (
       url.endsWith("/activation-codes/code-1/reveal") &&
@@ -177,6 +181,16 @@ function installFetch(options?: {
         status: "APPROVED",
         replaced_device_id: "device-1",
         request_id: "req-replace-1",
+      });
+    }
+    if (
+      url.endsWith("/device-pairings/pairing-4/approve") &&
+      init?.method === "POST"
+    ) {
+      return jsonResponse({
+        pairing_id: "pairing-4",
+        status: "APPROVED",
+        request_id: "req-approve-4",
       });
     }
     if (url.endsWith("/devices/device-1/unbind") && init?.method === "POST") {
@@ -361,6 +375,68 @@ describe("ActivationCodesPage", () => {
         confirm: true,
         reason: "客户重装系统更换设备",
       }),
+    );
+  });
+
+  it("offers ordinary approval when the first device is unavailable", async () => {
+    // PR #85 评审 P2：槽位 1 已解绑、槽位 2 仍绑定时，服务端普通批准通道
+    // 开放——UI 必须提供"批准设备"，而不是只剩替换槽位 2 一条路。
+    const items = codesPage.items.map((item) => ({ ...item }));
+    items[1] = {
+      ...items[1],
+      code_id: "code-4",
+      devices: [
+        {
+          device_id: "device-4a",
+          slot_no: 1,
+          display_name: "旧办公室电脑",
+          platform: "windows",
+          status: "UNBOUND",
+          bound_at: "2026-08-20T10:05:00+00:00",
+          last_active_at: "2026-08-21T10:05:00+00:00",
+          unbound_at: "2026-08-25T08:00:00+00:00",
+          revoked_at: null,
+        },
+        {
+          device_id: "device-4b",
+          slot_no: 2,
+          display_name: "备用笔记本",
+          platform: "windows",
+          status: "BOUND",
+          bound_at: "2026-08-21T10:05:00+00:00",
+          last_active_at: "2026-08-22T10:05:00+00:00",
+          unbound_at: null,
+          revoked_at: null,
+        },
+      ],
+      pending_pairings: [
+        {
+          pairing_request_id: "pairing-4",
+          display_name: "新办公室电脑",
+          platform: "windows",
+          status: "PENDING",
+          created_at: "2026-08-26T10:00:00+00:00",
+          expires_at: "2026-08-26T10:15:00+00:00",
+        },
+      ],
+    };
+    const fetchMock = installFetch({ items });
+    render(<ActivationCodesPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "2 台设备" }));
+
+    // 首设备不可用：普通批准可用；槽位 2 替换仍然可用（两条通道都展示）。
+    fireEvent.click(await screen.findByRole("button", { name: "批准设备" }));
+    fireEvent.change(screen.getByLabelText("操作原因"), {
+      target: { value: "首设备已解绑，直接批准新设备" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "确认执行" }));
+
+    expect(await screen.findByText(/req-approve-4/)).toBeInTheDocument();
+    const approveCall = fetchMock.mock.calls.find(([url]) =>
+      String(url).endsWith("/device-pairings/pairing-4/approve"),
+    );
+    expect(approveCall?.[1]?.body).toBe(
+      JSON.stringify({ confirm: true, reason: "首设备已解绑，直接批准新设备" }),
     );
   });
 

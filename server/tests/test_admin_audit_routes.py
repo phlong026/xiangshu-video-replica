@@ -170,11 +170,15 @@ def _insert_adjustment(
     target: str,
     source_type: str,
     reason: str,
+    created_at: str | None = None,
 ) -> str:
     """Create one PAID adjustment-style order plus its audit row.
 
     ``admin_adjustments.recharge_order_id`` is unique (one audit row per
-    order) so every row gets its own order.
+    order) so every row gets its own order. ``created_at`` pins the row's
+    timestamp for ordering/range tests — the Python lane writes ISO ``T``
+    text while the column default writes space-formatted timestamps, and the
+    unified audit view must handle both (PR #85 review).
     """
     adjustment_id = str(uuid.uuid4())
     order_id = f"audit-order-{adjustment_id}"
@@ -188,21 +192,27 @@ def _insert_adjustment(
         "1000, 1000, 10000, 1000, 1000, 1, now())",
         (order_id, target, f"AUDIT-{adjustment_id}"),
     )
+    columns = (
+        "id, recharge_order_id, target_user_id, admin_user_id, "
+        "source_document_type, source_document_ref, reason, request_id"
+    )
+    values: tuple[object, ...] = (
+        adjustment_id,
+        order_id,
+        target,
+        actor,
+        source_type,
+        f"REF-{uuid.uuid4()}",
+        reason,
+        str(uuid.uuid4()),
+    )
+    if created_at is not None:
+        columns += ", created_at"
+        values += (created_at,)
+    placeholders = ", ".join(["%s"] * len(values))
     conn.execute(
-        "INSERT INTO admin_adjustments "
-        "(id, recharge_order_id, target_user_id, admin_user_id, "
-        " source_document_type, source_document_ref, reason, request_id) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-        (
-            adjustment_id,
-            order_id,
-            target,
-            actor,
-            source_type,
-            f"REF-{uuid.uuid4()}",
-            reason,
-            str(uuid.uuid4()),
-        ),
+        f"INSERT INTO admin_adjustments ({columns}) VALUES ({placeholders})",
+        values,
     )
     conn.commit()
     return adjustment_id
@@ -467,3 +477,81 @@ def test_list_audit_log_filters_by_target_and_time(client: TestClient, route_sta
     )
     assert past_only.status_code == 200
     assert past_only.json()["total"] == 0
+
+
+@pytest.mark.pg
+def test_list_audit_log_orders_mixed_timestamp_formats(client: TestClient, route_state: str):
+    """PR #85 评审 P2：统一视图按真实时间排序，不被文本格式分组.
+
+    admin_adjustments 由 Python 写入 ISO ``T`` 文本，audit_logs 等表走
+    ``CURRENT_TIMESTAMP`` 空格默认；同日事件若按文本排序会先按格式再按
+    时间分组，跨页错位。种子：10:00 的调整行（T 格式）+ 15:00 的通用
+    审计行（空格格式）——真实时间降序必须 15:00 在前，文本降序则相反。
+    """
+    _admin_session(client, "admin_u")
+    with psycopg.connect(_t34_dsn(), autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO audit_logs "
+            "(id, actor_user_id, action, entity_type, entity_id, metadata_json, "
+            " created_at) "
+            "VALUES (%s, 'admin_u', 'audit.space.late', 'runtime_settings', '1', "
+            "'{}', '2026-09-30 15:00:00+00')",
+            (str(uuid.uuid4()),),
+        )
+        _insert_adjustment(
+            conn,
+            actor="admin_u",
+            target="customer_u",
+            source_type="CS_TICKET",
+            reason="排序验证",
+            created_at="2026-09-30T10:00:00+00:00",
+        )
+
+    response = client.get(AUDIT_PATH)
+    assert response.status_code == 200, response.text
+    items = response.json()["items"]
+    types = [item["event_type"] for item in items]
+    assert "audit.space.late" in types
+    assert "ADMIN_ADJUSTMENT" in types
+    assert types.index("audit.space.late") < types.index("ADMIN_ADJUSTMENT")
+
+
+@pytest.mark.pg
+def test_list_audit_log_created_to_includes_whole_day(client: TestClient, route_state: str):
+    """PR #85 评审 P2：date-only created_to 表示"含当天整天".
+
+    UI 日期输入给的是 ``2026-09-30`` 这种 date-only 值；按当天零点比较
+    会漏掉当天 15:20 的事件。归一为当天最后一微秒（含）。
+    """
+    _admin_session(client, "admin_u")
+    with psycopg.connect(_t34_dsn(), autocommit=True) as conn:
+        _insert_adjustment(
+            conn,
+            actor="admin_u",
+            target="customer_u",
+            source_type="CS_TICKET",
+            reason="整天包含验证",
+            created_at="2026-09-30T15:20:00+00:00",
+        )
+
+    # event_type 过滤掉会话登录自身的审计行，只数种子行。
+    same_day = client.get(
+        AUDIT_PATH,
+        params={"created_to": "2026-09-30", "event_type": "ADMIN_ADJUSTMENT"},
+    )
+    assert same_day.status_code == 200, same_day.text
+    assert same_day.json()["total"] == 1
+
+    day_before = client.get(
+        AUDIT_PATH,
+        params={"created_to": "2026-09-29", "event_type": "ADMIN_ADJUSTMENT"},
+    )
+    assert day_before.status_code == 200
+    assert day_before.json()["total"] == 0
+
+    next_day = client.get(
+        AUDIT_PATH,
+        params={"created_to": "2026-10-01", "event_type": "ADMIN_ADJUSTMENT"},
+    )
+    assert next_day.status_code == 200
+    assert next_day.json()["total"] == 1

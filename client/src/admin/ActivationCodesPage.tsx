@@ -564,6 +564,12 @@ function PairingList({
     return null;
   }
   const boundDevices = devices.filter((device) => device.status === "BOUND");
+  // PR #85 评审 P2：普通批准通道的开关是"首个设备（槽位 1）是否仍 BOUND"
+  // （服务端 §12.2 step 3 语义），不是"是否还有任何绑定设备"——槽位 1 已
+  // 解绑/撤销而槽位 2 仍绑定时，直接批准可用，不必先替换掉健康的槽位 2。
+  const firstDeviceBound = devices.some(
+    (device) => device.slot_no === 1 && device.status === "BOUND",
+  );
   return (
     <section aria-label="待处理设备申请" className="pairing-pending">
       <h3>待处理设备申请</h3>
@@ -577,7 +583,7 @@ function PairingList({
           <small>配对编号：{pairing.pairing_request_id}</small>
           {pairing.status === "APPROVED" ? (
             <p>已批准，等待新设备完成绑定。</p>
-          ) : readOnly ? null : boundDevices.length === 0 ? (
+          ) : readOnly ? null : !firstDeviceBound ? (
             <button
               type="button"
               onClick={() =>
@@ -591,29 +597,30 @@ function PairingList({
             >
               批准设备
             </button>
-          ) : (
-            boundDevices.map((device) => (
-              <button
-                type="button"
-                key={device.device_id}
-                onClick={() =>
-                  onAction({
-                    kind: "pairing",
-                    codeId,
-                    pairingId: pairing.pairing_request_id,
-                    candidateName: pairing.display_name,
-                    replaceDeviceId: device.device_id,
-                    replaceDeviceName:
-                      device.display_name || `设备 #${device.slot_no}`,
-                  })
-                }
-              >
-                {boundDevices.length === 1
-                  ? `替换为${pairing.display_name}`
-                  : `用${pairing.display_name}替换${device.display_name || `设备 #${device.slot_no}`}`}
-              </button>
-            ))
-          )}
+          ) : null}
+          {pairing.status !== "APPROVED" && !readOnly && boundDevices.length > 0
+            ? boundDevices.map((device) => (
+                <button
+                  type="button"
+                  key={device.device_id}
+                  onClick={() =>
+                    onAction({
+                      kind: "pairing",
+                      codeId,
+                      pairingId: pairing.pairing_request_id,
+                      candidateName: pairing.display_name,
+                      replaceDeviceId: device.device_id,
+                      replaceDeviceName:
+                        device.display_name || `设备 #${device.slot_no}`,
+                    })
+                  }
+                >
+                  {boundDevices.length === 1
+                    ? `替换为${pairing.display_name}`
+                    : `用${pairing.display_name}替换${device.display_name || `设备 #${device.slot_no}`}`}
+                </button>
+              ))
+            : null}
         </article>
       ))}
     </section>

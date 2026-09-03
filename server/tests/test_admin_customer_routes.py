@@ -1579,3 +1579,27 @@ def test_customers_csv_export_is_audited_and_filtered(client: TestClient) -> Non
     auditor = _admin_session(client, actor="auditor_u")
     denied = client.get("/api/control/customers.csv", headers=auditor)
     assert denied.status_code == 403
+
+
+def test_customers_csv_export_normalizes_status_casing(client: TestClient) -> None:
+    """PR #85 评审 P2：状态筛选在服务端归一为大写枚举.
+
+    UI 下拉传小写 active/suspended/revoked；导出查询比对的是大写库状态
+    （ACTIVE/…），直接透传会得到只有表头的空 CSV。
+    """
+    admin = _admin_session(client)
+    lowered = client.get(
+        "/api/control/customers.csv",
+        params={"status": "active"},
+        headers=admin,
+    )
+    assert lowered.status_code == 200, lowered.text
+    assert "customer_u" in lowered.text
+
+    suspended = client.get(
+        "/api/control/customers.csv",
+        params={"status": "SUSPENDED"},
+        headers=admin,
+    )
+    assert suspended.status_code == 200, suspended.text
+    assert "customer_u" not in suspended.text

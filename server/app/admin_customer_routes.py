@@ -868,9 +868,14 @@ def export_customers_csv(
                 )
                 clauses.append("u.username ILIKE %s")
                 params.append(f"%{literal}%")
-            if status:
+            # PR #85 review P2: the UI dropdown sends lowercase status values
+            # while the database enum is uppercase — normalize server-side so
+            # every caller (not just this console) matches real rows instead
+            # of exporting a header-only CSV.
+            normalized_status = status.strip().upper() if status else ""
+            if normalized_status:
                 clauses.append("ac.status = %s")
-                params.append(status)
+                params.append(normalized_status)
             where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
             rows = conn.execute(
                 "SELECT u.username, ac.masked_code, aca.activated_at, ac.status "
@@ -892,7 +897,7 @@ def export_customers_csv(
                 entity_type="control_ledger",
                 entity_id="customers",
                 metadata={
-                    "filters": {"status": status or "", "username": username},
+                    "filters": {"status": normalized_status, "username": username},
                     "limit": limit,
                 },
             )
