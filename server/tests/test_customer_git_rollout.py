@@ -8,7 +8,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 def test_customer_git_rollout_requires_an_exact_revision_before_any_mutation() -> None:
     script = (REPO_ROOT / "deploy" / "customer-git-rollout.sh").read_text(encoding="utf-8")
 
-    assert 'REPO_URL="${VIDEO_REPLICA_GIT_REPO_URL:-https://github.com/phlong026/xiangshu-video-replica.git}"' in script
+    assert (
+        'REPO_URL="${VIDEO_REPLICA_GIT_REPO_URL:-'
+        'https://github.com/phlong026/xiangshu-video-replica.git}"'
+    ) in script
     assert '[[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]' in script
     assert 'git -C "$SOURCE" fetch --depth=1 origin "$RELEASE_SHA"' in script
     assert '[[ "$(git -C "$SOURCE" rev-parse HEAD)" == "$RELEASE_SHA" ]]' in script
@@ -39,7 +42,7 @@ def test_customer_git_rollout_ignores_only_root_package_version_metadata() -> No
     script = (REPO_ROOT / "deploy" / "customer-git-rollout.sh").read_text(encoding="utf-8")
 
     assert "dependency_manifest_hash" in script
-    assert 'format_path = sys.argv[2]' in script
+    assert "format_path = sys.argv[2]" in script
     assert 'if format_path.endswith("pyproject.toml"):' in script
     assert 'package["name"] != "video-replica-api"' in script
     assert 'dependency_manifest_hash "$SOURCE/$dependency_file" "$dependency_file"' in script

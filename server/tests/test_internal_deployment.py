@@ -165,7 +165,15 @@ def test_fake_acceptance_runner_is_local_only_and_declares_external_gaps() -> No
         "test_finalize_failure_or_cancellation_releases_credit_once" in item for item in tests
     )
     assert any("test_real_provider_result_must_be_archived_in_cos" in item for item in tests)
-    assert any("test_undownloadable_archived_result_does_not_settle" in item for item in tests)
+    assert any(
+        "test_direct_generation_settles_once_even_when_storage_is_unavailable" in item
+        for item in tests
+    )
+    assert any(
+        "test_direct_generation_does_not_depend_on_storage_download_urls" in item for item in tests
+    )
+    assert any("旧归档流程" in item for item in module.VERIFIED_BEHAVIORS)
+    assert any("直链交付" in item for item in module.VERIFIED_BEHAVIORS)
     assert module.NOT_VERIFIED == (
         "real ZPay payment",
         "real COS archive and signed download",

@@ -481,8 +481,8 @@ def _reconcile(fair_state: str, task_id: str, provider: MetasoH3Provider) -> obj
 def test_reconcile_success_settles_exactly_once(
     fair_state: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Reconciling a succeeded provider result archives it and settles the
-    reserved credit exactly once; a repeated reconcile never settles twice."""
+    """Reconciliation preserves the direct result URL and settles the reserved
+    credit exactly once; a repeated reconcile never settles twice."""
     # The SSRF guard is covered by its own tests; here the fake provider's
     # example.com result URL must not trigger a real DNS/address check. Patch
     # only the module-level guard, never the socket module (psycopg relies on
@@ -504,15 +504,16 @@ def test_reconcile_success_settles_exactly_once(
     with pg_transaction() as raw:
         conn = BusinessConnection.postgres(raw)
         task = conn.execute(
-            "SELECT status, archive_status, result_asset_id "
+            "SELECT status, archive_status, result_asset_id, provider_result_url "
             "FROM generation_tasks WHERE id = 'task-u1-0'"
         ).fetchone()
         wallet = conn.execute(
             "SELECT available_credits, reserved_credits FROM wallets WHERE user_id = 'u1'"
         ).fetchone()
     assert task["status"] == "SUCCEEDED"
-    assert task["archive_status"] == "ARCHIVED"
-    assert task["result_asset_id"] is not None
+    assert task["archive_status"] == "DIRECT"
+    assert task["result_asset_id"] is None
+    assert task["provider_result_url"] == "https://example.com/results/ok.mp4"
     assert int(wallet["available_credits"]) == 999
     assert int(wallet["reserved_credits"]) == 0
     assert _billing_rows(fair_state, "task-u1-0") == [("RESERVE", 1), ("SETTLE", 1)]
@@ -798,13 +799,16 @@ def test_pg_worker_once_loop_claims_processes_and_drains(fair_state: str) -> Non
     with pg_transaction() as raw:
         conn = BusinessConnection.postgres(raw)
         rows = conn.execute(
-            "SELECT status, archive_status, result_asset_id FROM generation_tasks ORDER BY id"
+            "SELECT status, archive_status, result_asset_id, provider_task_id, provider_result_url "
+            "FROM generation_tasks ORDER BY id"
         ).fetchall()
     assert len(rows) == 4
     for row in rows:
         assert row["status"] == "SUCCEEDED"
-        assert row["archive_status"] == "ARCHIVED"
-        assert row["result_asset_id"] is not None
+        assert row["archive_status"] == "DIRECT"
+        assert row["result_asset_id"] is None
+        assert row["provider_task_id"]
+        assert row["provider_result_url"] == f"fake://h3-results/{row['provider_task_id']}.mp4"
     assert _cursor_count(fair_state, "u1") == 0
     assert _cursor_count(fair_state, "u2") == 0
 
@@ -841,8 +845,8 @@ def test_pg_worker_persists_provider_id_and_resumes_without_resubmit(
     """A paid task crosses separate worker rounds as RUNNING/ARCHIVING.
 
     The provider id is committed in the submission observer before the first
-    round returns. Later rounds query/download the same task and never call
-    submit a second time.
+    round returns. Later rounds query/check the same task, preserve its direct
+    result URL and never call submit a second time.
     """
 
     _seed(fair_state, user_ids=["u1"], tasks_per_user=1, wallet_credits=1000)
@@ -907,13 +911,14 @@ def test_pg_worker_persists_provider_id_and_resumes_without_resubmit(
     assert provider.submit_count == 1
     with psycopg.connect(fair_state, autocommit=True) as pg:
         row = pg.execute(
-            "SELECT status, archive_status, result_asset_id "
+            "SELECT status, archive_status, result_asset_id, provider_result_url "
             "FROM generation_tasks WHERE id = 'task-u1-0'"
         ).fetchone()
     assert row is not None
     assert row[0] == "SUCCEEDED"
-    assert row[1] == "ARCHIVED"
-    assert row[2] is not None
+    assert row[1] == "DIRECT"
+    assert row[2] is None
+    assert row[3] == "https://example.com/result.mp4"
 
 
 def test_expired_running_lease_resumes_instead_of_becoming_uncertain(

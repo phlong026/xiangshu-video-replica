@@ -23,8 +23,8 @@ ACCEPTANCE_TESTS = (
     "server/tests/test_wallet_billing_service.py::test_real_provider_result_must_be_archived_in_cos",
     "server/tests/test_wallet_billing_service.py::test_finalize_failure_or_cancellation_releases_credit_once",
     "server/tests/test_media.py::test_media_storage_prefers_cos_when_configured",
-    "server/tests/test_generation.py::test_archived_generation_settles_once_but_archive_failure_stays_reserved",
-    "server/tests/test_generation.py::test_undownloadable_archived_result_does_not_settle",
+    "server/tests/test_generation.py::test_direct_generation_settles_once_even_when_storage_is_unavailable",
+    "server/tests/test_generation.py::test_direct_generation_does_not_depend_on_storage_download_urls",
     "server/tests/test_generation.py::test_terminal_provider_failure_releases_reserved_credit",
 )
 
@@ -33,8 +33,9 @@ VERIFIED_BEHAVIORS = (
     "重复和并发回调只入账一次",
     "同步返回页不入账，主动查单复用同一入账服务",
     "任务冻结幂等且余额不足不部分写入",
-    "归档且可下载后才结算，真实 Provider 结果必须进入 COS",
-    "归档或下载失败保持冻结，Provider 失败或取消只返还一次",
+    "旧归档流程只对已归档结果结算，真实 Provider 的归档结果必须进入 COS",
+    "直链交付仅结算一次，不依赖成片云存储或存储下载链接",
+    "旧归档流程缺少合格资产时保持冻结，Provider 失败或取消只返还一次",
 )
 
 NOT_VERIFIED = (
