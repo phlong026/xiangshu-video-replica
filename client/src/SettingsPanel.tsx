@@ -202,8 +202,13 @@ function ProviderForm({
   const [statusTone, setStatusTone] = useState<"ok" | "error">("ok");
   const [isSaving, setIsSaving] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
+  const previousConfigRef = useRef(settings.config);
 
   useEffect(() => {
+    if (previousConfigRef.current === settings.config) {
+      return;
+    }
+    previousConfigRef.current = settings.config;
     setValues(initialValues(form.fields, settings.config));
   }, [form.fields, settings.config]);
 
