@@ -17,15 +17,17 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import ipaddress
 import logging
 import socket
+import ssl
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import Protocol
-from urllib.parse import quote, urlsplit
-from urllib.request import Request, urlopen
+from urllib.parse import quote, urljoin, urlsplit
 
 from app.storage import DownloadIntent, StoredObject
 from app.viral_decrypt import decrypt_head, is_encrypted_mp4
@@ -62,6 +64,7 @@ class ViralMediaResult:
     size: int
     content_type: str
     cache_hit: bool
+    sha256: str = ""
 
 
 def _storage_video_id(video_id: str) -> str:
@@ -95,6 +98,8 @@ class ViralStorage(Protocol):
 
     def put_object(self, key: str, content: bytes, *, content_type: str) -> StoredObject: ...
 
+    def get_object(self, key: str) -> bytes: ...
+
     def create_download_intent(
         self, key: str, *, expires_in: timedelta, can_read: bool
     ) -> DownloadIntent: ...
@@ -106,48 +111,154 @@ class UrlFetcher:
     上游返回的媒体/封面 URL 属于半可信输入：真实视频号 CDN 链接就是
     ``http://``，因此不能强制 https，但必须拒绝非 http(s) 协议与解析到
     私网/环回/链路本地的地址（``file://``、云元数据 169.254.169.254 等），
-    否则被污染的数据源响应可以驱动服务端 SSRF。解析与请求之间存在 TOCTOU
-    窗口，与 METASO 结果下载的防护同级（generation._require_public_https_host）。
+    否则被污染的数据源响应可以驱动服务端 SSRF。连接固定到本次校验得到的
+    公网 IP；HTTPS 仍使用原主机名做 SNI 与证书校验，每次重定向重新校验。
     """
 
-    def __init__(self, *, timeout_seconds: float = _DEFAULT_FETCH_TIMEOUT_SECONDS) -> None:
+    def __init__(
+        self,
+        *,
+        timeout_seconds: float = _DEFAULT_FETCH_TIMEOUT_SECONDS,
+        max_bytes: int = _MAX_DOWNLOAD_BYTES,
+        connection_factory: Callable[[str, str, int, str, float], http.client.HTTPConnection]
+        | None = None,
+    ) -> None:
         self.timeout_seconds = timeout_seconds
+        self.max_bytes = max_bytes
+        self.last_content_type: str | None = None
+        self._connection_factory = connection_factory or _pinned_connection
 
     def fetch(self, url: str) -> bytes:
-        _require_public_http_url(url)
-        request = Request(url, headers={"User-Agent": _USER_AGENT}, method="GET")
-        with urlopen(request, timeout=self.timeout_seconds) as response:  # noqa: S310
-            declared = response.headers.get("Content-Length")
-            if declared and int(declared) > _MAX_DOWNLOAD_BYTES:
+        current_url = url
+        for _redirect in range(6):
+            scheme, hostname, port, connect_ip = _resolve_public_http_url(current_url)
+            parsed = urlsplit(current_url)
+            target = parsed.path or "/"
+            if parsed.query:
+                target += f"?{parsed.query}"
+            host_header = f"[{hostname}]" if ":" in hostname else hostname
+            if port != (443 if scheme == "https" else 80):
+                host_header = f"{host_header}:{port}"
+            connection = self._connection_factory(
+                scheme, hostname, port, connect_ip, self.timeout_seconds
+            )
+            try:
+                connection.request(
+                    "GET",
+                    target,
+                    headers={"Host": host_header, "User-Agent": _USER_AGENT},
+                )
+                response = connection.getresponse()
+                if response.status in {301, 302, 303, 307, 308}:
+                    location = response.headers.get("Location")
+                    if not location:
+                        raise ViralMediaError("媒体地址重定向无效")
+                    next_url = urljoin(current_url, location)
+                    if scheme == "https" and urlsplit(next_url).scheme != "https":
+                        raise ViralMediaError("媒体地址禁止降级到不安全连接")
+                    current_url = next_url
+                    continue
+                if response.status < 200 or response.status >= 300:
+                    raise ViralMediaError("媒体地址返回异常状态")
+                return self._read_response(response)
+            finally:
+                connection.close()
+        raise ViralMediaError("媒体地址重定向次数过多")
+
+    def _read_response(self, response: http.client.HTTPResponse) -> bytes:
+        self.last_content_type = response.headers.get("Content-Type")
+        declared = response.headers.get("Content-Length")
+        try:
+            if declared and int(declared) > self.max_bytes:
                 raise ViralMediaError("媒体文件超出可下载大小上限")
-            chunks: list[bytes] = []
-            total = 0
-            while True:
-                chunk = response.read(1024 * 1024)
-                if not chunk:
-                    break
-                total += len(chunk)
-                if total > _MAX_DOWNLOAD_BYTES:
-                    raise ViralMediaError("媒体文件超出可下载大小上限")
-                chunks.append(chunk)
-            return b"".join(chunks)
+        except ValueError as exc:
+            raise ViralMediaError("媒体地址返回无效文件长度") from exc
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = response.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > self.max_bytes:
+                raise ViralMediaError("媒体文件超出可下载大小上限")
+            chunks.append(chunk)
+        return b"".join(chunks)
 
 
-def _require_public_http_url(url: str) -> None:
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, host: str, port: int, connect_ip: str, timeout: float) -> None:
+        super().__init__(host, port=port, timeout=timeout)
+        self._connect_ip = connect_ip
+
+    def connect(self) -> None:
+        self.sock = socket.create_connection((self._connect_ip, self.port), self.timeout)
+        _verify_peer(self.sock, self._connect_ip)
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, host: str, port: int, connect_ip: str, timeout: float) -> None:
+        tls_context = ssl.create_default_context()
+        super().__init__(host, port=port, timeout=timeout, context=tls_context)
+        self._connect_ip = connect_ip
+        self._tls_context = tls_context
+
+    def connect(self) -> None:
+        sock = socket.create_connection((self._connect_ip, self.port), self.timeout)
+        _verify_peer(sock, self._connect_ip)
+        try:
+            self.sock = self._tls_context.wrap_socket(sock, server_hostname=self.host)
+        except BaseException:
+            sock.close()
+            raise
+
+
+def _verify_peer(sock: socket.socket, expected_ip: str) -> None:
+    actual_ip = str(sock.getpeername()[0])
+    if ipaddress.ip_address(actual_ip) != ipaddress.ip_address(expected_ip):
+        sock.close()
+        raise ViralMediaError("媒体连接地址与已验证地址不一致")
+
+
+def _pinned_connection(
+    scheme: str, hostname: str, port: int, connect_ip: str, timeout: float
+) -> http.client.HTTPConnection:
+    if scheme == "https":
+        return _PinnedHTTPSConnection(hostname, port, connect_ip, timeout)
+    return _PinnedHTTPConnection(hostname, port, connect_ip, timeout)
+
+
+def _resolve_public_http_url(url: str) -> tuple[str, str, int, str]:
     parsed = urlsplit(url)
     if parsed.scheme not in {"http", "https"}:
         raise ViralMediaError("媒体地址协议不受支持")
     hostname = parsed.hostname
     if not hostname:
         raise ViralMediaError("媒体地址缺少主机名")
+    if parsed.username is not None or parsed.password is not None:
+        raise ViralMediaError("媒体地址不得包含凭据")
     try:
-        addresses = socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError as exc:
+        raise ViralMediaError("媒体地址端口无效") from exc
+    expected_port = 443 if parsed.scheme == "https" else 80
+    if port != expected_port:
+        raise ViralMediaError("媒体地址端口不受支持")
+    try:
+        addresses = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
     except socket.gaierror as exc:
         raise ViralMediaError("媒体地址无法解析") from exc
+    if not addresses:
+        raise ViralMediaError("媒体地址无法解析")
+    public_ips: list[str] = []
     for address in addresses:
-        ip = ipaddress.ip_address(address[4][0])
+        ip_text = str(address[4][0])
+        ip = ipaddress.ip_address(ip_text)
         if not ip.is_global:
             raise ViralMediaError("媒体地址必须指向公网主机")
+        if ip_text not in public_ips:
+            public_ips.append(ip_text)
+    return parsed.scheme, hostname, port, public_ips[0]
 
 
 def guess_image_content_type(content: bytes, url: str = "") -> str:
@@ -225,10 +336,12 @@ class ViralMediaPipeline:
         client: ViralSourceClient | None,
         storage: ViralStorage,
         fetcher: UrlFetcher | None = None,
+        validator: Callable[[bytes, str, str | None], None] | None = None,
     ) -> None:
         self._client = client
         self._storage = storage
         self._fetcher = fetcher or UrlFetcher()
+        self._validator = validator
         self.detail: WechatVideoDetail | None = None
 
     def fetch(self, video: ViralVideo, *, prefer: str | None = None) -> ViralMediaResult:
@@ -239,8 +352,16 @@ class ViralMediaPipeline:
             self.detail = None
             existing = self._storage.head_object(key)
             if existing is not None:
+                if self._validator is not None:
+                    self._validator(self._storage.get_object(key), kind, existing.content_type)
                 return self._result(key, existing, kind, content_type, cache_hit=True)
             content = self._download_content(video, kind)
+            if self._validator is not None:
+                self._validator(
+                    content,
+                    kind,
+                    getattr(self._fetcher, "last_content_type", None),
+                )
             stored = self._storage.put_object(key, content, content_type=content_type)
             return self._result(key, stored, kind, content_type, cache_hit=False)
 
@@ -316,4 +437,5 @@ class ViralMediaPipeline:
             size=stored.size,
             content_type=stored.content_type,
             cache_hit=cache_hit,
+            sha256=str(getattr(stored, "sha256", "")),
         )

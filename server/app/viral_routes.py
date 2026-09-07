@@ -23,10 +23,12 @@ from pathlib import Path as FilePath
 from typing import Annotated, Any, Literal
 from urllib.parse import quote, unquote, urlsplit
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.auth import AuthenticatedUser, Database
+from app.customer_fence import BusinessDbDep
 from app.db import connect_database
 from app.db_pg import DATABASE_URL_ENV, get_pg_pool, pg_transaction
 from app.db_portable import BusinessConnection
@@ -44,15 +46,28 @@ from app.viral_media import (
     viral_cover_key,
     viral_media_key,
 )
+from app.viral_refresh import enqueue_viral_refresh_task, viral_refresh_status
 from app.viral_statistics import refresh_viral_statistics
 from app.viral_store import (
+    InvalidViralCursorError,
+    ViralAvailability,
+    add_viral_favorite,
+    favorite_viral_video_ids,
     fetch_state_is_fresh,
     get_viral_video,
+    is_viral_favorite,
+    list_favorite_viral_video_page,
+    list_viral_video_page,
     mark_fetch_state,
+    remove_viral_favorite,
     update_viral_cover,
     update_viral_statistics,
     upsert_viral_videos,
+    validate_viral_cursor,
     viral_fetched_at,
+    viral_runtime_controls,
+    viral_video_availabilities,
+    viral_video_availability,
 )
 from app.viral_store import (
     list_viral_videos as list_stored_viral_videos,
@@ -90,6 +105,7 @@ class ViralVideoItem(BaseModel):
     videoId: str
     category: str
     title: str
+    sourceDescription: str | None
     author: str
     authorAvatar: str | None
     verified: bool
@@ -106,6 +122,8 @@ class ViralVideoItem(BaseModel):
     hasPlayableAudio: bool
     playUrl: str | None = None
     native: dict[str, Any] = Field(default_factory=dict)
+    isFavorite: bool = False
+    availability: Literal["available", "hidden", "unavailable"] = "available"
 
 
 class ViralListResponse(BaseModel):
@@ -114,8 +132,25 @@ class ViralListResponse(BaseModel):
     categories: list[str]
     items: list[ViralVideoItem]
     fetchedAt: str | None
+    dataVersion: str | None
     source: Literal["database"] = "database"
     stale: bool = False
+    refreshing: bool = False
+    refreshError: str | None = None
+    total: int
+    hasMore: bool
+    nextCursor: str | None
+
+
+class ViralFavoritesResponse(BaseModel):
+    items: list[ViralVideoItem]
+    total: int
+    hasMore: bool
+    nextCursor: str | None
+
+
+class ViralFavoriteMutationResponse(BaseModel):
+    isFavorite: bool
 
 
 class ViralMediaRequest(BaseModel):
@@ -193,7 +228,7 @@ def _open_worker_connection() -> tuple[BusinessConnection, Callable[[], None]]:
 
 
 @contextmanager
-def _refresh_connection(request_conn: Database) -> Iterator[BusinessConnection]:
+def _refresh_connection(request_conn: BusinessConnection | None) -> Iterator[BusinessConnection]:
     """回源期间改用独立连接，请求事务内不做外呼与平台锁等待.
 
     上游回源是数十秒级外呼：若在请求级 PG 事务内等待平台锁/承载回源，
@@ -210,10 +245,14 @@ def _refresh_connection(request_conn: Database) -> Iterator[BusinessConnection]:
             borrowed.raw.autocommit = True
             yield borrowed
         return
+    if request_conn is None:
+        raise RuntimeError("SQLite viral refresh requires a live business connection")
     yield request_conn
 
 
-def _spawn_cover_enrich(enricher: CoverEnricher, videos: list[ViralVideo]) -> None:
+def _spawn_cover_enrich(enricher: CoverEnricher | None, videos: list[ViralVideo]) -> None:
+    if enricher is None:
+        return
     pending = [video for video in videos if not video.cover_key and video.cover_url]
     if not pending:
         return
@@ -248,90 +287,110 @@ def _spawn_cover_enrich(enricher: CoverEnricher, videos: list[ViralVideo]) -> No
 
 
 def _collect_videos(
-    conn: Database,
+    conn: BusinessConnection | None,
     client: ViralSourceClient | None,
     *,
     platform: str,
     sort: str,
     max_age: timedelta,
     enricher: CoverEnricher | None = None,
+    read_result: bool = True,
 ) -> list[ViralVideo]:
-    """响应始终从库读取；同平台冷请求等待首轮落库，随后复用。"""
-    with _REFRESH_LOCKS[platform], _refresh_connection(conn) as refresh_conn:
-        # 回源/落库全部走独立连接；请求事务内不承载外呼（安全专项 P1）。
-        conn = refresh_conn
-        if not fetch_state_is_fresh(conn, platform=platform, sort=sort, max_age=max_age):
-            failures: list[ViralSourceError] = []
-            jobs: list[tuple[str, str]] = []
-            for category in viral_categories():
-                keyword = viral_keyword(category, platform)
-                if not keyword or fetch_state_is_fresh(
-                    conn, platform=platform, sort=f"{sort}:category:{category}", max_age=max_age
-                ):
-                    continue
-                if fetch_state_is_fresh(
-                    conn,
-                    platform=platform,
-                    sort=f"{sort}:retry:{category}",
-                    max_age=timedelta(minutes=1),
-                ):
-                    failures.append(ViralSourceError("爆款数据源暂时不可用，请稍后重试"))
-                else:
-                    jobs.append((category, keyword))
-            if client is None:
-                failures.append(ViralSourceUnavailable("爆款数据源尚未配置"))
-            else:
-                # 分类独立回源并分别记成功状态；一类失败不丢掉已付费取得的数据。
-                with ThreadPoolExecutor(max_workers=4) as pool:
-                    futures = {
-                        pool.submit(
-                            _fetch_videos, client, platform, category, keyword, sort
-                        ): category
-                        for category, keyword in jobs
-                    }
-                    outcomes: dict[str, list[ViralVideo] | ViralSourceError] = {}
-                    for future in as_completed(futures):
-                        category = futures[future]
-                        try:
-                            outcomes[category] = future.result()
-                        except ViralSourceError as exc:
-                            outcomes[category] = exc
-                        except (ValueError, TypeError):
-                            outcomes[category] = ViralSourceError("爆款数据源返回异常，请稍后重试")
+    """Refresh outside database ownership, then serve the persisted page."""
+    with _REFRESH_LOCKS[platform]:
+        failures: list[ViralSourceError] = []
+        jobs: list[tuple[str, str]] = []
+        with _refresh_connection(conn) as state_conn:
+            refresh_needed = not fetch_state_is_fresh(
+                state_conn, platform=platform, sort=sort, max_age=max_age
+            )
+            if refresh_needed:
+                for category in viral_categories():
+                    keyword = viral_keyword(category, platform)
+                    if not keyword or fetch_state_is_fresh(
+                        state_conn,
+                        platform=platform,
+                        sort=f"{sort}:category:{category}",
+                        max_age=max_age,
+                    ):
+                        continue
+                    if fetch_state_is_fresh(
+                        state_conn,
+                        platform=platform,
+                        sort=f"{sort}:retry:{category}",
+                        max_age=timedelta(minutes=1),
+                    ):
+                        failures.append(ViralSourceError("爆款数据源暂时不可用，请稍后重试"))
+                    else:
+                        jobs.append((category, keyword))
 
-                    # HTTP 保持并行，数据库按配置顺序串行写入；跨分类同 video_id
-                    # 时，最终归属不受 future 完成先后影响。
-                    for category, _keyword in jobs:
-                        outcome = outcomes[category]
-                        if isinstance(outcome, ViralSourceError):
-                            failure = outcome
-                            failures.append(failure)
-                            mark_fetch_state(
-                                conn, platform=platform, sort=f"{sort}:retry:{category}"
-                            )
-                            logger.warning(
-                                "Viral refresh failed for %s/%s: %s",
-                                platform,
-                                category,
-                                type(failure).__name__,
-                            )
-                            continue
-                        upsert_viral_videos(conn, outcome)
+        outcomes: dict[str, list[ViralVideo] | ViralSourceError] = {}
+        if refresh_needed and client is None:
+            failures.append(ViralSourceUnavailable("爆款数据源尚未配置"))
+        elif refresh_needed:
+            # Network work deliberately happens with no database connection checked out.
+            assert client is not None
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                futures = {
+                    pool.submit(_fetch_videos, client, platform, category, keyword, sort): category
+                    for category, keyword in jobs
+                }
+                for future in as_completed(futures):
+                    category = futures[future]
+                    try:
+                        outcomes[category] = future.result()
+                    except ViralSourceError as exc:
+                        outcomes[category] = exc
+                    except (ValueError, TypeError):
+                        outcomes[category] = ViralSourceError("爆款数据源返回异常，请稍后重试")
+
+        with _refresh_connection(conn) as store_conn:
+            if refresh_needed:
+                # Preserve configured category order so duplicate IDs have
+                # deterministic ownership.
+                for category, _keyword in jobs:
+                    outcome = outcomes.get(category)
+                    if isinstance(outcome, ViralSourceError):
+                        failures.append(outcome)
                         mark_fetch_state(
-                            conn, platform=platform, sort=f"{sort}:category:{category}"
+                            store_conn, platform=platform, sort=f"{sort}:retry:{category}"
                         )
-            if not failures:
-                mark_fetch_state(conn, platform=platform, sort=sort)
-            elif not list_stored_viral_videos(conn, platform=platform, sort=sort):
-                raise failures[0]
-        videos = list_stored_viral_videos(conn, platform=platform, sort=sort)
+                        logger.warning(
+                            "Viral refresh failed for %s/%s: %s",
+                            platform,
+                            category,
+                            type(outcome).__name__,
+                        )
+                    elif outcome is not None:
+                        upsert_viral_videos(store_conn, outcome)
+                        mark_fetch_state(
+                            store_conn, platform=platform, sort=f"{sort}:category:{category}"
+                        )
+                if not failures:
+                    mark_fetch_state(store_conn, platform=platform, sort=sort)
+                elif not list_stored_viral_videos(store_conn, platform=platform, sort=sort):
+                    raise failures[0]
+            videos = (
+                list_stored_viral_videos(store_conn, platform=platform, sort=sort)
+                if read_result
+                else []
+            )
     if enricher is not None:
         _spawn_cover_enrich(enricher, videos)
     return videos
 
 
-def _item(video: ViralVideo) -> ViralVideoItem:
-    item = ViralVideoItem(**video.to_client_dict())
+def _item(
+    video: ViralVideo,
+    *,
+    is_favorite: bool = False,
+    availability: ViralAvailability = "available",
+) -> ViralVideoItem:
+    item = ViralVideoItem(
+        **video.to_client_dict(),
+        isFavorite=is_favorite,
+        availability=availability,
+    )
     if item.coverUrl and item.coverUrl.startswith("/"):
         # 自有稳定封面路由：下发绝对地址，跨源前端（桌面/开发）可直接加载。
         item.coverUrl = f"{api_base_url()}{item.coverUrl}"
@@ -345,6 +404,8 @@ def list_viral_videos(
     client: ViralSourceClientDep,
     platform: str = PLATFORM_DOUYIN,
     sort: str = SORT_HOT,
+    limit: Annotated[int, Query(ge=1, le=50)] = 12,
+    cursor: Annotated[str | None, Query(max_length=2048)] = None,
 ) -> ViralListResponse:
     if platform not in _VALID_PLATFORMS:
         raise HTTPException(
@@ -355,35 +416,202 @@ def list_viral_videos(
         raise HTTPException(
             status_code=400, detail={"code": "VIRAL_SORT_INVALID", "message": "不支持的排序方式"}
         )
+    if cursor is not None:
+        try:
+            validate_viral_cursor(cursor, platform=platform, sort=sort)
+        except InvalidViralCursorError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "VIRAL_CURSOR_INVALID", "message": "分页游标无效，请刷新列表"},
+            ) from exc
+    collection_enabled, _ = viral_runtime_controls(conn)
+    fresh = fetch_state_is_fresh(conn, platform=platform, sort=sort, max_age=VIRAL_LIST_CACHE_TTL)
+    refreshing = False
+    refresh_error: str | None = None
+    if collection_enabled and not fresh and conn.is_postgres:
+        enqueue_viral_refresh_task(conn, platform=platform, sort=sort)
+        refreshing, refresh_error = viral_refresh_status(conn, platform=platform, sort=sort)
+    elif collection_enabled and not fresh:
+        try:
+            _collect_videos(
+                conn,
+                client,
+                platform=platform,
+                sort=sort,
+                max_age=VIRAL_LIST_CACHE_TTL,
+                read_result=False,
+            )
+        except ViralSourceUnavailable as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "VIRAL_SOURCE_UNAVAILABLE", "message": str(exc)},
+            ) from exc
+        except ViralSourceError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail={"code": "VIRAL_SOURCE_UPSTREAM", "message": str(exc)},
+            ) from exc
+        fresh = fetch_state_is_fresh(
+            conn, platform=platform, sort=sort, max_age=VIRAL_LIST_CACHE_TTL
+        )
     try:
-        videos = _collect_videos(
+        page = list_viral_video_page(
             conn,
-            client,
             platform=platform,
             sort=sort,
-            max_age=VIRAL_LIST_CACHE_TTL,
-            enricher=_cover_enricher_or_none(conn),
+            limit=limit,
+            cursor=cursor,
         )
-    except ViralSourceUnavailable as exc:
+    except InvalidViralCursorError as exc:
         raise HTTPException(
-            status_code=503,
-            detail={"code": "VIRAL_SOURCE_UNAVAILABLE", "message": str(exc)},
+            status_code=400,
+            detail={"code": "VIRAL_CURSOR_INVALID", "message": "分页游标无效，请刷新列表"},
         ) from exc
-    except ViralSourceError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail={"code": "VIRAL_SOURCE_UPSTREAM", "message": str(exc)},
-        ) from exc
+    favorite_ids = favorite_viral_video_ids(
+        conn,
+        user_id=actor.id,
+        platform=platform,
+        video_ids=[video.video_id for video in page.items],
+    )
+    availability_by_id = viral_video_availabilities(
+        conn,
+        platform=platform,
+        video_ids=[video.video_id for video in page.items],
+    )
+    _spawn_cover_enrich(_cover_enricher_or_none(conn), page.items)
     return ViralListResponse(
         platform=platform,
         sort=sort,
         categories=viral_categories(),
-        items=[_item(video) for video in videos],
+        items=[
+            _item(
+                video,
+                is_favorite=video.video_id in favorite_ids,
+                availability=availability_by_id.get(video.video_id, "available"),
+            )
+            for video in page.items
+        ],
         fetchedAt=viral_fetched_at(conn, platform=platform, sort=sort),
-        stale=not fetch_state_is_fresh(
-            conn, platform=platform, sort=sort, max_age=VIRAL_LIST_CACHE_TTL
-        ),
+        dataVersion=viral_fetched_at(conn, platform=platform, sort=sort),
+        stale=not fresh,
+        refreshing=refreshing,
+        refreshError=refresh_error,
+        total=page.total,
+        hasMore=page.has_more,
+        nextCursor=page.next_cursor,
     )
+
+
+@router.get("/favorites", response_model=ViralFavoritesResponse)
+def list_viral_favorites(
+    conn: Database,
+    actor: AuthenticatedUser,
+    platform: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=50)] = 24,
+    cursor: Annotated[str | None, Query(max_length=2048)] = None,
+) -> ViralFavoritesResponse:
+    if platform is not None and platform not in _VALID_PLATFORMS:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "VIRAL_PLATFORM_INVALID", "message": "不支持的视频平台"},
+        )
+    try:
+        page = list_favorite_viral_video_page(
+            conn,
+            user_id=actor.id,
+            platform=platform,
+            limit=limit,
+            cursor=cursor,
+        )
+    except InvalidViralCursorError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "VIRAL_CURSOR_INVALID", "message": "分页游标无效，请刷新列表"},
+        ) from exc
+    availability_by_platform: dict[str, dict[str, ViralAvailability]] = {}
+    for video_platform in {video.platform for video in page.items}:
+        availability_by_platform[video_platform] = viral_video_availabilities(
+            conn,
+            platform=video_platform,
+            video_ids=[video.video_id for video in page.items if video.platform == video_platform],
+        )
+    return ViralFavoritesResponse(
+        items=[
+            _item(
+                video,
+                is_favorite=True,
+                availability=availability_by_platform[video.platform].get(
+                    video.video_id, "available"
+                ),
+            )
+            for video in page.items
+        ],
+        total=page.total,
+        hasMore=page.has_more,
+        nextCursor=page.next_cursor,
+    )
+
+
+def _require_stored_video(
+    conn: Database,
+    *,
+    platform: str,
+    video_id: str,
+    require_available: bool = False,
+) -> ViralVideo:
+    if platform not in _VALID_PLATFORMS:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "VIRAL_PLATFORM_INVALID", "message": "不支持的视频平台"},
+        )
+    video = get_viral_video(conn, platform=platform, video_id=video_id)
+    if video is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "VIRAL_VIDEO_NOT_FOUND", "message": "该爆款视频不存在"},
+        )
+    if (
+        require_available
+        and viral_video_availability(conn, platform=platform, video_id=video_id) != "available"
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "VIRAL_VIDEO_UNAVAILABLE",
+                "message": "该爆款视频当前不可用于创作",
+            },
+        )
+    return video
+
+
+@router.put("/favorites/{platform}/{video_id:path}", response_model=ViralFavoriteMutationResponse)
+def add_viral_video_favorite(
+    db: BusinessDbDep,
+    platform: str,
+    video_id: str,
+) -> ViralFavoriteMutationResponse:
+    with db.write() as (conn, actor):
+        _require_stored_video(conn, platform=platform, video_id=video_id, require_available=True)
+        add_viral_favorite(conn, user_id=actor.id, platform=platform, video_id=video_id)
+    return ViralFavoriteMutationResponse(isFavorite=True)
+
+
+@router.delete(
+    "/favorites/{platform}/{video_id:path}", response_model=ViralFavoriteMutationResponse
+)
+def remove_viral_video_favorite(
+    db: BusinessDbDep,
+    platform: str,
+    video_id: str,
+) -> ViralFavoriteMutationResponse:
+    if platform not in _VALID_PLATFORMS:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "VIRAL_PLATFORM_INVALID", "message": "不支持的视频平台"},
+        )
+    with db.write() as (conn, actor):
+        remove_viral_favorite(conn, user_id=actor.id, platform=platform, video_id=video_id)
+    return ViralFavoriteMutationResponse(isFavorite=False)
 
 
 @router.post("/videos/statistics", response_model=ViralStatisticsResponse)
@@ -433,6 +661,17 @@ def fetch_viral_video_media(
         video = next(
             (candidate for candidate in refreshed if candidate.video_id == payload.videoId),
             None,
+        )
+    if (
+        viral_video_availability(conn, platform=payload.platform, video_id=payload.videoId)
+        != "available"
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "VIRAL_VIDEO_UNAVAILABLE",
+                "message": "该爆款视频当前不可用于创作",
+            },
         )
     if video is None:
         raise HTTPException(
@@ -638,6 +877,7 @@ def download_viral_media_file(
     expires: Annotated[str, Query(min_length=1, max_length=20)],
     user_id: Annotated[str, Query(min_length=1)],
     sig: Annotated[str, Query(min_length=1)],
+    range_header: Annotated[str | None, Header(alias="Range")] = None,
 ) -> Response:
     # 签名即授权（绑定 user_id + 过期时间），与本地资产签名下载同一模式；
     # 浏览器 <audio>/<video> 标签无法携带身份头，故不设登录依赖。
@@ -660,15 +900,84 @@ def download_viral_media_file(
         stored = storage.head_object(key)
         if stored is None:
             raise HTTPException(status_code=404, detail={"code": "OBJECT_NOT_FOUND"})
-        content = storage.get_object(key)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail={"code": "OBJECT_NOT_FOUND"}) from None
     except StorageBackendUnavailable:
         raise HTTPException(
             status_code=503, detail={"code": "STORAGE_BACKEND_UNAVAILABLE"}
         ) from None
-    return Response(
-        content=content,
+    start, end, is_partial = _requested_byte_range(range_header, stored.size)
+    content_length = end - start + 1
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "private, max-age=3600",
+        "Content-Length": str(content_length),
+    }
+    if is_partial:
+        headers["Content-Range"] = f"bytes {start}-{end}/{stored.size}"
+    return StreamingResponse(
+        storage.iter_object(key, start=start, end=end),
+        status_code=206 if is_partial else 200,
         media_type=stored.content_type,
-        headers={"Cache-Control": "private, max-age=3600"},
+        headers=headers,
+    )
+
+
+def _requested_byte_range(value: str | None, size: int) -> tuple[int, int, bool]:
+    if size <= 0:
+        raise HTTPException(
+            status_code=416,
+            detail={"code": "VIRAL_MEDIA_RANGE_INVALID"},
+            headers={"Content-Range": "bytes */0"},
+        )
+    if value is None:
+        return 0, size - 1, False
+    if not value.startswith("bytes=") or "," in value:
+        raise HTTPException(
+            status_code=416,
+            detail={"code": "VIRAL_MEDIA_RANGE_INVALID"},
+            headers={"Content-Range": f"bytes */{size}"},
+        )
+    raw_start, separator, raw_end = value[6:].partition("-")
+    try:
+        if not separator:
+            raise ValueError
+        if raw_start:
+            start = int(raw_start)
+            end = size - 1 if not raw_end else min(int(raw_end), size - 1)
+        else:
+            suffix_length = int(raw_end)
+            if suffix_length <= 0:
+                raise ValueError
+            start = max(0, size - suffix_length)
+            end = size - 1
+        if start < 0 or start >= size or end < start:
+            raise ValueError
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=416,
+            detail={"code": "VIRAL_MEDIA_RANGE_INVALID"},
+            headers={"Content-Range": f"bytes */{size}"},
+        ) from exc
+    return start, end, True
+
+
+@router.get("/videos/{platform}/{video_id:path}", response_model=ViralVideoItem)
+def get_viral_video_detail(
+    conn: Database,
+    actor: AuthenticatedUser,
+    platform: str,
+    video_id: str,
+) -> ViralVideoItem:
+    video = _require_stored_video(conn, platform=platform, video_id=video_id)
+    availability = viral_video_availability(conn, platform=platform, video_id=video_id)
+    return _item(
+        video,
+        is_favorite=is_viral_favorite(
+            conn,
+            user_id=actor.id,
+            platform=platform,
+            video_id=video_id,
+        ),
+        availability=availability,
     )

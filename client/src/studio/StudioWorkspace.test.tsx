@@ -30,6 +30,7 @@ const live = vi.hoisted(() => ({
     saved: item.saved,
     allowedUses: item.allowed_uses,
   })),
+  loadViralVideos: vi.fn(async () => ({ videos: [], errors: [] })),
   loadPersonAssets: vi.fn(),
   loadProjectDraft: vi.fn(),
   reloadTasks: vi.fn(async (): Promise<unknown[]> => []),
@@ -41,6 +42,7 @@ const live = vi.hoisted(() => ({
     unavailableIds: [] as string[],
   })),
   loadSavedScriptList: vi.fn(async (): Promise<unknown[]> => []),
+  loadLatestScriptFromUpload: vi.fn(async (): Promise<unknown> => null),
   persistCloudDraft: vi.fn(async (_draft: unknown): Promise<void> => {}),
   persistSavedScript: vi.fn(
     async (_script: unknown, _sourceProjectId?: string): Promise<void> => {},
@@ -1048,6 +1050,29 @@ describe("V1.4 workspace integration", () => {
       expect(
         (screen.getByLabelText("二创文案") as HTMLTextAreaElement).value,
       ).toBe("提取出的乡墅口播原文");
+    });
+
+    it("重新进入工作区时恢复同一来源资产已完成的提取任务", async () => {
+      live.loadStudioData.mockResolvedValue(emptyStudioData);
+      live.loadCloudDraft.mockResolvedValue(undefined);
+      live.loadLatestScriptFromUpload.mockResolvedValueOnce({
+        id: "asr-restored",
+        status: "SUCCEEDED",
+        result: { text: "后台已经完成的转写文案" },
+        sourceAssetId: "asset-1",
+      });
+      const state = createState("workbench");
+      state.draft.projectId = "project-1";
+      state.draft.sourceAssetId = "asset-1";
+      render(<StudioWorkspace currentUser={reviewUser} initialState={state} />);
+
+      expect(
+        await screen.findByText(/文案提取已完成.*恢复到当前草稿/),
+      ).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "文案工坊" }));
+      expect(screen.getByLabelText("二创文案")).toHaveValue(
+        "后台已经完成的转写文案",
+      );
     });
 
     it("提取文案失败时保留工作区并提示服务端错误", async () => {

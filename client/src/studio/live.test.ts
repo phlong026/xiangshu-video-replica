@@ -871,6 +871,16 @@ describe("真实 Studio 只读适配器", () => {
     expect(data.errors).toContain("读取视频号爆款失败：channels timeout");
   });
 
+  it("核心工作台数据可不等待慢爆款请求", async () => {
+    api.listViralVideos.mockReturnValue(new Promise(() => {}));
+
+    const data = await loadStudioData(user, { includeViral: false });
+
+    expect(data.projects).toEqual([project]);
+    expect(data.videos).toEqual([]);
+    expect(api.listViralVideos).not.toHaveBeenCalled();
+  });
+
   it("把真实声音和分身按人物绑定并加载可预览素材", async () => {
     api.listOralAvatars.mockResolvedValue([
       {

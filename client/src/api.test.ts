@@ -44,6 +44,7 @@ import {
   getLatestScriptRewriteTask,
   getLatestScriptVersion,
   getOralTask,
+  getScriptFromAudioTask,
   getSettings,
   hideMaterial,
   listCharacterSceneLooksPage,
@@ -56,6 +57,7 @@ import {
   listProjects,
   listSavedGenerationPrompts,
   listSimpleCharacterLibraryPage,
+  listViralVideos,
   lockGenerationPrompt,
   readAnalysisPayload,
   readFirstFrameCandidates,
@@ -63,6 +65,7 @@ import {
   regenerateGenerationBatch,
   regenerateGenerationTask,
   resolveApiBaseUrl,
+  resolveViralLink,
   retryGenerationTask,
   retryOralTask,
   retryOralTaskArchive,
@@ -85,6 +88,74 @@ import {
   waitForScriptRewriteTask,
   waitForSourceFrameTask,
 } from "./api";
+
+describe("爆款列表 API", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("将分页游标编码到查询参数并保持 GET 请求", async () => {
+    const page = {
+      platform: "douyin",
+      sort: "latest",
+      categories: [],
+      items: [],
+      hasMore: false,
+      nextCursor: null,
+      total: 0,
+    };
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => page,
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      listViralVideos("douyin", "latest", {
+        limit: 12,
+        cursor: "page/2+=",
+      }),
+    ).resolves.toEqual(page);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:8000/api/viral/videos?platform=douyin&sort=latest&limit=12&cursor=page%2F2%2B%3D",
+      expect.objectContaining({
+        headers: expect.any(Headers),
+        signal: expect.any(AbortSignal),
+      }),
+    );
+  });
+
+  it("提交链接和用途到受限时长的解析接口", async () => {
+    const body = {
+      item: { platform: "douyin", videoId: "source-1" },
+      importIdempotencyKey: "stable-import-key",
+    };
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => body,
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      resolveViralLink("https://v.douyin.com/share/", "replica", "resolve-key"),
+    ).resolves.toEqual(body);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:8000/api/viral/link-resolutions",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          url: "https://v.douyin.com/share/",
+          purpose: "replica",
+        }),
+        signal: expect.any(AbortSignal),
+      }),
+    );
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(new Headers(init.headers).get("Idempotency-Key")).toBe(
+      "resolve-key",
+    );
+  });
+});
 
 describe("素材库 API", () => {
   afterEach(() => {
@@ -2043,6 +2114,18 @@ describe("startVideoAnalysis", () => {
       identity_id: "identity-1",
       idempotency_key: expect.any(String),
     });
+  });
+
+  it("读取本次音频转写任务使用任务 ID 并编码路径", async () => {
+    const task = { id: "asr/one", status: "RUNNING" };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue({ ok: true, json: async () => task });
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(getScriptFromAudioTask("asr/one")).resolves.toEqual(task);
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "http://127.0.0.1:8000/api/script-from-audio-tasks/asr%2Fone",
+    );
   });
 
   it("按人物或无人物作用域读取最新改写任务", async () => {

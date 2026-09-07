@@ -873,24 +873,16 @@ export async function deleteStudioSavedScript(scriptId: string): Promise<void> {
   );
 }
 
-export type ScriptFromAudioTask = {
-  id: string;
-  project_id: string;
+export type ScriptFromAudioTask = Omit<
+  components["schemas"]["ScriptFromAudioTaskResponse"],
+  "status"
+> & {
   status:
     | "PENDING"
     | "RUNNING"
     | "SUCCEEDED"
     | "FAILED"
     | "SUBMISSION_UNCERTAIN";
-  attempt: number;
-  result: {
-    text: string;
-    duration_sec: number | null;
-    language: string | null;
-  } | null;
-  error_code: string | null;
-  error_message: string | null;
-  retryable: boolean;
 };
 
 /** 提交"提取文案"异步任务（202）：上传视频 → 抽音轨 → ASR 转写。 */
@@ -909,6 +901,16 @@ export async function createScriptFromAudioTask(
         idempotency_key: idempotencyKey,
       }),
     },
+  );
+}
+
+/** 按提交回执中的任务 ID 读取转写，避免项目 latest 被其他任务替换。 */
+export async function getScriptFromAudioTask(
+  taskId: string,
+): Promise<ScriptFromAudioTask> {
+  return requestApiJson<ScriptFromAudioTask>(
+    `/api/script-from-audio-tasks/${encodeURIComponent(taskId)}`,
+    "读取文案提取任务失败",
   );
 }
 
@@ -5423,6 +5425,7 @@ export type ViralVideoItem = {
   videoId: string;
   category: string;
   title: string;
+  sourceDescription?: string | null;
   author: string;
   authorAvatar: string | null;
   verified: boolean;
@@ -5439,6 +5442,8 @@ export type ViralVideoItem = {
   hasPlayableAudio: boolean;
   /** 源平台播放地址；真实列表播放统一由服务端媒体管线转存后使用。 */
   playUrl: string | null;
+  isFavorite?: boolean;
+  availability?: "available" | "unavailable" | "hidden";
 };
 
 export type ViralListResponse = {
@@ -5447,8 +5452,32 @@ export type ViralListResponse = {
   categories: string[];
   items: ViralVideoItem[];
   fetchedAt: string | null;
+  dataVersion?: string | null;
   source?: "database";
   stale?: boolean;
+  refreshing?: boolean;
+  refreshError?: string | null;
+  hasMore?: boolean;
+  nextCursor?: string | null;
+  total?: number;
+};
+
+export type ViralFavoritesResponse = {
+  items: ViralVideoItem[];
+  total: number;
+  hasMore?: boolean;
+  nextCursor?: string | null;
+};
+
+export type ViralFavoriteResponse = {
+  isFavorite: boolean;
+};
+
+export type ViralDetailResponse = { item: ViralVideoItem } | ViralVideoItem;
+
+export type ViralListOptions = {
+  limit?: number;
+  cursor?: string;
 };
 
 export type ViralMediaResponse = {
@@ -5463,18 +5492,146 @@ export type ViralStatisticsResponse = {
   items: ViralVideoItem[];
 };
 
+export type ViralImportPurpose = "copy" | "replica";
+export type ViralLinkResolution = {
+  item: ViralVideoItem;
+  importIdempotencyKey: string;
+};
+export type ViralImportTask = {
+  id?: string;
+  taskId?: string;
+  status: "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED";
+  projectId?: string | null;
+  sourceAssetId?: string | null;
+  mediaKind?: "audio" | "video" | null;
+  canTranscribe?: boolean;
+  canAnalyze?: boolean;
+  error?: string | null;
+  errorMessage?: string | null;
+  message?: string | null;
+  retryable?: boolean;
+};
+
 /** 最近 7 天爆款列表（服务端按分类关键词聚合，带计费护栏缓存）。 */
 export function listViralVideos(
   platform: ViralPlatform,
   sort: ViralSort = "hot",
+  options: ViralListOptions = {},
 ): Promise<ViralListResponse> {
   const query = new URLSearchParams({ platform, sort });
+  if (options.limit !== undefined) query.set("limit", String(options.limit));
+  if (options.cursor) query.set("cursor", options.cursor);
   // 视频号冷库需聚合 12 次上游调用（3 页 × 4 分类），实测最长约 80s。
   return requestApiJson<ViralListResponse>(
     `/api/viral/videos?${query}`,
     "爆款视频列表暂不可用",
     {},
     VIRAL_LIST_TIMEOUT_MS,
+  );
+}
+
+/** 从数据库读取单条爆款视频，用于详情页刷新恢复。 */
+export function fetchViralVideo(
+  platform: ViralPlatform,
+  videoId: string,
+): Promise<ViralDetailResponse> {
+  return requestApiJson<ViralDetailResponse>(
+    `/api/viral/videos/${encodeURIComponent(platform)}/${encodeURIComponent(videoId)}`,
+    "视频详情暂不可用",
+  );
+}
+
+export function listViralFavorites(
+  options: ViralListOptions & { platform?: ViralPlatform } = {},
+): Promise<ViralFavoritesResponse> {
+  const query = new URLSearchParams();
+  if (options.platform) query.set("platform", options.platform);
+  if (options.limit !== undefined) query.set("limit", String(options.limit));
+  if (options.cursor) query.set("cursor", options.cursor);
+  const suffix = query.size ? `?${query}` : "";
+  return requestApiJson<ViralFavoritesResponse>(
+    `/api/viral/favorites${suffix}`,
+    "收藏列表暂不可用",
+  );
+}
+
+async function updateViralFavorite(
+  platform: ViralPlatform,
+  videoId: string,
+  method: "PUT" | "DELETE",
+): Promise<ViralFavoriteResponse> {
+  const response = await requestApi(
+    `/api/viral/favorites/${encodeURIComponent(platform)}/${encodeURIComponent(videoId)}`,
+    { method },
+  );
+  if (!response.ok) {
+    const details = await responseErrorDetails(response, "更新收藏失败");
+    const error = new Error(details.message) as RequestError;
+    error.status = response.status;
+    error.code = details.code;
+    throw error;
+  }
+  if (response.status === 204) return { isFavorite: method === "PUT" };
+  try {
+    return (await response.json()) as ViralFavoriteResponse;
+  } catch {
+    return { isFavorite: method === "PUT" };
+  }
+}
+
+export function saveViralFavorite(
+  platform: ViralPlatform,
+  videoId: string,
+): Promise<ViralFavoriteResponse> {
+  return updateViralFavorite(platform, videoId, "PUT");
+}
+
+export function removeViralFavorite(
+  platform: ViralPlatform,
+  videoId: string,
+): Promise<ViralFavoriteResponse> {
+  return updateViralFavorite(platform, videoId, "DELETE");
+}
+
+export function createViralImportTask(
+  platform: ViralPlatform,
+  videoId: string,
+  purpose: ViralImportPurpose,
+  idempotencyKey: string,
+): Promise<ViralImportTask> {
+  return requestApiJson<ViralImportTask>(
+    "/api/viral/videos/import-tasks",
+    "导入爆款视频失败",
+    {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
+      body: JSON.stringify({ platform, videoId, purpose }),
+    },
+    VIRAL_MEDIA_TIMEOUT_MS,
+  );
+}
+
+export function resolveViralLink(
+  url: string,
+  purpose: ViralImportPurpose,
+  idempotencyKey: string,
+): Promise<ViralLinkResolution> {
+  return requestApiJson<ViralLinkResolution>(
+    "/api/viral/link-resolutions",
+    "视频链接解析失败",
+    {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
+      body: JSON.stringify({ url, purpose }),
+    },
+    60_000,
+  );
+}
+
+export function getViralImportTask(taskId: string): Promise<ViralImportTask> {
+  return requestApiJson<ViralImportTask>(
+    `/api/viral/import-tasks/${encodeURIComponent(taskId)}`,
+    "读取导入任务失败",
   );
 }
 

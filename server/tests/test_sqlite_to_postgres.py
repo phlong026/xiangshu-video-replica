@@ -24,6 +24,7 @@ from scripts.reconcile_customer_billing import (
 )
 from scripts.sqlite_to_postgres import (
     MIGRATION_ADVISORY_LOCK_KEYS,
+    SEED_TABLES,
     MigrationReconciliationError,
     MigrationSafetyError,
     migrate_snapshot,
@@ -563,6 +564,7 @@ def test_revision_dependency_and_maintenance_guards() -> None:
 def test_pg_only_cost_tables_have_explicit_cutover_contracts() -> None:
     assert {"daily_external_prices", "operation_cost_records"} <= PG_ONLY_TABLES
     assert "operation_cost_rates" in PG_ONLY_SEEDED_TABLES
+    assert "viral_runtime_controls" in SEED_TABLES
 
 
 class _ScalarCursor:

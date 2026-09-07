@@ -4,6 +4,7 @@ import { PaymentSettingsSection } from "./PaymentSettingsSection";
 import { QueueModeSection } from "./QueueModeSection";
 import { RatesManager } from "./RatesManager";
 import { TabBar } from "./ui/TabBar";
+import { ViralRuntimeSection } from "./ViralRuntimeSection";
 
 const tabs = [
   { id: "payment", label: "支付与价格" },
@@ -38,6 +39,7 @@ export function SystemSettingsPage({
       {tab === "services" ? (
         <>
           <QueueModeSection readOnly={readOnly} />
+          <ViralRuntimeSection readOnly={readOnly} />
           <section className="admin-panel" aria-label="服务配置">
             <SettingsPanel readOnly={readOnly} source="control" />
           </section>

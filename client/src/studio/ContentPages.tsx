@@ -1,17 +1,30 @@
 import type { RefObject } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { MaterialItem, MaterialPage, ViralVideoItem } from "../api";
+import type {
+  MaterialItem,
+  MaterialPage,
+  ViralImportPurpose,
+  ViralImportTask,
+  ViralPlatform,
+  ViralVideoItem,
+} from "../api";
 import {
   completeMaterialUpload,
   createGenerationTaskPreviewUrl,
   createMaterialUploadIntent,
+  createViralImportTask,
   downloadMaterialAsset,
+  fetchViralVideo,
   fetchViralVideoMedia,
   fetchViralVideoStatistics,
   getAssetDownloadUrl,
+  getViralImportTask,
   hideMaterial,
   listMaterials,
+  listViralFavorites,
   listViralVideos,
+  removeViralFavorite,
+  saveViralFavorite,
   updateMaterial,
   uploadMaterial,
 } from "../api";
@@ -24,6 +37,12 @@ import type {
   StudioVideo,
 } from "./types";
 import { Button, Empty, Field, Hint, Icon, Media, Panel, Tabs } from "./ui";
+import {
+  clearViralImportIdempotencyKey,
+  shouldClearViralImportIdempotencyKey,
+  ViralImportPollingTimeoutError,
+  viralImportIdempotencyKey,
+} from "./viralImport";
 import "./content.css";
 
 const pageSize = 6;
@@ -41,7 +60,38 @@ function assetKindLabel(kind: StudioAsset["kind"]) {
 }
 
 const viralInitialCount = 12;
-const viralRevealStep = 8;
+const viralPageSize = 12;
+
+function viralIdentity(video: StudioVideo) {
+  return video.platformKey && video.nativeId
+    ? `${video.platformKey}:${video.nativeId}`
+    : video.id;
+}
+
+function apiErrorCode(error: unknown) {
+  if (!error || typeof error !== "object" || !("code" in error)) return;
+  return typeof error.code === "string" ? error.code : undefined;
+}
+
+function viralDetailParams():
+  | { platform: ViralPlatform; videoId: string }
+  | undefined {
+  const params = new URLSearchParams(window.location.search);
+  const platform = params.get("viralPlatform");
+  const videoId = params.get("viralVideoId")?.trim();
+  if ((platform === "douyin" || platform === "wechat_channels") && videoId) {
+    return { platform, videoId };
+  }
+  return undefined;
+}
+
+function persistViralDetailUrl(video: StudioVideo) {
+  if (!video.platformKey || !video.nativeId) return;
+  const url = new URL(window.location.href);
+  url.searchParams.set("viralPlatform", video.platformKey);
+  url.searchParams.set("viralVideoId", video.nativeId);
+  window.history.replaceState(null, "", url);
+}
 
 type MaterialPreviewState = {
   status: "loading" | "ready" | "error";
@@ -362,17 +412,114 @@ function ViralStatsRow({ video }: { video: StudioVideo }) {
   );
 }
 
+export function ViralFavoriteButton({
+  video,
+  savedFromServer,
+  onSavedChange,
+}: {
+  video: StudioVideo;
+  savedFromServer?: boolean;
+  onSavedChange?: (saved: boolean) => void;
+}) {
+  const { state, review, notify, patchState, user } = useStudio();
+  const [saved, setSaved] = useState(
+    savedFromServer ?? state.favorites.includes(video.id),
+  );
+  const [savingOperation, setSavingOperation] = useState<{
+    accountId: string;
+    operationId: number;
+  }>();
+  const accountRef = useRef(user.id);
+  const operationRef = useRef(0);
+  if (accountRef.current !== user.id) {
+    accountRef.current = user.id;
+    operationRef.current += 1;
+  }
+  const saving = Boolean(
+    savingOperation &&
+      savingOperation.accountId === user.id &&
+      savingOperation.operationId === operationRef.current,
+  );
+  useEffect(() => {
+    if (savedFromServer !== undefined) setSaved(savedFromServer);
+  }, [savedFromServer]);
+  useEffect(() => {
+    return () => {
+      operationRef.current += 1;
+    };
+  }, []);
+
+  const toggle = async () => {
+    if (saving) return;
+    const operation = {
+      accountId: user.id,
+      operationId: ++operationRef.current,
+    };
+    const isCurrent = () =>
+      accountRef.current === operation.accountId &&
+      operationRef.current === operation.operationId;
+    const nextSaved = !saved;
+    if (!isCurrent()) return;
+    setSaved(nextSaved);
+    onSavedChange?.(nextSaved);
+    patchState({
+      favorites: nextSaved
+        ? [...new Set([...state.favorites, video.id])]
+        : state.favorites.filter((id) => id !== video.id),
+    });
+    if (review || !video.platformKey || !video.nativeId) return;
+    setSavingOperation(operation);
+    try {
+      if (nextSaved) {
+        await saveViralFavorite(video.platformKey, video.nativeId);
+      } else {
+        await removeViralFavorite(video.platformKey, video.nativeId);
+      }
+    } catch {
+      if (!isCurrent()) return;
+      setSaved(saved);
+      onSavedChange?.(saved);
+      patchState({
+        favorites: saved
+          ? [...new Set([...state.favorites, video.id])]
+          : state.favorites.filter((id) => id !== video.id),
+      });
+      notify("收藏失败，已恢复原状态");
+    } finally {
+      if (isCurrent()) setSavingOperation(undefined);
+    }
+  };
+
+  return (
+    <Button
+      variant="outline"
+      aria-label={`收藏 ${video.title}`}
+      disabled={saving}
+      onClick={() => void toggle()}
+    >
+      {saved ? "已收藏" : "收藏"}
+    </Button>
+  );
+}
+
 function ViralCard({
   video,
   active,
   onActivate,
+  savedFromServer,
+  onFavoriteChange,
+  availability = "available",
 }: {
   video: StudioVideo;
   active: boolean;
   onActivate: () => void;
+  savedFromServer?: boolean;
+  onFavoriteChange: (saved: boolean) => void;
+  availability?: ViralVideoItem["availability"];
 }) {
-  const { state, navigate, patchDraft, patchState } = useStudio();
+  const { review, navigate, notify, patchDraft, user } = useStudio();
   const playerRef = useRef<HTMLVideoElement | null>(null);
+  const { importState, start } = useViralImport(video.id, user.id);
   const { playback, play, retry, markFailed, activate } = useViralPlayback(
     video,
     active,
@@ -381,18 +528,46 @@ function ViralCard({
   useEffect(() => {
     if (!active) playerRef.current?.pause();
   }, [active]);
-  const saved = state.favorites.includes(video.id);
-  const toggleFavorite = () =>
-    patchState({
-      favorites: saved
-        ? state.favorites.filter((id) => id !== video.id)
-        : [...state.favorites, video.id],
-    });
-  const openDetail = () =>
+  const openDetail = () => {
     navigate("viral-detail", {
       selectedVideoId: video.id,
       returnTo: "viral",
     });
+    persistViralDetailUrl(video);
+  };
+  const beginReplica = () => {
+    if (availability !== "available") {
+      notify("该视频已不可用，无法导入复刻");
+      return;
+    }
+    if (review) {
+      patchDraft({ sourceId: video.id });
+      navigate("replica", {
+        selectedVideoId: video.id,
+        returnTo: "viral",
+      });
+      return;
+    }
+    if (!video.platformKey || !video.nativeId) {
+      notify("该视频缺少可导入的平台标识");
+      return;
+    }
+    void start(video, "replica", (task) => {
+      if (!task.canAnalyze || !task.projectId || !task.sourceAssetId) {
+        notify("该来源暂不支持视频复刻");
+        return;
+      }
+      patchDraft({
+        projectId: task.projectId,
+        sourceId: task.sourceAssetId,
+        sourceAssetId: task.sourceAssetId,
+      });
+      navigate("replica", {
+        selectedVideoId: video.id,
+        returnTo: "viral",
+      });
+    });
+  };
   return (
     <article className="viral-card">
       <ViralCover
@@ -420,42 +595,93 @@ function ViralCard({
           <Button variant="quiet" onClick={openDetail}>
             查看详情
           </Button>
-          <Button
-            variant="outline"
-            aria-label={`收藏 ${video.title}`}
-            onClick={toggleFavorite}
-          >
-            {saved ? "已收藏" : "收藏"}
-          </Button>
+          <ViralFavoriteButton
+            video={video}
+            savedFromServer={savedFromServer}
+            onSavedChange={onFavoriteChange}
+          />
           <Button
             variant="outline"
             aria-label={`复刻 ${video.title}`}
-            onClick={() => {
-              patchDraft({ sourceId: video.id });
-              navigate("replica", {
-                selectedVideoId: video.id,
-                returnTo: "viral",
-              });
-            }}
+            disabled={importState.status === "loading"}
+            onClick={beginReplica}
           >
             复刻
           </Button>
         </div>
+        {importState.status !== "idle" && (
+          <p
+            className={`viral-media-status is-${importState.status}`}
+            role="status"
+          >
+            {importState.message}
+          </p>
+        )}
+        {availability !== "available" && (
+          <p className="viral-media-status is-error" role="status">
+            该视频已不可用
+          </p>
+        )}
       </div>
     </article>
   );
 }
 
 export function ViralPage() {
-  const { data, review, updateData } = useStudio();
+  const { data, review, updateData, user } = useStudio();
+  const accountId = user.id;
   const [platform, setPlatform] = useState<"抖音" | "视频号">("抖音");
   const [category, setCategory] = useState("全部");
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<"热门优先" | "最新">("热门优先");
+  const [scope, setScope] = useState<"all" | "favorites">("all");
   const [visibleCount, setVisibleCount] = useState(viralInitialCount);
   const [activeVideoId, setActiveVideoId] = useState<string>();
   const [listError, setListError] = useState<string>();
-  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const [refreshStatus, setRefreshStatus] = useState<string>();
+  const [listLoading, setListLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [nextCursor, setNextCursor] = useState<string>();
+  const [hasMore, setHasMore] = useState(false);
+  const [listReloadRevision, setListReloadRevision] = useState(0);
+  const [serverCategories, setServerCategories] = useState<string[]>([]);
+  const [favoriteKeys, setFavoriteKeys] = useState(new Set<string>());
+  const [availabilityByKey, setAvailabilityByKey] = useState(
+    new Map<string, ViralVideoItem["availability"]>(),
+  );
+  const sentinelRef = useRef<HTMLButtonElement | null>(null);
+  const listRequestRef = useRef(0);
+  const loadingMoreRef = useRef(false);
+  const listReloadRevisionRef = useRef(listReloadRevision);
+  const queryRef = useRef(query);
+  const queryLifecycleRef = useRef(query);
+  listReloadRevisionRef.current = listReloadRevision;
+  queryRef.current = query;
+  const platformKey: ViralPlatform =
+    platform === "抖音" ? "douyin" : "wechat_channels";
+  const sortKey = sort === "最新" ? "latest" : "hot";
+  const paginationContextKey = `${accountId}:${scope}:${platformKey}:${sortKey}:${category}`;
+  const paginationContextKeyRef = useRef(paginationContextKey);
+  const paginationOperationRef = useRef(0);
+  const activePaginationContextRef = useRef({
+    key: `${paginationContextKey}:${listReloadRevision}`,
+    operationId: 0,
+  });
+  const renderedPaginationContextKey = `${paginationContextKey}:${listReloadRevision}`;
+  if (activePaginationContextRef.current.key !== renderedPaginationContextKey) {
+    activePaginationContextRef.current = {
+      key: renderedPaginationContextKey,
+      operationId: ++paginationOperationRef.current,
+    };
+  }
+  const renderedPaginationContext = activePaginationContextRef.current;
+  const confirmedPaginationContextRef = useRef<
+    typeof renderedPaginationContext | undefined
+  >(undefined);
+  const paginationSnapshotsRef = useRef(
+    new Map<string, { nextCursor?: string; hasMore: boolean }>(),
+  );
+  paginationContextKeyRef.current = paginationContextKey;
 
   const shown = useMemo(
     () =>
@@ -463,6 +689,7 @@ export function ViralPage() {
         .filter(
           (item) =>
             item.platform === platform &&
+            (scope === "all" || favoriteKeys.has(viralIdentity(item))) &&
             (category === "全部" || item.category === category) &&
             `${item.title}${item.author}`.includes(query),
         )
@@ -475,44 +702,98 @@ export function ViralPage() {
           }
           return (right.publishedAt ?? 0) - (left.publishedAt ?? 0);
         }),
-    [category, data.videos, platform, query, sort],
+    [category, data.videos, favoriteKeys, platform, query, scope, sort],
   );
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: 平台/分类/搜索词/排序变化时重置滚动加载计数。
   useEffect(() => {
     setVisibleCount(viralInitialCount);
-  }, [platform, category, query, sort]);
+  }, [platform, category, query, scope, sort]);
 
-  useEffect(() => {
-    const node = sentinelRef.current;
-    if (!node) return;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) {
-          setVisibleCount((count) =>
-            Math.min(count + viralRevealStep, shown.length),
-          );
-        }
-      },
-      { rootMargin: "240px 0px" },
-    );
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, [shown.length]);
-
-  const current = shown.slice(0, visibleCount);
+  const current = review ? shown.slice(0, visibleCount) : shown;
   const statisticsError = useViralStatistics(current, !review);
 
   useEffect(() => {
-    if (review) return;
-    const platformKey = platform === "抖音" ? "douyin" : "wechat_channels";
-    const sortKey = sort === "最新" ? "latest" : "hot";
+    void accountId;
+    setFavoriteKeys(new Set());
+  }, [accountId]);
+
+  useEffect(() => {
+    if (queryLifecycleRef.current === query) return;
+    queryLifecycleRef.current = query;
+    listRequestRef.current += 1;
+    loadingMoreRef.current = false;
+    setListLoading(false);
+    setLoadingMore(false);
+    setListError(undefined);
+    const snapshot = paginationSnapshotsRef.current.get(paginationContextKey);
+    if (!query && snapshot) {
+      setNextCursor(snapshot.nextCursor);
+      setHasMore(snapshot.hasMore);
+    } else {
+      setNextCursor(undefined);
+      setHasMore(false);
+    }
+  }, [paginationContextKey, query]);
+
+  useEffect(() => {
+    if (review || scope !== "all") return;
+    const requestContext = renderedPaginationContext;
+    const requestId = ++listRequestRef.current;
+    const requestReloadRevision = listReloadRevision;
+    loadingMoreRef.current = false;
+    setLoadingMore(false);
     let cancelled = false;
     setListError(undefined);
-    void listViralVideos(platformKey, sortKey)
+    setRefreshStatus(undefined);
+    setListLoading(true);
+    setNextCursor(undefined);
+    setHasMore(false);
+    void listViralVideos(platformKey, sortKey, { limit: viralPageSize })
       .then((result) => {
-        if (cancelled) return;
+        if (
+          cancelled ||
+          requestId !== listRequestRef.current ||
+          requestReloadRevision !== listReloadRevisionRef.current ||
+          requestContext !== activePaginationContextRef.current ||
+          paginationContextKey !== paginationContextKeyRef.current
+        )
+          return;
         const incoming = result.items.map(studioVideoFromViral);
+        setServerCategories(result.categories);
+        const confirmedNextCursor = result.nextCursor ?? undefined;
+        const confirmedHasMore = Boolean(result.hasMore && result.nextCursor);
+        confirmedPaginationContextRef.current = requestContext;
+        paginationSnapshotsRef.current.set(paginationContextKey, {
+          nextCursor: confirmedNextCursor,
+          hasMore: confirmedHasMore,
+        });
+        setNextCursor(confirmedNextCursor);
+        setHasMore(confirmedHasMore);
+        setRefreshStatus(
+          result.refreshing
+            ? "正在采集爆款视频，当前先展示已缓存内容…"
+            : result.refreshError
+              ? result.refreshError
+              : result.stale
+                ? "当前展示缓存内容，等待下次刷新。"
+                : undefined,
+        );
+        setFavoriteKeys(
+          new Set(
+            result.items
+              .filter((item) => item.isFavorite)
+              .map((item) => `${item.platform}:${item.videoId}`),
+          ),
+        );
+        setAvailabilityByKey(
+          new Map(
+            result.items.map((item) => [
+              `${item.platform}:${item.videoId}`,
+              item.availability,
+            ]),
+          ),
+        );
         updateData((currentData) => ({
           ...currentData,
           videos: [
@@ -524,12 +805,259 @@ export function ViralPage() {
         }));
       })
       .catch(() => {
-        if (!cancelled) setListError("视频列表暂时无法更新，已保留当前内容");
+        if (
+          !cancelled &&
+          requestId === listRequestRef.current &&
+          requestReloadRevision === listReloadRevisionRef.current &&
+          requestContext === activePaginationContextRef.current &&
+          paginationContextKey === paginationContextKeyRef.current
+        ) {
+          setListError("视频列表暂时无法更新，已保留当前内容");
+        }
+      })
+      .finally(() => {
+        if (
+          !cancelled &&
+          requestId === listRequestRef.current &&
+          requestReloadRevision === listReloadRevisionRef.current &&
+          requestContext === activePaginationContextRef.current &&
+          paginationContextKey === paginationContextKeyRef.current
+        ) {
+          setListLoading(false);
+        }
       });
     return () => {
       cancelled = true;
     };
-  }, [platform, review, sort, updateData]);
+  }, [
+    listReloadRevision,
+    paginationContextKey,
+    platformKey,
+    review,
+    renderedPaginationContext,
+    scope,
+    sortKey,
+    updateData,
+  ]);
+
+  useEffect(() => {
+    if (review || scope !== "favorites") return;
+    const requestContext = renderedPaginationContext;
+    const requestId = ++listRequestRef.current;
+    const requestReloadRevision = listReloadRevision;
+    loadingMoreRef.current = false;
+    setLoadingMore(false);
+    let cancelled = false;
+    setListError(undefined);
+    setListLoading(true);
+    setNextCursor(undefined);
+    setHasMore(false);
+    void listViralFavorites({ platform: platformKey, limit: viralPageSize })
+      .then((result) => {
+        if (
+          cancelled ||
+          requestId !== listRequestRef.current ||
+          requestReloadRevision !== listReloadRevisionRef.current ||
+          requestContext !== activePaginationContextRef.current ||
+          paginationContextKey !== paginationContextKeyRef.current
+        )
+          return;
+        const incoming = result.items.map(studioVideoFromViral);
+        setFavoriteKeys(
+          new Set(
+            result.items.map((item) => `${item.platform}:${item.videoId}`),
+          ),
+        );
+        setAvailabilityByKey(
+          new Map(
+            result.items.map((item) => [
+              `${item.platform}:${item.videoId}`,
+              item.availability,
+            ]),
+          ),
+        );
+        setServerCategories([
+          ...new Set(result.items.map((item) => item.category).filter(Boolean)),
+        ]);
+        const confirmedNextCursor = result.nextCursor ?? undefined;
+        const confirmedHasMore = Boolean(result.hasMore && result.nextCursor);
+        confirmedPaginationContextRef.current = requestContext;
+        paginationSnapshotsRef.current.set(paginationContextKey, {
+          nextCursor: confirmedNextCursor,
+          hasMore: confirmedHasMore,
+        });
+        setNextCursor(confirmedNextCursor);
+        setHasMore(confirmedHasMore);
+        updateData((currentData) => ({
+          ...currentData,
+          videos: [
+            ...currentData.videos.filter(
+              (video) => video.platformKey !== platformKey,
+            ),
+            ...incoming,
+          ],
+        }));
+      })
+      .catch(() => {
+        if (
+          !cancelled &&
+          requestId === listRequestRef.current &&
+          requestReloadRevision === listReloadRevisionRef.current &&
+          requestContext === activePaginationContextRef.current &&
+          paginationContextKey === paginationContextKeyRef.current
+        ) {
+          setListError("收藏列表暂时无法更新");
+        }
+      })
+      .finally(() => {
+        if (
+          !cancelled &&
+          requestId === listRequestRef.current &&
+          requestReloadRevision === listReloadRevisionRef.current &&
+          requestContext === activePaginationContextRef.current &&
+          paginationContextKey === paginationContextKeyRef.current
+        ) {
+          setListLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    listReloadRevision,
+    paginationContextKey,
+    platformKey,
+    review,
+    renderedPaginationContext,
+    scope,
+    updateData,
+  ]);
+
+  const loadMore = useCallback(async () => {
+    if (review) {
+      setVisibleCount((count) => Math.min(count + viralPageSize, shown.length));
+      return;
+    }
+    if (
+      !hasMore ||
+      !nextCursor ||
+      loadingMoreRef.current ||
+      confirmedPaginationContextRef.current !== renderedPaginationContext
+    )
+      return;
+    const requestId = listRequestRef.current;
+    const requestQuery = query;
+    const requestContextKey = paginationContextKey;
+    const requestContext = renderedPaginationContext;
+    const isCurrent = () =>
+      requestId === listRequestRef.current &&
+      requestQuery === queryRef.current &&
+      requestContext === activePaginationContextRef.current &&
+      requestContext === confirmedPaginationContextRef.current &&
+      requestContextKey === paginationContextKeyRef.current;
+    loadingMoreRef.current = true;
+    setLoadingMore(true);
+    setListError(undefined);
+    try {
+      const result =
+        scope === "favorites"
+          ? await listViralFavorites({
+              platform: platformKey,
+              limit: viralPageSize,
+              cursor: nextCursor,
+            })
+          : await listViralVideos(platformKey, sortKey, {
+              limit: viralPageSize,
+              cursor: nextCursor,
+            });
+      if (!isCurrent()) return;
+      const incoming = result.items.map(studioVideoFromViral);
+      const confirmedNextCursor = result.nextCursor ?? undefined;
+      const confirmedHasMore = Boolean(result.hasMore && result.nextCursor);
+      paginationSnapshotsRef.current.set(paginationContextKey, {
+        nextCursor: confirmedNextCursor,
+        hasMore: confirmedHasMore,
+      });
+      setNextCursor(confirmedNextCursor);
+      setHasMore(confirmedHasMore);
+      setFavoriteKeys((currentKeys) => {
+        const nextKeys = new Set(currentKeys);
+        result.items.forEach((item) => {
+          if (scope === "favorites" || item.isFavorite) {
+            nextKeys.add(`${item.platform}:${item.videoId}`);
+          }
+        });
+        return nextKeys;
+      });
+      setAvailabilityByKey((currentAvailability) => {
+        const nextAvailability = new Map(currentAvailability);
+        result.items.forEach((item) => {
+          nextAvailability.set(
+            `${item.platform}:${item.videoId}`,
+            item.availability,
+          );
+        });
+        return nextAvailability;
+      });
+      updateData((currentData) => {
+        const incomingIds = new Set(incoming.map((video) => video.id));
+        return {
+          ...currentData,
+          videos: [
+            ...currentData.videos.filter(
+              (video) =>
+                video.platformKey !== platformKey || !incomingIds.has(video.id),
+            ),
+            ...incoming,
+          ],
+        };
+      });
+    } catch (error) {
+      if (isCurrent()) {
+        if (apiErrorCode(error) === "VIRAL_CURSOR_INVALID") {
+          paginationSnapshotsRef.current.delete(paginationContextKey);
+          setNextCursor(undefined);
+          setHasMore(false);
+          setListError(undefined);
+          setListReloadRevision((revision) => revision + 1);
+          return;
+        }
+        setListError("加载更多失败，请重试");
+      }
+    } finally {
+      if (isCurrent()) {
+        loadingMoreRef.current = false;
+        setLoadingMore(false);
+      }
+    }
+  }, [
+    hasMore,
+    nextCursor,
+    paginationContextKey,
+    platformKey,
+    query,
+    renderedPaginationContext,
+    review,
+    scope,
+    shown.length,
+    sortKey,
+    updateData,
+  ]);
+
+  const canLoadMore = review ? visibleCount < shown.length : !query && hasMore;
+  useEffect(() => {
+    const node = sentinelRef.current;
+    if (!node || !canLoadMore) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) void loadMore();
+      },
+      { rootMargin: "240px 0px" },
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [canLoadMore, loadMore]);
+
   const platformTabs = (["抖音", "视频号"] as const).map((item) => ({
     id: item,
     label: `${item} ${
@@ -540,6 +1068,9 @@ export function ViralPage() {
         : data.videos.filter((video) => video.platform === item).length
     }`,
   }));
+  const categories = review
+    ? categoryTabs
+    : ["全部", ...serverCategories.filter((item) => item !== "全部")];
 
   return (
     <section className="content-page content-viral">
@@ -564,6 +1095,36 @@ export function ViralPage() {
         <div
           className="content-platform-tabs"
           role="tablist"
+          aria-label="内容范围"
+        >
+          <button
+            aria-selected={scope === "all"}
+            className={scope === "all" ? "is-active" : ""}
+            onClick={() => {
+              setCategory("全部");
+              setScope("all");
+            }}
+            role="tab"
+            type="button"
+          >
+            全部爆款
+          </button>
+          <button
+            aria-selected={scope === "favorites"}
+            className={scope === "favorites" ? "is-active" : ""}
+            onClick={() => {
+              setCategory("全部");
+              setScope("favorites");
+            }}
+            role="tab"
+            type="button"
+          >
+            我的收藏
+          </button>
+        </div>
+        <div
+          className="content-platform-tabs"
+          role="tablist"
           aria-label="视频平台"
         >
           {platformTabs.map((item) => (
@@ -571,7 +1132,10 @@ export function ViralPage() {
               aria-selected={item.id === platform}
               className={item.id === platform ? "is-active" : ""}
               key={item.id}
-              onClick={() => setPlatform(item.id)}
+              onClick={() => {
+                setCategory("全部");
+                setPlatform(item.id);
+              }}
               role="tab"
               type="button"
             >
@@ -594,7 +1158,7 @@ export function ViralPage() {
         </label>
       </div>
       <nav className="content-filters" aria-label="视频分类">
-        {categoryTabs.map((item) => (
+        {categories.map((item) => (
           <Button
             key={item}
             variant={item === category ? "primary" : "outline"}
@@ -609,69 +1173,179 @@ export function ViralPage() {
           {listError ?? statisticsError}
         </p>
       )}
+      {refreshStatus && (
+        <p className="viral-media-status" role="status">
+          {refreshStatus}
+        </p>
+      )}
+      {listLoading && (
+        <p className="viral-media-status" role="status">
+          正在读取爆款视频…
+        </p>
+      )}
       {current.length ? (
-        <>
-          <section className="content-video-grid content-video-grid-viral">
-            {current.map((video) => (
-              <ViralCard
-                key={video.id}
-                video={video}
-                active={activeVideoId === video.id}
-                onActivate={() => setActiveVideoId(video.id)}
-              />
-            ))}
-          </section>
-          {visibleCount < shown.length && (
-            <div className="viral-reveal-sentinel" aria-hidden="true">
-              <span>上拉加载更多…</span>
-            </div>
-          )}
-        </>
+        <section className="content-video-grid content-video-grid-viral">
+          {current.map((video) => (
+            <ViralCard
+              key={video.id}
+              video={video}
+              active={activeVideoId === video.id}
+              onActivate={() => setActiveVideoId(video.id)}
+              savedFromServer={
+                review ? undefined : favoriteKeys.has(viralIdentity(video))
+              }
+              onFavoriteChange={(saved) =>
+                setFavoriteKeys((currentKeys) => {
+                  const nextKeys = new Set(currentKeys);
+                  const key = viralIdentity(video);
+                  if (saved) nextKeys.add(key);
+                  else nextKeys.delete(key);
+                  return nextKeys;
+                })
+              }
+              availability={availabilityByKey.get(viralIdentity(video))}
+            />
+          ))}
+        </section>
       ) : (
         <Empty
-          title="暂无爆款视频"
-          description="数据源尚未配置或最近 7 天暂无内容，配置后自动展示。"
+          title={scope === "favorites" ? "暂无收藏视频" : "暂无爆款视频"}
+          description={
+            scope === "favorites"
+              ? "收藏爆款视频后，可以在这里统一查看。"
+              : refreshStatus
+                ? refreshStatus
+                : "数据源尚未配置或最近 7 天暂无内容，配置后自动展示。"
+          }
         />
+      )}
+      {canLoadMore && (
+        <button
+          type="button"
+          className="viral-reveal-sentinel"
+          ref={sentinelRef}
+          disabled={loadingMore}
+          onClick={() => void loadMore()}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              void loadMore();
+            }
+          }}
+        >
+          {loadingMore
+            ? "正在加载…"
+            : review
+              ? "上拉加载更多…"
+              : "加载更多视频"}
+        </button>
       )}
     </section>
   );
 }
 
-type ViralMediaState = {
+type ViralImportState = {
   status: "idle" | "loading" | "ready" | "error";
   message?: string;
 };
 
-function useViralMedia() {
-  const { updateData } = useStudio();
-  const [media, setMedia] = useState<ViralMediaState>({ status: "idle" });
+function useViralImport(sourceId?: string, accountId = "anonymous") {
+  const [state, setState] = useState<ViralImportState>({ status: "idle" });
+  const requestRef = useRef(0);
+  const sourceRef = useRef(sourceId);
+  const accountRef = useRef(accountId);
+  const idempotencyKeysRef = useRef(new Map<string, string>());
+  useEffect(() => {
+    sourceRef.current = sourceId;
+    accountRef.current = accountId;
+    setState({ status: "idle" });
+    return () => {
+      requestRef.current += 1;
+    };
+  }, [sourceId, accountId]);
+
+  const waitForCompletion = async (
+    initial: ViralImportTask,
+    request: number,
+  ) => {
+    let task = initial;
+    for (let attempt = 0; attempt < 120; attempt += 1) {
+      if (request !== requestRef.current) return undefined;
+      if (task.status === "SUCCEEDED" || task.status === "FAILED") return task;
+      const taskId = task.taskId ?? task.id;
+      if (!taskId) throw new Error("导入任务缺少任务 ID");
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 1_000));
+      if (request !== requestRef.current) return undefined;
+      task = await getViralImportTask(taskId);
+    }
+    if (request !== requestRef.current) return undefined;
+    if (task.status === "SUCCEEDED" || task.status === "FAILED") return task;
+    throw new ViralImportPollingTimeoutError("导入任务等待超时，请稍后重试");
+  };
+
   return {
-    media,
-    prepare: async (
+    importState: state,
+    start: async (
       video: StudioVideo,
-      onReady: (kind: "audio" | "video") => void,
+      purpose: ViralImportPurpose,
+      onReady: (task: ViralImportTask) => void,
     ) => {
+      if (video.id !== sourceRef.current || accountId !== accountRef.current)
+        return;
       if (!video.platformKey || !video.nativeId) {
-        onReady("video");
+        setState({ status: "error", message: "该视频缺少可导入的平台标识" });
         return;
       }
-      setMedia({ status: "loading" });
+      const request = ++requestRef.current;
+      const actionKey = `${video.platformKey}:${video.nativeId}:${purpose}`;
+      const memoryKey = `${accountId}:${actionKey}`;
+      const idempotencyKey =
+        idempotencyKeysRef.current.get(memoryKey) ??
+        viralImportIdempotencyKey(accountId, actionKey);
+      idempotencyKeysRef.current.set(memoryKey, idempotencyKey);
+      const clearKey = () => {
+        idempotencyKeysRef.current.delete(memoryKey);
+        clearViralImportIdempotencyKey(accountId, actionKey, idempotencyKey);
+      };
+      setState({ status: "loading", message: "正在导入参考素材…" });
       try {
-        const result = await fetchViralVideoMedia(
+        const created = await createViralImportTask(
           video.platformKey,
           video.nativeId,
+          purpose,
+          idempotencyKey,
         );
-        updateViralStats(updateData, result.video);
-        setMedia({
-          status: "ready",
-          message:
-            result.kind === "audio" ? "原声音频已就绪" : "低清视频已就绪",
-        });
-        onReady(result.kind);
+        const completed = await waitForCompletion(created, request);
+        if (!completed || request !== requestRef.current) return;
+        if (completed.status === "FAILED") {
+          if (completed.retryable === false) clearKey();
+          throw new Error(
+            completed.errorMessage ||
+              completed.error ||
+              completed.message ||
+              "导入任务执行失败",
+          );
+        }
+        if (!completed.projectId || !completed.sourceAssetId) {
+          clearKey();
+          throw new Error("导入任务缺少项目或素材结果");
+        }
+        if (purpose === "copy" && !completed.canTranscribe) {
+          clearKey();
+          throw new Error("该来源暂不支持提取文案");
+        }
+        if (purpose === "replica" && !completed.canAnalyze) {
+          clearKey();
+          throw new Error("该来源暂不支持视频复刻");
+        }
+        setState({ status: "ready", message: "参考素材已导入" });
+        onReady(completed);
       } catch (error) {
-        setMedia({
+        if (request !== requestRef.current) return;
+        if (shouldClearViralImportIdempotencyKey(error)) clearKey();
+        setState({
           status: "error",
-          message: error instanceof Error ? error.message : "素材准备失败",
+          message: error instanceof Error ? error.message : "导入任务失败",
         });
       }
     },
@@ -679,19 +1353,115 @@ function useViralMedia() {
 }
 
 export function ViralDetailPage() {
-  const { data, state, review, navigate, patchDraft, patchState } = useStudio();
-  const { media, prepare } = useViralMedia();
-  const video = state.selectedVideoId
+  const {
+    data,
+    state,
+    user,
+    review,
+    navigate,
+    notify,
+    patchDraft,
+    updateData,
+    extractScriptFromUpload,
+  } = useStudio();
+  const accountId = user.id;
+  const selectedVideo = state.selectedVideoId
     ? data.videos.find((item) => item.id === state.selectedVideoId)
     : undefined;
+  const [remoteVideo, setRemoteVideo] = useState<StudioVideo>();
+  const [detailStatus, setDetailStatus] = useState<
+    "idle" | "loading" | "error"
+  >("idle");
+  const [detailAvailability, setDetailAvailability] =
+    useState<ViralVideoItem["availability"]>("available");
+  const [detailFavorite, setDetailFavorite] = useState<boolean>();
+  const detailAccountRef = useRef(accountId);
+  const detailRequestRef = useRef(0);
+  detailAccountRef.current = accountId;
+  const detailParams = useMemo(viralDetailParams, []);
+  const video = remoteVideo ?? selectedVideo;
+  const { importState, start } = useViralImport(video?.id, accountId);
+
+  useEffect(() => {
+    void accountId;
+    setRemoteVideo(undefined);
+    setDetailFavorite(undefined);
+    setDetailAvailability("available");
+    setDetailStatus("idle");
+  }, [accountId]);
+
+  useEffect(() => {
+    void accountId;
+    if (remoteVideo || review || !detailParams) return;
+    if (
+      selectedVideo &&
+      (selectedVideo.platformKey !== detailParams.platform ||
+        selectedVideo.nativeId !== detailParams.videoId)
+    ) {
+      return;
+    }
+    const requestAccountId = accountId;
+    const requestId = ++detailRequestRef.current;
+    const isCurrent = () =>
+      detailAccountRef.current === requestAccountId &&
+      detailRequestRef.current === requestId;
+    setDetailStatus("loading");
+    void fetchViralVideo(detailParams.platform, detailParams.videoId)
+      .then((response) => {
+        if (!isCurrent()) return;
+        const item = "item" in response ? response.item : response;
+        const restored = studioVideoFromViral(item);
+        if (!isCurrent()) return;
+        setDetailAvailability(item.availability ?? "available");
+        setDetailFavorite(Boolean(item.isFavorite));
+        setRemoteVideo(restored);
+        setDetailStatus("idle");
+        if (!isCurrent()) return;
+        updateData((current) => ({
+          ...current,
+          videos: [
+            ...current.videos.filter(
+              (candidate) => candidate.id !== restored.id,
+            ),
+            restored,
+          ],
+        }));
+      })
+      .catch(() => {
+        if (isCurrent()) setDetailStatus("error");
+      });
+    return () => {
+      if (detailRequestRef.current === requestId) {
+        detailRequestRef.current += 1;
+      }
+    };
+  }, [detailParams, remoteVideo, review, selectedVideo, updateData, accountId]);
+
+  useEffect(() => {
+    if (video) persistViralDetailUrl(video);
+  }, [video]);
+
   const statisticsError = useViralStatistics(video ? [video] : [], !review);
   const { playback, play, retry, markFailed } = useViralPlayback(video);
+  if (!video && detailStatus === "loading") {
+    return (
+      <section className="content-page">
+        <p className="viral-media-status" role="status">
+          正在读取视频详情…
+        </p>
+      </section>
+    );
+  }
   if (!video)
     return (
       <section className="content-page">
         <Empty
-          title="暂未选择参考视频"
-          description="请返回爆款视频列表选择一条内容。"
+          title={detailStatus === "error" ? "视频暂不可用" : "暂未选择参考视频"}
+          description={
+            detailStatus === "error"
+              ? "该视频可能已下架或暂时无法读取。"
+              : "请返回爆款视频列表选择一条内容。"
+          }
           action={
             <Button variant="primary" onClick={() => navigate("viral")}>
               返回爆款视频
@@ -700,7 +1470,6 @@ export function ViralDetailPage() {
         />
       </section>
     );
-  const saved = state.favorites.includes(video.id);
   const published =
     video.publishedDisplay ??
     (video.publishedAt
@@ -712,15 +1481,32 @@ export function ViralDetailPage() {
     ["share", "转发", formatCount(video.shares)],
     ["star", "收藏", formatCount(video.collections)],
   ];
-  const goExtract = () => {
-    patchDraft({ sourceId: video.id });
+  const goExtract = (task: ViralImportTask) => {
+    if (!task.canTranscribe || !task.projectId || !task.sourceAssetId) {
+      notify("该来源暂不支持提取文案");
+      return;
+    }
+    patchDraft({
+      projectId: task.projectId,
+      sourceId: task.sourceAssetId,
+      sourceAssetId: task.sourceAssetId,
+    });
+    extractScriptFromUpload(task.projectId, task.sourceAssetId);
     navigate("copy", {
       selectedVideoId: video.id,
       returnTo: "viral-detail",
     });
   };
-  const goReplica = () => {
-    patchDraft({ sourceId: video.id });
+  const goReplica = (task: ViralImportTask) => {
+    if (!task.canAnalyze || !task.projectId || !task.sourceAssetId) {
+      notify("该来源暂不支持视频复刻");
+      return;
+    }
+    patchDraft({
+      projectId: task.projectId,
+      sourceId: task.sourceAssetId,
+      sourceAssetId: task.sourceAssetId,
+    });
     navigate("replica", {
       selectedVideoId: video.id,
       returnTo: "viral-detail",
@@ -815,52 +1601,53 @@ export function ViralDetailPage() {
               {statisticsError}
             </p>
           )}
-          <Field label="视频摘要（来源作品原文）">
+          {detailAvailability !== "available" && (
+            <p className="viral-media-status is-error" role="status">
+              该视频已不可用，暂不能导入创作。
+            </p>
+          )}
+          <Field label="视频摘要（来源描述，非提取文案）">
             <p className="content-source-copy">{video.description}</p>
           </Field>
-          {media.status !== "idle" && (
+          {importState.status !== "idle" && (
             <p
-              className={`viral-media-status is-${media.status}`}
+              className={`viral-media-status is-${importState.status}`}
               role="status"
             >
-              {media.status === "loading" && "素材准备中，可能需要几十秒…"}
-              {media.status === "ready" && media.message}
-              {media.status === "error" &&
-                `素材准备失败：${media.message ?? ""}`}
+              {importState.message}
             </p>
           )}
           <div className="content-detail-actions">
             <div className="content-detail-action">
               <Button
-                disabled={media.status === "loading"}
+                disabled={
+                  importState.status === "loading" ||
+                  detailAvailability !== "available"
+                }
                 variant="outline"
-                onClick={() => prepare(video, goExtract)}
+                onClick={() => void start(video, "copy", goExtract)}
               >
                 提取文案
               </Button>
             </div>
             <div className="content-detail-action">
               <Button
-                disabled={media.status === "loading"}
+                disabled={
+                  importState.status === "loading" ||
+                  detailAvailability !== "available"
+                }
                 variant="outline"
-                onClick={() => prepare(video, goReplica)}
+                onClick={() => void start(video, "replica", goReplica)}
               >
                 视频复刻
               </Button>
             </div>
             <div className="content-detail-action">
-              <Button
-                variant="outline"
-                onClick={() =>
-                  patchState({
-                    favorites: saved
-                      ? state.favorites.filter((id) => id !== video.id)
-                      : [...state.favorites, video.id],
-                  })
-                }
-              >
-                {saved ? "已收藏" : "收藏"}
-              </Button>
+              <ViralFavoriteButton
+                video={video}
+                savedFromServer={review ? undefined : detailFavorite}
+                onSavedChange={setDetailFavorite}
+              />
             </div>
           </div>
         </Panel>

@@ -28,12 +28,16 @@ const {
   useStudio,
   loadTaskPreview,
   uploadWorkbenchSourceVideo,
+  studioVideoFromViral,
   cancelStudioTask,
   downloadStudioTaskResult,
   retryStudioTask,
   loadMoreGenerationTasks,
   loadMoreOralTasks,
   loadStudioTaskDetail,
+  createViralImportTask,
+  resolveViralLink,
+  getViralImportTask,
   getStudioNotificationPreferences,
   updateStudioNotificationPreferences,
 } = vi.hoisted(() => ({
@@ -47,12 +51,29 @@ const {
         signal?: AbortSignal,
       ) => Promise<WorkbenchUploadResult>
     >(),
+  studioVideoFromViral: vi.fn((item: import("../api").ViralVideoItem) => ({
+    id: `${item.platform}-${item.videoId}`,
+    nativeId: item.videoId,
+    platformKey: item.platform,
+    title: item.title,
+    author: item.author,
+    platform: "抖音",
+    category: item.category,
+    duration: "00:30",
+    likes: item.likes,
+    collections: item.collects,
+    shares: item.shares,
+    description: item.sourceDescription ?? item.title,
+  })),
   cancelStudioTask: vi.fn(),
   downloadStudioTaskResult: vi.fn(),
   retryStudioTask: vi.fn(),
   loadMoreGenerationTasks: vi.fn(),
   loadMoreOralTasks: vi.fn(),
   loadStudioTaskDetail: vi.fn(),
+  createViralImportTask: vi.fn(),
+  resolveViralLink: vi.fn(),
+  getViralImportTask: vi.fn(),
   getStudioNotificationPreferences: vi.fn(),
   updateStudioNotificationPreferences: vi.fn(),
 }));
@@ -60,12 +81,16 @@ const {
 vi.mock("./context", () => ({ useStudio }));
 vi.mock("../api", async (importOriginal) => ({
   ...(await importOriginal<object>()),
+  createViralImportTask,
+  resolveViralLink,
+  getViralImportTask,
   getStudioNotificationPreferences,
   updateStudioNotificationPreferences,
 }));
 vi.mock("./live", () => ({
   loadTaskPreview,
   uploadWorkbenchSourceVideo,
+  studioVideoFromViral,
   cancelStudioTask,
   downloadStudioTaskResult,
   retryStudioTask,
@@ -490,6 +515,33 @@ describe("V1.4 工作台正在进行行", () => {
     });
   }
 
+  it("爆款来源未上传时在工作台展示原视频上传引导", () => {
+    const state = createState("workbench");
+    state.draft.sourceId = "viral-source";
+    const videos: StudioVideo[] = [
+      {
+        id: "viral-source",
+        title: "建房预算参考",
+        author: "作者",
+        platform: "抖音",
+        category: "建房预算",
+        poster: "/studio/source-preview.jpg",
+        duration: "00:30",
+        likes: 0,
+        collections: null,
+        shares: null,
+        description: "参考标题",
+      },
+    ];
+    useStudio.mockReturnValue(workbench({ state, data: data([], videos) }));
+    render(<WorkbenchPage />);
+
+    expect(screen.getByText(/已选参考：建房预算参考/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/请上传该视频的 MP4 或 MOV 文件/),
+    ).toBeInTheDocument();
+  });
+
   it("每行提供更多操作菜单：打开任务中心与复制任务编号", async () => {
     const value = workbench();
     useStudio.mockReturnValue(value);
@@ -565,6 +617,12 @@ describe("V1.4 工作台新版首页布局", () => {
     description: "乡墅爆款案例",
   }));
 
+  beforeEach(() => {
+    window.sessionStorage.clear();
+    createViralImportTask.mockReset();
+    getViralImportTask.mockReset();
+  });
+
   it("展示新版主标题、居中辅助文案、五个竖屏爆款与四个快捷入口", () => {
     const value = studio(undefined, {
       state: createState("workbench"),
@@ -579,9 +637,9 @@ describe("V1.4 工作台新版首页布局", () => {
         name: "粘贴一条爆款乡墅视频链接，快速生成它的原创视频",
       }),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText("提取文案进入文案工坊，开始复刻进入分镜工作区。"),
-    ).toHaveClass("studio-start-helper");
+    expect(screen.getByText(/链接解析当前支持抖音视频/)).toHaveClass(
+      "studio-start-helper",
+    );
     expect(
       screen.getByRole("heading", { name: "爆款视频精选" }),
     ).toBeInTheDocument();
@@ -598,8 +656,9 @@ describe("V1.4 工作台新版首页布局", () => {
     }
   });
 
-  it("从首页爆款卡片开始复刻时复用既有草稿与导航流程", () => {
+  it("审核首页从爆款卡片开始复刻时复用既有草稿与导航流程", () => {
     const value = studio(undefined, {
+      review: true,
       state: createState("workbench"),
       data: data([], videos),
     });
@@ -615,6 +674,173 @@ describe("V1.4 工作台新版首页布局", () => {
       selectedVideoId: "video-1",
       returnTo: "workbench",
     });
+  });
+
+  it("首页精选按热度和稳定 ID 确定排序，不依赖接口数组顺序", () => {
+    const value = studio(undefined, {
+      state: createState("workbench"),
+      data: data([], [...videos].reverse()),
+    });
+    useStudio.mockReturnValue(value);
+
+    render(<WorkbenchPage />);
+
+    expect(screen.getByText("灵感视频 1")).toBeInTheDocument();
+    expect(screen.getByText("灵感视频 5")).toBeInTheDocument();
+    expect(screen.queryByText("灵感视频 6")).not.toBeInTheDocument();
+  });
+
+  it("真实爆款从首页复刻时先导入项目素材", async () => {
+    createViralImportTask.mockResolvedValue({
+      taskId: "import-home",
+      status: "SUCCEEDED",
+      projectId: "project-home",
+      sourceAssetId: "asset-home",
+      canAnalyze: true,
+    });
+    const source = {
+      ...videos[0],
+      platformKey: "douyin" as const,
+      nativeId: "native-home",
+    };
+    const value = studio(undefined, {
+      state: createState("workbench"),
+      data: data([], [source]),
+    });
+    useStudio.mockReturnValue(value);
+    render(<WorkbenchPage />);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "用它复刻：灵感视频 1" }),
+    );
+
+    await waitFor(() =>
+      expect(value.patchDraft).toHaveBeenCalledWith({
+        projectId: "project-home",
+        sourceId: "asset-home",
+        sourceAssetId: "asset-home",
+      }),
+    );
+    expect(createViralImportTask).toHaveBeenCalledWith(
+      "douyin",
+      "native-home",
+      "replica",
+      expect.any(String),
+    );
+  });
+
+  it("首页爆款永久失败后使用新幂等键重试", async () => {
+    createViralImportTask
+      .mockResolvedValueOnce({
+        id: "home-expired",
+        status: "FAILED",
+        retryable: false,
+        errorMessage: "首页来源已失效",
+      })
+      .mockResolvedValueOnce({
+        id: "home-replacement",
+        status: "SUCCEEDED",
+        projectId: "home-project-new",
+        sourceAssetId: "home-asset-new",
+        canAnalyze: true,
+      });
+    const source = {
+      ...videos[0],
+      platformKey: "douyin" as const,
+      nativeId: "native-home-expired",
+    };
+    const value = studio(undefined, {
+      user: {
+        id: "customer-home",
+        username: "customer-home",
+        display_name: "首页客户",
+        role: "customer",
+      },
+      state: createState("workbench"),
+      data: data([], [source]),
+    });
+    useStudio.mockReturnValue(value);
+    render(<WorkbenchPage />);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "用它复刻：灵感视频 1" }),
+    );
+    await waitFor(() =>
+      expect(value.notify).toHaveBeenCalledWith("首页来源已失效"),
+    );
+    const failedKey = createViralImportTask.mock.calls[0][3];
+    fireEvent.click(
+      screen.getByRole("button", { name: "用它复刻：灵感视频 1" }),
+    );
+    await waitFor(() => expect(createViralImportTask).toHaveBeenCalledTimes(2));
+
+    expect(createViralImportTask.mock.calls[1][3]).not.toBe(failedKey);
+  });
+
+  it("首页爆款畸形成功后不写草稿且使用新幂等键重试", async () => {
+    createViralImportTask.mockResolvedValue({
+      id: "home-malformed",
+      status: "SUCCEEDED",
+      projectId: "home-project",
+      sourceAssetId: "home-audio",
+      canAnalyze: false,
+    });
+    const source = {
+      ...videos[0],
+      platformKey: "douyin" as const,
+      nativeId: "native-home-malformed",
+    };
+    const value = studio(undefined, {
+      user: {
+        id: "customer-home-malformed",
+        username: "customer-home-malformed",
+        display_name: "首页客户",
+        role: "customer",
+      },
+      state: createState("workbench"),
+      data: data([], [source]),
+    });
+    useStudio.mockReturnValue(value);
+    render(<WorkbenchPage />);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "用它复刻：灵感视频 1" }),
+    );
+    await waitFor(() =>
+      expect(value.notify).toHaveBeenCalledWith("该来源暂不支持视频复刻"),
+    );
+    const malformedKey = createViralImportTask.mock.calls[0][3];
+    fireEvent.click(
+      screen.getByRole("button", { name: "用它复刻：灵感视频 1" }),
+    );
+    await waitFor(() => expect(createViralImportTask).toHaveBeenCalledTimes(2));
+
+    expect(createViralImportTask.mock.calls[1][3]).not.toBe(malformedKey);
+    expect(value.patchDraft).not.toHaveBeenCalled();
+    expect(value.navigate).not.toHaveBeenCalled();
+  });
+
+  it("正式首页爆款缺少平台原生 ID 时不创建伪复刻项目", () => {
+    const source = {
+      ...videos[0],
+      platformKey: undefined,
+      nativeId: undefined,
+    };
+    const value = studio(undefined, {
+      review: false,
+      state: createState("workbench"),
+      data: data([], [source]),
+    });
+    useStudio.mockReturnValue(value);
+    render(<WorkbenchPage />);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "用它复刻：灵感视频 1" }),
+    );
+
+    expect(value.notify).toHaveBeenCalledWith("该视频缺少可导入的平台标识");
+    expect(value.patchDraft).not.toHaveBeenCalled();
+    expect(value.navigate).not.toHaveBeenCalled();
   });
 });
 
@@ -645,6 +871,9 @@ describe("V1.4 工作台上传与创作入口", () => {
   beforeEach(() => {
     useStudio.mockReset();
     uploadWorkbenchSourceVideo.mockReset();
+    resolveViralLink.mockReset();
+    createViralImportTask.mockReset();
+    getViralImportTask.mockReset();
   });
 
   function workbench(
@@ -882,6 +1111,295 @@ describe("V1.4 工作台上传与创作入口", () => {
     fireEvent.click(screen.getByRole("button", { name: "提取文案" }));
     expect(value.extractScriptFromUpload).toHaveBeenCalledTimes(1);
     expect(value.openLive).not.toHaveBeenCalled();
+  });
+
+  it("抖音链接解析后复用爆款导入状态流进入复刻且不重复提交", async () => {
+    const value = workbench();
+    useStudio.mockReturnValue(value);
+    const resolution = deferred<import("../api").ViralLinkResolution>();
+    resolveViralLink.mockReturnValue(resolution.promise);
+    createViralImportTask.mockResolvedValue({
+      id: "link-import-1",
+      status: "SUCCEEDED",
+      projectId: "link-project-1",
+      sourceAssetId: "link-asset-1",
+      canAnalyze: true,
+    });
+    render(<WorkbenchPage />);
+
+    fireEvent.change(screen.getByLabelText("视频链接"), {
+      target: {
+        value: "3.28 复制打开抖音 https://v.douyin.com/shareCode/",
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "开始复刻" }));
+    expect(
+      screen.getByRole("button", { name: "正在解析链接…" }),
+    ).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "正在解析链接…" }));
+    expect(resolveViralLink).toHaveBeenCalledWith(
+      "3.28 复制打开抖音 https://v.douyin.com/shareCode/",
+      "replica",
+      expect.any(String),
+    );
+
+    resolution.resolve({
+      importIdempotencyKey: "stable-link-import-key",
+      item: {
+        platform: "douyin",
+        videoId: "native-link-1",
+        category: "链接导入",
+        title: "链接乡墅案例",
+        author: "作者",
+        authorAvatar: null,
+        verified: false,
+        coverUrl: null,
+        durationMs: 30_000,
+        likes: 0,
+        comments: null,
+        shares: null,
+        collects: null,
+        publishedAt: null,
+        publishedDisplay: null,
+        likeDisplay: null,
+        tags: [],
+        hasPlayableAudio: true,
+        playUrl: "https://cdn.example/video.mp4",
+      },
+    });
+
+    await waitFor(() =>
+      expect(createViralImportTask).toHaveBeenCalledWith(
+        "douyin",
+        "native-link-1",
+        "replica",
+        "stable-link-import-key",
+      ),
+    );
+    expect(value.patchDraft).toHaveBeenCalledWith({
+      projectId: "link-project-1",
+      sourceId: "link-asset-1",
+      sourceAssetId: "link-asset-1",
+    });
+    expect(value.navigate).toHaveBeenCalledWith("replica", {
+      selectedVideoId: "douyin-native-link-1",
+      returnTo: "workbench",
+    });
+  });
+
+  it("链接输入切换后忽略上一请求的迟到响应", async () => {
+    const value = workbench();
+    useStudio.mockReturnValue(value);
+    const resolution = deferred<import("../api").ViralLinkResolution>();
+    resolveViralLink.mockReturnValue(resolution.promise);
+    render(<WorkbenchPage />);
+
+    const input = screen.getByLabelText("视频链接");
+    fireEvent.change(input, {
+      target: { value: "https://v.douyin.com/old-link/" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "开始复刻" }));
+    fireEvent.change(input, {
+      target: { value: "https://v.douyin.com/new-link/" },
+    });
+
+    resolution.resolve({
+      importIdempotencyKey: "stale-import-key",
+      item: {
+        platform: "douyin",
+        videoId: "stale-link",
+        category: "链接导入",
+        title: "迟到响应",
+        author: "作者",
+        authorAvatar: null,
+        verified: false,
+        coverUrl: null,
+        durationMs: 30_000,
+        likes: 0,
+        comments: null,
+        shares: null,
+        collects: null,
+        publishedAt: null,
+        publishedDisplay: null,
+        likeDisplay: null,
+        tags: [],
+        hasPlayableAudio: true,
+        playUrl: "https://cdn.example/stale.mp4",
+      },
+    });
+    await act(async () => Promise.resolve());
+
+    await waitFor(() => expect(resolveViralLink).toHaveBeenCalledOnce());
+    expect(createViralImportTask).not.toHaveBeenCalled();
+    expect(value.patchDraft).not.toHaveBeenCalled();
+    expect(value.navigate).not.toHaveBeenCalled();
+  });
+
+  it("账号在 effect 前切换时阻断旧链接响应和后续导入", async () => {
+    const accountA = workbench({
+      user: { id: "customer-a" } as StudioContextValue["user"],
+    });
+    const accountB = workbench({
+      user: { id: "customer-b" } as StudioContextValue["user"],
+    });
+    let current = accountA;
+    useStudio.mockImplementation(() => current);
+    const resolution = deferred<import("../api").ViralLinkResolution>();
+    resolveViralLink.mockReturnValue(resolution.promise);
+    const view = render(<WorkbenchPage />);
+
+    fireEvent.change(screen.getByLabelText("视频链接"), {
+      target: { value: "https://v.douyin.com/account-a/" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "开始复刻" }));
+    current = accountB;
+    view.rerender(<WorkbenchPage />);
+    resolution.resolve({
+      importIdempotencyKey: "account-a-import",
+      item: {
+        platform: "douyin",
+        videoId: "7345678901234567890",
+        category: "链接导入",
+        title: "账号 A 链接",
+        author: "作者",
+        authorAvatar: null,
+        verified: false,
+        coverUrl: null,
+        durationMs: 30_000,
+        likes: 0,
+        comments: null,
+        shares: null,
+        collects: null,
+        publishedAt: null,
+        publishedDisplay: null,
+        likeDisplay: null,
+        tags: [],
+        hasPlayableAudio: true,
+        playUrl: "https://cdn.example/account-a.mp4",
+      },
+    });
+    await act(async () => Promise.resolve());
+
+    await waitFor(() => expect(resolveViralLink).toHaveBeenCalledOnce());
+    expect(createViralImportTask).not.toHaveBeenCalled();
+    expect(accountA.updateData).not.toHaveBeenCalled();
+    expect(accountB.updateData).not.toHaveBeenCalled();
+    expect(accountA.notify).not.toHaveBeenCalled();
+    expect(accountB.notify).not.toHaveBeenCalled();
+  });
+
+  it("切换账号后立即隐藏旧链接且不能以新账号提交", () => {
+    const accountA = workbench({
+      user: { id: "customer-a" } as StudioContextValue["user"],
+    });
+    const accountB = workbench({
+      user: { id: "customer-b" } as StudioContextValue["user"],
+    });
+    let current = accountA;
+    useStudio.mockImplementation(() => current);
+    const view = render(<WorkbenchPage />);
+    fireEvent.change(screen.getByLabelText("视频链接"), {
+      target: { value: "https://v.douyin.com/account-a/" },
+    });
+
+    current = accountB;
+    view.rerender(<WorkbenchPage />);
+    expect(screen.getByLabelText("视频链接")).toHaveValue("");
+    fireEvent.click(screen.getByRole("button", { name: "开始复刻" }));
+
+    expect(resolveViralLink).not.toHaveBeenCalled();
+    expect(accountB.navigate).not.toHaveBeenCalled();
+    expect(accountB.extractScriptFromUpload).not.toHaveBeenCalled();
+    expect(accountB.openLive).toHaveBeenCalledWith("projects");
+
+    current = accountA;
+    view.rerender(<WorkbenchPage />);
+    expect(screen.getByLabelText("视频链接")).toHaveValue("");
+  });
+
+  it("切换账号后隐藏旧上传且迟到上传不会写入新账号", async () => {
+    const accountA = workbench({
+      user: { id: "customer-a" } as StudioContextValue["user"],
+    });
+    const accountB = workbench({
+      user: { id: "customer-b" } as StudioContextValue["user"],
+    });
+    let current = accountA;
+    useStudio.mockImplementation(() => current);
+    const upload = deferred<WorkbenchUploadResult>();
+    uploadWorkbenchSourceVideo.mockReturnValue(upload.promise);
+    const view = render(<WorkbenchPage />);
+    changeFile("账号A.mp4");
+    expect(screen.getByText(/正在上传 账号A\.mp4/)).toBeInTheDocument();
+
+    current = accountB;
+    view.rerender(<WorkbenchPage />);
+    expect(screen.queryByText(/账号A\.mp4/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "提取文案" }));
+    expect(accountB.extractScriptFromUpload).not.toHaveBeenCalled();
+    expect(accountB.openLive).toHaveBeenCalledWith("projects");
+
+    upload.resolve({ projectId: "project-a", assetId: "asset-a" });
+    await act(async () => upload.promise);
+    expect(accountA.patchDraft).not.toHaveBeenCalled();
+    expect(accountB.patchDraft).not.toHaveBeenCalled();
+    expect(accountA.notify).not.toHaveBeenCalled();
+    expect(accountB.notify).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "视频号链接暂不支持解析，请上传 MP4 或 MOV 文件。",
+    "视频链接已过期，请重新复制链接或上传 MP4/MOV 文件。",
+    "链接中没有可用视频，请上传 MP4 或 MOV 文件。",
+  ])("链接失败显示上传回退且不创建导入任务：%s", async (message) => {
+    const value = workbench();
+    useStudio.mockReturnValue(value);
+    resolveViralLink.mockRejectedValue(new Error(message));
+    render(<WorkbenchPage />);
+
+    fireEvent.change(screen.getByLabelText("视频链接"), {
+      target: { value: "https://channels.weixin.qq.com/example" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "开始复刻" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(message);
+    expect(createViralImportTask).not.toHaveBeenCalled();
+    expect(value.patchDraft).not.toHaveBeenCalled();
+    expect(value.navigate).not.toHaveBeenCalled();
+  });
+
+  it("解析结果未知时保留同一幂等键供安全重放", async () => {
+    useStudio.mockReturnValue(workbench());
+    const error = Object.assign(new Error("视频链接解析结果未知"), {
+      status: 503,
+      code: "VIRAL_LINK_SUBMISSION_UNCERTAIN",
+    });
+    resolveViralLink.mockRejectedValue(error);
+    render(<WorkbenchPage />);
+
+    fireEvent.change(screen.getByLabelText("视频链接"), {
+      target: { value: "https://v.douyin.com/retain-key/" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "开始复刻" }));
+    await screen.findByRole("alert");
+    fireEvent.click(screen.getByRole("button", { name: "开始复刻" }));
+    await waitFor(() => expect(resolveViralLink).toHaveBeenCalledTimes(2));
+
+    expect(resolveViralLink.mock.calls[1]?.[2]).toBe(
+      resolveViralLink.mock.calls[0]?.[2],
+    );
+    expect(createViralImportTask).not.toHaveBeenCalled();
+  });
+
+  it("工作台明确说明支持范围、上传格式和解析超时", () => {
+    useStudio.mockReturnValue(workbench());
+    render(<WorkbenchPage />);
+
+    expect(
+      screen.getByText(
+        "链接解析当前支持抖音视频；视频号及其他平台请上传 MP4/MOV 文件。解析最长约 60 秒。",
+      ),
+    ).toBeInTheDocument();
   });
 });
 

@@ -60,6 +60,7 @@ from app.simple_character_routes import router as character_simple_router
 from app.source_frame_routes import router as source_frame_router
 from app.studio_draft_routes import router as studio_draft_router
 from app.studio_routes import router as studio_router
+from app.viral_import_routes import router as viral_import_router
 from app.viral_routes import router as viral_router
 from app.wallet_routes import router as wallet_router
 
@@ -350,6 +351,7 @@ app.include_router(settings_router)
 app.include_router(media_router)
 app.include_router(analysis_router)
 app.include_router(viral_router)
+app.include_router(viral_import_router)
 app.include_router(character_router)
 app.include_router(character_identity_router)
 app.include_router(character_generation_router)

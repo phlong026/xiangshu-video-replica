@@ -1877,6 +1877,41 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/control/settings/viral": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Viral Runtime */
+    get: operations["read_viral_runtime_api_control_settings_viral_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    /** Update Viral Runtime */
+    patch: operations["update_viral_runtime_api_control_settings_viral_patch"];
+    trace?: never;
+  };
+  "/api/control/viral/videos/{platform}/{video_id}/availability": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    /** Update Viral Video Availability */
+    patch: operations["update_viral_video_availability_api_control_viral_videos__platform___video_id__availability_patch"];
+    trace?: never;
+  };
   "/api/control/settings/queue-mode": {
     parameters: {
       query?: never;
@@ -3108,6 +3143,41 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/viral/favorites": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List Viral Favorites */
+    get: operations["list_viral_favorites_api_viral_favorites_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/viral/favorites/{platform}/{video_id}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    /** Add Viral Video Favorite */
+    put: operations["add_viral_video_favorite_api_viral_favorites__platform___video_id__put"];
+    post?: never;
+    /** Remove Viral Video Favorite */
+    delete: operations["remove_viral_video_favorite_api_viral_favorites__platform___video_id__delete"];
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/viral/videos/statistics": {
     parameters: {
       query?: never;
@@ -3174,6 +3244,74 @@ export interface paths {
     };
     /** Download Viral Media File */
     get: operations["download_viral_media_file_api_viral_videos_media_file_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/viral/videos/{platform}/{video_id}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Get Viral Video Detail */
+    get: operations["get_viral_video_detail_api_viral_videos__platform___video_id__get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/viral/link-resolutions": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Resolve Viral Link */
+    post: operations["resolve_viral_link_api_viral_link_resolutions_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/viral/videos/import-tasks": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Create Viral Import Task */
+    post: operations["create_viral_import_task_api_viral_videos_import_tasks_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/viral/import-tasks/{task_id}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Viral Import Task */
+    get: operations["read_viral_import_task_api_viral_import_tasks__task_id__get"];
     put?: never;
     post?: never;
     delete?: never;
@@ -7124,6 +7262,8 @@ export interface components {
       id: string;
       /** Project Id */
       project_id: string;
+      /** Source Asset Id */
+      source_asset_id: string;
       /** Status */
       status: string;
       /** Attempt */
@@ -7875,6 +8015,121 @@ export interface components {
       /** Duration Seconds */
       duration_seconds: number;
     };
+    /** ViralAvailabilityResponse */
+    ViralAvailabilityResponse: {
+      /**
+       * Platform
+       * @enum {string}
+       */
+      platform: "douyin" | "wechat_channels";
+      /** Video Id */
+      video_id: string;
+      /**
+       * Status
+       * @enum {string}
+       */
+      status: "AVAILABLE" | "HIDDEN" | "UNAVAILABLE";
+    };
+    /** ViralAvailabilityUpdateRequest */
+    ViralAvailabilityUpdateRequest: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default
+       */
+      reason: string;
+      /**
+       * Status
+       * @enum {string}
+       */
+      status: "AVAILABLE" | "HIDDEN" | "UNAVAILABLE";
+    };
+    /** ViralFavoriteMutationResponse */
+    ViralFavoriteMutationResponse: {
+      /** Isfavorite */
+      isFavorite: boolean;
+    };
+    /** ViralFavoritesResponse */
+    ViralFavoritesResponse: {
+      /** Items */
+      items: components["schemas"]["ViralVideoItem"][];
+      /** Total */
+      total: number;
+      /** Hasmore */
+      hasMore: boolean;
+      /** Nextcursor */
+      nextCursor: string | null;
+    };
+    /** ViralImportRequest */
+    ViralImportRequest: {
+      /**
+       * Platform
+       * @enum {string}
+       */
+      platform: "douyin" | "wechat_channels";
+      /** Videoid */
+      videoId: string;
+      /**
+       * Purpose
+       * @enum {string}
+       */
+      purpose: "copy" | "replica";
+      /** Projectid */
+      projectId?: string | null;
+    };
+    /** ViralImportTaskResponse */
+    ViralImportTaskResponse: {
+      /** Id */
+      id: string;
+      /** Status */
+      status: string;
+      /** Platform */
+      platform: string;
+      /** Videoid */
+      videoId: string;
+      /** Purpose */
+      purpose: string;
+      /** Projectid */
+      projectId: string;
+      /** Sourceassetid */
+      sourceAssetId: string | null;
+      /** Mediakind */
+      mediaKind: string | null;
+      /** Cantranscribe */
+      canTranscribe: boolean;
+      /** Cananalyze */
+      canAnalyze: boolean;
+      /** Errorcode */
+      errorCode: string | null;
+      /** Errormessage */
+      errorMessage: string | null;
+      /** Retryable */
+      retryable: boolean;
+      /** Createdat */
+      createdAt: string;
+      /** Updatedat */
+      updatedAt: string;
+    };
+    /** ViralLinkResolutionRequest */
+    ViralLinkResolutionRequest: {
+      /** Url */
+      url: string;
+      /**
+       * Purpose
+       * @enum {string}
+       */
+      purpose: "copy" | "replica";
+    };
+    /** ViralLinkResolutionResponse */
+    ViralLinkResolutionResponse: {
+      item: components["schemas"]["ViralVideoItem"];
+      /** Importidempotencykey */
+      importIdempotencyKey: string;
+    };
     /** ViralListResponse */
     ViralListResponse: {
       /** Platform */
@@ -7887,6 +8142,8 @@ export interface components {
       items: components["schemas"]["ViralVideoItem"][];
       /** Fetchedat */
       fetchedAt: string | null;
+      /** Dataversion */
+      dataVersion: string | null;
       /**
        * Source
        * @default database
@@ -7898,6 +8155,19 @@ export interface components {
        * @default false
        */
       stale: boolean;
+      /**
+       * Refreshing
+       * @default false
+       */
+      refreshing: boolean;
+      /** Refresherror */
+      refreshError?: string | null;
+      /** Total */
+      total: number;
+      /** Hasmore */
+      hasMore: boolean;
+      /** Nextcursor */
+      nextCursor: string | null;
     };
     /** ViralMediaRequest */
     ViralMediaRequest: {
@@ -7920,6 +8190,70 @@ export interface components {
       cacheHit: boolean;
       video?: components["schemas"]["ViralVideoItem"] | null;
     };
+    /** ViralPlatformStatus */
+    ViralPlatformStatus: {
+      /**
+       * Platform
+       * @enum {string}
+       */
+      platform: "douyin" | "wechat_channels";
+      /** Cached Videos */
+      cached_videos: number;
+      /** Last Fetched At */
+      last_fetched_at: string | null;
+      /**
+       * Refresh Status
+       * @enum {string}
+       */
+      refresh_status:
+        | "not_configured"
+        | "configured_only"
+        | "refreshing"
+        | "ok"
+        | "error";
+      /** Last Refresh Error */
+      last_refresh_error: string | null;
+    };
+    /** ViralRuntimeResponse */
+    ViralRuntimeResponse: {
+      /** Collection Enabled */
+      collection_enabled: boolean;
+      /** Import Enabled */
+      import_enabled: boolean;
+      /** Pending Imports */
+      pending_imports: number;
+      /** Running Imports */
+      running_imports: number;
+      /** Failed Imports */
+      failed_imports: number;
+      /** Pending Refreshes */
+      pending_refreshes: number;
+      /** Running Refreshes */
+      running_refreshes: number;
+      /** Failed Refreshes */
+      failed_refreshes: number;
+      /** Source Configured */
+      source_configured: boolean;
+      /** Platforms */
+      platforms: components["schemas"]["ViralPlatformStatus"][];
+    };
+    /** ViralRuntimeUpdateRequest */
+    ViralRuntimeUpdateRequest: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default
+       */
+      reason: string;
+      /** Collection Enabled */
+      collection_enabled: boolean;
+      /** Import Enabled */
+      import_enabled: boolean;
+    };
     /** ViralStatisticsRequest */
     ViralStatisticsRequest: {
       /** Videoids */
@@ -7940,6 +8274,8 @@ export interface components {
       category: string;
       /** Title */
       title: string;
+      /** Sourcedescription */
+      sourceDescription: string | null;
       /** Author */
       author: string;
       /** Authoravatar */
@@ -7974,6 +8310,17 @@ export interface components {
       native?: {
         [key: string]: unknown;
       };
+      /**
+       * Isfavorite
+       * @default false
+       */
+      isFavorite: boolean;
+      /**
+       * Availability
+       * @default available
+       * @enum {string}
+       */
+      availability: "available" | "hidden" | "unavailable";
     };
     /** VoiceCloneRequest */
     VoiceCloneRequest: {
@@ -12145,6 +12492,95 @@ export interface operations {
       };
     };
   };
+  read_viral_runtime_api_control_settings_viral_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ViralRuntimeResponse"];
+        };
+      };
+    };
+  };
+  update_viral_runtime_api_control_settings_viral_patch: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ViralRuntimeUpdateRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ViralRuntimeResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  update_viral_video_availability_api_control_viral_videos__platform___video_id__availability_patch: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        platform: "douyin" | "wechat_channels";
+        video_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ViralAvailabilityUpdateRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ViralAvailabilityResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   read_queue_mode_api_control_settings_queue_mode_get: {
     parameters: {
       query?: never;
@@ -14273,6 +14709,8 @@ export interface operations {
       query?: {
         platform?: string;
         sort?: string;
+        limit?: number;
+        cursor?: string | null;
       };
       header?: {
         "X-Dev-User-Id"?: string | null;
@@ -14290,6 +14728,106 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["ViralListResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  list_viral_favorites_api_viral_favorites_get: {
+    parameters: {
+      query?: {
+        platform?: string | null;
+        limit?: number;
+        cursor?: string | null;
+      };
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ViralFavoritesResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  add_viral_video_favorite_api_viral_favorites__platform___video_id__put: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        platform: string;
+        video_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ViralFavoriteMutationResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  remove_viral_video_favorite_api_viral_favorites__platform___video_id__delete: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        platform: string;
+        video_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ViralFavoriteMutationResponse"];
         };
       };
       /** @description Validation Error */
@@ -14415,7 +14953,9 @@ export interface operations {
         user_id: string;
         sig: string;
       };
-      header?: never;
+      header?: {
+        Range?: string | null;
+      };
       path?: never;
       cookie?: never;
     };
@@ -14428,6 +14968,180 @@ export interface operations {
         };
         content: {
           "application/json": unknown;
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  get_viral_video_detail_api_viral_videos__platform___video_id__get: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
+      };
+      path: {
+        platform: string;
+        video_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ViralVideoItem"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  resolve_viral_link_api_viral_link_resolutions_post: {
+    parameters: {
+      query?: never;
+      header: {
+        "Idempotency-Key": string;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ViralLinkResolutionRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ViralLinkResolutionResponse"];
+        };
+      };
+      /** @description Conflict */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Gone */
+      410: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+      /** @description Bad Gateway */
+      502: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Service Unavailable */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Gateway Timeout */
+      504: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+    };
+  };
+  create_viral_import_task_api_viral_videos_import_tasks_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "Idempotency-Key"?: string | null;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ViralImportRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      202: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ViralImportTaskResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_viral_import_task_api_viral_import_tasks__task_id__get: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
+      };
+      path: {
+        task_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ViralImportTaskResponse"];
         };
       };
       /** @description Validation Error */

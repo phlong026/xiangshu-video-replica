@@ -4,7 +4,9 @@ import argparse
 import logging
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -94,7 +96,9 @@ from app.oral_worker import (
     prepare_oral_work,
 )
 from app.script_from_audio import (
+    ScriptFromAudioTaskLease,
     acquire_script_from_audio_task,
+    checkpoint_script_from_audio_task,
     complete_script_from_audio_task,
     fail_script_from_audio_task,
     mark_script_from_audio_submission_started,
@@ -128,8 +132,113 @@ from app.storage import (
     StorageBackendUnavailable,
     StoragePermissionError,
 )
+from app.viral_import import (
+    acquire_viral_import_task,
+    complete_viral_import_task,
+    discard_viral_import_outcome,
+    fail_viral_import_task,
+    fail_viral_media_preparation,
+    perform_viral_import_task,
+    prepare_viral_import_task,
+)
+from app.viral_refresh import (
+    ViralRefreshLease,
+    acquire_viral_refresh_task,
+    complete_viral_refresh_task,
+    fail_viral_refresh_task,
+)
+from app.viral_routes import _collect_videos, get_viral_source_client
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _sqlite_audio_connection(conn: BusinessConnection) -> Iterator[BusinessConnection]:
+    yield conn
+
+
+@contextmanager
+def _pg_audio_connection() -> Iterator[BusinessConnection]:
+    with pg_transaction() as raw_conn:
+        yield BusinessConnection.postgres(raw_conn)
+
+
+def _cleanup_audio_objects(
+    connection: Callable[[], AbstractContextManager[BusinessConnection]],
+    storage: StorageAdapter,
+) -> None:
+    # Leave uncertain submissions' input available until the signed URL expires.
+    cutoff = (datetime.now(UTC) - timedelta(minutes=30)).strftime("%Y-%m-%d %H:%M:%S")
+    with connection() as conn:
+        rows = conn.execute(
+            "SELECT id,audio_object_key FROM script_from_audio_tasks "
+            "WHERE audio_object_key IS NOT NULL AND (status IN ('SUCCEEDED','FAILED') "
+            "OR (status='SUBMISSION_UNCERTAIN' AND updated_at<=%s)) "
+            "ORDER BY updated_at,id LIMIT 10",
+            (cutoff,),
+        ).fetchall()
+    for row in rows:
+        try:
+            storage.delete_object(
+                str(row["audio_object_key"]), actor_id="script-from-audio-cleanup"
+            )
+            with connection() as conn:
+                conn.execute(
+                    "UPDATE script_from_audio_tasks SET audio_object_key=NULL "
+                    "WHERE id=%s AND audio_object_key=%s "
+                    "AND status IN ('SUCCEEDED','FAILED','SUBMISSION_UNCERTAIN')",
+                    (row["id"], row["audio_object_key"]),
+                )
+                conn.commit()
+        except Exception as exc:
+            logger.warning("ASR cleanup deferred for task %s: %s", row["id"], type(exc).__name__)
+
+
+def _run_audio_lease(
+    lease: ScriptFromAudioTaskLease,
+    *,
+    storage: StorageAdapter,
+    connection: Callable[[], AbstractContextManager[BusinessConnection]],
+) -> None:
+    submission_started = False
+    work = None
+
+    def before_provider_call() -> None:
+        nonlocal submission_started
+        with connection() as conn:
+            mark_script_from_audio_submission_started(conn, lease=lease)
+        submission_started = True
+
+    def checkpoint(provider_task_id: str | None = None) -> None:
+        with connection() as conn:
+            checkpoint_script_from_audio_task(conn, lease=lease, provider_task_id=provider_task_id)
+
+    try:
+        with connection() as conn:
+            work = prepare_script_from_audio_task(conn, lease=lease, storage=storage)
+        submission_started = work.provider_task_id is not None
+        result = perform_script_from_audio_task(
+            work,
+            before_provider_call=before_provider_call,
+            on_submitted=checkpoint,
+            heartbeat=checkpoint,
+        )
+        with connection() as conn:
+            complete_script_from_audio_task(
+                conn,
+                lease=lease,
+                result=result,
+                audio_deleted=work.audio_deleted,
+            )
+    except Exception as exc:
+        with connection() as conn:
+            fail_script_from_audio_task(
+                conn,
+                lease=lease,
+                cause=exc,
+                submission_started=submission_started,
+                audio_deleted=work.audio_deleted if work is not None else False,
+            )
 
 
 def source_frame_semantic_inspector(
@@ -322,6 +431,62 @@ def _run_sqlite_oral_step(
     return True
 
 
+def _run_sqlite_viral_refresh_step(conn: BusinessConnection, *, worker_id: str) -> bool:
+    lease = acquire_viral_refresh_task(conn, worker_id=worker_id)
+    if lease is None:
+        return False
+    try:
+        _collect_videos(
+            conn,
+            get_viral_source_client(conn),
+            platform=lease.platform,
+            sort=lease.sort,
+            max_age=timedelta(0),
+            read_result=False,
+        )
+        complete_viral_refresh_task(conn, lease=lease)
+    except Exception as exc:
+        conn.rollback()
+        _fail_viral_refresh_if_current(conn, lease=lease, cause=exc)
+    return True
+
+
+def _fail_viral_refresh_if_current(
+    conn: BusinessConnection, *, lease: ViralRefreshLease, cause: Exception
+) -> None:
+    try:
+        fail_viral_refresh_task(conn, lease=lease, cause=cause)
+    except HTTPException as lease_error:
+        detail: dict[str, object] = (
+            lease_error.detail if isinstance(lease_error.detail, dict) else {}
+        )
+        if detail.get("code") != "VIRAL_REFRESH_LEASE_LOST":
+            raise
+        conn.rollback()
+        logger.warning("viral refresh failure ignored after lease loss: task=%s", lease.id)
+
+
+def _run_pg_viral_refresh(lease: ViralRefreshLease) -> None:
+    try:
+        with pg_transaction() as raw_conn:
+            client = get_viral_source_client(BusinessConnection.postgres(raw_conn))
+        _collect_videos(
+            None,
+            client,
+            platform=lease.platform,
+            sort=lease.sort,
+            max_age=timedelta(0),
+            read_result=False,
+        )
+        with pg_transaction() as raw_conn:
+            complete_viral_refresh_task(BusinessConnection.postgres(raw_conn), lease=lease)
+    except Exception as exc:
+        with pg_transaction() as raw_conn:
+            _fail_viral_refresh_if_current(
+                BusinessConnection.postgres(raw_conn), lease=lease, cause=exc
+            )
+
+
 def run_worker_once(
     conn: BusinessConnection,
     *,
@@ -343,9 +508,48 @@ def run_worker_once(
     """Process all currently eligible tasks, then return so SQLite connections stay short-lived."""
     if max_tasks is not None and max_tasks < 1:
         raise ValueError("max_tasks must be at least 1")
+    _cleanup_audio_objects(lambda: _sqlite_audio_connection(conn), storage)
     processed = 0
     while True:
         processed_round = False
+        if _run_sqlite_viral_refresh_step(conn, worker_id=worker_id):
+            processed += 1
+            processed_round = True
+            if max_tasks is not None and processed >= max_tasks:
+                return processed
+        viral_import_lease = acquire_viral_import_task(conn, worker_id=worker_id)
+        if viral_import_lease is not None:
+            viral_import_work = None
+            viral_import_outcome = None
+            try:
+                viral_import_work = prepare_viral_import_task(
+                    conn, lease=viral_import_lease, storage=storage
+                )
+                viral_import_outcome = perform_viral_import_task(viral_import_work)
+                complete_viral_import_task(
+                    conn, lease=viral_import_lease, outcome=viral_import_outcome
+                )
+            except Exception as exc:
+                if viral_import_outcome is not None:
+                    discard_viral_import_outcome(
+                        storage,
+                        outcome=viral_import_outcome,
+                        actor_id=viral_import_lease.owner_user_id,
+                    )
+                conn.rollback()
+                fail_viral_media_preparation(
+                    conn,
+                    preparation=(
+                        viral_import_work.media_preparation
+                        if viral_import_work is not None
+                        else None
+                    ),
+                )
+                fail_viral_import_task(conn, lease=viral_import_lease, cause=exc)
+            processed += 1
+            processed_round = True
+            if max_tasks is not None and processed >= max_tasks:
+                return processed
         if _run_sqlite_oral_step(
             conn,
             worker_id=worker_id,
@@ -444,31 +648,11 @@ def run_worker_once(
                 return processed
         script_from_audio_lease = acquire_script_from_audio_task(conn, worker_id=worker_id)
         if script_from_audio_lease is not None:
-            audio_submission_started = False
-            try:
-                audio_work = prepare_script_from_audio_task(
-                    conn,
-                    lease=script_from_audio_lease,
-                    storage=storage,
-                )
-                mark_script_from_audio_submission_started(
-                    conn,
-                    lease=script_from_audio_lease,
-                )
-                audio_submission_started = True
-                audio_result = perform_script_from_audio_task(audio_work)
-                complete_script_from_audio_task(
-                    conn,
-                    lease=script_from_audio_lease,
-                    result=audio_result,
-                )
-            except Exception as exc:
-                fail_script_from_audio_task(
-                    conn,
-                    lease=script_from_audio_lease,
-                    cause=exc,
-                    submission_started=audio_submission_started,
-                )
+            _run_audio_lease(
+                script_from_audio_lease,
+                storage=storage,
+                connection=lambda: _sqlite_audio_connection(conn),
+            )
             processed += 1
             processed_round = True
             if max_tasks is not None and processed >= max_tasks:
@@ -914,9 +1098,67 @@ def run_pg_worker_once(
     """
     if max_tasks is not None and max_tasks < 1:
         raise ValueError("max_tasks must be at least 1")
+    _cleanup_audio_objects(_pg_audio_connection, storage)
     processed = 0
     while True:
         processed_round = False
+        with pg_transaction() as raw_conn:
+            viral_refresh_lease = acquire_viral_refresh_task(
+                BusinessConnection.postgres(raw_conn), worker_id=worker_id
+            )
+        if viral_refresh_lease is not None:
+            _run_pg_viral_refresh(viral_refresh_lease)
+            processed += 1
+            processed_round = True
+            if max_tasks is not None and processed >= max_tasks:
+                return processed
+        with pg_transaction() as raw_conn:
+            viral_import_lease = acquire_viral_import_task(
+                BusinessConnection.postgres(raw_conn), worker_id=worker_id
+            )
+        if viral_import_lease is not None:
+            viral_import_work = None
+            viral_import_outcome = None
+            try:
+                with pg_transaction() as raw_conn:
+                    viral_import_work = prepare_viral_import_task(
+                        BusinessConnection.postgres(raw_conn),
+                        lease=viral_import_lease,
+                        storage=storage,
+                    )
+                viral_import_outcome = perform_viral_import_task(viral_import_work)
+                with pg_transaction() as raw_conn:
+                    complete_viral_import_task(
+                        BusinessConnection.postgres(raw_conn),
+                        lease=viral_import_lease,
+                        outcome=viral_import_outcome,
+                    )
+            except Exception as exc:
+                if viral_import_outcome is not None:
+                    discard_viral_import_outcome(
+                        storage,
+                        outcome=viral_import_outcome,
+                        actor_id=viral_import_lease.owner_user_id,
+                    )
+                with pg_transaction() as raw_conn:
+                    import_conn = BusinessConnection.postgres(raw_conn)
+                    fail_viral_media_preparation(
+                        import_conn,
+                        preparation=(
+                            viral_import_work.media_preparation
+                            if viral_import_work is not None
+                            else None
+                        ),
+                    )
+                    fail_viral_import_task(
+                        import_conn,
+                        lease=viral_import_lease,
+                        cause=exc,
+                    )
+            processed += 1
+            processed_round = True
+            if max_tasks is not None and processed >= max_tasks:
+                return processed
         with pg_transaction() as raw_conn:
             oral_lease = claim_oral_work(BusinessConnection.postgres(raw_conn), worker_id=worker_id)
         if oral_lease is not None:
@@ -1089,6 +1331,17 @@ def run_pg_worker_once(
                         cause=exc,
                         submission_started=submission_started,
                     )
+            processed += 1
+            processed_round = True
+            if max_tasks is not None and processed >= max_tasks:
+                return processed
+        with pg_transaction() as raw_conn:
+            audio_lease = acquire_script_from_audio_task(
+                BusinessConnection.postgres(raw_conn),
+                worker_id=worker_id,
+            )
+        if audio_lease is not None:
+            _run_audio_lease(audio_lease, storage=storage, connection=_pg_audio_connection)
             processed += 1
             processed_round = True
             if max_tasks is not None and processed >= max_tasks:

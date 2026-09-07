@@ -27,6 +27,7 @@ import {
   getLatestScriptFromAudioTask,
   getLatestScriptVersion,
   getOralTask,
+  getScriptFromAudioTask,
   getStudioAnalytics,
   getStudioDraft,
   getStudioStats,
@@ -867,7 +868,7 @@ export function studioVideoFromViral(item: ViralVideoItem): StudioVideo {
     likes: item.likes,
     collections: item.collects,
     shares: item.shares,
-    description: item.title,
+    description: item.sourceDescription ?? "",
     platformKey: item.platform,
     nativeId: item.videoId,
     authorAvatar: item.authorAvatar,
@@ -884,7 +885,7 @@ export function studioVideoFromViral(item: ViralVideoItem): StudioVideo {
 
 /** 爆款视频（C4 重启）：两个平台各自聚合；数据源未配置或失败时保持
  * 空态，不打断工作台其余数据的加载（与统计指标同一容错口径）。 */
-async function loadViralVideos(): Promise<{
+export async function loadViralVideos(): Promise<{
   videos: StudioVideo[];
   errors: string[];
 }> {
@@ -907,6 +908,7 @@ async function loadViralVideos(): Promise<{
 
 export async function loadStudioData(
   currentUser: CurrentUser,
+  options: { includeViral?: boolean } = {},
 ): Promise<StudioData> {
   const [
     projectsResult,
@@ -926,7 +928,9 @@ export async function loadStudioData(
     getStudioAnalytics(7),
     getStudioAnalytics(30),
     loadOralTasks(),
-    loadViralVideos(),
+    options.includeViral === false
+      ? Promise.resolve({ videos: [], errors: [] })
+      : loadViralVideos(),
     loadVideoMaterialMetadata(),
   ]);
   const errors: string[] = [];
@@ -1270,21 +1274,37 @@ export async function loadPersonAssets(
 export async function extractScriptFromUpload(
   projectId: string,
   assetId: string,
-): Promise<{ text: string }> {
-  await createScriptFromAudioTask(projectId, assetId, crypto.randomUUID());
+): Promise<{ text: string; taskId: string }> {
+  const submitted = await createScriptFromAudioTask(
+    projectId,
+    assetId,
+    crypto.randomUUID(),
+  );
   const maxAttempts = 150; // 2s × 150 = 5 分钟上限（长音频异步转写兜底）
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     await new Promise((resolve) => window.setTimeout(resolve, 2000));
-    const task = await getLatestScriptFromAudioTask(projectId);
-    if (!task) continue;
+    const task = await getScriptFromAudioTask(submitted.id);
     if (task.status === "SUCCEEDED" && task.result) {
-      return { text: task.result.text };
+      return { text: task.result.text, taskId: task.id };
     }
     if (task.status === "FAILED" || task.status === "SUBMISSION_UNCERTAIN") {
       throw new Error(task.error_message || "文案提取失败，请稍后重试。");
     }
   }
-  throw new Error("文案提取超时，请稍后在任务中心重试。");
+  throw new Error("文案仍在后台提取，请返回文案工坊恢复本次任务。");
+}
+
+export async function loadLatestScriptFromUpload(projectId: string) {
+  const task = await getLatestScriptFromAudioTask(projectId);
+  return task
+    ? {
+        id: task.id,
+        status: task.status,
+        result: task.result,
+        errorMessage: task.error_message ?? undefined,
+        sourceAssetId: task.source_asset_id ?? undefined,
+      }
+    : null;
 }
 
 /** 复刻一键生成：存稿 → 编译 →（编辑过则存修订）→ 锁定 → 建批。 */

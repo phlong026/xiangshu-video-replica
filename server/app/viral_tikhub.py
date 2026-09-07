@@ -151,6 +151,7 @@ class ViralVideo:
             "videoId": self.video_id,
             "category": self.category,
             "title": self.title,
+            "sourceDescription": str(self.native.get("source_description") or "") or None,
             "author": self.author,
             "authorAvatar": self.author_avatar,
             "verified": self.verified,
@@ -170,7 +171,11 @@ class ViralVideo:
             "tags": list(self.tags[:MAX_TAGS]),
             "hasPlayableAudio": bool(self.audio_url),
             "playUrl": self.play_url,
-            "native": {key: value for key, value in self.native.items() if not key.startswith("_")},
+            "native": {
+                key: value
+                for key, value in self.native.items()
+                if not key.startswith("_") and key != "source_description"
+            },
         }
 
 
@@ -420,7 +425,11 @@ def normalize_douyin_aweme(aweme: Mapping[str, Any], category: str) -> ViralVide
         tags=tags,
         play_url=pick_douyin_play_url(video_block),
         audio_url=audio_url,
-        native={"aweme_id": video_id, "_playback_version": 1},
+        native={
+            "aweme_id": video_id,
+            "source_description": str(aweme.get("desc") or "").strip(),
+            "_playback_version": 1,
+        },
     )
 
 

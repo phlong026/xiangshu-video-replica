@@ -1,9 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import {
   type CustomerProfile,
+  createViralImportTask,
   customerVisibleErrorMessage,
   getStudioNotificationPreferences,
+  getViralImportTask,
+  resolveViralLink,
   updateStudioNotificationPreferences,
+  type ViralImportTask,
 } from "../api";
 import { useStudio } from "./context";
 import {
@@ -14,6 +18,7 @@ import {
   loadStudioTaskDetail,
   loadTaskPreview,
   retryStudioTask,
+  studioVideoFromViral,
   uploadWorkbenchSourceVideo,
 } from "./live";
 import { draftFromTask } from "./state";
@@ -30,6 +35,12 @@ import {
   Panel,
   Tabs,
 } from "./ui";
+import {
+  clearViralImportIdempotencyKey,
+  shouldClearViralImportIdempotencyKey,
+  ViralImportPollingTimeoutError,
+  viralImportIdempotencyKey,
+} from "./viralImport";
 
 const statusNames: Record<StudioTask["status"], string> = {
   running: "生成中",
@@ -72,6 +83,14 @@ function formatWorkbenchLikes(video: StudioVideo) {
     return `${(video.likes / 10000).toFixed(1).replace(".0", "")}万`;
   }
   return video.likes.toLocaleString("zh-CN");
+}
+
+function persistWorkbenchViralDetailUrl(video: StudioVideo) {
+  if (!video.platformKey || !video.nativeId) return;
+  const url = new URL(window.location.href);
+  url.searchParams.set("viralPlatform", video.platformKey);
+  url.searchParams.set("viralVideoId", video.nativeId);
+  window.history.replaceState(null, "", url);
 }
 
 function Status({ task }: { task: StudioTask }) {
@@ -180,6 +199,7 @@ function RunningRowMenu({ task }: { task: StudioTask }) {
 export function WorkbenchPage() {
   const {
     data,
+    user,
     review,
     navigate,
     openLive,
@@ -189,35 +209,276 @@ export function WorkbenchPage() {
     state,
     extractScriptFromUpload,
   } = useStudio();
-  const [sourceLink, setSourceLink] = useState("");
-  const [upload, setUpload] = useState<{
+  const accountId = user.id || "anonymous";
+  const accountGenerationRef = useRef({ accountId, generation: 0 });
+  if (accountGenerationRef.current.accountId !== accountId) {
+    accountGenerationRef.current = {
+      accountId,
+      generation: accountGenerationRef.current.generation + 1,
+    };
+  }
+  const accountContextKey = `${accountId}:${accountGenerationRef.current.generation}`;
+  const [sourceLinkState, setSourceLinkState] = useState({
+    accountContextKey,
+    value: "",
+  });
+  const sourceLink =
+    sourceLinkState.accountContextKey === accountContextKey
+      ? sourceLinkState.value
+      : "";
+  const [uploadState, setUpload] = useState<{
+    accountContextKey: string;
     name: string;
     progress: number;
     error: string;
     projectId: string | null;
     completed: boolean;
   } | null>(null);
+  const upload =
+    uploadState?.accountContextKey === accountContextKey ? uploadState : null;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const uploadOperationRef = useRef(0);
+  const linkOperationRef = useRef(0);
+  const viralOperationRef = useRef(0);
+  const viralIdempotencyKeysRef = useRef(new Map<string, string>());
   const uploadAbortRef = useRef<AbortController | null>(null);
+  const [viralImportingId, setViralImportingId] = useState<string>();
+  const [linkStateValue, setLinkState] = useState<{
+    accountContextKey: string;
+    status: "idle" | "loading" | "error";
+    message?: string;
+  }>({ accountContextKey, status: "idle" });
+  const linkState =
+    linkStateValue.accountContextKey === accountContextKey
+      ? linkStateValue
+      : ({ accountContextKey, status: "idle" } as const);
+  const activeAccountRef = useRef(accountId);
+  if (activeAccountRef.current !== accountId) {
+    activeAccountRef.current = accountId;
+    uploadOperationRef.current += 1;
+    linkOperationRef.current += 1;
+    viralOperationRef.current += 1;
+    uploadAbortRef.current?.abort();
+    uploadAbortRef.current = null;
+  }
   useEffect(
     () => () => {
       uploadOperationRef.current += 1;
+      linkOperationRef.current += 1;
+      viralOperationRef.current += 1;
       uploadAbortRef.current?.abort();
     },
     [],
   );
+  useEffect(() => {
+    if (activeAccountRef.current !== accountId) return;
+    setViralImportingId(undefined);
+  }, [accountId]);
   const active = data.tasks.filter((task) =>
     ["running", "queued", "uncertain"].includes(task.status),
   );
-  const featuredVideos = data.videos.slice(0, 5);
-  const begin = (mode: "copy" | "replica") => {
+  const featuredVideos = [...data.videos]
+    .sort(
+      (left, right) =>
+        right.likes - left.likes ||
+        left.id.localeCompare(right.id, undefined, { numeric: true }),
+    )
+    .slice(0, 5);
+  const beginViralCreation = async (
+    video: StudioVideo,
+    purpose: "copy" | "replica" = "replica",
+    providedIdempotencyKey?: string,
+    requestAccount = accountId,
+  ) => {
+    if (review) {
+      patchDraft({ sourceId: video.id });
+      navigate(purpose, {
+        selectedVideoId: video.id,
+        returnTo: "workbench",
+      });
+      return;
+    }
+    if (!video.platformKey || !video.nativeId) {
+      notify("该视频缺少可导入的平台标识");
+      return;
+    }
+    const operation = ++viralOperationRef.current;
+    const actionKey = `${video.platformKey}:${video.nativeId}:${purpose}`;
+    const memoryKey = `${requestAccount}:${actionKey}`;
+    const idempotencyKey =
+      providedIdempotencyKey ??
+      viralIdempotencyKeysRef.current.get(memoryKey) ??
+      viralImportIdempotencyKey(requestAccount, actionKey);
+    viralIdempotencyKeysRef.current.set(memoryKey, idempotencyKey);
+    const clearKey = () => {
+      viralIdempotencyKeysRef.current.delete(memoryKey);
+      clearViralImportIdempotencyKey(requestAccount, actionKey, idempotencyKey);
+    };
+    setViralImportingId(video.id);
+    try {
+      let task: ViralImportTask = await createViralImportTask(
+        video.platformKey,
+        video.nativeId,
+        purpose,
+        idempotencyKey,
+      );
+      if (
+        operation !== viralOperationRef.current ||
+        requestAccount !== activeAccountRef.current
+      )
+        return;
+      for (let attempt = 0; attempt < 120; attempt += 1) {
+        if (
+          operation !== viralOperationRef.current ||
+          requestAccount !== activeAccountRef.current
+        )
+          return;
+        if (task.status === "SUCCEEDED" || task.status === "FAILED") break;
+        const taskId = task.taskId ?? task.id;
+        if (!taskId) throw new Error("导入任务缺少任务 ID");
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 1_000));
+        if (
+          operation !== viralOperationRef.current ||
+          requestAccount !== activeAccountRef.current
+        )
+          return;
+        task = await getViralImportTask(taskId);
+      }
+      if (
+        operation !== viralOperationRef.current ||
+        requestAccount !== activeAccountRef.current
+      )
+        return;
+      if (task.status !== "SUCCEEDED" && task.status !== "FAILED") {
+        throw new ViralImportPollingTimeoutError(
+          "导入任务等待超时，请稍后重试",
+        );
+      }
+      if (task.status !== "SUCCEEDED") {
+        if (task.retryable === false) clearKey();
+        throw new Error(
+          task.errorMessage || task.error || task.message || "参考素材导入失败",
+        );
+      }
+      if (!task.projectId || !task.sourceAssetId) {
+        clearKey();
+        throw new Error("导入任务缺少项目或素材结果");
+      }
+      if (purpose === "replica" && !task.canAnalyze) {
+        clearKey();
+        throw new Error("该来源暂不支持视频复刻");
+      }
+      if (purpose === "copy" && !task.canTranscribe) {
+        clearKey();
+        throw new Error("该来源暂不支持提取文案");
+      }
+      patchDraft({
+        projectId: task.projectId,
+        sourceId: task.sourceAssetId,
+        sourceAssetId: task.sourceAssetId,
+      });
+      if (purpose === "copy") {
+        extractScriptFromUpload(task.projectId, task.sourceAssetId);
+      } else {
+        navigate("replica", {
+          selectedVideoId: video.id,
+          returnTo: "workbench",
+        });
+      }
+    } catch (error) {
+      if (shouldClearViralImportIdempotencyKey(error)) clearKey();
+      if (
+        operation === viralOperationRef.current &&
+        requestAccount === activeAccountRef.current
+      ) {
+        notify(error instanceof Error ? error.message : "参考素材导入失败");
+      }
+    } finally {
+      if (
+        operation === viralOperationRef.current &&
+        requestAccount === activeAccountRef.current
+      )
+        setViralImportingId(undefined);
+    }
+  };
+  const pendingViralSource = !state.draft.projectId
+    ? data.videos.find((video) => video.id === state.draft.sourceId)
+    : undefined;
+  const begin = async (mode: "copy" | "replica") => {
     if (review) {
       navigate(mode);
       return;
     }
     if (sourceLink.trim()) {
-      notify("视频链接解析接口尚未接入，可先上传视频进行拆解。");
+      if (linkState.status === "loading") return;
+      const operation = ++linkOperationRef.current;
+      const requestAccount = accountId;
+      const linkActionKey = `link:${sourceLink.trim()}:${mode}`;
+      const resolutionKey = viralImportIdempotencyKey(
+        requestAccount,
+        linkActionKey,
+      );
+      setLinkState({ accountContextKey, status: "loading" });
+      try {
+        const resolution = await resolveViralLink(
+          sourceLink.trim(),
+          mode,
+          resolutionKey,
+        );
+        if (
+          operation !== linkOperationRef.current ||
+          requestAccount !== activeAccountRef.current
+        )
+          return;
+        const video = studioVideoFromViral(resolution.item);
+        updateData((current) => ({
+          ...current,
+          videos: [
+            video,
+            ...current.videos.filter((candidate) => candidate.id !== video.id),
+          ],
+        }));
+        await beginViralCreation(
+          video,
+          mode,
+          resolution.importIdempotencyKey,
+          requestAccount,
+        );
+        if (
+          operation === linkOperationRef.current &&
+          requestAccount === activeAccountRef.current
+        ) {
+          setLinkState({ accountContextKey, status: "idle" });
+        }
+      } catch (error) {
+        if (
+          operation !== linkOperationRef.current ||
+          requestAccount !== activeAccountRef.current
+        )
+          return;
+        const requestError = error as { code?: string; status?: number };
+        if (
+          requestError.code !== "VIRAL_LINK_IN_PROGRESS" &&
+          requestError.code !== "VIRAL_LINK_SUBMISSION_UNCERTAIN" &&
+          requestError.status !== undefined &&
+          requestError.status >= 400 &&
+          requestError.status < 500
+        ) {
+          clearViralImportIdempotencyKey(
+            requestAccount,
+            linkActionKey,
+            resolutionKey,
+          );
+        }
+        setLinkState({
+          accountContextKey,
+          status: "error",
+          message:
+            error instanceof Error && error.message.trim()
+              ? error.message.trim()
+              : "视频链接解析失败，请上传 MP4/MOV 文件。",
+        });
+      }
       return;
     }
     if (upload?.projectId || state.draft.sourceId || state.draft.projectId) {
@@ -238,10 +499,12 @@ export function WorkbenchPage() {
       return;
     }
     const operation = ++uploadOperationRef.current;
+    const requestAccount = accountId;
     uploadAbortRef.current?.abort();
     const abortController = new AbortController();
     uploadAbortRef.current = abortController;
     setUpload({
+      accountContextKey,
       name: file.name,
       progress: 0,
       error: "",
@@ -251,16 +514,28 @@ export function WorkbenchPage() {
     void uploadWorkbenchSourceVideo(
       file,
       (progress) => {
-        if (operation !== uploadOperationRef.current) return;
-        setUpload((current) => (current ? { ...current, progress } : current));
+        if (
+          operation !== uploadOperationRef.current ||
+          requestAccount !== activeAccountRef.current
+        )
+          return;
+        setUpload((current) =>
+          current?.accountContextKey === accountContextKey
+            ? { ...current, progress }
+            : current,
+        );
       },
       abortController.signal,
     )
       .then((uploaded) => {
-        if (operation !== uploadOperationRef.current) return;
+        if (
+          operation !== uploadOperationRef.current ||
+          requestAccount !== activeAccountRef.current
+        )
+          return;
         const { projectId, assetId } = uploaded;
         setUpload((current) =>
-          current
+          current?.accountContextKey === accountContextKey
             ? { ...current, progress: 100, projectId, completed: true }
             : current,
         );
@@ -293,9 +568,13 @@ export function WorkbenchPage() {
         notify("视频已上传云存储，来源已加入当前创作。");
       })
       .catch((error) => {
-        if (operation !== uploadOperationRef.current) return;
+        if (
+          operation !== uploadOperationRef.current ||
+          requestAccount !== activeAccountRef.current
+        )
+          return;
         setUpload((current) =>
-          current
+          current?.accountContextKey === accountContextKey
             ? {
                 ...current,
                 error:
@@ -334,9 +613,18 @@ export function WorkbenchPage() {
           </button>
           <input
             aria-label="视频链接"
-            placeholder="粘贴视频链接，如抖音、视频号、小红书链接等"
+            placeholder="粘贴抖音视频链接"
             value={sourceLink}
-            onChange={(event) => setSourceLink(event.target.value)}
+            onChange={(event) => {
+              linkOperationRef.current += 1;
+              viralOperationRef.current += 1;
+              setSourceLinkState({
+                accountContextKey,
+                value: event.target.value,
+              });
+              setLinkState({ accountContextKey, status: "idle" });
+              setViralImportingId(undefined);
+            }}
           />
           <input
             ref={fileInputRef}
@@ -350,13 +638,20 @@ export function WorkbenchPage() {
               event.target.value = "";
             }}
           />
-          <Button variant="primary" onClick={() => begin("copy")}>
+          <Button
+            disabled={linkState.status === "loading"}
+            variant="primary"
+            onClick={() => void begin("copy")}
+          >
             <Icon name="pen" />
             提取文案
           </Button>
-          <Button onClick={() => begin("replica")}>
+          <Button
+            disabled={linkState.status === "loading"}
+            onClick={() => void begin("replica")}
+          >
             <Icon name="play" />
-            开始复刻
+            {linkState.status === "loading" ? "正在解析链接…" : "开始复刻"}
           </Button>
         </div>
         {upload && (
@@ -369,8 +664,20 @@ export function WorkbenchPage() {
           </p>
         )}
         <p className="studio-start-helper">
-          提取文案进入文案工坊，开始复刻进入分镜工作区。
+          链接解析当前支持抖音视频；视频号及其他平台请上传 MP4/MOV
+          文件。解析最长约 60 秒。
         </p>
+        {linkState.status === "error" && (
+          <p className="viral-media-status is-error" role="alert">
+            {linkState.message}
+          </p>
+        )}
+        {pendingViralSource && (
+          <p className="studio-upload-status" role="status">
+            已选参考：{pendingViralSource.title}。请上传该视频的 MP4 或 MOV
+            文件， 上传完成后点击“提取文案”。
+          </p>
+        )}
       </div>
       <div className="studio-home-metrics">
         {[
@@ -508,12 +815,13 @@ export function WorkbenchPage() {
                     type="button"
                     className="studio-home-viral-cover"
                     aria-label={`查看详情：${video.title}`}
-                    onClick={() =>
+                    onClick={() => {
                       navigate("viral-detail", {
                         selectedVideoId: video.id,
                         returnTo: "workbench",
-                      })
-                    }
+                      });
+                      persistWorkbenchViralDetailUrl(video);
+                    }}
                   >
                     <img src={video.poster} alt="" loading="lazy" />
                     <span className="studio-home-viral-platform">
@@ -532,15 +840,10 @@ export function WorkbenchPage() {
                     <Button
                       variant="quiet"
                       aria-label={`用它复刻：${video.title}`}
-                      onClick={() => {
-                        patchDraft({ sourceId: video.id });
-                        navigate("replica", {
-                          selectedVideoId: video.id,
-                          returnTo: "workbench",
-                        });
-                      }}
+                      disabled={viralImportingId === video.id}
+                      onClick={() => void beginViralCreation(video)}
                     >
-                      用它复刻
+                      {viralImportingId === video.id ? "导入中…" : "用它复刻"}
                     </Button>
                   </div>
                 </article>
