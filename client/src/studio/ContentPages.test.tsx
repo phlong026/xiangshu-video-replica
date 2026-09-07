@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { MaterialItem } from "../api";
 import type { StudioContextValue, StudioState } from "./types";
 
 const {
@@ -58,6 +59,7 @@ class IntersectionObserverStub {
 vi.stubGlobal("IntersectionObserver", IntersectionObserverStub);
 
 import {
+  failMaterialPreview,
   MaterialsPage,
   PublishPage,
   ViralDetailPage,
@@ -174,6 +176,35 @@ function studio(
   };
 }
 
+function material(
+  id: string,
+  overrides: Partial<MaterialItem> = {},
+): MaterialItem {
+  return {
+    id: `asset:${id}`,
+    owner_user_id: "employee_1",
+    asset_id: id,
+    generation_task_id: null,
+    project_id: null,
+    person_id: null,
+    title: `${id}.png`,
+    group: "我的上传",
+    media_type: "image",
+    source: "upload",
+    status: "ready",
+    delivery: "stored",
+    content_type: "image/png",
+    size_bytes: 1024,
+    duration_seconds: null,
+    created_at: "2026-09-08 10:00:00",
+    hidden: false,
+    saved: true,
+    allowed_uses: [],
+    allowed_actions: ["preview", "download", "rename", "hide"],
+    ...overrides,
+  };
+}
+
 describe("V1.4 内容与运营页面", () => {
   beforeEach(() => {
     useStudio.mockReset();
@@ -202,6 +233,18 @@ describe("V1.4 内容与运营页面", () => {
     createGenerationTaskPreviewUrl.mockResolvedValue(
       "https://provider.test/direct-result.mp4",
     );
+  });
+
+  it("迟到的旧媒体错误不能覆盖已成功的新签名", () => {
+    const current = {
+      material: { status: "ready" as const, url: "https://storage.test/new" },
+    };
+    expect(
+      failMaterialPreview(current, "material", "https://storage.test/old"),
+    ).toBe(current);
+    expect(
+      failMaterialPreview(current, "material", "https://storage.test/new"),
+    ).toEqual({ material: { status: "error" } });
   });
 
   it("爆款视频按平台过滤、收藏并把来源带入复刻", () => {
@@ -961,6 +1004,297 @@ describe("V1.4 内容与运营页面", () => {
         pageSize: 6,
       }),
     );
+  });
+
+  it("只并行签名当前素材页并在翻页后打开真实图视频音频详情", async () => {
+    const firstPage = [
+      material("image-1"),
+      material("video-2", {
+        title: "video-2.mp4",
+        media_type: "video",
+        content_type: "video/mp4",
+      }),
+      material("audio-3", {
+        title: "audio-3.mp3",
+        media_type: "audio",
+        content_type: "audio/mpeg",
+      }),
+      ...Array.from({ length: 3 }, (_, index) =>
+        material(`image-${index + 4}`),
+      ),
+    ];
+    listMaterials.mockImplementation(({ page }: { page: number }) =>
+      Promise.resolve({
+        items: page === 1 ? firstPage : [material("image-7")],
+        page,
+        page_size: 6,
+        total: 7,
+      }),
+    );
+    const pendingResolvers: Array<() => void> = [];
+    getAssetDownloadUrl.mockImplementation(
+      (id: string) =>
+        new Promise((resolve) => {
+          pendingResolvers.push(() =>
+            resolve({ url: `https://storage.test/${id}` }),
+          );
+        }),
+    );
+    useStudio.mockReturnValue(studio({ review: false }));
+    render(<MaterialsPage />);
+
+    await waitFor(() => expect(getAssetDownloadUrl).toHaveBeenCalledTimes(6));
+    expect(pendingResolvers).toHaveLength(6);
+    pendingResolvers.splice(0).forEach((resolve) => {
+      resolve();
+    });
+    expect(
+      await screen.findByRole("img", { name: "image-1.png" }),
+    ).toHaveAttribute("src", "https://storage.test/image-1");
+    expect(screen.getByLabelText("video-2.mp4")).toHaveAttribute(
+      "src",
+      "https://storage.test/video-2",
+    );
+    expect(screen.getByLabelText("audio-3.mp3")).toHaveAttribute(
+      "src",
+      "https://storage.test/audio-3",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    await waitFor(() => expect(getAssetDownloadUrl).toHaveBeenCalledTimes(7));
+    pendingResolvers.splice(0).forEach((resolve) => {
+      resolve();
+    });
+    fireEvent.click(
+      await screen.findByRole("button", { name: "选择素材 image-7.png" }),
+    );
+    expect(
+      screen.getByRole("heading", { level: 2, name: "image-7.png" }),
+    ).toBeInTheDocument();
+    expect(screen.getAllByRole("img", { name: "image-7.png" })).toHaveLength(2);
+    expect(getAssetDownloadUrl).toHaveBeenCalledTimes(7);
+  });
+
+  it("预览签名失败显示重试且旧页迟到响应不能覆盖当前页", async () => {
+    let resolveOld: ((value: { url: string }) => void) | undefined;
+    listMaterials.mockImplementation(({ page }: { page: number }) =>
+      Promise.resolve({
+        items:
+          page === 1
+            ? [
+                material("old-1"),
+                ...Array.from({ length: 5 }, (_, index) =>
+                  material(`old-${index + 2}`),
+                ),
+              ]
+            : [material("current-7")],
+        page,
+        page_size: 6,
+        total: 7,
+      }),
+    );
+    getAssetDownloadUrl.mockImplementation((id: string) => {
+      if (id === "old-1")
+        return new Promise((resolve) => {
+          resolveOld = resolve;
+        });
+      if (
+        id === "current-7" &&
+        getAssetDownloadUrl.mock.calls.filter(([assetId]) => assetId === id)
+          .length === 1
+      )
+        return Promise.reject(new Error("签名服务超时"));
+      return Promise.resolve({ url: `https://storage.test/${id}` });
+    });
+    useStudio.mockReturnValue(studio({ review: false }));
+    render(<MaterialsPage />);
+
+    await screen.findByRole("button", { name: "选择素材 old-1.png" });
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    expect(
+      await screen.findByText("预览加载失败，点击重试"),
+    ).toBeInTheDocument();
+    resolveOld?.({ url: "https://storage.test/stale-old-1" });
+    fireEvent.click(
+      screen.getByRole("button", { name: "选择素材 current-7.png" }),
+    );
+    expect(
+      await screen.findAllByRole("img", { name: "current-7.png" }),
+    ).toHaveLength(2);
+    for (const image of screen.getAllByRole("img", { name: "current-7.png" }))
+      expect(image).toHaveAttribute("src", "https://storage.test/current-7");
+    expect(screen.queryByText("stale-old-1")).toBeNull();
+    expect(getAssetDownloadUrl).toHaveBeenCalledTimes(8);
+  });
+
+  it("签名地址过期后显示失败并由用户重试取得新地址", async () => {
+    listMaterials.mockResolvedValue({
+      items: [material("expiring-image")],
+      page: 1,
+      page_size: 6,
+      total: 1,
+    });
+    getAssetDownloadUrl
+      .mockResolvedValueOnce({ url: "https://storage.test/expired" })
+      .mockResolvedValueOnce({ url: "https://storage.test/refreshed" });
+    useStudio.mockReturnValue(studio({ review: false }));
+    render(<MaterialsPage />);
+
+    const expiredImage = await screen.findByRole("img", {
+      name: "expiring-image.png",
+    });
+    fireEvent.error(expiredImage);
+    expect(
+      await screen.findByText("预览加载失败，点击重试"),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "选择素材 expiring-image.png" }),
+    );
+    expect(
+      await screen.findAllByRole("img", { name: "expiring-image.png" }),
+    ).toHaveLength(2);
+    for (const image of screen.getAllByRole("img", {
+      name: "expiring-image.png",
+    }))
+      expect(image).toHaveAttribute("src", "https://storage.test/refreshed");
+    expect(getAssetDownloadUrl).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ["image", "image/png", "img"],
+    ["video", "video/mp4", "video"],
+    ["audio", "audio/mpeg", "audio"],
+  ] as const)(
+    "%s 媒体错误后单次重签并让详情复用新地址",
+    async (mediaType, contentType, tagName) => {
+      const item = material(`retry-${mediaType}`, {
+        title: `retry-${mediaType}.${mediaType === "image" ? "png" : mediaType === "video" ? "mp4" : "mp3"}`,
+        media_type: mediaType,
+        content_type: contentType,
+      });
+      listMaterials.mockResolvedValue({
+        items: [item],
+        page: 1,
+        page_size: 6,
+        total: 1,
+      });
+      getAssetDownloadUrl
+        .mockResolvedValueOnce({ url: `https://storage.test/${mediaType}-old` })
+        .mockResolvedValueOnce({
+          url: `https://storage.test/${mediaType}-new`,
+        });
+      useStudio.mockReturnValue(studio({ review: false }));
+      render(<MaterialsPage />);
+
+      const card = await screen.findByRole("button", {
+        name: `选择素材 ${item.title}`,
+      });
+      const oldMedia = await waitFor(() => {
+        const element = card.querySelector(tagName);
+        expect(element).toHaveAttribute(
+          "src",
+          `https://storage.test/${mediaType}-old`,
+        );
+        return element as HTMLElement;
+      });
+      fireEvent.error(oldMedia);
+      fireEvent.click(card);
+      await waitFor(() =>
+        expect(card.querySelector(tagName)).toHaveAttribute(
+          "src",
+          `https://storage.test/${mediaType}-new`,
+        ),
+      );
+      fireEvent.error(oldMedia);
+
+      expect(card.querySelector(tagName)).toHaveAttribute(
+        "src",
+        `https://storage.test/${mediaType}-new`,
+      );
+      expect(screen.queryByText("预览加载失败，点击重试")).toBeNull();
+      expect(
+        screen.getByRole("heading", { name: item.title }),
+      ).toBeInTheDocument();
+      expect(
+        screen
+          .getByRole("heading", { name: item.title })
+          .parentElement?.querySelector(tagName),
+      ).toHaveAttribute("src", `https://storage.test/${mediaType}-new`);
+      expect(getAssetDownloadUrl).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it("直出素材通过 generation_task_id 获取预览且详情复用", async () => {
+    const direct = material("direct-task", {
+      id: "generation:direct-task",
+      asset_id: null,
+      generation_task_id: "direct-task",
+      title: "直出成片.mp4",
+      media_type: "video",
+      content_type: "video/mp4",
+      source: "generation",
+      delivery: "direct",
+      saved: false,
+    });
+    listMaterials.mockResolvedValue({
+      items: [direct],
+      page: 1,
+      page_size: 6,
+      total: 1,
+    });
+    createGenerationTaskPreviewUrl.mockResolvedValue(
+      "https://provider.test/direct-task.mp4",
+    );
+    useStudio.mockReturnValue(studio({ review: false }));
+    render(<MaterialsPage />);
+
+    const card = await screen.findByRole("button", {
+      name: "选择素材 直出成片.mp4",
+    });
+    await waitFor(() =>
+      expect(card.querySelector("video")).toHaveAttribute(
+        "src",
+        "https://provider.test/direct-task.mp4",
+      ),
+    );
+    fireEvent.click(card);
+    expect(createGenerationTaskPreviewUrl).toHaveBeenCalledOnce();
+    expect(getAssetDownloadUrl).not.toHaveBeenCalled();
+    expect(screen.getAllByLabelText("直出成片.mp4")).toHaveLength(2);
+  });
+
+  it("移除末页唯一素材后回到有效页且不形成空白死页", async () => {
+    const firstPage = Array.from({ length: 6 }, (_, index) =>
+      material(`item-${index + 1}`),
+    );
+    let total = 7;
+    listMaterials.mockImplementation(({ page }: { page: number }) =>
+      Promise.resolve({
+        items: page === 1 ? firstPage : [material("last-item")],
+        page,
+        page_size: 6,
+        total,
+      }),
+    );
+    hideMaterial.mockImplementation(() => {
+      total = 6;
+      return Promise.resolve();
+    });
+    useStudio.mockReturnValue(studio({ review: false }));
+    render(<MaterialsPage />);
+
+    await screen.findByRole("button", { name: "选择素材 item-1.png" });
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "选择素材 last-item.png" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "从素材库移除" }));
+
+    await screen.findByRole("button", { name: "选择素材 item-1.png" });
+    expect(listMaterials).toHaveBeenLastCalledWith(
+      expect.objectContaining({ page: 1 }),
+    );
+    expect(screen.queryByText("暂无素材")).toBeNull();
   });
 
   it("已归档素材支持修改分组和直接下载", async () => {

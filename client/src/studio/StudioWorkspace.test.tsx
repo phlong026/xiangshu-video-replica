@@ -1123,6 +1123,50 @@ describe("视频生成（C2 独立创作）", () => {
     expect(screen.getByLabelText("上传参考图")).toBeDisabled();
   });
 
+  it("图片素材选择器只签当前六条且下一页只增加一条", async () => {
+    const materials = Array.from({ length: 7 }, (_, index) => ({
+      id: `material-${index + 1}`,
+      assetId: `material-${index + 1}`,
+      name: `云端素材 ${index + 1}.jpg`,
+      kind: "image" as const,
+      group: "素材库",
+      source: "素材库",
+      saved: true,
+    }));
+    live.loadStudioData.mockResolvedValue({
+      ...emptyStudioData,
+      materials,
+    });
+    api.getAssetDownloadUrl.mockImplementation((assetId: string) =>
+      Promise.resolve({ url: `https://storage.test/${assetId}` }),
+    );
+    const initial = createState("reference");
+    render(<StudioWorkspace currentUser={reviewUser} initialState={initial} />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: /从素材库选择/ }),
+    );
+    const picker = screen.getByRole("dialog", { name: "选择参考素材" });
+    await waitFor(() =>
+      expect(api.getAssetDownloadUrl).toHaveBeenCalledTimes(6),
+    );
+    expect(within(picker).getByAltText("云端素材 1.jpg")).toHaveAttribute(
+      "src",
+      "https://storage.test/material-1",
+    );
+    expect(within(picker).queryByText("云端素材 7.jpg")).toBeNull();
+
+    fireEvent.click(within(picker).getByRole("button", { name: "下一页素材" }));
+    await waitFor(() =>
+      expect(api.getAssetDownloadUrl).toHaveBeenCalledTimes(7),
+    );
+    expect(within(picker).getByAltText("云端素材 7.jpg")).toHaveAttribute(
+      "src",
+      "https://storage.test/material-7",
+    );
+    expect(within(picker).queryByText("云端素材 1.jpg")).toBeNull();
+  });
+
   it("参考生视频能力关闭时禁止进入提交确认", async () => {
     api.getIndependentCapabilities.mockResolvedValue({
       extended_modes_enabled: false,

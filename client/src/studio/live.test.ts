@@ -36,6 +36,7 @@ const api = vi.hoisted(() => ({
   listCharacterSceneLooks: vi.fn(),
   listCharacterSceneLooksPage: vi.fn(),
   listGenerationBatches: vi.fn(),
+  listMaterials: vi.fn(),
   listOralAvatars: vi.fn<() => Promise<OralAvatarRecord[]>>(async () => []),
   listOralTasks: vi.fn<() => Promise<OralTaskRecord[]>>(async () => []),
   listOralTasksPage: vi.fn(),
@@ -241,6 +242,12 @@ describe("真实 Studio 只读适配器", () => {
       }),
     );
     api.listGenerationBatches.mockResolvedValue(batchPage);
+    api.listMaterials.mockResolvedValue({
+      items: [],
+      page: 1,
+      page_size: 60,
+      total: 0,
+    });
     api.getAssetDownloadUrl.mockResolvedValue({ url: "https://signed/source" });
     api.getCachedCharacterAssetUrl.mockResolvedValue({
       url: "https://signed/character",
@@ -962,6 +969,50 @@ describe("真实 Studio 只读适配器", () => {
     expect(data.people).toHaveLength(8);
     expect(api.getAssetDownloadUrl).toHaveBeenCalledTimes(8);
     expect(api.getCachedCharacterAssetUrl).toHaveBeenCalledTimes(16);
+  });
+
+  it("启动只读取60条素材元数据且不逐条签名", async () => {
+    api.listMaterials.mockResolvedValue({
+      items: Array.from(
+        { length: 60 },
+        (_, index) =>
+          ({
+            id: `asset:material-${index}`,
+            owner_user_id: "user-1",
+            asset_id: `material-${index}`,
+            generation_task_id: null,
+            project_id: null,
+            person_id: null,
+            title: `素材${index}.png`,
+            group: "我的上传",
+            media_type: "image",
+            source: "upload",
+            status: "ready",
+            delivery: "stored",
+            content_type: "image/png",
+            size_bytes: 1024,
+            duration_seconds: null,
+            created_at: "2026-09-08T10:00:00+08:00",
+            hidden: false,
+            saved: true,
+            allowed_uses: ["reference"],
+            allowed_actions: ["preview"],
+          }) satisfies MaterialItem,
+      ),
+      page: 1,
+      page_size: 60,
+      total: 60,
+    });
+
+    const data = await loadStudioData(user);
+
+    expect(data.materials).toHaveLength(60);
+    expect(api.listMaterials).toHaveBeenCalledWith({
+      mediaType: "image",
+      pageSize: 60,
+    });
+    expect(api.getAssetDownloadUrl).toHaveBeenCalledOnce();
+    expect(api.getAssetDownloadUrl).toHaveBeenCalledWith("source-video-1");
   });
 
   it("场景形象照每个场景只取一张正面预览，不展开成五张", async () => {

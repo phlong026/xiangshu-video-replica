@@ -77,6 +77,7 @@ export type StudioPerson = {
   expression: string;
   sheetId?: string;
   photoIds: string[];
+  photoCount?: number;
   avatars: StudioAvatar[];
   voices: StudioVoice[];
 };

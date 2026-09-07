@@ -242,6 +242,13 @@ describe("PeoplePages", () => {
     });
   });
 
+  it("人物场景照片尚未读取时显示未知而不是零张", () => {
+    review = false;
+    render(<PeoplePage />);
+    expect(screen.getAllByText("形象照片数量未知")).toHaveLength(2);
+    expect(screen.queryByText("✓ 形象照片 0 张")).toBeNull();
+  });
+
   it("renders the people library and its primary empty-safe actions", () => {
     render(<PeoplePage />);
     expect(screen.getByRole("heading", { name: "人物库" })).toBeInTheDocument();

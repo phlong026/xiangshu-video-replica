@@ -255,10 +255,12 @@ function PersonCard({
   person: StudioPerson;
   onOpen(): void;
 }) {
-  const { navigate } = useStudio();
+  const { navigate, review } = useStudio();
   const portrait = person.portrait;
   const voices = person.voices.filter((voice) => voice.confirmed).length;
   const avatars = person.avatars.filter((avatar) => avatar.ready).length;
+  const photoCount =
+    person.photoCount ?? (review ? person.photoIds.length : undefined);
   return (
     <article className="person-card">
       <Media
@@ -282,7 +284,11 @@ function PersonCard({
         <h2>{person.name}</h2>
         <p>{person.role}</p>
         <div className="person-card__meta">
-          <span>✓ 形象照片 {person.photoIds.length} 张</span>
+          <span>
+            {photoCount === undefined
+              ? "形象照片数量未知"
+              : `✓ 形象照片 ${photoCount} 张`}
+          </span>
           <span>✓ 口播分身 {avatars} 个</span>
           <span className={voices ? "" : "is-warning"}>
             {voices ? `✓ 可用声音 ${voices} 个` : "！声音待添加"}
@@ -511,6 +517,7 @@ function PhotosPanel({ person }: { person: StudioPerson }) {
                     ...entry.photoIds,
                     ...nextAssets.map((asset) => asset.id),
                   ],
+                  photoCount: result.total,
                 }
               : entry,
           ),

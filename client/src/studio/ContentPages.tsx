@@ -1,5 +1,5 @@
 import type { RefObject } from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MaterialItem, MaterialPage, ViralVideoItem } from "../api";
 import {
   completeMaterialUpload,
@@ -42,6 +42,22 @@ function assetKindLabel(kind: StudioAsset["kind"]) {
 
 const viralInitialCount = 12;
 const viralRevealStep = 8;
+
+type MaterialPreviewState = {
+  status: "loading" | "ready" | "error";
+  url?: string;
+};
+type MaterialPreviewStates = Record<string, MaterialPreviewState>;
+
+export function failMaterialPreview(
+  current: MaterialPreviewStates,
+  assetId: string,
+  failedUrl?: string,
+): MaterialPreviewStates {
+  const preview = current[assetId];
+  if (preview?.status !== "ready" || preview.url !== failedUrl) return current;
+  return { ...current, [assetId]: { status: "error" } };
+}
 
 function viralLikesLabel(video: StudioVideo) {
   return video.likeDisplay ?? formatCount(video.likes);
@@ -856,11 +872,15 @@ export function ViralDetailPage() {
 function AssetCard({
   asset,
   selected,
+  previewStatus,
   onSelect,
+  onPreviewError,
 }: {
   asset: StudioAsset;
   selected: boolean;
+  previewStatus?: "loading" | "ready" | "error";
   onSelect: () => void;
+  onPreviewError: (failedUrl?: string) => void;
 }) {
   return (
     <button
@@ -869,17 +889,21 @@ function AssetCard({
       onClick={onSelect}
       aria-label={`选择素材 ${asset.name}`}
     >
-      <Media asset={asset} alt={asset.name} />
+      <Media asset={asset} alt={asset.name} onError={onPreviewError} />
       <strong>{asset.name}</strong>
       <span>
         {asset.group} · {assetKindLabel(asset.kind)}
       </span>
       <i>
-        {asset.delivery === "direct"
-          ? "供应商直出"
-          : asset.saved
-            ? "永久保存"
-            : "处理中"}
+        {previewStatus === "loading"
+          ? "预览加载中…"
+          : previewStatus === "error"
+            ? "预览加载失败，点击重试"
+            : asset.delivery === "direct"
+              ? "供应商直出"
+              : asset.saved
+                ? "永久保存"
+                : "处理中"}
       </i>
     </button>
   );
@@ -908,6 +932,10 @@ export function MaterialsPage() {
   const [busyAction, setBusyAction] = useState<string>();
   const [renameValue, setRenameValue] = useState("");
   const [groupValue, setGroupValue] = useState("");
+  const [previewStates, setPreviewStates] = useState<MaterialPreviewStates>({});
+  const visiblePreviewIdsRef = useRef(new Set<string>());
+  const previewRequestVersionsRef = useRef(new Map<string, number>());
+  const previewLoadingIdsRef = useRef(new Set<string>());
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
   const reviewAssets = data.assets.filter(
     (asset) => kind === "全部" || asset.kind === kind,
@@ -936,6 +964,51 @@ export function MaterialsPage() {
   const total = review ? reviewAssets.length : (remotePage?.total ?? 0);
   const pages = Math.max(1, Math.ceil(total / pageSize));
   const selectedAssetIdRef = useRef(state.selectedAssetId);
+  const loadPreview = useCallback(async (asset: StudioAsset) => {
+    if (
+      asset.url ||
+      !asset.allowedActions?.includes("preview") ||
+      previewLoadingIdsRef.current.has(asset.id)
+    )
+      return;
+    previewLoadingIdsRef.current.add(asset.id);
+    const requestVersion =
+      (previewRequestVersionsRef.current.get(asset.id) ?? 0) + 1;
+    previewRequestVersionsRef.current.set(asset.id, requestVersion);
+    setPreviewStates((current) => ({
+      ...current,
+      [asset.id]: { status: "loading" },
+    }));
+    try {
+      const url = asset.assetId
+        ? (await getAssetDownloadUrl(asset.assetId)).url
+        : asset.generationTaskId
+          ? await createGenerationTaskPreviewUrl(asset.generationTaskId)
+          : undefined;
+      if (
+        previewRequestVersionsRef.current.get(asset.id) !== requestVersion ||
+        !visiblePreviewIdsRef.current.has(asset.id)
+      )
+        return;
+      setPreviewStates((current) => ({
+        ...current,
+        [asset.id]: url ? { status: "ready", url } : { status: "error" },
+      }));
+    } catch {
+      if (
+        previewRequestVersionsRef.current.get(asset.id) !== requestVersion ||
+        !visiblePreviewIdsRef.current.has(asset.id)
+      )
+        return;
+      setPreviewStates((current) => ({
+        ...current,
+        [asset.id]: { status: "error" },
+      }));
+    } finally {
+      if (previewRequestVersionsRef.current.get(asset.id) === requestVersion)
+        previewLoadingIdsRef.current.delete(asset.id);
+    }
+  }, []);
 
   useEffect(() => {
     if (review) return;
@@ -968,6 +1041,31 @@ export function MaterialsPage() {
   }, [kind, page, query, review, source]);
 
   useEffect(() => {
+    if (!review && remotePage?.page === page && page > pages) setPage(pages);
+  }, [page, pages, remotePage?.page, review]);
+
+  useEffect(() => {
+    if (review || remotePage?.page !== page) return;
+    const visibleIds = new Set(remoteAssets.map((asset) => asset.id));
+    visiblePreviewIdsRef.current = visibleIds;
+    setPreviewStates((current) =>
+      Object.fromEntries(
+        Object.entries(current).filter(([id]) => visibleIds.has(id)),
+      ),
+    );
+    for (const asset of remoteAssets) void loadPreview(asset);
+    return () => {
+      for (const id of visibleIds) {
+        previewLoadingIdsRef.current.delete(id);
+        previewRequestVersionsRef.current.set(
+          id,
+          (previewRequestVersionsRef.current.get(id) ?? 0) + 1,
+        );
+      }
+    };
+  }, [loadPreview, page, remoteAssets, remotePage?.page, review]);
+
+  useEffect(() => {
     if (selectedAssetIdRef.current === state.selectedAssetId) return;
     selectedAssetIdRef.current = state.selectedAssetId;
     if (review && selectedIndex >= 0) {
@@ -979,30 +1077,6 @@ export function MaterialsPage() {
     setRenameValue(selected?.name ?? "");
     setGroupValue(selected?.group ?? "");
   }, [selected?.group, selected?.name]);
-
-  useEffect(() => {
-    if (review || !selected?.materialId || selected.url) return;
-    let current = true;
-    const preview = selected.assetId
-      ? getAssetDownloadUrl(selected.assetId).then((result) => result.url)
-      : selected.generationTaskId
-        ? createGenerationTaskPreviewUrl(selected.generationTaskId)
-        : Promise.resolve(null);
-    void preview
-      .then((url) => {
-        if (current && url) {
-          setSelectedAsset((asset) =>
-            asset?.id === selected.id ? { ...asset, url } : asset,
-          );
-        }
-      })
-      .catch(() => {
-        if (current) notify("素材预览暂不可用，请稍后重试");
-      });
-    return () => {
-      current = false;
-    };
-  }, [notify, review, selected]);
 
   const currentAssets = review
     ? assets.slice((page - 1) * pageSize, page * pageSize)
@@ -1250,11 +1324,22 @@ export function MaterialsPage() {
             {currentAssets.map((asset) => (
               <AssetCard
                 key={asset.id}
-                asset={asset}
+                asset={{
+                  ...asset,
+                  url: asset.url ?? previewStates[asset.id]?.url,
+                }}
                 selected={selected?.id === asset.id}
+                previewStatus={previewStates[asset.id]?.status}
                 onSelect={() => {
+                  if (previewStates[asset.id]?.status === "error")
+                    void loadPreview(asset);
                   setSelectedAsset(asset);
                   patchState({ selectedAssetId: asset.id });
+                }}
+                onPreviewError={(failedUrl) => {
+                  setPreviewStates((current) =>
+                    failMaterialPreview(current, asset.id, failedUrl),
+                  );
                 }}
               />
             ))}
@@ -1303,7 +1388,18 @@ export function MaterialsPage() {
           {selected ? (
             <>
               <h2>{selected.name}</h2>
-              <Media asset={selected} alt={selected.name} />
+              <Media
+                asset={{
+                  ...selected,
+                  url: selected.url ?? previewStates[selected.id]?.url,
+                }}
+                alt={selected.name}
+                onError={(failedUrl) => {
+                  setPreviewStates((current) =>
+                    failMaterialPreview(current, selected.id, failedUrl),
+                  );
+                }}
+              />
               <dl>
                 <dt>类型</dt>
                 <dd>{assetKindLabel(selected.kind)}</dd>
