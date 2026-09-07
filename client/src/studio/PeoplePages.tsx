@@ -35,15 +35,16 @@ type CloneSubmission = {
   consentId?: string;
 };
 
+const MISSING_ORAL_SOURCE_CODES = new Set([
+  "ASSET_NOT_FOUND",
+  "MATERIAL_NOT_FOUND",
+  "SOURCE_ASSET_NOT_FOUND",
+]);
+
 function isMissingOralSource(cause: unknown): boolean {
   if (!cause || typeof cause !== "object") return false;
-  const { status, code } = cause as { status?: number; code?: string };
-  return (
-    status === 404 ||
-    code === "ASSET_NOT_FOUND" ||
-    code === "MATERIAL_NOT_FOUND" ||
-    code === "SOURCE_ASSET_NOT_FOUND"
-  );
+  const code = (cause as { code?: string }).code?.trim().toUpperCase();
+  return MISSING_ORAL_SOURCE_CODES.has(code ?? "");
 }
 
 function createCloneIdempotencyKey(kind: "avatar" | "voice") {
@@ -600,8 +601,37 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
   const sourceKey = source
     ? `${person.id}:${source.kind}:${source.id}`
     : undefined;
-  const currentSourceKeyRef = useRef(sourceKey);
-  currentSourceKeyRef.current = sourceKey;
+  const selectionLifecycleKey = uploadedVideo
+    ? `${person.id}:VIDEO:${uploadedVideo.assetId}`
+    : `${person.id}:IMAGE:${state.draft.imageId ?? ""}`;
+  const selectionLifecycleRef = useRef(selectionLifecycleKey);
+  const contextVersionRef = useRef(0);
+  const mountedRef = useRef(true);
+  const activeOperationRef = useRef<
+    { contextVersion: number; id: number; selectionKey: string } | undefined
+  >(undefined);
+  const operationSequenceRef = useRef(0);
+  const isCurrentOperation = (
+    operation: NonNullable<typeof activeOperationRef.current>,
+  ) =>
+    mountedRef.current &&
+    operation.contextVersion === contextVersionRef.current &&
+    operation.selectionKey === selectionLifecycleRef.current &&
+    activeOperationRef.current === operation;
+  useEffect(() => {
+    selectionLifecycleRef.current = selectionLifecycleKey;
+    contextVersionRef.current += 1;
+    activeOperationRef.current = undefined;
+    setBusy(false);
+  }, [selectionLifecycleKey]);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      contextVersionRef.current += 1;
+      activeOperationRef.current = undefined;
+    };
+  }, []);
   const consented = Boolean(source && consentedSourceId === source.id);
   const handleVideoUpload = async (file: File) => {
     if (review || busy) return;
@@ -631,7 +661,13 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
   };
   const startClone = async () => {
     if (review || busy || !source || !consented) return;
-    const requestSourceKey = sourceKey;
+    const operation = {
+      contextVersion: contextVersionRef.current,
+      id: operationSequenceRef.current + 1,
+      selectionKey: selectionLifecycleRef.current,
+    };
+    operationSequenceRef.current = operation.id;
+    activeOperationRef.current = operation;
     setBusy(true);
     setError(undefined);
     try {
@@ -658,6 +694,7 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
           sourceAssetId: source.id,
           purpose: "AVATAR",
         });
+        if (!isCurrentOperation(operation)) return;
         submission.consentId = consent.id;
       }
       await createOralAvatarClone({
@@ -668,14 +705,15 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
         consentId: submission.consentId,
         idempotencyKey: submission.idempotencyKey,
       });
+      if (!isCurrentOperation(operation)) return;
       notify(
         `${source.kind === "VIDEO" ? "视频" : "照片"}分身已提交，可在本页刷新制作状态。`,
       );
       refresh();
     } catch (cause) {
-      if (currentSourceKeyRef.current !== requestSourceKey) return;
+      if (!isCurrentOperation(operation)) return;
       if (source.kind === "IMAGE" && isMissingOralSource(cause)) {
-        setInvalidPhotoSourceKey(requestSourceKey);
+        setInvalidPhotoSourceKey(sourceKey);
         setConsentedSourceId(undefined);
         cloneSubmissionRef.current = undefined;
         setError(undefined);
@@ -685,7 +723,10 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
       setError(message);
       notify(message);
     } finally {
-      setBusy(false);
+      if (isCurrentOperation(operation)) {
+        activeOperationRef.current = undefined;
+        setBusy(false);
+      }
     }
   };
   const refreshClone = async (avatarId: string) => {
