@@ -1,13 +1,26 @@
 """HTTP routes for durable viral-video project imports."""
 
-from typing import Annotated, Literal
+import hashlib
+import json
+from typing import Annotated, Any, Literal
+from uuid import uuid4
 
 from fastapi import APIRouter, Header, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.auth import AuthenticatedUser, Database
 from app.customer_fence import BusinessDbDep
+from app.db_portable import BusinessConnection
+from app.media import (
+    MAX_UPLOAD_BYTES,
+    FFprobeVideoProbe,
+    VideoProbe,
+    VideoProbeFailed,
+    VideoProbeUnavailable,
+)
+from app.media_routes import get_media_storage
 from app.permissions import require_not_auditor
+from app.storage import StorageAdapter
 from app.viral_import import (
     ViralImportRequest,
     ViralImportTaskResponse,
@@ -16,10 +29,12 @@ from app.viral_import import (
     viral_import_task_response,
 )
 from app.viral_link import (
+    ResolvedViralLink,
     ViralLinkError,
     douyidou_link_client_from_settings,
     normalize_supported_link,
 )
+from app.viral_media import UrlFetcher, ViralMediaError, ViralMediaPipeline
 from app.viral_routes import ViralVideoItem
 from app.viral_store import upsert_viral_videos
 from app.viral_tikhub import ViralVideo
@@ -36,32 +51,106 @@ class ViralLinkResolutionRequest(BaseModel):
 
 class ViralLinkResolutionResponse(BaseModel):
     item: ViralVideoItem
+    import_idempotency_key: str = Field(alias="importIdempotencyKey")
 
 
-@router.post("/link-resolutions", response_model=ViralLinkResolutionResponse)
-def resolve_viral_link(
-    request: ViralLinkResolutionRequest,
-    db: BusinessDbDep,
-) -> ViralLinkResolutionResponse:
-    try:
-        normalized_url = normalize_supported_link(request.url)
-        with db.write() as (conn, actor):
-            require_not_auditor(
-                conn,
-                actor=actor,
-                action="viral.link.resolve",
-                entity_type="viral_link",
-                entity_id="douyin",
-            )
-            resolver = douyidou_link_client_from_settings(conn)
-        resolved = resolver.resolve(normalized_url, purpose=request.purpose)
-    except ViralLinkError as exc:
+def _link_request_hash(normalized_url: str, purpose: str) -> str:
+    payload = json.dumps(
+        {"purpose": purpose, "url": normalized_url},
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _claim_link_receipt(
+    conn: BusinessConnection,
+    *,
+    owner_user_id: str,
+    idempotency_key: str,
+    normalized_url: str,
+    purpose: str,
+) -> tuple[Any, bool]:
+    request_hash = _link_request_hash(normalized_url, purpose)
+    receipt_id = str(uuid4())
+    conn.execute(
+        """
+        INSERT INTO viral_link_resolution_receipts (
+            id, owner_user_id, idempotency_key, normalized_url, purpose,
+            request_hash, status
+        ) VALUES (%s, %s, %s, %s, %s, %s, 'SUBMITTING')
+        ON CONFLICT (owner_user_id, idempotency_key) DO NOTHING
+        """,
+        (receipt_id, owner_user_id, idempotency_key, normalized_url, purpose, request_hash),
+    )
+    row = conn.execute(
+        """SELECT * FROM viral_link_resolution_receipts
+        WHERE owner_user_id = %s AND idempotency_key = %s""",
+        (owner_user_id, idempotency_key),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=409, detail={"code": "VIRAL_LINK_RECEIPT_CONFLICT"})
+    if str(row["request_hash"]) != request_hash:
         raise HTTPException(
-            status_code=exc.status_code,
-            detail={"code": exc.code, "message": exc.message},
-        ) from exc
+            status_code=409,
+            detail={
+                "code": "VIRAL_LINK_IDEMPOTENCY_CONFLICT",
+                "message": "幂等键已用于不同的视频链接请求。",
+            },
+        )
+    conn.commit()
+    return row, str(row["id"]) == receipt_id
 
-    video = ViralVideo(
+
+def _receipt_replay(row: Any) -> ViralLinkResolutionResponse:
+    status_value = str(row["status"])
+    if status_value == "SUCCEEDED" and row["response_json"]:
+        return ViralLinkResolutionResponse.model_validate_json(str(row["response_json"]))
+    if status_value == "FAILED":
+        raise HTTPException(
+            status_code=int(row["error_status"] or 422),
+            detail={
+                "code": str(row["error_code"] or "VIRAL_LINK_PARSE_FAILED"),
+                "message": str(row["error_message_redacted"] or "视频链接无法解析。"),
+            },
+        )
+    if status_value == "UNCERTAIN":
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "VIRAL_LINK_SUBMISSION_UNCERTAIN",
+                "message": "视频链接解析结果未知，请勿更换幂等键重复调用；请上传 MP4/MOV 文件。",
+            },
+        )
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": "VIRAL_LINK_IN_PROGRESS",
+            "message": "该视频链接正在解析，请使用原请求稍后重试。",
+        },
+    )
+
+
+def _record_link_failure(
+    conn: BusinessConnection, *, receipt_id: str, error: ViralLinkError
+) -> None:
+    status_value = "UNCERTAIN" if error.uncertain else "FAILED"
+    conn.execute(
+        """
+        UPDATE viral_link_resolution_receipts
+        SET status = %s, error_status = %s, error_code = %s,
+            error_message_redacted = %s, completed_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s AND status = 'SUBMITTING'
+        """,
+        (status_value, error.status_code, error.code, error.message, receipt_id),
+    )
+    conn.commit()
+
+
+def _resolved_video(resolved: ResolvedViralLink) -> ViralVideo:
+    return ViralVideo(
         platform=resolved.platform,
         video_id=resolved.video_id,
         category="链接导入",
@@ -87,9 +176,165 @@ def resolve_viral_link(
             "link_resolved": True,
         },
     )
-    with db.write() as (conn, _actor):
+
+
+def preflight_resolved_media(
+    resolved: ResolvedViralLink, *, purpose: str, storage: StorageAdapter
+) -> None:
+    prefer = "audio" if purpose == "copy" and resolved.audio_url else "video"
+
+    def validate(content: bytes, kind: str, content_type: str | None) -> None:
+        validate_resolved_media_content(
+            content,
+            kind=kind,
+            content_type=content_type,
+            probe=FFprobeVideoProbe(),
+        )
+
+    try:
+        ViralMediaPipeline(
+            client=None,
+            storage=storage,
+            fetcher=UrlFetcher(timeout_seconds=25.0, max_bytes=MAX_UPLOAD_BYTES),
+            validator=validate,
+        ).fetch(_resolved_video(resolved), prefer=prefer)
+    except ViralLinkError:
+        raise
+    except ViralMediaError as exc:
+        raise ViralLinkError(
+            422,
+            "VIRAL_LINK_MEDIA_INVALID",
+            "链接媒体不可用，请上传 MP4 或 MOV 文件。",
+            retryable=False,
+        ) from exc
+
+
+def validate_resolved_media_content(
+    content: bytes,
+    *,
+    kind: str,
+    content_type: str | None,
+    probe: VideoProbe,
+) -> None:
+    normalized_type = (content_type or "").split(";", 1)[0].strip().lower()
+    expected_prefix = "audio/" if kind == "audio" else "video/"
+    if kind == "audio":
+        magic_valid = content.startswith(b"ID3") or (
+            len(content) >= 2 and content[0] == 0xFF and content[1] & 0xE0 == 0xE0
+        )
+    else:
+        magic_valid = len(content) >= 12 and content[4:8] == b"ftyp"
+    if not normalized_type.startswith(expected_prefix) or not magic_valid:
+        raise ViralLinkError(
+            422,
+            "VIRAL_LINK_MEDIA_INVALID",
+            "链接媒体格式无效，请上传 MP4 或 MOV 文件。",
+            retryable=False,
+        )
+    try:
+        metadata = probe.probe(content, filename="source.mp3" if kind == "audio" else "source.mp4")
+    except VideoProbeUnavailable as exc:
+        raise ViralLinkError(
+            503,
+            "VIRAL_LINK_MEDIA_PROBE_UNAVAILABLE",
+            "视频检测服务暂不可用，请上传 MP4 或 MOV 文件。",
+            retryable=False,
+        ) from exc
+    except VideoProbeFailed as exc:
+        raise ViralLinkError(
+            422,
+            "VIRAL_LINK_MEDIA_INVALID",
+            "链接媒体无法播放，请上传 MP4 或 MOV 文件。",
+            retryable=False,
+        ) from exc
+    if metadata.duration_seconds <= 0:
+        raise ViralLinkError(
+            422,
+            "VIRAL_LINK_MEDIA_INVALID",
+            "链接媒体无法播放，请上传 MP4 或 MOV 文件。",
+            retryable=False,
+        )
+
+
+@router.post(
+    "/link-resolutions",
+    response_model=ViralLinkResolutionResponse,
+    responses={409: {}, 410: {}, 502: {}, 503: {}, 504: {}},
+)
+def resolve_viral_link(
+    request: ViralLinkResolutionRequest,
+    db: BusinessDbDep,
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+) -> ViralLinkResolutionResponse:
+    key = idempotency_key.strip()
+    if not key or len(key) > 128:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "VIRAL_LINK_IDEMPOTENCY_KEY_REQUIRED",
+                "message": "Idempotency-Key 请求头无效。",
+            },
+        )
+    try:
+        normalized_url = normalize_supported_link(request.url)
+        with db.write() as (conn, actor):
+            require_not_auditor(
+                conn,
+                actor=actor,
+                action="viral.link.resolve",
+                entity_type="viral_link",
+                entity_id="douyin",
+            )
+            receipt, created = _claim_link_receipt(
+                conn,
+                owner_user_id=actor.id,
+                idempotency_key=key,
+                normalized_url=normalized_url,
+                purpose=request.purpose,
+            )
+            if not created:
+                return _receipt_replay(receipt)
+            resolver = douyidou_link_client_from_settings(conn)
+        resolved = resolver.resolve(normalized_url, purpose=request.purpose)
+        with db.write() as (conn, media_actor):
+            if media_actor.id != actor.id:
+                raise HTTPException(status_code=401, detail={"code": "SESSION_REPLACED"})
+            storage = get_media_storage(conn)
+        preflight_resolved_media(resolved, purpose=request.purpose, storage=storage)
+    except ViralLinkError as exc:
+        if "receipt" in locals():
+            with db.write() as (conn, _actor):
+                _record_link_failure(conn, receipt_id=str(receipt["id"]), error=exc)
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": exc.message},
+        ) from exc
+    video = _resolved_video(resolved)
+    import_key = (
+        "viral-link-"
+        + hashlib.sha256(
+            f"{actor.id}:{video.platform}:{video.video_id}:{request.purpose}".encode()
+        ).hexdigest()
+    )
+    response = ViralLinkResolutionResponse(
+        item=ViralVideoItem(**video.to_client_dict()),
+        importIdempotencyKey=import_key,
+    )
+    with db.write() as (conn, completed_actor):
+        if completed_actor.id != actor.id:
+            raise HTTPException(status_code=401, detail={"code": "SESSION_REPLACED"})
         upsert_viral_videos(conn, [video])
-    return ViralLinkResolutionResponse(item=ViralVideoItem(**video.to_client_dict()))
+        conn.execute(
+            """
+            UPDATE viral_link_resolution_receipts
+            SET status = 'SUCCEEDED', response_json = %s,
+                completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+            WHERE id = %s AND status = 'SUBMITTING'
+            """,
+            (response.model_dump_json(by_alias=True), receipt["id"]),
+        )
+        conn.commit()
+    return response
 
 
 @router.post(

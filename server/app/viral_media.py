@@ -21,6 +21,7 @@ import ipaddress
 import logging
 import socket
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import Any, Protocol
@@ -112,6 +113,8 @@ class ViralStorage(Protocol):
 
     def put_object(self, key: str, content: bytes, *, content_type: str) -> StoredObject: ...
 
+    def get_object(self, key: str) -> bytes: ...
+
     def create_download_intent(
         self, key: str, *, expires_in: timedelta, can_read: bool
     ) -> DownloadIntent: ...
@@ -127,16 +130,24 @@ class UrlFetcher:
     窗口，与 METASO 结果下载的防护同级（generation._require_public_https_host）。
     """
 
-    def __init__(self, *, timeout_seconds: float = _DEFAULT_FETCH_TIMEOUT_SECONDS) -> None:
+    def __init__(
+        self,
+        *,
+        timeout_seconds: float = _DEFAULT_FETCH_TIMEOUT_SECONDS,
+        max_bytes: int = _MAX_DOWNLOAD_BYTES,
+    ) -> None:
         self.timeout_seconds = timeout_seconds
+        self.max_bytes = max_bytes
+        self.last_content_type: str | None = None
 
     def fetch(self, url: str) -> bytes:
         _require_public_http_url(url)
         request = Request(url, headers={"User-Agent": _USER_AGENT}, method="GET")
         opener = build_opener(PublicRedirectHandler())
         with opener.open(request, timeout=self.timeout_seconds) as response:  # noqa: S310
+            self.last_content_type = response.headers.get("Content-Type")
             declared = response.headers.get("Content-Length")
-            if declared and int(declared) > _MAX_DOWNLOAD_BYTES:
+            if declared and int(declared) > self.max_bytes:
                 raise ViralMediaError("媒体文件超出可下载大小上限")
             chunks: list[bytes] = []
             total = 0
@@ -145,7 +156,7 @@ class UrlFetcher:
                 if not chunk:
                     break
                 total += len(chunk)
-                if total > _MAX_DOWNLOAD_BYTES:
+                if total > self.max_bytes:
                     raise ViralMediaError("媒体文件超出可下载大小上限")
                 chunks.append(chunk)
             return b"".join(chunks)
@@ -243,10 +254,12 @@ class ViralMediaPipeline:
         client: ViralSourceClient | None,
         storage: ViralStorage,
         fetcher: UrlFetcher | None = None,
+        validator: Callable[[bytes, str, str | None], None] | None = None,
     ) -> None:
         self._client = client
         self._storage = storage
         self._fetcher = fetcher or UrlFetcher()
+        self._validator = validator
         self.detail: WechatVideoDetail | None = None
 
     def fetch(self, video: ViralVideo, *, prefer: str | None = None) -> ViralMediaResult:
@@ -257,8 +270,16 @@ class ViralMediaPipeline:
             self.detail = None
             existing = self._storage.head_object(key)
             if existing is not None:
+                if self._validator is not None:
+                    self._validator(self._storage.get_object(key), kind, existing.content_type)
                 return self._result(key, existing, kind, content_type, cache_hit=True)
             content = self._download_content(video, kind)
+            if self._validator is not None:
+                self._validator(
+                    content,
+                    kind,
+                    getattr(self._fetcher, "last_content_type", None),
+                )
             stored = self._storage.put_object(key, content, content_type=content_type)
             return self._result(key, stored, kind, content_type, cache_hit=False)
 

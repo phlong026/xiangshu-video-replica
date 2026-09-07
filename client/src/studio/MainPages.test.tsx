@@ -969,7 +969,7 @@ describe("V1.4 工作台上传与创作入口", () => {
   it("抖音链接解析后复用爆款导入状态流进入复刻且不重复提交", async () => {
     const value = workbench();
     useStudio.mockReturnValue(value);
-    const resolution = deferred<{ item: import("../api").ViralVideoItem }>();
+    const resolution = deferred<import("../api").ViralLinkResolution>();
     resolveViralLink.mockReturnValue(resolution.promise);
     createViralImportTask.mockResolvedValue({
       id: "link-import-1",
@@ -990,9 +990,14 @@ describe("V1.4 工作台上传与创作入口", () => {
       screen.getByRole("button", { name: "正在解析链接…" }),
     ).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "正在解析链接…" }));
-    expect(resolveViralLink).toHaveBeenCalledOnce();
+    expect(resolveViralLink).toHaveBeenCalledWith(
+      "3.28 复制打开抖音 https://v.douyin.com/shareCode/",
+      "replica",
+      expect.any(String),
+    );
 
     resolution.resolve({
+      importIdempotencyKey: "stable-link-import-key",
       item: {
         platform: "douyin",
         videoId: "native-link-1",
@@ -1021,7 +1026,7 @@ describe("V1.4 工作台上传与创作入口", () => {
         "douyin",
         "native-link-1",
         "replica",
-        expect.any(String),
+        "stable-link-import-key",
       ),
     );
     expect(value.patchDraft).toHaveBeenCalledWith({
@@ -1038,7 +1043,7 @@ describe("V1.4 工作台上传与创作入口", () => {
   it("链接输入切换后忽略上一请求的迟到响应", async () => {
     const value = workbench();
     useStudio.mockReturnValue(value);
-    const resolution = deferred<{ item: import("../api").ViralVideoItem }>();
+    const resolution = deferred<import("../api").ViralLinkResolution>();
     resolveViralLink.mockReturnValue(resolution.promise);
     render(<WorkbenchPage />);
 
@@ -1052,6 +1057,7 @@ describe("V1.4 工作台上传与创作入口", () => {
     });
 
     resolution.resolve({
+      importIdempotencyKey: "stale-import-key",
       item: {
         platform: "douyin",
         videoId: "stale-link",
@@ -1074,11 +1080,65 @@ describe("V1.4 工作台上传与创作入口", () => {
         playUrl: "https://cdn.example/stale.mp4",
       },
     });
+    await act(async () => Promise.resolve());
 
     await waitFor(() => expect(resolveViralLink).toHaveBeenCalledOnce());
     expect(createViralImportTask).not.toHaveBeenCalled();
     expect(value.patchDraft).not.toHaveBeenCalled();
     expect(value.navigate).not.toHaveBeenCalled();
+  });
+
+  it("账号在 effect 前切换时阻断旧链接响应和后续导入", async () => {
+    const accountA = workbench({
+      user: { id: "customer-a" } as StudioContextValue["user"],
+    });
+    const accountB = workbench({
+      user: { id: "customer-b" } as StudioContextValue["user"],
+    });
+    let current = accountA;
+    useStudio.mockImplementation(() => current);
+    const resolution = deferred<import("../api").ViralLinkResolution>();
+    resolveViralLink.mockReturnValue(resolution.promise);
+    const view = render(<WorkbenchPage />);
+
+    fireEvent.change(screen.getByLabelText("视频链接"), {
+      target: { value: "https://v.douyin.com/account-a/" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "开始复刻" }));
+    current = accountB;
+    view.rerender(<WorkbenchPage />);
+    resolution.resolve({
+      importIdempotencyKey: "account-a-import",
+      item: {
+        platform: "douyin",
+        videoId: "7345678901234567890",
+        category: "链接导入",
+        title: "账号 A 链接",
+        author: "作者",
+        authorAvatar: null,
+        verified: false,
+        coverUrl: null,
+        durationMs: 30_000,
+        likes: 0,
+        comments: null,
+        shares: null,
+        collects: null,
+        publishedAt: null,
+        publishedDisplay: null,
+        likeDisplay: null,
+        tags: [],
+        hasPlayableAudio: true,
+        playUrl: "https://cdn.example/account-a.mp4",
+      },
+    });
+    await act(async () => Promise.resolve());
+
+    await waitFor(() => expect(resolveViralLink).toHaveBeenCalledOnce());
+    expect(createViralImportTask).not.toHaveBeenCalled();
+    expect(accountA.updateData).not.toHaveBeenCalled();
+    expect(accountB.updateData).not.toHaveBeenCalled();
+    expect(accountA.notify).not.toHaveBeenCalled();
+    expect(accountB.notify).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -1100,6 +1160,29 @@ describe("V1.4 工作台上传与创作入口", () => {
     expect(createViralImportTask).not.toHaveBeenCalled();
     expect(value.patchDraft).not.toHaveBeenCalled();
     expect(value.navigate).not.toHaveBeenCalled();
+  });
+
+  it("解析结果未知时保留同一幂等键供安全重放", async () => {
+    useStudio.mockReturnValue(workbench());
+    const error = Object.assign(new Error("视频链接解析结果未知"), {
+      status: 503,
+      code: "VIRAL_LINK_SUBMISSION_UNCERTAIN",
+    });
+    resolveViralLink.mockRejectedValue(error);
+    render(<WorkbenchPage />);
+
+    fireEvent.change(screen.getByLabelText("视频链接"), {
+      target: { value: "https://v.douyin.com/retain-key/" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "开始复刻" }));
+    await screen.findByRole("alert");
+    fireEvent.click(screen.getByRole("button", { name: "开始复刻" }));
+    await waitFor(() => expect(resolveViralLink).toHaveBeenCalledTimes(2));
+
+    expect(resolveViralLink.mock.calls[1]?.[2]).toBe(
+      resolveViralLink.mock.calls[0]?.[2],
+    );
+    expect(createViralImportTask).not.toHaveBeenCalled();
   });
 
   it("工作台明确说明支持范围、上传格式和解析超时", () => {

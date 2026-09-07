@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterator, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 from urllib.error import HTTPError
+from urllib.request import Request
 
 import pytest
 from fastapi.testclient import TestClient
@@ -13,14 +16,17 @@ from app.db import connect_database, initialize_database
 from app.db_portable import BusinessConnection
 from app.generation_worker import run_worker_once
 from app.main import app
+from app.media import VideoMetadata, VideoProbeFailed
 from app.storage import FakeStorageAdapter
 from app.viral_link import (
     DouyidouHttpTransport,
     DouyidouLinkClient,
+    NoRedirectHandler,
     ResolvedViralLink,
+    UrllibDouyidouHttpTransport,
     ViralLinkError,
 )
-from app.viral_media import ViralMediaResult
+from app.viral_media import UrlFetcher, ViralMediaError, ViralMediaResult
 
 
 @pytest.fixture()
@@ -91,6 +97,17 @@ def _resolved() -> ResolvedViralLink:
     )
 
 
+class StubProbe:
+    def __init__(self, *, duration: float = 12.0, failure: Exception | None = None) -> None:
+        self.duration = duration
+        self.failure = failure
+
+    def probe(self, content: bytes, *, filename: str) -> VideoMetadata:
+        if self.failure is not None:
+            raise self.failure
+        return VideoMetadata(duration_seconds=self.duration)
+
+
 def test_douyidou_signature_and_media_mapping_match_the_gateway_contract() -> None:
     transport = StubTransport(
         b'{"code":0,"data":{"aweme_id":"7345678901234567890",'
@@ -120,15 +137,13 @@ def test_douyidou_signature_and_media_mapping_match_the_gateway_contract() -> No
     assert headers == {"Sign": "d856569640dedb34722b6ce5fdfa9e5e"}
 
 
-def test_douyidou_retries_only_server_errors() -> None:
-    successful = b'{"code":0,"data":{"video":["https://cdn.example/video.mp4"]}}'
-    retrying = StubTransport(
-        HTTPError("https://gateway.example", 503, "down", {}, None),
-        successful,
-    )
-    client = DouyidouLinkClient(app_id="a", app_secret="s", transport=retrying)
-    client.resolve("https://v.douyin.com/share/", purpose="replica")
-    assert len(retrying.calls) == 2
+def test_douyidou_does_not_retry_a_paid_request_without_provider_idempotency() -> None:
+    transport = StubTransport(HTTPError("https://gateway.example", 503, "down", {}, None))
+    client = DouyidouLinkClient(app_id="a", app_secret="s", transport=transport)
+    with pytest.raises(ViralLinkError) as failure:
+        client.resolve("https://v.douyin.com/share/", purpose="replica")
+    assert failure.value.uncertain is True
+    assert len(transport.calls) == 1
 
     rejected = StubTransport(HTTPError("https://gateway.example", 401, "bad", {}, None))
     client = DouyidouLinkClient(app_id="a", app_secret="s", transport=rejected)
@@ -136,6 +151,44 @@ def test_douyidou_retries_only_server_errors() -> None:
         client.resolve("https://v.douyin.com/share/", purpose="replica")
     assert failure.value.retryable is False
     assert len(rejected.calls) == 1
+
+
+def test_douyidou_requires_a_canonical_native_video_id() -> None:
+    client = DouyidouLinkClient(
+        app_id="a",
+        app_secret="s",
+        transport=StubTransport(b'{"code":0,"data":{"video":["https://cdn.example/video.mp4"]}}'),
+    )
+    with pytest.raises(ViralLinkError) as failure:
+        client.resolve("https://v.douyin.com/share/", purpose="replica")
+    assert failure.value.code == "VIRAL_LINK_NATIVE_ID_INVALID"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://gateway.diadi.cn/api/parse",
+        "https://evil.example/api/parse",
+        "https://127.0.0.1/api/parse",
+    ],
+)
+def test_douyidou_transport_refuses_noncanonical_gateway_targets(url: str) -> None:
+    with pytest.raises(ViralLinkError) as failure:
+        UrllibDouyidouHttpTransport().request(url, headers={"Sign": "local-contract"})
+    assert failure.value.code == "VIRAL_LINK_GATEWAY_INVALID"
+
+
+def test_douyidou_transport_does_not_forward_signature_on_redirect() -> None:
+    request = Request("https://gateway.diadi.cn/api/parse", headers={"Sign": "local-contract"})
+    redirected = NoRedirectHandler().redirect_request(
+        request,
+        None,
+        302,
+        "Found",
+        {"Location": "http://127.0.0.1/internal"},
+        "http://127.0.0.1/internal",
+    )
+    assert redirected is None
 
 
 def test_douyidou_rejects_expired_and_media_less_responses() -> None:
@@ -156,6 +209,93 @@ def test_douyidou_rejects_expired_and_media_less_responses() -> None:
     with pytest.raises(ViralLinkError) as empty_failure:
         empty.resolve("https://v.douyin.com/share/", purpose="replica")
     assert empty_failure.value.code == "VIRAL_LINK_MEDIA_MISSING"
+
+
+@pytest.mark.parametrize(
+    ("content", "kind", "content_type"),
+    [
+        (b"<html>expired</html>", "video", "text/html"),
+        (b'{"error":"expired"}', "video", "application/json"),
+        (b"\x00\x00\x00\x18ftypisom-broken", "video", "application/json"),
+        (b"ID3broken", "audio", "video/mp4"),
+    ],
+)
+def test_link_media_preflight_rejects_wrong_content_or_mime(
+    content: bytes, kind: str, content_type: str
+) -> None:
+    from app.viral_import_routes import validate_resolved_media_content
+
+    with pytest.raises(ViralLinkError) as failure:
+        validate_resolved_media_content(
+            content,
+            kind=kind,
+            content_type=content_type,
+            probe=StubProbe(),
+        )
+    assert failure.value.code == "VIRAL_LINK_MEDIA_INVALID"
+
+
+def test_link_media_preflight_rejects_corrupt_mp4_after_magic_check() -> None:
+    from app.viral_import_routes import validate_resolved_media_content
+
+    with pytest.raises(ViralLinkError) as failure:
+        validate_resolved_media_content(
+            b"\x00\x00\x00\x18ftypisom-broken",
+            kind="video",
+            content_type="video/mp4",
+            probe=StubProbe(failure=VideoProbeFailed("broken")),
+        )
+    assert failure.value.code == "VIRAL_LINK_MEDIA_INVALID"
+
+
+def test_link_media_fetcher_enforces_the_smaller_preflight_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.viral_media as media
+
+    class Response:
+        headers = {"Content-Length": "9", "Content-Type": "video/mp4"}
+
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    class Opener:
+        def open(self, request: object, *, timeout: float) -> Response:
+            return Response()
+
+    monkeypatch.setattr(media, "_require_public_http_url", lambda url: None)
+    monkeypatch.setattr(media, "build_opener", lambda *handlers: Opener())
+    with pytest.raises(ViralMediaError, match="上限"):
+        UrlFetcher(max_bytes=8).fetch("https://cdn.example/video.mp4")
+
+
+def test_link_resolution_requires_idempotency_key(client: TestClient) -> None:
+    response = client.post(
+        "/api/viral/link-resolutions",
+        headers={"X-Dev-User-Id": "employee_1"},
+        json={"url": "https://v.douyin.com/share/", "purpose": "replica"},
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["loc"] == ["header", "Idempotency-Key"]
+
+
+def test_link_resolution_openapi_locks_idempotency_purpose_and_errors() -> None:
+    schema = app.openapi()
+    operation = schema["paths"]["/api/viral/link-resolutions"]["post"]
+
+    idempotency_header = next(
+        parameter for parameter in operation["parameters"] if parameter["name"] == "Idempotency-Key"
+    )
+    assert idempotency_header["required"] is True
+    assert set(operation["responses"]) >= {"200", "409", "410", "422", "502", "503", "504"}
+
+    request_schema = schema["components"]["schemas"]["ViralLinkResolutionRequest"]
+    assert request_schema["properties"]["purpose"]["enum"] == ["copy", "replica"]
+    response_schema = schema["components"]["schemas"]["ViralLinkResolutionResponse"]
+    assert "importIdempotencyKey" in response_schema["required"]
 
 
 def test_resolved_link_becomes_existing_viral_import_source(
@@ -189,12 +329,18 @@ def test_resolved_link_becomes_existing_viral_import_source(
 
     resolver = StubResolver(_resolved())
     monkeypatch.setattr(routes, "douyidou_link_client_from_settings", lambda conn: resolver)
+    monkeypatch.setattr(
+        routes,
+        "get_media_storage",
+        lambda conn: FakeStorageAdapter(provider="fake", bucket="private"),
+    )
+    monkeypatch.setattr(routes, "preflight_resolved_media", lambda *args, **kwargs: None)
     monkeypatch.setattr(import_domain, "ViralMediaPipeline", LinkPipeline)
     monkeypatch.setattr(import_domain, "viral_source_client_from_settings", lambda conn: object())
 
     response = client.post(
         "/api/viral/link-resolutions",
-        headers={"X-Dev-User-Id": "employee_1"},
+        headers={"X-Dev-User-Id": "employee_1", "Idempotency-Key": "resolve-link-1"},
         json={
             "url": "https://www.douyin.com/video/7345678901234567890",
             "purpose": "replica",
@@ -207,13 +353,50 @@ def test_resolved_link_becomes_existing_viral_import_source(
     assert item["videoId"] == "7345678901234567890"
     assert item["playUrl"] == "https://cdn.example/video.mp4"
     assert resolver.calls == [("https://www.douyin.com/video/7345678901234567890", "replica")]
+    with sqlite3.connect(db_path) as receipt_conn:
+        receipt = receipt_conn.execute(
+            "SELECT status, response_json FROM viral_link_resolution_receipts"
+        ).fetchone()
+        assert receipt is not None
+        assert receipt[0] == "SUCCEEDED"
+        assert receipt[1]
+
+    replay = client.post(
+        "/api/viral/link-resolutions",
+        headers={"X-Dev-User-Id": "employee_1", "Idempotency-Key": "resolve-link-1"},
+        json={
+            "url": "https://www.douyin.com/video/7345678901234567890",
+            "purpose": "replica",
+        },
+    )
+    assert replay.json() == response.json()
+    assert len(resolver.calls) == 1
+    conflict = client.post(
+        "/api/viral/link-resolutions",
+        headers={"X-Dev-User-Id": "employee_1", "Idempotency-Key": "resolve-link-1"},
+        json={"url": "https://v.douyin.com/another/", "purpose": "replica"},
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"]["code"] == "VIRAL_LINK_IDEMPOTENCY_CONFLICT"
+    assert len(resolver.calls) == 1
+
+    same_video = client.post(
+        "/api/viral/link-resolutions",
+        headers={"X-Dev-User-Id": "employee_1", "Idempotency-Key": "resolve-link-2"},
+        json={"url": "https://v.douyin.com/other-short-link/", "purpose": "replica"},
+    )
+    assert same_video.status_code == 200
+    assert same_video.json()["importIdempotencyKey"] == response.json()["importIdempotencyKey"]
 
     payload = {
         "platform": item["platform"],
         "videoId": item["videoId"],
         "purpose": "replica",
     }
-    headers = {"X-Dev-User-Id": "employee_1", "Idempotency-Key": "link-replica-1"}
+    headers = {
+        "X-Dev-User-Id": "employee_1",
+        "Idempotency-Key": response.json()["importIdempotencyKey"],
+    }
     first = client.post("/api/viral/videos/import-tasks", headers=headers, json=payload)
     replay = client.post("/api/viral/videos/import-tasks", headers=headers, json=payload)
     assert first.status_code == 202
@@ -242,6 +425,119 @@ def test_resolved_link_becomes_existing_viral_import_source(
             ).fetchone()[0]
             == completed["projectId"]
         )
+
+
+def test_uncertain_resolution_receipt_blocks_another_paid_call(
+    client: TestClient, db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import app.viral_import_routes as routes
+
+    resolver = StubResolver(
+        ViralLinkError(
+            504,
+            "VIRAL_LINK_SUBMISSION_UNCERTAIN",
+            "视频链接解析结果未知。",
+            retryable=False,
+            uncertain=True,
+        )
+    )
+    monkeypatch.setattr(routes, "douyidou_link_client_from_settings", lambda conn: resolver)
+    headers = {"X-Dev-User-Id": "employee_1", "Idempotency-Key": "uncertain-link"}
+    payload = {"url": "https://v.douyin.com/uncertain/", "purpose": "replica"}
+
+    first = client.post("/api/viral/link-resolutions", headers=headers, json=payload)
+    replay = client.post("/api/viral/link-resolutions", headers=headers, json=payload)
+
+    assert first.status_code == 504
+    assert replay.status_code == 503
+    assert replay.json()["detail"]["code"] == "VIRAL_LINK_SUBMISSION_UNCERTAIN"
+    assert len(resolver.calls) == 1
+    with sqlite3.connect(db_path) as conn:
+        assert (
+            conn.execute("SELECT status FROM viral_link_resolution_receipts").fetchone()[0]
+            == "UNCERTAIN"
+        )
+
+
+def test_concurrent_same_key_calls_provider_once(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import app.viral_import_routes as routes
+
+    started = Event()
+    release = Event()
+    calls = 0
+
+    class BlockingResolver:
+        def resolve(self, url: str, *, purpose: str) -> ResolvedViralLink:
+            nonlocal calls
+            calls += 1
+            started.set()
+            assert release.wait(timeout=5)
+            return _resolved()
+
+    monkeypatch.setattr(
+        routes, "douyidou_link_client_from_settings", lambda conn: BlockingResolver()
+    )
+    monkeypatch.setattr(
+        routes,
+        "get_media_storage",
+        lambda conn: FakeStorageAdapter(provider="fake", bucket="private"),
+    )
+    monkeypatch.setattr(routes, "preflight_resolved_media", lambda *args, **kwargs: None)
+    headers = {"X-Dev-User-Id": "employee_1", "Idempotency-Key": "concurrent-link"}
+    payload = {"url": "https://v.douyin.com/concurrent/", "purpose": "replica"}
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(
+            client.post, "/api/viral/link-resolutions", headers=headers, json=payload
+        )
+        assert started.wait(timeout=5)
+        concurrent = client.post("/api/viral/link-resolutions", headers=headers, json=payload)
+        release.set()
+        completed = first.result(timeout=5)
+
+    assert completed.status_code == 200
+    assert concurrent.status_code == 409
+    assert concurrent.json()["detail"]["code"] == "VIRAL_LINK_IN_PROGRESS"
+    assert calls == 1
+
+
+def test_invalid_downloaded_media_never_creates_source_project_or_asset(
+    client: TestClient, db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import app.viral_import_routes as routes
+
+    monkeypatch.setattr(
+        routes, "douyidou_link_client_from_settings", lambda conn: StubResolver(_resolved())
+    )
+    monkeypatch.setattr(
+        routes,
+        "get_media_storage",
+        lambda conn: FakeStorageAdapter(provider="fake", bucket="private"),
+    )
+    monkeypatch.setattr(
+        routes,
+        "preflight_resolved_media",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            ViralLinkError(
+                422,
+                "VIRAL_LINK_MEDIA_INVALID",
+                "链接媒体格式无效，请上传 MP4 或 MOV 文件。",
+                retryable=False,
+            )
+        ),
+    )
+    response = client.post(
+        "/api/viral/link-resolutions",
+        headers={"X-Dev-User-Id": "employee_1", "Idempotency-Key": "bad-media"},
+        json={"url": "https://v.douyin.com/bad-media/", "purpose": "replica"},
+    )
+    assert response.status_code == 422
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM viral_videos").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM assets").fetchone()[0] == 0
 
 
 @pytest.mark.parametrize(
@@ -273,7 +569,7 @@ def test_unsupported_links_require_upload_without_creating_projects(
     monkeypatch.setattr(routes, "douyidou_link_client_from_settings", lambda conn: resolver)
     response = client.post(
         "/api/viral/link-resolutions",
-        headers={"X-Dev-User-Id": "employee_1"},
+        headers={"X-Dev-User-Id": "employee_1", "Idempotency-Key": "unsupported-link"},
         json={"url": url, "purpose": "replica"},
     )
 
@@ -324,7 +620,7 @@ def test_expired_or_media_less_results_do_not_create_fake_projects(
     )
     response = client.post(
         "/api/viral/link-resolutions",
-        headers={"X-Dev-User-Id": "employee_1"},
+        headers={"X-Dev-User-Id": "employee_1", "Idempotency-Key": expected_code},
         json={"url": "https://v.douyin.com/validShareCode/", "purpose": "replica"},
     )
 

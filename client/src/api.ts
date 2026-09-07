@@ -5348,7 +5348,10 @@ export type ViralStatisticsResponse = {
 };
 
 export type ViralImportPurpose = "copy" | "replica";
-export type ViralLinkResolution = { item: ViralVideoItem };
+export type ViralLinkResolution = {
+  item: ViralVideoItem;
+  importIdempotencyKey: string;
+};
 export type ViralImportTask = {
   id?: string;
   taskId?: string;
@@ -5466,15 +5469,17 @@ export function createViralImportTask(
 export function resolveViralLink(
   url: string,
   purpose: ViralImportPurpose,
+  idempotencyKey: string,
 ): Promise<ViralLinkResolution> {
   return requestApiJson<ViralLinkResolution>(
     "/api/viral/link-resolutions",
     "视频链接解析失败",
     {
       method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
       body: JSON.stringify({ url, purpose }),
     },
-    65_000,
+    60_000,
   );
 }
 

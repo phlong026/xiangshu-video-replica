@@ -11,16 +11,15 @@ from dataclasses import dataclass
 from typing import Any, Literal, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from app.db_portable import BusinessConnection
 from app.settings import SettingsRepository, SettingsUnavailableError
 
 DOUYIDOU_BASE_URL = "https://gateway.diadi.cn"
-DOUYIDOU_TIMEOUT_SECONDS = 60.0
+DOUYIDOU_TIMEOUT_SECONDS = 25.0
 _MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _URL_PATTERN = re.compile(r"https?://[^\s<>'\"]+")
-_DOUYIN_ID_PATTERN = re.compile(r"(?:video|note)/(\d{17,20})")
 _TRAILING_PUNCTUATION = ".,;:!?，。；：！？、)）]】}"
 _WECHAT_HOSTS = {"channels.weixin.qq.com", "weixin.qq.com", "www.weixin.qq.com"}
 _DOUYIN_HOSTS = {
@@ -42,12 +41,19 @@ class ViralLinkError(Exception):
         message: str,
         *,
         retryable: bool = True,
+        uncertain: bool = False,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.code = code
         self.message = message
         self.retryable = retryable
+        self.uncertain = uncertain
+
+
+class NoRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, *args: object, **kwargs: object) -> None:
+        return None
 
 
 class DouyidouHttpTransport:
@@ -60,9 +66,18 @@ class UrllibDouyidouHttpTransport(DouyidouHttpTransport):
         self.timeout_seconds = timeout_seconds
 
     def request(self, url: str, *, headers: Mapping[str, str]) -> bytes:
+        parsed = urlsplit(url)
+        if parsed.scheme != "https" or parsed.hostname != "gateway.diadi.cn":
+            raise ViralLinkError(
+                502,
+                "VIRAL_LINK_GATEWAY_INVALID",
+                "视频链接解析服务地址异常，请上传 MP4/MOV 文件。",
+                retryable=False,
+            )
         request = Request(url, headers=dict(headers), method="GET")
+        opener = build_opener(NoRedirectHandler())
         try:
-            with urlopen(request, timeout=self.timeout_seconds) as response:  # noqa: S310
+            with opener.open(request, timeout=self.timeout_seconds) as response:  # noqa: S310
                 return cast(bytes, response.read(_MAX_RESPONSE_BYTES + 1))
         except HTTPError as exc:
             logger.warning("Link resolver returned HTTP %s", exc.code)
@@ -71,8 +86,10 @@ class UrllibDouyidouHttpTransport(DouyidouHttpTransport):
             logger.warning("Link resolver network request failed: %s", type(exc).__name__)
             raise ViralLinkError(
                 504,
-                "VIRAL_LINK_TIMEOUT",
-                "视频链接解析超时，请稍后重试或上传 MP4/MOV 文件。",
+                "VIRAL_LINK_SUBMISSION_UNCERTAIN",
+                "视频链接解析结果未知，请使用原请求重试查询，或上传 MP4/MOV 文件。",
+                retryable=False,
+                uncertain=True,
             ) from exc
 
 
@@ -162,31 +179,34 @@ class DouyidouLinkClient:
             f"{query}{self.app_secret}".encode(), usedforsecurity=False
         ).hexdigest()
         endpoint = f"{DOUYIDOU_BASE_URL}/api/parse?{query}"
-        for attempt in range(2):
-            try:
-                body = self.transport.request(endpoint, headers={"Sign": signature})
-                if len(body) > _MAX_RESPONSE_BYTES:
-                    raise ValueError
-                decoded = json.loads(body)
-                if not isinstance(decoded, dict):
-                    raise ValueError
-                return decoded
-            except HTTPError as exc:
-                if exc.code >= 500 and attempt == 0:
-                    continue
-                raise ViralLinkError(
-                    503 if exc.code >= 500 else 422,
-                    "VIRAL_LINK_PROVIDER_FAILED",
-                    "视频链接暂时无法解析，请检查链接或上传 MP4/MOV 文件。",
-                    retryable=exc.code >= 500,
-                ) from exc
-            except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
-                raise ViralLinkError(
-                    502,
-                    "VIRAL_LINK_RESPONSE_INVALID",
-                    "视频链接解析结果异常，请稍后重试或上传 MP4/MOV 文件。",
-                ) from exc
-        raise AssertionError("unreachable")
+        try:
+            body = self.transport.request(endpoint, headers={"Sign": signature})
+            if len(body) > _MAX_RESPONSE_BYTES:
+                raise ValueError
+            decoded = json.loads(body)
+            if not isinstance(decoded, dict):
+                raise ValueError
+            return decoded
+        except HTTPError as exc:
+            uncertain = exc.code >= 500
+            raise ViralLinkError(
+                503 if uncertain else 422,
+                "VIRAL_LINK_SUBMISSION_UNCERTAIN" if uncertain else "VIRAL_LINK_PROVIDER_FAILED",
+                (
+                    "视频链接解析结果未知，请使用原请求重试查询，或上传 MP4/MOV 文件。"
+                    if uncertain
+                    else "视频链接暂时无法解析，请检查链接或上传 MP4/MOV 文件。"
+                ),
+                retryable=False,
+                uncertain=uncertain,
+            ) from exc
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+            raise ViralLinkError(
+                502,
+                "VIRAL_LINK_RESPONSE_INVALID",
+                "视频链接解析结果异常，请稍后重试或上传 MP4/MOV 文件。",
+                retryable=False,
+            ) from exc
 
     def resolve(self, raw_url: str, *, purpose: str) -> ResolvedViralLink:
         source_url = normalize_supported_link(raw_url)
@@ -224,10 +244,14 @@ class DouyidouLinkClient:
             ),
             "",
         )
-        match = _DOUYIN_ID_PATTERN.search(source_url)
-        video_id = source_id or (match.group(1) if match else "")
-        if not video_id:
-            video_id = f"link-{hashlib.sha256(source_url.encode()).hexdigest()[:32]}"
+        if not re.fullmatch(r"\d{17,20}", source_id):
+            raise ViralLinkError(
+                502,
+                "VIRAL_LINK_NATIVE_ID_INVALID",
+                "链接未返回有效视频标识，请上传 MP4 或 MOV 文件。",
+                retryable=False,
+            )
+        video_id = source_id
         author = payload.get("author")
         author_name = ""
         if isinstance(author, dict):

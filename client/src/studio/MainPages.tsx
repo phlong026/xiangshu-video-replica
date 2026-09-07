@@ -216,6 +216,12 @@ export function WorkbenchPage() {
   }>({ status: "idle" });
   const accountId = user.id || "anonymous";
   const activeAccountRef = useRef(accountId);
+  if (activeAccountRef.current !== accountId) {
+    activeAccountRef.current = accountId;
+    uploadOperationRef.current += 1;
+    linkOperationRef.current += 1;
+    viralOperationRef.current += 1;
+  }
   useEffect(
     () => () => {
       uploadOperationRef.current += 1;
@@ -226,10 +232,7 @@ export function WorkbenchPage() {
     [],
   );
   useEffect(() => {
-    if (activeAccountRef.current === accountId) return;
-    activeAccountRef.current = accountId;
-    linkOperationRef.current += 1;
-    viralOperationRef.current += 1;
+    if (activeAccountRef.current !== accountId) return;
     setViralImportingId(undefined);
     setLinkState({ status: "idle" });
   }, [accountId]);
@@ -246,6 +249,8 @@ export function WorkbenchPage() {
   const beginViralCreation = async (
     video: StudioVideo,
     purpose: "copy" | "replica" = "replica",
+    providedIdempotencyKey?: string,
+    requestAccount = accountId,
   ) => {
     if (review) {
       patchDraft({ sourceId: video.id });
@@ -261,14 +266,15 @@ export function WorkbenchPage() {
     }
     const operation = ++viralOperationRef.current;
     const actionKey = `${video.platformKey}:${video.nativeId}:${purpose}`;
-    const memoryKey = `${accountId}:${actionKey}`;
+    const memoryKey = `${requestAccount}:${actionKey}`;
     const idempotencyKey =
+      providedIdempotencyKey ??
       viralIdempotencyKeysRef.current.get(memoryKey) ??
-      viralImportIdempotencyKey(accountId, actionKey);
+      viralImportIdempotencyKey(requestAccount, actionKey);
     viralIdempotencyKeysRef.current.set(memoryKey, idempotencyKey);
     const clearKey = () => {
       viralIdempotencyKeysRef.current.delete(memoryKey);
-      clearViralImportIdempotencyKey(accountId, actionKey, idempotencyKey);
+      clearViralImportIdempotencyKey(requestAccount, actionKey, idempotencyKey);
     };
     setViralImportingId(video.id);
     try {
@@ -278,15 +284,33 @@ export function WorkbenchPage() {
         purpose,
         idempotencyKey,
       );
+      if (
+        operation !== viralOperationRef.current ||
+        requestAccount !== activeAccountRef.current
+      )
+        return;
       for (let attempt = 0; attempt < 120; attempt += 1) {
-        if (operation !== viralOperationRef.current) return;
+        if (
+          operation !== viralOperationRef.current ||
+          requestAccount !== activeAccountRef.current
+        )
+          return;
         if (task.status === "SUCCEEDED" || task.status === "FAILED") break;
         const taskId = task.taskId ?? task.id;
         if (!taskId) throw new Error("导入任务缺少任务 ID");
         await new Promise<void>((resolve) => window.setTimeout(resolve, 1_000));
-        if (operation !== viralOperationRef.current) return;
+        if (
+          operation !== viralOperationRef.current ||
+          requestAccount !== activeAccountRef.current
+        )
+          return;
         task = await getViralImportTask(taskId);
       }
+      if (
+        operation !== viralOperationRef.current ||
+        requestAccount !== activeAccountRef.current
+      )
+        return;
       if (task.status !== "SUCCEEDED" && task.status !== "FAILED") {
         throw new ViralImportPollingTimeoutError(
           "导入任务等待超时，请稍后重试",
@@ -325,11 +349,17 @@ export function WorkbenchPage() {
       }
     } catch (error) {
       if (shouldClearViralImportIdempotencyKey(error)) clearKey();
-      if (operation === viralOperationRef.current) {
+      if (
+        operation === viralOperationRef.current &&
+        requestAccount === activeAccountRef.current
+      ) {
         notify(error instanceof Error ? error.message : "参考素材导入失败");
       }
     } finally {
-      if (operation === viralOperationRef.current)
+      if (
+        operation === viralOperationRef.current &&
+        requestAccount === activeAccountRef.current
+      )
         setViralImportingId(undefined);
     }
   };
@@ -344,10 +374,24 @@ export function WorkbenchPage() {
     if (sourceLink.trim()) {
       if (linkState.status === "loading") return;
       const operation = ++linkOperationRef.current;
+      const requestAccount = accountId;
+      const linkActionKey = `link:${sourceLink.trim()}:${mode}`;
+      const resolutionKey = viralImportIdempotencyKey(
+        requestAccount,
+        linkActionKey,
+      );
       setLinkState({ status: "loading" });
       try {
-        const resolution = await resolveViralLink(sourceLink.trim(), mode);
-        if (operation !== linkOperationRef.current) return;
+        const resolution = await resolveViralLink(
+          sourceLink.trim(),
+          mode,
+          resolutionKey,
+        );
+        if (
+          operation !== linkOperationRef.current ||
+          requestAccount !== activeAccountRef.current
+        )
+          return;
         const video = studioVideoFromViral(resolution.item);
         updateData((current) => ({
           ...current,
@@ -356,12 +400,38 @@ export function WorkbenchPage() {
             ...current.videos.filter((candidate) => candidate.id !== video.id),
           ],
         }));
-        await beginViralCreation(video, mode);
-        if (operation === linkOperationRef.current) {
+        await beginViralCreation(
+          video,
+          mode,
+          resolution.importIdempotencyKey,
+          requestAccount,
+        );
+        if (
+          operation === linkOperationRef.current &&
+          requestAccount === activeAccountRef.current
+        ) {
           setLinkState({ status: "idle" });
         }
       } catch (error) {
-        if (operation !== linkOperationRef.current) return;
+        if (
+          operation !== linkOperationRef.current ||
+          requestAccount !== activeAccountRef.current
+        )
+          return;
+        const requestError = error as { code?: string; status?: number };
+        if (
+          requestError.code !== "VIRAL_LINK_IN_PROGRESS" &&
+          requestError.code !== "VIRAL_LINK_SUBMISSION_UNCERTAIN" &&
+          requestError.status !== undefined &&
+          requestError.status >= 400 &&
+          requestError.status < 500
+        ) {
+          clearViralImportIdempotencyKey(
+            requestAccount,
+            linkActionKey,
+            resolutionKey,
+          );
+        }
         setLinkState({
           status: "error",
           message:

@@ -120,7 +120,10 @@ describe("爆款列表 API", () => {
   });
 
   it("提交链接和用途到受限时长的解析接口", async () => {
-    const body = { item: { platform: "douyin", videoId: "source-1" } };
+    const body = {
+      item: { platform: "douyin", videoId: "source-1" },
+      importIdempotencyKey: "stable-import-key",
+    };
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => body,
@@ -128,7 +131,7 @@ describe("爆款列表 API", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(
-      resolveViralLink("https://v.douyin.com/share/", "replica"),
+      resolveViralLink("https://v.douyin.com/share/", "replica", "resolve-key"),
     ).resolves.toEqual(body);
     expect(fetchMock).toHaveBeenCalledWith(
       "http://127.0.0.1:8000/api/viral/link-resolutions",
@@ -140,6 +143,10 @@ describe("爆款列表 API", () => {
         }),
         signal: expect.any(AbortSignal),
       }),
+    );
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(new Headers(init.headers).get("Idempotency-Key")).toBe(
+      "resolve-key",
     );
   });
 });

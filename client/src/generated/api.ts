@@ -3269,23 +3269,6 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
-  "/api/viral/videos/import-tasks": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    get?: never;
-    put?: never;
-    /** Create Viral Import Task */
-    post: operations["create_viral_import_task_api_viral_videos_import_tasks_post"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
   "/api/viral/link-resolutions": {
     parameters: {
       query?: never;
@@ -3297,6 +3280,23 @@ export interface paths {
     put?: never;
     /** Resolve Viral Link */
     post: operations["resolve_viral_link_api_viral_link_resolutions_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/viral/videos/import-tasks": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Create Viral Import Task */
+    post: operations["create_viral_import_task_api_viral_videos_import_tasks_post"];
     delete?: never;
     options?: never;
     head?: never;
@@ -7979,7 +7979,7 @@ export interface components {
        * Purpose
        * @enum {string}
        */
-      purpose: string;
+      purpose: "copy" | "replica";
       /** Projectid */
       projectId?: string | null;
     };
@@ -7994,7 +7994,7 @@ export interface components {
       /** Videoid */
       videoId: string;
       /** Purpose */
-      purpose: "copy" | "replica";
+      purpose: string;
       /** Projectid */
       projectId: string;
       /** Sourceassetid */
@@ -8020,13 +8020,17 @@ export interface components {
     ViralLinkResolutionRequest: {
       /** Url */
       url: string;
-      /** Purpose */
+      /**
+       * Purpose
+       * @enum {string}
+       */
       purpose: "copy" | "replica";
     };
     /** ViralLinkResolutionResponse */
     ViralLinkResolutionResponse: {
-      /** Item */
       item: components["schemas"]["ViralVideoItem"];
+      /** Importidempotencykey */
+      importIdempotencyKey: string;
     };
     /** ViralListResponse */
     ViralListResponse: {
@@ -14912,7 +14916,9 @@ export interface operations {
   resolve_viral_link_api_viral_link_resolutions_post: {
     parameters: {
       query?: never;
-      header?: never;
+      header: {
+        "Idempotency-Key": string;
+      };
       path?: never;
       cookie?: never;
     };
@@ -14931,6 +14937,20 @@ export interface operations {
           "application/json": components["schemas"]["ViralLinkResolutionResponse"];
         };
       };
+      /** @description Conflict */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Gone */
+      410: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
       /** @description Validation Error */
       422: {
         headers: {
@@ -14939,6 +14959,27 @@ export interface operations {
         content: {
           "application/json": components["schemas"]["HTTPValidationError"];
         };
+      };
+      /** @description Bad Gateway */
+      502: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Service Unavailable */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Gateway Timeout */
+      504: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
       };
     };
   };
