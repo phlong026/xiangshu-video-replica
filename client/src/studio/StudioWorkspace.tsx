@@ -46,6 +46,7 @@ import {
   loadProjectDraft,
   loadSavedScriptList,
   loadStudioData,
+  loadViralVideos,
   persistCloudDraft,
   persistSavedScript,
   publishScriptVersion,
@@ -518,7 +519,8 @@ export function StudioWorkspace({
     if (revision > 0) loadedPeopleRef.current.clear();
     let active = true;
     setData((previous) => ({ ...previous, loading: true }));
-    void loadStudioData(currentUser)
+    const coreLoad = loadStudioData(currentUser, { includeViral: false });
+    void coreLoad
       .then((result) => {
         if (active)
           setData({
@@ -535,6 +537,28 @@ export function StudioWorkspace({
               customerVisibleErrorMessage(cause, "工作区暂不可用，请重试。"),
             ],
           });
+      });
+    void loadViralVideos()
+      .then((viral) =>
+        coreLoad.then(() => {
+          if (!active) return;
+          setData((previous) => ({
+            ...previous,
+            videos:
+              viral.videos.length || viral.errors.length
+                ? viral.videos
+                : previous.videos,
+            errors: [
+              ...previous.errors.filter(
+                (message) => !message.includes("爆款失败"),
+              ),
+              ...viral.errors,
+            ],
+          }));
+        }),
+      )
+      .catch(() => {
+        // 爆款区独立容错，不覆盖已加载的项目和任务。
       });
     return () => {
       active = false;

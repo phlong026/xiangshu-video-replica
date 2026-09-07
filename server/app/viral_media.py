@@ -23,9 +23,9 @@ import socket
 import threading
 from dataclasses import dataclass, replace
 from datetime import timedelta
-from typing import Protocol
+from typing import Any, Protocol
 from urllib.parse import quote, urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from app.storage import DownloadIntent, StoredObject
 from app.viral_decrypt import decrypt_head, is_encrypted_mp4
@@ -54,6 +54,22 @@ class ViralMediaError(ViralSourceError):
     """爆款媒体获取失败（文案中性，不含供应商名称）。"""
 
 
+class PublicRedirectHandler(HTTPRedirectHandler):
+    """Re-validate every redirect instead of trusting only the first URL."""
+
+    def redirect_request(
+        self,
+        req: Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> Request | None:
+        _require_public_http_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 @dataclass(frozen=True)
 class ViralMediaResult:
     kind: str  # "audio" | "video"
@@ -62,6 +78,7 @@ class ViralMediaResult:
     size: int
     content_type: str
     cache_hit: bool
+    sha256: str = ""
 
 
 def _storage_video_id(video_id: str) -> str:
@@ -116,7 +133,8 @@ class UrlFetcher:
     def fetch(self, url: str) -> bytes:
         _require_public_http_url(url)
         request = Request(url, headers={"User-Agent": _USER_AGENT}, method="GET")
-        with urlopen(request, timeout=self.timeout_seconds) as response:  # noqa: S310
+        opener = build_opener(PublicRedirectHandler())
+        with opener.open(request, timeout=self.timeout_seconds) as response:  # noqa: S310
             declared = response.headers.get("Content-Length")
             if declared and int(declared) > _MAX_DOWNLOAD_BYTES:
                 raise ViralMediaError("媒体文件超出可下载大小上限")
@@ -316,4 +334,5 @@ class ViralMediaPipeline:
             size=stored.size,
             content_type=stored.content_type,
             cache_hit=cache_hit,
+            sha256=str(getattr(stored, "sha256", "")),
         )

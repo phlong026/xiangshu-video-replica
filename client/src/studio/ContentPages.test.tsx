@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { StudioContextValue, StudioState } from "./types";
 
@@ -6,7 +12,13 @@ const {
   useStudio,
   fetchViralVideoMedia,
   fetchViralVideoStatistics,
+  fetchViralVideo,
+  createViralImportTask,
+  getViralImportTask,
+  listViralFavorites,
   listViralVideos,
+  saveViralFavorite,
+  removeViralFavorite,
   listMaterials,
   createMaterialUploadIntent,
   uploadMaterial,
@@ -20,7 +32,13 @@ const {
   useStudio: vi.fn(),
   fetchViralVideoMedia: vi.fn(),
   fetchViralVideoStatistics: vi.fn(),
+  fetchViralVideo: vi.fn(),
+  createViralImportTask: vi.fn(),
+  getViralImportTask: vi.fn(),
+  listViralFavorites: vi.fn(),
   listViralVideos: vi.fn(),
+  saveViralFavorite: vi.fn(),
+  removeViralFavorite: vi.fn(),
   listMaterials: vi.fn(),
   createMaterialUploadIntent: vi.fn(),
   uploadMaterial: vi.fn(),
@@ -35,7 +53,13 @@ vi.mock("./context", () => ({ useStudio }));
 vi.mock("../api", () => ({
   fetchViralVideoMedia,
   fetchViralVideoStatistics,
+  fetchViralVideo,
+  createViralImportTask,
+  getViralImportTask,
+  listViralFavorites,
   listViralVideos,
+  saveViralFavorite,
+  removeViralFavorite,
   listMaterials,
   createMaterialUploadIntent,
   uploadMaterial,
@@ -179,14 +203,36 @@ describe("V1.4 内容与运营页面", () => {
     useStudio.mockReset();
     fetchViralVideoMedia.mockReset();
     fetchViralVideoStatistics.mockReset();
+    fetchViralVideo.mockReset();
+    createViralImportTask.mockReset();
+    getViralImportTask.mockReset();
+    listViralFavorites.mockReset();
     listViralVideos.mockReset();
+    saveViralFavorite.mockReset();
+    removeViralFavorite.mockReset();
     listViralVideos.mockResolvedValue({
       platform: "douyin",
       sort: "hot",
       categories: [],
       items: [],
       fetchedAt: null,
+      hasMore: false,
+      nextCursor: null,
+      total: 0,
     });
+    listViralFavorites.mockResolvedValue({ items: [], total: 0 });
+    saveViralFavorite.mockResolvedValue({ isFavorite: true });
+    removeViralFavorite.mockResolvedValue({ isFavorite: false });
+    createViralImportTask.mockResolvedValue({
+      taskId: "import-1",
+      status: "SUCCEEDED",
+      projectId: "project-1",
+      sourceAssetId: "asset-1",
+      mediaKind: "video",
+      canTranscribe: true,
+      canAnalyze: true,
+    });
+    window.history.replaceState(null, "", "/");
     listMaterials.mockReset();
     createMaterialUploadIntent.mockReset();
     uploadMaterial.mockReset();
@@ -225,13 +271,63 @@ describe("V1.4 内容与运营页面", () => {
     });
   });
 
-  it("爆款详情展示平台字段，文案先备料再跳转", async () => {
-    fetchViralVideoMedia.mockResolvedValue({
-      kind: "audio",
-      url: "https://storage.test/viral/douyin/native-dy-1.mp3",
-      contentType: "audio/mpeg",
-      cacheHit: false,
+  it("我的收藏使用持久化分页接口读取当前平台", async () => {
+    const base = studio();
+    const value = studio({
+      review: false,
+      data: { ...base.data, videos: [] },
     });
+    listViralFavorites.mockResolvedValue({
+      items: [
+        {
+          platform: "douyin",
+          videoId: "favorite-native-1",
+          category: "庭院案例",
+          title: "已收藏的庭院视频",
+          author: "乡墅作者",
+          authorAvatar: null,
+          verified: false,
+          coverUrl: null,
+          durationMs: 16_000,
+          likes: 123,
+          comments: 4,
+          shares: 5,
+          collects: 6,
+          publishedAt: 1_788_600_000,
+          publishedDisplay: "1天前",
+          likeDisplay: "123",
+          tags: ["庭院"],
+          hasPlayableAudio: true,
+          playUrl: null,
+          isFavorite: true,
+          availability: "available",
+        },
+      ],
+      total: 1,
+      hasMore: false,
+      nextCursor: null,
+    });
+    useStudio.mockReturnValue(value);
+    render(<ViralPage />);
+
+    fireEvent.click(screen.getByRole("tab", { name: "我的收藏" }));
+
+    await waitFor(() =>
+      expect(listViralFavorites).toHaveBeenCalledWith({
+        platform: "douyin",
+        limit: 12,
+      }),
+    );
+    const update = vi.mocked(value.updateData).mock.calls.at(-1)?.[0];
+    expect(update?.(value.data).videos).toEqual([
+      expect.objectContaining({
+        nativeId: "favorite-native-1",
+        title: "已收藏的庭院视频",
+      }),
+    ]);
+  });
+
+  it("爆款详情导入来源项目后把真实资产交给文案工坊", async () => {
     const value = studio({
       state: {
         ...studio().state,
@@ -252,19 +348,112 @@ describe("V1.4 内容与运营页面", () => {
     expect(view.container.querySelector("main")).toBeNull();
     expect(screen.queryByText("内容浏览示例审核")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "提取文案" }));
-    expect(fetchViralVideoMedia).toHaveBeenCalledWith("douyin", "native-dy-1");
+    expect(createViralImportTask).toHaveBeenCalledWith(
+      "douyin",
+      "native-dy-1",
+      "copy",
+      expect.any(String),
+    );
     await waitFor(() => {
-      expect(value.patchDraft).toHaveBeenCalledWith({ sourceId: "dy-1" });
+      expect(value.patchDraft).toHaveBeenCalledWith({
+        projectId: "project-1",
+        sourceId: "asset-1",
+        sourceAssetId: "asset-1",
+      });
+      expect(value.extractScriptFromUpload).toHaveBeenCalledWith(
+        "project-1",
+        "asset-1",
+      );
     });
     expect(value.navigate).toHaveBeenCalledWith("copy", {
       selectedVideoId: "dy-1",
       returnTo: "viral-detail",
     });
-    expect(screen.getByText("原声音频已就绪")).toBeInTheDocument();
+    expect(screen.getByText("参考素材已导入")).toBeInTheDocument();
   });
 
-  it("爆款备料失败时保持详情页并展示错误", async () => {
-    fetchViralVideoMedia.mockRejectedValue(new Error("素材暂时无法获取"));
+  it("导入排队时始终使用服务端返回的同一任务 ID 轮询", async () => {
+    vi.useFakeTimers();
+    try {
+      createViralImportTask.mockResolvedValue({
+        id: "server-import-1",
+        status: "PENDING",
+        projectId: "project-1",
+        sourceAssetId: null,
+        canTranscribe: false,
+        canAnalyze: false,
+      });
+      getViralImportTask.mockResolvedValue({
+        id: "server-import-1",
+        status: "SUCCEEDED",
+        projectId: "project-1",
+        sourceAssetId: "asset-1",
+        canTranscribe: true,
+        canAnalyze: true,
+      });
+      const base = studio();
+      const value = studio({
+        state: {
+          ...base.state,
+          page: "viral-detail",
+          selectedVideoId: "dy-1",
+        },
+      });
+      useStudio.mockReturnValue(value);
+      render(<ViralDetailPage />);
+
+      fireEvent.click(screen.getByRole("button", { name: "提取文案" }));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+
+      expect(getViralImportTask).toHaveBeenCalledWith("server-import-1");
+      expect(value.patchDraft).toHaveBeenCalledWith({
+        projectId: "project-1",
+        sourceId: "asset-1",
+        sourceAssetId: "asset-1",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("离开爆款详情后，迟到的来源导入不会替换当前草稿或跳转", async () => {
+    let resolve: ((value: unknown) => void) | undefined;
+    createViralImportTask.mockImplementation(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+    const base = studio();
+    const value = studio({
+      state: { ...base.state, page: "viral-detail", selectedVideoId: "dy-1" },
+    });
+    useStudio.mockReturnValue(value);
+    const view = render(<ViralDetailPage />);
+    fireEvent.click(screen.getByRole("button", { name: "提取文案" }));
+    view.unmount();
+
+    await act(async () => {
+      resolve?.({
+        taskId: "late-import",
+        status: "SUCCEEDED",
+        projectId: "late-project",
+        sourceAssetId: "late-asset",
+        mediaKind: "video",
+        canTranscribe: true,
+        canAnalyze: true,
+      });
+    });
+
+    expect(value.patchDraft).not.toHaveBeenCalled();
+    expect(value.navigate).not.toHaveBeenCalled();
+    expect(value.updateData).not.toHaveBeenCalled();
+  });
+
+  it("爆款导入失败时保持详情页并展示错误", async () => {
+    createViralImportTask.mockRejectedValue(new Error("素材暂时无法获取"));
     const value = studio({
       state: {
         ...studio().state,
@@ -280,8 +469,12 @@ describe("V1.4 内容与运营页面", () => {
     expect(screen.getByText("▶ 播放")).toHaveClass("content-player-viral-play");
     fireEvent.click(screen.getByRole("button", { name: "视频复刻" }));
     await waitFor(() => {
-      expect(screen.getByText(/素材准备失败/)).toBeInTheDocument();
+      expect(screen.getByText(/素材暂时无法获取/)).toBeInTheDocument();
     });
+    const firstKey = createViralImportTask.mock.calls[0][3];
+    fireEvent.click(screen.getByRole("button", { name: "视频复刻" }));
+    await waitFor(() => expect(createViralImportTask).toHaveBeenCalledTimes(2));
+    expect(createViralImportTask.mock.calls[1][3]).toBe(firstKey);
     expect(value.navigate).not.toHaveBeenCalled();
   });
 
@@ -522,7 +715,11 @@ describe("V1.4 内容与运营页面", () => {
     useStudio.mockReturnValue(value);
     render(<ViralDetailPage />);
 
-    fireEvent.click(screen.getByRole("button", { name: "提取文案" }));
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "播放 农村建房预算，别只盯着主体",
+      }),
+    );
     await waitFor(() => expect(value.updateData).toHaveBeenCalledOnce());
     const update = vi.mocked(value.updateData).mock.calls[0][0];
     const updated = update(value.data);
@@ -696,8 +893,268 @@ describe("V1.4 内容与运营页面", () => {
     });
 
     await waitFor(() =>
-      expect(listViralVideos).toHaveBeenCalledWith("douyin", "latest"),
+      expect(listViralVideos).toHaveBeenCalledWith("douyin", "latest", {
+        limit: 12,
+      }),
     );
+  });
+
+  it("非审核列表使用服务端游标分页，并提供可键盘触发的加载入口", async () => {
+    const base = studio();
+    const item = {
+      platform: "douyin" as const,
+      videoId: "native-dy-1",
+      category: "建房预算",
+      title: "农村建房预算，别只盯着主体",
+      author: "乡墅建房笔记",
+      authorAvatar: null,
+      verified: true,
+      coverUrl: "/studio/demo.jpg",
+      durationMs: 88_000,
+      likes: 18_000,
+      comments: 10,
+      shares: 20,
+      collects: 30,
+      publishedAt: 1_788_600_000,
+      publishedDisplay: null,
+      likeDisplay: "1.8万",
+      tags: [],
+      hasPlayableAudio: true,
+      playUrl: null,
+      isFavorite: false,
+      availability: "available" as const,
+    };
+    listViralVideos
+      .mockResolvedValueOnce({
+        platform: "douyin",
+        sort: "hot",
+        categories: ["建房预算"],
+        items: [item],
+        fetchedAt: "2026-09-07T12:00:00Z",
+        hasMore: true,
+        nextCursor: "cursor-2",
+        total: 13,
+      })
+      .mockResolvedValueOnce({
+        platform: "douyin",
+        sort: "hot",
+        categories: ["建房预算"],
+        items: [{ ...item, videoId: "native-dy-2", title: "第二页视频" }],
+        fetchedAt: "2026-09-07T12:00:00Z",
+        hasMore: false,
+        nextCursor: null,
+        total: 13,
+      });
+    useStudio.mockReturnValue(
+      studio({ review: false, data: { ...base.data, videos: [] } }),
+    );
+    render(<ViralPage />);
+
+    await waitFor(() =>
+      expect(listViralVideos).toHaveBeenCalledWith("douyin", "hot", {
+        limit: 12,
+      }),
+    );
+    const loadMore = await screen.findByRole("button", {
+      name: "加载更多视频",
+    });
+    fireEvent.keyDown(loadMore, { key: "Enter" });
+    await waitFor(() =>
+      expect(listViralVideos).toHaveBeenCalledWith("douyin", "hot", {
+        limit: 12,
+        cursor: "cursor-2",
+      }),
+    );
+  });
+
+  it("切换平台后丢弃上一平台迟到的分页结果", async () => {
+    const base = studio();
+    const updateData = vi.fn();
+    const item = {
+      platform: "douyin" as const,
+      videoId: "native-dy-1",
+      category: "建房预算",
+      title: "抖音首页视频",
+      author: "作者",
+      authorAvatar: null,
+      verified: false,
+      coverUrl: "/studio/demo.jpg",
+      durationMs: 30_000,
+      likes: 100,
+      comments: 1,
+      shares: 2,
+      collects: 3,
+      publishedAt: 1_788_600_000,
+      publishedDisplay: null,
+      likeDisplay: "100",
+      tags: [],
+      hasPlayableAudio: true,
+      playUrl: null,
+      isFavorite: false,
+      availability: "available" as const,
+    };
+    let resolveOldPage:
+      | ((value: {
+          platform: "douyin";
+          sort: "hot";
+          categories: string[];
+          items: Array<typeof item>;
+          fetchedAt: string;
+          hasMore: boolean;
+          nextCursor: null;
+          total: number;
+        }) => void)
+      | undefined;
+    listViralVideos
+      .mockResolvedValueOnce({
+        platform: "douyin",
+        sort: "hot",
+        categories: ["建房预算"],
+        items: [item],
+        fetchedAt: "2026-09-07T12:00:00Z",
+        hasMore: true,
+        nextCursor: "cursor-2",
+        total: 2,
+      })
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveOldPage = resolve;
+        }),
+      )
+      .mockResolvedValueOnce({
+        platform: "wechat_channels",
+        sort: "hot",
+        categories: [],
+        items: [],
+        fetchedAt: "2026-09-07T12:00:01Z",
+        hasMore: false,
+        nextCursor: null,
+        total: 0,
+      });
+    useStudio.mockReturnValue(
+      studio({
+        review: false,
+        data: { ...base.data, videos: [] },
+        updateData,
+      }),
+    );
+    render(<ViralPage />);
+
+    const loadMore = await screen.findByRole("button", {
+      name: "加载更多视频",
+    });
+    updateData.mockClear();
+    fireEvent.click(loadMore);
+    fireEvent.click(screen.getByRole("tab", { name: /视频号/ }));
+    await waitFor(() =>
+      expect(listViralVideos).toHaveBeenCalledWith("wechat_channels", "hot", {
+        limit: 12,
+      }),
+    );
+
+    resolveOldPage?.({
+      platform: "douyin",
+      sort: "hot",
+      categories: ["建房预算"],
+      items: [{ ...item, videoId: "native-dy-late", title: "迟到的抖音视频" }],
+      fetchedAt: "2026-09-07T12:00:00Z",
+      hasMore: false,
+      nextCursor: null,
+      total: 2,
+    });
+    await Promise.resolve();
+
+    expect(updateData).toHaveBeenCalledTimes(1);
+  });
+
+  it("冷库刷新时保持页面可用并显示采集状态", async () => {
+    const base = studio();
+    listViralVideos.mockResolvedValue({
+      platform: "douyin",
+      sort: "hot",
+      categories: [],
+      items: [],
+      fetchedAt: null,
+      stale: true,
+      refreshing: true,
+      refreshError: null,
+      hasMore: false,
+      nextCursor: null,
+      total: 0,
+    });
+    useStudio.mockReturnValue(
+      studio({ review: false, data: { ...base.data, videos: [] } }),
+    );
+
+    render(<ViralPage />);
+
+    expect(
+      await screen.findAllByText("正在采集爆款视频，当前先展示已缓存内容…"),
+    ).not.toHaveLength(0);
+    expect(screen.getByText("暂无爆款视频")).toBeInTheDocument();
+  });
+
+  it("收藏使用持久化接口并在保存失败时回滚乐观状态", async () => {
+    saveViralFavorite.mockRejectedValueOnce(new Error("收藏失败"));
+    const value = studio({ review: false });
+    useStudio.mockReturnValue(value);
+    render(<ViralPage />);
+
+    const button = screen.getByRole("button", {
+      name: "收藏 农村建房预算，别只盯着主体",
+    });
+    fireEvent.click(button);
+    expect(button).toHaveTextContent("已收藏");
+    await waitFor(() => expect(button).toHaveTextContent("收藏"));
+    expect(saveViralFavorite).toHaveBeenCalledWith("douyin", "native-dy-1");
+    expect(value.notify).toHaveBeenCalledWith("收藏失败，已恢复原状态");
+  });
+
+  it("详情地址保留平台和视频 ID，刷新后可从单条接口恢复", async () => {
+    const base = studio();
+    const item = {
+      platform: "douyin" as const,
+      videoId: "native-dy-1",
+      category: "建房预算",
+      title: "刷新恢复的视频",
+      author: "乡墅建房笔记",
+      authorAvatar: null,
+      verified: true,
+      coverUrl: "/studio/demo.jpg",
+      durationMs: 88_000,
+      likes: 18_000,
+      comments: 10,
+      shares: 20,
+      collects: 30,
+      publishedAt: 1_788_600_000,
+      publishedDisplay: null,
+      likeDisplay: "1.8万",
+      tags: [],
+      hasPlayableAudio: true,
+      playUrl: null,
+      isFavorite: false,
+      availability: "available" as const,
+    };
+    fetchViralVideo.mockResolvedValue({ item });
+    window.history.replaceState(
+      null,
+      "",
+      "/?viralPlatform=douyin&viralVideoId=native-dy-1#studio/viral-detail",
+    );
+    useStudio.mockReturnValue(
+      studio({
+        review: false,
+        data: { ...base.data, videos: [] },
+        state: { ...base.state, page: "viral-detail" },
+      }),
+    );
+    render(<ViralDetailPage />);
+
+    expect(screen.getByText("正在读取视频详情…")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "刷新恢复的视频" }),
+    ).toBeInTheDocument();
+    expect(fetchViralVideo).toHaveBeenCalledWith("douyin", "native-dy-1");
   });
 
   it("非审核工作区不把示例三十条当作真实采集数据", () => {

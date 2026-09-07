@@ -41,6 +41,7 @@ import {
   getLatestProjectFirstFrames,
   getLatestScriptRewriteTask,
   getLatestScriptVersion,
+  getScriptFromAudioTask,
   getSettings,
   hideMaterial,
   listGenerationBatches,
@@ -1871,6 +1872,18 @@ describe("startVideoAnalysis", () => {
       identity_id: "identity-1",
       idempotency_key: expect.any(String),
     });
+  });
+
+  it("读取本次音频转写任务使用任务 ID 并编码路径", async () => {
+    const task = { id: "asr/one", status: "RUNNING" };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue({ ok: true, json: async () => task });
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(getScriptFromAudioTask("asr/one")).resolves.toEqual(task);
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "http://127.0.0.1:8000/api/script-from-audio-tasks/asr%2Fone",
+    );
   });
 
   it("按人物或无人物作用域读取最新改写任务", async () => {

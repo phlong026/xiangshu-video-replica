@@ -30,6 +30,8 @@ const {
   cancelStudioTask,
   downloadStudioTaskResult,
   retryStudioTask,
+  createViralImportTask,
+  getViralImportTask,
   getStudioNotificationPreferences,
   updateStudioNotificationPreferences,
 } = vi.hoisted(() => ({
@@ -46,6 +48,8 @@ const {
   cancelStudioTask: vi.fn(),
   downloadStudioTaskResult: vi.fn(),
   retryStudioTask: vi.fn(),
+  createViralImportTask: vi.fn(),
+  getViralImportTask: vi.fn(),
   getStudioNotificationPreferences: vi.fn(),
   updateStudioNotificationPreferences: vi.fn(),
 }));
@@ -53,6 +57,8 @@ const {
 vi.mock("./context", () => ({ useStudio }));
 vi.mock("../api", async (importOriginal) => ({
   ...(await importOriginal<object>()),
+  createViralImportTask,
+  getViralImportTask,
   getStudioNotificationPreferences,
   updateStudioNotificationPreferences,
 }));
@@ -343,6 +349,33 @@ describe("V1.4 工作台正在进行行", () => {
     });
   }
 
+  it("爆款来源未上传时在工作台展示原视频上传引导", () => {
+    const state = createState("workbench");
+    state.draft.sourceId = "viral-source";
+    const videos: StudioVideo[] = [
+      {
+        id: "viral-source",
+        title: "建房预算参考",
+        author: "作者",
+        platform: "抖音",
+        category: "建房预算",
+        poster: "/studio/source-preview.jpg",
+        duration: "00:30",
+        likes: 0,
+        collections: null,
+        shares: null,
+        description: "参考标题",
+      },
+    ];
+    useStudio.mockReturnValue(workbench({ state, data: data([], videos) }));
+    render(<WorkbenchPage />);
+
+    expect(screen.getByText(/已选参考：建房预算参考/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/请上传该视频的 MP4 或 MOV 文件/),
+    ).toBeInTheDocument();
+  });
+
   it("每行提供更多操作菜单：打开任务中心与复制任务编号", async () => {
     const value = workbench();
     useStudio.mockReturnValue(value);
@@ -418,6 +451,11 @@ describe("V1.4 工作台新版首页布局", () => {
     description: "乡墅爆款案例",
   }));
 
+  beforeEach(() => {
+    createViralImportTask.mockReset();
+    getViralImportTask.mockReset();
+  });
+
   it("展示新版主标题、居中辅助文案、五个竖屏爆款与四个快捷入口", () => {
     const value = studio(undefined, {
       state: createState("workbench"),
@@ -468,6 +506,59 @@ describe("V1.4 工作台新版首页布局", () => {
       selectedVideoId: "video-1",
       returnTo: "workbench",
     });
+  });
+
+  it("首页精选按热度和稳定 ID 确定排序，不依赖接口数组顺序", () => {
+    const value = studio(undefined, {
+      state: createState("workbench"),
+      data: data([], [...videos].reverse()),
+    });
+    useStudio.mockReturnValue(value);
+
+    render(<WorkbenchPage />);
+
+    expect(screen.getByText("灵感视频 1")).toBeInTheDocument();
+    expect(screen.getByText("灵感视频 5")).toBeInTheDocument();
+    expect(screen.queryByText("灵感视频 6")).not.toBeInTheDocument();
+  });
+
+  it("真实爆款从首页复刻时先导入项目素材", async () => {
+    createViralImportTask.mockResolvedValue({
+      taskId: "import-home",
+      status: "SUCCEEDED",
+      projectId: "project-home",
+      sourceAssetId: "asset-home",
+      canAnalyze: true,
+    });
+    const source = {
+      ...videos[0],
+      platformKey: "douyin" as const,
+      nativeId: "native-home",
+    };
+    const value = studio(undefined, {
+      state: createState("workbench"),
+      data: data([], [source]),
+    });
+    useStudio.mockReturnValue(value);
+    render(<WorkbenchPage />);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "用它复刻：灵感视频 1" }),
+    );
+
+    await waitFor(() =>
+      expect(value.patchDraft).toHaveBeenCalledWith({
+        projectId: "project-home",
+        sourceId: "asset-home",
+        sourceAssetId: "asset-home",
+      }),
+    );
+    expect(createViralImportTask).toHaveBeenCalledWith(
+      "douyin",
+      "native-home",
+      "replica",
+      expect.any(String),
+    );
   });
 });
 

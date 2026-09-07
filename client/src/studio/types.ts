@@ -264,9 +264,9 @@ export type StudioContextValue = {
   openLive: (panel: LivePanel) => void;
   requestGeneration: (kind: StudioTask["type"]) => void;
   saveDraft: () => void;
-  /** 确认终稿：置 confirmed + 立即云端持久化；带 projectId 时软发布到项目脚本版本。 */
+  /** 确认终稿：云端保存成功后置 confirmed；项目已有分镜时再同步项目脚本。 */
   confirmFinalDraft: () => void;
   /** 上传来源视频 → 提取文案（script-from-audio）→ 回填草稿并跳文案工坊。 */
-  extractScriptFromUpload: () => void;
+  extractScriptFromUpload: (projectId?: string, assetId?: string) => void;
   refresh: () => void;
 };

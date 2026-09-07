@@ -6,6 +6,8 @@ import hashlib
 import hmac
 import logging
 import os
+import shutil
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from mimetypes import guess_type
@@ -133,6 +135,17 @@ class StorageAdapter(Protocol):
     def put_object(self, key: str, content: bytes, *, content_type: str) -> StoredObject: ...
 
     def get_object(self, key: str) -> bytes: ...
+
+    def iter_object(
+        self,
+        key: str,
+        *,
+        start: int = 0,
+        end: int | None = None,
+        chunk_size: int = 1024 * 1024,
+    ) -> Iterator[bytes]: ...
+
+    def copy_object(self, source_key: str, destination_key: str) -> StoredObject: ...
 
     def head_object(self, key: str) -> StoredObject | None: ...
 
@@ -331,6 +344,19 @@ class _BaseStorageAdapter:
     def get_object(self, key: str) -> bytes:
         raise NotImplementedError
 
+    def iter_object(
+        self,
+        key: str,
+        *,
+        start: int = 0,
+        end: int | None = None,
+        chunk_size: int = 1024 * 1024,
+    ) -> Iterator[bytes]:
+        raise NotImplementedError
+
+    def copy_object(self, source_key: str, destination_key: str) -> StoredObject:
+        raise NotImplementedError
+
     def head_object(self, key: str) -> StoredObject | None:
         raise NotImplementedError
 
@@ -392,6 +418,32 @@ class FakeStorageAdapter(_BaseStorageAdapter):
         object_key = self._object_key(key)
         return self._objects[object_key][0]
 
+    def iter_object(
+        self,
+        key: str,
+        *,
+        start: int = 0,
+        end: int | None = None,
+        chunk_size: int = 1024 * 1024,
+    ) -> Iterator[bytes]:
+        content = self.get_object(key)
+        stop = len(content) if end is None else min(len(content), end + 1)
+        for offset in range(start, stop, chunk_size):
+            yield content[offset : min(stop, offset + chunk_size)]
+
+    def copy_object(self, source_key: str, destination_key: str) -> StoredObject:
+        source_object_key = self._object_key(source_key)
+        destination_object_key = self._object_key(destination_key)
+        try:
+            content, source = self._objects[source_object_key]
+        except KeyError as exc:
+            raise StorageBackendUnavailable("source object is unavailable") from exc
+        return self.put_object(
+            destination_object_key,
+            content,
+            content_type=source.content_type,
+        )
+
     def head_object(self, key: str) -> StoredObject | None:
         object_key = self._object_key(key)
         stored = self._objects.get(object_key)
@@ -448,16 +500,56 @@ class LocalStorageAdapter(_BaseStorageAdapter):
     def get_object(self, key: str) -> bytes:
         return self._path_for(self._object_key(key)).read_bytes()
 
+    def iter_object(
+        self,
+        key: str,
+        *,
+        start: int = 0,
+        end: int | None = None,
+        chunk_size: int = 1024 * 1024,
+    ) -> Iterator[bytes]:
+        path = self._path_for(self._object_key(key))
+        remaining = None if end is None else end - start + 1
+        with path.open("rb") as source:
+            source.seek(start)
+            while remaining is None or remaining > 0:
+                size = chunk_size if remaining is None else min(chunk_size, remaining)
+                chunk = source.read(size)
+                if not chunk:
+                    return
+                yield chunk
+                if remaining is not None:
+                    remaining -= len(chunk)
+
+    def copy_object(self, source_key: str, destination_key: str) -> StoredObject:
+        source_object_key = self._object_key(source_key)
+        destination_object_key = self._object_key(destination_key)
+        source_path = self._path_for(source_object_key)
+        destination_path = self._path_for(destination_object_key)
+        try:
+            destination_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source_path, destination_path)
+        except OSError as exc:
+            logger.warning("local object copy failed: %s", type(exc).__name__)
+            raise StorageBackendUnavailable("local object copy failed") from exc
+        return _stored_object_from_path(
+            provider=self.provider,
+            bucket=self.bucket,
+            key=destination_object_key,
+            path=destination_path,
+            content_type=guess_type(source_path.name)[0] or "application/octet-stream",
+        )
+
     def head_object(self, key: str) -> StoredObject | None:
         object_key = self._object_key(key)
         path = self._path_for(object_key)
         if not path.exists():
             return None
-        return _stored_object(
+        return _stored_object_from_path(
             provider=self.provider,
             bucket=self.bucket,
             key=object_key,
-            content=path.read_bytes(),
+            path=path,
             content_type=guess_type(path.name)[0] or "application/octet-stream",
         )
 
@@ -494,12 +586,14 @@ class CloudStorageAdapter(_BaseStorageAdapter):
 
     def put_object(self, key: str, content: bytes, *, content_type: str) -> StoredObject:
         object_key = self._object_key(key)
+        digest = hashlib.sha256(content).hexdigest()
         try:
             self._client.put_object(
                 Bucket=self.bucket,
                 Key=object_key,
                 Body=content,
                 ContentType=content_type,
+                Metadata={"x-cos-meta-sha256": digest},
             )
         except Exception as exc:
             raise StorageBackendUnavailable("cloud object upload failed") from exc
@@ -572,6 +666,49 @@ class CloudStorageAdapter(_BaseStorageAdapter):
         except Exception as exc:
             raise StorageBackendUnavailable("cloud object download failed") from exc
 
+    def iter_object(
+        self,
+        key: str,
+        *,
+        start: int = 0,
+        end: int | None = None,
+        chunk_size: int = 1024 * 1024,
+    ) -> Iterator[bytes]:
+        object_key = self._object_key(key)
+        request: dict[str, object] = {"Bucket": self.bucket, "Key": object_key}
+        if start or end is not None:
+            request["Range"] = f"bytes={start}-{'' if end is None else end}"
+        try:
+            response = self._client.get_object(**request)
+            stream = response["Body"].get_raw_stream()
+            while True:
+                chunk = stream.read(chunk_size)
+                if not chunk:
+                    return
+                yield bytes(chunk)
+        except Exception as exc:
+            raise StorageBackendUnavailable("cloud object stream failed") from exc
+
+    def copy_object(self, source_key: str, destination_key: str) -> StoredObject:
+        source_object_key = self._object_key(source_key)
+        destination_object_key = self._object_key(destination_key)
+        try:
+            self._client.copy_object(
+                Bucket=self.bucket,
+                Key=destination_object_key,
+                CopySource={
+                    "Bucket": self.bucket,
+                    "Key": source_object_key,
+                    "Region": self._region,
+                },
+            )
+        except Exception as exc:
+            raise StorageBackendUnavailable("cloud object copy failed") from exc
+        copied = self.head_object(destination_object_key)
+        if copied is None:
+            raise StorageBackendUnavailable("copied cloud object is unavailable")
+        return copied
+
     def head_object(self, key: str) -> StoredObject | None:
         object_key = self._object_key(key)
         try:
@@ -587,7 +724,7 @@ class CloudStorageAdapter(_BaseStorageAdapter):
             uri=f"{self.provider}://{self.bucket}/{object_key}",
             size=int(_header(headers, "content-length", "0")),
             content_type=str(_header(headers, "content-type", "application/octet-stream")),
-            sha256="",
+            sha256=str(_header(headers, "x-cos-meta-sha256", "")),
             updated_at=datetime.now(UTC),
         )
 
@@ -741,5 +878,29 @@ def _stored_object(
         size=len(content),
         content_type=content_type,
         sha256=digest,
+        updated_at=datetime.now(UTC),
+    )
+
+
+def _stored_object_from_path(
+    *,
+    provider: str,
+    bucket: str,
+    key: str,
+    path: Path,
+    content_type: str,
+) -> StoredObject:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return StoredObject(
+        provider=provider,
+        bucket=bucket,
+        key=key,
+        uri=f"{provider}://{bucket}/{key}",
+        size=path.stat().st_size,
+        content_type=content_type,
+        sha256=digest.hexdigest(),
         updated_at=datetime.now(UTC),
     )

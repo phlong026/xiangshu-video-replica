@@ -39,6 +39,18 @@ class AsrProviderError(RuntimeError):
     """Provider-side failure surfaced to the task as a redacted message."""
 
 
+class AsrSubmissionUncertain(AsrProviderError):
+    """The transport cannot prove whether a submit was accepted."""
+
+
+class AsrServiceUnavailable(AsrProviderError):
+    """An existing receipt can survive a temporary service/configuration failure."""
+
+
+class AsrTaskPending(AsrProviderError):
+    """A known receipt can be polled again without another paid submission."""
+
+
 @dataclass(frozen=True)
 class TranscriptResult:
     text: str
@@ -96,7 +108,8 @@ def _default_transport(
     except HTTPError as exc:
         return exc.code, exc.read()
     except (TimeoutError, URLError, OSError) as exc:
-        raise AsrProviderError(f"语音转写服务连接失败：{type(exc).__name__}") from exc
+        logger.warning("ASR transport failed: %s", type(exc).__name__)
+        raise AsrSubmissionUncertain("语音转写服务连接暂时中断。") from exc
 
 
 class FakeAsrProvider:
@@ -135,7 +148,14 @@ class DashScopeFunAsr:
 
     # ---------------- public ----------------
 
-    def transcribe(self, file_url: str, *, duration_sec: float | None = None) -> TranscriptResult:
+    def transcribe(
+        self,
+        file_url: str,
+        *,
+        duration_sec: float | None = None,
+        on_submitted: Callable[[str], None] | None = None,
+        heartbeat: Callable[[], None] | None = None,
+    ) -> TranscriptResult:
         cfg = self._config
         if not cfg.api_key:
             raise AsrProviderError("语音转写服务未配置")
@@ -146,7 +166,7 @@ class DashScopeFunAsr:
                 cfg.flash_threshold_sec,
             )
             return self._transcribe_flash(file_url)
-        return self._transcribe_async(file_url)
+        return self._transcribe_async(file_url, on_submitted=on_submitted, heartbeat=heartbeat)
 
     # ---------------- flash (sync) ----------------
 
@@ -184,10 +204,29 @@ class DashScopeFunAsr:
 
     # ---------------- async (submit → poll → download) ----------------
 
-    def _transcribe_async(self, file_url: str) -> TranscriptResult:
+    def _transcribe_async(
+        self,
+        file_url: str,
+        *,
+        on_submitted: Callable[[str], None] | None = None,
+        heartbeat: Callable[[], None] | None = None,
+    ) -> TranscriptResult:
         task_id = self._submit_async_task(file_url)
-        output = self._poll_async_task(task_id)
-        return self._download_transcription(output)
+        if on_submitted is not None:
+            on_submitted(task_id)
+        return self.resume(task_id, heartbeat=heartbeat)
+
+    def resume(
+        self,
+        task_id: str,
+        *,
+        heartbeat: Callable[[], None] | None = None,
+    ) -> TranscriptResult:
+        try:
+            output = self._poll_async_task(task_id, heartbeat=heartbeat)
+            return self._download_transcription(output)
+        except (AsrSubmissionUncertain, AsrServiceUnavailable) as exc:
+            raise AsrTaskPending("已有转写任务连接暂时中断，正在恢复查询。") from exc
 
     def _submit_async_task(self, file_url: str) -> str:
         cfg = self._config
@@ -203,15 +242,25 @@ class DashScopeFunAsr:
             body=json.dumps(payload).encode("utf-8"),
             timeout_seconds=30.0,
         )
+        if status >= 500:
+            logger.warning("ASR submit returned an uncertain HTTP status %s", status)
+            raise AsrSubmissionUncertain("转写请求可能已受理，请先核查任务状态。")
         data = self._decode(status, body)
         task_id = data.get("output", {}).get("task_id")
-        if not task_id:
-            raise AsrProviderError("语音转写任务提交失败：未返回任务号")
-        return str(task_id)
+        if not isinstance(task_id, str) or not task_id.strip():
+            raise AsrSubmissionUncertain("转写服务未返回有效任务号，请先核查任务状态。")
+        return task_id
 
-    def _poll_async_task(self, task_id: str) -> dict[str, Any]:
+    def _poll_async_task(
+        self,
+        task_id: str,
+        *,
+        heartbeat: Callable[[], None] | None = None,
+    ) -> dict[str, Any]:
         cfg = self._config
         for attempt in range(1, cfg.poll_max_attempts + 1):
+            if heartbeat is not None:
+                heartbeat()
             self._sleep(cfg.poll_interval_sec)
             status, body = self._transport(
                 "GET",
@@ -235,7 +284,7 @@ class DashScopeFunAsr:
                         message = str(item.get("message") or item.get("code") or "")
                         break
                 raise AsrProviderError(f"语音转写任务失败：{message or task_status}")
-        raise AsrProviderError("语音转写任务轮询超时，请稍后重试")
+        raise AsrTaskPending("语音转写任务轮询超时，正在继续查询原任务。")
 
     def _download_transcription(self, output: dict[str, Any]) -> TranscriptResult:
         transcription_url = None
@@ -281,7 +330,10 @@ class DashScopeFunAsr:
 
     def _decode(self, status: int, body: bytes) -> dict[str, Any]:
         if status in (401, 403):
-            raise AsrProviderError("语音转写服务凭据无效或无权限，请检查设置")
+            raise AsrServiceUnavailable("语音转写服务凭据无效或无权限，请检查设置")
+        if status == 429 or status >= 500:
+            logger.warning("ASR service temporarily unavailable: HTTP %s", status)
+            raise AsrServiceUnavailable("语音转写服务暂不可用，请稍后重试。")
         if status >= 400:
             raise AsrProviderError(f"语音转写服务返回错误（HTTP {status}）")
         try:

@@ -13,6 +13,7 @@ import { createState } from "./state";
 
 const live = vi.hoisted(() => ({
   loadStudioData: vi.fn(),
+  loadViralVideos: vi.fn(async () => ({ videos: [], errors: [] })),
   loadPersonAssets: vi.fn(),
   loadProjectDraft: vi.fn(),
   reloadTasks: vi.fn(async (): Promise<unknown[]> => []),

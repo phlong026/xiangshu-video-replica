@@ -127,9 +127,12 @@ export function patchStudioDraft(
   draft: StudioDraft,
   patch: Partial<StudioDraft>,
 ): StudioDraft {
+  const sourceChanged =
+    Object.hasOwn(patch, "sourceId") && patch.sourceId !== draft.sourceId;
   const projectChanged =
     Object.hasOwn(patch, "projectId") && patch.projectId !== draft.projectId;
   const identityChanged =
+    sourceChanged ||
     projectChanged ||
     (Object.hasOwn(patch, "ipId") && patch.ipId !== draft.ipId) ||
     (Object.hasOwn(patch, "imageId") && patch.imageId !== draft.imageId);
@@ -142,12 +145,22 @@ export function patchStudioDraft(
     id: draft.id,
     quoteRevision: draft.quoteRevision + 1,
   };
-  if (projectChanged) {
+  if (sourceChanged) {
+    if (!Object.hasOwn(patch, "projectId")) next.projectId = undefined;
+    if (!Object.hasOwn(patch, "sourceAssetId")) next.sourceAssetId = undefined;
+    if (!Object.hasOwn(patch, "originalImageId"))
+      next.originalImageId = undefined;
+    if (!Object.hasOwn(patch, "tailFrameId")) next.tailFrameId = undefined;
+    if (!Object.hasOwn(patch, "audioId")) next.audioId = undefined;
+    if (!Object.hasOwn(patch, "referenceIds")) next.referenceIds = [];
+  }
+  if (projectChanged || sourceChanged) {
     const blank = createDraft();
     if (!Object.hasOwn(patch, "prompt")) next.prompt = "";
     if (!Object.hasOwn(patch, "promptEdited")) next.promptEdited = false;
     if (!patch.script) next.script = blank.script;
     if (!Object.hasOwn(patch, "scriptEdited")) next.scriptEdited = false;
+    next.script = { ...next.script, confirmed: false };
   }
   // Asset ownership must be reselected when identity changes, never relabelled.
   if (Object.hasOwn(patch, "ipId") && patch.ipId !== draft.ipId) {
@@ -166,6 +179,7 @@ export function patchStudioDraft(
   if (
     patch.script &&
     !projectChanged &&
+    !sourceChanged &&
     patch.scriptEdited === undefined &&
     (patch.script.title !== draft.script.title ||
       patch.script.original !== draft.script.original ||
@@ -175,6 +189,7 @@ export function patchStudioDraft(
   if (
     Object.hasOwn(patch, "prompt") &&
     !projectChanged &&
+    !sourceChanged &&
     patch.promptEdited === undefined &&
     patch.prompt !== draft.prompt
   )

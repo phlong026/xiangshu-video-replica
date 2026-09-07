@@ -14,6 +14,7 @@ import pytest
 from app.storage import LocalStorageAdapter
 from app.viral_decrypt import keystream
 from app.viral_media import (
+    PublicRedirectHandler,
     UrlFetcher,
     ViralMediaError,
     ViralMediaPipeline,
@@ -407,3 +408,20 @@ def test_url_fetcher_rejects_non_public_targets() -> None:
     ):
         with pytest.raises(ViralMediaError):
             fetcher.fetch(url)
+
+
+def test_url_fetcher_rejects_redirect_to_private_target() -> None:
+    handler = PublicRedirectHandler()
+    request = __import__("urllib.request", fromlist=["Request"]).Request(
+        "https://cdn.example.com/video.mp4"
+    )
+
+    with pytest.raises(ViralMediaError, match="公网"):
+        handler.redirect_request(
+            request,
+            None,
+            302,
+            "Found",
+            {"Location": "http://127.0.0.1/internal"},
+            "http://127.0.0.1/internal",
+        )

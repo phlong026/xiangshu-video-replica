@@ -48,7 +48,7 @@ from scripts.reconcile_customer_billing import (
 
 ImportStatus = Literal["imported", "already_reconciled"]
 SERVER_DIR = Path(__file__).resolve().parent.parent
-SEED_TABLES = frozenset({"runtime_settings"})
+SEED_TABLES = frozenset({"runtime_settings", "viral_runtime_controls"})
 MIGRATION_ADVISORY_LOCK_KEYS = (0x543037, 0x44423035)
 # 042 materializes UTC timestamps for two shared tables. T07 runs before the
 # customer-production line opens, but its testable cutover contract permits an
