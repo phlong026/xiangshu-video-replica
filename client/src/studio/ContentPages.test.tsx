@@ -87,6 +87,7 @@ import {
   MaterialsPage,
   PublishPage,
   ViralDetailPage,
+  ViralFavoriteButton,
   ViralPage,
 } from "./ContentPages";
 
@@ -223,6 +224,23 @@ function RenderWindowTrigger({ onLayout }: { onLayout?: () => void }) {
 function DetailRenderWindowTrigger({ onLayout }: { onLayout?: () => void }) {
   useLayoutEffect(() => onLayout?.(), [onLayout]);
   return <ViralDetailPage />;
+}
+
+function FavoriteRenderWindowTrigger({
+  onLayout,
+  onSavedChange,
+}: {
+  onLayout?: () => void;
+  onSavedChange: (saved: boolean) => void;
+}) {
+  useLayoutEffect(() => onLayout?.(), [onLayout]);
+  return (
+    <ViralFavoriteButton
+      video={studio().data.videos[0]}
+      savedFromServer={false}
+      onSavedChange={onSavedChange}
+    />
+  );
 }
 
 function viralItem(index: number, overrides: Partial<ViralVideoItem> = {}) {
@@ -2340,6 +2358,44 @@ describe("V1.4 内容与运营页面", () => {
     expect(screen.queryByText("加载更多失败，请重试")).toBeNull();
   });
 
+  it("新账号首屏尚未启动时不能沿用旧账号游标加载深页", async () => {
+    listViralVideos
+      .mockResolvedValueOnce({
+        platform: "douyin",
+        sort: "hot",
+        categories: [],
+        items: [viralItem(1)],
+        fetchedAt: null,
+        hasMore: true,
+        nextCursor: "user-a-cursor",
+        total: 2,
+      })
+      .mockReturnValueOnce(new Promise(() => undefined));
+    let current = studio({
+      review: false,
+      user: { id: "user-a" } as StudioContextValue["user"],
+    });
+    useStudio.mockImplementation(() => current);
+    const view = render(<RenderWindowTrigger />);
+    await screen.findByRole("button", { name: "加载更多视频" });
+
+    current = {
+      ...current,
+      user: { id: "user-b" } as StudioContextValue["user"],
+    };
+    view.rerender(
+      <RenderWindowTrigger
+        onLayout={() =>
+          screen.getByRole("button", { name: "加载更多视频" }).click()
+        }
+      />,
+    );
+
+    expect(
+      listViralVideos.mock.calls.filter(([, , options]) => options?.cursor),
+    ).toHaveLength(0);
+  });
+
   it("收藏使用持久化接口并在保存失败时回滚乐观状态", async () => {
     saveViralFavorite.mockRejectedValueOnce(new Error("收藏失败"));
     const value = studio({ review: false });
@@ -2427,6 +2483,78 @@ describe("V1.4 内容与运营页面", () => {
       }),
     ).toHaveTextContent("收藏");
     expect(current.notify).toHaveBeenCalledWith("收藏失败，已恢复原状态");
+  });
+
+  it("A到B再回A时旧收藏结算保持静默且不会永久禁用", async () => {
+    let rejectUserA!: (reason: Error) => void;
+    saveViralFavorite.mockReturnValueOnce(
+      new Promise((_resolve, reject) => {
+        rejectUserA = reject;
+      }),
+    );
+    const userA = studio({
+      review: false,
+      user: { id: "user-a" } as StudioContextValue["user"],
+    });
+    let current = userA;
+    useStudio.mockImplementation(() => current);
+    const onSavedChange = vi.fn();
+    const view = render(
+      <FavoriteRenderWindowTrigger onSavedChange={onSavedChange} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /收藏/ }));
+    expect(saveViralFavorite).toHaveBeenCalledOnce();
+
+    onSavedChange.mockClear();
+    vi.mocked(userA.patchState).mockClear();
+    vi.mocked(userA.notify).mockClear();
+    current = {
+      ...userA,
+      user: { id: "user-b" } as StudioContextValue["user"],
+    };
+    view.rerender(
+      <FavoriteRenderWindowTrigger onSavedChange={onSavedChange} />,
+    );
+    current = userA;
+    view.rerender(
+      <FavoriteRenderWindowTrigger
+        onSavedChange={onSavedChange}
+        onLayout={() => rejectUserA(new Error("用户 A 的旧请求失败"))}
+      />,
+    );
+    await act(async () => Promise.resolve());
+
+    expect(screen.getByRole("button", { name: /收藏/ })).toBeEnabled();
+    expect(onSavedChange).not.toHaveBeenCalled();
+    expect(userA.patchState).not.toHaveBeenCalled();
+    expect(userA.notify).not.toHaveBeenCalled();
+  });
+
+  it("收藏按钮卸载后旧请求结算不再回滚或通知", async () => {
+    let rejectRequest!: (reason: Error) => void;
+    saveViralFavorite.mockReturnValueOnce(
+      new Promise((_resolve, reject) => {
+        rejectRequest = reject;
+      }),
+    );
+    const value = studio({ review: false });
+    useStudio.mockReturnValue(value);
+    const onSavedChange = vi.fn();
+    const view = render(
+      <FavoriteRenderWindowTrigger onSavedChange={onSavedChange} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /收藏/ }));
+    onSavedChange.mockClear();
+    vi.mocked(value.patchState).mockClear();
+    vi.mocked(value.notify).mockClear();
+
+    view.unmount();
+    rejectRequest(new Error("卸载后的旧请求失败"));
+    await act(async () => Promise.resolve());
+
+    expect(onSavedChange).not.toHaveBeenCalled();
+    expect(value.patchState).not.toHaveBeenCalled();
+    expect(value.notify).not.toHaveBeenCalled();
   });
 
   it("详情地址保留平台和视频 ID，刷新后可从单条接口恢复", async () => {
