@@ -1192,6 +1192,8 @@ function useViralImport(sourceId?: string, accountId = "anonymous") {
       if (request !== requestRef.current) return undefined;
       task = await getViralImportTask(taskId);
     }
+    if (request !== requestRef.current) return undefined;
+    if (task.status === "SUCCEEDED" || task.status === "FAILED") return task;
     throw new ViralImportPollingTimeoutError("导入任务等待超时，请稍后重试");
   };
 

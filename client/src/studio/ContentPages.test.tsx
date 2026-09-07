@@ -712,6 +712,118 @@ describe("V1.4 内容与运营页面", () => {
     }
   });
 
+  it("第120次轮询成功时只写入一次草稿并保留操作键", async () => {
+    vi.useFakeTimers();
+    try {
+      let polls = 0;
+      createViralImportTask.mockResolvedValue({
+        id: "boundary-success",
+        status: "PENDING",
+        projectId: "boundary-project",
+        sourceAssetId: null,
+      });
+      getViralImportTask.mockImplementation(async () => {
+        polls += 1;
+        return polls >= 120
+          ? {
+              id: "boundary-success",
+              status: "SUCCEEDED",
+              projectId: "boundary-project",
+              sourceAssetId: "boundary-asset",
+              canTranscribe: true,
+              canAnalyze: true,
+            }
+          : {
+              id: "boundary-success",
+              status: "PENDING",
+              projectId: "boundary-project",
+              sourceAssetId: null,
+            };
+      });
+      const value = studio({
+        state: {
+          ...studio().state,
+          page: "viral-detail",
+          selectedVideoId: "dy-1",
+        },
+      });
+      useStudio.mockReturnValue(value);
+      render(<ViralDetailPage />);
+
+      fireEvent.click(screen.getByRole("button", { name: "提取文案" }));
+      const firstKey = createViralImportTask.mock.calls[0][3];
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(120_000);
+      });
+
+      expect(getViralImportTask).toHaveBeenCalledTimes(120);
+      expect(value.patchDraft).toHaveBeenCalledOnce();
+      expect(value.patchDraft).toHaveBeenCalledWith({
+        projectId: "boundary-project",
+        sourceId: "boundary-asset",
+        sourceAssetId: "boundary-asset",
+      });
+      fireEvent.click(screen.getByRole("button", { name: "提取文案" }));
+      expect(createViralImportTask.mock.calls[1][3]).toBe(firstKey);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("第120次轮询永久失败时展示失败并清除操作键", async () => {
+    vi.useFakeTimers();
+    try {
+      let polls = 0;
+      createViralImportTask.mockResolvedValue({
+        id: "boundary-failure",
+        status: "PENDING",
+        projectId: "boundary-project",
+        sourceAssetId: null,
+      });
+      getViralImportTask.mockImplementation(async () => {
+        polls += 1;
+        return polls >= 120
+          ? {
+              id: "boundary-failure",
+              status: "FAILED",
+              projectId: "boundary-project",
+              sourceAssetId: null,
+              retryable: false,
+              errorMessage: "来源归属已变化",
+            }
+          : {
+              id: "boundary-failure",
+              status: "PENDING",
+              projectId: "boundary-project",
+              sourceAssetId: null,
+            };
+      });
+      const value = studio({
+        state: {
+          ...studio().state,
+          page: "viral-detail",
+          selectedVideoId: "dy-1",
+        },
+      });
+      useStudio.mockReturnValue(value);
+      render(<ViralDetailPage />);
+
+      fireEvent.click(screen.getByRole("button", { name: "视频复刻" }));
+      const firstKey = createViralImportTask.mock.calls[0][3];
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(120_000);
+      });
+
+      expect(getViralImportTask).toHaveBeenCalledTimes(120);
+      expect(screen.getByText("来源归属已变化")).toBeInTheDocument();
+      expect(value.patchDraft).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole("button", { name: "视频复刻" }));
+      expect(createViralImportTask.mock.calls[1][3]).not.toBe(firstKey);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("离开爆款详情后，迟到的来源导入不会替换当前草稿或跳转", async () => {
     let resolve: ((value: unknown) => void) | undefined;
     createViralImportTask.mockImplementation(
