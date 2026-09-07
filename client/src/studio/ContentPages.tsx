@@ -591,6 +591,8 @@ export function ViralPage() {
   const sentinelRef = useRef<HTMLButtonElement | null>(null);
   const listRequestRef = useRef(0);
   const loadingMoreRef = useRef(false);
+  const queryRef = useRef(query);
+  queryRef.current = query;
   const platformKey: ViralPlatform =
     platform === "抖音" ? "douyin" : "wechat_channels";
   const sortKey = sort === "最新" ? "latest" : "hot";
@@ -625,7 +627,7 @@ export function ViralPage() {
   const current = review ? shown.slice(0, visibleCount) : shown;
   const statisticsError = useViralStatistics(current, !review);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: 分类切换必须作废旧游标并重读首屏，后端仍按全分类分页。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 分类和本地搜索变化必须作废旧游标并重读首屏，后端仍按全分类分页。
   useEffect(() => {
     if (review || scope !== "all") return;
     const requestId = ++listRequestRef.current;
@@ -689,9 +691,9 @@ export function ViralPage() {
     return () => {
       cancelled = true;
     };
-  }, [category, platformKey, review, scope, sortKey, updateData]);
+  }, [category, platformKey, query, review, scope, sortKey, updateData]);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: 收藏分类切换也必须重建分页生命周期。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 收藏分类和本地搜索变化也必须重建分页生命周期。
   useEffect(() => {
     if (review || scope !== "favorites") return;
     const requestId = ++listRequestRef.current;
@@ -745,7 +747,7 @@ export function ViralPage() {
     return () => {
       cancelled = true;
     };
-  }, [category, platformKey, review, scope, updateData]);
+  }, [category, platformKey, query, review, scope, updateData]);
 
   const loadMore = useCallback(async () => {
     if (review) {
@@ -754,6 +756,7 @@ export function ViralPage() {
     }
     if (!hasMore || !nextCursor || loadingMoreRef.current) return;
     const requestId = listRequestRef.current;
+    const requestQuery = query;
     loadingMoreRef.current = true;
     setLoadingMore(true);
     setListError(undefined);
@@ -769,7 +772,11 @@ export function ViralPage() {
               limit: viralPageSize,
               cursor: nextCursor,
             });
-      if (requestId !== listRequestRef.current) return;
+      if (
+        requestId !== listRequestRef.current ||
+        requestQuery !== queryRef.current
+      )
+        return;
       const incoming = result.items.map(studioVideoFromViral);
       setNextCursor(result.nextCursor ?? undefined);
       setHasMore(Boolean(result.hasMore && result.nextCursor));
@@ -819,6 +826,7 @@ export function ViralPage() {
     hasMore,
     nextCursor,
     platformKey,
+    query,
     review,
     scope,
     shown.length,

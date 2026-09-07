@@ -1198,6 +1198,100 @@ describe("V1.4 内容与运营页面", () => {
     expect(screen.queryByText("乡墅参考 99")).toBeNull();
   });
 
+  it("修改本地搜索词会重置分页并丢弃旧游标的迟到结果", async () => {
+    const base = studio({ review: false });
+    let resolveOldPage:
+      | ((value: Awaited<ReturnType<typeof listViralVideos>>) => void)
+      | undefined;
+    let resolveNewPage:
+      | ((value: Awaited<ReturnType<typeof listViralVideos>>) => void)
+      | undefined;
+    listViralVideos
+      .mockResolvedValueOnce({
+        platform: "douyin",
+        sort: "hot",
+        categories: ["建房预算"],
+        items: Array.from({ length: 12 }, (_, index) => viralItem(index + 1)),
+        fetchedAt: "2026-09-07T12:00:00Z",
+        hasMore: true,
+        nextCursor: "cursor-2",
+        total: 13,
+      })
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveOldPage = resolve;
+        }),
+      )
+      .mockResolvedValueOnce({
+        platform: "douyin",
+        sort: "hot",
+        categories: ["建房预算"],
+        items: [viralItem(21, { title: "庭院搜索结果" })],
+        fetchedAt: "2026-09-07T12:00:00Z",
+        hasMore: true,
+        nextCursor: "search-cursor-2",
+        total: 13,
+      })
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveNewPage = resolve;
+        }),
+      );
+    render(
+      <StatefulViralPage
+        value={{ ...base, data: { ...base.data, videos: [] } }}
+      />,
+    );
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "加载更多视频" }),
+    );
+    fireEvent.change(screen.getByRole("textbox", { name: "搜索视频标题" }), {
+      target: { value: "庭院" },
+    });
+    await waitFor(() =>
+      expect(listViralVideos).toHaveBeenLastCalledWith("douyin", "hot", {
+        limit: 12,
+      }),
+    );
+    expect(await screen.findByText("庭院搜索结果")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "加载更多视频" }));
+    expect(listViralVideos).toHaveBeenLastCalledWith("douyin", "hot", {
+      limit: 12,
+      cursor: "search-cursor-2",
+    });
+    resolveOldPage?.({
+      platform: "douyin",
+      sort: "hot",
+      categories: ["建房预算"],
+      items: [viralItem(99, { title: "庭院旧页" })],
+      fetchedAt: "2026-09-07T12:00:00Z",
+      hasMore: true,
+      nextCursor: "cursor-3",
+      total: 13,
+    });
+    await Promise.resolve();
+
+    expect(screen.queryByText("庭院旧页")).toBeNull();
+    expect(screen.getByRole("button", { name: "正在加载…" })).toBeDisabled();
+    resolveNewPage?.({
+      platform: "douyin",
+      sort: "hot",
+      categories: ["建房预算"],
+      items: [viralItem(22, { title: "庭院新页" })],
+      fetchedAt: "2026-09-07T12:00:00Z",
+      hasMore: false,
+      nextCursor: null,
+      total: 13,
+    });
+    expect(await screen.findByText("庭院新页")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "加载更多视频" })).toBeNull();
+    expect(listViralVideos).not.toHaveBeenCalledWith("douyin", "hot", {
+      limit: 12,
+      cursor: "cursor-3",
+    });
+  });
+
   it("切换平台后丢弃上一平台迟到的分页结果", async () => {
     const base = studio();
     const updateData = vi.fn();
