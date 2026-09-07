@@ -35,6 +35,22 @@
   color: #aaa297;
 }
 
+.wallet-page .pagination {
+  margin-top: 16px;
+}
+
+.wallet-page .pagination button {
+  border: 1px solid #5a4525;
+  border-radius: 8px;
+  padding: 7px 12px;
+  color: #f1d39b;
+  background: #111114;
+}
+
+.wallet-page .pagination button:disabled {
+  opacity: 0.42;
+}
+
 @media (max-width: 1000px) {
   .wallet-page .recharge-presets {
     grid-template-columns: repeat(3, minmax(0, 1fr));

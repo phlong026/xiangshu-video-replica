@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CustomerWalletPanel } from "./CustomerWalletPanel";
@@ -75,7 +81,7 @@ describe("CustomerWalletPanel", () => {
       if (url.endsWith("/api/customer/wallet")) {
         return jsonResponse(wallet);
       }
-      if (url.endsWith("/api/customer/wallet/transactions")) {
+      if (url.includes("/api/customer/wallet/transactions?")) {
         return jsonResponse({
           items: [
             {
@@ -108,27 +114,31 @@ describe("CustomerWalletPanel", () => {
           paid_at: null,
         });
       }
-      if (url.endsWith("/api/customer/recharge-orders")) {
-        return options?.method === "POST"
-          ? jsonResponse(
-              {
-                order_no: "202608190001",
-                status: "PENDING",
-                amount_fen: 20000,
-                credits: 20,
-                gateway_url: "https://zpayz.cn/submit.php",
-                method: "POST",
-                form_fields: {
-                  pid: "merchant",
-                  type: "alipay",
-                  out_trade_no: "202608190001",
-                  sign: "signature",
-                  sign_type: "MD5",
-                },
-              },
-              201,
-            )
-          : jsonResponse({ items: [], total: 0, limit: 20, offset: 0 });
+      if (url.includes("/api/customer/recharge-orders?")) {
+        return jsonResponse({ items: [], total: 0, limit: 20, offset: 0 });
+      }
+      if (
+        url.endsWith("/api/customer/recharge-orders") &&
+        options?.method === "POST"
+      ) {
+        return jsonResponse(
+          {
+            order_no: "202608190001",
+            status: "PENDING",
+            amount_fen: 20000,
+            credits: 20,
+            gateway_url: "https://zpayz.cn/submit.php",
+            method: "POST",
+            form_fields: {
+              pid: "merchant",
+              type: "alipay",
+              out_trade_no: "202608190001",
+              sign: "signature",
+              sign_type: "MD5",
+            },
+          },
+          201,
+        );
       }
       throw new Error(`unexpected request: ${url}`);
     });
@@ -162,7 +172,7 @@ describe("CustomerWalletPanel", () => {
       if (url.endsWith("/api/customer/wallet")) {
         return jsonResponse(wallet);
       }
-      if (url.endsWith("/api/customer/wallet/transactions")) {
+      if (url.includes("/api/customer/wallet/transactions?")) {
         return jsonResponse({ items: [], total: 0, limit: 20, offset: 0 });
       }
       if (url.endsWith("/api/customer/recharge-orders/202608190001")) {
@@ -177,7 +187,7 @@ describe("CustomerWalletPanel", () => {
           paid_at: null,
         });
       }
-      if (url.endsWith("/api/customer/recharge-orders")) {
+      if (url.includes("/api/customer/recharge-orders?")) {
         return jsonResponse({
           items: [
             {
@@ -241,36 +251,39 @@ describe("CustomerWalletPanel", () => {
 
   it("deletes an unpaid order from the visible list after closing it", async () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
+    let closed = false;
     const fetchMock = vi.fn((url: string, options?: RequestInit) => {
       if (url.endsWith("/api/customer/wallet")) {
         return jsonResponse(wallet);
       }
-      if (url.endsWith("/api/customer/wallet/transactions")) {
+      if (url.includes("/api/customer/wallet/transactions?")) {
         return jsonResponse({ items: [], total: 0, limit: 20, offset: 0 });
       }
       if (url.endsWith("/api/customer/recharge-orders/order-pending")) {
-        return options?.method === "DELETE"
-          ? Promise.resolve({
-              ok: true,
-              status: 204,
-              json: async () => undefined,
-            })
-          : jsonResponse({
-              order_no: "order-pending",
-              status: "PENDING",
-              amount_fen: 10000,
-              credits: 10,
-              channel: "wxpay",
-              created_at: "2026-08-28 10:00:00",
-              paid_at: null,
-            });
+        if (options?.method === "DELETE") {
+          closed = true;
+          return Promise.resolve({
+            ok: true,
+            status: 204,
+            json: async () => undefined,
+          });
+        }
+        return jsonResponse({
+          order_no: "order-pending",
+          status: closed ? "CLOSED" : "PENDING",
+          amount_fen: 10000,
+          credits: 10,
+          channel: "wxpay",
+          created_at: "2026-08-28 10:00:00",
+          paid_at: null,
+        });
       }
-      if (url.endsWith("/api/customer/recharge-orders")) {
+      if (url.includes("/api/customer/recharge-orders?")) {
         return jsonResponse({
           items: [
             {
               order_no: "order-pending",
-              status: "PENDING",
+              status: closed ? "CLOSED" : "PENDING",
               amount_fen: 10000,
               credits: 10,
               channel: "wxpay",
@@ -300,5 +313,397 @@ describe("CustomerWalletPanel", () => {
       ),
     );
     expect(screen.queryByText("order-pending")).toBeNull();
+  });
+
+  it("pages through the complete customer ledger and recharge order history", async () => {
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/api/customer/wallet")) {
+        return jsonResponse(wallet);
+      }
+      if (url.includes("/api/customer/wallet/transactions")) {
+        const offset = Number(new URL(url).searchParams.get("offset") ?? "0");
+        return jsonResponse({
+          items: [
+            {
+              id: `tx-${offset}`,
+              user_id: "user-1",
+              type: "CHARGE",
+              available_delta: 1,
+              reserved_delta: 0,
+              recharge_order_id: `order-${offset}`,
+              task_id: null,
+              billing_round: null,
+              created_at:
+                offset === 0 ? "2026-09-07 10:00:00" : "2026-08-01 09:00:00",
+            },
+          ],
+          total: 21,
+          limit: 20,
+          offset,
+        });
+      }
+      if (url.includes("/api/customer/recharge-orders?")) {
+        const offset = Number(new URL(url).searchParams.get("offset") ?? "0");
+        return jsonResponse({
+          items: [
+            {
+              order_no: offset === 0 ? "recent-order" : "oldest-order",
+              status: offset === 0 ? "PAID" : "CLOSED",
+              amount_fen: 10000,
+              credits: 10,
+              channel: "alipay",
+              created_at: "2026-09-07 10:00:00",
+              paid_at: offset === 0 ? "2026-09-07 10:01:00" : null,
+            },
+          ],
+          total: 21,
+          limit: 20,
+          offset,
+        });
+      }
+      return jsonResponse({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(
+      <CustomerWalletPanel store={fakeStore()} onSessionExpired={vi.fn()} />,
+    );
+
+    const ledger = (
+      await screen.findByRole("heading", {
+        name: "额度流水",
+      })
+    ).closest("section");
+    expect(ledger).not.toBeNull();
+    expect(
+      within(ledger as HTMLElement).getByText("2026-09-07 10:00:00"),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      within(ledger as HTMLElement).getByRole("button", { name: "下一页" }),
+    );
+    expect(
+      await within(ledger as HTMLElement).findByText("2026-08-01 09:00:00"),
+    ).toBeInTheDocument();
+    expect(
+      fetchMock.mock.calls.filter(([url]) =>
+        String(url).includes("/api/customer/recharge-orders?"),
+      ),
+    ).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "查看全部充值记录" }));
+    const orderHistory = (
+      await screen.findByRole("heading", {
+        name: "充值订单历史",
+      })
+    ).closest("section");
+    expect(orderHistory).not.toBeNull();
+    expect(
+      within(orderHistory as HTMLElement).getByText("recent-order"),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      within(orderHistory as HTMLElement).getByRole("button", {
+        name: "下一页",
+      }),
+    );
+    expect(
+      await within(orderHistory as HTMLElement).findByText("oldest-order"),
+    ).toBeInTheDocument();
+
+    expect(
+      fetchMock.mock.calls.some(([url]) =>
+        String(url).endsWith(
+          "/api/customer/wallet/transactions?limit=20&offset=20",
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      fetchMock.mock.calls.some(([url]) =>
+        String(url).endsWith(
+          "/api/customer/recharge-orders?limit=20&offset=20",
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  it("keeps the last successful page and offers retry when either history request fails", async () => {
+    let failLedgerPage = true;
+    let failOrderPage = true;
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/api/customer/wallet")) {
+        return jsonResponse(wallet);
+      }
+      if (url.includes("/api/customer/wallet/transactions?")) {
+        const offset = Number(new URL(url).searchParams.get("offset") ?? "0");
+        if (offset === 20 && failLedgerPage) {
+          return Promise.reject(new Error("额度流水加载失败"));
+        }
+        return jsonResponse({
+          items: [
+            {
+              id: `tx-${offset}`,
+              user_id: "user-1",
+              type: "CHARGE",
+              available_delta: 1,
+              reserved_delta: 0,
+              recharge_order_id: `order-${offset}`,
+              task_id: null,
+              billing_round: null,
+              created_at: offset === 0 ? "ledger-page-one" : "ledger-page-two",
+            },
+          ],
+          total: 21,
+          limit: 20,
+          offset,
+        });
+      }
+      if (url.includes("/api/customer/recharge-orders?")) {
+        const offset = Number(new URL(url).searchParams.get("offset") ?? "0");
+        if (offset === 20 && failOrderPage) {
+          return Promise.reject(new Error("充值记录加载失败"));
+        }
+        return jsonResponse({
+          items: [
+            {
+              order_no: offset === 0 ? "order-page-one" : "order-page-two",
+              status: "PAID",
+              amount_fen: 10000,
+              credits: 10,
+              channel: "alipay",
+              created_at: "2026-09-07 10:00:00",
+              paid_at: "2026-09-07 10:01:00",
+            },
+          ],
+          total: 21,
+          limit: 20,
+          offset,
+        });
+      }
+      return jsonResponse({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(
+      <CustomerWalletPanel store={fakeStore()} onSessionExpired={vi.fn()} />,
+    );
+
+    const ledger = (await screen.findByText("ledger-page-one")).closest(
+      "section",
+    ) as HTMLElement;
+    fireEvent.click(within(ledger).getByRole("button", { name: "下一页" }));
+    expect(
+      await within(ledger).findByText("额度流水加载失败"),
+    ).toBeInTheDocument();
+    expect(within(ledger).getByText("ledger-page-one")).toBeInTheDocument();
+    expect(
+      within(ledger).getByText("第 1 / 2 页（共 21 条）"),
+    ).toBeInTheDocument();
+    failLedgerPage = false;
+    fireEvent.click(
+      within(ledger).getByRole("button", { name: "重试加载额度流水" }),
+    );
+    expect(
+      await within(ledger).findByText("ledger-page-two"),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "查看全部充值记录" }));
+    const orderHistory = (
+      await screen.findByRole("heading", {
+        name: "充值订单历史",
+      })
+    ).closest("section") as HTMLElement;
+    expect(
+      await within(orderHistory).findByText("order-page-one"),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      within(orderHistory).getByRole("button", { name: "下一页" }),
+    );
+    expect(
+      await within(orderHistory).findByText("充值记录加载失败"),
+    ).toBeInTheDocument();
+    expect(
+      within(orderHistory).getByText("order-page-one"),
+    ).toBeInTheDocument();
+    expect(
+      within(orderHistory).getByText("第 1 / 2 页（共 21 条）"),
+    ).toBeInTheDocument();
+    failOrderPage = false;
+    fireEvent.click(
+      within(orderHistory).getByRole("button", { name: "重试加载充值记录" }),
+    );
+    expect(
+      await within(orderHistory).findByText("order-page-two"),
+    ).toBeInTheDocument();
+  });
+
+  it("reloads the latest history page after a delayed order creation", async () => {
+    let resolveCreation:
+      | ((value: Awaited<ReturnType<typeof jsonResponse>>) => void)
+      | undefined;
+    const delayedCreation = new Promise<
+      Awaited<ReturnType<typeof jsonResponse>>
+    >((resolve) => {
+      resolveCreation = resolve;
+    });
+    let created = false;
+    vi.spyOn(HTMLFormElement.prototype, "submit").mockImplementation(
+      () => undefined,
+    );
+    const fetchMock = vi.fn((url: string, options?: RequestInit) => {
+      if (url.endsWith("/api/customer/wallet")) {
+        return jsonResponse(wallet);
+      }
+      if (url.includes("/api/customer/wallet/transactions?")) {
+        return jsonResponse({ items: [], total: 0, limit: 20, offset: 0 });
+      }
+      if (url.includes("/api/customer/recharge-orders?")) {
+        const offset = Number(new URL(url).searchParams.get("offset") ?? "0");
+        return jsonResponse({
+          items:
+            offset === 0
+              ? [
+                  {
+                    order_no: created ? "new-order" : "recent-order",
+                    status: created ? "PENDING" : "PAID",
+                    amount_fen: 10000,
+                    credits: 10,
+                    channel: "alipay",
+                    created_at: "2026-09-07 10:00:00",
+                    paid_at: created ? null : "2026-09-07 10:01:00",
+                  },
+                ]
+              : [
+                  {
+                    order_no: "oldest-order",
+                    status: "CLOSED",
+                    amount_fen: 10000,
+                    credits: 10,
+                    channel: "alipay",
+                    created_at: "2026-08-01 10:00:00",
+                    paid_at: null,
+                  },
+                ],
+          total: created ? 22 : 21,
+          limit: 20,
+          offset,
+        });
+      }
+      if (
+        url.endsWith("/api/customer/recharge-orders") &&
+        options?.method === "POST"
+      ) {
+        return delayedCreation;
+      }
+      return jsonResponse({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(
+      <CustomerWalletPanel store={fakeStore()} onSessionExpired={vi.fn()} />,
+    );
+    await screen.findByText("recent-order");
+    fireEvent.click(screen.getByRole("button", { name: "查看全部充值记录" }));
+    const orderHistory = (
+      await screen.findByRole("heading", {
+        name: "充值订单历史",
+      })
+    ).closest("section") as HTMLElement;
+    await within(orderHistory).findByText("recent-order");
+
+    fireEvent.click(screen.getByRole("button", { name: "充值200元" }));
+    fireEvent.click(
+      within(orderHistory).getByRole("button", { name: "下一页" }),
+    );
+    await within(orderHistory).findByText("oldest-order");
+    created = true;
+    resolveCreation?.(
+      await jsonResponse(
+        {
+          order_no: "new-order",
+          status: "PENDING",
+          amount_fen: 20000,
+          credits: 20,
+          gateway_url: "https://zpayz.cn/submit.php",
+          method: "POST",
+          form_fields: {
+            pid: "merchant",
+            type: "alipay",
+            out_trade_no: "new-order",
+            sign: "signature",
+            sign_type: "MD5",
+          },
+        },
+        201,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(within(orderHistory).queryByText("new-order")).toBeNull();
+      expect(
+        within(orderHistory).getByText("oldest-order"),
+      ).toBeInTheDocument();
+    });
+    expect(
+      fetchMock.mock.calls.filter(([url]) =>
+        String(url).endsWith(
+          "/api/customer/recharge-orders?limit=20&offset=20",
+        ),
+      ).length,
+    ).toBeGreaterThanOrEqual(2);
+  });
+
+  it("does not clear a newer order-action error when the initial ledger finishes", async () => {
+    let resolveLedger:
+      | ((value: Awaited<ReturnType<typeof jsonResponse>>) => void)
+      | undefined;
+    const delayedLedger = new Promise<Awaited<ReturnType<typeof jsonResponse>>>(
+      (resolve) => {
+        resolveLedger = resolve;
+      },
+    );
+    const fetchMock = vi.fn((url: string, options?: RequestInit) => {
+      if (url.endsWith("/api/customer/wallet")) {
+        return jsonResponse(wallet);
+      }
+      if (url.includes("/api/customer/wallet/transactions?")) {
+        return delayedLedger;
+      }
+      if (url.includes("/api/customer/recharge-orders?")) {
+        return jsonResponse({
+          items: [
+            {
+              order_no: "order-pending",
+              status: "PENDING",
+              amount_fen: 10000,
+              credits: 10,
+              channel: "wxpay",
+              created_at: "2026-09-07 10:00:00",
+              paid_at: null,
+            },
+          ],
+          total: 1,
+          limit: 20,
+          offset: 0,
+        });
+      }
+      if (
+        url.endsWith("/api/customer/recharge-orders/order-pending") &&
+        options?.method === "DELETE"
+      ) {
+        return Promise.reject(new Error("关闭订单失败"));
+      }
+      return jsonResponse({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(
+      <CustomerWalletPanel store={fakeStore()} onSessionExpired={vi.fn()} />,
+    );
+
+    await screen.findByText("order-pending");
+    fireEvent.click(screen.getByRole("button", { name: "删除待支付订单" }));
+    expect(await screen.findByText("关闭订单失败")).toBeInTheDocument();
+
+    resolveLedger?.(
+      await jsonResponse({ items: [], total: 0, limit: 20, offset: 0 }),
+    );
+    await delayedLedger;
+    expect(await screen.findByText("关闭订单失败")).toBeInTheDocument();
   });
 });

@@ -5236,9 +5236,19 @@ export async function customerUpdateProfile(
 /** The customer's wallet transaction ledger (GET /api/customer/wallet/transactions). */
 export async function customerListWalletTransactions(
   credential: CustomerSessionCredential,
+  {
+    limit = 20,
+    offset = 0,
+  }: {
+    limit?: number;
+    offset?: number;
+  } = {},
 ): Promise<WalletTransactionPage> {
   const { body } = await customerJson<WalletTransactionPage>(
-    "/api/customer/wallet/transactions",
+    `/api/customer/wallet/transactions?${new URLSearchParams({
+      limit: String(limit),
+      offset: String(offset),
+    })}`,
     { credential },
   );
   return body;
@@ -5247,9 +5257,19 @@ export async function customerListWalletTransactions(
 /** The customer's own recharge orders (GET /api/customer/recharge-orders). */
 export async function customerListRechargeOrders(
   credential: CustomerSessionCredential,
+  {
+    limit = 20,
+    offset = 0,
+  }: {
+    limit?: number;
+    offset?: number;
+  } = {},
 ): Promise<RechargeOrderPage> {
   const { body } = await customerJson<RechargeOrderPage>(
-    "/api/customer/recharge-orders",
+    `/api/customer/recharge-orders?${new URLSearchParams({
+      limit: String(limit),
+      offset: String(offset),
+    })}`,
     { credential },
   );
   return body;
