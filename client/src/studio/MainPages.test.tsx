@@ -27,10 +27,12 @@ const {
   useStudio,
   loadTaskPreview,
   uploadWorkbenchSourceVideo,
+  studioVideoFromViral,
   cancelStudioTask,
   downloadStudioTaskResult,
   retryStudioTask,
   createViralImportTask,
+  resolveViralLink,
   getViralImportTask,
   getStudioNotificationPreferences,
   updateStudioNotificationPreferences,
@@ -45,10 +47,25 @@ const {
         signal?: AbortSignal,
       ) => Promise<WorkbenchUploadResult>
     >(),
+  studioVideoFromViral: vi.fn((item: import("../api").ViralVideoItem) => ({
+    id: `${item.platform}-${item.videoId}`,
+    nativeId: item.videoId,
+    platformKey: item.platform,
+    title: item.title,
+    author: item.author,
+    platform: "抖音",
+    category: item.category,
+    duration: "00:30",
+    likes: item.likes,
+    collections: item.collects,
+    shares: item.shares,
+    description: item.sourceDescription ?? item.title,
+  })),
   cancelStudioTask: vi.fn(),
   downloadStudioTaskResult: vi.fn(),
   retryStudioTask: vi.fn(),
   createViralImportTask: vi.fn(),
+  resolveViralLink: vi.fn(),
   getViralImportTask: vi.fn(),
   getStudioNotificationPreferences: vi.fn(),
   updateStudioNotificationPreferences: vi.fn(),
@@ -58,6 +75,7 @@ vi.mock("./context", () => ({ useStudio }));
 vi.mock("../api", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   createViralImportTask,
+  resolveViralLink,
   getViralImportTask,
   getStudioNotificationPreferences,
   updateStudioNotificationPreferences,
@@ -65,6 +83,7 @@ vi.mock("../api", async (importOriginal) => ({
 vi.mock("./live", () => ({
   loadTaskPreview,
   uploadWorkbenchSourceVideo,
+  studioVideoFromViral,
   cancelStudioTask,
   downloadStudioTaskResult,
   retryStudioTask,
@@ -471,9 +490,9 @@ describe("V1.4 工作台新版首页布局", () => {
         name: "粘贴一条爆款乡墅视频链接，快速生成它的原创视频",
       }),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText("提取文案进入文案工坊，开始复刻进入分镜工作区。"),
-    ).toHaveClass("studio-start-helper");
+    expect(screen.getByText(/链接解析当前支持抖音视频/)).toHaveClass(
+      "studio-start-helper",
+    );
     expect(
       screen.getByRole("heading", { name: "爆款视频精选" }),
     ).toBeInTheDocument();
@@ -705,6 +724,9 @@ describe("V1.4 工作台上传与创作入口", () => {
   beforeEach(() => {
     useStudio.mockReset();
     uploadWorkbenchSourceVideo.mockReset();
+    resolveViralLink.mockReset();
+    createViralImportTask.mockReset();
+    getViralImportTask.mockReset();
   });
 
   function workbench(
@@ -942,6 +964,153 @@ describe("V1.4 工作台上传与创作入口", () => {
     fireEvent.click(screen.getByRole("button", { name: "提取文案" }));
     expect(value.extractScriptFromUpload).toHaveBeenCalledTimes(1);
     expect(value.openLive).not.toHaveBeenCalled();
+  });
+
+  it("抖音链接解析后复用爆款导入状态流进入复刻且不重复提交", async () => {
+    const value = workbench();
+    useStudio.mockReturnValue(value);
+    const resolution = deferred<{ item: import("../api").ViralVideoItem }>();
+    resolveViralLink.mockReturnValue(resolution.promise);
+    createViralImportTask.mockResolvedValue({
+      id: "link-import-1",
+      status: "SUCCEEDED",
+      projectId: "link-project-1",
+      sourceAssetId: "link-asset-1",
+      canAnalyze: true,
+    });
+    render(<WorkbenchPage />);
+
+    fireEvent.change(screen.getByLabelText("视频链接"), {
+      target: {
+        value: "3.28 复制打开抖音 https://v.douyin.com/shareCode/",
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "开始复刻" }));
+    expect(
+      screen.getByRole("button", { name: "正在解析链接…" }),
+    ).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "正在解析链接…" }));
+    expect(resolveViralLink).toHaveBeenCalledOnce();
+
+    resolution.resolve({
+      item: {
+        platform: "douyin",
+        videoId: "native-link-1",
+        category: "链接导入",
+        title: "链接乡墅案例",
+        author: "作者",
+        authorAvatar: null,
+        verified: false,
+        coverUrl: null,
+        durationMs: 30_000,
+        likes: 0,
+        comments: null,
+        shares: null,
+        collects: null,
+        publishedAt: null,
+        publishedDisplay: null,
+        likeDisplay: null,
+        tags: [],
+        hasPlayableAudio: true,
+        playUrl: "https://cdn.example/video.mp4",
+      },
+    });
+
+    await waitFor(() =>
+      expect(createViralImportTask).toHaveBeenCalledWith(
+        "douyin",
+        "native-link-1",
+        "replica",
+        expect.any(String),
+      ),
+    );
+    expect(value.patchDraft).toHaveBeenCalledWith({
+      projectId: "link-project-1",
+      sourceId: "link-asset-1",
+      sourceAssetId: "link-asset-1",
+    });
+    expect(value.navigate).toHaveBeenCalledWith("replica", {
+      selectedVideoId: "douyin-native-link-1",
+      returnTo: "workbench",
+    });
+  });
+
+  it("链接输入切换后忽略上一请求的迟到响应", async () => {
+    const value = workbench();
+    useStudio.mockReturnValue(value);
+    const resolution = deferred<{ item: import("../api").ViralVideoItem }>();
+    resolveViralLink.mockReturnValue(resolution.promise);
+    render(<WorkbenchPage />);
+
+    const input = screen.getByLabelText("视频链接");
+    fireEvent.change(input, {
+      target: { value: "https://v.douyin.com/old-link/" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "开始复刻" }));
+    fireEvent.change(input, {
+      target: { value: "https://v.douyin.com/new-link/" },
+    });
+
+    resolution.resolve({
+      item: {
+        platform: "douyin",
+        videoId: "stale-link",
+        category: "链接导入",
+        title: "迟到响应",
+        author: "作者",
+        authorAvatar: null,
+        verified: false,
+        coverUrl: null,
+        durationMs: 30_000,
+        likes: 0,
+        comments: null,
+        shares: null,
+        collects: null,
+        publishedAt: null,
+        publishedDisplay: null,
+        likeDisplay: null,
+        tags: [],
+        hasPlayableAudio: true,
+        playUrl: "https://cdn.example/stale.mp4",
+      },
+    });
+
+    await waitFor(() => expect(resolveViralLink).toHaveBeenCalledOnce());
+    expect(createViralImportTask).not.toHaveBeenCalled();
+    expect(value.patchDraft).not.toHaveBeenCalled();
+    expect(value.navigate).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "视频号链接暂不支持解析，请上传 MP4 或 MOV 文件。",
+    "视频链接已过期，请重新复制链接或上传 MP4/MOV 文件。",
+    "链接中没有可用视频，请上传 MP4 或 MOV 文件。",
+  ])("链接失败显示上传回退且不创建导入任务：%s", async (message) => {
+    const value = workbench();
+    useStudio.mockReturnValue(value);
+    resolveViralLink.mockRejectedValue(new Error(message));
+    render(<WorkbenchPage />);
+
+    fireEvent.change(screen.getByLabelText("视频链接"), {
+      target: { value: "https://channels.weixin.qq.com/example" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "开始复刻" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(message);
+    expect(createViralImportTask).not.toHaveBeenCalled();
+    expect(value.patchDraft).not.toHaveBeenCalled();
+    expect(value.navigate).not.toHaveBeenCalled();
+  });
+
+  it("工作台明确说明支持范围、上传格式和解析超时", () => {
+    useStudio.mockReturnValue(workbench());
+    render(<WorkbenchPage />);
+
+    expect(
+      screen.getByText(
+        "链接解析当前支持抖音视频；视频号及其他平台请上传 MP4/MOV 文件。解析最长约 60 秒。",
+      ),
+    ).toBeInTheDocument();
   });
 });
 

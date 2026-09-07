@@ -3,6 +3,7 @@ import {
   createViralImportTask,
   getStudioNotificationPreferences,
   getViralImportTask,
+  resolveViralLink,
   updateStudioNotificationPreferences,
   type ViralImportTask,
 } from "../api";
@@ -12,6 +13,7 @@ import {
   downloadStudioTaskResult,
   loadTaskPreview,
   retryStudioTask,
+  studioVideoFromViral,
   uploadWorkbenchSourceVideo,
 } from "./live";
 import { draftFromTask } from "./state";
@@ -203,15 +205,21 @@ export function WorkbenchPage() {
   } | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const uploadOperationRef = useRef(0);
+  const linkOperationRef = useRef(0);
   const viralOperationRef = useRef(0);
   const viralIdempotencyKeysRef = useRef(new Map<string, string>());
   const uploadAbortRef = useRef<AbortController | null>(null);
   const [viralImportingId, setViralImportingId] = useState<string>();
+  const [linkState, setLinkState] = useState<{
+    status: "idle" | "loading" | "error";
+    message?: string;
+  }>({ status: "idle" });
   const accountId = user.id || "anonymous";
   const activeAccountRef = useRef(accountId);
   useEffect(
     () => () => {
       uploadOperationRef.current += 1;
+      linkOperationRef.current += 1;
       viralOperationRef.current += 1;
       uploadAbortRef.current?.abort();
     },
@@ -220,8 +228,10 @@ export function WorkbenchPage() {
   useEffect(() => {
     if (activeAccountRef.current === accountId) return;
     activeAccountRef.current = accountId;
+    linkOperationRef.current += 1;
     viralOperationRef.current += 1;
     setViralImportingId(undefined);
+    setLinkState({ status: "idle" });
   }, [accountId]);
   const active = data.tasks.filter((task) =>
     ["running", "queued", "uncertain"].includes(task.status),
@@ -233,10 +243,13 @@ export function WorkbenchPage() {
         left.id.localeCompare(right.id, undefined, { numeric: true }),
     )
     .slice(0, 5);
-  const beginViralReplica = async (video: StudioVideo) => {
+  const beginViralCreation = async (
+    video: StudioVideo,
+    purpose: "copy" | "replica" = "replica",
+  ) => {
     if (review) {
       patchDraft({ sourceId: video.id });
-      navigate("replica", {
+      navigate(purpose, {
         selectedVideoId: video.id,
         returnTo: "workbench",
       });
@@ -247,7 +260,7 @@ export function WorkbenchPage() {
       return;
     }
     const operation = ++viralOperationRef.current;
-    const actionKey = `${video.platformKey}:${video.nativeId}:replica`;
+    const actionKey = `${video.platformKey}:${video.nativeId}:${purpose}`;
     const memoryKey = `${accountId}:${actionKey}`;
     const idempotencyKey =
       viralIdempotencyKeysRef.current.get(memoryKey) ??
@@ -262,7 +275,7 @@ export function WorkbenchPage() {
       let task: ViralImportTask = await createViralImportTask(
         video.platformKey,
         video.nativeId,
-        "replica",
+        purpose,
         idempotencyKey,
       );
       for (let attempt = 0; attempt < 120; attempt += 1) {
@@ -285,19 +298,31 @@ export function WorkbenchPage() {
           task.errorMessage || task.error || task.message || "参考素材导入失败",
         );
       }
-      if (!task.canAnalyze || !task.projectId || !task.sourceAssetId) {
+      if (!task.projectId || !task.sourceAssetId) {
+        clearKey();
+        throw new Error("导入任务缺少项目或素材结果");
+      }
+      if (purpose === "replica" && !task.canAnalyze) {
         clearKey();
         throw new Error("该来源暂不支持视频复刻");
+      }
+      if (purpose === "copy" && !task.canTranscribe) {
+        clearKey();
+        throw new Error("该来源暂不支持提取文案");
       }
       patchDraft({
         projectId: task.projectId,
         sourceId: task.sourceAssetId,
         sourceAssetId: task.sourceAssetId,
       });
-      navigate("replica", {
-        selectedVideoId: video.id,
-        returnTo: "workbench",
-      });
+      if (purpose === "copy") {
+        extractScriptFromUpload(task.projectId, task.sourceAssetId);
+      } else {
+        navigate("replica", {
+          selectedVideoId: video.id,
+          returnTo: "workbench",
+        });
+      }
     } catch (error) {
       if (shouldClearViralImportIdempotencyKey(error)) clearKey();
       if (operation === viralOperationRef.current) {
@@ -311,13 +336,40 @@ export function WorkbenchPage() {
   const pendingViralSource = !state.draft.projectId
     ? data.videos.find((video) => video.id === state.draft.sourceId)
     : undefined;
-  const begin = (mode: "copy" | "replica") => {
+  const begin = async (mode: "copy" | "replica") => {
     if (review) {
       navigate(mode);
       return;
     }
     if (sourceLink.trim()) {
-      notify("视频链接解析接口尚未接入，可先上传视频进行拆解。");
+      if (linkState.status === "loading") return;
+      const operation = ++linkOperationRef.current;
+      setLinkState({ status: "loading" });
+      try {
+        const resolution = await resolveViralLink(sourceLink.trim(), mode);
+        if (operation !== linkOperationRef.current) return;
+        const video = studioVideoFromViral(resolution.item);
+        updateData((current) => ({
+          ...current,
+          videos: [
+            video,
+            ...current.videos.filter((candidate) => candidate.id !== video.id),
+          ],
+        }));
+        await beginViralCreation(video, mode);
+        if (operation === linkOperationRef.current) {
+          setLinkState({ status: "idle" });
+        }
+      } catch (error) {
+        if (operation !== linkOperationRef.current) return;
+        setLinkState({
+          status: "error",
+          message:
+            error instanceof Error && error.message.trim()
+              ? error.message.trim()
+              : "视频链接解析失败，请上传 MP4/MOV 文件。",
+        });
+      }
       return;
     }
     if (upload?.projectId || state.draft.sourceId || state.draft.projectId) {
@@ -434,9 +486,15 @@ export function WorkbenchPage() {
           </button>
           <input
             aria-label="视频链接"
-            placeholder="粘贴视频链接，如抖音、视频号、小红书链接等"
+            placeholder="粘贴抖音视频链接"
             value={sourceLink}
-            onChange={(event) => setSourceLink(event.target.value)}
+            onChange={(event) => {
+              linkOperationRef.current += 1;
+              viralOperationRef.current += 1;
+              setSourceLink(event.target.value);
+              setLinkState({ status: "idle" });
+              setViralImportingId(undefined);
+            }}
           />
           <input
             ref={fileInputRef}
@@ -450,13 +508,20 @@ export function WorkbenchPage() {
               event.target.value = "";
             }}
           />
-          <Button variant="primary" onClick={() => begin("copy")}>
+          <Button
+            disabled={linkState.status === "loading"}
+            variant="primary"
+            onClick={() => void begin("copy")}
+          >
             <Icon name="pen" />
             提取文案
           </Button>
-          <Button onClick={() => begin("replica")}>
+          <Button
+            disabled={linkState.status === "loading"}
+            onClick={() => void begin("replica")}
+          >
             <Icon name="play" />
-            开始复刻
+            {linkState.status === "loading" ? "正在解析链接…" : "开始复刻"}
           </Button>
         </div>
         {upload && (
@@ -469,8 +534,14 @@ export function WorkbenchPage() {
           </p>
         )}
         <p className="studio-start-helper">
-          提取文案进入文案工坊，开始复刻进入分镜工作区。
+          链接解析当前支持抖音视频；视频号及其他平台请上传 MP4/MOV
+          文件。解析最长约 60 秒。
         </p>
+        {linkState.status === "error" && (
+          <p className="viral-media-status is-error" role="alert">
+            {linkState.message}
+          </p>
+        )}
         {pendingViralSource && (
           <p className="studio-upload-status" role="status">
             已选参考：{pendingViralSource.title}。请上传该视频的 MP4 或 MOV
@@ -637,7 +708,7 @@ export function WorkbenchPage() {
                       variant="quiet"
                       aria-label={`用它复刻：${video.title}`}
                       disabled={viralImportingId === video.id}
-                      onClick={() => void beginViralReplica(video)}
+                      onClick={() => void beginViralCreation(video)}
                     >
                       {viralImportingId === video.id ? "导入中…" : "用它复刻"}
                     </Button>

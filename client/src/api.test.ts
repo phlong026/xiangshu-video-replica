@@ -59,6 +59,7 @@ import {
   regenerateGenerationBatch,
   regenerateGenerationTask,
   resolveApiBaseUrl,
+  resolveViralLink,
   retryGenerationTask,
   retryOralTask,
   retryOralTaskArchive,
@@ -113,6 +114,30 @@ describe("爆款列表 API", () => {
       "http://127.0.0.1:8000/api/viral/videos?platform=douyin&sort=latest&limit=12&cursor=page%2F2%2B%3D",
       expect.objectContaining({
         headers: expect.any(Headers),
+        signal: expect.any(AbortSignal),
+      }),
+    );
+  });
+
+  it("提交链接和用途到受限时长的解析接口", async () => {
+    const body = { item: { platform: "douyin", videoId: "source-1" } };
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => body,
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      resolveViralLink("https://v.douyin.com/share/", "replica"),
+    ).resolves.toEqual(body);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:8000/api/viral/link-resolutions",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          url: "https://v.douyin.com/share/",
+          purpose: "replica",
+        }),
         signal: expect.any(AbortSignal),
       }),
     );

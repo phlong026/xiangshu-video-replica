@@ -1,11 +1,13 @@
 """HTTP routes for durable viral-video project imports."""
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Header, HTTPException, status
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.auth import AuthenticatedUser, Database
 from app.customer_fence import BusinessDbDep
+from app.permissions import require_not_auditor
 from app.viral_import import (
     ViralImportRequest,
     ViralImportTaskResponse,
@@ -13,8 +15,81 @@ from app.viral_import import (
     load_viral_import_task,
     viral_import_task_response,
 )
+from app.viral_link import (
+    ViralLinkError,
+    douyidou_link_client_from_settings,
+    normalize_supported_link,
+)
+from app.viral_routes import ViralVideoItem
+from app.viral_store import upsert_viral_videos
+from app.viral_tikhub import ViralVideo
 
 router = APIRouter(prefix="/api/viral", tags=["viral"])
+
+
+class ViralLinkResolutionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    url: str = Field(min_length=1, max_length=2000)
+    purpose: Literal["copy", "replica"]
+
+
+class ViralLinkResolutionResponse(BaseModel):
+    item: ViralVideoItem
+
+
+@router.post("/link-resolutions", response_model=ViralLinkResolutionResponse)
+def resolve_viral_link(
+    request: ViralLinkResolutionRequest,
+    db: BusinessDbDep,
+) -> ViralLinkResolutionResponse:
+    try:
+        normalized_url = normalize_supported_link(request.url)
+        with db.write() as (conn, actor):
+            require_not_auditor(
+                conn,
+                actor=actor,
+                action="viral.link.resolve",
+                entity_type="viral_link",
+                entity_id="douyin",
+            )
+            resolver = douyidou_link_client_from_settings(conn)
+        resolved = resolver.resolve(normalized_url, purpose=request.purpose)
+    except ViralLinkError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": exc.message},
+        ) from exc
+
+    video = ViralVideo(
+        platform=resolved.platform,
+        video_id=resolved.video_id,
+        category="链接导入",
+        title=resolved.title,
+        author=resolved.author,
+        author_avatar=None,
+        verified=False,
+        cover_url=resolved.cover_url,
+        duration_ms=resolved.duration_ms,
+        likes=0,
+        comments=None,
+        shares=None,
+        collects=None,
+        published_at=None,
+        published_display=None,
+        like_display=None,
+        tags=[],
+        play_url=resolved.video_url,
+        audio_url=resolved.audio_url,
+        native={
+            "source_audio_verified": bool(resolved.audio_url),
+            "source_description": resolved.source_description,
+            "link_resolved": True,
+        },
+    )
+    with db.write() as (conn, _actor):
+        upsert_viral_videos(conn, [video])
+    return ViralLinkResolutionResponse(item=ViralVideoItem(**video.to_client_dict()))
 
 
 @router.post(

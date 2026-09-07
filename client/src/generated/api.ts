@@ -3286,6 +3286,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/viral/link-resolutions": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Resolve Viral Link */
+    post: operations["resolve_viral_link_api_viral_link_resolutions_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/viral/import-tasks/{task_id}": {
     parameters: {
       query?: never;
@@ -7962,7 +7979,7 @@ export interface components {
        * Purpose
        * @enum {string}
        */
-      purpose: "copy" | "replica";
+      purpose: string;
       /** Projectid */
       projectId?: string | null;
     };
@@ -7977,7 +7994,7 @@ export interface components {
       /** Videoid */
       videoId: string;
       /** Purpose */
-      purpose: string;
+      purpose: "copy" | "replica";
       /** Projectid */
       projectId: string;
       /** Sourceassetid */
@@ -7998,6 +8015,18 @@ export interface components {
       createdAt: string;
       /** Updatedat */
       updatedAt: string;
+    };
+    /** ViralLinkResolutionRequest */
+    ViralLinkResolutionRequest: {
+      /** Url */
+      url: string;
+      /** Purpose */
+      purpose: "copy" | "replica";
+    };
+    /** ViralLinkResolutionResponse */
+    ViralLinkResolutionResponse: {
+      /** Item */
+      item: components["schemas"]["ViralVideoItem"];
     };
     /** ViralListResponse */
     ViralListResponse: {
@@ -14867,6 +14896,39 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["ViralVideoItem"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  resolve_viral_link_api_viral_link_resolutions_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ViralLinkResolutionRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ViralLinkResolutionResponse"];
         };
       };
       /** @description Validation Error */

@@ -5348,6 +5348,7 @@ export type ViralStatisticsResponse = {
 };
 
 export type ViralImportPurpose = "copy" | "replica";
+export type ViralLinkResolution = { item: ViralVideoItem };
 export type ViralImportTask = {
   id?: string;
   taskId?: string;
@@ -5459,6 +5460,21 @@ export function createViralImportTask(
       body: JSON.stringify({ platform, videoId, purpose }),
     },
     VIRAL_MEDIA_TIMEOUT_MS,
+  );
+}
+
+export function resolveViralLink(
+  url: string,
+  purpose: ViralImportPurpose,
+): Promise<ViralLinkResolution> {
+  return requestApiJson<ViralLinkResolution>(
+    "/api/viral/link-resolutions",
+    "视频链接解析失败",
+    {
+      method: "POST",
+      body: JSON.stringify({ url, purpose }),
+    },
+    65_000,
   );
 }
 
