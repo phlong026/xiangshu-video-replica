@@ -2349,7 +2349,7 @@ def test_oral_task_retry_route_requeues_uncertain_and_keeps_reservation(
         ("employee_1",),
     ).fetchone()
     assert (wallet["available_credits"], wallet["reserved_credits"]) == (19, 1)
-    listed = [entry for entry in listing.json() if entry["id"] == created.task_id]
+    listed = [entry for entry in listing.json()["items"] if entry["id"] == created.task_id]
     assert listed and listed[0]["status"] == "QUEUED"
     assert listed[0]["billing_status"] == "RESERVED"
     assert listed[0]["available_actions"] == []
@@ -2512,9 +2512,19 @@ def test_oral_task_serialization_reports_billing_status_and_available_actions(
         assert single.json()["available_actions"] == []
 
         listing = client.get("/api/oral/tasks", headers=headers).json()
-        by_id = {entry["id"]: entry for entry in listing}
+        assert listing["total"] == 2
+        by_id = {entry["id"]: entry for entry in listing["items"]}
         assert by_id[uncertain.task_id]["billing_status"] == "SETTLED"
         assert by_id[cancelled.task_id]["billing_status"] == "RELEASED"
+        second_page = client.get(
+            "/api/oral/tasks",
+            params={"limit": 1, "offset": 1},
+            headers=headers,
+        ).json()
+        assert second_page["total"] == 2
+        assert second_page["limit"] == 1
+        assert second_page["offset"] == 1
+        assert len(second_page["items"]) == 1
     finally:
         app.dependency_overrides.clear()
 

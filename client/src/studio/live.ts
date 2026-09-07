@@ -29,14 +29,14 @@ import {
   getStudioAnalytics,
   getStudioDraft,
   getStudioStats,
-  listCharacterSceneLooks,
+  listCharacterSceneLooksPage,
   listGenerationBatches,
   listMaterials,
   listOralAvatars,
-  listOralTasks,
+  listOralTasksPage,
   listOralVoices,
   listProjects,
-  listSimpleCharacterLibrary,
+  listSimpleCharacterLibraryPage,
   listStudioSavedScripts,
   listViralVideos,
   lockGenerationPrompt,
@@ -514,8 +514,18 @@ async function loadPeople(): Promise<{
   people: StudioPerson[];
   assets: StudioAsset[];
   errors: string[];
+  nextCursor: string | null;
+  total: number;
 }> {
-  const entries = (await listSimpleCharacterLibrary()).slice(0, personLimit);
+  const page = await listSimpleCharacterLibraryPage({ limit: personLimit });
+  return loadPeopleEntries(page.items, page.next_cursor, page.total);
+}
+
+async function loadPeopleEntries(
+  entries: SimpleLibraryEntry[],
+  nextCursor: string | null,
+  total: number,
+) {
   const errors: string[] = [];
   const people: StudioPerson[] = [];
   const assets: StudioAsset[] = [];
@@ -573,7 +583,15 @@ async function loadPeople(): Promise<{
       });
     }
   }
-  return { people, assets, errors };
+  return { people, assets, errors, nextCursor, total };
+}
+
+export async function loadMorePeople(cursor: string) {
+  const page = await listSimpleCharacterLibraryPage({
+    limit: personLimit,
+    cursor,
+  });
+  return loadPeopleEntries(page.items, page.next_cursor, page.total);
 }
 
 function studioTaskStatus(
@@ -634,11 +652,15 @@ export async function cancelStudioTask(
   return {};
 }
 
-async function loadTasks(_currentUser: CurrentUser): Promise<StudioTask[]> {
+async function loadTasks(_currentUser: CurrentUser) {
   // The authenticated server scope includes delegated project tasks; filtering
   // by creator here would silently hide work the current customer can access.
   const page = await listGenerationBatches({ limit: 20 });
-  return page.items.map(studioTask);
+  return {
+    items: page.items.map(studioTask),
+    nextCursor: page.next_cursor,
+    total: page.total ?? page.items.length,
+  };
 }
 
 /** 每轮同时刷新生成批次和口播任务；单边失败不丢弃另一边的有效结果。 */
@@ -656,8 +678,10 @@ export async function reloadTasks(
     throw generationResult.reason;
   }
   return [
-    ...(generationResult.status === "fulfilled" ? generationResult.value : []),
-    ...(oralResult.status === "fulfilled" ? oralResult.value : []),
+    ...(generationResult.status === "fulfilled"
+      ? generationResult.value.items
+      : []),
+    ...(oralResult.status === "fulfilled" ? oralResult.value.items : []),
   ];
 }
 
@@ -738,9 +762,31 @@ function oralTask(row: OralTaskRecord): StudioTask {
   };
 }
 
-async function loadOralTasks(): Promise<StudioTask[]> {
-  const rows = await listOralTasks(20);
-  return rows.map(oralTask);
+async function loadOralTasks() {
+  const page = await listOralTasksPage({ limit: 20 });
+  return {
+    items: page.items.map(oralTask),
+    loaded: page.items.length,
+    total: page.total ?? page.items.length,
+  };
+}
+
+export async function loadMoreGenerationTasks(cursor: string) {
+  const page = await listGenerationBatches({ limit: 20, cursor });
+  return {
+    items: page.items.map(studioTask),
+    nextCursor: page.next_cursor,
+    total: page.total ?? page.items.length,
+  };
+}
+
+export async function loadMoreOralTasks(offset: number) {
+  const page = await listOralTasksPage({ limit: 20, offset });
+  return {
+    items: page.items.map(oralTask),
+    loaded: offset + page.items.length,
+    total: page.total,
+  };
 }
 
 export async function retryStudioTask(task: StudioTask): Promise<void> {
@@ -853,10 +899,10 @@ export async function loadStudioData(
   const peopleData =
     peopleResult.status === "fulfilled"
       ? peopleResult.value
-      : { people: [], assets: [], errors: [] };
+      : { people: [], assets: [], errors: [], nextCursor: null, total: 0 };
   const tasks = [
-    ...(tasksResult.status === "fulfilled" ? tasksResult.value : []),
-    ...(oralResult.status === "fulfilled" ? oralResult.value : []),
+    ...(tasksResult.status === "fulfilled" ? tasksResult.value.items : []),
+    ...(oralResult.status === "fulfilled" ? oralResult.value.items : []),
   ];
   // 统计加载失败不打断工作区：指标卡回退为 "—"，重试路径会再次拉取。
   const stats = statsResult.status === "fulfilled" ? statsResult.value : null;
@@ -901,6 +947,27 @@ export async function loadStudioData(
     stats,
     analytics7,
     analytics30,
+    pagination: {
+      people: {
+        nextCursor: peopleData.nextCursor,
+        total: peopleData.total,
+      },
+      scenes: {},
+      generationTasks:
+        tasksResult.status === "fulfilled"
+          ? {
+              nextCursor: tasksResult.value.nextCursor,
+              total: tasksResult.value.total,
+            }
+          : { nextCursor: null, total: 0 },
+      oralTasks:
+        oralResult.status === "fulfilled"
+          ? {
+              loaded: oralResult.value.loaded,
+              total: oralResult.value.total,
+            }
+          : { loaded: 0, total: 0 },
+    },
   };
 }
 
@@ -1113,16 +1180,20 @@ export async function publishScriptVersion(
 export type PersonAssetLoad = {
   assets: StudioAsset[];
   errors: string[];
+  loaded: number;
+  total: number;
 };
 
 export async function loadPersonAssets(
   identityId: string,
+  offset = 0,
 ): Promise<PersonAssetLoad> {
   try {
-    const scenes = (await listCharacterSceneLooks(identityId)).slice(
-      0,
-      sceneLimit,
-    );
+    const page = await listCharacterSceneLooksPage(identityId, {
+      limit: sceneLimit,
+      offset,
+    });
+    const scenes = page.items;
     const selected = scenes
       .map((scene) => ({
         scene,
@@ -1159,12 +1230,14 @@ export async function loadPersonAssets(
         saved: Boolean(scene.published_at),
       };
     });
-    return { assets, errors };
-  } catch (error) {
     return {
-      assets: [],
-      errors: [`读取人物场景形象照失败：${errorText(error)}`],
+      assets,
+      errors,
+      loaded: offset + scenes.length,
+      total: page.total,
     };
+  } catch (error) {
+    throw new Error(`读取人物场景形象照失败：${errorText(error)}`);
   }
 }
 

@@ -160,6 +160,12 @@ export type StudioData = {
    * 加载失败为 null，看板页回退"尚未就绪"空态。 */
   analytics7: StudioAnalytics | null;
   analytics30: StudioAnalytics | null;
+  pagination?: {
+    people?: { nextCursor: string | null; total: number };
+    scenes?: Record<string, { loaded: number; total: number }>;
+    generationTasks?: { nextCursor: string | null; total: number };
+    oralTasks?: { loaded: number; total: number };
+  };
 };
 export type StudioScript = {
   id: string;

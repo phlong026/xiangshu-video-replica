@@ -6134,6 +6134,38 @@ def test_hidden_batches_are_filtered_before_pagination_and_only_for_acting_accou
         }
 
 
+def test_generation_batch_empty_deep_page_keeps_scoped_total(
+    client: TestClient, db_path: Path
+) -> None:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        for index in range(1, 4):
+            insert_generation_history(
+                conn,
+                batch_id=f"batch-boundary-0{index}",
+                created_at=f"2026-08-16 10:0{index}:00",
+            )
+        conn.commit()
+
+    first_page = client.get(
+        "/api/generation-batches?limit=1", headers=auth_headers("employee_1")
+    ).json()
+    assert [item["id"] for item in first_page["items"]] == ["batch-boundary-03"]
+
+    for batch_id in ("batch-boundary-02", "batch-boundary-01"):
+        hidden = client.delete(
+            f"/api/generation-batches/{batch_id}", headers=auth_headers("employee_1")
+        )
+        assert hidden.status_code == 204
+
+    empty_page = client.get(
+        "/api/generation-batches",
+        params={"limit": 1, "cursor": first_page["next_cursor"]},
+        headers=auth_headers("employee_1"),
+    ).json()
+
+    assert empty_page == {"items": [], "next_cursor": None, "total": 1}
+
+
 def test_generation_rejects_metaso_without_cos_settings(
     client: TestClient,
     db_path: Path,

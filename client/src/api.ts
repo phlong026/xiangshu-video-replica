@@ -244,8 +244,8 @@ export type GenerationBatchListItem = Omit<
 > & { tasks: GenerationTaskSummary[] };
 export type GenerationBatchListPage = Omit<
   components["schemas"]["GenerationBatchListPage"],
-  "items"
-> & { items: GenerationBatchListItem[] };
+  "items" | "total"
+> & { items: GenerationBatchListItem[]; total?: number };
 export type GenerationBatchListFilters = {
   projectId?: string;
   createdByUserId?: string;
@@ -1151,15 +1151,33 @@ export type OralTaskRecord = {
   updated_at: string;
 };
 
-/** 数字人口播任务列表（GET /api/oral/tasks）。 */
-export async function listOralTasks(limit = 20): Promise<OralTaskRecord[]> {
-  const body = await requestApiJson<
-    { items?: OralTaskRecord[] } | OralTaskRecord[]
-  >(
-    `/api/oral/tasks?limit=${encodeURIComponent(String(limit))}`,
+export type OffsetPage<T> = {
+  items: T[];
+  total: number;
+  limit: number;
+  offset: number;
+};
+
+/** 数字人口播任务分页（GET /api/oral/tasks）。 */
+export async function listOralTasksPage({
+  limit = 20,
+  offset = 0,
+}: {
+  limit?: number;
+  offset?: number;
+} = {}): Promise<OffsetPage<OralTaskRecord>> {
+  const query = new URLSearchParams({
+    limit: String(limit),
+    offset: String(offset),
+  });
+  return requestApiJson<OffsetPage<OralTaskRecord>>(
+    `/api/oral/tasks?${query.toString()}`,
     "读取口播任务失败",
   );
-  return Array.isArray(body) ? body : (body.items ?? []);
+}
+
+export async function listOralTasks(limit = 20): Promise<OralTaskRecord[]> {
+  return (await listOralTasksPage({ limit })).items;
 }
 
 function mutateOralTask(taskId: string, action: string, error: string) {
@@ -2966,6 +2984,18 @@ export interface SimpleLibraryEntry {
   views: SimpleCharacterView[];
 }
 
+export interface SimpleLibraryPage {
+  items: SimpleLibraryEntry[];
+  next_cursor: string | null;
+  total: number;
+}
+
+export interface SimpleLibraryPageFilters {
+  limit?: number;
+  cursor?: string;
+  query?: string;
+}
+
 export type DurableImageTaskStatus =
   | "PENDING"
   | "RUNNING"
@@ -3199,20 +3229,70 @@ async function pollCharacterSheetTask(
   throw new Error("人物生成仍在后台进行，请稍后返回人物库查看。");
 }
 
+export async function listSimpleCharacterLibraryPage(
+  filters: SimpleLibraryPageFilters = {},
+): Promise<SimpleLibraryPage> {
+  const query = new URLSearchParams();
+  if (filters.limit !== undefined) {
+    query.set("limit", String(filters.limit));
+  }
+  if (filters.cursor) {
+    query.set("cursor", filters.cursor);
+  }
+  if (filters.query) {
+    query.set("query", filters.query);
+  }
+  const suffix = query.size > 0 ? `?${query.toString()}` : "";
+  return requestApiJson<SimpleLibraryPage>(
+    `/api/simple-characters/library${suffix}`,
+    "读取人物库失败",
+  );
+}
+
 export async function listSimpleCharacterLibrary(): Promise<
   SimpleLibraryEntry[]
 > {
-  return requestApiJson<SimpleLibraryEntry[]>(
-    "/api/simple-characters/library",
-    "读取人物库失败",
-  );
+  const entries: SimpleLibraryEntry[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await listSimpleCharacterLibraryPage({ limit: 100, cursor });
+    entries.push(...page.items);
+    cursor = page.next_cursor ?? undefined;
+  } while (cursor);
+  return entries;
 }
 
 export async function listCharacterSceneLooks(
   identityId: string,
 ): Promise<SimpleSceneLook[]> {
-  return requestApiJson<SimpleSceneLook[]>(
-    `/api/simple-characters/identities/${encodeURIComponent(identityId)}/scene-looks`,
+  const items: SimpleSceneLook[] = [];
+  let offset = 0;
+  let total = Number.POSITIVE_INFINITY;
+  while (offset < total) {
+    const page = await listCharacterSceneLooksPage(identityId, {
+      limit: 100,
+      offset,
+    });
+    items.push(...page.items);
+    offset += page.items.length;
+    total = page.total;
+    if (page.items.length === 0) {
+      return items;
+    }
+  }
+  return items;
+}
+
+export async function listCharacterSceneLooksPage(
+  identityId: string,
+  { limit = 12, offset = 0 }: { limit?: number; offset?: number } = {},
+): Promise<OffsetPage<SimpleSceneLook>> {
+  const query = new URLSearchParams({
+    limit: String(limit),
+    offset: String(offset),
+  });
+  return requestApiJson<OffsetPage<SimpleSceneLook>>(
+    `/api/simple-characters/identities/${encodeURIComponent(identityId)}/scene-looks?${query.toString()}`,
     "读取人物场景造型失败",
   );
 }

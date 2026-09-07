@@ -5924,6 +5924,8 @@ export interface components {
       items: components["schemas"]["GenerationBatchListItem"][];
       /** Next Cursor */
       next_cursor: string | null;
+      /** Total */
+      total: number;
     };
     /** GenerationBatchRenameRequest */
     GenerationBatchRenameRequest: {
@@ -7296,6 +7298,15 @@ export interface components {
       /** Views */
       views: components["schemas"]["SimpleCharacterViewResponse"][];
     };
+    /** SimpleLibraryPageResponse */
+    SimpleLibraryPageResponse: {
+      /** Items */
+      items: components["schemas"]["SimpleLibraryEntryResponse"][];
+      /** Next Cursor */
+      next_cursor: string | null;
+      /** Total */
+      total: number;
+    };
     /** SimpleSceneLookCreateRequest */
     SimpleSceneLookCreateRequest: {
       /** Scene Name */
@@ -7306,6 +7317,17 @@ export interface components {
       costume_description: string;
       /** Idempotency Key */
       idempotency_key: string;
+    };
+    /** SimpleSceneLookPageResponse */
+    SimpleSceneLookPageResponse: {
+      /** Items */
+      items: components["schemas"]["SimpleSceneLookResponse"][];
+      /** Total */
+      total: number;
+      /** Limit */
+      limit: number;
+      /** Offset */
+      offset: number;
     };
     /** SimpleSceneLookResponse */
     SimpleSceneLookResponse: {
@@ -10052,6 +10074,7 @@ export interface operations {
     parameters: {
       query?: {
         limit?: number;
+        offset?: number;
       };
       header?: {
         "X-Dev-User-Id"?: string | null;
@@ -10070,7 +10093,7 @@ export interface operations {
         content: {
           "application/json": {
             [key: string]: unknown;
-          }[];
+          };
         };
       };
       /** @description Validation Error */
@@ -16249,7 +16272,14 @@ export interface operations {
   };
   read_simple_library_api_simple_characters_library_get: {
     parameters: {
-      query?: never;
+      query?: {
+        /** Limit */
+        limit?: number;
+        /** Cursor */
+        cursor?: string | null;
+        /** Query */
+        query?: string;
+      };
       header?: {
         "X-Dev-User-Id"?: string | null;
         Authorization?: string | null;
@@ -16265,7 +16295,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          "application/json": components["schemas"]["SimpleLibraryEntryResponse"][];
+          "application/json": components["schemas"]["SimpleLibraryPageResponse"];
         };
       };
       /** @description Validation Error */
@@ -16281,7 +16311,10 @@ export interface operations {
   };
   read_scene_looks_api_simple_characters_identities__identity_id__scene_looks_get: {
     parameters: {
-      query?: never;
+      query?: {
+        limit?: number;
+        offset?: number;
+      };
       header?: {
         "X-Dev-User-Id"?: string | null;
         Authorization?: string | null;
@@ -16299,7 +16332,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          "application/json": components["schemas"]["SimpleSceneLookResponse"][];
+          "application/json": components["schemas"]["SimpleSceneLookPageResponse"];
         };
       };
       /** @description Validation Error */

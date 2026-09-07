@@ -30,6 +30,8 @@ const {
   cancelStudioTask,
   downloadStudioTaskResult,
   retryStudioTask,
+  loadMoreGenerationTasks,
+  loadMoreOralTasks,
   getStudioNotificationPreferences,
   updateStudioNotificationPreferences,
 } = vi.hoisted(() => ({
@@ -46,6 +48,8 @@ const {
   cancelStudioTask: vi.fn(),
   downloadStudioTaskResult: vi.fn(),
   retryStudioTask: vi.fn(),
+  loadMoreGenerationTasks: vi.fn(),
+  loadMoreOralTasks: vi.fn(),
   getStudioNotificationPreferences: vi.fn(),
   updateStudioNotificationPreferences: vi.fn(),
 }));
@@ -62,6 +66,8 @@ vi.mock("./live", () => ({
   cancelStudioTask,
   downloadStudioTaskResult,
   retryStudioTask,
+  loadMoreGenerationTasks,
+  loadMoreOralTasks,
 }));
 
 import {
@@ -768,6 +774,8 @@ describe("V1.4 任务中心列表", () => {
   beforeEach(() => {
     useStudio.mockReset();
     cancelStudioTask.mockReset();
+    loadMoreGenerationTasks.mockReset();
+    loadMoreOralTasks.mockReset();
     vi.useFakeTimers({ now: clock, toFake: ["Date"] });
   });
 
@@ -792,6 +800,45 @@ describe("V1.4 任务中心列表", () => {
     expect(screen.getByRole("tab", { name: "进行中 2" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "待处理 1" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "已完成" })).toBeInTheDocument();
+  });
+
+  it("普通批次和口播任务使用独立历史游标且按 id 去重追加", async () => {
+    const value = tasksPage({
+      data: {
+        ...data([runningTask, { ...doneTask, backendKind: "oral_task" }]),
+        pagination: {
+          generationTasks: { nextCursor: "batch-next", total: 21 },
+          oralTasks: { loaded: 20, total: 21 },
+        },
+      },
+    });
+    useStudio.mockReturnValue(value);
+    loadMoreGenerationTasks.mockResolvedValue({
+      items: [runningTask, queuedTask],
+      nextCursor: null,
+      total: 21,
+    });
+    loadMoreOralTasks.mockResolvedValue({
+      items: [{ ...doneTask, id: "oral-deep", backendKind: "oral_task" }],
+      loaded: 21,
+      total: 21,
+    });
+    render(<TasksPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "加载更多普通批次" }));
+    await waitFor(() =>
+      expect(loadMoreGenerationTasks).toHaveBeenCalledWith("batch-next"),
+    );
+    const generationUpdate = vi.mocked(value.updateData).mock.calls[0]?.[0];
+    const generationData = generationUpdate?.(value.data);
+    expect(generationData?.tasks.map((task) => task.id)).toEqual([
+      runningTask.id,
+      doneTask.id,
+      queuedTask.id,
+    ]);
+
+    fireEvent.click(screen.getByRole("button", { name: "加载更多口播任务" }));
+    await waitFor(() => expect(loadMoreOralTasks).toHaveBeenCalledWith(20));
   });
 
   it("状态列带子文案：排队中→等待开始、待处理→生成失败", () => {

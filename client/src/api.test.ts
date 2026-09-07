@@ -45,13 +45,16 @@ import {
   getLatestScriptVersion,
   getSettings,
   hideMaterial,
+  listCharacterSceneLooksPage,
   listGenerationBatches,
   listMaterials,
   listOralAvatars,
+  listOralTasksPage,
   listOralVoices,
   listProjectCharacterVersions,
   listProjects,
   listSavedGenerationPrompts,
+  listSimpleCharacterLibraryPage,
   lockGenerationPrompt,
   readAnalysisPayload,
   readFirstFrameCandidates,
@@ -252,6 +255,44 @@ describe("素材库 API", () => {
   });
 });
 
+describe("人物库 API", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("使用服务端查询和不透明游标读取下一页", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ items: [], next_cursor: "next-cursor" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await listSimpleCharacterLibraryPage({
+      limit: 12,
+      cursor: "cursor/value",
+      query: "林 夏",
+    });
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "http://127.0.0.1:8000/api/simple-characters/library?limit=12&cursor=cursor%2Fvalue&query=%E6%9E%97+%E5%A4%8F",
+    );
+  });
+
+  it("场景造型按人物使用 limit 和 offset 分页", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ items: [], total: 13, limit: 12, offset: 12 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await listCharacterSceneLooksPage("person 1", { limit: 12, offset: 12 });
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "http://127.0.0.1:8000/api/simple-characters/identities/person%201/scene-looks?limit=12&offset=12",
+    );
+  });
+});
+
 describe("人物 IP 口播资产 API", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -272,6 +313,20 @@ describe("人物 IP 口播资产 API", () => {
     );
     expect(fetchMock.mock.calls[1]?.[0]).toBe(
       "http://127.0.0.1:8000/api/oral/voices?identity_id=person%201",
+    );
+  });
+
+  it("口播任务使用独立 limit 和 offset 历史范围", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ items: [], total: 21, limit: 20, offset: 20 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await listOralTasksPage({ limit: 20, offset: 20 });
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "http://127.0.0.1:8000/api/oral/tasks?limit=20&offset=20",
     );
   });
 

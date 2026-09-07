@@ -881,7 +881,16 @@ export function StudioWorkspace({
       if (document.hidden || busyRef.current) return;
       void reloadTasks(currentUser)
         .then((tasks) => {
-          setData((previous) => ({ ...previous, tasks }));
+          setData((previous) => {
+            const refreshedIds = new Set(tasks.map((task) => task.id));
+            return {
+              ...previous,
+              tasks: [
+                ...tasks,
+                ...previous.tasks.filter((task) => !refreshedIds.has(task.id)),
+              ],
+            };
+          });
         })
         .catch(() => {});
       void reloadStats().then((stats) => {
@@ -930,6 +939,16 @@ export function StudioWorkspace({
                 }
               : person,
           ),
+          pagination: {
+            ...previous.pagination,
+            scenes: {
+              ...previous.pagination?.scenes,
+              [personToLoad]: {
+                loaded: result.loaded,
+                total: result.total,
+              },
+            },
+          },
           errors: [...previous.errors, ...result.errors],
         }));
         if (result.errors.length) loadedPeopleRef.current.delete(personToLoad);

@@ -8,6 +8,8 @@ project's available character version list.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import logging
@@ -213,6 +215,21 @@ class SimpleLibraryEntry:
     contact_sheet_asset_id: str | None
     generation_source: str | None
     views: tuple[SimpleCharacterView, ...]
+
+
+@dataclass(frozen=True)
+class SimpleLibraryPage:
+    items: list[SimpleLibraryEntry]
+    next_cursor: str | None
+    total: int
+
+
+@dataclass(frozen=True)
+class SimpleSceneLookPage:
+    items: list[SimpleSceneLookEntry]
+    total: int
+    limit: int
+    offset: int
 
 
 @dataclass(frozen=True)
@@ -654,6 +671,158 @@ def list_simple_library(
     *,
     actor: CurrentUser,
 ) -> list[SimpleLibraryEntry]:
+    """List the complete scoped library for internal compatibility callers."""
+    identity_rows = conn.execute(
+        f"""
+        SELECT identity.id
+        FROM person_identities AS identity
+        {_simple_library_owner_clause(actor)}
+        ORDER BY identity.created_at DESC, identity.id DESC
+        """,
+        () if actor.role in {"admin", "auditor"} else (actor.id,),
+    ).fetchall()
+    return _load_simple_library_entries(
+        conn,
+        actor=actor,
+        identity_ids=[str(row["id"]) for row in identity_rows],
+    )
+
+
+def list_simple_library_page(
+    conn: BusinessConnection,
+    *,
+    actor: CurrentUser,
+    limit: int,
+    cursor: str | None,
+    query: str,
+) -> SimpleLibraryPage:
+    """Page identities first, then aggregate their complete published assets."""
+    normalized_query = query.strip().casefold()
+    scope_hash = _simple_library_scope_hash(actor=actor, query=normalized_query)
+    cursor_position = (
+        None
+        if cursor is None
+        else _decode_simple_library_cursor(cursor, expected_scope_hash=scope_hash)
+    )
+    clauses: list[str] = []
+    parameters: list[object] = []
+    if actor.role not in {"admin", "auditor"}:
+        clauses.append("identity.owner_user_id = %s")
+        parameters.append(actor.id)
+    if normalized_query:
+        pattern = f"%{normalized_query}%"
+        clauses.append(
+            """
+            (
+                LOWER(identity.display_name) LIKE %s
+                OR EXISTS (
+                    SELECT 1
+                    FROM character_personas AS search_persona
+                    WHERE search_persona.identity_id = identity.id
+                      AND (
+                        LOWER(COALESCE(search_persona.occupation, '')) LIKE %s
+                        OR LOWER(COALESCE(search_persona.appearance_constraints_json, '')) LIKE %s
+                      )
+                )
+            )
+            """
+        )
+        parameters.extend([pattern, pattern, pattern])
+    count_where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    total_row = conn.execute(
+        f"SELECT COUNT(*) AS total FROM person_identities AS identity {count_where_clause}",
+        tuple(parameters),
+    ).fetchone()
+    total = int(total_row["total"] if total_row is not None else 0)
+    if cursor_position is not None:
+        created_at, identity_id = cursor_position
+        clauses.append(
+            "(identity.created_at < %s OR (identity.created_at = %s AND identity.id < %s))"
+        )
+        parameters.extend([created_at, created_at, identity_id])
+    where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    parameters.append(limit + 1)
+    identity_rows = conn.execute(
+        f"""
+        SELECT identity.id, identity.created_at
+        FROM person_identities AS identity
+        {where_clause}
+        ORDER BY identity.created_at DESC, identity.id DESC
+        LIMIT %s
+        """,
+        tuple(parameters),
+    ).fetchall()
+    page_rows = identity_rows[:limit]
+    identity_ids = [str(row["id"]) for row in page_rows]
+    items = _load_simple_library_entries(conn, actor=actor, identity_ids=identity_ids)
+    next_cursor = None
+    if len(identity_rows) > limit:
+        last_row = page_rows[-1]
+        next_cursor = _encode_simple_library_cursor(
+            created_at=str(last_row["created_at"]),
+            identity_id=str(last_row["id"]),
+            scope_hash=scope_hash,
+        )
+    return SimpleLibraryPage(items=items, next_cursor=next_cursor, total=total)
+
+
+def _simple_library_owner_clause(actor: CurrentUser) -> str:
+    return "" if actor.role in {"admin", "auditor"} else "WHERE identity.owner_user_id = %s"
+
+
+def _simple_library_scope_hash(*, actor: CurrentUser, query: str) -> str:
+    payload = {
+        "actor_id": actor.id,
+        "actor_role": actor.role,
+        "query": query,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def _encode_simple_library_cursor(*, created_at: str, identity_id: str, scope_hash: str) -> str:
+    payload = json.dumps(
+        {"v": 1, "created_at": created_at, "id": identity_id, "scope_hash": scope_hash},
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return base64.urlsafe_b64encode(payload).decode().rstrip("=")
+
+
+def _decode_simple_library_cursor(value: str, *, expected_scope_hash: str) -> tuple[str, str]:
+    try:
+        padding = "=" * (-len(value) % 4)
+        decoded = base64.b64decode(value + padding, altchars=b"-_", validate=True)
+        payload = json.loads(decoded.decode())
+    except (ValueError, binascii.Error, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise character_error(400, "INVALID_CURSOR", "人物库游标无效。") from exc
+    if not isinstance(payload, dict):
+        raise character_error(400, "INVALID_CURSOR", "人物库游标无效。")
+    created_at = payload.get("created_at")
+    identity_id = payload.get("id")
+    scope_hash = payload.get("scope_hash")
+    if (
+        payload.get("v") != 1
+        or not isinstance(created_at, str)
+        or not created_at
+        or not isinstance(identity_id, str)
+        or not identity_id
+        or not isinstance(scope_hash, str)
+    ):
+        raise character_error(400, "INVALID_CURSOR", "人物库游标无效。")
+    if scope_hash != expected_scope_hash:
+        raise character_error(400, "CURSOR_SCOPE_MISMATCH", "人物库游标与当前查询不匹配。")
+    return created_at, identity_id
+
+
+def _load_simple_library_entries(
+    conn: BusinessConnection,
+    *,
+    actor: CurrentUser,
+    identity_ids: list[str],
+) -> list[SimpleLibraryEntry]:
     """List characters with the published seven-view assets for previews.
 
     Customer-workspace roles only see identities they own.  Administrators and
@@ -661,8 +830,14 @@ def list_simple_library(
     only the latest published version's approved selection is returned so the
     preview always matches what video generation would actually consume.
     """
-    owner_clause = "" if actor.role in {"admin", "auditor"} else "WHERE identity.owner_user_id = %s"
-    parameters: tuple[object, ...] = () if not owner_clause else (actor.id,)
+    if not identity_ids:
+        return []
+    placeholders = ", ".join("%s" for _ in identity_ids)
+    clauses = [f"identity.id IN ({placeholders})"]
+    parameters: list[object] = list(identity_ids)
+    if actor.role not in {"admin", "auditor"}:
+        clauses.append("identity.owner_user_id = %s")
+        parameters.append(actor.id)
     rows = conn.execute(
         f"""
         SELECT identity.id AS identity_id,
@@ -687,11 +862,11 @@ def list_simple_library(
           ON view.character_version_id = version.id
          AND view.review_status = 'APPROVED'
          AND view.is_published_selection = 1
-        {owner_clause}
-        ORDER BY identity.created_at DESC, identity.id,
+        WHERE {" AND ".join(clauses)}
+        ORDER BY identity.created_at DESC, identity.id DESC,
                  version.published_at DESC, view.view_type
         """,
-        parameters,
+        tuple(parameters),
     ).fetchall()
 
     entries: list[SimpleLibraryEntry] = []
@@ -741,7 +916,10 @@ def list_simple_library(
                 views=views,
             )
         )
-    return entries
+    entries_by_id = {entry.identity_id: entry for entry in entries}
+    return [
+        entries_by_id[identity_id] for identity_id in identity_ids if identity_id in entries_by_id
+    ]
 
 
 def _profile_constraint(constraints: dict[str, object], key: str) -> str:
@@ -1410,39 +1588,87 @@ def create_simple_scene_look(
     return result
 
 
-def list_simple_scene_looks(
+def list_simple_scene_looks_page(
     conn: BusinessConnection,
     *,
     actor: CurrentUser,
     identity_id: str,
-) -> list[SimpleSceneLookEntry]:
+    limit: int,
+    offset: int,
+) -> SimpleSceneLookPage:
     identity = read_identity_row(conn, identity_id)
     if actor.role not in {"admin", "auditor"} and str(identity["owner_user_id"]) != actor.id:
         raise character_error(404, "PERSON_IDENTITY_NOT_FOUND", "人物身份不存在或不可用。")
-    rows = conn.execute(
-        """
-        SELECT persona.id AS persona_id, persona.name, persona.scene_description,
-               persona.costume_description, persona.appearance_constraints_json,
-               version.id AS version_id, version.version_number,
-               version.published_at, version.publication_snapshot_json,
-               view.view_type, view.asset_id
+    appearance_type = (
+        "persona.appearance_constraints_json::jsonb ->> 'appearance_type'"
+        if conn.is_postgres
+        else "json_extract(persona.appearance_constraints_json, '$.appearance_type')"
+    )
+    total_row = conn.execute(
+        f"""
+        SELECT COUNT(*) AS total
         FROM character_personas AS persona
-        JOIN character_versions AS version ON version.persona_id = persona.id
-        LEFT JOIN character_assets AS view
-          ON view.character_version_id = version.id
-         AND view.review_status = 'APPROVED'
-         AND view.is_published_selection = 1
-        WHERE persona.identity_id = %s AND version.status = 'PUBLISHED'
-        ORDER BY persona.created_at DESC, persona.id,
-                 version.version_number DESC, view.view_type
+        WHERE persona.identity_id = %s
+          AND {appearance_type} = 'scene'
+          AND EXISTS (
+              SELECT 1
+              FROM character_versions AS published_version
+              WHERE published_version.persona_id = persona.id
+                AND published_version.status = 'PUBLISHED'
+          )
         """,
         (identity_id,),
+    ).fetchone()
+    total = int(total_row["total"] if total_row is not None else 0)
+    rows = conn.execute(
+        f"""
+        WITH paged_personas AS (
+            SELECT persona.id AS persona_id, persona.name,
+                   persona.scene_description, persona.costume_description,
+                   persona.created_at AS persona_created_at
+            FROM character_personas AS persona
+            WHERE persona.identity_id = %s
+              AND {appearance_type} = 'scene'
+              AND EXISTS (
+                  SELECT 1
+                  FROM character_versions AS published_version
+                  WHERE published_version.persona_id = persona.id
+                    AND published_version.status = 'PUBLISHED'
+              )
+            ORDER BY persona.created_at DESC, persona.id
+            LIMIT %s OFFSET %s
+        ),
+        latest_versions AS (
+            SELECT persona.persona_id, persona.name,
+                   persona.scene_description, persona.costume_description,
+                   persona.persona_created_at,
+                   version.id AS version_id, version.version_number,
+                   version.published_at, version.publication_snapshot_json
+            FROM character_versions AS version
+            JOIN paged_personas AS persona ON persona.persona_id = version.persona_id
+            WHERE version.status = 'PUBLISHED'
+              AND version.version_number = (
+                  SELECT MAX(candidate.version_number)
+                  FROM character_versions AS candidate
+                  WHERE candidate.persona_id = version.persona_id
+                    AND candidate.status = 'PUBLISHED'
+              )
+        )
+        SELECT look.persona_id, look.name, look.scene_description,
+               look.costume_description, look.version_id, look.version_number,
+               look.published_at, look.publication_snapshot_json,
+               view.view_type, view.asset_id
+        FROM latest_versions AS look
+        LEFT JOIN character_assets AS view
+          ON view.character_version_id = look.version_id
+         AND view.review_status = 'APPROVED'
+         AND view.is_published_selection = 1
+        ORDER BY look.persona_created_at DESC, look.persona_id, view.view_type
+        """,
+        (identity_id, limit, offset),
     ).fetchall()
     grouped: dict[str, list[sqlite3.Row]] = {}
     for row in rows:
-        constraints = decode_scene_constraints(row["appearance_constraints_json"])
-        if constraints.get("appearance_type") != "scene":
-            continue
         grouped.setdefault(str(row["persona_id"]), []).append(row)
 
     looks: list[SimpleSceneLookEntry] = []
@@ -1474,7 +1700,7 @@ def list_simple_scene_looks(
                 published_at=str(latest_rows[0]["published_at"]),
             )
         )
-    return looks
+    return SimpleSceneLookPage(items=looks, total=total, limit=limit, offset=offset)
 
 
 def decode_scene_constraints(value: object) -> dict[str, object]:
