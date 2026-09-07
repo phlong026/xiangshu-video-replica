@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 from typing import Any
 
 import pytest
@@ -667,16 +669,18 @@ def test_retryable_failed_idempotent_replay_requeues_same_record_once(
             == 1
         )
 
-    replay_one = client.post(
-        "/api/projects/project_owned/script-rewrite",
-        headers=auth_headers("employee_1"),
-        json=request,
-    )
-    replay_two = client.post(
-        "/api/projects/project_owned/script-rewrite",
-        headers=auth_headers("employee_1"),
-        json=request,
-    )
+    barrier = Barrier(2)
+
+    def replay() -> Any:
+        barrier.wait()
+        return client.post(
+            "/api/projects/project_owned/script-rewrite",
+            headers=auth_headers("employee_1"),
+            json=request,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        replay_one, replay_two = executor.map(lambda _index: replay(), range(2))
     assert replay_one.status_code == 202
     assert replay_two.status_code == 202
     assert replay_one.json()["id"] == task_id
@@ -746,6 +750,48 @@ def test_uncertain_idempotent_replay_never_requeues(
     assert replay.json()["status"] == "SUBMISSION_UNCERTAIN"
     with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         assert script_rewrite.acquire_script_rewrite_task(conn, worker_id="must-not-run") is None
+
+
+def test_retryable_replay_returns_conflict_when_another_project_task_is_active(
+    client: TestClient,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configure_deepseek(db_path, monkeypatch)
+    failed_request = {
+        "text": "旧失败任务A。",
+        "idempotency_key": "old-retryable-a-key",
+    }
+    failed = client.post(
+        "/api/projects/project_owned/script-rewrite",
+        headers=auth_headers("employee_1"),
+        json=failed_request,
+    )
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        conn.execute(
+            "UPDATE script_rewrite_tasks SET status = 'FAILED', retryable = 1 WHERE id = %s",
+            (failed.json()["id"],),
+        )
+        conn.commit()
+    active = client.post(
+        "/api/projects/project_owned/script-rewrite",
+        headers=auth_headers("employee_1"),
+        json={"text": "当前活动任务B。", "idempotency_key": "active-b-key"},
+    )
+    assert active.status_code == 202
+
+    conflict = client.post(
+        "/api/projects/project_owned/script-rewrite",
+        headers=auth_headers("employee_1"),
+        json=failed_request,
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"]["code"] == "SCRIPT_REWRITE_ALREADY_RUNNING"
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        failed_row = script_rewrite.load_script_rewrite_task(conn, failed.json()["id"])
+        active_row = script_rewrite.load_script_rewrite_task(conn, active.json()["id"])
+        assert failed_row["status"] == "FAILED"
+        assert active_row["status"] == "PENDING"
 
 
 def test_script_rewrite_latest_supports_all_identity_and_none_scopes(

@@ -8,7 +8,12 @@ export type ScriptRewriteScope = {
   text: string;
 };
 
-const inMemoryKeys = new Map<string, Map<string, string>>();
+type InMemoryKeyState = {
+  activeFingerprint?: string;
+  keys: Map<string, string>;
+};
+
+const inMemoryKeys = new Map<string, InMemoryKeyState>();
 const ACTIVE_FINGERPRINT = "$active";
 
 function accountStorageKey(accountId: string) {
@@ -28,12 +33,12 @@ function scopeFingerprint(scope: ScriptRewriteScope) {
 
 function memoryKeys(accountId: string) {
   const storageKey = accountStorageKey(accountId);
-  let keys = inMemoryKeys.get(storageKey);
-  if (!keys) {
-    keys = new Map();
-    inMemoryKeys.set(storageKey, keys);
+  let state = inMemoryKeys.get(storageKey);
+  if (!state) {
+    state = { keys: new Map() };
+    inMemoryKeys.set(storageKey, state);
   }
-  return keys;
+  return state;
 }
 
 function readStoredKeys(accountId: string): Record<string, string> {
@@ -64,23 +69,26 @@ export function scriptRewriteIdempotencyKey(scope: ScriptRewriteScope): string {
   const fingerprint = scopeFingerprint(scope);
   const stored = readStoredKeys(scope.accountId);
   const memory = memoryKeys(scope.accountId);
-  const previousFingerprint = stored[ACTIVE_FINGERPRINT];
+  const previousFingerprint =
+    stored[ACTIVE_FINGERPRINT] ?? memory.activeFingerprint;
   if (previousFingerprint && previousFingerprint !== fingerprint) {
     delete stored[previousFingerprint];
-    memory.delete(previousFingerprint);
+    memory.keys.delete(previousFingerprint);
   }
   stored[ACTIVE_FINGERPRINT] = fingerprint;
+  memory.activeFingerprint = fingerprint;
   if (typeof stored[fingerprint] === "string" && stored[fingerprint]) {
+    memory.keys.set(fingerprint, stored[fingerprint]);
     writeStoredKeys(scope.accountId, stored);
     return stored[fingerprint];
   }
-  const existing = memory.get(fingerprint);
+  const existing = memory.keys.get(fingerprint);
   if (existing && previousFingerprint === fingerprint) {
     writeStoredKeys(scope.accountId, stored);
     return existing;
   }
   const created = crypto.randomUUID();
-  memory.set(fingerprint, created);
+  memory.keys.set(fingerprint, created);
   stored[fingerprint] = created;
   writeStoredKeys(scope.accountId, stored);
   return created;
@@ -97,7 +105,8 @@ export function clearScriptRewriteIdempotencyKey(
     writeStoredKeys(scope.accountId, stored);
   }
   const memory = memoryKeys(scope.accountId);
-  if (memory.get(fingerprint) === expectedKey) memory.delete(fingerprint);
+  if (memory.keys.get(fingerprint) === expectedKey)
+    memory.keys.delete(fingerprint);
 }
 
 export function shouldClearScriptRewriteIdempotencyKey(error: unknown) {

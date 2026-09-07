@@ -3,6 +3,7 @@ import {
   type ReactNode,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
 } from "react";
@@ -247,17 +248,19 @@ export function StudioWorkspace({
   const saveAccountRef = useRef(currentUser.id);
   const saveScopeRef = useRef(savedDraftScope(currentUser.id, state.draft));
   const renderedSaveScope = savedDraftScope(currentUser.id, state.draft);
-  if (
-    saveAccountRef.current !== currentUser.id ||
-    saveScopeRef.current !== renderedSaveScope
-  ) {
+  useLayoutEffect(() => {
+    if (
+      saveAccountRef.current === currentUser.id &&
+      saveScopeRef.current === renderedSaveScope
+    )
+      return;
     if (saveAccountRef.current !== currentUser.id) {
       draftTouchedRef.current = false;
     }
     saveAccountRef.current = currentUser.id;
     saveScopeRef.current = renderedSaveScope;
     saveOperationRef.current += 1;
-  }
+  }, [currentUser.id, renderedSaveScope]);
   const referenceAssetsRequestRef = useRef(0);
   const referenceAssetsDraftRef = useRef<StudioDraft | undefined>(undefined);
   useEffect(() => {
@@ -996,6 +999,7 @@ export function StudioWorkspace({
     const accountId = currentUser.id;
     const expectedScope = savedDraftScope(accountId, draft);
     const operation = ++saveOperationRef.current;
+    window.clearTimeout(draftSaveTimerRef.current);
     const isCurrentSave = () =>
       saveMountedRef.current &&
       saveOperationRef.current === operation &&
@@ -1029,14 +1033,14 @@ export function StudioWorkspace({
     void persistSavedScript(script, draft.projectId, draft.ipId)
       .then(async () => {
         if (!isCurrentSave()) return;
-        markSaved();
-        if (!isCurrentSave()) return;
         await persistCloudDraft({
           ...draft,
           script,
           scriptEdited: false,
         }).catch(() => undefined);
         if (!isCurrentSave()) return;
+        draftTouchedRef.current = false;
+        markSaved();
         notify("已保存到我的文案，换设备登录也能找回。");
       })
       .catch(() => {

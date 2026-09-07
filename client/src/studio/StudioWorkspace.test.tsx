@@ -6,6 +6,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
+import { StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createReviewData, createReviewState, reviewUser } from "./fixtures";
 import { StudioWorkspace } from "./StudioWorkspace";
@@ -542,6 +543,72 @@ describe("V1.4 workspace integration", () => {
           scriptEdited: false,
         }),
       );
+    });
+
+    it("StrictMode下慢云写成功后仅写一次草稿并通知一次", async () => {
+      let resolveCloud: (() => void) | undefined;
+      live.persistCloudDraft.mockReturnValueOnce(
+        new Promise<void>((resolve) => {
+          resolveCloud = resolve;
+        }),
+      );
+      live.loadStudioData.mockResolvedValue(emptyStudioData);
+      live.loadCloudDraft.mockResolvedValue(undefined);
+      const state = createState("copy");
+      state.draft.projectId = "project-1";
+      state.draft.sourceId = "asset-1";
+      state.draft.ipId = "identity-1";
+      state.draft.script.text = "只保存一次的文案";
+      state.draft.scriptEdited = true;
+      render(
+        <StrictMode>
+          <StudioWorkspace currentUser={reviewUser} initialState={state} />
+        </StrictMode>,
+      );
+
+      await openCopyPage();
+      vi.useFakeTimers();
+      try {
+        fireEvent.click(screen.getByRole("button", { name: "保存版本" }));
+        await act(async () => Promise.resolve());
+        expect(live.persistCloudDraft).toHaveBeenCalledTimes(1);
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(2_000);
+          resolveCloud?.();
+          await Promise.resolve();
+          await vi.advanceTimersByTimeAsync(2_000);
+        });
+        expect(live.persistCloudDraft).toHaveBeenCalledTimes(1);
+        expect(screen.getAllByText(/已保存到我的文案/)).toHaveLength(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("显式草稿云写等待期间卸载后保持静默且不追加写入", async () => {
+      let resolveCloud: (() => void) | undefined;
+      live.persistCloudDraft.mockReturnValueOnce(
+        new Promise<void>((resolve) => {
+          resolveCloud = resolve;
+        }),
+      );
+      live.loadStudioData.mockResolvedValue(emptyStudioData);
+      const state = createState("copy");
+      state.draft.projectId = "project-1";
+      state.draft.sourceId = "asset-1";
+      state.draft.script.text = "卸载前的显式保存";
+      state.draft.scriptEdited = true;
+      const view = render(
+        <StudioWorkspace currentUser={reviewUser} initialState={state} />,
+      );
+      await openCopyPage();
+      fireEvent.click(screen.getByRole("button", { name: "保存版本" }));
+      await waitFor(() =>
+        expect(live.persistCloudDraft).toHaveBeenCalledTimes(1),
+      );
+      view.unmount();
+      await act(async () => resolveCloud?.());
+      expect(live.persistCloudDraft).toHaveBeenCalledTimes(1);
     });
 
     it("版本保存失败时仍保持未保存门禁", async () => {

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   clearScriptRewriteIdempotencyKey,
   type ScriptRewriteScope,
@@ -47,6 +47,34 @@ describe("文案改写幂等键生命周期", () => {
     expect(second).not.toBe(first);
     expect(third).not.toBe(first);
     expect(third).not.toBe(second);
+  });
+
+  it("sessionStorage拒绝访问时仍由账号内存状态复用并淘汰旧范围", () => {
+    const getItem = vi
+      .spyOn(Storage.prototype, "getItem")
+      .mockImplementation(() => {
+        throw new DOMException("blocked", "SecurityError");
+      });
+    const setItem = vi
+      .spyOn(Storage.prototype, "setItem")
+      .mockImplementation(() => {
+        throw new DOMException("blocked", "SecurityError");
+      });
+    try {
+      const first = scriptRewriteIdempotencyKey(scope);
+      expect(scriptRewriteIdempotencyKey({ ...scope })).toBe(first);
+      const second = scriptRewriteIdempotencyKey({
+        ...scope,
+        sourceAssetId: "source-without-storage",
+      });
+      const third = scriptRewriteIdempotencyKey(scope);
+      expect(second).not.toBe(first);
+      expect(third).not.toBe(first);
+      expect(third).not.toBe(second);
+    } finally {
+      getItem.mockRestore();
+      setItem.mockRestore();
+    }
   });
 
   it("只清理仍与终态请求匹配的键", () => {

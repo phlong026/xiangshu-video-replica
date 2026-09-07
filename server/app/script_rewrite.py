@@ -19,6 +19,7 @@ from urllib.request import Request, urlopen
 from uuid import uuid4
 
 from fastapi import HTTPException
+from psycopg import errors as psycopg_errors
 from pydantic import BaseModel, Field
 
 from app.auth import CurrentUser
@@ -444,19 +445,42 @@ def enqueue_script_rewrite_task(
             identity_id=identity_id,
         )
         if str(replay["status"]) == "FAILED" and bool(replay["retryable"]):
-            retried = conn.execute(
+            active = conn.execute(
                 """
-                UPDATE script_rewrite_tasks
-                SET status = 'PENDING', provider_started_at = NULL,
-                    locked_by = NULL, locked_until = NULL,
-                    result_json = NULL, error_code = NULL,
-                    error_message_redacted = NULL, retryable = 0,
-                    completed_at = NULL, updated_at = %s
-                WHERE id = %s AND status = 'FAILED' AND retryable = 1
-                RETURNING *
+                SELECT id FROM script_rewrite_tasks
+                WHERE project_id = %s AND id <> %s
+                  AND status IN ('PENDING','RUNNING')
+                LIMIT 1
                 """,
-                (_time_text(datetime.now(UTC)), replay["id"]),
+                (project_id, replay["id"]),
             ).fetchone()
+            if active is not None:
+                raise _script_rewrite_error(
+                    409,
+                    "SCRIPT_REWRITE_ALREADY_RUNNING",
+                    "该项目已有口播稿正在后台改写，请等待完成。",
+                )
+            try:
+                retried = conn.execute(
+                    """
+                    UPDATE script_rewrite_tasks
+                    SET status = 'PENDING', provider_started_at = NULL,
+                        locked_by = NULL, locked_until = NULL,
+                        result_json = NULL, error_code = NULL,
+                        error_message_redacted = NULL, retryable = 0,
+                        completed_at = NULL, updated_at = %s
+                    WHERE id = %s AND status = 'FAILED' AND retryable = 1
+                    RETURNING *
+                    """,
+                    (_time_text(datetime.now(UTC)), replay["id"]),
+                ).fetchone()
+            except (sqlite3.IntegrityError, psycopg_errors.UniqueViolation) as exc:
+                conn.rollback()
+                raise _script_rewrite_error(
+                    409,
+                    "SCRIPT_REWRITE_ALREADY_RUNNING",
+                    "该项目已有口播稿正在后台改写，请等待完成。",
+                ) from exc
             if retried is not None:
                 conn.commit()
                 return cast(sqlite3.Row, retried)
