@@ -1601,7 +1601,7 @@ def test_other_employee_cannot_see_or_update_ip_profile(client: TestClient) -> N
         "expression_style": "越权风格",
     }
 
-    for user_id in ("employee_2", "auditor_1"):
+    for user_id in ("employee_2",):
         response = client.patch(
             f"/api/simple-characters/identities/{created['identity_id']}/profile",
             headers=headers(user_id),
@@ -1621,6 +1621,70 @@ def test_other_employee_cannot_see_or_update_ip_profile(client: TestClient) -> N
     ).json()["items"]
     assert owner_library[0]["display_name"] == "荣哥"
     assert owner_library[0]["role"] == ""
+
+
+def test_auditor_cannot_rename_or_update_ip_profile_without_side_effects(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    created = generate_global(client).json()
+    identity_id = created["identity_id"]
+    profile_url = f"/api/simple-characters/identities/{identity_id}/profile"
+
+    renamed = client.patch(
+        f"/api/simple-characters/identities/{identity_id}/name",
+        headers=headers("auditor_1"),
+        json={"display_name": "审计员越权命名"},
+    )
+    updated = client.patch(
+        profile_url,
+        headers=headers("auditor_1"),
+        json={
+            "display_name": "审计员越权档案",
+            "role": "越权角色",
+            "service_scope": "越权范围",
+            "target_audience": "越权人群",
+            "expression_style": "越权风格",
+        },
+    )
+
+    assert renamed.status_code == 403
+    assert renamed.json()["detail"]["code"] == "ROLE_FORBIDDEN"
+    assert updated.status_code == 403
+    assert updated.json()["detail"]["code"] == "ROLE_FORBIDDEN"
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        identity = conn.execute(
+            "SELECT display_name FROM person_identities WHERE id = %s", (identity_id,)
+        ).fetchone()
+        persona = conn.execute(
+            "SELECT occupation, ip_profile_revision FROM character_personas WHERE id = %s",
+            (created["persona_id"],),
+        ).fetchone()
+    assert identity["display_name"] == "荣哥"
+    assert persona["occupation"] is None
+    assert persona["ip_profile_revision"] == 0
+
+
+def test_customer_can_update_own_ip_profile(client: TestClient, db_path: Path) -> None:
+    created = generate_global(client).json()
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        conn.execute("UPDATE users SET role = 'customer' WHERE id = 'employee_1'")
+        conn.commit()
+
+    response = client.patch(
+        f"/api/simple-characters/identities/{created['identity_id']}/profile",
+        headers=headers("employee_1"),
+        json={
+            "display_name": "客户自有IP",
+            "role": "乡墅顾问",
+            "service_scope": "建房咨询",
+            "target_audience": "返乡业主",
+            "expression_style": "专业直接",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["display_name"] == "客户自有IP"
 
 
 def test_ip_profile_update_does_not_modify_scene_persona(
@@ -2325,6 +2389,7 @@ def test_owner_generates_and_lists_a_direct_publish_scene_look(
 
 def test_scene_looks_hide_foreign_identities_and_reject_auditors(
     client: TestClient,
+    db_path: Path,
 ) -> None:
     created = generate_global(client).json()
     identity_id = created["identity_id"]
@@ -2349,6 +2414,35 @@ def test_scene_looks_hide_foreign_identities_and_reject_auditors(
         },
     )
     assert auditor.status_code == 403
+    assert auditor.json()["detail"]["code"] == "ROLE_FORBIDDEN"
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM character_sheet_tasks "
+                "WHERE idempotency_key = 'scene-look-auditor'"
+            ).fetchone()[0]
+            == 0
+        )
+
+
+def test_customer_can_enqueue_own_scene_look(client: TestClient, db_path: Path) -> None:
+    created = generate_global(client).json()
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        conn.execute("UPDATE users SET role = 'customer' WHERE id = 'employee_1'")
+        conn.commit()
+
+    response = client.post(
+        f"/api/simple-characters/identities/{created['identity_id']}/scene-looks/tasks/generate",
+        headers=headers("employee_1"),
+        json={
+            "scene_name": "客户讲解",
+            "scene_description": "现代客厅",
+            "costume_description": "商务休闲装",
+            "idempotency_key": "customer-scene-look",
+        },
+    )
+
+    assert response.status_code == 202, response.text
 
 
 def test_scene_look_page_limits_database_rows_and_returns_scoped_total(

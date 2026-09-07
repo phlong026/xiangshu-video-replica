@@ -29,7 +29,7 @@ from app.db_portable import BusinessConnection
 from app.hifly import HiflyClient, HiflyError, HiflySubmissionUncertain
 from app.internal_billing import finalize_oral_billing, reserve_oral_billing
 from app.media_routes import get_media_storage, storage_for_asset
-from app.permissions import require_asset_access, write_audit
+from app.permissions import require_asset_access, require_not_auditor, write_audit
 from app.settings import SettingsRepository
 from app.storage import StorageAdapter
 
@@ -205,6 +205,13 @@ def create_oral_consent(
     purpose: str,
     consent_text_version: str,
 ) -> dict[str, Any]:
+    require_not_auditor(
+        conn,
+        actor=actor,
+        action="oral.consent.create",
+        entity_type="person_identity",
+        entity_id=identity_id,
+    )
     _require_own_identity(conn, actor, identity_id)
     if consent_text_version != ORAL_CONSENT_TEXT_VERSION:
         raise OralDomainError("授权文本版本已更新，请重新确认")
@@ -355,6 +362,13 @@ def start_avatar_clone(
     idempotency_key: str,
     vendor: HiflyClient | None = None,
 ) -> CloneStartResult:
+    require_not_auditor(
+        conn,
+        actor=actor,
+        action="oral.avatar.create",
+        entity_type="person_identity",
+        entity_id=identity_id,
+    )
     if source_kind not in {"VIDEO", "IMAGE"}:
         raise OralDomainError("分身素材类型不支持")
     _require_own_identity(conn, actor, identity_id)
@@ -443,6 +457,13 @@ def start_voice_clone(
     idempotency_key: str,
     vendor: HiflyClient | None = None,
 ) -> CloneStartResult:
+    require_not_auditor(
+        conn,
+        actor=actor,
+        action="oral.voice.create",
+        entity_type="person_identity",
+        entity_id=identity_id,
+    )
     _require_own_identity(conn, actor, identity_id)
     asset = _require_biometric_source_asset(
         conn,
@@ -1159,6 +1180,13 @@ def confirm_voice_clone(
     voice_id: str,
     actor: CurrentUser,
 ) -> dict[str, Any]:
+    require_not_auditor(
+        conn,
+        actor=actor,
+        action="oral.voice.confirm",
+        entity_type="oral_voice",
+        entity_id=voice_id,
+    )
     row = conn.execute(
         "SELECT * FROM oral_voices WHERE id = %s AND owner_user_id = %s",
         (voice_id, actor.id),

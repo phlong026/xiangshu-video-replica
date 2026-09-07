@@ -61,7 +61,7 @@ from app.media_tools import (
     resolve_media_binary,
     validate_image_decodable,
 )
-from app.permissions import require_project_access, write_audit
+from app.permissions import require_not_auditor, require_project_access, write_audit
 from app.storage import (
     StorageAdapter,
     StorageBackendUnavailable,
@@ -978,6 +978,13 @@ def rename_simple_character_identity(
     touches ``display_name`` and allows the identity owner (or an admin);
     renames must never widen access to authorization or source assets.
     """
+    require_not_auditor(
+        conn,
+        actor=actor,
+        action="person_identity.rename",
+        entity_type="person_identity",
+        entity_id=identity_id,
+    )
     row = read_identity_row(conn, identity_id)
     if actor.role != "admin" and str(row["owner_user_id"]) != actor.id:
         raise character_error(
@@ -1025,10 +1032,15 @@ def update_simple_character_profile(
     expression_style: str,
 ) -> SimpleLibraryEntry:
     """Update the owner-facing IP profile on the identity's base persona."""
+    require_not_auditor(
+        conn,
+        actor=actor,
+        action="person_identity.profile_update",
+        entity_type="person_identity",
+        entity_id=identity_id,
+    )
     identity = read_identity_row(conn, identity_id)
-    if actor.role != "admin" and (
-        actor.role == "auditor" or str(identity["owner_user_id"]) != actor.id
-    ):
+    if actor.role != "admin" and str(identity["owner_user_id"]) != actor.id:
         raise character_error(404, "PERSON_IDENTITY_NOT_FOUND", "人物身份不存在或不可用。")
     if str(identity["status"]) == "ARCHIVED":
         raise character_error(409, "IDENTITY_ARCHIVED", "已归档人物身份不能修改。")

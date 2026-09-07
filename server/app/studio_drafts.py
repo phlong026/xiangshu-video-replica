@@ -175,13 +175,20 @@ def save_studio_draft(
 def delete_studio_draft(
     conn: BusinessConnection,
     *,
-    actor_id: str,
+    actor: CurrentUser,
     kind: str,
 ) -> None:
+    require_not_auditor(
+        conn,
+        actor=actor,
+        action="studio.draft_delete",
+        entity_type="studio_draft",
+        entity_id=kind,
+    )
     _validate_draft_kind(kind)
     cursor = conn.execute(
         "DELETE FROM studio_drafts WHERE user_id = %s AND draft_kind = %s",
-        (actor_id, kind),
+        (actor.id, kind),
     )
     if getattr(cursor, "rowcount", 0) == 0:
         raise _draft_not_found()
@@ -274,12 +281,19 @@ def save_saved_script(
 def delete_saved_script(
     conn: BusinessConnection,
     *,
-    actor_id: str,
+    actor: CurrentUser,
     script_id: str,
 ) -> None:
+    require_not_auditor(
+        conn,
+        actor=actor,
+        action="studio.saved_script_delete",
+        entity_type="studio_saved_script",
+        entity_id=script_id,
+    )
     cursor = conn.execute(
         "DELETE FROM studio_saved_scripts WHERE user_id = %s AND script_id = %s",
-        (actor_id, script_id),
+        (actor.id, script_id),
     )
     if getattr(cursor, "rowcount", 0) == 0:
         raise HTTPException(
