@@ -611,6 +611,49 @@ describe("V1.4 工作台新版首页布局", () => {
     expect(createViralImportTask.mock.calls[1][3]).not.toBe(failedKey);
   });
 
+  it("首页爆款畸形成功后不写草稿且使用新幂等键重试", async () => {
+    createViralImportTask.mockResolvedValue({
+      id: "home-malformed",
+      status: "SUCCEEDED",
+      projectId: "home-project",
+      sourceAssetId: "home-audio",
+      canAnalyze: false,
+    });
+    const source = {
+      ...videos[0],
+      platformKey: "douyin" as const,
+      nativeId: "native-home-malformed",
+    };
+    const value = studio(undefined, {
+      user: {
+        id: "customer-home-malformed",
+        username: "customer-home-malformed",
+        display_name: "首页客户",
+        role: "customer",
+      },
+      state: createState("workbench"),
+      data: data([], [source]),
+    });
+    useStudio.mockReturnValue(value);
+    render(<WorkbenchPage />);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "用它复刻：灵感视频 1" }),
+    );
+    await waitFor(() =>
+      expect(value.notify).toHaveBeenCalledWith("该来源暂不支持视频复刻"),
+    );
+    const malformedKey = createViralImportTask.mock.calls[0][3];
+    fireEvent.click(
+      screen.getByRole("button", { name: "用它复刻：灵感视频 1" }),
+    );
+    await waitFor(() => expect(createViralImportTask).toHaveBeenCalledTimes(2));
+
+    expect(createViralImportTask.mock.calls[1][3]).not.toBe(malformedKey);
+    expect(value.patchDraft).not.toHaveBeenCalled();
+    expect(value.navigate).not.toHaveBeenCalled();
+  });
+
   it("正式首页爆款缺少平台原生 ID 时不创建伪复刻项目", () => {
     const source = {
       ...videos[0],

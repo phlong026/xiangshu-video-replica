@@ -577,7 +577,7 @@ describe("V1.4 内容与运营页面", () => {
     );
   });
 
-  it("仅音频来源不会伪装成可分析的视频项目", async () => {
+  it("仅音频来源不会伪装成视频项目且再次点击使用新键", async () => {
     createViralImportTask.mockResolvedValue({
       taskId: "audio-import",
       status: "SUCCEEDED",
@@ -599,10 +599,47 @@ describe("V1.4 内容与运营页面", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "视频复刻" }));
 
-    await waitFor(() =>
-      expect(value.notify).toHaveBeenCalledWith("该来源暂不支持视频复刻"),
-    );
+    expect(
+      await screen.findByText("该来源暂不支持视频复刻"),
+    ).toBeInTheDocument();
+    const malformedKey = createViralImportTask.mock.calls[0][3];
+    fireEvent.click(screen.getByRole("button", { name: "视频复刻" }));
+    await waitFor(() => expect(createViralImportTask).toHaveBeenCalledTimes(2));
+    expect(createViralImportTask.mock.calls[1][3]).not.toBe(malformedKey);
     expect(value.patchDraft).not.toHaveBeenCalled();
+    expect(value.navigate).not.toHaveBeenCalled();
+  });
+
+  it("不可转写的畸形成功不会写入文案草稿且再次点击使用新键", async () => {
+    createViralImportTask.mockResolvedValue({
+      taskId: "malformed-copy",
+      status: "SUCCEEDED",
+      projectId: "copy-project",
+      sourceAssetId: "copy-asset",
+      mediaKind: "video",
+      canTranscribe: false,
+      canAnalyze: true,
+    });
+    const value = studio({
+      state: {
+        ...studio().state,
+        page: "viral-detail",
+        selectedVideoId: "dy-1",
+      },
+    });
+    useStudio.mockReturnValue(value);
+    render(<ViralDetailPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "提取文案" }));
+    expect(
+      await screen.findByText("该来源暂不支持提取文案"),
+    ).toBeInTheDocument();
+    const malformedKey = createViralImportTask.mock.calls[0][3];
+    fireEvent.click(screen.getByRole("button", { name: "提取文案" }));
+    await waitFor(() => expect(createViralImportTask).toHaveBeenCalledTimes(2));
+    expect(createViralImportTask.mock.calls[1][3]).not.toBe(malformedKey);
+    expect(value.patchDraft).not.toHaveBeenCalled();
+    expect(value.extractScriptFromUpload).not.toHaveBeenCalled();
     expect(value.navigate).not.toHaveBeenCalled();
   });
 

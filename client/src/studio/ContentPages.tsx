@@ -1242,6 +1242,14 @@ function useViralImport(sourceId?: string, accountId = "anonymous") {
           clearKey();
           throw new Error("导入任务缺少项目或素材结果");
         }
+        if (purpose === "copy" && !completed.canTranscribe) {
+          clearKey();
+          throw new Error("该来源暂不支持提取文案");
+        }
+        if (purpose === "replica" && !completed.canAnalyze) {
+          clearKey();
+          throw new Error("该来源暂不支持视频复刻");
+        }
         setState({ status: "ready", message: "参考素材已导入" });
         onReady(completed);
       } catch (error) {

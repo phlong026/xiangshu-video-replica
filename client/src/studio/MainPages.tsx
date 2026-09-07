@@ -286,7 +286,7 @@ export function WorkbenchPage() {
         );
       }
       if (!task.canAnalyze || !task.projectId || !task.sourceAssetId) {
-        if (!task.projectId || !task.sourceAssetId) clearKey();
+        clearKey();
         throw new Error("该来源暂不支持视频复刻");
       }
       patchDraft({
