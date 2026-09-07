@@ -11,7 +11,7 @@ from app.db import alembic_config, connect_database, initialize_database
 from app.db_portable import BusinessConnection
 from app.settings import SettingsRepository
 
-HEAD_REVISION = "078_viral_module_launch"
+HEAD_REVISION = "080_viral_link_resolution_receipts"
 
 
 def seed_subjects(conn: sqlite3.Connection) -> None:
