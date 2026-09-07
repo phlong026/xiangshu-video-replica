@@ -86,6 +86,7 @@ const api = vi.hoisted(() => ({
   ),
   createIndependentVideoTask: vi.fn(),
   listUserSavedPrompts: vi.fn(async (): Promise<unknown[]> => []),
+  getLatestScriptRewriteTask: vi.fn(async (): Promise<unknown> => null),
 }));
 vi.mock("../api", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
@@ -519,11 +520,18 @@ describe("V1.4 workspace integration", () => {
 
     it("自动保存进行中连续两次显式保存仍发送最新终态草稿", async () => {
       let resolveAutosave: (() => void) | undefined;
-      live.persistCloudDraft.mockReturnValueOnce(
-        new Promise<void>((resolve) => {
-          resolveAutosave = resolve;
-        }),
-      );
+      let resolveFinalDraft: (() => void) | undefined;
+      live.persistCloudDraft
+        .mockReturnValueOnce(
+          new Promise<void>((resolve) => {
+            resolveAutosave = resolve;
+          }),
+        )
+        .mockReturnValueOnce(
+          new Promise<void>((resolve) => {
+            resolveFinalDraft = resolve;
+          }),
+        );
       live.loadStudioData.mockResolvedValue(emptyStudioData);
       live.loadCloudDraft.mockResolvedValue(undefined);
       const state = createState("copy");
@@ -533,48 +541,44 @@ describe("V1.4 workspace integration", () => {
       state.draft.ipId = "identity-double-save";
       render(<StudioWorkspace currentUser={reviewUser} initialState={state} />);
       await openCopyPage();
-      vi.useFakeTimers();
-      try {
-        fireEvent.change(screen.getByLabelText("二创文案"), {
-          target: { value: "连续保存的终态正文" },
-        });
-        await act(async () => {
-          await vi.advanceTimersByTimeAsync(2_000);
-        });
-        const autosaveDraft = live.persistCloudDraft.mock.calls[0]?.[0] as
-          | ReturnType<typeof restoredDraft>
-          | undefined;
 
-        fireEvent.click(screen.getByRole("button", { name: "保存版本" }));
-        await act(async () => Promise.resolve());
-        fireEvent.click(screen.getByRole("button", { name: "保存版本" }));
-        await act(async () => Promise.resolve());
-        expect(live.persistCloudDraft).toHaveBeenCalledTimes(1);
+      fireEvent.change(screen.getByLabelText("二创文案"), {
+        target: { value: "连续保存的终态正文" },
+      });
+      await waitFor(
+        () => expect(live.persistCloudDraft).toHaveBeenCalledTimes(1),
+        { timeout: 3_000 },
+      );
+      const autosaveDraft = live.persistCloudDraft.mock.calls[0]?.[0] as
+        | ReturnType<typeof restoredDraft>
+        | undefined;
 
-        await act(async () => {
-          resolveAutosave?.();
-          await vi.runAllTimersAsync();
-        });
-        expect(live.persistCloudDraft).toHaveBeenCalledTimes(2);
-        expect(live.persistCloudDraft.mock.calls[1]?.[0]).toMatchObject({
-          projectId: "project-double-save",
-          sourceId: "source-double-save",
-          sourceAssetId: "asset-double-save",
-          quoteRevision: autosaveDraft?.quoteRevision,
-          scriptEdited: false,
-          script: {
-            ipId: "identity-double-save",
-            sourceProjectId: "project-double-save",
-            sourceKind: "project",
-          },
-        });
-        vi.useRealTimers();
-        await waitFor(() =>
-          expect(screen.getAllByText(/换设备登录也能找回/)).toHaveLength(1),
-        );
-      } finally {
-        vi.useRealTimers();
-      }
+      fireEvent.click(screen.getByRole("button", { name: "保存版本" }));
+      fireEvent.click(screen.getByRole("button", { name: "保存版本" }));
+      await waitFor(() =>
+        expect(live.persistSavedScript).toHaveBeenCalledTimes(2),
+      );
+      expect(live.persistCloudDraft).toHaveBeenCalledTimes(1);
+
+      await act(async () => resolveAutosave?.());
+      await waitFor(() =>
+        expect(live.persistCloudDraft).toHaveBeenCalledTimes(2),
+      );
+      expect(live.persistCloudDraft.mock.calls[1]?.[0]).toMatchObject({
+        projectId: "project-double-save",
+        sourceId: "source-double-save",
+        sourceAssetId: "asset-double-save",
+        quoteRevision: autosaveDraft?.quoteRevision,
+        scriptEdited: false,
+        script: {
+          ipId: "identity-double-save",
+          sourceProjectId: "project-double-save",
+          sourceKind: "project",
+        },
+      });
+
+      await act(async () => resolveFinalDraft?.());
+      expect(await screen.findAllByText(/换设备登录也能找回/)).toHaveLength(1);
     });
 
     it("同范围自动保存已成功时显式保存补写终态草稿", async () => {
