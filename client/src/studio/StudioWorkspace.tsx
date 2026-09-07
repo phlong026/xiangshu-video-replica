@@ -340,6 +340,8 @@ export function StudioWorkspace({
   const restoredAssetsRef = useRef<StudioAsset[]>([]);
   const oralSubmittingRef = useRef(false);
   const videoSubmittingRef = useRef(false);
+  const oralSubmitAttemptRef = useRef(0);
+  const videoSubmitAttemptRef = useRef(0);
   const oralSubmissionRef = useRef<SubmissionEnvelope | null>(null);
   const videoSubmissionRef = useRef<SubmissionEnvelope | null>(null);
   const currentUserRoleRef = useRef(currentUser.role);
@@ -349,6 +351,8 @@ export function StudioWorkspace({
     permissionGenerationRef.current += 1;
     operationRef.current += 1;
     generationDialogRevisionRef.current += 1;
+    oralSubmitAttemptRef.current += 1;
+    videoSubmitAttemptRef.current += 1;
     pendingRouteRef.current = undefined;
   }
   const notify = useCallback((message: string) => setNotice(message), []);
@@ -708,6 +712,7 @@ export function StudioWorkspace({
     }
     const dialogRevision = generationDialogRevisionRef.current;
     const permissionGeneration = permissionGenerationRef.current;
+    const attempt = ++oralSubmitAttemptRef.current;
     const draft = latestDraftRef.current;
     const draftFingerprint = JSON.stringify(draft);
     const page = studioPageRef.current;
@@ -764,8 +769,10 @@ export function StudioWorkspace({
         );
       }
     } finally {
-      oralSubmittingRef.current = false;
-      setOralSubmitting(false);
+      if (oralSubmitAttemptRef.current === attempt) {
+        oralSubmittingRef.current = false;
+        setOralSubmitting(false);
+      }
     }
   };
   const refresh = useCallback(() => setRevision((value) => value + 1), []);
@@ -800,6 +807,7 @@ export function StudioWorkspace({
     const page = studioPageRef.current;
     const dialogRevision = generationDialogRevisionRef.current;
     const permissionGeneration = permissionGenerationRef.current;
+    const attempt = ++videoSubmitAttemptRef.current;
     const isCurrent = () =>
       mountedRef.current &&
       currentUserRoleRef.current !== "auditor" &&
@@ -875,8 +883,10 @@ export function StudioWorkspace({
         );
       }
     } finally {
-      videoSubmittingRef.current = false;
-      setVideoSubmitting(false);
+      if (videoSubmitAttemptRef.current === attempt) {
+        videoSubmittingRef.current = false;
+        setVideoSubmitting(false);
+      }
     }
   };
 

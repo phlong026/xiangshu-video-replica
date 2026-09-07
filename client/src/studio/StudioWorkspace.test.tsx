@@ -2121,6 +2121,59 @@ describe("视频生成（C2 独立创作）", () => {
     expect(window.location.hash).toBe(previousHash);
   });
 
+  it("旧口播请求的 finally 不会解锁角色往返后的新提交", async () => {
+    const resolveTasks: Array<(value: { id: string; status: string }) => void> =
+      [];
+    api.createOralTask.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveTasks.push(resolve);
+        }),
+    );
+    live.loadStudioData.mockResolvedValue(createReviewData());
+    const state = createReviewState("oral");
+    const view = render(
+      <StudioWorkspace currentUser={reviewUser} initialState={state} />,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "生成口播视频" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "确认费用并提交" }),
+    );
+    await waitFor(() => expect(api.createOralTask).toHaveBeenCalledOnce());
+
+    view.rerender(
+      <StudioWorkspace
+        currentUser={{ ...reviewUser, role: "auditor" }}
+        initialState={state}
+      />,
+    );
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    view.rerender(
+      <StudioWorkspace currentUser={reviewUser} initialState={state} />,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "生成口播视频" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "确认费用并提交" }),
+    );
+    await waitFor(() => expect(api.createOralTask).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole("button", { name: "提交中…" })).toBeDisabled();
+
+    await act(async () => {
+      resolveTasks[0]?.({ id: "oral-a", status: "QUEUED" });
+      await Promise.resolve();
+    });
+
+    expect(screen.getByRole("button", { name: "提交中…" })).toBeDisabled();
+    await act(async () => {
+      resolveTasks[1]?.({ id: "oral-b", status: "QUEUED" });
+      await Promise.resolve();
+    });
+  });
+
   it("工作区卸载后旧口播响应不会再跳转页面", async () => {
     live.loadPersonAssets.mockResolvedValue({ assets: [], errors: [] });
     let resolveTask:
@@ -2277,6 +2330,65 @@ describe("视频生成（C2 独立创作）", () => {
     expect(api.createIndependentVideoTask.mock.calls[1]).toEqual(
       api.createIndependentVideoTask.mock.calls[0],
     );
+  });
+
+  it("旧视频请求的 finally 不会解锁角色往返后的新提交", async () => {
+    api.getIndependentCapabilities.mockResolvedValue({
+      extended_modes_enabled: true,
+      t2v_enabled: true,
+      i2v_enabled: true,
+      r2v_enabled: true,
+      last_frame_enabled: true,
+      max_reference_images: 4,
+      max_quantity: 4,
+    });
+    const resolveBatches: Array<
+      (value: { id: string; status: string; tasks: unknown[] }) => void
+    > = [];
+    api.createIndependentVideoTask.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveBatches.push(resolve);
+        }),
+    );
+    live.loadStudioData.mockResolvedValue(emptyStudioData);
+    const view = render(<StudioWorkspace currentUser={reviewUser} />);
+    await openVideoPage();
+    fireEvent.change(screen.getByLabelText("提示词"), {
+      target: { value: "航拍乡墅庭院" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "生成视频" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "确认费用并提交" }),
+    );
+    await waitFor(() =>
+      expect(api.createIndependentVideoTask).toHaveBeenCalledOnce(),
+    );
+
+    view.rerender(
+      <StudioWorkspace currentUser={{ ...reviewUser, role: "auditor" }} />,
+    );
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    view.rerender(<StudioWorkspace currentUser={reviewUser} />);
+    fireEvent.click(screen.getByRole("button", { name: "生成视频" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "确认费用并提交" }),
+    );
+    await waitFor(() =>
+      expect(api.createIndependentVideoTask).toHaveBeenCalledTimes(2),
+    );
+    expect(screen.getByRole("button", { name: "提交中…" })).toBeDisabled();
+
+    await act(async () => {
+      resolveBatches[0]?.({ id: "batch-a", status: "QUEUED", tasks: [] });
+      await Promise.resolve();
+    });
+
+    expect(screen.getByRole("button", { name: "提交中…" })).toBeDisabled();
+    await act(async () => {
+      resolveBatches[1]?.({ id: "batch-b", status: "QUEUED", tasks: [] });
+      await Promise.resolve();
+    });
   });
 
   it("视频结果未知后价格变化不换键，业务参数变化才换键", async () => {
