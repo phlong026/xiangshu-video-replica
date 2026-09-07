@@ -1,6 +1,13 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createState } from "./state";
+import type { Project } from "../api";
+import { createState, patchStudioDraft } from "./state";
 import type {
   StudioAsset,
   StudioContextValue,
@@ -8,6 +15,13 @@ import type {
   StudioTask,
   StudioVideo,
 } from "./types";
+
+type WorkbenchUploadResult = {
+  projectId: string;
+  assetId: string;
+  project?: Project;
+  asset?: StudioAsset;
+};
 
 const {
   useStudio,
@@ -21,7 +35,14 @@ const {
 } = vi.hoisted(() => ({
   useStudio: vi.fn<() => StudioContextValue>(),
   loadTaskPreview: vi.fn(),
-  uploadWorkbenchSourceVideo: vi.fn(),
+  uploadWorkbenchSourceVideo:
+    vi.fn<
+      (
+        file: File,
+        onProgress: (percent: number) => void,
+        signal?: AbortSignal,
+      ) => Promise<WorkbenchUploadResult>
+    >(),
   cancelStudioTask: vi.fn(),
   downloadStudioTaskResult: vi.fn(),
   retryStudioTask: vi.fn(),
@@ -518,16 +539,16 @@ describe("V1.4 工作台上传与创作入口", () => {
     expect(uploadWorkbenchSourceVideo).not.toHaveBeenCalled();
   });
 
-  it("上传成功：展示进度与云存储状态，并把来源写入当前草稿", async () => {
+  it("上传成功：同步项目、来源资产与当前草稿", async () => {
     const value = workbench();
     useStudio.mockReturnValue(value);
-    const pending: {
-      resolve?: (value: { projectId: string; assetId: string }) => void;
-    } = {};
+    const pending: { resolve?: (value: WorkbenchUploadResult) => void } = {};
+    let reportProgress: ((percent: number) => void) | undefined;
     uploadWorkbenchSourceVideo.mockImplementation(
       (_file: File, onProgress: (percent: number) => void) =>
         new Promise<{ projectId: string; assetId: string }>((resolve) => {
           pending.resolve = resolve;
+          reportProgress = onProgress;
           onProgress(40);
         }),
     );
@@ -536,18 +557,126 @@ describe("V1.4 工作台上传与创作入口", () => {
     changeFile("乡墅案例.mp4");
     expect(uploadWorkbenchSourceVideo).toHaveBeenCalledOnce();
     expect(screen.getByText("正在上传 乡墅案例.mp4… 40%")).toBeInTheDocument();
+    act(() => reportProgress?.(100));
+    expect(screen.getByText("正在上传 乡墅案例.mp4… 100%")).toBeInTheDocument();
+    expect(screen.queryByText("已上传云存储：乡墅案例.mp4")).toBeNull();
 
-    pending.resolve?.({ projectId: "proj-1", assetId: "asset-1" });
+    pending.resolve?.({
+      projectId: "proj-1",
+      assetId: "asset-1",
+      project: {
+        id: "proj-1",
+        owner_user_id: "user-1",
+        name: "乡墅案例",
+        status: "DRAFT",
+        reference_asset_id: "asset-1",
+        reference_upload_status: "READY",
+        analysis_status: "NOT_READY",
+      },
+      asset: {
+        id: "asset-1",
+        name: "乡墅案例 · 来源视频",
+        kind: "video",
+        group: "乡墅案例",
+        source: "项目上传",
+        saved: true,
+      },
+    });
     await waitFor(() =>
       expect(value.patchDraft).toHaveBeenCalledWith({
-        sourceId: "proj-1",
+        projectId: "proj-1",
+        sourceId: "asset-1",
         sourceAssetId: "asset-1",
       }),
     );
+    expect(value.updateData).toHaveBeenCalledOnce();
+    const update = vi.mocked(value.updateData).mock.calls[0][0];
+    expect(update(value.data)).toMatchObject({
+      projects: [
+        expect.objectContaining({
+          id: "proj-1",
+          reference_asset_id: "asset-1",
+          reference_upload_status: "READY",
+        }),
+      ],
+      assets: [
+        expect.objectContaining({
+          id: "asset-1",
+          kind: "video",
+          saved: true,
+        }),
+      ],
+    });
     expect(screen.getByText("已上传云存储：乡墅案例.mp4")).toBeInTheDocument();
     expect(value.notify).toHaveBeenCalledWith(
       "视频已上传云存储，来源已加入当前创作。",
     );
+  });
+
+  it("A 项目编辑后从工作台上传 B，进入复刻前清除 A 的文本归属", async () => {
+    const state = createState("workbench");
+    state.draft = {
+      ...state.draft,
+      projectId: "project-a",
+      prompt: "A Prompt",
+      promptEdited: true,
+      script: {
+        ...state.draft.script,
+        title: "A 标题",
+        original: "A 原文",
+        text: "A 文案",
+      },
+      scriptEdited: true,
+    };
+    const value = workbench({ state });
+    uploadWorkbenchSourceVideo.mockResolvedValue({
+      projectId: "project-b",
+      assetId: "asset-b",
+    });
+    useStudio.mockReturnValue(value);
+    render(<WorkbenchPage />);
+
+    changeFile("来源B.mp4");
+    await waitFor(() => expect(value.patchDraft).toHaveBeenCalledOnce());
+    const patch = vi.mocked(value.patchDraft).mock.calls[0][0];
+    const next = patchStudioDraft(state.draft, patch);
+
+    expect(next.projectId).toBe("project-b");
+    expect(next.prompt).toBe("");
+    expect(next.promptEdited).toBe(false);
+    expect(next.script).toMatchObject({ title: "", original: "", text: "" });
+    expect(next.scriptEdited).toBe(false);
+  });
+
+  it("忽略被后一次上传取代的迟到结果与错误", async () => {
+    const value = workbench();
+    useStudio.mockReturnValue(value);
+    const first = deferred<WorkbenchUploadResult>();
+    const second = deferred<WorkbenchUploadResult>();
+    uploadWorkbenchSourceVideo
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+    render(<WorkbenchPage />);
+
+    changeFile("来源A.mp4");
+    changeFile("来源B.mp4");
+    expect(uploadWorkbenchSourceVideo.mock.calls[0]?.[2]?.aborted).toBe(true);
+
+    second.resolve({ projectId: "project-b", assetId: "asset-b" });
+    await waitFor(() =>
+      expect(value.patchDraft).toHaveBeenCalledWith({
+        projectId: "project-b",
+        sourceId: "asset-b",
+        sourceAssetId: "asset-b",
+      }),
+    );
+
+    first.reject(new Error("迟到失败"));
+    await first.promise.catch(() => undefined);
+    await Promise.resolve();
+    expect(value.patchDraft).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("已上传云存储：来源B.mp4")).toBeInTheDocument();
+    expect(screen.queryByText(/迟到失败/)).toBeNull();
   });
 
   it("上传完成后开始复刻直接进分镜工作区，不再打开项目面板", async () => {
@@ -562,7 +691,8 @@ describe("V1.4 工作台上传与创作入口", () => {
     changeFile("乡墅案例.mp4");
     await waitFor(() =>
       expect(value.patchDraft).toHaveBeenCalledWith({
-        sourceId: "proj-1",
+        projectId: "proj-1",
+        sourceId: "asset-1",
         sourceAssetId: "asset-1",
       }),
     );
@@ -583,7 +713,8 @@ describe("V1.4 工作台上传与创作入口", () => {
     changeFile("乡墅案例.mp4");
     await waitFor(() =>
       expect(value.patchDraft).toHaveBeenCalledWith({
-        sourceId: "proj-1",
+        projectId: "proj-1",
+        sourceId: "asset-1",
         sourceAssetId: "asset-1",
       }),
     );
@@ -886,7 +1017,9 @@ describe("V1.4 个人中心通知偏好（C10b）", () => {
     const { unmount } = render(<ProfilePage />);
     const reviewToggle = screen
       .getAllByRole("button", { name: "通知偏好" })
-      .at(-1)!;
+      .at(-1);
+    expect(reviewToggle).toBeDefined();
+    if (!reviewToggle) throw new Error("审核模式缺少通知偏好开关");
     await waitFor(() => expect(reviewToggle).toHaveTextContent("开启"));
     fireEvent.click(reviewToggle);
     expect(updateStudioNotificationPreferences).not.toHaveBeenCalled();

@@ -607,7 +607,12 @@ export async function uploadWorkbenchSourceVideo(
   file: File,
   onProgress: (percent: number) => void,
   signal?: AbortSignal,
-): Promise<{ projectId: string; assetId: string }> {
+): Promise<{
+  projectId: string;
+  assetId: string;
+  project?: Project;
+  asset?: StudioAsset;
+}> {
   const base = file.name.replace(/\.(mp4|mov)$/i, "").trim();
   const project = await createProject((base || file.name).slice(0, 120));
   const intent = await createVideoUploadIntent(project.id, file);
@@ -617,7 +622,17 @@ export async function uploadWorkbenchSourceVideo(
     const completed = await completeVideoUpload(intent.asset_id);
     assetId = completed.asset_id;
   }
-  return { projectId: project.id, assetId };
+  const uploadedProject: Project = {
+    ...project,
+    reference_asset_id: assetId,
+    reference_upload_status: "READY",
+  };
+  return {
+    projectId: project.id,
+    assetId,
+    project: uploadedProject,
+    asset: projectAsset(uploadedProject),
+  };
 }
 
 function oralTask(row: OralTaskRecord): StudioTask {
@@ -901,6 +916,16 @@ function draftFromPayload(payload: unknown): StudioDraft | null {
       ...base.script,
       ...(script as Partial<StudioScript>),
     },
+    promptEdited:
+      typeof payload.promptEdited === "boolean"
+        ? payload.promptEdited
+        : typeof payload.prompt === "string" && payload.prompt.length > 0,
+    scriptEdited:
+      typeof payload.scriptEdited === "boolean"
+        ? payload.scriptEdited
+        : [script.title, script.original, script.text].some(
+            (value) => typeof value === "string" && value.length > 0,
+          ),
   };
   return merged;
 }

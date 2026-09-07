@@ -10,6 +10,64 @@ import {
 } from "./state";
 
 describe("V1.4 交接合同", () => {
+  it("记录 Prompt 与文案的本地编辑状态，包括主动清空", () => {
+    const draft = createDraft();
+    const withPrompt = patchStudioDraft(draft, { prompt: "待编辑" });
+    const clearedPrompt = patchStudioDraft(withPrompt, { prompt: "" });
+    const changedScript = patchStudioDraft(clearedPrompt, {
+      script: { ...clearedPrompt.script, title: "本地标题" },
+    });
+
+    expect(clearedPrompt.promptEdited).toBe(true);
+    expect(changedScript.scriptEdited).toBe(true);
+  });
+
+  it("切换项目时清空未显式交接的旧项目文本与编辑标记", () => {
+    const draft = {
+      ...createDraft(),
+      projectId: "project-a",
+      prompt: "A Prompt",
+      promptEdited: true,
+      script: {
+        ...createDraft().script,
+        title: "A 标题",
+        original: "A 原文",
+        text: "A 文案",
+      },
+      scriptEdited: true,
+    };
+
+    const next = patchStudioDraft(draft, { projectId: "project-b" });
+
+    expect(next.prompt).toBe("");
+    expect(next.promptEdited).toBe(false);
+    expect(next.script).toMatchObject({ title: "", original: "", text: "" });
+    expect(next.scriptEdited).toBe(false);
+  });
+
+  it("项目、人物或目标图变化时使旧首帧确认与版本失效", () => {
+    const confirmed = {
+      ...createDraft(),
+      projectId: "project-a",
+      ipId: "person-a",
+      imageId: "photo-a",
+      firstFrameId: "frame-a",
+      firstFrameSelectionVersionId: "ffv-a",
+      frameConfirmed: true,
+    };
+
+    for (const patch of [
+      { projectId: "project-b" },
+      { ipId: "person-b" },
+      { imageId: "photo-b" },
+    ]) {
+      const next = patchStudioDraft(confirmed, patch);
+      expect(next.firstFrameId).toBeUndefined();
+      expect(next.firstFrameSelectionVersionId).toBeUndefined();
+      expect(next.frameConfirmed).toBe(false);
+    }
+  });
+
   it("同项目返回保留人物和未保存终稿，不回退到旧版本", () => {
     const state = createState("copy");
     state.draft = {

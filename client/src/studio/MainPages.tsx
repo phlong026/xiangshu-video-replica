@@ -171,6 +171,7 @@ export function WorkbenchPage() {
     openLive,
     notify,
     patchDraft,
+    updateData,
     state,
     extractScriptFromUpload,
   } = useStudio();
@@ -180,8 +181,18 @@ export function WorkbenchPage() {
     progress: number;
     error: string;
     projectId: string | null;
+    completed: boolean;
   } | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const uploadOperationRef = useRef(0);
+  const uploadAbortRef = useRef<AbortController | null>(null);
+  useEffect(
+    () => () => {
+      uploadOperationRef.current += 1;
+      uploadAbortRef.current?.abort();
+    },
+    [],
+  );
   const active = data.tasks.filter((task) =>
     ["running", "queued", "uncertain"].includes(task.status),
   );
@@ -212,18 +223,63 @@ export function WorkbenchPage() {
       notify("目前仅支持 MP4 / MOV 视频文件。");
       return;
     }
-    setUpload({ name: file.name, progress: 0, error: "", projectId: null });
-    void uploadWorkbenchSourceVideo(file, (progress) =>
-      setUpload((current) => (current ? { ...current, progress } : current)),
+    const operation = ++uploadOperationRef.current;
+    uploadAbortRef.current?.abort();
+    const abortController = new AbortController();
+    uploadAbortRef.current = abortController;
+    setUpload({
+      name: file.name,
+      progress: 0,
+      error: "",
+      projectId: null,
+      completed: false,
+    });
+    void uploadWorkbenchSourceVideo(
+      file,
+      (progress) => {
+        if (operation !== uploadOperationRef.current) return;
+        setUpload((current) => (current ? { ...current, progress } : current));
+      },
+      abortController.signal,
     )
-      .then(({ projectId, assetId }) => {
+      .then((uploaded) => {
+        if (operation !== uploadOperationRef.current) return;
+        const { projectId, assetId } = uploaded;
         setUpload((current) =>
-          current ? { ...current, progress: 100, projectId } : current,
+          current
+            ? { ...current, progress: 100, projectId, completed: true }
+            : current,
         );
-        patchDraft({ sourceId: projectId, sourceAssetId: assetId });
+        patchDraft({
+          projectId,
+          sourceId: assetId,
+          sourceAssetId: assetId,
+        });
+        if (uploaded.project || uploaded.asset) {
+          updateData((current) => ({
+            ...current,
+            projects: uploaded.project
+              ? [
+                  uploaded.project,
+                  ...current.projects.filter(
+                    (project) => project.id !== uploaded.project?.id,
+                  ),
+                ]
+              : current.projects,
+            assets: uploaded.asset
+              ? [
+                  uploaded.asset,
+                  ...current.assets.filter(
+                    (asset) => asset.id !== uploaded.asset?.id,
+                  ),
+                ]
+              : current.assets,
+          }));
+        }
         notify("视频已上传云存储，来源已加入当前创作。");
       })
       .catch((error) => {
+        if (operation !== uploadOperationRef.current) return;
         setUpload((current) =>
           current
             ? {
@@ -293,7 +349,7 @@ export function WorkbenchPage() {
           <p className="studio-upload-status" role="status">
             {upload.error
               ? `上传失败：${upload.error}`
-              : upload.progress >= 100
+              : upload.completed
                 ? `已上传云存储：${upload.name}`
                 : `正在上传 ${upload.name}… ${upload.progress}%`}
           </p>
