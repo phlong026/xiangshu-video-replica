@@ -37,6 +37,7 @@ import type {
   StudioVideo,
 } from "./types";
 import { Button, Empty, Field, Hint, Icon, Media, Panel, Tabs } from "./ui";
+import { viralImportIdempotencyKey } from "./viralImport";
 import "./content.css";
 
 const pageSize = 6;
@@ -490,12 +491,16 @@ function ViralCard({
       notify("该视频已不可用，无法导入复刻");
       return;
     }
-    if (review || !video.platformKey || !video.nativeId) {
+    if (review) {
       patchDraft({ sourceId: video.id });
       navigate("replica", {
         selectedVideoId: video.id,
         returnTo: "viral",
       });
+      return;
+    }
+    if (!video.platformKey || !video.nativeId) {
+      notify("该视频缺少可导入的平台标识");
       return;
     }
     void start(video, "replica", (task) => {
@@ -1198,7 +1203,8 @@ function useViralImport(sourceId?: string) {
       const request = ++requestRef.current;
       const actionKey = `${video.platformKey}:${video.nativeId}:${purpose}`;
       const idempotencyKey =
-        idempotencyKeysRef.current.get(actionKey) ?? crypto.randomUUID();
+        idempotencyKeysRef.current.get(actionKey) ??
+        viralImportIdempotencyKey(actionKey);
       idempotencyKeysRef.current.set(actionKey, idempotencyKey);
       setState({ status: "loading", message: "正在导入参考素材…" });
       try {
@@ -1222,7 +1228,6 @@ function useViralImport(sourceId?: string) {
           throw new Error("导入任务缺少项目或素材结果");
         }
         setState({ status: "ready", message: "参考素材已导入" });
-        idempotencyKeysRef.current.delete(actionKey);
         onReady(completed);
       } catch (error) {
         if (request !== requestRef.current) return;

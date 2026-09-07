@@ -244,6 +244,7 @@ function viralItem(index: number, overrides: Partial<ViralVideoItem> = {}) {
 
 describe("V1.4 内容与运营页面", () => {
   beforeEach(() => {
+    window.sessionStorage.clear();
     useStudio.mockReset();
     fetchViralVideoMedia.mockReset();
     fetchViralVideoStatistics.mockReset();
@@ -414,6 +415,141 @@ describe("V1.4 内容与运营页面", () => {
       returnTo: "viral-detail",
     });
     expect(screen.getByText("参考素材已导入")).toBeInTheDocument();
+  });
+
+  it("同一爆款重挂载后复用幂等键，避免重复创建项目和任务", async () => {
+    const value = studio({
+      state: {
+        ...studio().state,
+        page: "viral-detail",
+        selectedVideoId: "dy-1",
+      },
+    });
+    useStudio.mockReturnValue(value);
+    const firstView = render(<ViralDetailPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "提取文案" }));
+    await waitFor(() => expect(createViralImportTask).toHaveBeenCalledOnce());
+    const firstKey = createViralImportTask.mock.calls[0][3];
+    firstView.unmount();
+    useStudio.mockReturnValue(value);
+    render(<ViralDetailPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "提取文案" }));
+    await waitFor(() => expect(createViralImportTask).toHaveBeenCalledTimes(2));
+
+    expect(createViralImportTask.mock.calls[1][3]).toBe(firstKey);
+  });
+
+  it("请求未完成时切换爆款来源会丢弃旧来源迟到结果", async () => {
+    let resolveFirst: ((value: unknown) => void) | undefined;
+    createViralImportTask.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveFirst = resolve;
+        }),
+    );
+    const base = studio();
+    let value = studio({
+      state: { ...base.state, page: "viral-detail", selectedVideoId: "dy-1" },
+    });
+    useStudio.mockImplementation(() => value);
+    const view = render(<ViralDetailPage />);
+    fireEvent.click(screen.getByRole("button", { name: "提取文案" }));
+
+    value = studio({
+      state: { ...base.state, page: "viral-detail", selectedVideoId: "wx-1" },
+    });
+    view.rerender(<ViralDetailPage />);
+    expect(screen.getByText("新中式庭院的三个细节")).toBeInTheDocument();
+
+    await act(async () => {
+      resolveFirst?.({
+        taskId: "late-first",
+        status: "SUCCEEDED",
+        projectId: "project-first",
+        sourceAssetId: "asset-first",
+        mediaKind: "video",
+        canTranscribe: true,
+        canAnalyze: true,
+      });
+    });
+
+    expect(value.patchDraft).not.toHaveBeenCalled();
+    expect(value.navigate).not.toHaveBeenCalled();
+    expect(value.extractScriptFromUpload).not.toHaveBeenCalled();
+  });
+
+  it("视频号爆款使用平台与原生视频 ID 建立提取任务", async () => {
+    const base = studio();
+    const value = studio({
+      state: { ...base.state, page: "viral-detail", selectedVideoId: "wx-1" },
+    });
+    useStudio.mockReturnValue(value);
+    render(<ViralDetailPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "提取文案" }));
+
+    await waitFor(() =>
+      expect(createViralImportTask).toHaveBeenCalledWith(
+        "wechat_channels",
+        "native-wx-1",
+        "copy",
+        expect.any(String),
+      ),
+    );
+  });
+
+  it("仅音频来源不会伪装成可分析的视频项目", async () => {
+    createViralImportTask.mockResolvedValue({
+      taskId: "audio-import",
+      status: "SUCCEEDED",
+      projectId: "audio-project",
+      sourceAssetId: "audio-asset",
+      mediaKind: "audio",
+      canTranscribe: true,
+      canAnalyze: false,
+    });
+    const value = studio({
+      state: {
+        ...studio().state,
+        page: "viral-detail",
+        selectedVideoId: "dy-1",
+      },
+    });
+    useStudio.mockReturnValue(value);
+    render(<ViralDetailPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "视频复刻" }));
+
+    await waitFor(() =>
+      expect(value.notify).toHaveBeenCalledWith("该来源暂不支持视频复刻"),
+    );
+    expect(value.patchDraft).not.toHaveBeenCalled();
+    expect(value.navigate).not.toHaveBeenCalled();
+  });
+
+  it("正式爆款卡片缺少平台原生 ID 时明确报错且不进入伪项目", () => {
+    const base = studio();
+    const malformed = {
+      ...base.data.videos[0],
+      platformKey: undefined,
+      nativeId: undefined,
+    };
+    const value = studio({
+      review: false,
+      data: { ...base.data, videos: [malformed] },
+    });
+    useStudio.mockReturnValue(value);
+    render(<ViralPage />);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: `复刻 ${malformed.title}` }),
+    );
+
+    expect(value.notify).toHaveBeenCalledWith("该视频缺少可导入的平台标识");
+    expect(value.patchDraft).not.toHaveBeenCalled();
+    expect(value.navigate).not.toHaveBeenCalled();
   });
 
   it("导入排队时始终使用服务端返回的同一任务 ID 轮询", async () => {

@@ -452,6 +452,7 @@ describe("V1.4 工作台新版首页布局", () => {
   }));
 
   beforeEach(() => {
+    window.sessionStorage.clear();
     createViralImportTask.mockReset();
     getViralImportTask.mockReset();
   });
@@ -489,8 +490,9 @@ describe("V1.4 工作台新版首页布局", () => {
     }
   });
 
-  it("从首页爆款卡片开始复刻时复用既有草稿与导航流程", () => {
+  it("审核首页从爆款卡片开始复刻时复用既有草稿与导航流程", () => {
     const value = studio(undefined, {
+      review: true,
       state: createState("workbench"),
       data: data([], videos),
     });
@@ -559,6 +561,29 @@ describe("V1.4 工作台新版首页布局", () => {
       "replica",
       expect.any(String),
     );
+  });
+
+  it("正式首页爆款缺少平台原生 ID 时不创建伪复刻项目", () => {
+    const source = {
+      ...videos[0],
+      platformKey: undefined,
+      nativeId: undefined,
+    };
+    const value = studio(undefined, {
+      review: false,
+      state: createState("workbench"),
+      data: data([], [source]),
+    });
+    useStudio.mockReturnValue(value);
+    render(<WorkbenchPage />);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "用它复刻：灵感视频 1" }),
+    );
+
+    expect(value.notify).toHaveBeenCalledWith("该视频缺少可导入的平台标识");
+    expect(value.patchDraft).not.toHaveBeenCalled();
+    expect(value.navigate).not.toHaveBeenCalled();
   });
 });
 

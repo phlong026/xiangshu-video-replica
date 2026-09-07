@@ -28,6 +28,7 @@ import {
   Panel,
   Tabs,
 } from "./ui";
+import { viralImportIdempotencyKey } from "./viralImport";
 
 const statusNames: Record<StudioTask["status"], string> = {
   running: "生成中",
@@ -219,7 +220,7 @@ export function WorkbenchPage() {
     .slice(0, 5);
   const [viralImportingId, setViralImportingId] = useState<string>();
   const beginViralReplica = async (video: StudioVideo) => {
-    if (review || !video.platformKey || !video.nativeId) {
+    if (review) {
       patchDraft({ sourceId: video.id });
       navigate("replica", {
         selectedVideoId: video.id,
@@ -227,10 +228,15 @@ export function WorkbenchPage() {
       });
       return;
     }
+    if (!video.platformKey || !video.nativeId) {
+      notify("该视频缺少可导入的平台标识");
+      return;
+    }
     const operation = ++viralOperationRef.current;
     const actionKey = `${video.platformKey}:${video.nativeId}:replica`;
     const idempotencyKey =
-      viralIdempotencyKeysRef.current.get(actionKey) ?? crypto.randomUUID();
+      viralIdempotencyKeysRef.current.get(actionKey) ??
+      viralImportIdempotencyKey(actionKey);
     viralIdempotencyKeysRef.current.set(actionKey, idempotencyKey);
     setViralImportingId(video.id);
     try {
@@ -262,7 +268,6 @@ export function WorkbenchPage() {
         sourceId: task.sourceAssetId,
         sourceAssetId: task.sourceAssetId,
       });
-      viralIdempotencyKeysRef.current.delete(actionKey);
       navigate("replica", {
         selectedVideoId: video.id,
         returnTo: "workbench",

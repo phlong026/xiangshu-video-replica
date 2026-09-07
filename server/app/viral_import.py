@@ -462,16 +462,20 @@ def _require_lease(conn: BusinessConnection, lease: ViralImportLease) -> sqlite3
     return cast(sqlite3.Row, row)
 
 
-def prepare_viral_import_task(
-    conn: BusinessConnection, *, lease: ViralImportLease, storage: StorageAdapter
-) -> ViralImportWork:
-    _require_lease(conn, lease)
-    _require_import_enabled(conn)
+def _require_project_owner(conn: BusinessConnection, lease: ViralImportLease) -> None:
     project = conn.execute(
         "SELECT owner_user_id FROM projects WHERE id = %s", (lease.project_id,)
     ).fetchone()
     if project is None or str(project["owner_user_id"]) != lease.owner_user_id:
         raise _error(409, "VIRAL_IMPORT_PROJECT_CHANGED", "目标项目已不存在或归属已变化。")
+
+
+def prepare_viral_import_task(
+    conn: BusinessConnection, *, lease: ViralImportLease, storage: StorageAdapter
+) -> ViralImportWork:
+    _require_lease(conn, lease)
+    _require_import_enabled(conn)
+    _require_project_owner(conn, lease)
     video = get_viral_video(conn, platform=lease.platform, video_id=lease.video_id)
     if video is None:
         raise _error(404, "VIRAL_VIDEO_NOT_FOUND", "爆款视频不存在或已下架。")
@@ -540,6 +544,7 @@ def complete_viral_import_task(
     conn: BusinessConnection, *, lease: ViralImportLease, outcome: ViralImportOutcome
 ) -> None:
     _require_lease(conn, lease)
+    _require_project_owner(conn, lease)
     _complete_viral_media_preparation(conn, outcome.media_preparation)
     asset_id = str(uuid4())
     conn.execute(

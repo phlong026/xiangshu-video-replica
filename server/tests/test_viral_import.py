@@ -5,6 +5,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app.auth import get_database
@@ -232,6 +233,48 @@ def test_worker_imports_project_asset_and_exposes_capabilities(
         assert f'"import_task_id": "{created["id"]}"' in asset["metadata_json"]
         assert '"platform": "douyin"' in asset["metadata_json"]
         assert '"video_id": "viral-1"' in asset["metadata_json"]
+
+
+def test_completion_rejects_project_owner_change(
+    client: TestClient,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.viral_import as domain
+
+    monkeypatch.setattr(domain, "ViralMediaPipeline", StubPipeline)
+    monkeypatch.setattr(domain, "viral_source_client_from_settings", lambda conn: object())
+    storage = FakeStorageAdapter(provider="fake", bucket="private")
+    created = client.post(
+        "/api/viral/import-tasks",
+        json={"platform": "douyin", "videoId": "viral-1", "purpose": "replica"},
+        headers=_headers("employee_1", "owner-change-key"),
+    ).json()
+
+    conn = BusinessConnection.sqlite(connect_database(db_path))
+    try:
+        lease = domain.acquire_viral_import_task(conn, worker_id="worker-owner-change")
+        assert lease is not None
+        work = domain.prepare_viral_import_task(conn, lease=lease, storage=storage)
+        outcome = domain.perform_viral_import_task(work)
+        conn.execute(
+            "UPDATE projects SET owner_user_id = %s WHERE id = %s",
+            ("employee_2", created["projectId"]),
+        )
+        conn.commit()
+
+        with pytest.raises(HTTPException) as raised:
+            domain.complete_viral_import_task(conn, lease=lease, outcome=outcome)
+
+        assert raised.value.detail["code"] == "VIRAL_IMPORT_PROJECT_CHANGED"
+        assert (
+            conn.execute(
+                "SELECT 1 FROM assets WHERE project_id = %s", (created["projectId"],)
+            ).fetchone()
+            is None
+        )
+    finally:
+        conn.close()
 
 
 def test_copy_uses_audio_only_when_source_marks_it_verified(
