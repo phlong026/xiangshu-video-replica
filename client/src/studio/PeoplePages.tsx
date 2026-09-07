@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   completeMaterialUpload,
   confirmOralVoice,
@@ -618,13 +618,14 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
     operation.contextVersion === contextVersionRef.current &&
     operation.selectionKey === selectionLifecycleRef.current &&
     activeOperationRef.current === operation;
-  useEffect(() => {
+  // Invalidate before a parent layout effect can settle an earlier request.
+  useLayoutEffect(() => {
     selectionLifecycleRef.current = selectionLifecycleKey;
     contextVersionRef.current += 1;
     activeOperationRef.current = undefined;
     setBusy(false);
   }, [selectionLifecycleKey]);
-  useEffect(() => {
+  useLayoutEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;

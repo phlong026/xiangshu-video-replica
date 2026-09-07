@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { StrictMode, startTransition, useLayoutEffect, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PeoplePage, PersonPage } from "./PeoplePages";
 
@@ -527,6 +528,58 @@ describe("PeoplePages", () => {
 
     expect(api.createOralAvatarClone).not.toHaveBeenCalled();
     expect(screen.getByText("已选：庭院讲解")).toBeInTheDocument();
+  });
+
+  it("B 提交后的父 layout effect 完成旧 A 授权时不得继续克隆", async () => {
+    currentPage = "person-avatars";
+    review = false;
+    draft = { ipId: "p1", imageId: "scene" };
+    let resolveOldConsent: ((value: { id: string }) => void) | undefined;
+    api.createOralConsent.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveOldConsent = resolve;
+        }),
+    );
+    let switchToB: (() => void) | undefined;
+    let submitTextDuringBLayout: string | null | undefined;
+    let resolveBLayout: (() => void) | undefined;
+    const bLayoutCommitted = new Promise<void>((resolve) => {
+      resolveBLayout = resolve;
+    });
+    function LayoutHarness() {
+      const [phase, setPhase] = useState<"A" | "B">("A");
+      switchToB = () => setPhase("B");
+      useLayoutEffect(() => {
+        if (phase === "B") {
+          submitTextDuringBLayout = document.querySelector(
+            ".studio-button--primary",
+          )?.textContent;
+          resolveOldConsent?.({ id: "old-consent" });
+          resolveBLayout?.();
+        }
+      }, [phase]);
+      return <PersonPage />;
+    }
+
+    render(
+      <StrictMode>
+        <LayoutHarness />
+      </StrictMode>,
+    );
+    screen.getByRole("checkbox", { name: "确认分身克隆授权" }).click();
+    screen.getByRole("button", { name: "开始制作照片分身" }).click();
+    expect(api.createOralConsent).toHaveBeenCalledTimes(1);
+
+    selectedPersonId = "p2";
+    draft = { ipId: "p2", imageId: "other-scene" };
+    startTransition(() => switchToB?.());
+    await bLayoutCommitted;
+    await Promise.resolve();
+
+    expect(api.createOralAvatarClone).not.toHaveBeenCalled();
+    expect(submitTextDuringBLayout).toBe("开始制作照片分身");
+    expect(screen.getByText("已选：其他人物场景照")).toBeInTheDocument();
   });
 
   it("旧操作结束不会解除新 A 操作的忙碌状态", async () => {
