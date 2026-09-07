@@ -194,7 +194,9 @@ export function AnalyticsPage() {
 
   function viewWork(work: StudioAnalytics["recent_works"][number]) {
     navigate("task-detail", {
-      selectedTaskId: work.task_id,
+      selectedTaskId: work.batch_id,
+      selectedTaskKind: "generation_batch",
+      selectedTaskBackendId: work.batch_id,
       returnTo: "analytics",
     });
   }

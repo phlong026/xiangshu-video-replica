@@ -71,11 +71,13 @@ import {
   createDraft,
   createState,
   DEFAULT_MAX_REFERENCE_IMAGES,
+  navigateStudioState,
   pageTitles,
   patchStudioDraft,
   resolveVideoMode,
-  routeFromHash,
   SUPPORTED_VIDEO_RATIOS,
+  studioHashForState,
+  studioRouteFromHash,
   validateReferenceImages,
   withImportedProject,
 } from "./state";
@@ -251,9 +253,11 @@ export function StudioWorkspace({
 }: Props) {
   // Review is an explicit development entry; failed requests never enable it.
   const review = Boolean(import.meta.env.DEV && reviewData);
-  const [state, setState] = useState<StudioState>(
-    () => initialState || createState(routeFromHash(window.location.hash)),
-  );
+  const [state, setState] = useState<StudioState>(() => {
+    if (initialState) return initialState;
+    const route = studioRouteFromHash(window.location.hash);
+    return { ...createState(route.page), ...route };
+  });
   const studioPageRef = useRef(state.page);
   studioPageRef.current = state.page;
   const [data, setData] = useState<StudioData>(() =>
@@ -326,6 +330,9 @@ export function StudioWorkspace({
   const [videoQuoteRevision, setVideoQuoteRevision] = useState(0);
   const [videoSubmitting, setVideoSubmitting] = useState(false);
   const busyRef = useRef(false);
+  const pendingRouteRef = useRef<
+    ReturnType<typeof studioRouteFromHash> | undefined
+  >(undefined);
   const operationRef = useRef(0);
   const loadedPeopleRef = useRef(new Set<string>());
   const restoredAssetsRef = useRef<StudioAsset[]>([]);
@@ -967,14 +974,14 @@ export function StudioWorkspace({
 
   useEffect(() => {
     const onHashChange = () => {
+      const route = studioRouteFromHash(window.location.hash);
       if (busyRef.current) {
+        pendingRouteRef.current = route;
         notify("当前操作正在处理中，请等待完成后切换页面。");
         return;
       }
-      setState((previous) => ({
-        ...previous,
-        page: routeFromHash(window.location.hash),
-      }));
+      operationRef.current += 1;
+      setState((previous) => ({ ...previous, ...route }));
       setLivePanel(undefined);
     };
     window.addEventListener("hashchange", onHashChange);
@@ -991,8 +998,11 @@ export function StudioWorkspace({
       return;
     }
     operationRef.current += 1;
-    setState((previous) => ({ ...previous, ...patch, page }));
-    window.history.pushState(null, "", `#studio/${page}`);
+    setState((previous) => {
+      const nextState = navigateStudioState(previous, page, patch);
+      window.history.pushState(null, "", studioHashForState(nextState));
+      return nextState;
+    });
     setMenuOpen(false);
     setShowSearch(false);
     setLivePanel(undefined);
@@ -1450,6 +1460,13 @@ export function StudioWorkspace({
                 onClose={closeLive}
                 onBusyChange={(busy) => {
                   busyRef.current = busy;
+                  if (!busy && pendingRouteRef.current) {
+                    const pendingRoute = pendingRouteRef.current;
+                    pendingRouteRef.current = undefined;
+                    operationRef.current += 1;
+                    setState((previous) => ({ ...previous, ...pendingRoute }));
+                    setLivePanel(undefined);
+                  }
                 }}
                 onBatchCreated={(batch) => {
                   setHandoffBatch(batch);

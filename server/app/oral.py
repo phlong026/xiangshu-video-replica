@@ -57,6 +57,10 @@ class OralConflictError(OralDomainError):
     """An idempotency key was reused for a different request."""
 
 
+class OralTaskNotFoundError(OralDomainError):
+    """The requested task is absent from the current actor's scope."""
+
+
 def oral_unit_price_fen(conn: BusinessConnection) -> int:
     """Per-task list price for oral renders; admin-configurable via billing."""
     try:
@@ -817,7 +821,7 @@ def _vendor_voice_id(conn: BusinessConnection, voice_id: str) -> str:
 def _oral_task_row(conn: BusinessConnection, task_id: str) -> dict[str, Any]:
     row = conn.execute("SELECT * FROM oral_tasks WHERE id = %s", (task_id,)).fetchone()
     if row is None:
-        raise OralDomainError("口播任务不存在")
+        raise OralTaskNotFoundError("口播任务不存在")
     return dict(row)
 
 
@@ -832,7 +836,7 @@ def read_oral_task(
         (task_id, actor.id),
     ).fetchone()
     if row is None:
-        raise OralDomainError("口播任务不存在")
+        raise OralTaskNotFoundError("口播任务不存在")
     return dict(row)
 
 

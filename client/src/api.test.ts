@@ -43,6 +43,7 @@ import {
   getLatestProjectFirstFrames,
   getLatestScriptRewriteTask,
   getLatestScriptVersion,
+  getOralTask,
   getSettings,
   hideMaterial,
   listCharacterSceneLooksPage,
@@ -327,6 +328,20 @@ describe("人物 IP 口播资产 API", () => {
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
       "http://127.0.0.1:8000/api/oral/tasks?limit=20&offset=20",
+    );
+  });
+
+  it("口播详情按编码后的原生任务 ID 读取", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: "oral 1", status: "SUCCEEDED" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await getOralTask("oral 1");
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "http://127.0.0.1:8000/api/oral/tasks/oral%201",
     );
   });
 

@@ -6355,6 +6355,17 @@ export interface components {
        */
       purpose: "AVATAR" | "VOICE" | "AVATAR_CLONE" | "VOICE_CLONE";
     };
+    /** OralTaskPageResponse */
+    OralTaskPageResponse: {
+      /** Items */
+      items: components["schemas"]["OralTaskResponse"][];
+      /** Total */
+      total: number;
+      /** Limit */
+      limit: number;
+      /** Offset */
+      offset: number;
+    };
     /** OralTaskRequest */
     OralTaskRequest: {
       /** Identity Id */
@@ -6380,6 +6391,60 @@ export interface components {
       } | null;
       /** Idempotency Key */
       idempotency_key: string;
+    };
+    /** OralTaskResponse */
+    OralTaskResponse: {
+      /** Id */
+      id: string;
+      /**
+       * Status
+       * @enum {string}
+       */
+      status:
+        | "QUEUED"
+        | "SUBMITTING"
+        | "RUNNING"
+        | "ARCHIVING"
+        | "SUBMISSION_UNCERTAIN"
+        | "ARCHIVE_FAILED"
+        | "SUCCEEDED"
+        | "FAILED"
+        | "CANCELLED";
+      /** Title */
+      title: string;
+      /**
+       * Mode
+       * @enum {string}
+       */
+      mode: "TTS" | "AUDIO";
+      /** Identity Id */
+      identity_id: string;
+      /** Avatar Id */
+      avatar_id: string;
+      /** Voice Id */
+      voice_id: string | null;
+      /** Script Text */
+      script_text: string | null;
+      /** Audio Asset Id */
+      audio_asset_id: string | null;
+      /** Status Message */
+      status_message?: string | null;
+      /** Error Message */
+      error_message?: string | null;
+      /** Result Asset Id */
+      result_asset_id: string | null;
+      /** Duration Sec */
+      duration_sec: number | null;
+      /** Estimated Cost Fen */
+      estimated_cost_fen: number;
+      /** Billing Status */
+      billing_status?: string | null;
+      /** Available Actions */
+      available_actions?: string[];
+      /** Created At */
+      created_at: string;
+      /** Updated At */
+      updated_at: string;
     };
     /** PaidRegenerationRequest */
     PaidRegenerationRequest: {
@@ -6717,6 +6782,8 @@ export interface components {
       provider: string;
       /** Test Kind */
       test_kind: string;
+      /** Account Credit */
+      account_credit?: number | null;
     };
     /** QueueModeResponse */
     QueueModeResponse: {
@@ -10091,9 +10158,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          "application/json": {
-            [key: string]: unknown;
-          };
+          "application/json": components["schemas"]["OralTaskPageResponse"];
         };
       };
       /** @description Validation Error */
@@ -10162,10 +10227,15 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          "application/json": {
-            [key: string]: unknown;
-          };
+          "application/json": components["schemas"]["OralTaskResponse"];
         };
+      };
+      /** @description 口播任务不存在或不属于当前账号 */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
       };
       /** @description Validation Error */
       422: {
@@ -16273,11 +16343,8 @@ export interface operations {
   read_simple_library_api_simple_characters_library_get: {
     parameters: {
       query?: {
-        /** Limit */
         limit?: number;
-        /** Cursor */
         cursor?: string | null;
-        /** Query */
         query?: string;
       };
       header?: {
