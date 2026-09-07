@@ -1102,6 +1102,7 @@ export type StudioAccountSummary = {
   walletStatus: "loading" | "ready" | "error" | "unknown";
   availableCredits: number | null;
   retryWallet: () => void;
+  retryProfile?: () => void;
   profile: CustomerProfile | null;
   profileLoadError: string;
 };
@@ -1334,7 +1335,14 @@ export function ProfilePage({
                 {accountSummary?.profileLoadError && (
                   <div>
                     <dt>资料状态</dt>
-                    <dd>{accountSummary.profileLoadError}</dd>
+                    <dd>
+                      {accountSummary.profileLoadError}
+                      {accountSummary.retryProfile && (
+                        <Button onClick={accountSummary.retryProfile}>
+                          重试资料查询
+                        </Button>
+                      )}
+                    </dd>
                   </div>
                 )}
                 <div>

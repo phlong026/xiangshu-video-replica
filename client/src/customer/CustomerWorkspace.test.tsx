@@ -366,6 +366,61 @@ describe("CustomerWorkspace (T31)", () => {
     expect(profileAttempts).toBe(attemptsBeforeRetry + 1);
   });
 
+  it("retries profile loading from the studio account overview", async () => {
+    let profileAttempts = 0;
+    let allowProfileSuccess = false;
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/api/customer/profile")) {
+        profileAttempts += 1;
+        return allowProfileSuccess
+          ? jsonResponse(mockProfile)
+          : jsonResponse({ detail: "upstream unavailable" }, 500);
+      }
+      if (url.endsWith("/api/customer/wallet")) {
+        return jsonResponse({
+          available_credits: 0,
+          reserved_credits: 0,
+          internal_unit_price_fen: 100,
+          min_recharge_fen: 100,
+          recharge_step_fen: 100,
+        });
+      }
+      if (url.endsWith("/api/customer/devices")) {
+        return jsonResponse(mockDevices);
+      }
+      if (url.endsWith("/health")) {
+        return jsonResponse({ status: "ok", service: "video-replica-api" });
+      }
+      return jsonResponse([]);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <CustomerWorkspace
+        user={user}
+        store={fakeStore()}
+        onLogout={vi.fn()}
+        onSessionExpired={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: /^用户档案$/ }));
+    expect(
+      await screen.findByText("账号资料加载失败，请稍后重试。"),
+    ).toBeInTheDocument();
+    const attemptsBeforeRetry = profileAttempts;
+    allowProfileSuccess = true;
+    fireEvent.click(screen.getByRole("button", { name: "重试资料查询" }));
+
+    expect(
+      await screen.findByRole("heading", {
+        name: new RegExp(mockProfile.display_name),
+      }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("账号资料加载失败，请稍后重试。")).toBeNull();
+    expect(profileAttempts).toBe(attemptsBeforeRetry + 1);
+  });
+
   it("does not send a profile request after its credential read belongs to an unmounted workspace", async () => {
     const olderSessionText = "older-workspace-session";
     const currentSessionText = "current-workspace-session";

@@ -337,6 +337,35 @@ describe("V1.4 workspace integration", () => {
     ).toBeInTheDocument();
   });
 
+  it("账户资料失败入口透传既有资料刷新操作", async () => {
+    api.customerGetWallet.mockResolvedValue({
+      available_credits: 5,
+      reserved_credits: 0,
+      internal_unit_price_fen: 100,
+      min_recharge_fen: 100,
+      recharge_step_fen: 100,
+    });
+    const account = customerAccount(customerStore("session-token"));
+    account.profileLoadError = "账号资料加载失败，请稍后重试。";
+    render(
+      <StudioWorkspace
+        currentUser={{
+          id: "customer-a",
+          username: "customer-a",
+          display_name: "客户甲",
+          role: "customer",
+        }}
+        customerAccount={account}
+        initialState={createState("profile")}
+      />,
+    );
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "重试资料查询" }),
+    );
+    expect(account.onRefreshProfile).toHaveBeenCalledOnce();
+  });
+
   it("退出后的空会话不读取钱包，并转交既有会话失效处理", async () => {
     const account = customerAccount(customerStore(null));
     render(

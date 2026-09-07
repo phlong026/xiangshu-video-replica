@@ -294,6 +294,9 @@ export function StudioWorkspace({
   const accountSummary: StudioAccountSummary = {
     ...walletSummary,
     retryWallet,
+    retryProfile: customerAccount
+      ? () => void customerAccount.onRefreshProfile()
+      : undefined,
     profile: customerAccount?.profile ?? null,
     profileLoadError: customerAccount?.profileLoadError ?? "",
   };

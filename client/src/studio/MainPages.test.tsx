@@ -1044,6 +1044,32 @@ describe("V1.4 个人中心通知偏好（C10b）", () => {
     expect(retryWallet).toHaveBeenCalledOnce();
   });
 
+  it("资料读取失败可重试，并在资料刷新成功后移除错误", () => {
+    getStudioNotificationPreferences.mockResolvedValue({ enabled: true });
+    useStudio.mockReturnValue(studio());
+    const retryProfile = vi.fn();
+    const accountSummary = {
+      walletStatus: "ready" as const,
+      availableCredits: 8,
+      retryWallet: vi.fn(),
+      retryProfile,
+      profile: null,
+      profileLoadError: "账号资料加载失败，请稍后重试。",
+    };
+    const view = render(<ProfilePage accountSummary={accountSummary} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "重试资料查询" }));
+    expect(retryProfile).toHaveBeenCalledOnce();
+
+    view.rerender(
+      <ProfilePage
+        accountSummary={{ ...accountSummary, profileLoadError: "" }}
+      />,
+    );
+    expect(screen.queryByText("账号资料加载失败，请稍后重试。")).toBeNull();
+    expect(screen.queryByRole("button", { name: "重试资料查询" })).toBeNull();
+  });
+
   it("保存失败时回退开关状态并提示", async () => {
     getStudioNotificationPreferences.mockResolvedValue({ enabled: true });
     updateStudioNotificationPreferences.mockRejectedValue(
