@@ -59,6 +59,7 @@ class IntersectionObserverStub {
 vi.stubGlobal("IntersectionObserver", IntersectionObserverStub);
 
 import {
+  failMaterialPreview,
   MaterialsPage,
   PublishPage,
   ViralDetailPage,
@@ -232,6 +233,18 @@ describe("V1.4 内容与运营页面", () => {
     createGenerationTaskPreviewUrl.mockResolvedValue(
       "https://provider.test/direct-result.mp4",
     );
+  });
+
+  it("迟到的旧媒体错误不能覆盖已成功的新签名", () => {
+    const current = {
+      material: { status: "ready" as const, url: "https://storage.test/new" },
+    };
+    expect(
+      failMaterialPreview(current, "material", "https://storage.test/old"),
+    ).toBe(current);
+    expect(
+      failMaterialPreview(current, "material", "https://storage.test/new"),
+    ).toEqual({ material: { status: "error" } });
   });
 
   it("爆款视频按平台过滤、收藏并把来源带入复刻", () => {
@@ -1145,6 +1158,109 @@ describe("V1.4 内容与运营页面", () => {
     }))
       expect(image).toHaveAttribute("src", "https://storage.test/refreshed");
     expect(getAssetDownloadUrl).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ["image", "image/png", "img"],
+    ["video", "video/mp4", "video"],
+    ["audio", "audio/mpeg", "audio"],
+  ] as const)(
+    "%s 媒体错误后单次重签并让详情复用新地址",
+    async (mediaType, contentType, tagName) => {
+      const item = material(`retry-${mediaType}`, {
+        title: `retry-${mediaType}.${mediaType === "image" ? "png" : mediaType === "video" ? "mp4" : "mp3"}`,
+        media_type: mediaType,
+        content_type: contentType,
+      });
+      listMaterials.mockResolvedValue({
+        items: [item],
+        page: 1,
+        page_size: 6,
+        total: 1,
+      });
+      getAssetDownloadUrl
+        .mockResolvedValueOnce({ url: `https://storage.test/${mediaType}-old` })
+        .mockResolvedValueOnce({
+          url: `https://storage.test/${mediaType}-new`,
+        });
+      useStudio.mockReturnValue(studio({ review: false }));
+      render(<MaterialsPage />);
+
+      const card = await screen.findByRole("button", {
+        name: `选择素材 ${item.title}`,
+      });
+      const oldMedia = await waitFor(() => {
+        const element = card.querySelector(tagName);
+        expect(element).toHaveAttribute(
+          "src",
+          `https://storage.test/${mediaType}-old`,
+        );
+        return element as HTMLElement;
+      });
+      fireEvent.error(oldMedia);
+      fireEvent.click(card);
+      await waitFor(() =>
+        expect(card.querySelector(tagName)).toHaveAttribute(
+          "src",
+          `https://storage.test/${mediaType}-new`,
+        ),
+      );
+      fireEvent.error(oldMedia);
+
+      expect(card.querySelector(tagName)).toHaveAttribute(
+        "src",
+        `https://storage.test/${mediaType}-new`,
+      );
+      expect(screen.queryByText("预览加载失败，点击重试")).toBeNull();
+      expect(
+        screen.getByRole("heading", { name: item.title }),
+      ).toBeInTheDocument();
+      expect(
+        screen
+          .getByRole("heading", { name: item.title })
+          .parentElement?.querySelector(tagName),
+      ).toHaveAttribute("src", `https://storage.test/${mediaType}-new`);
+      expect(getAssetDownloadUrl).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it("直出素材通过 generation_task_id 获取预览且详情复用", async () => {
+    const direct = material("direct-task", {
+      id: "generation:direct-task",
+      asset_id: null,
+      generation_task_id: "direct-task",
+      title: "直出成片.mp4",
+      media_type: "video",
+      content_type: "video/mp4",
+      source: "generation",
+      delivery: "direct",
+      saved: false,
+    });
+    listMaterials.mockResolvedValue({
+      items: [direct],
+      page: 1,
+      page_size: 6,
+      total: 1,
+    });
+    createGenerationTaskPreviewUrl.mockResolvedValue(
+      "https://provider.test/direct-task.mp4",
+    );
+    useStudio.mockReturnValue(studio({ review: false }));
+    render(<MaterialsPage />);
+
+    const card = await screen.findByRole("button", {
+      name: "选择素材 直出成片.mp4",
+    });
+    await waitFor(() =>
+      expect(card.querySelector("video")).toHaveAttribute(
+        "src",
+        "https://provider.test/direct-task.mp4",
+      ),
+    );
+    fireEvent.click(card);
+    expect(createGenerationTaskPreviewUrl).toHaveBeenCalledOnce();
+    expect(getAssetDownloadUrl).not.toHaveBeenCalled();
+    expect(screen.getAllByLabelText("直出成片.mp4")).toHaveLength(2);
   });
 
   it("移除末页唯一素材后回到有效页且不形成空白死页", async () => {

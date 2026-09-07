@@ -43,6 +43,22 @@ function assetKindLabel(kind: StudioAsset["kind"]) {
 const viralInitialCount = 12;
 const viralRevealStep = 8;
 
+type MaterialPreviewState = {
+  status: "loading" | "ready" | "error";
+  url?: string;
+};
+type MaterialPreviewStates = Record<string, MaterialPreviewState>;
+
+export function failMaterialPreview(
+  current: MaterialPreviewStates,
+  assetId: string,
+  failedUrl?: string,
+): MaterialPreviewStates {
+  const preview = current[assetId];
+  if (preview?.status !== "ready" || preview.url !== failedUrl) return current;
+  return { ...current, [assetId]: { status: "error" } };
+}
+
 function viralLikesLabel(video: StudioVideo) {
   return video.likeDisplay ?? formatCount(video.likes);
 }
@@ -864,7 +880,7 @@ function AssetCard({
   selected: boolean;
   previewStatus?: "loading" | "ready" | "error";
   onSelect: () => void;
-  onPreviewError: () => void;
+  onPreviewError: (failedUrl?: string) => void;
 }) {
   return (
     <button
@@ -916,11 +932,10 @@ export function MaterialsPage() {
   const [busyAction, setBusyAction] = useState<string>();
   const [renameValue, setRenameValue] = useState("");
   const [groupValue, setGroupValue] = useState("");
-  const [previewStates, setPreviewStates] = useState<
-    Record<string, { status: "loading" | "ready" | "error"; url?: string }>
-  >({});
+  const [previewStates, setPreviewStates] = useState<MaterialPreviewStates>({});
   const visiblePreviewIdsRef = useRef(new Set<string>());
   const previewRequestVersionsRef = useRef(new Map<string, number>());
+  const previewLoadingIdsRef = useRef(new Set<string>());
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
   const reviewAssets = data.assets.filter(
     (asset) => kind === "全部" || asset.kind === kind,
@@ -950,7 +965,13 @@ export function MaterialsPage() {
   const pages = Math.max(1, Math.ceil(total / pageSize));
   const selectedAssetIdRef = useRef(state.selectedAssetId);
   const loadPreview = useCallback(async (asset: StudioAsset) => {
-    if (asset.url || !asset.allowedActions?.includes("preview")) return;
+    if (
+      asset.url ||
+      !asset.allowedActions?.includes("preview") ||
+      previewLoadingIdsRef.current.has(asset.id)
+    )
+      return;
+    previewLoadingIdsRef.current.add(asset.id);
     const requestVersion =
       (previewRequestVersionsRef.current.get(asset.id) ?? 0) + 1;
     previewRequestVersionsRef.current.set(asset.id, requestVersion);
@@ -983,6 +1004,9 @@ export function MaterialsPage() {
         ...current,
         [asset.id]: { status: "error" },
       }));
+    } finally {
+      if (previewRequestVersionsRef.current.get(asset.id) === requestVersion)
+        previewLoadingIdsRef.current.delete(asset.id);
     }
   }, []);
 
@@ -1032,6 +1056,7 @@ export function MaterialsPage() {
     for (const asset of remoteAssets) void loadPreview(asset);
     return () => {
       for (const id of visibleIds) {
+        previewLoadingIdsRef.current.delete(id);
         previewRequestVersionsRef.current.set(
           id,
           (previewRequestVersionsRef.current.get(id) ?? 0) + 1,
@@ -1311,11 +1336,10 @@ export function MaterialsPage() {
                   setSelectedAsset(asset);
                   patchState({ selectedAssetId: asset.id });
                 }}
-                onPreviewError={() => {
-                  setPreviewStates((current) => ({
-                    ...current,
-                    [asset.id]: { status: "error" },
-                  }));
+                onPreviewError={(failedUrl) => {
+                  setPreviewStates((current) =>
+                    failMaterialPreview(current, asset.id, failedUrl),
+                  );
                 }}
               />
             ))}
@@ -1370,11 +1394,10 @@ export function MaterialsPage() {
                   url: selected.url ?? previewStates[selected.id]?.url,
                 }}
                 alt={selected.name}
-                onError={() => {
-                  setPreviewStates((current) => ({
-                    ...current,
-                    [selected.id]: { status: "error" },
-                  }));
+                onError={(failedUrl) => {
+                  setPreviewStates((current) =>
+                    failMaterialPreview(current, selected.id, failedUrl),
+                  );
                 }}
               />
               <dl>

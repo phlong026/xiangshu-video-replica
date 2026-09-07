@@ -889,7 +889,7 @@ export async function loadStudioData(
     getStudioAnalytics(30),
     loadOralTasks(),
     loadViralVideos(),
-    loadVideoMaterials(),
+    loadVideoMaterialMetadata(),
   ]);
   const errors: string[] = [];
   const projectData =
@@ -971,24 +971,10 @@ export async function loadStudioData(
   };
 }
 
-/** 素材库图片（视频生成页的首帧/尾帧/参考素材选择来源），签名后返回。 */
-export async function loadVideoMaterials(): Promise<StudioAsset[]> {
+/** 启动阶段只读取图片素材元数据；预览地址由实际可见的选择器按页签发。 */
+async function loadVideoMaterialMetadata(): Promise<StudioAsset[]> {
   const page = await listMaterials({ mediaType: "image", pageSize: 60 });
-  const assets = page.items.map(studioAssetFromMaterial);
-  const previewResults = await Promise.allSettled(
-    assets.map((asset) =>
-      asset.assetId
-        ? getAssetDownloadUrl(asset.assetId).then((result) => result.url)
-        : Promise.resolve(undefined),
-    ),
-  );
-  return assets.map((asset, index) => ({
-    ...asset,
-    url:
-      previewResults[index]?.status === "fulfilled"
-        ? previewResults[index].value
-        : undefined,
-  }));
+  return page.items.map(studioAssetFromMaterial);
 }
 
 /** 视频生成页本机上传图片：素材三步通道，返回可直接引用的签名资产。 */

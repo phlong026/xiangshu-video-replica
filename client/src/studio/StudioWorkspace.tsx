@@ -3,6 +3,7 @@ import {
   type ReactNode,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -1921,6 +1922,74 @@ function StudioPicker({
     videoCapabilities,
   } = useStudio();
   const person = data.people.find((item) => item.id === state.draft.ipId);
+  const usesCloudImages =
+    kind === "reference" || kind === "first-frame" || kind === "tail-frame";
+  const cloudImageCandidates = useMemo(
+    () =>
+      usesCloudImages
+        ? data.materials.filter(
+            (material) =>
+              material.kind === "image" &&
+              !data.assets.some((asset) => asset.id === material.id) &&
+              (kind !== "reference" ||
+                !state.draft.referenceIds.includes(material.id)),
+          )
+        : [],
+    [
+      data.assets,
+      data.materials,
+      kind,
+      state.draft.referenceIds,
+      usesCloudImages,
+    ],
+  );
+  const cloudImagePageSize = 6;
+  const [cloudImagePage, setCloudImagePage] = useState(1);
+  const [cloudImageUrls, setCloudImageUrls] = useState<Record<string, string>>(
+    {},
+  );
+  const cloudImageOperationRef = useRef(0);
+  const cloudImagePages = Math.max(
+    1,
+    Math.ceil(cloudImageCandidates.length / cloudImagePageSize),
+  );
+  const visibleCloudImages = useMemo(
+    () =>
+      cloudImageCandidates.slice(
+        (cloudImagePage - 1) * cloudImagePageSize,
+        cloudImagePage * cloudImagePageSize,
+      ),
+    [cloudImageCandidates, cloudImagePage],
+  );
+  useEffect(() => {
+    if (!usesCloudImages) return;
+    const operation = ++cloudImageOperationRef.current;
+    const visible = visibleCloudImages;
+    void Promise.allSettled(
+      visible.map((asset) =>
+        asset.url
+          ? Promise.resolve(asset.url)
+          : asset.assetId
+            ? getAssetDownloadUrl(asset.assetId).then((result) => result.url)
+            : Promise.resolve(undefined),
+      ),
+    ).then((results) => {
+      if (operation !== cloudImageOperationRef.current) return;
+      setCloudImageUrls(
+        Object.fromEntries(
+          visible.flatMap((asset, index) => {
+            const result = results[index];
+            return result?.status === "fulfilled" && result.value
+              ? [[asset.id, result.value]]
+              : [];
+          }),
+        ),
+      );
+    });
+    return () => {
+      cloudImageOperationRef.current += 1;
+    };
+  }, [usesCloudImages, visibleCloudImages]);
   const title: Record<PickerKind, string> = {
     person: "选择人物 IP",
     image: "选择人物形象照片",
@@ -1954,12 +2023,10 @@ function StudioPicker({
     );
   }
   // 视频生成的帧/参考选择额外提供素材库图片（C9 通道，用户归属）。
-  const materials =
-    kind === "reference" || kind === "first-frame" || kind === "tail-frame"
-      ? data.materials.filter(
-          (material) => !data.assets.some((asset) => asset.id === material.id),
-        )
-      : [];
+  const materials = visibleCloudImages.map((material) => ({
+    ...material,
+    url: material.url ?? cloudImageUrls[material.id],
+  }));
   const referenceValidation = validateReferenceImages(
     state.draft.referenceIds,
     [...data.assets, ...data.materials],
@@ -2088,6 +2155,29 @@ function StudioPicker({
                   </button>
                 ))}
       </div>
+      {usesCloudImages && cloudImageCandidates.length > cloudImagePageSize ? (
+        <nav className="content-pagination" aria-label="图片素材分页">
+          <Button
+            aria-label="上一页素材"
+            disabled={cloudImagePage === 1}
+            variant="outline"
+            onClick={() => setCloudImagePage((page) => page - 1)}
+          >
+            ‹
+          </Button>
+          <span>
+            {cloudImagePage} / {cloudImagePages}
+          </span>
+          <Button
+            aria-label="下一页素材"
+            disabled={cloudImagePage === cloudImagePages}
+            variant="outline"
+            onClick={() => setCloudImagePage((page) => page + 1)}
+          >
+            ›
+          </Button>
+        </nav>
+      ) : null}
       {((kind === "voice" &&
         !person?.voices.some((voice) => voice.confirmed)) ||
         (kind === "avatar" &&
