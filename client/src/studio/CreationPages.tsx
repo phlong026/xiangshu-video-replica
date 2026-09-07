@@ -38,9 +38,12 @@ import { SourceFrameSelection } from "../SourceFrameSelection";
 import { CreationNavigation } from "./CreationNavigation";
 import { useStudio } from "./context";
 import {
+  readAudioDuration,
   runReplicaGeneration,
+  uploadOralAudioMaterial,
   uploadVideoMaterial,
   uploadWorkbenchSourceVideo,
+  validateOralAudioFile,
 } from "./live";
 import {
   buildReplicaPromptText,
@@ -2474,12 +2477,18 @@ export function OralPage() {
     state,
     data,
     patchDraft,
+    updateData,
     navigate,
     openPicker,
     saveDraft,
     requestGeneration,
     notify,
+    review,
   } = useStudio();
+  const audioUploadInputRef = useRef<HTMLInputElement>(null);
+  const audioUploadAbortRef = useRef<AbortController | undefined>(undefined);
+  const audioUploadOperationRef = useRef(0);
+  const [audioUploadProgress, setAudioUploadProgress] = useState<number>();
   const audioMode = state.page === "oral-audio";
   const person = activePerson(data.people, state.draft.ipId);
   const avatar = person?.avatars.find(
@@ -2489,7 +2498,11 @@ export function OralPage() {
     (item) => item.id === state.draft.voiceId && item.confirmed,
   );
   const audio = findAsset(data.assets, state.draft.audioId);
-  const speechAudio = audio?.kind === "audio" ? audio : undefined;
+  const speechAudio =
+    audio?.kind === "audio" &&
+    (!audio.allowedUses || audio.allowedUses.includes("oral_audio"))
+      ? audio
+      : undefined;
   const avatarImage = findAsset(data.assets, avatar?.imageId);
   const ready = audioMode
     ? Boolean(person && avatar && speechAudio)
@@ -2500,6 +2513,80 @@ export function OralPage() {
           state.draft.script.confirmed &&
           state.draft.script.text.trim(),
       );
+
+  useEffect(() => {
+    if (audioMode) return;
+    audioUploadOperationRef.current += 1;
+    audioUploadAbortRef.current?.abort();
+    audioUploadAbortRef.current = undefined;
+    setAudioUploadProgress(undefined);
+  }, [audioMode]);
+
+  useEffect(
+    () => () => {
+      audioUploadOperationRef.current += 1;
+      audioUploadAbortRef.current?.abort();
+    },
+    [],
+  );
+
+  const cancelAudioUpload = () => {
+    audioUploadOperationRef.current += 1;
+    audioUploadAbortRef.current?.abort();
+    audioUploadAbortRef.current = undefined;
+    setAudioUploadProgress(undefined);
+    notify("口播音频上传已取消");
+  };
+
+  const uploadSpeechAudio = async (file: File) => {
+    if (review) {
+      notify("审核模式不执行真实上传");
+      return;
+    }
+    const validationError = validateOralAudioFile(file);
+    if (validationError) {
+      notify(validationError);
+      return;
+    }
+    const operation = ++audioUploadOperationRef.current;
+    audioUploadAbortRef.current?.abort();
+    const controller = new AbortController();
+    audioUploadAbortRef.current = controller;
+    setAudioUploadProgress(0);
+    try {
+      const duration = await readAudioDuration(file);
+      if (operation !== audioUploadOperationRef.current) return;
+      const uploaded = await uploadOralAudioMaterial(
+        file,
+        "oral_audio",
+        duration,
+        (progress) => {
+          if (operation === audioUploadOperationRef.current)
+            setAudioUploadProgress(progress);
+        },
+        controller.signal,
+      );
+      if (operation !== audioUploadOperationRef.current) return;
+      updateData((current) => ({
+        ...current,
+        assets: [
+          uploaded,
+          ...current.assets.filter((item) => item.id !== uploaded.id),
+        ],
+      }));
+      patchDraft({ audioId: uploaded.id, voiceId: undefined });
+      notify(`音频“${uploaded.name}”已上传并永久保存`);
+    } catch (cause) {
+      if (operation !== audioUploadOperationRef.current) return;
+      notify(customerVisibleErrorMessage(cause, "上传口播音频失败"));
+    } finally {
+      if (operation === audioUploadOperationRef.current) {
+        audioUploadAbortRef.current = undefined;
+        setAudioUploadProgress(undefined);
+        if (audioUploadInputRef.current) audioUploadInputRef.current.value = "";
+      }
+    }
+  };
 
   return (
     <section className="creation-page creation-oral">
@@ -2554,14 +2641,31 @@ export function OralPage() {
                   <Button variant="outline" onClick={() => openPicker("audio")}>
                     从素材库选择
                   </Button>
+                  <input
+                    accept=".mp3,audio/mpeg"
+                    aria-label="选择口播音频"
+                    hidden
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      if (file) void uploadSpeechAudio(file);
+                    }}
+                    ref={audioUploadInputRef}
+                    type="file"
+                  />
                   <Button
+                    disabled={audioUploadProgress !== undefined}
                     variant="outline"
-                    onClick={() =>
-                      notify("音频上传服务尚未接通，请先从素材库选择")
-                    }
+                    onClick={() => audioUploadInputRef.current?.click()}
                   >
-                    上传音频
+                    {audioUploadProgress === undefined
+                      ? "上传音频"
+                      : `上传中 ${audioUploadProgress}%`}
                   </Button>
+                  {audioUploadProgress !== undefined && (
+                    <Button variant="quiet" onClick={cancelAudioUpload}>
+                      取消上传
+                    </Button>
+                  )}
                 </div>
                 <Hint>使用音频中的原声直接驱动口型，无需另选克隆声音。</Hint>
               </ControlGroup>

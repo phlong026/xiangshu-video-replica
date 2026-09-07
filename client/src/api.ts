@@ -2316,7 +2316,12 @@ export async function resolveMaterials(
 
 export async function createMaterialUploadIntent(
   file: File,
-  input: { title?: string; group?: string } = {},
+  input: {
+    title?: string;
+    group?: string;
+    audioPurpose?: "oral_audio" | "voice_clone";
+    durationSeconds?: number;
+  } = {},
 ): Promise<MaterialUploadIntent> {
   const sha256 = await sha256ForUpload(file);
   return requestApiJson<MaterialUploadIntent>(
@@ -2329,7 +2334,12 @@ export async function createMaterialUploadIntent(
         content_type: materialContentTypeForFile(file),
         size_bytes: file.size,
         ...(sha256 === null ? {} : { sha256 }),
-        ...input,
+        ...(input.title ? { title: input.title } : {}),
+        ...(input.group ? { group: input.group } : {}),
+        ...(input.audioPurpose ? { audio_purpose: input.audioPurpose } : {}),
+        ...(input.durationSeconds !== undefined
+          ? { duration_seconds: input.durationSeconds }
+          : {}),
       }),
     },
   );

@@ -76,6 +76,7 @@ const projectLimit = 24;
 const personLimit = 8;
 const projectPreviewLimit = 8;
 const sceneLimit = 12;
+const MAX_ORAL_SOURCE_BYTES = 50 * 1024 * 1024;
 
 type FrozenReplicaRequest = {
   fingerprint: string;
@@ -143,6 +144,38 @@ export function studioAssetFromMaterial(item: MaterialItem): StudioAsset {
     allowedUses: item.allowed_uses,
     allowedActions: item.allowed_actions,
   };
+}
+
+export type OralAudioPurpose = "oral_audio" | "voice_clone";
+
+export function validateOralAudioFile(file: File) {
+  if (!file.name.toLowerCase().endsWith(".mp3")) return "仅支持 MP3 音频。";
+  if (file.size <= 0) return "上传文件不能为空。";
+  if (file.size > MAX_ORAL_SOURCE_BYTES) return "上传文件不能超过 50 MB。";
+  return undefined;
+}
+
+export function readAudioDuration(file: File): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const audio = document.createElement("audio");
+    const cleanup = () => {
+      audio.removeAttribute("src");
+      URL.revokeObjectURL(url);
+    };
+    audio.preload = "metadata";
+    audio.onloadedmetadata = () => {
+      const duration = audio.duration;
+      cleanup();
+      if (Number.isFinite(duration) && duration > 0) resolve(duration);
+      else reject(new Error("无法读取音频时长，请重新选择 MP3 文件。"));
+    };
+    audio.onerror = () => {
+      cleanup();
+      reject(new Error("无法读取音频时长，请重新选择 MP3 文件。"));
+    };
+    audio.src = url;
+  });
 }
 
 function draftAssetIds(draft: StudioDraft): string[] {
@@ -896,12 +929,37 @@ export async function uploadVideoMaterial(
   file: File,
   group: string,
   onProgress: (progress: number) => void,
+  signal?: AbortSignal,
 ): Promise<StudioAsset> {
   const intent = await createMaterialUploadIntent(file, {
     title: file.name,
     group,
   });
-  await uploadMaterial(intent, file, onProgress);
+  await uploadMaterial(intent, file, onProgress, signal);
+  const material = await completeMaterialUpload(intent.asset_id);
+  const asset = studioAssetFromMaterial(material);
+  const url = material.asset_id
+    ? await getAssetDownloadUrl(material.asset_id)
+        .then((result) => result.url)
+        .catch(() => undefined)
+    : undefined;
+  return { ...asset, url };
+}
+
+export async function uploadOralAudioMaterial(
+  file: File,
+  purpose: OralAudioPurpose,
+  durationSeconds: number,
+  onProgress: (progress: number) => void,
+  signal?: AbortSignal,
+): Promise<StudioAsset> {
+  const intent = await createMaterialUploadIntent(file, {
+    title: file.name,
+    group: purpose === "oral_audio" ? "完整口播音频" : "声音克隆样本",
+    audioPurpose: purpose,
+    durationSeconds,
+  });
+  await uploadMaterial(intent, file, onProgress, signal);
   const material = await completeMaterialUpload(intent.asset_id);
   const asset = studioAssetFromMaterial(material);
   const url = material.asset_id

@@ -171,6 +171,34 @@ describe("素材库 API", () => {
     );
   });
 
+  it("音频上传意图携带用途与浏览器读取的时长", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        material_id: "asset:audio-1",
+        asset_id: "audio-1",
+        storage_key: null,
+        method: "PUT",
+        url: "https://storage.test/audio",
+        headers: { "Content-Type": "audio/mpeg" },
+        expires_at: "2030-01-01T00:00:00Z",
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createMaterialUploadIntent(
+      new File(["ID3audio"], "完整口播.mp3", { type: "audio/mpeg" }),
+      { audioPurpose: "oral_audio", durationSeconds: 42 },
+    );
+
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual(
+      expect.objectContaining({
+        audio_purpose: "oral_audio",
+        duration_seconds: 42,
+      }),
+    );
+  });
+
   it("复用带本地鉴权和进度处理的上传通道", async () => {
     class MaterialUploadRequest {
       static latest: MaterialUploadRequest | null = null;
