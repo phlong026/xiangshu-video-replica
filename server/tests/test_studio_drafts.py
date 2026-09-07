@@ -63,6 +63,7 @@ def seed_data(conn: sqlite3.Connection) -> None:
         [
             ("employee_1", "employee_1", "Employee One", "employee"),
             ("employee_2", "employee_2", "Employee Two", "employee"),
+            ("customer_1", "customer_1", "Customer One", "customer"),
             ("auditor_1", "auditor_1", "Auditor One", "auditor"),
         ],
     )
@@ -174,8 +175,50 @@ def test_oversized_draft_payload_rejected(client: TestClient) -> None:
 
 
 def test_auditor_cannot_write_draft(client: TestClient) -> None:
-    response = client.put(DRAFT_URL, json=draft_body(), headers=auth_headers("auditor_1"))
-    assert response.status_code == 403
+    headers = auth_headers("auditor_1")
+    draft = client.put(DRAFT_URL, json=draft_body(), headers=headers)
+    script = client.post(SAVED_URL, json=saved_script_body(), headers=headers)
+
+    assert draft.status_code == 403
+    assert script.status_code == 403
+    assert client.get(DRAFT_URL, headers=headers).status_code == 404
+    assert client.get(SAVED_URL, headers=headers).json()["items"] == []
+
+
+def test_auditor_cannot_delete_cloud_writes_without_side_effects(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        conn.execute(
+            "INSERT INTO studio_drafts (id, user_id, draft_kind, payload) "
+            "VALUES ('auditor-draft', 'auditor_1', 'copy', '{}')"
+        )
+        conn.execute(
+            "INSERT INTO studio_saved_scripts ("
+            "id, user_id, script_id, title, text, version"
+            ") VALUES ('auditor-script-row', 'auditor_1', 'auditor-script', '标题', '正文', 1)"
+        )
+        conn.commit()
+
+    draft_delete = client.delete(DRAFT_URL, headers=auth_headers("auditor_1"))
+    script_delete = client.delete(f"{SAVED_URL}/auditor-script", headers=auth_headers("auditor_1"))
+
+    assert draft_delete.status_code == 403
+    assert script_delete.status_code == 403
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM studio_drafts WHERE id = 'auditor-draft'"
+            ).fetchone()[0]
+            == 1
+        )
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM studio_saved_scripts WHERE id = 'auditor-script-row'"
+            ).fetchone()[0]
+            == 1
+        )
 
 
 def test_draft_requires_authentication(client: TestClient) -> None:
@@ -225,6 +268,20 @@ def test_saved_scripts_crud_and_upsert(client: TestClient) -> None:
 
     missing = client.delete(f"{SAVED_URL}/script-1", headers=auth_headers("employee_1"))
     assert missing.status_code == 404
+
+
+def test_customer_can_write_and_delete_cloud_draft_and_saved_script(
+    client: TestClient,
+) -> None:
+    headers = auth_headers("customer_1")
+
+    draft = client.put(DRAFT_URL, json=draft_body(), headers=headers)
+    script = client.post(SAVED_URL, json=saved_script_body(), headers=headers)
+
+    assert draft.status_code == 200
+    assert script.status_code == 200
+    assert client.delete(DRAFT_URL, headers=headers).status_code == 200
+    assert client.delete(f"{SAVED_URL}/script-1", headers=headers).status_code == 200
 
 
 def test_saved_scripts_isolated_per_user(client: TestClient) -> None:
