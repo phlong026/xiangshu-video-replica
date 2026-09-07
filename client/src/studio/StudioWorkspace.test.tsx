@@ -1391,6 +1391,41 @@ describe("V1.4 workspace integration", () => {
       }
     });
 
+    it("切换为审计员会取消已排程自动保存且旧回调仍二次拒绝", async () => {
+      live.loadStudioData.mockResolvedValue(emptyStudioData);
+      live.loadCloudDraft.mockResolvedValue(undefined);
+      const auditor = {
+        id: reviewUser.id,
+        username: reviewUser.username,
+        display_name: "审计员",
+        role: "auditor" as const,
+      };
+      const view = render(<StudioWorkspace currentUser={reviewUser} />);
+
+      await openCopyPage();
+      const timeoutSpy = vi.spyOn(window, "setTimeout");
+      const clearTimeoutSpy = vi.spyOn(window, "clearTimeout");
+      try {
+        fireEvent.change(screen.getByLabelText("二创文案"), {
+          target: { value: "切换角色前的待保存内容" },
+        });
+        const scheduledSave = timeoutSpy.mock.calls.find(
+          ([, delay]) => delay === 2_000,
+        )?.[0] as (() => void) | undefined;
+        expect(scheduledSave).toBeTypeOf("function");
+
+        view.rerender(<StudioWorkspace currentUser={auditor} />);
+        expect(clearTimeoutSpy).toHaveBeenCalled();
+        scheduledSave?.();
+        await Promise.resolve();
+
+        expect(live.persistCloudDraft).not.toHaveBeenCalled();
+      } finally {
+        timeoutSpy.mockRestore();
+        clearTimeoutSpy.mockRestore();
+      }
+    });
+
     it("保存版本写入云端我的文案", async () => {
       live.loadStudioData.mockResolvedValue(emptyStudioData);
       live.loadCloudDraft.mockResolvedValue(undefined);
@@ -1621,6 +1656,39 @@ describe("V1.4 workspace integration", () => {
       expect(screen.queryByText("局部字段保持不变")).not.toBeInTheDocument();
     });
 
+    it("审计员可读取文案但保存和确认均不发写请求", async () => {
+      live.loadStudioData.mockResolvedValue(emptyStudioData);
+      live.loadCloudDraft.mockResolvedValue({ draft: restoredDraft() });
+      const auditor = {
+        id: "auditor-1",
+        username: "auditor-1",
+        display_name: "审计员",
+        role: "auditor" as const,
+      };
+      render(<StudioWorkspace currentUser={auditor} />);
+
+      await openCopyPage();
+      await waitFor(() =>
+        expect(screen.getByLabelText("二创文案")).toHaveValue(
+          "云端恢复的文案内容",
+        ),
+      );
+      expect(screen.getByLabelText("二创文案")).toBeDisabled();
+      expect(screen.getByRole("button", { name: "保存版本" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "确认终稿" })).toBeDisabled();
+      vi.useFakeTimers();
+      try {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(2_000);
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(live.persistSavedScript).not.toHaveBeenCalled();
+      expect(live.persistCloudDraft).not.toHaveBeenCalled();
+      expect(live.publishScriptVersion).not.toHaveBeenCalled();
+    });
+
     it("确认终稿立即持久化并带 projectId 时发布到项目脚本版本", async () => {
       live.loadStudioData.mockResolvedValue(emptyStudioData);
       live.loadCloudDraft.mockResolvedValue(undefined);
@@ -1683,6 +1751,92 @@ describe("V1.4 workspace integration", () => {
       expect(
         (screen.getByLabelText("二创文案") as HTMLTextAreaElement).value,
       ).toBe("提取出的乡墅口播原文");
+    });
+
+    it("同一账号提取期间切换为审计员会丢弃迟到成功回调", async () => {
+      live.loadStudioData.mockResolvedValue(emptyStudioData);
+      live.loadCloudDraft.mockResolvedValue(undefined);
+      let resolveExtraction!: (value: { text: string }) => void;
+      live.extractScriptFromUpload.mockReturnValue(
+        new Promise((resolve) => {
+          resolveExtraction = resolve;
+        }),
+      );
+      const state = createState("workbench");
+      state.draft.projectId = "project-1";
+      state.draft.sourceAssetId = "asset-1";
+      const view = render(
+        <StudioWorkspace currentUser={reviewUser} initialState={state} />,
+      );
+
+      fireEvent.click(screen.getByRole("button", { name: "提取文案" }));
+      await waitFor(() =>
+        expect(live.extractScriptFromUpload).toHaveBeenCalledWith(
+          "project-1",
+          "asset-1",
+        ),
+      );
+      view.rerender(
+        <StudioWorkspace
+          currentUser={{
+            id: reviewUser.id,
+            username: reviewUser.username,
+            display_name: "审计员",
+            role: "auditor",
+          }}
+          initialState={state}
+        />,
+      );
+      await act(async () => {
+        resolveExtraction({ text: "不应写入的迟到转写" });
+        await Promise.resolve();
+      });
+
+      expect(screen.queryByLabelText("二创文案")).toBeNull();
+      expect(live.persistCloudDraft).not.toHaveBeenCalled();
+    });
+
+    it("同一账号提取期间切换为审计员会静默丢弃迟到失败", async () => {
+      live.loadStudioData.mockResolvedValue(emptyStudioData);
+      live.loadCloudDraft.mockResolvedValue(undefined);
+      let rejectExtraction!: (cause: Error) => void;
+      live.extractScriptFromUpload.mockReturnValue(
+        new Promise((_resolve, reject) => {
+          rejectExtraction = reject;
+        }),
+      );
+      const state = createState("workbench");
+      state.draft.projectId = "project-1";
+      state.draft.sourceAssetId = "asset-1";
+      const view = render(
+        <StudioWorkspace currentUser={reviewUser} initialState={state} />,
+      );
+
+      fireEvent.click(screen.getByRole("button", { name: "提取文案" }));
+      await waitFor(() =>
+        expect(live.extractScriptFromUpload).toHaveBeenCalledWith(
+          "project-1",
+          "asset-1",
+        ),
+      );
+      view.rerender(
+        <StudioWorkspace
+          currentUser={{
+            ...reviewUser,
+            display_name: "审计员",
+            role: "auditor",
+          }}
+          initialState={state}
+        />,
+      );
+      await act(async () => {
+        rejectExtraction(new Error("不应显示的迟到错误"));
+        await Promise.resolve();
+      });
+
+      expect(screen.queryByText("不应显示的迟到错误")).toBeNull();
+      expect(screen.queryByText(/文案提取失败/)).toBeNull();
+      expect(live.persistCloudDraft).not.toHaveBeenCalled();
     });
 
     it("重新进入工作区时恢复同一来源资产已完成的提取任务", async () => {
@@ -1767,6 +1921,8 @@ describe("视频生成（C2 独立创作）", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.useRealTimers();
+    api.getWallet.mockReset();
+    api.getWallet.mockRejectedValue(new Error("internal wallet unavailable"));
     api.getIndependentCapabilities.mockResolvedValue({
       extended_modes_enabled: true,
       t2v_enabled: true,
@@ -2551,6 +2707,108 @@ describe("视频生成（C2 独立创作）", () => {
     );
   });
 
+  it("同一账号提交口播后切换为审计员会静默丢弃迟到响应", async () => {
+    let resolveTask:
+      | ((value: { id: string; status: string }) => void)
+      | undefined;
+    api.createOralTask.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveTask = resolve;
+        }),
+    );
+    live.loadStudioData.mockResolvedValue(createReviewData());
+    const view = render(
+      <StudioWorkspace
+        currentUser={reviewUser}
+        initialState={createReviewState("oral")}
+      />,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "生成口播视频" }),
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: "生成确认 · 数字人口播",
+    });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "确认费用并提交" }),
+    );
+    await waitFor(() => expect(api.createOralTask).toHaveBeenCalledOnce());
+    const previousHash = window.location.hash;
+
+    view.rerender(
+      <StudioWorkspace
+        currentUser={{
+          ...reviewUser,
+          display_name: "审计员",
+          role: "auditor",
+        }}
+        initialState={createReviewState("oral")}
+      />,
+    );
+    await act(async () => {
+      resolveTask?.({ id: "oral-after-role-change", status: "QUEUED" });
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByText(/口播任务已提交/)).toBeNull();
+    expect(window.location.hash).toBe(previousHash);
+  });
+
+  it("旧口播请求的 finally 不会解锁角色往返后的新提交", async () => {
+    const resolveTasks: Array<(value: { id: string; status: string }) => void> =
+      [];
+    api.createOralTask.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveTasks.push(resolve);
+        }),
+    );
+    live.loadStudioData.mockResolvedValue(createReviewData());
+    const state = createReviewState("oral");
+    const view = render(
+      <StudioWorkspace currentUser={reviewUser} initialState={state} />,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "生成口播视频" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "确认费用并提交" }),
+    );
+    await waitFor(() => expect(api.createOralTask).toHaveBeenCalledOnce());
+
+    view.rerender(
+      <StudioWorkspace
+        currentUser={{ ...reviewUser, role: "auditor" }}
+        initialState={state}
+      />,
+    );
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    view.rerender(
+      <StudioWorkspace currentUser={reviewUser} initialState={state} />,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "生成口播视频" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "确认费用并提交" }),
+    );
+    await waitFor(() => expect(api.createOralTask).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole("button", { name: "提交中…" })).toBeDisabled();
+
+    await act(async () => {
+      resolveTasks[0]?.({ id: "oral-a", status: "QUEUED" });
+      await Promise.resolve();
+    });
+
+    expect(screen.getByRole("button", { name: "提交中…" })).toBeDisabled();
+    await act(async () => {
+      resolveTasks[1]?.({ id: "oral-b", status: "QUEUED" });
+      await Promise.resolve();
+    });
+  });
+
   it("工作区卸载后旧口播响应不会再跳转页面", async () => {
     live.loadPersonAssets.mockResolvedValue({ assets: [], errors: [] });
     let resolveTask:
@@ -2707,6 +2965,65 @@ describe("视频生成（C2 独立创作）", () => {
     expect(api.createIndependentVideoTask.mock.calls[1]).toEqual(
       api.createIndependentVideoTask.mock.calls[0],
     );
+  });
+
+  it("旧视频请求的 finally 不会解锁角色往返后的新提交", async () => {
+    api.getIndependentCapabilities.mockResolvedValue({
+      extended_modes_enabled: true,
+      t2v_enabled: true,
+      i2v_enabled: true,
+      r2v_enabled: true,
+      last_frame_enabled: true,
+      max_reference_images: 4,
+      max_quantity: 4,
+    });
+    const resolveBatches: Array<
+      (value: { id: string; status: string; tasks: unknown[] }) => void
+    > = [];
+    api.createIndependentVideoTask.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveBatches.push(resolve);
+        }),
+    );
+    live.loadStudioData.mockResolvedValue(emptyStudioData);
+    const view = render(<StudioWorkspace currentUser={reviewUser} />);
+    await openVideoPage();
+    fireEvent.change(screen.getByLabelText("提示词"), {
+      target: { value: "航拍乡墅庭院" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "生成视频" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "确认费用并提交" }),
+    );
+    await waitFor(() =>
+      expect(api.createIndependentVideoTask).toHaveBeenCalledOnce(),
+    );
+
+    view.rerender(
+      <StudioWorkspace currentUser={{ ...reviewUser, role: "auditor" }} />,
+    );
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    view.rerender(<StudioWorkspace currentUser={reviewUser} />);
+    fireEvent.click(screen.getByRole("button", { name: "生成视频" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "确认费用并提交" }),
+    );
+    await waitFor(() =>
+      expect(api.createIndependentVideoTask).toHaveBeenCalledTimes(2),
+    );
+    expect(screen.getByRole("button", { name: "提交中…" })).toBeDisabled();
+
+    await act(async () => {
+      resolveBatches[0]?.({ id: "batch-a", status: "QUEUED", tasks: [] });
+      await Promise.resolve();
+    });
+
+    expect(screen.getByRole("button", { name: "提交中…" })).toBeDisabled();
+    await act(async () => {
+      resolveBatches[1]?.({ id: "batch-b", status: "QUEUED", tasks: [] });
+      await Promise.resolve();
+    });
   });
 
   it("视频结果未知后价格变化不换键，业务参数变化才换键", async () => {

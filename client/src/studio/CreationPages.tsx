@@ -168,10 +168,13 @@ export function CopyPage() {
     confirmFinalDraft,
     openLive,
     openPicker,
+
     notify,
     review,
+
     user,
   } = useStudio();
+  const readOnly = user.role === "auditor";
   const [tab, setTab] = useState<"rewrite" | "saved">("rewrite");
   const [rewriting, setRewriting] = useState(false);
   const rewritePendingRef = useRef(false);
@@ -493,6 +496,7 @@ export function CopyPage() {
               <input
                 aria-label="作品名称"
                 className="creation-input"
+                disabled={readOnly}
                 onChange={(event) =>
                   patchDraft({
                     script: {
@@ -508,6 +512,7 @@ export function CopyPage() {
               <textarea
                 aria-label="二创文案"
                 className="creation-textarea creation-copy-textarea"
+                disabled={readOnly}
                 onChange={(event) =>
                   patchDraft({
                     script: {
@@ -574,15 +579,25 @@ export function CopyPage() {
               </Button>
               <Button
                 variant="quiet"
-                onClick={confirmFinalDraft}
-                disabled={!state.draft.script.text.trim()}
+                onClick={() => {
+                  if (readOnly) return;
+                  confirmFinalDraft();
+                }}
+                disabled={readOnly || !state.draft.script.text.trim()}
               >
                 确认终稿
               </Button>
             </Panel>
           </div>
           <footer className="creation-action-bar">
-            <Button variant="outline" onClick={saveDraft}>
+            <Button
+              variant="outline"
+              disabled={readOnly}
+              onClick={() => {
+                if (readOnly) return;
+                saveDraft();
+              }}
+            >
               保存版本
             </Button>
             <Button
@@ -687,7 +702,9 @@ export function ReplicaPage() {
     notify,
     saveDraft,
     openLive,
+    user,
   } = useStudio();
+  const readOnly = user.role === "auditor";
   const project = data.projects.find(
     (item) => item.id === state.draft.projectId,
   );
@@ -990,7 +1007,7 @@ export function ReplicaPage() {
   );
 
   const handleUpload = async (file: File) => {
-    if (review) {
+    if (review || readOnly) {
       notify("审核示例不上传视频。");
       return;
     }
@@ -1102,7 +1119,7 @@ export function ReplicaPage() {
   };
 
   const startAnalysis = async () => {
-    if (review) {
+    if (review || readOnly) {
       notify("审核示例不调用真实接口。");
       return;
     }
@@ -1175,7 +1192,7 @@ export function ReplicaPage() {
   };
 
   const saveAsCustomPrompt = async () => {
-    if (review) {
+    if (review || readOnly) {
       notify("审核示例不调用真实接口。");
       return;
     }
@@ -1229,7 +1246,7 @@ export function ReplicaPage() {
   };
 
   const sendToGeneration = async () => {
-    if (review) {
+    if (review || readOnly) {
       notify("审核示例不调用真实接口。");
       return;
     }
@@ -1339,6 +1356,7 @@ export function ReplicaPage() {
             action={
               <div className="creation-upload-row">
                 <Button
+                  disabled={readOnly}
                   variant="primary"
                   onClick={() => uploadInputRef.current?.click()}
                 >
@@ -1349,6 +1367,7 @@ export function ReplicaPage() {
                     aria-label="选择已有项目"
                     className="creation-project-select"
                     defaultValue=""
+                    disabled={readOnly}
                     onChange={(event) => {
                       if (event.target.value) {
                         selectExistingProject(event.target.value);
@@ -1385,7 +1404,7 @@ export function ReplicaPage() {
             <div className="creation-upload-row">
               <Button
                 variant="primary"
-                disabled={analysisBusy}
+                disabled={readOnly || analysisBusy}
                 onClick={() => void startAnalysis()}
               >
                 {analysisBusy
@@ -1395,7 +1414,7 @@ export function ReplicaPage() {
                     : "启动 AI 拆解"}
               </Button>
               <Button
-                disabled={analysisBusy}
+                disabled={readOnly || analysisBusy}
                 variant="outline"
                 onClick={() => uploadInputRef.current?.click()}
               >
@@ -1459,6 +1478,7 @@ export function ReplicaPage() {
             </div>
             <textarea
               aria-label="拆解 Prompt"
+              disabled={readOnly}
               className="creation-textarea"
               onChange={(event) => {
                 setPromptText(event.target.value);
@@ -1481,12 +1501,13 @@ export function ReplicaPage() {
                   <input
                     aria-label="自定义提示词名称"
                     className="creation-project-select"
+                    disabled={readOnly}
                     onChange={(event) => setPromptName(event.target.value)}
                     placeholder="提示词名称"
                     value={promptName}
                   />
                   <Button
-                    disabled={savingPrompt}
+                    disabled={readOnly || savingPrompt}
                     onClick={() => void saveAsCustomPrompt()}
                     variant="primary"
                   >
@@ -1502,6 +1523,7 @@ export function ReplicaPage() {
               ) : (
                 <>
                   <Button
+                    disabled={readOnly}
                     onClick={() => setPromptNameOpen(true)}
                     variant="outline"
                   >
@@ -1528,6 +1550,7 @@ export function ReplicaPage() {
                   ) : null}
                   <Button
                     disabled={
+                      readOnly ||
                       generating ||
                       analysisBusy ||
                       displayShots.length === 0 ||
@@ -1553,7 +1576,14 @@ export function ReplicaPage() {
           <strong>分镜、Prompt 与生成批次能力已在本页打通</strong>
           <Hint>需要逐镜头精修可进入成熟分镜工作区。</Hint>
         </div>
-        <Button variant="outline" onClick={saveDraft}>
+        <Button
+          variant="outline"
+          disabled={readOnly}
+          onClick={() => {
+            if (readOnly) return;
+            saveDraft();
+          }}
+        >
           保存草稿
         </Button>
         <Button variant="outline" onClick={() => openLive("analysis")}>
@@ -1577,8 +1607,9 @@ export function ReplicaPage() {
 }
 
 export function ReplacementPage() {
-  const { state, data, review, patchDraft, navigate, notify, saveDraft } =
+  const { state, data, review, patchDraft, navigate, notify, saveDraft, user } =
     useStudio();
+  const readOnly = user.role === "auditor";
   const project = data.projects.find(
     (item) => item.id === state.draft.projectId,
   );
@@ -1600,6 +1631,8 @@ export function ReplacementPage() {
   >(null);
   const referenceMatchInFlightRef = useRef<string | undefined>(undefined);
   const referenceRetryScheduledRef = useRef(false);
+  const readOnlyRef = useRef(readOnly);
+  readOnlyRef.current = readOnly;
   const characterVersionIdRef = useRef<string | null | undefined>(undefined);
   const sourceFrameSelectionIdRef = useRef<string | undefined>(undefined);
   const referenceMatchPromiseRef = useRef<
@@ -1620,6 +1653,7 @@ export function ReplacementPage() {
     : null;
 
   const clearConfirmedFirstFrame = useCallback(() => {
+    if (readOnlyRef.current) return;
     confirmedSelectionKeyRef.current = undefined;
     patchDraftRef.current({
       firstFrameId: undefined,
@@ -1642,7 +1676,7 @@ export function ReplacementPage() {
     characterVersionIdRef.current = undefined;
     sourceFrameSelectionIdRef.current = undefined;
     confirmedSelectionKeyRef.current = undefined;
-    if (projectId) {
+    if (projectId && !readOnlyRef.current) {
       patchDraftRef.current({
         firstFrameId: undefined,
         firstFrameSelectionVersionId: undefined,
@@ -1682,6 +1716,7 @@ export function ReplacementPage() {
   useEffect(() => {
     if (
       review ||
+      readOnly ||
       !projectId ||
       !characterVersionId ||
       !sourceFrameSelectionId ||
@@ -1735,6 +1770,7 @@ export function ReplacementPage() {
     };
   }, [
     review,
+    readOnly,
     projectId,
     characterVersionId,
     sourceFrameSelectionId,
@@ -1777,6 +1813,7 @@ export function ReplacementPage() {
   const handleFirstFrameChange = useCallback(
     (selection: AnalysisVersion | null) => {
       setFirstFrameSelection(selection);
+      if (readOnlyRef.current) return;
       if (!selection) {
         clearConfirmedFirstFrame();
         return;
@@ -1801,6 +1838,7 @@ export function ReplacementPage() {
 
   const retryReferenceMatch = () => {
     if (
+      readOnly ||
       referenceMatching ||
       referenceMatchInFlightRef.current ||
       referenceRetryScheduledRef.current
@@ -1830,7 +1868,9 @@ export function ReplacementPage() {
                   aria-label="选择项目"
                   className="creation-project-select"
                   defaultValue=""
+                  disabled={readOnly}
                   onChange={(event) => {
+                    if (readOnly) return;
                     const selected = data.projects.find(
                       (item) => item.id === event.target.value,
                     );
@@ -1870,6 +1910,7 @@ export function ReplacementPage() {
               onBusyChange={setLeafBusy}
               onVersionChange={handleCharacterChange}
               projectId={project.id}
+              readOnly={readOnly}
               variant="inline"
             />
           </Panel>
@@ -1879,6 +1920,7 @@ export function ReplacementPage() {
               onBusyChange={setLeafBusy}
               onSelectionChange={handleSourceFrameChange}
               projectId={project.id}
+              readOnly={readOnly}
               referenceAssetId={project.reference_asset_id}
               simplified
               videoDurationSeconds={sourceDurationSeconds}
@@ -1892,7 +1934,7 @@ export function ReplacementPage() {
                   {referenceError}
                 </p>
                 <Button
-                  disabled={referenceMatching}
+                  disabled={readOnly || referenceMatching}
                   onClick={retryReferenceMatch}
                   variant="outline"
                 >
@@ -1905,6 +1947,7 @@ export function ReplacementPage() {
                 onBusyChange={setLeafBusy}
                 onSelectionChange={handleFirstFrameChange}
                 projectId={project.id}
+                readOnly={readOnly}
                 referenceSelection={referenceSelection}
                 simplified
                 sourceFrameSelectionId={sourceFrameSelection.id}
@@ -1946,7 +1989,14 @@ export function ReplacementPage() {
           </strong>
           <Hint>确认后的首帧可直接用于文/图生视频。</Hint>
         </div>
-        <Button variant="outline" onClick={saveDraft}>
+        <Button
+          variant="outline"
+          disabled={readOnly}
+          onClick={() => {
+            if (readOnly) return;
+            saveDraft();
+          }}
+        >
           保存草稿
         </Button>
       </footer>
@@ -1962,7 +2012,8 @@ const assetKindNames: Record<StudioAsset["kind"], string> = {
 };
 
 function ParameterControls() {
-  const { state, patchDraft } = useStudio();
+  const { state, patchDraft, user } = useStudio();
+  const readOnly = user.role === "auditor";
   const draft = state.draft;
   return (
     <div className="creation-parameters">
@@ -1971,6 +2022,7 @@ function ParameterControls() {
           {["768P", "2K"].map((resolution) => (
             <button
               className={draft.resolution === resolution ? "active" : ""}
+              disabled={readOnly}
               key={resolution}
               onClick={() => patchDraft({ resolution })}
               type="button"
@@ -1983,6 +2035,7 @@ function ParameterControls() {
       <ControlGroup label={`时长 ${draft.duration} 秒`}>
         <input
           aria-label="时长"
+          disabled={readOnly}
           max={15}
           min={4}
           onChange={(event) =>
@@ -1997,6 +2050,7 @@ function ParameterControls() {
           {ratios.map((ratio) => (
             <button
               className={draft.ratio === ratio ? "active" : ""}
+              disabled={readOnly}
               key={ratio}
               onClick={() => patchDraft({ ratio })}
               type="button"
@@ -2011,6 +2065,7 @@ function ParameterControls() {
           {[1, 2, 4].map((count) => (
             <button
               className={draft.count === count ? "active" : ""}
+              disabled={readOnly}
               key={count}
               onClick={() => patchDraft({ count })}
               type="button"
@@ -2126,9 +2181,11 @@ function SavedPromptImporter({
   const [open, setOpen] = useState(false);
   const [prompts, setPrompts] = useState<SavedPromptItem[]>();
   const [error, setError] = useState<string>();
-  const { review, notify } = useStudio();
+  const { review, notify, user } = useStudio();
+  const readOnly = user.role === "auditor";
 
   const toggle = () => {
+    if (readOnly) return;
     const next = !open;
     setOpen(next);
     if (next && prompts === undefined && !error && !review) {
@@ -2140,7 +2197,7 @@ function SavedPromptImporter({
 
   return (
     <div className="creation-prompt-import">
-      <Button variant="quiet" onClick={toggle}>
+      <Button variant="quiet" disabled={readOnly} onClick={toggle}>
         <Icon name="arrow" size={16} /> 导入提示词
       </Button>
       {open && (
@@ -2194,7 +2251,8 @@ function VideoMaterialUpload({
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [progress, setProgress] = useState<number>();
-  const { review, notify } = useStudio();
+  const { review, notify, user } = useStudio();
+  const readOnly = user.role === "auditor";
   const onUploadedRef = useRef(onUploaded);
   const mountedRef = useRef(false);
   onUploadedRef.current = onUploaded;
@@ -2207,6 +2265,7 @@ function VideoMaterialUpload({
   }, []);
 
   const upload = async (file: File) => {
+    if (readOnly) return;
     if (!["image/png", "image/jpeg"].includes(file.type)) {
       notify("仅支持 PNG 或 JPEG 图片。");
       return;
@@ -2233,7 +2292,7 @@ function VideoMaterialUpload({
     <>
       <button
         className="creation-upload-mini"
-        disabled={disabled || progress !== undefined}
+        disabled={readOnly || disabled || progress !== undefined}
         onClick={() => inputRef.current?.click()}
         type="button"
       >
@@ -2242,7 +2301,7 @@ function VideoMaterialUpload({
       <input
         accept="image/png,image/jpeg"
         aria-label={`上传${label}`}
-        disabled={disabled}
+        disabled={readOnly || disabled}
         hidden
         onChange={(event) => {
           const file = event.target.files?.[0];
@@ -2274,7 +2333,9 @@ export function VideoPage() {
     referenceAssetsPending,
     referenceAssetsError,
     retryReferenceAssets,
+    user,
   } = useStudio();
+  const readOnly = user.role === "auditor";
   const referenceMode = state.page === "reference";
   const storedFirstFrame =
     findAsset(data.assets, state.draft.firstFrameId) ??
@@ -2462,6 +2523,7 @@ export function VideoPage() {
             <textarea
               aria-label="提示词"
               className="creation-textarea"
+              disabled={readOnly}
               onChange={(event) => patchDraft({ prompt: event.target.value })}
               placeholder="描述镜头、场景、运动与光线"
               value={state.draft.prompt}
@@ -2476,6 +2538,7 @@ export function VideoPage() {
                 <button
                   className="creation-upload"
                   disabled={
+                    readOnly ||
                     referenceCapabilityPending ||
                     referenceCapabilityError ||
                     referenceModeDisabled ||
@@ -2498,6 +2561,7 @@ export function VideoPage() {
                 <VideoMaterialUpload
                   key={`reference-upload-${state.draft.id}`}
                   disabled={
+                    readOnly ||
                     referenceCapabilityPending ||
                     referenceCapabilityError ||
                     referenceModeDisabled ||
@@ -2555,7 +2619,9 @@ export function VideoPage() {
                 ))}
               {referenceHasIssues && (
                 <Button
+                  disabled={readOnly}
                   onClick={() =>
+                    !readOnly &&
                     patchDraft({ referenceIds: referenceValidation.repairIds })
                   }
                   variant="outline"
@@ -2578,6 +2644,7 @@ export function VideoPage() {
                     <Button
                       aria-label={`移除 ${asset.name}`}
                       className="creation-reference-remove"
+                      disabled={readOnly}
                       onClick={() =>
                         patchDraft({
                           referenceIds: state.draft.referenceIds.filter(
@@ -2599,6 +2666,7 @@ export function VideoPage() {
               <div className="creation-frame-row">
                 <div className="creation-frame-slot">
                   <button
+                    disabled={readOnly}
                     onClick={() => openPicker("first-frame")}
                     type="button"
                   >
@@ -2617,6 +2685,7 @@ export function VideoPage() {
                 <Icon name="arrow" />
                 <div className="creation-frame-slot">
                   <button
+                    disabled={readOnly}
                     onClick={() => openPicker("tail-frame")}
                     type="button"
                   >
@@ -2640,12 +2709,19 @@ export function VideoPage() {
           <div className="creation-panel-title">参数设置</div>
           <ParameterControls />
           <div className="creation-form-actions">
-            <Button variant="outline" onClick={saveDraft}>
+            <Button
+              variant="outline"
+              disabled={readOnly}
+              onClick={() => {
+                if (readOnly) return;
+                saveDraft();
+              }}
+            >
               保存草稿
             </Button>
             <Button
               variant="primary"
-              disabled={!ready}
+              disabled={readOnly || !ready}
               onClick={() => requestGeneration("视频生成")}
             >
               生成视频
@@ -2714,12 +2790,17 @@ export function VideoPage() {
 }
 
 function PersonIdentity({ person }: { person?: StudioPerson }) {
-  const { openPicker } = useStudio();
+  const { openPicker, user } = useStudio();
+  const readOnly = user.role === "auditor";
   return (
     <div className="creation-identity-row">
       <span>人物 IP</span>
       <strong>{person ? `${person.name} · ${person.role}` : "未选择"}</strong>
-      <Button variant="outline" onClick={() => openPicker("person")}>
+      <Button
+        variant="outline"
+        disabled={readOnly}
+        onClick={() => openPicker("person")}
+      >
         更换 IP
       </Button>
     </div>
@@ -2743,7 +2824,9 @@ export function OralPage() {
     requestGeneration,
     notify,
     review,
+    user,
   } = useStudio();
+  const readOnly = user.role === "auditor";
   const audioUploadInputRef = useRef<HTMLInputElement>(null);
   const audioUploadAbortRef = useRef<AbortController | undefined>(undefined);
   const audioUploadOperationRef = useRef(0);
@@ -2798,7 +2881,7 @@ export function OralPage() {
   };
 
   const uploadSpeechAudio = async (file: File) => {
-    if (review) {
+    if (review || readOnly) {
       notify("审核模式不执行真实上传");
       return;
     }
@@ -2897,12 +2980,17 @@ export function OralPage() {
                   />
                 )}
                 <div className="creation-inline-actions">
-                  <Button variant="outline" onClick={() => openPicker("audio")}>
+                  <Button
+                    variant="outline"
+                    disabled={readOnly}
+                    onClick={() => openPicker("audio")}
+                  >
                     从素材库选择
                   </Button>
                   <input
                     accept=".mp3,audio/mpeg"
                     aria-label="选择口播音频"
+                    disabled={readOnly}
                     hidden
                     onChange={(event) => {
                       const file = event.target.files?.[0];
@@ -2912,7 +3000,7 @@ export function OralPage() {
                     type="file"
                   />
                   <Button
-                    disabled={audioUploadProgress !== undefined}
+                    disabled={readOnly || audioUploadProgress !== undefined}
                     variant="outline"
                     onClick={() => audioUploadInputRef.current?.click()}
                   >
@@ -2955,6 +3043,7 @@ export function OralPage() {
                     <small>{voice ? "已就绪" : "需在人物库试听确认"}</small>
                     <Button
                       variant="outline"
+                      disabled={readOnly}
                       onClick={() => openPicker("voice")}
                     >
                       更换
@@ -2981,7 +3070,11 @@ export function OralPage() {
           <PersonIdentity person={person} />
           <div className="creation-panel-title-row">
             <span>口播分身{audioMode ? "预览" : ""}</span>
-            <Button variant="outline" onClick={() => openPicker("avatar")}>
+            <Button
+              variant="outline"
+              disabled={readOnly}
+              onClick={() => openPicker("avatar")}
+            >
               更换分身
             </Button>
           </div>
@@ -3035,12 +3128,14 @@ export function OralPage() {
           <div className="creation-style-controls">
             <span>成片样式</span>
             <Button
+              disabled={readOnly}
               variant={state.draft.style === "standard" ? "outline" : "quiet"}
               onClick={() => patchDraft({ style: "standard" })}
             >
               标准口播
             </Button>
             <Button
+              disabled={readOnly}
               variant={state.draft.style === "template" ? "outline" : "quiet"}
               onClick={() => patchDraft({ style: "template" })}
             >
@@ -3050,12 +3145,14 @@ export function OralPage() {
               <>
                 <span>字幕</span>
                 <Button
+                  disabled={readOnly}
                   variant={!state.draft.subtitles ? "outline" : "quiet"}
                   onClick={() => patchDraft({ subtitles: false })}
                 >
                   不添加
                 </Button>
                 <Button
+                  disabled={readOnly}
                   variant={state.draft.subtitles ? "outline" : "quiet"}
                   onClick={() => patchDraft({ subtitles: true })}
                 >
@@ -3065,12 +3162,19 @@ export function OralPage() {
             )}
           </div>
         )}
-        <Button variant="outline" onClick={saveDraft}>
+        <Button
+          variant="outline"
+          disabled={readOnly}
+          onClick={() => {
+            if (readOnly) return;
+            saveDraft();
+          }}
+        >
           保存草稿
         </Button>
         <Button
           variant="primary"
-          disabled={!ready}
+          disabled={readOnly || !ready}
           onClick={() => requestGeneration("数字人口播")}
         >
           生成口播视频

@@ -133,7 +133,9 @@ function selectedPerson(people: StudioPerson[], id?: string) {
 }
 
 export function PeoplePage() {
-  const { data, navigate, openLive, review, updateData, notify } = useStudio();
+  const { data, navigate, openLive, review, updateData, notify, user } =
+    useStudio();
+  const readOnly = user.role === "auditor";
   const [roleFilter, setRoleFilter] = useState("全部");
   const [loadingMore, setLoadingMore] = useState(false);
   const people = data.people;
@@ -185,8 +187,11 @@ export function PeoplePage() {
         </div>
         <Button
           aria-label="新增人物"
+          disabled={readOnly}
           variant="primary"
-          onClick={() => openLive("characters")}
+          onClick={() => {
+            if (!readOnly) openLive("characters");
+          }}
         >
           ＋ 新增人物
         </Button>
@@ -210,7 +215,14 @@ export function PeoplePage() {
           title="还没有人物"
           description="从人物库创建第一位乡墅行业 IP。"
           action={
-            <Button variant="primary" onClick={() => openLive("characters")}>
+            <Button
+              disabled={readOnly}
+              variant="primary"
+              onClick={() => {
+                if (readOnly) return;
+                openLive("characters");
+              }}
+            >
               新增人物
             </Button>
           }
@@ -382,7 +394,9 @@ function PersonHeader({ person }: { person: StudioPerson }) {
 }
 
 function IpPanel({ person }: { person: StudioPerson }) {
-  const { review, updateData, navigate, notify, patchDraft } = useStudio();
+  const { review, updateData, navigate, notify, patchDraft, user } =
+    useStudio();
+  const readOnly = user.role === "auditor";
   const [saving, setSaving] = useState(false);
   const [draft, setDraft] = useState(() => ({
     name: person.name,
@@ -394,7 +408,7 @@ function IpPanel({ person }: { person: StudioPerson }) {
   const update = (key: keyof typeof draft, value: string) =>
     setDraft((current) => ({ ...current, [key]: value }));
   const save = async () => {
-    if (saving) return;
+    if (readOnly || saving) return;
     if (review) {
       updateData((data) => ({
         ...data,
@@ -433,30 +447,35 @@ function IpPanel({ person }: { person: StudioPerson }) {
         <h2>人物定位</h2>
         <Field label="姓名">
           <input
+            disabled={readOnly}
             value={draft.name}
             onChange={(event) => update("name", event.target.value)}
           />
         </Field>
         <Field label="身份">
           <input
+            disabled={readOnly}
             value={draft.role}
             onChange={(event) => update("role", event.target.value)}
           />
         </Field>
         <Field label="服务范围">
           <input
+            disabled={readOnly}
             value={draft.scope}
             onChange={(event) => update("scope", event.target.value)}
           />
         </Field>
         <Field label="目标人群">
           <input
+            disabled={readOnly}
             value={draft.audience}
             onChange={(event) => update("audience", event.target.value)}
           />
         </Field>
         <Field label="表达特点">
           <input
+            disabled={readOnly}
             value={draft.expression}
             onChange={(event) => update("expression", event.target.value)}
           />
@@ -471,12 +490,18 @@ function IpPanel({ person }: { person: StudioPerson }) {
         <Hint>文案工坊会引用此定位生成更贴合乡墅行业的内容。</Hint>
       </Panel>
       <div className="person-footer">
-        <Button variant="primary" disabled={saving} onClick={() => void save()}>
+        <Button
+          variant="primary"
+          disabled={readOnly || saving}
+          onClick={() => void save()}
+        >
           {review ? "保存定位草稿" : saving ? "保存中…" : "保存 IP 定位"}
         </Button>
         <Button
+          disabled={readOnly}
           variant="outline"
           onClick={() => {
+            if (readOnly) return;
             patchDraft({ ipId: person.id });
             navigate("copy", { selectedPersonId: person.id });
           }}
@@ -489,8 +514,17 @@ function IpPanel({ person }: { person: StudioPerson }) {
 }
 
 function PhotosPanel({ person }: { person: StudioPerson }) {
-  const { openLive, navigate, patchDraft, data, notify, review, updateData } =
-    useStudio();
+  const {
+    openLive,
+    navigate,
+    patchDraft,
+    data,
+    notify,
+    review,
+    updateData,
+    user,
+  } = useStudio();
+  const readOnly = user.role === "auditor";
   const [loadingMore, setLoadingMore] = useState(false);
   const assets = data.assets.filter(
     (asset) => asset.personId === person.id && asset.kind === "image",
@@ -546,8 +580,10 @@ function PhotosPanel({ person }: { person: StudioPerson }) {
         </div>
         <div>
           <Button
+            disabled={readOnly}
             variant="outline"
             onClick={() => {
+              if (readOnly) return;
               notify(`正在打开${person.name}的五视图与场景造型。`);
               openLive("characters");
             }}
@@ -555,8 +591,10 @@ function PhotosPanel({ person }: { person: StudioPerson }) {
             管理形象照
           </Button>
           <Button
+            disabled={readOnly}
             variant="primary"
             onClick={() => {
+              if (readOnly) return;
               notify(`将在人物管理中为${person.name}选择并生成场景形象照。`);
               openLive("characters");
             }}
@@ -588,7 +626,14 @@ function PhotosPanel({ person }: { person: StudioPerson }) {
             title="暂无五视图合成图"
             description="前往人物管理上传照片创建。"
             action={
-              <Button variant="outline" onClick={() => openLive("characters")}>
+              <Button
+                disabled={readOnly}
+                variant="outline"
+                onClick={() => {
+                  if (readOnly) return;
+                  openLive("characters");
+                }}
+              >
                 打开人物管理
               </Button>
             }
@@ -605,8 +650,10 @@ function PhotosPanel({ person }: { person: StudioPerson }) {
               <strong>{asset.name}</strong>
               <div>
                 <Button
+                  disabled={readOnly}
                   variant="outline"
                   onClick={() => {
+                    if (readOnly) return;
                     patchDraft({ ipId: person.id, imageId: asset.id });
                     navigate("person-avatars", {
                       selectedPersonId: person.id,
@@ -617,8 +664,10 @@ function PhotosPanel({ person }: { person: StudioPerson }) {
                   制作口播分身
                 </Button>
                 <Button
+                  disabled={readOnly}
                   variant="primary"
                   onClick={() => {
+                    if (readOnly) return;
                     patchDraft({ ipId: person.id, imageId: asset.id });
                     navigate("replacement", {
                       selectedPersonId: person.id,
@@ -656,7 +705,9 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
     patchDraft,
     notify,
     refresh,
+    user,
   } = useStudio();
+  const readOnly = user.role === "auditor";
   const [title, setTitle] = useState(`${person.name}照片分身`);
   const [busy, setBusy] = useState(false);
   const [consentedSourceId, setConsentedSourceId] = useState<string>();
@@ -751,7 +802,7 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
   }, []);
   const consented = Boolean(source && consentedSourceId === source.id);
   const handleVideoUpload = async (file: File) => {
-    if (review || busy) return;
+    if (review || readOnly || busy) return;
     const validationError = validateOralSource(file, "video");
     if (validationError) {
       setError(validationError);
@@ -777,7 +828,7 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
     }
   };
   const startClone = async () => {
-    if (review || busy || !source || !consented) return;
+    if (review || readOnly || busy || !source || !consented) return;
     const operation = {
       contextVersion: contextVersionRef.current,
       id: operationSequenceRef.current + 1,
@@ -874,8 +925,10 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
                 {avatar.origin} · {avatar.duration}
               </p>
               <Button
+                disabled={readOnly}
                 variant="outline"
                 onClick={() => {
+                  if (readOnly) return;
                   patchDraft({ ipId: person.id, avatarId: avatar.id });
                   navigate(state.returnTo ?? "oral", {
                     selectedPersonId: person.id,
@@ -917,8 +970,10 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
         <h2>制作口播分身</h2>
         <p>只使用当前人物的素材，不会新建人物。完成后可直接用于数字人口播。</p>
         <Button
+          disabled={readOnly}
           variant="outline"
           onClick={() => {
+            if (readOnly) return;
             patchDraft({
               ipId: person.id,
               ...(photoSelectionInvalid ? { imageId: undefined } : {}),
@@ -941,7 +996,7 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
             <input
               accept=".mp4,.mov,video/mp4,video/quicktime"
               aria-label="选择人物视频"
-              disabled={busy}
+              disabled={readOnly || busy}
               type="file"
               onChange={(event) => {
                 const file = event.target.files?.[0];
@@ -952,6 +1007,7 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
         )}
         <Field label="分身名称">
           <input
+            disabled={readOnly}
             value={title}
             onChange={(event) => {
               setTitle(event.target.value);
@@ -974,7 +1030,7 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
           <input
             aria-label="确认分身克隆授权"
             checked={consented}
-            disabled={review || busy || !source}
+            disabled={review || readOnly || busy || !source}
             type="checkbox"
             onChange={(event) => {
               cloneSubmissionRef.current = undefined;
@@ -988,7 +1044,7 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
         <Hint>支持 MP4/MOV，上限 50 MB；分身制作为异步任务。</Hint>
         <Button
           variant="primary"
-          disabled={review || busy || !source || !consented}
+          disabled={review || readOnly || busy || !source || !consented}
           onClick={() => void startClone()}
         >
           {busy
@@ -1011,7 +1067,9 @@ function VoicePanel({ person }: { person: StudioPerson }) {
     updateData,
     notify,
     refresh,
+    user,
   } = useStudio();
+  const readOnly = user.role === "auditor";
   const [title, setTitle] = useState(`${person.name}本人音色`);
   const [busy, setBusy] = useState(false);
   const [consentedSourceId, setConsentedSourceId] = useState<string>();
@@ -1090,7 +1148,7 @@ function VoicePanel({ person }: { person: StudioPerson }) {
     if (uploadInputRef.current) uploadInputRef.current.value = "";
   };
   const handleAudioUpload = async (file: File) => {
-    if (review || busy) return;
+    if (review || readOnly || busy) return;
     const validationError = validateOralAudioFile(file);
     if (validationError) {
       setError(validationError);
@@ -1161,7 +1219,7 @@ function VoicePanel({ person }: { person: StudioPerson }) {
     }
   };
   const startClone = async () => {
-    if (review || busy || !source || !consented) return;
+    if (review || readOnly || busy || !source || !consented) return;
     setBusy(true);
     setError(undefined);
     try {
@@ -1213,7 +1271,7 @@ function VoicePanel({ person }: { person: StudioPerson }) {
     }
   };
   const confirmVoice = async (voiceId: string) => {
-    if (busy) return;
+    if (readOnly || busy) return;
     setBusy(true);
     setError(undefined);
     try {
@@ -1297,8 +1355,10 @@ function VoicePanel({ person }: { person: StudioPerson }) {
               )}
               {voice.confirmed ? (
                 <Button
+                  disabled={readOnly}
                   variant="primary"
                   onClick={() => {
+                    if (readOnly) return;
                     patchDraft({ ipId: person.id, voiceId: voice.id });
                     navigate(state.returnTo ?? "oral", {
                       selectedPersonId: person.id,
@@ -1322,7 +1382,7 @@ function VoicePanel({ person }: { person: StudioPerson }) {
                   (review && !voice.status) ? (
                   <Button
                     variant="primary"
-                    disabled={busy}
+                    disabled={readOnly || busy}
                     onClick={() => void confirmVoice(voice.id)}
                   >
                     确认使用此声音
@@ -1343,8 +1403,10 @@ function VoicePanel({ person }: { person: StudioPerson }) {
         <h2>克隆声音</h2>
         <p>仅使用本人或已获授权的声音样本，建议 5–180 秒（3 分钟）清晰干声。</p>
         <Button
+          disabled={readOnly}
           variant="outline"
           onClick={() => {
+            if (readOnly) return;
             patchDraft({ ipId: person.id });
             openPicker("voice-audio");
           }}
@@ -1357,7 +1419,7 @@ function VoicePanel({ person }: { person: StudioPerson }) {
               ref={uploadInputRef}
               accept=".mp3,audio/mpeg"
               aria-label="选择声音样本"
-              disabled={busy}
+              disabled={readOnly || busy}
               type="file"
               onChange={(event) => {
                 const file = event.target.files?.[0];
@@ -1368,6 +1430,7 @@ function VoicePanel({ person }: { person: StudioPerson }) {
         )}
         <Field label="声音名称">
           <input
+            disabled={readOnly}
             value={title}
             onChange={(event) => {
               setTitle(event.target.value);
@@ -1394,7 +1457,7 @@ function VoicePanel({ person }: { person: StudioPerson }) {
           <input
             aria-label="确认声音克隆授权"
             checked={consented}
-            disabled={review || busy}
+            disabled={review || readOnly || busy}
             type="checkbox"
             onChange={(event) => {
               cloneSubmissionRef.current = undefined;
@@ -1407,7 +1470,7 @@ function VoicePanel({ person }: { person: StudioPerson }) {
         </label>
         <Button
           variant="primary"
-          disabled={review || busy || !source || !consented}
+          disabled={review || readOnly || busy || !source || !consented}
           onClick={() => void startClone()}
         >
           {busy ? "提交中…" : "开始克隆声音"}

@@ -346,8 +346,21 @@ export function StudioWorkspace({
   const restoredAssetsRef = useRef<StudioAsset[]>([]);
   const oralSubmittingRef = useRef(false);
   const videoSubmittingRef = useRef(false);
+  const oralSubmitAttemptRef = useRef(0);
+  const videoSubmitAttemptRef = useRef(0);
   const oralSubmissionRef = useRef<SubmissionEnvelope | null>(null);
   const videoSubmissionRef = useRef<SubmissionEnvelope | null>(null);
+  const currentUserRoleRef = useRef(currentUser.role);
+  const permissionGenerationRef = useRef(0);
+  if (currentUserRoleRef.current !== currentUser.role) {
+    currentUserRoleRef.current = currentUser.role;
+    permissionGenerationRef.current += 1;
+    operationRef.current += 1;
+    generationDialogRevisionRef.current += 1;
+    oralSubmitAttemptRef.current += 1;
+    videoSubmitAttemptRef.current += 1;
+    pendingRouteRef.current = undefined;
+  }
   const notify = useCallback((message: string) => setNotice(message), []);
 
   useEffect(() => {
@@ -446,27 +459,37 @@ export function StudioWorkspace({
   }, []);
   const draftTouchedRef = useRef(false);
   const draftSaveTimerRef = useRef<number | undefined>(undefined);
+
   const [cloudDraftQueue] = useState(() =>
     createCloudDraftQueue(persistCloudDraft),
   );
   const saveOperationRef = useRef(0);
   const saveMountedRef = useRef(false);
   const saveAccountRef = useRef(currentUser.id);
+  const savePermissionGenerationRef = useRef(permissionGenerationRef.current);
   const saveScopeRef = useRef(savedDraftScope(currentUser.id, state.draft));
   const renderedSaveScope = savedDraftScope(currentUser.id, state.draft);
+  const renderedPermissionGeneration = permissionGenerationRef.current;
   useLayoutEffect(() => {
     if (
       saveAccountRef.current === currentUser.id &&
-      saveScopeRef.current === renderedSaveScope
+      saveScopeRef.current === renderedSaveScope &&
+      savePermissionGenerationRef.current === renderedPermissionGeneration
     )
       return;
-    if (saveAccountRef.current !== currentUser.id) {
+    if (
+      saveAccountRef.current !== currentUser.id ||
+      currentUserRoleRef.current === "auditor"
+    ) {
       draftTouchedRef.current = false;
     }
+    window.clearTimeout(draftSaveTimerRef.current);
+    draftSaveTimerRef.current = undefined;
     saveAccountRef.current = currentUser.id;
     saveScopeRef.current = renderedSaveScope;
+    savePermissionGenerationRef.current = renderedPermissionGeneration;
     saveOperationRef.current += 1;
-  }, [currentUser.id, renderedSaveScope]);
+  }, [currentUser.id, renderedPermissionGeneration, renderedSaveScope]);
   const referenceAssetsRequestRef = useRef(0);
   const referenceAssetsDraftRef = useRef<StudioDraft | undefined>(undefined);
   useEffect(() => {
@@ -477,15 +500,6 @@ export function StudioWorkspace({
       window.clearTimeout(draftSaveTimerRef.current);
     };
   }, []);
-  useEffect(() => {
-    const accountId = currentUser.id;
-    return () => {
-      if (accountId !== saveAccountRef.current || !saveMountedRef.current) {
-        window.clearTimeout(draftSaveTimerRef.current);
-        saveOperationRef.current += 1;
-      }
-    };
-  }, [currentUser.id]);
   const persistCloudDraftForScope = useCallback(
     (draft: StudioDraft, accountId: string, isCurrent: () => boolean) =>
       cloudDraftQueue.persist(
@@ -497,14 +511,17 @@ export function StudioWorkspace({
   );
   const scheduleDraftSave = useCallback(
     (draft: StudioDraft) => {
-      if (review) return;
+      if (review || currentUserRoleRef.current === "auditor") return;
       const accountId = currentUser.id;
       const expectedScope = savedDraftScope(accountId, draft);
       const operation = saveOperationRef.current;
+      const permissionGeneration = permissionGenerationRef.current;
       window.clearTimeout(draftSaveTimerRef.current);
       draftSaveTimerRef.current = window.setTimeout(() => {
         if (
           !saveMountedRef.current ||
+          currentUserRoleRef.current === "auditor" ||
+          permissionGenerationRef.current !== permissionGeneration ||
           operation !== saveOperationRef.current ||
           accountId !== saveAccountRef.current ||
           expectedScope !== saveScopeRef.current
@@ -513,6 +530,8 @@ export function StudioWorkspace({
         void persistCloudDraftForScope(draft, accountId, () =>
           Boolean(
             saveMountedRef.current &&
+              currentUserRoleRef.current !== "auditor" &&
+              permissionGenerationRef.current === permissionGeneration &&
               operation === saveOperationRef.current &&
               accountId === saveAccountRef.current &&
               expectedScope === saveScopeRef.current,
@@ -520,6 +539,8 @@ export function StudioWorkspace({
         ).catch(() => {
           if (
             saveMountedRef.current &&
+            currentUserRoleRef.current !== "auditor" &&
+            permissionGenerationRef.current === permissionGeneration &&
             operation === saveOperationRef.current &&
             accountId === saveAccountRef.current &&
             expectedScope === saveScopeRef.current
@@ -530,6 +551,20 @@ export function StudioWorkspace({
     },
     [review, currentUser.id, notify, persistCloudDraftForScope],
   );
+
+  useEffect(() => {
+    if (currentUser.role !== "auditor") return;
+    window.clearTimeout(draftSaveTimerRef.current);
+    draftSaveTimerRef.current = undefined;
+    generationRef.current = undefined;
+    oralSubmissionRef.current = null;
+    videoSubmissionRef.current = null;
+    oralSubmittingRef.current = false;
+    videoSubmittingRef.current = false;
+    setGeneration(undefined);
+    setOralSubmitting(false);
+    setVideoSubmitting(false);
+  }, [currentUser.role]);
 
   const restoreDraftAssets = useCallback(
     async (draft: StudioDraft) => {
@@ -750,7 +785,7 @@ export function StudioWorkspace({
   );
 
   const submitOralTask = async () => {
-    if (currentUser.role === "auditor") {
+    if (currentUserRoleRef.current === "auditor") {
       notify("当前账号为只读权限，不能提交生成。");
       return;
     }
@@ -764,11 +799,15 @@ export function StudioWorkspace({
       return;
     }
     const dialogRevision = generationDialogRevisionRef.current;
+    const permissionGeneration = permissionGenerationRef.current;
+    const attempt = ++oralSubmitAttemptRef.current;
     const draft = latestDraftRef.current;
     const draftFingerprint = JSON.stringify(draft);
     const page = studioPageRef.current;
     const isCurrent = () =>
       mountedRef.current &&
+      currentUserRoleRef.current !== "auditor" &&
+      permissionGenerationRef.current === permissionGeneration &&
       generationDialogRevisionRef.current === dialogRevision &&
       generationRef.current === "数字人口播" &&
       studioPageRef.current === page &&
@@ -818,8 +857,10 @@ export function StudioWorkspace({
         );
       }
     } finally {
-      oralSubmittingRef.current = false;
-      setOralSubmitting(false);
+      if (oralSubmitAttemptRef.current === attempt) {
+        oralSubmittingRef.current = false;
+        setOralSubmitting(false);
+      }
     }
   };
   const refresh = useCallback(() => setRevision((value) => value + 1), []);
@@ -843,7 +884,7 @@ export function StudioWorkspace({
   };
 
   const submitVideoTask = async () => {
-    if (currentUser.role === "auditor") {
+    if (currentUserRoleRef.current === "auditor") {
       notify("当前账号为只读权限，不能提交生成。");
       return;
     }
@@ -853,8 +894,12 @@ export function StudioWorkspace({
     const draftFingerprint = JSON.stringify(draft);
     const page = studioPageRef.current;
     const dialogRevision = generationDialogRevisionRef.current;
+    const permissionGeneration = permissionGenerationRef.current;
+    const attempt = ++videoSubmitAttemptRef.current;
     const isCurrent = () =>
       mountedRef.current &&
+      currentUserRoleRef.current !== "auditor" &&
+      permissionGenerationRef.current === permissionGeneration &&
       generationDialogRevisionRef.current === dialogRevision &&
       generationRef.current === "视频生成" &&
       studioPageRef.current === page &&
@@ -926,8 +971,10 @@ export function StudioWorkspace({
         );
       }
     } finally {
-      videoSubmittingRef.current = false;
-      setVideoSubmitting(false);
+      if (videoSubmitAttemptRef.current === attempt) {
+        videoSubmittingRef.current = false;
+        setVideoSubmitting(false);
+      }
     }
   };
 
@@ -1114,6 +1161,7 @@ export function StudioWorkspace({
     window.scrollTo?.({ top: 0 });
   };
   const patchDraft = (patch: Partial<StudioDraft>) => {
+    if (currentUserRoleRef.current === "auditor") return;
     if (Object.hasOwn(patch, "ipId") && patch.ipId !== state.draft.ipId)
       notify(
         "人物已更换，请重新选择该人物的分身和声音，并核对文案中的自我介绍。",
@@ -1285,7 +1333,7 @@ export function StudioWorkspace({
     }
   };
   const requestGeneration = (kind: StudioTask["type"]) => {
-    if (currentUser.role === "auditor") {
+    if (currentUserRoleRef.current === "auditor") {
       notify("当前账号为只读权限，不能提交生成。");
       return;
     }
@@ -1381,6 +1429,10 @@ export function StudioWorkspace({
     }
   };
   const saveDraft = () => {
+    if (currentUserRoleRef.current === "auditor") {
+      notify("当前账号为只读权限，不能保存或确认创作内容。");
+      return;
+    }
     if (
       !state.draft.script.text.trim() &&
       !state.draft.prompt.trim() &&
@@ -1393,9 +1445,12 @@ export function StudioWorkspace({
     const accountId = currentUser.id;
     const expectedScope = savedDraftScope(accountId, draft);
     const operation = ++saveOperationRef.current;
+    const permissionGeneration = permissionGenerationRef.current;
     window.clearTimeout(draftSaveTimerRef.current);
     const isCurrentSave = () =>
       saveMountedRef.current &&
+      currentUserRoleRef.current !== "auditor" &&
+      permissionGenerationRef.current === permissionGeneration &&
       saveOperationRef.current === operation &&
       saveAccountRef.current === accountId &&
       saveScopeRef.current === expectedScope;
@@ -1426,6 +1481,7 @@ export function StudioWorkspace({
       notify("已保留在本次工作区，可继续切换页面。");
       return;
     }
+
     void persistSavedScript(script, draft.projectId, draft.ipId)
       .then(async () => {
         if (!isCurrentSave()) return;
@@ -1458,6 +1514,10 @@ export function StudioWorkspace({
       });
   };
   const confirmFinalDraft = () => {
+    if (currentUserRoleRef.current === "auditor") {
+      notify("当前账号为只读权限，不能保存或确认创作内容。");
+      return;
+    }
     const script = { ...state.draft.script, confirmed: true };
     const draft = patchStudioDraft(state.draft, { script });
     const accountId = currentUser.id;
@@ -1466,9 +1526,12 @@ export function StudioWorkspace({
     patchDraft({ script });
     if (review) return;
     // 立即持久化终稿（不等防抖），并软发布到项目脚本版本。
+    const permissionGeneration = permissionGenerationRef.current;
     void persistCloudDraftForScope(draft, accountId, () =>
       Boolean(
         saveMountedRef.current &&
+          currentUserRoleRef.current !== "auditor" &&
+          permissionGenerationRef.current === permissionGeneration &&
           saveAccountRef.current === accountId &&
           (saveScopeRef.current === previousScope ||
             saveScopeRef.current === confirmedScope),
@@ -1477,6 +1540,11 @@ export function StudioWorkspace({
     if (!state.draft.projectId) return;
     void publishScriptVersion(state.draft.projectId, script.text).then(
       (published) => {
+        if (
+          currentUserRoleRef.current === "auditor" ||
+          permissionGenerationRef.current !== permissionGeneration
+        )
+          return;
         if (!published)
           notify(
             "终稿已确认，但同步到项目脚本版本未成功，可稍后在来源分析中重试。",
@@ -1490,7 +1558,7 @@ export function StudioWorkspace({
       notify("审核示例不调用真实接口。");
       return;
     }
-    if (currentUser.role === "auditor") {
+    if (currentUserRoleRef.current === "auditor") {
       notify("当前账号为只读权限，不能提交生成。");
       return;
     }
@@ -1507,10 +1575,16 @@ export function StudioWorkspace({
       return;
     }
     extractingRef.current = true;
+    const permissionGeneration = permissionGenerationRef.current;
     notify("正在提取音频并转写文案，预计一到两分钟，请勿关闭页面…");
     void extractScriptFromUploadLive(projectId, assetId)
       .then(({ text }) => {
         extractingRef.current = false;
+        if (
+          currentUserRoleRef.current === "auditor" ||
+          permissionGenerationRef.current !== permissionGeneration
+        )
+          return;
         const currentScript = latestDraftRef.current.script;
         patchDraft({
           sourceId: projectId,
@@ -1527,6 +1601,11 @@ export function StudioWorkspace({
       })
       .catch((cause: unknown) => {
         extractingRef.current = false;
+        if (
+          currentUserRoleRef.current === "auditor" ||
+          permissionGenerationRef.current !== permissionGeneration
+        )
+          return;
         notify(
           customerVisibleErrorMessage(cause, "文案提取失败，请稍后重试。"),
         );
