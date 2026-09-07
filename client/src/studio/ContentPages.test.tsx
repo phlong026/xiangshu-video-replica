@@ -5,7 +5,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
-import { useCallback, useState } from "react";
+import { useCallback, useLayoutEffect, useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ViralVideoItem } from "../api";
 import type { StudioContextValue, StudioData, StudioState } from "./types";
@@ -213,6 +213,16 @@ function StatefulViralPage({ value }: { value: StudioContextValue }) {
     updateData,
   });
   return <ViralPage />;
+}
+
+function RenderWindowTrigger({ onLayout }: { onLayout?: () => void }) {
+  useLayoutEffect(() => onLayout?.(), [onLayout]);
+  return <ViralPage />;
+}
+
+function DetailRenderWindowTrigger({ onLayout }: { onLayout?: () => void }) {
+  useLayoutEffect(() => onLayout?.(), [onLayout]);
+  return <ViralDetailPage />;
 }
 
 function viralItem(index: number, overrides: Partial<ViralVideoItem> = {}) {
@@ -2253,6 +2263,83 @@ describe("V1.4 内容与运营页面", () => {
     ).toHaveTextContent("收藏");
   });
 
+  it.each([
+    ["全部", "成功"],
+    ["全部", "失败"],
+    ["收藏", "成功"],
+    ["收藏", "失败"],
+  ] as const)("%s深页在切换账号后忽略迟到%s", async (scope, outcome) => {
+    let resolvePage!: (
+      value: Awaited<ReturnType<typeof listViralVideos>>,
+    ) => void;
+    let rejectPage!: (reason: Error) => void;
+    const deferred = new Promise<Awaited<ReturnType<typeof listViralVideos>>>(
+      (resolve, reject) => {
+        resolvePage = resolve;
+        rejectPage = reject;
+      },
+    );
+    const firstPage = {
+      platform: "douyin" as const,
+      sort: "hot" as const,
+      categories: [],
+      items: [viralItem(1, { isFavorite: scope === "收藏" })],
+      fetchedAt: null,
+      hasMore: true,
+      nextCursor: "cursor-2",
+      total: 2,
+    };
+    if (scope === "全部") {
+      listViralVideos
+        .mockResolvedValueOnce(firstPage)
+        .mockReturnValueOnce(deferred)
+        .mockReturnValueOnce(new Promise(() => undefined));
+    } else {
+      listViralFavorites
+        .mockResolvedValueOnce(firstPage)
+        .mockReturnValueOnce(deferred)
+        .mockReturnValueOnce(new Promise(() => undefined));
+    }
+    const updateData = vi.fn();
+    let current = studio({
+      review: false,
+      user: { id: "user-a" } as StudioContextValue["user"],
+      updateData,
+    });
+    useStudio.mockImplementation(() => current);
+    const view = render(<RenderWindowTrigger />);
+    if (scope === "收藏") {
+      fireEvent.click(screen.getByRole("tab", { name: "我的收藏" }));
+    }
+    fireEvent.click(
+      await screen.findByRole("button", { name: "加载更多视频" }),
+    );
+    updateData.mockClear();
+
+    current = {
+      ...current,
+      user: { id: "user-b" } as StudioContextValue["user"],
+    };
+    const settle = () => {
+      if (outcome === "成功") {
+        resolvePage({
+          ...firstPage,
+          items: [viralItem(2, { title: "旧账号迟到深页" })],
+          hasMore: false,
+          nextCursor: null,
+        });
+      } else {
+        rejectPage(new Error("旧账号深页失败"));
+      }
+    };
+    view.rerender(<RenderWindowTrigger onLayout={settle} />);
+    await act(async () => Promise.resolve());
+
+    expect(updateData).not.toHaveBeenCalled();
+    expect(screen.queryByText("旧账号迟到深页")).toBeNull();
+    expect(screen.queryByText("加载更多失败，请重试")).toBeNull();
+  });
+
   it("收藏使用持久化接口并在保存失败时回滚乐观状态", async () => {
     saveViralFavorite.mockRejectedValueOnce(new Error("收藏失败"));
     const value = studio({ review: false });
@@ -2302,6 +2389,44 @@ describe("V1.4 内容与运营页面", () => {
     rejectRemoval(new Error("取消失败"));
     await waitFor(() => expect(button).toHaveTextContent("已收藏"));
     expect(value.notify).toHaveBeenCalledWith("收藏失败，已恢复原状态");
+  });
+
+  it("账号渲染完成但被动 effect 尚未执行时仍回滚新账号收藏失败", async () => {
+    saveViralFavorite.mockImplementationOnce(() => {
+      throw new Error("新账号收藏失败");
+    });
+    let current = studio({
+      review: false,
+      user: { id: "user-a" } as StudioContextValue["user"],
+    });
+    useStudio.mockImplementation(() => current);
+    const view = render(<RenderWindowTrigger />);
+
+    vi.mocked(current.patchState).mockClear();
+    vi.mocked(current.notify).mockClear();
+    current = {
+      ...current,
+      user: { id: "user-b" } as StudioContextValue["user"],
+    };
+    view.rerender(
+      <RenderWindowTrigger
+        onLayout={() =>
+          screen
+            .getByRole("button", {
+              name: "收藏 农村建房预算，别只盯着主体",
+            })
+            .click()
+        }
+      />,
+    );
+    await act(async () => Promise.resolve());
+
+    expect(
+      screen.getByRole("button", {
+        name: "收藏 农村建房预算，别只盯着主体",
+      }),
+    ).toHaveTextContent("收藏");
+    expect(current.notify).toHaveBeenCalledWith("收藏失败，已恢复原状态");
   });
 
   it("详情地址保留平台和视频 ID，刷新后可从单条接口恢复", async () => {
@@ -2395,6 +2520,52 @@ describe("V1.4 内容与运营页面", () => {
 
     await waitFor(() => expect(fetchViralVideo).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(button).toHaveTextContent("收藏"));
+  });
+
+  it("详情页账号已渲染时同步拒绝旧账号迟到成功", async () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/?viralPlatform=douyin&viralVideoId=native-dy-1#studio/viral-detail",
+    );
+    let resolveUserA!: (value: { item: ViralVideoItem }) => void;
+    fetchViralVideo
+      .mockReturnValueOnce({
+        // biome-ignore lint/suspicious/noThenProperty: 同步 thenable 用于复现 render 到 passive effect 之间的响应窗口。
+        then(resolve: (value: { item: ViralVideoItem }) => void) {
+          resolveUserA = resolve;
+          return { catch: () => undefined };
+        },
+      })
+      .mockReturnValueOnce(new Promise(() => undefined));
+    const initial = studio();
+    let current = studio({
+      review: false,
+      user: { id: "user-a" } as StudioContextValue["user"],
+      data: { ...initial.data, videos: [] },
+      state: { ...initial.state, page: "viral-detail" },
+    });
+    useStudio.mockImplementation(() => current);
+    const view = render(<DetailRenderWindowTrigger />);
+    await waitFor(() => expect(fetchViralVideo).toHaveBeenCalledTimes(1));
+
+    vi.mocked(current.updateData).mockClear();
+    current = {
+      ...current,
+      user: { id: "user-b" } as StudioContextValue["user"],
+    };
+    view.rerender(
+      <DetailRenderWindowTrigger
+        onLayout={() =>
+          resolveUserA({
+            item: viralItem(1, { title: "用户 A 的迟到详情" }),
+          })
+        }
+      />,
+    );
+
+    expect(current.updateData).not.toHaveBeenCalled();
+    expect(screen.queryByText("用户 A 的迟到详情")).toBeNull();
   });
 
   it("非审核工作区不把示例三十条当作真实采集数据", () => {

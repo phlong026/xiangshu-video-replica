@@ -409,20 +409,39 @@ function ViralFavoriteButton({
   const [saved, setSaved] = useState(
     savedFromServer ?? state.favorites.includes(video.id),
   );
-  const [saving, setSaving] = useState(false);
+  const [savingOperation, setSavingOperation] = useState<{
+    accountId: string;
+    operationId: number;
+  }>();
   const accountRef = useRef(user.id);
+  const operationRef = useRef(0);
+  if (accountRef.current !== user.id) {
+    accountRef.current = user.id;
+    operationRef.current += 1;
+  }
+  const saving = Boolean(
+    savingOperation && savingOperation.accountId === user.id,
+  );
   useEffect(() => {
     if (savedFromServer !== undefined) setSaved(savedFromServer);
   }, [savedFromServer]);
   useEffect(() => {
-    accountRef.current = user.id;
-    setSaving(false);
-  }, [user.id]);
+    return () => {
+      operationRef.current += 1;
+    };
+  }, []);
 
   const toggle = async () => {
     if (saving) return;
-    const accountId = user.id;
+    const operation = {
+      accountId: user.id,
+      operationId: ++operationRef.current,
+    };
+    const isCurrent = () =>
+      accountRef.current === operation.accountId &&
+      operationRef.current === operation.operationId;
     const nextSaved = !saved;
+    if (!isCurrent()) return;
     setSaved(nextSaved);
     onSavedChange?.(nextSaved);
     patchState({
@@ -431,7 +450,7 @@ function ViralFavoriteButton({
         : state.favorites.filter((id) => id !== video.id),
     });
     if (review || !video.platformKey || !video.nativeId) return;
-    setSaving(true);
+    setSavingOperation(operation);
     try {
       if (nextSaved) {
         await saveViralFavorite(video.platformKey, video.nativeId);
@@ -439,7 +458,7 @@ function ViralFavoriteButton({
         await removeViralFavorite(video.platformKey, video.nativeId);
       }
     } catch {
-      if (accountRef.current !== accountId) return;
+      if (!isCurrent()) return;
       setSaved(saved);
       onSavedChange?.(saved);
       patchState({
@@ -449,7 +468,7 @@ function ViralFavoriteButton({
       });
       notify("收藏失败，已恢复原状态");
     } finally {
-      if (accountRef.current === accountId) setSaving(false);
+      if (isCurrent()) setSavingOperation(undefined);
     }
   };
 
@@ -876,6 +895,11 @@ export function ViralPage() {
     if (!hasMore || !nextCursor || loadingMoreRef.current) return;
     const requestId = listRequestRef.current;
     const requestQuery = query;
+    const requestContextKey = paginationContextKey;
+    const isCurrent = () =>
+      requestId === listRequestRef.current &&
+      requestQuery === queryRef.current &&
+      requestContextKey === paginationContextKeyRef.current;
     loadingMoreRef.current = true;
     setLoadingMore(true);
     setListError(undefined);
@@ -891,11 +915,7 @@ export function ViralPage() {
               limit: viralPageSize,
               cursor: nextCursor,
             });
-      if (
-        requestId !== listRequestRef.current ||
-        requestQuery !== queryRef.current
-      )
-        return;
+      if (!isCurrent()) return;
       const incoming = result.items.map(studioVideoFromViral);
       const confirmedNextCursor = result.nextCursor ?? undefined;
       const confirmedHasMore = Boolean(result.hasMore && result.nextCursor);
@@ -938,10 +958,7 @@ export function ViralPage() {
         };
       });
     } catch (error) {
-      if (
-        requestId === listRequestRef.current &&
-        requestQuery === queryRef.current
-      ) {
+      if (isCurrent()) {
         if (apiErrorCode(error) === "VIRAL_CURSOR_INVALID") {
           paginationSnapshotsRef.current.delete(paginationContextKey);
           setNextCursor(undefined);
@@ -953,7 +970,7 @@ export function ViralPage() {
         setListError("加载更多失败，请重试");
       }
     } finally {
-      if (requestId === listRequestRef.current) {
+      if (isCurrent()) {
         loadingMoreRef.current = false;
         setLoadingMore(false);
       }
@@ -1302,6 +1319,9 @@ export function ViralDetailPage() {
   const [detailAvailability, setDetailAvailability] =
     useState<ViralVideoItem["availability"]>("available");
   const [detailFavorite, setDetailFavorite] = useState<boolean>();
+  const detailAccountRef = useRef(accountId);
+  const detailRequestRef = useRef(0);
+  detailAccountRef.current = accountId;
   const detailParams = useMemo(viralDetailParams, []);
   const video = remoteVideo ?? selectedVideo;
   const { importState, start } = useViralImport(video?.id, accountId);
@@ -1324,17 +1344,23 @@ export function ViralDetailPage() {
     ) {
       return;
     }
-    let cancelled = false;
+    const requestAccountId = accountId;
+    const requestId = ++detailRequestRef.current;
+    const isCurrent = () =>
+      detailAccountRef.current === requestAccountId &&
+      detailRequestRef.current === requestId;
     setDetailStatus("loading");
     void fetchViralVideo(detailParams.platform, detailParams.videoId)
       .then((response) => {
-        if (cancelled) return;
+        if (!isCurrent()) return;
         const item = "item" in response ? response.item : response;
         const restored = studioVideoFromViral(item);
+        if (!isCurrent()) return;
         setDetailAvailability(item.availability ?? "available");
         setDetailFavorite(Boolean(item.isFavorite));
         setRemoteVideo(restored);
         setDetailStatus("idle");
+        if (!isCurrent()) return;
         updateData((current) => ({
           ...current,
           videos: [
@@ -1346,10 +1372,12 @@ export function ViralDetailPage() {
         }));
       })
       .catch(() => {
-        if (!cancelled) setDetailStatus("error");
+        if (isCurrent()) setDetailStatus("error");
       });
     return () => {
-      cancelled = true;
+      if (detailRequestRef.current === requestId) {
+        detailRequestRef.current += 1;
+      }
     };
   }, [detailParams, remoteVideo, review, selectedVideo, updateData, accountId]);
 

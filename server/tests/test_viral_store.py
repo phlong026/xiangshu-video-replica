@@ -407,6 +407,30 @@ def test_favorites_support_stable_keyset_pagination(tmp_path: Path) -> None:
         conn.close()
 
 
+def test_favorite_page_order_uses_covering_index_without_temp_sort(tmp_path: Path) -> None:
+    db_path = tmp_path / "viral.db"
+    initialize_database(db_path).close()
+    conn = _open(db_path)
+    try:
+        plan = conn.execute(
+            """
+            EXPLAIN QUERY PLAN
+            SELECT v.*, f.created_at AS favorite_created_at
+            FROM viral_video_favorites f
+            JOIN viral_videos v
+              ON v.platform = f.platform AND v.video_id = f.video_id
+            WHERE f.user_id = ?
+            ORDER BY f.created_at DESC, f.platform ASC, f.video_id ASC
+            LIMIT ?
+            """,
+            ("user-a", 51),
+        ).fetchall()
+        details = [str(row["detail"]) for row in plan]
+        assert not any("TEMP B-TREE" in detail for detail in details), details
+    finally:
+        conn.close()
+
+
 def test_search_upsert_and_statistics_update_do_not_lose_native_metadata(
     tmp_path: Path, monkeypatch
 ) -> None:
