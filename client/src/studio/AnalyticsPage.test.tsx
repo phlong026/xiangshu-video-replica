@@ -144,7 +144,9 @@ describe("V1.4 数据看板", () => {
     const row = screen.getByRole("row", { name: /张工 · 建房预算/ });
     fireEvent.click(within(row).getByRole("button", { name: "查看视频" }));
     expect(value.navigate).toHaveBeenCalledWith("task-detail", {
-      selectedTaskId: "task-completed",
+      selectedTaskId: "batch-review-1",
+      selectedTaskKind: "generation_batch",
+      selectedTaskBackendId: "batch-review-1",
       returnTo: "analytics",
     });
   });

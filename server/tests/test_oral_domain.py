@@ -2452,6 +2452,12 @@ def test_oral_task_serialization_reports_billing_status_and_available_actions(
         assert single.status_code == 200
         assert single.json()["billing_status"] == "RESERVED"
         assert single.json()["available_actions"] == []
+        denied = client.get(
+            f"/api/oral/tasks/{uncertain.task_id}",
+            headers={"X-Dev-User-Id": "employee_2"},
+        )
+        assert denied.status_code == 404
+        assert denied.json()["detail"]["code"] == "ORAL_TASK_NOT_FOUND"
 
         conn.execute(
             """

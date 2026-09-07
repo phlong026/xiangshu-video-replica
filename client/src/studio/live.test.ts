@@ -28,6 +28,7 @@ const api = vi.hoisted(() => ({
   getAssetDownloadUrl: vi.fn(),
   getCachedCharacterAssetUrl: vi.fn(),
   getGenerationBatch: vi.fn(),
+  getOralTask: vi.fn(),
   getLatestProjectAnalysis: vi.fn(),
   getStudioDraft: vi.fn(),
   getStudioAnalytics: vi.fn(async () => null),
@@ -66,6 +67,7 @@ import {
   loadPersonAssets,
   loadProjectDraft,
   loadStudioData,
+  loadStudioTaskDetail,
   loadTaskPreview,
   reloadTasks,
   retryStudioTask,
@@ -107,6 +109,94 @@ const person: SimpleLibraryEntry = {
     { view_type: "FRONT_FULL", asset_id: "full-1" },
   ],
 };
+
+describe("任务详情按稳定对象类型读取", () => {
+  it("普通生成按 batch id、口播按 oral task id 加载且不串型", async () => {
+    api.getGenerationBatch.mockResolvedValue({
+      id: "batch-deep",
+      project_id: "project-1",
+      prompt_version_id: "prompt-1",
+      status: "SUCCEEDED",
+      quantity: 1,
+      stale: false,
+      display_name: "深页普通生成",
+      creation_kind: "independent",
+      progress: {
+        total_count: 1,
+        terminal_count: 1,
+        progress_percent: 100,
+        counts: { SUCCEEDED: 1 },
+      },
+      tasks: [
+        {
+          id: "generation-task-1",
+          status: "SUCCEEDED",
+          archive_status: "ARCHIVED",
+          quality_status: "PASSED",
+          quality_issue_codes: [],
+          result_asset_id: "result-1",
+          direct_result_available: false,
+          stage: "COMPLETED",
+          provider: "metaso",
+          model: "h3",
+          provider_task_id_tail: null,
+          attempt: 1,
+          archive_retry_count: 0,
+          estimated_cost: null,
+          actual_cost: null,
+          error_code: null,
+          error_message_redacted: null,
+          submitted_at: "2026-09-08T00:00:00Z",
+          started_at: null,
+          completed_at: "2026-09-08T00:01:00Z",
+          duration_seconds: 8,
+          retry_of_task_id: null,
+          superseded_by_task_id: null,
+          superseded_at: null,
+          retry_reason: null,
+          retry_requested_at: null,
+          available_actions: [],
+          prompt_snapshot: null,
+        },
+      ],
+    } satisfies GenerationBatch);
+    api.getOralTask.mockResolvedValue({
+      id: "oral-deep",
+      status: "SUCCEEDED",
+      title: "深页口播",
+      mode: "AUDIO",
+      identity_id: "person-1",
+      avatar_id: "avatar-1",
+      voice_id: null,
+      script_text: null,
+      audio_asset_id: "audio-1",
+      result_asset_id: "oral-result",
+      duration_sec: 30,
+      estimated_cost_fen: 100,
+      created_at: "2026-09-08T00:00:00Z",
+      updated_at: "2026-09-08T00:01:00Z",
+    } satisfies OralTaskRecord);
+
+    await expect(
+      loadStudioTaskDetail("generation_batch", "batch-deep"),
+    ).resolves.toMatchObject({
+      id: "batch-deep",
+      backendKind: "generation_batch",
+      backendId: "batch-deep",
+      type: "视频生成",
+    });
+    await expect(
+      loadStudioTaskDetail("oral_task", "oral-deep"),
+    ).resolves.toMatchObject({
+      id: "oral-oral-deep",
+      backendKind: "oral_task",
+      backendId: "oral-deep",
+      type: "数字人口播",
+    });
+    expect(api.getGenerationBatch).toHaveBeenCalledWith("batch-deep");
+    expect(api.getOralTask).toHaveBeenCalledWith("oral-deep");
+  });
+});
 
 const batchPage = {
   next_cursor: null,

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   type CustomerProfile,
+  customerVisibleErrorMessage,
   getStudioNotificationPreferences,
   updateStudioNotificationPreferences,
 } from "../api";
@@ -10,6 +11,7 @@ import {
   downloadStudioTaskResult,
   loadMoreGenerationTasks,
   loadMoreOralTasks,
+  loadStudioTaskDetail,
   loadTaskPreview,
   retryStudioTask,
   uploadWorkbenchSourceVideo,
@@ -37,6 +39,14 @@ const statusNames: Record<StudioTask["status"], string> = {
   uncertain: "状态待确认",
   cancelled: "已取消",
 };
+
+function taskDetailPatch(task: StudioTask) {
+  return {
+    selectedTaskId: task.id,
+    selectedTaskKind: task.backendKind,
+    selectedTaskBackendId: task.backendId ?? task.batchId ?? task.id,
+  };
+}
 
 /** 任务中心状态列的图标与子文案（与效果图一致：排队中"等待开始"、
  * 待处理"生成失败"），状态待确认保持独立提示避免误导重试。 */
@@ -460,7 +470,7 @@ export function WorkbenchPage() {
                   </div>
                   <Button
                     onClick={() =>
-                      navigate("task-detail", { selectedTaskId: task.id })
+                      navigate("task-detail", taskDetailPatch(task))
                     }
                   >
                     查看详情
@@ -548,9 +558,7 @@ export function WorkbenchPage() {
               <button
                 type="button"
                 key={task.id}
-                onClick={() =>
-                  navigate("task-detail", { selectedTaskId: task.id })
-                }
+                onClick={() => navigate("task-detail", taskDetailPatch(task))}
               >
                 <i className={`studio-dot studio-dot--${task.status}`} />
                 <span>
@@ -821,7 +829,7 @@ export function TasksPage() {
                     <Button
                       variant="quiet"
                       onClick={() =>
-                        navigate("task-detail", { selectedTaskId: task.id })
+                        navigate("task-detail", taskDetailPatch(task))
                       }
                     >
                       {task.status === "completed" ? "查看结果" : "查看详情"}
@@ -905,21 +913,130 @@ export function TaskDetailPage() {
     updateData,
     notify,
     refresh,
+    user,
   } = useStudio();
   const [actionBusy, setActionBusy] = useState<"download" | "retry">();
   const [previewLoad, setPreviewLoad] = useState<{
     taskId?: string;
     status: "idle" | "loading" | "empty" | "error" | "ready";
   }>({ status: "idle" });
+  const [detailLoad, setDetailLoad] = useState<{
+    key?: string;
+    status: "idle" | "loading" | "error" | "ready";
+    error?: string;
+  }>({ status: "idle" });
+  const [detailRetry, setDetailRetry] = useState(0);
   const selectedTaskIdRef = useRef(state.selectedTaskId);
   const previewRequestRef = useRef(0);
+  const detailRequestRef = useRef(0);
+  const detailUserIdRef = useRef(user.id);
+  const verifiedDetailRef = useRef<{ key: string; userId: string } | undefined>(
+    undefined,
+  );
   selectedTaskIdRef.current = state.selectedTaskId;
+  detailUserIdRef.current = user.id;
   const task = data.tasks.find((item) => item.id === state.selectedTaskId);
-  if (!task)
+  const detailKind = state.selectedTaskKind;
+  const detailId = state.selectedTaskBackendId;
+  const detailKey =
+    detailKind && detailId ? `${detailKind}:${detailId}` : undefined;
+  useEffect(() => {
+    void detailRetry;
+    if (review || !detailKind || !detailId) return;
+    if (
+      task?.backendKind === detailKind &&
+      (task.backendId ?? task.batchId ?? task.id) === detailId &&
+      verifiedDetailRef.current?.key === detailKey &&
+      verifiedDetailRef.current?.userId === user.id
+    )
+      return;
+    const requestId = ++detailRequestRef.current;
+    const requestedUserId = user.id;
+    let active = true;
+    setDetailLoad({ key: detailKey, status: "loading" });
+    void loadStudioTaskDetail(detailKind, detailId)
+      .then((loaded) => {
+        if (
+          !active ||
+          requestId !== detailRequestRef.current ||
+          detailUserIdRef.current !== requestedUserId
+        )
+          return;
+        verifiedDetailRef.current = {
+          key: detailKey as string,
+          userId: requestedUserId,
+        };
+        updateData((current) => ({
+          ...current,
+          tasks: current.tasks.some((item) => item.id === loaded.id)
+            ? current.tasks.map((item) =>
+                item.id === loaded.id ? loaded : item,
+              )
+            : [...current.tasks, loaded],
+        }));
+        setDetailLoad({ key: detailKey, status: "ready" });
+      })
+      .catch((cause: unknown) => {
+        if (
+          !active ||
+          requestId !== detailRequestRef.current ||
+          detailUserIdRef.current !== requestedUserId
+        )
+          return;
+        setDetailLoad({
+          key: detailKey,
+          status: "error",
+          error: customerVisibleErrorMessage(
+            cause,
+            "任务详情暂不可用，请重试。",
+          ),
+        });
+      });
+    return () => {
+      active = false;
+      detailRequestRef.current += 1;
+    };
+  }, [
+    detailId,
+    detailKey,
+    detailKind,
+    detailRetry,
+    review,
+    task?.backendId,
+    task?.backendKind,
+    task?.batchId,
+    task?.id,
+    updateData,
+    user.id,
+  ]);
+  const detailIsLoading =
+    detailLoad.key === detailKey && detailLoad.status === "loading";
+  const detailHasError =
+    detailLoad.key === detailKey && detailLoad.status === "error";
+  if (!task || detailIsLoading || detailHasError)
     return (
       <Empty
-        title="未选择任务"
-        action={<Button onClick={() => navigate("tasks")}>返回任务中心</Button>}
+        title={
+          detailIsLoading
+            ? "正在读取任务详情"
+            : detailHasError
+              ? "任务详情暂不可用"
+              : "未选择任务"
+        }
+        description={
+          detailLoad.key === detailKey ? detailLoad.error : undefined
+        }
+        action={
+          detailHasError ? (
+            <Button onClick={() => setDetailRetry((value) => value + 1)}>
+              重试读取任务详情
+            </Button>
+          ) : (
+            <Button onClick={() => navigate(state.returnTo ?? "tasks")}>
+              返回任务中心
+            </Button>
+          )
+        }
       />
     );
   const result = data.assets.find((asset) => asset.id === task.resultId);
@@ -1047,7 +1164,7 @@ export function TaskDetailPage() {
   return (
     <section className="studio-task-detail">
       <h1>任务详情与结果</h1>
-      <Button onClick={() => navigate("tasks")}>
+      <Button onClick={() => navigate(state.returnTo ?? "tasks")}>
         <Icon name="back" />
         返回任务中心
       </Button>

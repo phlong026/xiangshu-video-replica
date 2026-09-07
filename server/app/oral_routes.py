@@ -29,6 +29,7 @@ from app.oral import (
     ORAL_CONSENT_TEXT_VERSION,
     OralConflictError,
     OralDomainError,
+    OralTaskNotFoundError,
     cancel_oral_task,
     confirm_voice_clone,
     create_oral_consent,
@@ -65,6 +66,8 @@ class OralError(HTTPException):
 
 
 def _domain_guard(exc: OralDomainError) -> HTTPException:
+    if isinstance(exc, OralTaskNotFoundError):
+        return OralError("ORAL_TASK_NOT_FOUND", str(exc), status_code=404)
     if isinstance(exc, OralConflictError):
         return OralError("ORAL_IDEMPOTENCY_CONFLICT", str(exc), status_code=409)
     return OralError("ORAL_REQUEST_INVALID", str(exc))

@@ -1180,6 +1180,13 @@ export async function listOralTasks(limit = 20): Promise<OralTaskRecord[]> {
   return (await listOralTasksPage({ limit })).items;
 }
 
+export function getOralTask(taskId: string): Promise<OralTaskRecord> {
+  return requestApiJson<OralTaskRecord>(
+    `/api/oral/tasks/${encodeURIComponent(taskId)}`,
+    "读取口播任务失败",
+  );
+}
+
 function mutateOralTask(taskId: string, action: string, error: string) {
   return requestApiJson<OralTaskRecord>(
     `/api/oral/tasks/${encodeURIComponent(taskId)}/${action}`,

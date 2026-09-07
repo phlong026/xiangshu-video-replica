@@ -32,14 +32,95 @@ export const pageTitles: Record<StudioPage, string> = {
 };
 
 export function routeFromHash(hash: string): StudioPage {
-  const raw = hash.replace(/^#(?:studio\/)?/, "");
+  return studioRouteFromHash(hash).page;
+}
+
+const selectableStateKeys = [
+  "selectedVideoId",
+  "selectedTaskId",
+  "selectedTaskKind",
+  "selectedTaskBackendId",
+  "selectedAssetId",
+  "selectedPersonId",
+  "returnTo",
+] as const;
+
+function decodeRouteId(value: string) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return "";
+  }
+}
+
+export function studioRouteFromHash(hash: string): Pick<
+  StudioState,
+  (typeof selectableStateKeys)[number]
+> & {
+  page: StudioPage;
+} {
+  const value = hash.replace(/^#/, "");
+  const [path, query = ""] = value.split("?", 2);
+  const raw = path.replace(/^studio\//, "");
   const aliases: Record<string, StudioPage> = {
     projects: "replica",
     characters: "people",
     wallet: "profile",
   };
-  if (Object.hasOwn(aliases, raw)) return aliases[raw];
-  return Object.hasOwn(pageTitles, raw) ? (raw as StudioPage) : "workbench";
+  const params = new URLSearchParams(query);
+  const result: ReturnType<typeof studioRouteFromHash> = {
+    page: Object.hasOwn(aliases, raw)
+      ? aliases[raw]
+      : Object.hasOwn(pageTitles, raw)
+        ? (raw as StudioPage)
+        : "workbench",
+    selectedVideoId: undefined,
+    selectedTaskId: undefined,
+    selectedTaskKind: undefined,
+    selectedTaskBackendId: undefined,
+    selectedAssetId: undefined,
+    selectedPersonId: undefined,
+    returnTo: undefined,
+  };
+  const taskMatch = raw.match(
+    /^task-detail\/(generation_batch|oral_task)\/([^/]+)$/,
+  );
+  if (taskMatch) {
+    const kind = taskMatch[1] as "generation_batch" | "oral_task";
+    const backendId = decodeRouteId(taskMatch[2] ?? "");
+    result.page = "task-detail";
+    result.selectedTaskKind = kind;
+    result.selectedTaskBackendId = backendId;
+    result.selectedTaskId =
+      kind === "oral_task" ? `oral-${backendId}` : backendId;
+  }
+  result.selectedVideoId = params.get("video") ?? undefined;
+  result.selectedAssetId = params.get("asset") ?? undefined;
+  result.selectedPersonId = params.get("person") ?? undefined;
+  const returnTo = params.get("returnTo");
+  if (returnTo && Object.hasOwn(pageTitles, returnTo)) {
+    result.returnTo = returnTo as StudioPage;
+  }
+  return result;
+}
+
+export function studioHashForState(state: StudioState): string {
+  const params = new URLSearchParams();
+  if (state.selectedVideoId && state.page === "viral-detail")
+    params.set("video", state.selectedVideoId);
+  if (state.selectedAssetId && state.page === "materials")
+    params.set("asset", state.selectedAssetId);
+  if (state.selectedPersonId && state.page.startsWith("person-"))
+    params.set("person", state.selectedPersonId);
+  if (state.returnTo) params.set("returnTo", state.returnTo);
+  const path =
+    state.page === "task-detail" &&
+    state.selectedTaskKind &&
+    state.selectedTaskBackendId
+      ? `task-detail/${state.selectedTaskKind}/${encodeURIComponent(state.selectedTaskBackendId)}`
+      : state.page;
+  const query = params.toString();
+  return `#studio/${path}${query ? `?${query}` : ""}`;
 }
 
 export function createDraft(): StudioDraft {
@@ -97,6 +178,8 @@ export function withImportedProject(
     draft: imported,
     selectedVideoId: undefined,
     selectedTaskId: undefined,
+    selectedTaskKind: undefined,
+    selectedTaskBackendId: undefined,
     selectedAssetId: undefined,
     selectedPersonId: undefined,
     returnTo: undefined,

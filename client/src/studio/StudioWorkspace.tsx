@@ -74,8 +74,9 @@ import {
   pageTitles,
   patchStudioDraft,
   resolveVideoMode,
-  routeFromHash,
   SUPPORTED_VIDEO_RATIOS,
+  studioHashForState,
+  studioRouteFromHash,
   validateReferenceImages,
   withImportedProject,
 } from "./state";
@@ -251,9 +252,11 @@ export function StudioWorkspace({
 }: Props) {
   // Review is an explicit development entry; failed requests never enable it.
   const review = Boolean(import.meta.env.DEV && reviewData);
-  const [state, setState] = useState<StudioState>(
-    () => initialState || createState(routeFromHash(window.location.hash)),
-  );
+  const [state, setState] = useState<StudioState>(() => {
+    if (initialState) return initialState;
+    const route = studioRouteFromHash(window.location.hash);
+    return { ...createState(route.page), ...route };
+  });
   const studioPageRef = useRef(state.page);
   studioPageRef.current = state.page;
   const [data, setData] = useState<StudioData>(() =>
@@ -971,10 +974,8 @@ export function StudioWorkspace({
         notify("当前操作正在处理中，请等待完成后切换页面。");
         return;
       }
-      setState((previous) => ({
-        ...previous,
-        page: routeFromHash(window.location.hash),
-      }));
+      const route = studioRouteFromHash(window.location.hash);
+      setState((previous) => ({ ...previous, ...route }));
       setLivePanel(undefined);
     };
     window.addEventListener("hashchange", onHashChange);
@@ -991,8 +992,11 @@ export function StudioWorkspace({
       return;
     }
     operationRef.current += 1;
-    setState((previous) => ({ ...previous, ...patch, page }));
-    window.history.pushState(null, "", `#studio/${page}`);
+    setState((previous) => {
+      const nextState = { ...previous, ...patch, page };
+      window.history.pushState(null, "", studioHashForState(nextState));
+      return nextState;
+    });
     setMenuOpen(false);
     setShowSearch(false);
     setLivePanel(undefined);

@@ -525,6 +525,41 @@ describe("V1.4 workspace integration", () => {
     expect(screen.getByText("张工本人音色 V1")).toBeInTheDocument();
     expect(screen.getByText(/去文案工坊修改/)).toBeInTheDocument();
   });
+  it("任务详情与人物子页把对象和返回位置写入可恢复 URL", async () => {
+    const reviewData = createReviewData();
+    reviewData.tasks = [
+      {
+        ...reviewData.tasks[0],
+        id: "batch-deep",
+        backendKind: "generation_batch",
+        backendId: "batch-deep",
+        batchId: "batch-deep",
+        status: "completed",
+      },
+    ];
+    render(
+      <StudioWorkspace
+        currentUser={reviewUser}
+        reviewData={reviewData}
+        initialState={createReviewState("tasks")}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /查看详情|查看结果/ }));
+    expect(window.location.hash).toBe(
+      "#studio/task-detail/generation_batch/batch-deep",
+    );
+
+    window.history.pushState(
+      null,
+      "",
+      "#studio/person-voices?person=zhang&returnTo=oral",
+    );
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    expect(
+      await screen.findByRole("heading", { name: "张工" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("← 返回创作")).toBeInTheDocument();
+  });
   it("changing IP invalidates the previous person's voice and avatar", () => {
     render(
       <StudioWorkspace

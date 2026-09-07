@@ -26,6 +26,7 @@ import {
   getLatestProjectShotCards,
   getLatestScriptFromAudioTask,
   getLatestScriptVersion,
+  getOralTask,
   getStudioAnalytics,
   getStudioDraft,
   getStudioStats,
@@ -595,7 +596,7 @@ export async function loadMorePeople(cursor: string) {
 }
 
 function studioTaskStatus(
-  batch: GenerationBatchListItem,
+  batch: Pick<GenerationBatchListItem, "status" | "needs_attention_count">,
 ): StudioTask["status"] {
   const status = batch.status.toUpperCase();
   if (status === "SUBMISSION_UNCERTAIN") return "uncertain";
@@ -630,6 +631,34 @@ function studioTask(batch: GenerationBatchListItem): StudioTask {
     status: studioTaskStatus(batch),
     progress: batch.progress.progress_percent,
     submitted: batch.created_at,
+    resultId:
+      batch.tasks.find((task) => task.result_asset_id)?.result_asset_id ??
+      undefined,
+  };
+}
+
+function studioTaskFromBatch(batch: GenerationBatch): StudioTask {
+  const needsAttention = batch.tasks.filter((task) =>
+    ["FAILED", "NEEDS_ATTENTION", "SUBMISSION_UNCERTAIN"].includes(
+      task.status.toUpperCase(),
+    ),
+  ).length;
+  return {
+    id: batch.id,
+    backendKind: "generation_batch",
+    backendId: batch.id,
+    backendStatus: batch.status,
+    batchId: batch.id,
+    projectId: batch.project_id,
+    title: batch.display_name?.trim() || batch.id,
+    type: CREATION_KIND_LABELS[batch.creation_kind] ?? "视频生成",
+    status: studioTaskStatus({
+      status: batch.status,
+      needs_attention_count: needsAttention,
+    }),
+    progress: batch.progress.progress_percent,
+    submitted:
+      batch.tasks.find((task) => task.submitted_at)?.submitted_at ?? "—",
     resultId:
       batch.tasks.find((task) => task.result_asset_id)?.result_asset_id ??
       undefined,
@@ -787,6 +816,15 @@ export async function loadMoreOralTasks(offset: number) {
     loaded: offset + page.items.length,
     total: page.total,
   };
+}
+
+export async function loadStudioTaskDetail(
+  kind: "generation_batch" | "oral_task",
+  id: string,
+): Promise<StudioTask> {
+  return kind === "oral_task"
+    ? oralTask(await getOralTask(id))
+    : studioTaskFromBatch(await getGenerationBatch(id));
 }
 
 export async function retryStudioTask(task: StudioTask): Promise<void> {

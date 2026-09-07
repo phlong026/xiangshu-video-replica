@@ -32,6 +32,7 @@ const {
   retryStudioTask,
   loadMoreGenerationTasks,
   loadMoreOralTasks,
+  loadStudioTaskDetail,
   getStudioNotificationPreferences,
   updateStudioNotificationPreferences,
 } = vi.hoisted(() => ({
@@ -50,6 +51,7 @@ const {
   retryStudioTask: vi.fn(),
   loadMoreGenerationTasks: vi.fn(),
   loadMoreOralTasks: vi.fn(),
+  loadStudioTaskDetail: vi.fn(),
   getStudioNotificationPreferences: vi.fn(),
   updateStudioNotificationPreferences: vi.fn(),
 }));
@@ -68,6 +70,7 @@ vi.mock("./live", () => ({
   retryStudioTask,
   loadMoreGenerationTasks,
   loadMoreOralTasks,
+  loadStudioTaskDetail,
 }));
 
 import {
@@ -164,6 +167,82 @@ describe("V1.4 任务详情真实成片预览", () => {
     loadTaskPreview.mockReset();
     downloadStudioTaskResult.mockReset();
     retryStudioTask.mockReset();
+    loadStudioTaskDetail.mockReset();
+  });
+
+  it("首屏外任务按 URL 中的类型和后端 ID 读取，失败可受控重试", async () => {
+    const loaded = {
+      ...taskA,
+      id: "oral-deep",
+      backendKind: "oral_task" as const,
+      backendId: "deep",
+    };
+    loadStudioTaskDetail
+      .mockRejectedValueOnce(new Error("任务不存在或无权访问"))
+      .mockResolvedValueOnce(loaded);
+    const value = studio("oral-deep", {
+      state: {
+        ...createState("task-detail"),
+        selectedTaskId: "oral-deep",
+        selectedTaskKind: "oral_task",
+        selectedTaskBackendId: "deep",
+        returnTo: "analytics",
+      },
+      data: data([]),
+      user: { id: "account-a" } as StudioContextValue["user"],
+    });
+    useStudio.mockReturnValue(value);
+    render(<TaskDetailPage />);
+
+    expect(await screen.findByText("任务详情暂不可用")).toBeInTheDocument();
+    expect(screen.getByText("任务不存在或无权访问")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "重试读取任务详情" }));
+    await waitFor(() => expect(loadStudioTaskDetail).toHaveBeenCalledTimes(2));
+    expect(loadStudioTaskDetail).toHaveBeenLastCalledWith("oral_task", "deep");
+    expect(value.updateData).toHaveBeenCalledOnce();
+  });
+
+  it("A到B再到A及账号切换时忽略所有旧详情响应", async () => {
+    const oldA = deferred<StudioTask>();
+    const oldB = deferred<StudioTask>();
+    const currentA = deferred<StudioTask>();
+    loadStudioTaskDetail
+      .mockReturnValueOnce(oldA.promise)
+      .mockReturnValueOnce(oldB.promise)
+      .mockReturnValueOnce(currentA.promise);
+    const updateData = vi.fn();
+    const context = (
+      id: string,
+      account: string,
+    ): Partial<StudioContextValue> => ({
+      state: {
+        ...createState("task-detail"),
+        selectedTaskId: id,
+        selectedTaskKind: "generation_batch",
+        selectedTaskBackendId: id,
+      },
+      data: data([]),
+      user: { id: account } as StudioContextValue["user"],
+      updateData,
+    });
+    useStudio.mockReturnValue(studio("a", context("a", "account-a")));
+    const view = render(<TaskDetailPage />);
+    useStudio.mockReturnValue(studio("b", context("b", "account-a")));
+    view.rerender(<TaskDetailPage />);
+    useStudio.mockReturnValue(studio("a", context("a", "account-b")));
+    view.rerender(<TaskDetailPage />);
+
+    await act(async () => {
+      oldA.resolve({ ...taskA, id: "a" });
+      oldB.resolve({ ...taskB, id: "b" });
+      await Promise.resolve();
+    });
+    expect(updateData).not.toHaveBeenCalled();
+    await act(async () => {
+      currentA.resolve({ ...taskA, id: "a" });
+      await Promise.resolve();
+    });
+    expect(updateData).toHaveBeenCalledOnce();
   });
 
   it("仅在用户点击后按需加载，并只回填发起任务的结果", async () => {

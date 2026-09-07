@@ -238,6 +238,8 @@ export type StudioState = {
   draft: StudioDraft;
   selectedVideoId?: string;
   selectedTaskId?: string;
+  selectedTaskKind?: "generation_batch" | "oral_task";
+  selectedTaskBackendId?: string;
   selectedAssetId?: string;
   returnTo?: StudioPage;
   selectedPersonId?: string;

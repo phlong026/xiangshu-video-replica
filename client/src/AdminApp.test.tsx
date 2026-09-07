@@ -7,7 +7,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { AdminApp } from "./AdminApp";
+import { AdminApp, adminRouteFromHash } from "./AdminApp";
 import { getAdminCsrfToken, SESSION_EXPIRED_EVENT } from "./api";
 
 const SERVICE_KEY_TEXT = ["service", "key"].join("-");
@@ -355,6 +355,47 @@ describe("AdminApp", () => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
     window.location.hash = "";
+  });
+
+  it("七个管理模块地址均可恢复且未知地址回总览", () => {
+    for (const tab of [
+      "overview",
+      "analytics",
+      "funds",
+      "customersMgmt",
+      "generationRecords",
+      "auditCenter",
+      "systemSettings",
+    ] as const) {
+      expect(adminRouteFromHash(`#admin/${tab}`).tab).toBe(tab);
+    }
+    expect(adminRouteFromHash("#admin/unknown").tab).toBe("overview");
+  });
+
+  it("刷新和前进后退恢复模块及失败记录筛选意图", async () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/admin#admin/generationRecords?intent=failedGenerationRecords",
+    );
+    const fetchMock = installFetch({ session: "valid" });
+    render(<AdminApp />);
+
+    expect(
+      await screen.findByRole("heading", { level: 1, name: "用户生成记录" }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("生成状态")).toHaveValue("FAILED");
+    expect(
+      fetchMock.mock.calls.some(([url]) =>
+        String(url).includes("status=FAILED"),
+      ),
+    ).toBe(true);
+
+    window.history.pushState(null, "", "/admin#admin/funds");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    expect(
+      await screen.findByRole("heading", { level: 1, name: "资金流水" }),
+    ).toBeInTheDocument();
   });
 
   it("starts at the account-password gate before exposing control navigation", async () => {
