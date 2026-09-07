@@ -3,15 +3,17 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from threading import Event
 from urllib.error import HTTPError
 from urllib.request import Request
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from app.auth import get_database
+from app.auth import CurrentUser, get_database
 from app.db import connect_database, initialize_database
 from app.db_portable import BusinessConnection
 from app.generation_worker import run_worker_once
@@ -638,6 +640,60 @@ def test_expired_request_sent_receipt_becomes_uncertain_without_paid_retry(
             conn.execute(
                 "SELECT status FROM viral_link_resolution_receipts WHERE idempotency_key = ?",
                 ("sent-restart",),
+            ).fetchone()[0]
+            == "UNCERTAIN"
+        )
+
+
+def test_expired_request_sent_commits_uncertain_before_pg_style_http_error(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.viral_import_routes as routes
+
+    _insert_expired_link_receipt(db_path, status="REQUEST_SENT", key="pg-sent-restart")
+    resolver = StubResolver(_resolved())
+    monkeypatch.setattr(routes, "douyidou_link_client_from_settings", lambda conn: resolver)
+    monkeypatch.setattr(BusinessConnection, "__exit__", lambda self, *args: None)
+
+    class PgStyleDb:
+        @contextmanager
+        def write(self):
+            raw = connect_database(db_path)
+            raw.execute("BEGIN IMMEDIATE")
+            connection = BusinessConnection.sqlite(raw)
+            actor = CurrentUser(
+                id="employee_1",
+                username="employee_1",
+                display_name="Employee One",
+                role="employee",
+            )
+            try:
+                yield connection, actor
+            except BaseException:
+                raw.rollback()
+                raise
+            else:
+                raw.commit()
+            finally:
+                raw.close()
+
+    with pytest.raises(HTTPException) as raised:
+        routes.resolve_viral_link(
+            routes.ViralLinkResolutionRequest(
+                url="https://v.douyin.com/restart/", purpose="replica"
+            ),
+            PgStyleDb(),
+            "pg-sent-restart",
+        )
+
+    assert raised.value.status_code == 503
+    assert resolver.calls == []
+    with sqlite3.connect(db_path) as conn:
+        assert (
+            conn.execute(
+                "SELECT status FROM viral_link_resolution_receipts WHERE idempotency_key = ?",
+                ("pg-sent-restart",),
             ).fetchone()[0]
             == "UNCERTAIN"
         )

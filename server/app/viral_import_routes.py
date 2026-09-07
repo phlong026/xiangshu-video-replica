@@ -352,10 +352,11 @@ def resolve_viral_link(
                     normalized_url=normalized_url,
                     purpose=request.purpose,
                 )
-            if not created:
-                return _receipt_replay(receipt)
-            with conn:
-                resolver = douyidou_link_client_from_settings(conn)
+            if created:
+                with conn:
+                    resolver = douyidou_link_client_from_settings(conn)
+        if not created:
+            return _receipt_replay(receipt)
         with db.write() as (conn, sending_actor):
             with conn:
                 if sending_actor.id != actor.id:
