@@ -1141,6 +1141,65 @@ describe("V1.4 工作台上传与创作入口", () => {
     expect(accountB.notify).not.toHaveBeenCalled();
   });
 
+  it("切换账号后立即隐藏旧链接且不能以新账号提交", () => {
+    const accountA = workbench({
+      user: { id: "customer-a" } as StudioContextValue["user"],
+    });
+    const accountB = workbench({
+      user: { id: "customer-b" } as StudioContextValue["user"],
+    });
+    let current = accountA;
+    useStudio.mockImplementation(() => current);
+    const view = render(<WorkbenchPage />);
+    fireEvent.change(screen.getByLabelText("视频链接"), {
+      target: { value: "https://v.douyin.com/account-a/" },
+    });
+
+    current = accountB;
+    view.rerender(<WorkbenchPage />);
+    expect(screen.getByLabelText("视频链接")).toHaveValue("");
+    fireEvent.click(screen.getByRole("button", { name: "开始复刻" }));
+
+    expect(resolveViralLink).not.toHaveBeenCalled();
+    expect(accountB.navigate).not.toHaveBeenCalled();
+    expect(accountB.extractScriptFromUpload).not.toHaveBeenCalled();
+    expect(accountB.openLive).toHaveBeenCalledWith("projects");
+
+    current = accountA;
+    view.rerender(<WorkbenchPage />);
+    expect(screen.getByLabelText("视频链接")).toHaveValue("");
+  });
+
+  it("切换账号后隐藏旧上传且迟到上传不会写入新账号", async () => {
+    const accountA = workbench({
+      user: { id: "customer-a" } as StudioContextValue["user"],
+    });
+    const accountB = workbench({
+      user: { id: "customer-b" } as StudioContextValue["user"],
+    });
+    let current = accountA;
+    useStudio.mockImplementation(() => current);
+    const upload = deferred<WorkbenchUploadResult>();
+    uploadWorkbenchSourceVideo.mockReturnValue(upload.promise);
+    const view = render(<WorkbenchPage />);
+    changeFile("账号A.mp4");
+    expect(screen.getByText(/正在上传 账号A\.mp4/)).toBeInTheDocument();
+
+    current = accountB;
+    view.rerender(<WorkbenchPage />);
+    expect(screen.queryByText(/账号A\.mp4/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "提取文案" }));
+    expect(accountB.extractScriptFromUpload).not.toHaveBeenCalled();
+    expect(accountB.openLive).toHaveBeenCalledWith("projects");
+
+    upload.resolve({ projectId: "project-a", assetId: "asset-a" });
+    await act(async () => upload.promise);
+    expect(accountA.patchDraft).not.toHaveBeenCalled();
+    expect(accountB.patchDraft).not.toHaveBeenCalled();
+    expect(accountA.notify).not.toHaveBeenCalled();
+    expect(accountB.notify).not.toHaveBeenCalled();
+  });
+
   it.each([
     "视频号链接暂不支持解析，请上传 MP4 或 MOV 文件。",
     "视频链接已过期，请重新复制链接或上传 MP4/MOV 文件。",

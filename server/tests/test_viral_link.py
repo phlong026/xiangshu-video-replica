@@ -254,22 +254,31 @@ def test_link_media_fetcher_enforces_the_smaller_preflight_limit(
     import app.viral_media as media
 
     class Response:
+        status = 200
         headers = {"Content-Length": "9", "Content-Type": "video/mp4"}
 
-        def __enter__(self) -> Response:
-            return self
+        def read(self, size: int = -1) -> bytes:
+            return b""
 
-        def __exit__(self, *args: object) -> None:
-            return None
+    class Connection:
+        def request(self, method: str, target: str, *, headers: Mapping[str, str]) -> None:
+            pass
 
-    class Opener:
-        def open(self, request: object, *, timeout: float) -> Response:
+        def getresponse(self) -> Response:
             return Response()
 
-    monkeypatch.setattr(media, "_require_public_http_url", lambda url: None)
-    monkeypatch.setattr(media, "build_opener", lambda *handlers: Opener())
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        media,
+        "_resolve_public_http_url",
+        lambda url: ("https", "cdn.example", 443, "93.184.216.34"),
+    )
     with pytest.raises(ViralMediaError, match="上限"):
-        UrlFetcher(max_bytes=8).fetch("https://cdn.example/video.mp4")
+        UrlFetcher(max_bytes=8, connection_factory=lambda *args: Connection()).fetch(
+            "https://cdn.example/video.mp4"
+        )
 
 
 def test_link_resolution_requires_idempotency_key(client: TestClient) -> None:
@@ -501,6 +510,126 @@ def test_concurrent_same_key_calls_provider_once(
     assert concurrent.status_code == 409
     assert concurrent.json()["detail"]["code"] == "VIRAL_LINK_IN_PROGRESS"
     assert calls == 1
+
+
+def _insert_expired_link_receipt(
+    db_path: Path, *, status: str, key: str, url: str = "https://v.douyin.com/restart/"
+) -> None:
+    from app.viral_import_routes import _link_request_hash
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO viral_link_resolution_receipts (
+                id, owner_user_id, idempotency_key, normalized_url, purpose,
+                request_hash, status, lease_owner, lease_expires_at
+            ) VALUES (?, 'employee_1', ?, ?, 'replica', ?, ?, 'dead-process', ?)
+            """,
+            (
+                f"receipt-{key}",
+                key,
+                url,
+                _link_request_hash(url, "replica"),
+                status,
+                "2000-01-01 00:00:00+00:00",
+            ),
+        )
+
+
+def test_expired_prepared_receipt_is_safely_claimed_once_after_restart(
+    client: TestClient, db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import app.viral_import_routes as routes
+
+    _insert_expired_link_receipt(db_path, status="PREPARED", key="prepared-restart")
+    resolver = StubResolver(_resolved())
+    monkeypatch.setattr(routes, "douyidou_link_client_from_settings", lambda conn: resolver)
+    monkeypatch.setattr(
+        routes,
+        "get_media_storage",
+        lambda conn: FakeStorageAdapter(provider="fake", bucket="private"),
+    )
+    monkeypatch.setattr(routes, "preflight_resolved_media", lambda *args, **kwargs: None)
+
+    response = client.post(
+        "/api/viral/link-resolutions",
+        headers={"X-Dev-User-Id": "employee_1", "Idempotency-Key": "prepared-restart"},
+        json={"url": "https://v.douyin.com/restart/", "purpose": "replica"},
+    )
+
+    assert response.status_code == 200
+    assert len(resolver.calls) == 1
+
+
+def test_expired_request_sent_receipt_becomes_uncertain_without_paid_retry(
+    client: TestClient, db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import app.viral_import_routes as routes
+
+    _insert_expired_link_receipt(db_path, status="REQUEST_SENT", key="sent-restart")
+    resolver = StubResolver(_resolved())
+    monkeypatch.setattr(routes, "douyidou_link_client_from_settings", lambda conn: resolver)
+
+    response = client.post(
+        "/api/viral/link-resolutions",
+        headers={"X-Dev-User-Id": "employee_1", "Idempotency-Key": "sent-restart"},
+        json={"url": "https://v.douyin.com/restart/", "purpose": "replica"},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "VIRAL_LINK_SUBMISSION_UNCERTAIN"
+    assert resolver.calls == []
+    with sqlite3.connect(db_path) as conn:
+        assert (
+            conn.execute(
+                "SELECT status FROM viral_link_resolution_receipts WHERE idempotency_key = ?",
+                ("sent-restart",),
+            ).fetchone()[0]
+            == "UNCERTAIN"
+        )
+
+
+def test_provider_success_then_process_crash_never_repeats_paid_request(
+    client: TestClient, db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import app.viral_import_routes as routes
+
+    resolver = StubResolver(_resolved())
+    monkeypatch.setattr(routes, "douyidou_link_client_from_settings", lambda conn: resolver)
+    monkeypatch.setattr(
+        routes,
+        "get_media_storage",
+        lambda conn: FakeStorageAdapter(provider="fake", bucket="private"),
+    )
+    monkeypatch.setattr(
+        routes,
+        "preflight_resolved_media",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("process crashed")),
+    )
+    headers = {"X-Dev-User-Id": "employee_1", "Idempotency-Key": "success-crash"}
+    payload = {"url": "https://v.douyin.com/restart/", "purpose": "replica"}
+
+    with pytest.raises(RuntimeError, match="process crashed"):
+        client.post("/api/viral/link-resolutions", headers=headers, json=payload)
+    assert len(resolver.calls) == 1
+    with sqlite3.connect(db_path) as conn:
+        assert (
+            conn.execute(
+                "SELECT status FROM viral_link_resolution_receipts WHERE idempotency_key = ?",
+                ("success-crash",),
+            ).fetchone()[0]
+            == "REQUEST_SENT"
+        )
+        conn.execute(
+            """UPDATE viral_link_resolution_receipts
+            SET lease_expires_at = ? WHERE idempotency_key = ?""",
+            ("2000-01-01 00:00:00+00:00", "success-crash"),
+        )
+
+    replay = client.post("/api/viral/link-resolutions", headers=headers, json=payload)
+    assert replay.status_code == 503
+    assert replay.json()["detail"]["code"] == "VIRAL_LINK_SUBMISSION_UNCERTAIN"
+    assert len(resolver.calls) == 1
 
 
 def test_invalid_downloaded_media_never_creates_source_project_or_asset(

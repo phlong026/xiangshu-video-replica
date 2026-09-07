@@ -91,6 +91,14 @@ def test_initialize_database_applies_sqlite_pragmas_and_migrations(tmp_path: Pat
         alembic_versions = [
             row[0] for row in conn.execute("SELECT version_num FROM alembic_version").fetchall()
         ]
+        receipt_columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(viral_link_resolution_receipts)").fetchall()
+        }
+        receipt_schema = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+            ("viral_link_resolution_receipts",),
+        ).fetchone()[0]
 
     assert db_path.exists()
     assert journal_mode == "wal"
@@ -127,7 +135,13 @@ def test_initialize_database_applies_sqlite_pragmas_and_migrations(tmp_path: Pat
         "viral_import_tasks",
         "viral_media_preparations",
         "viral_refresh_tasks",
+        "viral_link_resolution_receipts",
     }.issubset(tables)
+    assert {"lease_owner", "lease_expires_at"}.issubset(receipt_columns)
+    assert all(
+        status in receipt_schema
+        for status in ("PREPARED", "REQUEST_SENT", "FAILED_SAFE", "UNCERTAIN")
+    )
 
 
 def test_alembic_upgrades_empty_database_to_head(tmp_path: Path) -> None:

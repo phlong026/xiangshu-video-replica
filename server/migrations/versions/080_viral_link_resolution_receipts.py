@@ -30,6 +30,8 @@ def upgrade() -> None:
         sa.Column("purpose", sa.Text(), nullable=False),
         sa.Column("request_hash", sa.Text(), nullable=False),
         sa.Column("status", sa.Text(), nullable=False),
+        sa.Column("lease_owner", sa.Text(), nullable=False),
+        sa.Column("lease_expires_at", sa.Text(), nullable=False),
         sa.Column("response_json", sa.Text()),
         sa.Column("error_status", sa.Integer()),
         sa.Column("error_code", sa.Text()),
@@ -51,7 +53,7 @@ def upgrade() -> None:
             name="ck_viral_link_receipts_purpose",
         ),
         sa.CheckConstraint(
-            "status IN ('SUBMITTING', 'SUCCEEDED', 'FAILED', 'UNCERTAIN')",
+            "status IN ('PREPARED', 'REQUEST_SENT', 'SUCCEEDED', 'FAILED_SAFE', 'UNCERTAIN')",
             name="ck_viral_link_receipts_status",
         ),
     )

@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal
 from uuid import uuid4
 
@@ -40,6 +41,7 @@ from app.viral_store import upsert_viral_videos
 from app.viral_tikhub import ViralVideo
 
 router = APIRouter(prefix="/api/viral", tags=["viral"])
+_LINK_RECEIPT_LEASE = timedelta(minutes=2)
 
 
 class ViralLinkResolutionRequest(BaseModel):
@@ -74,15 +76,26 @@ def _claim_link_receipt(
 ) -> tuple[Any, bool]:
     request_hash = _link_request_hash(normalized_url, purpose)
     receipt_id = str(uuid4())
+    lease_owner = str(uuid4())
+    lease_expires_at = (datetime.now(UTC) + _LINK_RECEIPT_LEASE).isoformat()
     conn.execute(
         """
         INSERT INTO viral_link_resolution_receipts (
             id, owner_user_id, idempotency_key, normalized_url, purpose,
-            request_hash, status
-        ) VALUES (%s, %s, %s, %s, %s, %s, 'SUBMITTING')
+            request_hash, status, lease_owner, lease_expires_at
+        ) VALUES (%s, %s, %s, %s, %s, %s, 'PREPARED', %s, %s)
         ON CONFLICT (owner_user_id, idempotency_key) DO NOTHING
         """,
-        (receipt_id, owner_user_id, idempotency_key, normalized_url, purpose, request_hash),
+        (
+            receipt_id,
+            owner_user_id,
+            idempotency_key,
+            normalized_url,
+            purpose,
+            request_hash,
+            lease_owner,
+            lease_expires_at,
+        ),
     )
     row = conn.execute(
         """SELECT * FROM viral_link_resolution_receipts
@@ -99,15 +112,65 @@ def _claim_link_receipt(
                 "message": "幂等键已用于不同的视频链接请求。",
             },
         )
+    claimed = str(row["id"]) == receipt_id
+    if not claimed and str(row["status"]) == "PREPARED":
+        claimed = (
+            conn.execute(
+                """
+                UPDATE viral_link_resolution_receipts
+                SET lease_owner = %s, lease_expires_at = %s,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s AND status = 'PREPARED'
+                  AND lease_expires_at::timestamptz < now()
+                """,
+                (lease_owner, lease_expires_at, row["id"]),
+            ).rowcount
+            == 1
+        )
+    elif not claimed and str(row["status"]) == "REQUEST_SENT":
+        conn.execute(
+            """
+            UPDATE viral_link_resolution_receipts
+            SET status = 'UNCERTAIN', completed_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = %s AND status = 'REQUEST_SENT'
+              AND lease_expires_at::timestamptz < now()
+            """,
+            (row["id"],),
+        )
     conn.commit()
-    return row, str(row["id"]) == receipt_id
+    current = conn.execute(
+        "SELECT * FROM viral_link_resolution_receipts WHERE id = %s", (row["id"],)
+    ).fetchone()
+    return current, claimed
+
+
+def _mark_link_request_sent(conn: BusinessConnection, *, receipt_id: str, lease_owner: str) -> None:
+    updated = conn.execute(
+        """
+        UPDATE viral_link_resolution_receipts
+        SET status = 'REQUEST_SENT', updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s AND status = 'PREPARED' AND lease_owner = %s
+        """,
+        (receipt_id, lease_owner),
+    )
+    if updated.rowcount != 1:
+        conn.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "VIRAL_LINK_IN_PROGRESS",
+                "message": "该视频链接正在解析，请使用原请求稍后重试。",
+            },
+        )
+    conn.commit()
 
 
 def _receipt_replay(row: Any) -> ViralLinkResolutionResponse:
     status_value = str(row["status"])
     if status_value == "SUCCEEDED" and row["response_json"]:
         return ViralLinkResolutionResponse.model_validate_json(str(row["response_json"]))
-    if status_value == "FAILED":
+    if status_value == "FAILED_SAFE":
         raise HTTPException(
             status_code=int(row["error_status"] or 422),
             detail={
@@ -135,14 +198,14 @@ def _receipt_replay(row: Any) -> ViralLinkResolutionResponse:
 def _record_link_failure(
     conn: BusinessConnection, *, receipt_id: str, error: ViralLinkError
 ) -> None:
-    status_value = "UNCERTAIN" if error.uncertain else "FAILED"
+    status_value = "UNCERTAIN" if error.uncertain else "FAILED_SAFE"
     conn.execute(
         """
         UPDATE viral_link_resolution_receipts
         SET status = %s, error_status = %s, error_code = %s,
             error_message_redacted = %s, completed_at = CURRENT_TIMESTAMP,
             updated_at = CURRENT_TIMESTAMP
-        WHERE id = %s AND status = 'SUBMITTING'
+        WHERE id = %s AND status = 'REQUEST_SENT'
         """,
         (status_value, error.status_code, error.code, error.message, receipt_id),
     )
@@ -295,6 +358,14 @@ def resolve_viral_link(
             if not created:
                 return _receipt_replay(receipt)
             resolver = douyidou_link_client_from_settings(conn)
+        with db.write() as (conn, sending_actor):
+            if sending_actor.id != actor.id:
+                raise HTTPException(status_code=401, detail={"code": "SESSION_REPLACED"})
+            _mark_link_request_sent(
+                conn,
+                receipt_id=str(receipt["id"]),
+                lease_owner=str(receipt["lease_owner"]),
+            )
         resolved = resolver.resolve(normalized_url, purpose=request.purpose)
         with db.write() as (conn, media_actor):
             if media_actor.id != actor.id:
@@ -323,16 +394,29 @@ def resolve_viral_link(
     with db.write() as (conn, completed_actor):
         if completed_actor.id != actor.id:
             raise HTTPException(status_code=401, detail={"code": "SESSION_REPLACED"})
-        upsert_viral_videos(conn, [video])
-        conn.execute(
+        updated = conn.execute(
             """
             UPDATE viral_link_resolution_receipts
             SET status = 'SUCCEEDED', response_json = %s,
                 completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-            WHERE id = %s AND status = 'SUBMITTING'
+            WHERE id = %s AND status = 'REQUEST_SENT' AND lease_owner = %s
             """,
-            (response.model_dump_json(by_alias=True), receipt["id"]),
+            (
+                response.model_dump_json(by_alias=True),
+                receipt["id"],
+                receipt["lease_owner"],
+            ),
         )
+        if updated.rowcount != 1:
+            conn.rollback()
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "VIRAL_LINK_SUBMISSION_UNCERTAIN",
+                    "message": "视频链接解析结果未知，请上传 MP4/MOV 文件。",
+                },
+            )
+        upsert_viral_videos(conn, [video])
         conn.commit()
     return response
 

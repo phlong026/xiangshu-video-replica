@@ -195,14 +195,33 @@ export function WorkbenchPage() {
     state,
     extractScriptFromUpload,
   } = useStudio();
-  const [sourceLink, setSourceLink] = useState("");
-  const [upload, setUpload] = useState<{
+  const accountId = user.id || "anonymous";
+  const accountGenerationRef = useRef({ accountId, generation: 0 });
+  if (accountGenerationRef.current.accountId !== accountId) {
+    accountGenerationRef.current = {
+      accountId,
+      generation: accountGenerationRef.current.generation + 1,
+    };
+  }
+  const accountContextKey = `${accountId}:${accountGenerationRef.current.generation}`;
+  const [sourceLinkState, setSourceLinkState] = useState({
+    accountContextKey,
+    value: "",
+  });
+  const sourceLink =
+    sourceLinkState.accountContextKey === accountContextKey
+      ? sourceLinkState.value
+      : "";
+  const [uploadState, setUpload] = useState<{
+    accountContextKey: string;
     name: string;
     progress: number;
     error: string;
     projectId: string | null;
     completed: boolean;
   } | null>(null);
+  const upload =
+    uploadState?.accountContextKey === accountContextKey ? uploadState : null;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const uploadOperationRef = useRef(0);
   const linkOperationRef = useRef(0);
@@ -210,17 +229,23 @@ export function WorkbenchPage() {
   const viralIdempotencyKeysRef = useRef(new Map<string, string>());
   const uploadAbortRef = useRef<AbortController | null>(null);
   const [viralImportingId, setViralImportingId] = useState<string>();
-  const [linkState, setLinkState] = useState<{
+  const [linkStateValue, setLinkState] = useState<{
+    accountContextKey: string;
     status: "idle" | "loading" | "error";
     message?: string;
-  }>({ status: "idle" });
-  const accountId = user.id || "anonymous";
+  }>({ accountContextKey, status: "idle" });
+  const linkState =
+    linkStateValue.accountContextKey === accountContextKey
+      ? linkStateValue
+      : ({ accountContextKey, status: "idle" } as const);
   const activeAccountRef = useRef(accountId);
   if (activeAccountRef.current !== accountId) {
     activeAccountRef.current = accountId;
     uploadOperationRef.current += 1;
     linkOperationRef.current += 1;
     viralOperationRef.current += 1;
+    uploadAbortRef.current?.abort();
+    uploadAbortRef.current = null;
   }
   useEffect(
     () => () => {
@@ -234,7 +259,6 @@ export function WorkbenchPage() {
   useEffect(() => {
     if (activeAccountRef.current !== accountId) return;
     setViralImportingId(undefined);
-    setLinkState({ status: "idle" });
   }, [accountId]);
   const active = data.tasks.filter((task) =>
     ["running", "queued", "uncertain"].includes(task.status),
@@ -380,7 +404,7 @@ export function WorkbenchPage() {
         requestAccount,
         linkActionKey,
       );
-      setLinkState({ status: "loading" });
+      setLinkState({ accountContextKey, status: "loading" });
       try {
         const resolution = await resolveViralLink(
           sourceLink.trim(),
@@ -410,7 +434,7 @@ export function WorkbenchPage() {
           operation === linkOperationRef.current &&
           requestAccount === activeAccountRef.current
         ) {
-          setLinkState({ status: "idle" });
+          setLinkState({ accountContextKey, status: "idle" });
         }
       } catch (error) {
         if (
@@ -433,6 +457,7 @@ export function WorkbenchPage() {
           );
         }
         setLinkState({
+          accountContextKey,
           status: "error",
           message:
             error instanceof Error && error.message.trim()
@@ -460,10 +485,12 @@ export function WorkbenchPage() {
       return;
     }
     const operation = ++uploadOperationRef.current;
+    const requestAccount = accountId;
     uploadAbortRef.current?.abort();
     const abortController = new AbortController();
     uploadAbortRef.current = abortController;
     setUpload({
+      accountContextKey,
       name: file.name,
       progress: 0,
       error: "",
@@ -473,16 +500,28 @@ export function WorkbenchPage() {
     void uploadWorkbenchSourceVideo(
       file,
       (progress) => {
-        if (operation !== uploadOperationRef.current) return;
-        setUpload((current) => (current ? { ...current, progress } : current));
+        if (
+          operation !== uploadOperationRef.current ||
+          requestAccount !== activeAccountRef.current
+        )
+          return;
+        setUpload((current) =>
+          current?.accountContextKey === accountContextKey
+            ? { ...current, progress }
+            : current,
+        );
       },
       abortController.signal,
     )
       .then((uploaded) => {
-        if (operation !== uploadOperationRef.current) return;
+        if (
+          operation !== uploadOperationRef.current ||
+          requestAccount !== activeAccountRef.current
+        )
+          return;
         const { projectId, assetId } = uploaded;
         setUpload((current) =>
-          current
+          current?.accountContextKey === accountContextKey
             ? { ...current, progress: 100, projectId, completed: true }
             : current,
         );
@@ -515,9 +554,13 @@ export function WorkbenchPage() {
         notify("视频已上传云存储，来源已加入当前创作。");
       })
       .catch((error) => {
-        if (operation !== uploadOperationRef.current) return;
+        if (
+          operation !== uploadOperationRef.current ||
+          requestAccount !== activeAccountRef.current
+        )
+          return;
         setUpload((current) =>
-          current
+          current?.accountContextKey === accountContextKey
             ? {
                 ...current,
                 error:
@@ -561,8 +604,11 @@ export function WorkbenchPage() {
             onChange={(event) => {
               linkOperationRef.current += 1;
               viralOperationRef.current += 1;
-              setSourceLink(event.target.value);
-              setLinkState({ status: "idle" });
+              setSourceLinkState({
+                accountContextKey,
+                value: event.target.value,
+              });
+              setLinkState({ accountContextKey, status: "idle" });
               setViralImportingId(undefined);
             }}
           />
