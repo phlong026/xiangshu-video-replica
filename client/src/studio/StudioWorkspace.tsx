@@ -243,6 +243,8 @@ export function StudioWorkspace({
   const latestDraftRef = useRef(state.draft);
   const draftTouchedRef = useRef(false);
   const draftSaveTimerRef = useRef<number | undefined>(undefined);
+  const cloudDraftInFlightRef = useRef(new Map<string, Promise<void>>());
+  const lastCloudDraftSuccessRef = useRef<string | undefined>(undefined);
   const saveOperationRef = useRef(0);
   const saveMountedRef = useRef(false);
   const saveAccountRef = useRef(currentUser.id);
@@ -280,6 +282,30 @@ export function StudioWorkspace({
       }
     };
   }, [currentUser.id]);
+  const persistCloudDraftForScope = useCallback(
+    (draft: StudioDraft, scope: string) => {
+      if (lastCloudDraftSuccessRef.current === scope) return Promise.resolve();
+      const existing = cloudDraftInFlightRef.current.get(scope);
+      if (existing) return existing;
+      const promise = persistCloudDraft(draft);
+      cloudDraftInFlightRef.current.set(scope, promise);
+      void promise.then(
+        () => {
+          if (cloudDraftInFlightRef.current.get(scope) === promise) {
+            cloudDraftInFlightRef.current.delete(scope);
+            lastCloudDraftSuccessRef.current = scope;
+          }
+        },
+        () => {
+          if (cloudDraftInFlightRef.current.get(scope) === promise) {
+            cloudDraftInFlightRef.current.delete(scope);
+          }
+        },
+      );
+      return promise;
+    },
+    [],
+  );
   const scheduleDraftSave = useCallback(
     (draft: StudioDraft) => {
       if (review) return;
@@ -295,7 +321,7 @@ export function StudioWorkspace({
           expectedScope !== saveScopeRef.current
         )
           return;
-        void persistCloudDraft(draft).catch(() => {
+        void persistCloudDraftForScope(draft, expectedScope).catch(() => {
           if (
             saveMountedRef.current &&
             operation === saveOperationRef.current &&
@@ -306,7 +332,7 @@ export function StudioWorkspace({
         });
       }, DRAFT_AUTOSAVE_DELAY_MS);
     },
-    [review, currentUser.id, notify],
+    [review, currentUser.id, notify, persistCloudDraftForScope],
   );
 
   const restoreDraftAssets = useCallback(
@@ -1033,11 +1059,14 @@ export function StudioWorkspace({
     void persistSavedScript(script, draft.projectId, draft.ipId)
       .then(async () => {
         if (!isCurrentSave()) return;
-        await persistCloudDraft({
-          ...draft,
-          script,
-          scriptEdited: false,
-        }).catch(() => undefined);
+        await persistCloudDraftForScope(
+          {
+            ...draft,
+            script,
+            scriptEdited: false,
+          },
+          expectedScope,
+        ).catch(() => undefined);
         if (!isCurrentSave()) return;
         draftTouchedRef.current = false;
         markSaved();

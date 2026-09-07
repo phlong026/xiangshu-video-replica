@@ -484,6 +484,64 @@ describe("V1.4 workspace integration", () => {
       }
     });
 
+    it("自动保存已在途时显式保存复用同一范围的云写", async () => {
+      let resolveAutosave: (() => void) | undefined;
+      live.persistCloudDraft.mockReturnValueOnce(
+        new Promise<void>((resolve) => {
+          resolveAutosave = resolve;
+        }),
+      );
+      live.loadStudioData.mockResolvedValue(emptyStudioData);
+      live.loadCloudDraft.mockResolvedValue(undefined);
+      render(<StudioWorkspace currentUser={reviewUser} />);
+      await openCopyPage();
+      vi.useFakeTimers();
+      try {
+        fireEvent.change(screen.getByLabelText("二创文案"), {
+          target: { value: "自动保存与显式保存共用正文" },
+        });
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(2_000);
+        });
+        expect(live.persistCloudDraft).toHaveBeenCalledTimes(1);
+
+        fireEvent.click(screen.getByRole("button", { name: "保存版本" }));
+        await act(async () => Promise.resolve());
+        expect(live.persistSavedScript).toHaveBeenCalledTimes(1);
+        expect(live.persistCloudDraft).toHaveBeenCalledTimes(1);
+        await act(async () => resolveAutosave?.());
+        expect(live.persistCloudDraft).toHaveBeenCalledTimes(1);
+        expect(screen.getAllByText(/已保存到我的文案/)).toHaveLength(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("同范围自动保存已成功时显式保存不重复写云草稿", async () => {
+      live.loadStudioData.mockResolvedValue(emptyStudioData);
+      live.loadCloudDraft.mockResolvedValue(undefined);
+      render(<StudioWorkspace currentUser={reviewUser} />);
+      await openCopyPage();
+      vi.useFakeTimers();
+      try {
+        fireEvent.change(screen.getByLabelText("二创文案"), {
+          target: { value: "已经自动保存的正文" },
+        });
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(2_000);
+        });
+        expect(live.persistCloudDraft).toHaveBeenCalledTimes(1);
+
+        fireEvent.click(screen.getByRole("button", { name: "保存版本" }));
+        await act(async () => Promise.resolve());
+        expect(live.persistSavedScript).toHaveBeenCalledTimes(1);
+        expect(live.persistCloudDraft).toHaveBeenCalledTimes(1);
+        expect(screen.getAllByText(/已保存到我的文案/)).toHaveLength(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("自动保存定时器等待期间账号A到B再回A时不使用迟到认证写入", async () => {
       live.loadStudioData.mockResolvedValue(emptyStudioData);
       live.loadCloudDraft.mockResolvedValue(undefined);
