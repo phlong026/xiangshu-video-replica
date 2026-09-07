@@ -155,6 +155,12 @@ const emptyData: StudioData = {
   analytics30: null,
 };
 const TASKS_POLL_INTERVAL_MS = 20_000;
+const ORAL_SUBTITLE_PRESET = {
+  st_show: true,
+  st_font_size: 30,
+  st_primary_color: "0xFFFFFF",
+  st_outline_color: "0x000000",
+};
 const creationPages = new Set<StudioPage>([
   "replica",
   "replacement",
@@ -565,6 +571,9 @@ export function StudioWorkspace({
         title: draft.script.title || "未命名口播",
         scriptText: draft.script.text,
         audioAssetId: input.audioAssetId,
+        ...(input.mode === "text" && input.subtitles
+          ? { subtitle: ORAL_SUBTITLE_PRESET }
+          : {}),
       };
       const fingerprint = JSON.stringify(request);
       if (oralSubmissionRef.current?.fingerprint !== fingerprint) {

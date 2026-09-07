@@ -19,6 +19,7 @@ import {
   createMaterialUploadIntent,
   createOralAvatarClone,
   createOralConsent,
+  createOralTask,
   createOralVoiceClone,
   createProject,
   createScriptVersion,
@@ -340,6 +341,34 @@ describe("人物 IP 口播资产 API", () => {
       "http://127.0.0.1:8000/api/oral/voices/voice%201/confirm",
       expect.objectContaining({ method: "POST" }),
     );
+  });
+
+  it("口播任务按选择序列化供应商原生字幕配置", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: "oral-1", status: "QUEUED" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const common = {
+      identityId: "person-1",
+      avatarId: "avatar-1",
+      voiceId: "voice-1",
+      mode: "TTS" as const,
+      title: "口播",
+      scriptText: "文案",
+    };
+
+    await createOralTask({ ...common, idempotencyKey: "oral-key-off" });
+    await createOralTask({
+      ...common,
+      subtitle: { st_show: true, st_font_size: 30 },
+      idempotencyKey: "oral-key-on",
+    });
+
+    const disabledBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    const enabledBody = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body));
+    expect(disabledBody.subtitle).toBeNull();
+    expect(enabledBody.subtitle).toEqual({ st_show: true, st_font_size: 30 });
   });
 
   it("调用口播任务取消与两种重试合同", async () => {

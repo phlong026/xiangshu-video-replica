@@ -1111,6 +1111,133 @@ describe("视频生成（C2 独立创作）", () => {
     expect(submit).toBeEnabled();
   });
 
+  it("文案口播关闭字幕时不提交供应商字幕配置", async () => {
+    api.createOralTask.mockResolvedValue({ id: "oral-1", status: "QUEUED" });
+    live.loadStudioData.mockResolvedValue(createReviewData());
+    render(
+      <StudioWorkspace
+        currentUser={reviewUser}
+        initialState={createReviewState("oral")}
+      />,
+    );
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "生成口播视频" }),
+    );
+    expect(await screen.findByText("5.00 元/条")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "确认费用并提交" }));
+
+    await waitFor(() => expect(api.createOralTask).toHaveBeenCalledTimes(1));
+    expect(api.createOralTask.mock.calls[0]?.[0]).not.toHaveProperty(
+      "subtitle",
+    );
+  });
+
+  it("文案口播开启字幕时提交供应商原生字幕配置", async () => {
+    api.createOralTask.mockResolvedValue({ id: "oral-1", status: "QUEUED" });
+    live.loadStudioData.mockResolvedValue(createReviewData());
+    render(
+      <StudioWorkspace
+        currentUser={reviewUser}
+        initialState={createReviewState("oral")}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "添加" }));
+    fireEvent.click(screen.getByRole("button", { name: "生成口播视频" }));
+    expect(await screen.findByText("5.00 元/条")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "确认费用并提交" }));
+
+    await waitFor(() => expect(api.createOralTask).toHaveBeenCalledTimes(1));
+    expect(api.createOralTask.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({
+        mode: "TTS",
+        subtitle: {
+          st_show: true,
+          st_font_size: 30,
+          st_primary_color: "0xFFFFFF",
+          st_outline_color: "0x000000",
+        },
+      }),
+    );
+  });
+
+  it("音频口播不展示字幕开关也不提交 TTS 字幕配置", async () => {
+    api.createOralTask.mockResolvedValue({ id: "oral-1", status: "QUEUED" });
+    live.loadStudioData.mockResolvedValue(createReviewData());
+    const initial = createReviewState("oral-audio");
+    initial.draft.subtitles = true;
+    render(<StudioWorkspace currentUser={reviewUser} initialState={initial} />);
+
+    expect(
+      await screen.findByRole("button", { name: "生成口播视频" }),
+    ).toBeEnabled();
+    expect(
+      screen.queryByRole("button", { name: "添加" }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "生成口播视频" }));
+    expect(await screen.findByText("5.00 元/条")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "确认费用并提交" }));
+
+    await waitFor(() => expect(api.createOralTask).toHaveBeenCalledTimes(1));
+    expect(api.createOralTask.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({ mode: "AUDIO" }),
+    );
+    expect(api.createOralTask.mock.calls[0]?.[0]).not.toHaveProperty(
+      "subtitle",
+    );
+  });
+
+  it("旧文案口播响应不会把字幕状态带入后来打开的音频口播", async () => {
+    let resolveTask:
+      | ((value: { id: string; status: string }) => void)
+      | undefined;
+    api.createOralTask.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveTask = resolve;
+        }),
+    );
+    live.loadStudioData.mockResolvedValue(createReviewData());
+    render(
+      <StudioWorkspace
+        currentUser={reviewUser}
+        initialState={createReviewState("oral")}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "添加" }));
+    fireEvent.click(screen.getByRole("button", { name: "生成口播视频" }));
+    const firstDialog = await screen.findByRole("dialog", {
+      name: "生成确认 · 数字人口播",
+    });
+    expect(await screen.findByText("5.00 元/条")).toBeInTheDocument();
+    fireEvent.click(
+      within(firstDialog).getByRole("button", { name: "确认费用并提交" }),
+    );
+    fireEvent.click(within(firstDialog).getByRole("button", { name: "关闭" }));
+    fireEvent.click(screen.getByRole("tab", { name: "用已有音频生成" }));
+    expect(
+      screen.queryByRole("button", { name: "添加" }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "生成口播视频" }));
+    expect(
+      await screen.findByRole("dialog", { name: "生成确认 · 数字人口播" }),
+    ).toBeInTheDocument();
+
+    await act(async () => {
+      resolveTask?.({ id: "oral-old-tts", status: "QUEUED" });
+      await Promise.resolve();
+    });
+
+    expect(
+      screen.getByRole("dialog", { name: "生成确认 · 数字人口播" }),
+    ).toBeInTheDocument();
+    expect(api.createOralTask.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({ mode: "TTS", subtitle: expect.any(Object) }),
+    );
+  });
+
   it("口播确认连续点击只创建一个任务", async () => {
     let resolveTask:
       | ((value: { id: string; status: string }) => void)
