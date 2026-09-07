@@ -1629,6 +1629,55 @@ describe("V1.4 内容与运营页面", () => {
     expect(screen.getByText("暂无爆款视频")).toBeInTheDocument();
   });
 
+  it("全部列表首屏在搜索变化后迟到失败不污染当前页面", async () => {
+    const base = studio({ review: false });
+    useStudio.mockReturnValue(base);
+    let rejectOldRequest: ((reason: Error) => void) | undefined;
+    listViralVideos.mockReturnValueOnce(
+      new Promise((_resolve, reject) => {
+        rejectOldRequest = reject;
+      }),
+    );
+    render(<ViralPage />);
+
+    fireEvent.change(screen.getByRole("textbox", { name: "搜索视频标题" }), {
+      target: { value: "建房" },
+    });
+    await act(async () => {
+      rejectOldRequest?.(new Error("old all request failed"));
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText(base.data.videos[0].title)).toBeInTheDocument();
+    expect(
+      screen.queryByText("视频列表暂时无法更新，已保留当前内容"),
+    ).toBeNull();
+  });
+
+  it("收藏首屏在搜索变化后迟到失败不污染当前页面", async () => {
+    const base = studio({ review: false });
+    useStudio.mockReturnValue(base);
+    let rejectOldRequest: ((reason: Error) => void) | undefined;
+    listViralFavorites.mockReturnValueOnce(
+      new Promise((_resolve, reject) => {
+        rejectOldRequest = reject;
+      }),
+    );
+    render(<ViralPage />);
+    fireEvent.click(screen.getByRole("tab", { name: "我的收藏" }));
+    await waitFor(() => expect(listViralFavorites).toHaveBeenCalledTimes(1));
+
+    fireEvent.change(screen.getByRole("textbox", { name: "搜索视频标题" }), {
+      target: { value: "庭院" },
+    });
+    await act(async () => {
+      rejectOldRequest?.(new Error("old favorite request failed"));
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByText("收藏列表暂时无法更新")).toBeNull();
+  });
+
   it("收藏使用持久化接口并在保存失败时回滚乐观状态", async () => {
     saveViralFavorite.mockRejectedValueOnce(new Error("收藏失败"));
     const value = studio({ review: false });

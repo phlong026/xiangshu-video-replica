@@ -606,9 +606,11 @@ export function ViralPage() {
     platform === "抖音" ? "douyin" : "wechat_channels";
   const sortKey = sort === "最新" ? "latest" : "hot";
   const paginationContextKey = `${scope}:${platformKey}:${sortKey}:${category}`;
+  const paginationContextKeyRef = useRef(paginationContextKey);
   const paginationSnapshotsRef = useRef(
     new Map<string, { nextCursor?: string; hasMore: boolean }>(),
   );
+  paginationContextKeyRef.current = paginationContextKey;
 
   const shown = useMemo(
     () =>
@@ -675,7 +677,8 @@ export function ViralPage() {
         if (
           cancelled ||
           requestId !== listRequestRef.current ||
-          requestReloadRevision !== listReloadRevisionRef.current
+          requestReloadRevision !== listReloadRevisionRef.current ||
+          paginationContextKey !== paginationContextKeyRef.current
         )
           return;
         const incoming = result.items.map(studioVideoFromViral);
@@ -723,10 +726,22 @@ export function ViralPage() {
         }));
       })
       .catch(() => {
-        if (!cancelled) setListError("视频列表暂时无法更新，已保留当前内容");
+        if (
+          !cancelled &&
+          requestId === listRequestRef.current &&
+          requestReloadRevision === listReloadRevisionRef.current &&
+          paginationContextKey === paginationContextKeyRef.current
+        ) {
+          setListError("视频列表暂时无法更新，已保留当前内容");
+        }
       })
       .finally(() => {
-        if (!cancelled && requestId === listRequestRef.current) {
+        if (
+          !cancelled &&
+          requestId === listRequestRef.current &&
+          requestReloadRevision === listReloadRevisionRef.current &&
+          paginationContextKey === paginationContextKeyRef.current
+        ) {
           setListLoading(false);
         }
       });
@@ -759,7 +774,8 @@ export function ViralPage() {
         if (
           cancelled ||
           requestId !== listRequestRef.current ||
-          requestReloadRevision !== listReloadRevisionRef.current
+          requestReloadRevision !== listReloadRevisionRef.current ||
+          paginationContextKey !== paginationContextKeyRef.current
         )
           return;
         const incoming = result.items.map(studioVideoFromViral);
@@ -798,10 +814,22 @@ export function ViralPage() {
         }));
       })
       .catch(() => {
-        if (!cancelled) setListError("收藏列表暂时无法更新");
+        if (
+          !cancelled &&
+          requestId === listRequestRef.current &&
+          requestReloadRevision === listReloadRevisionRef.current &&
+          paginationContextKey === paginationContextKeyRef.current
+        ) {
+          setListError("收藏列表暂时无法更新");
+        }
       })
       .finally(() => {
-        if (!cancelled && requestId === listRequestRef.current) {
+        if (
+          !cancelled &&
+          requestId === listRequestRef.current &&
+          requestReloadRevision === listReloadRevisionRef.current &&
+          paginationContextKey === paginationContextKeyRef.current
+        ) {
           setListLoading(false);
         }
       });
