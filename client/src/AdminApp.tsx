@@ -645,6 +645,7 @@ export function AdminApp() {
           ) : null}
           {activeTab === "generationRecords" ? (
             <GenerationRecordsPage
+              key={`generationRecords:${navigationIntent}`}
               initialStatus={
                 navigationIntent === "failedGenerationRecords"
                   ? "FAILED"

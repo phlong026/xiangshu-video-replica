@@ -40,11 +40,12 @@ const statusNames: Record<StudioTask["status"], string> = {
   cancelled: "已取消",
 };
 
-function taskDetailPatch(task: StudioTask) {
+function taskDetailPatch(task: StudioTask, returnTo: "workbench" | "tasks") {
   return {
     selectedTaskId: task.id,
     selectedTaskKind: task.backendKind,
     selectedTaskBackendId: task.backendId ?? task.batchId ?? task.id,
+    returnTo,
   };
 }
 
@@ -470,7 +471,10 @@ export function WorkbenchPage() {
                   </div>
                   <Button
                     onClick={() =>
-                      navigate("task-detail", taskDetailPatch(task))
+                      navigate(
+                        "task-detail",
+                        taskDetailPatch(task, "workbench"),
+                      )
                     }
                   >
                     查看详情
@@ -558,7 +562,9 @@ export function WorkbenchPage() {
               <button
                 type="button"
                 key={task.id}
-                onClick={() => navigate("task-detail", taskDetailPatch(task))}
+                onClick={() =>
+                  navigate("task-detail", taskDetailPatch(task, "workbench"))
+                }
               >
                 <i className={`studio-dot studio-dot--${task.status}`} />
                 <span>
@@ -829,7 +835,7 @@ export function TasksPage() {
                     <Button
                       variant="quiet"
                       onClick={() =>
-                        navigate("task-detail", taskDetailPatch(task))
+                        navigate("task-detail", taskDetailPatch(task, "tasks"))
                       }
                     >
                       {task.status === "completed" ? "查看结果" : "查看详情"}
@@ -917,7 +923,7 @@ export function TaskDetailPage() {
   } = useStudio();
   const [actionBusy, setActionBusy] = useState<"download" | "retry">();
   const [previewLoad, setPreviewLoad] = useState<{
-    taskId?: string;
+    key?: string;
     status: "idle" | "loading" | "empty" | "error" | "ready";
   }>({ status: "idle" });
   const [detailLoad, setDetailLoad] = useState<{
@@ -926,34 +932,51 @@ export function TaskDetailPage() {
     error?: string;
   }>({ status: "idle" });
   const [detailRetry, setDetailRetry] = useState(0);
-  const selectedTaskIdRef = useRef(state.selectedTaskId);
   const previewRequestRef = useRef(0);
   const detailRequestRef = useRef(0);
   const detailUserIdRef = useRef(user.id);
   const verifiedDetailRef = useRef<{ key: string; userId: string } | undefined>(
     undefined,
   );
-  selectedTaskIdRef.current = state.selectedTaskId;
   detailUserIdRef.current = user.id;
   const task = data.tasks.find((item) => item.id === state.selectedTaskId);
   const detailKind = state.selectedTaskKind;
   const detailId = state.selectedTaskBackendId;
   const detailKey =
     detailKind && detailId ? `${detailKind}:${detailId}` : undefined;
+  const detailContextKey = detailKey ? `${user.id}:${detailKey}` : undefined;
+  const taskMatchesRoute =
+    task !== undefined &&
+    task.backendKind === detailKind &&
+    (task.backendId ?? task.batchId ?? task.id) === detailId;
+  const taskIsVerified =
+    review ||
+    !detailContextKey ||
+    (taskMatchesRoute &&
+      verifiedDetailRef.current?.key === detailContextKey &&
+      verifiedDetailRef.current?.userId === user.id);
+  const previewContextKey = `${user.id}:${detailKey ?? state.selectedTaskId ?? "none"}`;
+  const previewContextRef = useRef(previewContextKey);
+  previewContextRef.current = previewContextKey;
+  useEffect(() => {
+    previewContextRef.current = previewContextKey;
+    return () => {
+      previewRequestRef.current += 1;
+    };
+  }, [previewContextKey]);
   useEffect(() => {
     void detailRetry;
     if (review || !detailKind || !detailId) return;
     if (
-      task?.backendKind === detailKind &&
-      (task.backendId ?? task.batchId ?? task.id) === detailId &&
-      verifiedDetailRef.current?.key === detailKey &&
+      taskMatchesRoute &&
+      verifiedDetailRef.current?.key === detailContextKey &&
       verifiedDetailRef.current?.userId === user.id
     )
       return;
     const requestId = ++detailRequestRef.current;
     const requestedUserId = user.id;
     let active = true;
-    setDetailLoad({ key: detailKey, status: "loading" });
+    setDetailLoad({ key: detailContextKey, status: "loading" });
     void loadStudioTaskDetail(detailKind, detailId)
       .then((loaded) => {
         if (
@@ -963,7 +986,7 @@ export function TaskDetailPage() {
         )
           return;
         verifiedDetailRef.current = {
-          key: detailKey as string,
+          key: detailContextKey as string,
           userId: requestedUserId,
         };
         updateData((current) => ({
@@ -974,7 +997,7 @@ export function TaskDetailPage() {
               )
             : [...current.tasks, loaded],
         }));
-        setDetailLoad({ key: detailKey, status: "ready" });
+        setDetailLoad({ key: detailContextKey, status: "ready" });
       })
       .catch((cause: unknown) => {
         if (
@@ -984,7 +1007,7 @@ export function TaskDetailPage() {
         )
           return;
         setDetailLoad({
-          key: detailKey,
+          key: detailContextKey,
           status: "error",
           error: customerVisibleErrorMessage(
             cause,
@@ -998,22 +1021,20 @@ export function TaskDetailPage() {
     };
   }, [
     detailId,
-    detailKey,
+    detailContextKey,
     detailKind,
     detailRetry,
     review,
-    task?.backendId,
-    task?.backendKind,
-    task?.batchId,
-    task?.id,
+    taskMatchesRoute,
     updateData,
     user.id,
   ]);
   const detailIsLoading =
-    detailLoad.key === detailKey && detailLoad.status === "loading";
+    Boolean(detailContextKey && !taskIsVerified) &&
+    !(detailLoad.key === detailContextKey && detailLoad.status === "error");
   const detailHasError =
-    detailLoad.key === detailKey && detailLoad.status === "error";
-  if (!task || detailIsLoading || detailHasError)
+    detailLoad.key === detailContextKey && detailLoad.status === "error";
+  if (!task || !taskIsVerified || detailIsLoading || detailHasError)
     return (
       <Empty
         title={
@@ -1024,7 +1045,7 @@ export function TaskDetailPage() {
               : "未选择任务"
         }
         description={
-          detailLoad.key === detailKey ? detailLoad.error : undefined
+          detailLoad.key === detailContextKey ? detailLoad.error : undefined
         }
         action={
           detailHasError ? (
@@ -1041,7 +1062,7 @@ export function TaskDetailPage() {
     );
   const result = data.assets.find((asset) => asset.id === task.resultId);
   const previewStatus =
-    previewLoad.taskId === task.id ? previewLoad.status : "idle";
+    previewLoad.key === previewContextKey ? previewLoad.status : "idle";
   const person = data.people.find((item) => item.id === task.ipId);
   const info = [
     ["任务类型", task.type],
@@ -1086,17 +1107,18 @@ export function TaskDetailPage() {
   };
   const previewResult = async () => {
     const requestedTask = task;
+    const requestedContext = previewContextKey;
     const requestId = ++previewRequestRef.current;
-    setPreviewLoad({ taskId: requestedTask.id, status: "loading" });
+    setPreviewLoad({ key: requestedContext, status: "loading" });
     try {
       const asset = await loadTaskPreview(requestedTask);
       if (
         requestId !== previewRequestRef.current ||
-        selectedTaskIdRef.current !== requestedTask.id
+        previewContextRef.current !== requestedContext
       )
         return;
       if (!asset) {
-        setPreviewLoad({ taskId: requestedTask.id, status: "empty" });
+        setPreviewLoad({ key: requestedContext, status: "empty" });
         return;
       }
       updateData((current) => ({
@@ -1108,13 +1130,13 @@ export function TaskDetailPage() {
           item.id === requestedTask.id ? { ...item, resultId: asset.id } : item,
         ),
       }));
-      setPreviewLoad({ taskId: requestedTask.id, status: "ready" });
+      setPreviewLoad({ key: requestedContext, status: "ready" });
     } catch {
       if (
         requestId === previewRequestRef.current &&
-        selectedTaskIdRef.current === requestedTask.id
+        previewContextRef.current === requestedContext
       )
-        setPreviewLoad({ taskId: requestedTask.id, status: "error" });
+        setPreviewLoad({ key: requestedContext, status: "error" });
     }
   };
   const downloadResult = async () => {

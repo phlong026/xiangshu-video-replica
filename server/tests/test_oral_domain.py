@@ -2459,6 +2459,15 @@ def test_oral_task_serialization_reports_billing_status_and_available_actions(
         assert denied.status_code == 404
         assert denied.json()["detail"]["code"] == "ORAL_TASK_NOT_FOUND"
 
+        contract = client.get("/openapi.json").json()
+        list_get = contract["paths"]["/api/oral/tasks"]["get"]
+        detail_get = contract["paths"]["/api/oral/tasks/{task_id}"]["get"]
+        list_schema = list_get["responses"]["200"]["content"]["application/json"]["schema"]
+        detail_schema = detail_get["responses"]["200"]["content"]["application/json"]["schema"]
+        assert list_schema["$ref"].endswith("/OralTaskPageResponse")
+        assert detail_schema["$ref"].endswith("/OralTaskResponse")
+        assert "404" in detail_get["responses"]
+
         conn.execute(
             """
             UPDATE oral_tasks SET status = 'SUBMISSION_UNCERTAIN',

@@ -1121,35 +1121,7 @@ export async function createOralTask(
   );
 }
 
-export type OralTaskRecord = {
-  id: string;
-  status:
-    | "QUEUED"
-    | "SUBMITTING"
-    | "RUNNING"
-    | "ARCHIVING"
-    | "SUBMISSION_UNCERTAIN"
-    | "ARCHIVE_FAILED"
-    | "SUCCEEDED"
-    | "FAILED"
-    | "CANCELLED";
-  title: string;
-  mode: "TTS" | "AUDIO";
-  identity_id: string;
-  avatar_id: string;
-  voice_id: string | null;
-  script_text: string | null;
-  audio_asset_id: string | null;
-  status_message?: string | null;
-  error_message?: string | null;
-  result_asset_id: string | null;
-  duration_sec: number | null;
-  estimated_cost_fen: number;
-  billing_status?: string | null;
-  available_actions?: string[];
-  created_at: string;
-  updated_at: string;
-};
+export type OralTaskRecord = components["schemas"]["OralTaskResponse"];
 
 export type OffsetPage<T> = {
   items: T[];
@@ -1165,12 +1137,12 @@ export async function listOralTasksPage({
 }: {
   limit?: number;
   offset?: number;
-} = {}): Promise<OffsetPage<OralTaskRecord>> {
+} = {}): Promise<components["schemas"]["OralTaskPageResponse"]> {
   const query = new URLSearchParams({
     limit: String(limit),
     offset: String(offset),
   });
-  return requestApiJson<OffsetPage<OralTaskRecord>>(
+  return requestApiJson<components["schemas"]["OralTaskPageResponse"]>(
     `/api/oral/tasks?${query.toString()}`,
     "读取口播任务失败",
   );

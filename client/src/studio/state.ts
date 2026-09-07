@@ -123,6 +123,30 @@ export function studioHashForState(state: StudioState): string {
   return `#studio/${path}${query ? `?${query}` : ""}`;
 }
 
+export function navigateStudioState(
+  state: StudioState,
+  page: StudioPage,
+  patch: Partial<StudioState> = {},
+): StudioState {
+  const keepTaskContext =
+    page === "task-detail" || patch.returnTo === "task-detail";
+  const keepPersonContext = page.startsWith("person-");
+  return {
+    ...state,
+    selectedVideoId: undefined,
+    selectedTaskId: keepTaskContext ? state.selectedTaskId : undefined,
+    selectedTaskKind: keepTaskContext ? state.selectedTaskKind : undefined,
+    selectedTaskBackendId: keepTaskContext
+      ? state.selectedTaskBackendId
+      : undefined,
+    selectedAssetId: undefined,
+    selectedPersonId: keepPersonContext ? state.selectedPersonId : undefined,
+    returnTo: undefined,
+    ...patch,
+    page,
+  };
+}
+
 export function createDraft(): StudioDraft {
   return {
     id: `draft-${crypto.randomUUID()}`,

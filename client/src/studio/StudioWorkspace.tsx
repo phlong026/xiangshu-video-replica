@@ -71,6 +71,7 @@ import {
   createDraft,
   createState,
   DEFAULT_MAX_REFERENCE_IMAGES,
+  navigateStudioState,
   pageTitles,
   patchStudioDraft,
   resolveVideoMode,
@@ -329,6 +330,9 @@ export function StudioWorkspace({
   const [videoQuoteRevision, setVideoQuoteRevision] = useState(0);
   const [videoSubmitting, setVideoSubmitting] = useState(false);
   const busyRef = useRef(false);
+  const pendingRouteRef = useRef<
+    ReturnType<typeof studioRouteFromHash> | undefined
+  >(undefined);
   const operationRef = useRef(0);
   const loadedPeopleRef = useRef(new Set<string>());
   const restoredAssetsRef = useRef<StudioAsset[]>([]);
@@ -970,11 +974,13 @@ export function StudioWorkspace({
 
   useEffect(() => {
     const onHashChange = () => {
+      const route = studioRouteFromHash(window.location.hash);
       if (busyRef.current) {
+        pendingRouteRef.current = route;
         notify("当前操作正在处理中，请等待完成后切换页面。");
         return;
       }
-      const route = studioRouteFromHash(window.location.hash);
+      operationRef.current += 1;
       setState((previous) => ({ ...previous, ...route }));
       setLivePanel(undefined);
     };
@@ -993,7 +999,7 @@ export function StudioWorkspace({
     }
     operationRef.current += 1;
     setState((previous) => {
-      const nextState = { ...previous, ...patch, page };
+      const nextState = navigateStudioState(previous, page, patch);
       window.history.pushState(null, "", studioHashForState(nextState));
       return nextState;
     });
@@ -1454,6 +1460,13 @@ export function StudioWorkspace({
                 onClose={closeLive}
                 onBusyChange={(busy) => {
                   busyRef.current = busy;
+                  if (!busy && pendingRouteRef.current) {
+                    const pendingRoute = pendingRouteRef.current;
+                    pendingRouteRef.current = undefined;
+                    operationRef.current += 1;
+                    setState((previous) => ({ ...previous, ...pendingRoute }));
+                    setLivePanel(undefined);
+                  }
                 }}
                 onBatchCreated={(batch) => {
                   setHandoffBatch(batch);

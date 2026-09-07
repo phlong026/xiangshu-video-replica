@@ -12,6 +12,11 @@ import { StudioWorkspace } from "./StudioWorkspace";
 import { createState } from "./state";
 
 const live = vi.hoisted(() => ({
+  CREATION_KIND_LABELS: {
+    replica: "视频复刻",
+    independent: "独立创作",
+    replacement: "人物置换",
+  },
   loadStudioData: vi.fn(),
   studioAssetFromMaterial: vi.fn((item: Record<string, unknown>) => ({
     id: item.asset_id,
@@ -125,6 +130,7 @@ vi.mock("./LiveWorkspacePanel", () => ({
     onClose: () => void;
     onHandoffConsumed?: () => void;
     onProjectSelected: (project: typeof livePanel.project) => void;
+    onBusyChange: (busy: boolean) => void;
   }) => (
     <section aria-label="模拟已有功能工作区">
       <button
@@ -151,6 +157,12 @@ vi.mock("./LiveWorkspacePanel", () => ({
       ) : null}
       <button type="button" onClick={props.onClose}>
         返回新工作台
+      </button>
+      <button type="button" onClick={() => props.onBusyChange(true)}>
+        模拟开始忙碌
+      </button>
+      <button type="button" onClick={() => props.onBusyChange(false)}>
+        模拟结束忙碌
       </button>
     </section>
   ),
@@ -546,7 +558,7 @@ describe("V1.4 workspace integration", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: /查看详情|查看结果/ }));
     expect(window.location.hash).toBe(
-      "#studio/task-detail/generation_batch/batch-deep",
+      "#studio/task-detail/generation_batch/batch-deep?returnTo=tasks",
     );
 
     window.history.pushState(
@@ -559,6 +571,70 @@ describe("V1.4 workspace integration", () => {
       await screen.findByRole("heading", { name: "张工" }),
     ).toBeInTheDocument();
     expect(screen.getByText("← 返回创作")).toBeInTheDocument();
+  });
+  it("busy期间浏览器回退完成后应用被延迟的历史路由", async () => {
+    live.loadStudioData.mockResolvedValue({
+      ...createReviewData(),
+      loading: false,
+    });
+    render(<StudioWorkspace currentUser={reviewUser} />);
+    await waitFor(() => expect(live.loadStudioData).toHaveBeenCalled());
+
+    window.history.pushState(null, "", "#studio/viral");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    expect(
+      await screen.findByRole("heading", { name: "爆款视频" }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "工作台" }));
+    fireEvent.click(screen.getByRole("button", { name: "开始复刻" }));
+    fireEvent.click(screen.getByRole("button", { name: "模拟开始忙碌" }));
+
+    await act(async () => window.history.back());
+    await waitFor(() => expect(window.location.hash).toBe("#studio/viral"));
+    expect(screen.getByLabelText("模拟已有功能工作区")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "模拟结束忙碌" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "爆款视频" }),
+    ).toBeInTheDocument();
+  });
+
+  it("普通导航清除旧详情返回位置且每个详情入口写入当前来源", () => {
+    const reviewData = createReviewData();
+    reviewData.tasks = [
+      {
+        ...reviewData.tasks[0],
+        id: "batch-review-1",
+        backendKind: "generation_batch",
+        backendId: "batch-review-1",
+        batchId: "batch-review-1",
+        status: "completed",
+      },
+      {
+        ...reviewData.tasks[0],
+        id: "batch-review-2",
+        backendKind: "generation_batch",
+        backendId: "batch-review-2",
+        batchId: "batch-review-2",
+        status: "completed",
+      },
+    ];
+    render(
+      <StudioWorkspace
+        currentUser={reviewUser}
+        reviewData={reviewData}
+        initialState={createReviewState("analytics")}
+      />,
+    );
+
+    fireEvent.click(screen.getAllByRole("button", { name: "查看视频" })[0]);
+    expect(window.location.hash).toContain("returnTo=analytics");
+    fireEvent.click(screen.getByRole("button", { name: "任务中心" }));
+    expect(window.location.hash).toBe("#studio/tasks");
+    fireEvent.click(screen.getAllByRole("button", { name: "查看结果" })[1]);
+    expect(window.location.hash).toBe(
+      "#studio/task-detail/generation_batch/batch-review-2?returnTo=tasks",
+    );
   });
   it("changing IP invalidates the previous person's voice and avatar", () => {
     render(

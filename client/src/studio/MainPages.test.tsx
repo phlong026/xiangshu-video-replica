@@ -5,6 +5,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
+import { useLayoutEffect } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Project } from "../api";
 import { createState, patchStudioDraft } from "./state";
@@ -243,6 +244,67 @@ describe("V1.4 任务详情真实成片预览", () => {
       await Promise.resolve();
     });
     expect(updateData).toHaveBeenCalledOnce();
+  });
+
+  it("同ID换账号时首屏隐藏旧详情且旧预览不得写入新账号", async () => {
+    const preview = deferred<StudioAsset | undefined>();
+    const detailB = deferred<StudioTask>();
+    const updateData = vi.fn();
+    const layoutSnapshots: string[] = [];
+    let value = studio(taskA.id, {
+      state: {
+        ...createState("task-detail"),
+        selectedTaskId: taskA.id,
+        selectedTaskKind: "generation_batch",
+        selectedTaskBackendId: taskA.id,
+      },
+      data: data([
+        { ...taskA, backendKind: "generation_batch", backendId: taskA.id },
+      ]),
+      user: { id: "account-a" } as StudioContextValue["user"],
+      updateData,
+    });
+    loadStudioTaskDetail
+      .mockResolvedValueOnce({
+        ...taskA,
+        backendKind: "generation_batch",
+        backendId: taskA.id,
+      })
+      .mockReturnValueOnce(detailB.promise);
+    loadTaskPreview.mockReturnValue(preview.promise);
+    useStudio.mockImplementation(() => value);
+    function Probe({ account }: { account: string }) {
+      useLayoutEffect(() => {
+        layoutSnapshots.push(`${account}:${document.body.textContent ?? ""}`);
+      }, [account]);
+      return <TaskDetailPage />;
+    }
+    const view = render(<Probe account="account-a" />);
+    expect(
+      await screen.findByRole("heading", { name: taskA.title }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "预览成片" }));
+
+    value = {
+      ...value,
+      user: { id: "account-b" } as StudioContextValue["user"],
+    };
+    view.rerender(<Probe account="account-b" />);
+    expect(layoutSnapshots.at(-1)).not.toContain(taskA.title);
+    expect(screen.getByText("正在读取任务详情")).toBeInTheDocument();
+    await act(async () => {
+      preview.resolve({
+        id: "old-account-preview",
+        name: "旧账号预览",
+        kind: "video",
+        url: "/old-account-preview",
+        group: "任务结果",
+        source: "任务中心",
+        saved: true,
+      });
+      await Promise.resolve();
+    });
+    expect(updateData).toHaveBeenCalledTimes(1);
   });
 
   it("仅在用户点击后按需加载，并只回填发起任务的结果", async () => {
