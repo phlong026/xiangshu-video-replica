@@ -123,6 +123,20 @@ const emptyData: StudioData = {
   analytics30: null,
 };
 const TASKS_POLL_INTERVAL_MS = 20_000;
+
+function savedDraftScope(accountId: string, draft: StudioDraft) {
+  return JSON.stringify([
+    accountId,
+    draft.projectId,
+    draft.sourceId,
+    draft.sourceAssetId,
+    draft.ipId,
+    draft.script.id,
+    draft.script.version,
+    draft.script.text,
+    draft.quoteRevision,
+  ]);
+}
 const creationPages = new Set<StudioPage>([
   "replica",
   "replacement",
@@ -236,10 +250,30 @@ export function StudioWorkspace({
   // 编辑后防抖自动保存；恢复只在用户尚未做任何编辑时生效，绝不覆盖进行中的输入。
   const DRAFT_AUTOSAVE_DELAY_MS = 2000;
   const latestDraftRef = useRef(state.draft);
+  const saveOperationRef = useRef(0);
+  const saveMountedRef = useRef(false);
+  const saveAccountRef = useRef(currentUser.id);
+  const saveScopeRef = useRef(savedDraftScope(currentUser.id, state.draft));
+  const renderedSaveScope = savedDraftScope(currentUser.id, state.draft);
+  if (
+    saveAccountRef.current !== currentUser.id ||
+    saveScopeRef.current !== renderedSaveScope
+  ) {
+    saveAccountRef.current = currentUser.id;
+    saveScopeRef.current = renderedSaveScope;
+    saveOperationRef.current += 1;
+  }
   const referenceAssetsRequestRef = useRef(0);
   const referenceAssetsDraftRef = useRef<StudioDraft | undefined>(undefined);
   const draftTouchedRef = useRef(false);
   const draftSaveTimerRef = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    saveMountedRef.current = true;
+    return () => {
+      saveMountedRef.current = false;
+      saveOperationRef.current += 1;
+    };
+  }, []);
   const scheduleDraftSave = useCallback(() => {
     if (review) return;
     window.clearTimeout(draftSaveTimerRef.current);
@@ -939,6 +973,14 @@ export function StudioWorkspace({
       return;
     }
     const draft = state.draft;
+    const accountId = currentUser.id;
+    const expectedScope = savedDraftScope(accountId, draft);
+    const operation = ++saveOperationRef.current;
+    const isCurrentSave = () =>
+      saveMountedRef.current &&
+      saveOperationRef.current === operation &&
+      saveAccountRef.current === accountId &&
+      saveScopeRef.current === expectedScope;
     const script = {
       ...draft.script,
       ipId: draft.ipId,
@@ -947,19 +989,12 @@ export function StudioWorkspace({
     };
     const markSaved = () =>
       setState((previous) => {
-        const sameDraft =
-          previous.draft.id === draft.id &&
-          previous.draft.projectId === draft.projectId &&
-          previous.draft.ipId === draft.ipId &&
-          previous.draft.script.id === draft.script.id &&
-          previous.draft.script.title === draft.script.title &&
-          previous.draft.script.text === draft.script.text &&
-          previous.draft.script.version === draft.script.version;
+        if (savedDraftScope(accountId, previous.draft) !== expectedScope) {
+          return previous;
+        }
         return {
           ...previous,
-          draft: sameDraft
-            ? { ...previous.draft, scriptEdited: false }
-            : previous.draft,
+          draft: { ...previous.draft, scriptEdited: false },
           savedScripts: [
             ...previous.savedScripts.filter((item) => item.id !== script.id),
             script,
@@ -972,14 +1007,23 @@ export function StudioWorkspace({
       return;
     }
     void persistSavedScript(script, draft.projectId, draft.ipId)
-      .then(() => {
+      .then(async () => {
+        if (!isCurrentSave()) return;
         markSaved();
-        void persistCloudDraft({ ...draft, script, scriptEdited: false }).catch(
-          () => {},
-        );
+        if (!isCurrentSave()) return;
+        await persistCloudDraft({
+          ...draft,
+          script,
+          scriptEdited: false,
+        }).catch(() => undefined);
+        if (!isCurrentSave()) return;
         notify("已保存到我的文案，换设备登录也能找回。");
       })
-      .catch(() => notify("云端保存失败，本次仅保留在工作区，请稍后重试。"));
+      .catch(() => {
+        if (isCurrentSave()) {
+          notify("云端保存失败，本次仅保留在工作区，请稍后重试。");
+        }
+      });
   };
   const confirmFinalDraft = () => {
     const script = { ...state.draft.script, confirmed: true };

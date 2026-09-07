@@ -1894,6 +1894,8 @@ describe("startVideoAnalysis", () => {
       "project-1",
       "待改写原稿。",
       "identity-1",
+      "source-1",
+      "rewrite-key-1",
     );
     const first = waitForScriptRewriteTask(task.id);
     const recovered = waitForScriptRewriteTask(task.id);
@@ -1908,7 +1910,8 @@ describe("startVideoAnalysis", () => {
     expect(enqueueBody).toEqual({
       text: "待改写原稿。",
       identity_id: "identity-1",
-      idempotency_key: expect.any(String),
+      source_asset_id: "source-1",
+      idempotency_key: "rewrite-key-1",
     });
   });
 
@@ -1930,11 +1933,11 @@ describe("startVideoAnalysis", () => {
       .mockResolvedValue({ ok: true, json: async () => null });
     vi.stubGlobal("fetch", fetchMock);
 
-    await getLatestScriptRewriteTask("project-1", "identity 1");
+    await getLatestScriptRewriteTask("project-1", "identity 1", "source/1");
     await getLatestScriptRewriteTask("project-1");
 
     expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
-      "http://127.0.0.1:8000/api/projects/project-1/script-rewrite-tasks/latest?identity_scope=identity&identity_id=identity+1",
+      "http://127.0.0.1:8000/api/projects/project-1/script-rewrite-tasks/latest?identity_scope=identity&identity_id=identity+1&source_asset_id=source%2F1",
       "http://127.0.0.1:8000/api/projects/project-1/script-rewrite-tasks/latest?identity_scope=none",
     ]);
   });

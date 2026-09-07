@@ -2811,6 +2811,7 @@ export type ScriptRewriteTask = {
     expression_style: string;
     profile_version: number;
   } | null;
+  source_asset_id: string | null;
   source_text: string;
   status:
     | "PENDING"
@@ -2835,6 +2836,8 @@ export async function rewriteProjectScript(
   projectId: string,
   text: string,
   identityId?: string,
+  sourceAssetId?: string,
+  idempotencyKey: string = newControlWriteIdempotencyKey(),
 ): Promise<ScriptRewriteTask> {
   return requestApiJson<ScriptRewriteTask>(
     `/api/projects/${encodeURIComponent(projectId)}/script-rewrite`,
@@ -2844,7 +2847,8 @@ export async function rewriteProjectScript(
       body: JSON.stringify({
         text,
         ...(identityId ? { identity_id: identityId } : {}),
-        idempotency_key: newControlWriteIdempotencyKey(),
+        ...(sourceAssetId ? { source_asset_id: sourceAssetId } : {}),
+        idempotency_key: idempotencyKey,
       }),
     },
   );
@@ -2862,11 +2866,13 @@ export async function getScriptRewriteTask(
 export async function getLatestScriptRewriteTask(
   projectId: string,
   identityId?: string | null,
+  sourceAssetId?: string | null,
 ): Promise<ScriptRewriteTask | null> {
   const query = new URLSearchParams({
     identity_scope: identityId ? "identity" : "none",
   });
   if (identityId) query.set("identity_id", identityId);
+  if (sourceAssetId) query.set("source_asset_id", sourceAssetId);
   const response = await requestApi(
     `/api/projects/${encodeURIComponent(projectId)}/script-rewrite-tasks/latest?${query}`,
     { method: "GET" },
@@ -2911,11 +2917,23 @@ async function pollScriptRewriteTask(
       return task;
     }
     if (task.status === "FAILED" || task.status === "SUBMISSION_UNCERTAIN") {
-      throw new Error(task.error_message || "AI 改写失败，请重新提交。");
+      throw new ScriptRewriteTaskError(task);
     }
     await waitForPoll();
   }
   throw new Error("AI 改写仍在后台执行，请稍后返回查看。");
+}
+
+export class ScriptRewriteTaskError extends Error {
+  readonly code: string | null;
+  readonly retryable: boolean;
+
+  constructor(task: ScriptRewriteTask) {
+    super(task.error_message || "AI 改写失败，请重新提交。");
+    this.name = "ScriptRewriteTaskError";
+    this.code = task.error_code;
+    this.retryable = task.retryable;
+  }
 }
 
 export type CharacterViewType =

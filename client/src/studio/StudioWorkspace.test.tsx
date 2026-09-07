@@ -542,6 +542,75 @@ describe("V1.4 workspace integration", () => {
       expect(screen.getByText(/先保存当前编辑/)).toBeInTheDocument();
     });
 
+    it("保存等待期间账号A到B再回A时不写草稿、不更新列表且保持静默", async () => {
+      let resolveSave: (() => void) | undefined;
+      live.persistSavedScript.mockReturnValueOnce(
+        new Promise<void>((resolve) => {
+          resolveSave = resolve;
+        }),
+      );
+      live.loadStudioData.mockResolvedValue(emptyStudioData);
+      const state = createState("copy");
+      state.draft.projectId = "project-1";
+      state.draft.sourceId = "source-1";
+      state.draft.sourceAssetId = "source-1";
+      state.draft.ipId = "identity-1";
+      state.draft.script.text = "账号隔离正文";
+      state.draft.scriptEdited = true;
+      const accountA = { ...reviewUser, id: "account-a" };
+      const accountB = { ...reviewUser, id: "account-b" };
+      const view = render(
+        <StudioWorkspace currentUser={accountA} initialState={state} />,
+      );
+      await openCopyPage();
+      fireEvent.click(screen.getByRole("button", { name: "保存版本" }));
+
+      view.rerender(
+        <StudioWorkspace currentUser={accountB} initialState={state} />,
+      );
+      view.rerender(
+        <StudioWorkspace currentUser={accountA} initialState={state} />,
+      );
+      await act(async () => resolveSave?.());
+
+      expect(live.persistCloudDraft).not.toHaveBeenCalled();
+      expect(screen.queryByText(/已保存到我的文案/)).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole("tab", { name: "我的文案" }));
+      expect(screen.queryByText("账号隔离正文")).not.toBeInTheDocument();
+    });
+
+    it("保存等待期间正文A到B再回A或卸载时不发后续cloud写入", async () => {
+      let resolveSave: (() => void) | undefined;
+      live.persistSavedScript.mockReturnValueOnce(
+        new Promise<void>((resolve) => {
+          resolveSave = resolve;
+        }),
+      );
+      live.loadStudioData.mockResolvedValue(emptyStudioData);
+      const state = createState("copy");
+      state.draft.projectId = "project-1";
+      state.draft.sourceId = "source-1";
+      state.draft.sourceAssetId = "source-1";
+      state.draft.ipId = "identity-1";
+      state.draft.script.text = "正文A";
+      state.draft.scriptEdited = true;
+      const view = render(
+        <StudioWorkspace currentUser={reviewUser} initialState={state} />,
+      );
+      await openCopyPage();
+      fireEvent.click(screen.getByRole("button", { name: "保存版本" }));
+      fireEvent.change(screen.getByLabelText("二创文案"), {
+        target: { value: "正文B" },
+      });
+      fireEvent.change(screen.getByLabelText("二创文案"), {
+        target: { value: "正文A" },
+      });
+      view.unmount();
+      await act(async () => resolveSave?.());
+
+      expect(live.persistCloudDraft).not.toHaveBeenCalled();
+    });
+
     it("确认终稿立即持久化并带 projectId 时发布到项目脚本版本", async () => {
       live.loadStudioData.mockResolvedValue(emptyStudioData);
       live.loadCloudDraft.mockResolvedValue(undefined);

@@ -25,7 +25,9 @@ const replicaApi = vi.hoisted(() => ({
   getLatestProjectAnalysis: vi.fn(async () => ({ id: "av-x", payload: {} })),
   getLatestGenerationPrompt: vi.fn(),
   getLatestScriptVersion: vi.fn(),
-  getLatestScriptRewriteTask: vi.fn(async () => null),
+  getLatestScriptRewriteTask: vi.fn<
+    (...args: [string, string?, string?]) => Promise<unknown>
+  >(async () => null),
   rewriteProjectScript: vi.fn(),
   waitForScriptRewriteTask: vi.fn(),
   getLatestProjectFirstFrameSelection: vi.fn(),
@@ -144,6 +146,7 @@ function studio(
         id: "draft-1",
         ipId: "person-1",
         sourceId: "source-1",
+        sourceAssetId: "source-1",
         projectId: "project-1",
         selectedShotId: "shot-2",
         originalImageId: "original-1",
@@ -388,6 +391,7 @@ describe("V1.4 创作页面", () => {
       id: "rewrite-1",
       project_id: "project-1",
       identity_id: "person-1",
+      source_asset_id: "source-1",
       ip_profile_snapshot: { profile_version: 7 },
       source_text: "已确认的乡墅口播终稿",
       status: "PENDING",
@@ -397,6 +401,7 @@ describe("V1.4 创作页面", () => {
       id: "rewrite-1",
       project_id: "project-1",
       identity_id: "person-1",
+      source_asset_id: "source-1",
       ip_profile_snapshot: { profile_version: 7 },
       source_text: "已确认的乡墅口播终稿",
       status: "SUCCEEDED",
@@ -411,6 +416,8 @@ describe("V1.4 创作页面", () => {
       "project-1",
       "已确认的乡墅口播终稿",
       "person-1",
+      "source-1",
+      expect.any(String),
     );
     await waitFor(() =>
       expect(value.patchDraft).toHaveBeenCalledWith({
@@ -459,6 +466,7 @@ describe("V1.4 创作页面", () => {
         id: "rewrite-retry",
         project_id: "project-1",
         identity_id: "person-1",
+        source_asset_id: "source-1",
         source_text: "已确认的乡墅口播终稿",
         status: "SUCCEEDED",
         result: { rewritten_text: "重试成功稿" },
@@ -483,6 +491,9 @@ describe("V1.4 创作页面", () => {
       ),
     );
     expect(replicaApi.rewriteProjectScript).toHaveBeenCalledTimes(2);
+    expect(replicaApi.rewriteProjectScript.mock.calls[1]?.[4]).toBe(
+      replicaApi.rewriteProjectScript.mock.calls[0]?.[4],
+    );
   });
 
   it("仅恢复同人物且同正文的未完成改写任务", async () => {
@@ -495,6 +506,7 @@ describe("V1.4 创作页面", () => {
       id: "rewrite-restored",
       project_id: "project-1",
       identity_id: "person-1",
+      source_asset_id: "source-1",
       source_text: "已确认的乡墅口播终稿",
       status: "RUNNING",
       result: null,
@@ -503,6 +515,7 @@ describe("V1.4 创作页面", () => {
       id: "rewrite-restored",
       project_id: "project-1",
       identity_id: "person-1",
+      source_asset_id: "source-1",
       source_text: "已确认的乡墅口播终稿",
       status: "SUCCEEDED",
       result: { rewritten_text: "恢复完成的同稿结果" },
@@ -513,6 +526,7 @@ describe("V1.4 创作页面", () => {
     expect(replicaApi.getLatestScriptRewriteTask).toHaveBeenCalledWith(
       "project-1",
       "person-1",
+      "source-1",
     );
     await waitFor(() =>
       expect(value.patchDraft).toHaveBeenCalledWith(
@@ -532,6 +546,7 @@ describe("V1.4 创作页面", () => {
       id: "rewrite-old",
       project_id: "project-1",
       identity_id: "person-1",
+      source_asset_id: "source-1",
       source_text: "已确认的乡墅口播终稿",
       status: "PENDING",
       result: null,
@@ -564,6 +579,7 @@ describe("V1.4 创作页面", () => {
       id: "rewrite-old",
       project_id: "project-1",
       identity_id: "person-1",
+      source_asset_id: "source-1",
       source_text: "已确认的乡墅口播终稿",
       status: "SUCCEEDED",
       result: { rewritten_text: "迟到的旧A稿" },
@@ -574,6 +590,54 @@ describe("V1.4 创作页面", () => {
     expect(original.notify).not.toHaveBeenCalledWith(
       expect.stringContaining("完成"),
     );
+  });
+
+  it("同项目同人物同正文切换来源后不得恢复旧来源任务", async () => {
+    let resolveOld: ((value: unknown) => void) | undefined;
+    replicaApi.getLatestScriptRewriteTask.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveOld = resolve;
+      }),
+    );
+    const sourceA = studio({ review: false });
+    sourceA.state = {
+      ...sourceA.state,
+      draft: {
+        ...sourceA.state.draft,
+        sourceId: "source-a",
+        sourceAssetId: "source-a",
+        scriptEdited: false,
+      },
+    };
+    const sourceB = {
+      ...sourceA,
+      state: {
+        ...sourceA.state,
+        draft: {
+          ...sourceA.state.draft,
+          sourceId: "source-b",
+          sourceAssetId: "source-b",
+        },
+      },
+    };
+    let current = sourceA;
+    useStudio.mockImplementation(() => current);
+    const view = render(<CopyPage />);
+    current = sourceB;
+    view.rerender(<CopyPage />);
+    resolveOld?.({
+      id: "rewrite-source-a",
+      project_id: "project-1",
+      identity_id: "person-1",
+      source_asset_id: "source-a",
+      source_text: "已确认的乡墅口播终稿",
+      status: "RUNNING",
+      result: null,
+    });
+
+    await Promise.resolve();
+    expect(replicaApi.waitForScriptRewriteTask).not.toHaveBeenCalled();
+    expect(sourceA.patchDraft).not.toHaveBeenCalled();
   });
 
   it("审核示例与只读账号不调用改写接口", () => {

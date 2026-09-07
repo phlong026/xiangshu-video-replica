@@ -119,6 +119,32 @@ def configure_deepseek(db_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         )
 
 
+def add_project_source(
+    db_path: Path,
+    *,
+    asset_id: str,
+    project_id: str = "project_owned",
+    created_by: str = "employee_1",
+) -> None:
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        conn.execute(
+            """
+            INSERT INTO assets (
+                id, project_id, kind, storage_uri, sha256, size_bytes,
+                content_type, created_by_user_id
+            ) VALUES (%s, %s, 'reference_video', %s, %s, 12, 'video/mp4', %s)
+            """,
+            (
+                asset_id,
+                project_id,
+                f"file:///tmp/{asset_id}.mp4",
+                asset_id.ljust(64, "0")[:64],
+                created_by,
+            ),
+        )
+        conn.commit()
+
+
 def test_script_rewrite_requires_deepseek_configuration(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -695,3 +721,156 @@ def test_script_rewrite_response_fails_closed_on_corrupt_profile_snapshot(
     )
     assert response.status_code == 500
     assert response.json()["detail"]["code"] == "SCRIPT_REWRITE_SNAPSHOT_INTEGRITY_ERROR"
+
+
+def test_script_rewrite_binds_current_owned_source_in_hash_and_latest_scope(
+    client: TestClient,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configure_deepseek(db_path, monkeypatch)
+    add_project_source(db_path, asset_id="source-a")
+    first = client.post(
+        "/api/projects/project_owned/script-rewrite",
+        headers=auth_headers("employee_1"),
+        json={
+            "text": "同一篇正文",
+            "identity_id": "identity_owned",
+            "source_asset_id": "source-a",
+            "idempotency_key": "source-a-key",
+        },
+    )
+    assert first.status_code == 202, first.text
+    assert first.json()["source_asset_id"] == "source-a"
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        conn.execute(
+            "UPDATE script_rewrite_tasks SET status = 'FAILED' WHERE id = %s",
+            (first.json()["id"],),
+        )
+        conn.commit()
+
+    add_project_source(db_path, asset_id="source-b")
+    latest = client.get(
+        "/api/projects/project_owned/script-rewrite-tasks/latest",
+        headers=auth_headers("employee_1"),
+        params={
+            "identity_scope": "identity",
+            "identity_id": "identity_owned",
+            "source_asset_id": "source-b",
+        },
+    )
+    assert latest.status_code == 200
+    assert latest.json() is None
+
+    conflict = client.post(
+        "/api/projects/project_owned/script-rewrite",
+        headers=auth_headers("employee_1"),
+        json={
+            "text": "同一篇正文",
+            "identity_id": "identity_owned",
+            "source_asset_id": "source-b",
+            "idempotency_key": "source-a-key",
+        },
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"]["code"] == "SCRIPT_REWRITE_IDEMPOTENCY_CONFLICT"
+
+    second = client.post(
+        "/api/projects/project_owned/script-rewrite",
+        headers=auth_headers("employee_1"),
+        json={
+            "text": "同一篇正文",
+            "identity_id": "identity_owned",
+            "source_asset_id": "source-b",
+            "idempotency_key": "source-b-key",
+        },
+    )
+    assert second.status_code == 202, second.text
+    assert second.json()["id"] != first.json()["id"]
+    assert second.json()["source_asset_id"] == "source-b"
+
+
+def test_script_rewrite_rejects_foreign_or_stale_source_assets(
+    client: TestClient,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configure_deepseek(db_path, monkeypatch)
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        conn.execute(
+            "INSERT INTO projects (id, owner_user_id, name) VALUES (%s, %s, %s)",
+            ("project_foreign", "employee_2", "Foreign Project"),
+        )
+        conn.commit()
+    add_project_source(
+        db_path,
+        asset_id="source-foreign",
+        project_id="project_foreign",
+        created_by="employee_2",
+    )
+    add_project_source(db_path, asset_id="source-old")
+    add_project_source(db_path, asset_id="source-z-current")
+
+    for source_id in ("source-foreign", "source-old"):
+        response = client.post(
+            "/api/projects/project_owned/script-rewrite",
+            headers=auth_headers("employee_1"),
+            json={
+                "text": "来源必须可信",
+                "source_asset_id": source_id,
+                "idempotency_key": f"reject-{source_id}",
+            },
+        )
+        assert response.status_code == 404
+        assert response.json()["detail"]["code"] == "SCRIPT_REWRITE_SOURCE_NOT_FOUND"
+
+
+@pytest.mark.parametrize(
+    "request_json",
+    [
+        "not-json",
+        json.dumps({"text": "篡改正文"}, ensure_ascii=False),
+        json.dumps({"text": "x" * 20_001}, ensure_ascii=False),
+        json.dumps(
+            {
+                "text": "完整性正文",
+                "identity_id": "identity_foreign",
+                "source_asset_id": "source-integrity",
+                "ip_profile_snapshot": {"identity_id": "identity_foreign"},
+            },
+            ensure_ascii=False,
+        ),
+    ],
+)
+def test_script_rewrite_response_fails_closed_on_tampered_request_payload(
+    client: TestClient,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    request_json: str,
+) -> None:
+    configure_deepseek(db_path, monkeypatch)
+    add_project_source(db_path, asset_id="source-integrity")
+    queued = client.post(
+        "/api/projects/project_owned/script-rewrite",
+        headers=auth_headers("employee_1"),
+        json={
+            "text": "完整性正文",
+            "identity_id": "identity_owned",
+            "source_asset_id": "source-integrity",
+            "idempotency_key": f"integrity-{len(request_json)}",
+        },
+    )
+    assert queued.status_code == 202, queued.text
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        conn.execute(
+            "UPDATE script_rewrite_tasks SET request_json = %s WHERE id = %s",
+            (request_json, queued.json()["id"]),
+        )
+        conn.commit()
+
+    response = client.get(
+        f"/api/script-rewrite-tasks/{queued.json()['id']}",
+        headers=auth_headers("employee_1"),
+    )
+    assert response.status_code == 500
+    assert response.json()["detail"]["code"] == "SCRIPT_REWRITE_REQUEST_INTEGRITY_ERROR"

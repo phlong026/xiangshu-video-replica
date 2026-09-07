@@ -25,6 +25,7 @@ import {
   rewriteProjectScript,
   type SavedPromptItem,
   type ScriptRewriteTask,
+  ScriptRewriteTaskError,
   type ShotCard,
   type ShotCardPayload,
   saveGenerationPrompt,
@@ -44,6 +45,12 @@ import {
   uploadVideoMaterial,
   uploadWorkbenchSourceVideo,
 } from "./live";
+import {
+  clearScriptRewriteIdempotencyKey,
+  type ScriptRewriteScope,
+  scriptRewriteIdempotencyKey,
+  shouldClearScriptRewriteIdempotencyKey,
+} from "./scriptRewrite";
 import {
   buildReplicaPromptText,
   createDraft,
@@ -162,6 +169,7 @@ export function CopyPage() {
   } = useStudio();
   const [tab, setTab] = useState<"rewrite" | "saved">("rewrite");
   const [rewriting, setRewriting] = useState(false);
+  const rewritePendingRef = useRef(false);
   const rewriteOperationRef = useRef(0);
   const scopeGenerationRef = useRef(0);
   const currentRef = useRef({ state, patchDraft, notify });
@@ -195,12 +203,14 @@ export function CopyPage() {
       task: ScriptRewriteTask,
       expectedScope: { key: string; generation: number },
       operation: number,
+      requestScope: ScriptRewriteScope,
+      idempotencyKey: string,
     ) => {
       try {
         const completed =
-          task.status === "SUCCEEDED"
-            ? task
-            : await waitForScriptRewriteTask(task.id);
+          task.status === "PENDING" || task.status === "RUNNING"
+            ? await waitForScriptRewriteTask(task.id)
+            : task;
         if (
           rewriteOperationRef.current !== operation ||
           activeScopeRef.current !== expectedScope
@@ -208,21 +218,31 @@ export function CopyPage() {
           return;
         const current = currentRef.current.state.draft;
         const rewritten = completed.result?.rewritten_text?.trim();
+        const currentSourceAssetId = current.sourceAssetId ?? current.sourceId;
         if (
           completed.status !== "SUCCEEDED" ||
+          completed.project_id !== current.projectId ||
           completed.identity_id !== current.ipId ||
+          completed.source_asset_id !== currentSourceAssetId ||
           completed.source_text !== current.script.text ||
           !rewritten
         )
-          throw new Error(
-            completed.error_message || "改写未返回完整正文，请重试。",
-          );
+          throw completed.status === "FAILED" ||
+            completed.status === "SUBMISSION_UNCERTAIN"
+            ? new ScriptRewriteTaskError(completed)
+            : new Error(
+                completed.error_message || "改写未返回完整正文，请重试。",
+              );
+        clearScriptRewriteIdempotencyKey(requestScope, idempotencyKey);
         currentRef.current.patchDraft({
           script: { ...current.script, text: rewritten, confirmed: false },
           scriptEdited: true,
         });
         currentRef.current.notify("改写已完成，请核对并保存当前版本。");
       } catch (cause) {
+        if (shouldClearScriptRewriteIdempotencyKey(cause)) {
+          clearScriptRewriteIdempotencyKey(requestScope, idempotencyKey);
+        }
         if (
           rewriteOperationRef.current === operation &&
           activeScopeRef.current === expectedScope
@@ -234,8 +254,10 @@ export function CopyPage() {
         if (
           rewriteOperationRef.current === operation &&
           activeScopeRef.current === expectedScope
-        )
+        ) {
+          rewritePendingRef.current = false;
           setRewriting(false);
+        }
       }
     },
     [],
@@ -243,6 +265,7 @@ export function CopyPage() {
 
   useEffect(() => {
     const operation = ++rewriteOperationRef.current;
+    rewritePendingRef.current = false;
     setRewriting(false);
     const draft = currentRef.current.state.draft;
     if (
@@ -254,18 +277,40 @@ export function CopyPage() {
       draft.script.text.trim() &&
       draft.scriptEdited !== true
     ) {
-      void getLatestScriptRewriteTask(draft.projectId, draft.ipId)
+      const sourceAssetId = draft.sourceAssetId ?? draft.sourceId;
+      const requestScope: ScriptRewriteScope = {
+        accountId: user.id,
+        projectId: draft.projectId,
+        sourceAssetId,
+        identityId: draft.ipId,
+        scriptId: draft.script.id,
+        scriptVersion: draft.script.version,
+        text: draft.script.text,
+      };
+      const idempotencyKey = scriptRewriteIdempotencyKey(requestScope);
+      void getLatestScriptRewriteTask(
+        draft.projectId,
+        draft.ipId,
+        sourceAssetId,
+      )
         .then((task) => {
           if (
             rewriteOperationRef.current !== operation ||
             activeScopeRef.current !== activeScope ||
             !task ||
-            task.source_text !== draft.script.text ||
-            (task.status !== "PENDING" && task.status !== "RUNNING")
+            task.source_asset_id !== sourceAssetId ||
+            task.source_text !== draft.script.text
           )
             return;
+          rewritePendingRef.current = true;
           setRewriting(true);
-          void finishRewrite(task, activeScope, operation);
+          void finishRewrite(
+            task,
+            activeScope,
+            operation,
+            requestScope,
+            idempotencyKey,
+          );
         })
         .catch((cause) => {
           if (
@@ -283,7 +328,7 @@ export function CopyPage() {
     return () => {
       rewriteOperationRef.current += 1;
     };
-  }, [activeScope, finishRewrite, review, user.role]);
+  }, [activeScope, finishRewrite, review, user.id, user.role]);
 
   const rewriteUnavailableReason = review
     ? "审核示例不调用业务接口。"
@@ -304,31 +349,56 @@ export function CopyPage() {
                   : "";
 
   const rewrite = async () => {
-    if (rewriteUnavailableReason || rewriting) return;
+    if (rewriteUnavailableReason || rewriting || rewritePendingRef.current)
+      return;
     const draft = state.draft;
     const projectId = draft.projectId;
     const identityId = draft.ipId;
-    if (!projectId || !identityId) return;
+    const sourceAssetId = draft.sourceAssetId ?? draft.sourceId;
+    if (!projectId || !identityId || !sourceAssetId) return;
     const operation = ++rewriteOperationRef.current;
     const expectedScope = activeScopeRef.current;
+    const requestScope: ScriptRewriteScope = {
+      accountId: user.id,
+      projectId,
+      sourceAssetId,
+      identityId,
+      scriptId: draft.script.id,
+      scriptVersion: draft.script.version,
+      text: draft.script.text,
+    };
+    const idempotencyKey = scriptRewriteIdempotencyKey(requestScope);
+    rewritePendingRef.current = true;
     setRewriting(true);
     try {
       const task = await rewriteProjectScript(
         projectId,
         draft.script.text,
         identityId,
+        sourceAssetId,
+        idempotencyKey,
       );
       if (
         rewriteOperationRef.current !== operation ||
         activeScopeRef.current !== expectedScope
       )
         return;
-      await finishRewrite(task, expectedScope, operation);
+      await finishRewrite(
+        task,
+        expectedScope,
+        operation,
+        requestScope,
+        idempotencyKey,
+      );
     } catch (cause) {
+      if (shouldClearScriptRewriteIdempotencyKey(cause)) {
+        clearScriptRewriteIdempotencyKey(requestScope, idempotencyKey);
+      }
       if (
         rewriteOperationRef.current === operation &&
         activeScopeRef.current === expectedScope
       ) {
+        rewritePendingRef.current = false;
         setRewriting(false);
         notify(
           customerVisibleErrorMessage(cause, "提交文案改写失败，请重试。"),
