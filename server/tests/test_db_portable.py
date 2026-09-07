@@ -112,6 +112,10 @@ def test_timestamptz_identifier_becomes_datetime_parse() -> None:
         translate_to_sqlite("WHERE next_poll_at::timestamptz <= now() - interval '60 seconds'")
         == "WHERE datetime(next_poll_at) <= datetime('now', '-60 seconds')"
     )
+    assert (
+        translate_to_sqlite("WHERE task.updated_at::timestamptz >= %s::timestamptz")
+        == "WHERE datetime(task.updated_at) >= datetime(?)"
+    )
 
 
 def test_timestamptz_parameter_cast_stays_stripped() -> None:

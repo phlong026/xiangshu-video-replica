@@ -12,21 +12,23 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from app import studio_routes
 from app.auth import CurrentUser, get_database
 from app.db import connect_database, initialize_database
 from app.db_portable import BusinessConnection
 from app.main import app
-from app.studio_routes import studio_analytics
+from app.studio_routes import studio_analytics, studio_task_stats
 
 # 2026-09-06 12:00 UTC = 2026-09-06 20:00 北京；固定"当前时间"防跨天漂移。
 _NOW = datetime(2026, 9, 6, 12, 0, tzinfo=UTC)
 
 # 北京日界两侧的完成时刻（UTC 文本，与 CURRENT_TIMESTAMP 写入口径一致）：
 #   2026-09-05 15:59 UTC = 09-05 23:59 北京 → 属于 09-05
-#   2026-09-05 16:30 UTC = 09-06 00:30 北京 → 属于 09-06
+#   2026-09-05 16:01 UTC = 09-06 00:01 北京 → 属于 09-06
 _TODAY = "2026-09-06 03:00:00"
-_YESTERDAY_BEIJING = "2026-09-05 15:59:00"
-_TODAY_BEIJING_EARLY = "2026-09-05 16:30:00"
+_YESTERDAY_BEIJING = "2026-09-05T15:59:00+00:00"
+_TODAY_BEIJING_EARLY = "2026-09-05T09:01:00-07:00"
+_INDEPENDENT_COMPLETED = "2026-09-06 02:00:00"
 _OUT_OF_RANGE = "2026-08-30 00:00:00"
 
 
@@ -50,8 +52,8 @@ def seed_analytics_scene(connection) -> None:
         """
         INSERT INTO generation_batches (
             id, project_id, created_by_user_id, idempotency_key, request_hash,
-            request_snapshot_json, status, creation_kind, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            request_snapshot_json, status, creation_kind, display_name, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             (
@@ -63,6 +65,7 @@ def seed_analytics_scene(connection) -> None:
                 "{}",
                 "SUCCEEDED",
                 "replica",
+                None,
                 _TODAY,
                 _TODAY,
             ),
@@ -75,6 +78,7 @@ def seed_analytics_scene(connection) -> None:
                 "{}",
                 "SUCCEEDED",
                 "independent",
+                None,
                 _TODAY,
                 _TODAY,
             ),
@@ -87,6 +91,7 @@ def seed_analytics_scene(connection) -> None:
                 "{}",
                 "SUCCEEDED",
                 "replacement",
+                None,
                 _TODAY,
                 _TODAY,
             ),
@@ -99,8 +104,22 @@ def seed_analytics_scene(connection) -> None:
                 "{}",
                 "SUCCEEDED",
                 "replica",
+                None,
                 _TODAY,
                 _TODAY,
+            ),
+            (
+                "b-independent",
+                None,
+                "employee_1",
+                "ik-independent",
+                "h-independent",
+                "{}",
+                "SUCCEEDED",
+                "independent",
+                "无项目独立创作",
+                _INDEPENDENT_COMPLETED,
+                _INDEPENDENT_COMPLETED,
             ),
         ],
     )
@@ -121,11 +140,97 @@ def seed_analytics_scene(connection) -> None:
             ("t7-hidden", "b-hidden", "SUCCEEDED", None, _TODAY, _TODAY),
             ("t8-running", "b-1", "RUNNING", None, _TODAY, _TODAY),
             ("t9-old", "b-2", "SUCCEEDED", None, _OUT_OF_RANGE, _OUT_OF_RANGE),
+            ("t10-submitting", "b-1", "SUBMITTING", None, _TODAY, _TODAY),
+            ("t11-archiving", "b-1", "ARCHIVING", None, _TODAY, _TODAY),
+            (
+                "t-independent",
+                "b-independent",
+                "SUCCEEDED",
+                None,
+                _INDEPENDENT_COMPLETED,
+                _INDEPENDENT_COMPLETED,
+            ),
         ],
     )
     connection.execute(
         "INSERT INTO customer_batch_visibility (user_id, batch_id) VALUES (?, ?)",
         ("employee_1", "b-hidden"),
+    )
+    connection.execute(
+        """
+        INSERT INTO person_identities (id, owner_user_id, display_name, status)
+        VALUES ('analytics-identity', 'employee_1', '口播人物', 'ACTIVE')
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO oral_avatars (
+            id, identity_id, owner_user_id, title, status, source_kind, source_asset_id
+        ) VALUES (
+            'analytics-avatar', 'analytics-identity', 'employee_1', '口播分身',
+            'READY', 'IMAGE', 'analytics-source'
+        )
+        """
+    )
+    connection.executemany(
+        """
+        INSERT INTO oral_tasks (
+            id, owner_user_id, identity_id, avatar_id, mode, title, status,
+            estimated_cost_fen, idempotency_key, request_hash, submission_state,
+            provider_charge_state, created_at, updated_at
+        ) VALUES (?, ?, 'analytics-identity', 'analytics-avatar', 'TTS', ?, ?, 350,
+                  ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                "oral-succeeded",
+                "employee_1",
+                "院落介绍口播",
+                "SUCCEEDED",
+                "oral-key-success",
+                "oral-hash-success",
+                "SUBMITTED",
+                "CHARGED",
+                _TODAY,
+                _TODAY_BEIJING_EARLY,
+            ),
+            (
+                "oral-failed",
+                "employee_1",
+                "失败口播",
+                "FAILED",
+                "oral-key-failed",
+                "oral-hash-failed",
+                "FAILED",
+                "NOT_CHARGED",
+                _TODAY,
+                _TODAY,
+            ),
+            (
+                "oral-queued",
+                "employee_1",
+                "排队口播",
+                "QUEUED",
+                "oral-key-queued",
+                "oral-hash-queued",
+                "LOCAL_PENDING",
+                "NOT_SUBMITTED",
+                _TODAY,
+                _TODAY,
+            ),
+            (
+                "oral-running",
+                "employee_1",
+                "处理中口播",
+                "RUNNING",
+                "oral-key-running",
+                "oral-hash-running",
+                "SUBMITTED",
+                "CHARGED",
+                _TODAY,
+                _TODAY,
+            ),
+        ],
     )
     # 按秒计费账本（057 形状约束）：t1 预留 8 秒并成功结算 → 消耗 8 积分；
     # 其余成片无计费记录 → cost_credits 为 null（不伪造）。
@@ -169,17 +274,79 @@ def test_daily_series_covers_full_window_by_beijing_day(tmp_path: Path) -> None:
         "2026-09-05",
         "2026-09-06",
     ]
-    # 09-05：t3（北京 23:59）；09-06：t1、t2（北京 00:30 属次日）、t4、t7；
-    # 失败桶仅 t5-failed（09-06）。
+    # 09-05：t3（北京 23:59）；09-06：5 个普通成片 + 1 个成功口播；
+    # 失败桶为 t5-failed + oral-failed。
     by_day = {day.day: day for day in result.daily}
     assert by_day["2026-09-05"].completed == 1
     assert by_day["2026-09-05"].failed == 0
-    assert by_day["2026-09-06"].completed == 4
-    assert by_day["2026-09-06"].failed == 1
-    assert result.range_completed == 5
+    assert by_day["2026-09-06"].completed == 6
+    assert by_day["2026-09-06"].failed == 2
+    assert result.range_completed == 7
+    assert result.today_completed == by_day["2026-09-06"].completed
+    assert result.range_completed == sum(day.completed for day in result.daily)
+    assert result.range_generation_outputs == 6
+    assert result.range_oral_outputs == 1
+    assert result.range_generation_batches == 5
+    assert result.total_generation_batches == 5
     # t3 完成于北京 09-05，不计入"今日"；t9（08-30）计入全期累计。
-    assert result.today_completed == 4
-    assert result.total_completed == 6
+    assert result.today_completed == 6
+    assert result.total_completed == 8
+
+
+def test_analytics_uses_one_clock_read_across_beijing_midnight(tmp_path: Path, monkeypatch) -> None:
+    connection = initialize_database(tmp_path / "analytics-midnight-clock.db")
+    connection.execute(
+        "INSERT INTO users (id, username, display_name, role) VALUES (?, ?, ?, ?)",
+        ("admin_1", "admin_1", "Admin One", "admin"),
+    )
+    connection.execute(
+        "INSERT INTO projects (id, owner_user_id, name) VALUES ('p-1', 'admin_1', 'P')"
+    )
+    connection.execute(
+        """
+        INSERT INTO generation_batches (
+            id, project_id, created_by_user_id, idempotency_key, request_hash,
+            request_snapshot_json, status, creation_kind, created_at, updated_at
+        ) VALUES ('b-1', 'p-1', 'admin_1', 'ik', 'h', '{}', 'SUCCEEDED',
+                  'replica', ?, ?)
+        """,
+        ("2026-09-05 15:59:59", "2026-09-05 15:59:59"),
+    )
+    connection.execute(
+        """
+        INSERT INTO generation_tasks (
+            id, batch_id, provider, model, status, archive_status, created_at, updated_at
+        ) VALUES ('t-before', 'b-1', 'metaso', 'MiniMax-H3', 'SUCCEEDED', 'NONE',
+                  '2026-09-05 15:59:59', '2026-09-05 15:59:59')
+        """
+    )
+    connection.commit()
+
+    clock_values = iter(
+        [
+            datetime(2026, 9, 5, 15, 59, 59, 999999, tzinfo=UTC),
+            datetime(2026, 9, 5, 16, 0, 0, tzinfo=UTC),
+        ]
+    )
+
+    class MidnightClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = next(clock_values)
+            return value if tz is None else value.astimezone(tz)
+
+    monkeypatch.setattr(studio_routes, "datetime", MidnightClock)
+    result = studio_analytics(
+        BusinessConnection.sqlite(connection), actor=actor("admin_1", "admin"), days=1
+    )
+
+    assert result.today_completed == 1
+    assert result.range_completed == 1
+    assert result.generated_at == "2026-09-05T15:59:59.999999+00:00"
+    assert result.daily == [
+        studio_routes.StudioAnalyticsDay(day="2026-09-05", completed=1, failed=0)
+    ]
+    assert next(clock_values) == datetime(2026, 9, 5, 16, 0, 0, tzinfo=UTC)
 
 
 def test_kind_breakdown_counts_only_visible_completed_tasks(tmp_path: Path) -> None:
@@ -188,18 +355,51 @@ def test_kind_breakdown_counts_only_visible_completed_tasks(tmp_path: Path) -> N
     admin_view = studio_analytics(conn, actor=actor("admin_1", "admin"), now=_NOW, days=7)
     assert {(item.kind, item.completed) for item in admin_view.kind_breakdown} == {
         ("replica", 3),
-        ("independent", 1),
+        ("independent", 2),
         ("replacement", 1),
+        ("oral", 1),
     }
 
     employee_view = studio_analytics(conn, actor=actor("employee_1", "employee"), now=_NOW, days=7)
-    # employee_1 只看 p-1，且 b-hidden 被本人隐藏：t1/t3 + t2（t9 计全期）。
+    # employee_1 可见 p-1 与自己创建的无项目批次，且 b-hidden 被本人隐藏。
     assert {(item.kind, item.completed) for item in employee_view.kind_breakdown} == {
         ("replica", 2),
-        ("independent", 1),
+        ("independent", 2),
+        ("oral", 1),
     }
-    assert employee_view.range_completed == 3
-    assert employee_view.total_completed == 4
+    # 普通生成 b-1 有两个产出项，但批次只计一次；b-2 为另一个批次。
+    assert employee_view.range_generation_batches == 3
+    assert employee_view.total_generation_batches == 3
+    assert employee_view.range_generation_outputs == 4
+    assert employee_view.range_oral_outputs == 1
+    assert employee_view.range_completed == 5
+    assert employee_view.total_completed == 6
+
+    customer_view = studio_analytics(conn, actor=actor("employee_1", "customer"), now=_NOW, days=7)
+    assert customer_view == employee_view
+
+    other_employee = studio_analytics(conn, actor=actor("employee_2", "employee"), now=_NOW, days=7)
+    assert all(work.batch_id != "b-independent" for work in other_employee.recent_works)
+
+
+def test_task_stats_combine_visible_generation_and_oral_statuses(tmp_path: Path) -> None:
+    conn = analytics_connection(tmp_path, "analytics-stats.db")
+
+    admin_stats = studio_task_stats(conn, actor=actor("admin_1", "admin"), now=_NOW)
+    employee_stats = studio_task_stats(conn, actor=actor("employee_1", "employee"), now=_NOW)
+    customer_stats = studio_task_stats(conn, actor=actor("employee_1", "customer"), now=_NOW)
+    other_employee_stats = studio_task_stats(conn, actor=actor("employee_2", "employee"), now=_NOW)
+
+    assert admin_stats.today_completed == 6
+    assert admin_stats.total_completed == 8
+    assert employee_stats.today_completed == 4
+    assert employee_stats.running == 4
+    assert employee_stats.queued == 1
+    assert employee_stats.needs_attention == 2
+    assert employee_stats.total_completed == 6
+    assert customer_stats == employee_stats
+    assert other_employee_stats.today_completed == 1
+    assert other_employee_stats.total_completed == 1
 
 
 def test_recent_works_sorted_scoped_and_capped(tmp_path: Path) -> None:
@@ -211,6 +411,8 @@ def test_recent_works_sorted_scoped_and_capped(tmp_path: Path) -> None:
         "t1",
         "t4",
         "t7-hidden",
+        "t-independent",
+        "oral-succeeded",
         "t2",
         "t3",
     ]
@@ -223,12 +425,25 @@ def test_recent_works_sorted_scoped_and_capped(tmp_path: Path) -> None:
     assert first.completed_at == _TODAY
     # t1 有按秒计费的 RESERVE 记录 → 消耗 8 积分；无计费记录的成片为 null。
     assert first.cost_credits == 8
-    assert admin_view.recent_works[3].task_id == "t2"
-    assert admin_view.recent_works[3].cost_credits is None
+    oral = next(work for work in admin_view.recent_works if work.task_id == "oral-succeeded")
+    assert oral.task_kind == "oral"
+    assert oral.batch_id is None
+    assert oral.project_id is None
+    assert oral.cost_credits is None
+    independent = next(work for work in admin_view.recent_works if work.task_id == "t-independent")
+    assert independent.project_id is None
+    assert independent.batch_id == "b-independent"
+    assert independent.title == "无项目独立创作"
 
     employee_view = studio_analytics(conn, actor=actor("employee_1", "employee"), now=_NOW, days=7)
     # 隐藏批次与他人的 p-2 任务都不出现。
-    assert [work.task_id for work in employee_view.recent_works] == ["t1", "t2", "t3"]
+    assert [work.task_id for work in employee_view.recent_works] == [
+        "t1",
+        "t-independent",
+        "oral-succeeded",
+        "t2",
+        "t3",
+    ]
 
 
 def test_recent_works_cap_at_twenty(tmp_path: Path) -> None:
@@ -264,6 +479,7 @@ def test_recent_works_cap_at_twenty(tmp_path: Path) -> None:
     result = studio_analytics(conn, actor=actor("admin_1", "admin"), now=_NOW, days=7)
 
     assert result.range_completed == 22
+    assert result.range_generation_batches == 1
     assert len(result.recent_works) == 20
     assert result.recent_works[0].task_id == "t-21"
 
@@ -280,7 +496,7 @@ def test_days_window_is_clamped(tmp_path: Path) -> None:
     assert ninety_days.range_days == 90
     assert len(ninety_days.daily) == 90
     # 30 天窗口外的 t9（08-30）在 90 天窗口内计入。
-    assert ninety_days.range_completed == 6
+    assert ninety_days.range_completed == 8
 
 
 def test_analytics_route_scopes_by_caller(tmp_path: Path, monkeypatch) -> None:
@@ -304,11 +520,16 @@ def test_analytics_route_scopes_by_caller(tmp_path: Path, monkeypatch) -> None:
         payload = response.json()
         assert payload["range_days"] == 7
         assert len(payload["daily"]) == 7
-        assert payload["range_completed"] == 3
-        assert payload["daily"][-1]["failed"] == 0
+        assert payload["range_completed"] == 5
+        assert payload["range_generation_batches"] == 3
+        assert "range_completed_outputs" not in payload
+        daily = {item["day"]: item for item in payload["daily"]}
+        assert daily["2026-09-06"]["failed"] == 2
         works = payload["recent_works"]
         assert [work["task_id"] for work in works] == [
             "t1",
+            "t-independent",
+            "oral-succeeded",
             "t2",
             "t3",
         ]

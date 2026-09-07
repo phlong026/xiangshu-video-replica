@@ -7679,12 +7679,24 @@ export interface components {
     StudioAnalyticsResponse: {
       /** Range Days */
       range_days: number;
+      /** Generated At */
+      generated_at: string;
       /** Today Completed */
       today_completed: number;
       /** Range Completed */
       range_completed: number;
       /** Total Completed */
       total_completed: number;
+      /** Today Generation Batches */
+      today_generation_batches: number;
+      /** Range Generation Batches */
+      range_generation_batches: number;
+      /** Total Generation Batches */
+      total_generation_batches: number;
+      /** Range Generation Outputs */
+      range_generation_outputs: number;
+      /** Range Oral Outputs */
+      range_oral_outputs: number;
       /** Daily */
       daily: components["schemas"]["StudioAnalyticsDay"][];
       /** Kind Breakdown */
@@ -7696,10 +7708,12 @@ export interface components {
     StudioAnalyticsWorkItem: {
       /** Task Id */
       task_id: string;
+      /** Task Kind */
+      task_kind: string;
       /** Batch Id */
-      batch_id: string;
+      batch_id: string | null;
       /** Project Id */
-      project_id: string;
+      project_id: string | null;
       /** Title */
       title: string;
       /** Creation Kind */

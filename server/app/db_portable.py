@@ -51,17 +51,17 @@ def _consume_trailing_identifier(out: list[str]) -> str | None:
 
     The streaming translator appends each identifier character as its own
     element, so the tail of ``out`` is the identifier's characters in order.
-    Used by the ``::timestamptz`` rule to wrap a bare column reference with
-    SQLite's ``datetime()`` (see ``translate_to_sqlite``). Returns None when
-    the tail is not a plain identifier (a ``?`` parameter or an expression),
-    in which case the cast is simply dropped as before.
+    Used by the ``::timestamptz`` rule to wrap a bare or table-qualified
+    column reference with SQLite's ``datetime()`` (see ``translate_to_sqlite``).
+    Returns None when the tail is not a plain identifier (a ``?`` parameter or
+    an expression), in which case the cast is simply dropped as before.
     """
-    chars: list[str] = []
-    while out and out[-1] and (out[-1].isalnum() or out[-1] == "_"):
-        chars.append(out.pop())
-    if not chars:
+    translated = "".join(out)
+    match = re.search(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$", translated)
+    if match is None:
         return None
-    return "".join(reversed(chars))
+    out[:] = [translated[: match.start()]]
+    return match.group()
 
 
 def translate_to_sqlite(sql: str) -> str:
