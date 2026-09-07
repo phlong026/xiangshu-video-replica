@@ -2811,6 +2811,7 @@ export type ScriptRewriteTask = {
     expression_style: string;
     profile_version: number;
   } | null;
+  source_text: string;
   status:
     | "PENDING"
     | "RUNNING"

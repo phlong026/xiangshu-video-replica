@@ -7253,6 +7253,8 @@ export interface components {
       ip_profile_snapshot:
         | components["schemas"]["ScriptRewriteIpProfileSummary"]
         | null;
+      /** Source Text */
+      source_text: string;
       /** Status */
       status: string;
       /** Attempt */

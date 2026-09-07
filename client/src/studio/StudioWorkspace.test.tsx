@@ -487,7 +487,11 @@ describe("V1.4 workspace integration", () => {
       live.loadStudioData.mockResolvedValue(emptyStudioData);
       live.loadCloudDraft.mockResolvedValue(undefined);
       const state = createState("copy");
+      state.draft.projectId = "project-1";
+      state.draft.sourceId = "asset-1";
+      state.draft.ipId = "identity-1";
       state.draft.script.text = "要保存的文案";
+      state.draft.scriptEdited = true;
       render(<StudioWorkspace currentUser={reviewUser} initialState={state} />);
 
       await openCopyPage();
@@ -497,7 +501,45 @@ describe("V1.4 workspace integration", () => {
         { text: string },
       ];
       expect(script.text).toBe("要保存的文案");
+      expect(live.persistSavedScript).toHaveBeenCalledWith(
+        expect.objectContaining({
+          ipId: "identity-1",
+          sourceProjectId: "project-1",
+        }),
+        "project-1",
+        "identity-1",
+      );
       expect(screen.getByText(/已保存到我的文案/)).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "按 IP 二创" })).toBeEnabled();
+      expect(live.persistCloudDraft).toHaveBeenCalledWith(
+        expect.objectContaining({
+          projectId: "project-1",
+          ipId: "identity-1",
+          scriptEdited: false,
+        }),
+      );
+    });
+
+    it("版本保存失败时仍保持未保存门禁", async () => {
+      live.loadStudioData.mockResolvedValue(emptyStudioData);
+      live.loadCloudDraft.mockResolvedValue(undefined);
+      live.persistSavedScript.mockRejectedValueOnce(new Error("save failed"));
+      const state = createState("copy");
+      state.draft.projectId = "project-1";
+      state.draft.sourceId = "asset-1";
+      state.draft.ipId = "identity-1";
+      state.draft.script.text = "仍未保存的文案";
+      state.draft.scriptEdited = true;
+      render(<StudioWorkspace currentUser={reviewUser} initialState={state} />);
+
+      await openCopyPage();
+      fireEvent.click(screen.getByRole("button", { name: "保存版本" }));
+
+      await waitFor(() =>
+        expect(screen.getByText(/云端保存失败/)).toBeInTheDocument(),
+      );
+      expect(screen.getByRole("button", { name: "按 IP 二创" })).toBeDisabled();
+      expect(screen.getByText(/先保存当前编辑/)).toBeInTheDocument();
     });
 
     it("确认终稿立即持久化并带 projectId 时发布到项目脚本版本", async () => {

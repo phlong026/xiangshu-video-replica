@@ -15,13 +15,16 @@ import {
   getLatestProjectAnalysis,
   getLatestProjectFirstFrameSelection,
   getLatestProjectShotCards,
+  getLatestScriptRewriteTask,
   getLatestScriptVersion,
   listUserSavedPrompts,
   type Project,
   type ProjectMainCharacter,
   readAnalysisPayload,
   readFirstFrameSelectionPayload,
+  rewriteProjectScript,
   type SavedPromptItem,
+  type ScriptRewriteTask,
   type ShotCard,
   type ShotCardPayload,
   saveGenerationPrompt,
@@ -29,6 +32,7 @@ import {
   selectCharacterReferences,
   startVideoAnalysis,
   waitForAnalysisTask,
+  waitForScriptRewriteTask,
 } from "../api";
 import { CharacterSelection } from "../CharacterSelection";
 import { FirstFrameSelection } from "../FirstFrameSelection";
@@ -152,8 +156,186 @@ export function CopyPage() {
     confirmFinalDraft,
     openLive,
     openPicker,
+    notify,
+    review,
+    user,
   } = useStudio();
   const [tab, setTab] = useState<"rewrite" | "saved">("rewrite");
+  const [rewriting, setRewriting] = useState(false);
+  const rewriteOperationRef = useRef(0);
+  const scopeGenerationRef = useRef(0);
+  const currentRef = useRef({ state, patchDraft, notify });
+  currentRef.current = { state, patchDraft, notify };
+  const rewriteScopeKey = JSON.stringify([
+    user.id,
+    state.draft.id,
+    state.draft.projectId,
+    state.draft.sourceId,
+    state.draft.sourceAssetId,
+    state.draft.ipId,
+    state.draft.script.id,
+    state.draft.script.version,
+    state.draft.script.title,
+    state.draft.script.original,
+    state.draft.script.text,
+    state.draft.script.confirmed,
+    state.draft.scriptEdited,
+  ]);
+  const activeScopeRef = useRef({ key: rewriteScopeKey, generation: 0 });
+  if (activeScopeRef.current.key !== rewriteScopeKey) {
+    activeScopeRef.current = {
+      key: rewriteScopeKey,
+      generation: ++scopeGenerationRef.current,
+    };
+  }
+  const activeScope = activeScopeRef.current;
+
+  const finishRewrite = useCallback(
+    async (
+      task: ScriptRewriteTask,
+      expectedScope: { key: string; generation: number },
+      operation: number,
+    ) => {
+      try {
+        const completed =
+          task.status === "SUCCEEDED"
+            ? task
+            : await waitForScriptRewriteTask(task.id);
+        if (
+          rewriteOperationRef.current !== operation ||
+          activeScopeRef.current !== expectedScope
+        )
+          return;
+        const current = currentRef.current.state.draft;
+        const rewritten = completed.result?.rewritten_text?.trim();
+        if (
+          completed.status !== "SUCCEEDED" ||
+          completed.identity_id !== current.ipId ||
+          completed.source_text !== current.script.text ||
+          !rewritten
+        )
+          throw new Error(
+            completed.error_message || "改写未返回完整正文，请重试。",
+          );
+        currentRef.current.patchDraft({
+          script: { ...current.script, text: rewritten, confirmed: false },
+          scriptEdited: true,
+        });
+        currentRef.current.notify("改写已完成，请核对并保存当前版本。");
+      } catch (cause) {
+        if (
+          rewriteOperationRef.current === operation &&
+          activeScopeRef.current === expectedScope
+        )
+          currentRef.current.notify(
+            customerVisibleErrorMessage(cause, "文案改写失败，请重试。"),
+          );
+      } finally {
+        if (
+          rewriteOperationRef.current === operation &&
+          activeScopeRef.current === expectedScope
+        )
+          setRewriting(false);
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    const operation = ++rewriteOperationRef.current;
+    setRewriting(false);
+    const draft = currentRef.current.state.draft;
+    if (
+      !review &&
+      user.role !== "auditor" &&
+      draft.projectId &&
+      draft.sourceId &&
+      draft.ipId &&
+      draft.script.text.trim() &&
+      draft.scriptEdited !== true
+    ) {
+      void getLatestScriptRewriteTask(draft.projectId, draft.ipId)
+        .then((task) => {
+          if (
+            rewriteOperationRef.current !== operation ||
+            activeScopeRef.current !== activeScope ||
+            !task ||
+            task.source_text !== draft.script.text ||
+            (task.status !== "PENDING" && task.status !== "RUNNING")
+          )
+            return;
+          setRewriting(true);
+          void finishRewrite(task, activeScope, operation);
+        })
+        .catch((cause) => {
+          if (
+            rewriteOperationRef.current === operation &&
+            activeScopeRef.current === activeScope
+          )
+            currentRef.current.notify(
+              customerVisibleErrorMessage(
+                cause,
+                "读取上次改写任务失败，可直接重新提交。",
+              ),
+            );
+        });
+    }
+    return () => {
+      rewriteOperationRef.current += 1;
+    };
+  }, [activeScope, finishRewrite, review, user.role]);
+
+  const rewriteUnavailableReason = review
+    ? "审核示例不调用业务接口。"
+    : user.role === "auditor"
+      ? "当前账号为只读权限，不能改写文案。"
+      : !state.draft.projectId
+        ? "当前文案缺少来源项目，暂不能按 IP 二创。"
+        : !state.draft.sourceId
+          ? "当前文案缺少来源视频，请重新选择来源。"
+          : !state.draft.ipId
+            ? "请先选择参与二创的人物 IP。"
+            : !state.draft.script.text.trim()
+              ? "请输入待改写正文。"
+              : state.draft.script.text.length > 20_000
+                ? "待改写正文不能超过 20000 字符。"
+                : state.draft.scriptEdited === true
+                  ? "请先保存当前编辑，再按 IP 二创。"
+                  : "";
+
+  const rewrite = async () => {
+    if (rewriteUnavailableReason || rewriting) return;
+    const draft = state.draft;
+    const projectId = draft.projectId;
+    const identityId = draft.ipId;
+    if (!projectId || !identityId) return;
+    const operation = ++rewriteOperationRef.current;
+    const expectedScope = activeScopeRef.current;
+    setRewriting(true);
+    try {
+      const task = await rewriteProjectScript(
+        projectId,
+        draft.script.text,
+        identityId,
+      );
+      if (
+        rewriteOperationRef.current !== operation ||
+        activeScopeRef.current !== expectedScope
+      )
+        return;
+      await finishRewrite(task, expectedScope, operation);
+    } catch (cause) {
+      if (
+        rewriteOperationRef.current === operation &&
+        activeScopeRef.current === expectedScope
+      ) {
+        setRewriting(false);
+        notify(
+          customerVisibleErrorMessage(cause, "提交文案改写失败，请重试。"),
+        );
+      }
+    }
+  };
   const source = findSource(
     data.assets,
     data.videos,
@@ -302,9 +484,16 @@ export function CopyPage() {
                   description="二创时可带入人物定位与表达方式。"
                 />
               )}
-              <Button variant="outline" onClick={() => openLive("analysis")}>
-                按 IP 二创
+              <Button
+                variant="outline"
+                onClick={() => void rewrite()}
+                disabled={Boolean(rewriteUnavailableReason) || rewriting}
+              >
+                {rewriting ? "正在按 IP 二创…" : "按 IP 二创"}
               </Button>
+              {rewriteUnavailableReason ? (
+                <Hint>{rewriteUnavailableReason}</Hint>
+              ) : null}
               <Button variant="outline" onClick={() => openPicker("person")}>
                 更换人物
               </Button>

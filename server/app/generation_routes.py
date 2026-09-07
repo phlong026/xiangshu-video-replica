@@ -102,6 +102,7 @@ class ScriptRewriteTaskResponse(BaseModel):
     identity_id: str | None
     ip_profile_hash: str | None
     ip_profile_snapshot: ScriptRewriteIpProfileSummary | None
+    source_text: str
     status: str
     attempt: int
     result: ScriptRewriteResult | None
@@ -244,12 +245,27 @@ def script_rewrite_task_response(row: sqlite3.Row) -> ScriptRewriteTaskResponse:
         identity_id=None if row["identity_id"] is None else str(row["identity_id"]),
         expected_hash=None if row["ip_profile_hash"] is None else str(row["ip_profile_hash"]),
     )
+    try:
+        request_payload = json.loads(str(row["request_json"]))
+        source_text = request_payload["text"]
+        if not isinstance(source_text, str) or not source_text.strip():
+            raise ValueError("missing source text")
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        logger.error("Script rewrite task %s has invalid request payload", row["id"])
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "SCRIPT_REWRITE_REQUEST_INTEGRITY_ERROR",
+                "message": "改写任务原文校验失败，请重新提交。",
+            },
+        ) from exc
     return ScriptRewriteTaskResponse(
         id=str(row["id"]),
         project_id=str(row["project_id"]),
         identity_id=None if row["identity_id"] is None else str(row["identity_id"]),
         ip_profile_hash=(None if row["ip_profile_hash"] is None else str(row["ip_profile_hash"])),
         ip_profile_snapshot=snapshot,
+        source_text=source_text,
         status=str(row["status"]),
         attempt=int(row["attempt"]),
         result=script_rewrite_task_result(row),

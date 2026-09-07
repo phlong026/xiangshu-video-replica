@@ -347,6 +347,7 @@ def test_script_rewrite_snapshots_owned_ip_profile(
     assert response.status_code == 202
     body = response.json()
     assert body["identity_id"] == "identity_owned"
+    assert body["source_text"] == "请围绕乡墅设计改写。"
     assert len(body["ip_profile_hash"]) == 64
     assert body["ip_profile_snapshot"] == {
         "display_name": "张工",
@@ -593,6 +594,7 @@ def test_script_rewrite_idempotency_and_latest_are_identity_scoped(
     )
     assert latest.status_code == 200
     assert latest.json()["id"] == first.json()["id"]
+    assert latest.json()["source_text"] == "相同文本"
 
 
 def test_script_rewrite_latest_supports_all_identity_and_none_scopes(

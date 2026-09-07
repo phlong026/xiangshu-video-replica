@@ -938,24 +938,48 @@ export function StudioWorkspace({
       notify("请先填写创作内容。");
       return;
     }
-    const script = { ...state.draft.script };
-    setState((previous) => ({
-      ...previous,
-      savedScripts: [
-        ...previous.savedScripts.filter(
-          (item) => item.id !== previous.draft.script.id,
-        ),
-        script,
-      ],
-    }));
+    const draft = state.draft;
+    const script = {
+      ...draft.script,
+      ipId: draft.ipId,
+      sourceProjectId: draft.projectId,
+      sourceKind: draft.projectId ? ("project" as const) : ("manual" as const),
+    };
+    const markSaved = () =>
+      setState((previous) => {
+        const sameDraft =
+          previous.draft.id === draft.id &&
+          previous.draft.projectId === draft.projectId &&
+          previous.draft.ipId === draft.ipId &&
+          previous.draft.script.id === draft.script.id &&
+          previous.draft.script.title === draft.script.title &&
+          previous.draft.script.text === draft.script.text &&
+          previous.draft.script.version === draft.script.version;
+        return {
+          ...previous,
+          draft: sameDraft
+            ? { ...previous.draft, scriptEdited: false }
+            : previous.draft,
+          savedScripts: [
+            ...previous.savedScripts.filter((item) => item.id !== script.id),
+            script,
+          ],
+        };
+      });
     if (review) {
+      markSaved();
       notify("已保留在本次工作区，可继续切换页面。");
       return;
     }
-    void persistSavedScript(script, state.draft.projectId)
-      .then(() => notify("已保存到我的文案，换设备登录也能找回。"))
+    void persistSavedScript(script, draft.projectId, draft.ipId)
+      .then(() => {
+        markSaved();
+        void persistCloudDraft({ ...draft, script, scriptEdited: false }).catch(
+          () => {},
+        );
+        notify("已保存到我的文案，换设备登录也能找回。");
+      })
       .catch(() => notify("云端保存失败，本次仅保留在工作区，请稍后重试。"));
-    void persistCloudDraft({ ...state.draft, script }).catch(() => {});
   };
   const confirmFinalDraft = () => {
     const script = { ...state.draft.script, confirmed: true };
