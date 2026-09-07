@@ -2194,6 +2194,65 @@ describe("V1.4 内容与运营页面", () => {
     expect(screen.queryByText("收藏列表暂时无法更新")).toBeNull();
   });
 
+  it("切换账号后立即清除旧收藏并忽略上一账号的迟到响应", async () => {
+    let current = studio({
+      review: false,
+      user: { id: "user-a" } as StudioContextValue["user"],
+    });
+    useStudio.mockImplementation(() => current);
+    let resolveUserA!: (value: {
+      platform: "douyin";
+      sort: "hot";
+      categories: string[];
+      items: ViralVideoItem[];
+      fetchedAt: null;
+      hasMore: false;
+      nextCursor: null;
+      total: number;
+    }) => void;
+    listViralVideos.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveUserA = resolve;
+      }),
+    );
+    const view = render(<ViralPage />);
+
+    current = {
+      ...current,
+      user: { id: "user-b" } as StudioContextValue["user"],
+    };
+    listViralVideos.mockResolvedValueOnce({
+      platform: "douyin",
+      sort: "hot",
+      categories: [],
+      items: [viralItem(1, { isFavorite: false })],
+      fetchedAt: null,
+      hasMore: false,
+      nextCursor: null,
+      total: 1,
+    });
+    view.rerender(<ViralPage />);
+
+    await waitFor(() => expect(listViralVideos).toHaveBeenCalledTimes(2));
+    resolveUserA({
+      platform: "douyin",
+      sort: "hot",
+      categories: [],
+      items: [viralItem(1, { isFavorite: true })],
+      fetchedAt: null,
+      hasMore: false,
+      nextCursor: null,
+      total: 1,
+    });
+    await act(async () => Promise.resolve());
+
+    expect(
+      screen.getByRole("button", {
+        name: "收藏 农村建房预算，别只盯着主体",
+      }),
+    ).toHaveTextContent("收藏");
+  });
+
   it("收藏使用持久化接口并在保存失败时回滚乐观状态", async () => {
     saveViralFavorite.mockRejectedValueOnce(new Error("收藏失败"));
     const value = studio({ review: false });
@@ -2207,6 +2266,41 @@ describe("V1.4 内容与运营页面", () => {
     expect(button).toHaveTextContent("已收藏");
     await waitFor(() => expect(button).toHaveTextContent("收藏"));
     expect(saveViralFavorite).toHaveBeenCalledWith("douyin", "native-dy-1");
+    expect(value.notify).toHaveBeenCalledWith("收藏失败，已恢复原状态");
+  });
+
+  it("取消收藏失败时恢复收藏状态且请求未完成期间不重复提交", async () => {
+    let rejectRemoval!: (reason: Error) => void;
+    removeViralFavorite.mockReturnValueOnce(
+      new Promise((_resolve, reject) => {
+        rejectRemoval = reject;
+      }),
+    );
+    listViralVideos.mockResolvedValueOnce({
+      platform: "douyin",
+      sort: "hot",
+      categories: [],
+      items: [viralItem(1, { isFavorite: true })],
+      fetchedAt: null,
+      hasMore: false,
+      nextCursor: null,
+      total: 1,
+    });
+    const value = studio({ review: false });
+    useStudio.mockReturnValue(value);
+    render(<ViralPage />);
+
+    const button = screen.getByRole("button", {
+      name: "收藏 农村建房预算，别只盯着主体",
+    });
+    await waitFor(() => expect(button).toHaveTextContent("已收藏"));
+    fireEvent.click(button);
+    fireEvent.click(button);
+    expect(removeViralFavorite).toHaveBeenCalledTimes(1);
+    expect(button).toHaveTextContent("收藏");
+
+    rejectRemoval(new Error("取消失败"));
+    await waitFor(() => expect(button).toHaveTextContent("已收藏"));
     expect(value.notify).toHaveBeenCalledWith("收藏失败，已恢复原状态");
   });
 
@@ -2255,6 +2349,52 @@ describe("V1.4 内容与运营页面", () => {
       await screen.findByRole("heading", { name: "刷新恢复的视频" }),
     ).toBeInTheDocument();
     expect(fetchViralVideo).toHaveBeenCalledWith("douyin", "native-dy-1");
+  });
+
+  it("详情页切换账号后重新读取当前账号的收藏状态", async () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/?viralPlatform=douyin&viralVideoId=native-dy-1#studio/viral-detail",
+    );
+    const initial = studio();
+    let current = studio({
+      review: false,
+      user: { id: "user-a" } as StudioContextValue["user"],
+      state: {
+        ...initial.state,
+        page: "viral-detail",
+        selectedVideoId: "dy-1",
+      },
+    });
+    useStudio.mockImplementation(() => current);
+    fetchViralVideo
+      .mockResolvedValueOnce({
+        item: viralItem(1, {
+          title: "农村建房预算，别只盯着主体",
+          isFavorite: true,
+        }),
+      })
+      .mockResolvedValueOnce({
+        item: viralItem(1, {
+          title: "农村建房预算，别只盯着主体",
+          isFavorite: false,
+        }),
+      });
+    const view = render(<ViralDetailPage />);
+
+    const button = screen.getByRole("button", {
+      name: "收藏 农村建房预算，别只盯着主体",
+    });
+    await waitFor(() => expect(button).toHaveTextContent("已收藏"));
+    current = {
+      ...current,
+      user: { id: "user-b" } as StudioContextValue["user"],
+    };
+    view.rerender(<ViralDetailPage />);
+
+    await waitFor(() => expect(fetchViralVideo).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(button).toHaveTextContent("收藏"));
   });
 
   it("非审核工作区不把示例三十条当作真实采集数据", () => {
