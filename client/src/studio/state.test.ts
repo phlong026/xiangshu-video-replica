@@ -153,14 +153,34 @@ describe("V1.4 交接合同", () => {
     const draft = {
       ...createDraft(),
       ipId: "a",
+      imageId: "photo-a",
       avatarId: "avatar-a",
       voiceId: "voice-a",
     };
     const next = patchStudioDraft(draft, { ipId: "b" });
+    expect(next.imageId).toBeUndefined();
     expect(next.avatarId).toBeUndefined();
     expect(next.voiceId).toBeUndefined();
     expect(next.quoteRevision).toBe(draft.quoteRevision + 1);
     expect(next.id).toBe(draft.id);
+  });
+  it("更换IP并显式交接新照片时保留新人物照片", () => {
+    const draft = {
+      ...createDraft(),
+      ipId: "a",
+      imageId: "photo-a",
+      avatarId: "avatar-a",
+      voiceId: "voice-a",
+    };
+
+    const next = patchStudioDraft(draft, {
+      ipId: "b",
+      imageId: "photo-b",
+    });
+
+    expect(next.imageId).toBe("photo-b");
+    expect(next.avatarId).toBeUndefined();
+    expect(next.voiceId).toBeUndefined();
   });
   it("照片带入仅修改目标，不覆盖原始画面与选中镜头", () => {
     const draft = {

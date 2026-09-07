@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   completeMaterialUpload,
   confirmOralVoice,
@@ -34,6 +34,18 @@ type CloneSubmission = {
   idempotencyKey: string;
   consentId?: string;
 };
+
+const MISSING_ORAL_SOURCE_CODES = new Set([
+  "ASSET_NOT_FOUND",
+  "MATERIAL_NOT_FOUND",
+  "SOURCE_ASSET_NOT_FOUND",
+]);
+
+function isMissingOralSource(cause: unknown): boolean {
+  if (!cause || typeof cause !== "object") return false;
+  const code = (cause as { code?: string }).code?.trim().toUpperCase();
+  return MISSING_ORAL_SOURCE_CODES.has(code ?? "");
+}
 
 function createCloneIdempotencyKey(kind: "avatar" | "voice") {
   const suffix =
@@ -489,7 +501,7 @@ function PhotosPanel({ person }: { person: StudioPerson }) {
                 <Button
                   variant="outline"
                   onClick={() => {
-                    patchDraft({ ipId: person.id });
+                    patchDraft({ ipId: person.id, imageId: asset.id });
                     navigate("person-avatars", {
                       selectedPersonId: person.id,
                       selectedAssetId: asset.id,
@@ -535,15 +547,26 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
   const [error, setError] = useState<string>();
   const [uploadProgress, setUploadProgress] = useState<number>();
   const [uploadedVideo, setUploadedVideo] = useState<UploadedOralSource>();
+  const [invalidPhotoSourceKey, setInvalidPhotoSourceKey] = useState<string>();
   const cloneSubmissionRef = useRef<CloneSubmission | undefined>(undefined);
   const ready = person.avatars.filter((avatar) => avatar.ready);
   const pending = person.avatars.filter((avatar) => !avatar.ready);
-  const sourceAsset = data.assets.find(
+  const selectedPhotoAsset = data.assets.find(
     (asset) =>
       asset.id === state.draft.imageId &&
       asset.kind === "image" &&
       asset.personId === person.id &&
       !asset.composite,
+  );
+  const selectedPhotoSourceKey = selectedPhotoAsset
+    ? `${person.id}:IMAGE:${selectedPhotoAsset.id}`
+    : undefined;
+  const sourceAsset =
+    invalidPhotoSourceKey === selectedPhotoSourceKey
+      ? undefined
+      : selectedPhotoAsset;
+  const photoSelectionInvalid = Boolean(
+    state.draft.imageId && (!selectedPhotoAsset || !sourceAsset),
   );
   const selectedSourceAssetId = sourceAsset?.id;
   const previousSourceAssetId = useRef(selectedSourceAssetId);
@@ -575,6 +598,41 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
     : sourceAsset
       ? { id: sourceAsset.id, name: sourceAsset.name, kind: "IMAGE" as const }
       : undefined;
+  const sourceKey = source
+    ? `${person.id}:${source.kind}:${source.id}`
+    : undefined;
+  const selectionLifecycleKey = uploadedVideo
+    ? `${person.id}:VIDEO:${uploadedVideo.assetId}`
+    : `${person.id}:IMAGE:${state.draft.imageId ?? ""}`;
+  const selectionLifecycleRef = useRef(selectionLifecycleKey);
+  const contextVersionRef = useRef(0);
+  const mountedRef = useRef(true);
+  const activeOperationRef = useRef<
+    { contextVersion: number; id: number; selectionKey: string } | undefined
+  >(undefined);
+  const operationSequenceRef = useRef(0);
+  const isCurrentOperation = (
+    operation: NonNullable<typeof activeOperationRef.current>,
+  ) =>
+    mountedRef.current &&
+    operation.contextVersion === contextVersionRef.current &&
+    operation.selectionKey === selectionLifecycleRef.current &&
+    activeOperationRef.current === operation;
+  // Invalidate before a parent layout effect can settle an earlier request.
+  useLayoutEffect(() => {
+    selectionLifecycleRef.current = selectionLifecycleKey;
+    contextVersionRef.current += 1;
+    activeOperationRef.current = undefined;
+    setBusy(false);
+  }, [selectionLifecycleKey]);
+  useLayoutEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      contextVersionRef.current += 1;
+      activeOperationRef.current = undefined;
+    };
+  }, []);
   const consented = Boolean(source && consentedSourceId === source.id);
   const handleVideoUpload = async (file: File) => {
     if (review || busy) return;
@@ -604,6 +662,13 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
   };
   const startClone = async () => {
     if (review || busy || !source || !consented) return;
+    const operation = {
+      contextVersion: contextVersionRef.current,
+      id: operationSequenceRef.current + 1,
+      selectionKey: selectionLifecycleRef.current,
+    };
+    operationSequenceRef.current = operation.id;
+    activeOperationRef.current = operation;
     setBusy(true);
     setError(undefined);
     try {
@@ -630,6 +695,7 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
           sourceAssetId: source.id,
           purpose: "AVATAR",
         });
+        if (!isCurrentOperation(operation)) return;
         submission.consentId = consent.id;
       }
       await createOralAvatarClone({
@@ -640,16 +706,28 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
         consentId: submission.consentId,
         idempotencyKey: submission.idempotencyKey,
       });
+      if (!isCurrentOperation(operation)) return;
       notify(
         `${source.kind === "VIDEO" ? "视频" : "照片"}分身已提交，可在本页刷新制作状态。`,
       );
       refresh();
     } catch (cause) {
+      if (!isCurrentOperation(operation)) return;
+      if (source.kind === "IMAGE" && isMissingOralSource(cause)) {
+        setInvalidPhotoSourceKey(sourceKey);
+        setConsentedSourceId(undefined);
+        cloneSubmissionRef.current = undefined;
+        setError(undefined);
+        return;
+      }
       const message = customerVisibleErrorMessage(cause, "口播分身制作失败");
       setError(message);
       notify(message);
     } finally {
-      setBusy(false);
+      if (isCurrentOperation(operation)) {
+        activeOperationRef.current = undefined;
+        setBusy(false);
+      }
     }
   };
   const refreshClone = async (avatarId: string) => {
@@ -725,11 +803,15 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
         <Button
           variant="outline"
           onClick={() => {
-            patchDraft({ ipId: person.id });
+            patchDraft({
+              ipId: person.id,
+              ...(photoSelectionInvalid ? { imageId: undefined } : {}),
+            });
+            setInvalidPhotoSourceKey(undefined);
             openPicker("avatar-photo");
           }}
         >
-          用形象照片制作
+          {photoSelectionInvalid ? "重新选择形象照片" : "用形象照片制作"}
         </Button>
         {review ? (
           <Button
@@ -766,7 +848,9 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
             ? `已上传：${uploadedVideo.fileName}`
             : sourceAsset
               ? `已选：${sourceAsset.name}`
-              : "请先选择当前人物的一张场景形象照。"}
+              : photoSelectionInvalid
+                ? "所选照片已失效或不属于当前人物，请重新选择。"
+                : "请先选择当前人物的一张场景形象照。"}
         </p>
         {uploadProgress !== undefined ? <p>上传中 {uploadProgress}%</p> : null}
         {error ? <p role="alert">{error}</p> : null}
@@ -774,7 +858,7 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
           <input
             aria-label="确认分身克隆授权"
             checked={consented}
-            disabled={review || busy}
+            disabled={review || busy || !source}
             type="checkbox"
             onChange={(event) => {
               cloneSubmissionRef.current = undefined;
