@@ -1151,6 +1151,9 @@ function savedScriptFromRecord(record: {
   text: string;
   original: string | null;
   version: number;
+  ip_id: string | null;
+  source_project_id: string | null;
+  source_kind: string | null;
 }): StudioScript {
   return {
     id: record.script_id,
@@ -1159,6 +1162,14 @@ function savedScriptFromRecord(record: {
     text: record.text,
     version: record.version,
     confirmed: false,
+    ipId: record.ip_id ?? undefined,
+    sourceProjectId: record.source_project_id ?? undefined,
+    sourceKind:
+      record.source_kind === "project" ||
+      record.source_kind === "upload" ||
+      record.source_kind === "manual"
+        ? record.source_kind
+        : undefined,
   };
 }
 
@@ -1170,6 +1181,7 @@ export async function loadSavedScriptList(): Promise<StudioScript[]> {
 export async function persistSavedScript(
   script: StudioScript,
   sourceProjectId?: string,
+  ipId?: string,
 ): Promise<void> {
   const input: StudioSavedScriptInput = {
     script_id: script.id,
@@ -1177,7 +1189,7 @@ export async function persistSavedScript(
     text: script.text,
     original: script.original || null,
     version: script.version,
-    ip_id: null,
+    ip_id: ipId ?? script.ipId ?? null,
     source_project_id: sourceProjectId ?? null,
     source_kind: sourceProjectId ? "project" : "upload",
   };

@@ -175,6 +175,9 @@ export type StudioScript = {
   text: string;
   version: number;
   confirmed: boolean;
+  ipId?: string;
+  sourceProjectId?: string;
+  sourceKind?: "project" | "upload" | "manual";
 };
 export type StudioDraft = {
   id: string;

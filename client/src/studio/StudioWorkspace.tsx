@@ -3,6 +3,7 @@ import {
   type ReactNode,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -41,6 +42,7 @@ import {
   ReplicaPage,
   VideoPage,
 } from "./CreationPages";
+import { createCloudDraftQueue } from "./cloudDraftQueue";
 import { StudioContext, useStudio } from "./context";
 import { LiveWorkspacePanel } from "./LiveWorkspacePanel";
 import {
@@ -185,6 +187,10 @@ const ORAL_SUBTITLE_PRESET = {
   st_primary_color: "0xFFFFFF",
   st_outline_color: "0x000000",
 };
+
+function savedDraftScope(accountId: string, draft: StudioDraft) {
+  return JSON.stringify([accountId, draft]);
+}
 const creationPages = new Set<StudioPage>([
   "replica",
   "replacement",
@@ -438,19 +444,92 @@ export function StudioWorkspace({
       generationDialogRevisionRef.current += 1;
     };
   }, []);
-  const referenceAssetsRequestRef = useRef(0);
-  const referenceAssetsDraftRef = useRef<StudioDraft | undefined>(undefined);
   const draftTouchedRef = useRef(false);
   const draftSaveTimerRef = useRef<number | undefined>(undefined);
-  const scheduleDraftSave = useCallback(() => {
-    if (review) return;
-    window.clearTimeout(draftSaveTimerRef.current);
-    draftSaveTimerRef.current = window.setTimeout(() => {
-      void persistCloudDraft(latestDraftRef.current).catch(() => {
-        notify("云端草稿保存失败，内容仍在本机，请稍后继续编辑。");
-      });
-    }, DRAFT_AUTOSAVE_DELAY_MS);
-  }, [review, notify]);
+  const [cloudDraftQueue] = useState(() =>
+    createCloudDraftQueue(persistCloudDraft),
+  );
+  const saveOperationRef = useRef(0);
+  const saveMountedRef = useRef(false);
+  const saveAccountRef = useRef(currentUser.id);
+  const saveScopeRef = useRef(savedDraftScope(currentUser.id, state.draft));
+  const renderedSaveScope = savedDraftScope(currentUser.id, state.draft);
+  useLayoutEffect(() => {
+    if (
+      saveAccountRef.current === currentUser.id &&
+      saveScopeRef.current === renderedSaveScope
+    )
+      return;
+    if (saveAccountRef.current !== currentUser.id) {
+      draftTouchedRef.current = false;
+    }
+    saveAccountRef.current = currentUser.id;
+    saveScopeRef.current = renderedSaveScope;
+    saveOperationRef.current += 1;
+  }, [currentUser.id, renderedSaveScope]);
+  const referenceAssetsRequestRef = useRef(0);
+  const referenceAssetsDraftRef = useRef<StudioDraft | undefined>(undefined);
+  useEffect(() => {
+    saveMountedRef.current = true;
+    return () => {
+      saveMountedRef.current = false;
+      saveOperationRef.current += 1;
+      window.clearTimeout(draftSaveTimerRef.current);
+    };
+  }, []);
+  useEffect(() => {
+    const accountId = currentUser.id;
+    return () => {
+      if (accountId !== saveAccountRef.current || !saveMountedRef.current) {
+        window.clearTimeout(draftSaveTimerRef.current);
+        saveOperationRef.current += 1;
+      }
+    };
+  }, [currentUser.id]);
+  const persistCloudDraftForScope = useCallback(
+    (draft: StudioDraft, accountId: string, isCurrent: () => boolean) =>
+      cloudDraftQueue.persist(
+        savedDraftScope(accountId, draft),
+        draft,
+        isCurrent,
+      ),
+    [cloudDraftQueue],
+  );
+  const scheduleDraftSave = useCallback(
+    (draft: StudioDraft) => {
+      if (review) return;
+      const accountId = currentUser.id;
+      const expectedScope = savedDraftScope(accountId, draft);
+      const operation = saveOperationRef.current;
+      window.clearTimeout(draftSaveTimerRef.current);
+      draftSaveTimerRef.current = window.setTimeout(() => {
+        if (
+          !saveMountedRef.current ||
+          operation !== saveOperationRef.current ||
+          accountId !== saveAccountRef.current ||
+          expectedScope !== saveScopeRef.current
+        )
+          return;
+        void persistCloudDraftForScope(draft, accountId, () =>
+          Boolean(
+            saveMountedRef.current &&
+              operation === saveOperationRef.current &&
+              accountId === saveAccountRef.current &&
+              expectedScope === saveScopeRef.current,
+          ),
+        ).catch(() => {
+          if (
+            saveMountedRef.current &&
+            operation === saveOperationRef.current &&
+            accountId === saveAccountRef.current &&
+            expectedScope === saveScopeRef.current
+          )
+            notify("云端草稿保存失败，内容仍在本机，请稍后继续编辑。");
+        });
+      }, DRAFT_AUTOSAVE_DELAY_MS);
+    },
+    [review, currentUser.id, notify, persistCloudDraftForScope],
+  );
 
   const restoreDraftAssets = useCallback(
     async (draft: StudioDraft) => {
@@ -528,7 +607,8 @@ export function StudioWorkspace({
       setReferenceAssetsPending(false);
       setReferenceAssetsError(false);
     }
-  }, [state.draft]);
+    if (draftTouchedRef.current) scheduleDraftSave(state.draft);
+  }, [state.draft, scheduleDraftSave]);
   // 数字人口播提交前拉取单价（元/条）；失败保持 null 显示“待服务端报价”。
   useEffect(() => {
     void oralQuoteRevision;
@@ -1062,7 +1142,6 @@ export function StudioWorkspace({
       }
       return { ...previous, draft: next };
     });
-    scheduleDraftSave();
   };
   const extractionDraftId = state.draft.id;
   const extractionProjectId = state.draft.projectId;
@@ -1119,7 +1198,6 @@ export function StudioWorkspace({
           draftTouchedRef.current = true;
           latestDraftRef.current = restored;
           setState((previous) => ({ ...previous, draft: restored }));
-          scheduleDraftSave();
           notify(
             current.script.text.trim()
               ? "文案提取已完成，已保留你的编辑并补回来源原文。"
@@ -1158,7 +1236,6 @@ export function StudioWorkspace({
     extractionProjectId,
     extractionAssetId,
     notify,
-    scheduleDraftSave,
   ]);
   const openLive = (panel: LivePanel) => {
     if (review) {
@@ -1312,31 +1389,91 @@ export function StudioWorkspace({
       notify("请先填写创作内容。");
       return;
     }
-    const script = { ...state.draft.script };
-    setState((previous) => ({
-      ...previous,
-      savedScripts: [
-        ...previous.savedScripts.filter(
-          (item) => item.id !== previous.draft.script.id,
-        ),
-        script,
-      ],
-    }));
+    const draft = state.draft;
+    const accountId = currentUser.id;
+    const expectedScope = savedDraftScope(accountId, draft);
+    const operation = ++saveOperationRef.current;
+    window.clearTimeout(draftSaveTimerRef.current);
+    const isCurrentSave = () =>
+      saveMountedRef.current &&
+      saveOperationRef.current === operation &&
+      saveAccountRef.current === accountId &&
+      saveScopeRef.current === expectedScope;
+    const script = {
+      ...draft.script,
+      ipId: draft.ipId,
+      sourceProjectId: draft.projectId,
+      sourceKind: draft.projectId ? ("project" as const) : ("manual" as const),
+    };
+    const recordSavedVersion = (cloudSynced: boolean) =>
+      setState((previous) => {
+        if (savedDraftScope(accountId, previous.draft) !== expectedScope) {
+          return previous;
+        }
+        return {
+          ...previous,
+          draft: cloudSynced
+            ? { ...previous.draft, scriptEdited: false }
+            : previous.draft,
+          savedScripts: [
+            ...previous.savedScripts.filter((item) => item.id !== script.id),
+            script,
+          ],
+        };
+      });
     if (review) {
+      recordSavedVersion(true);
       notify("已保留在本次工作区，可继续切换页面。");
       return;
     }
-    void persistSavedScript(script, state.draft.projectId)
-      .then(() => notify("已保存到我的文案，换设备登录也能找回。"))
-      .catch(() => notify("云端保存失败，本次仅保留在工作区，请稍后重试。"));
-    void persistCloudDraft({ ...state.draft, script }).catch(() => {});
+    void persistSavedScript(script, draft.projectId, draft.ipId)
+      .then(async () => {
+        if (!isCurrentSave()) return;
+        try {
+          await persistCloudDraftForScope(
+            {
+              ...draft,
+              script,
+              scriptEdited: false,
+            },
+            accountId,
+            isCurrentSave,
+          );
+        } catch {
+          if (isCurrentSave()) {
+            recordSavedVersion(false);
+            notify("版本已保存，但云端草稿同步失败，请再次点击保存版本重试。");
+          }
+          return;
+        }
+        if (!isCurrentSave()) return;
+        draftTouchedRef.current = false;
+        recordSavedVersion(true);
+        notify("已保存到我的文案，换设备登录也能找回。");
+      })
+      .catch(() => {
+        if (isCurrentSave()) {
+          notify("云端保存失败，本次仅保留在工作区，请稍后重试。");
+        }
+      });
   };
   const confirmFinalDraft = () => {
     const script = { ...state.draft.script, confirmed: true };
+    const draft = patchStudioDraft(state.draft, { script });
+    const accountId = currentUser.id;
+    const previousScope = savedDraftScope(accountId, state.draft);
+    const confirmedScope = savedDraftScope(accountId, draft);
     patchDraft({ script });
     if (review) return;
     // 立即持久化终稿（不等防抖），并软发布到项目脚本版本。
-    void persistCloudDraft({ ...state.draft, script }).catch(() => {});
+    void persistCloudDraftForScope(draft, accountId, () =>
+      Boolean(
+        saveMountedRef.current &&
+          saveAccountRef.current === accountId &&
+          (saveScopeRef.current === previousScope ||
+            saveScopeRef.current === confirmedScope),
+      ),
+    ).catch(() => {});
     if (!state.draft.projectId) return;
     void publishScriptVersion(state.draft.projectId, script.text).then(
       (published) => {

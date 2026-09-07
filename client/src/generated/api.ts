@@ -7320,6 +7320,8 @@ export interface components {
       text: string;
       /** Identity Id */
       identity_id?: string | null;
+      /** Source Asset Id */
+      source_asset_id?: string | null;
       /** Idempotency Key */
       idempotency_key?: string | null;
     };
@@ -7348,6 +7350,10 @@ export interface components {
       ip_profile_snapshot:
         | components["schemas"]["ScriptRewriteIpProfileSummary"]
         | null;
+      /** Source Asset Id */
+      source_asset_id: string | null;
+      /** Source Text */
+      source_text: string;
       /** Status */
       status: string;
       /** Attempt */
@@ -8536,6 +8542,7 @@ export interface operations {
       query?: {
         identity_scope?: "all" | "identity" | "none";
         identity_id?: string | null;
+        source_asset_id?: string | null;
       };
       header?: {
         "X-Dev-User-Id"?: string | null;
