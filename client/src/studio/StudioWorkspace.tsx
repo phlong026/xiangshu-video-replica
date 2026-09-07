@@ -936,6 +936,7 @@ export function StudioWorkspace({
                   photoIds: result.assets
                     .filter((asset) => !asset.composite)
                     .map((asset) => asset.id),
+                  photoCount: result.total,
                 }
               : person,
           ),
