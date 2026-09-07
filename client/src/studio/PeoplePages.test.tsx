@@ -21,6 +21,16 @@ const api = vi.hoisted(() => ({
 
 vi.mock("../api", () => api);
 
+const oralLive = vi.hoisted(() => ({
+  readAudioDuration: vi.fn(async () => 30),
+  uploadOralAudioMaterial: vi.fn(),
+  validateOralAudioFile: vi.fn(),
+}));
+vi.mock("./live", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  ...oralLive,
+}));
+
 const navigate = vi.fn();
 const patchDraft = vi.fn();
 const notify = vi.fn();
@@ -203,6 +213,21 @@ describe("PeoplePages", () => {
     updateData.mockClear();
     openPicker.mockClear();
     vi.clearAllMocks();
+    oralLive.readAudioDuration.mockResolvedValue(30);
+    oralLive.validateOralAudioFile.mockImplementation((file: File) =>
+      file.name.toLowerCase().endsWith(".mp3")
+        ? undefined
+        : "仅支持 MP3 音频。",
+    );
+    oralLive.uploadOralAudioMaterial.mockResolvedValue({
+      id: "audio-upload",
+      name: "voice.mp3",
+      kind: "audio",
+      group: "声音克隆样本",
+      source: "我的上传",
+      saved: true,
+      allowedUses: ["voice_clone"],
+    });
   });
 
   it("renders the people library and its primary empty-safe actions", () => {
@@ -759,12 +784,15 @@ describe("PeoplePages", () => {
   it("上传本地 MP3 后提交声音克隆", async () => {
     currentPage = "person-voices";
     review = false;
-    api.createMaterialUploadIntent.mockResolvedValue({
-      asset_id: "audio-asset",
-      material_id: "asset:audio-asset",
+    oralLive.uploadOralAudioMaterial.mockResolvedValue({
+      id: "audio-asset",
+      name: "voice.mp3",
+      kind: "audio",
+      group: "声音克隆样本",
+      source: "我的上传",
+      saved: true,
+      allowedUses: ["voice_clone"],
     });
-    api.uploadMaterial.mockResolvedValue(undefined);
-    api.completeMaterialUpload.mockResolvedValue({ asset_id: "audio-asset" });
     api.createOralConsent.mockResolvedValue({ id: "consent-audio" });
     api.createOralVoiceClone.mockResolvedValue({
       id: "voice-new",
@@ -781,7 +809,12 @@ describe("PeoplePages", () => {
     screen.getByRole("checkbox", { name: "确认声音克隆授权" }).click();
     screen.getByRole("button", { name: "开始克隆声音" }).click();
 
-    expect(api.completeMaterialUpload).toHaveBeenCalledWith("audio-asset");
+    expect(oralLive.uploadOralAudioMaterial).toHaveBeenCalledWith(
+      expect.any(File),
+      "voice_clone",
+      30,
+      expect.any(Function),
+    );
     await vi.waitFor(() =>
       expect(api.createOralVoiceClone).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -908,6 +941,30 @@ describe("PeoplePages", () => {
     expect(
       screen.getByText(/MP3，时长 5–180 秒（3 分钟），上限 50 MB/),
     ).toBeInTheDocument();
+  });
+
+  it("声音样本选择使用独立用途选择器", () => {
+    currentPage = "person-voices";
+    render(<PersonPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "从素材选择声音样本" }));
+    expect(openPicker).toHaveBeenCalledWith("voice-audio");
+  });
+
+  it("声音克隆样本超过 180 秒时在上传前拒绝", async () => {
+    currentPage = "person-voices";
+    review = false;
+    oralLive.readAudioDuration.mockResolvedValue(181);
+    render(<PersonPage />);
+
+    fireEvent.change(screen.getByLabelText("选择声音样本"), {
+      target: {
+        files: [new File(["ID3audio"], "too-long.mp3", { type: "audio/mpeg" })],
+      },
+    });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("5–180 秒");
+    expect(oralLive.uploadOralAudioMaterial).not.toHaveBeenCalled();
   });
 
   it("切换声音素材后清空旧授权状态", () => {

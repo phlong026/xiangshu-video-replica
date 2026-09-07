@@ -1473,6 +1473,58 @@ def test_create_audio_oral_task_rejects_wrong_inaccessible_or_incomplete_asset(
         )
 
 
+def test_oral_audio_and_voice_clone_do_not_cross_use_explicit_purpose(
+    tmp_path: Path,
+    fake_source_storage: FakeSourceStorage,
+) -> None:
+    conn = seed_scene(tmp_path, "oral-audio-purpose.db")
+    avatar_id, _ = seed_ready_assets(conn)
+    vendor, _ = make_vendor()
+
+    conn.execute(
+        "UPDATE assets SET metadata_json = ? WHERE id = 'asset-audio'",
+        ('{"audio_purpose":"voice_clone","duration_seconds":42}',),
+    )
+    conn.commit()
+    with pytest.raises(OralDomainError, match="用途"):
+        create_oral_task(
+            conn,
+            actor=actor(),
+            identity_id="ident-1",
+            avatar_id=avatar_id,
+            voice_id=None,
+            mode="AUDIO",
+            title="用途错误",
+            script_text=None,
+            audio_asset_id="asset-audio",
+            subtitle=None,
+            idempotency_key="wrong-oral-purpose",
+            vendor=vendor,
+        )
+
+    conn.execute(
+        "UPDATE assets SET metadata_json = ? WHERE id = 'asset-audio'",
+        ('{"audio_purpose":"oral_audio","duration_seconds":42}',),
+    )
+    conn.commit()
+    voice_consent = consent_for(
+        conn,
+        purpose="VOICE_CLONE",
+        source_asset_id="asset-audio",
+    )
+    with pytest.raises(OralDomainError, match="用途"):
+        start_voice_clone(
+            conn,
+            actor=actor(),
+            identity_id="ident-1",
+            title="用途错误",
+            source_asset_id="asset-audio",
+            consent_id=voice_consent,
+            idempotency_key="wrong-clone-purpose",
+            vendor=vendor,
+        )
+
+
 def test_refresh_oral_task_archives_result_asset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

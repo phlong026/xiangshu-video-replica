@@ -214,6 +214,7 @@ export type PickerKind =
   | "avatar"
   | "voice"
   | "audio"
+  | "voice-audio"
   | "avatar-photo";
 export type StudioPublishDraft = {
   id: string;

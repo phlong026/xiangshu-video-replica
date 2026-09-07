@@ -13,6 +13,18 @@ import { createState } from "./state";
 
 const live = vi.hoisted(() => ({
   loadStudioData: vi.fn(),
+  studioAssetFromMaterial: vi.fn((item: Record<string, unknown>) => ({
+    id: item.asset_id,
+    assetId: item.asset_id,
+    materialId: item.id,
+    name: item.title,
+    kind: item.media_type,
+    duration: "00:42",
+    group: item.group,
+    source: "我的上传",
+    saved: item.saved,
+    allowedUses: item.allowed_uses,
+  })),
   loadPersonAssets: vi.fn(),
   loadProjectDraft: vi.fn(),
   reloadTasks: vi.fn(async (): Promise<unknown[]> => []),
@@ -87,6 +99,8 @@ const api = vi.hoisted(() => ({
   createOralTask: vi.fn(),
   createIndependentVideoTask: vi.fn(),
   listUserSavedPrompts: vi.fn(async (): Promise<unknown[]> => []),
+  listMaterials: vi.fn(),
+  getAssetDownloadUrl: vi.fn(),
 }));
 vi.mock("../api", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
@@ -477,6 +491,15 @@ describe("V1.4 workspace integration", () => {
       analytics30: null,
     });
     live.loadPersonAssets.mockResolvedValue({ assets: [], errors: [] });
+    api.listMaterials.mockResolvedValue({
+      items: [],
+      page: 1,
+      page_size: 12,
+      total: 0,
+    });
+    api.getAssetDownloadUrl.mockImplementation(async (assetId: string) => ({
+      url: `https://signed.example/${assetId}.mp3`,
+    }));
     window.history.replaceState(null, "", "/#studio/workbench");
   });
   it("renders the approved navigation order and keeps review data isolated", () => {
@@ -531,6 +554,94 @@ describe("V1.4 workspace integration", () => {
       within(screen.getByRole("dialog")).getByRole("button", { name: "关闭" }),
     );
     expect(screen.getByText("张工本人音色 V1")).toBeInTheDocument();
+  });
+  it("完整口播音频选择器服务端搜索并加载首屏外音频", async () => {
+    api.listMaterials
+      .mockResolvedValueOnce({
+        items: [],
+        page: 1,
+        page_size: 12,
+        total: 13,
+      })
+      .mockResolvedValueOnce({
+        items: [
+          {
+            id: "asset:deep-audio",
+            owner_user_id: "review-user",
+            asset_id: "deep-audio",
+            generation_task_id: null,
+            project_id: null,
+            person_id: null,
+            title: "深页口播.mp3",
+            group: "完整口播音频",
+            media_type: "audio",
+            source: "upload",
+            status: "ready",
+            delivery: "stored",
+            content_type: "audio/mpeg",
+            size_bytes: 100,
+            duration_seconds: 42,
+            created_at: "2026-09-07T00:00:00Z",
+            hidden: false,
+            saved: true,
+            allowed_uses: ["oral_audio"],
+            allowed_actions: ["preview"],
+          },
+          {
+            id: "asset:clone-only",
+            owner_user_id: "review-user",
+            asset_id: "clone-only",
+            generation_task_id: null,
+            project_id: null,
+            person_id: null,
+            title: "声音克隆样本.mp3",
+            group: "声音克隆样本",
+            media_type: "audio",
+            source: "upload",
+            status: "ready",
+            delivery: "stored",
+            content_type: "audio/mpeg",
+            size_bytes: 100,
+            duration_seconds: 20,
+            created_at: "2026-09-07T00:00:00Z",
+            hidden: false,
+            saved: true,
+            allowed_uses: ["voice_clone"],
+            allowed_actions: ["preview"],
+          },
+        ],
+        page: 1,
+        page_size: 12,
+        total: 1,
+      });
+    render(
+      <StudioWorkspace
+        currentUser={reviewUser}
+        reviewData={createReviewData()}
+        initialState={createReviewState("oral-audio")}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "从素材库选择" }));
+    await screen.findByText("没有可用音频");
+    const picker = screen.getByRole("dialog", { name: "选择完整口播音频" });
+    fireEvent.change(within(picker).getByLabelText("搜索云端音频"), {
+      target: { value: "深页" },
+    });
+    fireEvent.click(within(picker).getByRole("button", { name: "搜索" }));
+    expect(await screen.findByLabelText("预听深页口播.mp3")).toHaveAttribute(
+      "src",
+      "https://signed.example/deep-audio.mp3",
+    );
+    expect(screen.queryByText("声音克隆样本.mp3")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "选择深页口播.mp3" }));
+    expect(screen.getByText("深页口播.mp3")).toBeInTheDocument();
+    expect(api.listMaterials).toHaveBeenLastCalledWith({
+      mediaType: "audio",
+      query: "深页",
+      page: 1,
+      pageSize: 12,
+    });
   });
   it("loads real data without falling back to review examples", async () => {
     live.loadStudioData.mockResolvedValue({
@@ -1445,7 +1556,11 @@ describe("视频生成（C2 独立创作）", () => {
 
     await waitFor(() => expect(api.createOralTask).toHaveBeenCalledTimes(1));
     expect(api.createOralTask.mock.calls[0]?.[0]).toEqual(
-      expect.objectContaining({ mode: "AUDIO" }),
+      expect.objectContaining({
+        mode: "AUDIO",
+        audioAssetId: "speech",
+        voiceId: undefined,
+      }),
     );
     expect(api.createOralTask.mock.calls[0]?.[0]).not.toHaveProperty(
       "subtitle",

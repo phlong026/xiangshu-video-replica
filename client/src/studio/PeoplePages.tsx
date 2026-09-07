@@ -13,6 +13,11 @@ import {
   uploadMaterial,
 } from "../api";
 import { useStudio } from "./context";
+import {
+  readAudioDuration,
+  uploadOralAudioMaterial,
+  validateOralAudioFile,
+} from "./live";
 import type { StudioPage, StudioPerson } from "./types";
 import { Button, Empty, Field, Hint, Media, Panel, Tabs } from "./ui";
 import "./people.css";
@@ -904,7 +909,10 @@ function VoicePanel({ person }: { person: StudioPerson }) {
   const [uploadedAudio, setUploadedAudio] = useState<UploadedOralSource>();
   const cloneSubmissionRef = useRef<CloneSubmission | undefined>(undefined);
   const sourceAsset = data.assets.find(
-    (asset) => asset.id === state.draft.audioId && asset.kind === "audio",
+    (asset) =>
+      asset.id === state.draft.audioId &&
+      asset.kind === "audio" &&
+      (!asset.allowedUses || asset.allowedUses.includes("voice_clone")),
   );
   const selectedSourceAssetId = sourceAsset?.id;
   const previousSourceAssetId = useRef(selectedSourceAssetId);
@@ -939,7 +947,7 @@ function VoicePanel({ person }: { person: StudioPerson }) {
   const consented = Boolean(source && consentedSourceId === source.id);
   const handleAudioUpload = async (file: File) => {
     if (review || busy) return;
-    const validationError = validateOralSource(file, "audio");
+    const validationError = validateOralAudioFile(file);
     if (validationError) {
       setError(validationError);
       return;
@@ -950,9 +958,18 @@ function VoicePanel({ person }: { person: StudioPerson }) {
     cloneSubmissionRef.current = undefined;
     setUploadProgress(0);
     try {
-      setUploadedAudio(
-        await uploadOralSource(file, "声音克隆样本", setUploadProgress),
+      const duration = await readAudioDuration(file);
+      if (duration < 5 || duration > 180) {
+        setError("声音克隆样本时长必须为 5–180 秒。");
+        return;
+      }
+      const uploaded = await uploadOralAudioMaterial(
+        file,
+        "voice_clone",
+        duration,
+        setUploadProgress,
       );
+      setUploadedAudio({ assetId: uploaded.id, fileName: file.name });
     } catch (cause) {
       setError(customerVisibleErrorMessage(cause, "声音样本上传失败"));
     } finally {
@@ -1146,7 +1163,7 @@ function VoicePanel({ person }: { person: StudioPerson }) {
           variant="outline"
           onClick={() => {
             patchDraft({ ipId: person.id });
-            openPicker("audio");
+            openPicker("voice-audio");
           }}
         >
           从素材选择声音样本

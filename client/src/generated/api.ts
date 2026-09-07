@@ -6293,6 +6293,10 @@ export interface components {
       title?: string | null;
       /** Group */
       group?: string | null;
+      /** Audio Purpose */
+      audio_purpose?: ("oral_audio" | "voice_clone") | null;
+      /** Duration Seconds */
+      duration_seconds?: number | null;
     };
     /** MaterialUploadIntentResponse */
     MaterialUploadIntentResponse: {

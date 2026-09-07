@@ -16,12 +16,14 @@ import {
   type GenerationBatch,
   type GenerationPriceQuote,
   type GenerationRatio,
+  getAssetDownloadUrl,
   getGenerationBatch,
   getGenerationPriceQuote,
   getIndependentCapabilities,
   getOralPrice,
   getWallet,
   type IndependentCapabilities,
+  listMaterials,
   type Project,
 } from "../api";
 import { AnalyticsPage } from "./AnalyticsPage";
@@ -53,6 +55,7 @@ import {
   publishScriptVersion,
   reloadStats,
   reloadTasks,
+  studioAssetFromMaterial,
 } from "./live";
 import {
   ProfilePage,
@@ -1081,7 +1084,9 @@ export function StudioWorkspace({
           input.mode === "audio" &&
           !data.assets.some(
             (asset) =>
-              asset.id === input.audioAssetId && asset.kind === "audio",
+              asset.id === input.audioAssetId &&
+              asset.kind === "audio" &&
+              (!asset.allowedUses || asset.allowedUses.includes("oral_audio")),
           )
         )
           throw new Error("完整口播音频已失效，请重新选择");
@@ -1716,6 +1721,169 @@ export function StudioDialog({
   );
 }
 
+function AudioMaterialPicker({
+  onClose,
+  onSelect,
+  purpose,
+}: {
+  onClose: () => void;
+  onSelect: (asset: StudioAsset) => void;
+  purpose: "oral_audio" | "voice_clone";
+}) {
+  const [query, setQuery] = useState("");
+  const [activeQuery, setActiveQuery] = useState("");
+  const [page, setPage] = useState(1);
+  const [items, setItems] = useState<StudioAsset[]>([]);
+  const [hasMore, setHasMore] = useState(false);
+  const [status, setStatus] = useState<"loading" | "ready" | "error">(
+    "loading",
+  );
+  const [retryRevision, setRetryRevision] = useState(0);
+  const operationRef = useRef(0);
+
+  useEffect(() => {
+    void retryRevision;
+    const operation = ++operationRef.current;
+    setStatus("loading");
+    void listMaterials({
+      mediaType: "audio",
+      query: activeQuery,
+      page,
+      pageSize: 12,
+    })
+      .then(async (result) => {
+        const usable = result.items.filter(
+          (item) =>
+            item.status === "ready" &&
+            item.asset_id &&
+            item.allowed_uses.includes(purpose),
+        );
+        const urls = await Promise.allSettled(
+          usable.map((item) =>
+            getAssetDownloadUrl(item.asset_id as string).then(
+              (response) => response.url,
+            ),
+          ),
+        );
+        if (operation !== operationRef.current) return;
+        const next = usable.map((item, index) => ({
+          ...studioAssetFromMaterial(item),
+          url:
+            urls[index]?.status === "fulfilled" ? urls[index].value : undefined,
+        }));
+        setItems((current) =>
+          page === 1 ? next : mergeStudioAssets(current, next),
+        );
+        setHasMore(result.page * result.page_size < result.total);
+        setStatus("ready");
+      })
+      .catch(() => {
+        if (operation === operationRef.current) setStatus("error");
+      });
+    return () => {
+      operationRef.current += 1;
+    };
+  }, [activeQuery, page, purpose, retryRevision]);
+
+  return (
+    <StudioDialog
+      title={purpose === "oral_audio" ? "选择完整口播音频" : "选择声音克隆样本"}
+      onClose={onClose}
+    >
+      <form
+        className="studio-picker-search"
+        onSubmit={(event) => {
+          event.preventDefault();
+          setItems([]);
+          setPage(1);
+          setActiveQuery(query.trim());
+        }}
+      >
+        <input
+          aria-label="搜索云端音频"
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="输入音频名称"
+          value={query}
+        />
+        <Button type="submit" variant="outline">
+          搜索
+        </Button>
+      </form>
+      {status === "error" ? (
+        <Empty
+          title="音频素材读取失败"
+          description="请检查网络后重试。"
+          action={
+            <Button
+              variant="outline"
+              onClick={() => setRetryRevision((value) => value + 1)}
+            >
+              重试
+            </Button>
+          }
+        />
+      ) : status === "loading" && items.length === 0 ? (
+        <Empty title="正在读取音频" description="正在查询云端素材库。" />
+      ) : items.length === 0 ? (
+        <Empty
+          title="没有可用音频"
+          description={
+            purpose === "oral_audio"
+              ? "可继续查询下一页，或返回口播页上传完整 MP3。"
+              : "可继续查询下一页，或返回声音页上传合规样本。"
+          }
+          action={
+            hasMore ? (
+              <Button
+                variant="outline"
+                onClick={() => setPage((value) => value + 1)}
+              >
+                加载更多音频
+              </Button>
+            ) : undefined
+          }
+        />
+      ) : (
+        <>
+          <div className="studio-picker-grid">
+            {items.map((asset) => (
+              <article key={asset.id} className="studio-picker-audio">
+                <strong>{asset.name}</strong>
+                <small>
+                  {asset.source} · {asset.duration ?? "时长未知"}
+                </small>
+                {asset.url ? (
+                  <audio
+                    controls
+                    src={asset.url}
+                    aria-label={`预听${asset.name}`}
+                  >
+                    <track kind="captions" label="口播音频" />
+                  </audio>
+                ) : (
+                  <small>预听地址暂不可用</small>
+                )}
+                <Button variant="outline" onClick={() => onSelect(asset)}>
+                  选择{asset.name}
+                </Button>
+              </article>
+            ))}
+          </div>
+          {hasMore && (
+            <Button
+              disabled={status === "loading"}
+              variant="outline"
+              onClick={() => setPage((value) => value + 1)}
+            >
+              {status === "loading" ? "加载中…" : "加载更多音频"}
+            </Button>
+          )}
+        </>
+      )}
+    </StudioDialog>
+  );
+}
+
 function StudioPicker({
   kind,
   onClose,
@@ -1723,8 +1891,15 @@ function StudioPicker({
   kind: PickerKind;
   onClose: () => void;
 }) {
-  const { state, data, patchDraft, navigate, notify, videoCapabilities } =
-    useStudio();
+  const {
+    state,
+    data,
+    patchDraft,
+    updateData,
+    navigate,
+    notify,
+    videoCapabilities,
+  } = useStudio();
   const person = data.people.find((item) => item.id === state.draft.ipId);
   const title: Record<PickerKind, string> = {
     person: "选择人物 IP",
@@ -1736,12 +1911,28 @@ function StudioPicker({
     avatar: "选择口播分身",
     voice: "选择已确认声音",
     audio: "选择完整口播音频",
+    "voice-audio": "选择声音克隆样本",
     "avatar-photo": "选择单张照片制作分身",
   };
   const select = (patch: Partial<StudioDraft>) => {
     patchDraft(patch);
     onClose();
   };
+  if (kind === "audio" || kind === "voice-audio") {
+    return (
+      <AudioMaterialPicker
+        onClose={onClose}
+        purpose={kind === "audio" ? "oral_audio" : "voice_clone"}
+        onSelect={(asset) => {
+          updateData((current) => ({
+            ...current,
+            assets: mergeStudioAssets(current.assets, [asset]),
+          }));
+          select({ audioId: asset.id, voiceId: undefined });
+        }}
+      />
+    );
+  }
   // 视频生成的帧/参考选择额外提供素材库图片（C9 通道，用户归属）。
   const materials =
     kind === "reference" || kind === "first-frame" || kind === "tail-frame"
