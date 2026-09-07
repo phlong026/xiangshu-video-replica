@@ -99,6 +99,19 @@ vi.mock("./context", () => ({
             },
           ],
         },
+        {
+          id: "p2",
+          name: "其他人物",
+          role: "项目经理",
+          portrait: "/people/other-person.png",
+          version: 1,
+          scope: "施工管理",
+          audience: "在建家庭",
+          expression: "清晰",
+          photoIds: ["other-scene"],
+          avatars: [],
+          voices: [],
+        },
       ],
       assets: [
         {
@@ -228,17 +241,24 @@ describe("PeoplePages", () => {
 
   it("把场景照片和所属人物一起带入口播分身制作", () => {
     currentPage = "person-photos";
+    selectedPersonId = "p2";
+    draft = {
+      ipId: "p1",
+      imageId: "scene",
+      avatarId: "avatar-1",
+      voiceId: "voice-ok",
+    };
     render(<PersonPage />);
 
     screen.getByRole("button", { name: "制作口播分身" }).click();
 
     expect(patchDraft).toHaveBeenCalledWith({
-      ipId: "p1",
-      imageId: "scene",
+      ipId: "p2",
+      imageId: "other-scene",
     });
     expect(navigate).toHaveBeenCalledWith("person-avatars", {
-      selectedPersonId: "p1",
-      selectedAssetId: "scene",
+      selectedPersonId: "p2",
+      selectedAssetId: "other-scene",
     });
   });
 
@@ -362,6 +382,94 @@ describe("PeoplePages", () => {
       }),
     );
     await vi.waitFor(() => expect(refresh).toHaveBeenCalled());
+  });
+
+  it.each(["consent", "clone"])(
+    "%s 明确返回素材不存在时冻结旧照片并要求重选",
+    async (failureAt) => {
+      currentPage = "person-avatars";
+      review = false;
+      draft = { ipId: "p1", imageId: "scene" };
+      api.createOralConsent.mockImplementation(() =>
+        failureAt === "consent"
+          ? Promise.reject({ status: 404 })
+          : Promise.resolve({ id: "consent-avatar" }),
+      );
+      api.createOralAvatarClone.mockImplementation(() =>
+        failureAt === "clone"
+          ? Promise.reject({ code: "ASSET_NOT_FOUND" })
+          : Promise.resolve({ id: "avatar-new", status: "RUNNING" }),
+      );
+
+      render(<PersonPage />);
+      const consent = screen.getByRole("checkbox", {
+        name: "确认分身克隆授权",
+      });
+      consent.click();
+      screen.getByRole("button", { name: "开始制作照片分身" }).click();
+
+      expect(
+        await screen.findByText("所选照片已失效或不属于当前人物，请重新选择。"),
+      ).toBeInTheDocument();
+      expect(consent).not.toBeChecked();
+      expect(consent).toBeDisabled();
+      expect(
+        screen.getByRole("button", { name: "开始制作照片分身" }),
+      ).toBeDisabled();
+      expect(
+        screen.getByRole("button", { name: "重新选择形象照片" }),
+      ).toBeInTheDocument();
+    },
+  );
+
+  it("普通网络错误不会把有效照片误判为失效", async () => {
+    currentPage = "person-avatars";
+    review = false;
+    draft = { ipId: "p1", imageId: "scene" };
+    api.createOralConsent.mockRejectedValue(new Error("network"));
+
+    render(<PersonPage />);
+    const consent = screen.getByRole("checkbox", {
+      name: "确认分身克隆授权",
+    });
+    consent.click();
+    screen.getByRole("button", { name: "开始制作照片分身" }).click();
+
+    await screen.findByRole("alert");
+    expect(screen.getByText("已选：庭院讲解")).toBeInTheDocument();
+    expect(consent).toBeChecked();
+    expect(
+      screen.queryByRole("button", { name: "重新选择形象照片" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("人物切换后忽略上一人物迟到的素材失效响应", async () => {
+    currentPage = "person-avatars";
+    review = false;
+    draft = { ipId: "p1", imageId: "scene" };
+    let rejectOldRequest: ((reason: unknown) => void) | undefined;
+    api.createOralConsent.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectOldRequest = reject;
+        }),
+    );
+
+    const view = render(<PersonPage />);
+    screen.getByRole("checkbox", { name: "确认分身克隆授权" }).click();
+    screen.getByRole("button", { name: "开始制作照片分身" }).click();
+
+    selectedPersonId = "p2";
+    draft = { ipId: "p2", imageId: "other-scene" };
+    view.rerender(<PersonPage />);
+    await act(async () => {
+      rejectOldRequest?.({ status: 404, code: "ASSET_NOT_FOUND" });
+    });
+
+    expect(screen.getByText("已选：其他人物场景照")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "重新选择形象照片" }),
+    ).not.toBeInTheDocument();
   });
 
   it("用已选音频提交声音克隆", async () => {

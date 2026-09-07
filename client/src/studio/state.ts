@@ -151,6 +151,7 @@ export function patchStudioDraft(
   }
   // Asset ownership must be reselected when identity changes, never relabelled.
   if (Object.hasOwn(patch, "ipId") && patch.ipId !== draft.ipId) {
+    if (!Object.hasOwn(patch, "imageId")) next.imageId = undefined;
     next.voiceId = undefined;
     next.avatarId = undefined;
     next.script = { ...next.script, confirmed: false };

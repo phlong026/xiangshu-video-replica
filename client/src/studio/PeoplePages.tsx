@@ -35,6 +35,17 @@ type CloneSubmission = {
   consentId?: string;
 };
 
+function isMissingOralSource(cause: unknown): boolean {
+  if (!cause || typeof cause !== "object") return false;
+  const { status, code } = cause as { status?: number; code?: string };
+  return (
+    status === 404 ||
+    code === "ASSET_NOT_FOUND" ||
+    code === "MATERIAL_NOT_FOUND" ||
+    code === "SOURCE_ASSET_NOT_FOUND"
+  );
+}
+
 function createCloneIdempotencyKey(kind: "avatar" | "voice") {
   const suffix =
     globalThis.crypto?.randomUUID?.() ??
@@ -535,17 +546,27 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
   const [error, setError] = useState<string>();
   const [uploadProgress, setUploadProgress] = useState<number>();
   const [uploadedVideo, setUploadedVideo] = useState<UploadedOralSource>();
+  const [invalidPhotoSourceKey, setInvalidPhotoSourceKey] = useState<string>();
   const cloneSubmissionRef = useRef<CloneSubmission | undefined>(undefined);
   const ready = person.avatars.filter((avatar) => avatar.ready);
   const pending = person.avatars.filter((avatar) => !avatar.ready);
-  const sourceAsset = data.assets.find(
+  const selectedPhotoAsset = data.assets.find(
     (asset) =>
       asset.id === state.draft.imageId &&
       asset.kind === "image" &&
       asset.personId === person.id &&
       !asset.composite,
   );
-  const photoSelectionInvalid = Boolean(state.draft.imageId && !sourceAsset);
+  const selectedPhotoSourceKey = selectedPhotoAsset
+    ? `${person.id}:IMAGE:${selectedPhotoAsset.id}`
+    : undefined;
+  const sourceAsset =
+    invalidPhotoSourceKey === selectedPhotoSourceKey
+      ? undefined
+      : selectedPhotoAsset;
+  const photoSelectionInvalid = Boolean(
+    state.draft.imageId && (!selectedPhotoAsset || !sourceAsset),
+  );
   const selectedSourceAssetId = sourceAsset?.id;
   const previousSourceAssetId = useRef(selectedSourceAssetId);
   useEffect(() => {
@@ -576,6 +597,11 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
     : sourceAsset
       ? { id: sourceAsset.id, name: sourceAsset.name, kind: "IMAGE" as const }
       : undefined;
+  const sourceKey = source
+    ? `${person.id}:${source.kind}:${source.id}`
+    : undefined;
+  const currentSourceKeyRef = useRef(sourceKey);
+  currentSourceKeyRef.current = sourceKey;
   const consented = Boolean(source && consentedSourceId === source.id);
   const handleVideoUpload = async (file: File) => {
     if (review || busy) return;
@@ -605,6 +631,7 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
   };
   const startClone = async () => {
     if (review || busy || !source || !consented) return;
+    const requestSourceKey = sourceKey;
     setBusy(true);
     setError(undefined);
     try {
@@ -646,6 +673,14 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
       );
       refresh();
     } catch (cause) {
+      if (currentSourceKeyRef.current !== requestSourceKey) return;
+      if (source.kind === "IMAGE" && isMissingOralSource(cause)) {
+        setInvalidPhotoSourceKey(requestSourceKey);
+        setConsentedSourceId(undefined);
+        cloneSubmissionRef.current = undefined;
+        setError(undefined);
+        return;
+      }
       const message = customerVisibleErrorMessage(cause, "口播分身制作失败");
       setError(message);
       notify(message);
@@ -730,6 +765,7 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
               ipId: person.id,
               ...(photoSelectionInvalid ? { imageId: undefined } : {}),
             });
+            setInvalidPhotoSourceKey(undefined);
             openPicker("avatar-photo");
           }}
         >
@@ -780,7 +816,7 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
           <input
             aria-label="确认分身克隆授权"
             checked={consented}
-            disabled={review || busy}
+            disabled={review || busy || !source}
             type="checkbox"
             onChange={(event) => {
               cloneSubmissionRef.current = undefined;
