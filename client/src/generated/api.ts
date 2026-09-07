@@ -7547,12 +7547,6 @@ export interface components {
       range_completed: number;
       /** Total Completed */
       total_completed: number;
-      /** Today Completed Outputs */
-      today_completed_outputs: number;
-      /** Range Completed Outputs */
-      range_completed_outputs: number;
-      /** Total Completed Outputs */
-      total_completed_outputs: number;
       /** Today Generation Batches */
       today_generation_batches: number;
       /** Range Generation Batches */

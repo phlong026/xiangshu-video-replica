@@ -737,9 +737,6 @@ export type StudioAnalytics = {
   today_completed: number;
   range_completed: number;
   total_completed: number;
-  today_completed_outputs: number;
-  range_completed_outputs: number;
-  total_completed_outputs: number;
   today_generation_batches: number;
   range_generation_batches: number;
   total_generation_batches: number;

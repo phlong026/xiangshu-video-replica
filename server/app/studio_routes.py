@@ -24,8 +24,8 @@ router = APIRouter(prefix="/api")
 
 _BEIJING_TZ = timezone(timedelta(hours=8))
 
-# CURRENT_TIMESTAMP writes UTC on both dialects; the text comparison below
-# therefore keys on the Beijing calendar day converted back to UTC.
+# CURRENT_TIMESTAMP writes UTC on both dialects; timestamp casts below also
+# normalize ISO-8601 values written with ``T`` or an explicit offset.
 _CUTOFF_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
@@ -65,15 +65,19 @@ def studio_task_stats(
     # then the visibility clause, then the optional owner clause.
     parameters: list[object] = [cutoff, actor.id]
     if actor.role in {"employee", "customer"}:
-        clauses.append("project.owner_user_id = %s")
-        parameters.append(actor.id)
+        clauses.append(
+            "(project.owner_user_id = %s "
+            "OR (batch.project_id IS NULL AND batch.created_by_user_id = %s))"
+        )
+        parameters.extend([actor.id, actor.id])
 
     generation_row = conn.execute(
         f"""
         SELECT
-            COALESCE(SUM(CASE WHEN task.status = 'SUCCEEDED' AND task.updated_at >= %s
+            COALESCE(SUM(CASE WHEN task.status = 'SUCCEEDED'
+                AND task.updated_at::timestamptz >= %s::timestamptz
                 THEN 1 ELSE 0 END), 0) AS today_completed,
-            COALESCE(SUM(CASE WHEN task.status = 'RUNNING'
+            COALESCE(SUM(CASE WHEN task.status IN ('SUBMITTING', 'RUNNING', 'ARCHIVING')
                 THEN 1 ELSE 0 END), 0) AS running,
             COALESCE(SUM(CASE WHEN task.status IN ('PENDING', 'QUEUED')
                 THEN 1 ELSE 0 END), 0) AS queued,
@@ -85,7 +89,7 @@ def studio_task_stats(
                 THEN 1 ELSE 0 END), 0) AS total_completed
         FROM generation_tasks AS task
         JOIN generation_batches AS batch ON batch.id = task.batch_id
-        JOIN projects AS project ON project.id = batch.project_id
+        LEFT JOIN projects AS project ON project.id = batch.project_id
         WHERE {" AND ".join(clauses)}
         """,
         tuple(parameters),
@@ -99,7 +103,8 @@ def studio_task_stats(
     oral_row = conn.execute(
         f"""
         SELECT
-            COALESCE(SUM(CASE WHEN status = 'SUCCEEDED' AND updated_at >= %s
+            COALESCE(SUM(CASE WHEN status = 'SUCCEEDED'
+                AND updated_at::timestamptz >= %s::timestamptz
                 THEN 1 ELSE 0 END), 0) AS today_completed,
             COALESCE(SUM(CASE WHEN status IN ('SUBMITTING', 'RUNNING', 'ARCHIVING')
                 THEN 1 ELSE 0 END), 0) AS running,
@@ -175,9 +180,6 @@ class StudioAnalyticsResponse(BaseModel):
     today_completed: int
     range_completed: int
     total_completed: int
-    today_completed_outputs: int
-    range_completed_outputs: int
-    total_completed_outputs: int
     today_generation_batches: int
     range_generation_batches: int
     total_generation_batches: int
@@ -189,13 +191,14 @@ class StudioAnalyticsResponse(BaseModel):
 
 
 _RECENT_WORKS_CAP = 20
-_MOMENT_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
 def _utc_moment(value: str) -> datetime:
     """UTC 文本时间戳（SQLite 文本 / PG 文本或 datetime 序列化）→ UTC 时刻。"""
-    text = str(value)[:19].replace("T", " ")
-    return datetime.strptime(text, _MOMENT_FORMAT).replace(tzinfo=UTC)
+    moment = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return moment.astimezone(UTC)
 
 
 def studio_analytics(
@@ -230,16 +233,19 @@ def studio_analytics(
     # 占位符顺序随 SQL 文本：可见性 → 归属（可选）→ 窗口起点。
     parameters: list[object] = [actor.id]
     if actor.role in {"employee", "customer"}:
-        clauses.append("project.owner_user_id = %s")
-        parameters.append(actor.id)
-    clauses.append("task.updated_at >= %s")
+        clauses.append(
+            "(project.owner_user_id = %s "
+            "OR (batch.project_id IS NULL AND batch.created_by_user_id = %s))"
+        )
+        parameters.extend([actor.id, actor.id])
+    clauses.append("task.updated_at::timestamptz >= %s::timestamptz")
     parameters.append(range_start)
 
     generation_rows = conn.execute(
         f"""
         SELECT task.id, task.batch_id, task.status, task.updated_at,
                task.archive_status, batch.creation_kind, batch.project_id,
-               project.name AS project_name,
+               COALESCE(project.name, batch.display_name, '') AS project_name,
                (
                    SELECT -wt.available_delta
                    FROM wallet_transactions AS wt
@@ -249,13 +255,13 @@ def studio_analytics(
                ) AS cost_credits
         FROM generation_tasks AS task
         JOIN generation_batches AS batch ON batch.id = task.batch_id
-        JOIN projects AS project ON project.id = batch.project_id
+        LEFT JOIN projects AS project ON project.id = batch.project_id
         WHERE {" AND ".join(clauses)}
         """,
         tuple(parameters),
     ).fetchall()
 
-    oral_clauses = ["task.updated_at >= %s"]
+    oral_clauses = ["task.updated_at::timestamptz >= %s::timestamptz"]
     oral_parameters: list[object] = [range_start]
     if actor.role in {"employee", "customer"}:
         oral_clauses.append("task.owner_user_id = %s")
@@ -285,14 +291,17 @@ def studio_analytics(
     ]
     total_batch_parameters: list[object] = [actor.id]
     if actor.role in {"employee", "customer"}:
-        total_batch_clauses.append("project.owner_user_id = %s")
-        total_batch_parameters.append(actor.id)
+        total_batch_clauses.append(
+            "(project.owner_user_id = %s "
+            "OR (batch.project_id IS NULL AND batch.created_by_user_id = %s))"
+        )
+        total_batch_parameters.extend([actor.id, actor.id])
     total_batch_row = conn.execute(
         f"""
         SELECT COUNT(DISTINCT task.batch_id) AS completed_batches
         FROM generation_tasks AS task
         JOIN generation_batches AS batch ON batch.id = task.batch_id
-        JOIN projects AS project ON project.id = batch.project_id
+        LEFT JOIN projects AS project ON project.id = batch.project_id
         WHERE {" AND ".join(total_batch_clauses)}
         """,
         tuple(total_batch_parameters),
@@ -335,7 +344,7 @@ def studio_analytics(
                     task_id=str(row["id"]),
                     task_kind="generation",
                     batch_id=batch_id,
-                    project_id=str(row["project_id"]),
+                    project_id=(None if row["project_id"] is None else str(row["project_id"])),
                     title=str(row["project_name"] or ""),
                     creation_kind=kind,
                     completed_at=str(row["updated_at"]),
@@ -386,16 +395,13 @@ def studio_analytics(
         StudioAnalyticsKindCount(kind=kind, completed=count)
         for kind, count in sorted(completed_by_kind.items(), key=lambda item: (-item[1], item[0]))
     ]
-    range_completed_outputs = range_generation_outputs + range_oral_outputs
+    range_completed = range_generation_outputs + range_oral_outputs
     return StudioAnalyticsResponse(
         range_days=days,
         generated_at=moment.isoformat(),
         today_completed=stats.today_completed,
-        range_completed=range_completed_outputs,
+        range_completed=range_completed,
         total_completed=stats.total_completed,
-        today_completed_outputs=stats.today_completed,
-        range_completed_outputs=range_completed_outputs,
-        total_completed_outputs=stats.total_completed,
         today_generation_batches=len(today_generation_batches),
         range_generation_batches=len(range_generation_batches),
         total_generation_batches=(

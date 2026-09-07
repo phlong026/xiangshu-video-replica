@@ -1,4 +1,6 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
+import { act } from "react";
+import { createRoot } from "react-dom/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { StudioAnalytics } from "../api";
 import { createReviewData, createReviewState, reviewUser } from "./fixtures";
@@ -61,9 +63,6 @@ const sampleAnalytics: StudioAnalytics = {
   today_completed: 3,
   range_completed: 9,
   total_completed: 42,
-  today_completed_outputs: 3,
-  range_completed_outputs: 9,
-  total_completed_outputs: 42,
   today_generation_batches: 2,
   range_generation_batches: 6,
   total_generation_batches: 30,
@@ -245,7 +244,6 @@ describe("V1.4 数据看板", () => {
     const refreshed = {
       ...sampleAnalytics,
       generated_at: "2026-09-07T09:30:00+00:00",
-      range_completed_outputs: 12,
       range_completed: 12,
     };
     getStudioAnalytics.mockResolvedValue(refreshed);
@@ -326,7 +324,6 @@ describe("V1.4 数据看板", () => {
     });
     const newAnalytics = {
       ...sampleAnalytics,
-      range_completed_outputs: 2,
       range_completed: 2,
       recent_works: [],
     };
@@ -349,8 +346,168 @@ describe("V1.4 数据看板", () => {
     rendered.rerender(<AnalyticsPage />);
     expect(screen.queryByText("庭院黄昏实拍")).not.toBeInTheDocument();
 
-    resolveOld?.({ ...sampleAnalytics, range_completed_outputs: 99 });
+    resolveOld?.({ ...sampleAnalytics, range_completed: 99 });
     expect(await screen.findByText("2 个")).toBeInTheDocument();
     expect(screen.queryByText("99 个")).not.toBeInTheDocument();
+  });
+
+  it("账号提交后的 layout 窗口先让旧请求令牌失效", async () => {
+    let resolveOld: ((value: StudioAnalytics) => void) | undefined;
+    const oldRequest = new Promise<StudioAnalytics>((resolve) => {
+      resolveOld = resolve;
+    });
+    const updateData = vi.fn();
+    getStudioAnalytics.mockReturnValueOnce(oldRequest).mockResolvedValueOnce({
+      ...sampleAnalytics,
+      range_completed: 2,
+      recent_works: [],
+    });
+    let value = studio({
+      review: false,
+      user: { ...reviewUser, id: "account-a" },
+      data: productionData({ analytics7: sampleAnalytics }),
+      updateData,
+    });
+    useStudio.mockImplementation(() => value);
+
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(<AnalyticsPage />);
+    });
+    value = studio({
+      review: false,
+      user: { ...reviewUser, id: "account-b" },
+      data: productionData({ analytics7: sampleAnalytics }),
+      updateData,
+    });
+    const accountBCommitted = new Promise<void>((resolve) => {
+      const observer = new MutationObserver(() => {
+        if (!container.textContent?.includes("统计数据尚未就绪")) return;
+        observer.disconnect();
+        resolve();
+      });
+      observer.observe(container, { childList: true, subtree: true });
+    });
+    root.render(<AnalyticsPage />);
+    await accountBCommitted;
+    resolveOld?.({ ...sampleAnalytics, range_completed: 99 });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(
+      updateData.mock.calls.some(([updater]) => {
+        if (typeof updater !== "function") return false;
+        return updater(productionData()).analytics7?.range_completed === 99;
+      }),
+    ).toBe(false);
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  it("A 切到 B 再切回 A 时不会接纳第一次 A 请求", async () => {
+    let resolveFirstA: ((value: StudioAnalytics) => void) | undefined;
+    const firstA = new Promise<StudioAnalytics>((resolve) => {
+      resolveFirstA = resolve;
+    });
+    getStudioAnalytics
+      .mockReturnValueOnce(firstA)
+      .mockResolvedValueOnce({
+        ...sampleAnalytics,
+        range_completed: 2,
+        recent_works: [],
+      })
+      .mockResolvedValueOnce({
+        ...sampleAnalytics,
+        range_completed: 3,
+        recent_works: [],
+      });
+    let value = studio({
+      review: false,
+      user: { ...reviewUser, id: "account-a" },
+      data: productionData({ analytics7: sampleAnalytics }),
+    });
+    useStudio.mockImplementation(() => value);
+    const rendered = render(<AnalyticsPage />);
+
+    value = studio({
+      review: false,
+      user: { ...reviewUser, id: "account-b" },
+      data: productionData(),
+    });
+    rendered.rerender(<AnalyticsPage />);
+    value = studio({
+      review: false,
+      user: { ...reviewUser, id: "account-a" },
+      data: productionData(),
+    });
+    rendered.rerender(<AnalyticsPage />);
+    resolveFirstA?.({ ...sampleAnalytics, range_completed: 99 });
+
+    expect((await screen.findAllByText("3 个")).length).toBeGreaterThan(0);
+    expect(screen.queryByText("99 个")).not.toBeInTheDocument();
+  });
+
+  it("切换账号后的请求失败时不回显旧账号数据", async () => {
+    getStudioAnalytics
+      .mockImplementationOnce(() => new Promise(() => {}))
+      .mockRejectedValueOnce(new Error("account b unavailable"));
+    let value = studio({
+      review: false,
+      user: { ...reviewUser, id: "account-a" },
+      data: productionData({ analytics7: sampleAnalytics }),
+    });
+    useStudio.mockImplementation(() => value);
+    const rendered = render(<AnalyticsPage />);
+
+    value = studio({
+      review: false,
+      user: { ...reviewUser, id: "account-b" },
+      data: productionData({ analytics7: sampleAnalytics }),
+    });
+    rendered.rerender(<AnalyticsPage />);
+
+    expect(await screen.findByText("统计数据尚未就绪")).toBeInTheDocument();
+    expect(screen.queryByText("庭院黄昏实拍")).not.toBeInTheDocument();
+  });
+
+  it("重新挂载后旧实例的请求不能写入新账号", async () => {
+    let resolveOld: ((value: StudioAnalytics) => void) | undefined;
+    getStudioAnalytics
+      .mockReturnValueOnce(
+        new Promise<StudioAnalytics>((resolve) => {
+          resolveOld = resolve;
+        }),
+      )
+      .mockResolvedValueOnce({
+        ...sampleAnalytics,
+        range_completed: 2,
+        recent_works: [],
+      });
+    const oldUpdateData = vi.fn();
+    useStudio.mockReturnValue(
+      studio({
+        review: false,
+        user: { ...reviewUser, id: "account-a" },
+        data: productionData({ analytics7: sampleAnalytics }),
+        updateData: oldUpdateData,
+      }),
+    );
+    const oldView = render(<AnalyticsPage />);
+    oldView.unmount();
+
+    useStudio.mockReturnValue(
+      studio({
+        review: false,
+        user: { ...reviewUser, id: "account-b" },
+        data: productionData(),
+      }),
+    );
+    render(<AnalyticsPage />);
+    resolveOld?.({ ...sampleAnalytics, range_completed: 99 });
+
+    expect(await screen.findByText("2 个")).toBeInTheDocument();
+    expect(oldUpdateData).not.toHaveBeenCalled();
   });
 });

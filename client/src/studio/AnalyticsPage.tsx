@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import {
   getStudioAnalytics,
   getStudioStats,
@@ -20,9 +26,6 @@ const EMPTY_ANALYTICS: StudioAnalytics = {
   today_completed: 0,
   range_completed: 0,
   total_completed: 0,
-  today_completed_outputs: 0,
-  range_completed_outputs: 0,
-  total_completed_outputs: 0,
   today_generation_batches: 0,
   range_generation_batches: 0,
   total_generation_batches: 0,
@@ -199,7 +202,7 @@ export function AnalyticsPage() {
     }
   }, [range, review, updateData, user.id]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (accountIdRef.current === user.id) return;
     accountIdRef.current = user.id;
     setFresh({});
@@ -253,13 +256,13 @@ export function AnalyticsPage() {
   const metrics = [
     {
       label: "期间成片（产出项）",
-      value: `${analytics.range_completed_outputs} 个`,
+      value: `${analytics.range_completed} 个`,
       icon: "video",
       detail: `普通生成 ${analytics.range_generation_outputs} 个 · 口播 ${analytics.range_oral_outputs} 个`,
     },
     {
       label: "今日成片（产出项）",
-      value: `${analytics.today_completed_outputs} 个`,
+      value: `${analytics.today_completed} 个`,
       icon: "chart",
       detail: "按北京时间自然日",
     },
@@ -394,7 +397,7 @@ export function AnalyticsPage() {
               description="完成创作后这里会出现趋势曲线。"
             />
           )}
-          <p>合计成片产出项：{analytics.range_completed_outputs} 个</p>
+          <p>合计成片产出项：{analytics.range_completed} 个</p>
         </Panel>
         <Panel className="analytics-share">
           <h2>
@@ -434,7 +437,7 @@ export function AnalyticsPage() {
               <p className="analytics-share-empty">暂无成片记录</p>
             )}
           </div>
-          <p>合计成片产出项：{analytics.range_completed_outputs} 个</p>
+          <p>合计成片产出项：{analytics.range_completed} 个</p>
         </Panel>
       </div>
 
