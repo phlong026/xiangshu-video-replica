@@ -24,6 +24,7 @@ vi.mock("./api", async (importOriginal) => {
     compileGenerationPrompt: vi.fn(),
     createGenerationBatch: vi.fn(),
     createScriptVersion: vi.fn(),
+    getGenerationPriceQuote: vi.fn(),
     getGenerationRuntimeLimits: vi.fn(),
     getLatestGenerationPrompt: vi.fn(),
     getLatestScriptRewriteTask: vi.fn(),
@@ -399,6 +400,14 @@ describe("AnalysisWorkspace workflow gates", () => {
       max_quantity: 4,
       estimated_cost_per_task: null,
     });
+    vi.mocked(api.getGenerationPriceQuote).mockImplementation(
+      async (input) => ({
+        ...input,
+        unit_price_fen_per_second: 9,
+        estimated_seconds: input.duration_seconds * input.quantity,
+        estimated_price_fen: input.duration_seconds * input.quantity * 9,
+      }),
+    );
     vi.mocked(api.startVideoAnalysis).mockResolvedValue(pendingAnalysisTask);
     vi.mocked(api.waitForAnalysisTask).mockResolvedValue({
       ...pendingAnalysisTask,
@@ -2652,7 +2661,7 @@ describe("AnalysisWorkspace workflow gates", () => {
     expect(
       await screen.findByText("将创建 4 个付费生成任务"),
     ).toBeInTheDocument();
-    expect(screen.getByText("预计费用：¥10.00")).toBeInTheDocument();
+    expect(screen.getByText("预计费用：¥1.44（9 分/秒）")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "开始生成" }));
     await waitFor(() => expect(onBatchCreated).toHaveBeenCalledTimes(1));

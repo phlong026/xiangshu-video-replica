@@ -1053,6 +1053,7 @@ describe("runReplicaGeneration（复刻一键管线）", () => {
     resolution: "768P" as const,
     ratio: "16:9" as const,
     quantity: 1,
+    idempotencyKey: "replica-idempotency-1",
   };
 
   function mockHappyPath() {
@@ -1100,7 +1101,49 @@ describe("runReplicaGeneration（复刻一键管线）", () => {
       "project-1",
       "prompt-revised",
     );
+    expect(api.createGenerationBatch).toHaveBeenCalledWith(
+      "project-1",
+      expect.objectContaining({ idempotency_key: "replica-idempotency-1" }),
+    );
     expect(batch.id).toBe("batch-r1");
+  });
+
+  it("建批响应不确定时复用已冻结的完整请求", async () => {
+    api.createScriptVersion.mockResolvedValue({
+      id: "script-first",
+      payload: { shot_card_version_id: "scv-1" },
+    });
+    api.compileGenerationPrompt.mockResolvedValue({
+      id: "prompt-compiled-first",
+      payload: { prompt_text: "编译产物提示词" },
+    });
+    api.reviseGenerationPrompt.mockResolvedValue({
+      id: "prompt-revised-first",
+      payload: { prompt_text: "编辑后的提示词" },
+    });
+    api.lockGenerationPrompt.mockResolvedValue({ id: "prompt-locked-first" });
+    api.createGenerationBatch
+      .mockRejectedValueOnce(new Error("提交结果未知，请安全重试。"))
+      .mockResolvedValueOnce({ id: "batch-replayed" });
+
+    await expect(
+      live.runReplicaGeneration("project-1", baseInput),
+    ).rejects.toThrow("提交结果未知");
+    await expect(
+      live.runReplicaGeneration("project-1", {
+        ...baseInput,
+        idempotencyKey: "replica-key-after-reenter",
+      }),
+    ).resolves.toEqual({ id: "batch-replayed" });
+
+    expect(api.createScriptVersion).toHaveBeenCalledOnce();
+    expect(api.compileGenerationPrompt).toHaveBeenCalledOnce();
+    expect(api.reviseGenerationPrompt).toHaveBeenCalledOnce();
+    expect(api.lockGenerationPrompt).toHaveBeenCalledOnce();
+    expect(api.createGenerationBatch).toHaveBeenCalledTimes(2);
+    expect(api.createGenerationBatch.mock.calls[1]).toEqual(
+      api.createGenerationBatch.mock.calls[0],
+    );
   });
 
   it("Prompt 未编辑时跳过 revise 直接锁定编译产物", async () => {

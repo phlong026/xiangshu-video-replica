@@ -1293,12 +1293,14 @@ export function AnalysisWorkspace({
           <>
             <strong>将创建 {generationDrafts.quantity} 个付费生成任务</strong>
             <span>
-              {generationDrafts.limits.estimated_cost_per_task == null
+              {generationDrafts.priceQuoteStatus !== "ready" ||
+              !generationDrafts.priceQuote
                 ? "预计费用暂不可用"
                 : `预计费用：¥${(
-                    generationDrafts.limits.estimated_cost_per_task *
-                      generationDrafts.quantity
-                  ).toFixed(2)}`}
+                    generationDrafts.priceQuote.estimated_price_fen / 100
+                  ).toFixed(
+                    2,
+                  )}（${generationDrafts.priceQuote.unit_price_fen_per_second} 分/秒）`}
             </span>
           </>
         ) : null}

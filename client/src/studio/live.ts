@@ -16,6 +16,7 @@ import {
   defaultBatchProvider,
   downloadMaterialAsset,
   type GenerationBatch,
+  type GenerationBatchInput,
   type GenerationBatchListItem,
   type GenerationRatio,
   getAssetDownloadUrl,
@@ -75,6 +76,33 @@ const projectLimit = 24;
 const personLimit = 8;
 const projectPreviewLimit = 8;
 const sceneLimit = 12;
+
+type FrozenReplicaRequest = {
+  fingerprint: string;
+  idempotencyKey: string;
+  projectId: string;
+  request: GenerationBatchInput;
+};
+
+const frozenReplicaRequests = new Map<string, FrozenReplicaRequest>();
+const frozenReplicaRequestsByContext = new Map<string, FrozenReplicaRequest>();
+
+function replicaRequestContextKey(projectId: string, fingerprint: string) {
+  return `${projectId}:${fingerprint}`;
+}
+
+function clearFrozenReplicaRequest(frozen: FrozenReplicaRequest) {
+  if (frozenReplicaRequests.get(frozen.idempotencyKey) === frozen) {
+    frozenReplicaRequests.delete(frozen.idempotencyKey);
+  }
+  const contextKey = replicaRequestContextKey(
+    frozen.projectId,
+    frozen.fingerprint,
+  );
+  if (frozenReplicaRequestsByContext.get(contextKey) === frozen) {
+    frozenReplicaRequestsByContext.delete(contextKey);
+  }
+}
 
 function errorText(error: unknown) {
   return error instanceof Error && error.message.trim()
@@ -1116,8 +1144,27 @@ export async function runReplicaGeneration(
     resolution: "768P" | "2K";
     ratio: GenerationRatio;
     quantity: number;
+    idempotencyKey: string;
+    isCurrent?: () => boolean;
   },
 ): Promise<GenerationBatch> {
+  const { idempotencyKey, isCurrent, ...stableInput } = input;
+  const fingerprint = JSON.stringify(stableInput);
+  const contextKey = replicaRequestContextKey(projectId, fingerprint);
+  const frozen =
+    frozenReplicaRequests.get(idempotencyKey) ??
+    frozenReplicaRequestsByContext.get(contextKey);
+  if (frozen) {
+    if (frozen.projectId !== projectId || frozen.fingerprint !== fingerprint) {
+      throw new Error("复刻提交参数已变化，请重新确认费用后再试。");
+    }
+    if (isCurrent && !isCurrent()) {
+      throw new Error("复刻页面已变化，本次旧提交已停止。");
+    }
+    const batch = await createGenerationBatch(projectId, frozen.request);
+    clearFrozenReplicaRequest(frozen);
+    return batch;
+  }
   const script = await createScriptVersion(projectId, {
     source: input.originalScriptText.trim() ? "original" : "custom",
     text: input.originalScriptText,
@@ -1142,15 +1189,29 @@ export async function runReplicaGeneration(
         })
       : compiled;
   const locked = await lockGenerationPrompt(projectId, finalPrompt.id);
-  return createGenerationBatch(projectId, {
+  if (isCurrent && !isCurrent()) {
+    throw new Error("复刻页面已变化，本次旧提交已停止。");
+  }
+  const request: GenerationBatchInput = {
     quantity: input.quantity,
     prompt_version_id: locked.id,
     first_frame_asset_id: input.firstFrameAssetId,
     output_duration_seconds: input.outputDurationSeconds,
     resolution: input.resolution,
     ratio: input.ratio,
-    idempotency_key: crypto.randomUUID(),
+    idempotency_key: idempotencyKey,
     provider: defaultBatchProvider(),
     fake_audio_quality: "ok",
-  });
+  };
+  const prepared = {
+    fingerprint,
+    idempotencyKey,
+    projectId,
+    request,
+  };
+  frozenReplicaRequests.set(idempotencyKey, prepared);
+  frozenReplicaRequestsByContext.set(contextKey, prepared);
+  const batch = await createGenerationBatch(projectId, request);
+  clearFrozenReplicaRequest(prepared);
+  return batch;
 }

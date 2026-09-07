@@ -91,6 +91,40 @@ type Props = ComponentProps<typeof WorkspaceShell> & {
   initialState?: StudioState;
 };
 
+type QuoteStatus = "idle" | "loading" | "ready" | "error";
+
+type GenerationQuoteInput = {
+  resolution: "768P" | "2K";
+  duration_seconds: number;
+  quantity: number;
+};
+
+type SubmissionEnvelope = { fingerprint: string; key: string };
+
+function quoteMatchesInput(
+  quote: GenerationPriceQuote | null,
+  input: GenerationQuoteInput,
+): quote is GenerationPriceQuote {
+  return Boolean(
+    quote &&
+      quote.resolution === input.resolution &&
+      quote.duration_seconds === input.duration_seconds &&
+      quote.quantity === input.quantity &&
+      quote.estimated_seconds === input.duration_seconds * input.quantity,
+  );
+}
+
+function videoQuoteInput(draft: StudioDraft): GenerationQuoteInput {
+  return {
+    resolution: draft.resolution === "2K" ? "2K" : "768P",
+    duration_seconds:
+      draft.duration >= 4 && draft.duration <= 15
+        ? Math.round(draft.duration)
+        : 8,
+    quantity: draft.count === 2 || draft.count === 4 ? draft.count : 1,
+  };
+}
+
 function mergeStudioAssets(
   current: StudioAsset[],
   incoming: StudioAsset[],
@@ -194,6 +228,8 @@ export function StudioWorkspace({
   const [state, setState] = useState<StudioState>(
     () => initialState || createState(routeFromHash(window.location.hash)),
   );
+  const studioPageRef = useRef(state.page);
+  studioPageRef.current = state.page;
   const [data, setData] = useState<StudioData>(() =>
     review && reviewData ? reviewData : emptyData,
   );
@@ -206,11 +242,18 @@ export function StudioWorkspace({
     null,
   );
   const [generation, setGeneration] = useState<StudioTask["type"]>();
+  const generationRef = useRef<StudioTask["type"] | undefined>(undefined);
+  const generationDialogRevisionRef = useRef(0);
+  const mountedRef = useRef(true);
   const [newCreation, setNewCreation] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [showSearch, setShowSearch] = useState(false);
   const [oralPriceFen, setOralPriceFen] = useState<number | null>(null);
+  const [oralQuoteStatus, setOralQuoteStatus] = useState<QuoteStatus>("idle");
+  const [oralQuoteError, setOralQuoteError] = useState("");
+  const [oralQuoteRevision, setOralQuoteRevision] = useState(0);
+  const [oralSubmitting, setOralSubmitting] = useState(false);
   // ---- 视频生成（C2 独立创作）----
   const [videoCapabilities, setVideoCapabilities] =
     useState<IndependentCapabilities>();
@@ -223,17 +266,37 @@ export function StudioWorkspace({
   const [videoQuote, setVideoQuote] = useState<GenerationPriceQuote | null>(
     null,
   );
+  const [videoQuoteStatus, setVideoQuoteStatus] = useState<QuoteStatus>("idle");
+  const [videoQuoteError, setVideoQuoteError] = useState("");
+  const [videoQuoteRevision, setVideoQuoteRevision] = useState(0);
   const [videoSubmitting, setVideoSubmitting] = useState(false);
   const busyRef = useRef(false);
   const operationRef = useRef(0);
   const loadedPeopleRef = useRef(new Set<string>());
   const restoredAssetsRef = useRef<StudioAsset[]>([]);
+  const oralSubmittingRef = useRef(false);
+  const videoSubmittingRef = useRef(false);
+  const oralSubmissionRef = useRef<SubmissionEnvelope | null>(null);
+  const videoSubmissionRef = useRef<SubmissionEnvelope | null>(null);
   const notify = useCallback((message: string) => setNotice(message), []);
 
   // ---- 云端草稿（C7）----
   // 编辑后防抖自动保存；恢复只在用户尚未做任何编辑时生效，绝不覆盖进行中的输入。
   const DRAFT_AUTOSAVE_DELAY_MS = 2000;
   const latestDraftRef = useRef(state.draft);
+  generationRef.current = generation;
+  const closeGenerationDialog = useCallback(() => {
+    generationDialogRevisionRef.current += 1;
+    generationRef.current = undefined;
+    setGeneration(undefined);
+  }, []);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      generationDialogRevisionRef.current += 1;
+    };
+  }, []);
   const referenceAssetsRequestRef = useRef(0);
   const referenceAssetsDraftRef = useRef<StudioDraft | undefined>(undefined);
   const draftTouchedRef = useRef(false);
@@ -327,22 +390,42 @@ export function StudioWorkspace({
   }, [state.draft]);
   // 数字人口播提交前拉取单价（元/条）；失败保持 null 显示“待服务端报价”。
   useEffect(() => {
+    void oralQuoteRevision;
     if (review || generation !== "数字人口播") {
       setOralPriceFen(null);
+      setOralQuoteStatus("idle");
+      setOralQuoteError("");
       return;
     }
     let active = true;
+    setOralPriceFen(null);
+    setOralQuoteStatus("loading");
+    setOralQuoteError("");
     void getOralPrice()
       .then((price) => {
-        if (active) setOralPriceFen(price.unit_price_fen);
+        if (active) {
+          setOralPriceFen(price.unit_price_fen);
+          setOralQuoteStatus("ready");
+        }
       })
-      .catch(() => {
-        if (active) setOralPriceFen(null);
+      .catch((cause: unknown) => {
+        if (active) {
+          setOralPriceFen(null);
+          setOralQuoteStatus("error");
+          setOralQuoteError(
+            customerVisibleErrorMessage(cause, "口播报价读取失败，请重试。"),
+          );
+        }
       });
     return () => {
       active = false;
     };
-  }, [review, generation]);
+  }, [review, generation, oralQuoteRevision]);
+
+  const retryOralQuote = useCallback(
+    () => setOralQuoteRevision((value) => value + 1),
+    [],
+  );
 
   // 视频生成能力探测（扩展模式是否开放、单批上限）；审核模式不探测。
   // biome-ignore lint/correctness/useExhaustiveDependencies: 修订号专门用于用户点击后重新发起能力请求。
@@ -375,56 +458,128 @@ export function StudioWorkspace({
   );
 
   // 视频生成确认弹窗：按分辨率/时长/条数拉取按秒报价；草稿参数变化自动刷新。
-  const videoDuration = state.draft.duration;
-  const videoResolution = state.draft.resolution;
-  const videoCount = state.draft.count;
+  const videoDuration =
+    state.draft.duration >= 4 && state.draft.duration <= 15
+      ? Math.round(state.draft.duration)
+      : 8;
+  const videoResolution: GenerationQuoteInput["resolution"] =
+    state.draft.resolution === "2K" ? "2K" : "768P";
+  const videoCount =
+    state.draft.count === 2 || state.draft.count === 4 ? state.draft.count : 1;
+  const currentVideoQuoteInput: GenerationQuoteInput = {
+    resolution: videoResolution,
+    duration_seconds: videoDuration,
+    quantity: videoCount,
+  };
+  const videoQuoteReady =
+    videoQuoteStatus === "ready" &&
+    quoteMatchesInput(videoQuote, currentVideoQuoteInput);
   useEffect(() => {
+    void videoQuoteRevision;
     if (review || generation !== "视频生成") {
       setVideoQuote(null);
+      setVideoQuoteStatus("idle");
+      setVideoQuoteError("");
       return;
     }
     let active = true;
     setVideoQuote(null);
-    void getGenerationPriceQuote({
-      resolution: videoResolution === "2K" ? "2K" : "768P",
-      duration_seconds: (videoDuration >= 4 && videoDuration <= 15
-        ? Math.round(videoDuration)
-        : 8) as 4 | 15,
-      quantity: (videoCount === 2 || videoCount === 4 ? videoCount : 1) as
-        | 1
-        | 2
-        | 4,
-    })
+    setVideoQuoteStatus("loading");
+    setVideoQuoteError("");
+    const input = {
+      resolution: videoResolution,
+      duration_seconds: videoDuration,
+      quantity: videoCount,
+    };
+    void getGenerationPriceQuote(input)
       .then((quote) => {
-        if (active) setVideoQuote(quote);
+        if (!active) return;
+        if (!quoteMatchesInput(quote, input)) {
+          setVideoQuoteStatus("error");
+          setVideoQuoteError("视频报价参数与当前生成参数不一致，请重新获取。");
+          return;
+        }
+        setVideoQuote(quote);
+        setVideoQuoteStatus("ready");
       })
-      .catch(() => {
-        if (active) setVideoQuote(null);
+      .catch((cause: unknown) => {
+        if (active) {
+          setVideoQuote(null);
+          setVideoQuoteStatus("error");
+          setVideoQuoteError(
+            customerVisibleErrorMessage(cause, "视频报价读取失败，请重试。"),
+          );
+        }
       });
     return () => {
       active = false;
     };
-  }, [review, generation, videoDuration, videoResolution, videoCount]);
+  }, [
+    review,
+    generation,
+    videoDuration,
+    videoResolution,
+    videoCount,
+    videoQuoteRevision,
+  ]);
+
+  const retryVideoQuote = useCallback(
+    () => setVideoQuoteRevision((value) => value + 1),
+    [],
+  );
 
   const submitOralTask = async () => {
     if (currentUser.role === "auditor") {
       notify("当前账号为只读权限，不能提交生成。");
       return;
     }
+    if (
+      oralSubmittingRef.current ||
+      generationRef.current !== "数字人口播" ||
+      oralQuoteStatus !== "ready" ||
+      oralPriceFen === null
+    ) {
+      if (!oralSubmittingRef.current) notify("请先取得有效口播报价后再提交。");
+      return;
+    }
+    const dialogRevision = generationDialogRevisionRef.current;
+    const draft = latestDraftRef.current;
+    const draftFingerprint = JSON.stringify(draft);
+    const page = studioPageRef.current;
+    const isCurrent = () =>
+      mountedRef.current &&
+      generationDialogRevisionRef.current === dialogRevision &&
+      generationRef.current === "数字人口播" &&
+      studioPageRef.current === page &&
+      JSON.stringify(latestDraftRef.current) === draftFingerprint;
+    oralSubmittingRef.current = true;
+    setOralSubmitting(true);
     try {
       const mode = state.page === "oral-audio" ? "audio" : "text";
-      const input = buildOralInput(state.draft, mode);
-      const result = await createOralTask({
+      const input = buildOralInput(draft, mode);
+      const request = {
         identityId: input.ipId,
         avatarId: input.avatarId,
         voiceId: input.voiceId,
-        mode: mode === "audio" ? "AUDIO" : "TTS",
-        title: state.draft.script.title || "未命名口播",
-        scriptText: state.draft.script.text,
+        mode: mode === "audio" ? ("AUDIO" as const) : ("TTS" as const),
+        title: draft.script.title || "未命名口播",
+        scriptText: draft.script.text,
         audioAssetId: input.audioAssetId,
-        idempotencyKey: crypto.randomUUID(),
+      };
+      const fingerprint = JSON.stringify(request);
+      if (oralSubmissionRef.current?.fingerprint !== fingerprint) {
+        oralSubmissionRef.current = {
+          fingerprint,
+          key: crypto.randomUUID(),
+        };
+      }
+      const result = await createOralTask({
+        ...request,
+        idempotencyKey: oralSubmissionRef.current.key,
       });
-      setGeneration(undefined);
+      if (!isCurrent()) return;
+      oralSubmissionRef.current = null;
+      closeGenerationDialog();
       if (result.status === "FAILED") {
         notify("口播任务提交未成功，请核对素材后重试。");
       } else {
@@ -433,9 +588,14 @@ export function StudioWorkspace({
         refresh();
       }
     } catch (cause: unknown) {
-      notify(
-        customerVisibleErrorMessage(cause, "口播任务提交失败，请稍后重试。"),
-      );
+      if (isCurrent()) {
+        notify(
+          customerVisibleErrorMessage(cause, "口播任务提交失败，请稍后重试。"),
+        );
+      }
+    } finally {
+      oralSubmittingRef.current = false;
+      setOralSubmitting(false);
     }
   };
   const refresh = useCallback(() => setRevision((value) => value + 1), []);
@@ -463,16 +623,35 @@ export function StudioWorkspace({
       notify("当前账号为只读权限，不能提交生成。");
       return;
     }
-    if (videoSubmitting) return;
+    if (videoSubmittingRef.current || generationRef.current !== "视频生成")
+      return;
+    const draft = latestDraftRef.current;
+    const draftFingerprint = JSON.stringify(draft);
+    const page = studioPageRef.current;
+    const dialogRevision = generationDialogRevisionRef.current;
+    const isCurrent = () =>
+      mountedRef.current &&
+      generationDialogRevisionRef.current === dialogRevision &&
+      generationRef.current === "视频生成" &&
+      studioPageRef.current === page &&
+      JSON.stringify(latestDraftRef.current) === draftFingerprint;
+    const quoteInput = videoQuoteInput(draft);
+    if (
+      videoQuoteStatus !== "ready" ||
+      !quoteMatchesInput(videoQuote, quoteInput)
+    ) {
+      notify("请先取得与当前参数一致的视频报价后再提交。");
+      return;
+    }
+    videoSubmittingRef.current = true;
     setVideoSubmitting(true);
     try {
-      const draft = latestDraftRef.current;
       const mode = resolveVideoMode(state.page, Boolean(draft.firstFrameId));
       if (mode === "r2v") {
         const error = referenceDraftError(draft);
         if (error) throw new Error(error);
       }
-      const result = await createIndependentVideoTask({
+      const request = {
         mode,
         prompt_text: draft.prompt,
         first_frame_asset_id:
@@ -486,28 +665,44 @@ export function StudioWorkspace({
           draft.duration >= 4 && draft.duration <= 15
             ? Math.round(draft.duration)
             : 8,
-        resolution: draft.resolution === "2K" ? "2K" : "768P",
+        resolution:
+          draft.resolution === "2K" ? ("2K" as const) : ("768P" as const),
         ratio: (SUPPORTED_VIDEO_RATIOS as readonly string[]).includes(
           draft.ratio,
         )
           ? (draft.ratio as GenerationRatio)
           : "adaptive",
         quantity: draft.count === 2 || draft.count === 4 ? draft.count : 1,
-        idempotency_key: crypto.randomUUID(),
         provider: defaultBatchProvider(),
+      };
+      const fingerprint = JSON.stringify(request);
+      if (videoSubmissionRef.current?.fingerprint !== fingerprint) {
+        videoSubmissionRef.current = {
+          fingerprint,
+          key: crypto.randomUUID(),
+        };
+      }
+      const result = await createIndependentVideoTask({
+        ...request,
+        idempotency_key: videoSubmissionRef.current.key,
       });
-      setGeneration(undefined);
+      if (!isCurrent()) return;
+      videoSubmissionRef.current = null;
+      closeGenerationDialog();
       patchDraft({ videoBatchId: result.id });
       notify("视频生成任务已提交，可在预览区查看进度。");
       refresh();
     } catch (cause: unknown) {
-      notify(
-        customerVisibleErrorMessage(
-          cause,
-          "视频生成任务提交失败，请稍后重试。",
-        ),
-      );
+      if (isCurrent()) {
+        notify(
+          customerVisibleErrorMessage(
+            cause,
+            "视频生成任务提交失败，请稍后重试。",
+          ),
+        );
+      }
     } finally {
+      videoSubmittingRef.current = false;
       setVideoSubmitting(false);
     }
   };
@@ -803,6 +998,18 @@ export function StudioWorkspace({
           }
         }
       }
+      if (kind === "数字人口播") {
+        setOralPriceFen(null);
+        setOralQuoteStatus("loading");
+        setOralQuoteError("");
+      }
+      if (kind === "视频生成") {
+        setVideoQuote(null);
+        setVideoQuoteStatus("loading");
+        setVideoQuoteError("");
+      }
+      generationDialogRevisionRef.current += 1;
+      generationRef.current = kind;
       setGeneration(kind);
     } catch (cause) {
       notify(cause instanceof Error ? cause.message : "请检查生成原材料");
@@ -1159,7 +1366,7 @@ export function StudioWorkspace({
         {generation && (
           <StudioDialog
             title={`生成确认 · ${generation}`}
-            onClose={() => setGeneration(undefined)}
+            onClose={closeGenerationDialog}
           >
             <Hint>
               {review
@@ -1178,11 +1385,16 @@ export function StudioWorkspace({
               <div>
                 <dt>费用</dt>
                 <dd>
-                  {generation === "数字人口播" && oralPriceFen !== null
+                  {generation === "数字人口播" &&
+                  oralQuoteStatus === "ready" &&
+                  oralPriceFen !== null
                     ? `${(oralPriceFen / 100).toFixed(2)} 元/条`
-                    : generation === "视频生成" && videoQuote !== null
+                    : generation === "视频生成" && videoQuoteReady
                       ? `${(videoQuote.estimated_price_fen / 100).toFixed(2)} 元（${videoQuote.unit_price_fen_per_second} 分/秒 × ${videoQuote.estimated_seconds} 秒）`
-                      : "待服务端报价"}
+                      : oralQuoteStatus === "loading" ||
+                          videoQuoteStatus === "loading"
+                        ? "正在读取服务端报价…"
+                        : "待服务端报价"}
                 </dd>
               </div>
               <div>
@@ -1190,6 +1402,22 @@ export function StudioWorkspace({
                 <dd>尚未提交 · 未扣费</dd>
               </div>
             </dl>
+            {generation === "数字人口播" && oralQuoteError ? (
+              <div className="settings-error" role="alert">
+                <p>{oralQuoteError}</p>
+                <Button onClick={retryOralQuote} variant="outline">
+                  重新获取口播报价
+                </Button>
+              </div>
+            ) : null}
+            {generation === "视频生成" && videoQuoteError ? (
+              <div className="settings-error" role="alert">
+                <p>{videoQuoteError}</p>
+                <Button onClick={retryVideoQuote} variant="outline">
+                  重新获取视频报价
+                </Button>
+              </div>
+            ) : null}
             {review ||
             generation === "人物置换" ||
             generation === "视频复刻" ? (
@@ -1199,14 +1427,22 @@ export function StudioWorkspace({
             ) : generation === "视频生成" ? (
               <Button
                 variant="primary"
-                disabled={videoSubmitting}
+                disabled={videoSubmitting || !videoQuoteReady}
                 onClick={() => void submitVideoTask()}
               >
-                确认费用并提交
+                {videoSubmitting ? "提交中…" : "确认费用并提交"}
               </Button>
             ) : (
-              <Button variant="primary" onClick={() => void submitOralTask()}>
-                确认费用并提交
+              <Button
+                disabled={
+                  oralSubmitting ||
+                  oralQuoteStatus !== "ready" ||
+                  oralPriceFen === null
+                }
+                variant="primary"
+                onClick={() => void submitOralTask()}
+              >
+                {oralSubmitting ? "提交中…" : "确认费用并提交"}
               </Button>
             )}
             {!review &&
@@ -1214,7 +1450,7 @@ export function StudioWorkspace({
               generation !== "视频生成" && (
                 <Button
                   onClick={() => {
-                    setGeneration(undefined);
+                    closeGenerationDialog();
                     openLive("analysis");
                   }}
                 >

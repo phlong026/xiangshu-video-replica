@@ -8,6 +8,7 @@ import {
   createScriptVersion,
   defaultBatchProvider,
   type GenerationBatch,
+  type GenerationBatchInput,
   type GenerationPriceQuote,
   type GenerationRatio,
   getGenerationPriceQuote,
@@ -40,11 +41,18 @@ type ProjectDetailFlowProps = {
 };
 
 type GenerationPhase = "idle" | "running" | "done";
+type QuoteStatus = "loading" | "ready" | "error";
 
 type IdempotencyEnvelope = {
-  fingerprint: string;
-  key: string;
+  request: GenerationBatchInput;
+  sourceFingerprint: string;
 };
+
+const frozenDetailRequests = new Map<string, IdempotencyEnvelope>();
+
+function detailRequestKey(project: Project, sourceFingerprint: string): string {
+  return JSON.stringify([project.owner_user_id, project.id, sourceFingerprint]);
+}
 
 function newIdempotencyKey(): string {
   return typeof globalThis.crypto?.randomUUID === "function"
@@ -91,6 +99,10 @@ export function ProjectDetailFlow({
   const [priceQuote, setPriceQuote] = useState<GenerationPriceQuote | null>(
     null,
   );
+  const [priceQuoteStatus, setPriceQuoteStatus] =
+    useState<QuoteStatus>("loading");
+  const [priceQuoteError, setPriceQuoteError] = useState("");
+  const [priceQuoteRevision, setPriceQuoteRevision] = useState(0);
   const [generationError, setGenerationError] = useState("");
   const [generationMessage, setGenerationMessage] = useState("");
   // 用户在第一段编辑并另存过的提示词文本。自定义文案未变时提交会复用；
@@ -104,6 +116,9 @@ export function ProjectDetailFlow({
   // 只有完全相同的提交内容才复用幂等键。上一次请求响应丢失时可安全重试；
   // 用户修改文案、Prompt、首帧或生成参数后必须生成新键，避免服务端 409。
   const idempotencyEnvelopeRef = useRef<IdempotencyEnvelope | null>(null);
+  const submissionBusyRef = useRef(false);
+  const submissionOperationRef = useRef(0);
+  const submissionContextRef = useRef("");
   const autoMatchAttemptedRef = useRef<Set<string>>(new Set());
   const firstFrameStepRef = useRef<HTMLFieldSetElement>(null);
   const onBusyChangeRef = useRef(onBusyChange);
@@ -116,8 +131,26 @@ export function ProjectDetailFlow({
   const isUpstreamBusy = upstreamBusyRef.current.size > 0;
   const isBusy = generationPhase === "running" || isUpstreamBusy;
   const scriptWasEdited = scriptText.trim() !== originalScript.trim();
+  submissionContextRef.current = JSON.stringify({
+    projectId: project.id,
+    firstFrameAssetId,
+    generationDuration,
+    generationQuantity,
+    generationRatio,
+    scriptText: scriptText.trim(),
+    revisedPromptText: revisedPromptText?.trim() ?? "",
+  });
+  const priceQuoteReady = Boolean(
+    priceQuoteStatus === "ready" &&
+      priceQuote &&
+      priceQuote.resolution === "768P" &&
+      priceQuote.duration_seconds === generationDuration &&
+      priceQuote.quantity === generationQuantity &&
+      priceQuote.estimated_seconds === generationDuration * generationQuantity,
+  );
   const canStart =
     Boolean(firstFrameAssetId) &&
+    priceQuoteReady &&
     !isBusy &&
     !firstFrameGenerationBusy &&
     !readOnly &&
@@ -126,6 +159,18 @@ export function ProjectDetailFlow({
   useEffect(() => {
     onBusyChangeRef.current?.(isBusy);
   }, [isBusy]);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 切换项目必须显式失效正在进行的付费提交。
+  useEffect(() => {
+    submissionOperationRef.current += 1;
+    submissionBusyRef.current = false;
+    setGenerationPhase("idle");
+    setGenerationError("");
+    setGenerationMessage("");
+    return () => {
+      submissionOperationRef.current += 1;
+    };
+  }, [project.id]);
 
   const markUpstreamBusy = useCallback((key: string, busy: boolean) => {
     if (busy) {
@@ -156,22 +201,38 @@ export function ProjectDetailFlow({
   }, [project.id]);
 
   useEffect(() => {
+    void priceQuoteRevision;
     let active = true;
     if (typeof getGenerationPriceQuote !== "function") return;
-    setPriceQuote(null);
-    setGenerationError("");
-    getGenerationPriceQuote({
-      resolution: "768P",
+    const input = {
+      resolution: "768P" as const,
       duration_seconds: generationDuration,
       quantity: generationQuantity,
-    })
+    };
+    setPriceQuote(null);
+    setPriceQuoteStatus("loading");
+    setPriceQuoteError("");
+    getGenerationPriceQuote(input)
       .then((quote) => {
-        if (active) setPriceQuote(quote);
+        if (!active) return;
+        if (
+          quote.resolution !== input.resolution ||
+          quote.duration_seconds !== input.duration_seconds ||
+          quote.quantity !== input.quantity ||
+          quote.estimated_seconds !== input.duration_seconds * input.quantity
+        ) {
+          setPriceQuoteStatus("error");
+          setPriceQuoteError("生成报价参数与当前生成参数不一致，请重新获取。");
+          return;
+        }
+        setPriceQuote(quote);
+        setPriceQuoteStatus("ready");
       })
       .catch((quoteError: unknown) => {
         if (active) {
           setPriceQuote(null);
-          setGenerationError(
+          setPriceQuoteStatus("error");
+          setPriceQuoteError(
             quoteError instanceof Error && quoteError.message.trim()
               ? quoteError.message
               : "读取生成费用失败，请稍后重试。",
@@ -181,7 +242,11 @@ export function ProjectDetailFlow({
     return () => {
       active = false;
     };
-  }, [generationDuration, generationQuantity]);
+  }, [generationDuration, generationQuantity, priceQuoteRevision]);
+
+  function retryPriceQuote() {
+    setPriceQuoteRevision((value) => value + 1);
+  }
 
   // 第一段提示词预览：进入页面即由拆解结果自动编译，不依赖首帧。
   useEffect(() => {
@@ -393,68 +458,106 @@ export function ProjectDetailFlow({
   }
 
   async function handleStartGeneration() {
-    if (!firstFrameAssetId || isBusy || firstFrameGenerationBusy || readOnly) {
+    if (
+      submissionBusyRef.current ||
+      !firstFrameAssetId ||
+      isBusy ||
+      firstFrameGenerationBusy ||
+      readOnly
+    ) {
       return;
     }
+    if (!priceQuoteReady) {
+      setGenerationError(
+        priceQuoteError || "请先取得与当前参数一致的生成报价后再提交。",
+      );
+      return;
+    }
+    const operation = submissionOperationRef.current + 1;
+    submissionOperationRef.current = operation;
+    const sourceFingerprint = submissionContextRef.current;
+    const isCurrent = () =>
+      submissionOperationRef.current === operation &&
+      submissionContextRef.current === sourceFingerprint;
+    submissionBusyRef.current = true;
     setGenerationPhase("running");
     setGenerationError("");
     setGenerationMessage("");
     try {
-      const shotCardVersionId = await ensureShotCardVersion();
-      const scriptVersionId = await ensureScriptVersion(shotCardVersionId);
-      const duration = generationDuration;
-      const compiled = await compileGenerationPrompt(project.id, {
-        script_version_id: scriptVersionId,
-        shot_card_version_id: shotCardVersionId,
-        first_frame_asset_id: firstFrameAssetId,
-        output_duration_seconds: duration,
-        resolution: "768P",
-        ratio: generationRatio,
-      });
-      // 只有文案未改时才复用第一段保存的完整 Prompt。自定义文案变化后，
-      // compiled 已包含新文本，不能再被此前保存的旧 Prompt 覆盖。
-      let promptVersionId = compiled.id;
-      if (revisedPromptText?.trim() && !scriptWasEdited) {
-        const revised = await reviseGenerationPrompt(project.id, {
-          base_prompt_version_id: compiled.id,
-          prompt_text: revisedPromptText,
+      let envelope = idempotencyEnvelopeRef.current;
+      const frozenRequestKey = detailRequestKey(project, sourceFingerprint);
+      if (!envelope || envelope.sourceFingerprint !== sourceFingerprint) {
+        envelope = frozenDetailRequests.get(frozenRequestKey) ?? null;
+        idempotencyEnvelopeRef.current = envelope;
+      }
+      if (!envelope || envelope.sourceFingerprint !== sourceFingerprint) {
+        const shotCardVersionId = await ensureShotCardVersion();
+        const scriptVersionId = await ensureScriptVersion(shotCardVersionId);
+        const duration = generationDuration;
+        const compiled = await compileGenerationPrompt(project.id, {
+          script_version_id: scriptVersionId,
+          shot_card_version_id: shotCardVersionId,
+          first_frame_asset_id: firstFrameAssetId,
+          output_duration_seconds: duration,
+          resolution: "768P",
+          ratio: generationRatio,
         });
-        promptVersionId = revised.id;
-      }
-      const locked = await lockGenerationPrompt(project.id, promptVersionId);
-      const batchRequest = {
-        quantity: generationQuantity,
-        prompt_version_id: locked.id,
-        first_frame_asset_id: firstFrameAssetId,
-        output_duration_seconds: duration,
-        resolution: "768P" as const,
-        ratio: generationRatio,
-        provider: defaultBatchProvider(),
-        fake_audio_quality: "ok" as const,
-      };
-      const fingerprint = JSON.stringify({
-        ...batchRequest,
-        script_text: scriptText.trim(),
-      });
-      if (idempotencyEnvelopeRef.current?.fingerprint !== fingerprint) {
-        idempotencyEnvelopeRef.current = {
-          fingerprint,
-          key: newIdempotencyKey(),
+        // 只有文案未改时才复用第一段保存的完整 Prompt。自定义文案变化后，
+        // compiled 已包含新文本，不能再被此前保存的旧 Prompt 覆盖。
+        let promptVersionId = compiled.id;
+        if (revisedPromptText?.trim() && !scriptWasEdited) {
+          const revised = await reviseGenerationPrompt(project.id, {
+            base_prompt_version_id: compiled.id,
+            prompt_text: revisedPromptText,
+          });
+          promptVersionId = revised.id;
+        }
+        const locked = await lockGenerationPrompt(project.id, promptVersionId);
+        if (!isCurrent()) {
+          throw new Error("生成参数已变化，请按最新报价重新提交。");
+        }
+        envelope = {
+          sourceFingerprint,
+          request: {
+            quantity: generationQuantity,
+            prompt_version_id: locked.id,
+            first_frame_asset_id: firstFrameAssetId,
+            output_duration_seconds: duration,
+            resolution: "768P",
+            ratio: generationRatio,
+            provider: defaultBatchProvider(),
+            fake_audio_quality: "ok",
+            idempotency_key: newIdempotencyKey(),
+          },
         };
+        idempotencyEnvelopeRef.current = envelope;
+        frozenDetailRequests.set(frozenRequestKey, envelope);
       }
-      const batch = await createGenerationBatch(project.id, {
-        ...batchRequest,
-        idempotency_key: idempotencyEnvelopeRef.current.key,
-      });
-      idempotencyEnvelopeRef.current = null;
+      if (!isCurrent()) {
+        throw new Error("生成参数已变化，请按最新报价重新提交。");
+      }
+      const batch = await createGenerationBatch(project.id, envelope.request);
+      if (idempotencyEnvelopeRef.current === envelope) {
+        idempotencyEnvelopeRef.current = null;
+      }
+      if (frozenDetailRequests.get(frozenRequestKey) === envelope) {
+        frozenDetailRequests.delete(frozenRequestKey);
+      }
+      if (!isCurrent()) return;
       setGenerationPhase("done");
       setGenerationMessage("生成任务已创建，正在前往任务记录…");
       onBatchCreated(batch);
     } catch (error) {
-      setGenerationPhase("idle");
-      setGenerationError(
-        error instanceof Error ? error.message : "创建生成任务失败，请重试。",
-      );
+      if (submissionOperationRef.current === operation) {
+        setGenerationPhase("idle");
+        setGenerationError(
+          error instanceof Error ? error.message : "创建生成任务失败，请重试。",
+        );
+      }
+    } finally {
+      if (submissionOperationRef.current === operation) {
+        submissionBusyRef.current = false;
+      }
     }
   }
 
@@ -462,8 +565,8 @@ export function ProjectDetailFlow({
     return (
       <p className="flow-cost">
         预计消耗 {generationDuration * generationQuantity} 秒额度
-        {priceQuote
-          ? `，约 ¥${(priceQuote.estimated_price_fen / 100).toFixed(2)}`
+        {priceQuoteReady && priceQuote
+          ? `，约 ¥${(priceQuote.estimated_price_fen / 100).toFixed(2)}（${priceQuote.unit_price_fen_per_second} 分/秒）`
           : ""}
         。
       </p>
@@ -533,7 +636,7 @@ export function ProjectDetailFlow({
         </p>
       ) : null}
 
-      <fieldset className="flow-step">
+      <fieldset className="flow-step" disabled={generationPhase === "running"}>
         <legend>① 解析提示词</legend>
         {isPreviewLoading ? (
           <p className="status-note">正在编译提示词预览…</p>
@@ -546,13 +649,20 @@ export function ProjectDetailFlow({
                 ? "已保存口播稿"
                 : "拆解原稿"
             }`}
-            onSave={readOnly ? undefined : handleSavePrompt}
+            onSave={
+              readOnly || generationPhase === "running"
+                ? undefined
+                : handleSavePrompt
+            }
             text={preview.prompt_text}
           />
         ) : null}
       </fieldset>
 
-      <fieldset className="flow-step" disabled={firstFrameGenerationBusy}>
+      <fieldset
+        className="flow-step"
+        disabled={firstFrameGenerationBusy || generationPhase === "running"}
+      >
         <legend>② 源画面与人物</legend>
         {firstFrameGenerationBusy ? (
           <p className="status-note">
@@ -583,7 +693,11 @@ export function ProjectDetailFlow({
         />
       </fieldset>
 
-      <fieldset className="flow-step" ref={firstFrameStepRef}>
+      <fieldset
+        className="flow-step"
+        disabled={generationPhase === "running"}
+        ref={firstFrameStepRef}
+      >
         <legend>③ 人物置换首帧</legend>
         {referenceStatus ? (
           referenceStatus
@@ -603,7 +717,7 @@ export function ProjectDetailFlow({
         ) : null}
       </fieldset>
 
-      <fieldset className="flow-step">
+      <fieldset className="flow-step" disabled={generationPhase === "running"}>
         <legend>④ 自定义文案</legend>
         <div className="flow-script">
           <p className="flow-hint">
@@ -612,7 +726,7 @@ export function ProjectDetailFlow({
           </p>
           <textarea
             aria-label="自定义文案"
-            disabled={readOnly}
+            disabled={readOnly || generationPhase === "running"}
             onChange={(event) => setScriptText(event.target.value)}
             value={scriptText}
           />
@@ -632,7 +746,23 @@ export function ProjectDetailFlow({
         </div>
       </fieldset>
 
-      <fieldset className="flow-step" disabled={!firstFrameAssetId}>
+      {priceQuoteStatus === "error" ? (
+        <div className="settings-error" role="alert">
+          <p>{priceQuoteError}</p>
+          <button
+            className="secondary-button"
+            onClick={retryPriceQuote}
+            type="button"
+          >
+            重新获取生成报价
+          </button>
+        </div>
+      ) : null}
+
+      <fieldset
+        className="flow-step"
+        disabled={!firstFrameAssetId || generationPhase === "running"}
+      >
         <legend>⑤ 提交生成</legend>
         {generationError ? (
           <p className="settings-error" role="alert">

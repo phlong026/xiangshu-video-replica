@@ -186,8 +186,13 @@ describe("GenerationComposer", () => {
       max_quantity: 4,
       estimated_cost_per_task: null,
     });
-    vi.mocked(api.getGenerationPriceQuote).mockRejectedValue(
-      new Error("quote unavailable"),
+    vi.mocked(api.getGenerationPriceQuote).mockImplementation(
+      async (input) => ({
+        ...input,
+        unit_price_fen_per_second: 9,
+        estimated_seconds: input.duration_seconds * input.quantity,
+        estimated_price_fen: input.duration_seconds * input.quantity * 9,
+      }),
     );
     vi.mocked(api.listSavedGenerationPrompts).mockResolvedValue([]);
     vi.mocked(api.saveGenerationPrompt).mockRejectedValue(
@@ -565,7 +570,11 @@ describe("GenerationComposer", () => {
     fireEvent.change(quantity, { target: { value: "4" } });
     expect(screen.getByText("将创建 4 个付费生成任务")).toBeInTheDocument();
     expect(screen.getByText("预计消耗 60 秒额度")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "创建 4 个生成任务" }));
+    const createFour = screen.getByRole("button", {
+      name: "创建 4 个生成任务",
+    });
+    await waitFor(() => expect(createFour).toBeEnabled());
+    fireEvent.click(createFour);
 
     await waitFor(() =>
       expect(api.createGenerationBatch).toHaveBeenCalledOnce(),
@@ -617,9 +626,11 @@ describe("GenerationComposer", () => {
     ).toEqual(["1", "2", "4"]);
 
     fireEvent.change(quantity, { target: { value: "4" } });
-    expect(
-      screen.getByRole("button", { name: "创建 4 个生成任务" }),
-    ).toBeEnabled();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "创建 4 个生成任务" }),
+      ).toBeEnabled(),
+    );
   });
 
   it("requires prompt recompilation after generation parameters change", async () => {
@@ -732,6 +743,54 @@ describe("GenerationComposer", () => {
         estimated_price_fen: 36,
       });
     });
+  });
+
+  it("blocks both generation actions while the current quote is unavailable and retries it", async () => {
+    vi.mocked(api.getLatestScriptVersion).mockResolvedValue({
+      version: {
+        ...baseVersion,
+        id: "script-1",
+        payload: {
+          source: "original",
+          full_text: props.originalScript,
+          shot_card_version_id: "shot-card-1",
+        },
+      },
+      stale: false,
+      stale_reasons: [],
+    });
+    vi.mocked(api.getLatestGenerationPrompt).mockResolvedValue({
+      version: promptVersion("LOCKED"),
+      stale: false,
+      stale_reasons: [],
+    });
+    vi.mocked(api.getGenerationPriceQuote)
+      .mockRejectedValueOnce(new Error("复刻费用暂不可用"))
+      .mockResolvedValueOnce({
+        resolution: "768P",
+        duration_seconds: 15,
+        quantity: 1,
+        unit_price_fen_per_second: 9,
+        estimated_seconds: 15,
+        estimated_price_fen: 135,
+      });
+
+    render(<WorkspaceHost />);
+
+    expect(await screen.findByText("复刻费用暂不可用")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "创建 1 个生成任务" }),
+    ).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "触发一键流水线" }));
+    expect(api.createGenerationBatch).not.toHaveBeenCalled();
+    expect(api.createScriptVersion).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "重新获取生成报价" }));
+
+    expect(await screen.findByText(/约 ¥1\.35/)).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "创建 1 个生成任务" }),
+    ).toBeEnabled();
   });
 
   it("keeps a legacy locked prompt without frozen parameters usable", async () => {
@@ -1032,6 +1091,18 @@ describe("GenerationComposer", () => {
   });
 
   it("blocks a different paid request until the unresolved batch is recovered", async () => {
+    const quote = {
+      resolution: "768P" as const,
+      duration_seconds: 15,
+      quantity: 1,
+      unit_price_fen_per_second: 9,
+      estimated_seconds: 15,
+      estimated_price_fen: 135,
+    };
+    vi.mocked(api.getGenerationPriceQuote)
+      .mockResolvedValueOnce(quote)
+      .mockRejectedValueOnce(new Error("恢复请求报价暂不可用"))
+      .mockResolvedValue(quote);
     vi.mocked(api.getLatestScriptVersion).mockResolvedValue({
       version: {
         ...baseVersion,
@@ -1078,6 +1149,17 @@ describe("GenerationComposer", () => {
     expect(await screen.findByText("网络连接失败")).toBeInTheDocument();
 
     const firstRequest = vi.mocked(api.createGenerationBatch).mock.calls[0][1];
+    expect(await screen.findByText("恢复请求报价暂不可用")).toBeInTheDocument();
+    const recover = screen.getByRole("button", {
+      name: "恢复已提交批次",
+    });
+    expect(recover).toBeDisabled();
+    fireEvent.click(recover);
+    expect(api.createGenerationBatch).toHaveBeenCalledOnce();
+
+    fireEvent.click(screen.getByRole("button", { name: "重新获取生成报价" }));
+    await waitFor(() => expect(recover).toBeEnabled());
+
     fireEvent.change(screen.getByLabelText("生成数量"), {
       target: { value: "2" },
     });
@@ -1099,7 +1181,7 @@ describe("GenerationComposer", () => {
       ).key,
     ).toBe(firstRequest.idempotency_key);
 
-    fireEvent.click(screen.getByRole("button", { name: "恢复已提交批次" }));
+    fireEvent.click(recover);
     await waitFor(() =>
       expect(api.createGenerationBatch).toHaveBeenCalledTimes(2),
     );

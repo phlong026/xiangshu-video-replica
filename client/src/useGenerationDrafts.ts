@@ -43,6 +43,8 @@ export type IdempotencyRecord = {
   request: GenerationBatchInput;
 };
 
+export type GenerationQuoteStatus = "idle" | "loading" | "ready" | "error";
+
 const DEFAULT_LIMITS: GenerationRuntimeLimits = {
   min_quantity: 1,
   max_quantity: 1,
@@ -104,6 +106,11 @@ export function useGenerationDrafts({
   const [priceQuote, setPriceQuote] = useState<GenerationPriceQuote | null>(
     null,
   );
+  const [priceQuoteStatus, setPriceQuoteStatus] =
+    useState<GenerationQuoteStatus>("idle");
+  const [priceQuoteError, setPriceQuoteError] = useState("");
+  const [priceQuoteContextKey, setPriceQuoteContextKey] = useState("");
+  const [priceQuoteRevision, setPriceQuoteRevision] = useState(0);
   const [savedPrompts, setSavedPrompts] = useState<GenerationVersion[]>([]);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -343,34 +350,93 @@ export function useGenerationDrafts({
       payloadMatchesOrMissing(promptVersion, "resolution", resolution) &&
       payloadMatchesOrMissing(promptVersion, "ratio", ratio),
   );
+  const quotedResolution = recoveryRecord?.request.resolution ?? resolution;
+  const quotedDuration =
+    recoveryRecord?.request.output_duration_seconds ?? duration;
+  const quotedQuantity = recoveryRecord?.request.quantity ?? quantity;
+  const quoteInputValid = recoveryRecord
+    ? Number.isInteger(quotedDuration) &&
+      quotedDuration >= 4 &&
+      quotedDuration <= 15 &&
+      quotedQuantity !== null &&
+      isCustomerQuantity(quotedQuantity)
+    : durationValid &&
+      quotedQuantity !== null &&
+      isCustomerQuantity(quotedQuantity);
+  const currentQuoteContextKey = recoveryRecord
+    ? `recovery:${recoveryRecord.key}`
+    : `current:${quotedResolution}:${quotedDuration}:${quotedQuantity ?? "invalid"}`;
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 恢复记录即使参数相同也必须重新报价后才能重放付费请求。
   useEffect(() => {
+    void priceQuoteRevision;
     let active = true;
     if (
       typeof getGenerationPriceQuote !== "function" ||
-      !durationValid ||
-      quantity === null ||
-      !isCustomerQuantity(quantity)
+      !quoteInputValid ||
+      quotedQuantity === null
     ) {
       setPriceQuote(null);
+      setPriceQuoteStatus("idle");
+      setPriceQuoteError("");
+      setPriceQuoteContextKey("");
       return;
     }
+    const input = {
+      resolution: quotedResolution,
+      duration_seconds: quotedDuration,
+      quantity: quotedQuantity,
+    };
     setPriceQuote(null);
-    getGenerationPriceQuote({
-      resolution,
-      duration_seconds: duration as 4 | 15,
-      quantity,
-    })
+    setPriceQuoteStatus("loading");
+    setPriceQuoteError("");
+    setPriceQuoteContextKey("");
+    getGenerationPriceQuote(input)
       .then((quote) => {
-        if (active) setPriceQuote(quote);
+        if (!active) return;
+        if (
+          quote.resolution !== input.resolution ||
+          quote.duration_seconds !== input.duration_seconds ||
+          quote.quantity !== input.quantity ||
+          quote.estimated_seconds !== input.duration_seconds * input.quantity
+        ) {
+          setPriceQuoteStatus("error");
+          setPriceQuoteError("生成报价参数与当前生成参数不一致，请重新获取。");
+          return;
+        }
+        setPriceQuote(quote);
+        setPriceQuoteStatus("ready");
+        setPriceQuoteContextKey(currentQuoteContextKey);
       })
-      .catch(() => {
-        if (active) setPriceQuote(null);
+      .catch((requestError: unknown) => {
+        if (!active) return;
+        setPriceQuote(null);
+        setPriceQuoteStatus("error");
+        setPriceQuoteError(
+          errorMessage(requestError, "读取生成费用失败，请重试。"),
+        );
       });
     return () => {
       active = false;
     };
-  }, [duration, durationValid, quantity, resolution]);
+  }, [
+    priceQuoteRevision,
+    quoteInputValid,
+    quotedDuration,
+    quotedQuantity,
+    quotedResolution,
+    recoveryRecord?.key,
+    currentQuoteContextKey,
+  ]);
+  const priceQuoteReady = Boolean(
+    priceQuoteStatus === "ready" &&
+      priceQuoteContextKey === currentQuoteContextKey &&
+      priceQuote &&
+      priceQuote.resolution === quotedResolution &&
+      priceQuote.duration_seconds === quotedDuration &&
+      priceQuote.quantity === quotedQuantity &&
+      priceQuote.estimated_seconds === quotedDuration * priceQuote.quantity,
+  );
   const canCompile = Boolean(
     !readOnly &&
       scriptVersion &&
@@ -390,6 +456,7 @@ export function useGenerationDrafts({
       promptParametersMatch &&
       quantity !== null &&
       durationValid &&
+      priceQuoteReady &&
       !recoveryRecordConflicts &&
       !busyAction,
   );
@@ -696,8 +763,12 @@ export function useGenerationDrafts({
       !recoveryRecord ||
       readOnly ||
       busyAction ||
-      isCreatingBatchRef.current
+      isCreatingBatchRef.current ||
+      !priceQuoteReady
     ) {
+      if (!priceQuoteReady) {
+        setError(priceQuoteError || "请先取得待恢复请求的有效报价后再继续。");
+      }
       return;
     }
     idempotencyRecordRef.current = recoveryRecord;
@@ -729,6 +800,12 @@ export function useGenerationDrafts({
     if (quantity === null) {
       setError(
         quantityError || "生成数量不在允许范围内，请先在「生成设置」中调整。",
+      );
+      return;
+    }
+    if (!priceQuoteReady) {
+      setError(
+        priceQuoteError || "请先取得与当前参数一致的生成报价后再开始生成。",
       );
       return;
     }
@@ -929,6 +1006,9 @@ export function useGenerationDrafts({
     resolution,
     ratio,
     priceQuote,
+    priceQuoteStatus,
+    priceQuoteError,
+    priceQuoteReady,
     savedPrompts,
     duration,
     durationValid,
@@ -956,6 +1036,7 @@ export function useGenerationDrafts({
     setOutputDuration,
     setResolution,
     setRatio,
+    retryPriceQuote: () => setPriceQuoteRevision((value) => value + 1),
     applySavedPrompt,
     createBatch,
     recoverBatch,

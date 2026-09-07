@@ -26,6 +26,7 @@ const replicaApi = vi.hoisted(() => ({
   getLatestGenerationPrompt: vi.fn(),
   getLatestScriptVersion: vi.fn(),
   getLatestProjectFirstFrameSelection: vi.fn(),
+  getGenerationPriceQuote: vi.fn(),
   saveGenerationPrompt: vi.fn(),
   saveShotCards: vi.fn(),
 }));
@@ -1300,6 +1301,7 @@ describe("视频复刻（模块①）", () => {
     replicaApi.getLatestGenerationPrompt.mockReset();
     replicaApi.getLatestScriptVersion.mockReset();
     replicaApi.saveGenerationPrompt.mockReset();
+    replicaApi.getGenerationPriceQuote.mockReset();
     replicaApi.getLatestProjectShotCards.mockResolvedValue(null);
     replicaApi.getLatestProjectAnalysis.mockResolvedValue({
       id: "av-empty",
@@ -1314,6 +1316,14 @@ describe("视频复刻（模块①）", () => {
       stale: false,
       stale_reasons: [],
       version: null,
+    });
+    replicaApi.getGenerationPriceQuote.mockResolvedValue({
+      resolution: "768P",
+      duration_seconds: 4,
+      quantity: 1,
+      unit_price_fen_per_second: 120,
+      estimated_seconds: 4,
+      estimated_price_fen: 480,
     });
   });
 
@@ -1396,7 +1406,7 @@ describe("视频复刻（模块①）", () => {
       id: "scv-1",
       payload: {
         source_analysis_version_id: "av-1",
-        duration_seconds: 8,
+        duration_seconds: 4,
         shots: [shot],
       },
     });
@@ -1407,7 +1417,7 @@ describe("视频复刻（模块①）", () => {
       id: "scv-saved",
       payload: {
         source_analysis_version_id: "av-saved",
-        duration_seconds: 8,
+        duration_seconds: 4,
         shots: [shot],
       },
     });
@@ -2168,7 +2178,9 @@ describe("视频复刻（模块①）", () => {
       stale: false,
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "送生成" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "确认费用并送生成" }),
+    );
 
     await waitFor(() => expect(value.notify).toHaveBeenCalled());
     expect(
@@ -2177,6 +2189,81 @@ describe("视频复刻（模块①）", () => {
       expect.stringContaining("请先到「人物置换」生成并确认首帧"),
     );
     expect(replicaLive.runReplicaGeneration).not.toHaveBeenCalled();
+  });
+
+  it("送生成：报价失败时禁止建批并可重试取得当前参数报价", async () => {
+    replicaApi.getGenerationPriceQuote
+      .mockRejectedValueOnce(new Error("复刻报价暂不可用"))
+      .mockResolvedValueOnce({
+        resolution: "768P",
+        duration_seconds: 4,
+        quantity: 1,
+        unit_price_fen_per_second: 120,
+        estimated_seconds: 4,
+        estimated_price_fen: 480,
+      });
+    await openReplicaAndAnalyze();
+
+    expect(await screen.findByText("复刻报价暂不可用")).toBeInTheDocument();
+    const submit = screen.getByRole("button", {
+      name: "确认费用并送生成",
+    });
+    expect(submit).toBeDisabled();
+    expect(replicaLive.runReplicaGeneration).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "重新获取复刻报价" }));
+
+    expect(await screen.findByText(/4\.80 元/)).toBeInTheDocument();
+    expect(submit).toBeEnabled();
+    expect(replicaApi.getGenerationPriceQuote).toHaveBeenCalledTimes(2);
+  });
+
+  it("送生成准备期间离开页面后不再发起旧项目付费请求", async () => {
+    const value = replicaStudio();
+    mockAnalysisSuccess();
+    let resolveSelection:
+      | ((value: {
+          version: {
+            payload: {
+              first_frame_candidates_version_id: string;
+              first_frame_asset_id: string;
+            };
+          };
+          stale: boolean;
+        }) => void)
+      | undefined;
+    replicaApi.getLatestProjectFirstFrameSelection.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveSelection = resolve;
+        }),
+    );
+    useStudio.mockReturnValue(value);
+    const view = render(<ReplicaPage />);
+    fireEvent.click(screen.getByRole("button", { name: "启动 AI 拆解" }));
+    await screen.findAllByText(/院落/);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "确认费用并送生成" }),
+    );
+    await waitFor(() =>
+      expect(replicaApi.getLatestProjectFirstFrameSelection).toHaveBeenCalled(),
+    );
+
+    view.unmount();
+    resolveSelection?.({
+      version: {
+        payload: {
+          first_frame_candidates_version_id: "cand-old",
+          first_frame_asset_id: "ff-old",
+        },
+      },
+      stale: false,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(replicaLive.runReplicaGeneration).not.toHaveBeenCalled();
+    expect(value.navigate).not.toHaveBeenCalledWith("tasks");
   });
 
   it("送生成：有确认首帧时走完整管线建批", async () => {
@@ -2195,7 +2282,9 @@ describe("视频复刻（模块①）", () => {
       status: "QUEUED",
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "送生成" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "确认费用并送生成" }),
+    );
 
     await waitFor(() =>
       expect(replicaLive.runReplicaGeneration).toHaveBeenCalledWith(

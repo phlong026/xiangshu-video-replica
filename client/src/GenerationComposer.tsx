@@ -62,6 +62,7 @@ export function GenerationComposer({
         onDurationChange={drafts.setOutputDuration}
         onLockPrompt={drafts.lockPrompt}
         onPromptTextChange={drafts.setPromptText}
+        onRetryPriceQuote={drafts.retryPriceQuote}
         onRatioChange={drafts.setRatio}
         onQuantityChange={drafts.setQuantityInput}
         onRecoverBatch={() => drafts.recoverBatch(onBatchCreated)}
@@ -75,6 +76,8 @@ export function GenerationComposer({
         promptText={drafts.promptText}
         promptVersion={drafts.promptVersion}
         priceQuote={drafts.priceQuote}
+        priceQuoteError={drafts.priceQuoteError}
+        priceQuoteStatus={drafts.priceQuoteStatus}
         quantity={drafts.quantity}
         quantityError={drafts.quantityError}
         quantityInput={drafts.quantityInput}

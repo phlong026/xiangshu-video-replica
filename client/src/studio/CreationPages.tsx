@@ -9,8 +9,10 @@ import {
   type AnalysisVersion,
   type CharacterReferenceSelection,
   customerVisibleErrorMessage,
+  type GenerationPriceQuote,
   type GenerationRatio,
   getAssetDownloadUrl,
+  getGenerationPriceQuote,
   getLatestGenerationPrompt,
   getLatestProjectAnalysis,
   getLatestProjectFirstFrameSelection,
@@ -385,6 +387,33 @@ function normalizeCustomerDuration(seconds: number): 4 | 15 {
   return seconds === 4 || seconds === 15 ? seconds : seconds <= 9 ? 4 : 15;
 }
 
+type ReplicaQuoteInput = {
+  resolution: "768P" | "2K";
+  duration_seconds: 4 | 15;
+  quantity: 1 | 2 | 4;
+};
+
+function replicaQuoteInput(draft: StudioDraft): ReplicaQuoteInput {
+  return {
+    resolution: draft.resolution === "2K" ? "2K" : "768P",
+    duration_seconds: normalizeCustomerDuration(draft.duration),
+    quantity: draft.count === 2 || draft.count === 4 ? draft.count : 1,
+  };
+}
+
+function replicaQuoteMatches(
+  quote: GenerationPriceQuote | null,
+  input: ReplicaQuoteInput,
+): quote is GenerationPriceQuote {
+  return Boolean(
+    quote &&
+      quote.resolution === input.resolution &&
+      quote.duration_seconds === input.duration_seconds &&
+      quote.quantity === input.quantity &&
+      quote.estimated_seconds === input.duration_seconds * input.quantity,
+  );
+}
+
 export function ReplicaPage() {
   const {
     state,
@@ -417,6 +446,14 @@ export function ReplicaPage() {
   const [promptName, setPromptName] = useState("");
   const [savingPrompt, setSavingPrompt] = useState(false);
   const [generating, setGenerating] = useState(false);
+  const [replicaQuote, setReplicaQuote] = useState<GenerationPriceQuote | null>(
+    null,
+  );
+  const [replicaQuoteStatus, setReplicaQuoteStatus] = useState<
+    "idle" | "loading" | "ready" | "error"
+  >("idle");
+  const [replicaQuoteError, setReplicaQuoteError] = useState("");
+  const [replicaQuoteRevision, setReplicaQuoteRevision] = useState(0);
   const [restoreBusy, setRestoreBusy] = useState(false);
   const [restoreError, setRestoreError] = useState("");
   const uploadInputRef = useRef<HTMLInputElement>(null);
@@ -436,6 +473,28 @@ export function ReplicaPage() {
   const promptTypedThisMountRef = useRef(false);
   const latestDraftRef = useRef(state.draft);
   const patchDraftRef = useRef(patchDraft);
+  const replicaSubmittingRef = useRef(false);
+  const replicaOperationRef = useRef(0);
+  const replicaContextRef = useRef("");
+  const replicaSubmissionRef = useRef<{
+    fingerprint: string;
+    key: string;
+  } | null>(null);
+  replicaContextRef.current = JSON.stringify({
+    draftId: state.draft.id,
+    projectId: state.draft.projectId,
+    sourceId: state.draft.sourceId,
+    shotCardVersionId,
+    promptText,
+    originalScript,
+    shots,
+    scriptText: state.draft.script.text,
+    scriptConfirmed: state.draft.script.confirmed,
+    duration: state.draft.duration,
+    resolution: state.draft.resolution,
+    count: state.draft.count,
+    ratio: state.draft.ratio,
+  });
   if (
     !promptTypedThisMountRef.current &&
     state.draft.projectId === project?.id &&
@@ -582,6 +641,91 @@ export function ReplicaPage() {
     if (review || !project) return;
     void restoreSavedProject(project);
   }, [project, restoreSavedProject, review]);
+
+  useEffect(
+    () => () => {
+      replicaOperationRef.current += 1;
+    },
+    [],
+  );
+
+  const replicaProjectId = state.draft.projectId;
+  const replicaDuration = normalizeCustomerDuration(state.draft.duration);
+  const replicaResolution: ReplicaQuoteInput["resolution"] =
+    state.draft.resolution === "2K" ? "2K" : "768P";
+  const replicaQuantity: ReplicaQuoteInput["quantity"] =
+    state.draft.count === 2 || state.draft.count === 4 ? state.draft.count : 1;
+  const currentReplicaQuoteInput: ReplicaQuoteInput = {
+    resolution: replicaResolution,
+    duration_seconds: replicaDuration,
+    quantity: replicaQuantity,
+  };
+  const replicaQuoteReady =
+    replicaQuoteStatus === "ready" &&
+    replicaQuoteMatches(replicaQuote, currentReplicaQuoteInput);
+  useEffect(() => {
+    void replicaQuoteRevision;
+    if (
+      review ||
+      stage !== "ready" ||
+      !replicaProjectId ||
+      !shotCardVersionId ||
+      shots.length === 0
+    ) {
+      setReplicaQuote(null);
+      setReplicaQuoteStatus("idle");
+      setReplicaQuoteError("");
+      return;
+    }
+    let active = true;
+    const input = {
+      resolution: replicaResolution,
+      duration_seconds: replicaDuration,
+      quantity: replicaQuantity,
+    };
+    setReplicaQuote(null);
+    setReplicaQuoteStatus("loading");
+    setReplicaQuoteError("");
+    void getGenerationPriceQuote(input)
+      .then((quote) => {
+        if (!active) return;
+        if (!replicaQuoteMatches(quote, input)) {
+          setReplicaQuoteStatus("error");
+          setReplicaQuoteError(
+            "复刻报价参数与当前生成参数不一致，请重新获取。",
+          );
+          return;
+        }
+        setReplicaQuote(quote);
+        setReplicaQuoteStatus("ready");
+      })
+      .catch((cause: unknown) => {
+        if (!active) return;
+        setReplicaQuote(null);
+        setReplicaQuoteStatus("error");
+        setReplicaQuoteError(
+          customerVisibleErrorMessage(cause, "复刻报价读取失败，请重试。"),
+        );
+      });
+    return () => {
+      active = false;
+    };
+  }, [
+    review,
+    stage,
+    replicaProjectId,
+    replicaDuration,
+    replicaResolution,
+    replicaQuantity,
+    shotCardVersionId,
+    shots.length,
+    replicaQuoteRevision,
+  ]);
+
+  const retryReplicaQuote = useCallback(
+    () => setReplicaQuoteRevision((value) => value + 1),
+    [],
+  );
 
   const handleUpload = async (file: File) => {
     if (review) {
@@ -827,11 +971,28 @@ export function ReplicaPage() {
       notify("审核示例不调用真实接口。");
       return;
     }
-    const projectId = state.draft.projectId;
+    if (replicaSubmittingRef.current) return;
+    const operation = replicaOperationRef.current + 1;
+    replicaOperationRef.current = operation;
+    const contextFingerprint = replicaContextRef.current;
+    const isCurrent = () =>
+      replicaOperationRef.current === operation &&
+      replicaContextRef.current === contextFingerprint;
+    const draft = latestDraftRef.current;
+    const quoteInput = replicaQuoteInput(draft);
+    if (
+      replicaQuoteStatus !== "ready" ||
+      !replicaQuoteMatches(replicaQuote, quoteInput)
+    ) {
+      notify("请先取得与当前参数一致的复刻报价后再提交。");
+      return;
+    }
+    const projectId = draft.projectId;
     if (!projectId || !shotCardVersionId) {
       notify("请先完成 AI 拆解。");
       return;
     }
+    replicaSubmittingRef.current = true;
     setGenerating(true);
     try {
       const selection = await getLatestProjectFirstFrameSelection(projectId);
@@ -840,6 +1001,7 @@ export function ReplicaPage() {
           ? (readFirstFrameSelectionPayload(selection.version)
               ?.first_frame_asset_id ?? null)
           : null;
+      if (!isCurrent()) return;
       if (!firstFrameAssetId) {
         notify(
           "还没有确认过的置换首帧：请先到「人物置换」生成并确认首帧，再回来送生成。",
@@ -853,28 +1015,42 @@ export function ReplicaPage() {
           .filter(Boolean)
           .join(" ") ||
         "纯画面叙事，无口播。";
-      await runReplicaGeneration(projectId, {
+      const request = {
         promptText,
         originalScriptText: scriptFallback,
         shotCardVersionId,
         firstFrameAssetId,
-        outputDurationSeconds: normalizeCustomerDuration(state.draft.duration),
-        resolution: state.draft.resolution === "2K" ? "2K" : "768P",
+        outputDurationSeconds: quoteInput.duration_seconds,
+        resolution: quoteInput.resolution,
         ratio: (SUPPORTED_VIDEO_RATIOS as readonly string[]).includes(
-          state.draft.ratio,
+          draft.ratio,
         )
-          ? (state.draft.ratio as GenerationRatio)
+          ? (draft.ratio as GenerationRatio)
           : "adaptive",
-        quantity:
-          state.draft.count === 2 || state.draft.count === 4
-            ? state.draft.count
-            : 1,
+        quantity: quoteInput.quantity,
+      };
+      const fingerprint = JSON.stringify({ request, replicaQuote });
+      if (replicaSubmissionRef.current?.fingerprint !== fingerprint) {
+        replicaSubmissionRef.current = {
+          fingerprint,
+          key: crypto.randomUUID(),
+        };
+      }
+      await runReplicaGeneration(projectId, {
+        ...request,
+        idempotencyKey: replicaSubmissionRef.current.key,
+        isCurrent,
       });
+      replicaSubmissionRef.current = null;
+      if (!isCurrent()) return;
       notify("复刻任务已提交，可在任务中心查看进度。");
       navigate("tasks");
     } catch (cause: unknown) {
-      notify(customerVisibleErrorMessage(cause, "送生成失败，请稍后重试。"));
+      if (isCurrent()) {
+        notify(customerVisibleErrorMessage(cause, "送生成失败，请稍后重试。"));
+      }
     } finally {
+      replicaSubmittingRef.current = false;
       setGenerating(false);
     }
   };
@@ -1069,14 +1245,36 @@ export function ReplicaPage() {
                   >
                     保存为自定义提示词
                   </Button>
+                  {replicaQuoteStatus === "loading" ? (
+                    <Hint>正在读取复刻报价…</Hint>
+                  ) : null}
+                  {replicaQuoteError ? (
+                    <div className="settings-error" role="alert">
+                      <p>{replicaQuoteError}</p>
+                      <Button onClick={retryReplicaQuote} variant="outline">
+                        重新获取复刻报价
+                      </Button>
+                    </div>
+                  ) : null}
+                  {replicaQuoteReady ? (
+                    <Hint>
+                      预计费用{" "}
+                      {(replicaQuote.estimated_price_fen / 100).toFixed(2)} 元
+                      （{replicaQuote.unit_price_fen_per_second} 分/秒 ×{" "}
+                      {replicaQuote.estimated_seconds} 秒）
+                    </Hint>
+                  ) : null}
                   <Button
                     disabled={
-                      generating || analysisBusy || displayShots.length === 0
+                      generating ||
+                      analysisBusy ||
+                      displayShots.length === 0 ||
+                      !replicaQuoteReady
                     }
                     onClick={() => void sendToGeneration()}
                     variant="primary"
                   >
-                    {generating ? "提交中…" : "送生成"}
+                    {generating ? "提交中…" : "确认费用并送生成"}
                   </Button>
                 </>
               )}

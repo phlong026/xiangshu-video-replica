@@ -6,6 +6,7 @@ import type {
 } from "./api";
 import {
   type GenerationBusyAction,
+  type GenerationQuoteStatus,
   type IdempotencyRecord,
   RECOVERY_CONFLICT_MESSAGE,
   readPayloadString,
@@ -27,6 +28,7 @@ type GenerationLauncherProps = {
   onDurationChange: (value: string) => void;
   onLockPrompt: () => void;
   onPromptTextChange: (text: string) => void;
+  onRetryPriceQuote?: () => void;
   onRatioChange?: (value: GenerationRatio) => void;
   onQuantityChange: (value: string) => void;
   onRecoverBatch: () => void;
@@ -40,6 +42,8 @@ type GenerationLauncherProps = {
   promptText: string;
   promptVersion: GenerationVersion | null;
   priceQuote?: GenerationPriceQuote | null;
+  priceQuoteError?: string;
+  priceQuoteStatus?: GenerationQuoteStatus;
   quantity: number | null;
   quantityError: string;
   quantityInput: string;
@@ -70,6 +74,7 @@ export function GenerationLauncher({
   onDurationChange,
   onLockPrompt,
   onPromptTextChange,
+  onRetryPriceQuote,
   onRatioChange,
   onQuantityChange,
   onRecoverBatch,
@@ -83,6 +88,8 @@ export function GenerationLauncher({
   promptText,
   promptVersion,
   priceQuote = null,
+  priceQuoteError = "",
+  priceQuoteStatus = priceQuote ? "ready" : "idle",
   quantity,
   quantityError,
   quantityInput,
@@ -99,6 +106,9 @@ export function GenerationLauncher({
 }: GenerationLauncherProps) {
   const busy = Boolean(busyAction);
   const promptStatus = readPayloadString(promptVersion, "status");
+  const displayedQuantity = recoveryRecord?.request.quantity ?? quantity;
+  const displayedDuration =
+    recoveryRecord?.request.output_duration_seconds ?? Number(outputDuration);
 
   return (
     <>
@@ -305,16 +315,41 @@ export function GenerationLauncher({
         {quantityError ? (
           <p className="settings-error">{quantityError}</p>
         ) : null}
-        {quantity !== null ? (
+        {displayedQuantity !== null ? (
           <div className="paid-task-warning">
-            <strong>将创建 {quantity} 个付费生成任务</strong>
+            <strong>
+              {recoveryRecord ? "待恢复" : "将创建"} {displayedQuantity}{" "}
+              个付费生成任务
+            </strong>
             <span>
-              {priceQuote
-                ? `预计消耗 ${priceQuote.estimated_seconds} 秒额度，约 ¥${(
-                    priceQuote.estimated_price_fen / 100
-                  ).toFixed(2)}`
-                : `预计消耗 ${Number(outputDuration) * quantity} 秒额度`}
+              预计消耗{" "}
+              {priceQuoteStatus === "ready" && priceQuote
+                ? priceQuote.estimated_seconds
+                : displayedDuration * displayedQuantity}{" "}
+              秒额度
             </span>
+            {priceQuoteStatus === "ready" && priceQuote ? (
+              <span>
+                约 ¥{(priceQuote.estimated_price_fen / 100).toFixed(2)}（
+                {priceQuote.unit_price_fen_per_second} 分/秒）
+              </span>
+            ) : priceQuoteStatus === "loading" ? (
+              <span>正在读取准确费用…</span>
+            ) : (
+              <span>准确费用暂不可用</span>
+            )}
+          </div>
+        ) : null}
+        {priceQuoteStatus === "error" ? (
+          <div className="settings-error" role="alert">
+            <p>{priceQuoteError}</p>
+            <button
+              className="secondary-button"
+              onClick={onRetryPriceQuote}
+              type="button"
+            >
+              重新获取生成报价
+            </button>
           </div>
         ) : null}
         {recoveryRecordConflicts ? (
@@ -332,7 +367,9 @@ export function GenerationLauncher({
         {recoveryRecord ? (
           <button
             className="secondary-button"
-            disabled={readOnly || busy}
+            disabled={
+              readOnly || busy || priceQuoteStatus !== "ready" || !priceQuote
+            }
             onClick={onRecoverBatch}
             type="button"
           >

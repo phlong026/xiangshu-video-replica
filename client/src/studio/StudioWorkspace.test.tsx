@@ -81,6 +81,8 @@ const api = vi.hoisted(() => ({
       estimated_price_fen: 960,
     }),
   ),
+  getOralPrice: vi.fn(async () => ({ unit_price_fen: 500 })),
+  createOralTask: vi.fn(),
   createIndependentVideoTask: vi.fn(),
   listUserSavedPrompts: vi.fn(async (): Promise<unknown[]> => []),
 }));
@@ -621,7 +623,26 @@ describe("视频生成（C2 独立创作）", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.useRealTimers();
+    api.getIndependentCapabilities.mockResolvedValue({
+      extended_modes_enabled: true,
+      t2v_enabled: true,
+      i2v_enabled: true,
+      r2v_enabled: true,
+      last_frame_enabled: true,
+      max_reference_images: 4,
+      max_quantity: 4,
+    });
+    api.getGenerationPriceQuote.mockResolvedValue({
+      resolution: "768P",
+      duration_seconds: 8,
+      quantity: 1,
+      unit_price_fen_per_second: 120,
+      estimated_seconds: 8,
+      estimated_price_fen: 960,
+    });
+    api.getOralPrice.mockResolvedValue({ unit_price_fen: 500 });
     live.loadCloudDraft.mockResolvedValue(undefined);
+    live.loadPersonAssets.mockResolvedValue({ assets: [], errors: [] });
     live.loadDraftMaterials.mockResolvedValue({
       assets: [],
       unavailableIds: [],
@@ -1036,6 +1057,219 @@ describe("视频生成（C2 独立创作）", () => {
     expect(api.createIndependentVideoTask).not.toHaveBeenCalled();
   });
 
+  it("视频报价失败时确认按钮不可用并可重新获取报价", async () => {
+    api.getGenerationPriceQuote
+      .mockRejectedValueOnce(new Error("视频报价暂不可用"))
+      .mockResolvedValueOnce({
+        resolution: "768P",
+        duration_seconds: 8,
+        quantity: 1,
+        unit_price_fen_per_second: 120,
+        estimated_seconds: 8,
+        estimated_price_fen: 960,
+      });
+    live.loadStudioData.mockResolvedValue(emptyStudioData);
+    render(<StudioWorkspace currentUser={reviewUser} />);
+    await openVideoPage();
+    fireEvent.change(screen.getByLabelText("提示词"), {
+      target: { value: "航拍乡墅庭院" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "生成视频" }));
+
+    expect(await screen.findByText("视频报价暂不可用")).toBeInTheDocument();
+    const submit = screen.getByRole("button", { name: "确认费用并提交" });
+    expect(submit).toBeDisabled();
+    expect(api.createIndependentVideoTask).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "重新获取视频报价" }));
+    expect(await screen.findByText(/9\.60 元/)).toBeInTheDocument();
+    expect(submit).toBeEnabled();
+  });
+
+  it("口播报价失败时禁止提交并支持重试", async () => {
+    api.getOralPrice
+      .mockRejectedValueOnce(new Error("口播报价暂不可用"))
+      .mockResolvedValueOnce({ unit_price_fen: 500 });
+    live.loadStudioData.mockResolvedValue(createReviewData());
+    render(
+      <StudioWorkspace
+        currentUser={reviewUser}
+        initialState={createReviewState("oral")}
+      />,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "生成口播视频" }),
+    );
+
+    expect(await screen.findByText("口播报价暂不可用")).toBeInTheDocument();
+    const submit = screen.getByRole("button", { name: "确认费用并提交" });
+    expect(submit).toBeDisabled();
+    expect(api.createOralTask).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "重新获取口播报价" }));
+    expect(await screen.findByText("5.00 元/条")).toBeInTheDocument();
+    expect(submit).toBeEnabled();
+  });
+
+  it("口播确认连续点击只创建一个任务", async () => {
+    let resolveTask:
+      | ((value: { id: string; status: string }) => void)
+      | undefined;
+    api.createOralTask.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveTask = resolve;
+        }),
+    );
+    live.loadStudioData.mockResolvedValue(createReviewData());
+    render(
+      <StudioWorkspace
+        currentUser={reviewUser}
+        initialState={createReviewState("oral")}
+      />,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "生成口播视频" }),
+    );
+    expect(await screen.findByText("5.00 元/条")).toBeInTheDocument();
+    const submit = screen.getByRole("button", { name: "确认费用并提交" });
+
+    fireEvent.click(submit);
+    fireEvent.click(submit);
+
+    expect(api.createOralTask).toHaveBeenCalledTimes(1);
+    resolveTask?.({ id: "oral-1", status: "QUEUED" });
+  });
+
+  it("口播结果未知后重新报价仍重放原请求和幂等键", async () => {
+    api.getOralPrice
+      .mockResolvedValueOnce({ unit_price_fen: 500 })
+      .mockResolvedValueOnce({ unit_price_fen: 600 });
+    api.createOralTask
+      .mockRejectedValueOnce(new Error("提交结果未知，请安全重试。"))
+      .mockRejectedValueOnce(new Error("提交结果仍未知，请继续安全重试。"));
+    live.loadStudioData.mockResolvedValue(createReviewData());
+    render(
+      <StudioWorkspace
+        currentUser={reviewUser}
+        initialState={createReviewState("oral")}
+      />,
+    );
+    const open = await screen.findByRole("button", {
+      name: "生成口播视频",
+    });
+    fireEvent.click(open);
+    expect(await screen.findByText("5.00 元/条")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "确认费用并提交" }));
+    expect(
+      await screen.findByText("提交结果未知，请安全重试。"),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "关闭",
+      }),
+    );
+
+    fireEvent.click(open);
+    expect(await screen.findByText("6.00 元/条")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "确认费用并提交" }));
+    expect(
+      await screen.findByText("提交结果仍未知，请继续安全重试。"),
+    ).toBeInTheDocument();
+
+    expect(api.createOralTask).toHaveBeenCalledTimes(2);
+    expect(api.createOralTask.mock.calls[1]).toEqual(
+      api.createOralTask.mock.calls[0],
+    );
+  });
+
+  it("旧口播提交响应不会关闭后来重新打开的确认弹窗", async () => {
+    let resolveTask:
+      | ((value: { id: string; status: string }) => void)
+      | undefined;
+    api.createOralTask.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveTask = resolve;
+        }),
+    );
+    live.loadStudioData.mockResolvedValue(createReviewData());
+    render(
+      <StudioWorkspace
+        currentUser={reviewUser}
+        initialState={createReviewState("oral")}
+      />,
+    );
+    const open = await screen.findByRole("button", {
+      name: "生成口播视频",
+    });
+    fireEvent.click(open);
+    const firstDialog = await screen.findByRole("dialog", {
+      name: "生成确认 · 数字人口播",
+    });
+    fireEvent.click(
+      within(firstDialog).getByRole("button", { name: "确认费用并提交" }),
+    );
+    fireEvent.click(within(firstDialog).getByRole("button", { name: "关闭" }));
+
+    fireEvent.click(open);
+    expect(
+      await screen.findByRole("dialog", { name: "生成确认 · 数字人口播" }),
+    ).toBeInTheDocument();
+
+    await act(async () => {
+      resolveTask?.({ id: "oral-old", status: "QUEUED" });
+      await Promise.resolve();
+    });
+
+    expect(
+      screen.getByRole("dialog", { name: "生成确认 · 数字人口播" }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "确认费用并提交" }));
+    expect(api.createOralTask).toHaveBeenCalledTimes(2);
+    expect(api.createOralTask.mock.calls[1]).toEqual(
+      api.createOralTask.mock.calls[0],
+    );
+  });
+
+  it("工作区卸载后旧口播响应不会再跳转页面", async () => {
+    live.loadPersonAssets.mockResolvedValue({ assets: [], errors: [] });
+    let resolveTask:
+      | ((value: { id: string; status: string }) => void)
+      | undefined;
+    api.createOralTask.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveTask = resolve;
+        }),
+    );
+    live.loadStudioData.mockResolvedValue(createReviewData());
+    const view = render(
+      <StudioWorkspace
+        currentUser={reviewUser}
+        initialState={createReviewState("oral")}
+      />,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "生成口播视频" }),
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: "生成确认 · 数字人口播",
+    });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "确认费用并提交" }),
+    );
+    const previousHash = window.location.hash;
+    view.unmount();
+
+    await act(async () => {
+      resolveTask?.({ id: "oral-after-unmount", status: "QUEUED" });
+      await Promise.resolve();
+    });
+
+    expect(window.location.hash).toBe(previousHash);
+  });
+
   it("确认弹窗展示按秒报价并可提交任务、预览区进入进度视图", async () => {
     api.getIndependentCapabilities.mockResolvedValue({
       extended_modes_enabled: true,
@@ -1098,6 +1332,129 @@ describe("视频生成（C2 独立创作）", () => {
     expect(
       screen.getByRole("progressbar", { name: "生成进度" }),
     ).toBeInTheDocument();
+  });
+
+  it("旧视频提交响应不会覆盖新打开的确认上下文", async () => {
+    api.getIndependentCapabilities.mockResolvedValue({
+      extended_modes_enabled: true,
+      t2v_enabled: true,
+      i2v_enabled: true,
+      r2v_enabled: true,
+      last_frame_enabled: true,
+      max_reference_images: 4,
+      max_quantity: 4,
+    });
+    let resolveBatch:
+      | ((value: { id: string; status: string; tasks: unknown[] }) => void)
+      | undefined;
+    api.createIndependentVideoTask.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveBatch = resolve;
+        }),
+    );
+    live.loadStudioData.mockResolvedValue(emptyStudioData);
+    render(<StudioWorkspace currentUser={reviewUser} />);
+    await openVideoPage();
+    fireEvent.change(screen.getByLabelText("提示词"), {
+      target: { value: "航拍乡墅庭院" },
+    });
+    const open = screen.getByRole("button", { name: "生成视频" });
+    fireEvent.click(open);
+    const firstDialog = await screen.findByRole("dialog", {
+      name: "生成确认 · 视频生成",
+    });
+    await screen.findByText(/9\.60 元/);
+    fireEvent.click(
+      within(firstDialog).getByRole("button", { name: "确认费用并提交" }),
+    );
+    fireEvent.click(within(firstDialog).getByRole("button", { name: "关闭" }));
+
+    fireEvent.click(open);
+    expect(
+      await screen.findByRole("dialog", { name: "生成确认 · 视频生成" }),
+    ).toBeInTheDocument();
+
+    await act(async () => {
+      resolveBatch?.({ id: "batch-old", status: "QUEUED", tasks: [] });
+      await Promise.resolve();
+    });
+
+    expect(
+      screen.getByRole("dialog", { name: "生成确认 · 视频生成" }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "确认费用并提交" }));
+    expect(api.createIndependentVideoTask).toHaveBeenCalledTimes(2);
+    expect(api.createIndependentVideoTask.mock.calls[1]).toEqual(
+      api.createIndependentVideoTask.mock.calls[0],
+    );
+  });
+
+  it("视频结果未知后价格变化不换键，业务参数变化才换键", async () => {
+    api.getGenerationPriceQuote
+      .mockResolvedValueOnce({
+        resolution: "768P",
+        duration_seconds: 8,
+        quantity: 1,
+        unit_price_fen_per_second: 120,
+        estimated_seconds: 8,
+        estimated_price_fen: 960,
+      })
+      .mockResolvedValue({
+        resolution: "768P",
+        duration_seconds: 8,
+        quantity: 1,
+        unit_price_fen_per_second: 150,
+        estimated_seconds: 8,
+        estimated_price_fen: 1200,
+      });
+    api.createIndependentVideoTask
+      .mockRejectedValueOnce(new Error("提交结果未知，请安全重试。"))
+      .mockRejectedValueOnce(new Error("提交结果仍未知，请继续安全重试。"))
+      .mockResolvedValueOnce({ id: "batch-new-input", tasks: [] });
+    live.loadStudioData.mockResolvedValue(emptyStudioData);
+    render(<StudioWorkspace currentUser={reviewUser} />);
+    await openVideoPage();
+    const prompt = screen.getByLabelText("提示词");
+    const open = screen.getByRole("button", { name: "生成视频" });
+    fireEvent.change(prompt, { target: { value: "航拍乡墅庭院" } });
+    fireEvent.click(open);
+    expect(await screen.findByText(/9\.60 元/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "确认费用并提交" }));
+    expect(
+      await screen.findByText("提交结果未知，请安全重试。"),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "关闭",
+      }),
+    );
+
+    fireEvent.click(open);
+    expect(await screen.findByText(/12\.00 元/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "确认费用并提交" }));
+    expect(
+      await screen.findByText("提交结果仍未知，请继续安全重试。"),
+    ).toBeInTheDocument();
+    const firstRequest = api.createIndependentVideoTask.mock.calls[0]?.[0];
+    const secondRequest = api.createIndependentVideoTask.mock.calls[1]?.[0];
+    expect(secondRequest).toEqual(firstRequest);
+
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "关闭",
+      }),
+    );
+    fireEvent.change(prompt, { target: { value: "夜景乡墅庭院" } });
+    fireEvent.click(open);
+    expect(await screen.findByText(/12\.00 元/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "确认费用并提交" }));
+    await waitFor(() =>
+      expect(api.createIndependentVideoTask).toHaveBeenCalledTimes(3),
+    );
+    const thirdRequest = api.createIndependentVideoTask.mock.calls[2]?.[0];
+    expect(thirdRequest.prompt_text).toBe("夜景乡墅庭院");
+    expect(thirdRequest.idempotency_key).not.toBe(firstRequest.idempotency_key);
   });
 
   it("提示词导入：从我的提示词一键回填", async () => {
