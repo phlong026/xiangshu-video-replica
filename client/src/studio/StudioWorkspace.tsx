@@ -37,6 +37,7 @@ import {
   ReplicaPage,
   VideoPage,
 } from "./CreationPages";
+import { createCloudDraftQueue } from "./cloudDraftQueue";
 import { StudioContext, useStudio } from "./context";
 import { LiveWorkspacePanel } from "./LiveWorkspacePanel";
 import {
@@ -92,15 +93,6 @@ import "./studio.css";
 type Props = ComponentProps<typeof WorkspaceShell> & {
   reviewData?: StudioData;
   initialState?: StudioState;
-};
-
-type CloudDraftIntent = {
-  key: string;
-  draft: StudioDraft;
-  isCurrent: () => boolean;
-  completion: Promise<void>;
-  resolve: () => void;
-  reject: (cause: unknown) => void;
 };
 
 function mergeStudioAssets(
@@ -252,9 +244,9 @@ export function StudioWorkspace({
   const latestDraftRef = useRef(state.draft);
   const draftTouchedRef = useRef(false);
   const draftSaveTimerRef = useRef<number | undefined>(undefined);
-  const cloudDraftActiveRef = useRef<CloudDraftIntent | undefined>(undefined);
-  const cloudDraftPendingRef = useRef<CloudDraftIntent | undefined>(undefined);
-  const lastCloudDraftSuccessRef = useRef<string | undefined>(undefined);
+  const [cloudDraftQueue] = useState(() =>
+    createCloudDraftQueue(persistCloudDraft),
+  );
   const saveOperationRef = useRef(0);
   const saveMountedRef = useRef(false);
   const saveAccountRef = useRef(currentUser.id);
@@ -293,70 +285,13 @@ export function StudioWorkspace({
     };
   }, [currentUser.id]);
   const persistCloudDraftForScope = useCallback(
-    (draft: StudioDraft, accountId: string, isCurrent: () => boolean) => {
-      const key = savedDraftScope(accountId, draft);
-      if (lastCloudDraftSuccessRef.current === key) return Promise.resolve();
-      if (cloudDraftActiveRef.current?.key === key) {
-        return cloudDraftActiveRef.current.completion;
-      }
-      if (cloudDraftPendingRef.current?.key === key) {
-        return cloudDraftPendingRef.current.completion;
-      }
-
-      let resolveIntent: (() => void) | undefined;
-      let rejectIntent: ((cause: unknown) => void) | undefined;
-      const completion = new Promise<void>((resolve, reject) => {
-        resolveIntent = resolve;
-        rejectIntent = reject;
-      });
-      const intent: CloudDraftIntent = {
-        key,
+    (draft: StudioDraft, accountId: string, isCurrent: () => boolean) =>
+      cloudDraftQueue.persist(
+        savedDraftScope(accountId, draft),
         draft,
         isCurrent,
-        completion,
-        resolve: () => resolveIntent?.(),
-        reject: (cause) => rejectIntent?.(cause),
-      };
-
-      const start = (next: CloudDraftIntent) => {
-        if (!next.isCurrent()) {
-          next.resolve();
-          return;
-        }
-        cloudDraftActiveRef.current = next;
-        void persistCloudDraft(next.draft).then(
-          () => {
-            lastCloudDraftSuccessRef.current = next.key;
-            next.resolve();
-            if (cloudDraftActiveRef.current === next) {
-              cloudDraftActiveRef.current = undefined;
-            }
-            const pending = cloudDraftPendingRef.current;
-            cloudDraftPendingRef.current = undefined;
-            if (pending) start(pending);
-          },
-          (cause) => {
-            next.reject(cause);
-            if (cloudDraftActiveRef.current === next) {
-              cloudDraftActiveRef.current = undefined;
-            }
-            const pending = cloudDraftPendingRef.current;
-            cloudDraftPendingRef.current = undefined;
-            pending?.reject(cause);
-          },
-        );
-      };
-
-      if (cloudDraftActiveRef.current) {
-        // 尚未开始的写入没有服务端副作用，只保留最新完整草稿。
-        cloudDraftPendingRef.current?.resolve();
-        cloudDraftPendingRef.current = intent;
-      } else {
-        start(intent);
-      }
-      return completion;
-    },
-    [],
+      ),
+    [cloudDraftQueue],
   );
   const scheduleDraftSave = useCallback(
     (draft: StudioDraft) => {
@@ -1150,7 +1085,7 @@ export function StudioWorkspace({
   };
   const confirmFinalDraft = () => {
     const script = { ...state.draft.script, confirmed: true };
-    const draft = { ...state.draft, script };
+    const draft = patchStudioDraft(state.draft, { script });
     const accountId = currentUser.id;
     const previousScope = savedDraftScope(accountId, state.draft);
     const confirmedScope = savedDraftScope(accountId, draft);

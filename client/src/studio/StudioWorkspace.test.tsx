@@ -674,6 +674,84 @@ describe("V1.4 workspace integration", () => {
       }
     });
 
+    it("旧账号写入失败后仍发送当前账号排队的草稿", async () => {
+      let rejectA: ((cause: Error) => void) | undefined;
+      live.persistCloudDraft
+        .mockReturnValueOnce(
+          new Promise<void>((_resolve, reject) => {
+            rejectA = reject;
+          }),
+        )
+        .mockResolvedValueOnce(undefined);
+      live.loadStudioData.mockResolvedValue(emptyStudioData);
+      live.loadCloudDraft.mockResolvedValue(undefined);
+      const accountA = { ...reviewUser, id: "failed-account-a" };
+      const accountB = { ...reviewUser, id: "current-account-b" };
+      const view = render(<StudioWorkspace currentUser={accountA} />);
+      await openCopyPage();
+      vi.useFakeTimers();
+      try {
+        fireEvent.change(screen.getByLabelText("二创文案"), {
+          target: { value: "账号A失败版本" },
+        });
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(2_000);
+        });
+        view.rerender(<StudioWorkspace currentUser={accountB} />);
+        fireEvent.change(screen.getByLabelText("二创文案"), {
+          target: { value: "账号B当前版本" },
+        });
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(2_000);
+          rejectA?.(new Error("account A offline"));
+          await Promise.resolve();
+        });
+
+        expect(live.persistCloudDraft).toHaveBeenCalledTimes(2);
+        expect(live.persistCloudDraft.mock.calls[1]?.[0]).toMatchObject({
+          script: { text: "账号B当前版本" },
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("旧自动保存失败后仍发送排队的确认终稿", async () => {
+      let rejectAutosave: ((cause: Error) => void) | undefined;
+      live.persistCloudDraft
+        .mockReturnValueOnce(
+          new Promise<void>((_resolve, reject) => {
+            rejectAutosave = reject;
+          }),
+        )
+        .mockResolvedValueOnce(undefined);
+      live.loadStudioData.mockResolvedValue(emptyStudioData);
+      live.loadCloudDraft.mockResolvedValue(undefined);
+      render(<StudioWorkspace currentUser={reviewUser} />);
+      await openCopyPage();
+      vi.useFakeTimers();
+      try {
+        fireEvent.change(screen.getByLabelText("二创文案"), {
+          target: { value: "等待确认的终稿" },
+        });
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(2_000);
+        });
+        fireEvent.click(screen.getByRole("button", { name: "确认终稿" }));
+        await act(async () => {
+          rejectAutosave?.(new Error("autosave offline"));
+          await Promise.resolve();
+        });
+
+        expect(live.persistCloudDraft).toHaveBeenCalledTimes(2);
+        expect(live.persistCloudDraft.mock.calls[1]?.[0]).toMatchObject({
+          script: { text: "等待确认的终稿", confirmed: true },
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("复用的自动保存失败时提示草稿待同步并允许显式重试", async () => {
       let rejectAutosave: ((cause: Error) => void) | undefined;
       live.persistCloudDraft
@@ -682,6 +760,7 @@ describe("V1.4 workspace integration", () => {
             rejectAutosave = reject;
           }),
         )
+        .mockRejectedValueOnce(new Error("final draft offline"))
         .mockResolvedValueOnce(undefined);
       live.loadStudioData.mockResolvedValue(emptyStudioData);
       live.loadCloudDraft.mockResolvedValue(undefined);
@@ -703,7 +782,7 @@ describe("V1.4 workspace integration", () => {
         fireEvent.click(screen.getByRole("button", { name: "保存版本" }));
         await act(async () => rejectAutosave?.(new Error("offline")));
 
-        expect(live.persistCloudDraft).toHaveBeenCalledTimes(1);
+        expect(live.persistCloudDraft).toHaveBeenCalledTimes(2);
         expect(
           screen.getByText(/版本已保存，但云端草稿同步失败/),
         ).toBeInTheDocument();
@@ -718,8 +797,8 @@ describe("V1.4 workspace integration", () => {
         await act(async () => {
           await vi.advanceTimersByTimeAsync(0);
         });
-        expect(live.persistCloudDraft).toHaveBeenCalledTimes(2);
-        expect(live.persistCloudDraft.mock.calls[1]?.[0]).toMatchObject({
+        expect(live.persistCloudDraft).toHaveBeenCalledTimes(3);
+        expect(live.persistCloudDraft.mock.calls[2]?.[0]).toMatchObject({
           projectId: "project-retry",
           sourceId: "source-retry",
           sourceAssetId: "asset-retry",
