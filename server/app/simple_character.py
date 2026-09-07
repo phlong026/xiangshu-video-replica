@@ -1622,33 +1622,43 @@ def list_simple_scene_looks_page(
     total = int(total_row["total"] if total_row is not None else 0)
     rows = conn.execute(
         f"""
-        WITH ranked_versions AS (
-            SELECT version.*,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY version.persona_id
-                       ORDER BY version.version_number DESC, version.id
-                   ) AS version_rank
-            FROM character_versions AS version
-            WHERE version.status = 'PUBLISHED'
-        ),
-        paged_looks AS (
+        WITH paged_personas AS (
             SELECT persona.id AS persona_id, persona.name,
                    persona.scene_description, persona.costume_description,
-                   persona.created_at AS persona_created_at,
-                   version.id AS version_id, version.version_number,
-                   version.published_at, version.publication_snapshot_json
+                   persona.created_at AS persona_created_at
             FROM character_personas AS persona
-            JOIN ranked_versions AS version
-              ON version.persona_id = persona.id AND version.version_rank = 1
-            WHERE persona.identity_id = %s AND {appearance_type} = 'scene'
+            WHERE persona.identity_id = %s
+              AND {appearance_type} = 'scene'
+              AND EXISTS (
+                  SELECT 1
+                  FROM character_versions AS published_version
+                  WHERE published_version.persona_id = persona.id
+                    AND published_version.status = 'PUBLISHED'
+              )
             ORDER BY persona.created_at DESC, persona.id
             LIMIT %s OFFSET %s
+        ),
+        latest_versions AS (
+            SELECT persona.persona_id, persona.name,
+                   persona.scene_description, persona.costume_description,
+                   persona.persona_created_at,
+                   version.id AS version_id, version.version_number,
+                   version.published_at, version.publication_snapshot_json
+            FROM character_versions AS version
+            JOIN paged_personas AS persona ON persona.persona_id = version.persona_id
+            WHERE version.status = 'PUBLISHED'
+              AND version.version_number = (
+                  SELECT MAX(candidate.version_number)
+                  FROM character_versions AS candidate
+                  WHERE candidate.persona_id = version.persona_id
+                    AND candidate.status = 'PUBLISHED'
+              )
         )
         SELECT look.persona_id, look.name, look.scene_description,
                look.costume_description, look.version_id, look.version_number,
                look.published_at, look.publication_snapshot_json,
                view.view_type, view.asset_id
-        FROM paged_looks AS look
+        FROM latest_versions AS look
         LEFT JOIN character_assets AS view
           ON view.character_version_id = look.version_id
          AND view.review_status = 'APPROVED'

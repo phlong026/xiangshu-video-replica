@@ -2398,6 +2398,30 @@ def test_scene_look_page_limits_database_rows_and_returns_scoped_total(
                     f"2026-09-07T00:{index:02d}:00Z",
                 ),
             )
+        for version_number in range(2, 202):
+            conn.execute(
+                """
+                INSERT INTO character_versions (
+                    id, persona_id, version_number, status,
+                    publication_snapshot_json, publication_hash,
+                    published_at, published_by, created_by
+                ) VALUES (%s, %s, %s, 'PUBLISHED', %s, %s, %s,
+                          'employee_1', 'employee_1')
+                """,
+                (
+                    f"unrelated-base-version-{version_number:03d}",
+                    created["persona_id"],
+                    version_number,
+                    json.dumps(
+                        {
+                            "contact_sheet_asset_id": f"base-sheet-{version_number:03d}",
+                            "generation_source": "test",
+                        }
+                    ),
+                    "1" * 64,
+                    f"2026-09-06T{version_number % 24:02d}:00:00Z",
+                ),
+            )
         conn.commit()
         statements: list[str] = []
         conn.set_trace_callback(statements.append)
@@ -2422,7 +2446,10 @@ def test_scene_look_page_limits_database_rows_and_returns_scoped_total(
         if "FROM CHARACTER_PERSONAS AS PERSONA" in statement.upper()
     ]
     assert len(page_queries) == 2
-    assert any("LIMIT 12 OFFSET 12" in statement for statement in page_queries)
+    page_query = next(statement for statement in page_queries if "LIMIT 12 OFFSET 12" in statement)
+    assert "ROW_NUMBER" not in page_query
+    assert page_query.index("WITH PAGED_PERSONAS AS") < page_query.index("LATEST_VERSIONS AS")
+    assert "JOIN PAGED_PERSONAS AS PERSONA" in page_query
 
 
 def test_scene_look_rejects_archived_identity_before_enqueue(
