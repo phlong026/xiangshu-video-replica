@@ -843,6 +843,7 @@ class GenerationBatchListPage(BaseModel):
 
     items: list[GenerationBatchListItem]
     next_cursor: str | None
+    total: int
 
 
 BatchStatusFilter = Literal[
@@ -5680,6 +5681,8 @@ def list_generation_batches(
             )
             """
         )
+    count_clauses = list(clauses)
+    count_parameters = list(parameters)
     if cursor_position is not None:
         cursor_created_at, cursor_batch_id = cursor_position
         clauses.append("(batch.created_at < %s OR (batch.created_at = %s AND batch.id < %s))")
@@ -5688,6 +5691,12 @@ def list_generation_batches(
 
     rows = conn.execute(
         f"""
+        WITH scoped_total AS (
+            SELECT COUNT(*) AS total
+            FROM generation_batches AS batch
+            LEFT JOIN projects AS project ON project.id = batch.project_id
+            WHERE {" AND ".join(count_clauses)}
+        )
         SELECT
             batch.id,
             batch.project_id,
@@ -5702,19 +5711,32 @@ def list_generation_batches(
             batch.source_batch_id,
             batch.source_task_id,
             batch.generation_reason,
-            batch.creation_kind
+            batch.creation_kind,
+            scoped_total.total AS page_total
         FROM generation_batches AS batch
         LEFT JOIN projects AS project ON project.id = batch.project_id
         JOIN users AS creator ON creator.id = batch.created_by_user_id
+        CROSS JOIN scoped_total
         WHERE {" AND ".join(clauses)}
         ORDER BY batch.created_at DESC, batch.id DESC
         LIMIT %s
         """,
-        tuple(parameters),
+        tuple([*count_parameters, *parameters]),
     ).fetchall()
     page_rows = rows[:limit]
     if not page_rows:
-        return GenerationBatchListPage(items=[], next_cursor=None)
+        total_row = conn.execute(
+            f"""
+            SELECT COUNT(*) AS total
+            FROM generation_batches AS batch
+            LEFT JOIN projects AS project ON project.id = batch.project_id
+            WHERE {" AND ".join(count_clauses)}
+            """,
+            tuple(count_parameters),
+        ).fetchone()
+        total = int(total_row["total"]) if total_row is not None else 0
+        return GenerationBatchListPage(items=[], next_cursor=None, total=total)
+    total = int(page_rows[0]["page_total"])
 
     batch_ids = [str(row["id"]) for row in page_rows]
     placeholders = ", ".join("%s" for _ in batch_ids)
@@ -5798,7 +5820,7 @@ def list_generation_batches(
             batch_id=str(last_row["id"]),
             filters_hash=filters_hash,
         )
-    return GenerationBatchListPage(items=items, next_cursor=next_cursor)
+    return GenerationBatchListPage(items=items, next_cursor=next_cursor, total=total)
 
 
 def batch_list_filters_hash(

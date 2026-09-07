@@ -15,6 +15,7 @@ from fastapi import (
     File,
     Form,
     HTTPException,
+    Query,
     Response,
     UploadFile,
     status,
@@ -46,7 +47,7 @@ from app.simple_character import (
     PreparedSimpleCharacterPublication,
     create_simple_character,
     delete_simple_character_identity,
-    list_simple_library,
+    list_simple_library_page,
     list_simple_scene_looks,
     prepare_simple_character_generation,
     regenerate_simple_character_contact_sheet,
@@ -124,6 +125,14 @@ class SimpleLibraryEntryResponse(BaseModel):
     views: list[SimpleCharacterViewResponse]
 
 
+class SimpleLibraryPageResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[SimpleLibraryEntryResponse]
+    next_cursor: str | None
+    total: int
+
+
 class SimpleCharacterRegenerationResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -151,6 +160,15 @@ class SimpleSceneLookResponse(BaseModel):
     generation_source: str
     views: list[SimpleCharacterViewResponse]
     published_at: str | None = None
+
+
+class SimpleSceneLookPageResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[SimpleSceneLookResponse]
+    total: int
+    limit: int
+    offset: int
 
 
 class SimpleSceneLookCreateRequest(BaseModel):
@@ -348,13 +366,23 @@ async def enqueue_project_simple_character(
     )
 
 
-@router.get("/library", response_model=list[SimpleLibraryEntryResponse])
+@router.get("/library", response_model=SimpleLibraryPageResponse)
 def read_simple_library(
     conn: Database,
     actor: AuthenticatedUser,
-) -> list[SimpleLibraryEntryResponse]:
+    limit: Annotated[int, Query(ge=1, le=100)] = 12,
+    cursor: Annotated[str | None, Query(min_length=1, max_length=512)] = None,
+    query: Annotated[str, Query(max_length=100)] = "",
+) -> SimpleLibraryPageResponse:
     """List characters with their contact sheet and seven-view asset ids."""
-    return [
+    page = list_simple_library_page(
+        conn,
+        actor=actor,
+        limit=limit,
+        cursor=cursor,
+        query=query,
+    )
+    items = [
         SimpleLibraryEntryResponse(
             identity_id=entry.identity_id,
             persona_id=entry.persona_id,
@@ -376,20 +404,28 @@ def read_simple_library(
                 for view in entry.views
             ],
         )
-        for entry in list_simple_library(conn, actor=actor)
+        for entry in page.items
     ]
+    return SimpleLibraryPageResponse(
+        items=items,
+        next_cursor=page.next_cursor,
+        total=page.total,
+    )
 
 
 @router.get(
     "/identities/{identity_id}/scene-looks",
-    response_model=list[SimpleSceneLookResponse],
+    response_model=SimpleSceneLookPageResponse,
 )
 def read_scene_looks(
     identity_id: str,
     conn: Database,
     actor: AuthenticatedUser,
-) -> list[SimpleSceneLookResponse]:
-    return [
+    limit: Annotated[int, Query(ge=1, le=100)] = 12,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> SimpleSceneLookPageResponse:
+    looks = list_simple_scene_looks(conn, actor=actor, identity_id=identity_id)
+    items = [
         SimpleSceneLookResponse(
             identity_id=look.identity_id,
             persona_id=look.persona_id,
@@ -408,8 +444,14 @@ def read_scene_looks(
             ],
             published_at=look.published_at,
         )
-        for look in list_simple_scene_looks(conn, actor=actor, identity_id=identity_id)
+        for look in looks[offset : offset + limit]
     ]
+    return SimpleSceneLookPageResponse(
+        items=items,
+        total=len(looks),
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.post(

@@ -13,6 +13,7 @@ import {
   uploadMaterial,
 } from "../api";
 import { useStudio } from "./context";
+import { loadMorePeople, loadPersonAssets } from "./live";
 import type { StudioPage, StudioPerson } from "./types";
 import { Button, Empty, Field, Hint, Media, Panel, Tabs } from "./ui";
 import "./people.css";
@@ -126,13 +127,49 @@ function selectedPerson(people: StudioPerson[], id?: string) {
 }
 
 export function PeoplePage() {
-  const { data, navigate, openLive } = useStudio();
+  const { data, navigate, openLive, review, updateData, notify } = useStudio();
   const [roleFilter, setRoleFilter] = useState("全部");
+  const [loadingMore, setLoadingMore] = useState(false);
   const people = data.people;
   const visiblePeople =
     roleFilter === "全部"
       ? people
       : people.filter((person) => person.role === roleFilter);
+  const peoplePage = data.pagination?.people;
+  const loadNextPeoplePage = async () => {
+    if (review || loadingMore || !peoplePage?.nextCursor) return;
+    setLoadingMore(true);
+    try {
+      const result = await loadMorePeople(peoplePage.nextCursor);
+      updateData((current) => {
+        const knownPeople = new Set(current.people.map((person) => person.id));
+        const knownAssets = new Set(current.assets.map((asset) => asset.id));
+        return {
+          ...current,
+          people: [
+            ...current.people,
+            ...result.people.filter((person) => !knownPeople.has(person.id)),
+          ],
+          assets: [
+            ...current.assets,
+            ...result.assets.filter((asset) => !knownAssets.has(asset.id)),
+          ],
+          errors: [...current.errors, ...result.errors],
+          pagination: {
+            ...current.pagination,
+            people: {
+              nextCursor: result.nextCursor,
+              total: result.total,
+            },
+          },
+        };
+      });
+    } catch (cause) {
+      notify(customerVisibleErrorMessage(cause, "加载更多人物失败，请重试。"));
+    } finally {
+      setLoadingMore(false);
+    }
+  };
   return (
     <section className="people-page" aria-label="人物库">
       <div className="people-toolbar">
@@ -185,6 +222,19 @@ export function PeoplePage() {
           ))}
         </div>
       )}
+      {peoplePage && peoplePage.total > people.length ? (
+        <div className="people-pagination">
+          <span>
+            已加载 {people.length} / {peoplePage.total} 位人物
+          </span>
+          <Button
+            disabled={loadingMore || !peoplePage.nextCursor}
+            onClick={() => void loadNextPeoplePage()}
+          >
+            {loadingMore ? "正在加载…" : "加载更多人物"}
+          </Button>
+        </div>
+      ) : null}
       <Hint>
         普通照片用于画面创作；口播需要可用分身，文案模式还需要已确认声音。
       </Hint>
@@ -427,10 +477,48 @@ function IpPanel({ person }: { person: StudioPerson }) {
 }
 
 function PhotosPanel({ person }: { person: StudioPerson }) {
-  const { openLive, navigate, patchDraft, data, notify } = useStudio();
+  const { openLive, navigate, patchDraft, data, notify, review, updateData } =
+    useStudio();
+  const [loadingMore, setLoadingMore] = useState(false);
   const assets = data.assets.filter(
     (asset) => asset.personId === person.id && asset.kind === "image",
   );
+  const scenePage = data.pagination?.scenes?.[person.id];
+  const loadNextScenes = async () => {
+    if (review || loadingMore || !scenePage) return;
+    setLoadingMore(true);
+    const result = await loadPersonAssets(person.id, scenePage.loaded);
+    updateData((current) => {
+      const knownAssets = new Set(current.assets.map((asset) => asset.id));
+      const nextAssets = result.assets.filter(
+        (asset) => !knownAssets.has(asset.id),
+      );
+      return {
+        ...current,
+        assets: [...current.assets, ...nextAssets],
+        people: current.people.map((entry) =>
+          entry.id === person.id
+            ? {
+                ...entry,
+                photoIds: [
+                  ...entry.photoIds,
+                  ...nextAssets.map((asset) => asset.id),
+                ],
+              }
+            : entry,
+        ),
+        errors: [...current.errors, ...result.errors],
+        pagination: {
+          ...current.pagination,
+          scenes: {
+            ...current.pagination?.scenes,
+            [person.id]: { loaded: result.loaded, total: result.total },
+          },
+        },
+      };
+    });
+    setLoadingMore(false);
+  };
   return (
     <div className="photos-panel">
       <div className="panel-heading">
@@ -526,6 +614,16 @@ function PhotosPanel({ person }: { person: StudioPerson }) {
             </Panel>
           ))}
       </div>
+      {scenePage && scenePage.loaded < scenePage.total ? (
+        <div className="people-pagination">
+          <span>
+            已加载 {scenePage.loaded} / {scenePage.total} 套场景
+          </span>
+          <Button disabled={loadingMore} onClick={() => void loadNextScenes()}>
+            {loadingMore ? "正在加载…" : "加载更多场景"}
+          </Button>
+        </div>
+      ) : null}
     </div>
   );
 }

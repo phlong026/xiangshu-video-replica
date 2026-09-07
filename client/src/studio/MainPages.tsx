@@ -7,12 +7,14 @@ import { useStudio } from "./context";
 import {
   cancelStudioTask,
   downloadStudioTaskResult,
+  loadMoreGenerationTasks,
+  loadMoreOralTasks,
   loadTaskPreview,
   retryStudioTask,
   uploadWorkbenchSourceVideo,
 } from "./live";
 import { draftFromTask } from "./state";
-import type { StudioTask, StudioVideo } from "./types";
+import type { StudioData, StudioTask, StudioVideo } from "./types";
 import {
   Button,
   Empty,
@@ -612,10 +614,14 @@ export function WorkbenchPage() {
 }
 
 export function TasksPage() {
-  const { data, navigate, openLive, review, notify, refresh } = useStudio();
+  const { data, navigate, openLive, review, notify, refresh, updateData } =
+    useStudio();
   const [status, setStatus] = useState("all");
   const [kind, setKind] = useState("全部");
   const [cancellingId, setCancellingId] = useState<string | null>(null);
+  const [loadingHistory, setLoadingHistory] = useState<
+    "generation" | "oral" | null
+  >(null);
   const matchesStatus = (task: StudioTask) =>
     status === "all" ||
     (status === "active"
@@ -647,6 +653,69 @@ export function TasksPage() {
   const attentionCount = data.tasks.filter((task) =>
     ["failed", "uncertain"].includes(task.status),
   ).length;
+  const generationPage = data.pagination?.generationTasks;
+  const oralPage = data.pagination?.oralTasks;
+  const appendTasks = (
+    incoming: StudioTask[],
+    pagination: NonNullable<StudioData["pagination"]>,
+  ) => {
+    updateData((current) => {
+      const known = new Set(current.tasks.map((task) => task.id));
+      return {
+        ...current,
+        tasks: [
+          ...current.tasks,
+          ...incoming.filter((task) => !known.has(task.id)),
+        ],
+        pagination: { ...current.pagination, ...pagination },
+      };
+    });
+  };
+  const loadGenerationHistory = async () => {
+    if (review || loadingHistory || !generationPage?.nextCursor) return;
+    setLoadingHistory("generation");
+    try {
+      const result = await loadMoreGenerationTasks(generationPage.nextCursor);
+      appendTasks(result.items, {
+        generationTasks: {
+          nextCursor: result.nextCursor,
+          total: result.total,
+        },
+      });
+    } catch (cause) {
+      notify(
+        cause instanceof Error && cause.message.trim()
+          ? cause.message
+          : "加载更多普通批次失败，请重试。",
+      );
+    } finally {
+      setLoadingHistory(null);
+    }
+  };
+  const loadOralHistory = async () => {
+    if (
+      review ||
+      loadingHistory ||
+      !oralPage ||
+      oralPage.loaded >= oralPage.total
+    )
+      return;
+    setLoadingHistory("oral");
+    try {
+      const result = await loadMoreOralTasks(oralPage.loaded);
+      appendTasks(result.items, {
+        oralTasks: { loaded: result.loaded, total: result.total },
+      });
+    } catch (cause) {
+      notify(
+        cause instanceof Error && cause.message.trim()
+          ? cause.message
+          : "加载更多口播任务失败，请重试。",
+      );
+    } finally {
+      setLoadingHistory(null);
+    }
+  };
   const cancelTask = async (task: StudioTask) => {
     if (review) {
       notify("审核示例不执行真实取消。");
@@ -781,9 +850,43 @@ export function TasksPage() {
           />
         )}
       </div>
+      {!review && (generationPage || oralPage) ? (
+        <fieldset className="studio-page-actions" aria-label="任务历史分页">
+          <span>
+            普通批次已加载{" "}
+            {
+              data.tasks.filter((task) => task.backendKind !== "oral_task")
+                .length
+            }
+            {generationPage ? ` / ${generationPage.total}` : ""}
+          </span>
+          <Button
+            disabled={loadingHistory !== null || !generationPage?.nextCursor}
+            onClick={() => void loadGenerationHistory()}
+          >
+            {loadingHistory === "generation"
+              ? "加载普通批次中…"
+              : "加载更多普通批次"}
+          </Button>
+          <span>
+            口播任务已加载 {oralPage?.loaded ?? 0}
+            {oralPage ? ` / ${oralPage.total}` : ""}
+          </span>
+          <Button
+            disabled={
+              loadingHistory !== null ||
+              !oralPage ||
+              oralPage.loaded >= oralPage.total
+            }
+            onClick={() => void loadOralHistory()}
+          >
+            {loadingHistory === "oral" ? "加载口播任务中…" : "加载更多口播任务"}
+          </Button>
+        </fieldset>
+      ) : null}
       {!review && (
         <Hint>
-          当前显示最近任务。更多记录及状态核对请进入“历史任务与下载”。状态待确认的任务请先核对，不要直接重复提交。
+          普通批次与口播任务分别分页；状态待确认的任务请先核对，不要直接重复提交。
         </Hint>
       )}
     </section>

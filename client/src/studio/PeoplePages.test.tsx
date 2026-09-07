@@ -18,8 +18,13 @@ const api = vi.hoisted(() => ({
   updateSimpleCharacterProfile: vi.fn(),
   uploadMaterial: vi.fn(),
 }));
+const live = vi.hoisted(() => ({
+  loadMorePeople: vi.fn(),
+  loadPersonAssets: vi.fn(),
+}));
 
 vi.mock("../api", () => api);
+vi.mock("./live", () => live);
 
 const navigate = vi.fn();
 const patchDraft = vi.fn();
@@ -32,6 +37,7 @@ let selectedPersonId: string | undefined = "p1";
 let returnTo: string | undefined;
 let review = true;
 let draft: Record<string, string | undefined> = {};
+let pagination: Record<string, unknown> | undefined;
 
 vi.mock("./context", () => ({
   useStudio: () => ({
@@ -166,6 +172,7 @@ vi.mock("./context", () => ({
           saved: true,
         },
       ],
+      pagination,
       videos: [],
       tasks: [],
       projects: [],
@@ -196,6 +203,7 @@ describe("PeoplePages", () => {
     returnTo = undefined;
     review = true;
     draft = {};
+    pagination = undefined;
     navigate.mockClear();
     patchDraft.mockClear();
     notify.mockClear();
@@ -223,6 +231,37 @@ describe("PeoplePages", () => {
     await screen.getByRole("button", { name: "客户经理" }).click();
     expect(screen.queryByText("测试人物")).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "人物库" })).toBeInTheDocument();
+  });
+
+  it("人物和场景分别按服务端 total 加载下一页", async () => {
+    review = false;
+    pagination = {
+      people: { nextCursor: "people-next", total: 9 },
+      scenes: { p1: { loaded: 1, total: 13 } },
+    };
+    live.loadMorePeople.mockResolvedValue({
+      people: [],
+      assets: [],
+      errors: [],
+      nextCursor: null,
+      total: 9,
+    });
+    live.loadPersonAssets.mockResolvedValue({
+      assets: [],
+      errors: [],
+      loaded: 13,
+      total: 13,
+    });
+
+    const peopleView = render(<PeoplePage />);
+    fireEvent.click(screen.getByRole("button", { name: "加载更多人物" }));
+    expect(live.loadMorePeople).toHaveBeenCalledWith("people-next");
+    peopleView.unmount();
+
+    currentPage = "person-photos";
+    render(<PersonPage />);
+    fireEvent.click(screen.getByRole("button", { name: "加载更多场景" }));
+    expect(live.loadPersonAssets).toHaveBeenCalledWith("p1", 1);
   });
 
   it("renders the IP tab without exposing authorization settings", () => {

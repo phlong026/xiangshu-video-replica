@@ -383,8 +383,20 @@ def list_oral_generation_tasks(
     conn: Database,
     actor: AuthenticatedUser,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
-) -> list[dict[str, Any]]:
-    return _serialize_tasks_for_owner(conn, list_oral_tasks(conn, actor=actor, limit=limit))
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> dict[str, Any]:
+    rows, total = list_oral_tasks(
+        conn,
+        actor=actor,
+        limit=limit,
+        offset=offset,
+    )
+    return {
+        "items": _serialize_tasks_for_owner(conn, rows),
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 @router.get("/tasks/{task_id}")

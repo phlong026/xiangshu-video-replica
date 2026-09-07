@@ -1229,6 +1229,84 @@ def test_library_requires_auth(client: TestClient) -> None:
     assert response.status_code == 401
 
 
+def test_library_uses_keyset_pages_without_duplicate_identities(client: TestClient) -> None:
+    created_ids = {generate_global(client).json()["identity_id"] for _ in range(3)}
+
+    first = client.get(
+        "/api/simple-characters/library?limit=2",
+        headers=headers("employee_1"),
+    )
+
+    assert first.status_code == 200, first.text
+    first_page = first.json()
+    assert len(first_page["items"]) == 2
+    assert first_page["next_cursor"]
+
+    second = client.get(
+        "/api/simple-characters/library",
+        params={"limit": 2, "cursor": first_page["next_cursor"]},
+        headers=headers("employee_1"),
+    )
+    assert second.status_code == 200, second.text
+    second_page = second.json()
+    assert second_page["next_cursor"] is None
+    listed_ids = [
+        *(item["identity_id"] for item in first_page["items"]),
+        *(item["identity_id"] for item in second_page["items"]),
+    ]
+    assert len(listed_ids) == len(set(listed_ids))
+    assert set(listed_ids) == created_ids
+
+
+def test_library_cursor_is_bound_to_actor_scope_and_query(client: TestClient) -> None:
+    generate_global(client, user_id="employee_1")
+    generate_global(client, user_id="employee_1")
+    generate_global(client, user_id="employee_2")
+    first = client.get(
+        "/api/simple-characters/library?limit=1",
+        headers=headers("employee_1"),
+    ).json()
+    cursor = first["next_cursor"]
+    assert cursor
+
+    wrong_query = client.get(
+        "/api/simple-characters/library",
+        params={"limit": 1, "cursor": cursor, "query": "荣哥"},
+        headers=headers("employee_1"),
+    )
+    wrong_actor = client.get(
+        "/api/simple-characters/library",
+        params={"limit": 1, "cursor": cursor},
+        headers=headers("employee_2"),
+    )
+    invalid = client.get(
+        "/api/simple-characters/library?cursor=not-a-cursor",
+        headers=headers("employee_1"),
+    )
+
+    assert wrong_query.status_code == 400
+    assert wrong_query.json()["detail"]["code"] == "CURSOR_SCOPE_MISMATCH"
+    assert wrong_actor.status_code == 400
+    assert wrong_actor.json()["detail"]["code"] == "CURSOR_SCOPE_MISMATCH"
+    assert invalid.status_code == 400
+    assert invalid.json()["detail"]["code"] == "INVALID_CURSOR"
+
+    no_matches = client.get(
+        "/api/simple-characters/library",
+        params={"query": "不存在的人物"},
+        headers=headers("employee_1"),
+    )
+    assert no_matches.status_code == 200
+    assert no_matches.json() == {"items": [], "next_cursor": None, "total": 0}
+
+    oversized = client.get(
+        "/api/simple-characters/library",
+        params={"cursor": "x" * 513},
+        headers=headers("employee_1"),
+    )
+    assert oversized.status_code == 422
+
+
 def test_library_lists_characters_with_published_views(
     client: TestClient,
 ) -> None:
@@ -1240,7 +1318,7 @@ def test_library_lists_characters_with_published_views(
     )
 
     assert response.status_code == 200, response.text
-    entries = response.json()
+    entries = response.json()["items"]
     matching = [entry for entry in entries if entry["identity_id"] == created["identity_id"]]
     assert len(matching) == 1
     entry = matching[0]
@@ -1282,7 +1360,9 @@ def test_library_falls_back_to_views_when_snapshot_has_no_contact_sheet(
 
     response = client.get("/api/simple-characters/library", headers=headers("employee_1"))
     matching = [
-        entry for entry in response.json() if entry["identity_id"] == created["identity_id"]
+        entry
+        for entry in response.json()["items"]
+        if entry["identity_id"] == created["identity_id"]
     ]
     assert len(matching) == 1
     entry = matching[0]
@@ -1297,13 +1377,13 @@ def test_library_is_isolated_by_owner_outside_control_roles(client: TestClient) 
 
     employee_one = client.get("/api/simple-characters/library", headers=headers("employee_1"))
     employee_two = client.get("/api/simple-characters/library", headers=headers("employee_2"))
-    assert [item["identity_id"] for item in employee_one.json()] == [first["identity_id"]]
-    assert [item["identity_id"] for item in employee_two.json()] == [second["identity_id"]]
+    assert [item["identity_id"] for item in employee_one.json()["items"]] == [first["identity_id"]]
+    assert [item["identity_id"] for item in employee_two.json()["items"]] == [second["identity_id"]]
 
     for user_id in ("admin_1", "auditor_1"):
         response = client.get("/api/simple-characters/library", headers=headers(user_id))
         assert response.status_code == 200, response.text
-        assert {item["identity_id"] for item in response.json()} == {
+        assert {item["identity_id"] for item in response.json()["items"]} == {
             first["identity_id"],
             second["identity_id"],
         }
@@ -1538,7 +1618,7 @@ def test_other_employee_cannot_see_or_update_ip_profile(client: TestClient) -> N
     owner_library = client.get(
         "/api/simple-characters/library",
         headers=headers("employee_1"),
-    ).json()
+    ).json()["items"]
     assert owner_library[0]["display_name"] == "荣哥"
     assert owner_library[0]["role"] == ""
 
@@ -1644,7 +1724,9 @@ def test_owner_delete_removes_identity_records_and_objects(
     )
     assert response.status_code == 204, response.text
 
-    library = client.get("/api/simple-characters/library", headers=headers("employee_1")).json()
+    library = client.get("/api/simple-characters/library", headers=headers("employee_1")).json()[
+        "items"
+    ]
     assert all(entry["identity_id"] != identity_id for entry in library)
 
     with BusinessConnection.sqlite(connect_database(db_path)) as conn:
@@ -1748,7 +1830,9 @@ def test_delete_rejects_identity_selected_by_project(
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "IDENTITY_IN_USE"
     # Nothing was removed.
-    library = client.get("/api/simple-characters/library", headers=headers("employee_1")).json()
+    library = client.get("/api/simple-characters/library", headers=headers("employee_1")).json()[
+        "items"
+    ]
     assert any(entry["identity_id"] == created["identity_id"] for entry in library)
 
 
@@ -1979,7 +2063,9 @@ def test_owner_regenerates_contact_sheet_as_next_version(
     ]
 
     # The library preview switches to the regenerated contact sheet.
-    library = client.get("/api/simple-characters/library", headers=headers("employee_1")).json()
+    library = client.get("/api/simple-characters/library", headers=headers("employee_1")).json()[
+        "items"
+    ]
     entry = next(item for item in library if item["identity_id"] == identity_id)
     assert entry["contact_sheet_asset_id"] == body["contact_sheet_asset_id"]
 
@@ -2189,10 +2275,14 @@ def test_owner_generates_and_lists_a_direct_publish_scene_look(
         headers=headers("employee_1"),
     )
     assert looks.status_code == 200, looks.text
-    assert looks.json() == [
+    look_page = looks.json()
+    assert look_page["total"] == 1
+    assert look_page["limit"] == 12
+    assert look_page["offset"] == 0
+    assert look_page["items"] == [
         {
             **result,
-            "published_at": looks.json()[0]["published_at"],
+            "published_at": look_page["items"][0]["published_at"],
         }
     ]
 
@@ -2200,7 +2290,7 @@ def test_owner_generates_and_lists_a_direct_publish_scene_look(
     library = client.get(
         "/api/simple-characters/library",
         headers=headers("employee_1"),
-    ).json()
+    ).json()["items"]
     base = next(item for item in library if item["identity_id"] == identity_id)
     assert base["contact_sheet_asset_id"] == created["contact_sheet_asset_id"]
 

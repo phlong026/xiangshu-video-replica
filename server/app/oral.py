@@ -1254,18 +1254,26 @@ def read_voice_clone(
 
 
 def list_oral_tasks(
-    conn: BusinessConnection, *, actor: CurrentUser, limit: int = 20
-) -> list[dict[str, Any]]:
+    conn: BusinessConnection,
+    *,
+    actor: CurrentUser,
+    limit: int = 20,
+    offset: int = 0,
+) -> tuple[list[dict[str, Any]], int]:
+    total_row = conn.execute(
+        "SELECT COUNT(*) AS total FROM oral_tasks WHERE owner_user_id = %s",
+        (actor.id,),
+    ).fetchone()
     rows = conn.execute(
         """
         SELECT * FROM oral_tasks
         WHERE owner_user_id = %s
         ORDER BY created_at DESC
-        LIMIT %s
+        LIMIT %s OFFSET %s
         """,
-        (actor.id, max(1, min(100, limit))),
+        (actor.id, max(1, min(100, limit)), max(0, offset)),
     ).fetchall()
-    return [dict(row) for row in rows]
+    return [dict(row) for row in rows], int(total_row["total"] if total_row else 0)
 
 
 def oral_price_quote(conn: BusinessConnection) -> dict[str, int]:
