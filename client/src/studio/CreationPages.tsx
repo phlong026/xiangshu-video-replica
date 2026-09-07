@@ -1127,13 +1127,26 @@ export function ReplacementPage() {
   const [referenceSelection, setReferenceSelection] =
     useState<CharacterReferenceSelection | null>(null);
   const [referenceError, setReferenceError] = useState("");
+  const [referenceMatching, setReferenceMatching] = useState(false);
+  const [referenceMatchRevision, setReferenceMatchRevision] = useState(0);
+  const [referenceInputRevision, setReferenceInputRevision] = useState(0);
   const [firstFrameSelection, setFirstFrameSelection] =
     useState<AnalysisVersion | null>(null);
   const [leafBusy, setLeafBusy] = useState(false);
   const [sourceDurationSeconds, setSourceDurationSeconds] = useState<
     number | null
   >(null);
-  const autoMatchAttemptedRef = useRef(new Set<string>());
+  const referenceMatchInFlightRef = useRef<string | undefined>(undefined);
+  const referenceRetryScheduledRef = useRef(false);
+  const characterVersionIdRef = useRef<string | null | undefined>(undefined);
+  const sourceFrameSelectionIdRef = useRef<string | undefined>(undefined);
+  const referenceMatchPromiseRef = useRef<
+    | {
+        key: string;
+        promise: ReturnType<typeof selectCharacterReferences>;
+      }
+    | undefined
+  >(undefined);
   // patchDraft 每次壳层渲染都是新引用，effect 依赖一律走 ref，避免无限置位循环。
   const patchDraftRef = useRef(patchDraft);
   patchDraftRef.current = patchDraft;
@@ -1161,7 +1174,11 @@ export function ReplacementPage() {
     setReferenceSelection(null);
     setFirstFrameSelection(null);
     setReferenceError("");
-    autoMatchAttemptedRef.current.clear();
+    setReferenceMatching(false);
+    referenceMatchInFlightRef.current = undefined;
+    referenceRetryScheduledRef.current = false;
+    characterVersionIdRef.current = undefined;
+    sourceFrameSelectionIdRef.current = undefined;
     confirmedSelectionKeyRef.current = undefined;
     if (projectId) {
       patchDraftRef.current({
@@ -1195,29 +1212,38 @@ export function ReplacementPage() {
     };
   }, [review, projectId]);
 
-  // 人物参考自动匹配：角色版本 × 已确认源画面，组合只自动尝试一次。
+  const characterVersionId = characterSelection?.character_version_id ?? "";
+  const sourceFrameSelectionId = sourceFrameSelection?.id ?? "";
+  const referenceSelectionId = referenceSelection?.id ?? "";
+
+  // 人物参考自动匹配：仅业务输入或明确重试变化时重新请求。
   useEffect(() => {
     if (
       review ||
-      !project ||
-      !characterSelection ||
-      !sourceFrameSelection ||
-      referenceSelection
+      !projectId ||
+      !characterVersionId ||
+      !sourceFrameSelectionId ||
+      referenceSelectionId
     ) {
+      setReferenceMatching(false);
+      referenceRetryScheduledRef.current = false;
       return;
     }
-    const characterVersionId = characterSelection.character_version_id ?? "";
-    const matchKey = `${project.id}:${characterVersionId}:${sourceFrameSelection.id}`;
-    if (autoMatchAttemptedRef.current.has(matchKey)) {
-      return;
-    }
-    autoMatchAttemptedRef.current.add(matchKey);
+    const matchKey = `${projectId}:${characterVersionId}:${sourceFrameSelectionId}`;
+    const requestKey = `${matchKey}:${referenceInputRevision}:${referenceMatchRevision}`;
     let active = true;
-    setLeafBusy(true);
-    selectCharacterReferences(project.id, {
-      character_version_id: characterVersionId,
-      source_frame_selection_version_id: sourceFrameSelection.id,
-    })
+    referenceMatchInFlightRef.current = requestKey;
+    setReferenceMatching(true);
+    const existing = referenceMatchPromiseRef.current;
+    const promise =
+      existing?.key === requestKey
+        ? existing.promise
+        : selectCharacterReferences(projectId, {
+            character_version_id: characterVersionId,
+            source_frame_selection_version_id: sourceFrameSelectionId,
+          });
+    referenceMatchPromiseRef.current = { key: requestKey, promise };
+    promise
       .then((selection) => {
         if (active) {
           setReferenceSelection(selection);
@@ -1230,23 +1256,39 @@ export function ReplacementPage() {
             cause instanceof Error ? cause.message : "自动匹配人物参考失败。",
           );
         }
+      })
+      .finally(() => {
+        if (!active) return;
+        if (referenceMatchInFlightRef.current === requestKey)
+          referenceMatchInFlightRef.current = undefined;
+        referenceRetryScheduledRef.current = false;
+        setReferenceMatching(false);
       });
     return () => {
       active = false;
-      setLeafBusy(false);
+      if (referenceMatchInFlightRef.current === requestKey) {
+        referenceMatchInFlightRef.current = undefined;
+        referenceRetryScheduledRef.current = false;
+      }
     };
   }, [
     review,
-    project,
-    characterSelection,
-    sourceFrameSelection,
-    referenceSelection,
+    projectId,
+    characterVersionId,
+    sourceFrameSelectionId,
+    referenceSelectionId,
+    referenceInputRevision,
+    referenceMatchRevision,
   ]);
 
   // 叶子组件的 effect 依赖回调身份：必须 useCallback 保持稳定，否则引发重取风暴。
   const handleCharacterChange = useCallback(
     (selection: ProjectMainCharacter | null) => {
+      const nextVersionId = selection?.character_version_id;
+      if (characterVersionIdRef.current === nextVersionId) return;
+      characterVersionIdRef.current = nextVersionId;
       setCharacterSelection(selection);
+      setReferenceInputRevision((revision) => revision + 1);
       setReferenceSelection(null);
       setReferenceError("");
       setFirstFrameSelection(null);
@@ -1257,7 +1299,11 @@ export function ReplacementPage() {
 
   const handleSourceFrameChange = useCallback(
     (selection: AnalysisVersion | null) => {
+      const nextSelectionId = selection?.id;
+      if (sourceFrameSelectionIdRef.current === nextSelectionId) return;
+      sourceFrameSelectionIdRef.current = nextSelectionId;
       setSourceFrameSelection(selection);
+      setReferenceInputRevision((revision) => revision + 1);
       setReferenceSelection(null);
       setReferenceError("");
       setFirstFrameSelection(null);
@@ -1292,12 +1338,15 @@ export function ReplacementPage() {
   );
 
   const retryReferenceMatch = () => {
-    const characterVersionId = characterSelection?.character_version_id ?? "";
-    const matchKey = `${project?.id ?? ""}:${characterVersionId}:${
-      sourceFrameSelection?.id ?? ""
-    }`;
-    autoMatchAttemptedRef.current.delete(matchKey);
+    if (
+      referenceMatching ||
+      referenceMatchInFlightRef.current ||
+      referenceRetryScheduledRef.current
+    )
+      return;
+    referenceRetryScheduledRef.current = true;
     setReferenceError("");
+    setReferenceMatchRevision((revision) => revision + 1);
   };
 
   const firstFrameReady = Boolean(firstFrameAssetId);
@@ -1380,7 +1429,11 @@ export function ReplacementPage() {
                 <p className="settings-error" role="alert">
                   {referenceError}
                 </p>
-                <Button onClick={retryReferenceMatch} variant="outline">
+                <Button
+                  disabled={referenceMatching}
+                  onClick={retryReferenceMatch}
+                  variant="outline"
+                >
                   重试匹配人物参考
                 </Button>
               </>
@@ -1409,7 +1462,7 @@ export function ReplacementPage() {
                   置换首帧已确认并写入当前创作草稿，可在「视频生成」中作为首帧图生视频。
                 </p>
                 <Button
-                  disabled={leafBusy}
+                  disabled={leafBusy || referenceMatching}
                   variant="primary"
                   onClick={() => navigate("video")}
                 >

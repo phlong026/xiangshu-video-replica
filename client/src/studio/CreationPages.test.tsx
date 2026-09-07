@@ -62,19 +62,31 @@ vi.mock("../SourceFrameSelection", () => ({
   SourceFrameSelection: (props: {
     onSelectionChange?: (s: unknown) => void;
   }) => (
-    <button
-      type="button"
-      onClick={() => props.onSelectionChange?.({ id: "sfv-1", payload: {} })}
-    >
-      stub-确认源画面
-    </button>
+    <>
+      <button
+        type="button"
+        onClick={() => props.onSelectionChange?.({ id: "sfv-1", payload: {} })}
+      >
+        stub-确认源画面
+      </button>
+      <button
+        type="button"
+        onClick={() => props.onSelectionChange?.({ id: "sfv-2", payload: {} })}
+      >
+        stub-切换源画面
+      </button>
+    </>
   ),
 }));
 vi.mock("../FirstFrameSelection", () => ({
   FirstFrameSelection: (props: {
     onSelectionChange?: (s: unknown) => void;
+    referenceSelection?: { id: string } | null;
   }) => (
     <>
+      {props.referenceSelection ? (
+        <span>stub-参考匹配-{props.referenceSelection.id}</span>
+      ) : null}
       <button
         type="button"
         onClick={() =>
@@ -265,6 +277,7 @@ describe("V1.4 创作页面", () => {
   beforeEach(() => {
     useStudio.mockReset();
     replicaApi.getAssetDownloadUrl.mockReset();
+    replicaApi.selectCharacterReferences.mockReset();
     replicaApi.getAssetDownloadUrl.mockImplementation(async (assetId) => ({
       url: `https://signed.example/${assetId}.png`,
     }));
@@ -454,6 +467,206 @@ describe("V1.4 创作页面", () => {
       firstFrameSelectionVersionId: undefined,
       frameConfirmed: false,
     });
+  });
+
+  it("人物参考匹配失败后重试会发起第二次请求并呈现成功结果", async () => {
+    const value = replacementStudio();
+    replicaApi.selectCharacterReferences
+      .mockRejectedValueOnce(new Error("匹配服务暂时不可用"))
+      .mockResolvedValueOnce({ id: "crs-retry", payload: {} });
+    useStudio.mockReturnValue(value);
+    render(<ReplacementPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "stub-选择人物" }));
+    fireEvent.click(screen.getByRole("button", { name: "stub-确认源画面" }));
+    expect(await screen.findByText("匹配服务暂时不可用")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "重试匹配人物参考" }));
+
+    expect(
+      await screen.findByText("stub-参考匹配-crs-retry"),
+    ).toBeInTheDocument();
+    expect(replicaApi.selectCharacterReferences).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText("匹配服务暂时不可用")).toBeNull();
+  });
+
+  it("人物参考匹配防重复重试并忽略切换源帧前的迟到结果", async () => {
+    let resolveRetry:
+      | ((value: { id: string; payload: object }) => void)
+      | undefined;
+    replicaApi.selectCharacterReferences
+      .mockRejectedValueOnce(new Error("首次匹配失败"))
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveRetry = resolve;
+          }),
+      )
+      .mockResolvedValueOnce({ id: "crs-new-source", payload: {} });
+    const value = replacementStudio();
+    useStudio.mockReturnValue(value);
+    render(<ReplacementPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "stub-选择人物" }));
+    fireEvent.click(screen.getByRole("button", { name: "stub-确认源画面" }));
+    const retry = await screen.findByRole("button", {
+      name: "重试匹配人物参考",
+    });
+    fireEvent.click(retry);
+    fireEvent.click(retry);
+    await waitFor(() =>
+      expect(replicaApi.selectCharacterReferences).toHaveBeenCalledTimes(2),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "stub-切换源画面" }));
+    expect(
+      await screen.findByText("stub-参考匹配-crs-new-source"),
+    ).toBeInTheDocument();
+    resolveRetry?.({ id: "crs-old-source", payload: {} });
+    await Promise.resolve();
+
+    expect(screen.queryByText("stub-参考匹配-crs-old-source")).toBeNull();
+    expect(replicaApi.selectCharacterReferences).toHaveBeenLastCalledWith(
+      "project-1",
+      {
+        character_version_id: "cv-1",
+        source_frame_selection_version_id: "sfv-2",
+      },
+    );
+  });
+
+  it("同项目 ID 的数据对象刷新不会取消正在进行的匹配", async () => {
+    let resolveMatch:
+      | ((value: { id: string; payload: object }) => void)
+      | undefined;
+    replicaApi.selectCharacterReferences.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveMatch = resolve;
+        }),
+    );
+    const initial = replacementStudio();
+    let current = initial;
+    useStudio.mockImplementation(() => current);
+    const view = render(<ReplacementPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "stub-选择人物" }));
+    fireEvent.click(screen.getByRole("button", { name: "stub-确认源画面" }));
+    await waitFor(() =>
+      expect(replicaApi.selectCharacterReferences).toHaveBeenCalledTimes(1),
+    );
+    current = {
+      ...current,
+      data: {
+        ...current.data,
+        projects: current.data.projects.map((project) => ({ ...project })),
+      },
+    };
+    view.rerender(<ReplacementPage />);
+    resolveMatch?.({ id: "crs-same-project", payload: {} });
+
+    expect(
+      await screen.findByText("stub-参考匹配-crs-same-project"),
+    ).toBeInTheDocument();
+    expect(replicaApi.selectCharacterReferences).toHaveBeenCalledTimes(1);
+  });
+
+  it("源帧 A 切到 B 再返回 A 时会重新匹配并隔离前两次迟到响应", async () => {
+    const resolvers: Array<(value: { id: string; payload: object }) => void> =
+      [];
+    replicaApi.selectCharacterReferences.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolvers.push(resolve);
+        }),
+    );
+    const value = replacementStudio();
+    useStudio.mockReturnValue(value);
+    render(<ReplacementPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "stub-选择人物" }));
+    fireEvent.click(screen.getByRole("button", { name: "stub-确认源画面" }));
+    await waitFor(() => expect(resolvers).toHaveLength(1));
+    fireEvent.click(screen.getByRole("button", { name: "stub-切换源画面" }));
+    await waitFor(() => expect(resolvers).toHaveLength(2));
+    fireEvent.click(screen.getByRole("button", { name: "stub-确认源画面" }));
+    await waitFor(() => expect(resolvers).toHaveLength(3));
+
+    resolvers[2]?.({ id: "crs-a-current", payload: {} });
+    expect(
+      await screen.findByText("stub-参考匹配-crs-a-current"),
+    ).toBeInTheDocument();
+    resolvers[0]?.({ id: "crs-a-old", payload: {} });
+    resolvers[1]?.({ id: "crs-b-old", payload: {} });
+    await Promise.resolve();
+
+    expect(screen.queryByText("stub-参考匹配-crs-a-old")).toBeNull();
+    expect(screen.queryByText("stub-参考匹配-crs-b-old")).toBeNull();
+    expect(replicaApi.selectCharacterReferences).toHaveBeenCalledTimes(3);
+  });
+
+  it("源帧 A 匹配已失败后切到 B 再返回 A 会发起新请求", async () => {
+    replicaApi.selectCharacterReferences
+      .mockRejectedValueOnce(new Error("A 匹配失败"))
+      .mockResolvedValueOnce({ id: "crs-b", payload: {} })
+      .mockResolvedValueOnce({ id: "crs-a-retry", payload: {} });
+    const value = replacementStudio();
+    useStudio.mockReturnValue(value);
+    render(<ReplacementPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "stub-选择人物" }));
+    fireEvent.click(screen.getByRole("button", { name: "stub-确认源画面" }));
+    expect(await screen.findByText("A 匹配失败")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "stub-切换源画面" }));
+    expect(await screen.findByText("stub-参考匹配-crs-b")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "stub-确认源画面" }));
+
+    expect(
+      await screen.findByText("stub-参考匹配-crs-a-retry"),
+    ).toBeInTheDocument();
+    expect(replicaApi.selectCharacterReferences).toHaveBeenCalledTimes(3);
+  });
+
+  it("同一源帧版本重复回调不重复匹配也不清除已确认首帧", async () => {
+    let resolveMatch:
+      | ((value: { id: string; payload: object }) => void)
+      | undefined;
+    replicaApi.selectCharacterReferences.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveMatch = resolve;
+        }),
+    );
+    const value = replacementStudio();
+    useStudio.mockReturnValue(value);
+    render(<ReplacementPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "stub-选择人物" }));
+    fireEvent.click(screen.getByRole("button", { name: "stub-确认源画面" }));
+    await waitFor(() =>
+      expect(replicaApi.selectCharacterReferences).toHaveBeenCalledTimes(1),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "stub-确认置换首帧" }));
+    await waitFor(() =>
+      expect(value.patchDraft).toHaveBeenLastCalledWith({
+        firstFrameId: "ff-asset-1",
+        firstFrameSelectionVersionId: "ffv-1",
+        frameConfirmed: true,
+      }),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "stub-确认源画面" }));
+    expect(replicaApi.selectCharacterReferences).toHaveBeenCalledTimes(1);
+    expect(value.patchDraft).toHaveBeenLastCalledWith({
+      firstFrameId: "ff-asset-1",
+      firstFrameSelectionVersionId: "ffv-1",
+      frameConfirmed: true,
+    });
+
+    resolveMatch?.({ id: "crs-same-source", payload: {} });
+    expect(
+      await screen.findByText("stub-参考匹配-crs-same-source"),
+    ).toBeInTheDocument();
   });
 
   it("视频页按确认首帧 ID 恢复签名预览并交给生成请求", async () => {
