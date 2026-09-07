@@ -551,7 +551,10 @@ describe("V1.4 workspace integration", () => {
         await act(async () => Promise.resolve());
         expect(live.persistCloudDraft).toHaveBeenCalledTimes(1);
 
-        await act(async () => resolveAutosave?.());
+        await act(async () => {
+          resolveAutosave?.();
+          await vi.runAllTimersAsync();
+        });
         expect(live.persistCloudDraft).toHaveBeenCalledTimes(2);
         expect(live.persistCloudDraft.mock.calls[1]?.[0]).toMatchObject({
           projectId: "project-double-save",
@@ -565,7 +568,10 @@ describe("V1.4 workspace integration", () => {
             sourceKind: "project",
           },
         });
-        expect(screen.getAllByText(/换设备登录也能找回/)).toHaveLength(1);
+        vi.useRealTimers();
+        await waitFor(() =>
+          expect(screen.getAllByText(/换设备登录也能找回/)).toHaveLength(1),
+        );
       } finally {
         vi.useRealTimers();
       }
