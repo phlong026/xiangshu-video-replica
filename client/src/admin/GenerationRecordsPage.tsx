@@ -18,20 +18,24 @@ import {
 
 const PAGE_SIZE = 50;
 
-export function GenerationRecordsPage() {
+export function GenerationRecordsPage({
+  initialStatus = "",
+}: {
+  initialStatus?: string;
+}) {
   const [items, setItems] = useState<AdminGenerationRecord[]>([]);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [username, setUsername] = useState("");
-  const [status, setStatus] = useState("");
+  const [status, setStatus] = useState(initialStatus);
   const [recordType, setRecordType] = useState("");
   const [createdFrom, setCreatedFrom] = useState("");
   const [createdTo, setCreatedTo] = useState("");
   const [filters, setFilters] = useState({
     username: "",
-    status: "",
+    status: initialStatus,
     recordType: "",
     createdFrom: "",
     createdTo: "",
@@ -98,7 +102,7 @@ export function GenerationRecordsPage() {
       </div>
 
       <p className="admin-hint">
-        记录视频、图片和 AI
+        记录视频、口播、图片和 AI
         评分调用。上游未返回精确成本时会明确标注，不以零成本代替。
       </p>
       <form
@@ -126,6 +130,7 @@ export function GenerationRecordsPage() {
           >
             <option value="">全部类型</option>
             <option value="VIDEO">视频</option>
+            <option value="ORAL_VIDEO">口播视频</option>
             <option value="FIRST_FRAME_IMAGE">首帧图片</option>
             <option value="CHARACTER_SHEET_IMAGE">人物表</option>
             <option value="CHARACTER_VIEW_IMAGE">人物视图</option>
@@ -220,7 +225,32 @@ export function GenerationRecordsPage() {
                   : "0 秒"}
               </td>
               <td>{formatProviderCost(item)}</td>
-              <td>{formatResult(item)}</td>
+              <td>
+                <details>
+                  <summary>
+                    <span>查看详情</span>
+                    <small>{formatResult(item)}</small>
+                  </summary>
+                  <dl>
+                    <dt>记录编号</dt>
+                    <dd>{item.record_id}</dd>
+                    <dt>结果引用</dt>
+                    <dd>{item.result_reference ?? "—"}</dd>
+                    <dt>供应商任务凭证</dt>
+                    <dd>{item.provider_reference ?? "—"}</dd>
+                    <dt>错误码</dt>
+                    <dd>{item.error_code ?? "—"}</dd>
+                    <dt>错误说明</dt>
+                    <dd>{item.error_message ?? "—"}</dd>
+                    <dt>记录数据</dt>
+                    <dd>
+                      {item.record_data_status === "CORRUPTED"
+                        ? "记录数据损坏"
+                        : "正常"}
+                    </dd>
+                  </dl>
+                </details>
+              </td>
             </tr>
           ))}
         </DataTable>

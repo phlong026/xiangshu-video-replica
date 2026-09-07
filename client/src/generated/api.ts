@@ -5153,6 +5153,7 @@ export interface components {
        */
       record_type:
         | "VIDEO"
+        | "ORAL_VIDEO"
         | "FIRST_FRAME_IMAGE"
         | "CHARACTER_SHEET_IMAGE"
         | "CHARACTER_VIEW_IMAGE"
@@ -5196,8 +5197,12 @@ export interface components {
       charged_credits: number;
       /** Result Reference */
       result_reference: string | null;
+      /** Provider Reference */
+      provider_reference: string | null;
       /** Error Code */
       error_code: string | null;
+      /** Error Message */
+      error_message: string | null;
       /** Created At */
       created_at: string;
       /** Completed At */
@@ -10929,6 +10934,7 @@ export interface operations {
         record_type?:
           | (
               | "VIDEO"
+              | "ORAL_VIDEO"
               | "FIRST_FRAME_IMAGE"
               | "CHARACTER_SHEET_IMAGE"
               | "CHARACTER_VIEW_IMAGE"

@@ -97,6 +97,126 @@ describe("DevicesPage (ADM-02 / T33)", () => {
     expect(screen.queryByLabelText("设备概览")).toBeNull();
   });
 
+  it("ignores a stale customer response after switching context", async () => {
+    let resolveCustomerA:
+      | ((value: Awaited<ReturnType<typeof adminApi.listDevices>>) => void)
+      | undefined;
+    vi.mocked(adminApi.listDevices)
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveCustomerA = resolve;
+        }),
+      )
+      .mockResolvedValueOnce({
+        items: [
+          {
+            device_id: "device-b",
+            activation_code_id: "code-b",
+            user_id: "customer-b",
+            slot_no: 1,
+            display_name: "B 的电脑",
+            platform: "windows",
+            status: "BOUND",
+            bound_at: "2026-08-24T10:00:00Z",
+            unbound_at: null,
+            revoked_at: null,
+          },
+        ],
+        total: 1,
+        limit: 20,
+        offset: 0,
+      });
+
+    const { rerender } = render(<DevicesPage userId="customer-a" />);
+    rerender(<DevicesPage userId="customer-b" />);
+    expect(await screen.findByText("B 的电脑")).toBeInTheDocument();
+
+    resolveCustomerA?.({
+      items: [
+        {
+          device_id: "device-a",
+          activation_code_id: "code-a",
+          user_id: "customer-a",
+          slot_no: 1,
+          display_name: "A 的旧电脑",
+          platform: "windows",
+          status: "BOUND",
+          bound_at: "2026-08-24T09:00:00Z",
+          unbound_at: null,
+          revoked_at: null,
+        },
+      ],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    });
+
+    await waitFor(() => expect(screen.queryByText("A 的旧电脑")).toBeNull());
+    expect(screen.getByText("当前客户：customer-b")).toBeInTheDocument();
+  });
+
+  it("does not apply an old operation after leaving and returning to a customer", async () => {
+    let resolveUnbind:
+      | ((value: Awaited<ReturnType<typeof adminApi.unbindDevice>>) => void)
+      | undefined;
+    vi.mocked(adminApi.listDevices).mockImplementation(async (options) => {
+      const userId = options?.userId;
+      return {
+        items: [
+          {
+            device_id: `device-${userId}`,
+            activation_code_id: `code-${userId}`,
+            user_id: userId ?? "all",
+            slot_no: 1,
+            display_name: `${userId} 的电脑`,
+            platform: "windows",
+            status: "BOUND",
+            bound_at: "2026-08-24T10:00:00Z",
+            unbound_at: null,
+            revoked_at: null,
+          },
+        ],
+        total: 1,
+        limit: 20,
+        offset: 0,
+      };
+    });
+    vi.mocked(adminApi.unbindDevice).mockReturnValue(
+      new Promise((resolve) => {
+        resolveUnbind = resolve;
+      }),
+    );
+
+    const { rerender } = render(<DevicesPage userId="customer-a" />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "下线设备：customer-a 的电脑",
+      }),
+    );
+    fireEvent.change(screen.getByLabelText("操作原因"), {
+      target: { value: "客户申请更换设备" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "确认下线" }));
+
+    rerender(<DevicesPage userId="customer-b" />);
+    await screen.findByText("customer-b 的电脑");
+    rerender(<DevicesPage userId="customer-a" />);
+    await screen.findByText("customer-a 的电脑");
+    const listCallCount = vi.mocked(adminApi.listDevices).mock.calls.length;
+
+    resolveUnbind?.({
+      device_id: "device-customer-a",
+      status: "UNBOUND",
+      outcome: "UNBOUND",
+      request_id: "old-request",
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByRole("status")).toBeNull();
+      expect(adminApi.listDevices).toHaveBeenCalledTimes(listCallCount);
+    });
+  });
+
   it("hides device mutations for auditors", async () => {
     vi.mocked(adminApi.listDevices).mockResolvedValue({
       items: [

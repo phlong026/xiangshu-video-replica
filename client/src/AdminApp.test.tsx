@@ -157,12 +157,15 @@ const settings = {
   },
 };
 
-function installFetch(options?: { session?: "valid" | "missing" }) {
+function installFetch(options?: {
+  session?: "valid" | "missing";
+  failedTasks?: number;
+}) {
   const sessionState = options?.session ?? "missing";
-  const fetchMock = vi.fn((url: string, options?: RequestInit) => {
+  const fetchMock = vi.fn((url: string, requestInit?: RequestInit) => {
     if (
       url.endsWith("/api/control/admin/session") &&
-      (!options?.method || options.method === "GET")
+      (!requestInit?.method || requestInit.method === "GET")
     ) {
       if (sessionState === "valid") {
         return jsonResponse(adminSession);
@@ -185,13 +188,13 @@ function installFetch(options?: { session?: "valid" | "missing" }) {
     }
     if (
       url.endsWith("/api/control/admin/password") &&
-      options?.method === "PUT"
+      requestInit?.method === "PUT"
     ) {
       return jsonResponse(undefined, 204);
     }
     if (
       url.endsWith("/api/control/admin/session") &&
-      options?.method === "DELETE"
+      requestInit?.method === "DELETE"
     ) {
       return jsonResponse(undefined, 204);
     }
@@ -211,7 +214,7 @@ function installFetch(options?: { session?: "valid" | "missing" }) {
         trend: [],
         todos: {
           pending_pairings: 0,
-          failed_tasks_7d: 0,
+          failed_tasks_7d: options?.failedTasks ?? 0,
           reconciliation_problems: 0,
           expiring_codes_7d: 0,
         },
@@ -265,7 +268,7 @@ function installFetch(options?: { session?: "valid" | "missing" }) {
     if (url.endsWith("/api/control/billing-reconciliation")) {
       return jsonResponse(reconciliation);
     }
-    if (url.endsWith("/api/control/settings") && !options?.method) {
+    if (url.endsWith("/api/control/settings") && !requestInit?.method) {
       return jsonResponse(settings);
     }
     if (url.endsWith("/api/control/settings/zpay")) {
@@ -294,7 +297,7 @@ function installFetch(options?: { session?: "valid" | "missing" }) {
       return jsonResponse(settings.runtime);
     }
     if (url.endsWith("/api/control/settings/queue-mode")) {
-      if (options?.method === "PATCH") {
+      if (requestInit?.method === "PATCH") {
         return jsonResponse({ fair_queue_enabled: true });
       }
       return jsonResponse({ fair_queue_enabled: false });
@@ -552,6 +555,27 @@ describe("AdminApp", () => {
     ).toBeInTheDocument();
     expect(await screen.findByText("人物置换首帧")).toBeInTheDocument();
     expect(screen.getByText("上游未回传")).toBeInTheDocument();
+  });
+
+  it("opens failed generation records from the overview todo", async () => {
+    const fetchMock = installFetch({ session: "valid", failedTasks: 1 });
+
+    render(<AdminApp />);
+    const failedTasks = await screen.findByText("失败任务待处理");
+    fireEvent.click(
+      failedTasks.closest("li")?.querySelector("button") as HTMLButtonElement,
+    );
+
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some(([url]) =>
+          String(url).includes(
+            "/api/control/generation-records?limit=50&offset=0&status=FAILED",
+          ),
+        ),
+      ).toBe(true);
+    });
+    expect(screen.getByLabelText("生成状态")).toHaveValue("FAILED");
   });
 
   it("restores a writable session after refresh without another login", async () => {

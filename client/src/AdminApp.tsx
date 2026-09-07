@@ -553,6 +553,7 @@ export function AdminApp() {
                     codes: "customersMgmt",
                     customerAdjustments: "customersMgmt",
                     costDetails: "analytics",
+                    failedGenerationRecords: "generationRecords",
                     rates: "systemSettings",
                   };
                   setActiveTab(
@@ -585,7 +586,15 @@ export function AdminApp() {
               initiallyShowGenerator={navigationIntent === "issueCodes"}
             />
           ) : null}
-          {activeTab === "generationRecords" ? <GenerationRecordsPage /> : null}
+          {activeTab === "generationRecords" ? (
+            <GenerationRecordsPage
+              initialStatus={
+                navigationIntent === "failedGenerationRecords"
+                  ? "FAILED"
+                  : undefined
+              }
+            />
+          ) : null}
           {activeTab === "auditCenter" ? <AuditCenterPage /> : null}
           {activeTab === "systemSettings" ? (
             <SystemSettingsPage
