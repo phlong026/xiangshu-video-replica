@@ -62,6 +62,11 @@ function viralIdentity(video: StudioVideo) {
     : video.id;
 }
 
+function apiErrorCode(error: unknown) {
+  if (!error || typeof error !== "object" || !("code" in error)) return;
+  return typeof error.code === "string" ? error.code : undefined;
+}
+
 function viralDetailParams():
   | { platform: ViralPlatform; videoId: string }
   | undefined {
@@ -583,6 +588,7 @@ export function ViralPage() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [nextCursor, setNextCursor] = useState<string>();
   const [hasMore, setHasMore] = useState(false);
+  const [listReloadRevision, setListReloadRevision] = useState(0);
   const [serverCategories, setServerCategories] = useState<string[]>([]);
   const [favoriteKeys, setFavoriteKeys] = useState(new Set<string>());
   const [availabilityByKey, setAvailabilityByKey] = useState(
@@ -591,22 +597,18 @@ export function ViralPage() {
   const sentinelRef = useRef<HTMLButtonElement | null>(null);
   const listRequestRef = useRef(0);
   const loadingMoreRef = useRef(false);
+  const listReloadRevisionRef = useRef(listReloadRevision);
   const queryRef = useRef(query);
   const queryLifecycleRef = useRef(query);
+  listReloadRevisionRef.current = listReloadRevision;
   queryRef.current = query;
   const platformKey: ViralPlatform =
     platform === "抖音" ? "douyin" : "wechat_channels";
   const sortKey = sort === "最新" ? "latest" : "hot";
   const paginationContextKey = `${scope}:${platformKey}:${sortKey}:${category}`;
-  const paginationContextRef = useRef(paginationContextKey);
-  const paginationSnapshotRef = useRef<
-    | {
-        contextKey: string;
-        nextCursor?: string;
-        hasMore: boolean;
-      }
-    | undefined
-  >(undefined);
+  const paginationSnapshotsRef = useRef(
+    new Map<string, { nextCursor?: string; hasMore: boolean }>(),
+  );
 
   const shown = useMemo(
     () =>
@@ -639,12 +641,6 @@ export function ViralPage() {
   const statisticsError = useViralStatistics(current, !review);
 
   useEffect(() => {
-    if (paginationContextRef.current === paginationContextKey) return;
-    paginationContextRef.current = paginationContextKey;
-    paginationSnapshotRef.current = undefined;
-  }, [paginationContextKey]);
-
-  useEffect(() => {
     if (queryLifecycleRef.current === query) return;
     queryLifecycleRef.current = query;
     listRequestRef.current += 1;
@@ -652,8 +648,8 @@ export function ViralPage() {
     setListLoading(false);
     setLoadingMore(false);
     setListError(undefined);
-    const snapshot = paginationSnapshotRef.current;
-    if (!query && snapshot?.contextKey === paginationContextKey) {
+    const snapshot = paginationSnapshotsRef.current.get(paginationContextKey);
+    if (!query && snapshot) {
       setNextCursor(snapshot.nextCursor);
       setHasMore(snapshot.hasMore);
     } else {
@@ -665,6 +661,7 @@ export function ViralPage() {
   useEffect(() => {
     if (review || scope !== "all") return;
     const requestId = ++listRequestRef.current;
+    const requestReloadRevision = listReloadRevision;
     loadingMoreRef.current = false;
     setLoadingMore(false);
     let cancelled = false;
@@ -675,16 +672,20 @@ export function ViralPage() {
     setHasMore(false);
     void listViralVideos(platformKey, sortKey, { limit: viralPageSize })
       .then((result) => {
-        if (cancelled || requestId !== listRequestRef.current) return;
+        if (
+          cancelled ||
+          requestId !== listRequestRef.current ||
+          requestReloadRevision !== listReloadRevisionRef.current
+        )
+          return;
         const incoming = result.items.map(studioVideoFromViral);
         setServerCategories(result.categories);
         const confirmedNextCursor = result.nextCursor ?? undefined;
         const confirmedHasMore = Boolean(result.hasMore && result.nextCursor);
-        paginationSnapshotRef.current = {
-          contextKey: paginationContextKey,
+        paginationSnapshotsRef.current.set(paginationContextKey, {
           nextCursor: confirmedNextCursor,
           hasMore: confirmedHasMore,
-        };
+        });
         setNextCursor(confirmedNextCursor);
         setHasMore(confirmedHasMore);
         setRefreshStatus(
@@ -732,11 +733,20 @@ export function ViralPage() {
     return () => {
       cancelled = true;
     };
-  }, [paginationContextKey, platformKey, review, scope, sortKey, updateData]);
+  }, [
+    listReloadRevision,
+    paginationContextKey,
+    platformKey,
+    review,
+    scope,
+    sortKey,
+    updateData,
+  ]);
 
   useEffect(() => {
     if (review || scope !== "favorites") return;
     const requestId = ++listRequestRef.current;
+    const requestReloadRevision = listReloadRevision;
     loadingMoreRef.current = false;
     setLoadingMore(false);
     let cancelled = false;
@@ -746,7 +756,12 @@ export function ViralPage() {
     setHasMore(false);
     void listViralFavorites({ platform: platformKey, limit: viralPageSize })
       .then((result) => {
-        if (cancelled || requestId !== listRequestRef.current) return;
+        if (
+          cancelled ||
+          requestId !== listRequestRef.current ||
+          requestReloadRevision !== listReloadRevisionRef.current
+        )
+          return;
         const incoming = result.items.map(studioVideoFromViral);
         setFavoriteKeys(
           new Set(
@@ -766,11 +781,10 @@ export function ViralPage() {
         ]);
         const confirmedNextCursor = result.nextCursor ?? undefined;
         const confirmedHasMore = Boolean(result.hasMore && result.nextCursor);
-        paginationSnapshotRef.current = {
-          contextKey: paginationContextKey,
+        paginationSnapshotsRef.current.set(paginationContextKey, {
           nextCursor: confirmedNextCursor,
           hasMore: confirmedHasMore,
-        };
+        });
         setNextCursor(confirmedNextCursor);
         setHasMore(confirmedHasMore);
         updateData((currentData) => ({
@@ -794,7 +808,14 @@ export function ViralPage() {
     return () => {
       cancelled = true;
     };
-  }, [paginationContextKey, platformKey, review, scope, updateData]);
+  }, [
+    listReloadRevision,
+    paginationContextKey,
+    platformKey,
+    review,
+    scope,
+    updateData,
+  ]);
 
   const loadMore = useCallback(async () => {
     if (review) {
@@ -827,11 +848,10 @@ export function ViralPage() {
       const incoming = result.items.map(studioVideoFromViral);
       const confirmedNextCursor = result.nextCursor ?? undefined;
       const confirmedHasMore = Boolean(result.hasMore && result.nextCursor);
-      paginationSnapshotRef.current = {
-        contextKey: paginationContextKey,
+      paginationSnapshotsRef.current.set(paginationContextKey, {
         nextCursor: confirmedNextCursor,
         hasMore: confirmedHasMore,
-      };
+      });
       setNextCursor(confirmedNextCursor);
       setHasMore(confirmedHasMore);
       setFavoriteKeys((currentKeys) => {
@@ -866,8 +886,19 @@ export function ViralPage() {
           ],
         };
       });
-    } catch {
-      if (requestId === listRequestRef.current) {
+    } catch (error) {
+      if (
+        requestId === listRequestRef.current &&
+        requestQuery === queryRef.current
+      ) {
+        if (apiErrorCode(error) === "VIRAL_CURSOR_INVALID") {
+          paginationSnapshotsRef.current.delete(paginationContextKey);
+          setNextCursor(undefined);
+          setHasMore(false);
+          setListError(undefined);
+          setListReloadRevision((revision) => revision + 1);
+          return;
+        }
         setListError("加载更多失败，请重试");
       }
     } finally {

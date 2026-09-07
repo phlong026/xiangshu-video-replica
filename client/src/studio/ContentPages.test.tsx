@@ -1136,6 +1136,55 @@ describe("V1.4 内容与运营页面", () => {
     });
   });
 
+  it("游标失效时清除当前上下文快照并自动恢复首屏", async () => {
+    const base = studio({ review: false });
+    listViralVideos
+      .mockResolvedValueOnce({
+        platform: "douyin",
+        sort: "hot",
+        categories: ["建房预算"],
+        items: Array.from({ length: 12 }, (_, index) => viralItem(index + 1)),
+        fetchedAt: "2026-09-07T12:00:00Z",
+        hasMore: true,
+        nextCursor: "expired-cursor",
+        total: 13,
+      })
+      .mockRejectedValueOnce(
+        Object.assign(new Error("分页游标无效，请刷新列表"), {
+          code: "VIRAL_CURSOR_INVALID",
+        }),
+      )
+      .mockResolvedValueOnce({
+        platform: "douyin",
+        sort: "hot",
+        categories: ["建房预算"],
+        items: [viralItem(31, { title: "恢复后的首屏" })],
+        fetchedAt: "2026-09-07T12:01:00Z",
+        hasMore: false,
+        nextCursor: null,
+        total: 1,
+      });
+    render(
+      <StatefulViralPage
+        value={{ ...base, data: { ...base.data, videos: [] } }}
+      />,
+    );
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "加载更多视频" }),
+    );
+
+    expect(await screen.findByText("恢复后的首屏")).toBeInTheDocument();
+    expect(listViralVideos).toHaveBeenNthCalledWith(2, "douyin", "hot", {
+      limit: 12,
+      cursor: "expired-cursor",
+    });
+    expect(listViralVideos).toHaveBeenNthCalledWith(3, "douyin", "hot", {
+      limit: 12,
+    });
+    expect(listViralVideos).toHaveBeenCalledTimes(3);
+  });
+
   it("切换分类会从首屏重置分页并丢弃旧分类的迟到结果", async () => {
     const base = studio({ review: false });
     let resolveOldPage:
