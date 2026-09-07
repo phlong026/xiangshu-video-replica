@@ -334,10 +334,14 @@ describe("RootApp", () => {
   });
 
   it("ignores a delayed profile 401 from the session that already logged out", async () => {
-    let resolveOldProfile: ((value: Response) => void) | undefined;
-    const oldProfile = new Promise<Response>((resolve) => {
-      resolveOldProfile = resolve;
-    });
+    let resolveOldProfile:
+      | ((value: Awaited<ReturnType<typeof jsonResponse>>) => void)
+      | undefined;
+    const oldProfile = new Promise<Awaited<ReturnType<typeof jsonResponse>>>(
+      (resolve) => {
+        resolveOldProfile = resolve;
+      },
+    );
     let profileCalls = 0;
     const workspaceFetch = stubCustomerWorkspaceFetch();
     const reloginBody = {

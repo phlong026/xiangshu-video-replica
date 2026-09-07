@@ -600,8 +600,12 @@ describe("useCustomerSession", () => {
 
   it("sends only one backend logout while concurrent clicks are pending", async () => {
     const store = memoryStore({ deviceToken: "device-token-1" });
-    let resolveLogout: ((value: Response) => void) | undefined;
-    const logoutResponse = new Promise<Response>((resolve) => {
+    let resolveLogout:
+      | ((value: Awaited<ReturnType<typeof jsonResponse>>) => void)
+      | undefined;
+    const logoutResponse = new Promise<
+      Awaited<ReturnType<typeof jsonResponse>>
+    >((resolve) => {
       resolveLogout = resolve;
     });
     const fetchMock = stubFetch((url) => {
@@ -851,8 +855,12 @@ describe("useCustomerSession", () => {
 
   it("ignores an older heartbeat failure after a newer heartbeat succeeds", async () => {
     const store = memoryStore({ deviceToken: "device-token-1" });
-    let resolveOlderHeartbeat: ((value: Response) => void) | undefined;
-    const olderHeartbeat = new Promise<Response>((resolve) => {
+    let resolveOlderHeartbeat:
+      | ((value: Awaited<ReturnType<typeof jsonResponse>>) => void)
+      | undefined;
+    const olderHeartbeat = new Promise<
+      Awaited<ReturnType<typeof jsonResponse>>
+    >((resolve) => {
       resolveOlderHeartbeat = resolve;
     });
     let heartbeatCalls = 0;
@@ -901,10 +909,14 @@ describe("useCustomerSession", () => {
 
   it("ignores a heartbeat from the previous session after logout and login", async () => {
     const store = memoryStore({ deviceToken: "device-token-1" });
-    let resolveOldHeartbeat: ((value: Response) => void) | undefined;
-    const oldHeartbeat = new Promise<Response>((resolve) => {
-      resolveOldHeartbeat = resolve;
-    });
+    let resolveOldHeartbeat:
+      | ((value: Awaited<ReturnType<typeof jsonResponse>>) => void)
+      | undefined;
+    const oldHeartbeat = new Promise<Awaited<ReturnType<typeof jsonResponse>>>(
+      (resolve) => {
+        resolveOldHeartbeat = resolve;
+      },
+    );
     let loginCalls = 0;
     const secondLoginBody = {
       ...loginBody,
