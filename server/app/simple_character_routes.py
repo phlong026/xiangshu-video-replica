@@ -53,6 +53,7 @@ from app.simple_character import (
     rename_simple_character_identity,
     store_simple_character_publication,
     update_simple_character_profile,
+    validate_simple_character_source,
 )
 from app.storage import (
     StorageAdapter,
@@ -233,7 +234,7 @@ def create_simple_upload_intent(
         generate_url="/api/simple-characters/tasks/generate",
         method="POST (multipart/form-data)",
         max_size_bytes=SIMPLE_UPLOAD_MAX_BYTES,
-        allowed_content_types=["image/png", "image/jpeg"],
+        allowed_content_types=sorted(SIMPLE_UPLOAD_ALLOWED_TYPES),
         required_form_fields=["file", "display_name", "idempotency_key"],
         task_status_url_template="/api/simple-characters/task-status/{task_id}",
     )
@@ -917,14 +918,16 @@ async def _enqueue_simple_character_upload(
             422, "SIMPLE_CHARACTER_IMAGE_TOO_LARGE", "人物授权图片超过 10MB 限制。"
         )
     content_type = (file.content_type or "application/octet-stream").split(";", 1)[0].lower()
-    if content_type not in SIMPLE_UPLOAD_ALLOWED_TYPES or not content:
-        raise character_error(
-            422, "SIMPLE_CHARACTER_IMAGE_INVALID", "请上传有效的 PNG 或 JPEG 图片。"
-        )
+    await run_in_threadpool(
+        validate_simple_character_source,
+        content,
+        content_type,
+        display_name,
+    )
     content_sha256 = hashlib.sha256(content).hexdigest()
     task_input_id = str(uuid4())
     extension = SIMPLE_UPLOAD_ALLOWED_TYPES[content_type]
-    input_key = f"users/task-inputs/{task_input_id}.{extension}"
+    input_key = f"users/task-inputs/{task_input_id}{extension}"
     stored = await run_in_threadpool(
         storage.put_object,
         input_key,

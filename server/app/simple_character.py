@@ -43,7 +43,7 @@ from app.character_identity import (
     required_text,
     validate_key_segment,
 )
-from app.character_image_generation import deterministic_png, png_chunk
+from app.character_image_generation import png_chunk
 from app.db_portable import BusinessConnection
 from app.first_frames import (
     FirstFrameModel,
@@ -53,6 +53,12 @@ from app.first_frames import (
     SceneContactSheetQualityResult,
 )
 from app.media import storage_key_from_uri
+from app.media_tools import (
+    MediaToolFailed,
+    MediaToolUnavailable,
+    resolve_media_binary,
+    validate_image_decodable,
+)
 from app.permissions import require_project_access, write_audit
 from app.storage import (
     StorageAdapter,
@@ -64,7 +70,13 @@ from app.storage import (
 logger = logging.getLogger(__name__)
 
 SIMPLE_UPLOAD_MAX_BYTES = 10 * 1024 * 1024
-SIMPLE_UPLOAD_ALLOWED_TYPES = {"image/png": ".png", "image/jpeg": ".jpg"}
+SIMPLE_PNG_MAX_DECOMPRESSED_BYTES = 256 * 1024 * 1024
+SIMPLE_IMAGE_MAX_PIXELS = 100_000_000
+SIMPLE_UPLOAD_ALLOWED_TYPES = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/webp": ".webp",
+}
 SIMPLE_AUTHORIZATION_SCOPE = ["internal-short-video"]
 SIMPLE_PERSONA_USAGE_SCOPE = ["internal-short-video"]
 SIMPLE_GENERATION_MODE = "simple_upload"
@@ -253,7 +265,7 @@ def prepare_simple_character_generation(
 ) -> PreparedSimpleCharacterGeneration:
     """Run the slow contact-sheet provider before opening a fenced write."""
 
-    _validate_source(source_content, source_content_type, display_name)
+    validate_simple_character_source(source_content, source_content_type, display_name)
     version_id = str(uuid.uuid4())
     normalized_content_type = source_content_type.split(";", 1)[0].strip().lower()
     contact_content, contact_content_type, contact_source = _generate_contact_sheet_content(
@@ -290,7 +302,11 @@ def store_simple_character_publication(
 ) -> PreparedSimpleCharacterPublication:
     """Upload every character object before opening the customer write fence."""
 
-    _validate_source(source_content, source_content_type, display_name)
+    validate_simple_character_source(source_content, source_content_type, display_name)
+    cropped_views = _require_contact_sheet_views(
+        generation.contact_content,
+        generation.contact_content_type,
+    )
     identity_id = str(uuid.uuid4())
     persona_id = str(uuid.uuid4())
     version_id = generation.version_id
@@ -326,22 +342,12 @@ def store_simple_character_publication(
         )
         object_keys.append(contact_stored.key)
 
-        cropped_views = crop_contact_sheet_views(
-            generation.contact_content,
-            generation.contact_content_type,
-        )
         prepared_views: list[PreparedSimpleCharacterViewStorage] = []
         for view_type in REQUIRED_CHARACTER_VIEW_TYPES:
             character_asset_id = str(uuid.uuid4())
             generated_asset_id = str(uuid.uuid4())
             approved_asset_id = str(uuid.uuid4())
-            content = cropped_views.get(view_type) if cropped_views else None
-            if content is None:
-                content = deterministic_png(
-                    f"{version_id}:{view_type}".encode(),
-                    width=1024,
-                    height=1536,
-                )
+            content = cropped_views[view_type]
             generated_key = generated_character_asset_key(
                 owner_user_id=actor.id,
                 persona_id=persona_id,
@@ -433,10 +439,10 @@ def create_simple_character(
 
     The uploaded image acts as both the authorization proof and the source
     asset (self-authorization). A single five-view contact sheet is rendered
-    from the photo (image provider when configured, local placeholder as a
-    fallback), the seven per-view assets are produced by the local
-    deterministic generator, every view is auto-approved, and the version is
-    published in the same transaction.
+    from the photo (image provider when configured, explicit local placeholder
+    otherwise), the seven per-view assets are cropped from that sheet, every
+    view is auto-approved, and the version is published in the same
+    transaction.
 
     ``project_id`` is only an access-control/audit hint: the global character
     library page passes ``None`` (no project context), while the in-project
@@ -449,7 +455,7 @@ def create_simple_character(
             project_id=project_id,
             action="simple_character.create",
         )
-    _validate_source(source_content, source_content_type, display_name)
+    validate_simple_character_source(source_content, source_content_type, display_name)
 
     if prepared_publication is not None:
         prepared_generation = prepared_publication.generation
@@ -1772,7 +1778,11 @@ def _identity_asset_ids(conn: BusinessConnection, identity_id: str) -> set[str]:
     return asset_ids
 
 
-def _validate_source(content: bytes, content_type: str, display_name: str) -> None:
+def validate_simple_character_source(
+    content: bytes,
+    content_type: str,
+    display_name: str,
+) -> None:
     name = display_name.strip()
     if not name:
         raise character_error(422, "SIMPLE_CHARACTER_NAME_REQUIRED", "请填写人物名称。")
@@ -1789,8 +1799,142 @@ def _validate_source(content: bytes, content_type: str, display_name: str) -> No
         raise character_error(
             422,
             "SIMPLE_CHARACTER_IMAGE_TYPE_UNSUPPORTED",
-            "仅支持 PNG 或 JPEG 图片。",
+            "仅支持 PNG、JPEG 或 WebP 图片。",
         )
+    if not _has_valid_image_structure(content, normalized_type):
+        raise character_error(
+            422,
+            "SIMPLE_CHARACTER_IMAGE_INVALID",
+            "人物授权图片文件无效，请重新选择原图。",
+        )
+    if normalized_type == "image/png" and _decode_png_rgb(content) is not None:
+        return
+    try:
+        ffmpeg_path = resolve_media_binary("ffmpeg")
+        validate_image_decodable(ffmpeg_path, content)
+    except MediaToolUnavailable as exc:
+        raise character_error(
+            503,
+            "SIMPLE_CHARACTER_IMAGE_VALIDATION_UNAVAILABLE",
+            "人物图片校验工具暂不可用，请稍后重试。",
+        ) from exc
+    except MediaToolFailed as exc:
+        raise character_error(
+            422,
+            "SIMPLE_CHARACTER_IMAGE_INVALID",
+            "人物授权图片无法解码，请重新选择原图。",
+        ) from exc
+
+
+def _has_valid_image_structure(content: bytes, content_type: str) -> bool:
+    if content_type == "image/png":
+        return _parse_png(content) is not None
+    if content_type == "image/jpeg":
+        return _jpeg_structure_is_valid(content)
+    if content_type == "image/webp":
+        return _webp_structure_is_valid(content)
+    return False
+
+
+JPEG_START_OF_FRAME_MARKERS = frozenset(
+    {
+        0xC0,
+        0xC1,
+        0xC2,
+        0xC3,
+        0xC5,
+        0xC6,
+        0xC7,
+        0xC9,
+        0xCA,
+        0xCB,
+        0xCD,
+        0xCE,
+        0xCF,
+    }
+)
+
+
+def _jpeg_structure_is_valid(content: bytes) -> bool:
+    if (
+        len(content) < 12
+        or not content.startswith(b"\xff\xd8")
+        or not content.endswith(b"\xff\xd9")
+    ):
+        return False
+    offset = 2
+    found_frame = False
+    while offset < len(content) - 2:
+        if content[offset] != 0xFF:
+            return False
+        while offset < len(content) and content[offset] == 0xFF:
+            offset += 1
+        if offset >= len(content):
+            return False
+        marker = content[offset]
+        offset += 1
+        if marker == 0xD9:
+            return found_frame and offset == len(content)
+        if marker == 0x00 or marker == 0xD8:
+            return False
+        if marker == 0x01 or 0xD0 <= marker <= 0xD7:
+            continue
+        if offset + 2 > len(content):
+            return False
+        segment_length = int.from_bytes(content[offset : offset + 2], "big")
+        segment_end = offset + segment_length
+        if segment_length < 2 or segment_end > len(content):
+            return False
+        if marker in JPEG_START_OF_FRAME_MARKERS:
+            if segment_length < 7:
+                return False
+            height = int.from_bytes(content[offset + 3 : offset + 5], "big")
+            width = int.from_bytes(content[offset + 5 : offset + 7], "big")
+            if width <= 0 or height <= 0 or width * height > SIMPLE_IMAGE_MAX_PIXELS:
+                return False
+            found_frame = True
+        if marker == 0xDA:
+            return found_frame and segment_end < len(content) - 2
+        offset = segment_end
+    return False
+
+
+def _webp_structure_is_valid(content: bytes) -> bool:
+    if (
+        len(content) < 20
+        or content[:4] != b"RIFF"
+        or content[8:12] != b"WEBP"
+        or int.from_bytes(content[4:8], "little") + 8 != len(content)
+    ):
+        return False
+    offset = 12
+    found_image = False
+    while offset < len(content):
+        if offset + 8 > len(content):
+            return False
+        chunk_type = content[offset : offset + 4]
+        chunk_size = int.from_bytes(content[offset + 4 : offset + 8], "little")
+        payload_start = offset + 8
+        payload_end = payload_start + chunk_size
+        padded_end = payload_end + (chunk_size % 2)
+        if payload_end > len(content) or padded_end > len(content):
+            return False
+        payload = content[payload_start:payload_end]
+        if chunk_type == b"VP8 ":
+            if len(payload) <= 10 or payload[3:6] != b"\x9d\x01\x2a":
+                return False
+            width = int.from_bytes(payload[6:8], "little") & 0x3FFF
+            height = int.from_bytes(payload[8:10], "little") & 0x3FFF
+            found_image = 0 < width * height <= SIMPLE_IMAGE_MAX_PIXELS
+        elif chunk_type == b"VP8L":
+            if len(payload) <= 5 or payload[0] != 0x2F:
+                return False
+            dimensions = int.from_bytes(payload[1:5], "little")
+            width = (dimensions & 0x3FFF) + 1
+            height = ((dimensions >> 14) & 0x3FFF) + 1
+            found_image = 0 < width * height <= SIMPLE_IMAGE_MAX_PIXELS
+        offset = padded_end
+    return found_image
 
 
 def _store_source_asset(
@@ -2013,10 +2157,9 @@ def crop_contact_sheet_views(
     """Crop the seven standard views out of the five-panel contact sheet.
 
     Returns ``{view_type: png_bytes}`` or ``None`` when the sheet cannot be
-    decoded (non-PNG provider output, other bit depths, interlacing) so the
-    caller can fall back to the deterministic placeholder. Sheets without
-    detectable dividers use the nominal layout geometry instead, so a
-    slightly off-layout sheet still yields real cropped views.
+    decoded (non-PNG provider output, other bit depths, interlacing). Sheets
+    without detectable dividers use the nominal layout geometry instead, so
+    a slightly off-layout sheet still yields real cropped views.
     """
     if contact_content_type.split(";", 1)[0].strip().lower() != "image/png":
         return None
@@ -2045,25 +2188,113 @@ def crop_contact_sheet_views(
     return crops
 
 
-def _decode_png_rgb(data: bytes) -> tuple[int, int, list[bytes]] | None:
-    """Decode a non-interlaced 8-bit RGB/RGBA PNG into per-row RGB bytes."""
+def _require_contact_sheet_views(
+    contact_content: bytes,
+    contact_content_type: str,
+) -> dict[str, bytes]:
+    try:
+        crops = crop_contact_sheet_views(contact_content, contact_content_type)
+    except (IndexError, struct.error, ValueError, zlib.error):
+        crops = None
+    if crops is None or any(
+        not crops.get(view_type) for view_type in REQUIRED_CHARACTER_VIEW_TYPES
+    ):
+        raise character_error(
+            502,
+            "CONTACT_SHEET_PROVIDER_INVALID_OUTPUT",
+            "人物五视图生成服务返回了无法裁剪的图片，请稍后重试。",
+        )
+    return crops
+
+
+@dataclass(frozen=True)
+class _ParsedPng:
+    width: int
+    height: int
+    bit_depth: int
+    color_type: int
+    interlace: int
+    compressed: bytes
+
+
+def _parse_png(data: bytes) -> _ParsedPng | None:
     if not data.startswith(b"\x89PNG\r\n\x1a\n"):
         return None
     width = height = bit_depth = color_type = interlace = 0
     compressed = bytearray()
     pos = 8
-    while pos + 8 <= len(data):
-        (length,) = struct.unpack(">I", data[pos : pos + 4])
+    seen_header = False
+    seen_image_data = False
+    image_data_ended = False
+    seen_end = False
+    while pos < len(data):
+        if pos + 12 > len(data):
+            return None
+        length = struct.unpack(">I", data[pos : pos + 4])[0]
         chunk_type = data[pos + 4 : pos + 8]
+        chunk_end = pos + 12 + length
+        if chunk_end > len(data):
+            return None
         body = data[pos + 8 : pos + 8 + length]
-        pos += 12 + length
-        if chunk_type == b"IHDR" and length >= 13:
+        expected_crc = struct.unpack(">I", data[pos + 8 + length : chunk_end])[0]
+        if zlib.crc32(chunk_type + body) & 0xFFFFFFFF != expected_crc:
+            return None
+        if not seen_header and chunk_type != b"IHDR":
+            return None
+        if chunk_type == b"IHDR":
+            if seen_header or length != 13:
+                return None
             width, height, bit_depth, color_type = struct.unpack(">IIBB", body[:10])
+            compression_method = body[10]
+            filter_method = body[11]
             interlace = body[12]
+            if compression_method != 0 or filter_method != 0 or interlace not in {0, 1}:
+                return None
+            seen_header = True
         elif chunk_type == b"IDAT":
-            compressed += body
+            if not seen_header or image_data_ended:
+                return None
+            seen_image_data = True
+            compressed.extend(body)
         elif chunk_type == b"IEND":
+            if length != 0 or not seen_image_data:
+                return None
+            seen_end = True
+            pos = chunk_end
             break
+        elif seen_image_data:
+            image_data_ended = True
+        pos = chunk_end
+    if (
+        not seen_header
+        or not seen_image_data
+        or not seen_end
+        or pos != len(data)
+        or width <= 0
+        or height <= 0
+        or width * height > SIMPLE_IMAGE_MAX_PIXELS
+    ):
+        return None
+    return _ParsedPng(
+        width=width,
+        height=height,
+        bit_depth=bit_depth,
+        color_type=color_type,
+        interlace=interlace,
+        compressed=bytes(compressed),
+    )
+
+
+def _decode_png_rgb(data: bytes) -> tuple[int, int, list[bytes]] | None:
+    """Decode a non-interlaced 8-bit RGB/RGBA PNG into per-row RGB bytes."""
+    parsed = _parse_png(data)
+    if parsed is None:
+        return None
+    width = parsed.width
+    height = parsed.height
+    bit_depth = parsed.bit_depth
+    color_type = parsed.color_type
+    interlace = parsed.interlace
     if width <= 0 or height <= 0 or bit_depth != 8 or interlace != 0:
         return None
     if color_type == 2:
@@ -2072,12 +2303,21 @@ def _decode_png_rgb(data: bytes) -> tuple[int, int, list[bytes]] | None:
         channels = 4
     else:
         return None
+    stride = width * channels
+    expected_size = height * (stride + 1)
+    if expected_size > SIMPLE_PNG_MAX_DECOMPRESSED_BYTES:
+        return None
+    decompressor = zlib.decompressobj()
     try:
-        raw = zlib.decompress(bytes(compressed))
+        raw = decompressor.decompress(parsed.compressed, expected_size + 1)
+        if decompressor.unconsumed_tail or len(raw) > expected_size:
+            return None
+        raw += decompressor.flush()
     except zlib.error:
         return None
-    stride = width * channels
-    if len(raw) < height * (stride + 1):
+    if not decompressor.eof or decompressor.unused_data or decompressor.unconsumed_tail:
+        return None
+    if len(raw) != expected_size:
         return None
     rows: list[bytes] = []
     previous = bytes(stride)
@@ -2327,12 +2567,10 @@ def _generate_and_approve_views(
 ) -> list[_ApprovedView]:
     """Store one approved per-view asset for each required view type.
 
-    Views are cropped from the real contact sheet whenever its pixels can be
-    decoded, so every published view shows the actual person. Undecodable
-    sheets (provider returned a non-PNG or unsupported PNG) keep the
-    deterministic placeholder fallback so the flow never blocks on cropping.
+    Every view is cropped from the contact sheet. Uncroppable provider output
+    must fail before any view is approved or published.
     """
-    cropped_views = crop_contact_sheet_views(contact_content, contact_content_type)
+    cropped_views = _require_contact_sheet_views(contact_content, contact_content_type)
     prepared_by_view = (
         {view.view_type: view for view in prepared_views} if prepared_views is not None else {}
     )
@@ -2343,11 +2581,7 @@ def _generate_and_approve_views(
             character_asset_id = str(uuid.uuid4())
             generated_asset_id = str(uuid.uuid4())
             review_id = str(uuid.uuid4())
-            content = cropped_views.get(view_type) if cropped_views else None
-            if content is None:
-                content = deterministic_png(
-                    f"{version_id}:{view_type}".encode(), width=1024, height=1536
-                )
+            content = cropped_views[view_type]
             generated_key = generated_character_asset_key(
                 owner_user_id=actor.id,
                 persona_id=persona_id,
@@ -2382,9 +2616,7 @@ def _generate_and_approve_views(
                         "character_version_id": version_id,
                         "generation_mode": SIMPLE_GENERATION_MODE,
                         "view_type": view_type,
-                        "view_content_source": (
-                            "contact_sheet_crop" if cropped_views else "local_placeholder"
-                        ),
+                        "view_content_source": "contact_sheet_crop",
                     }
                 ),
             ),
@@ -2607,6 +2839,7 @@ def _generate_contact_sheet_content(
                 image = generated[0]
                 content_type = image.content_type.split(";", 1)[0].strip().lower()
                 if image.content and content_type in SIMPLE_CONTACT_SHEET_EXTENSIONS:
+                    _require_contact_sheet_views(image.content, content_type)
                     return image.content, content_type, "image_provider"
             raise character_error(
                 502,

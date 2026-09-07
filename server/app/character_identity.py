@@ -1113,7 +1113,10 @@ def identity_asset_key(
         validate_key_segment(value)
     if purpose not in {"authorization", "source"}:
         raise ValueError("unsupported identity asset purpose")
-    if extension not in {".pdf", ".jpg", ".png"}:
+    allowed_extensions = (
+        {".jpg", ".png", ".webp"} if purpose == "source" else {".pdf", ".jpg", ".png"}
+    )
+    if extension not in allowed_extensions:
         raise ValueError("unsupported identity asset extension")
     return f"users/{owner_user_id}/identities/{identity_id}/{purpose}/{asset_id}{extension}"
 

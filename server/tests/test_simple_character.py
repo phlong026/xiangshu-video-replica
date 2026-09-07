@@ -21,6 +21,7 @@ from fastapi import HTTPException, UploadFile
 from fastapi.testclient import TestClient
 
 import app.rbac_routes as rbac_routes
+import app.simple_character as simple_character
 import app.simple_character_routes as simple_character_routes
 from app.auth import CurrentUser, get_database
 from app.character_identity import REQUIRED_CHARACTER_VIEW_TYPES
@@ -51,8 +52,10 @@ from app.media import storage_key_from_uri
 from app.media_routes import get_media_storage
 from app.simple_character import (
     SIMPLE_CONTACT_SHEET_MODEL,
+    PreparedSimpleCharacterGeneration,
     _decode_png_rgb,
     crop_contact_sheet_views,
+    store_simple_character_publication,
 )
 from app.storage import FakeStorageAdapter
 
@@ -173,7 +176,7 @@ def scene_sheet_inspection(*, identity_score: float = 0.95) -> SceneContactSheet
 
 @pytest.fixture()
 def contact_sheet_provider() -> StubContactSheetProvider:
-    return StubContactSheetProvider()
+    return StubContactSheetProvider(sheet_content=build_five_panel_sheet_png())
 
 
 @pytest.fixture()
@@ -242,6 +245,7 @@ def test_upload_intent_returns_direct_upload_contract(client: TestClient) -> Non
     assert payload["generate_url"] == "/api/simple-characters/tasks/generate"
     assert payload["max_size_bytes"] == 10 * 1024 * 1024
     assert "image/png" in payload["allowed_content_types"]
+    assert "image/webp" in payload["allowed_content_types"]
     assert payload["required_form_fields"] == ["file", "display_name", "idempotency_key"]
     assert payload["task_status_url_template"] == "/api/simple-characters/task-status/{task_id}"
 
@@ -461,6 +465,133 @@ def test_simple_character_rejects_unsupported_content_type(client: TestClient) -
     assert response.json()["detail"]["code"] == "SIMPLE_CHARACTER_IMAGE_TYPE_UNSUPPORTED"
 
 
+@pytest.mark.parametrize(
+    ("filename", "content", "content_type"),
+    [
+        pytest.param("portrait.png", b"\x89PNG\r\n\x1a\n", "image/png", id="png-header"),
+        pytest.param("portrait.jpg", b"\xff\xd8\xff\xd9", "image/jpeg", id="jpeg-header"),
+        pytest.param(
+            "portrait.webp",
+            b"RIFF\x04\x00\x00\x00WEBP",
+            "image/webp",
+            id="webp-header",
+        ),
+        pytest.param(
+            "portrait.jpg",
+            deterministic_png(b"mime-mismatch"),
+            "image/jpeg",
+            id="mime-mismatch",
+        ),
+        pytest.param(
+            "portrait.png",
+            bytes.fromhex(
+                "89504e470d0a1a0a0000000d494844520000012c000000c80802000000"
+                "ddbd4b020000000949444154789c630000000100015eff7df900000000"
+                "49454e44ae426082"
+            ),
+            "image/png",
+            id="png-invalid-pixels",
+        ),
+        pytest.param(
+            "portrait.jpg",
+            bytes.fromhex("ffd8ffc000070800010001ffda000278ffd9"),
+            "image/jpeg",
+            id="jpeg-invalid-pixels",
+        ),
+        pytest.param(
+            "portrait.webp",
+            bytes.fromhex("524946461800000057454250565038200c0000000000009d012a010001000000"),
+            "image/webp",
+            id="webp-invalid-pixels",
+        ),
+    ],
+)
+def test_simple_character_rejects_invalid_image_bytes(
+    client: TestClient,
+    db_path: Path,
+    contact_sheet_provider: StubContactSheetProvider,
+    filename: str,
+    content: bytes,
+    content_type: str,
+) -> None:
+    response = client.post(
+        "/api/simple-characters/project-owned/generate",
+        headers=headers("employee_1"),
+        files={"file": (filename, content, content_type)},
+        data={"display_name": "荣哥"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "SIMPLE_CHARACTER_IMAGE_INVALID"
+    assert contact_sheet_provider.calls == []
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        assert conn.execute("SELECT 1 FROM person_identities").fetchone() is None
+
+
+def test_simple_character_accepts_webp_source(
+    client: TestClient,
+    contact_sheet_provider: StubContactSheetProvider,
+) -> None:
+    source = bytes.fromhex(
+        "524946461e000000574542505650384c110000002f0000000007d0fffef7bfff8188e87f0000"
+    )
+    response = client.post(
+        "/api/simple-characters/project-owned/generate",
+        headers=headers("employee_1"),
+        files={"file": ("portrait.webp", source, "image/webp")},
+        data={"display_name": "荣哥"},
+    )
+
+    assert response.status_code == 201, response.text
+    provider_source = contact_sheet_provider.calls[-1]["source_image"]
+    assert getattr(provider_source, "content") == source
+    assert getattr(provider_source, "content_type") == "image/webp"
+
+
+def test_simple_character_accepts_jpeg_source(
+    client: TestClient,
+    contact_sheet_provider: StubContactSheetProvider,
+) -> None:
+    source = bytes.fromhex(
+        "ffd8ffe000104a46494600010200000100010000fffe00104c61766336322e32382e31303200"
+        "ffdb004300083e3e493e49555555555555645d64686868646464646868687070708383837070"
+        "70686870707c7c83838f938f8787838793939b9b9bbabab2b2d9d9e0ffffffffc4004b000101"
+        "00000000000000000000000000000008010100000000000000000000000000000000100100"
+        "000000000000000000000000000000110100000000000000000000000000000000ffc00011"
+        "080010001003012200021100031100ffda000c03010002110311003f009fc007ffd9"
+    )
+    response = client.post(
+        "/api/simple-characters/project-owned/generate",
+        headers=headers("employee_1"),
+        files={"file": ("portrait.jpg", source, "image/jpeg")},
+        data={"display_name": "荣哥"},
+    )
+
+    assert response.status_code == 201, response.text
+    provider_source = contact_sheet_provider.calls[-1]["source_image"]
+    assert getattr(provider_source, "content") == source
+    assert getattr(provider_source, "content_type") == "image/jpeg"
+
+
+def test_character_sheet_task_rejects_invalid_image_before_storage(
+    client: TestClient,
+    db_path: Path,
+    storage: FakeStorageAdapter,
+) -> None:
+    response = client.post(
+        "/api/simple-characters/tasks/generate",
+        headers=headers("employee_1"),
+        files={"file": ("portrait.png", b"\x89PNG\r\n\x1a\n", "image/png")},
+        data={"display_name": "荣哥", "idempotency_key": "invalid-source"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "SIMPLE_CHARACTER_IMAGE_INVALID"
+    assert storage._objects == {}
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        assert conn.execute("SELECT 1 FROM character_sheet_tasks").fetchone() is None
+
+
 def test_simple_character_rejects_empty_name(client: TestClient) -> None:
     response = client.post(
         "/api/simple-characters/project-owned/generate",
@@ -514,12 +645,14 @@ def test_simple_character_generation_runs_provider_work_off_the_event_loop(
 
     monkeypatch.setattr(storage, "put_object", observed_put_object)
 
+    source_content = deterministic_png(b"async-character-source")
+
     class InMemoryUpload:
-        size = 5
+        size = len(source_content)
         content_type = "image/png"
 
         async def read(self) -> bytes:
-            return b"image"
+            return source_content
 
     async def prepare_character():
         return await simple_character_routes._prepare_simple_character_upload(
@@ -538,7 +671,7 @@ def test_simple_character_generation_runs_provider_work_off_the_event_loop(
 
     content, content_type, persona_name, prepared = asyncio.run(prepare_character())
 
-    assert content == b"image"
+    assert content == source_content
     assert content_type == "image/png"
     assert persona_name == "荣哥"
     assert prepared.generation.contact_content == contact_sheet_provider.sheet_content
@@ -728,11 +861,13 @@ def test_generate_creates_contact_sheet_asset(
         ).fetchone()
         assert row is not None
         assert row["kind"] == "character_contact_sheet"
-        assert row["sha256"] == hashlib.sha256(b"contact-sheet-image").hexdigest()
+        assert row["sha256"] == hashlib.sha256(contact_sheet_provider.sheet_content).hexdigest()
         metadata = json.loads(str(row["metadata_json"]))
         assert metadata["character_version_id"] == payload["character_version_id"]
         assert metadata["generation_source"] == "image_provider"
-        assert storage.get_object(str(metadata["object_key"])) == b"contact-sheet-image"
+        assert (
+            storage.get_object(str(metadata["object_key"])) == contact_sheet_provider.sheet_content
+        )
 
         snapshot = json.loads(
             str(
@@ -844,7 +979,7 @@ def test_character_cache_downloads_once_and_serves_local_copy(
     parsed = urlsplit(second.json()["url"])
     cached = client.get(f"{parsed.path}?{parsed.query}")
     assert cached.status_code == 200
-    assert cached.content == b"contact-sheet-image"
+    assert cached.content == build_five_panel_sheet_png()
     assert cached.headers["content-type"].startswith("image/png")
 
     invalid_signature = client.get(f"{parsed.path}?{parsed.query}x")
@@ -967,7 +1102,7 @@ def test_customer_character_cache_is_shared_across_api_replicas(
     cached = client.get(f"{parsed.path}?{parsed.query}")
 
     assert cached.status_code == 200, cached.text
-    assert cached.content == b"contact-sheet-image"
+    assert cached.content == build_five_panel_sheet_png()
     assert cached.headers["content-type"].startswith("image/png")
     assert not second_replica_home.exists()
 
@@ -1008,6 +1143,55 @@ def test_contact_sheet_provider_failure_is_visible_and_does_not_publish(
 
     with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         assert conn.execute("SELECT 1 FROM person_identities").fetchone() is None
+
+
+def test_undecodable_provider_sheet_is_visible_and_does_not_publish(
+    client: TestClient,
+    db_path: Path,
+    storage: FakeStorageAdapter,
+    contact_sheet_provider: StubContactSheetProvider,
+) -> None:
+    contact_sheet_provider.sheet_content = b"contact-sheet-image"
+
+    response = generate_global(client)
+
+    assert response.status_code == 502, response.text
+    assert response.json()["detail"]["code"] == "CONTACT_SHEET_PROVIDER_INVALID_OUTPUT"
+    assert storage._objects == {}
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        assert conn.execute("SELECT 1 FROM person_identities").fetchone() is None
+        assert conn.execute("SELECT 1 FROM character_assets").fetchone() is None
+
+
+def test_prepared_publication_rejects_uncroppable_sheet_before_storage(
+    storage: FakeStorageAdapter,
+) -> None:
+    actor = CurrentUser(
+        id="employee_1",
+        username="employee_1",
+        display_name="Employee One",
+        role="employee",
+    )
+    generation = PreparedSimpleCharacterGeneration(
+        version_id="version-invalid-sheet",
+        contact_content=corrupt_png(build_five_panel_sheet_png(), "ihdr-compression"),
+        contact_content_type="image/png",
+        contact_source="image_provider",
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        store_simple_character_publication(
+            actor=actor,
+            storage=storage,
+            source_content=deterministic_png(b"prepared-publication-source"),
+            source_content_type="image/png",
+            display_name="荣哥",
+            generation=generation,
+        )
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.detail["code"] == "CONTACT_SHEET_PROVIDER_INVALID_OUTPUT"
+    assert storage._objects == {}
 
 
 def test_unconfigured_local_provider_keeps_explicit_placeholder_path(
@@ -2223,6 +2407,62 @@ def build_solid_sheet_png(width: int = 300, height: int = 200) -> bytes:
     )
 
 
+def corrupt_png(sheet: bytes, corruption: str) -> bytes:
+    if corruption == "missing-iend":
+        return sheet[:-12]
+    mutable = bytearray(sheet)
+    position = 8
+    while position < len(mutable):
+        length = struct.unpack(">I", mutable[position : position + 4])[0]
+        chunk_type = bytes(mutable[position + 4 : position + 8])
+        crc_position = position + 8 + length
+        if corruption == "ihdr-crc" and chunk_type == b"IHDR":
+            mutable[crc_position] ^= 0x01
+            return bytes(mutable)
+        if corruption == "ihdr-compression" and chunk_type == b"IHDR":
+            mutable[position + 18] = 1
+            new_crc = zlib.crc32(bytes(mutable[position + 4 : crc_position])) & 0xFFFFFFFF
+            mutable[crc_position : crc_position + 4] = struct.pack(">I", new_crc)
+            return bytes(mutable)
+        if corruption == "idat-crc" and chunk_type == b"IDAT":
+            mutable[crc_position] ^= 0x01
+            return bytes(mutable)
+        if corruption == "idat-data" and chunk_type == b"IDAT":
+            mutable[position + 8] ^= 0x01
+            new_crc = zlib.crc32(bytes(mutable[position + 4 : crc_position])) & 0xFFFFFFFF
+            mutable[crc_position : crc_position + 4] = struct.pack(">I", new_crc)
+            return bytes(mutable)
+        if corruption == "idat-crc-removed" and chunk_type == b"IDAT":
+            return bytes(mutable[:crc_position] + mutable[crc_position + 4 :])
+        position = crc_position + 4
+    raise AssertionError(f"missing PNG chunk for corruption: {corruption}")
+
+
+def test_simple_character_rejects_png_with_invalid_compressed_stream(
+    client: TestClient,
+    db_path: Path,
+    contact_sheet_provider: StubContactSheetProvider,
+) -> None:
+    response = client.post(
+        "/api/simple-characters/generate",
+        headers=headers("employee_1"),
+        files={
+            "file": (
+                "portrait.png",
+                corrupt_png(deterministic_png(b"corrupt-source"), "idat-data"),
+                "image/png",
+            )
+        },
+        data={"display_name": "荣哥"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "SIMPLE_CHARACTER_IMAGE_INVALID"
+    assert contact_sheet_provider.calls == []
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        assert conn.execute("SELECT 1 FROM person_identities").fetchone() is None
+
+
 def _mirror_pixels(row: bytes) -> bytes:
     """Reverse the pixel order of an RGB row, keeping channel order."""
     return b"".join(row[i : i + 3] for i in range(len(row) - 3, -1, -3))
@@ -2280,6 +2520,28 @@ def test_crop_contact_sheet_views_returns_none_for_undecodable_sheets() -> None:
     assert crop_contact_sheet_views(build_five_panel_sheet_png(), "image/jpeg") is None
     # Truncated PNG data fails decoding instead of producing garbage views.
     assert crop_contact_sheet_views(build_five_panel_sheet_png()[:200], "image/png") is None
+    for corruption in (
+        "missing-iend",
+        "ihdr-crc",
+        "ihdr-compression",
+        "idat-crc",
+        "idat-crc-removed",
+        "idat-data",
+    ):
+        assert (
+            crop_contact_sheet_views(
+                corrupt_png(build_five_panel_sheet_png(), corruption),
+                "image/png",
+            )
+            is None
+        )
+
+
+def test_crop_contact_sheet_views_honors_decompressed_size_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(simple_character, "SIMPLE_PNG_MAX_DECOMPRESSED_BYTES", 64)
+    assert crop_contact_sheet_views(build_five_panel_sheet_png(), "image/png") is None
 
 
 def test_generate_crops_views_from_provider_sheet(
@@ -2331,26 +2593,35 @@ def test_generate_crops_views_from_provider_sheet(
         )
 
 
-def test_generate_falls_back_to_placeholder_views_for_stub_payload(
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "truncated",
+        "missing-iend",
+        "ihdr-crc",
+        "ihdr-compression",
+        "idat-crc",
+        "idat-crc-removed",
+        "idat-data",
+    ],
+)
+def test_generate_rejects_invalid_provider_sheet_without_placeholder_views(
     client: TestClient,
     db_path: Path,
+    storage: FakeStorageAdapter,
+    contact_sheet_provider: StubContactSheetProvider,
+    corruption: str,
 ) -> None:
-    """Undecodable provider output keeps the deterministic placeholder views."""
+    """Invalid provider output must not create approved placeholder views."""
+    sheet = build_five_panel_sheet_png()
+    contact_sheet_provider.sheet_content = (
+        sheet[:200] if corruption == "truncated" else corrupt_png(sheet, corruption)
+    )
     response = generate_global(client)
-    assert response.status_code == 201, response.text
-    payload = response.json()
+    assert response.status_code == 502, response.text
+    assert response.json()["detail"]["code"] == "CONTACT_SHEET_PROVIDER_INVALID_OUTPUT"
+    assert storage._objects == {}
 
     with BusinessConnection.sqlite(connect_database(db_path)) as conn:
-        generated = conn.execute(
-            """
-            SELECT a.metadata_json FROM assets AS a
-            WHERE a.kind = 'character_generated_image'
-              AND json_extract(a.metadata_json, '$.character_version_id') = ?
-            """,
-            (payload["character_version_id"],),
-        ).fetchall()
-        assert len(generated) == len(REQUIRED_CHARACTER_VIEW_TYPES)
-        assert all(
-            json.loads(str(row[0]))["view_content_source"] == "local_placeholder"
-            for row in generated
-        )
+        assert conn.execute("SELECT 1 FROM person_identities").fetchone() is None
+        assert conn.execute("SELECT 1 FROM character_assets").fetchone() is None
