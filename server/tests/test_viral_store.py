@@ -212,7 +212,7 @@ def test_list_page_uses_stable_keyset_cursor_and_reports_total(tmp_path: Path) -
                 _video(video_id=f"video-{index:02d}", published_at=now - index),
                 likes=100 - index,
             )
-            for index in range(15)
+            for index in range(35)
         ]
         upsert_viral_videos(conn, videos)
 
@@ -220,26 +220,26 @@ def test_list_page_uses_stable_keyset_cursor_and_reports_total(tmp_path: Path) -
             conn,
             platform="wechat_channels",
             sort="hot",
-            limit=6,
+            limit=12,
         )
         second = list_viral_video_page(
             conn,
             platform="wechat_channels",
             sort="hot",
-            limit=6,
+            limit=12,
             cursor=first.next_cursor,
         )
         third = list_viral_video_page(
             conn,
             platform="wechat_channels",
             sort="hot",
-            limit=6,
+            limit=12,
             cursor=second.next_cursor,
         )
 
         ids = [video.video_id for page in (first, second, third) for video in page.items]
-        assert ids == [f"video-{index:02d}" for index in range(15)]
-        assert first.total == second.total == third.total == 15
+        assert ids == [f"video-{index:02d}" for index in range(35)]
+        assert first.total == second.total == third.total == 35
         assert first.has_more is True and second.has_more is True
         assert third.has_more is False and third.next_cursor is None
     finally:

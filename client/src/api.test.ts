@@ -51,6 +51,7 @@ import {
   listProjectCharacterVersions,
   listProjects,
   listSavedGenerationPrompts,
+  listViralVideos,
   lockGenerationPrompt,
   readAnalysisPayload,
   readFirstFrameCandidates,
@@ -80,6 +81,43 @@ import {
   waitForScriptRewriteTask,
   waitForSourceFrameTask,
 } from "./api";
+
+describe("爆款列表 API", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("将分页游标编码到查询参数并保持 GET 请求", async () => {
+    const page = {
+      platform: "douyin",
+      sort: "latest",
+      categories: [],
+      items: [],
+      hasMore: false,
+      nextCursor: null,
+      total: 0,
+    };
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => page,
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      listViralVideos("douyin", "latest", {
+        limit: 12,
+        cursor: "page/2+=",
+      }),
+    ).resolves.toEqual(page);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:8000/api/viral/videos?platform=douyin&sort=latest&limit=12&cursor=page%2F2%2B%3D",
+      expect.objectContaining({
+        headers: expect.any(Headers),
+        signal: expect.any(AbortSignal),
+      }),
+    );
+  });
+});
 
 describe("素材库 API", () => {
   afterEach(() => {

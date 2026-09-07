@@ -625,6 +625,7 @@ export function ViralPage() {
   const current = review ? shown.slice(0, visibleCount) : shown;
   const statisticsError = useViralStatistics(current, !review);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 分类切换必须作废旧游标并重读首屏，后端仍按全分类分页。
   useEffect(() => {
     if (review || scope !== "all") return;
     const requestId = ++listRequestRef.current;
@@ -688,8 +689,9 @@ export function ViralPage() {
     return () => {
       cancelled = true;
     };
-  }, [platformKey, review, scope, sortKey, updateData]);
+  }, [category, platformKey, review, scope, sortKey, updateData]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 收藏分类切换也必须重建分页生命周期。
   useEffect(() => {
     if (review || scope !== "favorites") return;
     const requestId = ++listRequestRef.current;
@@ -743,7 +745,7 @@ export function ViralPage() {
     return () => {
       cancelled = true;
     };
-  }, [platformKey, review, scope, updateData]);
+  }, [category, platformKey, review, scope, updateData]);
 
   const loadMore = useCallback(async () => {
     if (review) {
@@ -880,7 +882,10 @@ export function ViralPage() {
           <button
             aria-selected={scope === "all"}
             className={scope === "all" ? "is-active" : ""}
-            onClick={() => setScope("all")}
+            onClick={() => {
+              setCategory("全部");
+              setScope("all");
+            }}
             role="tab"
             type="button"
           >
@@ -889,7 +894,10 @@ export function ViralPage() {
           <button
             aria-selected={scope === "favorites"}
             className={scope === "favorites" ? "is-active" : ""}
-            onClick={() => setScope("favorites")}
+            onClick={() => {
+              setCategory("全部");
+              setScope("favorites");
+            }}
             role="tab"
             type="button"
           >
@@ -906,7 +914,10 @@ export function ViralPage() {
               aria-selected={item.id === platform}
               className={item.id === platform ? "is-active" : ""}
               key={item.id}
-              onClick={() => setPlatform(item.id)}
+              onClick={() => {
+                setCategory("全部");
+                setPlatform(item.id);
+              }}
               role="tab"
               type="button"
             >
