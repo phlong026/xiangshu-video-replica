@@ -215,8 +215,8 @@ def studio_analytics(
     播放/互动等外部平台数据不在其中——不伪造。
     """
     days = max(1, min(int(days), 90))
-    stats = studio_task_stats(conn, actor=actor, now=now)
     moment = now or datetime.now(tz=UTC)
+    stats = studio_task_stats(conn, actor=actor, now=moment)
     start_day = moment.astimezone(_BEIJING_TZ).date() - timedelta(days=days - 1)
     range_start = (
         datetime(start_day.year, start_day.month, start_day.day, tzinfo=_BEIJING_TZ)

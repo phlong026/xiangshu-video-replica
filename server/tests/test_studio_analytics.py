@@ -12,6 +12,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from app import studio_routes
 from app.auth import CurrentUser, get_database
 from app.db import connect_database, initialize_database
 from app.db_portable import BusinessConnection
@@ -290,6 +291,62 @@ def test_daily_series_covers_full_window_by_beijing_day(tmp_path: Path) -> None:
     # t3 完成于北京 09-05，不计入"今日"；t9（08-30）计入全期累计。
     assert result.today_completed == 6
     assert result.total_completed == 8
+
+
+def test_analytics_uses_one_clock_read_across_beijing_midnight(tmp_path: Path, monkeypatch) -> None:
+    connection = initialize_database(tmp_path / "analytics-midnight-clock.db")
+    connection.execute(
+        "INSERT INTO users (id, username, display_name, role) VALUES (?, ?, ?, ?)",
+        ("admin_1", "admin_1", "Admin One", "admin"),
+    )
+    connection.execute(
+        "INSERT INTO projects (id, owner_user_id, name) VALUES ('p-1', 'admin_1', 'P')"
+    )
+    connection.execute(
+        """
+        INSERT INTO generation_batches (
+            id, project_id, created_by_user_id, idempotency_key, request_hash,
+            request_snapshot_json, status, creation_kind, created_at, updated_at
+        ) VALUES ('b-1', 'p-1', 'admin_1', 'ik', 'h', '{}', 'SUCCEEDED',
+                  'replica', ?, ?)
+        """,
+        ("2026-09-05 15:59:59", "2026-09-05 15:59:59"),
+    )
+    connection.execute(
+        """
+        INSERT INTO generation_tasks (
+            id, batch_id, provider, model, status, archive_status, created_at, updated_at
+        ) VALUES ('t-before', 'b-1', 'metaso', 'MiniMax-H3', 'SUCCEEDED', 'NONE',
+                  '2026-09-05 15:59:59', '2026-09-05 15:59:59')
+        """
+    )
+    connection.commit()
+
+    clock_values = iter(
+        [
+            datetime(2026, 9, 5, 15, 59, 59, 999999, tzinfo=UTC),
+            datetime(2026, 9, 5, 16, 0, 0, tzinfo=UTC),
+        ]
+    )
+
+    class MidnightClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = next(clock_values)
+            return value if tz is None else value.astimezone(tz)
+
+    monkeypatch.setattr(studio_routes, "datetime", MidnightClock)
+    result = studio_analytics(
+        BusinessConnection.sqlite(connection), actor=actor("admin_1", "admin"), days=1
+    )
+
+    assert result.today_completed == 1
+    assert result.range_completed == 1
+    assert result.generated_at == "2026-09-05T15:59:59.999999+00:00"
+    assert result.daily == [
+        studio_routes.StudioAnalyticsDay(day="2026-09-05", completed=1, failed=0)
+    ]
+    assert next(clock_values) == datetime(2026, 9, 5, 16, 0, 0, tzinfo=UTC)
 
 
 def test_kind_breakdown_counts_only_visible_completed_tasks(tmp_path: Path) -> None:
