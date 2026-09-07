@@ -1135,6 +1135,7 @@ def update_control_provider_settings(
 @router.post(
     "/settings/providers/{provider}/connection-test",
     response_model=ProviderTestResult,
+    response_model_exclude_none=True,
 )
 def test_control_provider_connection(
     provider: str,

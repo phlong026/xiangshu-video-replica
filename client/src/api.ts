@@ -265,6 +265,7 @@ export type ProviderName =
   | "apilio"
   | "cos"
   | "deepseek"
+  | "hifly"
   | "tikhub"
   | "dashscope"
   | "douyidou";
@@ -3928,6 +3929,7 @@ export type ProviderTestResult = {
   status: string;
   provider: string;
   test_kind: string;
+  account_credit?: number;
 };
 
 export async function downloadDiagnosticReport(

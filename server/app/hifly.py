@@ -46,6 +46,7 @@ VendorTaskStatus = Literal["WAITING", "PROCESSING", "DONE", "FAILED", "UNKNOWN"]
 
 _MAX_TITLE_CHARS = 20
 _MAX_TTS_TEXT_CHARS = 10_000
+_MAX_SAFE_INTEGER = 9_007_199_254_740_991
 
 logger = logging.getLogger(__name__)
 
@@ -58,13 +59,24 @@ class HiflyError(RuntimeError):
     …) so callers can branch on known conditions.
     """
 
-    def __init__(self, message: str, *, vendor_code: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        vendor_code: int | None = None,
+        http_status: int | None = None,
+    ) -> None:
         super().__init__(message)
         self.vendor_code = vendor_code
+        self.http_status = http_status
 
 
 class HiflySubmissionUncertain(HiflyError):
     """A create POST may have reached the vendor but no receipt was obtained."""
+
+
+class HiflyTimeoutError(HiflyError):
+    """A HiFly request exceeded the configured transport deadline."""
 
 
 class HiflySettingsUnavailable(RuntimeError):
@@ -130,8 +142,18 @@ class UrllibHiflyHttpTransport(HiflyHttpTransport):
             except OSError:
                 pass
             logger.warning("ORAL vendor request failed with HTTP status %s: %s", exc.code, detail)
-            raise HiflyError(f"数字人服务返回 HTTP {exc.code}") from exc
-        except (TimeoutError, URLError, OSError) as exc:
+            if exc.code in {408, 504}:
+                raise HiflyTimeoutError("数字人服务请求超时，请稍后重试") from exc
+            raise HiflyError(f"数字人服务返回 HTTP {exc.code}", http_status=exc.code) from exc
+        except TimeoutError as exc:
+            logger.warning("ORAL vendor request timed out")
+            raise HiflyTimeoutError("数字人服务请求超时，请稍后重试") from exc
+        except URLError as exc:
+            logger.warning("ORAL vendor request failed: %s", type(exc.reason).__name__)
+            if isinstance(exc.reason, TimeoutError):
+                raise HiflyTimeoutError("数字人服务请求超时，请稍后重试") from exc
+            raise HiflyError("数字人服务网络异常，请稍后重试") from exc
+        except OSError as exc:
             logger.warning("ORAL vendor request failed: %s", type(exc).__name__)
             raise HiflyError("数字人服务网络异常，请稍后重试") from exc
 
@@ -234,15 +256,30 @@ class HiflyClient:
             raise HiflyError("数字人服务网络异常，请稍后重试") from exc
         try:
             envelope = json.loads(content)
-        except json.JSONDecodeError as exc:
+        except (UnicodeDecodeError, ValueError) as exc:
             raise HiflyError("数字人服务返回了无法解析的响应") from exc
         if not isinstance(envelope, dict) or "code" not in envelope:
             raise HiflyError("数字人服务响应缺少业务状态码")
-        code = envelope["code"]
-        if int(code) != 0:
+        raw_code = envelope["code"]
+        if isinstance(raw_code, bool):
+            raise HiflyError("数字人服务响应的业务状态码无效")
+        if isinstance(raw_code, int):
+            code = raw_code
+        elif isinstance(raw_code, str):
+            normalized_code = raw_code.strip()
+            digits = normalized_code[1:] if normalized_code[:1] in {"+", "-"} else normalized_code
+            if not digits or not digits.isascii() or not digits.isdigit():
+                raise HiflyError("数字人服务响应的业务状态码无效")
+            try:
+                code = int(normalized_code)
+            except ValueError as exc:
+                raise HiflyError("数字人服务响应的业务状态码无效") from exc
+        else:
+            raise HiflyError("数字人服务响应的业务状态码无效")
+        if code != 0:
             raise HiflyError(
-                _vendor_message(int(code), str(envelope.get("msg", ""))),
-                vendor_code=int(code),
+                _vendor_message(code, str(envelope.get("msg", ""))),
+                vendor_code=code,
             )
         data = envelope.get("data")
         return data if isinstance(data, dict) else {}
@@ -501,7 +538,11 @@ class HiflyClient:
     def account_credit(self) -> int:
         data = self._request("GET", ACCOUNT_CREDIT_PATH)
         credit = data.get("credit")
-        if not isinstance(credit, int):
+        if (
+            isinstance(credit, bool)
+            or not isinstance(credit, int)
+            or not 0 <= credit <= _MAX_SAFE_INTEGER
+        ):
             raise HiflyError("数字人服务积分余额响应不完整")
         return credit
 

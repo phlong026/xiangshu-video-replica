@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import cast
 
@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from app.db import connect_database, initialize_database
 from app.db_portable import BusinessConnection
+from app.hifly import HiflyClient, HiflyError, HiflyTimeoutError
 from app.settings import (
     SettingsDecryptError,
     SettingsKeyMissing,
@@ -20,6 +21,7 @@ from app.settings import (
     fernet_from_environment,
 )
 from app.settings_routes import (
+    HiflyProviderTester,
     NoopProviderTester,
     ProviderTestResult,
     StorageProviderTester,
@@ -93,6 +95,7 @@ def seed_users(conn: sqlite3.Connection) -> None:
             ("admin_1", "admin_1", "Admin One", "admin"),
             ("employee_1", "employee_1", "Employee One", "employee"),
             ("auditor_1", "auditor_1", "Auditor One", "auditor"),
+            ("customer_1", "customer_1", "Customer One", "customer"),
         ],
     )
     conn.commit()
@@ -487,6 +490,7 @@ def test_oss_runtime_provider_is_rejected(conn: sqlite3.Connection) -> None:
         ("admin_1", 200),
         ("employee_1", 403),
         ("auditor_1", 403),
+        ("customer_1", 403),
     ],
 )
 def test_settings_read_uses_admin_role_matrix(
@@ -522,6 +526,7 @@ def test_settings_read_uses_admin_role_matrix(
         ("admin_1", 200),
         ("employee_1", 403),
         ("auditor_1", 403),
+        ("customer_1", 403),
     ],
 )
 def test_settings_update_uses_admin_role_matrix(
@@ -926,6 +931,159 @@ def test_default_provider_tester_never_claims_real_connectivity_or_paid_access()
     assert error.value.status_code == 501
     detail = cast(dict[str, str], error.value.detail)
     assert detail["code"] == "PROVIDER_TEST_NOT_IMPLEMENTED"
+
+
+def test_hifly_provider_tester_uses_only_the_read_only_account_credit_probe() -> None:
+    class ReadOnlyAccountClient:
+        def account_credit(self) -> int:
+            return 321
+
+    tester = HiflyProviderTester(client_factory=lambda _: ReadOnlyAccountClient())
+
+    result = tester.connection_test("hifly", {"api_key": "dummy-hifly-token"})
+
+    assert result == ProviderTestResult(
+        status="ok",
+        provider="hifly",
+        test_kind="account_credit",
+        account_credit=321,
+    )
+
+
+@pytest.mark.parametrize(
+    ("error", "status_code", "error_code", "failure_phase"),
+    [
+        (HiflyError("bad credentials", vendor_code=2003), 422, "HIFLY_AUTH_FAILED", "authenticate"),
+        (
+            HiflyError("unauthorized", http_status=401),
+            422,
+            "HIFLY_AUTH_FAILED",
+            "authenticate",
+        ),
+        (HiflyTimeoutError("timed out"), 504, "HIFLY_ACCOUNT_CHECK_TIMEOUT", "account_credit"),
+        (
+            HiflyError("provider failure", vendor_code=1001),
+            503,
+            "HIFLY_ACCOUNT_CHECK_FAILED",
+            "account_credit",
+        ),
+    ],
+)
+def test_hifly_provider_tester_separates_auth_timeout_and_provider_failures(
+    error: HiflyError,
+    status_code: int,
+    error_code: str,
+    failure_phase: str,
+) -> None:
+    class FailingAccountClient:
+        def account_credit(self) -> int:
+            raise error
+
+    tester = HiflyProviderTester(client_factory=lambda _: FailingAccountClient())
+
+    with pytest.raises(HTTPException) as caught:
+        tester.connection_test("hifly", {"api_key": "dummy-hifly-token"})
+
+    assert caught.value.status_code == status_code
+    assert caught.value.detail == {
+        "code": error_code,
+        "failure_phase": failure_phase,
+        "message": {
+            "HIFLY_AUTH_FAILED": "Hifly 凭据认证失败；未创建收费任务。",
+            "HIFLY_ACCOUNT_CHECK_TIMEOUT": "Hifly 只读账户检查超时；未创建收费任务。",
+            "HIFLY_ACCOUNT_CHECK_FAILED": "Hifly 只读账户检查失败；未创建收费任务。",
+        }[error_code],
+    }
+
+
+def test_hifly_connection_route_returns_masked_config_and_read_only_balance(
+    client: TestClient,
+) -> None:
+    class ReadOnlyAccountClient:
+        def account_credit(self) -> int:
+            return 88
+
+    client.app.dependency_overrides[get_provider_tester] = lambda: HiflyProviderTester(
+        client_factory=lambda _: ReadOnlyAccountClient()
+    )
+
+    saved = client.put(
+        "/api/admin/settings/providers/hifly",
+        headers=admin_headers(),
+        json={"config": {"api_key": "dummy-hifly-token"}},
+    )
+    checked = client.post(
+        "/api/admin/settings/providers/hifly/connection-test",
+        headers=admin_headers(),
+    )
+
+    assert saved.status_code == 200
+    assert saved.json()["config"] == {"api_key": "********oken"}
+    assert "dummy-hifly-token" not in saved.text
+    assert checked.status_code == 200
+    assert checked.json() == {
+        "status": "ok",
+        "provider": "hifly",
+        "test_kind": "account_credit",
+        "account_credit": 88,
+    }
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"\xff",
+        b'{"code": null, "data": {}}',
+        b'{"code": "ERROR", "data": {}}',
+        b'{"code": false, "data": {"credit": 88}}',
+        b'{"code": 0.5, "data": {"credit": 88}}',
+        b'{"code": 1e309, "data": {"credit": 88}}',
+        b'{"code": ' + (b"9" * 4301) + b', "data": {"credit": 88}}',
+        b'{"code": "' + (b"9" * 4301) + b'", "data": {"credit": 88}}',
+        b'{"code": 0, "data": {"credit": true}}',
+        b'{"code": 0, "data": {"credit": -1}}',
+        b'{"code": 0, "data": {"credit": 9007199254740992}}',
+        b'{"code": 0, "data": {"credit": ' + (b"9" * 310) + b"}}",
+    ],
+)
+def test_hifly_connection_route_rejects_malformed_payload_without_false_success(
+    client: TestClient,
+    payload: bytes,
+) -> None:
+    class StaticTransport:
+        def request(
+            self,
+            method: str,
+            url: str,
+            *,
+            headers: Mapping[str, str],
+            body: bytes | None = None,
+        ) -> bytes:
+            del method, url, headers, body
+            return payload
+
+    client.app.dependency_overrides[get_provider_tester] = lambda: HiflyProviderTester(
+        client_factory=lambda config: HiflyClient(
+            api_key=config["api_key"], transport=StaticTransport()
+        )
+    )
+    client.put(
+        "/api/admin/settings/providers/hifly",
+        headers=admin_headers(),
+        json={"config": {"api_key": "dummy-hifly-token"}},
+    )
+
+    checked = client.post(
+        "/api/admin/settings/providers/hifly/connection-test",
+        headers=admin_headers(),
+    )
+
+    assert checked.status_code == 503
+    assert checked.json()["detail"] == {
+        "code": "HIFLY_ACCOUNT_CHECK_FAILED",
+        "failure_phase": "account_credit",
+        "message": "Hifly 只读账户检查失败；未创建收费任务。",
+    }
 
 
 @pytest.mark.parametrize(
