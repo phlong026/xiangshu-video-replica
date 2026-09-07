@@ -563,6 +563,54 @@ describe("V1.4 工作台新版首页布局", () => {
     );
   });
 
+  it("首页爆款永久失败后使用新幂等键重试", async () => {
+    createViralImportTask
+      .mockResolvedValueOnce({
+        id: "home-expired",
+        status: "FAILED",
+        retryable: false,
+        errorMessage: "首页来源已失效",
+      })
+      .mockResolvedValueOnce({
+        id: "home-replacement",
+        status: "SUCCEEDED",
+        projectId: "home-project-new",
+        sourceAssetId: "home-asset-new",
+        canAnalyze: true,
+      });
+    const source = {
+      ...videos[0],
+      platformKey: "douyin" as const,
+      nativeId: "native-home-expired",
+    };
+    const value = studio(undefined, {
+      user: {
+        id: "customer-home",
+        username: "customer-home",
+        display_name: "首页客户",
+        role: "customer",
+      },
+      state: createState("workbench"),
+      data: data([], [source]),
+    });
+    useStudio.mockReturnValue(value);
+    render(<WorkbenchPage />);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "用它复刻：灵感视频 1" }),
+    );
+    await waitFor(() =>
+      expect(value.notify).toHaveBeenCalledWith("首页来源已失效"),
+    );
+    const failedKey = createViralImportTask.mock.calls[0][3];
+    fireEvent.click(
+      screen.getByRole("button", { name: "用它复刻：灵感视频 1" }),
+    );
+    await waitFor(() => expect(createViralImportTask).toHaveBeenCalledTimes(2));
+
+    expect(createViralImportTask.mock.calls[1][3]).not.toBe(failedKey);
+  });
+
   it("正式首页爆款缺少平台原生 ID 时不创建伪复刻项目", () => {
     const source = {
       ...videos[0],

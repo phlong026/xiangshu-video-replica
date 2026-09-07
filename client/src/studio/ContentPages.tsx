@@ -37,7 +37,12 @@ import type {
   StudioVideo,
 } from "./types";
 import { Button, Empty, Field, Hint, Icon, Media, Panel, Tabs } from "./ui";
-import { viralImportIdempotencyKey } from "./viralImport";
+import {
+  clearViralImportIdempotencyKey,
+  shouldClearViralImportIdempotencyKey,
+  ViralImportPollingTimeoutError,
+  viralImportIdempotencyKey,
+} from "./viralImport";
 import "./content.css";
 
 const pageSize = 6;
@@ -468,9 +473,9 @@ function ViralCard({
   onFavoriteChange: (saved: boolean) => void;
   availability?: ViralVideoItem["availability"];
 }) {
-  const { review, navigate, notify, patchDraft } = useStudio();
+  const { review, navigate, notify, patchDraft, user } = useStudio();
   const playerRef = useRef<HTMLVideoElement | null>(null);
-  const { importState, start } = useViralImport(video.id);
+  const { importState, start } = useViralImport(video.id, user.id);
   const { playback, play, retry, markFailed, activate } = useViralPlayback(
     video,
     active,
@@ -1158,18 +1163,20 @@ type ViralImportState = {
   message?: string;
 };
 
-function useViralImport(sourceId?: string) {
+function useViralImport(sourceId?: string, accountId = "anonymous") {
   const [state, setState] = useState<ViralImportState>({ status: "idle" });
   const requestRef = useRef(0);
   const sourceRef = useRef(sourceId);
+  const accountRef = useRef(accountId);
   const idempotencyKeysRef = useRef(new Map<string, string>());
   useEffect(() => {
     sourceRef.current = sourceId;
+    accountRef.current = accountId;
     setState({ status: "idle" });
     return () => {
       requestRef.current += 1;
     };
-  }, [sourceId]);
+  }, [sourceId, accountId]);
 
   const waitForCompletion = async (
     initial: ViralImportTask,
@@ -1185,7 +1192,7 @@ function useViralImport(sourceId?: string) {
       if (request !== requestRef.current) return undefined;
       task = await getViralImportTask(taskId);
     }
-    throw new Error("导入任务等待超时，请稍后重试");
+    throw new ViralImportPollingTimeoutError("导入任务等待超时，请稍后重试");
   };
 
   return {
@@ -1195,17 +1202,23 @@ function useViralImport(sourceId?: string) {
       purpose: ViralImportPurpose,
       onReady: (task: ViralImportTask) => void,
     ) => {
-      if (video.id !== sourceRef.current) return;
+      if (video.id !== sourceRef.current || accountId !== accountRef.current)
+        return;
       if (!video.platformKey || !video.nativeId) {
         setState({ status: "error", message: "该视频缺少可导入的平台标识" });
         return;
       }
       const request = ++requestRef.current;
       const actionKey = `${video.platformKey}:${video.nativeId}:${purpose}`;
+      const memoryKey = `${accountId}:${actionKey}`;
       const idempotencyKey =
-        idempotencyKeysRef.current.get(actionKey) ??
-        viralImportIdempotencyKey(actionKey);
-      idempotencyKeysRef.current.set(actionKey, idempotencyKey);
+        idempotencyKeysRef.current.get(memoryKey) ??
+        viralImportIdempotencyKey(accountId, actionKey);
+      idempotencyKeysRef.current.set(memoryKey, idempotencyKey);
+      const clearKey = () => {
+        idempotencyKeysRef.current.delete(memoryKey);
+        clearViralImportIdempotencyKey(accountId, actionKey, idempotencyKey);
+      };
       setState({ status: "loading", message: "正在导入参考素材…" });
       try {
         const created = await createViralImportTask(
@@ -1217,6 +1230,7 @@ function useViralImport(sourceId?: string) {
         const completed = await waitForCompletion(created, request);
         if (!completed || request !== requestRef.current) return;
         if (completed.status === "FAILED") {
+          if (completed.retryable === false) clearKey();
           throw new Error(
             completed.errorMessage ||
               completed.error ||
@@ -1225,12 +1239,14 @@ function useViralImport(sourceId?: string) {
           );
         }
         if (!completed.projectId || !completed.sourceAssetId) {
+          clearKey();
           throw new Error("导入任务缺少项目或素材结果");
         }
         setState({ status: "ready", message: "参考素材已导入" });
         onReady(completed);
       } catch (error) {
         if (request !== requestRef.current) return;
+        if (shouldClearViralImportIdempotencyKey(error)) clearKey();
         setState({
           status: "error",
           message: error instanceof Error ? error.message : "导入任务失败",
@@ -1244,6 +1260,7 @@ export function ViralDetailPage() {
   const {
     data,
     state,
+    user,
     review,
     navigate,
     notify,
@@ -1263,7 +1280,7 @@ export function ViralDetailPage() {
   const [detailFavorite, setDetailFavorite] = useState<boolean>();
   const detailParams = useMemo(viralDetailParams, []);
   const video = remoteVideo ?? selectedVideo;
-  const { importState, start } = useViralImport(video?.id);
+  const { importState, start } = useViralImport(video?.id, user.id);
 
   useEffect(() => {
     if (remoteVideo || review || !detailParams) return;

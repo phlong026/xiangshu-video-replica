@@ -28,7 +28,12 @@ import {
   Panel,
   Tabs,
 } from "./ui";
-import { viralImportIdempotencyKey } from "./viralImport";
+import {
+  clearViralImportIdempotencyKey,
+  shouldClearViralImportIdempotencyKey,
+  ViralImportPollingTimeoutError,
+  viralImportIdempotencyKey,
+} from "./viralImport";
 
 const statusNames: Record<StudioTask["status"], string> = {
   running: "生成中",
@@ -178,6 +183,7 @@ function RunningRowMenu({ task }: { task: StudioTask }) {
 export function WorkbenchPage() {
   const {
     data,
+    user,
     review,
     navigate,
     openLive,
@@ -200,6 +206,9 @@ export function WorkbenchPage() {
   const viralOperationRef = useRef(0);
   const viralIdempotencyKeysRef = useRef(new Map<string, string>());
   const uploadAbortRef = useRef<AbortController | null>(null);
+  const [viralImportingId, setViralImportingId] = useState<string>();
+  const accountId = user.id || "anonymous";
+  const activeAccountRef = useRef(accountId);
   useEffect(
     () => () => {
       uploadOperationRef.current += 1;
@@ -208,6 +217,12 @@ export function WorkbenchPage() {
     },
     [],
   );
+  useEffect(() => {
+    if (activeAccountRef.current === accountId) return;
+    activeAccountRef.current = accountId;
+    viralOperationRef.current += 1;
+    setViralImportingId(undefined);
+  }, [accountId]);
   const active = data.tasks.filter((task) =>
     ["running", "queued", "uncertain"].includes(task.status),
   );
@@ -218,7 +233,6 @@ export function WorkbenchPage() {
         left.id.localeCompare(right.id, undefined, { numeric: true }),
     )
     .slice(0, 5);
-  const [viralImportingId, setViralImportingId] = useState<string>();
   const beginViralReplica = async (video: StudioVideo) => {
     if (review) {
       patchDraft({ sourceId: video.id });
@@ -234,10 +248,15 @@ export function WorkbenchPage() {
     }
     const operation = ++viralOperationRef.current;
     const actionKey = `${video.platformKey}:${video.nativeId}:replica`;
+    const memoryKey = `${accountId}:${actionKey}`;
     const idempotencyKey =
-      viralIdempotencyKeysRef.current.get(actionKey) ??
-      viralImportIdempotencyKey(actionKey);
-    viralIdempotencyKeysRef.current.set(actionKey, idempotencyKey);
+      viralIdempotencyKeysRef.current.get(memoryKey) ??
+      viralImportIdempotencyKey(accountId, actionKey);
+    viralIdempotencyKeysRef.current.set(memoryKey, idempotencyKey);
+    const clearKey = () => {
+      viralIdempotencyKeysRef.current.delete(memoryKey);
+      clearViralImportIdempotencyKey(accountId, actionKey, idempotencyKey);
+    };
     setViralImportingId(video.id);
     try {
       let task: ViralImportTask = await createViralImportTask(
@@ -255,12 +274,19 @@ export function WorkbenchPage() {
         if (operation !== viralOperationRef.current) return;
         task = await getViralImportTask(taskId);
       }
+      if (task.status !== "SUCCEEDED" && task.status !== "FAILED") {
+        throw new ViralImportPollingTimeoutError(
+          "导入任务等待超时，请稍后重试",
+        );
+      }
       if (task.status !== "SUCCEEDED") {
+        if (task.retryable === false) clearKey();
         throw new Error(
           task.errorMessage || task.error || task.message || "参考素材导入失败",
         );
       }
       if (!task.canAnalyze || !task.projectId || !task.sourceAssetId) {
+        if (!task.projectId || !task.sourceAssetId) clearKey();
         throw new Error("该来源暂不支持视频复刻");
       }
       patchDraft({
@@ -273,6 +299,7 @@ export function WorkbenchPage() {
         returnTo: "workbench",
       });
     } catch (error) {
+      if (shouldClearViralImportIdempotencyKey(error)) clearKey();
       if (operation === viralOperationRef.current) {
         notify(error instanceof Error ? error.message : "参考素材导入失败");
       }

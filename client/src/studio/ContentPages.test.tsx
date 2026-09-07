@@ -480,6 +480,83 @@ describe("V1.4 内容与运营页面", () => {
     expect(value.extractScriptFromUpload).not.toHaveBeenCalled();
   });
 
+  it("切换账户会隔离操作键并丢弃上一账户的迟到结果", async () => {
+    let resolveFirst: ((value: unknown) => void) | undefined;
+    createViralImportTask.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveFirst = resolve;
+        }),
+    );
+    const base = studio();
+    const accountA = {
+      id: "customer-a",
+      username: "customer-a",
+      display_name: "客户A",
+      role: "customer" as const,
+    };
+    const accountB = {
+      id: "customer-b",
+      username: "customer-b",
+      display_name: "客户B",
+      role: "customer" as const,
+    };
+    let value = studio({
+      user: accountA,
+      state: { ...base.state, page: "viral-detail", selectedVideoId: "dy-1" },
+    });
+    useStudio.mockImplementation(() => value);
+    const view = render(<ViralDetailPage />);
+    fireEvent.click(screen.getByRole("button", { name: "提取文案" }));
+    const accountAKey = createViralImportTask.mock.calls[0][3];
+
+    value = studio({
+      user: accountB,
+      state: { ...base.state, page: "viral-detail", selectedVideoId: "dy-1" },
+    });
+    view.rerender(<ViralDetailPage />);
+    await act(async () => {
+      resolveFirst?.({
+        id: "late-account-a",
+        status: "SUCCEEDED",
+        projectId: "project-a",
+        sourceAssetId: "asset-a",
+        canTranscribe: true,
+        canAnalyze: true,
+      });
+    });
+    expect(value.patchDraft).not.toHaveBeenCalled();
+
+    createViralImportTask.mockResolvedValueOnce({
+      id: "account-b-import",
+      status: "SUCCEEDED",
+      projectId: "project-b",
+      sourceAssetId: "asset-b",
+      canTranscribe: true,
+      canAnalyze: true,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "提取文案" }));
+    await waitFor(() => expect(createViralImportTask).toHaveBeenCalledTimes(2));
+    expect(createViralImportTask.mock.calls[1][3]).not.toBe(accountAKey);
+
+    value = studio({
+      user: accountA,
+      state: { ...base.state, page: "viral-detail", selectedVideoId: "dy-1" },
+    });
+    view.rerender(<ViralDetailPage />);
+    createViralImportTask.mockResolvedValueOnce({
+      id: "account-a-replay",
+      status: "SUCCEEDED",
+      projectId: "project-a",
+      sourceAssetId: "asset-a",
+      canTranscribe: true,
+      canAnalyze: true,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "提取文案" }));
+    await waitFor(() => expect(createViralImportTask).toHaveBeenCalledTimes(3));
+    expect(createViralImportTask.mock.calls[2][3]).toBe(accountAKey);
+  });
+
   it("视频号爆款使用平台与原生视频 ID 建立提取任务", async () => {
     const base = studio();
     const value = studio({
@@ -613,6 +690,7 @@ describe("V1.4 内容与运营页面", () => {
     useStudio.mockReturnValue(value);
     const view = render(<ViralDetailPage />);
     fireEvent.click(screen.getByRole("button", { name: "提取文案" }));
+    const firstKey = createViralImportTask.mock.calls[0][3];
     view.unmount();
 
     await act(async () => {
@@ -630,6 +708,82 @@ describe("V1.4 内容与运营页面", () => {
     expect(value.patchDraft).not.toHaveBeenCalled();
     expect(value.navigate).not.toHaveBeenCalled();
     expect(value.updateData).not.toHaveBeenCalled();
+
+    createViralImportTask.mockResolvedValueOnce({
+      taskId: "replayed-import",
+      status: "SUCCEEDED",
+      projectId: "replayed-project",
+      sourceAssetId: "replayed-asset",
+      mediaKind: "video",
+      canTranscribe: true,
+      canAnalyze: true,
+    });
+    useStudio.mockReturnValue(value);
+    render(<ViralDetailPage />);
+    fireEvent.click(screen.getByRole("button", { name: "提取文案" }));
+    await waitFor(() => expect(createViralImportTask).toHaveBeenCalledTimes(2));
+    expect(createViralImportTask.mock.calls[1][3]).toBe(firstKey);
+  });
+
+  it("导入轮询超时后清除旧键，允许用户发起新任务", async () => {
+    vi.useFakeTimers();
+    try {
+      createViralImportTask.mockResolvedValue({
+        id: "stalled-import",
+        status: "PENDING",
+        projectId: "stalled-project",
+        sourceAssetId: null,
+        retryable: true,
+      });
+      getViralImportTask.mockResolvedValue({
+        id: "stalled-import",
+        status: "RUNNING",
+        projectId: "stalled-project",
+        sourceAssetId: null,
+        retryable: true,
+      });
+      const base = studio();
+      const value = studio({
+        user: {
+          id: "customer-timeout",
+          username: "customer-timeout",
+          display_name: "超时客户",
+          role: "customer",
+        },
+        state: {
+          ...base.state,
+          page: "viral-detail",
+          selectedVideoId: "dy-1",
+        },
+      });
+      useStudio.mockReturnValue(value);
+      render(<ViralDetailPage />);
+
+      fireEvent.click(screen.getByRole("button", { name: "提取文案" }));
+      const firstKey = createViralImportTask.mock.calls[0][3];
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(120_000);
+      });
+      expect(
+        screen.getByText("导入任务等待超时，请稍后重试"),
+      ).toBeInTheDocument();
+
+      createViralImportTask.mockResolvedValueOnce({
+        id: "new-import",
+        status: "SUCCEEDED",
+        projectId: "new-project",
+        sourceAssetId: "new-asset",
+        canTranscribe: true,
+        canAnalyze: true,
+      });
+      fireEvent.click(screen.getByRole("button", { name: "提取文案" }));
+      await act(async () => {});
+
+      expect(createViralImportTask).toHaveBeenCalledTimes(2);
+      expect(createViralImportTask.mock.calls[1][3]).not.toBe(firstKey);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("爆款导入失败时保持详情页并展示错误", async () => {
@@ -656,6 +810,83 @@ describe("V1.4 内容与运营页面", () => {
     await waitFor(() => expect(createViralImportTask).toHaveBeenCalledTimes(2));
     expect(createViralImportTask.mock.calls[1][3]).toBe(firstKey);
     expect(value.navigate).not.toHaveBeenCalled();
+  });
+
+  it("永久失败后清除旧幂等键，再次点击创建新操作", async () => {
+    createViralImportTask
+      .mockResolvedValueOnce({
+        id: "permanent-failure",
+        status: "FAILED",
+        retryable: false,
+        errorMessage: "来源已过期",
+      })
+      .mockResolvedValueOnce({
+        id: "replacement",
+        status: "SUCCEEDED",
+        projectId: "project-new",
+        sourceAssetId: "asset-new",
+        canTranscribe: true,
+        canAnalyze: true,
+      });
+    const value = studio({
+      user: {
+        id: "customer-a",
+        username: "customer-a",
+        display_name: "客户A",
+        role: "customer",
+      },
+      state: {
+        ...studio().state,
+        page: "viral-detail",
+        selectedVideoId: "dy-1",
+      },
+    });
+    useStudio.mockReturnValue(value);
+    render(<ViralDetailPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "提取文案" }));
+    await screen.findByText("来源已过期");
+    const failedKey = createViralImportTask.mock.calls[0][3];
+    fireEvent.click(screen.getByRole("button", { name: "提取文案" }));
+    await waitFor(() => expect(createViralImportTask).toHaveBeenCalledTimes(2));
+
+    expect(createViralImportTask.mock.calls[1][3]).not.toBe(failedKey);
+  });
+
+  it("结果未知的网络异常保留幂等键供安全重放", async () => {
+    createViralImportTask
+      .mockRejectedValueOnce(new Error("network uncertain"))
+      .mockResolvedValueOnce({
+        id: "replayed",
+        status: "SUCCEEDED",
+        projectId: "project-replayed",
+        sourceAssetId: "asset-replayed",
+        canTranscribe: true,
+        canAnalyze: true,
+      });
+    const value = studio({
+      user: {
+        id: "customer-a",
+        username: "customer-a",
+        display_name: "客户A",
+        role: "customer",
+      },
+      state: {
+        ...studio().state,
+        page: "viral-detail",
+        selectedVideoId: "dy-1",
+      },
+    });
+    useStudio.mockReturnValue(value);
+    render(<ViralDetailPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "提取文案" }));
+    await screen.findByText("network uncertain");
+    const uncertainKey = createViralImportTask.mock.calls[0][3];
+    fireEvent.click(screen.getByRole("button", { name: "提取文案" }));
+    await waitFor(() => expect(createViralImportTask).toHaveBeenCalledTimes(2));
+
+    expect(createViralImportTask.mock.calls[1][3]).toBe(uncertainKey);
   });
 
   it("过期的视频选择显示空态，不回退到任意视频", () => {

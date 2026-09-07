@@ -5360,6 +5360,7 @@ export type ViralImportTask = {
   error?: string | null;
   errorMessage?: string | null;
   message?: string | null;
+  retryable?: boolean;
 };
 
 /** 最近 7 天爆款列表（服务端按分类关键词聚合，带计费护栏缓存）。 */
