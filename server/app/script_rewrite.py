@@ -438,11 +438,39 @@ def enqueue_script_rewrite_task(
         (project_id, idempotency_key),
     ).fetchone()
     if replay is not None:
-        return _validated_idempotent_replay(
+        replay = _validated_idempotent_replay(
             replay,
             request_hash=request_hash,
             identity_id=identity_id,
         )
+        if str(replay["status"]) == "FAILED" and bool(replay["retryable"]):
+            retried = conn.execute(
+                """
+                UPDATE script_rewrite_tasks
+                SET status = 'PENDING', provider_started_at = NULL,
+                    locked_by = NULL, locked_until = NULL,
+                    result_json = NULL, error_code = NULL,
+                    error_message_redacted = NULL, retryable = 0,
+                    completed_at = NULL, updated_at = %s
+                WHERE id = %s AND status = 'FAILED' AND retryable = 1
+                RETURNING *
+                """,
+                (_time_text(datetime.now(UTC)), replay["id"]),
+            ).fetchone()
+            if retried is not None:
+                conn.commit()
+                return cast(sqlite3.Row, retried)
+            replay = conn.execute(
+                "SELECT * FROM script_rewrite_tasks WHERE id = %s",
+                (replay["id"],),
+            ).fetchone()
+            if replay is None:
+                raise _script_rewrite_error(
+                    409,
+                    "SCRIPT_REWRITE_ENQUEUE_CONFLICT",
+                    "改写任务状态已经变化，请重试。",
+                )
+        return cast(sqlite3.Row, replay)
 
     active = conn.execute(
         """

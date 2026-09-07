@@ -125,17 +125,7 @@ const emptyData: StudioData = {
 const TASKS_POLL_INTERVAL_MS = 20_000;
 
 function savedDraftScope(accountId: string, draft: StudioDraft) {
-  return JSON.stringify([
-    accountId,
-    draft.projectId,
-    draft.sourceId,
-    draft.sourceAssetId,
-    draft.ipId,
-    draft.script.id,
-    draft.script.version,
-    draft.script.text,
-    draft.quoteRevision,
-  ]);
+  return JSON.stringify([accountId, draft]);
 }
 const creationPages = new Set<StudioPage>([
   "replica",
@@ -250,6 +240,8 @@ export function StudioWorkspace({
   // 编辑后防抖自动保存；恢复只在用户尚未做任何编辑时生效，绝不覆盖进行中的输入。
   const DRAFT_AUTOSAVE_DELAY_MS = 2000;
   const latestDraftRef = useRef(state.draft);
+  const draftTouchedRef = useRef(false);
+  const draftSaveTimerRef = useRef<number | undefined>(undefined);
   const saveOperationRef = useRef(0);
   const saveMountedRef = useRef(false);
   const saveAccountRef = useRef(currentUser.id);
@@ -259,30 +251,60 @@ export function StudioWorkspace({
     saveAccountRef.current !== currentUser.id ||
     saveScopeRef.current !== renderedSaveScope
   ) {
+    if (saveAccountRef.current !== currentUser.id) {
+      draftTouchedRef.current = false;
+    }
     saveAccountRef.current = currentUser.id;
     saveScopeRef.current = renderedSaveScope;
     saveOperationRef.current += 1;
   }
   const referenceAssetsRequestRef = useRef(0);
   const referenceAssetsDraftRef = useRef<StudioDraft | undefined>(undefined);
-  const draftTouchedRef = useRef(false);
-  const draftSaveTimerRef = useRef<number | undefined>(undefined);
   useEffect(() => {
     saveMountedRef.current = true;
     return () => {
       saveMountedRef.current = false;
       saveOperationRef.current += 1;
+      window.clearTimeout(draftSaveTimerRef.current);
     };
   }, []);
-  const scheduleDraftSave = useCallback(() => {
-    if (review) return;
-    window.clearTimeout(draftSaveTimerRef.current);
-    draftSaveTimerRef.current = window.setTimeout(() => {
-      void persistCloudDraft(latestDraftRef.current).catch(() => {
-        notify("云端草稿保存失败，内容仍在本机，请稍后继续编辑。");
-      });
-    }, DRAFT_AUTOSAVE_DELAY_MS);
-  }, [review, notify]);
+  useEffect(() => {
+    const accountId = currentUser.id;
+    return () => {
+      if (accountId !== saveAccountRef.current || !saveMountedRef.current) {
+        window.clearTimeout(draftSaveTimerRef.current);
+        saveOperationRef.current += 1;
+      }
+    };
+  }, [currentUser.id]);
+  const scheduleDraftSave = useCallback(
+    (draft: StudioDraft) => {
+      if (review) return;
+      const accountId = currentUser.id;
+      const expectedScope = savedDraftScope(accountId, draft);
+      const operation = saveOperationRef.current;
+      window.clearTimeout(draftSaveTimerRef.current);
+      draftSaveTimerRef.current = window.setTimeout(() => {
+        if (
+          !saveMountedRef.current ||
+          operation !== saveOperationRef.current ||
+          accountId !== saveAccountRef.current ||
+          expectedScope !== saveScopeRef.current
+        )
+          return;
+        void persistCloudDraft(draft).catch(() => {
+          if (
+            saveMountedRef.current &&
+            operation === saveOperationRef.current &&
+            accountId === saveAccountRef.current &&
+            expectedScope === saveScopeRef.current
+          )
+            notify("云端草稿保存失败，内容仍在本机，请稍后继续编辑。");
+        });
+      }, DRAFT_AUTOSAVE_DELAY_MS);
+    },
+    [review, currentUser.id, notify],
+  );
 
   const restoreDraftAssets = useCallback(
     async (draft: StudioDraft) => {
@@ -360,7 +382,8 @@ export function StudioWorkspace({
       setReferenceAssetsPending(false);
       setReferenceAssetsError(false);
     }
-  }, [state.draft]);
+    if (draftTouchedRef.current) scheduleDraftSave(state.draft);
+  }, [state.draft, scheduleDraftSave]);
   // 数字人口播提交前拉取单价（元/条）；失败保持 null 显示“待服务端报价”。
   useEffect(() => {
     if (review || generation !== "数字人口播") {
@@ -736,7 +759,6 @@ export function StudioWorkspace({
       }
       return { ...previous, draft: next };
     });
-    scheduleDraftSave();
   };
   const extractionDraftId = state.draft.id;
   const extractionProjectId = state.draft.projectId;
@@ -793,7 +815,6 @@ export function StudioWorkspace({
           draftTouchedRef.current = true;
           latestDraftRef.current = restored;
           setState((previous) => ({ ...previous, draft: restored }));
-          scheduleDraftSave();
           notify(
             current.script.text.trim()
               ? "文案提取已完成，已保留你的编辑并补回来源原文。"
@@ -832,7 +853,6 @@ export function StudioWorkspace({
     extractionProjectId,
     extractionAssetId,
     notify,
-    scheduleDraftSave,
   ]);
   const openLive = (panel: LivePanel) => {
     if (review) {

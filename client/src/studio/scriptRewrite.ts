@@ -9,6 +9,7 @@ export type ScriptRewriteScope = {
 };
 
 const inMemoryKeys = new Map<string, Map<string, string>>();
+const ACTIVE_FINGERPRINT = "$active";
 
 function accountStorageKey(accountId: string) {
   return `studio:script-rewrite:${accountId}`;
@@ -62,12 +63,22 @@ function writeStoredKeys(accountId: string, keys: Record<string, string>) {
 export function scriptRewriteIdempotencyKey(scope: ScriptRewriteScope): string {
   const fingerprint = scopeFingerprint(scope);
   const stored = readStoredKeys(scope.accountId);
+  const memory = memoryKeys(scope.accountId);
+  const previousFingerprint = stored[ACTIVE_FINGERPRINT];
+  if (previousFingerprint && previousFingerprint !== fingerprint) {
+    delete stored[previousFingerprint];
+    memory.delete(previousFingerprint);
+  }
+  stored[ACTIVE_FINGERPRINT] = fingerprint;
   if (typeof stored[fingerprint] === "string" && stored[fingerprint]) {
+    writeStoredKeys(scope.accountId, stored);
     return stored[fingerprint];
   }
-  const memory = memoryKeys(scope.accountId);
   const existing = memory.get(fingerprint);
-  if (existing) return existing;
+  if (existing && previousFingerprint === fingerprint) {
+    writeStoredKeys(scope.accountId, stored);
+    return existing;
+  }
   const created = crypto.randomUUID();
   memory.set(fingerprint, created);
   stored[fingerprint] = created;

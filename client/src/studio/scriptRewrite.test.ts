@@ -36,6 +36,19 @@ describe("文案改写幂等键生命周期", () => {
     ).not.toBe(first);
   });
 
+  it("离开输入范围后即淘汰旧键，A到B再回A会创建第三把键", () => {
+    const first = scriptRewriteIdempotencyKey(scope);
+    const second = scriptRewriteIdempotencyKey({
+      ...scope,
+      sourceAssetId: "source-b",
+    });
+    const third = scriptRewriteIdempotencyKey(scope);
+
+    expect(second).not.toBe(first);
+    expect(third).not.toBe(first);
+    expect(third).not.toBe(second);
+  });
+
   it("只清理仍与终态请求匹配的键", () => {
     const first = scriptRewriteIdempotencyKey(scope);
     clearScriptRewriteIdempotencyKey(scope, first);

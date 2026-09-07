@@ -483,6 +483,30 @@ describe("V1.4 workspace integration", () => {
       }
     });
 
+    it("自动保存定时器等待期间账号A到B再回A时不使用迟到认证写入", async () => {
+      live.loadStudioData.mockResolvedValue(emptyStudioData);
+      live.loadCloudDraft.mockResolvedValue(undefined);
+      const accountA = { ...reviewUser, id: "account-a" };
+      const accountB = { ...reviewUser, id: "account-b" };
+      const view = render(<StudioWorkspace currentUser={accountA} />);
+      await openCopyPage();
+      vi.useFakeTimers();
+      try {
+        fireEvent.change(screen.getByLabelText("二创文案"), {
+          target: { value: "账号A的待保存内容" },
+        });
+        view.rerender(<StudioWorkspace currentUser={accountB} />);
+        view.rerender(<StudioWorkspace currentUser={accountA} />);
+
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(2_000);
+        });
+        expect(live.persistCloudDraft).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("保存版本写入云端我的文案", async () => {
       live.loadStudioData.mockResolvedValue(emptyStudioData);
       live.loadCloudDraft.mockResolvedValue(undefined);
@@ -609,6 +633,42 @@ describe("V1.4 workspace integration", () => {
       await act(async () => resolveSave?.());
 
       expect(live.persistCloudDraft).not.toHaveBeenCalled();
+    });
+
+    it("保存等待期间完整草稿被替换时即使脚本字段相同也不回填", async () => {
+      let resolveSave: (() => void) | undefined;
+      live.persistSavedScript.mockReturnValueOnce(
+        new Promise<void>((resolve) => {
+          resolveSave = resolve;
+        }),
+      );
+      live.loadStudioData.mockResolvedValue(emptyStudioData);
+      const state = createState("copy");
+      state.draft.projectId = "project-1";
+      state.draft.sourceId = "source-1";
+      state.draft.ipId = "identity-1";
+      state.draft.script.text = "局部字段保持不变";
+      state.draft.scriptEdited = true;
+      state.draft.prompt = "旧提示词";
+      const view = render(
+        <StudioWorkspace currentUser={reviewUser} initialState={state} />,
+      );
+      await openCopyPage();
+      fireEvent.click(screen.getByRole("button", { name: "保存版本" }));
+
+      state.draft.prompt = "替换后的另一份完整草稿";
+      view.rerender(
+        <StudioWorkspace
+          currentUser={{ ...reviewUser }}
+          initialState={state}
+        />,
+      );
+      await act(async () => resolveSave?.());
+
+      expect(live.persistCloudDraft).not.toHaveBeenCalled();
+      expect(screen.queryByText(/已保存到我的文案/)).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole("tab", { name: "我的文案" }));
+      expect(screen.queryByText("局部字段保持不变")).not.toBeInTheDocument();
     });
 
     it("确认终稿立即持久化并带 projectId 时发布到项目脚本版本", async () => {

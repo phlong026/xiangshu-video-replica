@@ -623,6 +623,131 @@ def test_script_rewrite_idempotency_and_latest_are_identity_scoped(
     assert latest.json()["source_text"] == "相同文本"
 
 
+def test_retryable_failed_idempotent_replay_requeues_same_record_once(
+    client: TestClient,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configure_deepseek(db_path, monkeypatch)
+    provider_calls = 0
+
+    def rewrite(**_kwargs: object) -> str:
+        nonlocal provider_calls
+        provider_calls += 1
+        if provider_calls == 1:
+            raise HTTPException(
+                502,
+                detail={
+                    "code": "DEEPSEEK_REQUEST_FAILED",
+                    "message": "服务商明确拒绝了本次请求。",
+                },
+            )
+        return "同一收据重试成功。"
+
+    monkeypatch.setattr(script_rewrite, "_request_deepseek", rewrite)
+    request = {
+        "text": "可重试失败继续使用同一收据。",
+        "idempotency_key": "retryable-same-record-key",
+    }
+    first = client.post(
+        "/api/projects/project_owned/script-rewrite",
+        headers=auth_headers("employee_1"),
+        json=request,
+    )
+    assert first.status_code == 202
+    task_id = first.json()["id"]
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        assert (
+            run_worker_once(
+                conn,
+                worker_id="first-attempt",
+                storage=FakeStorageAdapter(provider="fake", bucket="private-bucket"),
+                max_tasks=1,
+            )
+            == 1
+        )
+
+    replay_one = client.post(
+        "/api/projects/project_owned/script-rewrite",
+        headers=auth_headers("employee_1"),
+        json=request,
+    )
+    replay_two = client.post(
+        "/api/projects/project_owned/script-rewrite",
+        headers=auth_headers("employee_1"),
+        json=request,
+    )
+    assert replay_one.status_code == 202
+    assert replay_two.status_code == 202
+    assert replay_one.json()["id"] == task_id
+    assert replay_two.json()["id"] == task_id
+    assert replay_one.json()["status"] == "PENDING"
+    assert replay_two.json()["status"] == "PENDING"
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        rows = conn.execute(
+            "SELECT id, status, attempt FROM script_rewrite_tasks WHERE idempotency_key = %s",
+            (request["idempotency_key"],),
+        ).fetchall()
+        assert [(row["id"], row["status"], row["attempt"]) for row in rows] == [
+            (task_id, "PENDING", 1)
+        ]
+        assert (
+            run_worker_once(
+                conn,
+                worker_id="retry-attempt",
+                storage=FakeStorageAdapter(provider="fake", bucket="private-bucket"),
+                max_tasks=2,
+            )
+            == 1
+        )
+        assert (
+            script_rewrite.acquire_script_rewrite_task(conn, worker_id="duplicate-worker") is None
+        )
+        completed = script_rewrite.load_script_rewrite_task(conn, task_id)
+        assert completed["status"] == "SUCCEEDED"
+        assert completed["attempt"] == 2
+    assert provider_calls == 2
+
+
+def test_uncertain_idempotent_replay_never_requeues(
+    client: TestClient,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configure_deepseek(db_path, monkeypatch)
+    request = {
+        "text": "状态不确定时不能再次调用服务商。",
+        "idempotency_key": "uncertain-no-requeue-key",
+    }
+    first = client.post(
+        "/api/projects/project_owned/script-rewrite",
+        headers=auth_headers("employee_1"),
+        json=request,
+    )
+    task_id = first.json()["id"]
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        conn.execute(
+            """
+            UPDATE script_rewrite_tasks
+            SET status = 'SUBMISSION_UNCERTAIN', retryable = 0
+            WHERE id = %s
+            """,
+            (task_id,),
+        )
+        conn.commit()
+
+    replay = client.post(
+        "/api/projects/project_owned/script-rewrite",
+        headers=auth_headers("employee_1"),
+        json=request,
+    )
+    assert replay.status_code == 202
+    assert replay.json()["id"] == task_id
+    assert replay.json()["status"] == "SUBMISSION_UNCERTAIN"
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        assert script_rewrite.acquire_script_rewrite_task(conn, worker_id="must-not-run") is None
+
+
 def test_script_rewrite_latest_supports_all_identity_and_none_scopes(
     client: TestClient,
     db_path: Path,
