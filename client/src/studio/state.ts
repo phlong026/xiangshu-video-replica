@@ -1,5 +1,11 @@
 import type { ShotCard } from "./../api";
-import type { StudioDraft, StudioPage, StudioState, StudioTask } from "./types";
+import type {
+  StudioAsset,
+  StudioDraft,
+  StudioPage,
+  StudioState,
+  StudioTask,
+} from "./types";
 
 export const pageTitles: Record<StudioPage, string> = {
   workbench: "工作台",
@@ -216,6 +222,59 @@ export const SUPPORTED_VIDEO_RATIOS = [
   "3:4",
   "9:16",
 ] as const;
+
+export const DEFAULT_MAX_REFERENCE_IMAGES = 4;
+
+export function validateReferenceImages(
+  referenceIds: string[],
+  availableAssets: StudioAsset[],
+  maxReferenceImages = DEFAULT_MAX_REFERENCE_IMAGES,
+) {
+  const assetById = new Map(availableAssets.map((asset) => [asset.id, asset]));
+  const seen = new Set<string>();
+  const images: StudioAsset[] = [];
+  let invalidCount = 0;
+  let duplicateCount = 0;
+
+  for (const id of referenceIds) {
+    if (seen.has(id)) {
+      duplicateCount += 1;
+      continue;
+    }
+    seen.add(id);
+    const asset = assetById.get(id);
+    if (asset?.kind !== "image") {
+      invalidCount += 1;
+      continue;
+    }
+    images.push(asset);
+  }
+
+  const limit = Math.max(0, Math.floor(maxReferenceImages));
+  const overLimitCount = Math.max(0, images.length - limit);
+  const issues: string[] = [];
+  if (invalidCount > 0)
+    issues.push(`参考图仅支持图片，旧草稿中有 ${invalidCount} 项无效素材。`);
+  if (duplicateCount > 0)
+    issues.push(
+      `参考图不能重复选择，旧草稿中有 ${duplicateCount} 项重复素材。`,
+    );
+  if (overLimitCount > 0)
+    issues.push(
+      `当前最多选择 ${limit} 张参考图，旧草稿已超出 ${overLimitCount} 张。`,
+    );
+
+  return {
+    images,
+    imageIds: images.map((asset) => asset.id),
+    repairIds: images.slice(0, limit).map((asset) => asset.id),
+    limit,
+    invalidCount,
+    duplicateCount,
+    overLimitCount,
+    issues,
+  };
+}
 
 /** 文图生页签有首帧即 I2V（可选尾帧），无首帧为 T2V；参考生页签为 R2V。 */
 export function resolveVideoMode(

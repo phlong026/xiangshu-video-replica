@@ -20,8 +20,8 @@ const live = vi.hoisted(() => ({
   // C7 云端草稿：默认无草稿/空列表，具体用例再覆盖。
   loadCloudDraft: vi.fn(async (): Promise<unknown> => undefined),
   loadDraftMaterials: vi.fn(async () => ({
-    assets: [],
-    unavailableIds: [],
+    assets: [] as unknown[],
+    unavailableIds: [] as string[],
   })),
   loadSavedScriptList: vi.fn(async (): Promise<unknown[]> => []),
   persistCloudDraft: vi.fn(async (_draft: unknown): Promise<void> => {}),
@@ -619,7 +619,13 @@ describe("V1.4 workspace integration", () => {
 
 describe("视频生成（C2 独立创作）", () => {
   beforeEach(() => {
+    vi.clearAllMocks();
     vi.useRealTimers();
+    live.loadCloudDraft.mockResolvedValue(undefined);
+    live.loadDraftMaterials.mockResolvedValue({
+      assets: [],
+      unavailableIds: [],
+    });
   });
 
   const emptyStudioData = {
@@ -668,6 +674,365 @@ describe("视频生成（C2 独立创作）", () => {
       await screen.findByText("该模式需要完成供应商核对后开放，敬请期待。"),
     ).toBeInTheDocument();
     expect(screen.queryByText("生成确认 · 视频生成")).toBeNull();
+    expect(api.createIndependentVideoTask).not.toHaveBeenCalled();
+  });
+
+  it("参考素材选择器只展示图片并在达到能力上限后阻止继续添加", async () => {
+    api.getIndependentCapabilities.mockResolvedValue({
+      extended_modes_enabled: true,
+      t2v_enabled: true,
+      i2v_enabled: true,
+      r2v_enabled: true,
+      last_frame_enabled: true,
+      max_reference_images: 2,
+      max_quantity: 4,
+    });
+    const imageA = {
+      id: "image-a",
+      name: "外立面 A.jpg",
+      kind: "image" as const,
+      group: "参考素材",
+      source: "素材库",
+      saved: true,
+    };
+    const imageB = { ...imageA, id: "image-b", name: "外立面 B.jpg" };
+    live.loadStudioData.mockResolvedValue({
+      ...emptyStudioData,
+      assets: [
+        imageA,
+        imageB,
+        { ...imageA, id: "video-a", name: "运镜.mp4", kind: "video" },
+        { ...imageA, id: "audio-a", name: "环境声.wav", kind: "audio" },
+      ],
+    });
+    const initial = createState("reference");
+    initial.draft.prompt = "参考外立面生成";
+    initial.draft.referenceIds = ["image-a"];
+    render(<StudioWorkspace currentUser={reviewUser} initialState={initial} />);
+
+    const pickerButton = await screen.findByRole("button", {
+      name: /从素材库选择/,
+    });
+    fireEvent.click(pickerButton);
+    const picker = screen.getByRole("dialog", { name: "选择参考素材" });
+    expect(within(picker).queryByText("运镜.mp4")).toBeNull();
+    expect(within(picker).queryByText("环境声.wav")).toBeNull();
+    expect(within(picker).queryByText("外立面 A.jpg")).toBeNull();
+    fireEvent.click(within(picker).getByRole("button", { name: /外立面 B/ }));
+
+    expect(
+      await screen.findByText("已选 2/2 张参考图，需移除后才能继续添加。"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /从素材库选择/ })).toBeDisabled();
+    expect(screen.getByLabelText("上传参考图")).toBeDisabled();
+  });
+
+  it("参考生视频能力关闭时禁止进入提交确认", async () => {
+    api.getIndependentCapabilities.mockResolvedValue({
+      extended_modes_enabled: false,
+      t2v_enabled: false,
+      i2v_enabled: true,
+      r2v_enabled: false,
+      last_frame_enabled: false,
+      max_reference_images: 4,
+      max_quantity: 4,
+    });
+    const image = (id: string) => ({
+      id,
+      name: `${id}.jpg`,
+      kind: "image" as const,
+      group: "参考素材",
+      source: "素材库",
+      saved: true,
+    });
+    live.loadStudioData.mockResolvedValue({
+      ...emptyStudioData,
+      assets: [image("image-a")],
+    });
+    const initial = createState("reference");
+    initial.draft.prompt = "旧草稿";
+    initial.draft.referenceIds = ["image-a"];
+    render(<StudioWorkspace currentUser={reviewUser} initialState={initial} />);
+
+    expect(
+      await screen.findByText("参考生视频当前未开放，请等待能力开启后再提交。"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "生成视频" })).toBeDisabled();
+    expect(screen.queryByText("生成确认 · 视频生成")).toBeNull();
+    expect(api.createIndependentVideoTask).not.toHaveBeenCalled();
+  });
+
+  it("旧草稿参考图超出能力上限时要求整理并禁止提交", async () => {
+    api.getIndependentCapabilities.mockResolvedValue({
+      extended_modes_enabled: true,
+      t2v_enabled: true,
+      i2v_enabled: true,
+      r2v_enabled: true,
+      last_frame_enabled: true,
+      max_reference_images: 2,
+      max_quantity: 4,
+    });
+    const image = (id: string) => ({
+      id,
+      name: `${id}.jpg`,
+      kind: "image" as const,
+      group: "参考素材",
+      source: "素材库",
+      saved: true,
+    });
+    live.loadStudioData.mockResolvedValue({
+      ...emptyStudioData,
+      assets: [image("image-a"), image("image-b"), image("image-c")],
+    });
+    const initial = createState("reference");
+    initial.draft.prompt = "旧草稿";
+    initial.draft.referenceIds = ["image-a", "image-b", "image-c"];
+    render(<StudioWorkspace currentUser={reviewUser} initialState={initial} />);
+
+    expect(
+      await screen.findByText("当前最多选择 2 张参考图，旧草稿已超出 1 张。"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "生成视频" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "整理参考图" })).toBeEnabled();
+    expect(api.createIndependentVideoTask).not.toHaveBeenCalled();
+  });
+
+  it("云端草稿参考图解析完成前禁止误整理合法引用", async () => {
+    api.getIndependentCapabilities.mockResolvedValue({
+      extended_modes_enabled: true,
+      t2v_enabled: true,
+      i2v_enabled: true,
+      r2v_enabled: true,
+      last_frame_enabled: true,
+      max_reference_images: 4,
+      max_quantity: 4,
+    });
+    const restored = createState("reference").draft;
+    restored.prompt = "恢复草稿";
+    restored.referenceIds = ["image-restored"];
+    live.loadCloudDraft.mockResolvedValue({ draft: restored });
+    live.loadStudioData.mockResolvedValue(emptyStudioData);
+    let resolveMaterials:
+      | ((value: { assets: unknown[]; unavailableIds: string[] }) => void)
+      | undefined;
+    live.loadDraftMaterials.mockImplementation(
+      () =>
+        new Promise<{ assets: unknown[]; unavailableIds: string[] }>(
+          (resolve) => {
+            resolveMaterials = resolve;
+          },
+        ),
+    );
+    render(
+      <StudioWorkspace
+        currentUser={reviewUser}
+        initialState={createState("reference")}
+      />,
+    );
+
+    expect(
+      await screen.findByText("正在恢复草稿参考图，请稍候。"),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "整理参考图" })).toBeNull();
+    resolveMaterials?.({
+      assets: [
+        {
+          id: "image-restored",
+          name: "恢复参考图.jpg",
+          kind: "image",
+          group: "参考素材",
+          source: "云端草稿",
+          saved: true,
+        },
+      ],
+      unavailableIds: [],
+    });
+
+    expect(await screen.findByText("恢复参考图.jpg")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "整理参考图" })).toBeNull();
+  });
+
+  it("云端草稿参考图解析失败时保留引用并可重试恢复", async () => {
+    api.getIndependentCapabilities.mockResolvedValue({
+      extended_modes_enabled: true,
+      t2v_enabled: true,
+      i2v_enabled: true,
+      r2v_enabled: true,
+      last_frame_enabled: true,
+      max_reference_images: 4,
+      max_quantity: 4,
+    });
+    const restored = createState("reference").draft;
+    restored.prompt = "恢复草稿";
+    restored.referenceIds = ["image-restored"];
+    live.loadCloudDraft.mockResolvedValue({ draft: restored });
+    live.loadStudioData.mockResolvedValue(emptyStudioData);
+    live.loadDraftMaterials
+      .mockRejectedValueOnce(new Error("解析接口失败"))
+      .mockResolvedValueOnce({
+        assets: [
+          {
+            id: "image-restored",
+            name: "恢复参考图.jpg",
+            kind: "image",
+            group: "参考素材",
+            source: "云端草稿",
+            saved: true,
+          },
+        ],
+        unavailableIds: [],
+      });
+    render(
+      <StudioWorkspace
+        currentUser={reviewUser}
+        initialState={createState("reference")}
+      />,
+    );
+
+    expect(
+      await screen.findByText("草稿参考图读取失败，请重试。"),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "整理参考图" })).toBeNull();
+    expect(live.persistCloudDraft).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "重试读取草稿参考图" }));
+
+    expect(await screen.findByText("恢复参考图.jpg")).toBeInTheDocument();
+    expect(live.loadDraftMaterials).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("button", { name: "整理参考图" })).toBeNull();
+    expect(live.persistCloudDraft).not.toHaveBeenCalled();
+  });
+
+  it("切换草稿后忽略旧草稿参考图重试的迟到结果", async () => {
+    api.getIndependentCapabilities.mockResolvedValue({
+      extended_modes_enabled: true,
+      t2v_enabled: true,
+      i2v_enabled: true,
+      r2v_enabled: true,
+      last_frame_enabled: true,
+      max_reference_images: 4,
+      max_quantity: 4,
+    });
+    const restored = createState("reference").draft;
+    restored.referenceIds = ["image-restored"];
+    live.loadCloudDraft.mockResolvedValue({ draft: restored });
+    live.loadStudioData.mockResolvedValue(emptyStudioData);
+    let resolveRetry:
+      | ((value: { assets: unknown[]; unavailableIds: string[] }) => void)
+      | undefined;
+    live.loadDraftMaterials
+      .mockRejectedValueOnce(new Error("解析接口失败"))
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveRetry = resolve;
+          }),
+      );
+    render(
+      <StudioWorkspace
+        currentUser={reviewUser}
+        initialState={createState("reference")}
+      />,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "重试读取草稿参考图" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "新建创作" }));
+    fireEvent.click(screen.getByRole("button", { name: "从空白创作开始" }));
+    resolveRetry?.({
+      assets: [
+        {
+          id: "image-restored",
+          name: "不应回填.jpg",
+          kind: "image",
+          group: "参考素材",
+          source: "云端草稿",
+          saved: true,
+        },
+      ],
+      unavailableIds: [],
+    });
+    await Promise.resolve();
+
+    expect(screen.queryByText("不应回填.jpg")).toBeNull();
+    expect(screen.queryByText("草稿参考图读取失败，请重试。")).toBeNull();
+  });
+
+  it("视频能力读取失败后可重试并恢复参考图操作", async () => {
+    api.getIndependentCapabilities
+      .mockRejectedValueOnce(new Error("能力接口失败"))
+      .mockResolvedValueOnce({
+        extended_modes_enabled: true,
+        t2v_enabled: true,
+        i2v_enabled: true,
+        r2v_enabled: true,
+        last_frame_enabled: true,
+        max_reference_images: 4,
+        max_quantity: 4,
+      });
+    live.loadStudioData.mockResolvedValue({
+      ...emptyStudioData,
+      assets: [
+        {
+          id: "image-a",
+          name: "外立面 A.jpg",
+          kind: "image",
+          group: "参考素材",
+          source: "素材库",
+          saved: true,
+        },
+      ],
+    });
+    const initial = createState("reference");
+    initial.draft.prompt = "参考外立面生成";
+    initial.draft.referenceIds = ["image-a"];
+    render(<StudioWorkspace currentUser={reviewUser} initialState={initial} />);
+
+    expect(
+      await screen.findByText("视频生成能力读取失败，请重试。"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "生成视频" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "重试读取视频能力" }));
+
+    await waitFor(() =>
+      expect(api.getIndependentCapabilities).toHaveBeenCalledTimes(2),
+    );
+    expect(screen.getByRole("button", { name: "生成视频" })).toBeEnabled();
+  });
+
+  it("确认弹窗打开后参考图失效也不能绕过最终提交校验", async () => {
+    api.getIndependentCapabilities.mockResolvedValue({
+      extended_modes_enabled: true,
+      t2v_enabled: true,
+      i2v_enabled: true,
+      r2v_enabled: true,
+      last_frame_enabled: true,
+      max_reference_images: 4,
+      max_quantity: 4,
+    });
+    live.loadStudioData.mockResolvedValue({
+      ...emptyStudioData,
+      assets: [
+        {
+          id: "image-a",
+          name: "外立面 A.jpg",
+          kind: "image",
+          group: "参考素材",
+          source: "素材库",
+          saved: true,
+        },
+      ],
+    });
+    const initial = createState("reference");
+    initial.draft.prompt = "参考外立面生成";
+    initial.draft.referenceIds = ["image-a"];
+    render(<StudioWorkspace currentUser={reviewUser} initialState={initial} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "生成视频" }));
+    expect(await screen.findByText("生成确认 · 视频生成")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "移除 外立面 A.jpg" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认费用并提交" }));
+
+    expect(await screen.findByText("请至少选择一张参考图")).toBeInTheDocument();
     expect(api.createIndependentVideoTask).not.toHaveBeenCalled();
   });
 

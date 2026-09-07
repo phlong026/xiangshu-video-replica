@@ -1,4 +1,9 @@
-import type { CurrentUser, Project, StudioAnalytics } from "../api";
+import type {
+  CurrentUser,
+  IndependentCapabilities,
+  Project,
+  StudioAnalytics,
+} from "../api";
 
 export type StudioPage =
   | "workbench"
@@ -244,6 +249,12 @@ export type StudioContextValue = {
   data: StudioData;
   review: boolean;
   user: CurrentUser;
+  videoCapabilities?: IndependentCapabilities;
+  videoCapabilitiesStatus?: "loading" | "ready" | "error";
+  retryVideoCapabilities?: () => void;
+  referenceAssetsPending?: boolean;
+  referenceAssetsError?: boolean;
+  retryReferenceAssets?: () => void;
   navigate: (page: StudioPage, patch?: Partial<StudioState>) => void;
   patchDraft: (patch: Partial<StudioDraft>) => void;
   patchState: (patch: Partial<StudioState>) => void;

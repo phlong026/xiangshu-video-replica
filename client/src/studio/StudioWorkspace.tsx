@@ -63,11 +63,13 @@ import {
   buildOralInput,
   createDraft,
   createState,
+  DEFAULT_MAX_REFERENCE_IMAGES,
   pageTitles,
   patchStudioDraft,
   resolveVideoMode,
   routeFromHash,
   SUPPORTED_VIDEO_RATIOS,
+  validateReferenceImages,
   withImportedProject,
 } from "./state";
 import type {
@@ -212,6 +214,12 @@ export function StudioWorkspace({
   // ---- 视频生成（C2 独立创作）----
   const [videoCapabilities, setVideoCapabilities] =
     useState<IndependentCapabilities>();
+  const [videoCapabilitiesStatus, setVideoCapabilitiesStatus] = useState<
+    "loading" | "ready" | "error"
+  >(review ? "ready" : "loading");
+  const [videoCapabilitiesRevision, setVideoCapabilitiesRevision] = useState(0);
+  const [referenceAssetsPending, setReferenceAssetsPending] = useState(false);
+  const [referenceAssetsError, setReferenceAssetsError] = useState(false);
   const [videoQuote, setVideoQuote] = useState<GenerationPriceQuote | null>(
     null,
   );
@@ -226,6 +234,8 @@ export function StudioWorkspace({
   // 编辑后防抖自动保存；恢复只在用户尚未做任何编辑时生效，绝不覆盖进行中的输入。
   const DRAFT_AUTOSAVE_DELAY_MS = 2000;
   const latestDraftRef = useRef(state.draft);
+  const referenceAssetsRequestRef = useRef(0);
+  const referenceAssetsDraftRef = useRef<StudioDraft | undefined>(undefined);
   const draftTouchedRef = useRef(false);
   const draftSaveTimerRef = useRef<number | undefined>(undefined);
   const scheduleDraftSave = useCallback(() => {
@@ -237,6 +247,48 @@ export function StudioWorkspace({
       });
     }, DRAFT_AUTOSAVE_DELAY_MS);
   }, [review, notify]);
+
+  const restoreDraftAssets = useCallback(
+    async (draft: StudioDraft) => {
+      const request = ++referenceAssetsRequestRef.current;
+      referenceAssetsDraftRef.current = draft;
+      setReferenceAssetsPending(true);
+      setReferenceAssetsError(false);
+      try {
+        const restored = await loadDraftMaterials(draft);
+        if (
+          request !== referenceAssetsRequestRef.current ||
+          latestDraftRef.current.id !== draft.id
+        )
+          return;
+        setReferenceAssetsPending(false);
+        restoredAssetsRef.current = restored.assets;
+        setData((previous) => ({
+          ...previous,
+          assets: mergeStudioAssets(previous.assets, restored.assets),
+        }));
+        if (restored.unavailableIds.length) {
+          notify("草稿已恢复，部分原素材已不可用，请重新选择。");
+        }
+      } catch {
+        if (
+          request !== referenceAssetsRequestRef.current ||
+          latestDraftRef.current.id !== draft.id
+        )
+          return;
+        setReferenceAssetsPending(false);
+        setReferenceAssetsError(true);
+      }
+    },
+    [notify],
+  );
+
+  const retryReferenceAssets = useCallback(() => {
+    const draft = referenceAssetsDraftRef.current;
+    if (!draft || draft.id !== latestDraftRef.current.id) return;
+    void restoreDraftAssets(draft);
+  }, [restoreDraftAssets]);
+
   // 挂载时恢复云端草稿与我的文案；失败静默（只读路径，不阻塞工作区）。
   useEffect(() => {
     if (review) return;
@@ -251,30 +303,27 @@ export function StudioWorkspace({
           latestDraftRef.current = restore.draft;
           setState((previous) => ({ ...previous, draft: restore.draft }));
           notify("已恢复上次云端草稿，请核对内容并确认终稿。");
-          const restored = await loadDraftMaterials(restore.draft).catch(
-            () => null,
-          );
-          if (!active || !restored) return;
-          restoredAssetsRef.current = restored.assets;
-          setData((previous) => ({
-            ...previous,
-            assets: mergeStudioAssets(previous.assets, restored.assets),
-          }));
-          if (restored.unavailableIds.length) {
-            notify("草稿已恢复，部分原素材已不可用，请重新选择。");
-          }
+          void restoreDraftAssets(restore.draft);
         }
       })
       .catch(() => {});
     return () => {
       active = false;
+      referenceAssetsRequestRef.current += 1;
       window.clearTimeout(draftSaveTimerRef.current);
     };
-  }, [review, notify]);
+  }, [review, notify, restoreDraftAssets]);
   // 自动保存始终跟随最新草稿：导入项目、任务快照回填等不经 patchDraft 的
   // 路径也在这里并入追踪。
   useEffect(() => {
     latestDraftRef.current = state.draft;
+    const restoringDraft = referenceAssetsDraftRef.current;
+    if (restoringDraft && restoringDraft.id !== state.draft.id) {
+      referenceAssetsRequestRef.current += 1;
+      referenceAssetsDraftRef.current = undefined;
+      setReferenceAssetsPending(false);
+      setReferenceAssetsError(false);
+    }
   }, [state.draft]);
   // 数字人口播提交前拉取单价（元/条）；失败保持 null 显示“待服务端报价”。
   useEffect(() => {
@@ -296,20 +345,34 @@ export function StudioWorkspace({
   }, [review, generation]);
 
   // 视频生成能力探测（扩展模式是否开放、单批上限）；审核模式不探测。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 修订号专门用于用户点击后重新发起能力请求。
   useEffect(() => {
     if (review) return;
     let active = true;
+    setVideoCapabilities(undefined);
+    setVideoCapabilitiesStatus("loading");
     void getIndependentCapabilities()
       .then((capabilities) => {
-        if (active) setVideoCapabilities(capabilities);
+        if (active) {
+          setVideoCapabilities(capabilities);
+          setVideoCapabilitiesStatus("ready");
+        }
       })
       .catch(() => {
-        if (active) setVideoCapabilities(undefined);
+        if (active) {
+          setVideoCapabilities(undefined);
+          setVideoCapabilitiesStatus("error");
+        }
       });
     return () => {
       active = false;
     };
-  }, [review]);
+  }, [review, videoCapabilitiesRevision]);
+
+  const retryVideoCapabilities = useCallback(
+    () => setVideoCapabilitiesRevision((value) => value + 1),
+    [],
+  );
 
   // 视频生成确认弹窗：按分辨率/时长/条数拉取按秒报价；草稿参数变化自动刷新。
   const videoDuration = state.draft.duration;
@@ -377,6 +440,24 @@ export function StudioWorkspace({
   };
   const refresh = useCallback(() => setRevision((value) => value + 1), []);
 
+  const referenceDraftError = (draft: StudioDraft): string | undefined => {
+    if (referenceAssetsPending) return "草稿参考图仍在恢复，请稍后重试。";
+    if (referenceAssetsError) return "草稿参考图读取失败，请先重试。";
+    if (videoCapabilitiesStatus === "error")
+      return "视频生成能力读取失败，请先重试。";
+    if (!videoCapabilities) return "视频生成能力尚未读取完成，请稍后重试。";
+    if (!videoCapabilities.r2v_enabled)
+      return "该模式需要完成供应商核对后开放，敬请期待。";
+    const validation = validateReferenceImages(
+      draft.referenceIds,
+      [...data.assets, ...data.materials],
+      videoCapabilities.max_reference_images,
+    );
+    if (validation.issues[0]) return validation.issues[0];
+    if (validation.imageIds.length === 0) return "请至少选择一张参考图";
+    return undefined;
+  };
+
   const submitVideoTask = async () => {
     if (currentUser.role === "auditor") {
       notify("当前账号为只读权限，不能提交生成。");
@@ -387,6 +468,10 @@ export function StudioWorkspace({
     try {
       const draft = latestDraftRef.current;
       const mode = resolveVideoMode(state.page, Boolean(draft.firstFrameId));
+      if (mode === "r2v") {
+        const error = referenceDraftError(draft);
+        if (error) throw new Error(error);
+      }
       const result = await createIndependentVideoTask({
         mode,
         prompt_text: draft.prompt,
@@ -700,6 +785,10 @@ export function StudioWorkspace({
         if (mode === "r2v" && state.draft.referenceIds.length === 0) {
           throw new Error("请至少选择一张参考图");
         }
+        if (mode === "r2v") {
+          const error = referenceDraftError(state.draft);
+          if (error) throw new Error(error);
+        }
         if (videoCapabilities) {
           const gated =
             (mode === "t2v" && !videoCapabilities.t2v_enabled) ||
@@ -816,6 +905,12 @@ export function StudioWorkspace({
     data,
     review,
     user: currentUser,
+    videoCapabilities,
+    videoCapabilitiesStatus,
+    retryVideoCapabilities,
+    referenceAssetsPending,
+    referenceAssetsError,
+    retryReferenceAssets,
     navigate,
     patchDraft,
     patchState: (patch) => setState((previous) => ({ ...previous, ...patch })),
@@ -1252,7 +1347,8 @@ function StudioPicker({
   kind: PickerKind;
   onClose: () => void;
 }) {
-  const { state, data, patchDraft, navigate, notify } = useStudio();
+  const { state, data, patchDraft, navigate, notify, videoCapabilities } =
+    useStudio();
   const person = data.people.find((item) => item.id === state.draft.ipId);
   const title: Record<PickerKind, string> = {
     person: "选择人物 IP",
@@ -1277,11 +1373,16 @@ function StudioPicker({
           (material) => !data.assets.some((asset) => asset.id === material.id),
         )
       : [];
+  const referenceValidation = validateReferenceImages(
+    state.draft.referenceIds,
+    [...data.assets, ...data.materials],
+    videoCapabilities?.max_reference_images ?? DEFAULT_MAX_REFERENCE_IMAGES,
+  );
   const assets = [...materials, ...data.assets].filter((asset) =>
     kind === "audio"
       ? asset.kind === "audio"
       : kind === "reference"
-        ? true
+        ? asset.kind === "image" && !state.draft.referenceIds.includes(asset.id)
         : asset.kind === "image" &&
           !asset.composite &&
           ((kind !== "image" && kind !== "avatar-photo") ||
@@ -1355,6 +1456,26 @@ function StudioPicker({
                         notify(
                           "已选择单张照片作为制作原料。照片尚不是口播分身，需完成制作后才能使用。",
                         );
+                      } else if (kind === "reference") {
+                        if (referenceValidation.issues.length > 0) {
+                          notify("请先整理旧草稿中的无效参考素材。");
+                          return;
+                        }
+                        if (
+                          referenceValidation.imageIds.length >=
+                          referenceValidation.limit
+                        ) {
+                          notify(
+                            `当前最多选择 ${referenceValidation.limit} 张参考图。`,
+                          );
+                          return;
+                        }
+                        select({
+                          referenceIds: [
+                            ...referenceValidation.imageIds,
+                            asset.id,
+                          ],
+                        });
                       } else
                         select(
                           kind === "image"
@@ -1368,16 +1489,7 @@ function StudioPicker({
                                 ? { firstFrameId: asset.id }
                                 : kind === "tail-frame"
                                   ? { tailFrameId: asset.id }
-                                  : kind === "audio"
-                                    ? { audioId: asset.id, voiceId: undefined }
-                                    : {
-                                        referenceIds: [
-                                          ...new Set([
-                                            ...state.draft.referenceIds,
-                                            asset.id,
-                                          ]),
-                                        ],
-                                      },
+                                  : { audioId: asset.id, voiceId: undefined },
                         );
                     }}
                   >

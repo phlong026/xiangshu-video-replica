@@ -7,7 +7,7 @@ import {
 } from "@testing-library/react";
 import { StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { StudioContextValue } from "./types";
+import type { StudioAsset, StudioContextValue } from "./types";
 
 const { useStudio } = vi.hoisted(() => ({
   useStudio: vi.fn<() => StudioContextValue>(),
@@ -31,6 +31,7 @@ const replicaApi = vi.hoisted(() => ({
 }));
 const replicaLive = vi.hoisted(() => ({
   uploadWorkbenchSourceVideo: vi.fn(),
+  uploadVideoMaterial: vi.fn(),
   runReplicaGeneration: vi.fn(),
 }));
 vi.mock("../api", async (importOriginal) => ({
@@ -278,6 +279,7 @@ describe("V1.4 创作页面", () => {
     useStudio.mockReset();
     replicaApi.getAssetDownloadUrl.mockReset();
     replicaApi.selectCharacterReferences.mockReset();
+    replicaLive.uploadVideoMaterial.mockReset();
     replicaApi.getAssetDownloadUrl.mockImplementation(async (assetId) => ({
       url: `https://signed.example/${assetId}.png`,
     }));
@@ -875,7 +877,7 @@ describe("V1.4 创作页面", () => {
     ).not.toBeNull();
   });
 
-  it("参考素材使用中文类型并可从草稿中移除", () => {
+  it("参考素材只接受图片并提示整理旧草稿中的无效类型", () => {
     const value = studio();
     value.state = {
       ...value.state,
@@ -907,13 +909,268 @@ describe("V1.4 创作页面", () => {
     render(<VideoPage />);
 
     expect(screen.getByText("图片 · 素材库")).toBeInTheDocument();
-    expect(screen.getByText("视频 · 素材库")).toBeInTheDocument();
-    expect(screen.getByText("音频 · 素材库")).toBeInTheDocument();
+    expect(screen.queryByText("视频 · 素材库")).toBeNull();
+    expect(screen.queryByText("音频 · 素材库")).toBeNull();
+    expect(
+      screen.getByText("参考图仅支持图片，旧草稿中有 2 项无效素材。"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "生成视频" })).toBeDisabled();
 
-    fireEvent.click(screen.getByRole("button", { name: "移除 乡墅外观.jpg" }));
+    fireEvent.click(screen.getByRole("button", { name: "整理参考图" }));
     expect(value.patchDraft).toHaveBeenCalledWith({
-      referenceIds: ["reference-video", "reference-audio"],
+      referenceIds: ["reference-1"],
     });
+  });
+
+  it("参考图本机上传会在发请求前拒绝视频文件", () => {
+    const value = studio({
+      review: false,
+      state: {
+        ...studio().state,
+        page: "reference",
+        draft: { ...studio().state.draft, referenceIds: [] },
+      },
+    });
+    useStudio.mockReturnValue(value);
+    render(<VideoPage />);
+
+    fireEvent.change(screen.getByLabelText("上传参考图"), {
+      target: {
+        files: [new File(["video"], "庭院.mp4", { type: "video/mp4" })],
+      },
+    });
+
+    expect(replicaLive.uploadVideoMaterial).not.toHaveBeenCalled();
+    expect(value.notify).toHaveBeenCalledWith("仅支持 PNG 或 JPEG 图片。");
+  });
+
+  it("参考图上传完成时按最新草稿追加而不复活已移除引用", async () => {
+    let resolveUpload: ((asset: StudioAsset) => void) | undefined;
+    replicaLive.uploadVideoMaterial.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveUpload = resolve;
+        }),
+    );
+    let current = studio({
+      review: false,
+      videoCapabilities: {
+        extended_modes_enabled: true,
+        t2v_enabled: true,
+        i2v_enabled: true,
+        r2v_enabled: true,
+        last_frame_enabled: true,
+        max_reference_images: 4,
+        max_quantity: 4,
+      },
+      state: {
+        ...studio().state,
+        page: "reference",
+        draft: { ...studio().state.draft, referenceIds: ["reference-1"] },
+      },
+    });
+    useStudio.mockImplementation(() => current);
+    const view = render(<VideoPage />);
+
+    fireEvent.change(screen.getByLabelText("上传参考图"), {
+      target: {
+        files: [new File(["image"], "庭院.jpg", { type: "image/jpeg" })],
+      },
+    });
+    current = {
+      ...current,
+      state: {
+        ...current.state,
+        draft: { ...current.state.draft, referenceIds: ["reference-b"] },
+      },
+      data: {
+        ...current.data,
+        assets: [
+          ...current.data.assets,
+          {
+            id: "reference-b",
+            name: "参考图 B.jpg",
+            kind: "image",
+            group: "参考素材",
+            source: "素材库",
+            saved: true,
+          },
+        ],
+      },
+    };
+    view.rerender(<VideoPage />);
+    resolveUpload?.({
+      id: "reference-new",
+      name: "庭院.jpg",
+      kind: "image",
+      group: "参考素材",
+      source: "本机上传",
+      saved: true,
+    });
+
+    await waitFor(() =>
+      expect(current.patchDraft).toHaveBeenCalledWith({
+        referenceIds: ["reference-b", "reference-new"],
+      }),
+    );
+  });
+
+  it("参考图上传期间达到上限时不再回填迟到结果", async () => {
+    let resolveUpload: ((asset: StudioAsset) => void) | undefined;
+    replicaLive.uploadVideoMaterial.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveUpload = resolve;
+        }),
+    );
+    let current = studio({
+      review: false,
+      videoCapabilities: {
+        extended_modes_enabled: true,
+        t2v_enabled: true,
+        i2v_enabled: true,
+        r2v_enabled: true,
+        last_frame_enabled: true,
+        max_reference_images: 1,
+        max_quantity: 4,
+      },
+      state: {
+        ...studio().state,
+        page: "reference",
+        draft: { ...studio().state.draft, referenceIds: [] },
+      },
+    });
+    useStudio.mockImplementation(() => current);
+    const view = render(<VideoPage />);
+    fireEvent.change(screen.getByLabelText("上传参考图"), {
+      target: {
+        files: [new File(["image"], "迟到.jpg", { type: "image/jpeg" })],
+      },
+    });
+    current = {
+      ...current,
+      state: {
+        ...current.state,
+        draft: { ...current.state.draft, referenceIds: ["reference-1"] },
+      },
+    };
+    view.rerender(<VideoPage />);
+    vi.mocked(current.patchDraft).mockClear();
+    resolveUpload?.({
+      id: "reference-late",
+      name: "迟到.jpg",
+      kind: "image",
+      group: "参考素材",
+      source: "本机上传",
+      saved: true,
+    });
+
+    await waitFor(() =>
+      expect(current.notify).toHaveBeenCalledWith("当前最多选择 1 张参考图。"),
+    );
+    expect(current.patchDraft).not.toHaveBeenCalled();
+  });
+
+  it("离开参考生视频后忽略仍在上传的参考图", async () => {
+    let resolveUpload: ((asset: StudioAsset) => void) | undefined;
+    replicaLive.uploadVideoMaterial.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveUpload = resolve;
+        }),
+    );
+    let current = studio({
+      review: false,
+      videoCapabilities: {
+        extended_modes_enabled: true,
+        t2v_enabled: true,
+        i2v_enabled: true,
+        r2v_enabled: true,
+        last_frame_enabled: true,
+        max_reference_images: 4,
+        max_quantity: 4,
+      },
+      state: {
+        ...studio().state,
+        page: "reference",
+        draft: { ...studio().state.draft, referenceIds: [] },
+      },
+    });
+    useStudio.mockImplementation(() => current);
+    const view = render(<VideoPage />);
+    fireEvent.change(screen.getByLabelText("上传参考图"), {
+      target: {
+        files: [new File(["image"], "离开.jpg", { type: "image/jpeg" })],
+      },
+    });
+    current = { ...current, state: { ...current.state, page: "video" } };
+    view.rerender(<VideoPage />);
+    vi.mocked(current.patchDraft).mockClear();
+    resolveUpload?.({
+      id: "reference-abandoned",
+      name: "离开.jpg",
+      kind: "image",
+      group: "参考素材",
+      source: "本机上传",
+      saved: true,
+    });
+    await Promise.resolve();
+
+    expect(current.patchDraft).not.toHaveBeenCalled();
+  });
+
+  it("切换草稿后不把旧草稿仍在上传的参考图写入新草稿", async () => {
+    let resolveUpload: ((asset: StudioAsset) => void) | undefined;
+    replicaLive.uploadVideoMaterial.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveUpload = resolve;
+        }),
+    );
+    let current = studio({
+      review: false,
+      videoCapabilities: {
+        extended_modes_enabled: true,
+        t2v_enabled: true,
+        i2v_enabled: true,
+        r2v_enabled: true,
+        last_frame_enabled: true,
+        max_reference_images: 4,
+        max_quantity: 4,
+      },
+      state: {
+        ...studio().state,
+        page: "reference",
+        draft: { ...studio().state.draft, referenceIds: [] },
+      },
+    });
+    useStudio.mockImplementation(() => current);
+    const view = render(<VideoPage />);
+    fireEvent.change(screen.getByLabelText("上传参考图"), {
+      target: {
+        files: [new File(["image"], "旧草稿.jpg", { type: "image/jpeg" })],
+      },
+    });
+    current = {
+      ...current,
+      state: {
+        ...current.state,
+        draft: { ...current.state.draft, id: "draft-2" },
+      },
+    };
+    view.rerender(<VideoPage />);
+    vi.mocked(current.patchDraft).mockClear();
+    resolveUpload?.({
+      id: "reference-old-draft",
+      name: "旧草稿.jpg",
+      kind: "image",
+      group: "参考素材",
+      source: "本机上传",
+      saved: true,
+    });
+    await Promise.resolve();
+
+    expect(current.patchDraft).not.toHaveBeenCalled();
   });
 
   it("音频驱动不显示终稿、声音、TTS和模板字段", () => {

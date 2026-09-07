@@ -495,7 +495,7 @@ export function createReviewState(page: StudioPage) {
     audioId: "speech",
     prompt:
       "镜头从庭院入口缓缓推进，展示新中式乡墅外立面，清晨自然光，画面平稳。",
-    referenceIds: ["villa", "courtyard-video"],
+    referenceIds: ["villa"],
     script: {
       id: "script-review",
       title: "张工 · 建房预算",

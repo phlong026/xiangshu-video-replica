@@ -372,6 +372,42 @@ def test_mode_asset_matrix_is_enforced(client: TestClient, db_path: Path) -> Non
     assert video_asset.json()["detail"]["code"] == "INDEPENDENT_ASSET_KIND_UNSUPPORTED"
 
 
+def test_reference_images_reject_duplicates_and_more_than_capability_limit(
+    client: TestClient, db_path: Path
+) -> None:
+    _enable_extended_modes(db_path)
+    base = {
+        "mode": "r2v",
+        "prompt_text": "严格校验参考图",
+        "output_duration_seconds": 8,
+        "quantity": 1,
+    }
+
+    duplicate = client.post(
+        "/api/independent/video-tasks",
+        headers=auth_headers("employee_1"),
+        json={
+            **base,
+            "reference_asset_ids": ["frame-owned", "frame-owned"],
+            "idempotency_key": "reference-duplicate",
+        },
+    )
+    assert duplicate.status_code == 422
+    assert duplicate.json()["detail"]["code"] == "INDEPENDENT_REFERENCE_DUPLICATE"
+
+    over_limit = client.post(
+        "/api/independent/video-tasks",
+        headers=auth_headers("employee_1"),
+        json={
+            **base,
+            "reference_asset_ids": [f"frame-{index}" for index in range(5)],
+            "idempotency_key": "reference-over-limit",
+        },
+    )
+    assert over_limit.status_code == 422
+    assert over_limit.json()["detail"][0]["type"] == "too_long"
+
+
 def test_auditor_cannot_create_independent_tasks(client: TestClient) -> None:
     response = client.post(
         "/api/independent/video-tasks",

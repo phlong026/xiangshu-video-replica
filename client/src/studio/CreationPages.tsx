@@ -43,7 +43,9 @@ import {
 import {
   buildReplicaPromptText,
   createDraft,
+  DEFAULT_MAX_REFERENCE_IMAGES,
   SUPPORTED_VIDEO_RATIOS,
+  validateReferenceImages,
 } from "./state";
 import type {
   StudioAsset,
@@ -1720,10 +1722,12 @@ function SavedPromptImporter({
 }
 
 function VideoMaterialUpload({
+  disabled = false,
   group,
   label,
   onUploaded,
 }: {
+  disabled?: boolean;
   group: string;
   label: string;
   onUploaded: (asset: StudioAsset) => void;
@@ -1731,8 +1735,22 @@ function VideoMaterialUpload({
   const inputRef = useRef<HTMLInputElement>(null);
   const [progress, setProgress] = useState<number>();
   const { review, notify } = useStudio();
+  const onUploadedRef = useRef(onUploaded);
+  const mountedRef = useRef(false);
+  onUploadedRef.current = onUploaded;
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const upload = async (file: File) => {
+    if (!["image/png", "image/jpeg"].includes(file.type)) {
+      notify("仅支持 PNG 或 JPEG 图片。");
+      return;
+    }
     if (review) {
       notify("审核示例不上传素材。");
       return;
@@ -1740,12 +1758,14 @@ function VideoMaterialUpload({
     setProgress(0);
     try {
       const asset = await uploadVideoMaterial(file, group, setProgress);
-      onUploaded(asset);
-      notify(`${label}「${file.name}」已上传到素材库。`);
+      if (mountedRef.current) {
+        onUploadedRef.current(asset);
+        notify(`${label}「${file.name}」已上传到素材库。`);
+      }
     } catch {
-      notify("素材上传失败，请稍后重试。");
+      if (mountedRef.current) notify("素材上传失败，请稍后重试。");
     } finally {
-      setProgress(undefined);
+      if (mountedRef.current) setProgress(undefined);
     }
   };
 
@@ -1753,7 +1773,7 @@ function VideoMaterialUpload({
     <>
       <button
         className="creation-upload-mini"
-        disabled={progress !== undefined}
+        disabled={disabled || progress !== undefined}
         onClick={() => inputRef.current?.click()}
         type="button"
       >
@@ -1762,6 +1782,7 @@ function VideoMaterialUpload({
       <input
         accept="image/png,image/jpeg"
         aria-label={`上传${label}`}
+        disabled={disabled}
         hidden
         onChange={(event) => {
           const file = event.target.files?.[0];
@@ -1785,7 +1806,14 @@ export function VideoPage() {
     saveDraft,
     requestGeneration,
     updateData,
+    notify,
     review,
+    videoCapabilities,
+    videoCapabilitiesStatus,
+    retryVideoCapabilities,
+    referenceAssetsPending,
+    referenceAssetsError,
+    retryReferenceAssets,
   } = useStudio();
   const referenceMode = state.page === "reference";
   const storedFirstFrame =
@@ -1881,13 +1909,37 @@ export function VideoPage() {
   const tailFrame =
     findAsset(data.assets, state.draft.tailFrameId) ??
     findAsset(data.materials, state.draft.tailFrameId);
-  const references = state.draft.referenceIds
-    .map((id) => findAsset(data.assets, id) ?? findAsset(data.materials, id))
-    .filter((asset): asset is StudioAsset => Boolean(asset));
+  const referenceValidation = validateReferenceImages(
+    state.draft.referenceIds,
+    [...data.assets, ...data.materials],
+    videoCapabilities?.max_reference_images ?? DEFAULT_MAX_REFERENCE_IMAGES,
+  );
+  const references = referenceValidation.images;
+  const effectiveCapabilitiesStatus = review
+    ? "ready"
+    : (videoCapabilitiesStatus ?? (videoCapabilities ? "ready" : "loading"));
+  const referenceCapabilityPending =
+    referenceMode && effectiveCapabilitiesStatus === "loading";
+  const referenceCapabilityError =
+    referenceMode && effectiveCapabilitiesStatus === "error";
+  const referenceModeDisabled =
+    referenceMode && !review && videoCapabilities?.r2v_enabled === false;
+  const referenceHasIssues =
+    !referenceAssetsPending &&
+    !referenceAssetsError &&
+    referenceValidation.issues.length > 0;
+  const referenceAtLimit =
+    references.length >= referenceValidation.limit && !referenceHasIssues;
   const ready =
     Boolean(state.draft.prompt.trim()) &&
     (referenceMode
-      ? references.length > 0
+      ? references.length > 0 &&
+        !referenceCapabilityPending &&
+        !referenceCapabilityError &&
+        !referenceModeDisabled &&
+        !referenceHasIssues &&
+        !referenceAssetsPending &&
+        !referenceAssetsError
       : !firstFrameId || Boolean(firstFrame));
   const videoTask = state.draft.videoBatchId
     ? data.tasks.find((task) => task.id === state.draft.videoBatchId)
@@ -1901,6 +1953,29 @@ export function VideoPage() {
         ...previous.materials.filter((item) => item.id !== asset.id),
       ],
     }));
+  };
+
+  const addReference = (asset: StudioAsset) => {
+    appendMaterial(asset);
+    if (asset.kind !== "image") {
+      notify("参考图仅支持图片，请重新选择。");
+      return;
+    }
+    if (referenceHasIssues) {
+      notify("请先整理旧草稿中的无效参考素材。");
+      return;
+    }
+    if (state.draft.referenceIds.includes(asset.id)) {
+      notify("该参考图已选择，请勿重复添加。");
+      return;
+    }
+    if (referenceAtLimit) {
+      notify(`当前最多选择 ${referenceValidation.limit} 张参考图。`);
+      return;
+    }
+    patchDraft({
+      referenceIds: [...state.draft.referenceIds, asset.id],
+    });
   };
 
   return (
@@ -1940,24 +2015,94 @@ export function VideoPage() {
               <div className="creation-upload-row">
                 <button
                   className="creation-upload"
+                  disabled={
+                    referenceCapabilityPending ||
+                    referenceCapabilityError ||
+                    referenceModeDisabled ||
+                    referenceHasIssues ||
+                    referenceAssetsPending ||
+                    referenceAssetsError ||
+                    referenceAtLimit
+                  }
                   onClick={() => openPicker("reference")}
                   type="button"
                 >
                   <Icon name="upload" />
                   <span>从素材库选择</span>
-                  <small>本批生成最多 4 张参考图</small>
+                  <small>
+                    {referenceAtLimit
+                      ? `已选 ${references.length}/${referenceValidation.limit} 张参考图，需移除后才能继续添加。`
+                      : `本批生成最多 ${referenceValidation.limit} 张参考图`}
+                  </small>
                 </button>
                 <VideoMaterialUpload
+                  key={`reference-upload-${state.draft.id}`}
+                  disabled={
+                    referenceCapabilityPending ||
+                    referenceCapabilityError ||
+                    referenceModeDisabled ||
+                    referenceHasIssues ||
+                    referenceAssetsPending ||
+                    referenceAssetsError ||
+                    referenceAtLimit
+                  }
                   group="参考素材"
                   label="参考图"
-                  onUploaded={(asset) => {
-                    appendMaterial(asset);
-                    patchDraft({
-                      referenceIds: [...state.draft.referenceIds, asset.id],
-                    });
-                  }}
+                  onUploaded={addReference}
                 />
               </div>
+              {referenceCapabilityPending && (
+                <p className="settings-error" role="status">
+                  正在读取参考生视频能力，请稍候。
+                </p>
+              )}
+              {referenceCapabilityError && (
+                <div>
+                  <p className="settings-error" role="alert">
+                    视频生成能力读取失败，请重试。
+                  </p>
+                  <Button onClick={retryVideoCapabilities} variant="outline">
+                    重试读取视频能力
+                  </Button>
+                </div>
+              )}
+              {referenceAssetsPending && (
+                <p className="settings-error" role="status">
+                  正在恢复草稿参考图，请稍候。
+                </p>
+              )}
+              {referenceAssetsError && (
+                <div>
+                  <p className="settings-error" role="alert">
+                    草稿参考图读取失败，请重试。
+                  </p>
+                  <Button onClick={retryReferenceAssets} variant="outline">
+                    重试读取草稿参考图
+                  </Button>
+                </div>
+              )}
+              {referenceModeDisabled && (
+                <p className="settings-error" role="alert">
+                  参考生视频当前未开放，请等待能力开启后再提交。
+                </p>
+              )}
+              {!referenceAssetsPending &&
+                !referenceAssetsError &&
+                referenceValidation.issues.map((issue) => (
+                  <p className="settings-error" key={issue} role="alert">
+                    {issue}
+                  </p>
+                ))}
+              {referenceHasIssues && (
+                <Button
+                  onClick={() =>
+                    patchDraft({ referenceIds: referenceValidation.repairIds })
+                  }
+                  variant="outline"
+                >
+                  整理参考图
+                </Button>
+              )}
               <div className="creation-reference-list">
                 {references.map((asset, index) => (
                   <div className="creation-reference-row" key={asset.id}>
