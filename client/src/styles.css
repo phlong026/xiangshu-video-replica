@@ -6005,6 +6005,13 @@ button.regenerate-button {
   color: #aaa297;
 }
 
+.customer-profile__hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 9px;
+}
+
 .customer-profile__tabs {
   display: flex;
   gap: 6px;

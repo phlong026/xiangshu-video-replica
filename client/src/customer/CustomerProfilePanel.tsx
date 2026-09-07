@@ -23,7 +23,9 @@ export function CustomerProfilePanel({
   onApprovePairing,
   onDismissPairing,
   onManualHeartbeat,
+  onLogout,
   onProfileUpdated,
+  onRefreshProfile,
   onRecharge,
   onRefreshDevices,
   onResetActivationCode,
@@ -31,6 +33,7 @@ export function CustomerProfilePanel({
   onUnbind,
   onUpdateProfile,
   profile,
+  profileLoadError,
   sessionRuntime = null,
   store,
   walletRefreshKey,
@@ -40,7 +43,9 @@ export function CustomerProfilePanel({
   onApprovePairing: (pairingId: string) => void;
   onDismissPairing: (pairingId: string) => void;
   onManualHeartbeat?: () => void;
+  onLogout: () => Promise<void>;
   onProfileUpdated: (profile: CustomerProfile) => void;
+  onRefreshProfile: () => Promise<void>;
   onRecharge: (amountYuan?: number) => void;
   onRefreshDevices: () => Promise<void>;
   onResetActivationCode: () => Promise<CustomerActivationCodeReset>;
@@ -48,6 +53,7 @@ export function CustomerProfilePanel({
   onUnbind: (deviceId: string) => void;
   onUpdateProfile: (displayName: string) => Promise<CustomerProfile>;
   profile: CustomerProfile | null;
+  profileLoadError: string;
   sessionRuntime?: CustomerSessionRuntime | null;
   store: CustomerCredentialStore;
   walletRefreshKey: number;
@@ -58,8 +64,17 @@ export function CustomerProfilePanel({
   const [profileNotice, setProfileNotice] = useState("");
   const [isSavingProfile, setIsSavingProfile] = useState(false);
   const [isResettingCode, setIsResettingCode] = useState(false);
+  const [isRetryingProfile, setIsRetryingProfile] = useState(false);
+  const [isLoggingOut, setIsLoggingOut] = useState(false);
   const [replacementCode, setReplacementCode] = useState("");
+  const [deferredPairingIds, setDeferredPairingIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const pendingPairings = devices?.pending_pairings ?? [];
+  const overviewPairings = pendingPairings.filter(
+    (pairing) => !deferredPairingIds.has(pairing.pairing_request_id),
+  );
+  const isOnline = useLeaseActive(sessionRuntime?.leaseExpiresAt ?? null);
 
   useEffect(() => {
     setDisplayName(profile?.display_name ?? "");
@@ -115,6 +130,43 @@ export function CustomerProfilePanel({
     }
   }
 
+  async function retryProfile() {
+    if (isRetryingProfile) {
+      return;
+    }
+    setIsRetryingProfile(true);
+    try {
+      await onRefreshProfile();
+    } catch (cause) {
+      setProfileError(
+        errorMessage(cause, "重新加载账号资料失败，请稍后重试。"),
+      );
+    } finally {
+      setIsRetryingProfile(false);
+    }
+  }
+
+  async function logout() {
+    if (isLoggingOut) {
+      return;
+    }
+    setIsLoggingOut(true);
+    setProfileError("");
+    try {
+      await onLogout();
+    } catch (cause) {
+      setProfileError(errorMessage(cause, "退出登录失败，请稍后重试。"));
+    } finally {
+      setIsLoggingOut(false);
+    }
+  }
+
+  function deferPairing(pairingId: string) {
+    setDeferredPairingIds((current) => new Set(current).add(pairingId));
+    setProfileNotice("已暂不处理，可稍后在设备管理中继续确认。");
+    setTab("overview");
+  }
+
   async function copyText(value: string, successMessage: string) {
     try {
       await navigator.clipboard.writeText(value);
@@ -132,15 +184,26 @@ export function CustomerProfilePanel({
           <p className="eyebrow">个人中心</p>
           <h2>{profile?.display_name ?? "客户账号"}</h2>
           <p>
-            {profile?.username ?? "正在读取账号信息"}
+            {profile?.username ??
+              (profileLoadError ? "账号资料读取失败" : "正在读取账号信息")}
             {profile?.joined_at
               ? ` · ${formatDate(profile.joined_at)} 加入`
               : ""}
           </p>
         </div>
-        <button onClick={() => onRecharge()} type="button">
-          充值秒数
-        </button>
+        <div className="customer-profile__hero-actions">
+          <button
+            className="secondary-button"
+            onClick={() => void logout()}
+            disabled={isLoggingOut}
+            type="button"
+          >
+            {isLoggingOut ? "正在退出" : "退出登录"}
+          </button>
+          <button onClick={() => onRecharge()} type="button">
+            充值秒数
+          </button>
+        </div>
       </header>
 
       <nav aria-label="个人中心功能" className="customer-profile__tabs">
@@ -171,6 +234,24 @@ export function CustomerProfilePanel({
         ))}
       </nav>
 
+      {profileLoadError ? (
+        <div
+          aria-label={profileLoadError}
+          className="settings-error"
+          role="alert"
+        >
+          <span>{profileLoadError}</span>
+          <button
+            className="secondary-button"
+            disabled={isRetryingProfile}
+            onClick={() => void retryProfile()}
+            type="button"
+          >
+            {isRetryingProfile ? "正在重新加载" : "重新加载账号资料"}
+          </button>
+        </div>
+      ) : null}
+
       {tab === "overview" ? (
         <div className="customer-profile__overview">
           <section
@@ -189,11 +270,12 @@ export function CustomerProfilePanel({
                 显示名称
                 <input
                   maxLength={50}
+                  disabled={!profile}
                   onChange={(event) => setDisplayName(event.target.value)}
                   value={displayName}
                 />
               </label>
-              <button disabled={isSavingProfile} type="submit">
+              <button disabled={isSavingProfile || !profile} type="submit">
                 {isSavingProfile ? "正在保存" : "保存个人资料"}
               </button>
             </form>
@@ -297,15 +379,15 @@ export function CustomerProfilePanel({
             </section>
           ) : null}
 
-          {pendingPairings.length > 0 ? (
+          {overviewPairings.length > 0 ? (
             <section className="customer-profile__pending">
               <h3>需要你确认</h3>
-              {pendingPairings.map((pending) => (
+              {overviewPairings.map((pending) => (
                 <PairingApprovalCard
                   key={pending.pairing_request_id}
                   onApprove={onApprovePairing}
                   onDelete={onDismissPairing}
-                  onReject={() => setTab("devices")}
+                  onReject={() => deferPairing(pending.pairing_request_id)}
                   pairing={{
                     id: pending.pairing_request_id,
                     deviceFingerprint: `${pending.display_name} · ${pending.platform}`,
@@ -328,6 +410,7 @@ export function CustomerProfilePanel({
           {sessionRuntime ? (
             <div className="customer-session-status">
               <HeartbeatStatus
+                connectivity={sessionRuntime.connectivity}
                 lastHeartbeatAt={sessionRuntime.lastHeartbeatAt}
                 onRefresh={() => onManualHeartbeat?.()}
               />
@@ -344,7 +427,7 @@ export function CustomerProfilePanel({
               key={pending.pairing_request_id}
               onApprove={onApprovePairing}
               onDelete={onDismissPairing}
-              onReject={() => undefined}
+              onReject={() => deferPairing(pending.pairing_request_id)}
               pairing={{
                 id: pending.pairing_request_id,
                 deviceFingerprint: `${pending.display_name} · ${pending.platform}`,
@@ -355,7 +438,7 @@ export function CustomerProfilePanel({
           {devices ? (
             <DeviceManagementPage
               devices={devices}
-              isOnline
+              isOnline={isOnline}
               leaseExpiresAt={sessionRuntime?.leaseExpiresAt ?? null}
               onRecharge={() => onRecharge()}
               onUnbind={onUnbind}
@@ -397,4 +480,30 @@ function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message.trim()
     ? error.message
     : fallback;
+}
+
+function useLeaseActive(expiresAt: string | null): boolean {
+  const [isActive, setIsActive] = useState(() => leaseIsActive(expiresAt));
+
+  useEffect(() => {
+    const expiry = expiresAt ? Date.parse(expiresAt) : Number.NaN;
+    const delayMs = expiry - Date.now();
+    if (!Number.isFinite(expiry) || delayMs <= 0) {
+      setIsActive(false);
+      return;
+    }
+    setIsActive(true);
+    const timer = window.setTimeout(() => setIsActive(false), delayMs + 1);
+    return () => window.clearTimeout(timer);
+  }, [expiresAt]);
+
+  return isActive;
+}
+
+function leaseIsActive(expiresAt: string | null): boolean {
+  if (!expiresAt) {
+    return false;
+  }
+  const expiry = Date.parse(expiresAt);
+  return Number.isFinite(expiry) && expiry > Date.now();
 }

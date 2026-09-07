@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   applySavedGenerationPrompt,
   attachCustomerSessionToken,
+  CUSTOMER_SESSION_EXPIRED_EVENT,
   CUSTOMER_SESSION_REPLACED_EVENT,
   CUSTOMER_SESSION_REVOKED_EVENT,
   cancelOralTask,
@@ -675,6 +676,50 @@ describe("customer workspace session lifecycle", () => {
       window.removeEventListener(eventName, listener);
     },
   );
+
+  it("ignores an older workspace 401 whose body finishes after a new session attaches", async () => {
+    let resolveErrorBody:
+      | ((value: { detail: { code: string; message: string } }) => void)
+      | undefined;
+    const delayedErrorBody = new Promise<{
+      detail: { code: string; message: string };
+    }>((resolve) => {
+      resolveErrorBody = resolve;
+    });
+    const cloneJson = vi.fn(() => delayedErrorBody);
+    const fetchResponse = {
+      ok: false,
+      status: 401,
+      headers: new Headers({ "X-Request-Id": "request-delayed-401" }),
+      json: vi.fn().mockResolvedValue({
+        detail: { code: "SESSION_EXPIRED", message: "older session expired" },
+      }),
+      clone: vi.fn(() => ({
+        ok: false,
+        status: 401,
+        headers: new Headers({ "X-Request-Id": "request-delayed-401" }),
+        json: cloneJson,
+      })),
+    };
+    const listener = vi.fn();
+    window.addEventListener(CUSTOMER_SESSION_EXPIRED_EVENT, listener);
+    const releaseOlder = attachCustomerSessionToken("older-session");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(fetchResponse));
+
+    const pendingRequest = listProjects();
+    await vi.waitFor(() => expect(cloneJson).toHaveBeenCalledTimes(1));
+    const releaseCurrent = attachCustomerSessionToken("current-session");
+    resolveErrorBody?.({
+      detail: { code: "SESSION_EXPIRED", message: "older session expired" },
+    });
+
+    await expect(pendingRequest).rejects.toThrow();
+    expect(listener).not.toHaveBeenCalled();
+
+    releaseOlder();
+    releaseCurrent();
+    window.removeEventListener(CUSTOMER_SESSION_EXPIRED_EVENT, listener);
+  });
 });
 
 const generationVersion = {

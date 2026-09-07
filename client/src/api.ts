@@ -4324,6 +4324,8 @@ async function requestApi(
   const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
   const headers = new Headers(init.headers);
   const devUserId = getDevelopmentUserId();
+  const customerOwnerAtStart =
+    internalAccessToken === null ? customerSessionOwner : null;
 
   if (init.body && !(init.body instanceof FormData)) {
     headers.set("Content-Type", "application/json");
@@ -4342,7 +4344,7 @@ async function requestApi(
       signal: controller.signal,
     });
     if (response.status === 401 && path !== "/api/auth/me") {
-      await emitWorkspaceSessionEnded(response);
+      await emitWorkspaceSessionEnded(response, customerOwnerAtStart);
     }
     return response;
   } catch (error) {
@@ -4370,7 +4372,13 @@ function emitSessionExpired() {
   window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT));
 }
 
-async function emitWorkspaceSessionEnded(response: Response) {
+async function emitWorkspaceSessionEnded(
+  response: Response,
+  ownerAtStart: symbol | null,
+) {
+  if (ownerAtStart !== null && ownerAtStart !== customerSessionOwner) {
+    return;
+  }
   if (customerSessionToken === null) {
     emitSessionExpired();
     return;
@@ -4385,6 +4393,9 @@ async function emitWorkspaceSessionEnded(response: Response) {
     // A proxy/non-JSON 401 still ends the customer session, but it must never
     // be guessed as a permanent device revocation (which would wipe the
     // long-lived device credential).
+  }
+  if (ownerAtStart !== null && ownerAtStart !== customerSessionOwner) {
+    return;
   }
   window.dispatchEvent(new Event(lifecycle));
 }
@@ -4788,6 +4799,9 @@ type CustomerRequestOptions = {
    * Omit it and the transport mints one (crypto.randomUUID) so every call
    * keeps a correlation key the server audit can be looked up by. */
   requestId?: string;
+  /** Optional stale-request gate for lifecycle events. The caller may reject
+   * an older response before it can end a newer request in the same session. */
+  shouldDispatchLifecycle?: () => boolean;
 };
 
 function isReplayed(response: Response): boolean {
@@ -4797,7 +4811,13 @@ function isReplayed(response: Response): boolean {
 async function requestCustomer(
   path: string,
   options: CustomerRequestOptions,
-): Promise<{ response: Response; requestId: string }> {
+): Promise<{
+  response: Response;
+  requestId: string;
+  sessionOwnerAtStart: symbol | null;
+  sessionTokenAtStart: string | null;
+  sessionCredentialMatchedAtStart: boolean;
+}> {
   const controller = new AbortController();
   const timeout = window.setTimeout(
     () => controller.abort(),
@@ -4807,6 +4827,13 @@ async function requestCustomer(
   // travels back inside CustomerApiError so the UI can report it on an
   // IDEMPOTENCY_CONFLICT (§13.2) and the audit trail can be located by it.
   const requestId = options.requestId ?? crypto.randomUUID();
+  const isSessionRequest = options.credential?.kind === "session";
+  const sessionOwnerAtStart = isSessionRequest ? customerSessionOwner : null;
+  const sessionTokenAtStart = isSessionRequest ? customerSessionToken : null;
+  const sessionCredentialMatchedAtStart =
+    !isSessionRequest ||
+    sessionTokenAtStart === null ||
+    options.credential?.token === sessionTokenAtStart;
   const headers = new Headers();
   headers.set("X-Request-Id", requestId);
   if (options.body !== undefined) {
@@ -4826,7 +4853,13 @@ async function requestCustomer(
         options.body === undefined ? undefined : JSON.stringify(options.body),
       signal: controller.signal,
     });
-    return { response, requestId };
+    return {
+      response,
+      requestId,
+      sessionOwnerAtStart,
+      sessionTokenAtStart,
+      sessionCredentialMatchedAtStart,
+    };
   } catch (error) {
     throw customerTransportError(error, requestId);
   } finally {
@@ -4860,11 +4893,23 @@ async function customerJson<T>(
   path: string,
   options: CustomerRequestOptions,
 ): Promise<{ response: Response; body: T }> {
-  const { response, requestId } = await requestCustomer(path, options);
+  const {
+    response,
+    requestId,
+    sessionOwnerAtStart,
+    sessionTokenAtStart,
+    sessionCredentialMatchedAtStart,
+  } = await requestCustomer(path, options);
   if (!response.ok) {
     const error = await customerErrorFromResponse(response, requestId);
     const lifecycle = customerLifecycleEvent(error.kind);
-    if (lifecycle) {
+    const belongsToCurrentSession =
+      options.credential?.kind !== "session" ||
+      (sessionCredentialMatchedAtStart &&
+        sessionOwnerAtStart === customerSessionOwner &&
+        sessionTokenAtStart === customerSessionToken);
+    const isCurrentRequest = options.shouldDispatchLifecycle?.() ?? true;
+    if (lifecycle && belongsToCurrentSession && isCurrentRequest) {
       window.dispatchEvent(new Event(lifecycle));
     }
     throw error;
@@ -4984,10 +5029,15 @@ export async function customerSwitch(
 /** Renew the session lease (POST /api/customer/sessions/heartbeat). */
 export async function customerHeartbeat(
   credential: CustomerSessionCredential,
+  options?: { shouldDispatchLifecycle?: () => boolean },
 ): Promise<CustomerHeartbeatResponse> {
   const { body } = await customerJson<CustomerHeartbeatResponse>(
     "/api/customer/sessions/heartbeat",
-    { method: "POST", credential },
+    {
+      method: "POST",
+      credential,
+      shouldDispatchLifecycle: options?.shouldDispatchLifecycle,
+    },
   );
   return body;
 }
@@ -5156,10 +5206,14 @@ export type CustomerProfile = components["schemas"]["CustomerProfileResponse"];
 
 export async function customerGetProfile(
   credential: CustomerSessionCredential,
+  options?: { shouldDispatchLifecycle?: () => boolean },
 ): Promise<CustomerProfile> {
   const { body } = await customerJson<CustomerProfile>(
     "/api/customer/profile",
-    { credential },
+    {
+      credential,
+      shouldDispatchLifecycle: options?.shouldDispatchLifecycle,
+    },
   );
   return body;
 }

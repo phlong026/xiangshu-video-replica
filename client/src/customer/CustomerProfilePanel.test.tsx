@@ -1,5 +1,11 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { CustomerDeviceListResponse, CustomerProfile } from "../api";
 import { CustomerProfilePanel } from "./CustomerProfilePanel";
@@ -52,19 +58,26 @@ const store: CustomerCredentialStore = {
 };
 
 describe("CustomerProfilePanel", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   const defaultProps = {
     deviceError: "",
     devices,
     onApprovePairing: vi.fn(),
     onDismissPairing: vi.fn(),
     onProfileUpdated: vi.fn(),
+    onRefreshProfile: vi.fn().mockResolvedValue(undefined),
     onRecharge: vi.fn(),
     onRefreshDevices: vi.fn().mockResolvedValue(undefined),
     onResetActivationCode: vi.fn(),
     onSessionExpired: vi.fn(),
+    onLogout: vi.fn().mockResolvedValue(undefined),
     onUnbind: vi.fn(),
     onUpdateProfile: vi.fn(),
     profile,
+    profileLoadError: "",
     store,
     walletRefreshKey: 0,
   };
@@ -138,6 +151,7 @@ describe("CustomerProfilePanel", () => {
       <CustomerProfilePanel
         {...defaultProps}
         sessionRuntime={{
+          connectivity: "reachable",
           lastHeartbeatAt: new Date(Date.now() - 5_000).toISOString(),
           leaseExpiresAt,
         }}
@@ -158,5 +172,87 @@ describe("CustomerProfilePanel", () => {
       screen.getAllByRole("button", { name: /立即续约|立即发送心跳/ })[0],
     );
     expect(onManualHeartbeat).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a failed profile request and retries it explicitly", async () => {
+    const onRefreshProfile = vi.fn().mockResolvedValue(undefined);
+    render(
+      <CustomerProfilePanel
+        {...defaultProps}
+        profile={null}
+        profileLoadError="账号资料加载失败，请稍后重试。"
+        onRefreshProfile={onRefreshProfile}
+      />,
+    );
+
+    expect(
+      screen.getByRole("alert", { name: "账号资料加载失败，请稍后重试。" }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "重新加载账号资料" }));
+
+    await waitFor(() => expect(onRefreshProfile).toHaveBeenCalledTimes(1));
+  });
+
+  it("derives the device online state from the server lease", () => {
+    render(
+      <CustomerProfilePanel
+        {...defaultProps}
+        sessionRuntime={{
+          connectivity: "unreachable",
+          lastHeartbeatAt: new Date(Date.now() - 40_000).toISOString(),
+          leaseExpiresAt: new Date(Date.now() - 1_000).toISOString(),
+        }}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "设备管理" }));
+
+    expect(screen.getByText("网络暂不可达")).toBeInTheDocument();
+    expect(screen.getByText("本机离线")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "解绑当前设备" })).toBeDisabled();
+  });
+
+  it("switches the device offline when the active server lease reaches its expiry", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-07T12:00:00Z"));
+    render(
+      <CustomerProfilePanel
+        {...defaultProps}
+        sessionRuntime={{
+          connectivity: "reachable",
+          lastHeartbeatAt: new Date().toISOString(),
+          leaseExpiresAt: new Date(Date.now() + 500).toISOString(),
+        }}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "设备管理" }));
+    expect(screen.getByText("本机在线")).toBeInTheDocument();
+
+    await act(async () => vi.advanceTimersByTimeAsync(501));
+
+    expect(screen.getByText("本机离线")).toBeInTheDocument();
+  });
+
+  it("prevents duplicate logout actions while the first request is pending", async () => {
+    let finishLogout: (() => void) | undefined;
+    const onLogout = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishLogout = resolve;
+        }),
+    );
+    render(<CustomerProfilePanel {...defaultProps} onLogout={onLogout} />);
+
+    const logoutButton = screen.getByRole("button", { name: "退出登录" });
+    fireEvent.click(logoutButton);
+    fireEvent.click(logoutButton);
+
+    expect(onLogout).toHaveBeenCalledTimes(1);
+    expect(logoutButton).toBeDisabled();
+    expect(logoutButton).toHaveTextContent("正在退出");
+
+    await act(async () => finishLogout?.());
+    expect(logoutButton).toBeEnabled();
+    expect(logoutButton).toHaveTextContent("退出登录");
   });
 });

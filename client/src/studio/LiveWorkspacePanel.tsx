@@ -162,6 +162,8 @@ export function LiveWorkspacePanel({
           onDismissPairing={customerAccount.onDismissPairing}
           onManualHeartbeat={customerAccount.onManualHeartbeat}
           onProfileUpdated={customerAccount.onProfileUpdated}
+          onRefreshProfile={customerAccount.onRefreshProfile}
+          onLogout={customerAccount.onLogout}
           onRecharge={(amountYuan) => openRecharge(amountYuan)}
           onRefreshDevices={customerAccount.onRefreshDevices}
           onResetActivationCode={customerAccount.onResetActivationCode}
@@ -169,6 +171,7 @@ export function LiveWorkspacePanel({
           onUnbind={customerAccount.onUnbind}
           onUpdateProfile={customerAccount.onUpdateProfile}
           profile={customerAccount.profile}
+          profileLoadError={customerAccount.profileLoadError}
           sessionRuntime={customerAccount.sessionRuntime}
           store={customerAccount.store}
           walletRefreshKey={walletRefreshKey}
