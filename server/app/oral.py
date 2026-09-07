@@ -159,9 +159,17 @@ def _require_audio_purpose(asset: dict[str, Any], expected: str, label: str) -> 
     except (TypeError, ValueError):
         metadata = {}
     purpose = metadata.get("audio_purpose") if isinstance(metadata, dict) else None
-    # Historical assets predate purpose metadata and remain usable. New uploads
-    # carry an explicit purpose and must never cross the oral/biometric boundary.
-    if purpose is not None and purpose != expected:
+    duration = metadata.get("duration_seconds") if isinstance(metadata, dict) else None
+    verified = metadata.get("audio_duration_verified") if isinstance(metadata, dict) else None
+    duration_value = (
+        float(duration)
+        if isinstance(duration, (int, float)) and not isinstance(duration, bool)
+        else None
+    )
+    duration_valid = duration_value is not None and duration_value > 0
+    if expected == "voice_clone" and duration_value is not None:
+        duration_valid = 5 <= duration_value <= 180
+    if purpose != expected or verified is not True or not duration_valid:
         raise OralDomainError(f"{label}用途不匹配，请重新选择")
 
 

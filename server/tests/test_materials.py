@@ -207,6 +207,7 @@ def test_upload_audio_to_storage_then_complete_and_list_it(
 @pytest.mark.parametrize(
     ("purpose", "duration", "expected_code"),
     [
+        (None, None, "MATERIAL_AUDIO_PURPOSE_REQUIRED"),
         ("voice_clone", 4.9, "MATERIAL_AUDIO_DURATION_INVALID"),
         ("voice_clone", 180.1, "MATERIAL_AUDIO_DURATION_INVALID"),
         ("oral_audio", None, "MATERIAL_AUDIO_DURATION_REQUIRED"),
@@ -260,6 +261,34 @@ def test_audio_complete_rejects_duration_that_differs_from_browser_claim(
 
     assert response.status_code == 422
     assert response.json()["detail"]["code"] == "MATERIAL_AUDIO_DURATION_MISMATCH"
+
+
+def test_historical_audio_without_verified_purpose_is_read_only(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    with connect_database(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO assets (
+                id, project_id, kind, storage_uri, sha256, size_bytes,
+                content_type, metadata_json, created_by_user_id
+            ) VALUES ('legacy-audio', NULL, 'material_audio', 'local://materials/legacy.mp3',
+                      'legacy-hash', 9, 'audio/mpeg',
+                      '{"audio_purpose":"oral_audio","duration_seconds":42}',
+                      'employee_1')
+            """
+        )
+
+    response = client.get(
+        "/api/studio/materials?media_type=audio",
+        headers=auth_headers(),
+    )
+
+    assert response.status_code == 200
+    legacy = next(item for item in response.json()["items"] if item["asset_id"] == "legacy-audio")
+    assert legacy["status"] == "ready"
+    assert legacy["allowed_uses"] == []
 
 
 def test_non_audio_upload_rejects_audio_purpose(client: TestClient) -> None:
@@ -367,6 +396,8 @@ def test_complete_rejects_bytes_that_do_not_match_declared_media(
             "filename": "voice.mp3",
             "content_type": "audio/mpeg",
             "size_bytes": 12,
+            "audio_purpose": "voice_clone",
+            "duration_seconds": 30,
         },
     ).json()
     storage.put_object(intent["storage_key"], b"not an audio", content_type="audio/mpeg")
@@ -424,6 +455,8 @@ def test_other_user_cannot_complete_material_upload(
             "filename": "voice.mp3",
             "content_type": "audio/mpeg",
             "size_bytes": 3,
+            "audio_purpose": "voice_clone",
+            "duration_seconds": 30,
         },
     ).json()
     storage.put_object(intent["storage_key"], b"ID3", content_type="audio/mpeg")

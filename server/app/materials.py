@@ -193,13 +193,11 @@ def validate_audio_contract(
             )
         return
     if audio_purpose is None:
-        if duration_seconds is not None:
-            raise material_error(
-                422,
-                "MATERIAL_AUDIO_PURPOSE_REQUIRED",
-                "声明音频时长时必须同时声明用途。",
-            )
-        return
+        raise material_error(
+            422,
+            "MATERIAL_AUDIO_PURPOSE_REQUIRED",
+            "音频素材必须声明完整口播或声音克隆用途。",
+        )
     if duration_seconds is None:
         raise material_error(
             422,
@@ -467,15 +465,16 @@ def material_item(row: Any) -> MaterialItem:
             uses = ["original_frame", "first_frame", "tail_frame", "reference"]
         elif media_type == "audio":
             purpose = metadata.get("audio_purpose")
-            uses = (
-                [purpose]
-                if purpose in {"oral_audio", "voice_clone"}
-                else [
-                    "oral_audio",
-                    "voice_clone",
-                    "reference",
-                ]
-            )
+            duration = _duration(metadata)
+            duration_valid = duration is not None and duration > 0
+            if purpose == "voice_clone" and duration is not None:
+                duration_valid = 5 <= duration <= 180
+            if (
+                purpose in {"oral_audio", "voice_clone"}
+                and duration_valid
+                and metadata.get("audio_duration_verified") is True
+            ):
+                uses = [purpose]
         elif media_type == "video":
             uses = ["reference"]
     actions = ["preview"] if ready else []
@@ -792,6 +791,7 @@ def persist_material_upload(
     metadata["upload_status"] = "READY"
     if probed.duration_seconds is not None:
         metadata["duration_seconds"] = probed.duration_seconds
+        metadata["audio_duration_verified"] = True
         validate_audio_contract(
             media_type="audio",
             audio_purpose=metadata.get("audio_purpose"),

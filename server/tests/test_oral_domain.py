@@ -214,11 +214,13 @@ def seed_scene(tmp_path: Path, name: str) -> BusinessConnection:
         """
         INSERT INTO assets (
             id, project_id, kind, storage_uri, sha256, size_bytes,
-            content_type, created_by_user_id
+            content_type, metadata_json, created_by_user_id
         )
         VALUES (
             'asset-audio', NULL, 'oral_audio', 'local://assets/v.mp3',
-            'audio-hash', 9, 'audio/mpeg', 'employee_1'
+            'audio-hash', 9, 'audio/mpeg',
+            '{"audio_purpose":"voice_clone","duration_seconds":42,"audio_duration_verified":true}',
+            'employee_1'
         )
         """
     )
@@ -1146,12 +1148,14 @@ def test_oral_task_idempotency_key_is_scoped_by_owner(
         """
         INSERT INTO assets (
             id, project_id, kind, storage_uri, sha256, size_bytes,
-            content_type, created_by_user_id
+            content_type, metadata_json, created_by_user_id
         ) VALUES
             ('asset-src-2', 'oral-project-2', 'source_video',
-             'local://assets/src-2.mp4', 'video-hash-2', 9, 'video/mp4', 'employee_2'),
+             'local://assets/src-2.mp4', 'video-hash-2', 9, 'video/mp4', '{}', 'employee_2'),
             ('asset-audio-2', 'oral-project-2', 'oral_audio',
-             'local://assets/audio-2.mp3', 'audio-hash-2', 9, 'audio/mpeg', 'employee_2')
+             'local://assets/audio-2.mp3', 'audio-hash-2', 9, 'audio/mpeg',
+             '{"audio_purpose":"oral_audio","duration_seconds":42,"audio_duration_verified":true}',
+             'employee_2')
         """
     )
     avatar_consent = create_oral_consent(
@@ -1186,6 +1190,11 @@ def test_oral_task_idempotency_key_is_scoped_by_owner(
         ),
     )
     transport.on("POST", "/api/v2/hifly/video/create_by_audio", envelope({"task_id": "vt"}))
+    conn.execute(
+        "UPDATE assets SET metadata_json = ? WHERE id = 'asset-audio'",
+        ('{"audio_purpose":"oral_audio","duration_seconds":42,"audio_duration_verified":true}',),
+    )
+    conn.commit()
 
     first = create_oral_task(
         conn,
@@ -1246,6 +1255,7 @@ def test_historical_ready_clone_without_consent_cannot_create_oral_task(
             idempotency_key=f"historical-{missing_consent}",
             vendor=vendor,
         )
+
     assert transport.calls == []
 
 
@@ -1483,7 +1493,7 @@ def test_oral_audio_and_voice_clone_do_not_cross_use_explicit_purpose(
 
     conn.execute(
         "UPDATE assets SET metadata_json = ? WHERE id = 'asset-audio'",
-        ('{"audio_purpose":"voice_clone","duration_seconds":42}',),
+        ('{"audio_purpose":"voice_clone","duration_seconds":42,"audio_duration_verified":true}',),
     )
     conn.commit()
     with pytest.raises(OralDomainError, match="用途"):
@@ -1504,7 +1514,7 @@ def test_oral_audio_and_voice_clone_do_not_cross_use_explicit_purpose(
 
     conn.execute(
         "UPDATE assets SET metadata_json = ? WHERE id = 'asset-audio'",
-        ('{"audio_purpose":"oral_audio","duration_seconds":42}',),
+        ('{"audio_purpose":"oral_audio","duration_seconds":42,"audio_duration_verified":true}',),
     )
     conn.commit()
     voice_consent = consent_for(
@@ -1523,6 +1533,53 @@ def test_oral_audio_and_voice_clone_do_not_cross_use_explicit_purpose(
             idempotency_key="wrong-clone-purpose",
             vendor=vendor,
         )
+
+
+@pytest.mark.parametrize("operation", ["oral", "voice_clone"])
+def test_audio_without_explicit_purpose_is_rejected(
+    tmp_path: Path,
+    fake_source_storage: FakeSourceStorage,
+    operation: str,
+) -> None:
+    conn = seed_scene(tmp_path, f"oral-audio-missing-purpose-{operation}.db")
+    avatar_id, _ = seed_ready_assets(conn)
+    conn.execute("UPDATE assets SET metadata_json = '{}' WHERE id = 'asset-audio'")
+    conn.commit()
+    vendor, transport = make_vendor()
+
+    with pytest.raises(OralDomainError, match="用途"):
+        if operation == "oral":
+            create_oral_task(
+                conn,
+                actor=actor(),
+                identity_id="ident-1",
+                avatar_id=avatar_id,
+                voice_id=None,
+                mode="AUDIO",
+                title="无用途音频",
+                script_text=None,
+                audio_asset_id="asset-audio",
+                subtitle=None,
+                idempotency_key="missing-purpose-oral",
+                vendor=vendor,
+            )
+        else:
+            start_voice_clone(
+                conn,
+                actor=actor(),
+                identity_id="ident-1",
+                title="无用途声音",
+                source_asset_id="asset-audio",
+                consent_id=consent_for(
+                    conn,
+                    purpose="VOICE_CLONE",
+                    source_asset_id="asset-audio",
+                ),
+                idempotency_key="missing-purpose-voice",
+                vendor=vendor,
+            )
+
+    assert transport.calls == []
 
 
 def test_refresh_oral_task_archives_result_asset(

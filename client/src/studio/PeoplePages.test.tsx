@@ -814,6 +814,7 @@ describe("PeoplePages", () => {
       "voice_clone",
       30,
       expect.any(Function),
+      expect.any(AbortSignal),
     );
     await vi.waitFor(() =>
       expect(api.createOralVoiceClone).toHaveBeenCalledWith(
@@ -823,6 +824,148 @@ describe("PeoplePages", () => {
         }),
       ),
     );
+  });
+
+  it("取消声音样本上传后中止请求并忽略迟到完成", async () => {
+    currentPage = "person-voices";
+    review = false;
+    let finishUpload!: (asset: {
+      id: string;
+      name: string;
+      kind: "audio";
+      group: string;
+      source: string;
+      saved: boolean;
+      allowedUses: string[];
+    }) => void;
+    oralLive.uploadOralAudioMaterial.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishUpload = resolve;
+        }),
+    );
+    render(<PersonPage />);
+
+    fireEvent.change(screen.getByLabelText("选择声音样本"), {
+      target: {
+        files: [new File(["ID3audio"], "voice.mp3", { type: "audio/mpeg" })],
+      },
+    });
+    const cancel = await screen.findByRole("button", { name: "取消上传" });
+    const signal = oralLive.uploadOralAudioMaterial.mock
+      .calls[0][4] as AbortSignal;
+    fireEvent.click(cancel);
+    expect(signal.aborted).toBe(true);
+
+    finishUpload({
+      id: "late-voice-audio",
+      name: "voice.mp3",
+      kind: "audio",
+      group: "声音克隆样本",
+      source: "我的上传",
+      saved: true,
+      allowedUses: ["voice_clone"],
+    });
+    await Promise.resolve();
+
+    expect(screen.queryByText("已上传：voice.mp3")).not.toBeInTheDocument();
+    expect(api.createOralConsent).not.toHaveBeenCalled();
+    expect(api.createOralVoiceClone).not.toHaveBeenCalled();
+    expect(patchDraft).not.toHaveBeenCalled();
+  });
+
+  it("切换人物后忽略上一人物声音上传的迟到完成", async () => {
+    currentPage = "person-voices";
+    review = false;
+    let finishUpload!: (asset: {
+      id: string;
+      name: string;
+      kind: "audio";
+      group: string;
+      source: string;
+      saved: boolean;
+      allowedUses: string[];
+    }) => void;
+    oralLive.uploadOralAudioMaterial.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishUpload = resolve;
+        }),
+    );
+    const view = render(<PersonPage />);
+    fireEvent.change(screen.getByLabelText("选择声音样本"), {
+      target: {
+        files: [new File(["ID3audio"], "old.mp3", { type: "audio/mpeg" })],
+      },
+    });
+    await vi.waitFor(() =>
+      expect(oralLive.uploadOralAudioMaterial).toHaveBeenCalledOnce(),
+    );
+
+    selectedPersonId = "p2";
+    view.rerender(<PersonPage />);
+    finishUpload({
+      id: "old-person-audio",
+      name: "old.mp3",
+      kind: "audio",
+      group: "声音克隆样本",
+      source: "我的上传",
+      saved: true,
+      allowedUses: ["voice_clone"],
+    });
+    await Promise.resolve();
+
+    expect(screen.queryByText("已上传：old.mp3")).not.toBeInTheDocument();
+    expect(api.createOralConsent).not.toHaveBeenCalled();
+    expect(api.createOralVoiceClone).not.toHaveBeenCalled();
+  });
+
+  it("离开声音页时中止上传并隔离迟到完成", async () => {
+    currentPage = "person-voices";
+    review = false;
+    let finishUpload!: (asset: {
+      id: string;
+      name: string;
+      kind: "audio";
+      group: string;
+      source: string;
+      saved: boolean;
+      allowedUses: string[];
+    }) => void;
+    oralLive.uploadOralAudioMaterial.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishUpload = resolve;
+        }),
+    );
+    const view = render(<PersonPage />);
+    fireEvent.change(screen.getByLabelText("选择声音样本"), {
+      target: {
+        files: [new File(["ID3audio"], "leave.mp3", { type: "audio/mpeg" })],
+      },
+    });
+    await vi.waitFor(() =>
+      expect(oralLive.uploadOralAudioMaterial).toHaveBeenCalledOnce(),
+    );
+    const signal = oralLive.uploadOralAudioMaterial.mock
+      .calls[0][4] as AbortSignal;
+
+    view.unmount();
+    expect(signal.aborted).toBe(true);
+    finishUpload({
+      id: "unmounted-audio",
+      name: "leave.mp3",
+      kind: "audio",
+      group: "声音克隆样本",
+      source: "我的上传",
+      saved: true,
+      allowedUses: ["voice_clone"],
+    });
+    await Promise.resolve();
+
+    expect(api.createOralConsent).not.toHaveBeenCalled();
+    expect(api.createOralVoiceClone).not.toHaveBeenCalled();
+    expect(patchDraft).not.toHaveBeenCalled();
   });
 
   it("未授权不能提交克隆，且上传格式错误可见", () => {

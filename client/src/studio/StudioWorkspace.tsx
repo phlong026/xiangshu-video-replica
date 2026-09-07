@@ -1946,15 +1946,13 @@ function StudioPicker({
     videoCapabilities?.max_reference_images ?? DEFAULT_MAX_REFERENCE_IMAGES,
   );
   const assets = [...materials, ...data.assets].filter((asset) =>
-    kind === "audio"
-      ? asset.kind === "audio"
-      : kind === "reference"
-        ? asset.kind === "image" && !state.draft.referenceIds.includes(asset.id)
-        : asset.kind === "image" &&
-          !asset.composite &&
-          ((kind !== "image" && kind !== "avatar-photo") ||
-            !person ||
-            asset.personId === person.id),
+    kind === "reference"
+      ? asset.kind === "image" && !state.draft.referenceIds.includes(asset.id)
+      : asset.kind === "image" &&
+        !asset.composite &&
+        ((kind !== "image" && kind !== "avatar-photo") ||
+          !person ||
+          asset.personId === person.id),
   );
   return (
     <StudioDialog title={title[kind]} onClose={onClose}>

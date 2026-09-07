@@ -2486,7 +2486,7 @@ export function OralPage() {
     review,
   } = useStudio();
   const audioUploadInputRef = useRef<HTMLInputElement>(null);
-  const audioUploadAbortRef = useRef<AbortController>();
+  const audioUploadAbortRef = useRef<AbortController | undefined>(undefined);
   const audioUploadOperationRef = useRef(0);
   const [audioUploadProgress, setAudioUploadProgress] = useState<number>();
   const audioMode = state.page === "oral-audio";
