@@ -262,7 +262,7 @@ describe("SourceFrameSelection", () => {
     );
   });
 
-  it("does not request protected preview downloads for a read-only auditor", async () => {
+  it("loads existing candidate previews for a read-only auditor without writing", async () => {
     render(
       <SourceFrameSelection
         projectId="project-1"
@@ -271,10 +271,13 @@ describe("SourceFrameSelection", () => {
       />,
     );
 
-    expect(
-      await screen.findByText(/只读身份不加载素材预览/),
-    ).toBeInTheDocument();
-    expect(getAssetDownloadUrl).not.toHaveBeenCalled();
+    expect(await screen.findByAltText("候选源画面 1")).toHaveAttribute(
+      "src",
+      "https://private.example/source-1.jpg",
+    );
+    expect(getAssetDownloadUrl).toHaveBeenCalledTimes(2);
+    expect(extractSourceFrames).not.toHaveBeenCalled();
+    expect(confirmSourceFrame).not.toHaveBeenCalled();
   });
 
   it("accepts a legacy selection without character features", async () => {

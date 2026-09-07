@@ -319,7 +319,10 @@ export function CopyPage() {
               </Button>
               <Button
                 variant="quiet"
-                onClick={confirmFinalDraft}
+                onClick={() => {
+                  if (readOnly) return;
+                  confirmFinalDraft();
+                }}
                 disabled={readOnly || !state.draft.script.text.trim()}
               >
                 确认终稿
@@ -327,7 +330,14 @@ export function CopyPage() {
             </Panel>
           </div>
           <footer className="creation-action-bar">
-            <Button variant="outline" disabled={readOnly} onClick={saveDraft}>
+            <Button
+              variant="outline"
+              disabled={readOnly}
+              onClick={() => {
+                if (readOnly) return;
+                saveDraft();
+              }}
+            >
               保存版本
             </Button>
             <Button
@@ -1306,7 +1316,14 @@ export function ReplicaPage() {
           <strong>分镜、Prompt 与生成批次能力已在本页打通</strong>
           <Hint>需要逐镜头精修可进入成熟分镜工作区。</Hint>
         </div>
-        <Button variant="outline" disabled={readOnly} onClick={saveDraft}>
+        <Button
+          variant="outline"
+          disabled={readOnly}
+          onClick={() => {
+            if (readOnly) return;
+            saveDraft();
+          }}
+        >
           保存草稿
         </Button>
         <Button variant="outline" onClick={() => openLive("analysis")}>
@@ -1354,6 +1371,8 @@ export function ReplacementPage() {
   >(null);
   const referenceMatchInFlightRef = useRef<string | undefined>(undefined);
   const referenceRetryScheduledRef = useRef(false);
+  const readOnlyRef = useRef(readOnly);
+  readOnlyRef.current = readOnly;
   const characterVersionIdRef = useRef<string | null | undefined>(undefined);
   const sourceFrameSelectionIdRef = useRef<string | undefined>(undefined);
   const referenceMatchPromiseRef = useRef<
@@ -1374,14 +1393,14 @@ export function ReplacementPage() {
     : null;
 
   const clearConfirmedFirstFrame = useCallback(() => {
-    if (readOnly) return;
+    if (readOnlyRef.current) return;
     confirmedSelectionKeyRef.current = undefined;
     patchDraftRef.current({
       firstFrameId: undefined,
       firstFrameSelectionVersionId: undefined,
       frameConfirmed: false,
     } as Partial<StudioDraft>);
-  }, [readOnly]);
+  }, []);
 
   // 换项目时重置全部下游状态与草稿中的旧首帧。
   const projectId = project?.id;
@@ -1397,14 +1416,14 @@ export function ReplacementPage() {
     characterVersionIdRef.current = undefined;
     sourceFrameSelectionIdRef.current = undefined;
     confirmedSelectionKeyRef.current = undefined;
-    if (projectId && !readOnly) {
+    if (projectId && !readOnlyRef.current) {
       patchDraftRef.current({
         firstFrameId: undefined,
         firstFrameSelectionVersionId: undefined,
         frameConfirmed: false,
       } as Partial<StudioDraft>);
     }
-  }, [projectId, readOnly]);
+  }, [projectId]);
 
   // 载入拆解时长供源画面取帧边界使用（缺省时叶子组件退化为固定前 2.5 秒）。
   useEffect(() => {
@@ -1503,7 +1522,6 @@ export function ReplacementPage() {
   // 叶子组件的 effect 依赖回调身份：必须 useCallback 保持稳定，否则引发重取风暴。
   const handleCharacterChange = useCallback(
     (selection: ProjectMainCharacter | null) => {
-      if (readOnly) return;
       const nextVersionId = selection?.character_version_id;
       if (characterVersionIdRef.current === nextVersionId) return;
       characterVersionIdRef.current = nextVersionId;
@@ -1514,12 +1532,11 @@ export function ReplacementPage() {
       setFirstFrameSelection(null);
       clearConfirmedFirstFrame();
     },
-    [clearConfirmedFirstFrame, readOnly],
+    [clearConfirmedFirstFrame],
   );
 
   const handleSourceFrameChange = useCallback(
     (selection: AnalysisVersion | null) => {
-      if (readOnly) return;
       const nextSelectionId = selection?.id;
       if (sourceFrameSelectionIdRef.current === nextSelectionId) return;
       sourceFrameSelectionIdRef.current = nextSelectionId;
@@ -1530,13 +1547,13 @@ export function ReplacementPage() {
       setFirstFrameSelection(null);
       clearConfirmedFirstFrame();
     },
-    [clearConfirmedFirstFrame, readOnly],
+    [clearConfirmedFirstFrame],
   );
 
   const handleFirstFrameChange = useCallback(
     (selection: AnalysisVersion | null) => {
-      if (readOnly) return;
       setFirstFrameSelection(selection);
+      if (readOnlyRef.current) return;
       if (!selection) {
         clearConfirmedFirstFrame();
         return;
@@ -1556,7 +1573,7 @@ export function ReplacementPage() {
         frameConfirmed: true,
       });
     },
-    [clearConfirmedFirstFrame, readOnly],
+    [clearConfirmedFirstFrame],
   );
 
   const retryReferenceMatch = () => {
@@ -1591,7 +1608,9 @@ export function ReplacementPage() {
                   aria-label="选择项目"
                   className="creation-project-select"
                   defaultValue=""
+                  disabled={readOnly}
                   onChange={(event) => {
+                    if (readOnly) return;
                     const selected = data.projects.find(
                       (item) => item.id === event.target.value,
                     );
@@ -1655,7 +1674,7 @@ export function ReplacementPage() {
                   {referenceError}
                 </p>
                 <Button
-                  disabled={referenceMatching}
+                  disabled={readOnly || referenceMatching}
                   onClick={retryReferenceMatch}
                   variant="outline"
                 >
@@ -1710,7 +1729,14 @@ export function ReplacementPage() {
           </strong>
           <Hint>确认后的首帧可直接用于文/图生视频。</Hint>
         </div>
-        <Button variant="outline" disabled={readOnly} onClick={saveDraft}>
+        <Button
+          variant="outline"
+          disabled={readOnly}
+          onClick={() => {
+            if (readOnly) return;
+            saveDraft();
+          }}
+        >
           保存草稿
         </Button>
       </footer>
@@ -2333,7 +2359,9 @@ export function VideoPage() {
                 ))}
               {referenceHasIssues && (
                 <Button
+                  disabled={readOnly}
                   onClick={() =>
+                    !readOnly &&
                     patchDraft({ referenceIds: referenceValidation.repairIds })
                   }
                   variant="outline"
@@ -2421,7 +2449,14 @@ export function VideoPage() {
           <div className="creation-panel-title">参数设置</div>
           <ParameterControls />
           <div className="creation-form-actions">
-            <Button variant="outline" disabled={readOnly} onClick={saveDraft}>
+            <Button
+              variant="outline"
+              disabled={readOnly}
+              onClick={() => {
+                if (readOnly) return;
+                saveDraft();
+              }}
+            >
               保存草稿
             </Button>
             <Button
@@ -2867,7 +2902,14 @@ export function OralPage() {
             )}
           </div>
         )}
-        <Button variant="outline" disabled={readOnly} onClick={saveDraft}>
+        <Button
+          variant="outline"
+          disabled={readOnly}
+          onClick={() => {
+            if (readOnly) return;
+            saveDraft();
+          }}
+        >
           保存草稿
         </Button>
         <Button

@@ -337,6 +337,28 @@ describe("V1.4 创作页面", () => {
     expect(screen.getByLabelText("提示词")).toBeDisabled();
     expect(screen.getByRole("button", { name: "生成视频" })).toBeDisabled();
 
+    value.data.assets.push({
+      id: "invalid-reference",
+      name: "无效参考视频.mp4",
+      kind: "video",
+      group: "参考素材",
+      source: "素材库",
+      saved: true,
+    });
+    value.state = {
+      ...value.state,
+      page: "reference",
+      draft: {
+        ...value.state.draft,
+        referenceIds: ["reference-1", "invalid-reference"],
+      },
+    };
+    view.rerender(<VideoPage />);
+    expect(screen.getByRole("button", { name: "整理参考图" })).toBeDisabled();
+    vi.mocked(value.patchDraft).mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "整理参考图" }));
+    expect(value.patchDraft).not.toHaveBeenCalled();
+
     value.state = { ...value.state, page: "oral" };
     view.rerender(<OralPage />);
     expect(screen.getByRole("button", { name: "生成口播视频" })).toBeDisabled();
@@ -2460,8 +2482,8 @@ describe("视频复刻（模块①）", () => {
       ],
     };
     value.user = {
-      id: "auditor-1",
-      username: "auditor-1",
+      id: value.user.id,
+      username: value.user.username,
       display_name: "审计员",
       role: "auditor",
     };
@@ -2477,6 +2499,97 @@ describe("视频复刻（模块①）", () => {
     vi.mocked(value.patchDraft).mockClear();
     fireEvent.click(screen.getByRole("button", { name: "stub-选择人物" }));
     fireEvent.click(screen.getByRole("button", { name: "stub-确认源画面" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "stub-确认置换首帧" }),
+    );
+    expect(
+      screen.getByRole("button", { name: "用于文/图生视频" }),
+    ).toBeInTheDocument();
+    expect(value.patchDraft).not.toHaveBeenCalled();
+    expect(replicaApi.selectCharacterReferences).not.toHaveBeenCalled();
+  });
+
+  it("审计员不能从空人物替换页切换项目", () => {
+    const value = studio({
+      review: false,
+      user: {
+        id: "auditor-1",
+        username: "auditor-1",
+        display_name: "审计员",
+        role: "auditor",
+      },
+    });
+    value.state = {
+      ...value.state,
+      page: "replacement",
+      draft: { ...value.state.draft, projectId: undefined },
+    };
+    value.data = {
+      ...value.data,
+      projects: [
+        {
+          id: "project-1",
+          name: "可查看项目",
+          owner_user_id: "auditor-1",
+          status: "ACTIVE",
+          reference_asset_id: "asset-1",
+          reference_upload_status: "READY",
+          analysis_status: "READY",
+        },
+      ],
+    };
+    useStudio.mockReturnValue(value);
+    render(<ReplacementPage />);
+
+    const selector = screen.getByLabelText("选择项目");
+    expect(selector).toBeDisabled();
+    fireEvent.change(selector, { target: { value: "project-1" } });
+    expect(value.patchDraft).not.toHaveBeenCalled();
+  });
+
+  it("切换为审计员后保留已恢复的人物与首帧展示", async () => {
+    replicaApi.selectCharacterReferences.mockResolvedValue({
+      id: "reference-selection-1",
+    });
+    const value = studio({ review: false });
+    value.state = {
+      ...value.state,
+      page: "replacement",
+      draft: { ...value.state.draft, projectId: "project-1" },
+    };
+    value.data = {
+      ...value.data,
+      projects: [
+        {
+          id: "project-1",
+          name: "角色切换项目",
+          owner_user_id: "customer-1",
+          status: "ACTIVE",
+          reference_asset_id: "asset-1",
+          reference_upload_status: "READY",
+          analysis_status: "READY",
+        },
+      ],
+    };
+    useStudio.mockReturnValue(value);
+    const view = render(<ReplacementPage />);
+    fireEvent.click(screen.getByRole("button", { name: "stub-选择人物" }));
+    fireEvent.click(screen.getByRole("button", { name: "stub-确认源画面" }));
+    await screen.findByRole("button", { name: "stub-确认置换首帧" });
+
+    value.user = {
+      id: "auditor-1",
+      username: "auditor-1",
+      display_name: "审计员",
+      role: "auditor",
+    };
+    vi.mocked(value.patchDraft).mockClear();
+    replicaApi.selectCharacterReferences.mockClear();
+    view.rerender(<ReplacementPage />);
+
+    expect(
+      screen.getByRole("button", { name: "stub-确认置换首帧" }),
+    ).toHaveAttribute("data-read-only", "true");
     expect(value.patchDraft).not.toHaveBeenCalled();
     expect(replicaApi.selectCharacterReferences).not.toHaveBeenCalled();
   });

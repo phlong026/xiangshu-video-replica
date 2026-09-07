@@ -342,6 +342,15 @@ export function StudioWorkspace({
   const videoSubmittingRef = useRef(false);
   const oralSubmissionRef = useRef<SubmissionEnvelope | null>(null);
   const videoSubmissionRef = useRef<SubmissionEnvelope | null>(null);
+  const currentUserRoleRef = useRef(currentUser.role);
+  const permissionGenerationRef = useRef(0);
+  if (currentUserRoleRef.current !== currentUser.role) {
+    currentUserRoleRef.current = currentUser.role;
+    permissionGenerationRef.current += 1;
+    operationRef.current += 1;
+    generationDialogRevisionRef.current += 1;
+    pendingRouteRef.current = undefined;
+  }
   const notify = useCallback((message: string) => setNotice(message), []);
 
   useEffect(() => {
@@ -443,14 +452,28 @@ export function StudioWorkspace({
   const draftTouchedRef = useRef(false);
   const draftSaveTimerRef = useRef<number | undefined>(undefined);
   const scheduleDraftSave = useCallback(() => {
-    if (review || currentUser.role === "auditor") return;
+    if (review || currentUserRoleRef.current === "auditor") return;
     window.clearTimeout(draftSaveTimerRef.current);
     draftSaveTimerRef.current = window.setTimeout(() => {
+      if (currentUserRoleRef.current === "auditor") return;
       void persistCloudDraft(latestDraftRef.current).catch(() => {
         notify("云端草稿保存失败，内容仍在本机，请稍后继续编辑。");
       });
     }, DRAFT_AUTOSAVE_DELAY_MS);
-  }, [review, currentUser.role, notify]);
+  }, [review, notify]);
+  useEffect(() => {
+    if (currentUser.role !== "auditor") return;
+    window.clearTimeout(draftSaveTimerRef.current);
+    draftSaveTimerRef.current = undefined;
+    generationRef.current = undefined;
+    oralSubmissionRef.current = null;
+    videoSubmissionRef.current = null;
+    oralSubmittingRef.current = false;
+    videoSubmittingRef.current = false;
+    setGeneration(undefined);
+    setOralSubmitting(false);
+    setVideoSubmitting(false);
+  }, [currentUser.role]);
 
   const restoreDraftAssets = useCallback(
     async (draft: StudioDraft) => {
@@ -670,7 +693,7 @@ export function StudioWorkspace({
   );
 
   const submitOralTask = async () => {
-    if (currentUser.role === "auditor") {
+    if (currentUserRoleRef.current === "auditor") {
       notify("当前账号为只读权限，不能提交生成。");
       return;
     }
@@ -684,11 +707,14 @@ export function StudioWorkspace({
       return;
     }
     const dialogRevision = generationDialogRevisionRef.current;
+    const permissionGeneration = permissionGenerationRef.current;
     const draft = latestDraftRef.current;
     const draftFingerprint = JSON.stringify(draft);
     const page = studioPageRef.current;
     const isCurrent = () =>
       mountedRef.current &&
+      currentUserRoleRef.current !== "auditor" &&
+      permissionGenerationRef.current === permissionGeneration &&
       generationDialogRevisionRef.current === dialogRevision &&
       generationRef.current === "数字人口播" &&
       studioPageRef.current === page &&
@@ -763,7 +789,7 @@ export function StudioWorkspace({
   };
 
   const submitVideoTask = async () => {
-    if (currentUser.role === "auditor") {
+    if (currentUserRoleRef.current === "auditor") {
       notify("当前账号为只读权限，不能提交生成。");
       return;
     }
@@ -773,8 +799,11 @@ export function StudioWorkspace({
     const draftFingerprint = JSON.stringify(draft);
     const page = studioPageRef.current;
     const dialogRevision = generationDialogRevisionRef.current;
+    const permissionGeneration = permissionGenerationRef.current;
     const isCurrent = () =>
       mountedRef.current &&
+      currentUserRoleRef.current !== "auditor" &&
+      permissionGenerationRef.current === permissionGeneration &&
       generationDialogRevisionRef.current === dialogRevision &&
       generationRef.current === "视频生成" &&
       studioPageRef.current === page &&
@@ -1034,7 +1063,7 @@ export function StudioWorkspace({
     window.scrollTo?.({ top: 0 });
   };
   const patchDraft = (patch: Partial<StudioDraft>) => {
-    if (currentUser.role === "auditor") return;
+    if (currentUserRoleRef.current === "auditor") return;
     if (Object.hasOwn(patch, "ipId") && patch.ipId !== state.draft.ipId)
       notify(
         "人物已更换，请重新选择该人物的分身和声音，并核对文案中的自我介绍。",
@@ -1209,7 +1238,7 @@ export function StudioWorkspace({
     }
   };
   const requestGeneration = (kind: StudioTask["type"]) => {
-    if (currentUser.role === "auditor") {
+    if (currentUserRoleRef.current === "auditor") {
       notify("当前账号为只读权限，不能提交生成。");
       return;
     }
@@ -1305,7 +1334,7 @@ export function StudioWorkspace({
     }
   };
   const saveDraft = () => {
-    if (currentUser.role === "auditor") {
+    if (currentUserRoleRef.current === "auditor") {
       notify("当前账号为只读权限，不能保存或确认创作内容。");
       return;
     }
@@ -1331,13 +1360,22 @@ export function StudioWorkspace({
       notify("已保留在本次工作区，可继续切换页面。");
       return;
     }
+    const permissionGeneration = permissionGenerationRef.current;
+    const canFinishSave = () =>
+      currentUserRoleRef.current !== "auditor" &&
+      permissionGenerationRef.current === permissionGeneration;
     void persistSavedScript(script, state.draft.projectId)
-      .then(() => notify("已保存到我的文案，换设备登录也能找回。"))
-      .catch(() => notify("云端保存失败，本次仅保留在工作区，请稍后重试。"));
+      .then(() => {
+        if (canFinishSave()) notify("已保存到我的文案，换设备登录也能找回。");
+      })
+      .catch(() => {
+        if (canFinishSave())
+          notify("云端保存失败，本次仅保留在工作区，请稍后重试。");
+      });
     void persistCloudDraft({ ...state.draft, script }).catch(() => {});
   };
   const confirmFinalDraft = () => {
-    if (currentUser.role === "auditor") {
+    if (currentUserRoleRef.current === "auditor") {
       notify("当前账号为只读权限，不能保存或确认创作内容。");
       return;
     }
@@ -1347,8 +1385,14 @@ export function StudioWorkspace({
     // 立即持久化终稿（不等防抖），并软发布到项目脚本版本。
     void persistCloudDraft({ ...state.draft, script }).catch(() => {});
     if (!state.draft.projectId) return;
+    const permissionGeneration = permissionGenerationRef.current;
     void publishScriptVersion(state.draft.projectId, script.text).then(
       (published) => {
+        if (
+          currentUserRoleRef.current === "auditor" ||
+          permissionGenerationRef.current !== permissionGeneration
+        )
+          return;
         if (!published)
           notify(
             "终稿已确认，但同步到项目脚本版本未成功，可稍后在来源分析中重试。",
@@ -1362,7 +1406,7 @@ export function StudioWorkspace({
       notify("审核示例不调用真实接口。");
       return;
     }
-    if (currentUser.role === "auditor") {
+    if (currentUserRoleRef.current === "auditor") {
       notify("当前账号为只读权限，不能提交生成。");
       return;
     }
@@ -1379,10 +1423,16 @@ export function StudioWorkspace({
       return;
     }
     extractingRef.current = true;
+    const permissionGeneration = permissionGenerationRef.current;
     notify("正在提取音频并转写文案，预计一到两分钟，请勿关闭页面…");
     void extractScriptFromUploadLive(projectId, assetId)
       .then(({ text }) => {
         extractingRef.current = false;
+        if (
+          currentUserRoleRef.current === "auditor" ||
+          permissionGenerationRef.current !== permissionGeneration
+        )
+          return;
         const currentScript = latestDraftRef.current.script;
         patchDraft({
           sourceId: projectId,
@@ -1399,6 +1449,11 @@ export function StudioWorkspace({
       })
       .catch((cause: unknown) => {
         extractingRef.current = false;
+        if (
+          currentUserRoleRef.current === "auditor" ||
+          permissionGenerationRef.current !== permissionGeneration
+        )
+          return;
         notify(
           customerVisibleErrorMessage(cause, "文案提取失败，请稍后重试。"),
         );

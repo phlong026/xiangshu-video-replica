@@ -145,7 +145,7 @@ export function PeoplePage() {
       : people.filter((person) => person.role === roleFilter);
   const peoplePage = data.pagination?.people;
   const loadNextPeoplePage = async () => {
-    if (review || readOnly || loadingMore || !peoplePage?.nextCursor) return;
+    if (review || loadingMore || !peoplePage?.nextCursor) return;
     setLoadingMore(true);
     try {
       const result = await loadMorePeople(peoplePage.nextCursor);
@@ -215,7 +215,14 @@ export function PeoplePage() {
           title="还没有人物"
           description="从人物库创建第一位乡墅行业 IP。"
           action={
-            <Button variant="primary" onClick={() => openLive("characters")}>
+            <Button
+              disabled={readOnly}
+              variant="primary"
+              onClick={() => {
+                if (readOnly) return;
+                openLive("characters");
+              }}
+            >
               新增人物
             </Button>
           }
@@ -239,7 +246,7 @@ export function PeoplePage() {
             已加载 {people.length} / {peoplePage.total} 位人物
           </span>
           <Button
-            disabled={readOnly || loadingMore || !peoplePage.nextCursor}
+            disabled={loadingMore || !peoplePage.nextCursor}
             onClick={() => void loadNextPeoplePage()}
           >
             {loadingMore ? "正在加载…" : "加载更多人物"}
@@ -491,8 +498,10 @@ function IpPanel({ person }: { person: StudioPerson }) {
           {review ? "保存定位草稿" : saving ? "保存中…" : "保存 IP 定位"}
         </Button>
         <Button
+          disabled={readOnly}
           variant="outline"
           onClick={() => {
+            if (readOnly) return;
             patchDraft({ ipId: person.id });
             navigate("copy", { selectedPersonId: person.id });
           }}
@@ -522,7 +531,7 @@ function PhotosPanel({ person }: { person: StudioPerson }) {
   );
   const scenePage = data.pagination?.scenes?.[person.id];
   const loadNextScenes = async () => {
-    if (review || readOnly || loadingMore || !scenePage) return;
+    if (review || loadingMore || !scenePage) return;
     setLoadingMore(true);
     try {
       const result = await loadPersonAssets(person.id, scenePage.loaded);
@@ -617,7 +626,14 @@ function PhotosPanel({ person }: { person: StudioPerson }) {
             title="暂无五视图合成图"
             description="前往人物管理上传照片创建。"
             action={
-              <Button variant="outline" onClick={() => openLive("characters")}>
+              <Button
+                disabled={readOnly}
+                variant="outline"
+                onClick={() => {
+                  if (readOnly) return;
+                  openLive("characters");
+                }}
+              >
                 打开人物管理
               </Button>
             }
@@ -634,8 +650,10 @@ function PhotosPanel({ person }: { person: StudioPerson }) {
               <strong>{asset.name}</strong>
               <div>
                 <Button
+                  disabled={readOnly}
                   variant="outline"
                   onClick={() => {
+                    if (readOnly) return;
                     patchDraft({ ipId: person.id, imageId: asset.id });
                     navigate("person-avatars", {
                       selectedPersonId: person.id,
@@ -646,8 +664,10 @@ function PhotosPanel({ person }: { person: StudioPerson }) {
                   制作口播分身
                 </Button>
                 <Button
+                  disabled={readOnly}
                   variant="primary"
                   onClick={() => {
+                    if (readOnly) return;
                     patchDraft({ ipId: person.id, imageId: asset.id });
                     navigate("replacement", {
                       selectedPersonId: person.id,
@@ -666,10 +686,7 @@ function PhotosPanel({ person }: { person: StudioPerson }) {
           <span>
             已加载 {scenePage.loaded} / {scenePage.total} 套场景
           </span>
-          <Button
-            disabled={readOnly || loadingMore}
-            onClick={() => void loadNextScenes()}
-          >
+          <Button disabled={loadingMore} onClick={() => void loadNextScenes()}>
             {loadingMore ? "正在加载…" : "加载更多场景"}
           </Button>
         </div>
@@ -908,8 +925,10 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
                 {avatar.origin} · {avatar.duration}
               </p>
               <Button
+                disabled={readOnly}
                 variant="outline"
                 onClick={() => {
+                  if (readOnly) return;
                   patchDraft({ ipId: person.id, avatarId: avatar.id });
                   navigate(state.returnTo ?? "oral", {
                     selectedPersonId: person.id,

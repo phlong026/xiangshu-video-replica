@@ -1273,18 +1273,41 @@ describe("PeoplePages", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("审计员可查看人物内容但不能触发人物写操作", async () => {
+  it("审计员可继续分页读取人物和场景但不能新增人物", async () => {
     review = false;
     currentRole = "auditor";
-    pagination = { people: { nextCursor: "next", total: 3 } };
-    render(<PeoplePage />);
+    pagination = {
+      people: { nextCursor: "next", total: 3 },
+      scenes: { p1: { loaded: 1, total: 2 } },
+    };
+    live.loadMorePeople.mockResolvedValue({
+      people: [],
+      assets: [],
+      errors: [],
+      nextCursor: null,
+      total: 3,
+    });
+    live.loadPersonAssets.mockResolvedValue({
+      assets: [],
+      errors: [],
+      loaded: 2,
+      total: 2,
+    });
+    const view = render(<PeoplePage />);
 
     expect(screen.getByText("测试人物")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "新增人物" }));
     fireEvent.click(screen.getByRole("button", { name: "加载更多人物" }));
-
     expect(openLive).not.toHaveBeenCalled();
-    expect(live.loadMorePeople).not.toHaveBeenCalled();
+    expect(live.loadMorePeople).toHaveBeenCalledWith("next");
+
+    view.unmount();
+    currentPage = "person-photos";
+    render(<PersonPage />);
+    expect(screen.getByRole("button", { name: "制作口播分身" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "用于人物置换" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "加载更多场景" }));
+    expect(live.loadPersonAssets).toHaveBeenCalledWith("p1", 1);
   });
 
   it("审计员的人物资料与口播克隆控件保持只读且不发 API", async () => {
@@ -1294,6 +1317,9 @@ describe("PeoplePages", () => {
     const view = render(<PersonPage />);
 
     expect(screen.getByLabelText("姓名")).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "去文案工坊创作" }),
+    ).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "保存 IP 定位" }));
     expect(api.updateSimpleCharacterProfile).not.toHaveBeenCalled();
 
@@ -1301,6 +1327,9 @@ describe("PeoplePages", () => {
     draft = { ipId: "p1", imageId: "scene" };
     view.rerender(<PersonPage />);
     expect(screen.getByLabelText("确认分身克隆授权")).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "用于数字人口播" }),
+    ).toBeDisabled();
     expect(
       screen.getByRole("button", { name: /开始制作照片分身/ }),
     ).toBeDisabled();
