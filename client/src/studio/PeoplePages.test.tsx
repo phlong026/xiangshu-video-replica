@@ -132,6 +132,16 @@ vi.mock("./context", () => ({
           saved: true,
         },
         {
+          id: "other-scene",
+          name: "其他人物场景照",
+          kind: "image",
+          url: "/other-scene.png",
+          group: "人物素材",
+          personId: "p2",
+          source: "AI生成",
+          saved: true,
+        },
+        {
           id: "voice-source",
           name: "张工录音样本",
           kind: "audio",
@@ -214,6 +224,41 @@ describe("PeoplePages", () => {
     render(<PersonPage />);
     expect(screen.getByAltText("五视图合成图")).toBeInTheDocument();
     expect(screen.getByText("基础五视图 · 1 张合成图")).toBeInTheDocument();
+  });
+
+  it("把场景照片和所属人物一起带入口播分身制作", () => {
+    currentPage = "person-photos";
+    render(<PersonPage />);
+
+    screen.getByRole("button", { name: "制作口播分身" }).click();
+
+    expect(patchDraft).toHaveBeenCalledWith({
+      ipId: "p1",
+      imageId: "scene",
+    });
+    expect(navigate).toHaveBeenCalledWith("person-avatars", {
+      selectedPersonId: "p1",
+      selectedAssetId: "scene",
+    });
+  });
+
+  it.each([
+    ["missing-scene", "失效"],
+    ["other-scene", "跨人物"],
+  ])("%s 的照片显示明确重选入口", (imageId) => {
+    currentPage = "person-avatars";
+    draft = { ipId: "p1", imageId };
+    render(<PersonPage />);
+
+    expect(
+      screen.getByText("所选照片已失效或不属于当前人物，请重新选择。"),
+    ).toBeInTheDocument();
+    screen.getByRole("button", { name: "重新选择形象照片" }).click();
+    expect(patchDraft).toHaveBeenCalledWith({
+      ipId: "p1",
+      imageId: undefined,
+    });
+    expect(openPicker).toHaveBeenCalledWith("avatar-photo");
   });
 
   it("does not present an unconfirmed voice as selectable", () => {

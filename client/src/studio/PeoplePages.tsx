@@ -489,7 +489,7 @@ function PhotosPanel({ person }: { person: StudioPerson }) {
                 <Button
                   variant="outline"
                   onClick={() => {
-                    patchDraft({ ipId: person.id });
+                    patchDraft({ ipId: person.id, imageId: asset.id });
                     navigate("person-avatars", {
                       selectedPersonId: person.id,
                       selectedAssetId: asset.id,
@@ -545,6 +545,7 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
       asset.personId === person.id &&
       !asset.composite,
   );
+  const photoSelectionInvalid = Boolean(state.draft.imageId && !sourceAsset);
   const selectedSourceAssetId = sourceAsset?.id;
   const previousSourceAssetId = useRef(selectedSourceAssetId);
   useEffect(() => {
@@ -725,11 +726,14 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
         <Button
           variant="outline"
           onClick={() => {
-            patchDraft({ ipId: person.id });
+            patchDraft({
+              ipId: person.id,
+              ...(photoSelectionInvalid ? { imageId: undefined } : {}),
+            });
             openPicker("avatar-photo");
           }}
         >
-          用形象照片制作
+          {photoSelectionInvalid ? "重新选择形象照片" : "用形象照片制作"}
         </Button>
         {review ? (
           <Button
@@ -766,7 +770,9 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
             ? `已上传：${uploadedVideo.fileName}`
             : sourceAsset
               ? `已选：${sourceAsset.name}`
-              : "请先选择当前人物的一张场景形象照。"}
+              : photoSelectionInvalid
+                ? "所选照片已失效或不属于当前人物，请重新选择。"
+                : "请先选择当前人物的一张场景形象照。"}
         </p>
         {uploadProgress !== undefined ? <p>上传中 {uploadProgress}%</p> : null}
         {error ? <p role="alert">{error}</p> : null}
