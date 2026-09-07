@@ -705,7 +705,7 @@ export type StudioStats = {
 };
 
 /** 平台侧真实工作台统计（C6/C10a）：GET /api/studio/stats。
- * 只统计可见生成任务的真实计数；播放/互动等外部平台数据不在其中。 */
+ * 统计可见普通生成和口播任务；播放/互动等外部平台数据不在其中。 */
 export async function getStudioStats(): Promise<StudioStats> {
   return requestApiJson<StudioStats>("/api/studio/stats", "读取工作台统计失败");
 }
@@ -718,8 +718,9 @@ export type StudioAnalyticsDay = {
 export type StudioAnalyticsKindCount = { kind: string; completed: number };
 export type StudioAnalyticsWorkItem = {
   task_id: string;
-  batch_id: string;
-  project_id: string;
+  task_kind: "generation" | "oral";
+  batch_id: string | null;
+  project_id: string | null;
   title: string;
   creation_kind: string;
   completed_at: string;
@@ -728,13 +729,22 @@ export type StudioAnalyticsWorkItem = {
 };
 
 /** 平台侧真实成片聚合（C6 数据看板）：GET /api/studio/analytics。
- * 窗口内按北京日界分桶的成片趋势（含失败叠加）、任务类型分布与最近成片清单；
+ * 窗口内按北京日界分桶的普通生成/口播产出项，并单列去重普通生成批次；
  * 播放/互动等外部平台数据不在其中。 */
 export type StudioAnalytics = {
   range_days: number;
+  generated_at: string;
   today_completed: number;
   range_completed: number;
   total_completed: number;
+  today_completed_outputs: number;
+  range_completed_outputs: number;
+  total_completed_outputs: number;
+  today_generation_batches: number;
+  range_generation_batches: number;
+  total_generation_batches: number;
+  range_generation_outputs: number;
+  range_oral_outputs: number;
   daily: StudioAnalyticsDay[];
   kind_breakdown: StudioAnalyticsKindCount[];
   recent_works: StudioAnalyticsWorkItem[];

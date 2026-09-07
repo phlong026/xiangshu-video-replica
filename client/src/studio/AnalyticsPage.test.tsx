@@ -4,8 +4,13 @@ import type { StudioAnalytics } from "../api";
 import { createReviewData, createReviewState, reviewUser } from "./fixtures";
 import type { StudioContextValue, StudioData } from "./types";
 
-const { useStudio } = vi.hoisted(() => ({ useStudio: vi.fn() }));
+const { getStudioAnalytics, getStudioStats, useStudio } = vi.hoisted(() => ({
+  getStudioAnalytics: vi.fn(),
+  getStudioStats: vi.fn(),
+  useStudio: vi.fn(),
+}));
 vi.mock("./context", () => ({ useStudio }));
+vi.mock("../api", () => ({ getStudioAnalytics, getStudioStats }));
 
 import { AnalyticsPage } from "./AnalyticsPage";
 
@@ -52,9 +57,18 @@ function productionData(overrides: Partial<StudioData> = {}): StudioData {
 
 const sampleAnalytics: StudioAnalytics = {
   range_days: 7,
+  generated_at: "2026-09-07T08:00:00+00:00",
   today_completed: 3,
   range_completed: 9,
   total_completed: 42,
+  today_completed_outputs: 3,
+  range_completed_outputs: 9,
+  total_completed_outputs: 42,
+  today_generation_batches: 2,
+  range_generation_batches: 6,
+  total_generation_batches: 30,
+  range_generation_outputs: 7,
+  range_oral_outputs: 2,
   daily: [
     { day: "2026-09-01", completed: 1, failed: 0 },
     { day: "2026-09-02", completed: 0, failed: 1 },
@@ -71,6 +85,7 @@ const sampleAnalytics: StudioAnalytics = {
   recent_works: [
     {
       task_id: "t-1",
+      task_kind: "generation",
       batch_id: "b-1",
       project_id: "p-1",
       title: "庭院黄昏实拍",
@@ -80,6 +95,7 @@ const sampleAnalytics: StudioAnalytics = {
     },
     {
       task_id: "t-2",
+      task_kind: "generation",
       batch_id: "b-2",
       project_id: "p-1",
       title: "户型讲解口播",
@@ -91,17 +107,29 @@ const sampleAnalytics: StudioAnalytics = {
 };
 
 describe("V1.4 数据看板", () => {
-  beforeEach(() => useStudio.mockReset());
+  beforeEach(() => {
+    useStudio.mockReset();
+    getStudioAnalytics.mockReset();
+    getStudioAnalytics.mockImplementation(() => new Promise(() => {}));
+    getStudioStats.mockReset();
+    getStudioStats.mockResolvedValue({
+      today_completed: 3,
+      running: 1,
+      queued: 2,
+      needs_attention: 1,
+      total_completed: 42,
+    });
+  });
 
-  it("审核模式呈现时间筛选、四个指标、成片趋势与最近成片表", () => {
+  it("审核模式呈现时间筛选、分单位指标、成片趋势与最近成片表", () => {
     useStudio.mockReturnValue(studio());
     render(<AnalyticsPage />);
 
     expect(screen.getByLabelText("时间筛选")).toHaveValue("7");
     expect(screen.getByText("示例数据")).toBeInTheDocument();
-    expect(screen.getByText("期间成片")).toBeInTheDocument();
+    expect(screen.getByText("期间成片（产出项）")).toBeInTheDocument();
     expect(screen.getByText("20 个")).toBeInTheDocument();
-    expect(screen.getByText("今日成片")).toBeInTheDocument();
+    expect(screen.getByText("今日成片（产出项）")).toBeInTheDocument();
     expect(screen.getByText("8 个")).toBeInTheDocument();
     expect(
       screen.getByRole("img", { name: "近7天成片趋势" }),
@@ -162,6 +190,7 @@ describe("V1.4 数据看板", () => {
   });
 
   it("正式工作区渲染真实聚合：指标、趋势、类型占比与作品表", () => {
+    getStudioAnalytics.mockResolvedValue(sampleAnalytics);
     useStudio.mockReturnValue(
       studio({
         review: false,
@@ -181,6 +210,8 @@ describe("V1.4 数据看板", () => {
     render(<AnalyticsPage />);
 
     expect(screen.getByText("9 个")).toBeInTheDocument();
+    expect(screen.getByText("6 批")).toBeInTheDocument();
+    expect(screen.getByText("普通生成 7 个 · 口播 2 个")).toBeInTheDocument();
     // 今日成片 3 与成片队列 3（running 1 + queued 2）文案相同，取并集断言。
     expect(screen.getAllByText("3 个").length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText("成片队列")).toBeInTheDocument();
@@ -193,6 +224,7 @@ describe("V1.4 数据看板", () => {
   });
 
   it("正式工作区所选窗口缺失聚合时回退空态", () => {
+    getStudioAnalytics.mockRejectedValue(new Error("analytics unavailable"));
     useStudio.mockReturnValue(
       studio({
         review: false,
@@ -207,5 +239,118 @@ describe("V1.4 数据看板", () => {
     });
     expect(screen.getByText("统计数据尚未就绪")).toBeInTheDocument();
     expect(screen.queryByText("9 个")).not.toBeInTheDocument();
+  });
+
+  it("进页读取并允许手动刷新，成功后更新当前窗口与更新时间", async () => {
+    const refreshed = {
+      ...sampleAnalytics,
+      generated_at: "2026-09-07T09:30:00+00:00",
+      range_completed_outputs: 12,
+      range_completed: 12,
+    };
+    getStudioAnalytics.mockResolvedValue(refreshed);
+    useStudio.mockReturnValue(
+      studio({
+        review: false,
+        data: productionData({ analytics7: sampleAnalytics }),
+      }),
+    );
+
+    render(<AnalyticsPage />);
+    await vi.waitFor(() => expect(getStudioAnalytics).toHaveBeenCalledWith(7));
+    expect(await screen.findByText("12 个")).toBeInTheDocument();
+    expect(screen.getByText(/更新时间/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "刷新报表" }));
+    await vi.waitFor(() => expect(getStudioAnalytics).toHaveBeenCalledTimes(2));
+  });
+
+  it("刷新失败保留旧数据并标记已过期，重试仍使用当前窗口", async () => {
+    getStudioAnalytics.mockRejectedValue(new Error("network down"));
+    useStudio.mockReturnValue(
+      studio({
+        review: false,
+        data: productionData({ analytics7: sampleAnalytics }),
+      }),
+    );
+
+    render(<AnalyticsPage />);
+
+    expect(
+      await screen.findByText("数据可能已过期，请重试刷新。"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("9 个")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "重试刷新" }));
+    await vi.waitFor(() => expect(getStudioAnalytics).toHaveBeenCalledTimes(2));
+    expect(getStudioAnalytics).toHaveBeenLastCalledWith(7);
+  });
+
+  it("口播成片从报表进入口播任务详情", () => {
+    const value = studio({
+      review: false,
+      data: productionData({
+        analytics7: {
+          ...sampleAnalytics,
+          recent_works: [
+            {
+              task_id: "oral-1",
+              task_kind: "oral",
+              batch_id: null,
+              project_id: null,
+              title: "院落口播",
+              creation_kind: "oral",
+              completed_at: "2026-09-07 09:00:00",
+              cost_credits: 3,
+            },
+          ],
+        },
+      }),
+    });
+    useStudio.mockReturnValue(value);
+    getStudioAnalytics.mockImplementation(() => new Promise(() => {}));
+
+    render(<AnalyticsPage />);
+    fireEvent.click(screen.getByRole("button", { name: "查看视频" }));
+    expect(value.navigate).toHaveBeenCalledWith("task-detail", {
+      selectedTaskId: "oral-1",
+      selectedTaskKind: "oral_task",
+      selectedTaskBackendId: "oral-1",
+      returnTo: "analytics",
+    });
+  });
+
+  it("账号切换后立即隐藏旧账号报表并忽略旧请求结果", async () => {
+    let resolveOld: ((value: StudioAnalytics) => void) | undefined;
+    const oldRequest = new Promise<StudioAnalytics>((resolve) => {
+      resolveOld = resolve;
+    });
+    const newAnalytics = {
+      ...sampleAnalytics,
+      range_completed_outputs: 2,
+      range_completed: 2,
+      recent_works: [],
+    };
+    getStudioAnalytics
+      .mockReturnValueOnce(oldRequest)
+      .mockResolvedValueOnce(newAnalytics);
+    let value = studio({
+      review: false,
+      user: { ...reviewUser, id: "account-a" },
+      data: productionData({ analytics7: sampleAnalytics }),
+    });
+    useStudio.mockImplementation(() => value);
+    const rendered = render(<AnalyticsPage />);
+
+    value = studio({
+      review: false,
+      user: { ...reviewUser, id: "account-b" },
+      data: productionData({ analytics7: sampleAnalytics }),
+    });
+    rendered.rerender(<AnalyticsPage />);
+    expect(screen.queryByText("庭院黄昏实拍")).not.toBeInTheDocument();
+
+    resolveOld?.({ ...sampleAnalytics, range_completed_outputs: 99 });
+    expect(await screen.findByText("2 个")).toBeInTheDocument();
+    expect(screen.queryByText("99 个")).not.toBeInTheDocument();
   });
 });

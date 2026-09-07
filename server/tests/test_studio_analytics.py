@@ -16,7 +16,7 @@ from app.auth import CurrentUser, get_database
 from app.db import connect_database, initialize_database
 from app.db_portable import BusinessConnection
 from app.main import app
-from app.studio_routes import studio_analytics
+from app.studio_routes import studio_analytics, studio_task_stats
 
 # 2026-09-06 12:00 UTC = 2026-09-06 20:00 北京；固定"当前时间"防跨天漂移。
 _NOW = datetime(2026, 9, 6, 12, 0, tzinfo=UTC)
@@ -127,6 +127,82 @@ def seed_analytics_scene(connection) -> None:
         "INSERT INTO customer_batch_visibility (user_id, batch_id) VALUES (?, ?)",
         ("employee_1", "b-hidden"),
     )
+    connection.execute(
+        """
+        INSERT INTO person_identities (id, owner_user_id, display_name, status)
+        VALUES ('analytics-identity', 'employee_1', '口播人物', 'ACTIVE')
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO oral_avatars (
+            id, identity_id, owner_user_id, title, status, source_kind, source_asset_id
+        ) VALUES (
+            'analytics-avatar', 'analytics-identity', 'employee_1', '口播分身',
+            'READY', 'IMAGE', 'analytics-source'
+        )
+        """
+    )
+    connection.executemany(
+        """
+        INSERT INTO oral_tasks (
+            id, owner_user_id, identity_id, avatar_id, mode, title, status,
+            estimated_cost_fen, idempotency_key, request_hash, submission_state,
+            provider_charge_state, created_at, updated_at
+        ) VALUES (?, ?, 'analytics-identity', 'analytics-avatar', 'TTS', ?, ?, 350,
+                  ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                "oral-succeeded",
+                "employee_1",
+                "院落介绍口播",
+                "SUCCEEDED",
+                "oral-key-success",
+                "oral-hash-success",
+                "SUBMITTED",
+                "CHARGED",
+                _TODAY,
+                _TODAY_BEIJING_EARLY,
+            ),
+            (
+                "oral-failed",
+                "employee_1",
+                "失败口播",
+                "FAILED",
+                "oral-key-failed",
+                "oral-hash-failed",
+                "FAILED",
+                "NOT_CHARGED",
+                _TODAY,
+                _TODAY,
+            ),
+            (
+                "oral-queued",
+                "employee_1",
+                "排队口播",
+                "QUEUED",
+                "oral-key-queued",
+                "oral-hash-queued",
+                "LOCAL_PENDING",
+                "NOT_SUBMITTED",
+                _TODAY,
+                _TODAY,
+            ),
+            (
+                "oral-running",
+                "employee_1",
+                "处理中口播",
+                "RUNNING",
+                "oral-key-running",
+                "oral-hash-running",
+                "SUBMITTED",
+                "CHARGED",
+                _TODAY,
+                _TODAY,
+            ),
+        ],
+    )
     # 按秒计费账本（057 形状约束）：t1 预留 8 秒并成功结算 → 消耗 8 积分；
     # 其余成片无计费记录 → cost_credits 为 null（不伪造）。
     connection.executemany(
@@ -169,17 +245,20 @@ def test_daily_series_covers_full_window_by_beijing_day(tmp_path: Path) -> None:
         "2026-09-05",
         "2026-09-06",
     ]
-    # 09-05：t3（北京 23:59）；09-06：t1、t2（北京 00:30 属次日）、t4、t7；
-    # 失败桶仅 t5-failed（09-06）。
+    # 09-05：t3（北京 23:59）；09-06：4 个普通成片 + 1 个成功口播；
+    # 失败桶为 t5-failed + oral-failed。
     by_day = {day.day: day for day in result.daily}
     assert by_day["2026-09-05"].completed == 1
     assert by_day["2026-09-05"].failed == 0
-    assert by_day["2026-09-06"].completed == 4
-    assert by_day["2026-09-06"].failed == 1
-    assert result.range_completed == 5
+    assert by_day["2026-09-06"].completed == 5
+    assert by_day["2026-09-06"].failed == 2
+    assert result.range_completed_outputs == 6
+    assert result.range_generation_outputs == 5
+    assert result.range_oral_outputs == 1
+    assert result.range_generation_batches == 4
     # t3 完成于北京 09-05，不计入"今日"；t9（08-30）计入全期累计。
-    assert result.today_completed == 4
-    assert result.total_completed == 6
+    assert result.today_completed_outputs == 5
+    assert result.total_completed_outputs == 7
 
 
 def test_kind_breakdown_counts_only_visible_completed_tasks(tmp_path: Path) -> None:
@@ -190,6 +269,7 @@ def test_kind_breakdown_counts_only_visible_completed_tasks(tmp_path: Path) -> N
         ("replica", 3),
         ("independent", 1),
         ("replacement", 1),
+        ("oral", 1),
     }
 
     employee_view = studio_analytics(conn, actor=actor("employee_1", "employee"), now=_NOW, days=7)
@@ -197,9 +277,29 @@ def test_kind_breakdown_counts_only_visible_completed_tasks(tmp_path: Path) -> N
     assert {(item.kind, item.completed) for item in employee_view.kind_breakdown} == {
         ("replica", 2),
         ("independent", 1),
+        ("oral", 1),
     }
-    assert employee_view.range_completed == 3
-    assert employee_view.total_completed == 4
+    # 普通生成 b-1 有两个产出项，但批次只计一次；b-2 为另一个批次。
+    assert employee_view.range_generation_batches == 2
+    assert employee_view.range_generation_outputs == 3
+    assert employee_view.range_oral_outputs == 1
+    assert employee_view.range_completed_outputs == 4
+    assert employee_view.total_completed_outputs == 5
+
+    customer_view = studio_analytics(conn, actor=actor("employee_1", "customer"), now=_NOW, days=7)
+    assert customer_view == employee_view
+
+
+def test_task_stats_combine_visible_generation_and_oral_statuses(tmp_path: Path) -> None:
+    conn = analytics_connection(tmp_path, "analytics-stats.db")
+
+    employee_stats = studio_task_stats(conn, actor=actor("employee_1", "employee"), now=_NOW)
+
+    assert employee_stats.today_completed == 3
+    assert employee_stats.running == 2
+    assert employee_stats.queued == 1
+    assert employee_stats.needs_attention == 2
+    assert employee_stats.total_completed == 5
 
 
 def test_recent_works_sorted_scoped_and_capped(tmp_path: Path) -> None:
@@ -211,6 +311,7 @@ def test_recent_works_sorted_scoped_and_capped(tmp_path: Path) -> None:
         "t1",
         "t4",
         "t7-hidden",
+        "oral-succeeded",
         "t2",
         "t3",
     ]
@@ -223,12 +324,20 @@ def test_recent_works_sorted_scoped_and_capped(tmp_path: Path) -> None:
     assert first.completed_at == _TODAY
     # t1 有按秒计费的 RESERVE 记录 → 消耗 8 积分；无计费记录的成片为 null。
     assert first.cost_credits == 8
-    assert admin_view.recent_works[3].task_id == "t2"
-    assert admin_view.recent_works[3].cost_credits is None
+    oral = next(work for work in admin_view.recent_works if work.task_id == "oral-succeeded")
+    assert oral.task_kind == "oral"
+    assert oral.batch_id is None
+    assert oral.project_id is None
+    assert oral.cost_credits is None
 
     employee_view = studio_analytics(conn, actor=actor("employee_1", "employee"), now=_NOW, days=7)
     # 隐藏批次与他人的 p-2 任务都不出现。
-    assert [work.task_id for work in employee_view.recent_works] == ["t1", "t2", "t3"]
+    assert [work.task_id for work in employee_view.recent_works] == [
+        "t1",
+        "oral-succeeded",
+        "t2",
+        "t3",
+    ]
 
 
 def test_recent_works_cap_at_twenty(tmp_path: Path) -> None:
@@ -263,7 +372,8 @@ def test_recent_works_cap_at_twenty(tmp_path: Path) -> None:
 
     result = studio_analytics(conn, actor=actor("admin_1", "admin"), now=_NOW, days=7)
 
-    assert result.range_completed == 22
+    assert result.range_completed_outputs == 22
+    assert result.range_generation_batches == 1
     assert len(result.recent_works) == 20
     assert result.recent_works[0].task_id == "t-21"
 
@@ -280,7 +390,7 @@ def test_days_window_is_clamped(tmp_path: Path) -> None:
     assert ninety_days.range_days == 90
     assert len(ninety_days.daily) == 90
     # 30 天窗口外的 t9（08-30）在 90 天窗口内计入。
-    assert ninety_days.range_completed == 6
+    assert ninety_days.range_completed_outputs == 7
 
 
 def test_analytics_route_scopes_by_caller(tmp_path: Path, monkeypatch) -> None:
@@ -304,11 +414,14 @@ def test_analytics_route_scopes_by_caller(tmp_path: Path, monkeypatch) -> None:
         payload = response.json()
         assert payload["range_days"] == 7
         assert len(payload["daily"]) == 7
-        assert payload["range_completed"] == 3
-        assert payload["daily"][-1]["failed"] == 0
+        assert payload["range_completed_outputs"] == 4
+        assert payload["range_generation_batches"] == 2
+        daily = {item["day"]: item for item in payload["daily"]}
+        assert daily["2026-09-06"]["failed"] == 2
         works = payload["recent_works"]
         assert [work["task_id"] for work in works] == [
             "t1",
+            "oral-succeeded",
             "t2",
             "t3",
         ]

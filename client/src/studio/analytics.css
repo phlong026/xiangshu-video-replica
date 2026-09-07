@@ -5,10 +5,32 @@
   padding: 8px 18px 28px;
 }
 
+.analytics-heading {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+}
+
 .analytics-heading h1 {
   font-size: 28px;
   line-height: 1.15;
   margin: 0 0 14px;
+}
+
+.analytics-freshness {
+  align-items: center;
+  color: #8f9089;
+  display: flex;
+  font-size: 13px;
+  gap: 16px;
+  margin: -4px 0 14px;
+}
+
+.analytics-freshness .is-stale {
+  align-items: center;
+  color: #e3a36c;
+  display: inline-flex;
+  gap: 6px;
 }
 
 .analytics-filters {
@@ -76,7 +98,7 @@
 .analytics-metrics {
   display: grid;
   gap: 14px;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
   margin-bottom: 14px;
 }
 
@@ -414,7 +436,7 @@
   margin: 6px 0 0;
 }
 
-.analytics-trend-legend span {
+.analytics-page .analytics-trend-legend span {
   align-items: center;
   display: inline-flex;
   gap: 6px;
