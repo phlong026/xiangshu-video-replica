@@ -1288,6 +1288,8 @@ describe("视频生成（C2 独立创作）", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.useRealTimers();
+    api.getWallet.mockReset();
+    api.getWallet.mockRejectedValue(new Error("internal wallet unavailable"));
     api.getIndependentCapabilities.mockResolvedValue({
       extended_modes_enabled: true,
       t2v_enabled: true,
