@@ -484,7 +484,7 @@ describe("V1.4 workspace integration", () => {
       }
     });
 
-    it("自动保存已在途时显式保存复用同一范围的云写", async () => {
+    it("自动保存已在途时显式保存排队补写终态草稿", async () => {
       let resolveAutosave: (() => void) | undefined;
       live.persistCloudDraft.mockReturnValueOnce(
         new Promise<void>((resolve) => {
@@ -510,14 +510,14 @@ describe("V1.4 workspace integration", () => {
         expect(live.persistSavedScript).toHaveBeenCalledTimes(1);
         expect(live.persistCloudDraft).toHaveBeenCalledTimes(1);
         await act(async () => resolveAutosave?.());
-        expect(live.persistCloudDraft).toHaveBeenCalledTimes(1);
+        expect(live.persistCloudDraft).toHaveBeenCalledTimes(2);
         expect(screen.getAllByText(/已保存到我的文案/)).toHaveLength(1);
       } finally {
         vi.useRealTimers();
       }
     });
 
-    it("同范围自动保存已成功时显式保存不重复写云草稿", async () => {
+    it("同范围自动保存已成功时显式保存补写终态草稿", async () => {
       live.loadStudioData.mockResolvedValue(emptyStudioData);
       live.loadCloudDraft.mockResolvedValue(undefined);
       render(<StudioWorkspace currentUser={reviewUser} />);
@@ -535,8 +535,202 @@ describe("V1.4 workspace integration", () => {
         fireEvent.click(screen.getByRole("button", { name: "保存版本" }));
         await act(async () => Promise.resolve());
         expect(live.persistSavedScript).toHaveBeenCalledTimes(1);
-        expect(live.persistCloudDraft).toHaveBeenCalledTimes(1);
+        expect(live.persistCloudDraft).toHaveBeenCalledTimes(2);
         expect(screen.getAllByText(/已保存到我的文案/)).toHaveLength(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("自动保存后显式保存补齐终态来源且重挂载无需再次保存", async () => {
+      let storedDraft: ReturnType<typeof restoredDraft> | undefined;
+      live.persistCloudDraft.mockImplementation(async (draft) => {
+        storedDraft = structuredClone(
+          draft as ReturnType<typeof restoredDraft>,
+        );
+      });
+      live.loadCloudDraft.mockImplementation(async () =>
+        storedDraft ? { draft: structuredClone(storedDraft) } : undefined,
+      );
+      live.loadStudioData.mockResolvedValue(emptyStudioData);
+      const state = createState("copy");
+      state.draft.projectId = "project-source";
+      state.draft.sourceId = "source-video";
+      state.draft.sourceAssetId = "source-asset";
+      state.draft.ipId = "identity-source";
+      const view = render(
+        <StudioWorkspace currentUser={reviewUser} initialState={state} />,
+      );
+      await openCopyPage();
+      vi.useFakeTimers();
+      try {
+        fireEvent.change(screen.getByLabelText("二创文案"), {
+          target: { value: "需要补齐来源的正文" },
+        });
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(2_000);
+        });
+        fireEvent.click(screen.getByRole("button", { name: "保存版本" }));
+        await act(async () => Promise.resolve());
+
+        expect(live.persistCloudDraft).toHaveBeenCalledTimes(2);
+        expect(storedDraft).toMatchObject({
+          projectId: "project-source",
+          sourceId: "source-video",
+          sourceAssetId: "source-asset",
+          scriptEdited: false,
+          script: {
+            ipId: "identity-source",
+            sourceProjectId: "project-source",
+            sourceKind: "project",
+          },
+        });
+
+        vi.useRealTimers();
+        view.unmount();
+        render(<StudioWorkspace currentUser={reviewUser} />);
+        await openCopyPage();
+        await waitFor(() =>
+          expect(
+            (screen.getByLabelText("二创文案") as HTMLTextAreaElement).value,
+          ).toBe("需要补齐来源的正文"),
+        );
+        expect(live.loadDraftMaterials).toHaveBeenLastCalledWith(
+          expect.objectContaining({
+            projectId: "project-source",
+            sourceId: "source-video",
+            sourceAssetId: "source-asset",
+            scriptEdited: false,
+          }),
+        );
+        expect(live.persistCloudDraft).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("账号切换期间串行写入并只保留尚未开始的最新草稿", async () => {
+      let resolveFirst: (() => void) | undefined;
+      let resolveSecond: (() => void) | undefined;
+      live.persistCloudDraft
+        .mockReturnValueOnce(
+          new Promise<void>((resolve) => {
+            resolveFirst = resolve;
+          }),
+        )
+        .mockReturnValueOnce(
+          new Promise<void>((resolve) => {
+            resolveSecond = resolve;
+          }),
+        );
+      live.loadStudioData.mockResolvedValue(emptyStudioData);
+      live.loadCloudDraft.mockResolvedValue(undefined);
+      const accountA = { ...reviewUser, id: "account-a" };
+      const accountB = { ...reviewUser, id: "account-b" };
+      const view = render(<StudioWorkspace currentUser={accountA} />);
+      await openCopyPage();
+      vi.useFakeTimers();
+      try {
+        fireEvent.change(screen.getByLabelText("二创文案"), {
+          target: { value: "账号A第一版" },
+        });
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(2_000);
+        });
+        expect(live.persistCloudDraft).toHaveBeenCalledTimes(1);
+
+        view.rerender(<StudioWorkspace currentUser={accountB} />);
+        fireEvent.change(screen.getByLabelText("二创文案"), {
+          target: { value: "账号B待写版本" },
+        });
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(2_000);
+        });
+        expect(live.persistCloudDraft).toHaveBeenCalledTimes(1);
+
+        view.rerender(<StudioWorkspace currentUser={accountA} />);
+        fireEvent.change(screen.getByLabelText("二创文案"), {
+          target: { value: "账号A最终版本" },
+        });
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(2_000);
+          resolveFirst?.();
+          await Promise.resolve();
+        });
+        expect(live.persistCloudDraft).toHaveBeenCalledTimes(2);
+        expect(live.persistCloudDraft.mock.calls[1]?.[0]).toMatchObject({
+          script: { text: "账号A最终版本" },
+        });
+        expect(
+          live.persistCloudDraft.mock.calls.some(
+            ([draft]) =>
+              (draft as ReturnType<typeof restoredDraft>).script.text ===
+              "账号B待写版本",
+          ),
+        ).toBe(false);
+        await act(async () => resolveSecond?.());
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("复用的自动保存失败时提示草稿待同步并允许显式重试", async () => {
+      let rejectAutosave: ((cause: Error) => void) | undefined;
+      live.persistCloudDraft
+        .mockReturnValueOnce(
+          new Promise<void>((_resolve, reject) => {
+            rejectAutosave = reject;
+          }),
+        )
+        .mockResolvedValueOnce(undefined);
+      live.loadStudioData.mockResolvedValue(emptyStudioData);
+      live.loadCloudDraft.mockResolvedValue(undefined);
+      const state = createState("copy");
+      state.draft.projectId = "project-retry";
+      state.draft.sourceId = "source-retry";
+      state.draft.sourceAssetId = "asset-retry";
+      state.draft.ipId = "identity-retry";
+      render(<StudioWorkspace currentUser={reviewUser} initialState={state} />);
+      await openCopyPage();
+      vi.useFakeTimers();
+      try {
+        fireEvent.change(screen.getByLabelText("二创文案"), {
+          target: { value: "首次同步失败后重试" },
+        });
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(2_000);
+        });
+        fireEvent.click(screen.getByRole("button", { name: "保存版本" }));
+        await act(async () => rejectAutosave?.(new Error("offline")));
+
+        expect(live.persistCloudDraft).toHaveBeenCalledTimes(1);
+        expect(
+          screen.getByText(/版本已保存，但云端草稿同步失败/),
+        ).toBeInTheDocument();
+        expect(
+          screen.queryByText(/换设备登录也能找回/),
+        ).not.toBeInTheDocument();
+        expect(
+          screen.getByRole("button", { name: "按 IP 二创" }),
+        ).toBeDisabled();
+
+        fireEvent.click(screen.getByRole("button", { name: "保存版本" }));
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(0);
+        });
+        expect(live.persistCloudDraft).toHaveBeenCalledTimes(2);
+        expect(live.persistCloudDraft.mock.calls[1]?.[0]).toMatchObject({
+          projectId: "project-retry",
+          sourceId: "source-retry",
+          sourceAssetId: "asset-retry",
+          scriptEdited: false,
+          script: {
+            ipId: "identity-retry",
+            sourceProjectId: "project-retry",
+            sourceKind: "project",
+          },
+        });
+        expect(screen.getAllByText(/换设备登录也能找回/)).toHaveLength(1);
       } finally {
         vi.useRealTimers();
       }

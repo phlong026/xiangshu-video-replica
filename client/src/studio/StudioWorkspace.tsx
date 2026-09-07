@@ -94,6 +94,15 @@ type Props = ComponentProps<typeof WorkspaceShell> & {
   initialState?: StudioState;
 };
 
+type CloudDraftIntent = {
+  key: string;
+  draft: StudioDraft;
+  isCurrent: () => boolean;
+  completion: Promise<void>;
+  resolve: () => void;
+  reject: (cause: unknown) => void;
+};
+
 function mergeStudioAssets(
   current: StudioAsset[],
   incoming: StudioAsset[],
@@ -243,7 +252,8 @@ export function StudioWorkspace({
   const latestDraftRef = useRef(state.draft);
   const draftTouchedRef = useRef(false);
   const draftSaveTimerRef = useRef<number | undefined>(undefined);
-  const cloudDraftInFlightRef = useRef(new Map<string, Promise<void>>());
+  const cloudDraftActiveRef = useRef<CloudDraftIntent | undefined>(undefined);
+  const cloudDraftPendingRef = useRef<CloudDraftIntent | undefined>(undefined);
   const lastCloudDraftSuccessRef = useRef<string | undefined>(undefined);
   const saveOperationRef = useRef(0);
   const saveMountedRef = useRef(false);
@@ -283,26 +293,68 @@ export function StudioWorkspace({
     };
   }, [currentUser.id]);
   const persistCloudDraftForScope = useCallback(
-    (draft: StudioDraft, scope: string) => {
-      if (lastCloudDraftSuccessRef.current === scope) return Promise.resolve();
-      const existing = cloudDraftInFlightRef.current.get(scope);
-      if (existing) return existing;
-      const promise = persistCloudDraft(draft);
-      cloudDraftInFlightRef.current.set(scope, promise);
-      void promise.then(
-        () => {
-          if (cloudDraftInFlightRef.current.get(scope) === promise) {
-            cloudDraftInFlightRef.current.delete(scope);
-            lastCloudDraftSuccessRef.current = scope;
-          }
-        },
-        () => {
-          if (cloudDraftInFlightRef.current.get(scope) === promise) {
-            cloudDraftInFlightRef.current.delete(scope);
-          }
-        },
-      );
-      return promise;
+    (draft: StudioDraft, accountId: string, isCurrent: () => boolean) => {
+      const key = savedDraftScope(accountId, draft);
+      if (lastCloudDraftSuccessRef.current === key) return Promise.resolve();
+      if (cloudDraftActiveRef.current?.key === key) {
+        return cloudDraftActiveRef.current.completion;
+      }
+      if (cloudDraftPendingRef.current?.key === key) {
+        return cloudDraftPendingRef.current.completion;
+      }
+
+      let resolveIntent: (() => void) | undefined;
+      let rejectIntent: ((cause: unknown) => void) | undefined;
+      const completion = new Promise<void>((resolve, reject) => {
+        resolveIntent = resolve;
+        rejectIntent = reject;
+      });
+      const intent: CloudDraftIntent = {
+        key,
+        draft,
+        isCurrent,
+        completion,
+        resolve: () => resolveIntent?.(),
+        reject: (cause) => rejectIntent?.(cause),
+      };
+
+      const start = (next: CloudDraftIntent) => {
+        if (!next.isCurrent()) {
+          next.resolve();
+          return;
+        }
+        cloudDraftActiveRef.current = next;
+        void persistCloudDraft(next.draft).then(
+          () => {
+            lastCloudDraftSuccessRef.current = next.key;
+            next.resolve();
+            if (cloudDraftActiveRef.current === next) {
+              cloudDraftActiveRef.current = undefined;
+            }
+            const pending = cloudDraftPendingRef.current;
+            cloudDraftPendingRef.current = undefined;
+            if (pending) start(pending);
+          },
+          (cause) => {
+            next.reject(cause);
+            if (cloudDraftActiveRef.current === next) {
+              cloudDraftActiveRef.current = undefined;
+            }
+            const pending = cloudDraftPendingRef.current;
+            cloudDraftPendingRef.current = undefined;
+            pending?.reject(cause);
+          },
+        );
+      };
+
+      if (cloudDraftActiveRef.current) {
+        // 尚未开始的写入没有服务端副作用，只保留最新完整草稿。
+        cloudDraftPendingRef.current?.resolve();
+        cloudDraftPendingRef.current = intent;
+      } else {
+        start(intent);
+      }
+      return completion;
     },
     [],
   );
@@ -321,7 +373,14 @@ export function StudioWorkspace({
           expectedScope !== saveScopeRef.current
         )
           return;
-        void persistCloudDraftForScope(draft, expectedScope).catch(() => {
+        void persistCloudDraftForScope(draft, accountId, () =>
+          Boolean(
+            saveMountedRef.current &&
+              operation === saveOperationRef.current &&
+              accountId === saveAccountRef.current &&
+              expectedScope === saveScopeRef.current,
+          ),
+        ).catch(() => {
           if (
             saveMountedRef.current &&
             operation === saveOperationRef.current &&
@@ -1037,14 +1096,16 @@ export function StudioWorkspace({
       sourceProjectId: draft.projectId,
       sourceKind: draft.projectId ? ("project" as const) : ("manual" as const),
     };
-    const markSaved = () =>
+    const recordSavedVersion = (cloudSynced: boolean) =>
       setState((previous) => {
         if (savedDraftScope(accountId, previous.draft) !== expectedScope) {
           return previous;
         }
         return {
           ...previous,
-          draft: { ...previous.draft, scriptEdited: false },
+          draft: cloudSynced
+            ? { ...previous.draft, scriptEdited: false }
+            : previous.draft,
           savedScripts: [
             ...previous.savedScripts.filter((item) => item.id !== script.id),
             script,
@@ -1052,24 +1113,33 @@ export function StudioWorkspace({
         };
       });
     if (review) {
-      markSaved();
+      recordSavedVersion(true);
       notify("已保留在本次工作区，可继续切换页面。");
       return;
     }
     void persistSavedScript(script, draft.projectId, draft.ipId)
       .then(async () => {
         if (!isCurrentSave()) return;
-        await persistCloudDraftForScope(
-          {
-            ...draft,
-            script,
-            scriptEdited: false,
-          },
-          expectedScope,
-        ).catch(() => undefined);
+        try {
+          await persistCloudDraftForScope(
+            {
+              ...draft,
+              script,
+              scriptEdited: false,
+            },
+            accountId,
+            isCurrentSave,
+          );
+        } catch {
+          if (isCurrentSave()) {
+            recordSavedVersion(false);
+            notify("版本已保存，但云端草稿同步失败，请再次点击保存版本重试。");
+          }
+          return;
+        }
         if (!isCurrentSave()) return;
         draftTouchedRef.current = false;
-        markSaved();
+        recordSavedVersion(true);
         notify("已保存到我的文案，换设备登录也能找回。");
       })
       .catch(() => {
@@ -1080,10 +1150,21 @@ export function StudioWorkspace({
   };
   const confirmFinalDraft = () => {
     const script = { ...state.draft.script, confirmed: true };
+    const draft = { ...state.draft, script };
+    const accountId = currentUser.id;
+    const previousScope = savedDraftScope(accountId, state.draft);
+    const confirmedScope = savedDraftScope(accountId, draft);
     patchDraft({ script });
     if (review) return;
     // 立即持久化终稿（不等防抖），并软发布到项目脚本版本。
-    void persistCloudDraft({ ...state.draft, script }).catch(() => {});
+    void persistCloudDraftForScope(draft, accountId, () =>
+      Boolean(
+        saveMountedRef.current &&
+          saveAccountRef.current === accountId &&
+          (saveScopeRef.current === previousScope ||
+            saveScopeRef.current === confirmedScope),
+      ),
+    ).catch(() => {});
     if (!state.draft.projectId) return;
     void publishScriptVersion(state.draft.projectId, script.text).then(
       (published) => {
