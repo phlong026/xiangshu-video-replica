@@ -597,6 +597,16 @@ export function ViralPage() {
   const platformKey: ViralPlatform =
     platform === "抖音" ? "douyin" : "wechat_channels";
   const sortKey = sort === "最新" ? "latest" : "hot";
+  const paginationContextKey = `${scope}:${platformKey}:${sortKey}:${category}`;
+  const paginationContextRef = useRef(paginationContextKey);
+  const paginationSnapshotRef = useRef<
+    | {
+        contextKey: string;
+        nextCursor?: string;
+        hasMore: boolean;
+      }
+    | undefined
+  >(undefined);
 
   const shown = useMemo(
     () =>
@@ -629,6 +639,12 @@ export function ViralPage() {
   const statisticsError = useViralStatistics(current, !review);
 
   useEffect(() => {
+    if (paginationContextRef.current === paginationContextKey) return;
+    paginationContextRef.current = paginationContextKey;
+    paginationSnapshotRef.current = undefined;
+  }, [paginationContextKey]);
+
+  useEffect(() => {
     if (queryLifecycleRef.current === query) return;
     queryLifecycleRef.current = query;
     listRequestRef.current += 1;
@@ -636,11 +652,16 @@ export function ViralPage() {
     setListLoading(false);
     setLoadingMore(false);
     setListError(undefined);
-    setNextCursor(undefined);
-    setHasMore(false);
-  }, [query]);
+    const snapshot = paginationSnapshotRef.current;
+    if (!query && snapshot?.contextKey === paginationContextKey) {
+      setNextCursor(snapshot.nextCursor);
+      setHasMore(snapshot.hasMore);
+    } else {
+      setNextCursor(undefined);
+      setHasMore(false);
+    }
+  }, [paginationContextKey, query]);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: 分类切换必须作废旧游标并重读首屏，后端仍按全分类分页。
   useEffect(() => {
     if (review || scope !== "all") return;
     const requestId = ++listRequestRef.current;
@@ -657,8 +678,15 @@ export function ViralPage() {
         if (cancelled || requestId !== listRequestRef.current) return;
         const incoming = result.items.map(studioVideoFromViral);
         setServerCategories(result.categories);
-        setNextCursor(result.nextCursor ?? undefined);
-        setHasMore(Boolean(result.hasMore && result.nextCursor));
+        const confirmedNextCursor = result.nextCursor ?? undefined;
+        const confirmedHasMore = Boolean(result.hasMore && result.nextCursor);
+        paginationSnapshotRef.current = {
+          contextKey: paginationContextKey,
+          nextCursor: confirmedNextCursor,
+          hasMore: confirmedHasMore,
+        };
+        setNextCursor(confirmedNextCursor);
+        setHasMore(confirmedHasMore);
         setRefreshStatus(
           result.refreshing
             ? "正在采集爆款视频，当前先展示已缓存内容…"
@@ -704,9 +732,8 @@ export function ViralPage() {
     return () => {
       cancelled = true;
     };
-  }, [category, platformKey, review, scope, sortKey, updateData]);
+  }, [paginationContextKey, platformKey, review, scope, sortKey, updateData]);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: 收藏分类切换也必须重建分页生命周期。
   useEffect(() => {
     if (review || scope !== "favorites") return;
     const requestId = ++listRequestRef.current;
@@ -737,8 +764,15 @@ export function ViralPage() {
         setServerCategories([
           ...new Set(result.items.map((item) => item.category).filter(Boolean)),
         ]);
-        setNextCursor(result.nextCursor ?? undefined);
-        setHasMore(Boolean(result.hasMore && result.nextCursor));
+        const confirmedNextCursor = result.nextCursor ?? undefined;
+        const confirmedHasMore = Boolean(result.hasMore && result.nextCursor);
+        paginationSnapshotRef.current = {
+          contextKey: paginationContextKey,
+          nextCursor: confirmedNextCursor,
+          hasMore: confirmedHasMore,
+        };
+        setNextCursor(confirmedNextCursor);
+        setHasMore(confirmedHasMore);
         updateData((currentData) => ({
           ...currentData,
           videos: [
@@ -760,7 +794,7 @@ export function ViralPage() {
     return () => {
       cancelled = true;
     };
-  }, [category, platformKey, review, scope, updateData]);
+  }, [paginationContextKey, platformKey, review, scope, updateData]);
 
   const loadMore = useCallback(async () => {
     if (review) {
@@ -791,8 +825,15 @@ export function ViralPage() {
       )
         return;
       const incoming = result.items.map(studioVideoFromViral);
-      setNextCursor(result.nextCursor ?? undefined);
-      setHasMore(Boolean(result.hasMore && result.nextCursor));
+      const confirmedNextCursor = result.nextCursor ?? undefined;
+      const confirmedHasMore = Boolean(result.hasMore && result.nextCursor);
+      paginationSnapshotRef.current = {
+        contextKey: paginationContextKey,
+        nextCursor: confirmedNextCursor,
+        hasMore: confirmedHasMore,
+      };
+      setNextCursor(confirmedNextCursor);
+      setHasMore(confirmedHasMore);
       setFavoriteKeys((currentKeys) => {
         const nextKeys = new Set(currentKeys);
         result.items.forEach((item) => {
@@ -838,6 +879,7 @@ export function ViralPage() {
   }, [
     hasMore,
     nextCursor,
+    paginationContextKey,
     platformKey,
     query,
     review,
@@ -847,7 +889,7 @@ export function ViralPage() {
     updateData,
   ]);
 
-  const canLoadMore = review ? visibleCount < shown.length : hasMore;
+  const canLoadMore = review ? visibleCount < shown.length : !query && hasMore;
   useEffect(() => {
     const node = sentinelRef.current;
     if (!node || !canLoadMore) return;

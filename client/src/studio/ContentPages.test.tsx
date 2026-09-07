@@ -1241,6 +1241,161 @@ describe("V1.4 内容与运营页面", () => {
     expect(listViralVideos).toHaveBeenCalledTimes(2);
   });
 
+  it("清空本地搜索后恢复已确认游标并继续下一页", async () => {
+    const base = studio({ review: false });
+    listViralVideos
+      .mockResolvedValueOnce({
+        platform: "douyin",
+        sort: "hot",
+        categories: ["建房预算"],
+        items: Array.from({ length: 12 }, (_, index) => viralItem(index + 1)),
+        fetchedAt: "2026-09-07T12:00:00Z",
+        hasMore: true,
+        nextCursor: "cursor-2",
+        total: 25,
+      })
+      .mockResolvedValueOnce({
+        platform: "douyin",
+        sort: "hot",
+        categories: ["建房预算"],
+        items: [
+          viralItem(12),
+          ...Array.from({ length: 11 }, (_, index) =>
+            viralItem(index + 13, {
+              title: index === 0 ? "第二页庭院案例" : `乡墅参考 ${index + 13}`,
+            }),
+          ),
+        ],
+        fetchedAt: "2026-09-07T12:00:00Z",
+        hasMore: true,
+        nextCursor: "cursor-3",
+        total: 25,
+      })
+      .mockResolvedValueOnce({
+        platform: "douyin",
+        sort: "hot",
+        categories: ["建房预算"],
+        items: [viralItem(24), viralItem(25)],
+        fetchedAt: "2026-09-07T12:00:00Z",
+        hasMore: false,
+        nextCursor: null,
+        total: 25,
+      });
+    render(
+      <StatefulViralPage
+        value={{ ...base, data: { ...base.data, videos: [] } }}
+      />,
+    );
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "加载更多视频" }),
+    );
+    expect(await screen.findByText("第二页庭院案例")).toBeInTheDocument();
+    fireEvent.change(screen.getByRole("textbox", { name: "搜索视频标题" }), {
+      target: { value: "庭院" },
+    });
+    expect(screen.getByText("第二页庭院案例")).toBeInTheDocument();
+    expect(listViralVideos).toHaveBeenCalledTimes(2);
+    fireEvent.change(screen.getByRole("textbox", { name: "搜索视频标题" }), {
+      target: { value: "参考" },
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: "搜索视频标题" }), {
+      target: { value: "庭院" },
+    });
+    expect(screen.getByText("第二页庭院案例")).toBeInTheDocument();
+    expect(listViralVideos).toHaveBeenCalledTimes(2);
+
+    fireEvent.change(screen.getByRole("textbox", { name: "搜索视频标题" }), {
+      target: { value: "" },
+    });
+    fireEvent.click(
+      await screen.findByRole("button", { name: "加载更多视频" }),
+    );
+
+    expect(await screen.findByText("乡墅参考 25")).toBeInTheDocument();
+    expect(listViralVideos).toHaveBeenLastCalledWith("douyin", "hot", {
+      limit: 12,
+      cursor: "cursor-3",
+    });
+    expect(screen.getAllByText("乡墅参考 12")).toHaveLength(1);
+  });
+
+  it("搜索期间切换平台只恢复新平台的已确认游标", async () => {
+    const base = studio({ review: false });
+    fetchViralVideoStatistics.mockResolvedValue({ items: [] });
+    listViralVideos
+      .mockResolvedValueOnce({
+        platform: "douyin",
+        sort: "hot",
+        categories: ["建房预算"],
+        items: Array.from({ length: 12 }, (_, index) => viralItem(index + 1)),
+        fetchedAt: "2026-09-07T12:00:00Z",
+        hasMore: true,
+        nextCursor: "douyin-cursor-2",
+        total: 24,
+      })
+      .mockResolvedValueOnce({
+        platform: "wechat_channels",
+        sort: "hot",
+        categories: ["庭院案例"],
+        items: [
+          viralItem(41, {
+            platform: "wechat_channels",
+            category: "庭院案例",
+            title: "视频号庭院首屏",
+          }),
+        ],
+        fetchedAt: "2026-09-07T12:00:01Z",
+        hasMore: true,
+        nextCursor: "wechat-cursor-2",
+        total: 2,
+      })
+      .mockResolvedValueOnce({
+        platform: "wechat_channels",
+        sort: "hot",
+        categories: ["庭院案例"],
+        items: [
+          viralItem(42, {
+            platform: "wechat_channels",
+            category: "庭院案例",
+            title: "视频号庭院第二页",
+          }),
+        ],
+        fetchedAt: "2026-09-07T12:00:01Z",
+        hasMore: false,
+        nextCursor: null,
+        total: 2,
+      });
+    render(
+      <StatefulViralPage
+        value={{ ...base, data: { ...base.data, videos: [] } }}
+      />,
+    );
+
+    await screen.findByRole("button", { name: "加载更多视频" });
+    fireEvent.change(screen.getByRole("textbox", { name: "搜索视频标题" }), {
+      target: { value: "庭院" },
+    });
+    fireEvent.click(screen.getByRole("tab", { name: /视频号/ }));
+    expect(await screen.findByText("视频号庭院首屏")).toBeInTheDocument();
+    fireEvent.change(screen.getByRole("textbox", { name: "搜索视频标题" }), {
+      target: { value: "" },
+    });
+    fireEvent.click(
+      await screen.findByRole("button", { name: "加载更多视频" }),
+    );
+
+    expect(await screen.findByText("视频号庭院第二页")).toBeInTheDocument();
+    expect(listViralVideos).toHaveBeenLastCalledWith("wechat_channels", "hot", {
+      limit: 12,
+      cursor: "wechat-cursor-2",
+    });
+    expect(listViralVideos).not.toHaveBeenCalledWith("douyin", "hot", {
+      limit: 12,
+      cursor: "douyin-cursor-2",
+    });
+  });
+
   it("修改本地搜索词会丢弃挂起旧页且不继续旧游标", async () => {
     const base = studio({ review: false });
     let resolveOldPage:
