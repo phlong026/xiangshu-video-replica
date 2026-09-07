@@ -194,12 +194,15 @@ def _merge_cached_statistics_metadata(
     return merged
 
 
-def upsert_viral_videos(conn: BusinessConnection, videos: list[ViralVideo]) -> None:
+def upsert_viral_videos(
+    conn: BusinessConnection, videos: list[ViralVideo], *, commit: bool = True
+) -> None:
     """按 (platform, video_id) 去重写入/刷新条目."""
     with _NATIVE_JSON_RMW_LOCK:
         for video in _merge_cached_statistics_metadata(conn, videos):
             conn.execute(_UPSERT_SQL, _video_row(video))
-        conn.commit()
+        if commit:
+            conn.commit()
 
 
 def list_viral_videos(conn: BusinessConnection, *, platform: str, sort: str) -> list[ViralVideo]:

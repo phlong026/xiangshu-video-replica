@@ -108,6 +108,15 @@ class StubProbe:
         return VideoMetadata(duration_seconds=self.duration)
 
 
+@pytest.fixture()
+def forbid_explicit_transaction_control(monkeypatch: pytest.MonkeyPatch) -> None:
+    def forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("explicit commit/rollback is forbidden inside a fenced transaction")
+
+    monkeypatch.setattr(BusinessConnection, "commit", forbidden)
+    monkeypatch.setattr(BusinessConnection, "rollback", forbidden)
+
+
 def test_douyidou_signature_and_media_mapping_match_the_gateway_contract() -> None:
     transport = StubTransport(
         b'{"code":0,"data":{"aweme_id":"7345678901234567890",'
@@ -308,7 +317,9 @@ def test_link_resolution_openapi_locks_idempotency_purpose_and_errors() -> None:
 
 
 def test_resolved_link_becomes_existing_viral_import_source(
-    client: TestClient, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    client: TestClient,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import app.viral_import as import_domain
     import app.viral_import_routes as routes
@@ -436,6 +447,41 @@ def test_resolved_link_becomes_existing_viral_import_source(
         )
 
 
+def test_link_resolution_relies_on_fenced_transaction_boundaries(
+    client: TestClient,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    forbid_explicit_transaction_control: None,
+) -> None:
+    import app.viral_import_routes as routes
+
+    resolver = StubResolver(_resolved())
+    monkeypatch.setattr(routes, "douyidou_link_client_from_settings", lambda conn: resolver)
+    monkeypatch.setattr(
+        routes,
+        "get_media_storage",
+        lambda conn: FakeStorageAdapter(provider="fake", bucket="private"),
+    )
+    monkeypatch.setattr(routes, "preflight_resolved_media", lambda *args, **kwargs: None)
+
+    response = client.post(
+        "/api/viral/link-resolutions",
+        headers={"X-Dev-User-Id": "employee_1", "Idempotency-Key": "fenced-success"},
+        json={"url": "https://v.douyin.com/fenced/", "purpose": "replica"},
+    )
+
+    assert response.status_code == 200
+    assert len(resolver.calls) == 1
+    with sqlite3.connect(db_path) as conn:
+        assert (
+            conn.execute(
+                "SELECT status FROM viral_link_resolution_receipts WHERE idempotency_key = ?",
+                ("fenced-success",),
+            ).fetchone()[0]
+            == "SUCCEEDED"
+        )
+
+
 def test_uncertain_resolution_receipt_blocks_another_paid_call(
     client: TestClient, db_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -469,7 +515,9 @@ def test_uncertain_resolution_receipt_blocks_another_paid_call(
 
 
 def test_concurrent_same_key_calls_provider_once(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    forbid_explicit_transaction_control: None,
 ) -> None:
     import app.viral_import_routes as routes
 
@@ -537,7 +585,10 @@ def _insert_expired_link_receipt(
 
 
 def test_expired_prepared_receipt_is_safely_claimed_once_after_restart(
-    client: TestClient, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    client: TestClient,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    forbid_explicit_transaction_control: None,
 ) -> None:
     import app.viral_import_routes as routes
 
@@ -562,7 +613,10 @@ def test_expired_prepared_receipt_is_safely_claimed_once_after_restart(
 
 
 def test_expired_request_sent_receipt_becomes_uncertain_without_paid_retry(
-    client: TestClient, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    client: TestClient,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    forbid_explicit_transaction_control: None,
 ) -> None:
     import app.viral_import_routes as routes
 
@@ -590,7 +644,10 @@ def test_expired_request_sent_receipt_becomes_uncertain_without_paid_retry(
 
 
 def test_provider_success_then_process_crash_never_repeats_paid_request(
-    client: TestClient, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    client: TestClient,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    forbid_explicit_transaction_control: None,
 ) -> None:
     import app.viral_import_routes as routes
 

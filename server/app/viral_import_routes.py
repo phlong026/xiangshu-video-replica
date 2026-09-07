@@ -138,7 +138,6 @@ def _claim_link_receipt(
             """,
             (row["id"],),
         )
-    conn.commit()
     current = conn.execute(
         "SELECT * FROM viral_link_resolution_receipts WHERE id = %s", (row["id"],)
     ).fetchone()
@@ -155,7 +154,6 @@ def _mark_link_request_sent(conn: BusinessConnection, *, receipt_id: str, lease_
         (receipt_id, lease_owner),
     )
     if updated.rowcount != 1:
-        conn.rollback()
         raise HTTPException(
             status_code=409,
             detail={
@@ -163,7 +161,6 @@ def _mark_link_request_sent(conn: BusinessConnection, *, receipt_id: str, lease_
                 "message": "该视频链接正在解析，请使用原请求稍后重试。",
             },
         )
-    conn.commit()
 
 
 def _receipt_replay(row: Any) -> ViralLinkResolutionResponse:
@@ -209,7 +206,6 @@ def _record_link_failure(
         """,
         (status_value, error.status_code, error.code, error.message, receipt_id),
     )
-    conn.commit()
 
 
 def _resolved_video(resolved: ResolvedViralLink) -> ViralVideo:
@@ -341,31 +337,34 @@ def resolve_viral_link(
     try:
         normalized_url = normalize_supported_link(request.url)
         with db.write() as (conn, actor):
-            require_not_auditor(
-                conn,
-                actor=actor,
-                action="viral.link.resolve",
-                entity_type="viral_link",
-                entity_id="douyin",
-            )
-            receipt, created = _claim_link_receipt(
-                conn,
-                owner_user_id=actor.id,
-                idempotency_key=key,
-                normalized_url=normalized_url,
-                purpose=request.purpose,
-            )
+            with conn:
+                require_not_auditor(
+                    conn,
+                    actor=actor,
+                    action="viral.link.resolve",
+                    entity_type="viral_link",
+                    entity_id="douyin",
+                )
+                receipt, created = _claim_link_receipt(
+                    conn,
+                    owner_user_id=actor.id,
+                    idempotency_key=key,
+                    normalized_url=normalized_url,
+                    purpose=request.purpose,
+                )
             if not created:
                 return _receipt_replay(receipt)
-            resolver = douyidou_link_client_from_settings(conn)
+            with conn:
+                resolver = douyidou_link_client_from_settings(conn)
         with db.write() as (conn, sending_actor):
-            if sending_actor.id != actor.id:
-                raise HTTPException(status_code=401, detail={"code": "SESSION_REPLACED"})
-            _mark_link_request_sent(
-                conn,
-                receipt_id=str(receipt["id"]),
-                lease_owner=str(receipt["lease_owner"]),
-            )
+            with conn:
+                if sending_actor.id != actor.id:
+                    raise HTTPException(status_code=401, detail={"code": "SESSION_REPLACED"})
+                _mark_link_request_sent(
+                    conn,
+                    receipt_id=str(receipt["id"]),
+                    lease_owner=str(receipt["lease_owner"]),
+                )
         resolved = resolver.resolve(normalized_url, purpose=request.purpose)
         with db.write() as (conn, media_actor):
             if media_actor.id != actor.id:
@@ -375,7 +374,8 @@ def resolve_viral_link(
     except ViralLinkError as exc:
         if "receipt" in locals():
             with db.write() as (conn, _actor):
-                _record_link_failure(conn, receipt_id=str(receipt["id"]), error=exc)
+                with conn:
+                    _record_link_failure(conn, receipt_id=str(receipt["id"]), error=exc)
         raise HTTPException(
             status_code=exc.status_code,
             detail={"code": exc.code, "message": exc.message},
@@ -392,32 +392,31 @@ def resolve_viral_link(
         importIdempotencyKey=import_key,
     )
     with db.write() as (conn, completed_actor):
-        if completed_actor.id != actor.id:
-            raise HTTPException(status_code=401, detail={"code": "SESSION_REPLACED"})
-        updated = conn.execute(
-            """
-            UPDATE viral_link_resolution_receipts
-            SET status = 'SUCCEEDED', response_json = %s,
-                completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-            WHERE id = %s AND status = 'REQUEST_SENT' AND lease_owner = %s
-            """,
-            (
-                response.model_dump_json(by_alias=True),
-                receipt["id"],
-                receipt["lease_owner"],
-            ),
-        )
-        if updated.rowcount != 1:
-            conn.rollback()
-            raise HTTPException(
-                status_code=503,
-                detail={
-                    "code": "VIRAL_LINK_SUBMISSION_UNCERTAIN",
-                    "message": "视频链接解析结果未知，请上传 MP4/MOV 文件。",
-                },
+        with conn:
+            if completed_actor.id != actor.id:
+                raise HTTPException(status_code=401, detail={"code": "SESSION_REPLACED"})
+            updated = conn.execute(
+                """
+                UPDATE viral_link_resolution_receipts
+                SET status = 'SUCCEEDED', response_json = %s,
+                    completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s AND status = 'REQUEST_SENT' AND lease_owner = %s
+                """,
+                (
+                    response.model_dump_json(by_alias=True),
+                    receipt["id"],
+                    receipt["lease_owner"],
+                ),
             )
-        upsert_viral_videos(conn, [video])
-        conn.commit()
+            if updated.rowcount != 1:
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "code": "VIRAL_LINK_SUBMISSION_UNCERTAIN",
+                        "message": "视频链接解析结果未知，请上传 MP4/MOV 文件。",
+                    },
+                )
+            upsert_viral_videos(conn, [video], commit=False)
     return response
 
 

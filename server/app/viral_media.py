@@ -241,6 +241,9 @@ def _resolve_public_http_url(url: str) -> tuple[str, str, int, str]:
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
     except ValueError as exc:
         raise ViralMediaError("媒体地址端口无效") from exc
+    expected_port = 443 if parsed.scheme == "https" else 80
+    if port != expected_port:
+        raise ViralMediaError("媒体地址端口不受支持")
     try:
         addresses = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
     except socket.gaierror as exc:

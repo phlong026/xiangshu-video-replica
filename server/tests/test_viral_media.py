@@ -517,6 +517,49 @@ def test_url_fetcher_revalidates_and_pins_each_redirect(
     ]
 
 
+@pytest.mark.parametrize(
+    "url",
+    ("http://media.example:8080/video.mp4", "https://media.example:8443/video.mp4"),
+)
+def test_url_fetcher_rejects_nonstandard_initial_ports(
+    url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        viral_media.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [(2, 1, 6, "", ("93.184.216.34", 443))],
+    )
+
+    with pytest.raises(ViralMediaError, match="端口"):
+        UrlFetcher(
+            connection_factory=lambda *args: (_ for _ in ()).throw(
+                AssertionError("nonstandard port must be rejected before connection")
+            )
+        ).fetch(url)
+
+
+def test_url_fetcher_rejects_redirect_to_nonstandard_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        viral_media.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [(2, 1, 6, "", ("93.184.216.34", 443))],
+    )
+    connections = 0
+
+    def connect(*args: object):
+        nonlocal connections
+        connections += 1
+        return _PinnedConnection(
+            _PinnedResponse(302, location="https://second.example:8443/final.mp4")
+        )
+
+    with pytest.raises(ViralMediaError, match="端口"):
+        UrlFetcher(connection_factory=connect).fetch("https://first.example/start.mp4")
+    assert connections == 1
+
+
 def test_url_fetcher_rejects_mixed_public_and_private_dns_answers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
