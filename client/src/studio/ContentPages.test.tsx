@@ -1198,12 +1198,52 @@ describe("V1.4 内容与运营页面", () => {
     expect(screen.queryByText("乡墅参考 99")).toBeNull();
   });
 
-  it("修改本地搜索词会重置分页并丢弃旧游标的迟到结果", async () => {
+  it("本地搜索保留已加载第二页且不发起新网络请求", async () => {
+    const base = studio({ review: false });
+    listViralVideos
+      .mockResolvedValueOnce({
+        platform: "douyin",
+        sort: "hot",
+        categories: ["建房预算"],
+        items: Array.from({ length: 12 }, (_, index) => viralItem(index + 1)),
+        fetchedAt: "2026-09-07T12:00:00Z",
+        hasMore: true,
+        nextCursor: "cursor-2",
+        total: 13,
+      })
+      .mockResolvedValueOnce({
+        platform: "douyin",
+        sort: "hot",
+        categories: ["建房预算"],
+        items: [viralItem(13, { title: "只在第二页的庭院案例" })],
+        fetchedAt: "2026-09-07T12:00:00Z",
+        hasMore: false,
+        nextCursor: null,
+        total: 13,
+      });
+    render(
+      <StatefulViralPage
+        value={{ ...base, data: { ...base.data, videos: [] } }}
+      />,
+    );
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "加载更多视频" }),
+    );
+    expect(await screen.findByText("只在第二页的庭院案例")).toBeInTheDocument();
+    expect(listViralVideos).toHaveBeenCalledTimes(2);
+
+    fireEvent.change(screen.getByRole("textbox", { name: "搜索视频标题" }), {
+      target: { value: "庭院" },
+    });
+
+    expect(screen.getByText("只在第二页的庭院案例")).toBeInTheDocument();
+    expect(listViralVideos).toHaveBeenCalledTimes(2);
+  });
+
+  it("修改本地搜索词会丢弃挂起旧页且不继续旧游标", async () => {
     const base = studio({ review: false });
     let resolveOldPage:
-      | ((value: Awaited<ReturnType<typeof listViralVideos>>) => void)
-      | undefined;
-    let resolveNewPage:
       | ((value: Awaited<ReturnType<typeof listViralVideos>>) => void)
       | undefined;
     listViralVideos
@@ -1221,21 +1261,6 @@ describe("V1.4 内容与运营页面", () => {
         new Promise((resolve) => {
           resolveOldPage = resolve;
         }),
-      )
-      .mockResolvedValueOnce({
-        platform: "douyin",
-        sort: "hot",
-        categories: ["建房预算"],
-        items: [viralItem(21, { title: "庭院搜索结果" })],
-        fetchedAt: "2026-09-07T12:00:00Z",
-        hasMore: true,
-        nextCursor: "search-cursor-2",
-        total: 13,
-      })
-      .mockReturnValueOnce(
-        new Promise((resolve) => {
-          resolveNewPage = resolve;
-        }),
       );
     render(
       <StatefulViralPage
@@ -1250,16 +1275,8 @@ describe("V1.4 内容与运营页面", () => {
       target: { value: "庭院" },
     });
     await waitFor(() =>
-      expect(listViralVideos).toHaveBeenLastCalledWith("douyin", "hot", {
-        limit: 12,
-      }),
+      expect(screen.queryByRole("button", { name: "正在加载…" })).toBeNull(),
     );
-    expect(await screen.findByText("庭院搜索结果")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "加载更多视频" }));
-    expect(listViralVideos).toHaveBeenLastCalledWith("douyin", "hot", {
-      limit: 12,
-      cursor: "search-cursor-2",
-    });
     resolveOldPage?.({
       platform: "douyin",
       sort: "hot",
@@ -1273,19 +1290,8 @@ describe("V1.4 内容与运营页面", () => {
     await Promise.resolve();
 
     expect(screen.queryByText("庭院旧页")).toBeNull();
-    expect(screen.getByRole("button", { name: "正在加载…" })).toBeDisabled();
-    resolveNewPage?.({
-      platform: "douyin",
-      sort: "hot",
-      categories: ["建房预算"],
-      items: [viralItem(22, { title: "庭院新页" })],
-      fetchedAt: "2026-09-07T12:00:00Z",
-      hasMore: false,
-      nextCursor: null,
-      total: 13,
-    });
-    expect(await screen.findByText("庭院新页")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "加载更多视频" })).toBeNull();
+    expect(listViralVideos).toHaveBeenCalledTimes(2);
     expect(listViralVideos).not.toHaveBeenCalledWith("douyin", "hot", {
       limit: 12,
       cursor: "cursor-3",

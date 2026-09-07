@@ -592,6 +592,7 @@ export function ViralPage() {
   const listRequestRef = useRef(0);
   const loadingMoreRef = useRef(false);
   const queryRef = useRef(query);
+  const queryLifecycleRef = useRef(query);
   queryRef.current = query;
   const platformKey: ViralPlatform =
     platform === "抖音" ? "douyin" : "wechat_channels";
@@ -627,7 +628,19 @@ export function ViralPage() {
   const current = review ? shown.slice(0, visibleCount) : shown;
   const statisticsError = useViralStatistics(current, !review);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: 分类和本地搜索变化必须作废旧游标并重读首屏，后端仍按全分类分页。
+  useEffect(() => {
+    if (queryLifecycleRef.current === query) return;
+    queryLifecycleRef.current = query;
+    listRequestRef.current += 1;
+    loadingMoreRef.current = false;
+    setListLoading(false);
+    setLoadingMore(false);
+    setListError(undefined);
+    setNextCursor(undefined);
+    setHasMore(false);
+  }, [query]);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 分类切换必须作废旧游标并重读首屏，后端仍按全分类分页。
   useEffect(() => {
     if (review || scope !== "all") return;
     const requestId = ++listRequestRef.current;
@@ -691,9 +704,9 @@ export function ViralPage() {
     return () => {
       cancelled = true;
     };
-  }, [category, platformKey, query, review, scope, sortKey, updateData]);
+  }, [category, platformKey, review, scope, sortKey, updateData]);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: 收藏分类和本地搜索变化也必须重建分页生命周期。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 收藏分类切换也必须重建分页生命周期。
   useEffect(() => {
     if (review || scope !== "favorites") return;
     const requestId = ++listRequestRef.current;
@@ -747,7 +760,7 @@ export function ViralPage() {
     return () => {
       cancelled = true;
     };
-  }, [category, platformKey, query, review, scope, updateData]);
+  }, [category, platformKey, review, scope, updateData]);
 
   const loadMore = useCallback(async () => {
     if (review) {
