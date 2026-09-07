@@ -396,7 +396,7 @@ function ViralStatsRow({ video }: { video: StudioVideo }) {
   );
 }
 
-function ViralFavoriteButton({
+export function ViralFavoriteButton({
   video,
   savedFromServer,
   onSavedChange,
@@ -420,7 +420,9 @@ function ViralFavoriteButton({
     operationRef.current += 1;
   }
   const saving = Boolean(
-    savingOperation && savingOperation.accountId === user.id,
+    savingOperation &&
+      savingOperation.accountId === user.id &&
+      savingOperation.operationId === operationRef.current,
   );
   useEffect(() => {
     if (savedFromServer !== undefined) setSaved(savedFromServer);
@@ -644,6 +646,22 @@ export function ViralPage() {
   const sortKey = sort === "最新" ? "latest" : "hot";
   const paginationContextKey = `${accountId}:${scope}:${platformKey}:${sortKey}:${category}`;
   const paginationContextKeyRef = useRef(paginationContextKey);
+  const paginationOperationRef = useRef(0);
+  const activePaginationContextRef = useRef({
+    key: `${paginationContextKey}:${listReloadRevision}`,
+    operationId: 0,
+  });
+  const renderedPaginationContextKey = `${paginationContextKey}:${listReloadRevision}`;
+  if (activePaginationContextRef.current.key !== renderedPaginationContextKey) {
+    activePaginationContextRef.current = {
+      key: renderedPaginationContextKey,
+      operationId: ++paginationOperationRef.current,
+    };
+  }
+  const renderedPaginationContext = activePaginationContextRef.current;
+  const confirmedPaginationContextRef = useRef<
+    typeof renderedPaginationContext | undefined
+  >(undefined);
   const paginationSnapshotsRef = useRef(
     new Map<string, { nextCursor?: string; hasMore: boolean }>(),
   );
@@ -704,6 +722,7 @@ export function ViralPage() {
 
   useEffect(() => {
     if (review || scope !== "all") return;
+    const requestContext = renderedPaginationContext;
     const requestId = ++listRequestRef.current;
     const requestReloadRevision = listReloadRevision;
     loadingMoreRef.current = false;
@@ -720,6 +739,7 @@ export function ViralPage() {
           cancelled ||
           requestId !== listRequestRef.current ||
           requestReloadRevision !== listReloadRevisionRef.current ||
+          requestContext !== activePaginationContextRef.current ||
           paginationContextKey !== paginationContextKeyRef.current
         )
           return;
@@ -727,6 +747,7 @@ export function ViralPage() {
         setServerCategories(result.categories);
         const confirmedNextCursor = result.nextCursor ?? undefined;
         const confirmedHasMore = Boolean(result.hasMore && result.nextCursor);
+        confirmedPaginationContextRef.current = requestContext;
         paginationSnapshotsRef.current.set(paginationContextKey, {
           nextCursor: confirmedNextCursor,
           hasMore: confirmedHasMore,
@@ -772,6 +793,7 @@ export function ViralPage() {
           !cancelled &&
           requestId === listRequestRef.current &&
           requestReloadRevision === listReloadRevisionRef.current &&
+          requestContext === activePaginationContextRef.current &&
           paginationContextKey === paginationContextKeyRef.current
         ) {
           setListError("视频列表暂时无法更新，已保留当前内容");
@@ -782,6 +804,7 @@ export function ViralPage() {
           !cancelled &&
           requestId === listRequestRef.current &&
           requestReloadRevision === listReloadRevisionRef.current &&
+          requestContext === activePaginationContextRef.current &&
           paginationContextKey === paginationContextKeyRef.current
         ) {
           setListLoading(false);
@@ -795,6 +818,7 @@ export function ViralPage() {
     paginationContextKey,
     platformKey,
     review,
+    renderedPaginationContext,
     scope,
     sortKey,
     updateData,
@@ -802,6 +826,7 @@ export function ViralPage() {
 
   useEffect(() => {
     if (review || scope !== "favorites") return;
+    const requestContext = renderedPaginationContext;
     const requestId = ++listRequestRef.current;
     const requestReloadRevision = listReloadRevision;
     loadingMoreRef.current = false;
@@ -817,6 +842,7 @@ export function ViralPage() {
           cancelled ||
           requestId !== listRequestRef.current ||
           requestReloadRevision !== listReloadRevisionRef.current ||
+          requestContext !== activePaginationContextRef.current ||
           paginationContextKey !== paginationContextKeyRef.current
         )
           return;
@@ -839,6 +865,7 @@ export function ViralPage() {
         ]);
         const confirmedNextCursor = result.nextCursor ?? undefined;
         const confirmedHasMore = Boolean(result.hasMore && result.nextCursor);
+        confirmedPaginationContextRef.current = requestContext;
         paginationSnapshotsRef.current.set(paginationContextKey, {
           nextCursor: confirmedNextCursor,
           hasMore: confirmedHasMore,
@@ -860,6 +887,7 @@ export function ViralPage() {
           !cancelled &&
           requestId === listRequestRef.current &&
           requestReloadRevision === listReloadRevisionRef.current &&
+          requestContext === activePaginationContextRef.current &&
           paginationContextKey === paginationContextKeyRef.current
         ) {
           setListError("收藏列表暂时无法更新");
@@ -870,6 +898,7 @@ export function ViralPage() {
           !cancelled &&
           requestId === listRequestRef.current &&
           requestReloadRevision === listReloadRevisionRef.current &&
+          requestContext === activePaginationContextRef.current &&
           paginationContextKey === paginationContextKeyRef.current
         ) {
           setListLoading(false);
@@ -883,6 +912,7 @@ export function ViralPage() {
     paginationContextKey,
     platformKey,
     review,
+    renderedPaginationContext,
     scope,
     updateData,
   ]);
@@ -892,13 +922,22 @@ export function ViralPage() {
       setVisibleCount((count) => Math.min(count + viralPageSize, shown.length));
       return;
     }
-    if (!hasMore || !nextCursor || loadingMoreRef.current) return;
+    if (
+      !hasMore ||
+      !nextCursor ||
+      loadingMoreRef.current ||
+      confirmedPaginationContextRef.current !== renderedPaginationContext
+    )
+      return;
     const requestId = listRequestRef.current;
     const requestQuery = query;
     const requestContextKey = paginationContextKey;
+    const requestContext = renderedPaginationContext;
     const isCurrent = () =>
       requestId === listRequestRef.current &&
       requestQuery === queryRef.current &&
+      requestContext === activePaginationContextRef.current &&
+      requestContext === confirmedPaginationContextRef.current &&
       requestContextKey === paginationContextKeyRef.current;
     loadingMoreRef.current = true;
     setLoadingMore(true);
@@ -981,6 +1020,7 @@ export function ViralPage() {
     paginationContextKey,
     platformKey,
     query,
+    renderedPaginationContext,
     review,
     scope,
     shown.length,
