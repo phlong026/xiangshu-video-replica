@@ -48,7 +48,7 @@ from app.simple_character import (
     create_simple_character,
     delete_simple_character_identity,
     list_simple_library_page,
-    list_simple_scene_looks,
+    list_simple_scene_looks_page,
     prepare_simple_character_generation,
     regenerate_simple_character_contact_sheet,
     rename_simple_character_identity,
@@ -424,7 +424,13 @@ def read_scene_looks(
     limit: Annotated[int, Query(ge=1, le=100)] = 12,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> SimpleSceneLookPageResponse:
-    looks = list_simple_scene_looks(conn, actor=actor, identity_id=identity_id)
+    page = list_simple_scene_looks_page(
+        conn,
+        actor=actor,
+        identity_id=identity_id,
+        limit=limit,
+        offset=offset,
+    )
     items = [
         SimpleSceneLookResponse(
             identity_id=look.identity_id,
@@ -444,13 +450,13 @@ def read_scene_looks(
             ],
             published_at=look.published_at,
         )
-        for look in looks[offset : offset + limit]
+        for look in page.items
     ]
     return SimpleSceneLookPageResponse(
         items=items,
-        total=len(looks),
-        limit=limit,
-        offset=offset,
+        total=page.total,
+        limit=page.limit,
+        offset=page.offset,
     )
 
 

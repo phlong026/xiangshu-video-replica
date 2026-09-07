@@ -2351,6 +2351,80 @@ def test_scene_looks_hide_foreign_identities_and_reject_auditors(
     assert auditor.status_code == 403
 
 
+def test_scene_look_page_limits_database_rows_and_returns_scoped_total(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    created = generate_global(client).json()
+    identity_id = created["identity_id"]
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        for index in range(13):
+            persona_id = f"scene-page-persona-{index:02d}"
+            conn.execute(
+                """
+                INSERT INTO character_personas (
+                    id, identity_id, name, appearance_constraints_json,
+                    usage_scope_json, created_by, created_at, updated_at
+                ) VALUES (%s, %s, %s, %s, '[]', 'employee_1', %s, %s)
+                """,
+                (
+                    persona_id,
+                    identity_id,
+                    f"场景 {index:02d}",
+                    json.dumps({"appearance_type": "scene"}),
+                    f"2026-09-07T00:{index:02d}:00Z",
+                    f"2026-09-07T00:{index:02d}:00Z",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO character_versions (
+                    id, persona_id, version_number, status,
+                    publication_snapshot_json, publication_hash,
+                    published_at, published_by, created_by
+                ) VALUES (%s, %s, 1, 'PUBLISHED', %s, %s, %s,
+                          'employee_1', 'employee_1')
+                """,
+                (
+                    f"scene-page-version-{index:02d}",
+                    persona_id,
+                    json.dumps(
+                        {
+                            "contact_sheet_asset_id": f"sheet-{index:02d}",
+                            "generation_source": "test",
+                        }
+                    ),
+                    "0" * 64,
+                    f"2026-09-07T00:{index:02d}:00Z",
+                ),
+            )
+        conn.commit()
+        statements: list[str] = []
+        conn.set_trace_callback(statements.append)
+        page = simple_character.list_simple_scene_looks_page(
+            conn,
+            actor=CurrentUser(
+                id="employee_1",
+                username="employee_1",
+                display_name="Employee One",
+                role="employee",
+            ),
+            identity_id=identity_id,
+            limit=12,
+            offset=12,
+        )
+
+    assert page.total == 13
+    assert [item.scene_name for item in page.items] == ["场景 00"]
+    page_queries = [
+        " ".join(statement.upper().split())
+        for statement in statements
+        if "FROM CHARACTER_PERSONAS AS PERSONA" in statement.upper()
+    ]
+    assert len(page_queries) == 2
+    assert any("LIMIT 12 OFFSET 12" in statement for statement in page_queries)
+
+
 def test_scene_look_rejects_archived_identity_before_enqueue(
     client: TestClient,
     db_path: Path,

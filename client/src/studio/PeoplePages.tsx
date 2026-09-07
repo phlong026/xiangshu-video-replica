@@ -487,37 +487,42 @@ function PhotosPanel({ person }: { person: StudioPerson }) {
   const loadNextScenes = async () => {
     if (review || loadingMore || !scenePage) return;
     setLoadingMore(true);
-    const result = await loadPersonAssets(person.id, scenePage.loaded);
-    updateData((current) => {
-      const knownAssets = new Set(current.assets.map((asset) => asset.id));
-      const nextAssets = result.assets.filter(
-        (asset) => !knownAssets.has(asset.id),
-      );
-      return {
-        ...current,
-        assets: [...current.assets, ...nextAssets],
-        people: current.people.map((entry) =>
-          entry.id === person.id
-            ? {
-                ...entry,
-                photoIds: [
-                  ...entry.photoIds,
-                  ...nextAssets.map((asset) => asset.id),
-                ],
-              }
-            : entry,
-        ),
-        errors: [...current.errors, ...result.errors],
-        pagination: {
-          ...current.pagination,
-          scenes: {
-            ...current.pagination?.scenes,
-            [person.id]: { loaded: result.loaded, total: result.total },
+    try {
+      const result = await loadPersonAssets(person.id, scenePage.loaded);
+      updateData((current) => {
+        const knownAssets = new Set(current.assets.map((asset) => asset.id));
+        const nextAssets = result.assets.filter(
+          (asset) => !knownAssets.has(asset.id),
+        );
+        return {
+          ...current,
+          assets: [...current.assets, ...nextAssets],
+          people: current.people.map((entry) =>
+            entry.id === person.id
+              ? {
+                  ...entry,
+                  photoIds: [
+                    ...entry.photoIds,
+                    ...nextAssets.map((asset) => asset.id),
+                  ],
+                }
+              : entry,
+          ),
+          errors: [...current.errors, ...result.errors],
+          pagination: {
+            ...current.pagination,
+            scenes: {
+              ...current.pagination?.scenes,
+              [person.id]: { loaded: result.loaded, total: result.total },
+            },
           },
-        },
-      };
-    });
-    setLoadingMore(false);
+        };
+      });
+    } catch (cause) {
+      notify(customerVisibleErrorMessage(cause, "加载更多场景失败，请重试。"));
+    } finally {
+      setLoadingMore(false);
+    }
   };
   return (
     <div className="photos-panel">

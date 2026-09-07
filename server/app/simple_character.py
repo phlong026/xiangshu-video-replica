@@ -225,6 +225,14 @@ class SimpleLibraryPage:
 
 
 @dataclass(frozen=True)
+class SimpleSceneLookPage:
+    items: list[SimpleSceneLookEntry]
+    total: int
+    limit: int
+    offset: int
+
+
+@dataclass(frozen=True)
 class PreparedSimpleCharacterGeneration:
     version_id: str
     contact_content: bytes
@@ -1580,39 +1588,77 @@ def create_simple_scene_look(
     return result
 
 
-def list_simple_scene_looks(
+def list_simple_scene_looks_page(
     conn: BusinessConnection,
     *,
     actor: CurrentUser,
     identity_id: str,
-) -> list[SimpleSceneLookEntry]:
+    limit: int,
+    offset: int,
+) -> SimpleSceneLookPage:
     identity = read_identity_row(conn, identity_id)
     if actor.role not in {"admin", "auditor"} and str(identity["owner_user_id"]) != actor.id:
         raise character_error(404, "PERSON_IDENTITY_NOT_FOUND", "人物身份不存在或不可用。")
-    rows = conn.execute(
-        """
-        SELECT persona.id AS persona_id, persona.name, persona.scene_description,
-               persona.costume_description, persona.appearance_constraints_json,
-               version.id AS version_id, version.version_number,
-               version.published_at, version.publication_snapshot_json,
-               view.view_type, view.asset_id
+    appearance_type = (
+        "persona.appearance_constraints_json::jsonb ->> 'appearance_type'"
+        if conn.is_postgres
+        else "json_extract(persona.appearance_constraints_json, '$.appearance_type')"
+    )
+    total_row = conn.execute(
+        f"""
+        SELECT COUNT(*) AS total
         FROM character_personas AS persona
-        JOIN character_versions AS version ON version.persona_id = persona.id
-        LEFT JOIN character_assets AS view
-          ON view.character_version_id = version.id
-         AND view.review_status = 'APPROVED'
-         AND view.is_published_selection = 1
-        WHERE persona.identity_id = %s AND version.status = 'PUBLISHED'
-        ORDER BY persona.created_at DESC, persona.id,
-                 version.version_number DESC, view.view_type
+        WHERE persona.identity_id = %s
+          AND {appearance_type} = 'scene'
+          AND EXISTS (
+              SELECT 1
+              FROM character_versions AS published_version
+              WHERE published_version.persona_id = persona.id
+                AND published_version.status = 'PUBLISHED'
+          )
         """,
         (identity_id,),
+    ).fetchone()
+    total = int(total_row["total"] if total_row is not None else 0)
+    rows = conn.execute(
+        f"""
+        WITH ranked_versions AS (
+            SELECT version.*,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY version.persona_id
+                       ORDER BY version.version_number DESC, version.id
+                   ) AS version_rank
+            FROM character_versions AS version
+            WHERE version.status = 'PUBLISHED'
+        ),
+        paged_looks AS (
+            SELECT persona.id AS persona_id, persona.name,
+                   persona.scene_description, persona.costume_description,
+                   persona.created_at AS persona_created_at,
+                   version.id AS version_id, version.version_number,
+                   version.published_at, version.publication_snapshot_json
+            FROM character_personas AS persona
+            JOIN ranked_versions AS version
+              ON version.persona_id = persona.id AND version.version_rank = 1
+            WHERE persona.identity_id = %s AND {appearance_type} = 'scene'
+            ORDER BY persona.created_at DESC, persona.id
+            LIMIT %s OFFSET %s
+        )
+        SELECT look.persona_id, look.name, look.scene_description,
+               look.costume_description, look.version_id, look.version_number,
+               look.published_at, look.publication_snapshot_json,
+               view.view_type, view.asset_id
+        FROM paged_looks AS look
+        LEFT JOIN character_assets AS view
+          ON view.character_version_id = look.version_id
+         AND view.review_status = 'APPROVED'
+         AND view.is_published_selection = 1
+        ORDER BY look.persona_created_at DESC, look.persona_id, view.view_type
+        """,
+        (identity_id, limit, offset),
     ).fetchall()
     grouped: dict[str, list[sqlite3.Row]] = {}
     for row in rows:
-        constraints = decode_scene_constraints(row["appearance_constraints_json"])
-        if constraints.get("appearance_type") != "scene":
-            continue
         grouped.setdefault(str(row["persona_id"]), []).append(row)
 
     looks: list[SimpleSceneLookEntry] = []
@@ -1644,7 +1690,7 @@ def list_simple_scene_looks(
                 published_at=str(latest_rows[0]["published_at"]),
             )
         )
-    return looks
+    return SimpleSceneLookPage(items=looks, total=total, limit=limit, offset=offset)
 
 
 def decode_scene_constraints(value: object) -> dict[str, object]:

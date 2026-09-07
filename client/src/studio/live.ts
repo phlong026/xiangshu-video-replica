@@ -1179,12 +1179,7 @@ export async function loadPersonAssets(
       total: page.total,
     };
   } catch (error) {
-    return {
-      assets: [],
-      errors: [`读取人物场景形象照失败：${errorText(error)}`],
-      loaded: offset,
-      total: offset,
-    };
+    throw new Error(`读取人物场景形象照失败：${errorText(error)}`);
   }
 }
 
