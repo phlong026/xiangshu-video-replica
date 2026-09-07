@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  type CustomerProfile,
   getStudioNotificationPreferences,
   updateStudioNotificationPreferences,
 } from "../api";
@@ -1097,7 +1098,19 @@ export function TaskDetailPage() {
   );
 }
 
-export function ProfilePage() {
+export type StudioAccountSummary = {
+  walletStatus: "loading" | "ready" | "error" | "unknown";
+  availableCredits: number | null;
+  retryWallet: () => void;
+  profile: CustomerProfile | null;
+  profileLoadError: string;
+};
+
+export function ProfilePage({
+  accountSummary,
+}: {
+  accountSummary?: StudioAccountSummary;
+}) {
   const { user, review, openLive, notify } = useStudio();
   const [name, setName] = useState(user.display_name || user.username);
   const [profileTab, setProfileTab] = useState("overview");
@@ -1106,6 +1119,10 @@ export function ProfilePage() {
     boolean | null
   >(null);
   const [savingNotifications, setSavingNotifications] = useState(false);
+
+  useEffect(() => {
+    setName(user.display_name || user.username);
+  }, [user.display_name, user.username]);
 
   useEffect(() => {
     if (review) {
@@ -1225,12 +1242,20 @@ export function ProfilePage() {
               </Field>
               <dl className="studio-details">
                 <div>
-                  <dt>团队</dt>
-                  <dd>{review ? "众墅之家" : "未提供"}</dd>
+                  <dt>账号</dt>
+                  <dd>{accountSummary?.profile?.username ?? user.username}</dd>
                 </div>
                 <div>
-                  <dt>手机号</dt>
-                  <dd>{review ? "138****6688" : "以账户资料为准"}</dd>
+                  <dt>加入时间</dt>
+                  <dd>
+                    {accountSummary?.profile?.joined_at
+                      ? new Date(
+                          accountSummary.profile.joined_at,
+                        ).toLocaleDateString("zh-CN")
+                      : review
+                        ? "审核示例"
+                        : "未查询"}
+                  </dd>
                 </div>
                 <div>
                   <dt>
@@ -1285,8 +1310,33 @@ export function ProfilePage() {
               <dl className="studio-details">
                 <div>
                   <dt>账户余额</dt>
-                  <dd>按实际账户显示</dd>
+                  <dd>
+                    {accountSummary?.walletStatus === "ready" &&
+                    accountSummary.availableCredits !== null
+                      ? `${accountSummary.availableCredits} 秒`
+                      : accountSummary?.walletStatus === "loading"
+                        ? "查询中"
+                        : accountSummary?.walletStatus === "error"
+                          ? "读取失败"
+                          : "未查询"}
+                  </dd>
                 </div>
+                {accountSummary?.walletStatus === "error" && (
+                  <div>
+                    <dt>余额查询</dt>
+                    <dd>
+                      <Button onClick={accountSummary.retryWallet}>
+                        重试余额查询
+                      </Button>
+                    </dd>
+                  </div>
+                )}
+                {accountSummary?.profileLoadError && (
+                  <div>
+                    <dt>资料状态</dt>
+                    <dd>{accountSummary.profileLoadError}</dd>
+                  </div>
+                )}
                 <div>
                   <dt>
                     使用记录<small>查看详细的使用记录</small>

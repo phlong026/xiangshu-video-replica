@@ -1565,7 +1565,7 @@ export function PublishPage() {
       <header className="content-title">
         <div>
           <h1>发布管理</h1>
-          <p>编辑发布草稿，确认后再提交至平台发布</p>
+          <p>可整理当前会话草稿；平台授权与正式发布暂缓未启用</p>
         </div>
       </header>
       <section className="content-publish-layout">
@@ -1575,10 +1575,10 @@ export function PublishPage() {
               发布草稿 <b>{draftCount}</b>
             </strong>
             <span>
-              待发布 <b>0</b>
+              待发布 <b>{review ? "0" : "暂缓"}</b>
             </span>
             <span>
-              已发布 <b>0</b>
+              已发布 <b>{review ? "0" : "暂缓"}</b>
             </span>
           </div>
           {visibleDrafts.length ? (

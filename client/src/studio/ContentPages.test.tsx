@@ -1171,8 +1171,13 @@ describe("V1.4 内容与运营页面", () => {
     useStudio.mockReturnValue(value);
     render(<PublishPage />);
 
+    expect(
+      screen.getByText("可整理当前会话草稿；平台授权与正式发布暂缓未启用"),
+    ).toBeInTheDocument();
     expect(screen.getByText("已发布")).toBeInTheDocument();
-    expect(screen.getAllByText("0")).not.toHaveLength(0);
+    expect(screen.getAllByText("暂缓")).toHaveLength(2);
+    expect(screen.queryByText(/待发布\s*0/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/已发布\s*0/)).not.toBeInTheDocument();
     expect(screen.getByText("尚未连接发布账号")).toBeInTheDocument();
     fireEvent.click(
       screen.getByRole("button", { name: "前往用户档案管理账号" }),

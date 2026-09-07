@@ -10,6 +10,7 @@ import type { WorkspaceShell } from "../App";
 import {
   createIndependentVideoTask,
   createOralTask,
+  customerGetWallet,
   customerVisibleErrorMessage,
   defaultBatchProvider,
   type GenerationBatch,
@@ -19,6 +20,7 @@ import {
   getGenerationPriceQuote,
   getIndependentCapabilities,
   getOralPrice,
+  getWallet,
   type IndependentCapabilities,
   type Project,
 } from "../api";
@@ -54,6 +56,7 @@ import {
 } from "./live";
 import {
   ProfilePage,
+  type StudioAccountSummary,
   TaskDetailPage,
   TasksPage,
   WorkbenchPage,
@@ -100,6 +103,19 @@ type GenerationQuoteInput = {
 };
 
 type SubmissionEnvelope = { fingerprint: string; key: string };
+type WalletSummary = Pick<
+  StudioAccountSummary,
+  "walletStatus" | "availableCredits"
+>;
+
+function walletSummaryLabel(summary: WalletSummary) {
+  if (summary.walletStatus === "ready" && summary.availableCredits !== null) {
+    return `${summary.availableCredits} 秒`;
+  }
+  if (summary.walletStatus === "loading") return "查询中";
+  if (summary.walletStatus === "error") return "读取失败";
+  return "未查询";
+}
 
 function quoteMatchesInput(
   quote: GenerationPriceQuote | null,
@@ -255,6 +271,32 @@ export function StudioWorkspace({
   const [menuOpen, setMenuOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [showSearch, setShowSearch] = useState(false);
+  const [walletRevision, setWalletRevision] = useState(0);
+  const walletRequestRef = useRef<{
+    userId: string;
+    revision: number;
+  } | null>(null);
+  const walletStore = customerAccount?.store ?? customerWallet?.store;
+  const onWalletSessionExpired =
+    customerAccount?.onSessionExpired ?? customerWallet?.onSessionExpired;
+  const [walletSummary, setWalletSummary] = useState<WalletSummary>(() => ({
+    walletStatus: review
+      ? "ready"
+      : walletStore || currentUser.role !== "customer"
+        ? "loading"
+        : "unknown",
+    availableCredits: review ? 2680 : null,
+  }));
+  const retryWallet = useCallback(
+    () => setWalletRevision((value) => value + 1),
+    [],
+  );
+  const accountSummary: StudioAccountSummary = {
+    ...walletSummary,
+    retryWallet,
+    profile: customerAccount?.profile ?? null,
+    profileLoadError: customerAccount?.profileLoadError ?? "",
+  };
   const [oralPriceFen, setOralPriceFen] = useState<number | null>(null);
   const [oralQuoteStatus, setOralQuoteStatus] = useState<QuoteStatus>("idle");
   const [oralQuoteError, setOralQuoteError] = useState("");
@@ -285,6 +327,83 @@ export function StudioWorkspace({
   const oralSubmissionRef = useRef<SubmissionEnvelope | null>(null);
   const videoSubmissionRef = useRef<SubmissionEnvelope | null>(null);
   const notify = useCallback((message: string) => setNotice(message), []);
+
+  useEffect(() => {
+    const request = { userId: currentUser.id, revision: walletRevision };
+    walletRequestRef.current = request;
+    if (review) {
+      setWalletSummary({
+        walletStatus: "ready",
+        availableCredits: 2680,
+      });
+      return;
+    }
+    if (!walletStore || !onWalletSessionExpired) {
+      if (currentUser.role !== "customer") {
+        setWalletSummary({ walletStatus: "loading", availableCredits: null });
+        void getWallet()
+          .then((wallet) => {
+            if (request !== walletRequestRef.current) return;
+            setWalletSummary({
+              walletStatus: "ready",
+              availableCredits: wallet.available_credits,
+            });
+          })
+          .catch(() => {
+            if (request !== walletRequestRef.current) return;
+            setWalletSummary({ walletStatus: "error", availableCredits: null });
+          });
+        return () => {
+          if (walletRequestRef.current === request) {
+            walletRequestRef.current = null;
+          }
+        };
+      }
+      setWalletSummary({
+        walletStatus: "unknown",
+        availableCredits: null,
+      });
+      return;
+    }
+    setWalletSummary({
+      walletStatus: "loading",
+      availableCredits: null,
+    });
+    void walletStore
+      .loadSessionToken()
+      .then((token) => {
+        if (request !== walletRequestRef.current) return null;
+        if (!token) {
+          onWalletSessionExpired();
+          throw new Error("登录已失效");
+        }
+        return customerGetWallet({ kind: "session", token });
+      })
+      .then((wallet) => {
+        if (!wallet || request !== walletRequestRef.current) return;
+        setWalletSummary({
+          walletStatus: "ready",
+          availableCredits: wallet.available_credits,
+        });
+      })
+      .catch(() => {
+        if (request !== walletRequestRef.current) return;
+        setWalletSummary({
+          walletStatus: "error",
+          availableCredits: null,
+        });
+      });
+    return () => {
+      if (walletRequestRef.current === request) walletRequestRef.current = null;
+    };
+  }, [
+    currentUser.id,
+    currentUser.role,
+    onWalletSessionExpired,
+    review,
+    walletRevision,
+    walletStore,
+  ]);
 
   // ---- 云端草稿（C7）----
   // 编辑后防抖自动保存；恢复只在用户尚未做任何编辑时生效，绝不覆盖进行中的输入。
@@ -1223,13 +1342,13 @@ export function StudioWorkspace({
           <button
             type="button"
             className={`studio-account-entry ${state.page === "profile" ? "is-active" : ""}`}
-            aria-label={`用户档案，积分 ${review ? "2680" : "—"}`}
+            aria-label={`用户档案，积分 ${walletSummaryLabel(walletSummary)}`}
             onClick={() => navigate("profile")}
           >
             <WorkspaceUserAvatar currentUser={currentUser} review={review} />
             <span className="studio-account-points">
               <small>积分</small>
-              <strong>{review ? "2680" : "—"}</strong>
+              <strong>{walletSummaryLabel(walletSummary)}</strong>
             </span>
           </button>
         </aside>
@@ -1318,7 +1437,10 @@ export function StudioWorkspace({
                 onRefresh={refresh}
               />
             ) : (
-              <StudioPageContent page={state.page} />
+              <StudioPageContent
+                page={state.page}
+                accountSummary={accountSummary}
+              />
             )}
           </div>
           <footer className="studio-version">
@@ -1507,7 +1629,13 @@ export function StudioWorkspace({
   );
 }
 
-function StudioPageContent({ page }: { page: StudioPage }) {
+function StudioPageContent({
+  page,
+  accountSummary,
+}: {
+  page: StudioPage;
+  accountSummary: StudioAccountSummary;
+}) {
   switch (page) {
     case "workbench":
       return <WorkbenchPage />;
@@ -1545,7 +1673,7 @@ function StudioPageContent({ page }: { page: StudioPage }) {
     case "analytics":
       return <AnalyticsPage />;
     case "profile":
-      return <ProfilePage />;
+      return <ProfilePage accountSummary={accountSummary} />;
   }
 }
 

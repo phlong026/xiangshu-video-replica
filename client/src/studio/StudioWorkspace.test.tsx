@@ -45,6 +45,8 @@ vi.mock("./live", () => live);
 // 视频生成（C2）：只覆盖新引入的四个 api 出口，其余保持原模块行为，
 // 避免既有用例（不触发这些函数）受 mock 影响。
 const api = vi.hoisted(() => ({
+  customerGetWallet: vi.fn(),
+  getWallet: vi.fn(),
   getIndependentCapabilities: vi.fn(
     async (): Promise<{
       extended_modes_enabled: boolean;
@@ -141,6 +143,223 @@ vi.mock("./LiveWorkspacePanel", () => ({
 }));
 
 describe("V1.4 workspace integration", () => {
+  const customerStore = (token: string | null) => ({
+    loadDeviceCredentialToken: vi.fn().mockResolvedValue(null),
+    loadSessionToken: vi.fn().mockResolvedValue(token),
+    saveActivation: vi.fn().mockResolvedValue(undefined),
+    saveSessionToken: vi.fn().mockResolvedValue(undefined),
+    clearSessionToken: vi.fn().mockResolvedValue(undefined),
+    clearAllCredentials: vi.fn().mockResolvedValue(undefined),
+    deviceInstanceId: vi.fn().mockResolvedValue("device-1"),
+    devicePlatform: () => "windows",
+  });
+
+  const customerAccount = (store: ReturnType<typeof customerStore>) => ({
+    devices: null,
+    deviceError: "",
+    onApprovePairing: vi.fn(),
+    onDismissPairing: vi.fn(),
+    onProfileUpdated: vi.fn(),
+    onRefreshProfile: vi.fn().mockResolvedValue(undefined),
+    onLogout: vi.fn().mockResolvedValue(undefined),
+    onRefreshDevices: vi.fn().mockResolvedValue(undefined),
+    onResetActivationCode: vi.fn(),
+    onUnbind: vi.fn(),
+    onUpdateProfile: vi.fn(),
+    profile: {
+      user_id: "customer-a",
+      username: "customer-a",
+      display_name: "客户甲",
+      joined_at: "2026-09-01T08:00:00Z",
+      activation_code_masked: null,
+      activation_status: "ACTIVE",
+      activated_at: "2026-09-01T08:00:00Z",
+      device_slots_used: 1,
+      device_slots_total: 2,
+    },
+    profileLoadError: "",
+    store,
+    onSessionExpired: vi.fn(),
+  });
+
+  it("正式客户侧栏读取真实钱包，并把零余额明确显示为 0 秒", async () => {
+    api.customerGetWallet.mockResolvedValue({
+      available_credits: 0,
+      reserved_credits: 0,
+      internal_unit_price_fen: 100,
+      min_recharge_fen: 100,
+      recharge_step_fen: 100,
+    });
+    const account = customerAccount(customerStore("session-token"));
+    render(
+      <StudioWorkspace
+        currentUser={{
+          id: "customer-a",
+          username: "customer-a",
+          display_name: "客户甲",
+          role: "customer",
+        }}
+        customerAccount={account}
+        initialState={createState("profile")}
+      />,
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "用户档案，积分 0 秒" }),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("0 秒")).toHaveLength(2);
+    expect(screen.getByText("客户甲")).toBeInTheDocument();
+    expect(screen.getByText("customer-a")).toBeInTheDocument();
+  });
+
+  it("正式内部工作区沿用已有钱包接口显示秒数", async () => {
+    api.getWallet.mockResolvedValue({
+      available_credits: 21,
+      reserved_credits: 0,
+      internal_unit_price_fen: 100,
+      min_recharge_fen: 100,
+      recharge_step_fen: 100,
+    });
+    render(
+      <StudioWorkspace
+        currentUser={{
+          id: "employee-a",
+          username: "employee-a",
+          display_name: "员工甲",
+          role: "employee",
+        }}
+        initialState={createState("workbench")}
+      />,
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "用户档案，积分 21 秒" }),
+    ).toBeInTheDocument();
+    expect(api.getWallet).toHaveBeenCalledOnce();
+  });
+
+  it("切换账号后忽略旧钱包的迟到响应", async () => {
+    let resolveOlder!: (value: unknown) => void;
+    const olderWallet = new Promise((resolve) => {
+      resolveOlder = resolve;
+    });
+    api.customerGetWallet
+      .mockReturnValueOnce(olderWallet)
+      .mockResolvedValueOnce({
+        available_credits: 8,
+        reserved_credits: 0,
+        internal_unit_price_fen: 100,
+        min_recharge_fen: 100,
+        recharge_step_fen: 100,
+      });
+    const olderAccount = customerAccount(customerStore("older-token"));
+    const newerAccount = customerAccount(customerStore("newer-token"));
+    newerAccount.profile = { ...newerAccount.profile, user_id: "customer-b" };
+    const view = render(
+      <StudioWorkspace
+        currentUser={{
+          id: "customer-a",
+          username: "customer-a",
+          display_name: "客户甲",
+          role: "customer",
+        }}
+        customerAccount={olderAccount}
+        initialState={createState("workbench")}
+      />,
+    );
+    await waitFor(() =>
+      expect(api.customerGetWallet).toHaveBeenCalledWith({
+        kind: "session",
+        token: "older-token",
+      }),
+    );
+    view.rerender(
+      <StudioWorkspace
+        currentUser={{
+          id: "customer-b",
+          username: "customer-b",
+          display_name: "客户乙",
+          role: "customer",
+        }}
+        customerAccount={newerAccount}
+        initialState={createState("workbench")}
+      />,
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "用户档案，积分 8 秒" }),
+    ).toBeInTheDocument();
+    resolveOlder({
+      available_credits: 99,
+      reserved_credits: 0,
+      internal_unit_price_fen: 100,
+      min_recharge_fen: 100,
+      recharge_step_fen: 100,
+    });
+    await act(async () => Promise.resolve());
+    expect(
+      screen.getByRole("button", { name: "用户档案，积分 8 秒" }),
+    ).toBeInTheDocument();
+  });
+
+  it("钱包读取失败与未知状态分开，并允许提供重试", async () => {
+    api.customerGetWallet
+      .mockRejectedValueOnce(new Error("wallet offline"))
+      .mockResolvedValueOnce({
+        available_credits: 12,
+        reserved_credits: 0,
+        internal_unit_price_fen: 100,
+        min_recharge_fen: 100,
+        recharge_step_fen: 100,
+      });
+    const account = customerAccount(customerStore("session-token"));
+    render(
+      <StudioWorkspace
+        currentUser={{
+          id: "customer-a",
+          username: "customer-a",
+          display_name: "客户甲",
+          role: "customer",
+        }}
+        customerAccount={account}
+        initialState={createState("profile")}
+      />,
+    );
+
+    await waitFor(() => expect(api.customerGetWallet).toHaveBeenCalledOnce());
+    expect(
+      await screen.findByRole("button", { name: "用户档案，积分 读取失败" }),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("读取失败")).toHaveLength(2);
+    fireEvent.click(screen.getByRole("button", { name: "重试余额查询" }));
+    expect(
+      await screen.findByRole("button", { name: "用户档案，积分 12 秒" }),
+    ).toBeInTheDocument();
+  });
+
+  it("退出后的空会话不读取钱包，并转交既有会话失效处理", async () => {
+    const account = customerAccount(customerStore(null));
+    render(
+      <StudioWorkspace
+        currentUser={{
+          id: "customer-a",
+          username: "customer-a",
+          display_name: "客户甲",
+          role: "customer",
+        }}
+        customerAccount={account}
+        initialState={createState("workbench")}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(account.onSessionExpired).toHaveBeenCalledOnce(),
+    );
+    expect(api.customerGetWallet).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("button", { name: "用户档案，积分 读取失败" }),
+    ).toBeInTheDocument();
+  });
   it("保持共享壳层尺寸稳定，避免路由切换时 Logo 和标题跳动", () => {
     const { container } = render(
       <StudioWorkspace
@@ -179,7 +398,7 @@ describe("V1.4 workspace integration", () => {
     );
 
     const accountAvatar = screen
-      .getByRole("button", { name: "用户档案，积分 2680" })
+      .getByRole("button", { name: "用户档案，积分 2680 秒" })
       .querySelector("img");
     const topAvatar = screen
       .getByRole("button", { name: "用户档案" })
@@ -212,6 +431,22 @@ describe("V1.4 workspace integration", () => {
   });
   beforeEach(() => {
     vi.clearAllMocks();
+    api.customerGetWallet.mockReset();
+    api.getWallet.mockReset();
+    api.getWallet.mockRejectedValue(new Error("internal wallet unavailable"));
+    live.loadStudioData.mockResolvedValue({
+      people: [],
+      assets: [],
+      materials: [],
+      videos: [],
+      tasks: [],
+      projects: [],
+      errors: [],
+      loading: false,
+      stats: null,
+      analytics7: null,
+      analytics30: null,
+    });
     live.loadPersonAssets.mockResolvedValue({ assets: [], errors: [] });
     window.history.replaceState(null, "", "/#studio/workbench");
   });
@@ -230,7 +465,7 @@ describe("V1.4 workspace integration", () => {
     expect(screen.getByText("粘贴一条爆款乡墅视频链接，")).toBeInTheDocument();
     expect(screen.getByText("快速生成它的原创视频")).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "用户档案，积分 2680" }),
+      screen.getByRole("button", { name: "用户档案，积分 2680 秒" }),
     ).toBeInTheDocument();
     expect(live.loadStudioData).not.toHaveBeenCalled();
     fireEvent.click(nav.getByRole("button", { name: "文案工坊" }));

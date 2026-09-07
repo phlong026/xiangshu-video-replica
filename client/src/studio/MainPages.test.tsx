@@ -988,6 +988,62 @@ describe("V1.4 个人中心通知偏好（C10b）", () => {
     await waitFor(() => expect(toggle).toHaveTextContent("关闭"));
   });
 
+  it("账户概览区分真实零余额、未知状态和读取失败", () => {
+    getStudioNotificationPreferences.mockResolvedValue({ enabled: true });
+    useStudio.mockReturnValue(
+      studio(undefined, {
+        user: {
+          id: "customer-1",
+          username: "customer-1",
+          display_name: "客户一",
+          role: "customer",
+        },
+      }),
+    );
+    const retryWallet = vi.fn();
+    const { rerender } = render(
+      <ProfilePage
+        accountSummary={{
+          walletStatus: "ready",
+          availableCredits: 0,
+          retryWallet,
+          profile: null,
+          profileLoadError: "",
+        }}
+      />,
+    );
+    expect(screen.getByText("0 秒")).toBeInTheDocument();
+
+    rerender(
+      <ProfilePage
+        accountSummary={{
+          walletStatus: "unknown",
+          availableCredits: null,
+          retryWallet,
+          profile: null,
+          profileLoadError: "",
+        }}
+      />,
+    );
+    expect(screen.getAllByText("未查询")).toHaveLength(2);
+
+    rerender(
+      <ProfilePage
+        accountSummary={{
+          walletStatus: "error",
+          availableCredits: null,
+          retryWallet,
+          profile: null,
+          profileLoadError: "资料读取失败",
+        }}
+      />,
+    );
+    expect(screen.getByText("读取失败")).toBeInTheDocument();
+    expect(screen.getByText("资料读取失败")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "重试余额查询" }));
+    expect(retryWallet).toHaveBeenCalledOnce();
+  });
+
   it("保存失败时回退开关状态并提示", async () => {
     getStudioNotificationPreferences.mockResolvedValue({ enabled: true });
     updateStudioNotificationPreferences.mockRejectedValue(

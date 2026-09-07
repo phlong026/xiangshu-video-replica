@@ -376,6 +376,7 @@ describe("CustomerWorkspace (T31)", () => {
     const olderStore = fakeStore();
     vi.mocked(olderStore.loadSessionToken)
       .mockResolvedValueOnce(olderSessionText)
+      .mockResolvedValueOnce(olderSessionText)
       .mockReturnValueOnce(delayedOlderCredential);
     const currentStore = fakeStore();
     vi.mocked(currentStore.loadSessionToken).mockResolvedValue(
@@ -427,7 +428,7 @@ describe("CustomerWorkspace (T31)", () => {
       await screen.findByRole("button", { name: "重新加载账号资料" }),
     );
     await waitFor(() => {
-      expect(olderStore.loadSessionToken).toHaveBeenCalledTimes(2);
+      expect(olderStore.loadSessionToken).toHaveBeenCalledTimes(3);
     });
 
     olderWorkspace.unmount();
