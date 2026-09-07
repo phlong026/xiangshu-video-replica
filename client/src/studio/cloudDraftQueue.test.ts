@@ -46,4 +46,29 @@ describe("cloud draft latest-intent queue", () => {
     await currentB;
     expect(write.mock.calls.map(([value]) => value)).toEqual(["A", "B"]);
   });
+
+  it("同key待写意图的旧谓词失效时改用最新谓词实际发送", async () => {
+    let resolveX: (() => void) | undefined;
+    let oldCurrent = true;
+    const write = vi
+      .fn<(value: string) => Promise<void>>()
+      .mockReturnValueOnce(
+        new Promise<void>((resolve) => {
+          resolveX = resolve;
+        }),
+      )
+      .mockResolvedValueOnce(undefined);
+    const queue = createCloudDraftQueue(write);
+
+    const activeX = queue.persist("X", "X", () => true);
+    const oldA = queue.persist("A", "old A", () => oldCurrent);
+    oldCurrent = false;
+    const latestA = queue.persist("A", "latest A", () => true);
+    resolveX?.();
+
+    await activeX;
+    await oldA;
+    await latestA;
+    expect(write.mock.calls.map(([value]) => value)).toEqual(["X", "latest A"]);
+  });
 });

@@ -40,7 +40,6 @@ export function createCloudDraftQueue<T>(write: (value: T) => Promise<void>) {
   const persist = (key: string, value: T, isCurrent: () => boolean) => {
     if (!active && !pending && lastSuccessKey === key) return Promise.resolve();
     if (active?.key === key) return active.completion;
-    if (pending?.key === key) return pending.completion;
 
     let resolveIntent: (() => void) | undefined;
     let rejectIntent: ((cause: unknown) => void) | undefined;
