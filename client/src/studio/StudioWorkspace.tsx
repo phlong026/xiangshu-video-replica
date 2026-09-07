@@ -561,6 +561,7 @@ export function StudioWorkspace({
     videoSubmissionRef.current = null;
     oralSubmittingRef.current = false;
     videoSubmittingRef.current = false;
+    setPicker(undefined);
     setGeneration(undefined);
     setOralSubmitting(false);
     setVideoSubmitting(false);
@@ -2273,8 +2274,10 @@ function StudioPicker({
     updateData,
     navigate,
     notify,
+    user,
     videoCapabilities,
   } = useStudio();
+  const readOnly = user.role === "auditor";
   const person = data.people.find((item) => item.id === state.draft.ipId);
   const usesCloudImages =
     kind === "reference" || kind === "first-frame" || kind === "tail-frame";
@@ -2358,6 +2361,7 @@ function StudioPicker({
     "avatar-photo": "选择单张照片制作分身",
   };
   const select = (patch: Partial<StudioDraft>) => {
+    if (readOnly) return;
     patchDraft(patch);
     onClose();
   };

@@ -335,12 +335,33 @@ describe("V1.4 创作页面", () => {
         role: "auditor",
       },
     });
+    value.state.savedScripts = [
+      {
+        id: "saved-audit-script",
+        title: "审计历史文案",
+        original: "历史原稿",
+        text: "历史终稿",
+        version: 2,
+        confirmed: true,
+      },
+    ];
     useStudio.mockReturnValue(value);
     const view = render(<CopyPage />);
 
     expect(screen.getByLabelText("二创文案")).toBeDisabled();
     expect(screen.getByRole("button", { name: "保存版本" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "确认终稿" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "更换人物" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "更换人物" }));
+    expect(value.openPicker).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("tab", { name: "我的文案" }));
+    const savedScript = screen.getByRole("button", {
+      name: /审计历史文案/,
+    });
+    expect(savedScript).toBeDisabled();
+    fireEvent.click(savedScript);
+    expect(value.patchDraft).not.toHaveBeenCalled();
 
     value.state = { ...value.state, page: "video" };
     view.rerender(<VideoPage />);

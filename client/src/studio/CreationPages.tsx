@@ -443,8 +443,12 @@ export function CopyPage() {
             saved.map((script) => (
               <button
                 className="creation-script-row"
+                disabled={readOnly}
                 key={script.id}
-                onClick={() => patchDraft({ script })}
+                onClick={() => {
+                  if (readOnly) return;
+                  patchDraft({ script });
+                }}
                 type="button"
               >
                 <span>{script.title}</span>
@@ -574,7 +578,14 @@ export function CopyPage() {
               {rewriteUnavailableReason ? (
                 <Hint>{rewriteUnavailableReason}</Hint>
               ) : null}
-              <Button variant="outline" onClick={() => openPicker("person")}>
+              <Button
+                disabled={readOnly}
+                variant="outline"
+                onClick={() => {
+                  if (readOnly) return;
+                  openPicker("person");
+                }}
+              >
                 更换人物
               </Button>
               <Button

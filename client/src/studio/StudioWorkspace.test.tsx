@@ -1689,6 +1689,34 @@ describe("V1.4 workspace integration", () => {
       expect(live.publishScriptVersion).not.toHaveBeenCalled();
     });
 
+    it("切换为审计员会关闭已打开的人物选择器", async () => {
+      live.loadStudioData.mockResolvedValue({
+        ...emptyStudioData,
+        materials: [],
+      });
+      live.loadCloudDraft.mockResolvedValue(undefined);
+      const auditor = {
+        ...reviewUser,
+        display_name: "审计员",
+        role: "auditor" as const,
+      };
+      const view = render(<StudioWorkspace currentUser={reviewUser} />);
+
+      await openCopyPage();
+      fireEvent.click(screen.getByRole("button", { name: "更换人物" }));
+      expect(
+        await screen.findByRole("dialog", { name: "选择人物 IP" }),
+      ).toBeInTheDocument();
+
+      view.rerender(<StudioWorkspace currentUser={auditor} />);
+
+      await waitFor(() =>
+        expect(
+          screen.queryByRole("dialog", { name: "选择人物 IP" }),
+        ).not.toBeInTheDocument(),
+      );
+    });
+
     it("确认终稿立即持久化并带 projectId 时发布到项目脚本版本", async () => {
       live.loadStudioData.mockResolvedValue(emptyStudioData);
       live.loadCloudDraft.mockResolvedValue(undefined);
