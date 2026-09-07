@@ -988,6 +988,39 @@ describe("V1.4 workspace integration", () => {
       expect(screen.getByText(/已保存到我的文案/)).toBeInTheDocument();
     });
 
+    it("审计员可读取文案但保存和确认均不发写请求", async () => {
+      live.loadStudioData.mockResolvedValue(emptyStudioData);
+      live.loadCloudDraft.mockResolvedValue({ draft: restoredDraft() });
+      const auditor = {
+        id: "auditor-1",
+        username: "auditor-1",
+        display_name: "审计员",
+        role: "auditor" as const,
+      };
+      render(<StudioWorkspace currentUser={auditor} />);
+
+      await openCopyPage();
+      await waitFor(() =>
+        expect(screen.getByLabelText("二创文案")).toHaveValue(
+          "云端恢复的文案内容",
+        ),
+      );
+      expect(screen.getByLabelText("二创文案")).toBeDisabled();
+      expect(screen.getByRole("button", { name: "保存版本" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "确认终稿" })).toBeDisabled();
+      vi.useFakeTimers();
+      try {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(2_000);
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(live.persistSavedScript).not.toHaveBeenCalled();
+      expect(live.persistCloudDraft).not.toHaveBeenCalled();
+      expect(live.publishScriptVersion).not.toHaveBeenCalled();
+    });
+
     it("确认终稿立即持久化并带 projectId 时发布到项目脚本版本", async () => {
       live.loadStudioData.mockResolvedValue(emptyStudioData);
       live.loadCloudDraft.mockResolvedValue(undefined);

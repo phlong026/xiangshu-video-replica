@@ -443,14 +443,14 @@ export function StudioWorkspace({
   const draftTouchedRef = useRef(false);
   const draftSaveTimerRef = useRef<number | undefined>(undefined);
   const scheduleDraftSave = useCallback(() => {
-    if (review) return;
+    if (review || currentUser.role === "auditor") return;
     window.clearTimeout(draftSaveTimerRef.current);
     draftSaveTimerRef.current = window.setTimeout(() => {
       void persistCloudDraft(latestDraftRef.current).catch(() => {
         notify("云端草稿保存失败，内容仍在本机，请稍后继续编辑。");
       });
     }, DRAFT_AUTOSAVE_DELAY_MS);
-  }, [review, notify]);
+  }, [review, currentUser.role, notify]);
 
   const restoreDraftAssets = useCallback(
     async (draft: StudioDraft) => {
@@ -1034,6 +1034,7 @@ export function StudioWorkspace({
     window.scrollTo?.({ top: 0 });
   };
   const patchDraft = (patch: Partial<StudioDraft>) => {
+    if (currentUser.role === "auditor") return;
     if (Object.hasOwn(patch, "ipId") && patch.ipId !== state.draft.ipId)
       notify(
         "人物已更换，请重新选择该人物的分身和声音，并核对文案中的自我介绍。",
@@ -1304,6 +1305,10 @@ export function StudioWorkspace({
     }
   };
   const saveDraft = () => {
+    if (currentUser.role === "auditor") {
+      notify("当前账号为只读权限，不能保存或确认创作内容。");
+      return;
+    }
     if (
       !state.draft.script.text.trim() &&
       !state.draft.prompt.trim() &&
@@ -1332,6 +1337,10 @@ export function StudioWorkspace({
     void persistCloudDraft({ ...state.draft, script }).catch(() => {});
   };
   const confirmFinalDraft = () => {
+    if (currentUser.role === "auditor") {
+      notify("当前账号为只读权限，不能保存或确认创作内容。");
+      return;
+    }
     const script = { ...state.draft.script, confirmed: true };
     patchDraft({ script });
     if (review) return;

@@ -49,8 +49,12 @@ vi.mock("./live", async (importOriginal) => ({
 
 // 人物替换（模块②）：叶子组件打桩，专测组合与置位链路。
 vi.mock("../CharacterSelection", () => ({
-  CharacterSelection: (props: { onVersionChange?: (s: unknown) => void }) => (
+  CharacterSelection: (props: {
+    onVersionChange?: (s: unknown) => void;
+    readOnly?: boolean;
+  }) => (
     <button
+      data-read-only={String(Boolean(props.readOnly))}
       type="button"
       onClick={() =>
         props.onVersionChange?.({
@@ -66,9 +70,11 @@ vi.mock("../CharacterSelection", () => ({
 vi.mock("../SourceFrameSelection", () => ({
   SourceFrameSelection: (props: {
     onSelectionChange?: (s: unknown) => void;
+    readOnly?: boolean;
   }) => (
     <>
       <button
+        data-read-only={String(Boolean(props.readOnly))}
         type="button"
         onClick={() => props.onSelectionChange?.({ id: "sfv-1", payload: {} })}
       >
@@ -87,12 +93,14 @@ vi.mock("../FirstFrameSelection", () => ({
   FirstFrameSelection: (props: {
     onSelectionChange?: (s: unknown) => void;
     referenceSelection?: { id: string } | null;
+    readOnly?: boolean;
   }) => (
     <>
       {props.referenceSelection ? (
         <span>stub-参考匹配-{props.referenceSelection.id}</span>
       ) : null}
       <button
+        data-read-only={String(Boolean(props.readOnly))}
         type="button"
         onClick={() =>
           props.onSelectionChange?.({
@@ -261,7 +269,12 @@ function studio(
       analytics30: null,
     },
     review: true,
-    user: {} as StudioContextValue["user"],
+    user: {
+      id: "customer-1",
+      username: "customer-1",
+      display_name: "客户",
+      role: "customer",
+    },
     navigate: vi.fn(),
     patchDraft: vi.fn(),
     patchState: vi.fn(),
@@ -300,6 +313,36 @@ describe("V1.4 创作页面", () => {
     render(<CopyPage />);
     fireEvent.click(screen.getByRole("button", { name: "用于数字人口播" }));
     expect(value.navigate).toHaveBeenCalledWith("oral", { returnTo: "copy" });
+  });
+
+  it("审计员可查看创作内容但文案、视频与口播提交控件只读", () => {
+    const value = studio({
+      review: false,
+      user: {
+        id: "auditor-1",
+        username: "auditor-1",
+        display_name: "审计员",
+        role: "auditor",
+      },
+    });
+    useStudio.mockReturnValue(value);
+    const view = render(<CopyPage />);
+
+    expect(screen.getByLabelText("二创文案")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "保存版本" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "确认终稿" })).toBeDisabled();
+
+    value.state = { ...value.state, page: "video" };
+    view.rerender(<VideoPage />);
+    expect(screen.getByLabelText("提示词")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "生成视频" })).toBeDisabled();
+
+    value.state = { ...value.state, page: "oral" };
+    view.rerender(<OralPage />);
+    expect(screen.getByRole("button", { name: "生成口播视频" })).toBeDisabled();
+    expect(value.saveDraft).not.toHaveBeenCalled();
+    expect(value.confirmFinalDraft).not.toHaveBeenCalled();
+    expect(value.requestGeneration).not.toHaveBeenCalled();
   });
 
   it("视频复刻入口复用已有成熟工作区", () => {
@@ -2393,5 +2436,48 @@ describe("视频复刻（模块①）", () => {
       ),
     );
     expect(value.navigate).toHaveBeenCalledWith("tasks");
+  });
+
+  it("审计员人物替换链路只读且不自动写入参考选择", async () => {
+    const value = studio({ review: false });
+    value.state = {
+      ...value.state,
+      page: "replacement",
+      draft: { ...value.state.draft, projectId: "project-1" },
+    };
+    value.data = {
+      ...value.data,
+      projects: [
+        {
+          id: "project-1",
+          name: "只读替换项目",
+          owner_user_id: "auditor-1",
+          status: "ACTIVE",
+          reference_asset_id: "asset-1",
+          reference_upload_status: "READY",
+          analysis_status: "READY",
+        },
+      ],
+    };
+    value.user = {
+      id: "auditor-1",
+      username: "auditor-1",
+      display_name: "审计员",
+      role: "auditor",
+    };
+    useStudio.mockReturnValue(value);
+    render(<ReplacementPage />);
+
+    expect(
+      screen.getByRole("button", { name: "stub-选择人物" }),
+    ).toHaveAttribute("data-read-only", "true");
+    expect(
+      screen.getByRole("button", { name: "stub-确认源画面" }),
+    ).toHaveAttribute("data-read-only", "true");
+    vi.mocked(value.patchDraft).mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "stub-选择人物" }));
+    fireEvent.click(screen.getByRole("button", { name: "stub-确认源画面" }));
+    expect(value.patchDraft).not.toHaveBeenCalled();
+    expect(replicaApi.selectCharacterReferences).not.toHaveBeenCalled();
   });
 });
