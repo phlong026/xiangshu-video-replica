@@ -42,6 +42,7 @@ import {
   extractScriptFromUpload as extractScriptFromUploadLive,
   loadCloudDraft,
   loadDraftMaterials,
+  loadLatestScriptFromUpload,
   loadPersonAssets,
   loadProjectDraft,
   loadSavedScriptList,
@@ -703,6 +704,102 @@ export function StudioWorkspace({
     });
     scheduleDraftSave();
   };
+  const extractionDraftId = state.draft.id;
+  const extractionProjectId = state.draft.projectId;
+  const extractionAssetId = state.draft.sourceAssetId;
+  useEffect(() => {
+    if (
+      review ||
+      !extractionProjectId ||
+      !extractionAssetId ||
+      extractingRef.current
+    ) {
+      return;
+    }
+    let active = true;
+    let timer: number | undefined;
+    let reportedRunning = false;
+    const restore = async () => {
+      try {
+        const task = await loadLatestScriptFromUpload(extractionProjectId);
+        if (!active || !task) return;
+        const current = latestDraftRef.current;
+        if (
+          current.id !== extractionDraftId ||
+          current.projectId !== extractionProjectId ||
+          current.sourceAssetId !== extractionAssetId ||
+          task.sourceAssetId !== extractionAssetId
+        ) {
+          return;
+        }
+        if (task.status === "PENDING" || task.status === "RUNNING") {
+          extractingRef.current = true;
+          if (!reportedRunning) {
+            reportedRunning = true;
+            notify("已恢复上次文案提取任务，正在后台继续处理…");
+          }
+          timer = window.setTimeout(() => void restore(), 2_000);
+          return;
+        }
+        if (task.status === "SUCCEEDED" && task.result?.text.trim()) {
+          extractingRef.current = false;
+          const text = task.result.text;
+          const restored = patchStudioDraft(current, {
+            sourceId: extractionAssetId,
+            projectId: extractionProjectId,
+            sourceAssetId: extractionAssetId,
+            script: {
+              ...current.script,
+              original: text,
+              text: current.script.text.trim() ? current.script.text : text,
+              confirmed: false,
+            },
+            scriptEdited: true,
+          });
+          draftTouchedRef.current = true;
+          latestDraftRef.current = restored;
+          setState((previous) => ({ ...previous, draft: restored }));
+          scheduleDraftSave();
+          notify(
+            current.script.text.trim()
+              ? "文案提取已完成，已保留你的编辑并补回来源原文。"
+              : "文案提取已完成，已恢复到当前草稿。",
+          );
+          return;
+        }
+        if (
+          task.status === "FAILED" ||
+          task.status === "SUBMISSION_UNCERTAIN"
+        ) {
+          extractingRef.current = false;
+          notify(task.errorMessage || "上次文案提取失败，可点击提取文案重试。");
+        }
+      } catch (cause: unknown) {
+        extractingRef.current = false;
+        if (active) {
+          notify(
+            customerVisibleErrorMessage(
+              cause,
+              "读取上次文案提取任务失败，可点击提取文案重试。",
+            ),
+          );
+        }
+      }
+    };
+    void restore();
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+      extractingRef.current = false;
+    };
+  }, [
+    review,
+    extractionDraftId,
+    extractionProjectId,
+    extractionAssetId,
+    notify,
+    scheduleDraftSave,
+  ]);
   const openLive = (panel: LivePanel) => {
     if (review) {
       notify(
