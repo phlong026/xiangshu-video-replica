@@ -405,17 +405,23 @@ function ViralFavoriteButton({
   savedFromServer?: boolean;
   onSavedChange?: (saved: boolean) => void;
 }) {
-  const { state, review, notify, patchState } = useStudio();
+  const { state, review, notify, patchState, user } = useStudio();
   const [saved, setSaved] = useState(
     savedFromServer ?? state.favorites.includes(video.id),
   );
   const [saving, setSaving] = useState(false);
+  const accountRef = useRef(user.id);
   useEffect(() => {
     if (savedFromServer !== undefined) setSaved(savedFromServer);
   }, [savedFromServer]);
+  useEffect(() => {
+    accountRef.current = user.id;
+    setSaving(false);
+  }, [user.id]);
 
   const toggle = async () => {
     if (saving) return;
+    const accountId = user.id;
     const nextSaved = !saved;
     setSaved(nextSaved);
     onSavedChange?.(nextSaved);
@@ -433,6 +439,7 @@ function ViralFavoriteButton({
         await removeViralFavorite(video.platformKey, video.nativeId);
       }
     } catch {
+      if (accountRef.current !== accountId) return;
       setSaved(saved);
       onSavedChange?.(saved);
       patchState({
@@ -442,7 +449,7 @@ function ViralFavoriteButton({
       });
       notify("收藏失败，已恢复原状态");
     } finally {
-      setSaving(false);
+      if (accountRef.current === accountId) setSaving(false);
     }
   };
 
@@ -584,7 +591,8 @@ function ViralCard({
 }
 
 export function ViralPage() {
-  const { data, review, updateData } = useStudio();
+  const { data, review, updateData, user } = useStudio();
+  const accountId = user.id;
   const [platform, setPlatform] = useState<"抖音" | "视频号">("抖音");
   const [category, setCategory] = useState("全部");
   const [query, setQuery] = useState("");
@@ -615,7 +623,7 @@ export function ViralPage() {
   const platformKey: ViralPlatform =
     platform === "抖音" ? "douyin" : "wechat_channels";
   const sortKey = sort === "最新" ? "latest" : "hot";
-  const paginationContextKey = `${scope}:${platformKey}:${sortKey}:${category}`;
+  const paginationContextKey = `${accountId}:${scope}:${platformKey}:${sortKey}:${category}`;
   const paginationContextKeyRef = useRef(paginationContextKey);
   const paginationSnapshotsRef = useRef(
     new Map<string, { nextCursor?: string; hasMore: boolean }>(),
@@ -651,6 +659,11 @@ export function ViralPage() {
 
   const current = review ? shown.slice(0, visibleCount) : shown;
   const statisticsError = useViralStatistics(current, !review);
+
+  useEffect(() => {
+    void accountId;
+    setFavoriteKeys(new Set());
+  }, [accountId]);
 
   useEffect(() => {
     if (queryLifecycleRef.current === query) return;
@@ -1278,6 +1291,7 @@ export function ViralDetailPage() {
     updateData,
     extractScriptFromUpload,
   } = useStudio();
+  const accountId = user.id;
   const selectedVideo = state.selectedVideoId
     ? data.videos.find((item) => item.id === state.selectedVideoId)
     : undefined;
@@ -1290,9 +1304,18 @@ export function ViralDetailPage() {
   const [detailFavorite, setDetailFavorite] = useState<boolean>();
   const detailParams = useMemo(viralDetailParams, []);
   const video = remoteVideo ?? selectedVideo;
-  const { importState, start } = useViralImport(video?.id, user.id);
+  const { importState, start } = useViralImport(video?.id, accountId);
 
   useEffect(() => {
+    void accountId;
+    setRemoteVideo(undefined);
+    setDetailFavorite(undefined);
+    setDetailAvailability("available");
+    setDetailStatus("idle");
+  }, [accountId]);
+
+  useEffect(() => {
+    void accountId;
     if (remoteVideo || review || !detailParams) return;
     if (
       selectedVideo &&
@@ -1328,7 +1351,7 @@ export function ViralDetailPage() {
     return () => {
       cancelled = true;
     };
-  }, [detailParams, remoteVideo, review, selectedVideo, updateData]);
+  }, [detailParams, remoteVideo, review, selectedVideo, updateData, accountId]);
 
   useEffect(() => {
     if (video) persistViralDetailUrl(video);
