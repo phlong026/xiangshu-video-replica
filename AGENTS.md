@@ -24,10 +24,11 @@
 
 1. 从最新 main 切分支 `feat/customer-v3-tXX-短横线描述`；同一时间只开一个任务分支（多分支同改账本会连环冲突）。
 2. 测试先行：先写失败测试（红），再实现（绿）。
-3. 全量验证零回归后提 PR：标题 `TXX: <英文摘要>`；三门禁 CI 全绿（secret 扫描 / Linux 质量门 / Windows NSIS）；受保护 main 仅接受 squash merge（所有者账号 phlong026）。
-4. 同一 PR 内更新账本：任务清单任务状态 + 头部状态行 + §12 工作包状态、`docs/CUSTOMER-TASK-EVIDENCE-V3.md` 登记、`docs/evidence/TXX-EVIDENCE.md`（证据文件统一存放于 `docs/evidence/`，结构参照 `docs/evidence/T06-EVIDENCE.md`，含 §14 模板全文；2026-08-21 M0 评审 M8 起不再放仓库根目录）。
-5. 一个 PR 只承载一个任务；评审评论逐条实质修复后 resolve，不得当作流程噪音跳过。
-6. 需人工授权的动作（真实 ZPay / 付费 Provider / 生产 COS 变更 / 对外发码 / 灰度扩大 / 公网发布）必须先取得用户明确授权。
+3. push 前核对提交清单（防并发会话污染任务 PR）：先 `git fetch origin --prune`，再确认 `git log origin/main..HEAD --oneline` 中是且仅是本任务的提交；发现其他会话/他人的提交时，先摘出到独立分支（或与所有者确认处理方式），严禁混入任务 PR——squash 合并后外来提交将不可逆地进入 main（2026-08-22 曾有并发会话提交混入 PR #39）。push 后、合并前再核对一次 PR 的 Commits 列表。
+4. 全量验证零回归后提 PR：标题 `TXX: <英文摘要>`；三门禁 CI 全绿（secret 扫描 / Linux 质量门 / Windows NSIS）；受保护 main 仅接受 squash merge（所有者账号 phlong026）。
+5. 同一 PR 内更新账本：任务清单任务状态 + 头部状态行 + §12 工作包状态、`docs/CUSTOMER-TASK-EVIDENCE-V3.md` 登记、`docs/evidence/TXX-EVIDENCE.md`（证据文件统一存放于 `docs/evidence/`，结构参照 `docs/evidence/T06-EVIDENCE.md`，含 §14 模板全文；2026-08-21 M0 评审 M8 起不再放仓库根目录）。
+6. 一个 PR 只承载一个任务；评审评论逐条实质修复后 resolve，不得当作流程噪音跳过。
+7. 需人工授权的动作（真实 ZPay / 付费 Provider / 生产 COS 变更 / 对外发码 / 灰度扩大 / 公网发布）必须先取得用户明确授权。
 
 ## 硬红线（摘要）
 
