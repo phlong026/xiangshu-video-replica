@@ -38,9 +38,11 @@ test("customer wallet creates a recharge order under the customer session", asyn
 
   // The customer-lane wallet panel loads (task #7): balance + recharge form.
   // V1.4 bills by seconds: the recharge section heading is 充值秒数额度.
-  await expect(page.getByRole("heading", { name: "充值秒数额度" })).toBeVisible({
-    timeout: 20_000,
-  });
+  await expect(page.getByRole("heading", { name: "充值秒数额度" })).toBeVisible(
+    {
+      timeout: 20_000,
+    },
+  );
   await expect(page.getByRole("button", { name: "充值100元" })).toBeVisible();
 
   // Read the balance before the recharge: PENDING must not credit the wallet.
