@@ -1,0 +1,23 @@
+{
+  "checked_at_utc": "2026-09-08T12:32:35.407022+00:00",
+  "result": "PASS",
+  "markdown_files": 4,
+  "local_links_checked": 128,
+  "source_line_links_checked": 118,
+  "issues": [],
+  "source_fingerprints_checked": 414,
+  "source_drift": [],
+  "report_credential_pattern_hits": [],
+  "repository_secret_scan_exit_code": 0,
+  "git_diff_check_exit_code": 0,
+  "independent_review": {
+    "result": "No remaining blocking findings after report corrections",
+    "corrections": [
+      "Added old/new client and backend compatibility window; current updater/minimum version enforcement is not assumed.",
+      "Added identifier, DPAPI file/entropy, Windows device registry and macOS Keychain namespace compatibility.",
+      "Added production topology and single default deployment path selection to W0.",
+      "Made legacy runtime deletion depend on data migration completion."
+    ]
+  },
+  "scope": "Report and static-source verification only; 24 selected deployment/build contracts separately recorded. Not a complete application, installed desktop, production or paid-provider validation."
+}
