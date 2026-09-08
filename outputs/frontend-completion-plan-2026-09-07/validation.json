@@ -1,0 +1,43 @@
+{
+  "tasks": 41,
+  "acceptance_cases": 96,
+  "decisions": 8,
+  "audit_records": 38,
+  "unmapped_audit_records": [],
+  "dependency_cycles": false,
+  "invalid_snapshot_paths": [],
+  "phase_counts": {
+    "A 基线与现有流程修复": 16,
+    "B 已有能力补齐": 12,
+    "C 需产品确认的扩展能力": 4,
+    "C 暂缓，解冻后单独排期": 3,
+    "D 完整验收与交付": 6
+  },
+  "source_sha": "452478f7222629e2e6f08854ef653ebdd37b9455",
+  "business_code_changed": false,
+  "tests_executed_this_planning_turn": false,
+  "acceptance_tables_valid": 41,
+  "csv_checks": {
+    "工作任务清单.csv": {
+      "rows": 41,
+      "columns": 15
+    },
+    "逐任务验收用例.csv": {
+      "rows": 96,
+      "columns": 14
+    },
+    "开工前确认事项.csv": {
+      "rows": 8,
+      "columns": 8
+    },
+    "审计缺口任务对应.csv": {
+      "rows": 38,
+      "columns": 3
+    }
+  },
+  "blocking_levels_explicit": true,
+  "formal_task_mapping_gate": "FP-00",
+  "inventory_confirmation_after_read_only": true,
+  "paused_publish_honesty_owner": "FP-26-A3 / FP-35",
+  "release_decision_prerequisite": "FP-38/39 status snapshot; Go requires passed gates"
+}

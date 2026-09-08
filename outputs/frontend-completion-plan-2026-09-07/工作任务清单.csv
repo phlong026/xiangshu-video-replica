@@ -1,0 +1,218 @@
+﻿任务ID,批次,优先级,任务,当前状态,排期条件,主责/复核,来源缺口,依赖,依赖要求,确认点,正式任务映射,完工标准,验收用例ID,源码范围（审计快照）
+FP-00,A 基线与现有流程修复,P0,建立复现基线与逐项处理台账,未开工,可先做基线确认,QA / 前端，独立评审,G01、G02、G03、G04、G05、G06、G07、G08、G09、G10,无,AUTOMATED_VERIFIED,无,待FP-00映射正式TXX、实施分支及PR；禁止擅自编号,"1. 核对审计分支452478f与当前main及目标实施分支的差异；若相关功能尚未合入，先确认并完成既定集成前置，不能在缺少V1.4功能的旧基线盲修。
+2. 固定待修源码 SHA、运行入口、角色和数据集；每个源码发现登记可复现/不复现/已修/待外部条件，不能直接视为浏览器已复现。
+3. 先复现 G01–G10；其他发现进入对应任务时复现。为成立缺陷写能在原实现失败的行为测试；不成立的记录反证并关闭，不为凑清单修改代码。
+4. 登记共享文件负责人、已有未提交变更及主账本关联；本清单是工作分解，不新建或重编号 V3 主任务。
+5. 交付本期每个FP → 正式TXX → 唯一实施分支 → PR/证据位置的映射；未建PR可先留计划占位，创建后回填。无法归入既有TXX的范围先登记待正式立项，不自创编号或开始实施。",FP-00-A1、FP-00-A2,"/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/CreationPages.test.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/StudioWorkspace.test.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/ContentPages.test.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/docs/客户版任务清单-V3.md"
+FP-01,A 基线与现有流程修复,P0,接通新上传项目与创作工作区,未开工,待基线复现/前置任务,前端 / 后端，QA 复核,G01,FP-00,AUTOMATED_VERIFIED,无,待FP-00映射正式TXX、实施分支及PR；禁止擅自编号,"1. 上传完成后同步已保存项目、来源资产和当前草稿，进入可拆解状态；复用既有上传/项目接口。
+2. 失败、取消、换来源和迟到响应有明确处理，不把未上传成功的来源设为就绪。",FP-01-A1、FP-01-A2,"/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/CreationPages.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/MainPages.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/StudioWorkspace.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/live.ts"
+FP-02,A 基线与现有流程修复,P0,恢复复刻分镜与脚本版本,未开工,待基线复现/前置任务,前端 / 后端，QA 复核,G02,FP-01,AUTOMATED_VERIFIED,无,待FP-00映射正式TXX、实施分支及PR；禁止擅自编号,"1. 重挂载时读取当前项目已保存分镜/脚本/Prompt版本；未保存编辑的离页行为明确。
+2. 恢复过程有加载/失败/重试，换项目清理旧状态；不通过重新AI拆解恢复已有数据。",FP-02-A1、FP-02-A2,"/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/CreationPages.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/StudioWorkspace.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/live.ts"
+FP-03,A 基线与现有流程修复,P0,接通确认首帧到视频生成的资产交接,未开工,待基线复现/前置任务,前端 / 后端，QA 复核,G03,FP-01,AUTOMATED_VERIFIED,无,待FP-00映射正式TXX、实施分支及PR；禁止擅自编号,"1. 确认首帧后同步或按ID读取可用资产与签名预览，保持首帧版本及归属一致。
+2. 上游人物/源帧/项目变化使确认失效；禁止失效首帧或旧请求覆盖。",FP-03-A1、FP-03-A2,"/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/CreationPages.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/StudioWorkspace.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/live.ts"
+FP-04,A 基线与现有流程修复,P0,让人物参考匹配重试真正执行,未开工,待基线复现/前置任务,前端 / 后端，QA 复核,G04,FP-00,AUTOMATED_VERIFIED,无,待FP-00映射正式TXX、实施分支及PR；禁止擅自编号,"1. 使用既有模式触发明确重试，保留忙态、错误和成功状态。
+2. 每次点击对应一次有效请求；切换上游后旧匹配结果作废。",FP-04-A1、FP-04-A2,"/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/CreationPages.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/ProjectDetailFlow.tsx"
+FP-05,A 基线与现有流程修复,P1,统一参考图选择与后端参数约束,未开工,待基线复现/前置任务,前端 / 后端，QA 复核,G12,FP-00,AUTOMATED_VERIFIED,无,待FP-00映射正式TXX、实施分支及PR；禁止擅自编号,"1. 仅展示/接受后端支持的图片类型和数量；沿用capabilities限制，不扩展后端模式或放松校验。
+2. 上传、素材选择、草稿恢复和最终提交都校验，提供清晰纠正提示。",FP-05-A1、FP-05-A2,"/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/StudioWorkspace.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/CreationPages.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/independent.py"
+FP-06,A 基线与现有流程修复,P0,统一生成费用确认与提交门禁,未开工,待基线复现/前置任务,前端 / 后端，QA 复核,G13,FP-02、FP-03、FP-05,AUTOMATED_VERIFIED,无,待FP-00映射正式TXX、实施分支及PR；禁止擅自编号,"1. 复刻、独立生成和口播都在取得有效报价后提供确认；报价失败/加载中不能提交。
+2. 参数或报价版本变化需要重新核对；复用钱包与幂等机制，不改变费率或结算规则。",FP-06-A1、FP-06-A2、FP-06-A3,"/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/StudioWorkspace.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/CreationPages.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/live.ts
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/api.ts"
+FP-07,A 基线与现有流程修复,P0,阻止真实人物生成落入占位切片,未开工,待基线复现/前置任务,后端 / 媒体处理，QA 复核,D02,FP-00,AUTOMATED_VERIFIED,无,待FP-00映射正式TXX、实施分支及PR；禁止擅自编号,"1. 真实主图裁切成功时只产生真实切片；失败时明确失败/可重试，绝不以deterministic_png替代并批准发布。
+2. 优先复用现有媒体能力；若支持某格式必须新增依赖，先提出具体依赖方案确认。保留主图与诊断证据，不删除用户原图。",FP-07-A1、FP-07-A2,"/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/simple_character.py
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/media_tools.py
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/first_frame_routes.py"
+FP-08,A 基线与现有流程修复,P0,统一资产来源展示与正式入口模拟限制,未开工,待排期，相关子项先确认,前端 / 后端，QA 复核,D01、D03、D04、D05、D06,FP-07,AUTOMATED_VERIFIED,Q01,待FP-00映射正式TXX、实施分支及PR；禁止擅自编号,"1. 主图/切片来源分别传递并展示；真实、占位、未知状态不混为一谈。
+2. 客户生产强制禁Fake；内部入口按Q01确认的用途落规则。保留隔离DEV审核与测试夹具，检查产物中生产不可达。",FP-08-A1、FP-08-A2,"/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/simple_character.py
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/analysis_routes.py
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/first_frame_routes.py
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/live.ts
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/PeoplePages.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/CharacterLibrary.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/RootApp.tsx"
+FP-09,A 基线与现有流程修复,P1,盘点历史占位资产并制定修复批次,未开工,数据源及只读访问范围明确后可盘点；Q02仅阻塞后续处置,后端 / 数据负责人，业务复核,D02、D03,FP-00,AUTOMATED_VERIFIED,无,待FP-00映射正式TXX、实施分支及PR；禁止擅自编号,"1. 明确目标数据源、环境、时间范围和只读访问范围后做统计：按主图/切片来源、引用关系和任务状态列出受影响范围，输出脱敏清单；不依赖Q02处置决定开工。
+2. 逐项生成保留原图/重新裁切/重新生成/标记不可用方案及成本、影响和回滚；本任务不自动删除、扣费或修改生产资产。
+3. 库存结论仅覆盖实际读取的数据源；本地fixture可验证盘点逻辑，不能替代目标客户/生产库存结论。Q02仅阻塞报告之后的写入、重生成或删除，不阻塞本任务报告验收。",FP-09-A1、FP-09-A2,"/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/simple_character.py
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/materials.py
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/docs/CUSTOMER-TASK-EVIDENCE-V3.md"
+FP-10,A 基线与现有流程修复,P1,修复爆款加载更多,未开工,待基线复现/前置任务,前端 / 后端，QA 复核,G08,FP-00,AUTOMATED_VERIFIED,无,待FP-00映射正式TXX、实施分支及PR；禁止擅自编号,"1. 接通观察节点或等价加载控件，处理切平台/筛选时的计数和加载状态。
+2. 服务端有更多页时按真实分页继续读取，不能只修DOM而仍截断后续内容。",FP-10-A1、FP-10-A2,/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/ContentPages.tsx
+FP-11,A 基线与现有流程修复,P0,打通爆款来源到提文案和复刻,未开工,待基线复现/前置任务,前端 / 后端，QA 复核,G06,FP-01、FP-02、FP-10,AUTOMATED_VERIFIED,无,待FP-00映射正式TXX、实施分支及PR；禁止擅自编号,"1. 媒体准备后保存可使用的来源资产/项目关联，分别接入已有ASR与视频分析流程。
+2. 区分音频与视频能力；仅有音频时支持转写并说明不可直接视频复刻。更换来源清理不兼容草稿，保留来源追溯和重复点击幂等。",FP-11-A1、FP-11-A2、FP-11-A3,"/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/ContentPages.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/StudioWorkspace.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/live.ts
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/viral_routes.py
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/script_from_audio_routes.py"
+FP-12,B 已有能力补齐,P1,让当前IP定位参与文案二创,未开工,待基线复现/前置任务,前端 / 后端，QA 复核,G06,FP-11,AUTOMATED_VERIFIED,无,待FP-00映射正式TXX、实施分支及PR；禁止擅自编号,"1. 当前文案、选中IP定位和版本进入既有改写请求；保持云端草稿、保存版本、终稿确认机制。
+2. 缺来源/缺IP/未保存内容的前置反馈清晰，不再仅打开旧项目列表。更换IP使旧确认失效。",FP-12-A1、FP-12-A2,"/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/CreationPages.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/StudioWorkspace.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/AnalysisWorkspace.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/script_rewrite.py"
+FP-13,A 基线与现有流程修复,P1,修复照片到口播分身交接,未开工,待基线复现/前置任务,前端 / 后端，QA 复核,G07,FP-00,AUTOMATED_VERIFIED,无,待FP-00映射正式TXX、实施分支及PR；禁止擅自编号,"1. 点选照片时同时传入源图ID及人物归属，分身页读取同一字段。
+2. 切人物清除旧图；无权、已删除或过期资产提供返回重选。",FP-13-A1、FP-13-A2,"/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/PeoplePages.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/StudioWorkspace.tsx"
+FP-14,B 已有能力补齐,P1,完成口播音频上传与完整素材选择,未开工,待基线复现/前置任务,前端 / 后端，QA 复核,U04、G16,FP-00,AUTOMATED_VERIFIED,无,待FP-00映射正式TXX、实施分支及PR；禁止擅自编号,"1. 口播上传按钮复用统一素材上传，含进度/取消/错误/完成；完整云端音频支持服务端搜索/分页选择。
+2. 音频样本克隆与完整口播音频按各自格式/时长契约校验，不能只依赖已加载图片资产。",FP-14-A1、FP-14-A2、FP-14-A3,"/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/CreationPages.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/PeoplePages.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/StudioWorkspace.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/api.ts
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/material_routes.py"
+FP-15,A 基线与现有流程修复,P1,接通口播原生字幕选项,未开工,待基线复现/前置任务,前端 / 后端，QA 复核,G09,FP-06,AUTOMATED_VERIFIED,无,待FP-00映射正式TXX、实施分支及PR；禁止擅自编号,"1. 字幕状态映射到后端既有subtitle字段和供应商原生字幕参数；关闭时明确关闭。
+2. 只接原生字幕，不恢复此前取消的本地视频后期处理；支持范围由既有接口契约验证。",FP-15-A1、FP-15-A2,"/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/CreationPages.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/StudioWorkspace.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/api.ts
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/oral_routes.py
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/oral_worker.py"
+FP-16,C 需产品确认的扩展能力,P2,明确并实现网感模板,未开工,待排期，相关子项先确认,前端 / 后端，QA 复核,G09,FP-15,AUTOMATED_VERIFIED,Q03,待FP-00映射正式TXX、实施分支及PR；禁止擅自编号,"1. Q03确认模板具体效果及供应商原生支持范围后冻结输入/输出样例。
+2. 如本期不做模板，明确关闭/移除可选入口并说明边界；如做，完成参数、后端处理、预览与结果的完整实现。",FP-16-A1、FP-16-A2,"/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/CreationPages.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/state.ts
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/api.ts
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/oral_routes.py
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/hifly.py"
+FP-17,B 已有能力补齐,P1,补齐人物、场景和任务历史分页,未开工,待基线复现/前置任务,前端 / 后端，QA 复核,G14,FP-00,AUTOMATED_VERIFIED,无,待FP-00映射正式TXX、实施分支及PR；禁止擅自编号,"1. 移除8人/12套/各20任务对可访问内容的静默截断，按现有后端分页能力接UI；缺失分页契约只做必要追加。
+2. 普通批次与口播有稳定独立标识、查询范围和历史入口；显示全部数量或明确当前加载数量，不能误标。",FP-17-A1、FP-17-A2,"/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/live.ts
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/PeoplePages.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/MainPages.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/api.ts
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/oral_routes.py
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/simple_character_routes.py
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/generation_routes.py"
+FP-18,B 已有能力补齐,P1,接通客户流水和充值历史分页,未开工,待基线复现/前置任务,前端 / 后端，QA 复核,G15,FP-00,AUTOMATED_VERIFIED,无,待FP-00映射正式TXX、实施分支及PR；禁止擅自编号,"1. 透传limit/offset等既有分页字段，额度流水提供完整历史；最近订单保留快捷区并提供完整历史入口。
+2. 刷新/充值完成/关闭订单后正确更新当前数据，不修改账务或支付状态判定。",FP-18-A1、FP-18-A2,"/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/api.ts
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/customer/CustomerWalletPanel.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/WalletPanel.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/recharge_routes.py"
+FP-19,B 已有能力补齐,P1,完善真实缩略图、照片计数与分页呈现,未开工,待基线复现/前置任务,前端 / 后端，QA 复核,G17,FP-17,AUTOMATED_VERIFIED,无,待FP-00映射正式TXX、实施分支及PR；禁止擅自编号,"1. 按可见项懒加载真实缩略图或签名地址，处理过期/失败；人物照片数量来自真实计数或显示加载/未知。
+2. 避免一次渲染全部页码或为全部历史素材串行签名，复用现有分页/图片能力。",FP-19-A1、FP-19-A2,"/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/live.ts
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/ContentPages.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/PeoplePages.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/material_routes.py"
+FP-20,B 已有能力补齐,P1,让爆款收藏按账号持久化,未开工,待基线复现/前置任务,前端 / 后端，QA 复核,U02,FP-10,AUTOMATED_VERIFIED,无,待FP-00映射正式TXX、实施分支及PR；禁止擅自编号,"1. 收藏/取消收藏/收藏列表持久化且按账号隔离，保持platform+nativeID身份稳定。
+2. 失败回退前端状态、重复点击幂等；来源下架仍保留可理解记录。新增文件/迁移编号在开工时对齐冻结映射，不先杜撰。",FP-20-A1、FP-20-A2,"/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/ContentPages.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/StudioWorkspace.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/api.ts
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/viral_routes.py
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/viral_store.py"
+FP-21,A 基线与现有流程修复,P0,修复结果跳转并恢复详情导航状态,未开工,待基线复现/前置任务,前端 / 后端，QA 复核,G05、G21,FP-00,AUTOMATED_VERIFIED,无,待FP-00映射正式TXX、实施分支及PR；禁止擅自编号,"1. 先修task_id/batch_id错误；详情按稳定对象类型和ID加载，不能仅依赖首20条内存数据。
+2. 保留原有hash别名与回退；Studio详情、管理端模块/子页支持可恢复地址和前进后退；URL不携带凭据。浏览器客户凭据仍遵循现有内存设计。",FP-21-A1、FP-21-A2、FP-21-A3,"/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/AnalyticsPage.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/MainPages.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/StudioWorkspace.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/state.ts
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/AdminApp.tsx"
+FP-22,B 已有能力补齐,P1,统一成片统计与口播报表覆盖,未开工,待基线复现/前置任务,前端 / 后端，QA 复核,G11、G22,FP-17、FP-21,AUTOMATED_VERIFIED,无,待FP-00映射正式TXX、实施分支及PR；禁止擅自编号,"1. 按现有成片任务口径并入口播，明示批次与成片单位，统一成功/失败/排队/隐藏/替代/时间边界，避免直接拼总数重复计算。
+2. 沿用已记录的进页读取+手动刷新决策，补齐入口、更新时间和失败重试；不新增20秒双聚合轮询，不伪造外部播放互动数。",FP-22-A1、FP-22-A2、FP-22-A3,"/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/studio_routes.py
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/admin_dashboard_routes.py
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/control_routes.py
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/AnalyticsPage.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/MainPages.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/admin/GenerationRecordsPage.tsx"
+FP-23,A 基线与现有流程修复,P1,修复后台客户上下文及异常记录入口,未开工,待基线复现/前置任务,前端 / 后端，QA 复核,G10、G22,FP-21,AUTOMATED_VERIFIED,无,待FP-00映射正式TXX、实施分支及PR；禁止擅自编号,"1. 客户设备/会话/详情共用当前客户上下文，切客户同步更新并清掉旧请求。
+2. 异常待办带失败筛选进入对应详情；默认保留后台只读处置边界，动作名称与可做事情一致，不新增代客户付费重试。",FP-23-A1、FP-23-A2,"/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/admin/CustomersManagementPage.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/admin/OverviewPage.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/admin/GenerationRecordsPage.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/control_routes.py"
+FP-24,B 已有能力补齐,P1,完成客户资料错误、在线状态和退出入口,未开工,待基线复现/前置任务,前端 / 后端，QA 复核,G18、U06、U09,FP-00,AUTOMATED_VERIFIED,无,待FP-00映射正式TXX、实施分支及PR；禁止擅自编号,"1. 非401资料错误可见且可重试；网络可达与会话租约状态分别表达，移除恒在线假状态。
+2. 接入既有logout完整释放/清理机制；暂不处理采用本地收起/返回，不改变为业务拒绝或删除。",FP-24-A1、FP-24-A2、FP-24-A3,"/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/customer/CustomerWorkspace.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/customer/CustomerProfilePanel.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/customer/DeviceManagementPage.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/customer/useCustomerSession.ts
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/RootApp.tsx"
+FP-25,B 已有能力补齐,P1,统一前端角色可操作范围,未开工,待基线复现/前置任务,前端 / 后端，QA 复核,G19,FP-01、FP-03、FP-14、FP-24,AUTOMATED_VERIFIED,无,待FP-00映射正式TXX、实施分支及PR；禁止擅自编号,"1. 复用已有角色与readOnly约束，创建/上传/改写/确认/重试按钮和叶子组件一致。
+2. 后端鉴权继续独立执行；前端隐藏/禁用不替代服务端授权，不更改已审核权限模型。",FP-25-A1、FP-25-A2,"/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/CreationPages.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/PeoplePages.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/StudioWorkspace.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/CharacterSelection.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/FirstFrameSelection.tsx"
+FP-26,B 已有能力补齐,P1,替换账户概览中的固定业务状态,未开工,待基线复现/前置任务,前端 / 后端，QA 复核,U10、D06、U01,FP-24,AUTOMATED_VERIFIED,无,待FP-00映射正式TXX、实施分支及PR；禁止擅自编号,"1. 侧栏积分和账户概览读取现有钱包/资料；保留现有秒=积分映射并标明单位。
+2. 未接发布量显示未接入/未知，不能把固定0当查询值；数据失效、失败和真实0区分。
+3. 本期检查发布账号页与发布页：明确暂缓/未启用，禁用会产生授权或发布请求的操作，清除固定业务数字；此项不等待C5解冻。",FP-26-A1、FP-26-A2、FP-26-A3,"/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/MainPages.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/StudioWorkspace.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/customer/CustomerProfilePanel.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/api.ts
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/ContentPages.tsx"
+FP-27,B 已有能力补齐,P1,补齐口播服务配置与连接检查能力,未开工,待基线复现/前置任务,前端 / 后端，QA 复核,U07、U08,FP-00,AUTOMATED_VERIFIED,无,待FP-00映射正式TXX、实施分支及PR；禁止擅自编号,"1. 复用已加密的设置链增加Hifly配置、掩码、能力状态与可用的只读账户/余额检查；不输出明文密钥。
+2. 为每服务区分配置校验、认证/连接可达、能力可用、付费生成验收。没有安全只读测试接口时明确仅配置校验，不能伪称连接成功。",FP-27-A1、FP-27-A2、FP-27-A3,"/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/SettingsPanel.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/api.ts
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/admin/SystemSettingsPage.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/settings.py
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/settings_routes.py
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/control_routes.py
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/hifly.py"
+FP-28,C 需产品确认的扩展能力,P2,明确并补齐工作区搜索范围,未开工,待排期，相关子项先确认,前端 / 后端，QA 复核,G20,FP-17、FP-20、FP-21,AUTOMATED_VERIFIED,Q04,待FP-00映射正式TXX、实施分支及PR；禁止擅自编号,"1. Q04确认页面/人物快捷搜索或视频/文案/人物/素材跨模块搜索，再实现与提示语一致的能力。
+2. 完整搜索需服务端分页和归属过滤，结果带对象类型/ID并跳到正确详情；不默认扩大为全网搜索。",FP-28-A1、FP-28-A2,"/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/StudioWorkspace.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/api.ts
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/studio_routes.py
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/material_routes.py
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/studio_draft_routes.py"
+FP-29,C 需产品确认的扩展能力,P2,实现与通知偏好一致的通知功能,未开工,待排期，相关子项先确认,前端 / 后端，QA 复核,G20,FP-21、FP-22,AUTOMATED_VERIFIED,Q05,待FP-00映射正式TXX、实施分支及PR；禁止擅自编号,"1. Q05确认本期事件与渠道，建议先站内任务成功/失败/需要处理、未读与详情跳转，公告与外部推送另确认。
+2. 消费既有通知偏好，重复终态事件去重；偏好关闭不隐藏交易/任务本身的必要状态。新增持久化/文件名在实施前对齐文件映射。",FP-29-A1、FP-29-A2,"/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/MainPages.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/StudioWorkspace.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/studio_routes.py
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/generation_worker.py
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/oral_worker.py"
+FP-30,B 已有能力补齐,P1,接通已选定的视频链接解析方案,未开工,待基线复现/前置任务,前端 / 后端，QA 复核,U03,FP-11、FP-27,AUTOMATED_VERIFIED,无,待FP-00映射正式TXX、实施分支及PR；禁止擅自编号,"1. 沿用已确认的Douyidou方案和现有工程参考，不重做供应商选型；移植所需新文件先对齐冻结文件映射。
+2. 解析→来源资产/项目→文案或复刻完整交接；明确支持平台和错误/限额/超时，视频号不支持时引导文件上传，不作假承诺。",FP-30-A1、FP-30-A2、FP-30-A3,"/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/MainPages.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/CreationPages.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/api.ts
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/media_routes.py
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/settings.py"
+FP-31,C 暂缓，解冻后单独排期,P2,发布账号授权与账号管理,未开工,暂缓（需解冻）,产品 / 前后端 / 平台对接,U01,FP-00,AUTOMATED_VERIFIED,Q06,待FP-00映射正式TXX、实施分支及PR；禁止擅自编号,"1. 保持C5暂缓；本期暂缓状态和固定数字收口由FP-26/35负责。本任务仅在Q06明确恢复、首发平台和接口条件后冻结并实现授权/回调/续期/解绑。
+2. 解冻后按账号归属和过期状态提供前后端管理；新增后端文件/API/迁移映射在立项时确认，不能把授权链接当已连接。",FP-31-A2,"/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/MainPages.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/ContentPages.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/api.ts"
+FP-32,C 暂缓，解冻后单独排期,P2,云端发布草稿、封面与提交,未开工,暂缓（需解冻）,产品 / 前后端 / 平台对接,U01、U02,FP-31、FP-19,AUTOMATED_VERIFIED,Q06,待FP-00映射正式TXX、实施分支及PR；禁止擅自编号,"1. 仅在Q06恢复发布范围后实现按账号云端草稿、标题/文案/标签、封面上传和校验、目标账号选择。
+2. 提交前明确用户确认与目标范围，写请求可追踪且幂等；本期C5暂缓时不建发布后台。",FP-32-A1、FP-32-A2,"/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/ContentPages.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/api.ts
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/material_routes.py"
+FP-33,C 暂缓，解冻后单独排期,P2,发布回执、异常处理与发布统计,未开工,暂缓（需解冻）,产品 / 前后端 / QA,U01、U10、D06,FP-22、FP-32,AUTOMATED_VERIFIED,Q06,待FP-00映射正式TXX、实施分支及PR；禁止擅自编号,"1. 解冻后建立真实发布状态回查、成功链接、失败原因及可重试动作；超时不直接认定失败重发。
+2. 发布计数按真实成功事件去重，外部播放/互动数据只有取得实际授权与来源后才接入。",FP-33-A1、FP-33-A2,"/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/ContentPages.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/AnalyticsPage.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/studio_routes.py"
+FP-34,C 需产品确认的扩展能力,P2,定义并实现实收收入和利润口径,未开工,待排期，相关子项先确认,业务 / 后端 / 财务数据复核,U05,FP-22,AUTOMATED_VERIFIED,Q07,待FP-00映射正式TXX、实施分支及PR；禁止擅自编号,"1. 先由Q07明确充值到账、消费收入或两套并列口径，以及退款/赠送/调账/历史价格归属；样例对账确认后再实现。
+2. 保留标准售价估算的独立标识，报表和CSV同口径，不修改底层已结算资金事实。",FP-34-A1、FP-34-A2,"/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/admin/ProfitOverview.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/admin/OverviewPage.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/api.admin.ts
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/admin_profit_routes.py
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/admin_dashboard_routes.py"
+FP-35,D 完整验收与交付,P0,完成52条页面模块的逐角色交互验收,未开工,待基线复现/前置任务,QA 主责，各模块负责人修复,无,FP-01、FP-02、FP-03、FP-04、FP-05、FP-06、FP-07、FP-08、FP-10、FP-11、FP-12、FP-13、FP-14、FP-15、FP-17、FP-18、FP-19、FP-20、FP-21、FP-22、FP-23、FP-24、FP-25、FP-26、FP-27、FP-30,AUTOMATED_VERIFIED,无,待FP-00映射正式TXX、实施分支及PR；禁止擅自编号,"1. 以52条模块清单和585处源码控件声明为起点，展开本期可见按钮/表单/弹窗/状态；记录角色、前置、步骤、请求、结果和返回路径。
+2. 覆盖新账号、已有数据、分页数据、异步中、空态、失败/重试、返回/刷新/重复点击；DEV审核与正式登录分别执行。新增E2E文件名先对齐现有映射。
+3. 本期若纳入FP-16/28/29/34，或明确解冻FP-31至33，必须将其加入本任务依赖和走查矩阵；未纳入项明确标为待确认/暂缓，不允许标通过。",FP-35-A1、FP-35-A2、FP-35-A3,"/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/RootApp.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/StudioWorkspace.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/AdminApp.tsx
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/e2e/customer/playwright.config.mjs
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/docs/客户版测试与验收规格-V3.md"
+FP-36,D 完整验收与交付,P0,完成候选版本质量门禁和证据收口,未开工,待基线复现/前置任务,集成负责人 / QA / 独立评审,无,FP-35,AUTOMATED_VERIFIED,无,待FP-00映射正式TXX、实施分支及PR；禁止擅自编号,"1. 按本期选择集合执行一次候选版本全仓门禁，检查API类型、格式、lint/typecheck、安全扫描及相关CI；每项任务自己的收尾门禁也不能遗漏。
+2. 审计源码、构建、测试、E2E证据绑定同一SHA；更新唯一主账本及证据关联，附变更范围、风险、回滚说明；不覆写历史证据。",FP-36-A1、FP-36-A2、FP-36-A3,"/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/package.json
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/scripts/pg-fixture.sh
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/docs/客户版任务清单-V3.md
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/docs/CUSTOMER-TASK-EVIDENCE-V3.md"
+FP-37,D 完整验收与交付,P0,衔接现有T35–T39类生产验证,未开工,待排期，相关子项先确认,运维 / 后端 / QA,无,FP-36,AUTOMATED_VERIFIED,Q08,待FP-00映射正式TXX、实施分支及PR；禁止擅自编号,"1. 复用既有T35–T39方案和证据要求，在指定staging运行双API、多Worker、PG、存储及故障恢复验证。
+2. 仅补当前候选版本的缺失证据，不重新编写整套基础设施；真实环境访问与变更范围通过Q08确认。",FP-37-A1、FP-37-A2,"/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/docs/客户版任务清单-V3.md
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/docs/客户版测试与验收规格-V3.md
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/docs/CUSTOMER-TASK-EVIDENCE-V3.md"
+FP-38,D 完整验收与交付,P0,逐供应商执行真实链路验收（关联T40）,未开工,待排期，相关子项先确认,QA / 业务 / 运维，各供应商独立销项,无,FP-37,STAGING_VERIFIED,Q08,待FP-00映射正式TXX、实施分支及PR；禁止擅自编号,"1. 执行前形成逐服务授权单：环境、测试账号、操作、样本、数量/金额上限、停止条件；已有明确授权仅按原范围复用，不在聊天里收集明文密钥。
+2. 每供应商独立登记配置/能力、请求回执、结果产物、内部任务及账务关联；单个服务通过不带动全部通过。故障负例优先受控注入，避免人为扩大真实费用。",FP-38-A1、FP-38-A2、FP-38-A3、FP-38-A4、FP-38-A5、FP-38-A6,"/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/docs/客户版任务清单-V3.md
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/docs/客户版测试与验收规格-V3.md
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/docs/CUSTOMER-TASK-EVIDENCE-V3.md"
+FP-39,D 完整验收与交付,P0,执行目标桌面安装包和下载验收,未开工,待排期，相关子项先确认,桌面负责人 / QA,无,FP-36,AUTOMATED_VERIFIED,Q08,待FP-00映射正式TXX、实施分支及PR；禁止擅自编号,"1. 沿用既定Windows客户版交付目标，核对签名/安装包配置和候选SHA；若新增macOS需单独确认范围。
+2. 真实安装/升级/启动登录/凭据恢复/下载保存/取消失败路径逐项验证；区分浏览器与Tauri行为。",FP-39-A1、FP-39-A2,"/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src-tauri/tauri.customer.conf.json
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/api.ts
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/videoDownload.test.ts
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/docs/客户版任务清单-V3.md"
+FP-40,D 完整验收与交付,P0,形成发布范围结论并衔接T41–T42,未开工,取得FP-38/39状态快照即可评审；Go与灰度另需通过及授权,业务 / 发布负责人 / QA,无,FP-38、FP-39,STATUS_SNAPSHOT,Q08,待FP-00映射正式TXX、实施分支及PR；禁止擅自编号,"1. 取得FP-38/39及本期任务的状态快照（通过、失败、未授权、未执行均可作为输入），汇总暂缓项和未获准能力并形成Go/No-Go；缺关键证据时可直接完成No-Go评审，不把暂缓项隐藏。
+2. 按原T41–T42经过真实链路、目标安装包、监控回滚与业务批准后，才执行获准灰度/发码；新发布账号模块未解冻则继续暂缓。",FP-40-A1、FP-40-A2,"/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/docs/客户版任务清单-V3.md
+/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/docs/CUSTOMER-TASK-EVIDENCE-V3.md"
