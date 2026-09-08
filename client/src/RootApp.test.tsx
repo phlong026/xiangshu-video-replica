@@ -279,8 +279,10 @@ describe("RootApp", () => {
       screen.getByRole("navigation", { name: "主要导航" }),
     ).toBeInTheDocument();
     // The compact account entry keeps identity details in the profile page.
+    // The workspace stub does not serve /api/customer/wallet pricing, so the
+    // wallet summary settles to the error label instead of a credit count.
     expect(
-      screen.getByRole("button", { name: "用户档案，积分 —" }),
+      await screen.findByRole("button", { name: "用户档案，积分 读取失败" }),
     ).toBeInTheDocument();
     expect(screen.queryByLabelText("内部访问令牌（云端模式）")).toBeNull();
   });
