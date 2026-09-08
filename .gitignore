@@ -31,6 +31,8 @@ target/
 client/src-tauri/gen/
 client/src-tauri/icons/android/
 client/src-tauri/icons/ios/
+# 桌面端运行日志（API / Worker 本地调试输出，不进版本库）
+client/src-tauri/resources/*.log
 
 # Local runtime data and secrets
 .env
