@@ -1,0 +1,959 @@
+
+> @video-replica/client@0.1.16 test
+> vitest run src/studio/CreationPages.test.tsx src/studio/live.test.ts -t 文案工坊|已确认工坊|保存文案元数据
+
+
+ RUN  v4.1.10 /Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client
+
+ ❯ src/studio/live.test.ts (37 tests | 2 failed | 35 skipped) 9ms
+     × 已确认工坊终稿以 custom 来源写入真实镜头映射并使用重编译 Prompt 6ms
+     × 读取和保存保留人物、来源项目与来源种类 1ms
+ ❯ src/studio/CreationPages.test.tsx (61 tests | 6 failed | 53 skipped) 3239ms
+     × 文案工坊直接改写当前正文并携带当前人物，成功后撤销确认 1019ms
+     × 文案工坊无来源项目时明确说明改写前提，不打开旧工作区 10ms
+     × 文案工坊改写期间手改后保留人工稿，候选结果须显式应用 1011ms
+     × 文案工坊选择保存稿恢复元数据，清空旧创作关联并返回编辑 11ms
+     × 文案工坊文案列表读取失败显示重试，成功刷新后显示保存稿 1008ms
+     × 文案工坊保存当前稿不冒充历史版本，显示去向限制和返回入口 43ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 8 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/studio/CreationPages.test.tsx > V1.4 创作页面 > 文案工坊直接改写当前正文并携带当前人物，成功后撤销确认
+AssertionError: expected "vi.fn()" to be called with arguments: [ 'project-1', '已确认的乡墅口播终稿', …(1) ]
+
+Number of calls: 0
+
+
+Ignored nodes: comments, script, style
+[36m<html>[39m
+  [36m<head />[39m
+  [36m<body>[39m
+    [36m<div>[39m
+      [36m<section[39m
+        [33mclass[39m=[32m"creation-page creation-copy"[39m
+      [36m>[39m
+        [36m<header[39m
+          [33mclass[39m=[32m"creation-heading"[39m
+        [36m>[39m
+          [36m<h1>[39m
+            [0m文案工坊[0m
+          [36m</h1>[39m
+          [36m<p>[39m
+            [0m提取与二创文案，优化表达，匹配乡墅场景[0m
+          [36m</p>[39m
+        [36m</header>[39m
+        [36m<div[39m
+          [33maria-label[39m=[32m"页面选项"[39m
+          [33mclass[39m=[32m"studio-tabs"[39m
+          [33mrole[39m=[32m"tablist"[39m
+        [36m>[39m
+          [36m<button[39m
+            [33maria-selected[39m=[32m"true"[39m
+            [33mclass[39m=[32m"is-active"[39m
+            [33mid[39m=[32m"_r_1_-rewrite"[39m
+            [33mrole[39m=[32m"tab"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0m文案改写[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33maria-selected[39m=[32m"false"[39m
+            [33mclass[39m=[32m""[39m
+            [33mid[39m=[32m"_r_1_-saved"[39m
+            [33mrole[39m=[32m"tab"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0m我的文案[0m
+          [36m</button>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"creation-source-strip"[39m
+        [36m>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"creation-status-dot"[39m
+          [36m/>[39m
+          [36m<span>[39m
+            [0m来源：[0m
+            [0m尚未选择来源视频[0m
+          [36m</span>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"creation-copy-grid"[39m
+        [36m>[39m
+          [36m<section[39m
+            [33mclass[39m=[32m"studio-panel creation-copy-source"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"creation-panel-title"[39m
+            [36m>[39m
+              [0m原文（提取自来源）[0m
+            [36m</div>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"creation-script-copy"[39m
+            [36m>[39m
+              [0m原始文案[0m
+            [36m</div>[39m
+          [36m</section>[39m
+          [36m<section[39m
+            [33mclass[39m=[32m"studio-panel creation-copy-editor"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"creation-panel-title-row"[39m
+            [36m>[39m
+              [36m<span>[39m
+                [0m二创文案（可编辑）[0m
+              [36m</span>[39m
+              [36m<small>[39m
+                [0m终稿[0m
+                [0m V[0m
+                [0m3[0m
+              [36m</small>[39m
+            [36m</div>[39m
+            [36m<input[39m
+              [33maria-label[39m=[32m"作品名称"[39m
+              [33mclass[39m=[32m"creation-input"[39m
+              [33mplaceholder[39m=[32m"作品名称"[39m
+              [33mvalue[39m=[32m"建房预算"[39m
+            [36m/>[39m
+            [36m<textarea[39m
+              [33maria-label[39m=[32m"二创文案"[39m
+              [33mclass[39m=[32m"creation-textarea creation-copy-textarea"[39m
+              [33mplaceholder[39m=[32m"在这里编辑乡墅口播文案"[39m
+            [36m>[39m
+              [0m已确认的乡墅口播终稿[0m
+            [36m</textarea>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"creation-saved-state"[39m
+            [36m>[39m
+              [0m内容变动后需重新确认终稿[0m
+            [36m</div>[39m
+          [36m</section>[39m
+          [36m<section[39m
+            [33mclass[39m=[32m"studio-panel creation-copy-person"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"creation-panel-title"[39m
+            [36m>[39m
+              [0mIP 选择[0m
+            [36m</div>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"creation-person-card"[39m
+            [36m>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"studio-media studio-media--empty creation-avatar"[39m
+              [36m>[39m
+                [36m<svg[39m
+                  [33maria-hidden[39m=[32m"true"[39m
+                  [33mclass[39m=[32m"studio-icon"[39m
+                  [33mfill[39m=[32m"none"[39m
+                  [33mheight[39m=[32m"44"[39m
+                  [33mstroke[39m=[32m"currentColor"[39m
+                  [33mstroke-linecap[39m=[32m"round"[39m
+                  [33mstroke-linejoin[39m=[32m"round"[39m
+                  [33mstroke-width[39m=[32m"1.5"[39m
+                  [33mviewBox[39m=[32m"0 0 24 24"[39m
+                  [33mwidth[39m=[32m"44"[39m
+                [36m>[39m
+                  [36m<path[39m
+                    [33md[39m=[32m"M3 3h18v18H3V3Zm0 14 6-7 5 6 3-3 4 5M15 7h1"[39m
+                  [36m/>[39m
+                [36m</svg>[39m
+                [36m<span>[39m
+                  [0m张工[0m
+                [36m</span>[39m
+              [36m</div>[39m
+              [36m<div>[39m
+                [36m<strong>[39m
+                  [0m张工[0m
+                  [0m · [0m
+                  [0m乡墅设计师[0m
+                [36m</strong>[39m
+                [36m<p>[39m
+                  [0m乡墅设计[0m
+                [36m</p>[39m
+                [36m<small>[39m
+                  [0m专业通俗[0m
+                [36m</small>[39m
+              [36m</div>[39m
+            [36m</div>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"studio-button studio-button--outline "[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [0m按 IP 二创[0m
+            [36m</button>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"studio-button studio-button--outline "[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [0m更换人物[0m
+            [36m</button>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"studio-button studio-button--quiet "[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [0m确认终稿[0m
+            [36m</button>[39m
+          [36m</section>[39m
+        [36m</div>[39m
+        [36m<footer[39m
+          [33mclass[39m=[32m"creation-action-bar"[39m
+        [36m>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"studio-button studio-button--outline "[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0m保存版本[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"studio-button studio-button--primary "[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0m用于数字人口播[0m
+          [36m</button>[39m
+        [36m</footer>[39m
+      [36m</section>[39m
+    [36m</div>[39m
+  [36m</body>[39m
+[36m</html>[39m
+ ❯ src/studio/CreationPages.test.tsx:389:65
+    387|     render(<CopyPage />);
+    388|     fireEvent.click(screen.getByRole("button", { name: "按 IP 二创" }));
+    389|     await waitFor(() => expect(replicaApi.rewriteProjectScript).toHave…
+       |                                                                 ^
+    390|       "project-1", "已确认的乡墅口播终稿", "person-1",
+    391|     ));
+ ❯ runWithExpensiveErrorDiagnosticsDisabled ../node_modules/@testing-library/dom/dist/config.js:47:12
+ ❯ checkCallback ../node_modules/@testing-library/dom/dist/wait-for.js:124:77
+ ❯ Timeout.checkRealTimersCallback ../node_modules/@testing-library/dom/dist/wait-for.js:118:16
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/8]⎯
+
+ FAIL  src/studio/CreationPages.test.tsx > V1.4 创作页面 > 文案工坊无来源项目时明确说明改写前提，不打开旧工作区
+AssertionError: expected "vi.fn()" to be called with arguments: [ StringContaining "来源项目" ]
+
+Number of calls: 0
+
+ ❯ src/studio/CreationPages.test.tsx:404:26
+    402|     render(<CopyPage />);
+    403|     fireEvent.click(screen.getByRole("button", { name: "按 IP 二创" }));
+    404|     expect(value.notify).toHaveBeenCalledWith(expect.stringContaining(…
+       |                          ^
+    405|     expect(value.openLive).not.toHaveBeenCalled();
+    406|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/8]⎯
+
+ FAIL  src/studio/CreationPages.test.tsx > V1.4 创作页面 > 文案工坊改写期间手改后保留人工稿，候选结果须显式应用
+AssertionError: expected undefined to be defined
+
+Ignored nodes: comments, script, style
+[36m<html>[39m
+  [36m<head />[39m
+  [36m<body>[39m
+    [36m<div>[39m
+      [36m<section[39m
+        [33mclass[39m=[32m"creation-page creation-copy"[39m
+      [36m>[39m
+        [36m<header[39m
+          [33mclass[39m=[32m"creation-heading"[39m
+        [36m>[39m
+          [36m<h1>[39m
+            [0m文案工坊[0m
+          [36m</h1>[39m
+          [36m<p>[39m
+            [0m提取与二创文案，优化表达，匹配乡墅场景[0m
+          [36m</p>[39m
+        [36m</header>[39m
+        [36m<div[39m
+          [33maria-label[39m=[32m"页面选项"[39m
+          [33mclass[39m=[32m"studio-tabs"[39m
+          [33mrole[39m=[32m"tablist"[39m
+        [36m>[39m
+          [36m<button[39m
+            [33maria-selected[39m=[32m"true"[39m
+            [33mclass[39m=[32m"is-active"[39m
+            [33mid[39m=[32m"_r_3_-rewrite"[39m
+            [33mrole[39m=[32m"tab"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0m文案改写[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33maria-selected[39m=[32m"false"[39m
+            [33mclass[39m=[32m""[39m
+            [33mid[39m=[32m"_r_3_-saved"[39m
+            [33mrole[39m=[32m"tab"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0m我的文案[0m
+          [36m</button>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"creation-source-strip"[39m
+        [36m>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"creation-status-dot"[39m
+          [36m/>[39m
+          [36m<span>[39m
+            [0m来源：[0m
+            [0m尚未选择来源视频[0m
+          [36m</span>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"creation-copy-grid"[39m
+        [36m>[39m
+          [36m<section[39m
+            [33mclass[39m=[32m"studio-panel creation-copy-source"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"creation-panel-title"[39m
+            [36m>[39m
+              [0m原文（提取自来源）[0m
+            [36m</div>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"creation-script-copy"[39m
+            [36m>[39m
+              [0m原始文案[0m
+            [36m</div>[39m
+          [36m</section>[39m
+          [36m<section[39m
+            [33mclass[39m=[32m"studio-panel creation-copy-editor"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"creation-panel-title-row"[39m
+            [36m>[39m
+              [36m<span>[39m
+                [0m二创文案（可编辑）[0m
+              [36m</span>[39m
+              [36m<small>[39m
+                [0m终稿[0m
+                [0m V[0m
+                [0m3[0m
+              [36m</small>[39m
+            [36m</div>[39m
+            [36m<input[39m
+              [33maria-label[39m=[32m"作品名称"[39m
+              [33mclass[39m=[32m"creation-input"[39m
+              [33mplaceholder[39m=[32m"作品名称"[39m
+              [33mvalue[39m=[32m"建房预算"[39m
+            [36m/>[39m
+            [36m<textarea[39m
+              [33maria-label[39m=[32m"二创文案"[39m
+              [33mclass[39m=[32m"creation-textarea creation-copy-textarea"[39m
+              [33mplaceholder[39m=[32m"在这里编辑乡墅口播文案"[39m
+            [36m>[39m
+              [0m已确认的乡墅口播终稿[0m
+            [36m</textarea>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"creation-saved-state"[39m
+            [36m>[39m
+              [0m内容变动后需重新确认终稿[0m
+            [36m</div>[39m
+          [36m</section>[39m
+          [36m<section[39m
+            [33mclass[39m=[32m"studio-panel creation-copy-person"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"creation-panel-title"[39m
+            [36m>[39m
+              [0mIP 选择[0m
+            [36m</div>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"creation-person-card"[39m
+            [36m>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"studio-media studio-media--empty creation-avatar"[39m
+              [36m>[39m
+                [36m<svg[39m
+                  [33maria-hidden[39m=[32m"true"[39m
+                  [33mclass[39m=[32m"studio-icon"[39m
+                  [33mfill[39m=[32m"none"[39m
+                  [33mheight[39m=[32m"44"[39m
+                  [33mstroke[39m=[32m"currentColor"[39m
+                  [33mstroke-linecap[39m=[32m"round"[39m
+                  [33mstroke-linejoin[39m=[32m"round"[39m
+                  [33mstroke-width[39m=[32m"1.5"[39m
+                  [33mviewBox[39m=[32m"0 0 24 24"[39m
+                  [33mwidth[39m=[32m"44"[39m
+                [36m>[39m
+                  [36m<path[39m
+                    [33md[39m=[32m"M3 3h18v18H3V3Zm0 14 6-7 5 6 3-3 4 5M15 7h1"[39m
+                  [36m/>[39m
+                [36m</svg>[39m
+                [36m<span>[39m
+                  [0m张工[0m
+                [36m</span>[39m
+              [36m</div>[39m
+              [36m<div>[39m
+                [36m<strong>[39m
+                  [0m张工[0m
+                  [0m · [0m
+                  [0m乡墅设计师[0m
+                [36m</strong>[39m
+                [36m<p>[39m
+                  [0m乡墅设计[0m
+                [36m</p>[39m
+                [36m<small>[39m
+                  [0m专业通俗[0m
+                [36m</small>[39m
+              [36m</div>[39m
+            [36m</div>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"studio-button studio-button--outline "[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [0m按 IP 二创[0m
+            [36m</button>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"studio-button studio-button--outline "[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [0m更换人物[0m
+            [36m</button>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"studio-button studio-button--quiet "[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [0m确认终稿[0m
+            [36m</button>[39m
+          [36m</section>[39m
+        [36m</div>[39m
+        [36m<footer[39m
+          [33mclass[39m=[32m"creation-action-bar"[39m
+        [36m>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"studio-button studio-button--outline "[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0m保存版本[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"studio-button studio-button--primary "[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0m用于数字人口播[0m
+          [36m</button>[39m
+        [36m</footer>[39m
+      [36m</section>[39m
+    [36m</div>[39m
+  [36m</body>[39m
+[36m</html>[39m
+ ❯ src/studio/CreationPages.test.tsx:416:40
+    414|     const view = render(<CopyPage />);
+    415|     fireEvent.click(screen.getByRole("button", { name: "按 IP 二创" }));
+    416|     await waitFor(() => expect(finish).toBeDefined());
+       |                                        ^
+    417|     const edited = studio({ ...value, state: { ...value.state, draft: …
+    418|     useStudio.mockReturnValue(edited);
+ ❯ runWithExpensiveErrorDiagnosticsDisabled ../node_modules/@testing-library/dom/dist/config.js:47:12
+ ❯ checkCallback ../node_modules/@testing-library/dom/dist/wait-for.js:124:77
+ ❯ Timeout.checkRealTimersCallback ../node_modules/@testing-library/dom/dist/wait-for.js:118:16
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/8]⎯
+
+ FAIL  src/studio/CreationPages.test.tsx > V1.4 创作页面 > 文案工坊选择保存稿恢复元数据，清空旧创作关联并返回编辑
+AssertionError: expected "vi.fn()" to be called with arguments: [ ObjectContaining{…} ]
+
+Received:
+
+  1st vi.fn() call:
+
+  [
+-   ObjectContaining {
+-     "avatarId": undefined,
+-     "firstFrameId": undefined,
+-     "ipId": "person-b",
+-     "projectId": "project-b",
+-     "script": ObjectContaining {
+-       "confirmed": false,
++   {
++     "script": {
++       "confirmed": true,
+        "id": "saved-b",
++       "ipId": "person-b",
++       "original": "原始文案",
++       "sourceKind": "project",
++       "sourceProjectId": "project-b",
++       "text": "B稿",
++       "title": "建房预算",
++       "version": 3,
+      },
+-     "sourceAssetId": undefined,
+-     "sourceId": undefined,
+-     "voiceId": undefined,
+    },
+  ]
+
+
+Number of calls: 1
+
+ ❯ src/studio/CreationPages.test.tsx:434:30
+    432|     fireEvent.click(screen.getByRole("tab", { name: "我的文案" }));
+    433|     fireEvent.click(screen.getByRole("button", { name: /建房预算/ }));
+    434|     expect(value.patchDraft).toHaveBeenCalledWith(expect.objectContain…
+       |                              ^
+    435|       projectId: "project-b", ipId: "person-b", sourceId: undefined, s…
+    436|       firstFrameId: undefined, voiceId: undefined, avatarId: undefined,
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/8]⎯
+
+ FAIL  src/studio/CreationPages.test.tsx > V1.4 创作页面 > 文案工坊文案列表读取失败显示重试，成功刷新后显示保存稿
+TestingLibraryElementError: Unable to find an element with the text: 文案列表暂不可用. This could be because the text is broken up by multiple elements. In this case, you can provide a function for your text matcher to make your matcher more flexible.
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<section[39m
+      [33mclass[39m=[32m"creation-page creation-copy"[39m
+    [36m>[39m
+      [36m<header[39m
+        [33mclass[39m=[32m"creation-heading"[39m
+      [36m>[39m
+        [36m<h1>[39m
+          [0m文案工坊[0m
+        [36m</h1>[39m
+        [36m<p>[39m
+          [0m提取与二创文案，优化表达，匹配乡墅场景[0m
+        [36m</p>[39m
+      [36m</header>[39m
+      [36m<div[39m
+        [33maria-label[39m=[32m"页面选项"[39m
+        [33mclass[39m=[32m"studio-tabs"[39m
+        [33mrole[39m=[32m"tablist"[39m
+      [36m>[39m
+        [36m<button[39m
+          [33maria-selected[39m=[32m"false"[39m
+          [33mclass[39m=[32m""[39m
+          [33mid[39m=[32m"_r_5_-rewrite"[39m
+          [33mrole[39m=[32m"tab"[39m
+          [33mtype[39m=[32m"button"[39m
+        [36m>[39m
+          [0m文案改写[0m
+        [36m</button>[39m
+        [36m<button[39m
+          [33maria-selected[39m=[32m"true"[39m
+          [33mclass[39m=[32m"is-active"[39m
+          [33mid[39m=[32m"_r_5_-saved"[39m
+          [33mrole[39m=[32m"tab"[39m
+          [33mtype[39m=[32m"button"[39m
+        [36m>[39m
+          [0m我的文案[0m
+        [36m</button>[39m
+      [36m</div>[39m
+      [36m<section[39m
+        [33mclass[39m=[32m"studio-panel creation-saved-list"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"studio-empty"[39m
+        [36m>[39m
+          [36m<svg[39m
+            [33maria-hidden[39m=[32m"true"[39m
+            [33mclass[39m=[32m"studio-icon"[39m
+            [33mfill[39m=[32m"none"[39m
+            [33mheight[39m=[32m"46"[39m
+            [33mstroke[39m=[32m"currentColor"[39m
+            [33mstroke-linecap[39m=[32m"round"[39m
+            [33mstroke-linejoin[39m=[32m"round"[39m
+            [33mstroke-width[39m=[32m"1.5"[39m
+            [33mviewBox[39m=[32m"0 0 24 24"[39m
+            [33mwidth[39m=[32m"46"[39m
+          [36m>[39m
+            [36m<path[39m
+              [33md[39m=[32m"M3 3h18v18H3V3Zm0 14 6-7 5 6 3-3 4 5M15 7h1"[39m
+            [36m/>[39m
+          [36m</svg>[39m
+          [36m<h3>[39m
+            [0m还没有保存的文案[0m
+          [36m</h3>[39m
+          [36m<p>[39m
+            [0m完成二创后保存版本，文案会集中显示在这里。[0m
+          [36m</p>[39m
+        [36m</div>[39m
+      [36m</section>[39m
+    [36m</section>[39m
+  [36m</div>[39m
+[36m</body>[39m
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<section[39m
+      [33mclass[39m=[32m"creation-page creation-copy"[39m
+    [36m>[39m
+      [36m<header[39m
+        [33mclass[39m=[32m"creation-heading"[39m
+      [36m>[39m
+        [36m<h1>[39m
+          [0m文案工坊[0m
+        [36m</h1>[39m
+        [36m<p>[39m
+          [0m提取与二创文案，优化表达，匹配乡墅场景[0m
+        [36m</p>[39m
+      [36m</header>[39m
+      [36m<div[39m
+        [33maria-label[39m=[32m"页面选项"[39m
+        [33mclass[39m=[32m"studio-tabs"[39m
+        [33mrole[39m=[32m"tablist"[39m
+      [36m>[39m
+        [36m<button[39m
+          [33maria-selected[39m=[32m"false"[39m
+          [33mclass[39m=[32m""[39m
+          [33mid[39m=[32m"_r_5_-rewrite"[39m
+          [33mrole[39m=[32m"tab"[39m
+          [33mtype[39m=[32m"button"[39m
+        [36m>[39m
+          [0m文案改写[0m
+        [36m</button>[39m
+        [36m<button[39m
+          [33maria-selected[39m=[32m"true"[39m
+          [33mclass[39m=[32m"is-active"[39m
+          [33mid[39m=[32m"_r_5_-saved"[39m
+          [33mrole[39m=[32m"tab"[39m
+          [33mtype[39m=[32m"button"[39m
+        [36m>[39m
+          [0m我的文案[0m
+        [36m</button>[39m
+      [36m</div>[39m
+      [36m<section[39m
+        [33mclass[39m=[32m"studio-panel creation-saved-list"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"studio-empty"[39m
+        [36m>[39m
+          [36m<svg[39m
+            [33maria-hidden[39m=[32m"true"[39m
+            [33mclass[39m=[32m"studio-icon"[39m
+            [33mfill[39m=[32m"none"[39m
+            [33mheight[39m=[32m"46"[39m
+            [33mstroke[39m=[32m"currentColor"[39m
+            [33mstroke-linecap[39m=[32m"round"[39m
+            [33mstroke-linejoin[39m=[32m"round"[39m
+            [33mstroke-width[39m=[32m"1.5"[39m
+            [33mviewBox[39m=[32m"0 0 24 24"[39m
+            [33mwidth[39m=[32m"46"[39m
+          [36m>[39m
+            [36m<path[39m
+              [33md[39m=[32m"M3 3h18v18H3V3Zm0 14 6-7 5 6 3-3 4 5M15 7h1"[39m
+            [36m/>[39m
+          [36m</svg>[39m
+          [36m<h3>[39m
+            [0m还没有保存的文案[0m
+          [36m</h3>[39m
+          [36m<p>[39m
+            [0m完成二创后保存版本，文案会集中显示在这里。[0m
+          [36m</p>[39m
+        [36m</div>[39m
+      [36m</section>[39m
+    [36m</section>[39m
+  [36m</div>[39m
+[36m</body>[39m
+ ❯ waitForWrapper ../node_modules/@testing-library/dom/dist/wait-for.js:163:27
+ ❯ ../node_modules/@testing-library/dom/dist/query-helpers.js:86:33
+ ❯ src/studio/CreationPages.test.tsx:448:18
+    446|     render(<CopyPage />);
+    447|     fireEvent.click(screen.getByRole("tab", { name: "我的文案" }));
+    448|     await screen.findByText("文案列表暂不可用");
+       |                  ^
+    449|     expect(screen.queryByText("还没有保存的文案")).not.toBeInTheDocument();
+    450|     replicaLive.loadSavedScriptList.mockResolvedValueOnce([{ ...value.…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/8]⎯
+
+ FAIL  src/studio/CreationPages.test.tsx > V1.4 创作页面 > 文案工坊保存当前稿不冒充历史版本，显示去向限制和返回入口
+TestingLibraryElementError: Unable to find an accessible element with the role "button" and name "保存当前稿"
+
+Here are the accessible roles:
+
+  banner:
+
+  Name "":
+  [36m<header[39m
+    [33mclass[39m=[32m"creation-heading"[39m
+  [36m/>[39m
+
+  --------------------------------------------------
+  heading:
+
+  Name "文案工坊":
+  [36m<h1 />[39m
+
+  --------------------------------------------------
+  paragraph:
+
+  Name "":
+  [36m<p />[39m
+
+  Name "":
+  [36m<p />[39m
+
+  --------------------------------------------------
+  tablist:
+
+  Name "页面选项":
+  [36m<div[39m
+    [33maria-label[39m=[32m"页面选项"[39m
+    [33mclass[39m=[32m"studio-tabs"[39m
+    [33mrole[39m=[32m"tablist"[39m
+  [36m/>[39m
+
+  --------------------------------------------------
+  tab:
+
+  Name "文案改写":
+  [36m<button[39m
+    [33maria-selected[39m=[32m"true"[39m
+    [33mclass[39m=[32m"is-active"[39m
+    [33mid[39m=[32m"_r_6_-rewrite"[39m
+    [33mrole[39m=[32m"tab"[39m
+    [33mtype[39m=[32m"button"[39m
+  [36m/>[39m
+
+  Name "我的文案":
+  [36m<button[39m
+    [33maria-selected[39m=[32m"false"[39m
+    [33mclass[39m=[32m""[39m
+    [33mid[39m=[32m"_r_6_-saved"[39m
+    [33mrole[39m=[32m"tab"[39m
+    [33mtype[39m=[32m"button"[39m
+  [36m/>[39m
+
+  --------------------------------------------------
+  textbox:
+
+  Name "作品名称":
+  [36m<input[39m
+    [33maria-label[39m=[32m"作品名称"[39m
+    [33mclass[39m=[32m"creation-input"[39m
+    [33mplaceholder[39m=[32m"作品名称"[39m
+    [33mvalue[39m=[32m"题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题"[39m
+  [36m/>[39m
+
+  Name "二创文案":
+  [36m<textarea[39m
+    [33maria-label[39m=[32m"二创文案"[39m
+    [33mclass[39m=[32m"creation-textarea creation-copy-textarea"[39m
+    [33mplaceholder[39m=[32m"在这里编辑乡墅口播文案"[39m
+  [36m/>[39m
+
+  --------------------------------------------------
+  strong:
+
+  Name "":
+  [36m<strong />[39m
+
+  --------------------------------------------------
+  button:
+
+  Name "按 IP 二创":
+  [36m<button[39m
+    [33mclass[39m=[32m"studio-button studio-button--outline "[39m
+    [33mtype[39m=[32m"button"[39m
+  [36m/>[39m
+
+  Name "更换人物":
+  [36m<button[39m
+    [33mclass[39m=[32m"studio-button studio-button--outline "[39m
+    [33mtype[39m=[32m"button"[39m
+  [36m/>[39m
+
+  Name "确认终稿":
+  [36m<button[39m
+    [33mclass[39m=[32m"studio-button studio-button--quiet "[39m
+    [33mtype[39m=[32m"button"[39m
+  [36m/>[39m
+
+  Name "保存版本":
+  [36m<button[39m
+    [33mclass[39m=[32m"studio-button studio-button--outline "[39m
+    [33mtype[39m=[32m"button"[39m
+  [36m/>[39m
+
+  Name "用于数字人口播":
+  [36m<button[39m
+    [33mclass[39m=[32m"studio-button studio-button--primary "[39m
+    [33mtype[39m=[32m"button"[39m
+  [36m/>[39m
+
+  --------------------------------------------------
+  contentinfo:
+
+  Name "":
+  [36m<footer[39m
+    [33mclass[39m=[32m"creation-action-bar"[39m
+  [36m/>[39m
+
+  --------------------------------------------------
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<section[39m
+      [33mclass[39m=[32m"creation-page creation-copy"[39m
+    [36m>[39m
+      [36m<header[39m
+        [33mclass[39m=[32m"creation-heading"[39m
+      [36m>[39m
+        [36m<h1>[39m
+          [0m文案工坊[0m
+        [36m</h1>[39m
+        [36m<p>[39m
+          [0m提取与二创文案，优化表达，匹配乡墅场景[0m
+        [36m</p>[39m
+      [36m</header>[39m
+      [36m<div[39m
+        [33maria-label[39m=[32m"页面选项"[39m
+        [33mclass[39m=[32m"studio-tabs"[39m
+        [33mrole[39m=[32m"tablist"[39m
+      [36m>[39m
+        [36m<button[39m
+          [33maria-selected[39m=[32m"true"[39m
+          [33mclass[39m=[32m"is-active"[39m
+          [33mid[39m=[32m"_r_6_-rewrite"[39m
+          [33mrole[39m=[32m"tab"[39m
+          [33mtype[39m=[32m"button"[39m
+        [36m>[39m
+          [0m文案改写[0m
+        [36m</button>[39m
+        [36m<button[39m
+          [33maria-selected[39m=[32m"false"[39m
+          [33mclass[39m=[32m""[39m
+          [33mid[39m=[32m"_r_6_-saved"[39m
+          [33mrole[39m=[32m"tab"[39m
+          [33mtype[39m=[32m"button"[39m
+        [36m>[39m
+          [0m我的文案[0m
+        [36m</button>[39m
+      [36m</div>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"creation-source-strip"[39m
+      [36m>[39m
+        [36m<span[39m
+          [33mclass[39m=[32m"creation-status-dot"[39m
+        [36m/>[39m
+        [36m<span>[39m
+          [0m来源：[0m
+          [0m尚未选择来源视频[0m
+        [36m</span>[39m
+      [36m</div>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"creation-copy-grid"[39m
+      [36m>[39m
+        [36m<section[39m
+          [33mclass[39m=[32m"studio-panel creation-copy-source"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"creation-panel-title"[39m
+          [36m>[39m
+            [0m原文（提取自来源）[0m
+          [36m</div>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"creation-script-copy"[39m
+          [36m>[39m
+            [0m原始文案[0m
+          [36m</div>[39m
+        [36m</section>[39m
+        [36m<section[39m
+          [33mclass[39m=[32m"studio-panel creation-copy-editor"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"creation-panel-title-row"[39m
+          [36m>[39m
+            [36m<span>[39m
+              [0m二创文案（可编辑）[0m
+            [36m</span>[39m
+            [36m<small>[39m
+              [0m终稿[0m
+              [0m V[0m
+              [0m3[0m
+            [36m</small>[39m
+          [36m</div>[39m
+          [36m<input[39m
+            [33maria-label[39m=[32m"作品名称"[39m
+            [33mclass[39m=[32m"creation-input"[39m
+            [33mplaceholder[39m=[32m"作品名称"[39m
+            [33mvalue[39m=[32m"题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题题"[39m
+          [36m/>[39m
+          [36m<textarea[39m
+            [33maria-label[39m=[32m"二创文案"[39m
+            [33mclass[39m=[32m"creation-textarea creation-copy-textarea"[39m
+            [33mplaceholder[39m=[32m"在这里编辑乡墅口播文案"[39m
+          [36m>[39m
+            [0m文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文文...
+ ❯ Object.getElementError ../node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ ../node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ ../node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ ../node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/studio/CreationPages.test.tsx:462:19
+    460|     useStudio.mockReturnValue(value);
+    461|     render(<CopyPage />);
+    462|     expect(screen.getByRole("button", { name: "保存当前稿" })).toBeInTheDoc…
+       |                   ^
+    463|     expect(screen.queryByText("终稿 V3")).not.toBeInTheDocument();
+    464|     expect(screen.getByText(/10001.*10000/)).toBeInTheDocument();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[6/8]⎯
+
+ FAIL  src/studio/live.test.ts > runReplicaGeneration（复刻一键管线） > 已确认工坊终稿以 custom 来源写入真实镜头映射并使用重编译 Prompt
+AssertionError: expected "vi.fn()" to be called with arguments: [ 'project-1', …(1) ]
+
+Received:
+
+  1st vi.fn() call:
+
+  [
+    "project-1",
+    {
+      "shot_card_version_id": "scv-1",
+-     "source": "custom",
+-     "text": "客户确认的新口播终稿",
++     "source": "original",
++     "text": "原片口播稿",
+    },
+  ]
+
+
+Number of calls: 1
+
+ ❯ src/studio/live.test.ts:1120:37
+    1118|       confirmedScriptText: "客户确认的新口播终稿",
+    1119|     });
+    1120|     expect(api.createScriptVersion).toHaveBeenCalledWith("project-1", {
+       |                                     ^
+    1121|       source: "custom", text: "客户确认的新口播终稿", shot_card_version_id: "scv…
+    1122|     });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[7/8]⎯
+
+ FAIL  src/studio/live.test.ts > 保存文案元数据 > 读取和保存保留人物、来源项目与来源种类
+AssertionError: expected { id: 'saved-1', title: '稿件', …(4) } to match object { ipId: 'person-b', …(3) }
+(5 matching properties omitted from actual)
+
+- Expected
++ Received
+
+  {
+    "confirmed": false,
+-   "ipId": "person-b",
+-   "sourceKind": "project",
+-   "sourceProjectId": "project-b",
+  }
+
+ ❯ src/studio/live.test.ts:1198:20
+
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[8/8]⎯
+
+
+ Test Files  2 failed (2)
+      Tests  8 failed | 2 passed | 88 skipped (98)
+   Start at  16:37:04
+   Duration  4.09s (transform 388ms, setup 190ms, import 415ms, tests 3.25s, environment 764ms)
+
+npm error Lifecycle script `test` failed with error:
+npm error code 1
+npm error path /Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client
+npm error workspace @video-replica/client@0.1.16
+npm error location /Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client
+npm error command failed
+npm error command sh -c vitest run src/studio/CreationPages.test.tsx src/studio/live.test.ts -t '文案工坊|已确认工坊|保存文案元数据'

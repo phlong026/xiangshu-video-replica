@@ -1,0 +1,212 @@
+{
+  "captured_at": "2026-09-07T13:06:14.724688+08:00",
+  "repo": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻",
+  "branch": "fix/frontend-completion-no-confirmation-20260907",
+  "head": "f3ae7e98588d3c8fafc2feaa0961b73015a7ae57",
+  "scope": "Current working tree; source audit and isolated tests; no real-provider or production claims",
+  "files": [
+    {
+      "path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/CreationPages.tsx",
+      "snapshot_path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/outputs/copy-workshop-audit-2026-09-07/source-snapshot/client/src/studio/CreationPages.tsx",
+      "sha256": "79f85880633233185b4b995c2aa237831ed8bef050250093912a09ee0b859fe6",
+      "lines": 2523
+    },
+    {
+      "path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/StudioWorkspace.tsx",
+      "snapshot_path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/outputs/copy-workshop-audit-2026-09-07/source-snapshot/client/src/studio/StudioWorkspace.tsx",
+      "sha256": "66d8bfb8657c2eae2d7c9e89072f93bce36b4fc5fd9de4e3293710b7b03e4340",
+      "lines": 1535
+    },
+    {
+      "path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/state.ts",
+      "snapshot_path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/outputs/copy-workshop-audit-2026-09-07/source-snapshot/client/src/studio/state.ts",
+      "sha256": "3f52db0285d765833356dd1bf676676362153f097f33861c15067e27080d7225",
+      "lines": 315
+    },
+    {
+      "path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/types.ts",
+      "snapshot_path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/outputs/copy-workshop-audit-2026-09-07/source-snapshot/client/src/studio/types.ts",
+      "sha256": "1447039ac121b71ebd374f99e5511d7c40d441fcc6ec277b725cce7ff521140e",
+      "lines": 272
+    },
+    {
+      "path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/live.ts",
+      "snapshot_path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/outputs/copy-workshop-audit-2026-09-07/source-snapshot/client/src/studio/live.ts",
+      "sha256": "fca5631c126395be19b562cb90c23c0da47ae6ce892b06fee413b7a5cedd17ab",
+      "lines": 1156
+    },
+    {
+      "path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/ContentPages.tsx",
+      "snapshot_path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/outputs/copy-workshop-audit-2026-09-07/source-snapshot/client/src/studio/ContentPages.tsx",
+      "sha256": "e3d3a7e1257f410b1a2f9d31dfd7c67f1baae74006ea28d4c7a30313d1586a99",
+      "lines": 1775
+    },
+    {
+      "path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/MainPages.tsx",
+      "snapshot_path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/outputs/copy-workshop-audit-2026-09-07/source-snapshot/client/src/studio/MainPages.tsx",
+      "sha256": "e7614bc541b3838e05c617c101d74e0be4234c07289b1ab609d947e1c43b1559",
+      "lines": 1330
+    },
+    {
+      "path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/PeoplePages.tsx",
+      "snapshot_path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/outputs/copy-workshop-audit-2026-09-07/source-snapshot/client/src/studio/PeoplePages.tsx",
+      "sha256": "7d23414c5cd89efc7204775873411ee7085b1ed777f9c72677f803303795cb86",
+      "lines": 1132
+    },
+    {
+      "path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/LiveWorkspacePanel.tsx",
+      "snapshot_path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/outputs/copy-workshop-audit-2026-09-07/source-snapshot/client/src/studio/LiveWorkspacePanel.tsx",
+      "sha256": "4c70088323271e5e1ba5ef2865d771020fac5a7538868c3f2568de1793b359dc",
+      "lines": 200
+    },
+    {
+      "path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/studio/CreationNavigation.tsx",
+      "snapshot_path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/outputs/copy-workshop-audit-2026-09-07/source-snapshot/client/src/studio/CreationNavigation.tsx",
+      "sha256": "a937c71f3079dca1456de9ece11c29e2568c4edd2cc942432cd37ef9aac988a4",
+      "lines": 27
+    },
+    {
+      "path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/api.ts",
+      "snapshot_path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/outputs/copy-workshop-audit-2026-09-07/source-snapshot/client/src/api.ts",
+      "sha256": "f06616eb3b8a1b1a7264175768efaaeb334eb2abf3a4b7383219218d70744ddd",
+      "lines": 5368
+    },
+    {
+      "path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/AnalysisWorkspace.tsx",
+      "snapshot_path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/outputs/copy-workshop-audit-2026-09-07/source-snapshot/client/src/AnalysisWorkspace.tsx",
+      "sha256": "29f65a0edb5542a725775f42354c1fada4169d6315696fa02ae8042158ee5ca9",
+      "lines": 1626
+    },
+    {
+      "path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/useGenerationDrafts.ts",
+      "snapshot_path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/outputs/copy-workshop-audit-2026-09-07/source-snapshot/client/src/useGenerationDrafts.ts",
+      "sha256": "208f48f114c863a70cfe7d5e0038c8e272a8adaec475f3a97110b2f2d08d0a40",
+      "lines": 1331
+    },
+    {
+      "path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client/src/ScriptEditor.tsx",
+      "snapshot_path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/outputs/copy-workshop-audit-2026-09-07/source-snapshot/client/src/ScriptEditor.tsx",
+      "sha256": "bfac346c87f7e45044056e91249700fff9fd7ae65938ac67d430f4e301bd12a5",
+      "lines": 104
+    },
+    {
+      "path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/main.py",
+      "snapshot_path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/outputs/copy-workshop-audit-2026-09-07/source-snapshot/server/app/main.py",
+      "sha256": "3c0d9433e560b23d338ee3bb1218a122fbf9d09e2c7a3dd98de04b096c03dbe8",
+      "lines": 421
+    },
+    {
+      "path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/studio_drafts.py",
+      "snapshot_path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/outputs/copy-workshop-audit-2026-09-07/source-snapshot/server/app/studio_drafts.py",
+      "sha256": "807ad1814cc68c80a4c77ec5a063bb7df574f9134245808fe4e3aa20ade3efc9",
+      "lines": 319
+    },
+    {
+      "path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/studio_draft_routes.py",
+      "snapshot_path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/outputs/copy-workshop-audit-2026-09-07/source-snapshot/server/app/studio_draft_routes.py",
+      "sha256": "77108e8b4b6314431c18c8e1f8ac53a2c105da6177570225c2c2074bb3a6c725",
+      "lines": 93
+    },
+    {
+      "path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/script_rewrite.py",
+      "snapshot_path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/outputs/copy-workshop-audit-2026-09-07/source-snapshot/server/app/script_rewrite.py",
+      "sha256": "16bfcd4b516d58c396282ed898be9bc5ffdae307a50aa3817f3b9a4f889a145f",
+      "lines": 820
+    },
+    {
+      "path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/script_from_audio.py",
+      "snapshot_path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/outputs/copy-workshop-audit-2026-09-07/source-snapshot/server/app/script_from_audio.py",
+      "sha256": "4b1326de993eb2cb8a734c9ecb08e1c8ab7f305b0b5235e499a6ad29e872eb4d",
+      "lines": 553
+    },
+    {
+      "path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/script_from_audio_routes.py",
+      "snapshot_path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/outputs/copy-workshop-audit-2026-09-07/source-snapshot/server/app/script_from_audio_routes.py",
+      "sha256": "146e0264b8ea80a41bdc7b66ecafe5263de5f46ddd3992f106e2e52fe575adb1",
+      "lines": 80
+    },
+    {
+      "path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/asr.py",
+      "snapshot_path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/outputs/copy-workshop-audit-2026-09-07/source-snapshot/server/app/asr.py",
+      "sha256": "0b20615b94c93f66acd618b53ce961faebf43a73fd39b139a185c845cf0c1a0b",
+      "lines": 350
+    },
+    {
+      "path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/generation_routes.py",
+      "snapshot_path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/outputs/copy-workshop-audit-2026-09-07/source-snapshot/server/app/generation_routes.py",
+      "sha256": "21a01eadb4e54a8c5415c52e384d83a7e97ac67f7fbf54179464eb8ec1a0e817",
+      "lines": 919
+    },
+    {
+      "path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/generation.py",
+      "snapshot_path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/outputs/copy-workshop-audit-2026-09-07/source-snapshot/server/app/generation.py",
+      "sha256": "cc28a813565877d2e8b69c9952c01330dc288d9592ac16beee99d75112a1b871",
+      "lines": 7169
+    },
+    {
+      "path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/generation_worker.py",
+      "snapshot_path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/outputs/copy-workshop-audit-2026-09-07/source-snapshot/server/app/generation_worker.py",
+      "sha256": "f8de9937e76ebd074eb0931cc3ca0417d70d085650d659d94bc5d168229bec2a",
+      "lines": 1509
+    },
+    {
+      "path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/viral_routes.py",
+      "snapshot_path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/outputs/copy-workshop-audit-2026-09-07/source-snapshot/server/app/viral_routes.py",
+      "sha256": "318e5e50fe226c7fb9d8e25bdc017ce49a358b0e686eb0df3295e49e39042449",
+      "lines": 674
+    },
+    {
+      "path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/viral_media.py",
+      "snapshot_path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/outputs/copy-workshop-audit-2026-09-07/source-snapshot/server/app/viral_media.py",
+      "sha256": "5082cd7a1da736abb4013b6c1db647c6e279d546ae6108f0da444c46b9b22461",
+      "lines": 319
+    },
+    {
+      "path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/oral_routes.py",
+      "snapshot_path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/outputs/copy-workshop-audit-2026-09-07/source-snapshot/server/app/oral_routes.py",
+      "sha256": "31c38d56cdcbef9187cef2644c7e0025bba68561581ecbd56b87bb826621dbbf",
+      "lines": 530
+    },
+    {
+      "path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/oral.py",
+      "snapshot_path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/outputs/copy-workshop-audit-2026-09-07/source-snapshot/server/app/oral.py",
+      "sha256": "9c5c378f7733a367e1ae3407e31a0c5059ec3455b5279852cd79775a1ab5cc1a",
+      "lines": 1306
+    },
+    {
+      "path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/app/customer_fence.py",
+      "snapshot_path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/outputs/copy-workshop-audit-2026-09-07/source-snapshot/server/app/customer_fence.py",
+      "sha256": "bcf1004d760879d56919803e32abe76359cf6992020b1b8a8003d5fa081ee7a6",
+      "lines": 469
+    },
+    {
+      "path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/migrations/versions/067_studio_drafts.py",
+      "snapshot_path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/outputs/copy-workshop-audit-2026-09-07/source-snapshot/server/migrations/versions/067_studio_drafts.py",
+      "sha256": "19023e89694e141f89aecef42587e4301ffcedaddb24ba533204db2b8c786609",
+      "lines": 99
+    },
+    {
+      "path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/migrations/versions/068_script_from_audio_tasks.py",
+      "snapshot_path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/outputs/copy-workshop-audit-2026-09-07/source-snapshot/server/migrations/versions/068_script_from_audio_tasks.py",
+      "sha256": "0fa1c73da00707d231447a0c83f9e0981f02851cfa7466c364747d0ac5bf47ae",
+      "lines": 97
+    },
+    {
+      "path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/migrations/versions/048_async_script_rewrite_tasks.py",
+      "snapshot_path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/outputs/copy-workshop-audit-2026-09-07/source-snapshot/server/migrations/versions/048_async_script_rewrite_tasks.py",
+      "sha256": "ca3866a8f82896979a375d4e02cde8055da73bda9a40160e4dd854ea867707f4",
+      "lines": 113
+    },
+    {
+      "path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/migrations/versions/074_script_rewrite_ip_profile_snapshot.py",
+      "snapshot_path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/outputs/copy-workshop-audit-2026-09-07/source-snapshot/server/migrations/versions/074_script_rewrite_ip_profile_snapshot.py",
+      "sha256": "13cd984cdfd75ee38e0925c2d3603ade35d47d5892adb07c0c4c28ce035511be",
+      "lines": 52
+    }
+  ],
+  "changed_since_initial_manifest": [
+    "client/src/studio/CreationPages.tsx",
+    "client/src/studio/StudioWorkspace.tsx",
+    "client/src/studio/types.ts"
+  ]
+}

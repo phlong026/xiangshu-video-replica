@@ -1,0 +1,60 @@
+
+> @video-replica/client@0.1.16 test
+> vitest run src/studio/live.test.ts -t 保存文案元数据
+
+
+ RUN  v4.1.10 /Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client
+
+ ❯ src/studio/live.test.ts (39 tests | 1 failed | 38 skipped) 10ms
+     × 读取和保存保留人物、来源项目与来源种类 9ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/studio/live.test.ts > 保存文案元数据 > 读取和保存保留人物、来源项目与来源种类
+AssertionError: expected "vi.fn()" to be called with arguments: [ ObjectContaining{…} ]
+
+Received:
+
+  1st vi.fn() call:
+
+  [
+-   ObjectContaining {
++   {
+      "ip_id": "person-current",
+-     "source_kind": "viral",
++     "original": "原文",
++     "script_id": "saved-1",
++     "source_kind": "project",
+      "source_project_id": "project-b",
++     "text": "新稿",
++     "title": "稿件",
++     "version": 3,
+    },
+  ]
+
+
+Number of calls: 1
+
+ ❯ src/studio/live.test.ts:1231:39
+    1229|     });
+    1230|     await live.persistSavedScript(script, "project-b", "person-current…
+    1231|     expect(api.saveStudioSavedScript).toHaveBeenCalledWith(
+       |                                       ^
+    1232|       expect.objectContaining({
+    1233|         ip_id: "person-current",
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 38 skipped (39)
+   Start at  16:45:14
+   Duration  664ms (transform 84ms, setup 79ms, import 87ms, tests 10ms, environment 377ms)
+
+npm error Lifecycle script `test` failed with error:
+npm error code 1
+npm error path /Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client
+npm error workspace @video-replica/client@0.1.16
+npm error location /Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client
+npm error command failed
+npm error command sh -c vitest run src/studio/live.test.ts -t 保存文案元数据

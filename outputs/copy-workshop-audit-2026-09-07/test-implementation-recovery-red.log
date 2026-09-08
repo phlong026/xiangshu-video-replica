@@ -1,0 +1,467 @@
+
+> @video-replica/client@0.1.16 test
+> vitest run src/studio/CreationPages.test.tsx -t 文案工坊重新进入后恢复
+
+
+ RUN  v4.1.10 /Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client
+
+ ❯ src/studio/CreationPages.test.tsx (63 tests | 1 failed | 62 skipped) 1029ms
+     × 文案工坊重新进入后恢复进行中的改写，不重新提交模型 1028ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/studio/CreationPages.test.tsx > V1.4 创作页面 > 文案工坊重新进入后恢复进行中的改写，不重新提交模型
+TestingLibraryElementError: Unable to find an element with the text: 恢复的任务结果. This could be because the text is broken up by multiple elements. In this case, you can provide a function for your text matcher to make your matcher more flexible.
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<section[39m
+      [33mclass[39m=[32m"creation-page creation-copy"[39m
+    [36m>[39m
+      [36m<header[39m
+        [33mclass[39m=[32m"creation-heading"[39m
+      [36m>[39m
+        [36m<h1>[39m
+          [0m文案工坊[0m
+        [36m</h1>[39m
+        [36m<p>[39m
+          [0m提取与二创文案，优化表达，匹配乡墅场景[0m
+        [36m</p>[39m
+      [36m</header>[39m
+      [36m<div[39m
+        [33maria-label[39m=[32m"页面选项"[39m
+        [33mclass[39m=[32m"studio-tabs"[39m
+        [33mrole[39m=[32m"tablist"[39m
+      [36m>[39m
+        [36m<button[39m
+          [33maria-selected[39m=[32m"true"[39m
+          [33mclass[39m=[32m"is-active"[39m
+          [33mid[39m=[32m"_r_0_-rewrite"[39m
+          [33mrole[39m=[32m"tab"[39m
+          [33mtype[39m=[32m"button"[39m
+        [36m>[39m
+          [0m文案改写[0m
+        [36m</button>[39m
+        [36m<button[39m
+          [33maria-selected[39m=[32m"false"[39m
+          [33mclass[39m=[32m""[39m
+          [33mid[39m=[32m"_r_0_-saved"[39m
+          [33mrole[39m=[32m"tab"[39m
+          [33mtype[39m=[32m"button"[39m
+        [36m>[39m
+          [0m我的文案[0m
+        [36m</button>[39m
+      [36m</div>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"creation-source-strip"[39m
+      [36m>[39m
+        [36m<span[39m
+          [33mclass[39m=[32m"creation-status-dot"[39m
+        [36m/>[39m
+        [36m<span>[39m
+          [0m来源：[0m
+          [0m尚未选择来源视频[0m
+        [36m</span>[39m
+      [36m</div>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"creation-copy-grid"[39m
+      [36m>[39m
+        [36m<section[39m
+          [33mclass[39m=[32m"studio-panel creation-copy-source"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"creation-panel-title"[39m
+          [36m>[39m
+            [0m原文（提取自来源）[0m
+          [36m</div>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"creation-script-copy"[39m
+          [36m>[39m
+            [0m原始文案[0m
+          [36m</div>[39m
+        [36m</section>[39m
+        [36m<section[39m
+          [33mclass[39m=[32m"studio-panel creation-copy-editor"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"creation-panel-title-row"[39m
+          [36m>[39m
+            [36m<span>[39m
+              [0m二创文案（可编辑）[0m
+            [36m</span>[39m
+            [36m<small>[39m
+              [0m已确认终稿[0m
+            [36m</small>[39m
+          [36m</div>[39m
+          [36m<input[39m
+            [33maria-label[39m=[32m"作品名称"[39m
+            [33mclass[39m=[32m"creation-input"[39m
+            [33mplaceholder[39m=[32m"作品名称"[39m
+            [33mvalue[39m=[32m"建房预算"[39m
+          [36m/>[39m
+          [36m<textarea[39m
+            [33maria-label[39m=[32m"二创文案"[39m
+            [33mclass[39m=[32m"creation-textarea creation-copy-textarea"[39m
+            [33mplaceholder[39m=[32m"在这里编辑乡墅口播文案"[39m
+          [36m>[39m
+            [0m已确认的乡墅口播终稿[0m
+          [36m</textarea>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"creation-saved-state"[39m
+          [36m>[39m
+            [0m内容变动后需重新确认终稿[0m
+          [36m</div>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"studio-hint"[39m
+          [36m>[39m
+            [36m<svg[39m
+              [33maria-hidden[39m=[32m"true"[39m
+              [33mclass[39m=[32m"studio-icon"[39m
+              [33mfill[39m=[32m"none"[39m
+              [33mheight[39m=[32m"18"[39m
+              [33mstroke[39m=[32m"currentColor"[39m
+              [33mstroke-linecap[39m=[32m"round"[39m
+              [33mstroke-linejoin[39m=[32m"round"[39m
+              [33mstroke-width[39m=[32m"1.5"[39m
+              [33mviewBox[39m=[32m"0 0 24 24"[39m
+              [33mwidth[39m=[32m"18"[39m
+            [36m>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M12 10v7M12 6v1M2 12a10 10 0 1 0 20 0 10 10 0 0 0-20 0"[39m
+              [36m/>[39m
+            [36m</svg>[39m
+            [36m<span>[39m
+              [0m10[0m
+              [0m / 10000 字符（数字人口播上限）；标题 [0m
+              [0m4[0m
+              [0m / 120 字符。AI 改写最多 20000 字符。[0m
+            [36m</span>[39m
+          [36m</div>[39m
+        [36m</section>[39m
+        [36m<section[39m
+          [33mclass[39m=[32m"studio-panel creation-copy-person"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"creation-panel-title"[39m
+          [36m>[39m
+            [0mIP 选择[0m
+          [36m</div>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"creation-person-card"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"studio-media studio-media--empty creation-avatar"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33maria-hidden[39m=[32m"true"[39m
+                [33mclass[39m=[32m"studio-icon"[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"44"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"1.5"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"44"[39m
+              [36m>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M3 3h18v18H3V3Zm0 14 6-7 5 6 3-3 4 5M15 7h1"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+              [36m<span>[39m
+                [0m张工[0m
+              [36m</span>[39m
+            [36m</div>[39m
+            [36m<div>[39m
+              [36m<strong>[39m
+                [0m张工[0m
+                [0m · [0m
+                [0m乡墅设计师[0m
+              [36m</strong>[39m
+              [36m<p>[39m
+                [0m乡墅设计[0m
+              [36m</p>[39m
+              [36m<small>[39m
+                [0m专业通俗[0m
+              [36m</small>[39m
+            [36m</div>[39m
+          [36m</div>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"studio-button studio-button--outline "[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0m按 IP 二创[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"studio-button studio-button--outline "[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0m更换人物[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"studio-button studio-button--quiet "[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0m确认终稿[0m
+          [36m</button>[39m
+        [36m</section>[39m
+      [36m</div>[39m
+      [36m<footer[39m
+        [33mclass[39m=[32m"creation-action-bar"[39m
+      [36m>[39m
+        [36m<button[39m
+          [33mclass[39m=[32m"studio-button studio-button--outline "[39m
+          [33mtype[39m=[32m"button"[39m
+        [36m>[39m
+          [0m保存当前稿[0m
+        [36m</button>[39m
+        [36m<button[39m
+          [33mclass[39m=[32m"studio-button studio-button--primary "[39m
+          [33mtype[39m=[32m"button"[39m
+        [36m>[39m
+          [0m用于数字人口播[0m
+        [36m</button>[39m
+      [36m</footer>[39m
+    [36m</section>[39m
+  [36m</div>[39m
+[36m</body>[39m
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<section[39m
+      [33mclass[39m=[32m"creation-page creation-copy"[39m
+    [36m>[39m
+      [36m<header[39m
+        [33mclass[39m=[32m"creation-heading"[39m
+      [36m>[39m
+        [36m<h1>[39m
+          [0m文案工坊[0m
+        [36m</h1>[39m
+        [36m<p>[39m
+          [0m提取与二创文案，优化表达，匹配乡墅场景[0m
+        [36m</p>[39m
+      [36m</header>[39m
+      [36m<div[39m
+        [33maria-label[39m=[32m"页面选项"[39m
+        [33mclass[39m=[32m"studio-tabs"[39m
+        [33mrole[39m=[32m"tablist"[39m
+      [36m>[39m
+        [36m<button[39m
+          [33maria-selected[39m=[32m"true"[39m
+          [33mclass[39m=[32m"is-active"[39m
+          [33mid[39m=[32m"_r_0_-rewrite"[39m
+          [33mrole[39m=[32m"tab"[39m
+          [33mtype[39m=[32m"button"[39m
+        [36m>[39m
+          [0m文案改写[0m
+        [36m</button>[39m
+        [36m<button[39m
+          [33maria-selected[39m=[32m"false"[39m
+          [33mclass[39m=[32m""[39m
+          [33mid[39m=[32m"_r_0_-saved"[39m
+          [33mrole[39m=[32m"tab"[39m
+          [33mtype[39m=[32m"button"[39m
+        [36m>[39m
+          [0m我的文案[0m
+        [36m</button>[39m
+      [36m</div>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"creation-source-strip"[39m
+      [36m>[39m
+        [36m<span[39m
+          [33mclass[39m=[32m"creation-status-dot"[39m
+        [36m/>[39m
+        [36m<span>[39m
+          [0m来源：[0m
+          [0m尚未选择来源视频[0m
+        [36m</span>[39m
+      [36m</div>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"creation-copy-grid"[39m
+      [36m>[39m
+        [36m<section[39m
+          [33mclass[39m=[32m"studio-panel creation-copy-source"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"creation-panel-title"[39m
+          [36m>[39m
+            [0m原文（提取自来源）[0m
+          [36m</div>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"creation-script-copy"[39m
+          [36m>[39m
+            [0m原始文案[0m
+          [36m</div>[39m
+        [36m</section>[39m
+        [36m<section[39m
+          [33mclass[39m=[32m"studio-panel creation-copy-editor"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"creation-panel-title-row"[39m
+          [36m>[39m
+            [36m<span>[39m
+              [0m二创文案（可编辑）[0m
+            [36m</span>[39m
+            [36m<small>[39m
+              [0m已确认终稿[0m
+            [36m</small>[39m
+          [36m</div>[39m
+          [36m<input[39m
+            [33maria-label[39m=[32m"作品名称"[39m
+            [33mclass[39m=[32m"creation-input"[39m
+            [33mplaceholder[39m=[32m"作品名称"[39m
+            [33mvalue[39m=[32m"建房预算"[39m
+          [36m/>[39m
+          [36m<textarea[39m
+            [33maria-label[39m=[32m"二创文案"[39m
+            [33mclass[39m=[32m"creation-textarea creation-copy-textarea"[39m
+            [33mplaceholder[39m=[32m"在这里编辑乡墅口播文案"[39m
+          [36m>[39m
+            [0m已确认的乡墅口播终稿[0m
+          [36m</textarea>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"creation-saved-state"[39m
+          [36m>[39m
+            [0m内容变动后需重新确认终稿[0m
+          [36m</div>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"studio-hint"[39m
+          [36m>[39m
+            [36m<svg[39m
+              [33maria-hidden[39m=[32m"true"[39m
+              [33mclass[39m=[32m"studio-icon"[39m
+              [33mfill[39m=[32m"none"[39m
+              [33mheight[39m=[32m"18"[39m
+              [33mstroke[39m=[32m"currentColor"[39m
+              [33mstroke-linecap[39m=[32m"round"[39m
+              [33mstroke-linejoin[39m=[32m"round"[39m
+              [33mstroke-width[39m=[32m"1.5"[39m
+              [33mviewBox[39m=[32m"0 0 24 24"[39m
+              [33mwidth[39m=[32m"18"[39m
+            [36m>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M12 10v7M12 6v1M2 12a10 10 0 1 0 20 0 10 10 0 0 0-20 0"[39m
+              [36m/>[39m
+            [36m</svg>[39m
+            [36m<span>[39m
+              [0m10[0m
+              [0m / 10000 字符（数字人口播上限）；标题 [0m
+              [0m4[0m
+              [0m / 120 字符。AI 改写最多 20000 字符。[0m
+            [36m</span>[39m
+          [36m</div>[39m
+        [36m</section>[39m
+        [36m<section[39m
+          [33mclass[39m=[32m"studio-panel creation-copy-person"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"creation-panel-title"[39m
+          [36m>[39m
+            [0mIP 选择[0m
+          [36m</div>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"creation-person-card"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"studio-media studio-media--empty creation-avatar"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33maria-hidden[39m=[32m"true"[39m
+                [33mclass[39m=[32m"studio-icon"[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"44"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"1.5"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"44"[39m
+              [36m>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M3 3h18v18H3V3Zm0 14 6-7 5 6 3-3 4 5M15 7h1"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+              [36m<span>[39m
+                [0m张工[0m
+              [36m</span>[39m
+            [36m</div>[39m
+            [36m<div>[39m
+              [36m<strong>[39m
+                [0m张工[0m
+                [0m · [0m
+                [0m乡墅设计师[0m
+              [36m</strong>[39m
+              [36m<p>[39m
+                [0m乡墅设计[0m
+              [36m</p>[39m
+              [36m<small>[39m
+                [0m专业通俗[0m
+              [36m</small>[39m
+            [36m</div>[39m
+          [36m</div>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"studio-button studio-button--outline "[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0m按 IP 二创[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"studio-button studio-button--outline "[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0m更换人物[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"studio-button studio-button--quiet "[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0m确认终稿[0m
+          [36m</button>[39m
+        [36m</section>[39m
+      [36m</div>[39m
+      [36m<footer[39m
+        [33mclass[39m=[32m"creation-action-bar"[39m
+      [36m>[39m
+        [36m<button[39m
+          [33mclass[39m=[32m"studio-button studio-button--outline "[39m
+          [33mtype[39m=[32m"button"[39m
+        [36m>[39m
+          [0m保存当前稿[0m
+        [36m</button>[39m
+        [36m<button[39m
+          [33mclass[39m=[32m"studio-button studio-button--primary "[39m
+          [33mtype[39m=[32m"button"[39m
+        [36m>[39m
+          [0m用于数字人口播[0m
+        [36m</button>[39m
+      [36m</footer>[39m
+    [36m</section>[39m
+  [36m</div>[39m
+[36m</body>[39m
+ ❯ waitForWrapper ../node_modules/@testing-library/dom/dist/wait-for.js:163:27
+ ❯ ../node_modules/@testing-library/dom/dist/query-helpers.js:86:33
+ ❯ src/studio/CreationPages.test.tsx:528:18
+    526|     useStudio.mockReturnValue(value);
+    527|     render(<CopyPage />);
+    528|     await screen.findByText("恢复的任务结果");
+       |                  ^
+    529|     expect(value.patchDraft).not.toHaveBeenCalled();
+    530|     fireEvent.click(screen.getByRole("button", { name: "应用候选稿" }));
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 62 skipped (63)
+   Start at  16:46:37
+   Duration  1.80s (transform 227ms, setup 78ms, import 245ms, tests 1.03s, environment 356ms)
+
+npm error Lifecycle script `test` failed with error:
+npm error code 1
+npm error path /Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client
+npm error workspace @video-replica/client@0.1.16
+npm error location /Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client
+npm error command failed
+npm error command sh -c vitest run src/studio/CreationPages.test.tsx -t 文案工坊重新进入后恢复

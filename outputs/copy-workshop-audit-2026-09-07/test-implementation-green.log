@@ -1,0 +1,12 @@
+
+> @video-replica/client@0.1.16 test
+> vitest run src/studio/CreationPages.test.tsx src/studio/live.test.ts
+
+
+ RUN  v4.1.10 /Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client
+
+
+ Test Files  2 passed (2)
+      Tests  100 passed (100)
+   Start at  16:41:16
+   Duration  1.85s (transform 341ms, setup 177ms, import 398ms, tests 964ms, environment 914ms)
