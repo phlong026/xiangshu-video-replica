@@ -68,6 +68,11 @@ const PROVIDER_FORMS: Record<ProviderName, ProviderFormSpec> = {
     note: "二创口播稿改写 · 默认 DeepSeek，只需 API Key",
     fields: [{ name: "api_key", label: "API Key", secret: true }],
   },
+  hifly: {
+    title: "数字人口播",
+    note: "Hifly · 只读检查账户余额，不会创建收费任务",
+    fields: [{ name: "api_key", label: "API Key", secret: true }],
+  },
   tikhub: {
     title: "爆款视频数据源",
     note: "抖音 / 视频号最近 7 天爆款参考库 · 只需 API Key",
@@ -93,6 +98,7 @@ const PROVIDER_ORDER: ProviderName[] = [
   "apilio",
   "cos",
   "deepseek",
+  "hifly",
   "tikhub",
   "dashscope",
   "douyidou",
@@ -278,7 +284,7 @@ function ProviderForm({
     try {
       const result = await onTest(provider);
       setStatus(testResultLabel(result));
-      setStatusTone(result.status === "not_configured" ? "error" : "ok");
+      setStatusTone(testResultSucceeded(result) ? "ok" : "error");
     } catch (error) {
       setStatus(
         visibleErrorMessage(error, "测试失败，请检查网络与管理员权限后重试。"),
@@ -356,7 +362,13 @@ function ProviderForm({
           onClick={handleTest}
           disabled={readOnly || isSaving || isTesting}
         >
-          {isTesting ? "正在测试" : "测试连接"}
+          {isTesting
+            ? provider === "hifly"
+              ? "正在检查"
+              : "正在测试"
+            : provider === "hifly"
+              ? "只读检查"
+              : "测试连接"}
         </button>
         {status ? (
           <span
@@ -493,12 +505,34 @@ function SecretToggleIcon({ visible }: { visible: boolean }) {
 function testResultLabel(result: ProviderTestResult) {
   switch (result.status) {
     case "ok":
+      if (result.provider === "hifly") {
+        if (hasValidHiflyCredit(result)) {
+          return `只读账户检查通过，余额 ${result.account_credit} 积分；未创建收费任务`;
+        }
+        return "只读账户检查响应异常，请稍后重试。";
+      }
       return "连接测试通过";
     case "configured_only":
       return "参数已保存；测试不会发起外部调用";
     default:
       return "尚未保存该服务的必要参数";
   }
+}
+
+function hasValidHiflyCredit(result: ProviderTestResult) {
+  return (
+    typeof result.account_credit === "number" &&
+    Number.isSafeInteger(result.account_credit) &&
+    result.account_credit >= 0
+  );
+}
+
+function testResultSucceeded(result: ProviderTestResult) {
+  return (
+    result.status === "configured_only" ||
+    (result.status === "ok" &&
+      (result.provider !== "hifly" || hasValidHiflyCredit(result)))
+  );
 }
 
 function initialValues(

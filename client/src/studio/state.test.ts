@@ -6,6 +6,8 @@ import {
   draftFromTask,
   patchStudioDraft,
   routeFromHash,
+  studioHashForState,
+  studioRouteFromHash,
   withImportedProject,
 } from "./state";
 
@@ -107,6 +109,37 @@ describe("V1.4 交接合同", () => {
     expect(draft.script.id).not.toBe(another.script.id);
   });
 
+  it("任务详情地址编码对象类型、后端 ID 与返回位置", () => {
+    const route = studioRouteFromHash(
+      "#studio/task-detail/oral_task/oral%2F42?returnTo=analytics",
+    );
+    expect(route).toMatchObject({
+      page: "task-detail",
+      selectedTaskKind: "oral_task",
+      selectedTaskBackendId: "oral/42",
+      selectedTaskId: "oral-oral/42",
+      returnTo: "analytics",
+    });
+    expect(studioHashForState({ ...createState(), ...route })).toBe(
+      "#studio/task-detail/oral_task/oral%2F42?returnTo=analytics",
+    );
+  });
+
+  it("详情选择可恢复且未知路由与旧别名安全回退", () => {
+    expect(
+      studioRouteFromHash(
+        "#studio/person-voices?person=person-7&returnTo=oral",
+      ),
+    ).toMatchObject({
+      page: "person-voices",
+      selectedPersonId: "person-7",
+      returnTo: "oral",
+    });
+    expect(routeFromHash("#projects")).toBe("replica");
+    expect(routeFromHash("#studio/not-a-page?token=forbidden")).toBe(
+      "workbench",
+    );
+  });
   it("记录 Prompt 与文案的本地编辑状态，包括主动清空", () => {
     const draft = createDraft();
     const withPrompt = patchStudioDraft(draft, { prompt: "待编辑" });
@@ -250,14 +283,34 @@ describe("V1.4 交接合同", () => {
     const draft = {
       ...createDraft(),
       ipId: "a",
+      imageId: "photo-a",
       avatarId: "avatar-a",
       voiceId: "voice-a",
     };
     const next = patchStudioDraft(draft, { ipId: "b" });
+    expect(next.imageId).toBeUndefined();
     expect(next.avatarId).toBeUndefined();
     expect(next.voiceId).toBeUndefined();
     expect(next.quoteRevision).toBe(draft.quoteRevision + 1);
     expect(next.id).toBe(draft.id);
+  });
+  it("更换IP并显式交接新照片时保留新人物照片", () => {
+    const draft = {
+      ...createDraft(),
+      ipId: "a",
+      imageId: "photo-a",
+      avatarId: "avatar-a",
+      voiceId: "voice-a",
+    };
+
+    const next = patchStudioDraft(draft, {
+      ipId: "b",
+      imageId: "photo-b",
+    });
+
+    expect(next.imageId).toBe("photo-b");
+    expect(next.avatarId).toBeUndefined();
+    expect(next.voiceId).toBeUndefined();
   });
   it("照片带入仅修改目标，不覆盖原始画面与选中镜头", () => {
     const draft = {

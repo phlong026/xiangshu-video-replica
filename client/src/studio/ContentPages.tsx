@@ -37,6 +37,12 @@ import type {
   StudioVideo,
 } from "./types";
 import { Button, Empty, Field, Hint, Icon, Media, Panel, Tabs } from "./ui";
+import {
+  clearViralImportIdempotencyKey,
+  shouldClearViralImportIdempotencyKey,
+  ViralImportPollingTimeoutError,
+  viralImportIdempotencyKey,
+} from "./viralImport";
 import "./content.css";
 
 const pageSize = 6;
@@ -62,6 +68,11 @@ function viralIdentity(video: StudioVideo) {
     : video.id;
 }
 
+function apiErrorCode(error: unknown) {
+  if (!error || typeof error !== "object" || !("code" in error)) return;
+  return typeof error.code === "string" ? error.code : undefined;
+}
+
 function viralDetailParams():
   | { platform: ViralPlatform; videoId: string }
   | undefined {
@@ -80,6 +91,22 @@ function persistViralDetailUrl(video: StudioVideo) {
   url.searchParams.set("viralPlatform", video.platformKey);
   url.searchParams.set("viralVideoId", video.nativeId);
   window.history.replaceState(null, "", url);
+}
+
+type MaterialPreviewState = {
+  status: "loading" | "ready" | "error";
+  url?: string;
+};
+type MaterialPreviewStates = Record<string, MaterialPreviewState>;
+
+export function failMaterialPreview(
+  current: MaterialPreviewStates,
+  assetId: string,
+  failedUrl?: string,
+): MaterialPreviewStates {
+  const preview = current[assetId];
+  if (preview?.status !== "ready" || preview.url !== failedUrl) return current;
+  return { ...current, [assetId]: { status: "error" } };
 }
 
 function viralLikesLabel(video: StudioVideo) {
@@ -385,7 +412,7 @@ function ViralStatsRow({ video }: { video: StudioVideo }) {
   );
 }
 
-function ViralFavoriteButton({
+export function ViralFavoriteButton({
   video,
   savedFromServer,
   onSavedChange,
@@ -394,18 +421,45 @@ function ViralFavoriteButton({
   savedFromServer?: boolean;
   onSavedChange?: (saved: boolean) => void;
 }) {
-  const { state, review, notify, patchState } = useStudio();
+  const { state, review, notify, patchState, user } = useStudio();
   const [saved, setSaved] = useState(
     savedFromServer ?? state.favorites.includes(video.id),
   );
-  const [saving, setSaving] = useState(false);
+  const [savingOperation, setSavingOperation] = useState<{
+    accountId: string;
+    operationId: number;
+  }>();
+  const accountRef = useRef(user.id);
+  const operationRef = useRef(0);
+  if (accountRef.current !== user.id) {
+    accountRef.current = user.id;
+    operationRef.current += 1;
+  }
+  const saving = Boolean(
+    savingOperation &&
+      savingOperation.accountId === user.id &&
+      savingOperation.operationId === operationRef.current,
+  );
   useEffect(() => {
     if (savedFromServer !== undefined) setSaved(savedFromServer);
   }, [savedFromServer]);
+  useEffect(() => {
+    return () => {
+      operationRef.current += 1;
+    };
+  }, []);
 
   const toggle = async () => {
     if (saving) return;
+    const operation = {
+      accountId: user.id,
+      operationId: ++operationRef.current,
+    };
+    const isCurrent = () =>
+      accountRef.current === operation.accountId &&
+      operationRef.current === operation.operationId;
     const nextSaved = !saved;
+    if (!isCurrent()) return;
     setSaved(nextSaved);
     onSavedChange?.(nextSaved);
     patchState({
@@ -414,7 +468,7 @@ function ViralFavoriteButton({
         : state.favorites.filter((id) => id !== video.id),
     });
     if (review || !video.platformKey || !video.nativeId) return;
-    setSaving(true);
+    setSavingOperation(operation);
     try {
       if (nextSaved) {
         await saveViralFavorite(video.platformKey, video.nativeId);
@@ -422,6 +476,7 @@ function ViralFavoriteButton({
         await removeViralFavorite(video.platformKey, video.nativeId);
       }
     } catch {
+      if (!isCurrent()) return;
       setSaved(saved);
       onSavedChange?.(saved);
       patchState({
@@ -431,7 +486,7 @@ function ViralFavoriteButton({
       });
       notify("收藏失败，已恢复原状态");
     } finally {
-      setSaving(false);
+      if (isCurrent()) setSavingOperation(undefined);
     }
   };
 
@@ -462,9 +517,9 @@ function ViralCard({
   onFavoriteChange: (saved: boolean) => void;
   availability?: ViralVideoItem["availability"];
 }) {
-  const { review, navigate, notify, patchDraft } = useStudio();
+  const { review, navigate, notify, patchDraft, user } = useStudio();
   const playerRef = useRef<HTMLVideoElement | null>(null);
-  const { importState, start } = useViralImport(video.id);
+  const { importState, start } = useViralImport(video.id, user.id);
   const { playback, play, retry, markFailed, activate } = useViralPlayback(
     video,
     active,
@@ -485,12 +540,16 @@ function ViralCard({
       notify("该视频已不可用，无法导入复刻");
       return;
     }
-    if (review || !video.platformKey || !video.nativeId) {
+    if (review) {
       patchDraft({ sourceId: video.id });
       navigate("replica", {
         selectedVideoId: video.id,
         returnTo: "viral",
       });
+      return;
+    }
+    if (!video.platformKey || !video.nativeId) {
+      notify("该视频缺少可导入的平台标识");
       return;
     }
     void start(video, "replica", (task) => {
@@ -569,7 +628,8 @@ function ViralCard({
 }
 
 export function ViralPage() {
-  const { data, review, updateData } = useStudio();
+  const { data, review, updateData, user } = useStudio();
+  const accountId = user.id;
   const [platform, setPlatform] = useState<"抖音" | "视频号">("抖音");
   const [category, setCategory] = useState("全部");
   const [query, setQuery] = useState("");
@@ -583,6 +643,7 @@ export function ViralPage() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [nextCursor, setNextCursor] = useState<string>();
   const [hasMore, setHasMore] = useState(false);
+  const [listReloadRevision, setListReloadRevision] = useState(0);
   const [serverCategories, setServerCategories] = useState<string[]>([]);
   const [favoriteKeys, setFavoriteKeys] = useState(new Set<string>());
   const [availabilityByKey, setAvailabilityByKey] = useState(
@@ -591,9 +652,36 @@ export function ViralPage() {
   const sentinelRef = useRef<HTMLButtonElement | null>(null);
   const listRequestRef = useRef(0);
   const loadingMoreRef = useRef(false);
+  const listReloadRevisionRef = useRef(listReloadRevision);
+  const queryRef = useRef(query);
+  const queryLifecycleRef = useRef(query);
+  listReloadRevisionRef.current = listReloadRevision;
+  queryRef.current = query;
   const platformKey: ViralPlatform =
     platform === "抖音" ? "douyin" : "wechat_channels";
   const sortKey = sort === "最新" ? "latest" : "hot";
+  const paginationContextKey = `${accountId}:${scope}:${platformKey}:${sortKey}:${category}`;
+  const paginationContextKeyRef = useRef(paginationContextKey);
+  const paginationOperationRef = useRef(0);
+  const activePaginationContextRef = useRef({
+    key: `${paginationContextKey}:${listReloadRevision}`,
+    operationId: 0,
+  });
+  const renderedPaginationContextKey = `${paginationContextKey}:${listReloadRevision}`;
+  if (activePaginationContextRef.current.key !== renderedPaginationContextKey) {
+    activePaginationContextRef.current = {
+      key: renderedPaginationContextKey,
+      operationId: ++paginationOperationRef.current,
+    };
+  }
+  const renderedPaginationContext = activePaginationContextRef.current;
+  const confirmedPaginationContextRef = useRef<
+    typeof renderedPaginationContext | undefined
+  >(undefined);
+  const paginationSnapshotsRef = useRef(
+    new Map<string, { nextCursor?: string; hasMore: boolean }>(),
+  );
+  paginationContextKeyRef.current = paginationContextKey;
 
   const shown = useMemo(
     () =>
@@ -626,8 +714,33 @@ export function ViralPage() {
   const statisticsError = useViralStatistics(current, !review);
 
   useEffect(() => {
+    void accountId;
+    setFavoriteKeys(new Set());
+  }, [accountId]);
+
+  useEffect(() => {
+    if (queryLifecycleRef.current === query) return;
+    queryLifecycleRef.current = query;
+    listRequestRef.current += 1;
+    loadingMoreRef.current = false;
+    setListLoading(false);
+    setLoadingMore(false);
+    setListError(undefined);
+    const snapshot = paginationSnapshotsRef.current.get(paginationContextKey);
+    if (!query && snapshot) {
+      setNextCursor(snapshot.nextCursor);
+      setHasMore(snapshot.hasMore);
+    } else {
+      setNextCursor(undefined);
+      setHasMore(false);
+    }
+  }, [paginationContextKey, query]);
+
+  useEffect(() => {
     if (review || scope !== "all") return;
+    const requestContext = renderedPaginationContext;
     const requestId = ++listRequestRef.current;
+    const requestReloadRevision = listReloadRevision;
     loadingMoreRef.current = false;
     setLoadingMore(false);
     let cancelled = false;
@@ -638,11 +751,25 @@ export function ViralPage() {
     setHasMore(false);
     void listViralVideos(platformKey, sortKey, { limit: viralPageSize })
       .then((result) => {
-        if (cancelled || requestId !== listRequestRef.current) return;
+        if (
+          cancelled ||
+          requestId !== listRequestRef.current ||
+          requestReloadRevision !== listReloadRevisionRef.current ||
+          requestContext !== activePaginationContextRef.current ||
+          paginationContextKey !== paginationContextKeyRef.current
+        )
+          return;
         const incoming = result.items.map(studioVideoFromViral);
         setServerCategories(result.categories);
-        setNextCursor(result.nextCursor ?? undefined);
-        setHasMore(Boolean(result.hasMore && result.nextCursor));
+        const confirmedNextCursor = result.nextCursor ?? undefined;
+        const confirmedHasMore = Boolean(result.hasMore && result.nextCursor);
+        confirmedPaginationContextRef.current = requestContext;
+        paginationSnapshotsRef.current.set(paginationContextKey, {
+          nextCursor: confirmedNextCursor,
+          hasMore: confirmedHasMore,
+        });
+        setNextCursor(confirmedNextCursor);
+        setHasMore(confirmedHasMore);
         setRefreshStatus(
           result.refreshing
             ? "正在采集爆款视频，当前先展示已缓存内容…"
@@ -678,21 +805,46 @@ export function ViralPage() {
         }));
       })
       .catch(() => {
-        if (!cancelled) setListError("视频列表暂时无法更新，已保留当前内容");
+        if (
+          !cancelled &&
+          requestId === listRequestRef.current &&
+          requestReloadRevision === listReloadRevisionRef.current &&
+          requestContext === activePaginationContextRef.current &&
+          paginationContextKey === paginationContextKeyRef.current
+        ) {
+          setListError("视频列表暂时无法更新，已保留当前内容");
+        }
       })
       .finally(() => {
-        if (!cancelled && requestId === listRequestRef.current) {
+        if (
+          !cancelled &&
+          requestId === listRequestRef.current &&
+          requestReloadRevision === listReloadRevisionRef.current &&
+          requestContext === activePaginationContextRef.current &&
+          paginationContextKey === paginationContextKeyRef.current
+        ) {
           setListLoading(false);
         }
       });
     return () => {
       cancelled = true;
     };
-  }, [platformKey, review, scope, sortKey, updateData]);
+  }, [
+    listReloadRevision,
+    paginationContextKey,
+    platformKey,
+    review,
+    renderedPaginationContext,
+    scope,
+    sortKey,
+    updateData,
+  ]);
 
   useEffect(() => {
     if (review || scope !== "favorites") return;
+    const requestContext = renderedPaginationContext;
     const requestId = ++listRequestRef.current;
+    const requestReloadRevision = listReloadRevision;
     loadingMoreRef.current = false;
     setLoadingMore(false);
     let cancelled = false;
@@ -702,7 +854,14 @@ export function ViralPage() {
     setHasMore(false);
     void listViralFavorites({ platform: platformKey, limit: viralPageSize })
       .then((result) => {
-        if (cancelled || requestId !== listRequestRef.current) return;
+        if (
+          cancelled ||
+          requestId !== listRequestRef.current ||
+          requestReloadRevision !== listReloadRevisionRef.current ||
+          requestContext !== activePaginationContextRef.current ||
+          paginationContextKey !== paginationContextKeyRef.current
+        )
+          return;
         const incoming = result.items.map(studioVideoFromViral);
         setFavoriteKeys(
           new Set(
@@ -720,8 +879,15 @@ export function ViralPage() {
         setServerCategories([
           ...new Set(result.items.map((item) => item.category).filter(Boolean)),
         ]);
-        setNextCursor(result.nextCursor ?? undefined);
-        setHasMore(Boolean(result.hasMore && result.nextCursor));
+        const confirmedNextCursor = result.nextCursor ?? undefined;
+        const confirmedHasMore = Boolean(result.hasMore && result.nextCursor);
+        confirmedPaginationContextRef.current = requestContext;
+        paginationSnapshotsRef.current.set(paginationContextKey, {
+          nextCursor: confirmedNextCursor,
+          hasMore: confirmedHasMore,
+        });
+        setNextCursor(confirmedNextCursor);
+        setHasMore(confirmedHasMore);
         updateData((currentData) => ({
           ...currentData,
           videos: [
@@ -733,25 +899,62 @@ export function ViralPage() {
         }));
       })
       .catch(() => {
-        if (!cancelled) setListError("收藏列表暂时无法更新");
+        if (
+          !cancelled &&
+          requestId === listRequestRef.current &&
+          requestReloadRevision === listReloadRevisionRef.current &&
+          requestContext === activePaginationContextRef.current &&
+          paginationContextKey === paginationContextKeyRef.current
+        ) {
+          setListError("收藏列表暂时无法更新");
+        }
       })
       .finally(() => {
-        if (!cancelled && requestId === listRequestRef.current) {
+        if (
+          !cancelled &&
+          requestId === listRequestRef.current &&
+          requestReloadRevision === listReloadRevisionRef.current &&
+          requestContext === activePaginationContextRef.current &&
+          paginationContextKey === paginationContextKeyRef.current
+        ) {
           setListLoading(false);
         }
       });
     return () => {
       cancelled = true;
     };
-  }, [platformKey, review, scope, updateData]);
+  }, [
+    listReloadRevision,
+    paginationContextKey,
+    platformKey,
+    review,
+    renderedPaginationContext,
+    scope,
+    updateData,
+  ]);
 
   const loadMore = useCallback(async () => {
     if (review) {
       setVisibleCount((count) => Math.min(count + viralPageSize, shown.length));
       return;
     }
-    if (!hasMore || !nextCursor || loadingMoreRef.current) return;
+    if (
+      !hasMore ||
+      !nextCursor ||
+      loadingMoreRef.current ||
+      confirmedPaginationContextRef.current !== renderedPaginationContext
+    )
+      return;
     const requestId = listRequestRef.current;
+    const requestQuery = query;
+    const requestContextKey = paginationContextKey;
+    const requestContext = renderedPaginationContext;
+    const isCurrent = () =>
+      requestId === listRequestRef.current &&
+      requestQuery === queryRef.current &&
+      requestContext === activePaginationContextRef.current &&
+      requestContext === confirmedPaginationContextRef.current &&
+      requestContextKey === paginationContextKeyRef.current;
     loadingMoreRef.current = true;
     setLoadingMore(true);
     setListError(undefined);
@@ -767,10 +970,16 @@ export function ViralPage() {
               limit: viralPageSize,
               cursor: nextCursor,
             });
-      if (requestId !== listRequestRef.current) return;
+      if (!isCurrent()) return;
       const incoming = result.items.map(studioVideoFromViral);
-      setNextCursor(result.nextCursor ?? undefined);
-      setHasMore(Boolean(result.hasMore && result.nextCursor));
+      const confirmedNextCursor = result.nextCursor ?? undefined;
+      const confirmedHasMore = Boolean(result.hasMore && result.nextCursor);
+      paginationSnapshotsRef.current.set(paginationContextKey, {
+        nextCursor: confirmedNextCursor,
+        hasMore: confirmedHasMore,
+      });
+      setNextCursor(confirmedNextCursor);
+      setHasMore(confirmedHasMore);
       setFavoriteKeys((currentKeys) => {
         const nextKeys = new Set(currentKeys);
         result.items.forEach((item) => {
@@ -803,12 +1012,20 @@ export function ViralPage() {
           ],
         };
       });
-    } catch {
-      if (requestId === listRequestRef.current) {
+    } catch (error) {
+      if (isCurrent()) {
+        if (apiErrorCode(error) === "VIRAL_CURSOR_INVALID") {
+          paginationSnapshotsRef.current.delete(paginationContextKey);
+          setNextCursor(undefined);
+          setHasMore(false);
+          setListError(undefined);
+          setListReloadRevision((revision) => revision + 1);
+          return;
+        }
         setListError("加载更多失败，请重试");
       }
     } finally {
-      if (requestId === listRequestRef.current) {
+      if (isCurrent()) {
         loadingMoreRef.current = false;
         setLoadingMore(false);
       }
@@ -816,7 +1033,10 @@ export function ViralPage() {
   }, [
     hasMore,
     nextCursor,
+    paginationContextKey,
     platformKey,
+    query,
+    renderedPaginationContext,
     review,
     scope,
     shown.length,
@@ -824,7 +1044,7 @@ export function ViralPage() {
     updateData,
   ]);
 
-  const canLoadMore = review ? visibleCount < shown.length : hasMore;
+  const canLoadMore = review ? visibleCount < shown.length : !query && hasMore;
   useEffect(() => {
     const node = sentinelRef.current;
     if (!node || !canLoadMore) return;
@@ -880,7 +1100,10 @@ export function ViralPage() {
           <button
             aria-selected={scope === "all"}
             className={scope === "all" ? "is-active" : ""}
-            onClick={() => setScope("all")}
+            onClick={() => {
+              setCategory("全部");
+              setScope("all");
+            }}
             role="tab"
             type="button"
           >
@@ -889,7 +1112,10 @@ export function ViralPage() {
           <button
             aria-selected={scope === "favorites"}
             className={scope === "favorites" ? "is-active" : ""}
-            onClick={() => setScope("favorites")}
+            onClick={() => {
+              setCategory("全部");
+              setScope("favorites");
+            }}
             role="tab"
             type="button"
           >
@@ -906,7 +1132,10 @@ export function ViralPage() {
               aria-selected={item.id === platform}
               className={item.id === platform ? "is-active" : ""}
               key={item.id}
-              onClick={() => setPlatform(item.id)}
+              onClick={() => {
+                setCategory("全部");
+                setPlatform(item.id);
+              }}
               role="tab"
               type="button"
             >
@@ -1020,18 +1249,20 @@ type ViralImportState = {
   message?: string;
 };
 
-function useViralImport(sourceId?: string) {
+function useViralImport(sourceId?: string, accountId = "anonymous") {
   const [state, setState] = useState<ViralImportState>({ status: "idle" });
   const requestRef = useRef(0);
   const sourceRef = useRef(sourceId);
+  const accountRef = useRef(accountId);
   const idempotencyKeysRef = useRef(new Map<string, string>());
   useEffect(() => {
     sourceRef.current = sourceId;
+    accountRef.current = accountId;
     setState({ status: "idle" });
     return () => {
       requestRef.current += 1;
     };
-  }, [sourceId]);
+  }, [sourceId, accountId]);
 
   const waitForCompletion = async (
     initial: ViralImportTask,
@@ -1047,7 +1278,9 @@ function useViralImport(sourceId?: string) {
       if (request !== requestRef.current) return undefined;
       task = await getViralImportTask(taskId);
     }
-    throw new Error("导入任务等待超时，请稍后重试");
+    if (request !== requestRef.current) return undefined;
+    if (task.status === "SUCCEEDED" || task.status === "FAILED") return task;
+    throw new ViralImportPollingTimeoutError("导入任务等待超时，请稍后重试");
   };
 
   return {
@@ -1057,16 +1290,23 @@ function useViralImport(sourceId?: string) {
       purpose: ViralImportPurpose,
       onReady: (task: ViralImportTask) => void,
     ) => {
-      if (video.id !== sourceRef.current) return;
+      if (video.id !== sourceRef.current || accountId !== accountRef.current)
+        return;
       if (!video.platformKey || !video.nativeId) {
         setState({ status: "error", message: "该视频缺少可导入的平台标识" });
         return;
       }
       const request = ++requestRef.current;
       const actionKey = `${video.platformKey}:${video.nativeId}:${purpose}`;
+      const memoryKey = `${accountId}:${actionKey}`;
       const idempotencyKey =
-        idempotencyKeysRef.current.get(actionKey) ?? crypto.randomUUID();
-      idempotencyKeysRef.current.set(actionKey, idempotencyKey);
+        idempotencyKeysRef.current.get(memoryKey) ??
+        viralImportIdempotencyKey(accountId, actionKey);
+      idempotencyKeysRef.current.set(memoryKey, idempotencyKey);
+      const clearKey = () => {
+        idempotencyKeysRef.current.delete(memoryKey);
+        clearViralImportIdempotencyKey(accountId, actionKey, idempotencyKey);
+      };
       setState({ status: "loading", message: "正在导入参考素材…" });
       try {
         const created = await createViralImportTask(
@@ -1078,6 +1318,7 @@ function useViralImport(sourceId?: string) {
         const completed = await waitForCompletion(created, request);
         if (!completed || request !== requestRef.current) return;
         if (completed.status === "FAILED") {
+          if (completed.retryable === false) clearKey();
           throw new Error(
             completed.errorMessage ||
               completed.error ||
@@ -1086,13 +1327,22 @@ function useViralImport(sourceId?: string) {
           );
         }
         if (!completed.projectId || !completed.sourceAssetId) {
+          clearKey();
           throw new Error("导入任务缺少项目或素材结果");
         }
+        if (purpose === "copy" && !completed.canTranscribe) {
+          clearKey();
+          throw new Error("该来源暂不支持提取文案");
+        }
+        if (purpose === "replica" && !completed.canAnalyze) {
+          clearKey();
+          throw new Error("该来源暂不支持视频复刻");
+        }
         setState({ status: "ready", message: "参考素材已导入" });
-        idempotencyKeysRef.current.delete(actionKey);
         onReady(completed);
       } catch (error) {
         if (request !== requestRef.current) return;
+        if (shouldClearViralImportIdempotencyKey(error)) clearKey();
         setState({
           status: "error",
           message: error instanceof Error ? error.message : "导入任务失败",
@@ -1106,6 +1356,7 @@ export function ViralDetailPage() {
   const {
     data,
     state,
+    user,
     review,
     navigate,
     notify,
@@ -1113,6 +1364,7 @@ export function ViralDetailPage() {
     updateData,
     extractScriptFromUpload,
   } = useStudio();
+  const accountId = user.id;
   const selectedVideo = state.selectedVideoId
     ? data.videos.find((item) => item.id === state.selectedVideoId)
     : undefined;
@@ -1123,11 +1375,23 @@ export function ViralDetailPage() {
   const [detailAvailability, setDetailAvailability] =
     useState<ViralVideoItem["availability"]>("available");
   const [detailFavorite, setDetailFavorite] = useState<boolean>();
+  const detailAccountRef = useRef(accountId);
+  const detailRequestRef = useRef(0);
+  detailAccountRef.current = accountId;
   const detailParams = useMemo(viralDetailParams, []);
   const video = remoteVideo ?? selectedVideo;
-  const { importState, start } = useViralImport(video?.id);
+  const { importState, start } = useViralImport(video?.id, accountId);
 
   useEffect(() => {
+    void accountId;
+    setRemoteVideo(undefined);
+    setDetailFavorite(undefined);
+    setDetailAvailability("available");
+    setDetailStatus("idle");
+  }, [accountId]);
+
+  useEffect(() => {
+    void accountId;
     if (remoteVideo || review || !detailParams) return;
     if (
       selectedVideo &&
@@ -1136,17 +1400,23 @@ export function ViralDetailPage() {
     ) {
       return;
     }
-    let cancelled = false;
+    const requestAccountId = accountId;
+    const requestId = ++detailRequestRef.current;
+    const isCurrent = () =>
+      detailAccountRef.current === requestAccountId &&
+      detailRequestRef.current === requestId;
     setDetailStatus("loading");
     void fetchViralVideo(detailParams.platform, detailParams.videoId)
       .then((response) => {
-        if (cancelled) return;
+        if (!isCurrent()) return;
         const item = "item" in response ? response.item : response;
         const restored = studioVideoFromViral(item);
+        if (!isCurrent()) return;
         setDetailAvailability(item.availability ?? "available");
         setDetailFavorite(Boolean(item.isFavorite));
         setRemoteVideo(restored);
         setDetailStatus("idle");
+        if (!isCurrent()) return;
         updateData((current) => ({
           ...current,
           videos: [
@@ -1158,12 +1428,14 @@ export function ViralDetailPage() {
         }));
       })
       .catch(() => {
-        if (!cancelled) setDetailStatus("error");
+        if (isCurrent()) setDetailStatus("error");
       });
     return () => {
-      cancelled = true;
+      if (detailRequestRef.current === requestId) {
+        detailRequestRef.current += 1;
+      }
     };
-  }, [detailParams, remoteVideo, review, selectedVideo, updateData]);
+  }, [detailParams, remoteVideo, review, selectedVideo, updateData, accountId]);
 
   useEffect(() => {
     if (video) persistViralDetailUrl(video);
@@ -1387,11 +1659,15 @@ export function ViralDetailPage() {
 function AssetCard({
   asset,
   selected,
+  previewStatus,
   onSelect,
+  onPreviewError,
 }: {
   asset: StudioAsset;
   selected: boolean;
+  previewStatus?: "loading" | "ready" | "error";
   onSelect: () => void;
+  onPreviewError: (failedUrl?: string) => void;
 }) {
   return (
     <button
@@ -1400,17 +1676,21 @@ function AssetCard({
       onClick={onSelect}
       aria-label={`选择素材 ${asset.name}`}
     >
-      <Media asset={asset} alt={asset.name} />
+      <Media asset={asset} alt={asset.name} onError={onPreviewError} />
       <strong>{asset.name}</strong>
       <span>
         {asset.group} · {assetKindLabel(asset.kind)}
       </span>
       <i>
-        {asset.delivery === "direct"
-          ? "供应商直出"
-          : asset.saved
-            ? "永久保存"
-            : "处理中"}
+        {previewStatus === "loading"
+          ? "预览加载中…"
+          : previewStatus === "error"
+            ? "预览加载失败，点击重试"
+            : asset.delivery === "direct"
+              ? "供应商直出"
+              : asset.saved
+                ? "永久保存"
+                : "处理中"}
       </i>
     </button>
   );
@@ -1439,6 +1719,10 @@ export function MaterialsPage() {
   const [busyAction, setBusyAction] = useState<string>();
   const [renameValue, setRenameValue] = useState("");
   const [groupValue, setGroupValue] = useState("");
+  const [previewStates, setPreviewStates] = useState<MaterialPreviewStates>({});
+  const visiblePreviewIdsRef = useRef(new Set<string>());
+  const previewRequestVersionsRef = useRef(new Map<string, number>());
+  const previewLoadingIdsRef = useRef(new Set<string>());
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const groupInputRef = useRef<HTMLInputElement | null>(null);
@@ -1469,6 +1753,51 @@ export function MaterialsPage() {
   const total = review ? reviewAssets.length : (remotePage?.total ?? 0);
   const pages = Math.max(1, Math.ceil(total / pageSize));
   const selectedAssetIdRef = useRef(state.selectedAssetId);
+  const loadPreview = useCallback(async (asset: StudioAsset) => {
+    if (
+      asset.url ||
+      !asset.allowedActions?.includes("preview") ||
+      previewLoadingIdsRef.current.has(asset.id)
+    )
+      return;
+    previewLoadingIdsRef.current.add(asset.id);
+    const requestVersion =
+      (previewRequestVersionsRef.current.get(asset.id) ?? 0) + 1;
+    previewRequestVersionsRef.current.set(asset.id, requestVersion);
+    setPreviewStates((current) => ({
+      ...current,
+      [asset.id]: { status: "loading" },
+    }));
+    try {
+      const url = asset.assetId
+        ? (await getAssetDownloadUrl(asset.assetId)).url
+        : asset.generationTaskId
+          ? await createGenerationTaskPreviewUrl(asset.generationTaskId)
+          : undefined;
+      if (
+        previewRequestVersionsRef.current.get(asset.id) !== requestVersion ||
+        !visiblePreviewIdsRef.current.has(asset.id)
+      )
+        return;
+      setPreviewStates((current) => ({
+        ...current,
+        [asset.id]: url ? { status: "ready", url } : { status: "error" },
+      }));
+    } catch {
+      if (
+        previewRequestVersionsRef.current.get(asset.id) !== requestVersion ||
+        !visiblePreviewIdsRef.current.has(asset.id)
+      )
+        return;
+      setPreviewStates((current) => ({
+        ...current,
+        [asset.id]: { status: "error" },
+      }));
+    } finally {
+      if (previewRequestVersionsRef.current.get(asset.id) === requestVersion)
+        previewLoadingIdsRef.current.delete(asset.id);
+    }
+  }, []);
 
   useEffect(() => {
     if (review) return;
@@ -1501,6 +1830,31 @@ export function MaterialsPage() {
   }, [kind, page, query, review, source]);
 
   useEffect(() => {
+    if (!review && remotePage?.page === page && page > pages) setPage(pages);
+  }, [page, pages, remotePage?.page, review]);
+
+  useEffect(() => {
+    if (review || remotePage?.page !== page) return;
+    const visibleIds = new Set(remoteAssets.map((asset) => asset.id));
+    visiblePreviewIdsRef.current = visibleIds;
+    setPreviewStates((current) =>
+      Object.fromEntries(
+        Object.entries(current).filter(([id]) => visibleIds.has(id)),
+      ),
+    );
+    for (const asset of remoteAssets) void loadPreview(asset);
+    return () => {
+      for (const id of visibleIds) {
+        previewLoadingIdsRef.current.delete(id);
+        previewRequestVersionsRef.current.set(
+          id,
+          (previewRequestVersionsRef.current.get(id) ?? 0) + 1,
+        );
+      }
+    };
+  }, [loadPreview, page, remoteAssets, remotePage?.page, review]);
+
+  useEffect(() => {
     if (selectedAssetIdRef.current === state.selectedAssetId) return;
     selectedAssetIdRef.current = state.selectedAssetId;
     if (review && selectedIndex >= 0) {
@@ -1512,30 +1866,6 @@ export function MaterialsPage() {
     setRenameValue(selected?.name ?? "");
     setGroupValue(selected?.group ?? "");
   }, [selected?.group, selected?.name]);
-
-  useEffect(() => {
-    if (review || !selected?.materialId || selected.url) return;
-    let current = true;
-    const preview = selected.assetId
-      ? getAssetDownloadUrl(selected.assetId).then((result) => result.url)
-      : selected.generationTaskId
-        ? createGenerationTaskPreviewUrl(selected.generationTaskId)
-        : Promise.resolve(null);
-    void preview
-      .then((url) => {
-        if (current && url) {
-          setSelectedAsset((asset) =>
-            asset?.id === selected.id ? { ...asset, url } : asset,
-          );
-        }
-      })
-      .catch(() => {
-        if (current) notify("素材预览暂不可用，请稍后重试");
-      });
-    return () => {
-      current = false;
-    };
-  }, [notify, review, selected]);
 
   const currentAssets = review
     ? assets.slice((page - 1) * pageSize, page * pageSize)
@@ -1785,11 +2115,22 @@ export function MaterialsPage() {
             {currentAssets.map((asset) => (
               <AssetCard
                 key={asset.id}
-                asset={asset}
+                asset={{
+                  ...asset,
+                  url: asset.url ?? previewStates[asset.id]?.url,
+                }}
                 selected={selected?.id === asset.id}
+                previewStatus={previewStates[asset.id]?.status}
                 onSelect={() => {
+                  if (previewStates[asset.id]?.status === "error")
+                    void loadPreview(asset);
                   setSelectedAsset(asset);
                   patchState({ selectedAssetId: asset.id });
+                }}
+                onPreviewError={(failedUrl) => {
+                  setPreviewStates((current) =>
+                    failMaterialPreview(current, asset.id, failedUrl),
+                  );
                 }}
               />
             ))}
@@ -1838,7 +2179,18 @@ export function MaterialsPage() {
           {selected ? (
             <>
               <h2>{selected.name}</h2>
-              <Media asset={selected} alt={selected.name} />
+              <Media
+                asset={{
+                  ...selected,
+                  url: selected.url ?? previewStates[selected.id]?.url,
+                }}
+                alt={selected.name}
+                onError={(failedUrl) => {
+                  setPreviewStates((current) =>
+                    failMaterialPreview(current, selected.id, failedUrl),
+                  );
+                }}
+              />
               <dl>
                 <dt>类型</dt>
                 <dd>{assetKindLabel(selected.kind)}</dd>
@@ -2102,7 +2454,7 @@ export function PublishPage() {
       <header className="content-title">
         <div>
           <h1>发布管理</h1>
-          <p>编辑发布草稿，确认后再提交至平台发布</p>
+          <p>可整理当前会话草稿；平台授权与正式发布暂缓未启用</p>
         </div>
       </header>
       <section className="content-publish-layout">
@@ -2112,10 +2464,10 @@ export function PublishPage() {
               发布草稿 <b>{draftCount}</b>
             </strong>
             <span>
-              待发布 <b>0</b>
+              待发布 <b>{review ? "0" : "暂缓"}</b>
             </span>
             <span>
-              已发布 <b>0</b>
+              已发布 <b>{review ? "0" : "暂缓"}</b>
             </span>
           </div>
           {visibleDrafts.length ? (

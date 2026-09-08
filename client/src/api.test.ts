@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   applySavedGenerationPrompt,
   attachCustomerSessionToken,
+  CUSTOMER_SESSION_EXPIRED_EVENT,
   CUSTOMER_SESSION_REPLACED_EVENT,
   CUSTOMER_SESSION_REVOKED_EVENT,
   cancelOralTask,
@@ -18,6 +19,7 @@ import {
   createMaterialUploadIntent,
   createOralAvatarClone,
   createOralConsent,
+  createOralTask,
   createOralVoiceClone,
   createProject,
   createScriptVersion,
@@ -41,16 +43,21 @@ import {
   getLatestProjectFirstFrames,
   getLatestScriptRewriteTask,
   getLatestScriptVersion,
+  getOralTask,
   getScriptFromAudioTask,
   getSettings,
   hideMaterial,
+  listCharacterSceneLooksPage,
   listGenerationBatches,
   listMaterials,
   listOralAvatars,
+  listOralTasksPage,
   listOralVoices,
   listProjectCharacterVersions,
   listProjects,
   listSavedGenerationPrompts,
+  listSimpleCharacterLibraryPage,
+  listViralVideos,
   lockGenerationPrompt,
   readAnalysisPayload,
   readFirstFrameCandidates,
@@ -58,6 +65,7 @@ import {
   regenerateGenerationBatch,
   regenerateGenerationTask,
   resolveApiBaseUrl,
+  resolveViralLink,
   retryGenerationTask,
   retryOralTask,
   retryOralTaskArchive,
@@ -80,6 +88,74 @@ import {
   waitForScriptRewriteTask,
   waitForSourceFrameTask,
 } from "./api";
+
+describe("爆款列表 API", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("将分页游标编码到查询参数并保持 GET 请求", async () => {
+    const page = {
+      platform: "douyin",
+      sort: "latest",
+      categories: [],
+      items: [],
+      hasMore: false,
+      nextCursor: null,
+      total: 0,
+    };
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => page,
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      listViralVideos("douyin", "latest", {
+        limit: 12,
+        cursor: "page/2+=",
+      }),
+    ).resolves.toEqual(page);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:8000/api/viral/videos?platform=douyin&sort=latest&limit=12&cursor=page%2F2%2B%3D",
+      expect.objectContaining({
+        headers: expect.any(Headers),
+        signal: expect.any(AbortSignal),
+      }),
+    );
+  });
+
+  it("提交链接和用途到受限时长的解析接口", async () => {
+    const body = {
+      item: { platform: "douyin", videoId: "source-1" },
+      importIdempotencyKey: "stable-import-key",
+    };
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => body,
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      resolveViralLink("https://v.douyin.com/share/", "replica", "resolve-key"),
+    ).resolves.toEqual(body);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:8000/api/viral/link-resolutions",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          url: "https://v.douyin.com/share/",
+          purpose: "replica",
+        }),
+        signal: expect.any(AbortSignal),
+      }),
+    );
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(new Headers(init.headers).get("Idempotency-Key")).toBe(
+      "resolve-key",
+    );
+  });
+});
 
 describe("素材库 API", () => {
   afterEach(() => {
@@ -170,6 +246,34 @@ describe("素材库 API", () => {
     );
   });
 
+  it("音频上传意图携带用途与浏览器读取的时长", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        material_id: "asset:audio-1",
+        asset_id: "audio-1",
+        storage_key: null,
+        method: "PUT",
+        url: "https://storage.test/audio",
+        headers: { "Content-Type": "audio/mpeg" },
+        expires_at: "2030-01-01T00:00:00Z",
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createMaterialUploadIntent(
+      new File(["ID3audio"], "完整口播.mp3", { type: "audio/mpeg" }),
+      { audioPurpose: "oral_audio", durationSeconds: 42 },
+    );
+
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual(
+      expect.objectContaining({
+        audio_purpose: "oral_audio",
+        duration_seconds: 42,
+      }),
+    );
+  });
+
   it("复用带本地鉴权和进度处理的上传通道", async () => {
     class MaterialUploadRequest {
       static latest: MaterialUploadRequest | null = null;
@@ -223,6 +327,44 @@ describe("素材库 API", () => {
   });
 });
 
+describe("人物库 API", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("使用服务端查询和不透明游标读取下一页", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ items: [], next_cursor: "next-cursor" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await listSimpleCharacterLibraryPage({
+      limit: 12,
+      cursor: "cursor/value",
+      query: "林 夏",
+    });
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "http://127.0.0.1:8000/api/simple-characters/library?limit=12&cursor=cursor%2Fvalue&query=%E6%9E%97+%E5%A4%8F",
+    );
+  });
+
+  it("场景造型按人物使用 limit 和 offset 分页", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ items: [], total: 13, limit: 12, offset: 12 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await listCharacterSceneLooksPage("person 1", { limit: 12, offset: 12 });
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "http://127.0.0.1:8000/api/simple-characters/identities/person%201/scene-looks?limit=12&offset=12",
+    );
+  });
+});
+
 describe("人物 IP 口播资产 API", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -243,6 +385,34 @@ describe("人物 IP 口播资产 API", () => {
     );
     expect(fetchMock.mock.calls[1]?.[0]).toBe(
       "http://127.0.0.1:8000/api/oral/voices?identity_id=person%201",
+    );
+  });
+
+  it("口播任务使用独立 limit 和 offset 历史范围", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ items: [], total: 21, limit: 20, offset: 20 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await listOralTasksPage({ limit: 20, offset: 20 });
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "http://127.0.0.1:8000/api/oral/tasks?limit=20&offset=20",
+    );
+  });
+
+  it("口播详情按编码后的原生任务 ID 读取", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: "oral 1", status: "SUCCEEDED" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await getOralTask("oral 1");
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "http://127.0.0.1:8000/api/oral/tasks/oral%201",
     );
   });
 
@@ -340,6 +510,34 @@ describe("人物 IP 口播资产 API", () => {
       "http://127.0.0.1:8000/api/oral/voices/voice%201/confirm",
       expect.objectContaining({ method: "POST" }),
     );
+  });
+
+  it("口播任务按选择序列化供应商原生字幕配置", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: "oral-1", status: "QUEUED" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const common = {
+      identityId: "person-1",
+      avatarId: "avatar-1",
+      voiceId: "voice-1",
+      mode: "TTS" as const,
+      title: "口播",
+      scriptText: "文案",
+    };
+
+    await createOralTask({ ...common, idempotencyKey: "oral-key-off" });
+    await createOralTask({
+      ...common,
+      subtitle: { st_show: true, st_font_size: 30 },
+      idempotencyKey: "oral-key-on",
+    });
+
+    const disabledBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    const enabledBody = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body));
+    expect(disabledBody.subtitle).toBeNull();
+    expect(enabledBody.subtitle).toEqual({ st_show: true, st_font_size: 30 });
   });
 
   it("调用口播任务取消与两种重试合同", async () => {
@@ -676,6 +874,50 @@ describe("customer workspace session lifecycle", () => {
       window.removeEventListener(eventName, listener);
     },
   );
+
+  it("ignores an older workspace 401 whose body finishes after a new session attaches", async () => {
+    let resolveErrorBody:
+      | ((value: { detail: { code: string; message: string } }) => void)
+      | undefined;
+    const delayedErrorBody = new Promise<{
+      detail: { code: string; message: string };
+    }>((resolve) => {
+      resolveErrorBody = resolve;
+    });
+    const cloneJson = vi.fn(() => delayedErrorBody);
+    const fetchResponse = {
+      ok: false,
+      status: 401,
+      headers: new Headers({ "X-Request-Id": "request-delayed-401" }),
+      json: vi.fn().mockResolvedValue({
+        detail: { code: "SESSION_EXPIRED", message: "older session expired" },
+      }),
+      clone: vi.fn(() => ({
+        ok: false,
+        status: 401,
+        headers: new Headers({ "X-Request-Id": "request-delayed-401" }),
+        json: cloneJson,
+      })),
+    };
+    const listener = vi.fn();
+    window.addEventListener(CUSTOMER_SESSION_EXPIRED_EVENT, listener);
+    const releaseOlder = attachCustomerSessionToken("older-session");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(fetchResponse));
+
+    const pendingRequest = listProjects();
+    await vi.waitFor(() => expect(cloneJson).toHaveBeenCalledTimes(1));
+    const releaseCurrent = attachCustomerSessionToken("current-session");
+    resolveErrorBody?.({
+      detail: { code: "SESSION_EXPIRED", message: "older session expired" },
+    });
+
+    await expect(pendingRequest).rejects.toThrow();
+    expect(listener).not.toHaveBeenCalled();
+
+    releaseOlder();
+    releaseCurrent();
+    window.removeEventListener(CUSTOMER_SESSION_EXPIRED_EVENT, listener);
+  });
 });
 
 const generationVersion = {
@@ -1856,6 +2098,8 @@ describe("startVideoAnalysis", () => {
       "project-1",
       "待改写原稿。",
       "identity-1",
+      "source-1",
+      "rewrite-key-1",
     );
     const first = waitForScriptRewriteTask(task.id);
     const recovered = waitForScriptRewriteTask(task.id);
@@ -1870,7 +2114,8 @@ describe("startVideoAnalysis", () => {
     expect(enqueueBody).toEqual({
       text: "待改写原稿。",
       identity_id: "identity-1",
-      idempotency_key: expect.any(String),
+      source_asset_id: "source-1",
+      idempotency_key: "rewrite-key-1",
     });
   });
 
@@ -1892,11 +2137,11 @@ describe("startVideoAnalysis", () => {
       .mockResolvedValue({ ok: true, json: async () => null });
     vi.stubGlobal("fetch", fetchMock);
 
-    await getLatestScriptRewriteTask("project-1", "identity 1");
+    await getLatestScriptRewriteTask("project-1", "identity 1", "source/1");
     await getLatestScriptRewriteTask("project-1");
 
     expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
-      "http://127.0.0.1:8000/api/projects/project-1/script-rewrite-tasks/latest?identity_scope=identity&identity_id=identity+1",
+      "http://127.0.0.1:8000/api/projects/project-1/script-rewrite-tasks/latest?identity_scope=identity&identity_id=identity+1&source_asset_id=source%2F1",
       "http://127.0.0.1:8000/api/projects/project-1/script-rewrite-tasks/latest?identity_scope=none",
     ]);
   });

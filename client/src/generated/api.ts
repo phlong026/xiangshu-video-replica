@@ -3269,6 +3269,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/viral/link-resolutions": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Resolve Viral Link */
+    post: operations["resolve_viral_link_api_viral_link_resolutions_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/viral/videos/import-tasks": {
     parameters: {
       query?: never;
@@ -5274,6 +5291,7 @@ export interface components {
        */
       record_type:
         | "VIDEO"
+        | "ORAL_VIDEO"
         | "FIRST_FRAME_IMAGE"
         | "CHARACTER_SHEET_IMAGE"
         | "CHARACTER_VIEW_IMAGE"
@@ -5317,8 +5335,12 @@ export interface components {
       charged_credits: number;
       /** Result Reference */
       result_reference: string | null;
+      /** Provider Reference */
+      provider_reference: string | null;
       /** Error Code */
       error_code: string | null;
+      /** Error Message */
+      error_message: string | null;
       /** Created At */
       created_at: string;
       /** Completed At */
@@ -6040,6 +6062,8 @@ export interface components {
       items: components["schemas"]["GenerationBatchListItem"][];
       /** Next Cursor */
       next_cursor: string | null;
+      /** Total */
+      total: number;
     };
     /** GenerationBatchRenameRequest */
     GenerationBatchRenameRequest: {
@@ -6409,6 +6433,10 @@ export interface components {
       title?: string | null;
       /** Group */
       group?: string | null;
+      /** Audio Purpose */
+      audio_purpose?: ("oral_audio" | "voice_clone") | null;
+      /** Duration Seconds */
+      duration_seconds?: number | null;
     };
     /** MaterialUploadIntentResponse */
     MaterialUploadIntentResponse: {
@@ -6465,6 +6493,17 @@ export interface components {
        */
       purpose: "AVATAR" | "VOICE" | "AVATAR_CLONE" | "VOICE_CLONE";
     };
+    /** OralTaskPageResponse */
+    OralTaskPageResponse: {
+      /** Items */
+      items: components["schemas"]["OralTaskResponse"][];
+      /** Total */
+      total: number;
+      /** Limit */
+      limit: number;
+      /** Offset */
+      offset: number;
+    };
     /** OralTaskRequest */
     OralTaskRequest: {
       /** Identity Id */
@@ -6490,6 +6529,60 @@ export interface components {
       } | null;
       /** Idempotency Key */
       idempotency_key: string;
+    };
+    /** OralTaskResponse */
+    OralTaskResponse: {
+      /** Id */
+      id: string;
+      /**
+       * Status
+       * @enum {string}
+       */
+      status:
+        | "QUEUED"
+        | "SUBMITTING"
+        | "RUNNING"
+        | "ARCHIVING"
+        | "SUBMISSION_UNCERTAIN"
+        | "ARCHIVE_FAILED"
+        | "SUCCEEDED"
+        | "FAILED"
+        | "CANCELLED";
+      /** Title */
+      title: string;
+      /**
+       * Mode
+       * @enum {string}
+       */
+      mode: "TTS" | "AUDIO";
+      /** Identity Id */
+      identity_id: string;
+      /** Avatar Id */
+      avatar_id: string;
+      /** Voice Id */
+      voice_id: string | null;
+      /** Script Text */
+      script_text: string | null;
+      /** Audio Asset Id */
+      audio_asset_id: string | null;
+      /** Status Message */
+      status_message?: string | null;
+      /** Error Message */
+      error_message?: string | null;
+      /** Result Asset Id */
+      result_asset_id: string | null;
+      /** Duration Sec */
+      duration_sec: number | null;
+      /** Estimated Cost Fen */
+      estimated_cost_fen: number;
+      /** Billing Status */
+      billing_status?: string | null;
+      /** Available Actions */
+      available_actions?: string[];
+      /** Created At */
+      created_at: string;
+      /** Updated At */
+      updated_at: string;
     };
     /** PaidRegenerationRequest */
     PaidRegenerationRequest: {
@@ -6827,6 +6920,8 @@ export interface components {
       provider: string;
       /** Test Kind */
       test_kind: string;
+      /** Account Credit */
+      account_credit?: number | null;
     };
     /** QueueModeResponse */
     QueueModeResponse: {
@@ -7225,6 +7320,8 @@ export interface components {
       text: string;
       /** Identity Id */
       identity_id?: string | null;
+      /** Source Asset Id */
+      source_asset_id?: string | null;
       /** Idempotency Key */
       idempotency_key?: string | null;
     };
@@ -7253,6 +7350,10 @@ export interface components {
       ip_profile_snapshot:
         | components["schemas"]["ScriptRewriteIpProfileSummary"]
         | null;
+      /** Source Asset Id */
+      source_asset_id: string | null;
+      /** Source Text */
+      source_text: string;
       /** Status */
       status: string;
       /** Attempt */
@@ -7410,6 +7511,15 @@ export interface components {
       /** Views */
       views: components["schemas"]["SimpleCharacterViewResponse"][];
     };
+    /** SimpleLibraryPageResponse */
+    SimpleLibraryPageResponse: {
+      /** Items */
+      items: components["schemas"]["SimpleLibraryEntryResponse"][];
+      /** Next Cursor */
+      next_cursor: string | null;
+      /** Total */
+      total: number;
+    };
     /** SimpleSceneLookCreateRequest */
     SimpleSceneLookCreateRequest: {
       /** Scene Name */
@@ -7420,6 +7530,17 @@ export interface components {
       costume_description: string;
       /** Idempotency Key */
       idempotency_key: string;
+    };
+    /** SimpleSceneLookPageResponse */
+    SimpleSceneLookPageResponse: {
+      /** Items */
+      items: components["schemas"]["SimpleSceneLookResponse"][];
+      /** Total */
+      total: number;
+      /** Limit */
+      limit: number;
+      /** Offset */
+      offset: number;
     };
     /** SimpleSceneLookResponse */
     SimpleSceneLookResponse: {
@@ -7564,12 +7685,24 @@ export interface components {
     StudioAnalyticsResponse: {
       /** Range Days */
       range_days: number;
+      /** Generated At */
+      generated_at: string;
       /** Today Completed */
       today_completed: number;
       /** Range Completed */
       range_completed: number;
       /** Total Completed */
       total_completed: number;
+      /** Today Generation Batches */
+      today_generation_batches: number;
+      /** Range Generation Batches */
+      range_generation_batches: number;
+      /** Total Generation Batches */
+      total_generation_batches: number;
+      /** Range Generation Outputs */
+      range_generation_outputs: number;
+      /** Range Oral Outputs */
+      range_oral_outputs: number;
       /** Daily */
       daily: components["schemas"]["StudioAnalyticsDay"][];
       /** Kind Breakdown */
@@ -7581,10 +7714,12 @@ export interface components {
     StudioAnalyticsWorkItem: {
       /** Task Id */
       task_id: string;
+      /** Task Kind */
+      task_kind: string;
       /** Batch Id */
-      batch_id: string;
+      batch_id: string | null;
       /** Project Id */
-      project_id: string;
+      project_id: string | null;
       /** Title */
       title: string;
       /** Creation Kind */
@@ -7999,6 +8134,22 @@ export interface components {
       /** Updatedat */
       updatedAt: string;
     };
+    /** ViralLinkResolutionRequest */
+    ViralLinkResolutionRequest: {
+      /** Url */
+      url: string;
+      /**
+       * Purpose
+       * @enum {string}
+       */
+      purpose: "copy" | "replica";
+    };
+    /** ViralLinkResolutionResponse */
+    ViralLinkResolutionResponse: {
+      item: components["schemas"]["ViralVideoItem"];
+      /** Importidempotencykey */
+      importIdempotencyKey: string;
+    };
     /** ViralListResponse */
     ViralListResponse: {
       /** Platform */
@@ -8391,6 +8542,7 @@ export interface operations {
       query?: {
         identity_scope?: "all" | "identity" | "none";
         identity_id?: string | null;
+        source_asset_id?: string | null;
       };
       header?: {
         "X-Dev-User-Id"?: string | null;
@@ -10357,6 +10509,7 @@ export interface operations {
     parameters: {
       query?: {
         limit?: number;
+        offset?: number;
       };
       header?: {
         "X-Dev-User-Id"?: string | null;
@@ -10373,9 +10526,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          "application/json": {
-            [key: string]: unknown;
-          }[];
+          "application/json": components["schemas"]["OralTaskPageResponse"];
         };
       };
       /** @description Validation Error */
@@ -10444,10 +10595,15 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          "application/json": {
-            [key: string]: unknown;
-          };
+          "application/json": components["schemas"]["OralTaskResponse"];
         };
+      };
+      /** @description 口播任务不存在或不属于当前账号 */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
       };
       /** @description Validation Error */
       422: {
@@ -11243,6 +11399,7 @@ export interface operations {
         record_type?:
           | (
               | "VIDEO"
+              | "ORAL_VIDEO"
               | "FIRST_FRAME_IMAGE"
               | "CHARACTER_SHEET_IMAGE"
               | "CHARACTER_VIEW_IMAGE"
@@ -14880,6 +15037,76 @@ export interface operations {
       };
     };
   };
+  resolve_viral_link_api_viral_link_resolutions_post: {
+    parameters: {
+      query?: never;
+      header: {
+        "Idempotency-Key": string;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ViralLinkResolutionRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ViralLinkResolutionResponse"];
+        };
+      };
+      /** @description Conflict */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Gone */
+      410: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+      /** @description Bad Gateway */
+      502: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Service Unavailable */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Gateway Timeout */
+      504: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+    };
+  };
   create_viral_import_task_api_viral_videos_import_tasks_post: {
     parameters: {
       query?: never;
@@ -16850,7 +17077,11 @@ export interface operations {
   };
   read_simple_library_api_simple_characters_library_get: {
     parameters: {
-      query?: never;
+      query?: {
+        limit?: number;
+        cursor?: string | null;
+        query?: string;
+      };
       header?: {
         "X-Dev-User-Id"?: string | null;
         Authorization?: string | null;
@@ -16866,7 +17097,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          "application/json": components["schemas"]["SimpleLibraryEntryResponse"][];
+          "application/json": components["schemas"]["SimpleLibraryPageResponse"];
         };
       };
       /** @description Validation Error */
@@ -16882,7 +17113,10 @@ export interface operations {
   };
   read_scene_looks_api_simple_characters_identities__identity_id__scene_looks_get: {
     parameters: {
-      query?: never;
+      query?: {
+        limit?: number;
+        offset?: number;
+      };
       header?: {
         "X-Dev-User-Id"?: string | null;
         Authorization?: string | null;
@@ -16900,7 +17134,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          "application/json": components["schemas"]["SimpleSceneLookResponse"][];
+          "application/json": components["schemas"]["SimpleSceneLookPageResponse"];
         };
       };
       /** @description Validation Error */

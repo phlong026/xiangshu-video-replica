@@ -212,7 +212,7 @@ def test_list_page_uses_stable_keyset_cursor_and_reports_total(tmp_path: Path) -
                 _video(video_id=f"video-{index:02d}", published_at=now - index),
                 likes=100 - index,
             )
-            for index in range(15)
+            for index in range(35)
         ]
         upsert_viral_videos(conn, videos)
 
@@ -220,26 +220,26 @@ def test_list_page_uses_stable_keyset_cursor_and_reports_total(tmp_path: Path) -
             conn,
             platform="wechat_channels",
             sort="hot",
-            limit=6,
+            limit=12,
         )
         second = list_viral_video_page(
             conn,
             platform="wechat_channels",
             sort="hot",
-            limit=6,
+            limit=12,
             cursor=first.next_cursor,
         )
         third = list_viral_video_page(
             conn,
             platform="wechat_channels",
             sort="hot",
-            limit=6,
+            limit=12,
             cursor=second.next_cursor,
         )
 
         ids = [video.video_id for page in (first, second, third) for video in page.items]
-        assert ids == [f"video-{index:02d}" for index in range(15)]
-        assert first.total == second.total == third.total == 15
+        assert ids == [f"video-{index:02d}" for index in range(35)]
+        assert first.total == second.total == third.total == 35
         assert first.has_more is True and second.has_more is True
         assert third.has_more is False and third.next_cursor is None
     finally:
@@ -403,6 +403,37 @@ def test_favorites_support_stable_keyset_pagination(tmp_path: Path) -> None:
         assert first.has_more is True
         assert second.has_more is False
         assert second.next_cursor is None
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("platform", [None, "wechat_channels"])
+def test_favorite_page_order_uses_covering_index_without_temp_sort(
+    tmp_path: Path, platform: str | None
+) -> None:
+    db_path = tmp_path / "viral.db"
+    initialize_database(db_path).close()
+    conn = _open(db_path)
+    try:
+        platform_sql = "AND f.platform = ?" if platform is not None else ""
+        params: tuple[object, ...] = (
+            ("user-a", platform, 51) if platform is not None else ("user-a", 51)
+        )
+        plan = conn.execute(
+            f"""
+            EXPLAIN QUERY PLAN
+            SELECT v.*, f.created_at AS favorite_created_at
+            FROM viral_video_favorites f
+            JOIN viral_videos v
+              ON v.platform = f.platform AND v.video_id = f.video_id
+            WHERE f.user_id = ? {platform_sql}
+            ORDER BY f.created_at DESC, f.platform ASC, f.video_id ASC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+        details = [str(row["detail"]) for row in plan]
+        assert not any("TEMP B-TREE" in detail for detail in details), details
     finally:
         conn.close()
 

@@ -60,6 +60,19 @@ class ViralImportTaskResponse(BaseModel):
     updated_at: str = Field(alias="updatedAt")
 
 
+class ViralImportError(HTTPException):
+    def __init__(
+        self,
+        status_code: int,
+        code: str,
+        message: str,
+        *,
+        retryable: bool = True,
+    ) -> None:
+        super().__init__(status_code=status_code, detail={"code": code, "message": message})
+        self.retryable = retryable
+
+
 def viral_import_task_response(row: sqlite3.Row) -> ViralImportTaskResponse:
     result = json.loads(str(row["result_json"])) if row["result_json"] else {}
     media_kind = result.get("mediaKind")
@@ -84,8 +97,14 @@ def viral_import_task_response(row: sqlite3.Row) -> ViralImportTaskResponse:
     )
 
 
-def _error(status_code: int, code: str, message: str) -> HTTPException:
-    return HTTPException(status_code=status_code, detail={"code": code, "message": message})
+def _error(
+    status_code: int,
+    code: str,
+    message: str,
+    *,
+    retryable: bool = True,
+) -> ViralImportError:
+    return ViralImportError(status_code, code, message, retryable=retryable)
 
 
 def _request_hash(payload: dict[str, str | None]) -> str:
@@ -462,24 +481,43 @@ def _require_lease(conn: BusinessConnection, lease: ViralImportLease) -> sqlite3
     return cast(sqlite3.Row, row)
 
 
+def _require_project_owner(conn: BusinessConnection, lease: ViralImportLease) -> None:
+    project = conn.execute(
+        "SELECT owner_user_id FROM projects WHERE id = %s", (lease.project_id,)
+    ).fetchone()
+    if project is None or str(project["owner_user_id"]) != lease.owner_user_id:
+        raise _error(
+            409,
+            "VIRAL_IMPORT_PROJECT_CHANGED",
+            "目标项目已不存在或归属已变化。",
+            retryable=False,
+        )
+
+
 def prepare_viral_import_task(
     conn: BusinessConnection, *, lease: ViralImportLease, storage: StorageAdapter
 ) -> ViralImportWork:
     _require_lease(conn, lease)
     _require_import_enabled(conn)
-    project = conn.execute(
-        "SELECT owner_user_id FROM projects WHERE id = %s", (lease.project_id,)
-    ).fetchone()
-    if project is None or str(project["owner_user_id"]) != lease.owner_user_id:
-        raise _error(409, "VIRAL_IMPORT_PROJECT_CHANGED", "目标项目已不存在或归属已变化。")
+    _require_project_owner(conn, lease)
     video = get_viral_video(conn, platform=lease.platform, video_id=lease.video_id)
     if video is None:
-        raise _error(404, "VIRAL_VIDEO_NOT_FOUND", "爆款视频不存在或已下架。")
+        raise _error(
+            404,
+            "VIRAL_VIDEO_NOT_FOUND",
+            "爆款视频不存在或已下架。",
+            retryable=False,
+        )
     if (
         viral_video_availability(conn, platform=lease.platform, video_id=lease.video_id)
         != "available"
     ):
-        raise _error(409, "VIRAL_VIDEO_UNAVAILABLE", "该爆款视频当前不可用于创作。")
+        raise _error(
+            409,
+            "VIRAL_VIDEO_UNAVAILABLE",
+            "该爆款视频当前不可用于创作。",
+            retryable=False,
+        )
     verified_audio = bool(video.audio_url and video.native.get("source_audio_verified") is True)
     prefer: Literal["audio", "video"] = (
         "audio" if lease.purpose == "copy" and verified_audio else "video"
@@ -540,6 +578,7 @@ def complete_viral_import_task(
     conn: BusinessConnection, *, lease: ViralImportLease, outcome: ViralImportOutcome
 ) -> None:
     _require_lease(conn, lease)
+    _require_project_owner(conn, lease)
     _complete_viral_media_preparation(conn, outcome.media_preparation)
     asset_id = str(uuid4())
     conn.execute(
@@ -608,16 +647,30 @@ def fail_viral_import_task(
     logger.warning("viral import task %s failed: %s", lease.id, type(cause).__name__)
     now = _time_text(datetime.now(UTC))
     message = "爆款视频导入失败，请稍后重试。"
-    if isinstance(cause, HTTPException) and isinstance(cause.detail, dict):
+    error_code = "VIRAL_IMPORT_FAILED"
+    retryable = True
+    if isinstance(cause, ViralImportError) and isinstance(cause.detail, dict):
         message = str(cause.detail.get("message") or message)
+        error_code = str(cause.detail.get("code") or error_code)
+        retryable = cause.retryable
     conn.execute(
         """
         UPDATE viral_import_tasks SET status = 'FAILED', locked_by = NULL,
-            locked_until = NULL, error_code = 'VIRAL_IMPORT_FAILED',
-            error_message_redacted = %s, retryable = 1, completed_at = %s, updated_at = %s
+            locked_until = NULL, error_code = %s,
+            error_message_redacted = %s, retryable = %s, completed_at = %s, updated_at = %s
         WHERE id = %s AND status = 'RUNNING' AND locked_by = %s
             AND attempt = %s AND locked_until IS NOT NULL AND locked_until > %s
         """,
-        (message, now, now, lease.id, lease.worker_id, lease.attempt, now),
+        (
+            error_code,
+            message,
+            1 if retryable else 0,
+            now,
+            now,
+            lease.id,
+            lease.worker_id,
+            lease.attempt,
+            now,
+        ),
     )
     conn.commit()

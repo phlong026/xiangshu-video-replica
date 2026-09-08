@@ -445,6 +445,10 @@ def test_detail_reports_hidden_availability(client: tuple[TestClient, StubViralC
         headers=_AUTH_HEADERS,
     )
     video_id = response.json()["items"][0]["videoId"]
+    assert (
+        http.put(f"/api/viral/favorites/douyin/{video_id}", headers=_AUTH_HEADERS).status_code
+        == 200
+    )
     from app.viral_routes import _open_worker_connection
 
     conn, close = _open_worker_connection()
@@ -463,6 +467,17 @@ def test_detail_reports_hidden_availability(client: tuple[TestClient, StubViralC
     detail = http.get(f"/api/viral/videos/douyin/{video_id}", headers=_AUTH_HEADERS)
     assert detail.status_code == 200
     assert detail.json()["availability"] == "hidden"
+    favorites = http.get(
+        "/api/viral/favorites",
+        params={"platform": "douyin"},
+        headers=_AUTH_HEADERS,
+    )
+    assert favorites.status_code == 200
+    assert len(favorites.json()["items"]) == 1
+    favorite = favorites.json()["items"][0]
+    assert favorite["videoId"] == video_id
+    assert favorite["isFavorite"] is True
+    assert favorite["availability"] == "hidden"
     listed = http.get("/api/viral/videos", params={"platform": "douyin"}, headers=_AUTH_HEADERS)
     assert video_id not in {item["videoId"] for item in listed.json()["items"]}
     media = http.post(

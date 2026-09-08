@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   attachCustomerSessionToken,
   type CustomerActivationCodeReset,
@@ -30,12 +30,14 @@ export function CustomerWorkspace({
   user,
   sessionRuntime = null,
   onManualHeartbeat,
+  onLogout,
   store,
   onSessionExpired,
 }: {
   user: CustomerWorkspaceUser;
   sessionRuntime?: CustomerSessionRuntime | null;
   onManualHeartbeat?: () => void;
+  onLogout: () => Promise<void>;
   store: CustomerCredentialStore;
   onSessionExpired: () => void;
 }) {
@@ -43,9 +45,65 @@ export function CustomerWorkspace({
     null,
   );
   const [profile, setProfile] = useState<CustomerProfile | null>(null);
+  const [profileLoadError, setProfileLoadError] = useState("");
   const [deviceError, setDeviceError] = useState("");
+  const [deviceLoadError, setDeviceLoadError] = useState("");
   const [workspaceCredentialReady, setWorkspaceCredentialReady] =
     useState(false);
+  const profileRequestIdRef = useRef(0);
+  const sessionRuntimeRef = useRef(sessionRuntime);
+  sessionRuntimeRef.current = sessionRuntime;
+
+  const loadProfile = useCallback(
+    async (existingToken?: string) => {
+      const requestId = ++profileRequestIdRef.current;
+      setProfileLoadError("");
+      let token = existingToken;
+      if (!token) {
+        try {
+          token = (await store.loadSessionToken()) ?? undefined;
+        } catch {
+          if (requestId === profileRequestIdRef.current) {
+            setProfileLoadError("账号资料加载失败，请稍后重试。");
+          }
+          return;
+        }
+      }
+      if (requestId !== profileRequestIdRef.current) {
+        return;
+      }
+      if (!token) {
+        onSessionExpired();
+        return;
+      }
+      try {
+        const nextProfile = await customerGetProfile(
+          {
+            kind: "session",
+            token,
+          },
+          {
+            shouldDispatchLifecycle: () =>
+              requestId === profileRequestIdRef.current,
+          },
+        );
+        if (requestId === profileRequestIdRef.current) {
+          setProfile(nextProfile);
+          setProfileLoadError("");
+        }
+      } catch (cause) {
+        if (requestId !== profileRequestIdRef.current) {
+          return;
+        }
+        if (cause instanceof CustomerApiError && cause.status === 401) {
+          onSessionExpired();
+          return;
+        }
+        setProfileLoadError("账号资料加载失败，请稍后重试。");
+      }
+    },
+    [store, onSessionExpired],
+  );
 
   useEffect(() => {
     let active = true;
@@ -61,17 +119,7 @@ export function CustomerWorkspace({
           return;
         }
         releaseSession = attachCustomerSessionToken(token);
-        void customerGetProfile({ kind: "session", token })
-          .then((nextProfile) => {
-            if (active) {
-              setProfile(nextProfile);
-            }
-          })
-          .catch((cause) => {
-            if (cause instanceof CustomerApiError && cause.status === 401) {
-              onSessionExpired();
-            }
-          });
+        void loadProfile(token);
         setWorkspaceCredentialReady(true);
       })
       .catch(() => {
@@ -81,9 +129,10 @@ export function CustomerWorkspace({
       });
     return () => {
       active = false;
+      profileRequestIdRef.current += 1;
       releaseSession();
     };
-  }, [store, onSessionExpired]);
+  }, [store, onSessionExpired, loadProfile]);
 
   const loadDevices = useCallback(async () => {
     const token = await store.loadDeviceCredentialToken();
@@ -94,13 +143,13 @@ export function CustomerWorkspace({
     try {
       const response = await customerListDevices({ kind: "device", token });
       setDevices(response);
-      setDeviceError("");
+      setDeviceLoadError("");
     } catch (cause) {
       if (cause instanceof CustomerApiError && cause.status === 401) {
         onSessionExpired();
         return;
       }
-      setDeviceError(
+      setDeviceLoadError(
         cause instanceof Error && cause.message
           ? cause.message
           : "设备列表加载失败",
@@ -113,12 +162,32 @@ export function CustomerWorkspace({
   }, [loadDevices]);
 
   async function handleUnbind(deviceId: string) {
+    const hasActiveLease = () => {
+      const leaseExpiresAt = sessionRuntimeRef.current?.leaseExpiresAt;
+      const leaseExpiry = leaseExpiresAt
+        ? Date.parse(leaseExpiresAt)
+        : Number.NaN;
+      if (Number.isFinite(leaseExpiry) && leaseExpiry > Date.now()) {
+        return true;
+      }
+      setDeviceError("会话租约已过期，请重新登录后管理设备。");
+      return false;
+    };
+    if (!hasActiveLease()) {
+      return;
+    }
     if (
       !window.confirm("确认下线并解绑这台设备？当前设备解绑后需要重新激活。")
     ) {
       return;
     }
+    if (!hasActiveLease()) {
+      return;
+    }
     const token = await store.loadDeviceCredentialToken();
+    if (!hasActiveLease()) {
+      return;
+    }
     if (token === null) {
       onSessionExpired();
       return;
@@ -127,6 +196,7 @@ export function CustomerWorkspace({
       await customerUnbindDevice({ kind: "device", token }, deviceId, {
         idempotencyKey: crypto.randomUUID(),
       });
+      setDeviceError("");
       await loadDevices();
     } catch (cause) {
       if (cause instanceof CustomerApiError && cause.status === 401) {
@@ -149,6 +219,7 @@ export function CustomerWorkspace({
     }
     try {
       await customerApproveDevicePairing({ kind: "device", token }, pairingId);
+      setDeviceError("");
       await loadDevices();
     } catch (cause) {
       if (cause instanceof CustomerApiError && cause.status === 401) {
@@ -174,6 +245,7 @@ export function CustomerWorkspace({
     }
     try {
       await customerDismissDevicePairing({ kind: "device", token }, pairingId);
+      setDeviceError("");
       await loadDevices();
     } catch (cause) {
       if (cause instanceof CustomerApiError && cause.status === 401) {
@@ -232,17 +304,20 @@ export function CustomerWorkspace({
           currentUser={customerToCurrentUser(user, profile)}
           customerAccount={{
             devices,
-            deviceError,
+            deviceError: deviceError || deviceLoadError,
             onApprovePairing: (pairingId) =>
               void handleApprovePairing(pairingId),
             onDismissPairing: (pairingId) =>
               void handleDismissPairing(pairingId),
             onProfileUpdated: setProfile,
+            onRefreshProfile: () => loadProfile(),
+            onLogout,
             onRefreshDevices: loadDevices,
             onResetActivationCode: handleResetActivationCode,
             onUnbind: (deviceId) => void handleUnbind(deviceId),
             onUpdateProfile: handleUpdateProfile,
             profile,
+            profileLoadError,
             store,
             onSessionExpired,
             sessionRuntime,

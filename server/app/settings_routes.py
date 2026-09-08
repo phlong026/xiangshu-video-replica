@@ -4,7 +4,7 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from typing import Annotated, Literal, Protocol
 
@@ -15,6 +15,12 @@ from pydantic import BaseModel, Field, StrictInt
 from app.auth import AuthenticatedUser, CurrentUser, Database
 from app.auth import get_database as auth_get_database
 from app.db_portable import BusinessConnection
+from app.hifly import (
+    HiflyError,
+    HiflySettingsUnavailable,
+    HiflyTimeoutError,
+    hifly_client_from_config,
+)
 from app.permissions import require_role
 from app.settings import ProviderName, SettingsRepository, is_secret_field, normalize_provider
 from app.storage import (
@@ -55,6 +61,7 @@ class ProviderTestResult(BaseModel):
     status: str
     provider: str
     test_kind: str
+    account_credit: int | None = None
 
 
 class DiagnosticProviderResult(BaseModel):
@@ -101,6 +108,73 @@ class NoopProviderTester:
                 "message": "A real provider client is required before paid tests can run.",
             },
         )
+
+
+class HiflyAccountProbe(Protocol):
+    def account_credit(self) -> int: ...
+
+
+class HiflyProviderTester:
+    def __init__(
+        self,
+        *,
+        fallback: ProviderTester | None = None,
+        client_factory: Callable[[Mapping[str, str]], HiflyAccountProbe] = hifly_client_from_config,
+    ) -> None:
+        self.fallback = fallback or NoopProviderTester()
+        self.client_factory = client_factory
+
+    def connection_test(self, provider: str, config: dict[str, str]) -> ProviderTestResult:
+        if provider != "hifly" or not config:
+            return self.fallback.connection_test(provider, config)
+        try:
+            account_credit = self.client_factory(config).account_credit()
+        except HiflyTimeoutError as exc:
+            raise HTTPException(
+                status_code=504,
+                detail={
+                    "code": "HIFLY_ACCOUNT_CHECK_TIMEOUT",
+                    "failure_phase": "account_credit",
+                    "message": "Hifly 只读账户检查超时；未创建收费任务。",
+                },
+            ) from exc
+        except HiflySettingsUnavailable as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "HIFLY_SETTINGS_INVALID",
+                    "failure_phase": "configuration",
+                    "message": "Hifly 配置不完整；请重新保存 API Key。",
+                },
+            ) from exc
+        except HiflyError as exc:
+            is_auth_failure = exc.vendor_code == 2003 or exc.http_status in {401, 403}
+            raise HTTPException(
+                # A vendor credential failure is an invalid saved setting, not
+                # an expired administrator session. Returning 401 here would
+                # make both settings clients sign the operator out.
+                status_code=422 if is_auth_failure else 503,
+                detail={
+                    "code": (
+                        "HIFLY_AUTH_FAILED" if is_auth_failure else "HIFLY_ACCOUNT_CHECK_FAILED"
+                    ),
+                    "failure_phase": "authenticate" if is_auth_failure else "account_credit",
+                    "message": (
+                        "Hifly 凭据认证失败；未创建收费任务。"
+                        if is_auth_failure
+                        else "Hifly 只读账户检查失败；未创建收费任务。"
+                    ),
+                },
+            ) from exc
+        return ProviderTestResult(
+            status="ok",
+            provider=provider,
+            test_kind="account_credit",
+            account_credit=account_credit,
+        )
+
+    def paid_test(self, provider: str, config: dict[str, str]) -> ProviderTestResult:
+        return self.fallback.paid_test(provider, config)
 
 
 class StorageProviderTester:
@@ -229,7 +303,7 @@ def remove_cos_lifecycle_rules(
 
 
 def get_provider_tester() -> ProviderTester:
-    return StorageProviderTester()
+    return StorageProviderTester(fallback=HiflyProviderTester())
 
 
 def require_settings_admin(conn: Database, actor: AuthenticatedUser) -> CurrentUser:
@@ -391,7 +465,11 @@ def update_billing_settings(
     return result
 
 
-@router.post("/providers/{provider}/connection-test")
+@router.post(
+    "/providers/{provider}/connection-test",
+    response_model=ProviderTestResult,
+    response_model_exclude_none=True,
+)
 def connection_test(
     provider: str,
     conn: Database,
@@ -403,7 +481,11 @@ def connection_test(
     return tester.connection_test(provider_name, config)
 
 
-@router.post("/providers/{provider}/paid-test")
+@router.post(
+    "/providers/{provider}/paid-test",
+    response_model=ProviderTestResult,
+    response_model_exclude_none=True,
+)
 def paid_test(
     provider: str,
     conn: Database,

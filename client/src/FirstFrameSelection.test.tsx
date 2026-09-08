@@ -650,7 +650,7 @@ describe("FirstFrameSelection", () => {
     expect(screen.getByRole("radio", { name: /首帧候选 1/ })).not.toBeChecked();
   });
 
-  it("does not request protected preview downloads for a read-only auditor", async () => {
+  it("loads existing candidate previews for a read-only auditor without writing", async () => {
     render(
       <FirstFrameSelection
         projectId="project-1"
@@ -660,10 +660,13 @@ describe("FirstFrameSelection", () => {
       />,
     );
 
-    expect(
-      await screen.findByText(/只读身份不加载素材预览/),
-    ).toBeInTheDocument();
-    expect(getAssetDownloadUrl).not.toHaveBeenCalled();
+    expect(await screen.findByAltText("首帧候选 1")).toHaveAttribute(
+      "src",
+      "https://private.example/first-1.png",
+    );
+    expect(getAssetDownloadUrl).toHaveBeenCalledTimes(2);
+    expect(generateFirstFrames).not.toHaveBeenCalled();
+    expect(confirmFirstFrame).not.toHaveBeenCalled();
   });
 
   it("treats a stale latest generation as an upstream gate instead of a load error", async () => {

@@ -1,4 +1,10 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CUSTOMER_SESSION_REPLACED_EVENT } from "./api";
@@ -273,10 +279,152 @@ describe("RootApp", () => {
       screen.getByRole("navigation", { name: "主要导航" }),
     ).toBeInTheDocument();
     // The compact account entry keeps identity details in the profile page.
+    // The workspace stub does not serve /api/customer/wallet pricing, so the
+    // wallet summary settles to the error label instead of a credit count.
     expect(
-      screen.getByRole("button", { name: "用户档案，积分 —" }),
+      await screen.findByRole("button", { name: "用户档案，积分 读取失败" }),
     ).toBeInTheDocument();
     expect(screen.queryByLabelText("内部访问令牌（云端模式）")).toBeNull();
+  });
+
+  it("logs out from the customer profile and keeps the device login available", async () => {
+    const workspaceFetch = stubCustomerWorkspaceFetch();
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (url.endsWith("/api/customer/profile")) {
+        return jsonResponse({
+          user_id: "user-1",
+          username: "user-1",
+          display_name: "客户一号",
+          joined_at: "2026-08-01T00:00:00Z",
+          activation_code_masked: "XS04-ABCD••••WXYZ",
+          activation_status: "ACTIVE",
+          activated_at: "2026-08-02T00:00:00Z",
+          device_slots_used: 1,
+          device_slots_total: 2,
+        });
+      }
+      if (url.endsWith("/api/customer/sessions/logout")) {
+        expect(init?.method).toBe("POST");
+        return jsonResponse(undefined, 204);
+      }
+      return workspaceFetch(url);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<RootApp path="/customer" />);
+    await screen.findByRole("heading", { name: "激活众墅之家 · AI 即创" });
+    fireEvent.change(screen.getByLabelText("激活码"), {
+      target: { value: "XS04-AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD" },
+    });
+    fireEvent.change(screen.getByLabelText("设备名称"), {
+      target: { value: "工作电脑" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "激活并进入工作台" }));
+    fireEvent.click(await screen.findByRole("button", { name: /^用户档案$/ }));
+    await screen.findByRole("heading", { name: "用户档案" });
+    fireEvent.click(screen.getByRole("tab", { name: "设备管理" }));
+    fireEvent.click(await screen.findByRole("button", { name: "退出登录" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "欢迎回来" }),
+    ).toBeInTheDocument();
+    expect(
+      fetchMock.mock.calls.filter(([url]) =>
+        String(url).endsWith("/api/customer/sessions/logout"),
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("ignores a delayed profile 401 from the session that already logged out", async () => {
+    let resolveOldProfile:
+      | ((value: Awaited<ReturnType<typeof jsonResponse>>) => void)
+      | undefined;
+    const oldProfile = new Promise<Awaited<ReturnType<typeof jsonResponse>>>(
+      (resolve) => {
+        resolveOldProfile = resolve;
+      },
+    );
+    let profileCalls = 0;
+    const workspaceFetch = stubCustomerWorkspaceFetch();
+    const reloginBody = {
+      user_id: "user-1",
+      device_id: "device-1",
+      session_id: "session-2",
+      session_token: sessionTokenText,
+      session_epoch: 2,
+      session_lease_expires_at: "2026-09-07T13:00:00Z",
+      request_id: "req-relogin",
+    };
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/api/customer/profile")) {
+        profileCalls += 1;
+        return profileCalls === 1
+          ? oldProfile
+          : jsonResponse({
+              user_id: "user-1",
+              username: "user-1",
+              display_name: "新会话客户",
+              joined_at: "2026-08-01T00:00:00Z",
+              activation_code_masked: "XS04-ABCD••••WXYZ",
+              activation_status: "ACTIVE",
+              activated_at: "2026-08-02T00:00:00Z",
+              device_slots_used: 1,
+              device_slots_total: 2,
+            });
+      }
+      if (url.endsWith("/api/customer/sessions/logout")) {
+        return jsonResponse(undefined, 204);
+      }
+      if (url.endsWith("/api/customer/sessions/login")) {
+        return jsonResponse(reloginBody, 201);
+      }
+      return workspaceFetch(url);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<RootApp path="/customer" />);
+    await screen.findByRole("heading", { name: "激活众墅之家 · AI 即创" });
+    fireEvent.change(screen.getByLabelText("激活码"), {
+      target: { value: "XS04-AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD" },
+    });
+    fireEvent.change(screen.getByLabelText("设备名称"), {
+      target: { value: "工作电脑" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "激活并进入工作台" }));
+    fireEvent.click(await screen.findByRole("button", { name: /^用户档案$/ }));
+    await screen.findByRole("heading", { name: "用户档案" });
+    fireEvent.click(screen.getByRole("tab", { name: "设备管理" }));
+    fireEvent.click(await screen.findByRole("button", { name: "退出登录" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "使用本机设备登录" }),
+    );
+    await waitFor(() => {
+      expect(profileCalls).toBe(2);
+      expect(
+        screen.getByRole("navigation", { name: "主要导航" }),
+      ).toBeInTheDocument();
+    });
+
+    await act(async () => {
+      resolveOldProfile?.(
+        await jsonResponse(
+          {
+            detail: {
+              code: "SESSION_EXPIRED",
+              message: "旧会话已过期",
+            },
+          },
+          401,
+        ),
+      );
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("navigation", { name: "主要导航" }),
+      ).toBeInTheDocument();
+      expect(screen.queryByRole("heading", { name: "登录已过期" })).toBeNull();
+    });
   });
 
   it("shows the displaced-session terminal screen when replaced mid-session (§4.2)", async () => {

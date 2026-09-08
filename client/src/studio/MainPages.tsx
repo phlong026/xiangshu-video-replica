@@ -1,8 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  type CustomerProfile,
   createViralImportTask,
+  customerVisibleErrorMessage,
   getStudioNotificationPreferences,
   getViralImportTask,
+  resolveViralLink,
   updateStudioNotificationPreferences,
   type ViralImportTask,
 } from "../api";
@@ -10,12 +13,16 @@ import { useStudio } from "./context";
 import {
   cancelStudioTask,
   downloadStudioTaskResult,
+  loadMoreGenerationTasks,
+  loadMoreOralTasks,
+  loadStudioTaskDetail,
   loadTaskPreview,
   retryStudioTask,
+  studioVideoFromViral,
   uploadWorkbenchSourceVideo,
 } from "./live";
 import { draftFromTask } from "./state";
-import type { StudioTask, StudioVideo } from "./types";
+import type { StudioData, StudioTask, StudioVideo } from "./types";
 import {
   Button,
   Empty,
@@ -28,6 +35,12 @@ import {
   Panel,
   Tabs,
 } from "./ui";
+import {
+  clearViralImportIdempotencyKey,
+  shouldClearViralImportIdempotencyKey,
+  ViralImportPollingTimeoutError,
+  viralImportIdempotencyKey,
+} from "./viralImport";
 
 const statusNames: Record<StudioTask["status"], string> = {
   running: "生成中",
@@ -37,6 +50,15 @@ const statusNames: Record<StudioTask["status"], string> = {
   uncertain: "状态待确认",
   cancelled: "已取消",
 };
+
+function taskDetailPatch(task: StudioTask, returnTo: "workbench" | "tasks") {
+  return {
+    selectedTaskId: task.id,
+    selectedTaskKind: task.backendKind,
+    selectedTaskBackendId: task.backendId ?? task.batchId ?? task.id,
+    returnTo,
+  };
+}
 
 /** 任务中心状态列的图标与子文案（与效果图一致：排队中"等待开始"、
  * 待处理"生成失败"），状态待确认保持独立提示避免误导重试。 */
@@ -177,6 +199,7 @@ function RunningRowMenu({ task }: { task: StudioTask }) {
 export function WorkbenchPage() {
   const {
     data,
+    user,
     review,
     navigate,
     openLive,
@@ -186,27 +209,71 @@ export function WorkbenchPage() {
     state,
     extractScriptFromUpload,
   } = useStudio();
-  const [sourceLink, setSourceLink] = useState("");
-  const [upload, setUpload] = useState<{
+  const accountId = user.id || "anonymous";
+  const accountGenerationRef = useRef({ accountId, generation: 0 });
+  if (accountGenerationRef.current.accountId !== accountId) {
+    accountGenerationRef.current = {
+      accountId,
+      generation: accountGenerationRef.current.generation + 1,
+    };
+  }
+  const accountContextKey = `${accountId}:${accountGenerationRef.current.generation}`;
+  const [sourceLinkState, setSourceLinkState] = useState({
+    accountContextKey,
+    value: "",
+  });
+  const sourceLink =
+    sourceLinkState.accountContextKey === accountContextKey
+      ? sourceLinkState.value
+      : "";
+  const [uploadState, setUpload] = useState<{
+    accountContextKey: string;
     name: string;
     progress: number;
     error: string;
     projectId: string | null;
     completed: boolean;
   } | null>(null);
+  const upload =
+    uploadState?.accountContextKey === accountContextKey ? uploadState : null;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const uploadOperationRef = useRef(0);
+  const linkOperationRef = useRef(0);
   const viralOperationRef = useRef(0);
   const viralIdempotencyKeysRef = useRef(new Map<string, string>());
   const uploadAbortRef = useRef<AbortController | null>(null);
+  const [viralImportingId, setViralImportingId] = useState<string>();
+  const [linkStateValue, setLinkState] = useState<{
+    accountContextKey: string;
+    status: "idle" | "loading" | "error";
+    message?: string;
+  }>({ accountContextKey, status: "idle" });
+  const linkState =
+    linkStateValue.accountContextKey === accountContextKey
+      ? linkStateValue
+      : ({ accountContextKey, status: "idle" } as const);
+  const activeAccountRef = useRef(accountId);
+  if (activeAccountRef.current !== accountId) {
+    activeAccountRef.current = accountId;
+    uploadOperationRef.current += 1;
+    linkOperationRef.current += 1;
+    viralOperationRef.current += 1;
+    uploadAbortRef.current?.abort();
+    uploadAbortRef.current = null;
+  }
   useEffect(
     () => () => {
       uploadOperationRef.current += 1;
+      linkOperationRef.current += 1;
       viralOperationRef.current += 1;
       uploadAbortRef.current?.abort();
     },
     [],
   );
+  useEffect(() => {
+    if (activeAccountRef.current !== accountId) return;
+    setViralImportingId(undefined);
+  }, [accountId]);
   const active = data.tasks.filter((task) =>
     ["running", "queued", "uncertain"].includes(task.status),
   );
@@ -217,75 +284,201 @@ export function WorkbenchPage() {
         left.id.localeCompare(right.id, undefined, { numeric: true }),
     )
     .slice(0, 5);
-  const [viralImportingId, setViralImportingId] = useState<string>();
-  const beginViralReplica = async (video: StudioVideo) => {
-    if (review || !video.platformKey || !video.nativeId) {
+  const beginViralCreation = async (
+    video: StudioVideo,
+    purpose: "copy" | "replica" = "replica",
+    providedIdempotencyKey?: string,
+    requestAccount = accountId,
+  ) => {
+    if (review) {
       patchDraft({ sourceId: video.id });
-      navigate("replica", {
+      navigate(purpose, {
         selectedVideoId: video.id,
         returnTo: "workbench",
       });
       return;
     }
+    if (!video.platformKey || !video.nativeId) {
+      notify("该视频缺少可导入的平台标识");
+      return;
+    }
     const operation = ++viralOperationRef.current;
-    const actionKey = `${video.platformKey}:${video.nativeId}:replica`;
+    const actionKey = `${video.platformKey}:${video.nativeId}:${purpose}`;
+    const memoryKey = `${requestAccount}:${actionKey}`;
     const idempotencyKey =
-      viralIdempotencyKeysRef.current.get(actionKey) ?? crypto.randomUUID();
-    viralIdempotencyKeysRef.current.set(actionKey, idempotencyKey);
+      providedIdempotencyKey ??
+      viralIdempotencyKeysRef.current.get(memoryKey) ??
+      viralImportIdempotencyKey(requestAccount, actionKey);
+    viralIdempotencyKeysRef.current.set(memoryKey, idempotencyKey);
+    const clearKey = () => {
+      viralIdempotencyKeysRef.current.delete(memoryKey);
+      clearViralImportIdempotencyKey(requestAccount, actionKey, idempotencyKey);
+    };
     setViralImportingId(video.id);
     try {
       let task: ViralImportTask = await createViralImportTask(
         video.platformKey,
         video.nativeId,
-        "replica",
+        purpose,
         idempotencyKey,
       );
+      if (
+        operation !== viralOperationRef.current ||
+        requestAccount !== activeAccountRef.current
+      )
+        return;
       for (let attempt = 0; attempt < 120; attempt += 1) {
-        if (operation !== viralOperationRef.current) return;
+        if (
+          operation !== viralOperationRef.current ||
+          requestAccount !== activeAccountRef.current
+        )
+          return;
         if (task.status === "SUCCEEDED" || task.status === "FAILED") break;
         const taskId = task.taskId ?? task.id;
         if (!taskId) throw new Error("导入任务缺少任务 ID");
         await new Promise<void>((resolve) => window.setTimeout(resolve, 1_000));
-        if (operation !== viralOperationRef.current) return;
+        if (
+          operation !== viralOperationRef.current ||
+          requestAccount !== activeAccountRef.current
+        )
+          return;
         task = await getViralImportTask(taskId);
       }
+      if (
+        operation !== viralOperationRef.current ||
+        requestAccount !== activeAccountRef.current
+      )
+        return;
+      if (task.status !== "SUCCEEDED" && task.status !== "FAILED") {
+        throw new ViralImportPollingTimeoutError(
+          "导入任务等待超时，请稍后重试",
+        );
+      }
       if (task.status !== "SUCCEEDED") {
+        if (task.retryable === false) clearKey();
         throw new Error(
           task.errorMessage || task.error || task.message || "参考素材导入失败",
         );
       }
-      if (!task.canAnalyze || !task.projectId || !task.sourceAssetId) {
+      if (!task.projectId || !task.sourceAssetId) {
+        clearKey();
+        throw new Error("导入任务缺少项目或素材结果");
+      }
+      if (purpose === "replica" && !task.canAnalyze) {
+        clearKey();
         throw new Error("该来源暂不支持视频复刻");
+      }
+      if (purpose === "copy" && !task.canTranscribe) {
+        clearKey();
+        throw new Error("该来源暂不支持提取文案");
       }
       patchDraft({
         projectId: task.projectId,
         sourceId: task.sourceAssetId,
         sourceAssetId: task.sourceAssetId,
       });
-      viralIdempotencyKeysRef.current.delete(actionKey);
-      navigate("replica", {
-        selectedVideoId: video.id,
-        returnTo: "workbench",
-      });
+      if (purpose === "copy") {
+        extractScriptFromUpload(task.projectId, task.sourceAssetId);
+      } else {
+        navigate("replica", {
+          selectedVideoId: video.id,
+          returnTo: "workbench",
+        });
+      }
     } catch (error) {
-      if (operation === viralOperationRef.current) {
+      if (shouldClearViralImportIdempotencyKey(error)) clearKey();
+      if (
+        operation === viralOperationRef.current &&
+        requestAccount === activeAccountRef.current
+      ) {
         notify(error instanceof Error ? error.message : "参考素材导入失败");
       }
     } finally {
-      if (operation === viralOperationRef.current)
+      if (
+        operation === viralOperationRef.current &&
+        requestAccount === activeAccountRef.current
+      )
         setViralImportingId(undefined);
     }
   };
   const pendingViralSource = !state.draft.projectId
     ? data.videos.find((video) => video.id === state.draft.sourceId)
     : undefined;
-  const begin = (mode: "copy" | "replica") => {
+  const begin = async (mode: "copy" | "replica") => {
     if (review) {
       navigate(mode);
       return;
     }
     if (sourceLink.trim()) {
-      notify("视频链接解析接口尚未接入，可先上传视频进行拆解。");
+      if (linkState.status === "loading") return;
+      const operation = ++linkOperationRef.current;
+      const requestAccount = accountId;
+      const linkActionKey = `link:${sourceLink.trim()}:${mode}`;
+      const resolutionKey = viralImportIdempotencyKey(
+        requestAccount,
+        linkActionKey,
+      );
+      setLinkState({ accountContextKey, status: "loading" });
+      try {
+        const resolution = await resolveViralLink(
+          sourceLink.trim(),
+          mode,
+          resolutionKey,
+        );
+        if (
+          operation !== linkOperationRef.current ||
+          requestAccount !== activeAccountRef.current
+        )
+          return;
+        const video = studioVideoFromViral(resolution.item);
+        updateData((current) => ({
+          ...current,
+          videos: [
+            video,
+            ...current.videos.filter((candidate) => candidate.id !== video.id),
+          ],
+        }));
+        await beginViralCreation(
+          video,
+          mode,
+          resolution.importIdempotencyKey,
+          requestAccount,
+        );
+        if (
+          operation === linkOperationRef.current &&
+          requestAccount === activeAccountRef.current
+        ) {
+          setLinkState({ accountContextKey, status: "idle" });
+        }
+      } catch (error) {
+        if (
+          operation !== linkOperationRef.current ||
+          requestAccount !== activeAccountRef.current
+        )
+          return;
+        const requestError = error as { code?: string; status?: number };
+        if (
+          requestError.code !== "VIRAL_LINK_IN_PROGRESS" &&
+          requestError.code !== "VIRAL_LINK_SUBMISSION_UNCERTAIN" &&
+          requestError.status !== undefined &&
+          requestError.status >= 400 &&
+          requestError.status < 500
+        ) {
+          clearViralImportIdempotencyKey(
+            requestAccount,
+            linkActionKey,
+            resolutionKey,
+          );
+        }
+        setLinkState({
+          accountContextKey,
+          status: "error",
+          message:
+            error instanceof Error && error.message.trim()
+              ? error.message.trim()
+              : "视频链接解析失败，请上传 MP4/MOV 文件。",
+        });
+      }
       return;
     }
     if (upload?.projectId || state.draft.sourceId || state.draft.projectId) {
@@ -306,10 +499,12 @@ export function WorkbenchPage() {
       return;
     }
     const operation = ++uploadOperationRef.current;
+    const requestAccount = accountId;
     uploadAbortRef.current?.abort();
     const abortController = new AbortController();
     uploadAbortRef.current = abortController;
     setUpload({
+      accountContextKey,
       name: file.name,
       progress: 0,
       error: "",
@@ -319,16 +514,28 @@ export function WorkbenchPage() {
     void uploadWorkbenchSourceVideo(
       file,
       (progress) => {
-        if (operation !== uploadOperationRef.current) return;
-        setUpload((current) => (current ? { ...current, progress } : current));
+        if (
+          operation !== uploadOperationRef.current ||
+          requestAccount !== activeAccountRef.current
+        )
+          return;
+        setUpload((current) =>
+          current?.accountContextKey === accountContextKey
+            ? { ...current, progress }
+            : current,
+        );
       },
       abortController.signal,
     )
       .then((uploaded) => {
-        if (operation !== uploadOperationRef.current) return;
+        if (
+          operation !== uploadOperationRef.current ||
+          requestAccount !== activeAccountRef.current
+        )
+          return;
         const { projectId, assetId } = uploaded;
         setUpload((current) =>
-          current
+          current?.accountContextKey === accountContextKey
             ? { ...current, progress: 100, projectId, completed: true }
             : current,
         );
@@ -361,9 +568,13 @@ export function WorkbenchPage() {
         notify("视频已上传云存储，来源已加入当前创作。");
       })
       .catch((error) => {
-        if (operation !== uploadOperationRef.current) return;
+        if (
+          operation !== uploadOperationRef.current ||
+          requestAccount !== activeAccountRef.current
+        )
+          return;
         setUpload((current) =>
-          current
+          current?.accountContextKey === accountContextKey
             ? {
                 ...current,
                 error:
@@ -402,9 +613,18 @@ export function WorkbenchPage() {
           </button>
           <input
             aria-label="视频链接"
-            placeholder="粘贴视频链接，如抖音、视频号、小红书链接等"
+            placeholder="粘贴抖音视频链接"
             value={sourceLink}
-            onChange={(event) => setSourceLink(event.target.value)}
+            onChange={(event) => {
+              linkOperationRef.current += 1;
+              viralOperationRef.current += 1;
+              setSourceLinkState({
+                accountContextKey,
+                value: event.target.value,
+              });
+              setLinkState({ accountContextKey, status: "idle" });
+              setViralImportingId(undefined);
+            }}
           />
           <input
             ref={fileInputRef}
@@ -418,13 +638,20 @@ export function WorkbenchPage() {
               event.target.value = "";
             }}
           />
-          <Button variant="primary" onClick={() => begin("copy")}>
+          <Button
+            disabled={linkState.status === "loading"}
+            variant="primary"
+            onClick={() => void begin("copy")}
+          >
             <Icon name="pen" />
             提取文案
           </Button>
-          <Button onClick={() => begin("replica")}>
+          <Button
+            disabled={linkState.status === "loading"}
+            onClick={() => void begin("replica")}
+          >
             <Icon name="play" />
-            开始复刻
+            {linkState.status === "loading" ? "正在解析链接…" : "开始复刻"}
           </Button>
         </div>
         {upload && (
@@ -437,8 +664,14 @@ export function WorkbenchPage() {
           </p>
         )}
         <p className="studio-start-helper">
-          提取文案进入文案工坊，开始复刻进入分镜工作区。
+          链接解析当前支持抖音视频；视频号及其他平台请上传 MP4/MOV
+          文件。解析最长约 60 秒。
         </p>
+        {linkState.status === "error" && (
+          <p className="viral-media-status is-error" role="alert">
+            {linkState.message}
+          </p>
+        )}
         {pendingViralSource && (
           <p className="studio-upload-status" role="status">
             已选参考：{pendingViralSource.title}。请上传该视频的 MP4 或 MOV
@@ -545,7 +778,10 @@ export function WorkbenchPage() {
                   </div>
                   <Button
                     onClick={() =>
-                      navigate("task-detail", { selectedTaskId: task.id })
+                      navigate(
+                        "task-detail",
+                        taskDetailPatch(task, "workbench"),
+                      )
                     }
                   >
                     查看详情
@@ -605,7 +841,7 @@ export function WorkbenchPage() {
                       variant="quiet"
                       aria-label={`用它复刻：${video.title}`}
                       disabled={viralImportingId === video.id}
-                      onClick={() => void beginViralReplica(video)}
+                      onClick={() => void beginViralCreation(video)}
                     >
                       {viralImportingId === video.id ? "导入中…" : "用它复刻"}
                     </Button>
@@ -630,7 +866,7 @@ export function WorkbenchPage() {
                 type="button"
                 key={task.id}
                 onClick={() =>
-                  navigate("task-detail", { selectedTaskId: task.id })
+                  navigate("task-detail", taskDetailPatch(task, "workbench"))
                 }
               >
                 <i className={`studio-dot studio-dot--${task.status}`} />
@@ -696,10 +932,14 @@ export function WorkbenchPage() {
 }
 
 export function TasksPage() {
-  const { data, navigate, openLive, review, notify, refresh } = useStudio();
+  const { data, navigate, openLive, review, notify, refresh, updateData } =
+    useStudio();
   const [status, setStatus] = useState("all");
   const [kind, setKind] = useState("全部");
   const [cancellingId, setCancellingId] = useState<string | null>(null);
+  const [loadingHistory, setLoadingHistory] = useState<
+    "generation" | "oral" | null
+  >(null);
   const matchesStatus = (task: StudioTask) =>
     status === "all" ||
     (status === "active"
@@ -731,6 +971,69 @@ export function TasksPage() {
   const attentionCount = data.tasks.filter((task) =>
     ["failed", "uncertain"].includes(task.status),
   ).length;
+  const generationPage = data.pagination?.generationTasks;
+  const oralPage = data.pagination?.oralTasks;
+  const appendTasks = (
+    incoming: StudioTask[],
+    pagination: NonNullable<StudioData["pagination"]>,
+  ) => {
+    updateData((current) => {
+      const known = new Set(current.tasks.map((task) => task.id));
+      return {
+        ...current,
+        tasks: [
+          ...current.tasks,
+          ...incoming.filter((task) => !known.has(task.id)),
+        ],
+        pagination: { ...current.pagination, ...pagination },
+      };
+    });
+  };
+  const loadGenerationHistory = async () => {
+    if (review || loadingHistory || !generationPage?.nextCursor) return;
+    setLoadingHistory("generation");
+    try {
+      const result = await loadMoreGenerationTasks(generationPage.nextCursor);
+      appendTasks(result.items, {
+        generationTasks: {
+          nextCursor: result.nextCursor,
+          total: result.total,
+        },
+      });
+    } catch (cause) {
+      notify(
+        cause instanceof Error && cause.message.trim()
+          ? cause.message
+          : "加载更多普通批次失败，请重试。",
+      );
+    } finally {
+      setLoadingHistory(null);
+    }
+  };
+  const loadOralHistory = async () => {
+    if (
+      review ||
+      loadingHistory ||
+      !oralPage ||
+      oralPage.loaded >= oralPage.total
+    )
+      return;
+    setLoadingHistory("oral");
+    try {
+      const result = await loadMoreOralTasks(oralPage.loaded);
+      appendTasks(result.items, {
+        oralTasks: { loaded: result.loaded, total: result.total },
+      });
+    } catch (cause) {
+      notify(
+        cause instanceof Error && cause.message.trim()
+          ? cause.message
+          : "加载更多口播任务失败，请重试。",
+      );
+    } finally {
+      setLoadingHistory(null);
+    }
+  };
   const cancelTask = async (task: StudioTask) => {
     if (review) {
       notify("审核示例不执行真实取消。");
@@ -835,7 +1138,7 @@ export function TasksPage() {
                     <Button
                       variant="quiet"
                       onClick={() =>
-                        navigate("task-detail", { selectedTaskId: task.id })
+                        navigate("task-detail", taskDetailPatch(task, "tasks"))
                       }
                     >
                       {task.status === "completed" ? "查看结果" : "查看详情"}
@@ -865,9 +1168,43 @@ export function TasksPage() {
           />
         )}
       </div>
+      {!review && (generationPage || oralPage) ? (
+        <fieldset className="studio-page-actions" aria-label="任务历史分页">
+          <span>
+            普通批次已加载{" "}
+            {
+              data.tasks.filter((task) => task.backendKind !== "oral_task")
+                .length
+            }
+            {generationPage ? ` / ${generationPage.total}` : ""}
+          </span>
+          <Button
+            disabled={loadingHistory !== null || !generationPage?.nextCursor}
+            onClick={() => void loadGenerationHistory()}
+          >
+            {loadingHistory === "generation"
+              ? "加载普通批次中…"
+              : "加载更多普通批次"}
+          </Button>
+          <span>
+            口播任务已加载 {oralPage?.loaded ?? 0}
+            {oralPage ? ` / ${oralPage.total}` : ""}
+          </span>
+          <Button
+            disabled={
+              loadingHistory !== null ||
+              !oralPage ||
+              oralPage.loaded >= oralPage.total
+            }
+            onClick={() => void loadOralHistory()}
+          >
+            {loadingHistory === "oral" ? "加载口播任务中…" : "加载更多口播任务"}
+          </Button>
+        </fieldset>
+      ) : null}
       {!review && (
         <Hint>
-          当前显示最近任务。更多记录及状态核对请进入“历史任务与下载”。状态待确认的任务请先核对，不要直接重复提交。
+          普通批次与口播任务分别分页；状态待确认的任务请先核对，不要直接重复提交。
         </Hint>
       )}
     </section>
@@ -885,26 +1222,150 @@ export function TaskDetailPage() {
     updateData,
     notify,
     refresh,
+    user,
   } = useStudio();
   const [actionBusy, setActionBusy] = useState<"download" | "retry">();
   const [previewLoad, setPreviewLoad] = useState<{
-    taskId?: string;
+    key?: string;
     status: "idle" | "loading" | "empty" | "error" | "ready";
   }>({ status: "idle" });
-  const selectedTaskIdRef = useRef(state.selectedTaskId);
+  const [detailLoad, setDetailLoad] = useState<{
+    key?: string;
+    status: "idle" | "loading" | "error" | "ready";
+    error?: string;
+  }>({ status: "idle" });
+  const [detailRetry, setDetailRetry] = useState(0);
   const previewRequestRef = useRef(0);
-  selectedTaskIdRef.current = state.selectedTaskId;
+  const detailRequestRef = useRef(0);
+  const detailUserIdRef = useRef(user.id);
+  const verifiedDetailRef = useRef<{ key: string; userId: string } | undefined>(
+    undefined,
+  );
+  detailUserIdRef.current = user.id;
   const task = data.tasks.find((item) => item.id === state.selectedTaskId);
-  if (!task)
+  const detailKind = state.selectedTaskKind;
+  const detailId = state.selectedTaskBackendId;
+  const detailKey =
+    detailKind && detailId ? `${detailKind}:${detailId}` : undefined;
+  const detailContextKey = detailKey ? `${user.id}:${detailKey}` : undefined;
+  const taskMatchesRoute =
+    task !== undefined &&
+    task.backendKind === detailKind &&
+    (task.backendId ?? task.batchId ?? task.id) === detailId;
+  const taskIsVerified =
+    review ||
+    !detailContextKey ||
+    (taskMatchesRoute &&
+      verifiedDetailRef.current?.key === detailContextKey &&
+      verifiedDetailRef.current?.userId === user.id);
+  const previewContextKey = `${user.id}:${detailKey ?? state.selectedTaskId ?? "none"}`;
+  const previewContextRef = useRef(previewContextKey);
+  previewContextRef.current = previewContextKey;
+  useEffect(() => {
+    previewContextRef.current = previewContextKey;
+    return () => {
+      previewRequestRef.current += 1;
+    };
+  }, [previewContextKey]);
+  useEffect(() => {
+    void detailRetry;
+    if (review || !detailKind || !detailId) return;
+    if (
+      taskMatchesRoute &&
+      verifiedDetailRef.current?.key === detailContextKey &&
+      verifiedDetailRef.current?.userId === user.id
+    )
+      return;
+    const requestId = ++detailRequestRef.current;
+    const requestedUserId = user.id;
+    let active = true;
+    setDetailLoad({ key: detailContextKey, status: "loading" });
+    void loadStudioTaskDetail(detailKind, detailId)
+      .then((loaded) => {
+        if (
+          !active ||
+          requestId !== detailRequestRef.current ||
+          detailUserIdRef.current !== requestedUserId
+        )
+          return;
+        verifiedDetailRef.current = {
+          key: detailContextKey as string,
+          userId: requestedUserId,
+        };
+        updateData((current) => ({
+          ...current,
+          tasks: current.tasks.some((item) => item.id === loaded.id)
+            ? current.tasks.map((item) =>
+                item.id === loaded.id ? loaded : item,
+              )
+            : [...current.tasks, loaded],
+        }));
+        setDetailLoad({ key: detailContextKey, status: "ready" });
+      })
+      .catch((cause: unknown) => {
+        if (
+          !active ||
+          requestId !== detailRequestRef.current ||
+          detailUserIdRef.current !== requestedUserId
+        )
+          return;
+        setDetailLoad({
+          key: detailContextKey,
+          status: "error",
+          error: customerVisibleErrorMessage(
+            cause,
+            "任务详情暂不可用，请重试。",
+          ),
+        });
+      });
+    return () => {
+      active = false;
+      detailRequestRef.current += 1;
+    };
+  }, [
+    detailId,
+    detailContextKey,
+    detailKind,
+    detailRetry,
+    review,
+    taskMatchesRoute,
+    updateData,
+    user.id,
+  ]);
+  const detailIsLoading =
+    Boolean(detailContextKey && !taskIsVerified) &&
+    !(detailLoad.key === detailContextKey && detailLoad.status === "error");
+  const detailHasError =
+    detailLoad.key === detailContextKey && detailLoad.status === "error";
+  if (!task || !taskIsVerified || detailIsLoading || detailHasError)
     return (
       <Empty
-        title="未选择任务"
-        action={<Button onClick={() => navigate("tasks")}>返回任务中心</Button>}
+        title={
+          detailIsLoading
+            ? "正在读取任务详情"
+            : detailHasError
+              ? "任务详情暂不可用"
+              : "未选择任务"
+        }
+        description={
+          detailLoad.key === detailContextKey ? detailLoad.error : undefined
+        }
+        action={
+          detailHasError ? (
+            <Button onClick={() => setDetailRetry((value) => value + 1)}>
+              重试读取任务详情
+            </Button>
+          ) : (
+            <Button onClick={() => navigate(state.returnTo ?? "tasks")}>
+              返回任务中心
+            </Button>
+          )
+        }
       />
     );
   const result = data.assets.find((asset) => asset.id === task.resultId);
   const previewStatus =
-    previewLoad.taskId === task.id ? previewLoad.status : "idle";
+    previewLoad.key === previewContextKey ? previewLoad.status : "idle";
   const person = data.people.find((item) => item.id === task.ipId);
   const info = [
     ["任务类型", task.type],
@@ -957,17 +1418,18 @@ export function TaskDetailPage() {
   };
   const previewResult = async () => {
     const requestedTask = task;
+    const requestedContext = previewContextKey;
     const requestId = ++previewRequestRef.current;
-    setPreviewLoad({ taskId: requestedTask.id, status: "loading" });
+    setPreviewLoad({ key: requestedContext, status: "loading" });
     try {
       const asset = await loadTaskPreview(requestedTask);
       if (
         requestId !== previewRequestRef.current ||
-        selectedTaskIdRef.current !== requestedTask.id
+        previewContextRef.current !== requestedContext
       )
         return;
       if (!asset) {
-        setPreviewLoad({ taskId: requestedTask.id, status: "empty" });
+        setPreviewLoad({ key: requestedContext, status: "empty" });
         return;
       }
       updateData((current) => ({
@@ -979,13 +1441,13 @@ export function TaskDetailPage() {
           item.id === requestedTask.id ? { ...item, resultId: asset.id } : item,
         ),
       }));
-      setPreviewLoad({ taskId: requestedTask.id, status: "ready" });
+      setPreviewLoad({ key: requestedContext, status: "ready" });
     } catch {
       if (
         requestId === previewRequestRef.current &&
-        selectedTaskIdRef.current === requestedTask.id
+        previewContextRef.current === requestedContext
       )
-        setPreviewLoad({ taskId: requestedTask.id, status: "error" });
+        setPreviewLoad({ key: requestedContext, status: "error" });
     }
   };
   const downloadResult = async () => {
@@ -1035,7 +1497,7 @@ export function TaskDetailPage() {
   return (
     <section className="studio-task-detail">
       <h1>任务详情与结果</h1>
-      <Button onClick={() => navigate("tasks")}>
+      <Button onClick={() => navigate(state.returnTo ?? "tasks")}>
         <Icon name="back" />
         返回任务中心
       </Button>
@@ -1197,7 +1659,20 @@ export function TaskDetailPage() {
   );
 }
 
-export function ProfilePage() {
+export type StudioAccountSummary = {
+  walletStatus: "loading" | "ready" | "error" | "unknown";
+  availableCredits: number | null;
+  retryWallet: () => void;
+  retryProfile?: () => void;
+  profile: CustomerProfile | null;
+  profileLoadError: string;
+};
+
+export function ProfilePage({
+  accountSummary,
+}: {
+  accountSummary?: StudioAccountSummary;
+}) {
   const { user, review, openLive, notify } = useStudio();
   const [name, setName] = useState(user.display_name || user.username);
   const [profileTab, setProfileTab] = useState("overview");
@@ -1206,6 +1681,10 @@ export function ProfilePage() {
     boolean | null
   >(null);
   const [savingNotifications, setSavingNotifications] = useState(false);
+
+  useEffect(() => {
+    setName(user.display_name || user.username);
+  }, [user.display_name, user.username]);
 
   useEffect(() => {
     if (review) {
@@ -1325,12 +1804,20 @@ export function ProfilePage() {
               </Field>
               <dl className="studio-details">
                 <div>
-                  <dt>团队</dt>
-                  <dd>{review ? "众墅之家" : "未提供"}</dd>
+                  <dt>账号</dt>
+                  <dd>{accountSummary?.profile?.username ?? user.username}</dd>
                 </div>
                 <div>
-                  <dt>手机号</dt>
-                  <dd>{review ? "138****6688" : "以账户资料为准"}</dd>
+                  <dt>加入时间</dt>
+                  <dd>
+                    {accountSummary?.profile?.joined_at
+                      ? new Date(
+                          accountSummary.profile.joined_at,
+                        ).toLocaleDateString("zh-CN")
+                      : review
+                        ? "审核示例"
+                        : "未查询"}
+                  </dd>
                 </div>
                 <div>
                   <dt>
@@ -1385,8 +1872,40 @@ export function ProfilePage() {
               <dl className="studio-details">
                 <div>
                   <dt>账户余额</dt>
-                  <dd>按实际账户显示</dd>
+                  <dd>
+                    {accountSummary?.walletStatus === "ready" &&
+                    accountSummary.availableCredits !== null
+                      ? `${accountSummary.availableCredits} 秒`
+                      : accountSummary?.walletStatus === "loading"
+                        ? "查询中"
+                        : accountSummary?.walletStatus === "error"
+                          ? "读取失败"
+                          : "未查询"}
+                  </dd>
                 </div>
+                {accountSummary?.walletStatus === "error" && (
+                  <div>
+                    <dt>余额查询</dt>
+                    <dd>
+                      <Button onClick={accountSummary.retryWallet}>
+                        重试余额查询
+                      </Button>
+                    </dd>
+                  </div>
+                )}
+                {accountSummary?.profileLoadError && (
+                  <div>
+                    <dt>资料状态</dt>
+                    <dd>
+                      {accountSummary.profileLoadError}
+                      {accountSummary.retryProfile && (
+                        <Button onClick={accountSummary.retryProfile}>
+                          重试资料查询
+                        </Button>
+                      )}
+                    </dd>
+                  </div>
+                )}
                 <div>
                   <dt>
                     使用记录<small>查看详细的使用记录</small>

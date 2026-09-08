@@ -5,6 +5,7 @@ import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.error import HTTPError
 
 import pytest
 from cryptography.fernet import Fernet
@@ -17,6 +18,8 @@ from app.hifly import (
     HiflyError,
     HiflySettingsUnavailable,
     HiflySubmissionUncertain,
+    HiflyTimeoutError,
+    UrllibHiflyHttpTransport,
     hifly_client_from_config,
 )
 from app.settings import (
@@ -167,6 +170,70 @@ def test_invalid_token_error_is_reported_as_configuration_problem() -> None:
     assert "未正确配置" in str(excinfo.value)
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"\xff",
+        b'{"code": null, "data": {}}',
+        b'{"code": "ERROR", "data": {}}',
+        b'{"code": false, "data": {"credit": 88}}',
+        b'{"code": 0.5, "data": {"credit": 88}}',
+        b'{"code": 1e309, "data": {"credit": 88}}',
+        b'{"code": ' + (b"9" * 4301) + b', "data": {"credit": 88}}',
+        b'{"code": "' + (b"9" * 4301) + b'", "data": {"credit": 88}}',
+        b'{"code": 0, "data": {"credit": true}}',
+        b'{"code": 0, "data": {"credit": -1}}',
+        b'{"code": 0, "data": {"credit": 9007199254740992}}',
+        b'{"code": 0, "data": {"credit": ' + (b"9" * 310) + b"}}",
+    ],
+)
+def test_account_credit_rejects_malformed_vendor_payloads(payload: bytes) -> None:
+    client, _ = client_with(payload)
+
+    with pytest.raises(HiflyError):
+        client.account_credit()
+
+
+def test_urllib_transport_preserves_timeout_as_a_distinct_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def timeout(*_args: object, **_kwargs: object) -> None:
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr("app.hifly.urlopen", timeout)
+
+    with pytest.raises(HiflyTimeoutError):
+        UrllibHiflyHttpTransport(timeout_seconds=0.01).request(
+            "GET",
+            f"{HIFLY_BASE_URL}/api/v2/hifly/account/credit",
+            headers={"Authorization": "Bearer dummy-hifly-token"},
+        )
+
+
+def test_urllib_transport_preserves_http_status_for_auth_classification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unauthorized(*_args: object, **_kwargs: object) -> None:
+        raise HTTPError(
+            f"{HIFLY_BASE_URL}/api/v2/hifly/account/credit",
+            401,
+            "Unauthorized",
+            {},  # type: ignore[arg-type]
+            None,
+        )
+
+    monkeypatch.setattr("app.hifly.urlopen", unauthorized)
+
+    with pytest.raises(HiflyError) as caught:
+        UrllibHiflyHttpTransport().request(
+            "GET",
+            f"{HIFLY_BASE_URL}/api/v2/hifly/account/credit",
+            headers={"Authorization": "Bearer dummy-hifly-token"},
+        )
+
+    assert caught.value.http_status == 401
+
+
 def test_avatar_task_normalizes_vendor_status() -> None:
     client, _ = client_with(b'{"code": 0, "msg": "", "data": {"status": 3, "avatar_id": "av-9"}}')
 
@@ -235,6 +302,12 @@ def test_account_credit_returns_left_credits() -> None:
     client, _ = client_with(b'{"code": 0, "msg": "", "data": {"credit": 42}}')
 
     assert client.account_credit() == 42
+
+
+def test_account_credit_accepts_the_javascript_safe_integer_boundary() -> None:
+    client, _ = client_with(b'{"code": 0, "msg": "", "data": {"credit": 9007199254740991}}')
+
+    assert client.account_credit() == 9_007_199_254_740_991
 
 
 def test_list_end_points_pass_pagination_and_kind() -> None:

@@ -53,6 +53,7 @@ export type CustomerSessionConflict = {
  * when the last heartbeat succeeded and when the server lease lapses.
  * Client-clock timestamps; `null` while no session is established. */
 export type CustomerSessionRuntime = {
+  connectivity: "reachable" | "unreachable";
   lastHeartbeatAt: string;
   leaseExpiresAt: string | null;
 };
@@ -145,6 +146,8 @@ export function useCustomerSession(
   const [sessionRuntime, setSessionRuntime] =
     useState<CustomerSessionRuntime | null>(null);
   const sessionTokenRef = useRef<string | null>(null);
+  const sessionGenerationRef = useRef(0);
+  const latestHeartbeatRequestIdRef = useRef(0);
   const bootstrappedRef = useRef(false);
 
   // Every established/renewed lease updates the runtime view: the heartbeat
@@ -152,16 +155,56 @@ export function useCustomerSession(
   // server response.
   const noteLease = useCallback((leaseExpiresAt: string | null) => {
     setSessionRuntime({
+      connectivity: "reachable",
       lastHeartbeatAt: new Date().toISOString(),
       leaseExpiresAt,
     });
   }, []);
+
+  const noteHeartbeatFailure = useCallback(() => {
+    setSessionRuntime((current) =>
+      current ? { ...current, connectivity: "unreachable" } : current,
+    );
+  }, []);
+
+  const sendHeartbeat = useCallback(
+    async (token: string) => {
+      const requestId = ++latestHeartbeatRequestIdRef.current;
+      const sessionGeneration = sessionGenerationRef.current;
+      const belongsToCurrentSession = () =>
+        requestId === latestHeartbeatRequestIdRef.current &&
+        sessionGeneration === sessionGenerationRef.current &&
+        token === sessionTokenRef.current;
+      try {
+        const body = await customerHeartbeat(
+          { kind: "session", token },
+          { shouldDispatchLifecycle: belongsToCurrentSession },
+        );
+        if (belongsToCurrentSession()) {
+          noteLease(body.lease_expires_at);
+        }
+      } catch {
+        if (belongsToCurrentSession()) {
+          noteHeartbeatFailure();
+        }
+      }
+    },
+    [noteHeartbeatFailure, noteLease],
+  );
 
   // For the current activation attempt, retain this key until final outcome to
   // enable retries when the response is lost/timed out. The server can recover
   // by replaying the original key; a new key would reject the already-consumed
   // activation code and leave the customer stranded.
   const currentActivationIdempotencyKeyRef = useRef<string | null>(null);
+
+  useEffect(
+    () => () => {
+      sessionGenerationRef.current += 1;
+      latestHeartbeatRequestIdRef.current += 1;
+    },
+    [],
+  );
 
   const establishSession = useCallback(
     async (deviceToken: string) => {
@@ -180,6 +223,7 @@ export function useCustomerSession(
         throw credentialStoreError(cause);
       }
       sessionTokenRef.current = result.session.session_token;
+      sessionGenerationRef.current += 1;
       setSessionToken(result.session.session_token);
       setUser({ userId: result.session.user_id, username: null });
       noteLease(result.session.session_lease_expires_at);
@@ -229,6 +273,7 @@ export function useCustomerSession(
             return;
           }
           sessionTokenRef.current = response.session_token;
+          sessionGenerationRef.current += 1;
           setSessionToken(response.session_token);
           setUser({ userId: response.user_id, username: response.username });
           noteLease(response.session_lease_expires_at);
@@ -322,6 +367,8 @@ export function useCustomerSession(
     const clearSession = () => {
       void store.clearSessionToken();
       sessionTokenRef.current = null;
+      sessionGenerationRef.current += 1;
+      latestHeartbeatRequestIdRef.current += 1;
       setSessionToken(null);
       setUser(null);
       setConflict(null);
@@ -338,6 +385,8 @@ export function useCustomerSession(
     const onRevoked = () => {
       void store.clearAllCredentials();
       sessionTokenRef.current = null;
+      sessionGenerationRef.current += 1;
+      latestHeartbeatRequestIdRef.current += 1;
       setSessionToken(null);
       setUser(null);
       setConflict(null);
@@ -370,19 +419,12 @@ export function useCustomerSession(
       if (token === null) {
         return;
       }
-      void customerHeartbeat({ kind: "session", token })
-        .then((body) => {
-          noteLease(body.lease_expires_at);
-        })
-        .catch(() => {
-          // Terminal outcomes arrive as lifecycle events; transient failures
-          // leave the next heartbeat to retry.
-        });
+      void sendHeartbeat(token);
     }, heartbeatIntervalMs);
     return () => {
       window.clearInterval(timer);
     };
-  }, [heartbeatIntervalMs, screen, sessionToken, noteLease]);
+  }, [heartbeatIntervalMs, screen, sessionToken, sendHeartbeat]);
 
   const activate = useCallback(
     async (input: CustomerActivationFormInput) => {
@@ -416,6 +458,7 @@ export function useCustomerSession(
           throw credentialStoreError(cause);
         }
         sessionTokenRef.current = response.session_token;
+        sessionGenerationRef.current += 1;
         setSessionToken(response.session_token);
         setUser({ userId: response.user_id, username: response.username });
         noteLease(response.session_lease_expires_at);
@@ -519,6 +562,7 @@ export function useCustomerSession(
         throw credentialStoreError(cause);
       }
       sessionTokenRef.current = result.session.session_token;
+      sessionGenerationRef.current += 1;
       setSessionToken(result.session.session_token);
       setUser({ userId: result.session.user_id, username: null });
       setConflict(null);
@@ -544,45 +588,50 @@ export function useCustomerSession(
     if (token === null) {
       return;
     }
-    try {
-      const body = await customerHeartbeat({ kind: "session", token });
-      noteLease(body.lease_expires_at);
-    } catch {
-      // Terminal outcomes arrive as lifecycle events; transient failures
-      // leave the next heartbeat to retry.
-    }
-  }, [noteLease]);
+    await sendHeartbeat(token);
+  }, [sendHeartbeat]);
 
+  const logoutInFlightRef = useRef(false);
   const logout = useCallback(async () => {
-    const token = sessionTokenRef.current;
-    setError(null);
-    setConflict(null);
-    if (token !== null) {
-      setIsBusy(true);
-      try {
-        await customerLogout(
-          { kind: "session", token },
-          { idempotencyKey: newIdempotencyKey() },
-        );
-      } catch {
-        // The session is being discarded locally regardless; a failing
-        // logout (network/timeout) must still return the user to the login
-        // screen with the device credential intact.
-      } finally {
-        setIsBusy(false);
-      }
+    if (logoutInFlightRef.current) {
+      return;
     }
+    logoutInFlightRef.current = true;
     try {
-      await store.clearSessionToken();
-    } catch {
-      // A failing vault write must still return the user to the login screen;
-      // the stale session token stays on disk and the next login overwrites it.
+      const token = sessionTokenRef.current;
+      sessionTokenRef.current = null;
+      sessionGenerationRef.current += 1;
+      latestHeartbeatRequestIdRef.current += 1;
+      setError(null);
+      setConflict(null);
+      if (token !== null) {
+        setIsBusy(true);
+        try {
+          await customerLogout(
+            { kind: "session", token },
+            { idempotencyKey: newIdempotencyKey() },
+          );
+        } catch {
+          // The session is being discarded locally regardless; a failing
+          // logout (network/timeout) must still return the user to the login
+          // screen with the device credential intact.
+        } finally {
+          setIsBusy(false);
+        }
+      }
+      try {
+        await store.clearSessionToken();
+      } catch {
+        // A failing vault write must still return the user to the login screen;
+        // the stale session token stays on disk and the next login overwrites it.
+      }
+      setSessionToken(null);
+      setUser(null);
+      setSessionRuntime(null);
+      dispatch({ type: "logout" });
+    } finally {
+      logoutInFlightRef.current = false;
     }
-    sessionTokenRef.current = null;
-    setSessionToken(null);
-    setUser(null);
-    setSessionRuntime(null);
-    dispatch({ type: "logout" });
   }, [store]);
 
   const restartAfterExpiry = useCallback(() => {

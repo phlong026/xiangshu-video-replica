@@ -214,11 +214,13 @@ def seed_scene(tmp_path: Path, name: str) -> BusinessConnection:
         """
         INSERT INTO assets (
             id, project_id, kind, storage_uri, sha256, size_bytes,
-            content_type, created_by_user_id
+            content_type, metadata_json, created_by_user_id
         )
         VALUES (
             'asset-audio', NULL, 'oral_audio', 'local://assets/v.mp3',
-            'audio-hash', 9, 'audio/mpeg', 'employee_1'
+            'audio-hash', 9, 'audio/mpeg',
+            '{"audio_purpose":"voice_clone","duration_seconds":42,"audio_duration_verified":true}',
+            'employee_1'
         )
         """
     )
@@ -331,6 +333,160 @@ def test_consent_read_keeps_foreign_and_missing_identity_indistinguishable(
         list_oral_consents(conn, actor=actor("employee_2"), identity_id="missing")
 
     assert str(foreign.value) == str(missing.value)
+
+
+def test_auditor_cannot_write_oral_biometrics_even_as_resource_owner(
+    tmp_path: Path,
+) -> None:
+    conn = seed_scene(tmp_path, "oral-auditor-write-gate.db")
+    owner = actor()
+    auditor = actor(role="auditor")
+    avatar_consent = create_oral_consent(
+        conn,
+        actor=owner,
+        identity_id="ident-1",
+        source_asset_id="asset-src",
+        purpose="AVATAR_CLONE",
+        consent_text_version=ORAL_CONSENT_TEXT_VERSION,
+    )
+    voice_consent = create_oral_consent(
+        conn,
+        actor=owner,
+        identity_id="ident-1",
+        source_asset_id="asset-audio",
+        purpose="VOICE_CLONE",
+        consent_text_version=ORAL_CONSENT_TEXT_VERSION,
+    )
+    conn.execute(
+        "INSERT INTO oral_voices ("
+        "id, identity_id, owner_user_id, title, status, source_asset_id, consent_id"
+        ") VALUES ('auditor-owned-ready', 'ident-1', 'employee_1', '待确认声音', "
+        "'READY', 'asset-audio', %s)",
+        (voice_consent["id"],),
+    )
+    conn.commit()
+
+    operations = [
+        lambda: create_oral_consent(
+            conn,
+            actor=auditor,
+            identity_id="ident-1",
+            source_asset_id="asset-audio",
+            purpose="VOICE_CLONE",
+            consent_text_version=ORAL_CONSENT_TEXT_VERSION,
+        ),
+        lambda: start_avatar_clone(
+            conn,
+            actor=auditor,
+            identity_id="ident-1",
+            title="审计员分身",
+            source_asset_id="asset-src",
+            source_kind="VIDEO",
+            consent_id=str(avatar_consent["id"]),
+            idempotency_key="auditor-avatar-write",
+        ),
+        lambda: start_voice_clone(
+            conn,
+            actor=auditor,
+            identity_id="ident-1",
+            title="审计员声音",
+            source_asset_id="asset-audio",
+            consent_id=str(voice_consent["id"]),
+            idempotency_key="auditor-voice-write",
+        ),
+        lambda: confirm_voice_clone(conn, voice_id="auditor-owned-ready", actor=auditor),
+    ]
+
+    for operation in operations:
+        with pytest.raises(HTTPException) as denied:
+            operation()
+        assert denied.value.status_code == 403
+        assert denied.value.detail["code"] == "ROLE_FORBIDDEN"
+
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM oral_consents WHERE owner_user_id = 'employee_1'"
+        ).fetchone()[0]
+        == 2
+    )
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM oral_avatars WHERE idempotency_key = 'auditor-avatar-write'"
+        ).fetchone()[0]
+        == 0
+    )
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM oral_voices WHERE idempotency_key = 'auditor-voice-write'"
+        ).fetchone()[0]
+        == 0
+    )
+    assert (
+        conn.execute(
+            "SELECT confirmed FROM oral_voices WHERE id = 'auditor-owned-ready'"
+        ).fetchone()[0]
+        == 0
+    )
+
+
+def test_customer_role_can_start_owned_oral_biometric_writes(tmp_path: Path) -> None:
+    conn = seed_scene(tmp_path, "oral-customer-write-gate.db")
+    customer = actor(role="customer")
+
+    avatar_consent = create_oral_consent(
+        conn,
+        actor=customer,
+        identity_id="ident-1",
+        source_asset_id="asset-src",
+        purpose="AVATAR_CLONE",
+        consent_text_version=ORAL_CONSENT_TEXT_VERSION,
+    )
+    voice_consent = create_oral_consent(
+        conn,
+        actor=customer,
+        identity_id="ident-1",
+        source_asset_id="asset-audio",
+        purpose="VOICE_CLONE",
+        consent_text_version=ORAL_CONSENT_TEXT_VERSION,
+    )
+    avatar = start_avatar_clone(
+        conn,
+        actor=customer,
+        identity_id="ident-1",
+        title="客户分身",
+        source_asset_id="asset-src",
+        source_kind="VIDEO",
+        consent_id=str(avatar_consent["id"]),
+        idempotency_key="customer-avatar-write",
+    )
+    voice = start_voice_clone(
+        conn,
+        actor=customer,
+        identity_id="ident-1",
+        title="客户声音",
+        source_asset_id="asset-audio",
+        consent_id=str(voice_consent["id"]),
+        idempotency_key="customer-voice-write",
+    )
+
+    assert avatar.status == "PENDING"
+    assert voice.status == "PENDING"
+    conn.execute(
+        "INSERT INTO assets ("
+        "id, project_id, kind, storage_uri, sha256, size_bytes, content_type, "
+        "created_by_user_id"
+        ") VALUES ('customer-voice-demo', NULL, 'oral_audio', "
+        "'local://assets/customer-voice-demo.mp3', 'demo-hash', 8, 'audio/mpeg', "
+        "'employee_1')"
+    )
+    conn.execute(
+        "UPDATE oral_voices SET status = 'READY', demo_asset_id = 'customer-voice-demo' "
+        "WHERE id = %s",
+        (voice.task_id,),
+    )
+    conn.commit()
+    confirmed = confirm_voice_clone(conn, voice_id=voice.task_id, actor=customer)
+    assert confirmed["confirmed"] == 1
 
 
 def test_consent_and_voice_confirmation_routes(
@@ -716,11 +872,12 @@ def test_clone_rejects_inaccessible_and_incomplete_assets(
         )
 
 
-@pytest.mark.parametrize("role", ["admin", "auditor"])
+@pytest.mark.parametrize(("role", "expected_status"), [("admin", 404), ("auditor", 403)])
 def test_privileged_roles_cannot_clone_another_users_biometric_asset(
     tmp_path: Path,
     fake_source_storage: FakeSourceStorage,
     role: str,
+    expected_status: int,
 ) -> None:
     conn = seed_scene(tmp_path, f"oral-biometric-owner-{role}.db")
     user_id = f"{role}_1"
@@ -748,7 +905,7 @@ def test_privileged_roles_cannot_clone_another_users_biometric_asset(
             vendor=vendor,
         )
 
-    assert hidden.value.status_code == 404
+    assert hidden.value.status_code == expected_status
     assert transport.calls == []
 
 
@@ -1146,12 +1303,14 @@ def test_oral_task_idempotency_key_is_scoped_by_owner(
         """
         INSERT INTO assets (
             id, project_id, kind, storage_uri, sha256, size_bytes,
-            content_type, created_by_user_id
+            content_type, metadata_json, created_by_user_id
         ) VALUES
             ('asset-src-2', 'oral-project-2', 'source_video',
-             'local://assets/src-2.mp4', 'video-hash-2', 9, 'video/mp4', 'employee_2'),
+             'local://assets/src-2.mp4', 'video-hash-2', 9, 'video/mp4', '{}', 'employee_2'),
             ('asset-audio-2', 'oral-project-2', 'oral_audio',
-             'local://assets/audio-2.mp3', 'audio-hash-2', 9, 'audio/mpeg', 'employee_2')
+             'local://assets/audio-2.mp3', 'audio-hash-2', 9, 'audio/mpeg',
+             '{"audio_purpose":"oral_audio","duration_seconds":42,"audio_duration_verified":true}',
+             'employee_2')
         """
     )
     avatar_consent = create_oral_consent(
@@ -1186,6 +1345,11 @@ def test_oral_task_idempotency_key_is_scoped_by_owner(
         ),
     )
     transport.on("POST", "/api/v2/hifly/video/create_by_audio", envelope({"task_id": "vt"}))
+    conn.execute(
+        "UPDATE assets SET metadata_json = ? WHERE id = 'asset-audio'",
+        ('{"audio_purpose":"oral_audio","duration_seconds":42,"audio_duration_verified":true}',),
+    )
+    conn.commit()
 
     first = create_oral_task(
         conn,
@@ -1246,6 +1410,7 @@ def test_historical_ready_clone_without_consent_cannot_create_oral_task(
             idempotency_key=f"historical-{missing_consent}",
             vendor=vendor,
         )
+
     assert transport.calls == []
 
 
@@ -1471,6 +1636,105 @@ def test_create_audio_oral_task_rejects_wrong_inaccessible_or_incomplete_asset(
             idempotency_key=f"invalid-{audio_asset_id}",
             vendor=vendor,
         )
+
+
+def test_oral_audio_and_voice_clone_do_not_cross_use_explicit_purpose(
+    tmp_path: Path,
+    fake_source_storage: FakeSourceStorage,
+) -> None:
+    conn = seed_scene(tmp_path, "oral-audio-purpose.db")
+    avatar_id, _ = seed_ready_assets(conn)
+    vendor, _ = make_vendor()
+
+    conn.execute(
+        "UPDATE assets SET metadata_json = ? WHERE id = 'asset-audio'",
+        ('{"audio_purpose":"voice_clone","duration_seconds":42,"audio_duration_verified":true}',),
+    )
+    conn.commit()
+    with pytest.raises(OralDomainError, match="用途"):
+        create_oral_task(
+            conn,
+            actor=actor(),
+            identity_id="ident-1",
+            avatar_id=avatar_id,
+            voice_id=None,
+            mode="AUDIO",
+            title="用途错误",
+            script_text=None,
+            audio_asset_id="asset-audio",
+            subtitle=None,
+            idempotency_key="wrong-oral-purpose",
+            vendor=vendor,
+        )
+
+    conn.execute(
+        "UPDATE assets SET metadata_json = ? WHERE id = 'asset-audio'",
+        ('{"audio_purpose":"oral_audio","duration_seconds":42,"audio_duration_verified":true}',),
+    )
+    conn.commit()
+    voice_consent = consent_for(
+        conn,
+        purpose="VOICE_CLONE",
+        source_asset_id="asset-audio",
+    )
+    with pytest.raises(OralDomainError, match="用途"):
+        start_voice_clone(
+            conn,
+            actor=actor(),
+            identity_id="ident-1",
+            title="用途错误",
+            source_asset_id="asset-audio",
+            consent_id=voice_consent,
+            idempotency_key="wrong-clone-purpose",
+            vendor=vendor,
+        )
+
+
+@pytest.mark.parametrize("operation", ["oral", "voice_clone"])
+def test_audio_without_explicit_purpose_is_rejected(
+    tmp_path: Path,
+    fake_source_storage: FakeSourceStorage,
+    operation: str,
+) -> None:
+    conn = seed_scene(tmp_path, f"oral-audio-missing-purpose-{operation}.db")
+    avatar_id, _ = seed_ready_assets(conn)
+    conn.execute("UPDATE assets SET metadata_json = '{}' WHERE id = 'asset-audio'")
+    conn.commit()
+    vendor, transport = make_vendor()
+
+    with pytest.raises(OralDomainError, match="用途"):
+        if operation == "oral":
+            create_oral_task(
+                conn,
+                actor=actor(),
+                identity_id="ident-1",
+                avatar_id=avatar_id,
+                voice_id=None,
+                mode="AUDIO",
+                title="无用途音频",
+                script_text=None,
+                audio_asset_id="asset-audio",
+                subtitle=None,
+                idempotency_key="missing-purpose-oral",
+                vendor=vendor,
+            )
+        else:
+            start_voice_clone(
+                conn,
+                actor=actor(),
+                identity_id="ident-1",
+                title="无用途声音",
+                source_asset_id="asset-audio",
+                consent_id=consent_for(
+                    conn,
+                    purpose="VOICE_CLONE",
+                    source_asset_id="asset-audio",
+                ),
+                idempotency_key="missing-purpose-voice",
+                vendor=vendor,
+            )
+
+    assert transport.calls == []
 
 
 def test_refresh_oral_task_archives_result_asset(
@@ -2240,7 +2504,7 @@ def test_oral_task_retry_route_requeues_uncertain_and_keeps_reservation(
         ("employee_1",),
     ).fetchone()
     assert (wallet["available_credits"], wallet["reserved_credits"]) == (19, 1)
-    listed = [entry for entry in listing.json() if entry["id"] == created.task_id]
+    listed = [entry for entry in listing.json()["items"] if entry["id"] == created.task_id]
     assert listed and listed[0]["status"] == "QUEUED"
     assert listed[0]["billing_status"] == "RESERVED"
     assert listed[0]["available_actions"] == []
@@ -2343,6 +2607,21 @@ def test_oral_task_serialization_reports_billing_status_and_available_actions(
         assert single.status_code == 200
         assert single.json()["billing_status"] == "RESERVED"
         assert single.json()["available_actions"] == []
+        denied = client.get(
+            f"/api/oral/tasks/{uncertain.task_id}",
+            headers={"X-Dev-User-Id": "employee_2"},
+        )
+        assert denied.status_code == 404
+        assert denied.json()["detail"]["code"] == "ORAL_TASK_NOT_FOUND"
+
+        contract = client.get("/openapi.json").json()
+        list_get = contract["paths"]["/api/oral/tasks"]["get"]
+        detail_get = contract["paths"]["/api/oral/tasks/{task_id}"]["get"]
+        list_schema = list_get["responses"]["200"]["content"]["application/json"]["schema"]
+        detail_schema = detail_get["responses"]["200"]["content"]["application/json"]["schema"]
+        assert list_schema["$ref"].endswith("/OralTaskPageResponse")
+        assert detail_schema["$ref"].endswith("/OralTaskResponse")
+        assert "404" in detail_get["responses"]
 
         conn.execute(
             """
@@ -2403,9 +2682,19 @@ def test_oral_task_serialization_reports_billing_status_and_available_actions(
         assert single.json()["available_actions"] == []
 
         listing = client.get("/api/oral/tasks", headers=headers).json()
-        by_id = {entry["id"]: entry for entry in listing}
+        assert listing["total"] == 2
+        by_id = {entry["id"]: entry for entry in listing["items"]}
         assert by_id[uncertain.task_id]["billing_status"] == "SETTLED"
         assert by_id[cancelled.task_id]["billing_status"] == "RELEASED"
+        second_page = client.get(
+            "/api/oral/tasks",
+            params={"limit": 1, "offset": 1},
+            headers=headers,
+        ).json()
+        assert second_page["total"] == 2
+        assert second_page["limit"] == 1
+        assert second_page["offset"] == 1
+        assert len(second_page["items"]) == 1
     finally:
         app.dependency_overrides.clear()
 

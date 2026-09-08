@@ -99,15 +99,22 @@ function analyticsSample(days: 7 | 30): StudioAnalytics {
         ];
   return {
     range_days: days,
+    generated_at: "2026-09-06T12:00:00+00:00",
     today_completed: 8,
     range_completed: counts.reduce((sum, count) => sum + count, 0),
     total_completed: 156,
+    today_generation_batches: 6,
+    range_generation_batches: days === 7 ? 15 : 29,
+    total_generation_batches: 120,
+    range_generation_outputs: counts.reduce((sum, count) => sum + count, 0),
+    range_oral_outputs: 0,
     daily,
     kind_breakdown: kindBreakdown,
     recent_works: reviewWorks
       .slice(0, days === 7 ? 3 : 4)
       .map((work, index) => ({
         task_id: "task-completed",
+        task_kind: "generation" as const,
         batch_id: `batch-review-${index + 1}`,
         project_id: `project-review-${index + 1}`,
         title: work.title,

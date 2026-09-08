@@ -5,6 +5,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app.auth import get_database
@@ -234,6 +235,48 @@ def test_worker_imports_project_asset_and_exposes_capabilities(
         assert '"video_id": "viral-1"' in asset["metadata_json"]
 
 
+def test_completion_rejects_project_owner_change(
+    client: TestClient,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.viral_import as domain
+
+    monkeypatch.setattr(domain, "ViralMediaPipeline", StubPipeline)
+    monkeypatch.setattr(domain, "viral_source_client_from_settings", lambda conn: object())
+    storage = FakeStorageAdapter(provider="fake", bucket="private")
+    created = client.post(
+        "/api/viral/import-tasks",
+        json={"platform": "douyin", "videoId": "viral-1", "purpose": "replica"},
+        headers=_headers("employee_1", "owner-change-key"),
+    ).json()
+
+    conn = BusinessConnection.sqlite(connect_database(db_path))
+    try:
+        lease = domain.acquire_viral_import_task(conn, worker_id="worker-owner-change")
+        assert lease is not None
+        work = domain.prepare_viral_import_task(conn, lease=lease, storage=storage)
+        outcome = domain.perform_viral_import_task(work)
+        conn.execute(
+            "UPDATE projects SET owner_user_id = %s WHERE id = %s",
+            ("employee_2", created["projectId"]),
+        )
+        conn.commit()
+
+        with pytest.raises(HTTPException) as raised:
+            domain.complete_viral_import_task(conn, lease=lease, outcome=outcome)
+
+        assert raised.value.detail["code"] == "VIRAL_IMPORT_PROJECT_CHANGED"
+        assert (
+            conn.execute(
+                "SELECT 1 FROM assets WHERE project_id = %s", (created["projectId"],)
+            ).fetchone()
+            is None
+        )
+    finally:
+        conn.close()
+
+
 def test_copy_uses_audio_only_when_source_marks_it_verified(
     client: TestClient,
     db_path: Path,
@@ -283,6 +326,105 @@ def test_retryable_failure_reuses_task_and_project(client: TestClient, db_path: 
     assert retried.json()["id"] == created["id"]
     assert retried.json()["projectId"] == created["projectId"]
     assert retried.json()["status"] == "PENDING"
+
+
+def test_worker_project_transfer_failure_is_not_replayed_with_same_key(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    payload = {"platform": "douyin", "videoId": "viral-1", "purpose": "replica"}
+    created = client.post(
+        "/api/viral/import-tasks",
+        json=payload,
+        headers=_headers("employee_1", "transferred-project-key"),
+    ).json()
+    with connect_database(db_path) as raw:
+        raw.execute(
+            "UPDATE projects SET owner_user_id = ? WHERE id = ?",
+            ("employee_2", created["projectId"]),
+        )
+
+    conn = BusinessConnection.sqlite(connect_database(db_path))
+    try:
+        assert (
+            run_worker_once(
+                conn,
+                worker_id="worker-transfer",
+                storage=FakeStorageAdapter(provider="fake", bucket="private"),
+            )
+            == 1
+        )
+    finally:
+        conn.close()
+
+    failed = client.get(
+        f"/api/viral/import-tasks/{created['id']}",
+        headers={"X-Dev-User-Id": "employee_1"},
+    )
+    assert failed.json()["status"] == "FAILED"
+    assert failed.json()["errorCode"] == "VIRAL_IMPORT_PROJECT_CHANGED"
+    assert failed.json()["retryable"] is False
+
+    replay = client.post(
+        "/api/viral/import-tasks",
+        json=payload,
+        headers=_headers("employee_1", "transferred-project-key"),
+    )
+    assert replay.json()["status"] == "FAILED"
+
+    replacement = client.post(
+        "/api/viral/import-tasks",
+        json=payload,
+        headers=_headers("employee_1", "replacement-project-key"),
+    )
+    assert replacement.status_code == 202
+    assert replacement.json()["id"] != created["id"]
+    assert replacement.json()["status"] == "PENDING"
+
+
+def test_worker_missing_source_failure_stays_terminal_and_replay_is_controlled(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    payload = {"platform": "douyin", "videoId": "viral-1", "purpose": "copy"}
+    created = client.post(
+        "/api/viral/import-tasks",
+        json=payload,
+        headers=_headers("employee_1", "removed-source-key"),
+    ).json()
+    with connect_database(db_path) as raw:
+        raw.execute(
+            "DELETE FROM viral_videos WHERE platform = ? AND video_id = ?",
+            ("douyin", "viral-1"),
+        )
+
+    conn = BusinessConnection.sqlite(connect_database(db_path))
+    try:
+        assert (
+            run_worker_once(
+                conn,
+                worker_id="worker-missing-source",
+                storage=FakeStorageAdapter(provider="fake", bucket="private"),
+            )
+            == 1
+        )
+    finally:
+        conn.close()
+
+    failed = client.get(
+        f"/api/viral/import-tasks/{created['id']}",
+        headers={"X-Dev-User-Id": "employee_1"},
+    )
+    assert failed.json()["errorCode"] == "VIRAL_VIDEO_NOT_FOUND"
+    assert failed.json()["retryable"] is False
+
+    replay = client.post(
+        "/api/viral/import-tasks",
+        json=payload,
+        headers=_headers("employee_1", "removed-source-key"),
+    )
+    assert replay.status_code == 404
+    assert replay.json()["detail"]["code"] == "VIRAL_VIDEO_NOT_FOUND"
 
 
 def test_unavailable_video_and_missing_idempotency_are_rejected(
@@ -481,6 +623,15 @@ def test_sqlite_worker_rolls_back_partial_asset_before_marking_failure(
             "SELECT status, retryable FROM viral_import_tasks WHERE id = ?", (created["id"],)
         ).fetchone()
         assert tuple(task) == ("FAILED", 1)
+
+    replay = client.post(
+        "/api/viral/import-tasks",
+        json={"platform": "douyin", "videoId": "viral-1", "purpose": "replica"},
+        headers=_headers("employee_1", "rollback-key"),
+    )
+    assert replay.status_code == 202
+    assert replay.json()["id"] == created["id"]
+    assert replay.json()["status"] == "PENDING"
     assert (
         storage.head_object(
             f"projects/{created['projectId']}/viral-imports/{created['id']}/source.mp4"

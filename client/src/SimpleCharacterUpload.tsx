@@ -3,7 +3,7 @@ import { useRef, useState } from "react";
 import { type SimpleCharacterResult, uploadSimpleCharacter } from "./api";
 
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
-const ALLOWED_TYPES = ["image/png", "image/jpeg"];
+const ALLOWED_TYPES = ["image/png", "image/jpeg", "image/webp"];
 
 export function SimpleCharacterUpload({
   onCreated,
@@ -34,7 +34,7 @@ export function SimpleCharacterUpload({
     }
     if (!ALLOWED_TYPES.includes(file.type)) {
       setFileName("");
-      setError("仅支持 PNG 或 JPEG 图片。");
+      setError("仅支持 PNG、JPEG 或 WebP 图片。");
       return;
     }
     if (file.size > MAX_UPLOAD_BYTES) {
@@ -101,7 +101,7 @@ export function SimpleCharacterUpload({
           上传人物图片，生成五视图拼合图
         </p>
         <p className="simple-character-upload__note">
-          授权图片 PNG / JPEG，不超过 10MB · AI 绘制约 1~3 分钟
+          授权图片 PNG / JPEG / WebP，不超过 10MB · AI 绘制约 1~3 分钟
         </p>
       </div>
       <div className="simple-character-upload-form">

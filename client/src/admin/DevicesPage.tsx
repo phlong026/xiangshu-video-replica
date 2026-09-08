@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   type DeviceListItem,
@@ -49,8 +49,12 @@ export function DevicesPage({
   const [actionError, setActionError] = useState("");
   const [notice, setNotice] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const requestIdRef = useRef(0);
+  const contextRef = useRef({ id: 0, userId });
 
   const loadDevices = useCallback(async () => {
+    const requestId = requestIdRef.current + 1;
+    requestIdRef.current = requestId;
     try {
       setLoading(true);
       setError("");
@@ -61,6 +65,9 @@ export function DevicesPage({
         platform: platformFilter || undefined,
         userId,
       });
+      if (requestId !== requestIdRef.current) {
+        return;
+      }
       setDevices(response.items);
       setTotal(response.total);
       setSummary(
@@ -72,15 +79,32 @@ export function DevicesPage({
         },
       );
     } catch (err) {
+      if (requestId !== requestIdRef.current) {
+        return;
+      }
       setError(
         err instanceof Error && err.message
           ? `加载失败：${err.message}`
           : "加载失败：未知错误",
       );
     } finally {
-      setLoading(false);
+      if (requestId === requestIdRef.current) {
+        setLoading(false);
+      }
     }
   }, [offset, pageSize, platformFilter, statusFilter, userId]);
+
+  useEffect(() => {
+    contextRef.current = { id: contextRef.current.id + 1, userId };
+    requestIdRef.current += 1;
+    setDevices([]);
+    setTotal(0);
+    setOffset(0);
+    setPendingAction(null);
+    setActionError("");
+    setNotice("");
+    setSubmitting(false);
+  }, [userId]);
 
   useEffect(() => {
     loadDevices();
@@ -101,6 +125,7 @@ export function DevicesPage({
     }
     setSubmitting(true);
     setActionError("");
+    const actionContext = contextRef.current;
     try {
       const result =
         pendingAction.kind === "unbind"
@@ -109,6 +134,9 @@ export function DevicesPage({
               pendingAction.device.device_id,
               reason,
             );
+      if (contextRef.current !== actionContext) {
+        return;
+      }
       setNotice(
         pendingAction.kind === "unbind"
           ? `设备已下线（审计编号：${result.request_id}）`
@@ -117,13 +145,18 @@ export function DevicesPage({
       setPendingAction(null);
       await loadDevices();
     } catch (err) {
+      if (contextRef.current !== actionContext) {
+        return;
+      }
       setActionError(
         err instanceof Error && err.message.trim()
           ? err.message
           : "设备操作失败，请重新登录管理端后重试",
       );
     } finally {
-      setSubmitting(false);
+      if (contextRef.current === actionContext) {
+        setSubmitting(false);
+      }
     }
   }
 

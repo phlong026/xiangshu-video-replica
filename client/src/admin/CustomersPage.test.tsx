@@ -150,8 +150,11 @@ describe("CustomersPage (ADM-02 / T33)", () => {
       "—",
       "user-1",
       "ABC-123",
+      // 与 formatDateTime 的展示契约一致：固定 Asia/Shanghai，
+      // 否则期望值随 runner 时区漂移（CI 为 UTC，本地为 +8）。
       new Date(mockCustomers[0].created_at).toLocaleString("zh-CN", {
         hour12: false,
+        timeZone: "Asia/Shanghai",
       }),
       "活跃",
       "0/2",

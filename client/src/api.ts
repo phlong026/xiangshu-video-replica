@@ -244,8 +244,8 @@ export type GenerationBatchListItem = Omit<
 > & { tasks: GenerationTaskSummary[] };
 export type GenerationBatchListPage = Omit<
   components["schemas"]["GenerationBatchListPage"],
-  "items"
-> & { items: GenerationBatchListItem[] };
+  "items" | "total"
+> & { items: GenerationBatchListItem[]; total?: number };
 export type GenerationBatchListFilters = {
   projectId?: string;
   createdByUserId?: string;
@@ -265,6 +265,7 @@ export type ProviderName =
   | "apilio"
   | "cos"
   | "deepseek"
+  | "hifly"
   | "tikhub"
   | "dashscope"
   | "douyidou";
@@ -704,7 +705,7 @@ export type StudioStats = {
 };
 
 /** 平台侧真实工作台统计（C6/C10a）：GET /api/studio/stats。
- * 只统计可见生成任务的真实计数；播放/互动等外部平台数据不在其中。 */
+ * 统计可见普通生成和口播任务；播放/互动等外部平台数据不在其中。 */
 export async function getStudioStats(): Promise<StudioStats> {
   return requestApiJson<StudioStats>("/api/studio/stats", "读取工作台统计失败");
 }
@@ -717,8 +718,9 @@ export type StudioAnalyticsDay = {
 export type StudioAnalyticsKindCount = { kind: string; completed: number };
 export type StudioAnalyticsWorkItem = {
   task_id: string;
-  batch_id: string;
-  project_id: string;
+  task_kind: "generation" | "oral";
+  batch_id: string | null;
+  project_id: string | null;
   title: string;
   creation_kind: string;
   completed_at: string;
@@ -727,13 +729,19 @@ export type StudioAnalyticsWorkItem = {
 };
 
 /** 平台侧真实成片聚合（C6 数据看板）：GET /api/studio/analytics。
- * 窗口内按北京日界分桶的成片趋势（含失败叠加）、任务类型分布与最近成片清单；
+ * 窗口内按北京日界分桶的普通生成/口播产出项，并单列去重普通生成批次；
  * 播放/互动等外部平台数据不在其中。 */
 export type StudioAnalytics = {
   range_days: number;
+  generated_at: string;
   today_completed: number;
   range_completed: number;
   total_completed: number;
+  today_generation_batches: number;
+  range_generation_batches: number;
+  total_generation_batches: number;
+  range_generation_outputs: number;
+  range_oral_outputs: number;
   daily: StudioAnalyticsDay[];
   kind_breakdown: StudioAnalyticsKindCount[];
   recent_works: StudioAnalyticsWorkItem[];
@@ -1122,45 +1130,42 @@ export async function createOralTask(
   );
 }
 
-export type OralTaskRecord = {
-  id: string;
-  status:
-    | "QUEUED"
-    | "SUBMITTING"
-    | "RUNNING"
-    | "ARCHIVING"
-    | "SUBMISSION_UNCERTAIN"
-    | "ARCHIVE_FAILED"
-    | "SUCCEEDED"
-    | "FAILED"
-    | "CANCELLED";
-  title: string;
-  mode: "TTS" | "AUDIO";
-  identity_id: string;
-  avatar_id: string;
-  voice_id: string | null;
-  script_text: string | null;
-  audio_asset_id: string | null;
-  status_message?: string | null;
-  error_message?: string | null;
-  result_asset_id: string | null;
-  duration_sec: number | null;
-  estimated_cost_fen: number;
-  billing_status?: string | null;
-  available_actions?: string[];
-  created_at: string;
-  updated_at: string;
+export type OralTaskRecord = components["schemas"]["OralTaskResponse"];
+
+export type OffsetPage<T> = {
+  items: T[];
+  total: number;
+  limit: number;
+  offset: number;
 };
 
-/** 数字人口播任务列表（GET /api/oral/tasks）。 */
-export async function listOralTasks(limit = 20): Promise<OralTaskRecord[]> {
-  const body = await requestApiJson<
-    { items?: OralTaskRecord[] } | OralTaskRecord[]
-  >(
-    `/api/oral/tasks?limit=${encodeURIComponent(String(limit))}`,
+/** 数字人口播任务分页（GET /api/oral/tasks）。 */
+export async function listOralTasksPage({
+  limit = 20,
+  offset = 0,
+}: {
+  limit?: number;
+  offset?: number;
+} = {}): Promise<components["schemas"]["OralTaskPageResponse"]> {
+  const query = new URLSearchParams({
+    limit: String(limit),
+    offset: String(offset),
+  });
+  return requestApiJson<components["schemas"]["OralTaskPageResponse"]>(
+    `/api/oral/tasks?${query.toString()}`,
     "读取口播任务失败",
   );
-  return Array.isArray(body) ? body : (body.items ?? []);
+}
+
+export async function listOralTasks(limit = 20): Promise<OralTaskRecord[]> {
+  return (await listOralTasksPage({ limit })).items;
+}
+
+export function getOralTask(taskId: string): Promise<OralTaskRecord> {
+  return requestApiJson<OralTaskRecord>(
+    `/api/oral/tasks/${encodeURIComponent(taskId)}`,
+    "读取口播任务失败",
+  );
 }
 
 function mutateOralTask(taskId: string, action: string, error: string) {
@@ -2317,7 +2322,12 @@ export async function resolveMaterials(
 
 export async function createMaterialUploadIntent(
   file: File,
-  input: { title?: string; group?: string } = {},
+  input: {
+    title?: string;
+    group?: string;
+    audioPurpose?: "oral_audio" | "voice_clone";
+    durationSeconds?: number;
+  } = {},
 ): Promise<MaterialUploadIntent> {
   const sha256 = await sha256ForUpload(file);
   return requestApiJson<MaterialUploadIntent>(
@@ -2330,7 +2340,12 @@ export async function createMaterialUploadIntent(
         content_type: materialContentTypeForFile(file),
         size_bytes: file.size,
         ...(sha256 === null ? {} : { sha256 }),
-        ...input,
+        ...(input.title ? { title: input.title } : {}),
+        ...(input.group ? { group: input.group } : {}),
+        ...(input.audioPurpose ? { audio_purpose: input.audioPurpose } : {}),
+        ...(input.durationSeconds !== undefined
+          ? { duration_seconds: input.durationSeconds }
+          : {}),
       }),
     },
   );
@@ -2811,6 +2826,8 @@ export type ScriptRewriteTask = {
     expression_style: string;
     profile_version: number;
   } | null;
+  source_asset_id: string | null;
+  source_text: string;
   status:
     | "PENDING"
     | "RUNNING"
@@ -2834,6 +2851,8 @@ export async function rewriteProjectScript(
   projectId: string,
   text: string,
   identityId?: string,
+  sourceAssetId?: string,
+  idempotencyKey: string = newControlWriteIdempotencyKey(),
 ): Promise<ScriptRewriteTask> {
   return requestApiJson<ScriptRewriteTask>(
     `/api/projects/${encodeURIComponent(projectId)}/script-rewrite`,
@@ -2843,7 +2862,8 @@ export async function rewriteProjectScript(
       body: JSON.stringify({
         text,
         ...(identityId ? { identity_id: identityId } : {}),
-        idempotency_key: newControlWriteIdempotencyKey(),
+        ...(sourceAssetId ? { source_asset_id: sourceAssetId } : {}),
+        idempotency_key: idempotencyKey,
       }),
     },
   );
@@ -2861,11 +2881,13 @@ export async function getScriptRewriteTask(
 export async function getLatestScriptRewriteTask(
   projectId: string,
   identityId?: string | null,
+  sourceAssetId?: string | null,
 ): Promise<ScriptRewriteTask | null> {
   const query = new URLSearchParams({
     identity_scope: identityId ? "identity" : "none",
   });
   if (identityId) query.set("identity_id", identityId);
+  if (sourceAssetId) query.set("source_asset_id", sourceAssetId);
   const response = await requestApi(
     `/api/projects/${encodeURIComponent(projectId)}/script-rewrite-tasks/latest?${query}`,
     { method: "GET" },
@@ -2910,11 +2932,23 @@ async function pollScriptRewriteTask(
       return task;
     }
     if (task.status === "FAILED" || task.status === "SUBMISSION_UNCERTAIN") {
-      throw new Error(task.error_message || "AI 改写失败，请重新提交。");
+      throw new ScriptRewriteTaskError(task);
     }
     await waitForPoll();
   }
   throw new Error("AI 改写仍在后台执行，请稍后返回查看。");
+}
+
+export class ScriptRewriteTaskError extends Error {
+  readonly code: string | null;
+  readonly retryable: boolean;
+
+  constructor(task: ScriptRewriteTask) {
+    super(task.error_message || "AI 改写失败，请重新提交。");
+    this.name = "ScriptRewriteTaskError";
+    this.code = task.error_code;
+    this.retryable = task.retryable;
+  }
 }
 
 export type CharacterViewType =
@@ -2955,6 +2989,18 @@ export interface SimpleLibraryEntry {
   contact_sheet_asset_id: string | null;
   generation_source: "image_provider" | "local_placeholder" | null;
   views: SimpleCharacterView[];
+}
+
+export interface SimpleLibraryPage {
+  items: SimpleLibraryEntry[];
+  next_cursor: string | null;
+  total: number;
+}
+
+export interface SimpleLibraryPageFilters {
+  limit?: number;
+  cursor?: string;
+  query?: string;
 }
 
 export type DurableImageTaskStatus =
@@ -3190,20 +3236,70 @@ async function pollCharacterSheetTask(
   throw new Error("人物生成仍在后台进行，请稍后返回人物库查看。");
 }
 
+export async function listSimpleCharacterLibraryPage(
+  filters: SimpleLibraryPageFilters = {},
+): Promise<SimpleLibraryPage> {
+  const query = new URLSearchParams();
+  if (filters.limit !== undefined) {
+    query.set("limit", String(filters.limit));
+  }
+  if (filters.cursor) {
+    query.set("cursor", filters.cursor);
+  }
+  if (filters.query) {
+    query.set("query", filters.query);
+  }
+  const suffix = query.size > 0 ? `?${query.toString()}` : "";
+  return requestApiJson<SimpleLibraryPage>(
+    `/api/simple-characters/library${suffix}`,
+    "读取人物库失败",
+  );
+}
+
 export async function listSimpleCharacterLibrary(): Promise<
   SimpleLibraryEntry[]
 > {
-  return requestApiJson<SimpleLibraryEntry[]>(
-    "/api/simple-characters/library",
-    "读取人物库失败",
-  );
+  const entries: SimpleLibraryEntry[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await listSimpleCharacterLibraryPage({ limit: 100, cursor });
+    entries.push(...page.items);
+    cursor = page.next_cursor ?? undefined;
+  } while (cursor);
+  return entries;
 }
 
 export async function listCharacterSceneLooks(
   identityId: string,
 ): Promise<SimpleSceneLook[]> {
-  return requestApiJson<SimpleSceneLook[]>(
-    `/api/simple-characters/identities/${encodeURIComponent(identityId)}/scene-looks`,
+  const items: SimpleSceneLook[] = [];
+  let offset = 0;
+  let total = Number.POSITIVE_INFINITY;
+  while (offset < total) {
+    const page = await listCharacterSceneLooksPage(identityId, {
+      limit: 100,
+      offset,
+    });
+    items.push(...page.items);
+    offset += page.items.length;
+    total = page.total;
+    if (page.items.length === 0) {
+      return items;
+    }
+  }
+  return items;
+}
+
+export async function listCharacterSceneLooksPage(
+  identityId: string,
+  { limit = 12, offset = 0 }: { limit?: number; offset?: number } = {},
+): Promise<OffsetPage<SimpleSceneLook>> {
+  const query = new URLSearchParams({
+    limit: String(limit),
+    offset: String(offset),
+  });
+  return requestApiJson<OffsetPage<SimpleSceneLook>>(
+    `/api/simple-characters/identities/${encodeURIComponent(identityId)}/scene-looks?${query.toString()}`,
     "读取人物场景造型失败",
   );
 }
@@ -3930,6 +4026,7 @@ export type ProviderTestResult = {
   status: string;
   provider: string;
   test_kind: string;
+  account_credit?: number;
 };
 
 export async function downloadDiagnosticReport(
@@ -4326,6 +4423,8 @@ async function requestApi(
   const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
   const headers = new Headers(init.headers);
   const devUserId = getDevelopmentUserId();
+  const customerOwnerAtStart =
+    internalAccessToken === null ? customerSessionOwner : null;
 
   if (init.body && !(init.body instanceof FormData)) {
     headers.set("Content-Type", "application/json");
@@ -4344,7 +4443,7 @@ async function requestApi(
       signal: controller.signal,
     });
     if (response.status === 401 && path !== "/api/auth/me") {
-      await emitWorkspaceSessionEnded(response);
+      await emitWorkspaceSessionEnded(response, customerOwnerAtStart);
     }
     return response;
   } catch (error) {
@@ -4372,7 +4471,13 @@ function emitSessionExpired() {
   window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT));
 }
 
-async function emitWorkspaceSessionEnded(response: Response) {
+async function emitWorkspaceSessionEnded(
+  response: Response,
+  ownerAtStart: symbol | null,
+) {
+  if (ownerAtStart !== null && ownerAtStart !== customerSessionOwner) {
+    return;
+  }
   if (customerSessionToken === null) {
     emitSessionExpired();
     return;
@@ -4387,6 +4492,9 @@ async function emitWorkspaceSessionEnded(response: Response) {
     // A proxy/non-JSON 401 still ends the customer session, but it must never
     // be guessed as a permanent device revocation (which would wipe the
     // long-lived device credential).
+  }
+  if (ownerAtStart !== null && ownerAtStart !== customerSessionOwner) {
+    return;
   }
   window.dispatchEvent(new Event(lifecycle));
 }
@@ -4790,6 +4898,9 @@ type CustomerRequestOptions = {
    * Omit it and the transport mints one (crypto.randomUUID) so every call
    * keeps a correlation key the server audit can be looked up by. */
   requestId?: string;
+  /** Optional stale-request gate for lifecycle events. The caller may reject
+   * an older response before it can end a newer request in the same session. */
+  shouldDispatchLifecycle?: () => boolean;
 };
 
 function isReplayed(response: Response): boolean {
@@ -4799,7 +4910,13 @@ function isReplayed(response: Response): boolean {
 async function requestCustomer(
   path: string,
   options: CustomerRequestOptions,
-): Promise<{ response: Response; requestId: string }> {
+): Promise<{
+  response: Response;
+  requestId: string;
+  sessionOwnerAtStart: symbol | null;
+  sessionTokenAtStart: string | null;
+  sessionCredentialMatchedAtStart: boolean;
+}> {
   const controller = new AbortController();
   const timeout = window.setTimeout(
     () => controller.abort(),
@@ -4809,6 +4926,13 @@ async function requestCustomer(
   // travels back inside CustomerApiError so the UI can report it on an
   // IDEMPOTENCY_CONFLICT (§13.2) and the audit trail can be located by it.
   const requestId = options.requestId ?? crypto.randomUUID();
+  const isSessionRequest = options.credential?.kind === "session";
+  const sessionOwnerAtStart = isSessionRequest ? customerSessionOwner : null;
+  const sessionTokenAtStart = isSessionRequest ? customerSessionToken : null;
+  const sessionCredentialMatchedAtStart =
+    !isSessionRequest ||
+    sessionTokenAtStart === null ||
+    options.credential?.token === sessionTokenAtStart;
   const headers = new Headers();
   headers.set("X-Request-Id", requestId);
   if (options.body !== undefined) {
@@ -4828,7 +4952,13 @@ async function requestCustomer(
         options.body === undefined ? undefined : JSON.stringify(options.body),
       signal: controller.signal,
     });
-    return { response, requestId };
+    return {
+      response,
+      requestId,
+      sessionOwnerAtStart,
+      sessionTokenAtStart,
+      sessionCredentialMatchedAtStart,
+    };
   } catch (error) {
     throw customerTransportError(error, requestId);
   } finally {
@@ -4862,11 +4992,23 @@ async function customerJson<T>(
   path: string,
   options: CustomerRequestOptions,
 ): Promise<{ response: Response; body: T }> {
-  const { response, requestId } = await requestCustomer(path, options);
+  const {
+    response,
+    requestId,
+    sessionOwnerAtStart,
+    sessionTokenAtStart,
+    sessionCredentialMatchedAtStart,
+  } = await requestCustomer(path, options);
   if (!response.ok) {
     const error = await customerErrorFromResponse(response, requestId);
     const lifecycle = customerLifecycleEvent(error.kind);
-    if (lifecycle) {
+    const belongsToCurrentSession =
+      options.credential?.kind !== "session" ||
+      (sessionCredentialMatchedAtStart &&
+        sessionOwnerAtStart === customerSessionOwner &&
+        sessionTokenAtStart === customerSessionToken);
+    const isCurrentRequest = options.shouldDispatchLifecycle?.() ?? true;
+    if (lifecycle && belongsToCurrentSession && isCurrentRequest) {
       window.dispatchEvent(new Event(lifecycle));
     }
     throw error;
@@ -4986,10 +5128,15 @@ export async function customerSwitch(
 /** Renew the session lease (POST /api/customer/sessions/heartbeat). */
 export async function customerHeartbeat(
   credential: CustomerSessionCredential,
+  options?: { shouldDispatchLifecycle?: () => boolean },
 ): Promise<CustomerHeartbeatResponse> {
   const { body } = await customerJson<CustomerHeartbeatResponse>(
     "/api/customer/sessions/heartbeat",
-    { method: "POST", credential },
+    {
+      method: "POST",
+      credential,
+      shouldDispatchLifecycle: options?.shouldDispatchLifecycle,
+    },
   );
   return body;
 }
@@ -5158,10 +5305,14 @@ export type CustomerProfile = components["schemas"]["CustomerProfileResponse"];
 
 export async function customerGetProfile(
   credential: CustomerSessionCredential,
+  options?: { shouldDispatchLifecycle?: () => boolean },
 ): Promise<CustomerProfile> {
   const { body } = await customerJson<CustomerProfile>(
     "/api/customer/profile",
-    { credential },
+    {
+      credential,
+      shouldDispatchLifecycle: options?.shouldDispatchLifecycle,
+    },
   );
   return body;
 }
@@ -5184,9 +5335,19 @@ export async function customerUpdateProfile(
 /** The customer's wallet transaction ledger (GET /api/customer/wallet/transactions). */
 export async function customerListWalletTransactions(
   credential: CustomerSessionCredential,
+  {
+    limit = 20,
+    offset = 0,
+  }: {
+    limit?: number;
+    offset?: number;
+  } = {},
 ): Promise<WalletTransactionPage> {
   const { body } = await customerJson<WalletTransactionPage>(
-    "/api/customer/wallet/transactions",
+    `/api/customer/wallet/transactions?${new URLSearchParams({
+      limit: String(limit),
+      offset: String(offset),
+    })}`,
     { credential },
   );
   return body;
@@ -5195,9 +5356,19 @@ export async function customerListWalletTransactions(
 /** The customer's own recharge orders (GET /api/customer/recharge-orders). */
 export async function customerListRechargeOrders(
   credential: CustomerSessionCredential,
+  {
+    limit = 20,
+    offset = 0,
+  }: {
+    limit?: number;
+    offset?: number;
+  } = {},
 ): Promise<RechargeOrderPage> {
   const { body } = await customerJson<RechargeOrderPage>(
-    "/api/customer/recharge-orders",
+    `/api/customer/recharge-orders?${new URLSearchParams({
+      limit: String(limit),
+      offset: String(offset),
+    })}`,
     { credential },
   );
   return body;
@@ -5348,6 +5519,10 @@ export type ViralStatisticsResponse = {
 };
 
 export type ViralImportPurpose = "copy" | "replica";
+export type ViralLinkResolution = {
+  item: ViralVideoItem;
+  importIdempotencyKey: string;
+};
 export type ViralImportTask = {
   id?: string;
   taskId?: string;
@@ -5360,6 +5535,7 @@ export type ViralImportTask = {
   error?: string | null;
   errorMessage?: string | null;
   message?: string | null;
+  retryable?: boolean;
 };
 
 /** 最近 7 天爆款列表（服务端按分类关键词聚合，带计费护栏缓存）。 */
@@ -5458,6 +5634,23 @@ export function createViralImportTask(
       body: JSON.stringify({ platform, videoId, purpose }),
     },
     VIRAL_MEDIA_TIMEOUT_MS,
+  );
+}
+
+export function resolveViralLink(
+  url: string,
+  purpose: ViralImportPurpose,
+  idempotencyKey: string,
+): Promise<ViralLinkResolution> {
+  return requestApiJson<ViralLinkResolution>(
+    "/api/viral/link-resolutions",
+    "视频链接解析失败",
+    {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
+      body: JSON.stringify({ url, purpose }),
+    },
+    60_000,
   );
 }
 

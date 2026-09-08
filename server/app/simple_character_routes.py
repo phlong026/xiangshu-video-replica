@@ -15,6 +15,7 @@ from fastapi import (
     File,
     Form,
     HTTPException,
+    Query,
     Response,
     UploadFile,
     status,
@@ -46,13 +47,14 @@ from app.simple_character import (
     PreparedSimpleCharacterPublication,
     create_simple_character,
     delete_simple_character_identity,
-    list_simple_library,
-    list_simple_scene_looks,
+    list_simple_library_page,
+    list_simple_scene_looks_page,
     prepare_simple_character_generation,
     regenerate_simple_character_contact_sheet,
     rename_simple_character_identity,
     store_simple_character_publication,
     update_simple_character_profile,
+    validate_simple_character_source,
 )
 from app.storage import (
     StorageAdapter,
@@ -123,6 +125,14 @@ class SimpleLibraryEntryResponse(BaseModel):
     views: list[SimpleCharacterViewResponse]
 
 
+class SimpleLibraryPageResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[SimpleLibraryEntryResponse]
+    next_cursor: str | None
+    total: int
+
+
 class SimpleCharacterRegenerationResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -150,6 +160,15 @@ class SimpleSceneLookResponse(BaseModel):
     generation_source: str
     views: list[SimpleCharacterViewResponse]
     published_at: str | None = None
+
+
+class SimpleSceneLookPageResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[SimpleSceneLookResponse]
+    total: int
+    limit: int
+    offset: int
 
 
 class SimpleSceneLookCreateRequest(BaseModel):
@@ -233,7 +252,7 @@ def create_simple_upload_intent(
         generate_url="/api/simple-characters/tasks/generate",
         method="POST (multipart/form-data)",
         max_size_bytes=SIMPLE_UPLOAD_MAX_BYTES,
-        allowed_content_types=["image/png", "image/jpeg"],
+        allowed_content_types=sorted(SIMPLE_UPLOAD_ALLOWED_TYPES),
         required_form_fields=["file", "display_name", "idempotency_key"],
         task_status_url_template="/api/simple-characters/task-status/{task_id}",
     )
@@ -347,13 +366,23 @@ async def enqueue_project_simple_character(
     )
 
 
-@router.get("/library", response_model=list[SimpleLibraryEntryResponse])
+@router.get("/library", response_model=SimpleLibraryPageResponse)
 def read_simple_library(
     conn: Database,
     actor: AuthenticatedUser,
-) -> list[SimpleLibraryEntryResponse]:
+    limit: Annotated[int, Query(ge=1, le=100)] = 12,
+    cursor: Annotated[str | None, Query(min_length=1, max_length=512)] = None,
+    query: Annotated[str, Query(max_length=100)] = "",
+) -> SimpleLibraryPageResponse:
     """List characters with their contact sheet and seven-view asset ids."""
-    return [
+    page = list_simple_library_page(
+        conn,
+        actor=actor,
+        limit=limit,
+        cursor=cursor,
+        query=query,
+    )
+    items = [
         SimpleLibraryEntryResponse(
             identity_id=entry.identity_id,
             persona_id=entry.persona_id,
@@ -375,20 +404,34 @@ def read_simple_library(
                 for view in entry.views
             ],
         )
-        for entry in list_simple_library(conn, actor=actor)
+        for entry in page.items
     ]
+    return SimpleLibraryPageResponse(
+        items=items,
+        next_cursor=page.next_cursor,
+        total=page.total,
+    )
 
 
 @router.get(
     "/identities/{identity_id}/scene-looks",
-    response_model=list[SimpleSceneLookResponse],
+    response_model=SimpleSceneLookPageResponse,
 )
 def read_scene_looks(
     identity_id: str,
     conn: Database,
     actor: AuthenticatedUser,
-) -> list[SimpleSceneLookResponse]:
-    return [
+    limit: Annotated[int, Query(ge=1, le=100)] = 12,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> SimpleSceneLookPageResponse:
+    page = list_simple_scene_looks_page(
+        conn,
+        actor=actor,
+        identity_id=identity_id,
+        limit=limit,
+        offset=offset,
+    )
+    items = [
         SimpleSceneLookResponse(
             identity_id=look.identity_id,
             persona_id=look.persona_id,
@@ -407,8 +450,14 @@ def read_scene_looks(
             ],
             published_at=look.published_at,
         )
-        for look in list_simple_scene_looks(conn, actor=actor, identity_id=identity_id)
+        for look in page.items
     ]
+    return SimpleSceneLookPageResponse(
+        items=items,
+        total=page.total,
+        limit=page.limit,
+        offset=page.offset,
+    )
 
 
 @router.post(
@@ -917,14 +966,16 @@ async def _enqueue_simple_character_upload(
             422, "SIMPLE_CHARACTER_IMAGE_TOO_LARGE", "人物授权图片超过 10MB 限制。"
         )
     content_type = (file.content_type or "application/octet-stream").split(";", 1)[0].lower()
-    if content_type not in SIMPLE_UPLOAD_ALLOWED_TYPES or not content:
-        raise character_error(
-            422, "SIMPLE_CHARACTER_IMAGE_INVALID", "请上传有效的 PNG 或 JPEG 图片。"
-        )
+    await run_in_threadpool(
+        validate_simple_character_source,
+        content,
+        content_type,
+        display_name,
+    )
     content_sha256 = hashlib.sha256(content).hexdigest()
     task_input_id = str(uuid4())
     extension = SIMPLE_UPLOAD_ALLOWED_TYPES[content_type]
-    input_key = f"users/task-inputs/{task_input_id}.{extension}"
+    input_key = f"users/task-inputs/{task_input_id}{extension}"
     stored = await run_in_threadpool(
         storage.put_object,
         input_key,

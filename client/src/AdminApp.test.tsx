@@ -7,7 +7,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { AdminApp } from "./AdminApp";
+import { AdminApp, adminRouteFromHash } from "./AdminApp";
 import { getAdminCsrfToken, SESSION_EXPIRED_EVENT } from "./api";
 
 const SERVICE_KEY_TEXT = ["service", "key"].join("-");
@@ -157,12 +157,16 @@ const settings = {
   },
 };
 
-function installFetch(options?: { session?: "valid" | "missing" }) {
+function installFetch(options?: {
+  session?: "valid" | "missing";
+  failedTasks?: number;
+  generationTotal?: number;
+}) {
   const sessionState = options?.session ?? "missing";
-  const fetchMock = vi.fn((url: string, options?: RequestInit) => {
+  const fetchMock = vi.fn((url: string, requestInit?: RequestInit) => {
     if (
       url.endsWith("/api/control/admin/session") &&
-      (!options?.method || options.method === "GET")
+      (!requestInit?.method || requestInit.method === "GET")
     ) {
       if (sessionState === "valid") {
         return jsonResponse(adminSession);
@@ -185,13 +189,13 @@ function installFetch(options?: { session?: "valid" | "missing" }) {
     }
     if (
       url.endsWith("/api/control/admin/password") &&
-      options?.method === "PUT"
+      requestInit?.method === "PUT"
     ) {
       return jsonResponse(undefined, 204);
     }
     if (
       url.endsWith("/api/control/admin/session") &&
-      options?.method === "DELETE"
+      requestInit?.method === "DELETE"
     ) {
       return jsonResponse(undefined, 204);
     }
@@ -211,7 +215,7 @@ function installFetch(options?: { session?: "valid" | "missing" }) {
         trend: [],
         todos: {
           pending_pairings: 0,
-          failed_tasks_7d: 0,
+          failed_tasks_7d: options?.failedTasks ?? 0,
           reconciliation_problems: 0,
           expiring_codes_7d: 0,
         },
@@ -257,7 +261,7 @@ function installFetch(options?: { session?: "valid" | "missing" }) {
             completed_at: "2026-09-02T10:01:00Z",
           },
         ],
-        total: 1,
+        total: options?.generationTotal ?? 1,
         limit: 50,
         offset: 0,
       });
@@ -265,7 +269,7 @@ function installFetch(options?: { session?: "valid" | "missing" }) {
     if (url.endsWith("/api/control/billing-reconciliation")) {
       return jsonResponse(reconciliation);
     }
-    if (url.endsWith("/api/control/settings") && !options?.method) {
+    if (url.endsWith("/api/control/settings") && !requestInit?.method) {
       return jsonResponse(settings);
     }
     if (url.endsWith("/api/control/settings/zpay")) {
@@ -294,7 +298,7 @@ function installFetch(options?: { session?: "valid" | "missing" }) {
       return jsonResponse(settings.runtime);
     }
     if (url.endsWith("/api/control/settings/queue-mode")) {
-      if (options?.method === "PATCH") {
+      if (requestInit?.method === "PATCH") {
         return jsonResponse({ fair_queue_enabled: true });
       }
       return jsonResponse({ fair_queue_enabled: false });
@@ -352,6 +356,97 @@ describe("AdminApp", () => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
     window.location.hash = "";
+  });
+
+  it("七个管理模块地址均可恢复且未知地址回总览", () => {
+    for (const tab of [
+      "overview",
+      "analytics",
+      "funds",
+      "customersMgmt",
+      "generationRecords",
+      "auditCenter",
+      "systemSettings",
+    ] as const) {
+      expect(adminRouteFromHash(`#admin/${tab}`).tab).toBe(tab);
+    }
+    expect(adminRouteFromHash("#admin/unknown").tab).toBe("overview");
+  });
+
+  it("刷新和前进后退恢复模块及失败记录筛选意图", async () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/admin#admin/generationRecords?intent=failedGenerationRecords",
+    );
+    const fetchMock = installFetch({ session: "valid" });
+    render(<AdminApp />);
+
+    expect(
+      await screen.findByRole("heading", { level: 1, name: "用户生成记录" }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("生成状态")).toHaveValue("FAILED");
+    expect(
+      fetchMock.mock.calls.some(([url]) =>
+        String(url).includes("status=FAILED"),
+      ),
+    ).toBe(true);
+
+    window.history.pushState(null, "", "/admin#admin/funds");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    expect(
+      await screen.findByRole("heading", { level: 1, name: "资金流水" }),
+    ).toBeInTheDocument();
+  });
+
+  it("同一生成记录模块切换意图时同步清空筛选和分页", async () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/admin#admin/generationRecords?intent=failedGenerationRecords",
+    );
+    const fetchMock = installFetch({
+      session: "valid",
+      generationTotal: 101,
+    });
+    render(<AdminApp />);
+
+    expect(await screen.findByLabelText("生成状态")).toHaveValue("FAILED");
+    fireEvent.change(screen.getByLabelText("生成账号"), {
+      target: { value: "customer-1" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "查询" }));
+    fireEvent.click(await screen.findByRole("button", { name: "下一页" }));
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(([url]) =>
+          String(url).includes("offset=50&username=customer-1&status=FAILED"),
+        ),
+      ).toBe(true),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "生成记录" }));
+    expect(window.location.hash).toBe("#admin/generationRecords");
+    expect(screen.getByLabelText("生成账号")).toHaveValue("");
+    expect(screen.getByLabelText("生成状态")).toHaveValue("");
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(([url]) =>
+          String(url).endsWith(
+            "/api/control/generation-records?limit=50&offset=0",
+          ),
+        ),
+      ).toBe(true),
+    );
+
+    await act(async () => window.history.back());
+    await waitFor(() => expect(window.location.hash).toContain("intent="));
+    expect(screen.getByLabelText("生成状态")).toHaveValue("FAILED");
+    await act(async () => window.history.forward());
+    await waitFor(() =>
+      expect(window.location.hash).toBe("#admin/generationRecords"),
+    );
+    expect(screen.getByLabelText("生成状态")).toHaveValue("");
   });
 
   it("starts at the account-password gate before exposing control navigation", async () => {
@@ -552,6 +647,27 @@ describe("AdminApp", () => {
     ).toBeInTheDocument();
     expect(await screen.findByText("人物置换首帧")).toBeInTheDocument();
     expect(screen.getByText("上游未回传")).toBeInTheDocument();
+  });
+
+  it("opens failed generation records from the overview todo", async () => {
+    const fetchMock = installFetch({ session: "valid", failedTasks: 1 });
+
+    render(<AdminApp />);
+    const failedTasks = await screen.findByText("失败任务待处理");
+    fireEvent.click(
+      failedTasks.closest("li")?.querySelector("button") as HTMLButtonElement,
+    );
+
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some(([url]) =>
+          String(url).includes(
+            "/api/control/generation-records?limit=50&offset=0&status=FAILED",
+          ),
+        ),
+      ).toBe(true);
+    });
+    expect(screen.getByLabelText("生成状态")).toHaveValue("FAILED");
   });
 
   it("restores a writable session after refresh without another login", async () => {

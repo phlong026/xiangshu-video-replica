@@ -57,6 +57,7 @@ OrderStatus = Literal["PENDING", "PAID", "FAILED", "CLOSED"]
 TransactionType = Literal["CHARGE", "RESERVE", "SETTLE", "RELEASE"]
 GenerationRecordType = Literal[
     "VIDEO",
+    "ORAL_VIDEO",
     "FIRST_FRAME_IMAGE",
     "CHARACTER_SHEET_IMAGE",
     "CHARACTER_VIEW_IMAGE",
@@ -168,7 +169,9 @@ class ControlGenerationRecord(BaseModel):
     record_data_status: RecordDataStatus
     charged_credits: int
     result_reference: str | None
+    provider_reference: str | None
     error_code: str | None
+    error_message: str | None
     created_at: str
     completed_at: str | None
 
@@ -683,6 +686,14 @@ def list_generation_records(
         created_from=created_from,
         created_to=created_to,
     )
+    oral_where, oral_params = _generation_record_filters(
+        record_types=("ORAL_VIDEO",),
+        username=username,
+        status=status,
+        record_type=record_type,
+        created_from=created_from,
+        created_to=created_to,
+    )
     first_where, first_params = _generation_record_filters(
         record_types=("FIRST_FRAME_IMAGE",),
         username=username,
@@ -754,9 +765,18 @@ def list_generation_records(
               + (SELECT COUNT(*) FROM source_frame_tasks task
                  JOIN users ON users.id = task.created_by_user_id
                  LEFT JOIN versions ON versions.id = task.result_version_id {source_where})
+              + (SELECT COUNT(*) FROM oral_tasks task
+                 JOIN users ON users.id = task.owner_user_id {oral_where})
                 AS total
             """,  # noqa: S608
-            (*video_params, *first_params, *sheet_params, *view_params, *source_params),
+            (
+                *video_params,
+                *first_params,
+                *sheet_params,
+                *view_params,
+                *source_params,
+                *oral_params,
+            ),
         ).fetchone()["total"]
     )
 
@@ -765,7 +785,9 @@ def list_generation_records(
         SELECT
             task.id, task.generation_mode AS operation, task.status,
             task.provider, task.model, task.actual_cost, task.estimated_cost,
-            task.result_asset_id AS result_reference, task.error_code,
+            task.result_asset_id AS result_reference, task.provider_task_id,
+            task.error_code,
+            task.error_message_redacted AS error_message,
             task.created_at, task.completed_at,
             batch.created_by_user_id AS user_id,
             users.username, users.display_name,
@@ -813,7 +835,9 @@ def list_generation_records(
                 result_reference=(
                     None if row["result_reference"] is None else str(row["result_reference"])
                 ),
+                provider_reference=_optional_text(row["provider_task_id"]),
                 error_code=None if row["error_code"] is None else str(row["error_code"]),
+                error_message=_optional_text(row["error_message"]),
                 created_at=str(row["created_at"]),
                 completed_at=(None if row["completed_at"] is None else str(row["completed_at"])),
             )
@@ -935,7 +959,9 @@ def list_generation_records(
                 record_data_status="VALID",
                 charged_credits=0,
                 result_reference=_optional_text(row["provider_task_id"]),
+                provider_reference=_optional_text(row["provider_task_id"]),
                 error_code=_optional_text(row["error_code"]),
+                error_message=_optional_text(row["error_message_redacted"]),
                 created_at=str(row["created_at"]),
                 completed_at=_optional_text(row["completed_at"]),
             )
@@ -1016,9 +1042,77 @@ def list_generation_records(
                 record_data_status=payload_status,
                 charged_credits=0,
                 result_reference=_optional_text(row["result_version_id"]),
+                provider_reference=None,
                 error_code=_optional_text(row["error_code"]),
+                error_message=_optional_text(row["error_message_redacted"]),
                 created_at=str(row["created_at"]),
                 completed_at=_optional_text(row["completed_at"]),
+            )
+        )
+
+    oral_rows = conn.execute(
+        f"""
+        SELECT
+            task.id, task.mode AS operation, task.status,
+            task.vendor_task_id, task.result_asset_id, task.error_message,
+            task.created_at, task.updated_at,
+            task.owner_user_id AS user_id,
+            users.username, users.display_name,
+            COALESCE((
+                SELECT SUM(-tx.reserved_delta)
+                FROM wallet_transactions AS tx
+                WHERE tx.oral_task_id = task.id AND tx.type = 'SETTLE'
+            ), 0) AS charged_credits
+        FROM oral_tasks AS task
+        JOIN users ON users.id = task.owner_user_id
+        {oral_where}
+        ORDER BY task.created_at DESC, task.id DESC
+        LIMIT %s
+        """,  # noqa: S608
+        (*oral_params, scan_limit),
+    ).fetchall()
+    terminal_oral_statuses = {
+        "SUBMISSION_UNCERTAIN",
+        "ARCHIVE_FAILED",
+        "SUCCEEDED",
+        "FAILED",
+        "CANCELLED",
+    }
+    oral_error_codes = {
+        "SUBMISSION_UNCERTAIN": "ORAL_SUBMISSION_UNCERTAIN",
+        "ARCHIVE_FAILED": "ORAL_ARCHIVE_FAILED",
+        "FAILED": "ORAL_TASK_FAILED",
+    }
+    for row in oral_rows:
+        oral_status = str(row["status"])
+        records.append(
+            ControlGenerationRecord(
+                record_id=str(row["id"]),
+                record_type="ORAL_VIDEO",
+                operation=str(row["operation"]),
+                user_id=str(row["user_id"]),
+                username=str(row["username"]),
+                display_name=str(row["display_name"]),
+                project_id=None,
+                project_name=None,
+                status=oral_status,
+                provider="hifly",
+                model=None,
+                provider_cost=None,
+                provider_cost_status="UNAVAILABLE",
+                record_data_status="VALID",
+                charged_credits=int(row["charged_credits"]),
+                result_reference=_optional_text(row["result_asset_id"]),
+                provider_reference=_optional_text(row["vendor_task_id"]),
+                error_code=oral_error_codes.get(oral_status),
+                error_message=_oral_admin_error_message(
+                    status=oral_status,
+                    raw_message=_optional_text(row["error_message"]),
+                ),
+                created_at=str(row["created_at"]),
+                completed_at=(
+                    str(row["updated_at"]) if oral_status in terminal_oral_statuses else None
+                ),
             )
         )
 
@@ -1135,6 +1229,7 @@ def update_control_provider_settings(
 @router.post(
     "/settings/providers/{provider}/connection-test",
     response_model=ProviderTestResult,
+    response_model_exclude_none=True,
 )
 def test_control_provider_connection(
     provider: str,
@@ -1493,6 +1588,17 @@ def _generation_record_filters(
     return (f"WHERE {' AND '.join(clauses)}" if clauses else "", tuple(params))
 
 
+def _oral_admin_error_message(*, status: str, raw_message: str | None) -> str | None:
+    messages = {
+        "SUBMISSION_UNCERTAIN": "数字人服务提交结果未知，请人工核对供应商任务。",
+        "ARCHIVE_FAILED": "口播成片归档失败，请核对存储状态。",
+        "FAILED": "数字人口播生成失败，请核对供应商任务和服务配置。",
+    }
+    if message := messages.get(status):
+        return message
+    return "口播任务处理异常，请核对任务状态。" if raw_message else None
+
+
 def _image_generation_record(
     *,
     row: sqlite3.Row,
@@ -1524,7 +1630,9 @@ def _image_generation_record(
         record_data_status=record_data_status,
         charged_credits=0,
         result_reference=result_reference,
+        provider_reference=None,
         error_code=_optional_text(row["error_code"]),
+        error_message=_optional_text(row["error_message_redacted"]),
         created_at=str(row["created_at"]),
         completed_at=_optional_text(row["completed_at"]),
     )

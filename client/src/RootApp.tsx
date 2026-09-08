@@ -140,6 +140,7 @@ function CustomerSessionShell({
           user={session.user}
           sessionRuntime={session.sessionRuntime}
           onManualHeartbeat={() => void session.sendHeartbeatNow()}
+          onLogout={session.logout}
           store={store}
           onSessionExpired={session.restartAfterExpiry}
         />

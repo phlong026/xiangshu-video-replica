@@ -263,6 +263,7 @@ def seed_data(conn: sqlite3.Connection) -> None:
             ("employee_1", "employee_1", "Employee One", "employee"),
             ("employee_2", "employee_2", "Employee Two", "employee"),
             ("admin_1", "admin_1", "Admin One", "admin"),
+            ("auditor_1", "auditor_1", "Auditor One", "auditor"),
         ],
     )
     conn.executemany(
@@ -442,6 +443,51 @@ def test_first_frame_task_is_idempotent_and_worker_publishes_result(
     )
     assert latest.status_code == 200
     assert latest.json()["id"] == task.json()["result_version_id"]
+
+
+def test_first_frame_write_role_gate_and_customer_access(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    prepare_inputs(client)
+    request = {
+        "model": "nano-banana-pro-2k",
+        "quantity": 1,
+        "idempotency_key": "first-frame-role-gate",
+    }
+
+    auditor_generate = client.post(
+        "/api/projects/project_owned/first-frame-tasks",
+        json=request,
+        headers=headers("auditor_1"),
+    )
+    auditor_confirm = client.post(
+        "/api/projects/project_owned/first-frames/confirm",
+        json={"first_frame_asset_id": "missing-candidate"},
+        headers=headers("auditor_1"),
+    )
+
+    assert auditor_generate.status_code == 403
+    assert auditor_generate.json()["detail"]["code"] == "ROLE_FORBIDDEN"
+    assert auditor_confirm.status_code == 403
+    assert auditor_confirm.json()["detail"]["code"] == "ROLE_FORBIDDEN"
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM first_frame_tasks").fetchone()[0] == 0
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM versions WHERE kind = 'first_frame_selection'"
+            ).fetchone()[0]
+            == 0
+        )
+        conn.execute("UPDATE users SET role = 'customer' WHERE id = 'employee_1'")
+        conn.commit()
+
+    customer_generate = client.post(
+        "/api/projects/project_owned/first-frame-tasks",
+        json=request,
+        headers=headers("employee_1"),
+    )
+    assert customer_generate.status_code == 202, customer_generate.text
 
 
 def test_first_frame_task_exposes_real_worker_stage(

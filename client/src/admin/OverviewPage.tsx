@@ -141,7 +141,7 @@ export function OverviewPage({
       label: "失败任务待处理",
       count: todos.failed_tasks_7d,
       tone: "danger",
-      tab: "generationRecords",
+      tab: "failedGenerationRecords",
     },
     {
       key: "recon",

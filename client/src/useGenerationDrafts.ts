@@ -25,6 +25,12 @@ import {
   saveGenerationPrompt,
   waitForScriptRewriteTask,
 } from "./api";
+import {
+  clearScriptRewriteIdempotencyKey,
+  type ScriptRewriteScope,
+  scriptRewriteIdempotencyKey,
+  shouldClearScriptRewriteIdempotencyKey,
+} from "./studio/scriptRewrite";
 
 export type ScriptSource = "original" | "custom";
 
@@ -69,6 +75,7 @@ type UseGenerationDraftsInput = {
   readOnly: boolean;
   referenceSelectionId: string | null;
   shotCardVersionId: string;
+  sourceAssetId: string | null;
 };
 
 export function useGenerationDrafts({
@@ -83,6 +90,7 @@ export function useGenerationDrafts({
   readOnly,
   referenceSelectionId,
   shotCardVersionId,
+  sourceAssetId,
 }: UseGenerationDraftsInput) {
   const [scriptVersion, setScriptVersion] = useState<GenerationVersion | null>(
     null,
@@ -122,6 +130,18 @@ export function useGenerationDrafts({
   const actionGenerationRef = useRef(0);
   const identityIdRef = useRef(identityId);
   identityIdRef.current = identityId;
+  const rewriteContext = JSON.stringify([
+    currentUserId,
+    projectId,
+    sourceAssetId,
+    identityId ?? null,
+    scriptText,
+  ]);
+  const rewriteContextRef = useRef(rewriteContext);
+  if (rewriteContextRef.current !== rewriteContext) {
+    rewriteContextRef.current = rewriteContext;
+    actionGenerationRef.current += 1;
+  }
   const isCreatingBatchRef = useRef(false);
   const idempotencyRecordRef = useRef<IdempotencyRecord | null>(null);
 
@@ -144,7 +164,7 @@ export function useGenerationDrafts({
       getLatestScriptVersion(projectId),
       getLatestGenerationPrompt(projectId),
       getGenerationRuntimeLimits(),
-      getLatestScriptRewriteTask(projectId, identityId),
+      getLatestScriptRewriteTask(projectId, identityId, sourceAssetId),
     ])
       .then(([scriptState, promptState, runtime, latestRewriteTask]) => {
         if (!active || loadGeneration !== loadGenerationRef.current) {
@@ -154,12 +174,12 @@ export function useGenerationDrafts({
         setQuantityInput(String(runtime.min_quantity));
 
         const restoredScript = scriptState.version;
+        const restoredScriptText =
+          readPayloadString(restoredScript, "full_text") ?? originalScript;
         setScriptVersion(restoredScript);
         const restoredSource = readScriptSource(restoredScript);
         setScriptSource(restoredSource);
-        setScriptText(
-          readPayloadString(restoredScript, "full_text") ?? originalScript,
-        );
+        setScriptText(restoredScriptText);
         setScriptStale(
           scriptState.stale ||
             (restoredScript !== null &&
@@ -207,10 +227,26 @@ export function useGenerationDrafts({
 
         if (
           latestRewriteTask &&
-          rewriteTaskMatchesIdentity(latestRewriteTask, identityId) &&
+          rewriteTaskMatchesScope(
+            latestRewriteTask,
+            identityId,
+            sourceAssetId,
+            restoredScriptText,
+          ) &&
           shouldRecoverScriptRewrite(latestRewriteTask, restoredScript)
         ) {
+          const recoveredScope: ScriptRewriteScope = {
+            accountId: currentUserId,
+            projectId,
+            sourceAssetId: sourceAssetId ?? "",
+            identityId: identityId ?? "",
+            scriptId: restoredScript?.id ?? "unsaved",
+            scriptVersion: restoredScript?.version_number ?? 0,
+            text: restoredScriptText,
+          };
+          const recoveredKey = scriptRewriteIdempotencyKey(recoveredScope);
           if (latestRewriteTask.status === "SUCCEEDED") {
+            clearScriptRewriteIdempotencyKey(recoveredScope, recoveredKey);
             applyRecoveredScriptRewrite(
               latestRewriteTask,
               identityId,
@@ -223,6 +259,12 @@ export function useGenerationDrafts({
             latestRewriteTask.status === "FAILED" ||
             latestRewriteTask.status === "SUBMISSION_UNCERTAIN"
           ) {
+            if (
+              latestRewriteTask.status === "FAILED" &&
+              !latestRewriteTask.retryable
+            ) {
+              clearScriptRewriteIdempotencyKey(recoveredScope, recoveredKey);
+            }
             setError(
               latestRewriteTask.error_message ||
                 (latestRewriteTask.status === "SUBMISSION_UNCERTAIN"
@@ -236,8 +278,17 @@ export function useGenerationDrafts({
                 if (
                   active &&
                   loadGeneration === loadGenerationRef.current &&
-                  rewriteTaskMatchesIdentity(completedTask, identityId)
+                  rewriteTaskMatchesScope(
+                    completedTask,
+                    identityId,
+                    sourceAssetId,
+                    restoredScriptText,
+                  )
                 ) {
+                  clearScriptRewriteIdempotencyKey(
+                    recoveredScope,
+                    recoveredKey,
+                  );
                   applyRecoveredScriptRewrite(
                     completedTask,
                     identityId,
@@ -250,6 +301,12 @@ export function useGenerationDrafts({
               })
               .catch((requestError) => {
                 if (active && loadGeneration === loadGenerationRef.current) {
+                  if (shouldClearScriptRewriteIdempotencyKey(requestError)) {
+                    clearScriptRewriteIdempotencyKey(
+                      recoveredScope,
+                      recoveredKey,
+                    );
+                  }
                   setError(errorMessage(requestError, "AI 改写失败。"));
                   setMessage("");
                 }
@@ -285,6 +342,7 @@ export function useGenerationDrafts({
     projectId,
     referenceSelectionId,
     shotCardVersionId,
+    sourceAssetId,
   ]);
 
   useEffect(() => {
@@ -486,17 +544,39 @@ export function useGenerationDrafts({
     setBusyAction("rewrite");
     setError("");
     setMessage("");
+    const requestScope: ScriptRewriteScope = {
+      accountId: currentUserId,
+      projectId,
+      sourceAssetId: sourceAssetId ?? "",
+      identityId: identityId ?? "",
+      scriptId: scriptVersion?.id ?? "unsaved",
+      scriptVersion: scriptVersion?.version_number ?? 0,
+      text,
+    };
+    const idempotencyKey = scriptRewriteIdempotencyKey(requestScope);
     try {
       const task = identityId
-        ? await rewriteProjectScript(projectId, text, identityId)
-        : await rewriteProjectScript(projectId, text);
+        ? await rewriteProjectScript(
+            projectId,
+            text,
+            identityId,
+            sourceAssetId ?? undefined,
+            idempotencyKey,
+          )
+        : await rewriteProjectScript(
+            projectId,
+            text,
+            undefined,
+            sourceAssetId ?? undefined,
+            idempotencyKey,
+          );
       if (
         actionGeneration !== actionGenerationRef.current ||
         !sameIdentity(identityIdRef.current, identityId)
       ) {
         return;
       }
-      if (!rewriteTaskMatchesIdentity(task, identityId)) {
+      if (!rewriteTaskMatchesScope(task, identityId, sourceAssetId, text)) {
         setError("改写任务的人物与当前选择不一致，已停止回填。");
         return;
       }
@@ -508,10 +588,11 @@ export function useGenerationDrafts({
       if (
         actionGeneration !== actionGenerationRef.current ||
         !sameIdentity(identityIdRef.current, identityId) ||
-        !rewriteTaskMatchesIdentity(completedTask, identityId)
+        !rewriteTaskMatchesScope(completedTask, identityId, sourceAssetId, text)
       ) {
         return;
       }
+      clearScriptRewriteIdempotencyKey(requestScope, idempotencyKey);
       applyRecoveredScriptRewrite(
         completedTask,
         identityId,
@@ -521,6 +602,9 @@ export function useGenerationDrafts({
         setError,
       );
     } catch (requestError) {
+      if (shouldClearScriptRewriteIdempotencyKey(requestError)) {
+        clearScriptRewriteIdempotencyKey(requestScope, idempotencyKey);
+      }
       if (
         actionGeneration === actionGenerationRef.current &&
         sameIdentity(identityIdRef.current, identityId)
@@ -1095,6 +1179,19 @@ function rewriteTaskMatchesIdentity(
   identityId: string | null | undefined,
 ): boolean {
   return sameIdentity(task.identity_id, identityId);
+}
+
+function rewriteTaskMatchesScope(
+  task: ScriptRewriteTask,
+  identityId: string | null | undefined,
+  sourceAssetId: string | null | undefined,
+  sourceText: string,
+): boolean {
+  return (
+    rewriteTaskMatchesIdentity(task, identityId) &&
+    (task.source_asset_id ?? null) === (sourceAssetId ?? null) &&
+    task.source_text === sourceText
+  );
 }
 
 function sameIdentity(

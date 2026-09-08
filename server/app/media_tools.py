@@ -1,4 +1,4 @@
-"""本机媒体工具：ffmpeg/ffprobe 定位与音轨抽取。
+"""本机媒体工具：ffmpeg/ffprobe 定位、图片校验与音轨抽取。
 
 客户版桌面部署把精简构建的 ffmpeg/ffprobe 随 NSIS 安装包分发到
 ``resources/ffmpeg/``（服务端启动脚本负责设置 ``VIDEO_REPLICA_FFMPEG_DIR``）。
@@ -9,6 +9,7 @@ fail-closed，不静默降级到其它解析通道。
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -16,6 +17,9 @@ from pathlib import Path
 
 FFMPEG_DIR_ENV = "VIDEO_REPLICA_FFMPEG_DIR"
 FFMPEG_TIMEOUT_SECONDS = 300
+IMAGE_DECODE_TIMEOUT_SECONDS = 15
+
+logger = logging.getLogger(__name__)
 
 
 class MediaToolUnavailable(RuntimeError):
@@ -84,6 +88,41 @@ def probe_duration_seconds(ffprobe_path: str, media_path: Path) -> float | None:
         return float(duration)
     except (subprocess.SubprocessError, KeyError, ValueError, OSError):
         return None
+
+
+def validate_image_decodable(ffmpeg_path: str, content: bytes) -> None:
+    """Decode one image frame in an isolated ffmpeg process without writing output."""
+    command = [
+        ffmpeg_path,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-xerror",
+        "-threads",
+        "1",
+        "-i",
+        "pipe:0",
+        "-map",
+        "0:v:0",
+        "-frames:v",
+        "1",
+        "-f",
+        "null",
+        "-",
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            input=content,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=IMAGE_DECODE_TIMEOUT_SECONDS,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        logger.warning("ffmpeg image validation failed to run: %s", type(exc).__name__)
+        raise MediaToolFailed("ffmpeg 图片解码校验执行失败") from exc
+    if completed.returncode != 0:
+        raise MediaToolFailed("ffmpeg 无法解码图片")
 
 
 def _run(command: list[str]) -> None:

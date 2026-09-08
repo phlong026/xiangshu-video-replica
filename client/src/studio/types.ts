@@ -77,6 +77,7 @@ export type StudioPerson = {
   expression: string;
   sheetId?: string;
   photoIds: string[];
+  photoCount?: number;
   avatars: StudioAvatar[];
   voices: StudioVoice[];
 };
@@ -162,6 +163,12 @@ export type StudioData = {
    * 加载失败为 null，看板页回退"尚未就绪"空态。 */
   analytics7: StudioAnalytics | null;
   analytics30: StudioAnalytics | null;
+  pagination?: {
+    people?: { nextCursor: string | null; total: number };
+    scenes?: Record<string, { loaded: number; total: number }>;
+    generationTasks?: { nextCursor: string | null; total: number };
+    oralTasks?: { loaded: number; total: number };
+  };
 };
 export type StudioScript = {
   id: string;
@@ -172,7 +179,7 @@ export type StudioScript = {
   confirmed: boolean;
   ipId?: string;
   sourceProjectId?: string;
-  sourceKind?: string;
+  sourceKind?: "viral" | "project" | "link" | "upload";
 };
 export type StudioDraft = {
   id: string;
@@ -219,6 +226,7 @@ export type PickerKind =
   | "avatar"
   | "voice"
   | "audio"
+  | "voice-audio"
   | "avatar-photo";
 export type StudioPublishDraft = {
   id: string;
@@ -235,6 +243,8 @@ export type StudioState = {
   draft: StudioDraft;
   selectedVideoId?: string;
   selectedTaskId?: string;
+  selectedTaskKind?: "generation_batch" | "oral_task";
+  selectedTaskBackendId?: string;
   selectedAssetId?: string;
   returnTo?: StudioPage;
   selectedPersonId?: string;

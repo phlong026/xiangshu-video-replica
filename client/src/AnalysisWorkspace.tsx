@@ -522,6 +522,7 @@ export function AnalysisWorkspace({
     readOnly: draftsReadOnly,
     referenceSelectionId: characterReferenceSelection?.id ?? null,
     shotCardVersionId,
+    sourceAssetId: project.reference_asset_id,
   });
 
   const readiness = useWorkspaceReadiness({

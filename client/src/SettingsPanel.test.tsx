@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { SESSION_EXPIRED_EVENT } from "./api";
 import { SettingsPanel } from "./SettingsPanel";
 
 function jsonResponse(payload: unknown, status = 200) {
@@ -25,6 +26,11 @@ const settingsSnapshot = {
       config: { bucket: "bucket-1", region: "ap-shanghai" },
     },
     deepseek: { provider: "deepseek", configured: false, config: {} },
+    hifly: {
+      provider: "hifly",
+      configured: true,
+      config: {},
+    },
     tikhub: { provider: "tikhub", configured: false, config: {} },
   },
   runtime: {
@@ -34,7 +40,16 @@ const settingsSnapshot = {
   },
 };
 
-function installFetch(options?: { providerSave?: "ok" | "fail" }) {
+function installFetch(options?: {
+  providerSave?: "ok" | "fail";
+  hiflyCheck?:
+    | "ok"
+    | "auth"
+    | "timeout"
+    | "missing-credit"
+    | "unsafe-credit"
+    | "infinite-credit";
+}) {
   const fetchMock = vi.fn((url: string, init?: RequestInit) => {
     if (url.endsWith("/api/admin/settings")) {
       return jsonResponse(settingsSnapshot);
@@ -60,6 +75,72 @@ function installFetch(options?: { providerSave?: "ok" | "fail" }) {
         status: "ok",
         provider: "metaso",
         test_kind: "metaso_h3",
+      });
+    }
+    if (
+      url.endsWith("/api/admin/settings/providers/hifly/connection-test") &&
+      init?.method === "POST"
+    ) {
+      if (options?.hiflyCheck === "auth") {
+        return jsonResponse(
+          {
+            detail: {
+              code: "HIFLY_AUTH_FAILED",
+              message: "Hifly 凭据认证失败；未创建收费任务。",
+            },
+          },
+          422,
+        );
+      }
+      if (options?.hiflyCheck === "timeout") {
+        return jsonResponse(
+          {
+            detail: {
+              code: "HIFLY_ACCOUNT_CHECK_TIMEOUT",
+              message: "Hifly 只读账户检查超时；未创建收费任务。",
+            },
+          },
+          504,
+        );
+      }
+      if (options?.hiflyCheck === "missing-credit") {
+        return jsonResponse({
+          status: "ok",
+          provider: "hifly",
+          test_kind: "account_credit",
+        });
+      }
+      if (options?.hiflyCheck === "unsafe-credit") {
+        return jsonResponse({
+          status: "ok",
+          provider: "hifly",
+          test_kind: "account_credit",
+          account_credit: Number.MAX_SAFE_INTEGER + 1,
+        });
+      }
+      if (options?.hiflyCheck === "infinite-credit") {
+        return jsonResponse({
+          status: "ok",
+          provider: "hifly",
+          test_kind: "account_credit",
+          account_credit: Number.POSITIVE_INFINITY,
+        });
+      }
+      return jsonResponse({
+        status: "ok",
+        provider: "hifly",
+        test_kind: "account_credit",
+        account_credit: 321,
+      });
+    }
+    if (
+      url.endsWith("/api/admin/settings/providers/hifly") &&
+      init?.method === "PUT"
+    ) {
+      return jsonResponse({
+        provider: "hifly",
+        configured: true,
+        config: {},
       });
     }
     throw new Error(`unexpected request: ${url} ${init?.method ?? "GET"}`);
@@ -101,6 +182,17 @@ describe("SettingsPanel", () => {
 
     const cos = providerCard(container, "cos");
     expect(cos.getByLabelText("Bucket")).toHaveValue("bucket-1");
+
+    const hifly = providerCard(container, "hifly");
+    expect(hifly.getByText("数字人口播")).toBeInTheDocument();
+    expect(
+      hifly.getByText("Hifly · 只读检查账户余额，不会创建收费任务"),
+    ).toBeInTheDocument();
+    expect(hifly.getByLabelText("API Key")).toHaveValue("");
+    expect(hifly.getByLabelText("API Key")).toHaveAttribute(
+      "placeholder",
+      "已保存，留空不修改",
+    );
 
     expect(screen.getByText("运行设置")).toBeInTheDocument();
     expect(screen.getByLabelText("单次生成数量上限")).toHaveValue(5);
@@ -183,5 +275,146 @@ describe("SettingsPanel", () => {
           ) && init?.method === "POST",
       ),
     ).toBe(true);
+  });
+
+  it("shows the Hifly read-only account result without starting a paid task", async () => {
+    const fetchMock = installFetch();
+    const { container } = render(<SettingsPanel />);
+
+    await screen.findByText("数字人口播");
+    const hifly = providerCard(container, "hifly");
+    fireEvent.click(hifly.getByRole("button", { name: "只读检查" }));
+
+    expect(
+      await hifly.findByText("只读账户检查通过，余额 321 积分；未创建收费任务"),
+    ).toBeInTheDocument();
+    expect(
+      fetchMock.mock.calls.some(
+        ([url, init]) =>
+          String(url).endsWith(
+            "/api/admin/settings/providers/hifly/connection-test",
+          ) && init?.method === "POST",
+      ),
+    ).toBe(true);
+    expect(
+      fetchMock.mock.calls.some(([url]) =>
+        String(url).includes("/api/oral/tasks"),
+      ),
+    ).toBe(false);
+  });
+
+  it("saves the Hifly token through the encrypted provider settings route", async () => {
+    const fetchMock = installFetch();
+    const { container } = render(<SettingsPanel />);
+
+    await screen.findByText("数字人口播");
+    const hifly = providerCard(container, "hifly");
+    fireEvent.change(hifly.getByLabelText("API Key"), {
+      target: { value: DUMMY_KEY },
+    });
+    fireEvent.click(hifly.getByRole("button", { name: "保存" }));
+
+    expect(await hifly.findByText("已保存")).toBeInTheDocument();
+    expect(hifly.getByLabelText("API Key")).toHaveValue("");
+    const call = fetchMock.mock.calls.find(
+      ([url, init]) =>
+        String(url).endsWith("/api/admin/settings/providers/hifly") &&
+        init?.method === "PUT",
+    );
+    expect(call?.[1]?.body).toBe(
+      JSON.stringify({ config: { api_key: DUMMY_KEY } }),
+    );
+  });
+
+  it.each([
+    ["auth", "Hifly 凭据认证失败；未创建收费任务。"],
+    ["timeout", "Hifly 只读账户检查超时；未创建收费任务。"],
+  ] as const)(
+    "surfaces the Hifly %s result without claiming success",
+    async (kind, message) => {
+      installFetch({ hiflyCheck: kind });
+      const { container } = render(<SettingsPanel />);
+
+      await screen.findByText("数字人口播");
+      const hifly = providerCard(container, "hifly");
+      fireEvent.click(hifly.getByRole("button", { name: "只读检查" }));
+
+      expect(await hifly.findByRole("alert")).toHaveTextContent(message);
+      expect(hifly.queryByText(/检查通过/)).toBeNull();
+    },
+  );
+
+  it.each(["missing-credit", "unsafe-credit", "infinite-credit"] as const)(
+    "rejects a Hifly %s response without claiming success",
+    async (kind) => {
+      installFetch({ hiflyCheck: kind });
+      const { container } = render(<SettingsPanel />);
+
+      await screen.findByText("数字人口播");
+      const hifly = providerCard(container, "hifly");
+      fireEvent.click(hifly.getByRole("button", { name: "只读检查" }));
+
+      expect(await hifly.findByRole("alert")).toHaveTextContent(
+        "只读账户检查响应异常，请稍后重试。",
+      );
+      expect(hifly.queryByText(/检查通过/)).toBeNull();
+      expect(hifly.queryByText(/连接测试通过/)).toBeNull();
+    },
+  );
+
+  it.each([
+    ["workspace", "/api/admin/settings"],
+    ["control", "/api/control/settings"],
+  ] as const)(
+    "keeps the %s settings session active after Hifly rejects its own credential",
+    async (source, basePath) => {
+      const onSessionExpired = vi.fn();
+      window.addEventListener(SESSION_EXPIRED_EVENT, onSessionExpired);
+      const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+        if (url.endsWith(basePath) && !init?.method) {
+          return jsonResponse(settingsSnapshot);
+        }
+        if (
+          url.endsWith(`${basePath}/providers/hifly/connection-test`) &&
+          init?.method === "POST"
+        ) {
+          return jsonResponse(
+            {
+              detail: {
+                code: "HIFLY_AUTH_FAILED",
+                message: "Hifly 凭据认证失败；未创建收费任务。",
+              },
+            },
+            422,
+          );
+        }
+        throw new Error(`unexpected request: ${url} ${init?.method ?? "GET"}`);
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const { container } = render(<SettingsPanel source={source} />);
+      await screen.findByText("数字人口播");
+      const hifly = providerCard(container, "hifly");
+      fireEvent.click(hifly.getByRole("button", { name: "只读检查" }));
+
+      expect(await hifly.findByRole("alert")).toHaveTextContent(
+        "Hifly 凭据认证失败；未创建收费任务。",
+      );
+      expect(onSessionExpired).not.toHaveBeenCalled();
+      expect(hifly.getByRole("button", { name: "只读检查" })).toBeEnabled();
+      expect(hifly.getByLabelText("API Key")).toBeEnabled();
+      window.removeEventListener(SESSION_EXPIRED_EVENT, onSessionExpired);
+    },
+  );
+
+  it("keeps provider settings and checks disabled for read-only operators", async () => {
+    installFetch();
+    const { container } = render(<SettingsPanel readOnly />);
+
+    await screen.findByText("数字人口播");
+    const hifly = providerCard(container, "hifly");
+    expect(hifly.getByLabelText("API Key")).toBeDisabled();
+    expect(hifly.getByRole("button", { name: "保存" })).toBeDisabled();
+    expect(hifly.getByRole("button", { name: "只读检查" })).toBeDisabled();
   });
 });

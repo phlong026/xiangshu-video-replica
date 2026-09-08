@@ -19,6 +19,7 @@ from urllib.request import Request, urlopen
 from uuid import uuid4
 
 from fastapi import HTTPException
+from psycopg import errors as psycopg_errors
 from pydantic import BaseModel, Field
 
 from app.auth import CurrentUser
@@ -58,6 +59,7 @@ class ScriptRewriteRequest(BaseModel):
 
     text: str = Field(min_length=1, max_length=20000)
     identity_id: str | None = Field(default=None, min_length=1, max_length=128)
+    source_asset_id: str | None = Field(default=None, min_length=1, max_length=128)
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=200)
 
 
@@ -87,6 +89,13 @@ class PreparedScriptRewrite:
     ip_profile_snapshot: dict[str, object] | None
 
 
+@dataclass(frozen=True)
+class ValidatedScriptRewriteRequest:
+    source_text: str
+    source_asset_id: str | None
+    ip_profile_snapshot: dict[str, object] | None
+
+
 def validate_script_rewrite_text(source_text: str) -> str:
     text = source_text.strip()
     if text:
@@ -106,6 +115,111 @@ def _canonical_json(value: object) -> str:
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
+    )
+
+
+def _script_rewrite_request_hash(payload: dict[str, object]) -> str:
+    return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+
+
+def require_current_script_rewrite_source(
+    conn: BusinessConnection,
+    *,
+    actor: CurrentUser,
+    project_id: str,
+    source_asset_id: str,
+) -> None:
+    row = conn.execute(
+        """
+        SELECT assets.id
+        FROM assets
+        JOIN projects ON projects.id = assets.project_id
+        WHERE assets.id = %s
+          AND assets.project_id = %s
+          AND projects.owner_user_id = %s
+          AND assets.id = (
+              SELECT candidate.id
+              FROM assets AS candidate
+              WHERE candidate.project_id = projects.id
+                AND (
+                    candidate.kind = 'reference_video'
+                    OR (
+                        candidate.kind = 'video'
+                        AND candidate.storage_uri LIKE
+                            '%%/projects/' || projects.id || '/uploads/%%'
+                    )
+                )
+              ORDER BY candidate.created_at DESC, candidate.id DESC
+              LIMIT 1
+          )
+        """,
+        (source_asset_id, project_id, actor.id),
+    ).fetchone()
+    if row is None:
+        raise _script_rewrite_error(
+            404,
+            "SCRIPT_REWRITE_SOURCE_NOT_FOUND",
+            "当前来源素材不存在或已被替换，请重新选择来源。",
+        )
+
+
+def validated_script_rewrite_request(row: sqlite3.Row) -> ValidatedScriptRewriteRequest:
+    try:
+        payload = json.loads(str(row["request_json"]))
+        if not isinstance(payload, dict):
+            raise ValueError("request payload must be an object")
+        source_text = payload.get("text")
+        if (
+            not isinstance(source_text, str)
+            or not source_text.strip()
+            or source_text != source_text.strip()
+            or len(source_text) > 20_000
+        ):
+            raise ValueError("request text is invalid")
+        source_asset_id = payload.get("source_asset_id")
+        if source_asset_id is not None and (
+            not isinstance(source_asset_id, str)
+            or not source_asset_id
+            or len(source_asset_id) > 128
+        ):
+            raise ValueError("request source is invalid")
+        stored_identity_id = None if row["identity_id"] is None else str(row["identity_id"])
+        if payload.get("identity_id") != stored_identity_id:
+            if stored_identity_id is not None or "identity_id" in payload:
+                raise ValueError("request identity mismatch")
+        snapshot_raw = row["ip_profile_snapshot_json"]
+        if stored_identity_id is None:
+            if (
+                "ip_profile_snapshot" in payload
+                or snapshot_raw is not None
+                or row["ip_profile_hash"] is not None
+            ):
+                raise ValueError("unexpected request profile")
+            snapshot = None
+        else:
+            snapshot = _validated_ip_profile_snapshot(payload.get("ip_profile_snapshot"))
+            stored_snapshot = _validated_ip_profile_snapshot(json.loads(str(snapshot_raw)))
+            if snapshot != stored_snapshot:
+                raise ValueError("request profile mismatch")
+            profile_hash = hashlib.sha256(_canonical_json(snapshot).encode("utf-8")).hexdigest()
+            if profile_hash != str(row["ip_profile_hash"]):
+                raise ValueError("request profile hash mismatch")
+        expected_payload: dict[str, object] = {"text": source_text}
+        if source_asset_id is not None:
+            expected_payload["source_asset_id"] = source_asset_id
+        if stored_identity_id is not None:
+            expected_payload["identity_id"] = stored_identity_id
+            expected_payload["ip_profile_snapshot"] = snapshot
+        if payload != expected_payload:
+            raise ValueError("request payload shape mismatch")
+        if _script_rewrite_request_hash(expected_payload) != str(row["request_hash"]):
+            raise ValueError("request hash mismatch")
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise ValueError("script rewrite request integrity check failed") from exc
+    return ValidatedScriptRewriteRequest(
+        source_text=source_text,
+        source_asset_id=source_asset_id,
+        ip_profile_snapshot=snapshot,
     )
 
 
@@ -275,6 +389,7 @@ def enqueue_script_rewrite_task(
     source_text: str,
     idempotency_key: str,
     identity_id: str | None = None,
+    source_asset_id: str | None = None,
 ) -> sqlite3.Row:
     require_not_auditor(
         conn,
@@ -290,6 +405,13 @@ def enqueue_script_rewrite_task(
         action="project.script_rewrite",
     )
     text = validate_script_rewrite_text(source_text)
+    if source_asset_id is not None:
+        require_current_script_rewrite_source(
+            conn,
+            actor=actor,
+            project_id=project_id,
+            source_asset_id=source_asset_id,
+        )
     # Fail fast before a task is accepted; the worker reloads the current
     # secret later and never persists it in request_json.
     load_script_rewrite_configuration(conn)
@@ -302,23 +424,13 @@ def enqueue_script_rewrite_task(
     profile_hash = (
         None if profile_json is None else hashlib.sha256(profile_json.encode("utf-8")).hexdigest()
     )
-    request_payload = (
-        {"text": text}
-        if identity_id is None
-        else {
-            "text": text,
-            "identity_id": identity_id,
-            "ip_profile_snapshot": profile_snapshot,
-        }
-    )
-    request_hash = hashlib.sha256(
-        json.dumps(
-            request_payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
+    request_payload: dict[str, object] = {"text": text}
+    if source_asset_id is not None:
+        request_payload["source_asset_id"] = source_asset_id
+    if identity_id is not None:
+        request_payload["identity_id"] = identity_id
+        request_payload["ip_profile_snapshot"] = profile_snapshot
+    request_hash = _script_rewrite_request_hash(request_payload)
     replay = conn.execute(
         """
         SELECT * FROM script_rewrite_tasks
@@ -327,11 +439,62 @@ def enqueue_script_rewrite_task(
         (project_id, idempotency_key),
     ).fetchone()
     if replay is not None:
-        return _validated_idempotent_replay(
+        replay = _validated_idempotent_replay(
             replay,
             request_hash=request_hash,
             identity_id=identity_id,
         )
+        if str(replay["status"]) == "FAILED" and bool(replay["retryable"]):
+            active = conn.execute(
+                """
+                SELECT id FROM script_rewrite_tasks
+                WHERE project_id = %s AND id <> %s
+                  AND status IN ('PENDING','RUNNING')
+                LIMIT 1
+                """,
+                (project_id, replay["id"]),
+            ).fetchone()
+            if active is not None:
+                raise _script_rewrite_error(
+                    409,
+                    "SCRIPT_REWRITE_ALREADY_RUNNING",
+                    "该项目已有口播稿正在后台改写，请等待完成。",
+                )
+            try:
+                retried = conn.execute(
+                    """
+                    UPDATE script_rewrite_tasks
+                    SET status = 'PENDING', provider_started_at = NULL,
+                        locked_by = NULL, locked_until = NULL,
+                        result_json = NULL, error_code = NULL,
+                        error_message_redacted = NULL, retryable = 0,
+                        completed_at = NULL, updated_at = %s
+                    WHERE id = %s AND status = 'FAILED' AND retryable = 1
+                    RETURNING *
+                    """,
+                    (_time_text(datetime.now(UTC)), replay["id"]),
+                ).fetchone()
+            except (sqlite3.IntegrityError, psycopg_errors.UniqueViolation) as exc:
+                conn.rollback()
+                raise _script_rewrite_error(
+                    409,
+                    "SCRIPT_REWRITE_ALREADY_RUNNING",
+                    "该项目已有口播稿正在后台改写，请等待完成。",
+                ) from exc
+            if retried is not None:
+                conn.commit()
+                return cast(sqlite3.Row, retried)
+            replay = conn.execute(
+                "SELECT * FROM script_rewrite_tasks WHERE id = %s",
+                (replay["id"],),
+            ).fetchone()
+            if replay is None:
+                raise _script_rewrite_error(
+                    409,
+                    "SCRIPT_REWRITE_ENQUEUE_CONFLICT",
+                    "改写任务状态已经变化，请重试。",
+                )
+        return cast(sqlite3.Row, replay)
 
     active = conn.execute(
         """
@@ -518,28 +681,18 @@ def prepare_script_rewrite_task(
     lease: ScriptRewriteTaskLease,
 ) -> PreparedScriptRewrite:
     row = require_owned_script_rewrite_task(conn, lease)
-    payload = json.loads(str(row["request_json"]))
-    source_text = payload.get("text")
-    if not isinstance(source_text, str):
-        raise RuntimeError("script rewrite task text is unavailable")
+    try:
+        request = validated_script_rewrite_request(row)
+    except ValueError as exc:
+        raise RuntimeError("script rewrite task request is unavailable") from exc
     base_url, api_key, model = load_script_rewrite_configuration(conn)
-    snapshot_raw = row["ip_profile_snapshot_json"]
-    snapshot = None
-    if snapshot_raw is not None:
-        decoded = json.loads(str(snapshot_raw))
-        if not isinstance(decoded, dict):
-            raise RuntimeError("script rewrite IP profile snapshot is unavailable")
-        snapshot = decoded
-        expected_hash = hashlib.sha256(_canonical_json(snapshot).encode("utf-8")).hexdigest()
-        if expected_hash != str(row["ip_profile_hash"]):
-            raise RuntimeError("script rewrite IP profile snapshot hash mismatch")
     return PreparedScriptRewrite(
         lease=lease,
-        source_text=validate_script_rewrite_text(source_text),
+        source_text=request.source_text,
         base_url=base_url,
         api_key=api_key,
         model=model,
-        ip_profile_snapshot=snapshot,
+        ip_profile_snapshot=request.ip_profile_snapshot,
     )
 
 

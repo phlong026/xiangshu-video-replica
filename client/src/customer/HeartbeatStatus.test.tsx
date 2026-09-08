@@ -45,7 +45,7 @@ describe("HeartbeatStatus (FE-04 / T31)", () => {
     expect(screen.getByText(/心跳已逾期/)).toBeInTheDocument();
   });
 
-  it("shows expired when heartbeat is > 2x interval", () => {
+  it("reports a long-overdue heartbeat without claiming the server lease expired", () => {
     const mockExpired = new Date(Date.now() - 70_000).toISOString(); // 70 秒前
     const mockOnRefresh = vi.fn();
 
@@ -57,7 +57,8 @@ describe("HeartbeatStatus (FE-04 / T31)", () => {
       />,
     );
 
-    expect(screen.getByText(/会话已过期/)).toBeInTheDocument();
+    expect(screen.getByText(/长时间未收到心跳结果/)).toBeInTheDocument();
+    expect(screen.queryByText(/会话已过期/)).not.toBeInTheDocument();
   });
 
   it("provides refresh button that calls onRefresh callback", () => {

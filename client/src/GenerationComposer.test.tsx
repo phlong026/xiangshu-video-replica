@@ -59,6 +59,7 @@ const props = {
   readOnly: false,
   referenceSelectionId: "reference-selection-1",
   shotCardVersionId: "shot-card-1",
+  sourceAssetId: null,
 };
 
 // P0-02-03：复刻工作区结构——ScriptEditor（标签页①）与 GenerationComposer
@@ -89,6 +90,7 @@ function WorkspaceHost({
     readOnly: props.readOnly,
     referenceSelectionId: props.referenceSelectionId,
     shotCardVersionId: props.shotCardVersionId,
+    sourceAssetId: props.sourceAssetId,
   });
 
   useEffect(() => {
@@ -219,6 +221,8 @@ describe("GenerationComposer", () => {
       identity_id: null,
       ip_profile_hash: null,
       ip_profile_snapshot: null,
+      source_asset_id: null,
+      source_text: "原稿第一句。原稿第二句。",
       status: "PENDING",
       attempt: 0,
       result: null,
@@ -257,6 +261,9 @@ describe("GenerationComposer", () => {
       expect(api.rewriteProjectScript).toHaveBeenCalledWith(
         "project-1",
         "原稿第一句。原稿第二句。",
+        undefined,
+        undefined,
+        expect.any(String),
       ),
     );
     await waitFor(() =>
@@ -289,6 +296,8 @@ describe("GenerationComposer", () => {
         expression_style: "专业直白",
         profile_version: 1,
       },
+      source_asset_id: null,
+      source_text: "原稿第一句。原稿第二句。",
       status: "PENDING",
       attempt: 0,
       result: null,
@@ -313,6 +322,7 @@ describe("GenerationComposer", () => {
       expect(api.getLatestScriptRewriteTask).toHaveBeenCalledWith(
         "project-1",
         "person-a",
+        null,
       ),
     );
     fireEvent.click(await screen.findByRole("button", { name: "AI 改写" }));
@@ -321,6 +331,8 @@ describe("GenerationComposer", () => {
         "project-1",
         "原稿第一句。原稿第二句。",
         "person-a",
+        undefined,
+        expect.any(String),
       ),
     );
     expect(
@@ -332,6 +344,7 @@ describe("GenerationComposer", () => {
       expect(api.getLatestScriptRewriteTask).toHaveBeenCalledWith(
         "project-1",
         "person-b",
+        null,
       ),
     );
     await act(async () => {
@@ -360,6 +373,8 @@ describe("GenerationComposer", () => {
       identity_id: null,
       ip_profile_hash: null,
       ip_profile_snapshot: null,
+      source_asset_id: null,
+      source_text: "原稿第一句。原稿第二句。",
       status: "RUNNING",
       attempt: 1,
       result: null,
@@ -393,6 +408,7 @@ describe("GenerationComposer", () => {
     expect(api.getLatestScriptRewriteTask).toHaveBeenCalledWith(
       "project-1",
       undefined,
+      null,
     );
     await waitFor(() =>
       expect(screen.getByLabelText("口播稿内容")).toHaveValue(

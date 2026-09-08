@@ -8,6 +8,8 @@ project's available character version list.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import logging
@@ -43,7 +45,7 @@ from app.character_identity import (
     required_text,
     validate_key_segment,
 )
-from app.character_image_generation import deterministic_png, png_chunk
+from app.character_image_generation import png_chunk
 from app.db_portable import BusinessConnection
 from app.first_frames import (
     FirstFrameModel,
@@ -53,7 +55,13 @@ from app.first_frames import (
     SceneContactSheetQualityResult,
 )
 from app.media import storage_key_from_uri
-from app.permissions import require_project_access, write_audit
+from app.media_tools import (
+    MediaToolFailed,
+    MediaToolUnavailable,
+    resolve_media_binary,
+    validate_image_decodable,
+)
+from app.permissions import require_not_auditor, require_project_access, write_audit
 from app.storage import (
     StorageAdapter,
     StorageBackendUnavailable,
@@ -64,7 +72,13 @@ from app.storage import (
 logger = logging.getLogger(__name__)
 
 SIMPLE_UPLOAD_MAX_BYTES = 10 * 1024 * 1024
-SIMPLE_UPLOAD_ALLOWED_TYPES = {"image/png": ".png", "image/jpeg": ".jpg"}
+SIMPLE_PNG_MAX_DECOMPRESSED_BYTES = 256 * 1024 * 1024
+SIMPLE_IMAGE_MAX_PIXELS = 100_000_000
+SIMPLE_UPLOAD_ALLOWED_TYPES = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/webp": ".webp",
+}
 SIMPLE_AUTHORIZATION_SCOPE = ["internal-short-video"]
 SIMPLE_PERSONA_USAGE_SCOPE = ["internal-short-video"]
 SIMPLE_GENERATION_MODE = "simple_upload"
@@ -204,6 +218,21 @@ class SimpleLibraryEntry:
 
 
 @dataclass(frozen=True)
+class SimpleLibraryPage:
+    items: list[SimpleLibraryEntry]
+    next_cursor: str | None
+    total: int
+
+
+@dataclass(frozen=True)
+class SimpleSceneLookPage:
+    items: list[SimpleSceneLookEntry]
+    total: int
+    limit: int
+    offset: int
+
+
+@dataclass(frozen=True)
 class PreparedSimpleCharacterGeneration:
     version_id: str
     contact_content: bytes
@@ -253,7 +282,7 @@ def prepare_simple_character_generation(
 ) -> PreparedSimpleCharacterGeneration:
     """Run the slow contact-sheet provider before opening a fenced write."""
 
-    _validate_source(source_content, source_content_type, display_name)
+    validate_simple_character_source(source_content, source_content_type, display_name)
     version_id = str(uuid.uuid4())
     normalized_content_type = source_content_type.split(";", 1)[0].strip().lower()
     contact_content, contact_content_type, contact_source = _generate_contact_sheet_content(
@@ -290,7 +319,11 @@ def store_simple_character_publication(
 ) -> PreparedSimpleCharacterPublication:
     """Upload every character object before opening the customer write fence."""
 
-    _validate_source(source_content, source_content_type, display_name)
+    validate_simple_character_source(source_content, source_content_type, display_name)
+    cropped_views = _require_contact_sheet_views(
+        generation.contact_content,
+        generation.contact_content_type,
+    )
     identity_id = str(uuid.uuid4())
     persona_id = str(uuid.uuid4())
     version_id = generation.version_id
@@ -326,22 +359,12 @@ def store_simple_character_publication(
         )
         object_keys.append(contact_stored.key)
 
-        cropped_views = crop_contact_sheet_views(
-            generation.contact_content,
-            generation.contact_content_type,
-        )
         prepared_views: list[PreparedSimpleCharacterViewStorage] = []
         for view_type in REQUIRED_CHARACTER_VIEW_TYPES:
             character_asset_id = str(uuid.uuid4())
             generated_asset_id = str(uuid.uuid4())
             approved_asset_id = str(uuid.uuid4())
-            content = cropped_views.get(view_type) if cropped_views else None
-            if content is None:
-                content = deterministic_png(
-                    f"{version_id}:{view_type}".encode(),
-                    width=1024,
-                    height=1536,
-                )
+            content = cropped_views[view_type]
             generated_key = generated_character_asset_key(
                 owner_user_id=actor.id,
                 persona_id=persona_id,
@@ -433,10 +456,10 @@ def create_simple_character(
 
     The uploaded image acts as both the authorization proof and the source
     asset (self-authorization). A single five-view contact sheet is rendered
-    from the photo (image provider when configured, local placeholder as a
-    fallback), the seven per-view assets are produced by the local
-    deterministic generator, every view is auto-approved, and the version is
-    published in the same transaction.
+    from the photo (image provider when configured, explicit local placeholder
+    otherwise), the seven per-view assets are cropped from that sheet, every
+    view is auto-approved, and the version is published in the same
+    transaction.
 
     ``project_id`` is only an access-control/audit hint: the global character
     library page passes ``None`` (no project context), while the in-project
@@ -449,7 +472,7 @@ def create_simple_character(
             project_id=project_id,
             action="simple_character.create",
         )
-    _validate_source(source_content, source_content_type, display_name)
+    validate_simple_character_source(source_content, source_content_type, display_name)
 
     if prepared_publication is not None:
         prepared_generation = prepared_publication.generation
@@ -648,6 +671,158 @@ def list_simple_library(
     *,
     actor: CurrentUser,
 ) -> list[SimpleLibraryEntry]:
+    """List the complete scoped library for internal compatibility callers."""
+    identity_rows = conn.execute(
+        f"""
+        SELECT identity.id
+        FROM person_identities AS identity
+        {_simple_library_owner_clause(actor)}
+        ORDER BY identity.created_at DESC, identity.id DESC
+        """,
+        () if actor.role in {"admin", "auditor"} else (actor.id,),
+    ).fetchall()
+    return _load_simple_library_entries(
+        conn,
+        actor=actor,
+        identity_ids=[str(row["id"]) for row in identity_rows],
+    )
+
+
+def list_simple_library_page(
+    conn: BusinessConnection,
+    *,
+    actor: CurrentUser,
+    limit: int,
+    cursor: str | None,
+    query: str,
+) -> SimpleLibraryPage:
+    """Page identities first, then aggregate their complete published assets."""
+    normalized_query = query.strip().casefold()
+    scope_hash = _simple_library_scope_hash(actor=actor, query=normalized_query)
+    cursor_position = (
+        None
+        if cursor is None
+        else _decode_simple_library_cursor(cursor, expected_scope_hash=scope_hash)
+    )
+    clauses: list[str] = []
+    parameters: list[object] = []
+    if actor.role not in {"admin", "auditor"}:
+        clauses.append("identity.owner_user_id = %s")
+        parameters.append(actor.id)
+    if normalized_query:
+        pattern = f"%{normalized_query}%"
+        clauses.append(
+            """
+            (
+                LOWER(identity.display_name) LIKE %s
+                OR EXISTS (
+                    SELECT 1
+                    FROM character_personas AS search_persona
+                    WHERE search_persona.identity_id = identity.id
+                      AND (
+                        LOWER(COALESCE(search_persona.occupation, '')) LIKE %s
+                        OR LOWER(COALESCE(search_persona.appearance_constraints_json, '')) LIKE %s
+                      )
+                )
+            )
+            """
+        )
+        parameters.extend([pattern, pattern, pattern])
+    count_where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    total_row = conn.execute(
+        f"SELECT COUNT(*) AS total FROM person_identities AS identity {count_where_clause}",
+        tuple(parameters),
+    ).fetchone()
+    total = int(total_row["total"] if total_row is not None else 0)
+    if cursor_position is not None:
+        created_at, identity_id = cursor_position
+        clauses.append(
+            "(identity.created_at < %s OR (identity.created_at = %s AND identity.id < %s))"
+        )
+        parameters.extend([created_at, created_at, identity_id])
+    where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    parameters.append(limit + 1)
+    identity_rows = conn.execute(
+        f"""
+        SELECT identity.id, identity.created_at
+        FROM person_identities AS identity
+        {where_clause}
+        ORDER BY identity.created_at DESC, identity.id DESC
+        LIMIT %s
+        """,
+        tuple(parameters),
+    ).fetchall()
+    page_rows = identity_rows[:limit]
+    identity_ids = [str(row["id"]) for row in page_rows]
+    items = _load_simple_library_entries(conn, actor=actor, identity_ids=identity_ids)
+    next_cursor = None
+    if len(identity_rows) > limit:
+        last_row = page_rows[-1]
+        next_cursor = _encode_simple_library_cursor(
+            created_at=str(last_row["created_at"]),
+            identity_id=str(last_row["id"]),
+            scope_hash=scope_hash,
+        )
+    return SimpleLibraryPage(items=items, next_cursor=next_cursor, total=total)
+
+
+def _simple_library_owner_clause(actor: CurrentUser) -> str:
+    return "" if actor.role in {"admin", "auditor"} else "WHERE identity.owner_user_id = %s"
+
+
+def _simple_library_scope_hash(*, actor: CurrentUser, query: str) -> str:
+    payload = {
+        "actor_id": actor.id,
+        "actor_role": actor.role,
+        "query": query,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def _encode_simple_library_cursor(*, created_at: str, identity_id: str, scope_hash: str) -> str:
+    payload = json.dumps(
+        {"v": 1, "created_at": created_at, "id": identity_id, "scope_hash": scope_hash},
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return base64.urlsafe_b64encode(payload).decode().rstrip("=")
+
+
+def _decode_simple_library_cursor(value: str, *, expected_scope_hash: str) -> tuple[str, str]:
+    try:
+        padding = "=" * (-len(value) % 4)
+        decoded = base64.b64decode(value + padding, altchars=b"-_", validate=True)
+        payload = json.loads(decoded.decode())
+    except (ValueError, binascii.Error, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise character_error(400, "INVALID_CURSOR", "人物库游标无效。") from exc
+    if not isinstance(payload, dict):
+        raise character_error(400, "INVALID_CURSOR", "人物库游标无效。")
+    created_at = payload.get("created_at")
+    identity_id = payload.get("id")
+    scope_hash = payload.get("scope_hash")
+    if (
+        payload.get("v") != 1
+        or not isinstance(created_at, str)
+        or not created_at
+        or not isinstance(identity_id, str)
+        or not identity_id
+        or not isinstance(scope_hash, str)
+    ):
+        raise character_error(400, "INVALID_CURSOR", "人物库游标无效。")
+    if scope_hash != expected_scope_hash:
+        raise character_error(400, "CURSOR_SCOPE_MISMATCH", "人物库游标与当前查询不匹配。")
+    return created_at, identity_id
+
+
+def _load_simple_library_entries(
+    conn: BusinessConnection,
+    *,
+    actor: CurrentUser,
+    identity_ids: list[str],
+) -> list[SimpleLibraryEntry]:
     """List characters with the published seven-view assets for previews.
 
     Customer-workspace roles only see identities they own.  Administrators and
@@ -655,8 +830,14 @@ def list_simple_library(
     only the latest published version's approved selection is returned so the
     preview always matches what video generation would actually consume.
     """
-    owner_clause = "" if actor.role in {"admin", "auditor"} else "WHERE identity.owner_user_id = %s"
-    parameters: tuple[object, ...] = () if not owner_clause else (actor.id,)
+    if not identity_ids:
+        return []
+    placeholders = ", ".join("%s" for _ in identity_ids)
+    clauses = [f"identity.id IN ({placeholders})"]
+    parameters: list[object] = list(identity_ids)
+    if actor.role not in {"admin", "auditor"}:
+        clauses.append("identity.owner_user_id = %s")
+        parameters.append(actor.id)
     rows = conn.execute(
         f"""
         SELECT identity.id AS identity_id,
@@ -681,11 +862,11 @@ def list_simple_library(
           ON view.character_version_id = version.id
          AND view.review_status = 'APPROVED'
          AND view.is_published_selection = 1
-        {owner_clause}
-        ORDER BY identity.created_at DESC, identity.id,
+        WHERE {" AND ".join(clauses)}
+        ORDER BY identity.created_at DESC, identity.id DESC,
                  version.published_at DESC, view.view_type
         """,
-        parameters,
+        tuple(parameters),
     ).fetchall()
 
     entries: list[SimpleLibraryEntry] = []
@@ -735,7 +916,10 @@ def list_simple_library(
                 views=views,
             )
         )
-    return entries
+    entries_by_id = {entry.identity_id: entry for entry in entries}
+    return [
+        entries_by_id[identity_id] for identity_id in identity_ids if identity_id in entries_by_id
+    ]
 
 
 def _profile_constraint(constraints: dict[str, object], key: str) -> str:
@@ -794,6 +978,13 @@ def rename_simple_character_identity(
     touches ``display_name`` and allows the identity owner (or an admin);
     renames must never widen access to authorization or source assets.
     """
+    require_not_auditor(
+        conn,
+        actor=actor,
+        action="person_identity.rename",
+        entity_type="person_identity",
+        entity_id=identity_id,
+    )
     row = read_identity_row(conn, identity_id)
     if actor.role != "admin" and str(row["owner_user_id"]) != actor.id:
         raise character_error(
@@ -841,10 +1032,15 @@ def update_simple_character_profile(
     expression_style: str,
 ) -> SimpleLibraryEntry:
     """Update the owner-facing IP profile on the identity's base persona."""
+    require_not_auditor(
+        conn,
+        actor=actor,
+        action="person_identity.profile_update",
+        entity_type="person_identity",
+        entity_id=identity_id,
+    )
     identity = read_identity_row(conn, identity_id)
-    if actor.role != "admin" and (
-        actor.role == "auditor" or str(identity["owner_user_id"]) != actor.id
-    ):
+    if actor.role != "admin" and str(identity["owner_user_id"]) != actor.id:
         raise character_error(404, "PERSON_IDENTITY_NOT_FOUND", "人物身份不存在或不可用。")
     if str(identity["status"]) == "ARCHIVED":
         raise character_error(409, "IDENTITY_ARCHIVED", "已归档人物身份不能修改。")
@@ -1404,39 +1600,87 @@ def create_simple_scene_look(
     return result
 
 
-def list_simple_scene_looks(
+def list_simple_scene_looks_page(
     conn: BusinessConnection,
     *,
     actor: CurrentUser,
     identity_id: str,
-) -> list[SimpleSceneLookEntry]:
+    limit: int,
+    offset: int,
+) -> SimpleSceneLookPage:
     identity = read_identity_row(conn, identity_id)
     if actor.role not in {"admin", "auditor"} and str(identity["owner_user_id"]) != actor.id:
         raise character_error(404, "PERSON_IDENTITY_NOT_FOUND", "人物身份不存在或不可用。")
-    rows = conn.execute(
-        """
-        SELECT persona.id AS persona_id, persona.name, persona.scene_description,
-               persona.costume_description, persona.appearance_constraints_json,
-               version.id AS version_id, version.version_number,
-               version.published_at, version.publication_snapshot_json,
-               view.view_type, view.asset_id
+    appearance_type = (
+        "persona.appearance_constraints_json::jsonb ->> 'appearance_type'"
+        if conn.is_postgres
+        else "json_extract(persona.appearance_constraints_json, '$.appearance_type')"
+    )
+    total_row = conn.execute(
+        f"""
+        SELECT COUNT(*) AS total
         FROM character_personas AS persona
-        JOIN character_versions AS version ON version.persona_id = persona.id
-        LEFT JOIN character_assets AS view
-          ON view.character_version_id = version.id
-         AND view.review_status = 'APPROVED'
-         AND view.is_published_selection = 1
-        WHERE persona.identity_id = %s AND version.status = 'PUBLISHED'
-        ORDER BY persona.created_at DESC, persona.id,
-                 version.version_number DESC, view.view_type
+        WHERE persona.identity_id = %s
+          AND {appearance_type} = 'scene'
+          AND EXISTS (
+              SELECT 1
+              FROM character_versions AS published_version
+              WHERE published_version.persona_id = persona.id
+                AND published_version.status = 'PUBLISHED'
+          )
         """,
         (identity_id,),
+    ).fetchone()
+    total = int(total_row["total"] if total_row is not None else 0)
+    rows = conn.execute(
+        f"""
+        WITH paged_personas AS (
+            SELECT persona.id AS persona_id, persona.name,
+                   persona.scene_description, persona.costume_description,
+                   persona.created_at AS persona_created_at
+            FROM character_personas AS persona
+            WHERE persona.identity_id = %s
+              AND {appearance_type} = 'scene'
+              AND EXISTS (
+                  SELECT 1
+                  FROM character_versions AS published_version
+                  WHERE published_version.persona_id = persona.id
+                    AND published_version.status = 'PUBLISHED'
+              )
+            ORDER BY persona.created_at DESC, persona.id
+            LIMIT %s OFFSET %s
+        ),
+        latest_versions AS (
+            SELECT persona.persona_id, persona.name,
+                   persona.scene_description, persona.costume_description,
+                   persona.persona_created_at,
+                   version.id AS version_id, version.version_number,
+                   version.published_at, version.publication_snapshot_json
+            FROM character_versions AS version
+            JOIN paged_personas AS persona ON persona.persona_id = version.persona_id
+            WHERE version.status = 'PUBLISHED'
+              AND version.version_number = (
+                  SELECT MAX(candidate.version_number)
+                  FROM character_versions AS candidate
+                  WHERE candidate.persona_id = version.persona_id
+                    AND candidate.status = 'PUBLISHED'
+              )
+        )
+        SELECT look.persona_id, look.name, look.scene_description,
+               look.costume_description, look.version_id, look.version_number,
+               look.published_at, look.publication_snapshot_json,
+               view.view_type, view.asset_id
+        FROM latest_versions AS look
+        LEFT JOIN character_assets AS view
+          ON view.character_version_id = look.version_id
+         AND view.review_status = 'APPROVED'
+         AND view.is_published_selection = 1
+        ORDER BY look.persona_created_at DESC, look.persona_id, view.view_type
+        """,
+        (identity_id, limit, offset),
     ).fetchall()
     grouped: dict[str, list[sqlite3.Row]] = {}
     for row in rows:
-        constraints = decode_scene_constraints(row["appearance_constraints_json"])
-        if constraints.get("appearance_type") != "scene":
-            continue
         grouped.setdefault(str(row["persona_id"]), []).append(row)
 
     looks: list[SimpleSceneLookEntry] = []
@@ -1468,7 +1712,7 @@ def list_simple_scene_looks(
                 published_at=str(latest_rows[0]["published_at"]),
             )
         )
-    return looks
+    return SimpleSceneLookPage(items=looks, total=total, limit=limit, offset=offset)
 
 
 def decode_scene_constraints(value: object) -> dict[str, object]:
@@ -1772,7 +2016,11 @@ def _identity_asset_ids(conn: BusinessConnection, identity_id: str) -> set[str]:
     return asset_ids
 
 
-def _validate_source(content: bytes, content_type: str, display_name: str) -> None:
+def validate_simple_character_source(
+    content: bytes,
+    content_type: str,
+    display_name: str,
+) -> None:
     name = display_name.strip()
     if not name:
         raise character_error(422, "SIMPLE_CHARACTER_NAME_REQUIRED", "请填写人物名称。")
@@ -1789,8 +2037,142 @@ def _validate_source(content: bytes, content_type: str, display_name: str) -> No
         raise character_error(
             422,
             "SIMPLE_CHARACTER_IMAGE_TYPE_UNSUPPORTED",
-            "仅支持 PNG 或 JPEG 图片。",
+            "仅支持 PNG、JPEG 或 WebP 图片。",
         )
+    if not _has_valid_image_structure(content, normalized_type):
+        raise character_error(
+            422,
+            "SIMPLE_CHARACTER_IMAGE_INVALID",
+            "人物授权图片文件无效，请重新选择原图。",
+        )
+    if normalized_type == "image/png" and _decode_png_rgb(content) is not None:
+        return
+    try:
+        ffmpeg_path = resolve_media_binary("ffmpeg")
+        validate_image_decodable(ffmpeg_path, content)
+    except MediaToolUnavailable as exc:
+        raise character_error(
+            503,
+            "SIMPLE_CHARACTER_IMAGE_VALIDATION_UNAVAILABLE",
+            "人物图片校验工具暂不可用，请稍后重试。",
+        ) from exc
+    except MediaToolFailed as exc:
+        raise character_error(
+            422,
+            "SIMPLE_CHARACTER_IMAGE_INVALID",
+            "人物授权图片无法解码，请重新选择原图。",
+        ) from exc
+
+
+def _has_valid_image_structure(content: bytes, content_type: str) -> bool:
+    if content_type == "image/png":
+        return _parse_png(content) is not None
+    if content_type == "image/jpeg":
+        return _jpeg_structure_is_valid(content)
+    if content_type == "image/webp":
+        return _webp_structure_is_valid(content)
+    return False
+
+
+JPEG_START_OF_FRAME_MARKERS = frozenset(
+    {
+        0xC0,
+        0xC1,
+        0xC2,
+        0xC3,
+        0xC5,
+        0xC6,
+        0xC7,
+        0xC9,
+        0xCA,
+        0xCB,
+        0xCD,
+        0xCE,
+        0xCF,
+    }
+)
+
+
+def _jpeg_structure_is_valid(content: bytes) -> bool:
+    if (
+        len(content) < 12
+        or not content.startswith(b"\xff\xd8")
+        or not content.endswith(b"\xff\xd9")
+    ):
+        return False
+    offset = 2
+    found_frame = False
+    while offset < len(content) - 2:
+        if content[offset] != 0xFF:
+            return False
+        while offset < len(content) and content[offset] == 0xFF:
+            offset += 1
+        if offset >= len(content):
+            return False
+        marker = content[offset]
+        offset += 1
+        if marker == 0xD9:
+            return found_frame and offset == len(content)
+        if marker == 0x00 or marker == 0xD8:
+            return False
+        if marker == 0x01 or 0xD0 <= marker <= 0xD7:
+            continue
+        if offset + 2 > len(content):
+            return False
+        segment_length = int.from_bytes(content[offset : offset + 2], "big")
+        segment_end = offset + segment_length
+        if segment_length < 2 or segment_end > len(content):
+            return False
+        if marker in JPEG_START_OF_FRAME_MARKERS:
+            if segment_length < 7:
+                return False
+            height = int.from_bytes(content[offset + 3 : offset + 5], "big")
+            width = int.from_bytes(content[offset + 5 : offset + 7], "big")
+            if width <= 0 or height <= 0 or width * height > SIMPLE_IMAGE_MAX_PIXELS:
+                return False
+            found_frame = True
+        if marker == 0xDA:
+            return found_frame and segment_end < len(content) - 2
+        offset = segment_end
+    return False
+
+
+def _webp_structure_is_valid(content: bytes) -> bool:
+    if (
+        len(content) < 20
+        or content[:4] != b"RIFF"
+        or content[8:12] != b"WEBP"
+        or int.from_bytes(content[4:8], "little") + 8 != len(content)
+    ):
+        return False
+    offset = 12
+    found_image = False
+    while offset < len(content):
+        if offset + 8 > len(content):
+            return False
+        chunk_type = content[offset : offset + 4]
+        chunk_size = int.from_bytes(content[offset + 4 : offset + 8], "little")
+        payload_start = offset + 8
+        payload_end = payload_start + chunk_size
+        padded_end = payload_end + (chunk_size % 2)
+        if payload_end > len(content) or padded_end > len(content):
+            return False
+        payload = content[payload_start:payload_end]
+        if chunk_type == b"VP8 ":
+            if len(payload) <= 10 or payload[3:6] != b"\x9d\x01\x2a":
+                return False
+            width = int.from_bytes(payload[6:8], "little") & 0x3FFF
+            height = int.from_bytes(payload[8:10], "little") & 0x3FFF
+            found_image = 0 < width * height <= SIMPLE_IMAGE_MAX_PIXELS
+        elif chunk_type == b"VP8L":
+            if len(payload) <= 5 or payload[0] != 0x2F:
+                return False
+            dimensions = int.from_bytes(payload[1:5], "little")
+            width = (dimensions & 0x3FFF) + 1
+            height = ((dimensions >> 14) & 0x3FFF) + 1
+            found_image = 0 < width * height <= SIMPLE_IMAGE_MAX_PIXELS
+        offset = padded_end
+    return found_image
 
 
 def _store_source_asset(
@@ -2013,10 +2395,9 @@ def crop_contact_sheet_views(
     """Crop the seven standard views out of the five-panel contact sheet.
 
     Returns ``{view_type: png_bytes}`` or ``None`` when the sheet cannot be
-    decoded (non-PNG provider output, other bit depths, interlacing) so the
-    caller can fall back to the deterministic placeholder. Sheets without
-    detectable dividers use the nominal layout geometry instead, so a
-    slightly off-layout sheet still yields real cropped views.
+    decoded (non-PNG provider output, other bit depths, interlacing). Sheets
+    without detectable dividers use the nominal layout geometry instead, so
+    a slightly off-layout sheet still yields real cropped views.
     """
     if contact_content_type.split(";", 1)[0].strip().lower() != "image/png":
         return None
@@ -2045,25 +2426,113 @@ def crop_contact_sheet_views(
     return crops
 
 
-def _decode_png_rgb(data: bytes) -> tuple[int, int, list[bytes]] | None:
-    """Decode a non-interlaced 8-bit RGB/RGBA PNG into per-row RGB bytes."""
+def _require_contact_sheet_views(
+    contact_content: bytes,
+    contact_content_type: str,
+) -> dict[str, bytes]:
+    try:
+        crops = crop_contact_sheet_views(contact_content, contact_content_type)
+    except (IndexError, struct.error, ValueError, zlib.error):
+        crops = None
+    if crops is None or any(
+        not crops.get(view_type) for view_type in REQUIRED_CHARACTER_VIEW_TYPES
+    ):
+        raise character_error(
+            502,
+            "CONTACT_SHEET_PROVIDER_INVALID_OUTPUT",
+            "人物五视图生成服务返回了无法裁剪的图片，请稍后重试。",
+        )
+    return crops
+
+
+@dataclass(frozen=True)
+class _ParsedPng:
+    width: int
+    height: int
+    bit_depth: int
+    color_type: int
+    interlace: int
+    compressed: bytes
+
+
+def _parse_png(data: bytes) -> _ParsedPng | None:
     if not data.startswith(b"\x89PNG\r\n\x1a\n"):
         return None
     width = height = bit_depth = color_type = interlace = 0
     compressed = bytearray()
     pos = 8
-    while pos + 8 <= len(data):
-        (length,) = struct.unpack(">I", data[pos : pos + 4])
+    seen_header = False
+    seen_image_data = False
+    image_data_ended = False
+    seen_end = False
+    while pos < len(data):
+        if pos + 12 > len(data):
+            return None
+        length = struct.unpack(">I", data[pos : pos + 4])[0]
         chunk_type = data[pos + 4 : pos + 8]
+        chunk_end = pos + 12 + length
+        if chunk_end > len(data):
+            return None
         body = data[pos + 8 : pos + 8 + length]
-        pos += 12 + length
-        if chunk_type == b"IHDR" and length >= 13:
+        expected_crc = struct.unpack(">I", data[pos + 8 + length : chunk_end])[0]
+        if zlib.crc32(chunk_type + body) & 0xFFFFFFFF != expected_crc:
+            return None
+        if not seen_header and chunk_type != b"IHDR":
+            return None
+        if chunk_type == b"IHDR":
+            if seen_header or length != 13:
+                return None
             width, height, bit_depth, color_type = struct.unpack(">IIBB", body[:10])
+            compression_method = body[10]
+            filter_method = body[11]
             interlace = body[12]
+            if compression_method != 0 or filter_method != 0 or interlace not in {0, 1}:
+                return None
+            seen_header = True
         elif chunk_type == b"IDAT":
-            compressed += body
+            if not seen_header or image_data_ended:
+                return None
+            seen_image_data = True
+            compressed.extend(body)
         elif chunk_type == b"IEND":
+            if length != 0 or not seen_image_data:
+                return None
+            seen_end = True
+            pos = chunk_end
             break
+        elif seen_image_data:
+            image_data_ended = True
+        pos = chunk_end
+    if (
+        not seen_header
+        or not seen_image_data
+        or not seen_end
+        or pos != len(data)
+        or width <= 0
+        or height <= 0
+        or width * height > SIMPLE_IMAGE_MAX_PIXELS
+    ):
+        return None
+    return _ParsedPng(
+        width=width,
+        height=height,
+        bit_depth=bit_depth,
+        color_type=color_type,
+        interlace=interlace,
+        compressed=bytes(compressed),
+    )
+
+
+def _decode_png_rgb(data: bytes) -> tuple[int, int, list[bytes]] | None:
+    """Decode a non-interlaced 8-bit RGB/RGBA PNG into per-row RGB bytes."""
+    parsed = _parse_png(data)
+    if parsed is None:
+        return None
+    width = parsed.width
+    height = parsed.height
+    bit_depth = parsed.bit_depth
+    color_type = parsed.color_type
+    interlace = parsed.interlace
     if width <= 0 or height <= 0 or bit_depth != 8 or interlace != 0:
         return None
     if color_type == 2:
@@ -2072,12 +2541,21 @@ def _decode_png_rgb(data: bytes) -> tuple[int, int, list[bytes]] | None:
         channels = 4
     else:
         return None
+    stride = width * channels
+    expected_size = height * (stride + 1)
+    if expected_size > SIMPLE_PNG_MAX_DECOMPRESSED_BYTES:
+        return None
+    decompressor = zlib.decompressobj()
     try:
-        raw = zlib.decompress(bytes(compressed))
+        raw = decompressor.decompress(parsed.compressed, expected_size + 1)
+        if decompressor.unconsumed_tail or len(raw) > expected_size:
+            return None
+        raw += decompressor.flush()
     except zlib.error:
         return None
-    stride = width * channels
-    if len(raw) < height * (stride + 1):
+    if not decompressor.eof or decompressor.unused_data or decompressor.unconsumed_tail:
+        return None
+    if len(raw) != expected_size:
         return None
     rows: list[bytes] = []
     previous = bytes(stride)
@@ -2327,12 +2805,10 @@ def _generate_and_approve_views(
 ) -> list[_ApprovedView]:
     """Store one approved per-view asset for each required view type.
 
-    Views are cropped from the real contact sheet whenever its pixels can be
-    decoded, so every published view shows the actual person. Undecodable
-    sheets (provider returned a non-PNG or unsupported PNG) keep the
-    deterministic placeholder fallback so the flow never blocks on cropping.
+    Every view is cropped from the contact sheet. Uncroppable provider output
+    must fail before any view is approved or published.
     """
-    cropped_views = crop_contact_sheet_views(contact_content, contact_content_type)
+    cropped_views = _require_contact_sheet_views(contact_content, contact_content_type)
     prepared_by_view = (
         {view.view_type: view for view in prepared_views} if prepared_views is not None else {}
     )
@@ -2343,11 +2819,7 @@ def _generate_and_approve_views(
             character_asset_id = str(uuid.uuid4())
             generated_asset_id = str(uuid.uuid4())
             review_id = str(uuid.uuid4())
-            content = cropped_views.get(view_type) if cropped_views else None
-            if content is None:
-                content = deterministic_png(
-                    f"{version_id}:{view_type}".encode(), width=1024, height=1536
-                )
+            content = cropped_views[view_type]
             generated_key = generated_character_asset_key(
                 owner_user_id=actor.id,
                 persona_id=persona_id,
@@ -2382,9 +2854,7 @@ def _generate_and_approve_views(
                         "character_version_id": version_id,
                         "generation_mode": SIMPLE_GENERATION_MODE,
                         "view_type": view_type,
-                        "view_content_source": (
-                            "contact_sheet_crop" if cropped_views else "local_placeholder"
-                        ),
+                        "view_content_source": "contact_sheet_crop",
                     }
                 ),
             ),
@@ -2607,6 +3077,7 @@ def _generate_contact_sheet_content(
                 image = generated[0]
                 content_type = image.content_type.split(";", 1)[0].strip().lower()
                 if image.content and content_type in SIMPLE_CONTACT_SHEET_EXTENSIONS:
+                    _require_contact_sheet_views(image.content, content_type)
                     return image.content, content_type, "image_provider"
             raise character_error(
                 502,

@@ -30,7 +30,9 @@ describe("GenerationRecordsPage", () => {
           record_data_status: "VALID",
           charged_credits: 0,
           result_reference: null,
+          provider_reference: null,
           error_code: null,
+          error_message: null,
           created_at: "2026-09-02T11:00:00Z",
           completed_at: null,
         },
@@ -51,7 +53,9 @@ describe("GenerationRecordsPage", () => {
           record_data_status: "VALID",
           charged_credits: 0,
           result_reference: "version-1",
+          provider_reference: null,
           error_code: null,
+          error_message: null,
           created_at: "2026-09-02T10:00:00Z",
           completed_at: "2026-09-02T10:01:00Z",
         },
@@ -72,7 +76,9 @@ describe("GenerationRecordsPage", () => {
           record_data_status: "VALID",
           charged_credits: 0,
           result_reference: "version-2",
+          provider_reference: null,
           error_code: null,
+          error_message: null,
           created_at: "2026-09-02T09:00:00Z",
           completed_at: "2026-09-02T09:01:00Z",
         },
@@ -106,6 +112,58 @@ describe("GenerationRecordsPage", () => {
     await waitFor(() => {
       expect(adminApi.getAdminGenerationRecords).toHaveBeenCalledTimes(2);
     });
+  });
+
+  it("opens failed records with the filter already applied", async () => {
+    render(<GenerationRecordsPage initialStatus="FAILED" />);
+
+    await waitFor(() => {
+      expect(adminApi.getAdminGenerationRecords).toHaveBeenCalledWith(
+        expect.objectContaining({ status: "FAILED" }),
+      );
+    });
+    expect(screen.getByLabelText("生成状态")).toHaveValue("FAILED");
+  });
+
+  it("shows read-only oral failure details without a retry action", async () => {
+    vi.mocked(adminApi.getAdminGenerationRecords).mockResolvedValue({
+      items: [
+        {
+          record_id: "oral-1",
+          record_type: "ORAL_VIDEO",
+          operation: "TTS",
+          user_id: "user-1",
+          username: "customer-1",
+          display_name: "客户一",
+          project_id: null,
+          project_name: null,
+          status: "FAILED",
+          provider: "hifly",
+          model: null,
+          provider_cost: null,
+          provider_cost_status: "UNAVAILABLE",
+          record_data_status: "VALID",
+          charged_credits: 12,
+          result_reference: null,
+          provider_reference: "hifly-task-1",
+          error_code: "ORAL_TASK_FAILED",
+          error_message: "数字人服务生成失败",
+          created_at: "2026-09-02T11:00:00Z",
+          completed_at: "2026-09-02T11:01:00Z",
+        },
+      ],
+      total: 1,
+      limit: 50,
+      offset: 0,
+    });
+
+    render(<GenerationRecordsPage initialStatus="FAILED" />);
+
+    expect(await screen.findByText("口播视频")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("查看详情"));
+    expect(screen.getByText("数字人服务生成失败")).toBeInTheDocument();
+    expect(screen.getByText("hifly-task-1")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /重试/ })).toBeNull();
   });
 
   it("submits draft filters once instead of loading while typing", async () => {
@@ -177,7 +235,9 @@ describe("GenerationRecordsPage", () => {
           record_data_status: "VALID",
           charged_credits: 1,
           result_reference: null,
+          provider_reference: null,
           error_code: null,
+          error_message: null,
           created_at: "2026-09-01T00:00:00Z",
           completed_at: null,
         },

@@ -48,6 +48,12 @@ type IdempotencyEnvelope = {
   sourceFingerprint: string;
 };
 
+const frozenDetailRequests = new Map<string, IdempotencyEnvelope>();
+
+function detailRequestKey(project: Project, sourceFingerprint: string): string {
+  return JSON.stringify([project.owner_user_id, project.id, sourceFingerprint]);
+}
+
 function newIdempotencyKey(): string {
   return typeof globalThis.crypto?.randomUUID === "function"
     ? globalThis.crypto.randomUUID()
@@ -479,6 +485,11 @@ export function ProjectDetailFlow({
     setGenerationMessage("");
     try {
       let envelope = idempotencyEnvelopeRef.current;
+      const frozenRequestKey = detailRequestKey(project, sourceFingerprint);
+      if (!envelope || envelope.sourceFingerprint !== sourceFingerprint) {
+        envelope = frozenDetailRequests.get(frozenRequestKey) ?? null;
+        idempotencyEnvelopeRef.current = envelope;
+      }
       if (!envelope || envelope.sourceFingerprint !== sourceFingerprint) {
         const shotCardVersionId = await ensureShotCardVersion();
         const scriptVersionId = await ensureScriptVersion(shotCardVersionId);
@@ -520,6 +531,7 @@ export function ProjectDetailFlow({
           },
         };
         idempotencyEnvelopeRef.current = envelope;
+        frozenDetailRequests.set(frozenRequestKey, envelope);
       }
       if (!isCurrent()) {
         throw new Error("生成参数已变化，请按最新报价重新提交。");
@@ -527,6 +539,9 @@ export function ProjectDetailFlow({
       const batch = await createGenerationBatch(project.id, envelope.request);
       if (idempotencyEnvelopeRef.current === envelope) {
         idempotencyEnvelopeRef.current = null;
+      }
+      if (frozenDetailRequests.get(frozenRequestKey) === envelope) {
+        frozenDetailRequests.delete(frozenRequestKey);
       }
       if (!isCurrent()) return;
       setGenerationPhase("done");

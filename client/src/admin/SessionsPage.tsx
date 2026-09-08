@@ -1,4 +1,10 @@
-import { type FormEvent, useCallback, useEffect, useState } from "react";
+import {
+  type FormEvent,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 
 import {
   type AdjustmentWriteInput,
@@ -55,9 +61,11 @@ function leaseState(item: CustomerSessionListItem, now: number) {
 export function SessionsPage({
   userId,
   readOnly = false,
+  onCustomerChange,
 }: {
   userId?: string;
   readOnly?: boolean;
+  onCustomerChange?: (userId: string | undefined) => void;
 }) {
   const [queryUserId, setQueryUserId] = useState(userId ?? "");
   const [viewUserId, setViewUserId] = useState<string | null>(userId ?? null);
@@ -86,6 +94,8 @@ export function SessionsPage({
   const [adjustConfirmOpen, setAdjustConfirmOpen] = useState(false);
   const [writeError, setWriteError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const requestIdRef = useRef(0);
+  const contextIdRef = useRef(0);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
@@ -94,31 +104,61 @@ export function SessionsPage({
 
   const load = useCallback(
     async (targetUserId: string | null, nextOffset = 0) => {
+      const requestId = requestIdRef.current + 1;
+      requestIdRef.current = requestId;
       setLoading(true);
       setError("");
       try {
         const response = targetUserId
           ? await listCustomerSessions(targetUserId, { limit: PAGE_SIZE })
           : await listLiveSessions({ limit: PAGE_SIZE, offset: nextOffset });
+        if (requestId !== requestIdRef.current) {
+          return;
+        }
         setItems(response.items);
         setTotal(response.total);
         setOffset(nextOffset);
       } catch (cause) {
+        if (requestId !== requestIdRef.current) {
+          return;
+        }
         setError(
           cause instanceof Error && cause.message
             ? `加载失败：${cause.message}`
             : "加载失败：未知错误",
         );
       } finally {
-        setLoading(false);
+        if (requestId === requestIdRef.current) {
+          setLoading(false);
+        }
       }
     },
     [],
   );
 
   useEffect(() => {
+    contextIdRef.current += 1;
+    requestIdRef.current += 1;
+    setQueryUserId(userId ?? "");
     setViewUserId(userId ?? null);
     setActiveUserId(userId ?? null);
+    setItems([]);
+    setTotal(0);
+    setOffset(0);
+    setError("");
+    setNotice("");
+    setPendingRevoke(null);
+    setRevokeKey(null);
+    setRevokeError("");
+    setRevoking(false);
+    setAdjustOpen(false);
+    setAdjustKey(null);
+    setCredits("");
+    setSourceType("CS_TICKET");
+    setSourceRef("");
+    setAdjustConfirmOpen(false);
+    setWriteError("");
+    setSubmitting(false);
     void load(userId ?? null, 0);
   }, [load, userId]);
 
@@ -126,6 +166,11 @@ export function SessionsPage({
     event.preventDefault();
     const target = queryUserId.trim();
     if (!target) return;
+    if (onCustomerChange) {
+      onCustomerChange(target);
+      return;
+    }
+    contextIdRef.current += 1;
     setViewUserId(target);
     setActiveUserId(target);
     setAdjustOpen(false);
@@ -134,6 +179,11 @@ export function SessionsPage({
   }
 
   function showAllLive() {
+    if (onCustomerChange) {
+      onCustomerChange(undefined);
+      return;
+    }
+    contextIdRef.current += 1;
     setViewUserId(null);
     setActiveUserId(null);
     setAdjustOpen(false);
@@ -142,6 +192,11 @@ export function SessionsPage({
   }
 
   function selectCustomer(item: CustomerSessionListItem) {
+    if (onCustomerChange) {
+      onCustomerChange(item.user_id);
+      return;
+    }
+    contextIdRef.current += 1;
     setActiveUserId(item.user_id);
     setQueryUserId(item.user_id);
     setAdjustOpen(false);
@@ -158,6 +213,7 @@ export function SessionsPage({
     const key = revokeKey ?? crypto.randomUUID();
     setRevokeKey(key);
     setRevoking(true);
+    const actionContextId = contextIdRef.current;
     try {
       await revokeCustomerSession(
         pendingRevoke.session_id,
@@ -165,11 +221,13 @@ export function SessionsPage({
         reason,
         key,
       );
+      if (contextIdRef.current !== actionContextId) return;
       setNotice(`已强制下线 ${pendingRevoke.username}，会话状态已刷新。`);
       setPendingRevoke(null);
       setRevokeKey(null);
       await load(viewUserId, offset);
     } catch (cause) {
+      if (contextIdRef.current !== actionContextId) return;
       setRevokeError(
         cause instanceof Error ? cause.message : "结束会话失败：未知错误",
       );
@@ -177,7 +235,9 @@ export function SessionsPage({
         setRevokeKey(null);
       }
     } finally {
-      setRevoking(false);
+      if (contextIdRef.current === actionContextId) {
+        setRevoking(false);
+      }
     }
   }
 
@@ -208,6 +268,7 @@ export function SessionsPage({
     const key = adjustKey ?? crypto.randomUUID();
     setAdjustKey(key);
     setSubmitting(true);
+    const actionContextId = contextIdRef.current;
     try {
       const result = await createCustomerAdjustment(
         activeUserId,
@@ -215,6 +276,7 @@ export function SessionsPage({
         reason,
         key,
       );
+      if (contextIdRef.current !== actionContextId) return;
       setNotice(
         `加秒成功（request id: ${result.request_id}），余额 ${result.wallet_balance_after} 秒`,
       );
@@ -224,6 +286,7 @@ export function SessionsPage({
       setAdjustConfirmOpen(false);
       await load(viewUserId, offset);
     } catch (cause) {
+      if (contextIdRef.current !== actionContextId) return;
       setWriteError(
         cause instanceof Error ? cause.message : "加秒失败：未知错误",
       );
@@ -231,7 +294,9 @@ export function SessionsPage({
         setAdjustKey(null);
       }
     } finally {
-      setSubmitting(false);
+      if (contextIdRef.current === actionContextId) {
+        setSubmitting(false);
+      }
     }
   }
 
