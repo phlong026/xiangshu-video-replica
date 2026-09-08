@@ -1,0 +1,20 @@
+{
+  "aggregate": "fix/frontend-completion-no-confirmation-20260907",
+  "covered": [
+    "feat/unified-frontend-gate-flow-audit-20260907",
+    "feat/viral-module-launch-20260907",
+    "fix/frontend-fp10-pagination-review-20260907",
+    "fix/frontend-fp11-source-flow-20260907",
+    "fix/frontend-fp12-ip-rewrite-20260908",
+    "fix/frontend-fp13-photo-avatar-20260907",
+    "fix/frontend-fp14-audio-assets-20260907",
+    "fix/frontend-fp15-subtitles-20260907",
+    "fix/frontend-fp17-pagination-20260907",
+    "fix/frontend-fp19-previews-20260908",
+    "fix/frontend-fp21-navigation-20260908",
+    "fix/frontend-fp22-analytics-20260908",
+    "fix/frontend-fp25-frontend-20260908",
+    "fix/frontend-fp26-account-status-20260907",
+    "fix/frontend-fp30-link-parser-20260908"
+  ]
+}

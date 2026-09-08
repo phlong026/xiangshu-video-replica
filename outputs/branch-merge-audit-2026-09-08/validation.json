@@ -1,0 +1,12 @@
+{
+  "branch_count": 41,
+  "worktree_count": 25,
+  "branch_inventory_complete": true,
+  "merge_probes": 27,
+  "independent_plan_review": "OKAY; no critical findings",
+  "review_scope": "Process and evidence only; not code approval or merge readiness",
+  "business_code_changed": false,
+  "git_refs_changed": false,
+  "pr_mutations": false,
+  "tests_or_ci_rerun": false
+}
