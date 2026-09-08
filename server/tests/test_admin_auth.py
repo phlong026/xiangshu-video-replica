@@ -11,7 +11,6 @@ implements the application layer on top of it.
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import hashlib
 import json
@@ -26,6 +25,7 @@ import psycopg
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pg_test_kit import require_pg_or_explicit_skip
 
 from app.admin_auth_routes import (
     ADMIN_CSRF_HEADER,
@@ -49,19 +49,6 @@ DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 PG_DSN = os.environ.get("TEST_POSTGRESQL_URL", DEFAULT_DSN)
 TEST_KEY = secrets.token_urlsafe(48)  # ≥ 32 bytes, never a real secret
 TEST_AEAD_KEY = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("ascii")
-
-
-def _pg_available(dsn: str) -> bool:
-    try:
-
-        def probe() -> None:
-            conn = psycopg.connect(dsn, connect_timeout=3)
-            conn.close()
-
-        asyncio.run(asyncio.wait_for(asyncio.to_thread(probe), timeout=5))
-    except Exception:
-        return False
-    return True
 
 
 @contextmanager
@@ -432,10 +419,14 @@ def test_legacy_control_identity_rejected_at_runtime_in_customer_production() ->
 # PG integration — admin session exchange / cookie / CSRF / RBAC
 # ---------------------------------------------------------------------------
 
-pytestmark_pg = pytest.mark.skipif(
-    not _pg_available(PG_DSN),
-    reason="PostgreSQL fixture not reachable; scripts/pg-fixture.sh start",
-)
+pytestmark_pg = pytest.mark.usefixtures("pg_hard_gate")
+
+
+@pytest.fixture(scope="module")
+def pg_hard_gate() -> None:
+    """CW-007 hard gate: unreachable PG fails the suite (explicit opt-in may skip)."""
+    require_pg_or_explicit_skip()
+
 
 T09_DB_NAME = "t09_admin_session_test"
 
@@ -462,8 +453,7 @@ def _alembic_upgrade(dsn: str) -> None:
 @pytest.fixture(scope="module")
 def admin_pg_dsn() -> Iterator[str]:
     """Dedicated migrated database with operator seed users."""
-    if not _pg_available(PG_DSN):
-        pytest.skip("PostgreSQL fixture not reachable")
+    require_pg_or_explicit_skip(PG_DSN)
     with psycopg.connect(_admin_dsn(), autocommit=True) as conn:
         conn.execute(f'DROP DATABASE IF EXISTS "{T09_DB_NAME}" WITH (FORCE)')
         conn.execute(f'CREATE DATABASE "{T09_DB_NAME}"')

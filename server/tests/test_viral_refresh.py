@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -9,6 +8,7 @@ import psycopg
 import pytest
 from alembic import command
 from fastapi import HTTPException
+from pg_test_kit import require_pg_or_explicit_skip
 
 from app.auth import CurrentUser
 from app.db import connect_database, initialize_database
@@ -131,19 +131,13 @@ def test_sqlite_refresh_failure_does_not_crash_after_lease_loss(
 
 @pytest.mark.pg
 def test_postgres_refresh_scope_has_one_task_and_one_lease() -> None:
-    base_dsn = os.environ.get(
-        "TEST_POSTGRESQL_URL",
-        "postgresql://testuser:testpass@localhost:5433/customer_v3_test",
-    )
+    base_dsn = require_pg_or_explicit_skip()
     admin_dsn = base_dsn.rsplit("/", 1)[0] + "/postgres"
     database_name = "viral_refresh_concurrency_test"
     dsn = base_dsn.rsplit("/", 1)[0] + f"/{database_name}"
-    try:
-        with psycopg.connect(admin_dsn, autocommit=True) as admin:
-            admin.execute(f'DROP DATABASE IF EXISTS "{database_name}" WITH (FORCE)')
-            admin.execute(f'CREATE DATABASE "{database_name}"')
-    except psycopg.Error:
-        pytest.skip("PostgreSQL fixture is unavailable")
+    with psycopg.connect(admin_dsn, autocommit=True) as admin:
+        admin.execute(f'DROP DATABASE IF EXISTS "{database_name}" WITH (FORCE)')
+        admin.execute(f'CREATE DATABASE "{database_name}"')
 
     from app.db import alembic_config
 

@@ -36,6 +36,7 @@ import psycopg
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pg_test_kit import require_pg_or_explicit_skip
 
 from app.activation_code_service import (
     ACTIVATION_CODE_HMAC_KEY_ENV,
@@ -46,7 +47,6 @@ from app.activation_code_service import (
 from app.db_pg import DATABASE_URL_ENV, close_pg_pool
 
 DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
-SKIP_REASON = "PostgreSQL fixture not reachable; start it via scripts/pg-fixture.sh start"
 
 TEST_KEY = secrets.token_urlsafe(48)  # code HMAC key (v1), never a real secret
 TEST_FINGERPRINT_KEY = secrets.token_urlsafe(48)  # device-fingerprint HMAC key
@@ -60,15 +60,6 @@ FUTURE_EXPIRY = "2099-01-01T00:00:00+00:00"
 
 def _b64key(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
-
-
-def _pg_available(dsn: str) -> bool:
-    try:
-        conn = psycopg.connect(dsn, connect_timeout=3)
-        conn.close()
-    except Exception:
-        return False
-    return True
 
 
 T13C_DB_NAME = "t13c_customer_activation_concurrency"
@@ -94,8 +85,7 @@ def concurrency_pg_dsn() -> Iterator[str]:
     from alembic import command
     from alembic.config import Config
 
-    if not _pg_available(_pg_dsn()):
-        pytest.skip(SKIP_REASON)
+    require_pg_or_explicit_skip(_pg_dsn())
     with psycopg.connect(_admin_dsn(), autocommit=True) as conn:
         conn.execute(f'DROP DATABASE IF EXISTS "{T13C_DB_NAME}" WITH (FORCE)')
         conn.execute(f'CREATE DATABASE "{T13C_DB_NAME}"')

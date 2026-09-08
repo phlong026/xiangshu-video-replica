@@ -13,6 +13,7 @@ import psycopg
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pg_test_kit import require_pg_or_explicit_skip
 
 from app.admin_auth_routes import (
     ADMIN_CSRF_HEADER,
@@ -25,15 +26,6 @@ TEST_KEY = "w15-dash-test-hmac-key-0123456789abcdef"
 
 DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 W15_DB_NAME = "w15_dashboard_test"
-
-
-def _pg_available(dsn: str) -> bool:
-    try:
-        conn = psycopg.connect(dsn, connect_timeout=3)
-        conn.close()
-    except Exception:
-        return False
-    return True
 
 
 def _pg_dsn() -> str:
@@ -55,8 +47,7 @@ def dashboard_pg_dsn() -> Iterator[str]:
     from alembic import command
     from alembic.config import Config
 
-    if not _pg_available(_pg_dsn()):
-        pytest.skip("PostgreSQL fixture is not available")
+    require_pg_or_explicit_skip(_pg_dsn())
     with psycopg.connect(_admin_dsn(), autocommit=True) as conn:
         conn.execute(f'DROP DATABASE IF EXISTS "{W15_DB_NAME}" WITH (FORCE)')
         conn.execute(f'CREATE DATABASE "{W15_DB_NAME}"')

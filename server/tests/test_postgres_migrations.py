@@ -22,9 +22,9 @@ from typing import Any
 import asyncpg  # type: ignore[import-untyped]
 import psycopg
 import pytest
+from pg_test_kit import require_pg_or_explicit_skip
 
 DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
-SKIP_REASON = "PostgreSQL fixture not reachable; start it via scripts/pg-fixture.sh start"
 HEAD_REVISION = "080_viral_link_resolution_receipts"
 
 
@@ -126,23 +126,9 @@ def _pg_dsn() -> str:
     return os.environ.get("TEST_POSTGRESQL_URL", DEFAULT_DSN)
 
 
-def _pg_available(dsn: str) -> bool:
-    try:
-
-        async def probe() -> None:
-            conn = await asyncpg.connect(dsn)
-            await conn.close()
-
-        asyncio.run(asyncio.wait_for(probe(), timeout=3))
-    except Exception:
-        return False
-    return True
-
-
-pytestmark = pytest.mark.skipif(
-    not _pg_available(_pg_dsn()),
-    reason=SKIP_REASON,
-)
+@pytest.fixture(scope="module", autouse=True)
+def _require_pg() -> None:
+    require_pg_or_explicit_skip(_pg_dsn())
 
 
 def _run(coro_fn: Callable[[], Coroutine[Any, Any, None]]) -> None:

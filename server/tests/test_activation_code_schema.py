@@ -17,9 +17,9 @@ from pathlib import Path
 
 import psycopg
 import pytest
+from pg_test_kit import require_pg_or_explicit_skip
 
 DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
-SKIP_REASON = "PostgreSQL fixture not reachable; start it via scripts/pg-fixture.sh start"
 
 BATCH_TABLE = "activation_code_batches"
 CODES_TABLE = "activation_codes"
@@ -35,19 +35,9 @@ def _pg_dsn() -> str:
     return os.environ.get("TEST_POSTGRESQL_URL", DEFAULT_DSN)
 
 
-def _pg_available(dsn: str) -> bool:
-    try:
-        conn = psycopg.connect(dsn, connect_timeout=3)
-        conn.close()
-    except Exception:
-        return False
-    return True
-
-
-pytestmark = pytest.mark.skipif(
-    not _pg_available(_pg_dsn()),
-    reason=SKIP_REASON,
-)
+@pytest.fixture(scope="module", autouse=True)
+def _require_pg() -> None:
+    require_pg_or_explicit_skip(_pg_dsn())
 
 
 def _admin_dsn() -> str:

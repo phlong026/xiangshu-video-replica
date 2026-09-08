@@ -14,6 +14,7 @@ import psycopg
 import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
+from pg_test_kit import require_pg_or_explicit_skip
 
 from app.auth import CurrentUser, get_current_user, get_database
 from app.db import connect_database, initialize_database
@@ -208,7 +209,6 @@ def test_unset_auth_mode_fails_closed_even_when_legacy_identities_exist(
 
 A1_DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 A1_DB_NAME = "a1_internal_token_lane_test"
-A1_SKIP = "PostgreSQL fixture not reachable; start it via scripts/pg-fixture.sh start"
 
 
 def _a1_base_dsn() -> str:
@@ -224,11 +224,7 @@ def a1_dsn() -> Iterator[str]:
     from alembic import command
     from alembic.config import Config
 
-    try:
-        probe = psycopg.connect(_a1_base_dsn(), connect_timeout=3)
-        probe.close()
-    except Exception:
-        pytest.skip(A1_SKIP)
+    require_pg_or_explicit_skip(_a1_base_dsn())
     with psycopg.connect(_a1_base_dsn().rsplit("/", 1)[0] + "/postgres", autocommit=True) as conn:
         conn.execute(f'DROP DATABASE IF EXISTS "{A1_DB_NAME}" WITH (FORCE)')
         conn.execute(f'CREATE DATABASE "{A1_DB_NAME}"')

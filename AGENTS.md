@@ -51,7 +51,9 @@
 ### 开发期（每任务每轮迭代，快）
 
 ```bash
-# server/目录；先启动隔离PG。缺PG必须失败，现有skip行为需在CW-007/044中退出
+# server/ 目录；CW-007 硬门：fixture 未启动时 PG 套件直接失败（非 skip）。
+# 开发期快速反馈可显式放行跳过（不得用于验收证据）：
+#   VIDEO_REPLICA_TEST_ALLOW_PG_SKIP=1 uv run python -m pytest tests/test_<受影响文件>.py -q
 uv run python -m pytest tests/test_<受影响文件>.py -q   # 只跑专项，秒级
 uv run ruff check . && uv run ruff format --check . && uv run mypy app
 ```
@@ -63,7 +65,7 @@ uv run ruff check . && uv run ruff format --check . && uv run mypy app
 scripts/pg-fixture.sh start
 
 # 2) 服务端专项复验（server/ 目录；全量 pytest 不在这一步跑——它由第 3 步统一承载，避免双跑；
-#    缺PG或跳过数据库用例不得作为完成证据；目标门禁必须非0失败）
+#    CW-007 硬门：fixture 未启动时 PG 套件失败而非 skip，缺库伪绿/缺库 skip 均不得声明 AUTOMATED_VERIFIED）
 uv run ruff check . && uv run ruff format --check . && uv run mypy app
 
 # 3) 全仓门禁（仓库根目录，等价于 CI Linux 质量门，覆盖前端/Tauri/服务端全套；
