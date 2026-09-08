@@ -1,0 +1,764 @@
+{
+  "schema_version": 1,
+  "scope": {
+    "baseline_commit": "bffc341",
+    "documentation_commit": "bf6aab8",
+    "task_ids": [
+      "CW-009",
+      "CW-010",
+      "CW-025",
+      "CW-026",
+      "CW-027",
+      "CW-028",
+      "CW-029",
+      "CW-030",
+      "CW-031",
+      "CW-032",
+      "CW-054",
+      "CW-055",
+      "CW-056",
+      "CW-057"
+    ],
+    "assessment_basis": "Static source/test/evidence review only. No service, PostgreSQL, full test suite, paid provider, or production operation was run."
+  },
+  "summary": {
+    "complete": 0,
+    "verify": 1,
+    "partial": 13,
+    "missing": 0,
+    "decision": 0,
+    "external": 0
+  },
+  "items": [
+    {
+      "id": "CW-009",
+      "status": "partial",
+      "existing": [
+        "客户会话 verifier 已在真实 PostgreSQL 事务中按 user/device/session/epoch/lease 重验，并把业务写和提交证据放在同一外层事务。",
+        "已有 fencing、安全、管理员 session/CSRF/auditor、生产配置 fail-closed 等专项测试。"
+      ],
+      "exclude_scope": [
+        "真实支付/Provider/COS 链路属于 CW-050；类生产全角色验收属于 CW-047—049。",
+        "密钥扫描只能作为补充证据，不能替代本项安全行为矩阵。"
+      ],
+      "remaining": [
+        "把 V3 §6 的每条安全要求映射到保留 method-path；当前各套测试尚不是一张 0 漏项矩阵。",
+        "TEST-PG 缺库必须失败；当前 fencing/security fixture 会 pytest.skip。",
+        "补齐日志、Sentry、CSV、dump、LocalStorage 全介质明文泄漏行为断言及支付回调独立鉴权映射。"
+      ],
+      "evidence": [
+        {
+          "path": "server/app/customer_fence.py",
+          "line": 181,
+          "why": "fenced_pg_transaction 在 PG 事务内重验并由外层统一提交/回滚。"
+        },
+        {
+          "path": "server/tests/test_customer_fencing.py",
+          "line": 99,
+          "why": "真实 PG fixture 存在，但缺库时第104—105行直接 skip。"
+        },
+        {
+          "path": "server/tests/test_customer_security.py",
+          "line": 402,
+          "why": "安全集成 fixture 在第407—408行缺 PG 时 skip。"
+        },
+        {
+          "path": "server/tests/test_admin_auth.py",
+          "line": 976,
+          "why": "已有 admin logout CSRF 行为测试。"
+        }
+      ],
+      "other_branch_evidence": [],
+      "acceptance_delta": [
+        "新增机器可核销的 V3 §6 requirement→test→method-path 清单，漏项=0、失败=0、skip=0。",
+        "在独立 PG 多连接下验证入口后切换、迟到 heartbeat/logout/业务写/幂等重放均 0 业务副作用。"
+      ],
+      "completion_delta": [
+        "保留路由角色矩阵和 V3 §6 子矩阵全部在必需 TEST-PG 门禁通过；独立安全复核无未决项。"
+      ]
+    },
+    {
+      "id": "CW-010",
+      "status": "partial",
+      "existing": [
+        "H3 崩溃恢复与客户公平队列已有真实 PG、多 Worker、租约、双领和释放专项。",
+        "钱包 RESERVE/SETTLE/RELEASE 和口播等类别已有大量行为测试，但主要仍以 tmp_path SQLite 建库。"
+      ],
+      "exclude_scope": [
+        "真实付费 Provider 调用属于 CW-050；本项允许受控 Provider 替身。",
+        "容量规模与类生产拓扑属于 CW-047。"
+      ],
+      "remaining": [
+        "将钱包、口播、图片、分析/改写/ASR、独立生成逐类迁为 TEST-PG 独立多连接基线；不能以 H3 覆盖替代。",
+        "补齐每类提交、领取、崩溃、超时、SUBMISSION_UNCERTAIN、回写及状态/账务差额断言。",
+        "缺 PG 必须非零失败且 0 skip。"
+      ],
+      "evidence": [
+        {
+          "path": "server/tests/test_worker_crash_recovery.py",
+          "line": 283,
+          "why": "已有 PG Worker 崩溃后恢复专项入口。"
+        },
+        {
+          "path": "server/tests/test_customer_queue_fairness.py",
+          "line": 369,
+          "why": "已有并发 Worker 不重复领取的真实 PG 测试。"
+        },
+        {
+          "path": "server/tests/test_wallet_billing_service.py",
+          "line": 76,
+          "why": "钱包基线以 tmp_path 为参数，仍是 SQLite 持久化测试。"
+        }
+      ],
+      "other_branch_evidence": [
+        {
+          "branch": "codex/pr95-hardening-20260908",
+          "commit": "e06806b142e5366d9f7c3c56ff268fc44998a027",
+          "path": "server/tests/test_oral_domain.py",
+          "line": 1,
+          "why": "该分支新增口播/克隆幂等回归，但未整合且整体分支含大量客户端改动，不能计入基线。",
+          "not_baseline": true,
+          "baseline_equivalent_present": false
+        }
+      ],
+      "acceptance_delta": [
+        "交付任务类别×状态×账务矩阵；每格标出真实 PG 连接数和 Provider 替身边界。",
+        "同一幂等键重放新增收费任务=0；成功结算次数=1；确认失败释放次数=1；未知提交重提次数=0。"
+      ],
+      "completion_delta": [
+        "所有保留异步任务类别均在 TEST-PG 多连接门禁通过，0 fail/0 skip，并保留缺陷 RED→GREEN 证据。"
+      ]
+    },
+    {
+      "id": "CW-025",
+      "status": "partial",
+      "existing": [
+        "客户生产模式已强制 PostgreSQL、TLS，并拒绝 PG 与 DB_PATH 混配；API/Worker 均已有 PG 执行入口。"
+      ],
+      "exclude_scope": [
+        "历史 SQLite 只读迁移工具与已发布 migration 由 CW-060 隔离，不作为在线运行入口。",
+        "SQL/类型与事务细节分别由 CW-054/055 收口。"
+      ],
+      "remaining": [
+        "删除所有环境对 sqlite://、DB_PATH、自动 SQLite 建库的在线解析和 API/Worker/开发回退。",
+        "让缺 DSN、SQLite URL、DB_PATH、PG 不可达、错 schema 在全部环境 fail-closed，且不生成 .db/-wal/-shm。",
+        "验证桌面制品不接收 PG DSN，API 与 Worker 只连接同一登记 PG。"
+      ],
+      "evidence": [
+        {
+          "path": "server/app/db_pg.py",
+          "line": 122,
+          "why": "解析器仍接受 sqlite:// 和 DB_PATH 回退（第125—154行）。"
+        },
+        {
+          "path": "server/app/auth.py",
+          "line": 40,
+          "why": "请求数据库仍在无 DATABASE_URL 时走 DB_PATH/SQLite（第47—76行）。"
+        },
+        {
+          "path": "server/app/generation_worker.py",
+          "line": 1583,
+          "why": "SQLite Worker 正式函数仍存在并可达。"
+        },
+        {
+          "path": "server/app/bootstrap.py",
+          "line": 540,
+          "why": "客户生产已有 PG/COS readiness gate。"
+        }
+      ],
+      "other_branch_evidence": [],
+      "acceptance_delta": [
+        "新增 dev/test/CI/staging/production 启动拒绝矩阵：有效 PG 成功，其余配置全部非零且无 SQLite 文件副作用。",
+        "API/Worker 并发启动需证明不会自行执行或竞争 schema migration。"
+      ],
+      "completion_delta": [
+        "PG-01 通过且所有在线入口仅有 PG；SQLite 在线实现最终删除须等 CW-043 覆盖完成。"
+      ]
+    },
+    {
+      "id": "CW-026",
+      "status": "partial",
+      "existing": [
+        "客户 PG 读请求可验证 customer session；写请求具备事务内 fencing 原语。",
+        "客户生产已禁止 internal access token 走业务读路径。"
+      ],
+      "exclude_scope": [
+        "管理员 session/CSRF 归 CW-027；旧路由最终取消注册归 CW-041。"
+      ],
+      "remaining": [
+        "收敛后所有环境移除 internal Bearer、X-Dev-User-Id、固定桌面身份旁路；当前非客户生产仍接受。",
+        "逐个保留业务路由证明 read owner 与 write fenced transaction 覆盖，入口后切换写入 0 副作用。",
+        "使幂等重放重新执行授权，不可仅返回旧结果绕过当前会话。"
+      ],
+      "evidence": [
+        {
+          "path": "server/app/auth.py",
+          "line": 82,
+          "why": "get_current_user 仍接收 X-Dev-User-Id。"
+        },
+        {
+          "path": "server/app/auth.py",
+          "line": 115,
+          "why": "非 customer-production PG 仍接受 internal access token，且第132行保留 dev identity。"
+        },
+        {
+          "path": "server/app/customer_fence.py",
+          "line": 105,
+          "why": "无 PG 时 customer snapshot 返回 None，继续内部/桌面身份路径。"
+        },
+        {
+          "path": "server/app/customer_fence.py",
+          "line": 181,
+          "why": "已有事务内 session re-verification。"
+        }
+      ],
+      "other_branch_evidence": [],
+      "acceptance_delta": [
+        "生成全部保留业务 method-path 的 read-owner/write-fence 表，漏项=0。",
+        "TEST-PG 双连接制造 snapshot 后 epoch/lease/session 切换，所有迟到写业务行和账务行增量均为0。"
+      ],
+      "completion_delta": [
+        "全部客户读写矩阵 0 fail/0 skip，旧身份与开发头在收敛运行方式不可达，独立安全复核通过。"
+      ]
+    },
+    {
+      "id": "CW-027",
+      "status": "verify",
+      "existing": [
+        "客户生产的 control 路由已转接逐管理员 session；写方法强制 AdminWriter，旧代理身份运行时拒绝。",
+        "统一管理写合同已包含 confirm、reason、Idempotency-Key，并按真实 actor 记录。",
+        "已有 admin session、CSRF、auditor 只读、过期/撤销与幂等专项测试。"
+      ],
+      "exclude_scope": [
+        "管理网页视觉及客户端制品隔离由前端/打包任务验收；真实生产角色 UAT 在 CW-047—050。",
+        "收敛前内部 P0 proxy 兼容路径的物理删除由 CW-041/042 完成。"
+      ],
+      "remaining": [
+        "无需预设重写后台鉴权；先按保留操作清单核验所有写路由确实使用 AdminWriter/写合同。",
+        "在 TEST-PG 运行 admin/auditor/customer/无CSRF/过期session/旧proxy 全矩阵；仅在发现漏接路由时修复。"
+      ],
+      "evidence": [
+        {
+          "path": "server/app/control_auth.py",
+          "line": 24,
+          "why": "旧 X-Control-Proxy-Token 在客户生产明确 403。"
+        },
+        {
+          "path": "server/app/control_auth.py",
+          "line": 73,
+          "why": "customer-production control 路由转逐管理员 session，写方法经 get_admin_writer。"
+        },
+        {
+          "path": "server/app/admin_write_contract.py",
+          "line": 77,
+          "why": "管理写统一要求 Idempotency-Key、confirm=true、非空 reason。"
+        },
+        {
+          "path": "server/tests/test_admin_auth.py",
+          "line": 1027,
+          "why": "已有 auditor 只读专项。"
+        }
+      ],
+      "other_branch_evidence": [],
+      "acceptance_delta": [
+        "补一张保留管理操作→route→AdminReader/AdminWriter→audit event 的静态与动态核销表，漏项=0。",
+        "真实 PG 下 actor/reason/idempotency/CSRF/auditor 测试 0 fail/0 skip。"
+      ],
+      "completion_delta": [
+        "若矩阵无漏接则以“验收完成”关闭，不另立重构；发现漏接仅补对应路由和单行为测试。"
+      ]
+    },
+    {
+      "id": "CW-028",
+      "status": "partial",
+      "existing": [
+        "客户 wallet/recharge/settings 与 control 路由仍注册，客户合法兼容 API 尚未被误删。",
+        "Provider 配置合并/测试等共享函数已有单一可运行实现。"
+      ],
+      "exclude_scope": [
+        "最终取消旧路由注册由 CW-041；源文件删除由 CW-042。"
+      ],
+      "remaining": [
+        "control_routes 仍直接从 settings_routes 导入共享工具，尚未迁到中性现有模块。",
+        "需要逐端点消费者证据、替代路径及“保留兼容/可删”冻结清单，不能按路径前缀推断。",
+        "共享工具迁移后补客户和管理员合同回归。"
+      ],
+      "evidence": [
+        {
+          "path": "server/app/control_routes.py",
+          "line": 41,
+          "why": "control_routes 直接复用 settings_routes 的 ProviderTester/merge 等帮助函数。"
+        },
+        {
+          "path": "server/app/main.py",
+          "line": 348,
+          "why": "recharge、wallet、settings 路由仍被主应用注册。"
+        },
+        {
+          "path": "server/app/storage.py",
+          "line": 224,
+          "why": "云存储配置转换属于可保留的共享能力，不能随旧设置路由误删。"
+        }
+      ],
+      "other_branch_evidence": [],
+      "acceptance_delta": [
+        "每个候选端点必须登记实际调用者、认证角色、替代路径、兼容期限；未知消费者不得标可删。",
+        "共享函数迁移前后同输入输出合同测试逐项相等。"
+      ],
+      "completion_delta": [
+        "共享工具只留一份中性实现，消费者清单与兼容允许清单经评审冻结，CW-041 可据此取消注册。"
+      ]
+    },
+    {
+      "id": "CW-029",
+      "status": "partial",
+      "existing": [
+        "钱包核心已有 RESERVE/SETTLE/RELEASE、billing_round 与幂等语义；支付回调和充值路由已有服务端入口。",
+        "已有重复、释放、结算、并发余额等测试，但大部分仍依赖 SQLite。"
+      ],
+      "exclude_scope": [
+        "真实 ZPay/Provider 回调验收归 CW-050；客户端显示金额不构成本项裁决证据。",
+        "历史 migration 不在本项改写。"
+      ],
+      "remaining": [
+        "把任务结果重复/乱序、未知提交、取消、客户隐藏记录、支付回调验签与跨用户订单全部迁成 TEST-PG 多连接矩阵。",
+        "对每用例核对 available+reserved+ledger 差额为0并证明历史价格快照不可被现价改写。",
+        "评估并有选择地重做其他分支的成本账本/口播幂等修复，禁止整体 cherry-pick 分叉分支。"
+      ],
+      "evidence": [
+        {
+          "path": "server/app/internal_billing.py",
+          "line": 134,
+          "why": "现有 reserve_task_credits 使用 billing_round 和幂等流水。"
+        },
+        {
+          "path": "server/app/payment_routes.py",
+          "line": 51,
+          "why": "支付回调入口包含签名解析与错误边界。"
+        },
+        {
+          "path": "server/tests/test_wallet_billing_service.py",
+          "line": 149,
+          "why": "已有预占幂等行为测试，但 fixture 是 tmp_path SQLite。"
+        }
+      ],
+      "other_branch_evidence": [
+        {
+          "branch": "codex/local-main-cost-billing-20260908",
+          "commit": "e2175cb524f37038b0ce87899b3eca68140f423a",
+          "path": "server/app/generation_worker.py",
+          "line": 1016,
+          "why": "该分支补付费调用成本账本与 migration 防护；相对 bffc341 同时有大量删除/重编号，不能算基线或整体合并。",
+          "not_baseline": true,
+          "baseline_equivalent_present": false
+        },
+        {
+          "branch": "codex/pr3-core-fix-20260908",
+          "commit": "b5479ca32dff66754af3cfe389602cf3df8e2fa3",
+          "path": "server/app/generation_worker.py",
+          "line": 84,
+          "why": "该分支把视频拆解每次 Provider 调用独立记成本，尚未整合。",
+          "not_baseline": true,
+          "baseline_equivalent_present": false
+        },
+        {
+          "branch": "codex/pr95-hardening-20260908",
+          "commit": "e06806b142e5366d9f7c3c56ff268fc44998a027",
+          "path": "server/app/oral.py",
+          "line": 446,
+          "why": "该分支增加口播/克隆幂等防重，尚未整合。",
+          "not_baseline": true,
+          "baseline_equivalent_present": false
+        }
+      ],
+      "acceptance_delta": [
+        "支付/任务状态矩阵需断言每用户钱包、冻结、ledger、成本账本四套独立差额；所有重复/乱序路径新增账务行=预期精确值。",
+        "伪造价格、未验签回调、跨用户订单均 4xx 且 0 数据副作用。"
+      ],
+      "completion_delta": [
+        "账务与回调 TEST-PG 自动化 0 fail/0 skip，独立复核通过；其他分支仅逐补丁评估后重做/整合。"
+      ]
+    },
+    {
+      "id": "CW-030",
+      "status": "partial",
+      "existing": [
+        "PG Worker 主循环和 H3 客户公平队列、租约回收、并发双领保护已存在。",
+        "同一 Worker 入口已覆盖多类任务处理函数。"
+      ],
+      "exclude_scope": [
+        "是否新增跨口播完整轮转由 CW-002 决策；A1000/B100/C10 类生产负载归 CW-047。"
+      ],
+      "remaining": [
+        "移除 run_sqlite_worker_round、run_forever、--db-path 与所有正式可达 SQLite Worker 路径。",
+        "逐类验证口播、图片、分析/文案/ASR、H3/独立的领取、租约、迟到结果、未知提交和计费/成本边界。",
+        "现有公平性主要锁定 H3 队列，不能推定所有任务类型无饥饿。"
+      ],
+      "evidence": [
+        {
+          "path": "server/app/generation_worker.py",
+          "line": 1583,
+          "why": "SQLite Worker round 仍完整存在。"
+        },
+        {
+          "path": "server/app/generation_worker.py",
+          "line": 1635,
+          "why": "并行存在 PG Worker round。"
+        },
+        {
+          "path": "server/app/generation_worker.py",
+          "line": 1681,
+          "why": "CLI main 仍负责在 PG/SQLite 路径间分派。"
+        },
+        {
+          "path": "server/tests/test_customer_queue_fairness.py",
+          "line": 322,
+          "why": "已有用户 round-robin 的 PG 公平队列测试。"
+        }
+      ],
+      "other_branch_evidence": [
+        {
+          "branch": "codex/pr3-core-fix-20260908",
+          "commit": "b5479ca32dff66754af3cfe389602cf3df8e2fa3",
+          "path": "server/app/generation_worker.py",
+          "line": 84,
+          "why": "分析 Provider 成本回写补丁可作为逐类核验参考，未整合。",
+          "not_baseline": true,
+          "baseline_equivalent_present": false
+        },
+        {
+          "branch": "codex/pr95-hardening-20260908",
+          "commit": "e06806b142e5366d9f7c3c56ff268fc44998a027",
+          "path": "server/app/oral.py",
+          "line": 446,
+          "why": "口播/克隆防重复提交补丁可作为参考，未整合。",
+          "not_baseline": true,
+          "baseline_equivalent_present": false
+        }
+      ],
+      "acceptance_delta": [
+        "每任务类型至少独立覆盖：2 Worker 同抢、lease 过期、迟到结果、Provider 超时、SUBMISSION_UNCERTAIN、重启恢复。",
+        "混合队列按冻结阈值断言最大等待；两设备不能把同用户 running slot 从1变2。"
+      ],
+      "completion_delta": [
+        "所有正式 Worker 仅 PG；每类/混合 TEST-PG 证据齐全，0 重复领取、0 重复收费、0 盲重提。"
+      ]
+    },
+    {
+      "id": "CW-031",
+      "status": "partial",
+      "existing": [
+        "客户生产 readiness 已要求 active_storage_provider=cos 并做私有 bucket readiness。",
+        "COS URI 解析、bucket 匹配、签名/授权能力已存在。"
+      ],
+      "exclude_scope": [
+        "旧 local 资产搬迁归 CW-037；真实 COS 凭据链归 CW-050。",
+        "可重建的本地临时处理中间文件可保留，但不得成为跨进程持久真源。"
+      ],
+      "remaining": [
+        "关闭全部正式服务本地持久存储回退；当前无 COS 时 get_media_storage 仍返回 LocalStorageAdapter。",
+        "保留历史 local URI 只作为迁移期可追溯输入，禁止新写。",
+        "补 API A 上传/API B或Worker读取、跨用户/撤销session、签名过期重获、COS故障不落本地的跨实例测试。"
+      ],
+      "evidence": [
+        {
+          "path": "server/app/storage.py",
+          "line": 21,
+          "why": "StorageProvider 仍公开 cos/local/fake 三种持久适配。"
+        },
+        {
+          "path": "server/app/media_routes.py",
+          "line": 147,
+          "why": "无 COS 配置时第155行明确回退本地。"
+        },
+        {
+          "path": "server/app/media_routes.py",
+          "line": 163,
+          "why": "已持久化 local URI 仍可解析到本地适配器。"
+        },
+        {
+          "path": "server/app/bootstrap.py",
+          "line": 554,
+          "why": "客户生产 readiness 强制 PG 配置中的 active provider 为 cos。"
+        }
+      ],
+      "other_branch_evidence": [],
+      "acceptance_delta": [
+        "用两个独立 API 进程语义/连接和一个 Worker 验证同一 COS 对象可读；临时目录删除后业务仍可恢复。",
+        "COS put/get/sign 任一故障均返回明确错误，本地持久文件新增数=0。"
+      ],
+      "completion_delta": [
+        "新持久资产 provider=cos 比例100%；local 新写=0；授权、撤销、过期、跨节点和故障专项 0 fail。"
+      ]
+    },
+    {
+      "id": "CW-032",
+      "status": "partial",
+      "existing": [
+        "已有客户环境模板、PG 单主机迁移锁、PITR 工具和可按 SHA 构建镜像的 rollout 脚本。",
+        "构建阶段已检查 ffmpeg/ffprobe、Python 编译和关键模块导入。"
+      ],
+      "exclude_scope": [
+        "真实多实例拓扑、容灾切换归 CW-047/048；真实密钥/Provider/COS 链归 CW-050。",
+        "历史 operator 工具由 CW-060 独立交付。"
+      ],
+      "remaining": [
+        "rollout 依赖 /opt/video-replica-candidate/compose.yaml 等仓库外主机文件，尚非空白环境可重建的唯一默认包。",
+        "仓库仍保留 internal P0 systemd 与 SQLite backup 单元，需从正式部署产物排除。",
+        "补齐应用/迁移/备份角色、全进程连接池预算、首次管理员、健康检查和制品哈希的可执行验收。"
+      ],
+      "evidence": [
+        {
+          "path": "deploy/customer-git-rollout.sh",
+          "line": 22,
+          "why": "部署根与 compose 路径固定到主机外部状态，第26行依赖外置 compose.yaml。"
+        },
+        {
+          "path": "deploy/customer-git-rollout.sh",
+          "line": 215,
+          "why": "脚本动态生成 Dockerfile 并检查 ffmpeg/ffprobe/模块导入。"
+        },
+        {
+          "path": "deploy/postgres/migrate.sh",
+          "line": 15,
+          "why": "迁移锁仅为 host-local，并要求 runbook 指定唯一迁移主机。"
+        },
+        {
+          "path": "server/pyproject.toml",
+          "line": 4,
+          "why": "项目描述仍是 internal desktop API，说明默认交付身份尚未完全收敛。"
+        }
+      ],
+      "other_branch_evidence": [],
+      "acceptance_delta": [
+        "在空白隔离目录仅使用登记制品重建 API/Worker/Admin；未登记主机文件依赖数=0。",
+        "缺 PG/COS/key/ffmpeg/ffprobe/codec 每项均独立 fail-fast；多个应用实例不得执行 schema DDL。"
+      ],
+      "completion_delta": [
+        "唯一默认部署包、锁定依赖、角色/池预算、备份轮换和健康检查全部与实际命令一致；正式单元中 SQLite backup=0。"
+      ]
+    },
+    {
+      "id": "CW-054",
+      "status": "partial",
+      "existing": [
+        "BusinessConnection 已提供 PG 原生 %s 执行和同时支持名称/位置的 row factory。",
+        "若干 SQLite-only BEGIN/PRAGMA 被 PG 门面吞掉以维持现有事务边界。"
+      ],
+      "exclude_scope": [
+        "全域业务测试批量映射核销归 CW-058/059，但不能代替本项每调用者修改前的首批 PG 回归。",
+        "在线 SQLite 实现最终删除归 CW-042。"
+      ],
+      "remaining": [
+        "Postgres executemany 当前完全 no-op；必须定义真实空批/非空批合同。",
+        "清除 sqlite3.Row/Error 类型与 SQL translator/PRAGMA/BEGIN IMMEDIATE 债务，逐调用者改为 PG 原生异常和数据类型。",
+        "补金额/布尔/NULL/UTC/JSON、RETURNING/rowcount、唯一/FK/check、导出/trace 实际 PG 结果，逐调用者保留 RED→GREEN。"
+      ],
+      "evidence": [
+        {
+          "path": "server/app/db_portable.py",
+          "line": 228,
+          "why": "PG backend 已直接执行原生 SQL。"
+        },
+        {
+          "path": "server/app/db_portable.py",
+          "line": 249,
+          "why": "自定义 row 同时支持名称和位置访问。"
+        },
+        {
+          "path": "server/app/db_portable.py",
+          "line": 320,
+          "why": "门面仍显式模拟 SQLite 形状并吞 BEGIN IMMEDIATE/PRAGMA。"
+        },
+        {
+          "path": "server/app/db_portable.py",
+          "line": 350,
+          "why": "executemany 在 PG 下不执行任何写入。"
+        },
+        {
+          "path": "server/app/generation.py",
+          "line": 917,
+          "why": "业务调用者仍以 sqlite3.Row 注解持久化行。"
+        }
+      ],
+      "other_branch_evidence": [],
+      "acceptance_delta": [
+        "每个实际调用者先有 TEST-PG 持久化断言；不兼容路径先红后绿并绑定提交。",
+        "非空 executemany 写入行数必须等于参数组数；失败后连接可复用且错误映射稳定。"
+      ],
+      "completion_delta": [
+        "当前业务调用者的 SQLite 查询/行/异常债务核销为0，PG合同矩阵0 fail/0 skip，无 ORM/多后端新抽象。"
+      ]
+    },
+    {
+      "id": "CW-055",
+      "status": "partial",
+      "existing": [
+        "pg_transaction 已使用连接池事务上下文统一提交/回滚，并校验 isolation allowlist。",
+        "fenced_pg_transaction 持有最终提交权；BusinessConnection 在 PG 上的 commit/rollback 是刻意 no-op。",
+        "基线已经包含 statement_timeout、idle_in_transaction_session_timeout 与池卫生参数。"
+      ],
+      "exclude_scope": [
+        "业务域全量映射核销归 CW-058/059；容量基准归 CW-047。"
+      ],
+      "remaining": [
+        "补齐每个已迁调用者修改前 TEST-PG 回归与 RED→GREEN；当前证据不足以证明全调用链均未中途提交。",
+        "增加池耗尽有界失败、断连、异常事务回收、死锁/serialization/timeout 的 SQLSTATE→幂等恢复矩阵。",
+        "缺 PG 不得 skip；验证序列值不可回滚这一 PG 事实不会被误断言。"
+      ],
+      "evidence": [
+        {
+          "path": "server/app/db_pg.py",
+          "line": 234,
+          "why": "连接池配置含 check、lifetime、idle、timeout 与服务端超时 options。"
+        },
+        {
+          "path": "server/app/db_pg.py",
+          "line": 270,
+          "why": "外层 pg_transaction 统一拥有事务生命周期。"
+        },
+        {
+          "path": "server/app/db_portable.py",
+          "line": 320,
+          "why": "PG commit/rollback no-op 明确为保护 fenced 外层提交边界。"
+        },
+        {
+          "path": "server/app/customer_fence.py",
+          "line": 205,
+          "why": "session verifier 与业务 yield 位于同一 PG transaction。"
+        },
+        {
+          "path": "server/tests/test_db_pg.py",
+          "line": 450,
+          "why": "已有提交/回滚测试，但整套 PG 集成仍受缺库 skip 机制影响。"
+        }
+      ],
+      "other_branch_evidence": [
+        {
+          "branch": "codex/local-main-pg-timeouts-20260908",
+          "commit": "6a2f579e2c6706062cbcd8cdbed7ec151062c867",
+          "path": "server/app/db_pg.py",
+          "line": 55,
+          "why": "该分支同类服务端 timeout 配置已在 bffc341 基线出现等价实现，不构成新增完成量。",
+          "not_baseline": true,
+          "baseline_equivalent_present": true
+        }
+      ],
+      "acceptance_delta": [
+        "池 max=N 时第N+1借用必须在配置 timeout 内失败并脱敏；归还后下一请求成功。",
+        "QueryCanceled/DeadlockDetected/SerializationFailure/业务异常分别断言完整回滚、连接可复用、幂等重试不重复付费。"
+      ],
+      "completion_delta": [
+        "PG-03 和独立审查通过；所有调用者具备先测证据，0 fail/0 skip；不得把 no-op commit 改为业务层中途提交。"
+      ]
+    },
+    {
+      "id": "CW-056",
+      "status": "partial",
+      "existing": [
+        "已有空 PG upgrade→downgrade→re-upgrade 和已发布 040 head→当前 head 的迁移演练。",
+        "另有从 054 带钱包/生成代表数据升级并验证保持的数据场景。"
+      ],
+      "exclude_scope": [
+        "生产实际停写/升级执行归 CW-051；SQLite→PG 只读导入工具归 CW-034—039/CW-060。"
+      ],
+      "remaining": [
+        "尚未冻结“所有已发且受支持 PG head”矩阵；当前仅覆盖若干起点，不能代表全部客户版本。",
+        "迁移集成文件缺 PG 时整体 skip；必须改为必需门禁。",
+        "Alembic env 仍支持默认/SQLite 与 offline SQL；当前 offline 输出不能当可执行升级证据。",
+        "每个支持 head 需代表数据、完整约束/trigger/JSON/时间语义、identity/serial/ledger 下一写不碰撞和失败状态证据。"
+      ],
+      "evidence": [
+        {
+          "path": "server/tests/test_postgres_migrations.py",
+          "line": 142,
+          "why": "整个迁移集成模块缺 PG 时 skip。"
+        },
+        {
+          "path": "server/tests/test_postgres_migrations.py",
+          "line": 452,
+          "why": "已有 published 040 head 到当前 head 的真实 PG 演练。"
+        },
+        {
+          "path": "server/tests/test_postgres_migrations.py",
+          "line": 498,
+          "why": "已有空 PG 全链 upgrade/downgrade/re-upgrade。"
+        },
+        {
+          "path": "server/migrations/env.py",
+          "line": 35,
+          "why": "迁移 URL 仍允许环境缺失时使用 alembic.ini 默认，并保留 SQLite/offline 路径。"
+        }
+      ],
+      "other_branch_evidence": [
+        {
+          "branch": "codex/local-main-cost-billing-20260908",
+          "commit": "e2175cb524f37038b0ce87899b3eca68140f423a",
+          "path": "server/migrations/versions/064_operation_cost_rates.py",
+          "line": 42,
+          "why": "该分支含 migration downgrade/账本保护补丁，但 revision 编号链与基线分叉，须按当前 head 重做评估。",
+          "not_baseline": true,
+          "baseline_equivalent_present": false
+        }
+      ],
+      "acceptance_delta": [
+        "建立 supported_release_head→final_head 表，所有登记起点各跑独立真实 PG 数据副本，漏项=0、skip=0。",
+        "每个起点核对 schema 对象、关键事实、约束和下一写；失败后 alembic_version/结构状态必须可判定。"
+      ],
+      "completion_delta": [
+        "PG-04 矩阵 0 漏项/0失败/0skip，单 head，历史 revision 哈希冻结；offline --sql 明确不作为交付升级脚本。"
+      ]
+    },
+    {
+      "id": "CW-057",
+      "status": "partial",
+      "existing": [
+        "若干当前维护脚本已要求显式 PostgreSQL DSN；PG migrate 与 PITR backup/recovery 工具已存在。"
+      ],
+      "exclude_scope": [
+        "sqlite_to_postgres、reconcile_customer_billing 等一次性历史导入/核对工具保留在 CW-060 隔离制品，不应强改为无 SQLite。",
+        "实际恢复演练归 CW-048。"
+      ],
+      "remaining": [
+        "gate1_bootstrap、gate1_e2e、app.backup 与 internal backup systemd 仍是 SQLite 当前入口。",
+        "盘点全部 HTTP 外命令，逐个标 current→PG、historical→CW-060、retire；未知项不得遗漏。",
+        "当前命令必须拒绝缺/错 DSN 与 SQLite 参数，验证只读不写、写命令审计/幂等、备份目标与日志脱敏。"
+      ],
+      "evidence": [
+        {
+          "path": "server/app/gate1_bootstrap.py",
+          "line": 23,
+          "why": "Gate1 bootstrap 直接 initialize_database 并包装 SQLite BusinessConnection。"
+        },
+        {
+          "path": "server/app/gate1_e2e.py",
+          "line": 469,
+          "why": "Gate1 E2E 固定创建 gate1.sqlite3。"
+        },
+        {
+          "path": "server/app/backup.py",
+          "line": 377,
+          "why": "当前 CLI 明确为 SQLite backup/restore tools。"
+        },
+        {
+          "path": "server/scripts/reconcile_dangling_billing_reservations.py",
+          "line": 33,
+          "why": "现有对账 CLI 已优先使用显式 PostgreSQL DSN。"
+        },
+        {
+          "path": "deploy/postgres/pitr-backup.sh",
+          "line": 34,
+          "why": "已有 pg_basebackup 与 pg_verifybackup 的 PG 备份链。"
+        }
+      ],
+      "other_branch_evidence": [],
+      "acceptance_delta": [
+        "输出 command×classification×database×role×write/audit/idempotency 矩阵；current 命令的 SQLite 接受数=0。",
+        "逐命令有效 PG 成功；缺/错/SQLite DSN 非零失败且不创建数据库文件；只读命令业务表变化=0。"
+      ],
+      "completion_delta": [
+        "所有 HTTP 外当前业务入口纳入 PG-01/08，未登记 DB_PATH/SQLite timer=0；历史工具只能从 CW-060 隔离入口执行。"
+      ]
+    }
+  ]
+}

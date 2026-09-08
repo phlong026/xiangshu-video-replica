@@ -1,0 +1,21 @@
+{
+  "captured_at_utc": "2026-09-08T15:21:48.642085+00:00",
+  "command": [
+    "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/server/.venv/bin/python",
+    "-m",
+    "pytest",
+    "--rootdir",
+    "server",
+    "-c",
+    "server/pyproject.toml",
+    "server/tests/test_db_pg.py",
+    "-k",
+    "test_production or test_non_production",
+    "-q",
+    "-p",
+    "no:cacheprovider"
+  ],
+  "exit_code": 0,
+  "scope": "Pure production/non-production configuration tests; fixture probe forced to loopback port 1; no business database or migration operated. Current SQLite-allowed behavior is deliberately observed, not accepted as the PG-only target.",
+  "output": "outputs/customer-cloud-convergence-analysis-2026-09-08/v3/audit/database-config-checks.log"
+}

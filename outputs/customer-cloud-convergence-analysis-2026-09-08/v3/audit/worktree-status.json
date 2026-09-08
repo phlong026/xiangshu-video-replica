@@ -1,0 +1,323 @@
+{
+  "policy": "WIP paths inventoried only; no WIP contents copied or discarded; uncommitted changes are not counted as completed implementation.",
+  "worktrees": [
+    {
+      "path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻",
+      "branch": "refs/heads/feat/viral-module-launch-20260907",
+      "head": "bffc3419f9d89bf76fd4ad1bdad65dd824a44553",
+      "status_exit": 0,
+      "changes": []
+    },
+    {
+      "path": "/private/tmp/c4-finalcheck",
+      "branch": "refs/heads/codex/pr95-hardening-20260908",
+      "head": "e06806b142e5366d9f7c3c56ff268fc44998a027",
+      "status_exit": 0,
+      "changes": [
+        " M client/src/api.ts",
+        " M client/src/studio/StudioWorkspace.test.tsx",
+        " M client/src/studio/StudioWorkspace.tsx",
+        " M server/app/hifly.py",
+        " M server/app/media_tools.py",
+        " M server/app/oral.py",
+        " M server/tests/test_hifly_client.py",
+        " M server/tests/test_oral_domain.py",
+        " M server/tests/test_postgres_migrations.py",
+        "?? client/node_modules",
+        "?? server/tests/test_media_tools.py"
+      ]
+    },
+    {
+      "path": "/private/tmp/c4-verify",
+      "branch": null,
+      "head": "d9704eff967494e0e53348b696363bb3f3163a72",
+      "status_exit": 0,
+      "changes": [
+        " M client/src/api.ts",
+        " M client/src/generated/api.ts",
+        " M client/src/studio/ContentPages.test.tsx",
+        " M client/src/studio/ContentPages.tsx",
+        " M client/src/studio/content.css",
+        " M client/src/studio/live.test.ts",
+        " M client/src/studio/live.ts",
+        " M client/src/studio/types.ts"
+      ]
+    },
+    {
+      "path": "/private/tmp/check-base",
+      "branch": null,
+      "head": "477cde3ff2a60f560f7271bf53aa746f3dee39f4",
+      "status_exit": 0,
+      "changes": []
+    },
+    {
+      "path": "/private/tmp/ci-speedup",
+      "branch": "refs/heads/codex/ci-speedup-20260908",
+      "head": "2cacc920fb68797471c6beccb62f4f7ea4702f3e",
+      "status_exit": 0,
+      "changes": [
+        " M .github/workflows/ci.yml",
+        " M server/tests/test_build_contracts.py",
+        " M server/tests/test_customer_ha_smoke.py"
+      ]
+    },
+    {
+      "path": "/private/tmp/frontend-fp06",
+      "branch": "refs/heads/fix/frontend-completion-no-confirmation-20260907",
+      "head": "cdfb4991a5d52bd83937c08227fbd5ac8aa25493",
+      "status_exit": 0,
+      "changes": []
+    },
+    {
+      "path": "/private/tmp/frontend-fp10",
+      "branch": "refs/heads/fix/frontend-fp10-pagination-review-20260907",
+      "head": "ae474a0bbfc20d0bbe5ad39465e753922baf3625",
+      "status_exit": 0,
+      "changes": [
+        "?? client/node_modules",
+        "?? server/.venv"
+      ]
+    },
+    {
+      "path": "/private/tmp/frontend-fp11",
+      "branch": "refs/heads/fix/frontend-fp11-source-flow-20260907",
+      "head": "5982bee3892f64accaa14ce6ff2be2145b6ed153",
+      "status_exit": 0,
+      "changes": [
+        "?? server/.venv"
+      ]
+    },
+    {
+      "path": "/private/tmp/frontend-fp12",
+      "branch": "refs/heads/fix/frontend-fp12-ip-rewrite-20260908",
+      "head": "ba62202dff4de918d2779b98778dd9f382f4bbd5",
+      "status_exit": 0,
+      "changes": [
+        "?? server/.venv"
+      ]
+    },
+    {
+      "path": "/private/tmp/frontend-fp13",
+      "branch": "refs/heads/fix/frontend-fp13-photo-avatar-20260907",
+      "head": "b2dede637ca31a738cb3beffba814d1d7a556a51",
+      "status_exit": 0,
+      "changes": [
+        "?? client/node_modules",
+        "?? server/.venv"
+      ]
+    },
+    {
+      "path": "/private/tmp/frontend-fp14",
+      "branch": "refs/heads/fix/frontend-fp14-audio-assets-20260907",
+      "head": "b1e878b224fc140103cdb88060d5bfc6e70c071a",
+      "status_exit": 0,
+      "changes": [
+        "?? server/.venv"
+      ]
+    },
+    {
+      "path": "/private/tmp/frontend-fp15",
+      "branch": "refs/heads/fix/frontend-fp15-subtitles-20260907",
+      "head": "7a424a3f2590b6c1b192f4f318c465f604420ea4",
+      "status_exit": 0,
+      "changes": [
+        "?? client/node_modules",
+        "?? server/.venv"
+      ]
+    },
+    {
+      "path": "/private/tmp/frontend-fp17",
+      "branch": "refs/heads/fix/frontend-fp17-pagination-20260907",
+      "head": "c07a0cfbe1ee79e1422215bf9b329e5d19af6fdc",
+      "status_exit": 0,
+      "changes": [
+        "?? server/.venv"
+      ]
+    },
+    {
+      "path": "/private/tmp/frontend-fp19",
+      "branch": "refs/heads/fix/frontend-fp19-previews-20260908",
+      "head": "57cfa25baa4c87b9836924bd0fa59f6c1df44c13",
+      "status_exit": 0,
+      "changes": [
+        "?? server/.venv"
+      ]
+    },
+    {
+      "path": "/private/tmp/frontend-fp20",
+      "branch": "refs/heads/fix/frontend-fp20-favorites-20260908",
+      "head": "e430e5db9dae21bd3b4fa3e7a3f966543582b0d4",
+      "status_exit": 0,
+      "changes": [
+        "?? server/.venv"
+      ]
+    },
+    {
+      "path": "/private/tmp/frontend-fp21",
+      "branch": "refs/heads/fix/frontend-fp21-navigation-20260908",
+      "head": "232d9e0d8f9f1d43d1f3dbaf2e0d48c4a8fb98e5",
+      "status_exit": 0,
+      "changes": [
+        "?? server/.venv"
+      ]
+    },
+    {
+      "path": "/private/tmp/frontend-fp22",
+      "branch": "refs/heads/fix/frontend-fp22-analytics-20260908",
+      "head": "6c3ff6bc0693057540bb954697a864514c9041ea",
+      "status_exit": 0,
+      "changes": [
+        "?? server/.venv"
+      ]
+    },
+    {
+      "path": "/private/tmp/frontend-fp25-backend",
+      "branch": "refs/heads/fix/frontend-fp25-backend-20260908",
+      "head": "35a6fe386df6ed4eb4259df63a77ae2912bb4382",
+      "status_exit": 0,
+      "changes": [
+        "?? server/.venv"
+      ]
+    },
+    {
+      "path": "/private/tmp/frontend-fp25-frontend",
+      "branch": "refs/heads/fix/frontend-fp25-frontend-20260908",
+      "head": "e852c5c25e79e94013a411487bb0d56d94d35ba6",
+      "status_exit": 0,
+      "changes": [
+        "?? server/.venv"
+      ]
+    },
+    {
+      "path": "/private/tmp/frontend-fp26",
+      "branch": "refs/heads/fix/frontend-fp26-account-status-20260907",
+      "head": "21816fe0d998fd635116fdab3f0c1844188f5e39",
+      "status_exit": 0,
+      "changes": [
+        "?? client/node_modules",
+        "?? server/.venv"
+      ]
+    },
+    {
+      "path": "/private/tmp/frontend-fp30",
+      "branch": "refs/heads/fix/frontend-fp30-link-parser-20260908",
+      "head": "39f0ede8ef9610cd16be1b987f8584eb02c4d523",
+      "status_exit": 0,
+      "changes": [
+        "?? server/.venv"
+      ]
+    },
+    {
+      "path": "/private/tmp/local-main-pr1-pg-timeouts",
+      "branch": "refs/heads/codex/local-main-pg-timeouts-20260908",
+      "head": "6a2f579e2c6706062cbcd8cdbed7ec151062c867",
+      "status_exit": 0,
+      "changes": []
+    },
+    {
+      "path": "/private/tmp/local-main-pr2-brand-shell",
+      "branch": "refs/heads/codex/local-main-brand-shell-20260908",
+      "head": "c21a8ed8bcfa033fb570545059390297e590f54e",
+      "status_exit": 0,
+      "changes": []
+    },
+    {
+      "path": "/private/tmp/local-main-pr3-cost-billing",
+      "branch": "refs/heads/codex/local-main-cost-billing-20260908",
+      "head": "e2175cb524f37038b0ce87899b3eca68140f423a",
+      "status_exit": 0,
+      "changes": []
+    },
+    {
+      "path": "/private/tmp/oral-wip",
+      "branch": "refs/heads/feat/oral-wip-checkpoint",
+      "head": "6c5bb29ec3865f50cd2af77944e009c9523446ae",
+      "status_exit": 0,
+      "changes": []
+    },
+    {
+      "path": "/private/tmp/pr3-core-fix",
+      "branch": "refs/heads/codex/pr3-core-fix-20260908",
+      "head": "b5479ca32dff66754af3cfe389602cf3df8e2fa3",
+      "status_exit": 0,
+      "changes": []
+    },
+    {
+      "path": "/private/tmp/pr3-ledger-fix",
+      "branch": "refs/heads/codex/pr3-ledger-fix-20260908",
+      "head": "e2175cb524f37038b0ce87899b3eca68140f423a",
+      "status_exit": 0,
+      "changes": [
+        " M server/migrations/versions/068_wallet_ledger_sequence.py",
+        " M server/tests/test_wallet_billing_service.py"
+      ]
+    },
+    {
+      "path": "/Users/honor.pei/Documents/订单项目/c5-publish",
+      "branch": "refs/heads/feat/c5-publish-module",
+      "head": "7e5450a777852d01d265cc64df09eb3d1eaf2d87",
+      "status_exit": 0,
+      "changes": []
+    },
+    {
+      "path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻-人物IP口播联调",
+      "branch": "refs/heads/codex/character-ip-oral-completion",
+      "head": "899ee7c29a5c373c543babbbf6e6f017e63fe492",
+      "status_exit": 0,
+      "changes": []
+    },
+    {
+      "path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻-人物库收口",
+      "branch": "refs/heads/feat/character-library-page-closure",
+      "head": "b24df32b665a8b38bf3709a417fb710f979420cb",
+      "status_exit": 0,
+      "changes": [
+        " M .github/workflows/ci.yml",
+        " M client/src-tauri/resources/ffmpeg/.gitignore",
+        " M client/src-tauri/resources/ffmpeg/README.md",
+        " M client/src-tauri/resources/start-backend.bat",
+        " M client/src/api.ts",
+        " M client/src/studio/MainPages.test.tsx",
+        " M client/src/studio/MainPages.tsx",
+        " M client/src/studio/live.test.ts",
+        " M client/src/studio/live.ts",
+        " M client/src/studio/studio.css",
+        " M client/src/studio/types.ts",
+        " M scripts/ffmpeg-minimal/Dockerfile",
+        " M scripts/ffmpeg-minimal/build.sh",
+        " M server/app/generation_worker.py",
+        " M server/app/main.py",
+        " M server/app/materials.py",
+        " M server/app/oral_routes.py",
+        " M server/app/permissions.py",
+        " M server/pyproject.toml",
+        " M server/tests/test_material_permissions.py",
+        " M server/tests/test_materials.py",
+        " M server/tests/test_oral_domain.py",
+        " M server/uv.lock",
+        "?? client/src/studio/OralCompositionPanel.test.tsx",
+        "?? client/src/studio/OralCompositionPanel.tsx",
+        "?? scripts/ffmpeg-minimal/verify-windows.ps1",
+        "?? server/app/oral_compose_routes.py",
+        "?? server/app/oral_composer.py",
+        "?? server/app/oral_compositions.py",
+        "?? server/migrations/versions/078_oral_compositions.py",
+        "?? server/tests/test_oral_compositions.py"
+      ]
+    },
+    {
+      "path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻-客户版收敛分析",
+      "branch": "refs/heads/codex/customer-cloud-convergence-analysis-20260908",
+      "head": "bf6aab8b3276831477b11e4a3d79f7c12108326b",
+      "status_exit": 0,
+      "changes": []
+    },
+    {
+      "path": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻-素材库联调完成",
+      "branch": "refs/heads/fix/material-library-isolation-and-completion",
+      "head": "435adbbb14559c968cd16d14fe6fb9ba0f30880a",
+      "status_exit": 0,
+      "changes": []
+    }
+  ]
+}

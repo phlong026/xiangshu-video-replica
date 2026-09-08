@@ -1,0 +1,933 @@
+{
+  "schema_version": 1,
+  "audit_kind": "bounded-source-inventory-for-cw-v3",
+  "workspace": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻-客户版收敛分析",
+  "document_baseline": "bf6aab8",
+  "application_baseline": "bffc3419f9d89bf76fd4ad1bdad65dd824a44553",
+  "scope": [
+    "CW-008",
+    "CW-011",
+    "CW-012",
+    "CW-013",
+    "CW-014",
+    "CW-015",
+    "CW-016",
+    "CW-017",
+    "CW-018",
+    "CW-019",
+    "CW-020",
+    "CW-021",
+    "CW-022",
+    "CW-023",
+    "CW-024",
+    "CW-040",
+    "CW-041",
+    "CW-046"
+  ],
+  "method": "只读当前源码/测试定义/历史证据，并读取已冻结候选 Git 对象；未运行服务、数据库迁移、付费操作或全量测试，未修改应用代码。status=complete 要求原整项验收满足；verify 仅表示保留现成实现并复验，未宣称当前任务已通过。",
+  "counts": {
+    "complete": 0,
+    "verify": 1,
+    "partial": 13,
+    "missing": 2,
+    "decision": 1,
+    "external": 1
+  },
+  "tasks": [
+    {
+      "id": "CW-008",
+      "status": "partial",
+      "existing": "RootApp 与 CustomerWorkspace 测试已经真实挂载 StudioWorkspace；已覆盖 Tauri 根入口、客户激活/被替换终态、凭据附着后业务读取、设备配对及审批；CustomerWalletPanel/RechargeDialog 有独立组件用例。仅 App.test.tsx 为旧壳兼容而替换 Studio。",
+      "exclude_scope": "剔除重新建设真实客户挂载基座、重复编写既有激活/配对/设备列表冒烟和钱包组件基本用例；复用现有 stub、凭据 store 与组件测试。",
+      "remaining": "补齐从真实客户壳点击使用记录及个人中心钱包两个入口的生产形状响应测试，锁定 customerAccount 未传成 customerWallet 导致旧钱包路径的失败；补退出、恢复契约和界面身份切换必要缺口。",
+      "evidence": [
+        {
+          "path": "client/src/RootApp.test.tsx",
+          "line": 111,
+          "why": "真实 Tauri 根入口激活测试"
+        },
+        {
+          "path": "client/src/customer/CustomerWorkspace.test.tsx",
+          "line": 216,
+          "why": "真实工作台先绑定客户 session 再请求 projects"
+        },
+        {
+          "path": "client/src/App.test.tsx",
+          "line": 17,
+          "why": "只有旧 App 测试在此替换 Studio 为 WorkspaceShell"
+        },
+        {
+          "path": "client/src/studio/LiveWorkspacePanel.test.tsx",
+          "line": 30,
+          "why": "现有仅任务/人物交接专项，没有钱包两入口"
+        },
+        {
+          "path": "client/src/customer/CustomerWalletPanel.test.tsx",
+          "line": 70,
+          "why": "钱包独立组件充值与余额测试已经存在"
+        }
+      ],
+      "other_branch_evidence": [
+        {
+          "branch": "fix/frontend-completion-no-confirmation-20260907",
+          "commit": "cdfb4991a5d52bd83937c08227fbd5ac8aa25493",
+          "path": "client/src/customer/CustomerWorkspace.tsx",
+          "line": 314,
+          "why": "候选已经提供 onLogout 接线，可带对应测试整合，非当前已完成",
+          "count_as_current_completion": false
+        }
+      ],
+      "acceptance_delta": "保留原客户钱包红灯要求；从已存在的真实挂载基座新增两入口用例，使用后端客户响应字段，不将其改成内部价格对象。",
+      "completion_delta": "只交新增缺陷红灯/修复转绿及既有用例复跑证据；不再将挂载基座从零建设计入开发。"
+    },
+    {
+      "id": "CW-011",
+      "status": "partial",
+      "existing": "已有客户专用无 sidecar 构建合同、HTTPS origin 拒绝矩阵、identifier/窗口/resources/version 校验；CI 解包检查启动器并记录 SHA；原生下载已有 Rust/前端合同。",
+      "exclude_scope": "复用 scripts/require_customer_api_base.mjs、customer no-sidecar 合同、版本/identifier 断言、CI 解包和哈希记录基础，不重复编写等价工具。",
+      "remaining": "将保护双发行目标的旧断言改成唯一客户默认目标；补 RootApp 静态图排除内部/管理代码、全部本地后端载荷排除、运行时缺地址失败及凭据命名空间/旧版本升级保护合同。",
+      "evidence": [
+        {
+          "path": "server/tests/test_customer_ha_smoke.py",
+          "line": 600,
+          "why": "现有客户构建整段合同，仍要求内部/客户双制品"
+        },
+        {
+          "path": "server/tests/test_customer_ha_smoke.py",
+          "line": 703,
+          "why": "无效远端 origin 参数化拒绝测试"
+        },
+        {
+          "path": "scripts/require_customer_api_base.mjs",
+          "line": 44,
+          "why": "HTTPS、loopback、端口、userinfo/path/query/hash 校验"
+        },
+        {
+          "path": "server/tests/test_build_contracts.py",
+          "line": 105,
+          "why": "现有 CI 门禁断言仍含双 NSIS"
+        },
+        {
+          "path": ".github/workflows/ci.yml",
+          "line": 207,
+          "why": "现有客户包启动器排除检查"
+        }
+      ],
+      "other_branch_evidence": [],
+      "acceptance_delta": "保留既有地址/identifier/下载断言，新增唯一默认构建、客户无内部/管理 chunk 与全量载荷检查；删除旧内部目标断言前登记其共享保护。",
+      "completion_delta": "新增合同失败必须指向当前实际残留，收敛后转绿；无需重做已存在 origin guard 和哈希工具。"
+    },
+    {
+      "id": "CW-012",
+      "status": "missing",
+      "existing": "上下文类型和映射函数已有实现，但仍置于 App/RootApp；客户工作台仍反向导入 customerToCurrentUser。",
+      "exclude_scope": "保留既有上下文字段与 customerToCurrentUser 的 owner/role/display-name 映射行为，剔除从零设计新数据模型。",
+      "remaining": "执行类型与映射的归属迁移，消除 Studio/LiveWorkspacePanel 对 App 的类型依赖和 CustomerWorkspace 对 RootApp 的运行时反向依赖；登记目的文件并校验图。",
+      "evidence": [
+        {
+          "path": "client/src/studio/StudioWorkspace.tsx",
+          "line": 9,
+          "why": "import type WorkspaceShell from App"
+        },
+        {
+          "path": "client/src/studio/LiveWorkspacePanel.tsx",
+          "line": 3,
+          "why": "类型从旧 App 派生"
+        },
+        {
+          "path": "client/src/customer/CustomerWorkspace.tsx",
+          "line": 16,
+          "why": "运行时反向导入 RootApp 映射"
+        },
+        {
+          "path": "client/src/RootApp.tsx",
+          "line": 205,
+          "why": "映射函数实现已存在、目标迁移尚未发生"
+        }
+      ],
+      "other_branch_evidence": [
+        {
+          "branch": "fix/frontend-completion-no-confirmation-20260907",
+          "commit": "cdfb4991a5d52bd83937c08227fbd5ac8aa25493",
+          "path": "client/src/customer/CustomerWorkspace.tsx",
+          "line": 304,
+          "why": "候选仍使用 RootApp 映射，不能当成类型拆分完成",
+          "count_as_current_completion": false
+        }
+      ],
+      "acceptance_delta": "仅迁移职责/引用；类型检查、依赖图和客户组件 owner/role 回归通过。",
+      "completion_delta": "新公共位置唯一且无循环依赖，旧入口无消费者；无需重写映射业务规则。"
+    },
+    {
+      "id": "CW-013",
+      "status": "partial",
+      "existing": "Tauri 所有路径及 /customer、/customer/* 已进入客户状态机；激活、登录、冲突、失效、撤销和配对返回壳已有实现与测试；Studio 已监听 hash 路由。",
+      "exclude_scope": "剔除重新实现整套客户状态机与配对壳，复用既有 RootApp/CustomerPairingFlow/customer-state。",
+      "remaining": "普通浏览器根路径仍进入内部 App，/admin 同构建；收敛正式客户入口，补刷新/后退/深链接/历史 hash 与配对返回矩阵，并交接独立管理入口。",
+      "evidence": [
+        {
+          "path": "client/src/RootApp.tsx",
+          "line": 33,
+          "why": "Tauri/customer 路由已有"
+        },
+        {
+          "path": "client/src/RootApp.tsx",
+          "line": 42,
+          "why": "其余正式根路径仍回落 App，管理仍同入口"
+        },
+        {
+          "path": "client/src/RootApp.tsx",
+          "line": 64,
+          "why": "显式配对返回后重新挂载客户 boot"
+        },
+        {
+          "path": "client/src/studio/StudioWorkspace.tsx",
+          "line": 884,
+          "why": "已有 hashchange 监听"
+        },
+        {
+          "path": "client/src/RootApp.test.tsx",
+          "line": 133,
+          "why": "已有配对 URL 测试"
+        }
+      ],
+      "other_branch_evidence": [
+        {
+          "branch": "fix/frontend-completion-no-confirmation-20260907",
+          "commit": "cdfb4991a5d52bd83937c08227fbd5ac8aa25493",
+          "path": "client/src/RootApp.tsx",
+          "line": 139,
+          "why": "候选增量只有 onLogout，根路由收敛未做",
+          "count_as_current_completion": false
+        }
+      ],
+      "acceptance_delta": "将已有客户路径用例保留为回归，仅新增根路径收敛及历史/配对导航缺口；所有入口未认证不得读写私有数据。",
+      "completion_delta": "客户矩阵全部同一状态机且内部兜底删除，原激活/配对状态机不重建。"
+    },
+    {
+      "id": "CW-014",
+      "status": "decision",
+      "existing": "当前客户采用整屏激活；客户成功建立身份后才挂载工作台。公开游客壳及目标动作续接未实现；DEV ReviewWorkspace 不等同正式游客产品。",
+      "exclude_scope": "不把 DEV review 示例壳当成已实现游客模式；CW-002 不启用游客时，本项登记 N/A，不再开发。",
+      "remaining": "先依据 CW-002 冻结是否保留游客浏览；仅在启用时新增公开壳、统一私有动作门禁、取消留页和一次续接，并覆盖自动保存/轮询/上传及多入口。",
+      "evidence": [
+        {
+          "path": "client/src/RootApp.tsx",
+          "line": 18,
+          "why": "ReviewWorkspace 仅 DEV"
+        },
+        {
+          "path": "client/src/RootApp.tsx",
+          "line": 96,
+          "why": "未激活直接整屏 ActivationPage"
+        },
+        {
+          "path": "client/src/RootApp.tsx",
+          "line": 135,
+          "why": "工作台需 session.user 成立才挂载"
+        },
+        {
+          "path": "client/src/customer/CustomerWorkspace.tsx",
+          "line": 230,
+          "why": "还需 workspaceCredentialReady 才挂载 Studio"
+        }
+      ],
+      "other_branch_evidence": [],
+      "acceptance_delta": "条件合同保持：启用则验证游客零私有请求、取消零写入、续接一次；未启用只以产品决策 N/A 关闭，不算功能完成。",
+      "completion_delta": "先记录范围决策，不能无条件计入开发或凭空剔除。"
+    },
+    {
+      "id": "CW-015",
+      "status": "partial",
+      "existing": "已有客户凭据桥且使用 Symbol owner 防止旧组件卸载清掉新 session；客户 API 已有状态码分类/生命周期事件/Retry-After；管理侧已有 Cookie/CSRF、写幂等；对象下载 credentials:omit，上传只同 API origin 加业务身份。",
+      "exclude_scope": "剔除重做客户 transport、owner 清理、管理 CSRF 和对象不携凭据基础；复用现有相关专项。",
+      "remaining": "移除 workspaceAccessToken 内部 token 优先、正式客户 loopback fallback 与开发身份路径，接入唯一地址来源；按客户构建验证缺地址、断网、过期/替换/429及敏感制品。",
+      "evidence": [
+        {
+          "path": "client/src/api.ts",
+          "line": 35,
+          "why": "地址缺失仍返回 DEFAULT_API_BASE_URL"
+        },
+        {
+          "path": "client/src/api.ts",
+          "line": 1211,
+          "why": "owner-aware attach/cleanup 已实现"
+        },
+        {
+          "path": "client/src/api.ts",
+          "line": 1227,
+          "why": "仍 internalAccessToken 优先"
+        },
+        {
+          "path": "client/src/api.ts",
+          "line": 4586,
+          "why": "客户错误分类 transport 已存在"
+        },
+        {
+          "path": "client/src/api.ts",
+          "line": 2098,
+          "why": "对象下载 credentials omit"
+        },
+        {
+          "path": "client/src/api.admin.ts",
+          "line": 55,
+          "why": "缺 CSRF 明确拒绝"
+        },
+        {
+          "path": "client/src/api.test.ts",
+          "line": 2061,
+          "why": "旧 workspace cleanup 不清新 session 专项"
+        }
+      ],
+      "other_branch_evidence": [
+        {
+          "branch": "fix/frontend-completion-no-confirmation-20260907",
+          "commit": "cdfb4991a5d52bd83937c08227fbd5ac8aa25493",
+          "path": "client/src/customer/useCustomerSession.ts",
+          "line": 163,
+          "why": "候选有心跳代次/迟到结果保护，复用到 CW-017，不需另建心跳层",
+          "count_as_current_completion": false
+        }
+      ],
+      "acceptance_delta": "保留现有 owner/CSRF/对象凭据测试；增加正式客户地址与身份唯一性合同，错误恢复不回落内部身份。",
+      "completion_delta": "仅新增移除后备/内部身份差额及复验，已有安全 transport 不重做。"
+    },
+    {
+      "id": "CW-016",
+      "status": "partial",
+      "existing": "CustomerWalletPanel、CustomerRechargeDialog、客户钱包/流水/充值/订单状态 API 与后台客户旧充值写拒绝均已实现；LiveWorkspacePanel 已可在收到 customerWallet 时渲染客户钱包，在 customerAccount 存在时渲染客户资料充值。",
+      "exclude_scope": "剔除从零重做客户钱包面板、二维码充值对话框、客户充值后端与订单查询关闭轮询。",
+      "remaining": "CustomerWorkspace 只传 customerAccount，钱包分支却仅判断 customerWallet，使用记录和个人中心使用记录均落旧 WalletPanel；统一上下文并补两入口真实挂载测试，保留客户费率与后端旧写拒绝。",
+      "evidence": [
+        {
+          "path": "client/src/customer/CustomerWorkspace.tsx",
+          "line": 233,
+          "why": "仅传 customerAccount"
+        },
+        {
+          "path": "client/src/studio/LiveWorkspacePanel.tsx",
+          "line": 145,
+          "why": "wallet 只判断 customerWallet，否则旧 WalletPanel"
+        },
+        {
+          "path": "client/src/studio/MainPages.tsx",
+          "line": 1395,
+          "why": "个人中心使用记录也 openLive wallet"
+        },
+        {
+          "path": "client/src/api.ts",
+          "line": 1231,
+          "why": "旧钱包 GET /api/wallet 后强制内部定价"
+        },
+        {
+          "path": "server/app/wallet_routes.py",
+          "line": 79,
+          "why": "客户共享钱包响应不暴露内部价格"
+        },
+        {
+          "path": "server/app/recharge_routes.py",
+          "line": 283,
+          "why": "客户走旧充值写返回 CUSTOMER_RECHARGE_ROUTE_REQUIRED"
+        },
+        {
+          "path": "client/src/customer/CustomerWalletPanel.test.tsx",
+          "line": 160,
+          "why": "已有未支付订单恢复轮询测试"
+        }
+      ],
+      "other_branch_evidence": [
+        {
+          "branch": "fix/frontend-completion-no-confirmation-20260907",
+          "commit": "cdfb4991a5d52bd83937c08227fbd5ac8aa25493",
+          "path": "client/src/studio/LiveWorkspacePanel.tsx",
+          "line": 145,
+          "why": "候选仍只用 customerWallet 判钱包分支；不能将候选账号摘要等同两入口修复",
+          "count_as_current_completion": false
+        }
+      ],
+      "acceptance_delta": "只验新增上下文/接线修复及两入口一致；红灯转绿，充值走客户接口；不改变后端内部费率隐藏或旧写拒绝规则。",
+      "completion_delta": "两入口网络证据、余额/计价/流水/充值订单状态齐全；钱包后端基础与已有面板仅复验。"
+    },
+    {
+      "id": "CW-017",
+      "status": "partial",
+      "existing": "当前已有 activate/login/conflict/switch/heartbeat/过期替换撤销状态、原生/内存 store、hook 内 server logout 和资料/设备 API。现有客户壳没有传入 logout，个人中心余额仍占位。",
+      "exclude_scope": "剔除重建客户认证状态机、设备列表/配对基本 UI、资料 API 与 hook logout endpoint；整合本地候选的 onLogout 接线、资料/余额摘要与迟到心跳保护。",
+      "remaining": "整合候选后补退出网络/凭据存储失败可见结果、迟到退出不污染新 session、清理事件矩阵；修正空激活码自动恢复的前端代码/测试，与后端完整激活码+原设备指纹恢复合同一致；复验两设备/第三设备及稳定身份。",
+      "evidence": [
+        {
+          "path": "client/src/customer/useCustomerSession.ts",
+          "line": 166,
+          "why": "已有保存设备凭据后登录/恢复"
+        },
+        {
+          "path": "client/src/RootApp.tsx",
+          "line": 139,
+          "why": "未把 session.logout 传给 CustomerWorkspace"
+        },
+        {
+          "path": "client/src/customer/useCustomerSession.ts",
+          "line": 556,
+          "why": "logout 有远端调用但 catch 吞掉远端和存储错误"
+        },
+        {
+          "path": "client/src/customer/useCustomerSession.ts",
+          "line": 322,
+          "why": "终态凭据清理使用未等待的 void 调用"
+        },
+        {
+          "path": "client/src/studio/MainPages.tsx",
+          "line": 1387,
+          "why": "余额占位非服务端事实"
+        },
+        {
+          "path": "client/src/customer/useCustomerSession.test.tsx",
+          "line": 144,
+          "why": "自动恢复测试 mock 允许空激活码"
+        },
+        {
+          "path": "client/src/api.ts",
+          "line": 4922,
+          "why": "customerRecover 仍发送空激活码"
+        },
+        {
+          "path": "server/app/activation_code_routes.py",
+          "line": 561,
+          "why": "后端拒绝无 code digest；首部明确完整码+同指纹，不应倒退"
+        }
+      ],
+      "other_branch_evidence": [
+        {
+          "branch": "fix/frontend-completion-no-confirmation-20260907",
+          "commit": "cdfb4991a5d52bd83937c08227fbd5ac8aa25493",
+          "path": "client/src/RootApp.tsx",
+          "line": 143,
+          "why": "onLogout 已接线",
+          "count_as_current_completion": false
+        },
+        {
+          "branch": "fix/frontend-completion-no-confirmation-20260907",
+          "commit": "cdfb4991a5d52bd83937c08227fbd5ac8aa25493",
+          "path": "client/src/customer/CustomerWorkspace.tsx",
+          "line": 314,
+          "why": "传递 logout/profile reload",
+          "count_as_current_completion": false
+        },
+        {
+          "branch": "fix/frontend-completion-no-confirmation-20260907",
+          "commit": "cdfb4991a5d52bd83937c08227fbd5ac8aa25493",
+          "path": "client/src/customer/useCustomerSession.ts",
+          "line": 594,
+          "why": "候选新增退出并发去重但仍吞掉失败",
+          "count_as_current_completion": false
+        },
+        {
+          "branch": "fix/frontend-completion-no-confirmation-20260907",
+          "commit": "cdfb4991a5d52bd83937c08227fbd5ac8aa25493",
+          "path": "client/src/studio/MainPages.tsx",
+          "line": 1856,
+          "why": "真实余额摘要与重试可复用",
+          "count_as_current_completion": false
+        }
+      ],
+      "acceptance_delta": "保留已实现认证/设备规则为回归；重点验 onLogout 到服务端、故障区别、迟到请求隔离、恢复合同与真实 PG 响应；禁止保留空码恢复 mock 作为真实恢复证据。",
+      "completion_delta": "候选按提交/文件复用并验证，只开发遗留故障/契约差额；原生凭据本身在 CW-022 复验，避免重复开发。"
+    },
+    {
+      "id": "CW-018",
+      "status": "partial",
+      "existing": "Studio 已有项目复刻、独立视频、口播、人物、文案、素材、爆款、任务、统计、资料路由；live.ts 接真实项目/人物/任务/云草稿/素材 API；共享旧业务组件有大量专项，发布未接入目前明确提示。",
+      "exclude_scope": "剔除重新开发 F01–F12 页面壳、共享项目/人物/分镜/首帧/任务组件和已接业务 API；先复用候选针对分页、来源流转、预览、文案/IP、角色竞态等补丁。",
+      "remaining": "按 F01–F12 复验真实客户场景与关联链；修正 API 仍提示检查本地服务的云端错误；将当前未接视频链接解析、口播音频上传、分页/刷新/迟到请求等范围逐条与本地候选对照，只整合确认有效差额；发布功能继续诚实未接通。",
+      "evidence": [
+        {
+          "path": "client/src/studio/StudioWorkspace.tsx",
+          "line": 1741,
+          "why": "业务路由完整挂载映射已存在"
+        },
+        {
+          "path": "client/src/studio/live.ts",
+          "line": 793,
+          "why": "真实 loadStudioData 使用 API 适配"
+        },
+        {
+          "path": "client/src/studio/live.ts",
+          "line": 968,
+          "why": "云草稿恢复与保存已有"
+        },
+        {
+          "path": "client/src/studio/LiveWorkspacePanel.tsx",
+          "line": 100,
+          "why": "项目/分析/详情及人物任务复用链已存在"
+        },
+        {
+          "path": "client/src/studio/MainPages.tsx",
+          "line": 288,
+          "why": "视频链接解析当前未接入提示"
+        },
+        {
+          "path": "client/src/studio/CreationPages.tsx",
+          "line": 2862,
+          "why": "口播音频上传当前未接通提示"
+        },
+        {
+          "path": "client/src/api.ts",
+          "line": 2450,
+          "why": "客户上传故障仍提示本地服务"
+        },
+        {
+          "path": "client/src/studio/MainPages.tsx",
+          "line": 1303,
+          "why": "发布账号明确未接入"
+        }
+      ],
+      "other_branch_evidence": [
+        {
+          "branch": "fix/frontend-completion-no-confirmation-20260907",
+          "commit": "cdfb4991a5d52bd83937c08227fbd5ac8aa25493",
+          "path": "client/src/studio/MainPages.tsx",
+          "line": 1222,
+          "why": "候选任务详情按后端 ID 恢复与 user 保护可复用",
+          "count_as_current_completion": false
+        },
+        {
+          "branch": "fix/frontend-completion-no-confirmation-20260907",
+          "commit": "cdfb4991a5d52bd83937c08227fbd5ac8aa25493",
+          "path": "client/src/studio/StudioWorkspace.tsx",
+          "line": 258,
+          "why": "候选汇集多项前端修补；整合前需 CW-001 文件/提交选择，不得整支当基线完成",
+          "count_as_current_completion": false
+        }
+      ],
+      "acceptance_delta": "保持 F01–F12 全链路验收，验收执行不等于重新开发；已实现路径只复验，失败项与未合候选差额明确登记。",
+      "completion_delta": "每格标当前实现/复验结果/候选整合/剩余缺口，源未接能力不伪装成功；避免一项笼统重做全部前端。"
+    },
+    {
+      "id": "CW-019",
+      "status": "missing",
+      "existing": "客户/内部/管理 React 页面本身都有实现，但当前 main 仅一个 RootApp，RootApp 静态 import AdminApp 与 App，Vite 没有客户/管理独立入口输出。",
+      "exclude_scope": "剔除重新实现管理页面或客户工作台；保留现成 AdminApp、公共组件和 API 类型。",
+      "remaining": "在已登记路径实施客户/管理独立入口与构建输出；客户生产依赖图彻底排除内部/管理代码而非懒加载隐藏；管理静态资源随服务器部署。",
+      "evidence": [
+        {
+          "path": "client/src/main.tsx",
+          "line": 4,
+          "why": "唯一入口 import RootApp"
+        },
+        {
+          "path": "client/src/RootApp.tsx",
+          "line": 2,
+          "why": "静态 import AdminApp"
+        },
+        {
+          "path": "client/src/RootApp.tsx",
+          "line": 3,
+          "why": "静态 import App"
+        },
+        {
+          "path": "client/vite.config.ts",
+          "line": 33,
+          "why": "build 无多入口/独立输出设置"
+        },
+        {
+          "path": "client/package.json",
+          "line": 7,
+          "why": "唯一 build 命令"
+        }
+      ],
+      "other_branch_evidence": [
+        {
+          "branch": "fix/frontend-completion-no-confirmation-20260907",
+          "commit": "cdfb4991a5d52bd83937c08227fbd5ac8aa25493",
+          "path": "client/src/RootApp.tsx",
+          "line": 139,
+          "why": "候选仍同 RootApp，仅 session logout 接线不代表产物拆分",
+          "count_as_current_completion": false
+        }
+      ],
+      "acceptance_delta": "只验入口/输出分离与现有管理功能回归；客户所有 chunk 不得含内部/管理入口。",
+      "completion_delta": "构建图、解包清单/哈希与两类独立部署输出可复现；不计重做页面工作量。"
+    },
+    {
+      "id": "CW-020",
+      "status": "partial",
+      "existing": "tauri.customer.conf.json 已定义既有 customer identifier、窗口 /customer、HTTPS CSP、resources 空列表及安装器 hook；专用 :customer build 已启用 --no-default-features 和 origin guard。",
+      "exclude_scope": "剔除从零创建客户 Tauri 配置、identifier、窗口/HTTPS 策略和无资源 customer target；沿用既有命名空间。",
+      "remaining": "把现有客户配置和命令变成唯一默认，删除内部 default feature/config 对正式发行的影响；默认 dev/build/check 统一，并联动地址失败合同和 README。",
+      "evidence": [
+        {
+          "path": "client/src-tauri/tauri.customer.conf.json",
+          "line": 5,
+          "why": "客户 identifier 已冻结"
+        },
+        {
+          "path": "client/src-tauri/tauri.customer.conf.json",
+          "line": 20,
+          "why": "HTTPS CSP 已有"
+        },
+        {
+          "path": "client/src-tauri/tauri.customer.conf.json",
+          "line": 24,
+          "why": "resources 为空"
+        },
+        {
+          "path": "package.json",
+          "line": 22,
+          "why": "默认 tauri:build 仍未选 customer 配置"
+        },
+        {
+          "path": "package.json",
+          "line": 23,
+          "why": "专用客户命令已存在"
+        },
+        {
+          "path": "client/src-tauri/Cargo.toml",
+          "line": 13,
+          "why": "默认 local-sidecar 仍开启"
+        }
+      ],
+      "other_branch_evidence": [],
+      "acceptance_delta": "默认命令直接产生同一既有客户产品，保留身份/版本链；新增默认构建和缺地址失败测试即可。",
+      "completion_delta": "唯一默认配置/命令合同通过，原 customer 配置有效部分复用，内部发行不能误触发。"
+    },
+    {
+      "id": "CW-021",
+      "status": "partial",
+      "existing": "客户 --no-default-features 可编译掉 local-sidecar 启动链，客户配置 resources=[]；窗口、凭据和下载 handler 已与 local-sidecar 分开。",
+      "exclude_scope": "剔除重做无 sidecar 特性隔离与原生桥；保留既有窗口/凭据/下载实现。",
+      "remaining": "源码仍有 BackendProcess、端口探测、BOOT_COMMAND、启动脚本、退出杀进程和默认 feature，需在唯一客户构建后删除并扩大制品检测；不能顺手删除旧安装数据。",
+      "evidence": [
+        {
+          "path": "client/src-tauri/src/lib.rs",
+          "line": 20,
+          "why": "本地端口/BootCommand/BackendProcess 仍在 feature 中"
+        },
+        {
+          "path": "client/src-tauri/src/lib.rs",
+          "line": 40,
+          "why": "仍查找本地启动脚本"
+        },
+        {
+          "path": "client/src-tauri/src/lib.rs",
+          "line": 92,
+          "why": "凭据/下载 handlers 已独立"
+        },
+        {
+          "path": "client/src-tauri/src/lib.rs",
+          "line": 119,
+          "why": "仍有启动和退出清理链"
+        },
+        {
+          "path": "client/src-tauri/Cargo.toml",
+          "line": 13,
+          "why": "feature 默认启用"
+        },
+        {
+          "path": "client/src-tauri/tauri.customer.conf.json",
+          "line": 24,
+          "why": "客户资源排除已实现"
+        }
+      ],
+      "other_branch_evidence": [],
+      "acceptance_delta": "删除范围仅残留本地启动源码/资源/命令；复验现成桥和制品无 server/.venv/Python/FFmpeg/SQLite/启动器、无业务端口与数据库写入。",
+      "completion_delta": "共享原生桥不重写；删除消费者与解包/运行证据完整，旧数据处置交 CW-039/CW-051。"
+    },
+    {
+      "id": "CW-022",
+      "status": "verify",
+      "existing": "原生凭据库已经具备 Windows DPAPI 加密文件、macOS Keychain、固定 service/account、稳定 device-instance-id、Windows 注册表迁移镜像、原子同步写；clear_session 保留设备凭据，clear_all 不删除稳定 ID；各 OS 条件测试已存在。",
+      "exclude_scope": "剔除重新实现加密 vault、DPAPI entropy、Keychain service/account、Windows 注册表稳定 ID、清理基础方法和相同目录重启 roundtrip。",
+      "remaining": "在 CW-020 沿用已发客户 identifier/app_data_dir 后，执行现成 OS 原生专项与受支持旧版本升级/重装/损坏/权限拒绝矩阵；核对 device_id/slot/epoch 和原密文可读，不凭函数存在当验收。前端清理故障/恢复合同差额统一由 CW-017 实现，新增支持平台差额由 CW-002 决策后登记。",
+      "evidence": [
+        {
+          "path": "client/src-tauri/src/customer_credentials.rs",
+          "line": 28,
+          "why": "稳定文件名与 DPAPI entropy 已有"
+        },
+        {
+          "path": "client/src-tauri/src/customer_credentials.rs",
+          "line": 87,
+          "why": "Windows registry 回读及旧 app-data ID 镜像迁移"
+        },
+        {
+          "path": "client/src-tauri/src/customer_credentials.rs",
+          "line": 105,
+          "why": "按 OS 使用 DPAPI/Keychain"
+        },
+        {
+          "path": "client/src-tauri/src/customer_credentials.rs",
+          "line": 146,
+          "why": "session/all 凭据清理已分离且不删稳定标识"
+        },
+        {
+          "path": "client/src-tauri/src/customer_credentials.rs",
+          "line": 268,
+          "why": "既有 Windows registry namespace"
+        },
+        {
+          "path": "client/src-tauri/src/customer_credentials.rs",
+          "line": 583,
+          "why": "Keychain SERVICE 已冻结"
+        },
+        {
+          "path": "client/src-tauri/src/customer_credentials.rs",
+          "line": 700,
+          "why": "Keychain account 由 app-data 目录命名"
+        },
+        {
+          "path": "client/src-tauri/src/customer_credentials.rs",
+          "line": 792,
+          "why": "稳定身份与 OS 加密/清理专项已存在"
+        },
+        {
+          "path": "docs/evidence/T29-EVIDENCE.md",
+          "line": 87,
+          "why": "历史记录明确真实 macOS/联合链路未验证"
+        }
+      ],
+      "other_branch_evidence": [],
+      "acceptance_delta": "保留原验收强度但任务类型转兼容复验；正常采用既有 namespace 不新增 vault 开发；命名空间变更或新增平台若必要须另记增量，不能悄悄吞进复验任务。",
+      "completion_delta": "当前代码不标整项完工；所有支持 OS/旧版本矩阵与清理/恢复前置任务通过才关闭，实机签名安装证据仍由 CW-046 提供。"
+    },
+    {
+      "id": "CW-023",
+      "status": "partial",
+      "existing": "已有 XHR 上传进度/abort、签名预览、对象请求不传 Bearer、Windows 保存框/路径授权、原生完成事件与查询补偿、非空文件校验、只允许完成记录打开目录、重复目标/晚到结果隔离测试。",
+      "exclude_scope": "剔除重建上传通道、签名下载、Windows 原生保存桥、完成状态机和现成异常测试。",
+      "remaining": "复验客户收敛后的上传/预览/保存完整路径；重点补实际失败/取消后残留文件处置和支持平台差额。当前原生保存/打开目录仅 Windows，已开始的写盘下载不能取消；必须在 CW-002 明确支持平台和取消范围后登记差额，不能宣称现有覆盖多 OS 或下载中取消。",
+      "evidence": [
+        {
+          "path": "client/src/api.ts",
+          "line": 2404,
+          "why": "上传进度与 AbortSignal 通道"
+        },
+        {
+          "path": "client/src/api.ts",
+          "line": 1946,
+          "why": "Windows/Tauri 保存流程与浏览器仅 started 区分"
+        },
+        {
+          "path": "client/src/api.ts",
+          "line": 2022,
+          "why": "事件丢失查询补偿"
+        },
+        {
+          "path": "client/src/api.ts",
+          "line": 2098,
+          "why": "下载外部对象 credentials omit"
+        },
+        {
+          "path": "client/src-tauri/src/video_downloads.rs",
+          "line": 128,
+          "why": "只允许尚未开始下载的取消"
+        },
+        {
+          "path": "client/src-tauri/src/video_downloads.rs",
+          "line": 213,
+          "why": "非 Windows 明确拒绝原生保存"
+        },
+        {
+          "path": "client/src-tauri/src/video_downloads.rs",
+          "line": 339,
+          "why": "完成必须实际非空文件"
+        },
+        {
+          "path": "client/src-tauri/src/video_downloads.rs",
+          "line": 497,
+          "why": "单次路径授权和失败/取消/重复目的地测试"
+        },
+        {
+          "path": "client/src/TaskRecordsPanel.test.tsx",
+          "line": 332,
+          "why": "晚到下载不影响其他批次/用户测试"
+        }
+      ],
+      "other_branch_evidence": [],
+      "acceptance_delta": "保留真实非空文件/哈希、上传返回、取消不报成功、失败恢复及外部无 Bearer；验收文档明确保存框取消与下载中取消的能力边界，支持平台不得默改。",
+      "completion_delta": "基础实现复用；补齐确认的跨平台/清理差额并通过针对测试，真实签名实机验证交 CW-046，不将弹框当保存成功。"
+    },
+    {
+      "id": "CW-024",
+      "status": "partial",
+      "existing": "已有客户 NSIS hook：固定旧内部 per-user 路径检测、同步卸载、退出码/执行错误即 Abort；CI 会构建无签名客户包、检查启动器并归档 SHA。",
+      "exclude_scope": "剔除从零建设客户 NSIS hook、卸载失败阻断和基础 SHA/包归档；复用现成机制并修改不满足数据保护的前置行为。",
+      "remaining": "当前 hook 在单一固定路径自动卸载且没有归档/迁移证明前置；补实际旧安装路径/运行进程/数据保护/回滚矩阵及唯一签名发布流程；现有 --no-sign 仅测试制品。",
+      "evidence": [
+        {
+          "path": "client/src-tauri/customer-installer-hooks.nsh",
+          "line": 5,
+          "why": "只检测一个固定旧内部安装路径"
+        },
+        {
+          "path": "client/src-tauri/customer-installer-hooks.nsh",
+          "line": 9,
+          "why": "直接先卸载，无数据已保护门禁"
+        },
+        {
+          "path": "client/src-tauri/customer-installer-hooks.nsh",
+          "line": 13,
+          "why": "卸载失败已有 Abort"
+        },
+        {
+          "path": ".github/workflows/ci.yml",
+          "line": 201,
+          "why": "当前构建无签名客户包"
+        },
+        {
+          "path": ".github/workflows/ci.yml",
+          "line": 233,
+          "why": "现有 SHA/归档基础"
+        },
+        {
+          "path": "package.json",
+          "line": 23,
+          "why": "客户命令明确 --no-sign"
+        }
+      ],
+      "other_branch_evidence": [],
+      "acceptance_delta": "差额聚焦安全升级/数据保护/签名；保留已有失败阻断，支持路径有样本、凭据/数据先保护、失败可恢复。",
+      "completion_delta": "未签名只标测试；只有版本/平台/签名/SHA 与升级/恢复矩阵齐全才交 CW-046；真实旧数据切换仍待 CW-051。"
+    },
+    {
+      "id": "CW-040",
+      "status": "partial",
+      "existing": "客户 API@/Worker@、PG PITR、监控、维护服务和脚本已存在，可作为退出内部发行的替代路径；内部发行/服务/SQLite 备份仍完整保留。",
+      "exclude_scope": "剔除重做客户 systemd 实例模板、PG PITR 脚本和已有监控维护基础；其真实运行证据另由相关运维任务负责。",
+      "remaining": "在调用/用途清单确认后删除内部 NSIS 构建、internal-p0 env/nginx/非模板 service、SQLite 专用备份和本地 launcher 的正式交付路径；保留有合法客户/离线迁移消费者部分。",
+      "evidence": [
+        {
+          "path": ".github/workflows/ci.yml",
+          "line": 170,
+          "why": "内部 NSIS 正式 CI 步骤仍在"
+        },
+        {
+          "path": "deploy/systemd/video-replica-api.service",
+          "line": 2,
+          "why": "internal P0 API service 尚存"
+        },
+        {
+          "path": "deploy/systemd/video-replica-api@.service",
+          "line": 2,
+          "why": "客户实例模板已实现"
+        },
+        {
+          "path": "deploy/systemd/video-replica-backup.service",
+          "line": 11,
+          "why": "SQLite daily 备份仍是独立正式服务"
+        },
+        {
+          "path": "deploy/systemd/video-replica-pitr-backup.service",
+          "line": 12,
+          "why": "客户物理 PG PITR 调用已存在"
+        }
+      ],
+      "other_branch_evidence": [],
+      "acceptance_delta": "仅退休无客户消费者的内部交付项；默认发布仅客户桌面与后端；既有客户备份/监控/恢复须回归，不以文件名删除共用服务。",
+      "completion_delta": "消费者清单、删除 diff、替代部署回归/回滚证据齐全；不在本项停止真实进程或删除旧数据。"
+    },
+    {
+      "id": "CW-041",
+      "status": "partial",
+      "existing": "客户生产 PG 认证已拒绝内部 access token 并复用客户 session verifier；生产控制面已使用 admin session/CSRF，合法共享业务 API 保留。内部开发/非生产 PG 仍接受内部 token 和 proxy 身份，内部 App/WalletPanel/CLI 仍在。",
+      "exclude_scope": "剔除重新实现客户生产身份拒绝和管理员 session 基础；保留合法共享 /api/projects 等业务路由及客户兼容 API。",
+      "remaining": "移除内部入口/旧钱包消费者、内部 token 签发认证、固定开发身份/共享代理模式及无合法消费者路由；把现有 production-only 边界扩展为唯一客户产品全部环境合同，更新兼容允许清单。",
+      "evidence": [
+        {
+          "path": "server/app/auth.py",
+          "line": 115,
+          "why": "production PG 已分离内部 token，但非生产仍可接受"
+        },
+        {
+          "path": "server/app/auth.py",
+          "line": 122,
+          "why": "内部令牌和开发身份分支仍存在"
+        },
+        {
+          "path": "server/app/control_auth.py",
+          "line": 87,
+          "why": "非生产仍回落 proxy-token 控制身份"
+        },
+        {
+          "path": "server/app/internal_accounts.py",
+          "line": 63,
+          "why": "内部 token 签发 CLI 尚存"
+        },
+        {
+          "path": "client/src/RootApp.tsx",
+          "line": 42,
+          "why": "内部/管理前端入口仍静态可达"
+        },
+        {
+          "path": "client/src/studio/LiveWorkspacePanel.tsx",
+          "line": 154,
+          "why": "旧 WalletPanel 仍被实际客户钱包路径消费"
+        }
+      ],
+      "other_branch_evidence": [],
+      "acceptance_delta": "保留当前生产拒绝用例为回归，新增全部正式环境内部身份拒绝/副作用 0、客户/管理员/回调正向矩阵；共享 API 按消费者保留。",
+      "completion_delta": "退出真实内部运行模式并通过依赖图/白名单/副作用矩阵；先修客户钱包消费者再删旧面板，避免误删客户能力。"
+    },
+    {
+      "id": "CW-046",
+      "status": "external",
+      "existing": "客户无 sidecar 配置、Windows CI 编译/无签名 NSIS 制品检查、凭据和下载单元合同已经存在；没有足以满足本项的真实签名+干净系统+旧包安装矩阵证据。",
+      "exclude_scope": "剔除把单元测试/CI 无签名包再次建设为新功能；这些仅作为实机前置复验，不能剔除本项真实交付验收。",
+      "remaining": "按 CW-002 支持 OS 和 CW-003 旧版本安装路径清单取得签名制品，在干净系统/旧安装样本实测激活、重启升级、两设备、上传预览下载取消、卸载/失败恢复、数据保护和进程端口。",
+      "evidence": [
+        {
+          "path": ".github/workflows/ci.yml",
+          "line": 201,
+          "why": "现有明示 unsigned customer NSIS"
+        },
+        {
+          "path": ".github/workflows/ci.yml",
+          "line": 204,
+          "why": "staging.example.invalid 仅合同制品地址"
+        },
+        {
+          "path": "docs/evidence/T36-EVIDENCE.md",
+          "line": 197,
+          "why": "真实 Windows staging origin/签名 installer 尚未验证"
+        },
+        {
+          "path": "docs/evidence/T29-EVIDENCE.md",
+          "line": 87,
+          "why": "历史原生凭据真实联合链路缺口"
+        },
+        {
+          "path": "client/src-tauri/src/video_downloads.rs",
+          "line": 213,
+          "why": "当前原生下载仅 Windows，不能用 Windows CI 冒充其他 OS"
+        }
+      ],
+      "other_branch_evidence": [],
+      "acceptance_delta": "保持原真实签名、无 Python/uv/FFmpeg/业务库、无本地业务进程端口、身份/数据安全、全部支持矩阵要求；不能降为代码存在或 Linux 单测。",
+      "completion_delta": "仍需 STAGING_VERIFIED 桌面实机证据；不以候选源码或 unsigned CI 包关闭，未支持平台必须来自事前产品决策。"
+    }
+  ],
+  "recommended_targeted_tests": [
+    {
+      "command": "npm run test --workspace client -- src/RootApp.test.tsx src/customer/CustomerWorkspace.test.tsx src/customer/useCustomerSession.test.tsx src/customer/customer-state.test.ts src/studio/LiveWorkspacePanel.test.tsx",
+      "boundary": "现有纯前端 mock 专项，证明基线测试通过；不覆盖 PG 真实响应，尤其空码恢复 mock 不能当真实恢复通过。",
+      "run_by_auditor": false
+    },
+    {
+      "command": "npm run test --workspace client -- src/customer/CustomerWalletPanel.test.tsx src/customer/CustomerRechargeDialog.test.tsx src/api.test.ts src/TaskRecordsPanel.test.tsx",
+      "boundary": "钱包/下载/凭据头客户端合同，未执行真实支付和文件签名包测试；需要先确认相关依赖可用。",
+      "run_by_auditor": false
+    },
+    {
+      "command": "uv run python -m pytest tests/test_customer_ha_smoke.py -q -k 'customer_cloud_build or customer_desktop_build or release_desktop'",
+      "workdir": "server",
+      "boundary": "只读构建静态合同与 origin guard 子进程；仍以旧双发行合同为现状，文档修订可能导致历史固定措辞断言失败，不运行整套 HA/PG。",
+      "run_by_auditor": false
+    }
+  ],
+  "notes": [
+    "共有 18 项；当前基线满足整项原验收可直接剔除的任务为 0；大量局部实现明确列入 exclude_scope，避免全量重做。",
+    "CW-022 转原生凭据兼容复验，前端恢复/清理故障集中 CW-017，不重复计入原生库开发。",
+    "缺开发项 CW-012/CW-019 表示目标职责/制品拆分尚未发生，不表示原组件不存在。",
+    "CW-014 产品条件、CW-046 实机外部验收独立于源码完成数量。",
+    "候选 cdfb499 与 21816fe 的代码存在不计当前基线完成；候选仍保留钱包 customerWallet 分支错误和 logout 失败吞掉问题。"
+  ]
+}

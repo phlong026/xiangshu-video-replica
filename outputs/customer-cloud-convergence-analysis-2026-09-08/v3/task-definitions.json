@@ -1,0 +1,3351 @@
+{
+  "schema_version": 3,
+  "scope": "本地实现核查与剩余工作定义；不证明实际改造、数据迁移或生产完成",
+  "document_input_commit": "bf6aab8b3276831477b11e4a3d79f7c12108326b",
+  "application_baseline": "bffc3419f9d89bf76fd4ad1bdad65dd824a44553",
+  "summary": {
+    "old_tasks": 60,
+    "whole_tasks_satisfying_all_current_acceptance": 0,
+    "reusable_implementation_tasks": 39,
+    "missing_target_structure": 2,
+    "preparation_or_conditional": 12,
+    "external_acceptance": 7,
+    "merged_schedule_items": 3,
+    "remaining_schedule_items": 57,
+    "status_counts": {
+      "decision": 12,
+      "partial": 32,
+      "verify": 7,
+      "missing": 2,
+      "external": 7
+    },
+    "work_kind_counts": {
+      "准备与决策": 6,
+      "代码与测试增量": 32,
+      "条件实施与验收": 5,
+      "复验": 7,
+      "现场执行与验收": 7
+    },
+    "dependency_edges": 241,
+    "dependency_graph_acyclic": true
+  },
+  "retired_schedule_items": {
+    "CW-006": {
+      "reason": "任务、文件和PG规范已经登记；具体责任、文件登记及证据更新属于每个实施增量的通用完工条件，取消重复的独立排程。",
+      "targets": [
+        "所有保留任务的通用完工要求"
+      ],
+      "type": "合并通用要求"
+    },
+    "CW-008": {
+      "reason": "真实客户挂载、激活/配对和钱包组件基座已经存在；缺口随相应页面修复先红后绿。",
+      "targets": [
+        "CW-012",
+        "CW-013",
+        "CW-015",
+        "CW-016",
+        "CW-017",
+        "CW-018"
+      ],
+      "type": "合并回归与修复"
+    },
+    "CW-011": {
+      "reason": "客户无sidecar、地址拒绝及原生凭据/下载已有合同；唯一默认和发行保护随对应制品改造执行。",
+      "targets": [
+        "CW-015",
+        "CW-019",
+        "CW-020",
+        "CW-021",
+        "CW-022",
+        "CW-023",
+        "CW-024",
+        "CW-046"
+      ],
+      "type": "合并回归与制品"
+    }
+  },
+  "tasks": [
+    {
+      "id": "CW-001",
+      "phase": "W0",
+      "title": "确定整合候选、补丁来源与发布基线",
+      "kind": "准备与决策",
+      "original_status": "decision",
+      "owner_role": "集成负责人",
+      "dependencies": [],
+      "condition": "必需",
+      "reuse": "已固定 bffc341 应用源、bf6aab8 文档输入；本轮快照47个本地分支、546项源文件及76个迁移，唯一head078。",
+      "excluded_development": "重复做未指定边界的全仓摸底；已有Git与迁移基线生成能力。",
+      "remaining_work": "将其他本地分支的保留补丁整合到正式候选，冻结候选SHA、变更来源、回滚点及责任；本轮快照只代表审计输入。",
+      "carried_requirement": "",
+      "file_scope": "git refs；server/migrations/versions/；source-baseline.json",
+      "acceptance_delta": "候选包含明确选择的补丁；迁移单head、历史revision不改；WIP与回退点可恢复。",
+      "retained_acceptance": "列出每个候选的保留、已合或待整合结论及依据；在所选基线复核迁移无多 head、无已发布 revision 改写；恢复抽查能找回受保护的原改动。 数据库源码与规范分别固定版本；旧报告的SQLite/PG并存只记现状，不作为新PG唯一目标。",
+      "completion_delta": "集成人确认正式候选与补丁决议；不能用分析分支代替最终集成版本。",
+      "retained_completion": "发布基线、补丁来源和迁移图经集成复核签字，后续任务统一引用该 SHA；不能把分析分支历史整体当作待合补丁。",
+      "required_evidence": "refs/补丁清单、迁移图、备份恢复记录",
+      "evidence_level": "决策与静态核验",
+      "source_evidence": [
+        {
+          "path": "outputs/customer-cloud-convergence-analysis-2026-09-08/v3/baseline.json",
+          "line": 1,
+          "why": "本轮固定的本地引用与源文件指纹"
+        },
+        {
+          "path": "server/migrations/versions/078_viral_module_launch.py",
+          "line": 1,
+          "why": "当前迁移链末端"
+        }
+      ],
+      "other_branch_evidence": [],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-002",
+      "phase": "W0",
+      "title": "补齐平台与条件业务范围决议",
+      "kind": "准备与决策",
+      "original_status": "decision",
+      "owner_role": "产品负责人 + 架构负责人",
+      "dependencies": [
+        "CW-001"
+      ],
+      "condition": "必需",
+      "reuse": "客户桌面+后端、全环境PG已由用户确认，现有工作台模块可从源码枚举。",
+      "excluded_development": "数据库类型、双产品是否收敛、是否重写已有业务的重复选型。",
+      "remaining_work": "仅冻结支持OS、游客门禁、发布管理现有边界、跨任务公平范围及条件项；映射真实角色UAT。",
+      "carried_requirement": "",
+      "file_scope": "client/src/studio/types.ts；client/src/studio/StudioWorkspace.tsx；分析报告 §4、§6",
+      "acceptance_delta": "保留功能/OS/条件任务都有明确范围，不把未接通功能当完成。",
+      "retained_acceptance": "功能/平台逐项登记保留、待补或不支持；数据库范围遵守PG-01—12，所有数据库行为测试用真实PG，SQLite仅允许登记的离线历史输入/兼容。发布与游客范围按既有决策，不把文档确认称为代码已完成。",
+      "completion_delta": "范围责任人确认，所有条件任务有启用或N/A事实依据。",
+      "retained_completion": "范围表有明确负责人结论；每个保留功能映射到 CW-018/CW-049 的验收行；所有条件任务均有启用依据或可追溯的不适用理由。",
+      "required_evidence": "功能/平台/条件任务范围表",
+      "evidence_level": "决策与静态核验",
+      "source_evidence": [
+        {
+          "path": "docs/PostgreSQL唯一数据库实施与验收规范.md",
+          "line": 7,
+          "why": "已经确定的环境范围"
+        },
+        {
+          "path": "client/src/studio/types.ts",
+          "line": 1,
+          "why": "现有工作台业务类型"
+        }
+      ],
+      "other_branch_evidence": [],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-003",
+      "phase": "W0",
+      "title": "冻结已发版本和兼容退出窗口",
+      "kind": "准备与决策",
+      "original_status": "decision",
+      "owner_role": "桌面负责人 + 后端负责人",
+      "dependencies": [
+        "CW-001"
+      ],
+      "condition": "必需",
+      "reuse": "当前客户Tauri配置、API类型和凭据命名空间已有代码。",
+      "excluded_development": "重新设计客户API或凭据存储。",
+      "remaining_work": "盘点实际发出的旧版本与哈希；冻结API/安装身份兼容窗口和退出判断；仓库不能证明实际分发数量。",
+      "carried_requirement": "",
+      "file_scope": "client/src/api.ts；client/src-tauri/tauri.customer.conf.json；client/src-tauri/src/customer_credentials.rs",
+      "acceptance_delta": "受支持旧版→新后端、新版→上一兼容后端逐格记录，拒绝不兼容版本无内部身份回退。",
+      "retained_acceptance": "每个仍受支持的发行版本均有接口消费者清单；不兼容组合返回明确升级结果且不回退内部身份；不能仅凭新包生成、懒加载或未观测到请求就宣布旧端点无人使用。",
+      "completion_delta": "实际版本清单和停止支持依据签认后才允许删旧接口。",
+      "retained_completion": "兼容窗口及退出判据已冻结；合法旧客户所需端点进入允许清单，删除任务受其约束；无自动更新时明确分发确认/版本观测办法。",
+      "required_evidence": "版本接口矩阵、凭据命名空间清单、兼容退出规则",
+      "evidence_level": "决策与静态核验",
+      "source_evidence": [
+        {
+          "path": "client/src-tauri/tauri.customer.conf.json",
+          "line": 1,
+          "why": "现有客户制品配置"
+        },
+        {
+          "path": "client/src-tauri/src/customer_credentials.rs",
+          "line": 1,
+          "why": "旧凭据兼容必须基于此实现"
+        }
+      ],
+      "other_branch_evidence": [],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-004",
+      "phase": "W0",
+      "title": "冻结实际部署、PG资源与验收指标",
+      "kind": "准备与决策",
+      "original_status": "decision",
+      "owner_role": "运维负责人 + QA",
+      "dependencies": [
+        "CW-001",
+        "CW-002"
+      ],
+      "condition": "必需",
+      "reuse": "PG16 fixture、CI数据库服务、HA/运维部署说明已有基础。",
+      "excluded_development": "从零建设PG16测试容器及重复编写抽象部署方案。",
+      "remaining_work": "确认真实环境的交付主线、PG版本/角色/连接池总预算、节点资源、负载及RTO/RPO/灰度数值。",
+      "carried_requirement": "",
+      "file_scope": "deploy/；docs/客户版测试与验收规格-V3.md §8；docs/客户版部署与灰度手册.md",
+      "acceptance_delta": "所有指标包含数值、采样窗口、环境与责任；开发/测试/生产隔离。",
+      "retained_acceptance": "默认部署路径能解释 API、Worker、迁移、管理资源、备份和监控的归属；发布阈值含数值、采样窗口、场景和负责人，不能仅写正常/稳定/足够快；使用正本建议值时注明待目标机定标。 不同环境不共用业务库；目标PG容量与连接预算按API/Worker进程数合计，迁移锁须覆盖多主机入口，不能只依赖单机flock。",
+      "completion_delta": "冻结拓扑和指标；未定参数不以文档示例冒充实测。",
+      "retained_completion": "拓扑与指标表完整冻结；未选部署方式或未定关键阈值时，不准删除旧部署脚本或进入负载/灰度验收。",
+      "required_evidence": "部署拓扑、资源清单、指标与灰度参数表",
+      "evidence_level": "决策与静态核验",
+      "source_evidence": [
+        {
+          "path": "scripts/pg-fixture.sh",
+          "line": 4,
+          "why": "已有本地容器生命周期"
+        },
+        {
+          "path": ".github/workflows/ci.yml",
+          "line": 47,
+          "why": "已有PG16 CI服务"
+        },
+        {
+          "path": "docs/客户版部署与灰度手册.md",
+          "line": 3,
+          "why": "已有运维手册",
+          "v3_navigation_line_adjusted": true
+        }
+      ],
+      "other_branch_evidence": [],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-005",
+      "phase": "W0",
+      "title": "盘点历史数据并签认处置路线",
+      "kind": "准备与决策",
+      "original_status": "decision",
+      "owner_role": "数据负责人 + 业务负责人",
+      "dependencies": [
+        "CW-001",
+        "CW-002"
+      ],
+      "condition": "必需",
+      "reuse": "已有SQLite→空PG导入及PG账務核对工具，A/B/C定义已确定。",
+      "excluded_development": "重复选择PG或重复实现空库导入器。",
+      "remaining_work": "真实数据批次只读盘点、价值/owner归属与A/B/C路线签认；不能默认无内部数据。",
+      "carried_requirement": "",
+      "file_scope": "server/scripts/sqlite_to_postgres.py；server/scripts/reconcile_customer_billing.py；data-deploy-audit.md §3",
+      "acceptance_delta": "每批来源/目标/owner与路线明确；原件保护、不按用户名合户。",
+      "retained_acceptance": "每个数据批次明确来源、目标、owner、需要保留的业务及路线；不得按用户名自动合户；不得把现有空库导入工具当作已有客户库合并工具；敏感实际数据不写入任务 CSV。 每条路线的最终业务库与数据库验收库均为PG；原SQLite只读保护，必要规范化写隔离副本。",
+      "completion_delta": "业务确认条件项及不适用理由；敏感原始数据不进入交付文档。",
+      "retained_completion": "形成业务认可的数据批次清单和条件任务选择表；无遗留数据也必须有盘点证据，不能口头跳过数据验收。",
+      "required_evidence": "脱敏数据清单、路线选择及业务确认记录",
+      "evidence_level": "决策与静态核验",
+      "source_evidence": [
+        {
+          "path": "server/scripts/sqlite_to_postgres.py",
+          "line": 1,
+          "why": "现有导入器"
+        },
+        {
+          "path": "server/scripts/reconcile_customer_billing.py",
+          "line": 1,
+          "why": "现有账务核对"
+        }
+      ],
+      "other_branch_evidence": [],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-053",
+      "phase": "W0",
+      "title": "补齐数据库语义清单与精确历史例外",
+      "kind": "准备与决策",
+      "original_status": "decision",
+      "owner_role": "架构负责人 + QA",
+      "dependencies": [
+        "CW-001",
+        "CW-002"
+      ],
+      "condition": "必需",
+      "reuse": "已有数据库门面/调用地图与12组PG合同；本轮补充按文件词法信号清单。",
+      "excluded_development": "重复扫描同一关键词并将文件数当覆盖结论。",
+      "remaining_work": "逐函数/fixture/业务表细分实际连接、类型引用、迁移和TEST分类；精确历史allowlist及责任/退役条件；形成可逐项核销表。",
+      "carried_requirement": "",
+      "file_scope": "server/app/；server/tests/；server/scripts/；server/migrations/；scripts/；deploy/；client/src-tauri/",
+      "acceptance_delta": "每个数据库消费者和测试行为归类，无宽泛目录豁免；线上数据未知单列。",
+      "retained_acceptance": "每个数据库消费者及fixture有归类、替代方式和责任；运行分支与纯类型引用分开统计；例外精确到文件/符号/用例且无整个目录豁免；线上未知数据单列，静态扫描不冒充盘点完成。",
+      "completion_delta": "审查完成语义级清单；词法扫描不算本项整体验收。",
+      "retained_completion": "数据库迁移面和例外范围完整复核；新业务或新数据库测试不能使用SQLite，后续收尾对照同一清单核销。",
+      "required_evidence": "源码/调用关系、测试分类与例外表、PG合同映射",
+      "evidence_level": "静态依赖与范围核验",
+      "source_evidence": [
+        {
+          "path": "outputs/customer-cloud-convergence-analysis-2026-09-08/v3/audit/database-signals.json",
+          "line": 1,
+          "why": "本轮信号清单仅作定位"
+        },
+        {
+          "path": "docs/PostgreSQL唯一数据库实施与验收规范.md",
+          "line": 23,
+          "why": "已有分类规范"
+        }
+      ],
+      "other_branch_evidence": [],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-007",
+      "phase": "W1",
+      "title": "补齐PG测试隔离、客户种子与缺库硬门",
+      "kind": "代码与测试增量",
+      "original_status": "partial",
+      "owner_role": "测试负责人 + 后端负责人",
+      "dependencies": [
+        "CW-001",
+        "CW-002",
+        "CW-003",
+        "CW-004",
+        "CW-005",
+        "CW-053"
+      ],
+      "condition": "必需",
+      "reuse": "已有PG16 Docker fixture、CI PG服务、PG测试建库与客户种子；不需从零建PG支持。",
+      "excluded_development": "重写容器/PG驱动和已有客户种子场景。",
+      "remaining_work": "统一测试资源命名/清理边界与PG preflight；移除当前业务缺PG skip和开发身份默认；补连续两次/中断/并发隔离验证。",
+      "carried_requirement": "",
+      "file_scope": "server/tests/conftest.py；server/tests/test_db_pg.py；server/tests/test_postgres_migrations.py；server/tests/test_customer_fencing.py；server/pyproject.toml；scripts/pg-fixture.sh",
+      "acceptance_delta": "TEST-PG缺库/错目标非0；两客户三设备种子可复用；共享全量串行、独立专项互不污染。",
+      "retained_acceptance": "无PG/错DSN/不安全目标时preflight非0失败，不skip或回退SQLite；测试host/库名前缀及范围明确，清理拒绝非测试库；至少2客户3设备可重复建种；连续2次及中断后重跑一致，2个独立专项不互删/串数据；共享全量fixture只允许1个suite运行。",
+      "completion_delta": "所有数据库测试进入合法隔离PG，无SQLite或skip替代。",
+      "retained_completion": "所有TEST-PG类可复用同一PG基座并记录版本/head/隔离ID；TEST-IMPORT/TEST-HISTORY目标与对账用PG且分栏报告；默认开发身份不再替代客户数据库测试，无缺库伪绿。",
+      "required_evidence": "逐类fixture表、缺库/错目标失败证据、连续与中断复验、隔离清理日志",
+      "evidence_level": "AUTOMATED_VERIFIED",
+      "source_evidence": [
+        {
+          "path": "scripts/pg-fixture.sh",
+          "line": 4,
+          "why": "固定共享容器和库名需加强隔离"
+        },
+        {
+          "path": "server/tests/conftest.py",
+          "line": 8,
+          "why": "当前默认开发身份"
+        },
+        {
+          "path": "server/tests/test_postgres_migrations.py",
+          "line": 142,
+          "why": "缺PG仍skip"
+        }
+      ],
+      "other_branch_evidence": [],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-009",
+      "phase": "W1",
+      "title": "补齐保留路由的PG安全与fencing回归",
+      "kind": "代码与测试增量",
+      "original_status": "partial",
+      "owner_role": "后端测试负责人",
+      "dependencies": [
+        "CW-007"
+      ],
+      "condition": "必需",
+      "reuse": "客户会话 verifier 已在真实 PostgreSQL 事务中按 user/device/session/epoch/lease 重验，并把业务写和提交证据放在同一外层事务；已有 fencing、安全、管理员 session/CSRF/auditor、生产配置 fail-closed 等专项测试。",
+      "excluded_development": "真实支付/Provider/COS 链路属于 CW-050；类生产全角色验收属于 CW-047—049；密钥扫描只能作为补充证据，不能替代本项安全行为矩阵。",
+      "remaining_work": "把 V3 §6 的每条安全要求映射到保留 method-path；当前各套测试尚不是一张 0 漏项矩阵；TEST-PG 缺库必须失败；当前 fencing/security fixture 会 pytest.skip；补齐日志、Sentry、CSV、dump、LocalStorage 全介质明文泄漏行为断言及支付回调独立鉴权映射。",
+      "carried_requirement": "",
+      "file_scope": "server/tests/test_customer_fencing.py；server/tests/test_customer_security.py；server/tests/test_internal_access_tokens.py；server/tests/test_admin_auth.py",
+      "acceptance_delta": "新增机器可核销的 V3 §6 requirement→test→method-path 清单，漏项=0、失败=0、skip=0；在独立 PG 多连接下验证入口后切换、迟到 heartbeat/logout/业务写/幂等重放均 0 业务副作用。",
+      "retained_acceptance": "越权读写、旧 token、被撤销设备、过期 lease、旧 epoch 写入全部拒绝且无业务副作用；客户 token 不能进行管理写，auditor 不能写；逐项验证CSRF、CORS、Host/Forwarded Header信任、Cookie属性、session fixation、epoch回退、重放、配对批准不可转用、枚举限流、管理员真实actor/原因/确认/幂等、密钥轮换旧key验证窗；码和设备/session token明文不进入日志、Sentry、CSV、数据库dump或LocalStorage；支付回调独立鉴权有测试。",
+      "completion_delta": "保留路由角色矩阵和 V3 §6 子矩阵全部在必需 TEST-PG 门禁通过；独立安全复核无未决项。",
+      "retained_completion": "待保留路由授权矩阵、事务内重验和V3§6安全子矩阵全部有用例及结果；行为测试与代码复核通过后才可退出兼容分支，密钥扫描不能代替安全行为测试。",
+      "required_evidence": "角色×method-path矩阵、V3§6逐条用例映射、PG竞态/拒绝及脱敏输出证据",
+      "evidence_level": "AUTOMATED_VERIFIED",
+      "source_evidence": [
+        {
+          "path": "server/app/customer_fence.py",
+          "line": 181,
+          "why": "fenced_pg_transaction 在 PG 事务内重验并由外层统一提交/回滚。"
+        },
+        {
+          "path": "server/tests/test_customer_fencing.py",
+          "line": 99,
+          "why": "真实 PG fixture 存在，但缺库时第104—105行直接 skip。"
+        },
+        {
+          "path": "server/tests/test_customer_security.py",
+          "line": 402,
+          "why": "安全集成 fixture 在第407—408行缺 PG 时 skip。"
+        },
+        {
+          "path": "server/tests/test_admin_auth.py",
+          "line": 976,
+          "why": "已有 admin logout CSRF 行为测试。"
+        }
+      ],
+      "other_branch_evidence": [],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-010",
+      "phase": "W1",
+      "title": "补齐各任务类别的真实PG恢复基线",
+      "kind": "代码与测试增量",
+      "original_status": "partial",
+      "owner_role": "后端测试负责人",
+      "dependencies": [
+        "CW-007",
+        "CW-002"
+      ],
+      "condition": "必需",
+      "reuse": "H3 崩溃恢复与客户公平队列已有真实 PG、多 Worker、租约、双领和释放专项；钱包 RESERVE/SETTLE/RELEASE 和口播等类别已有大量行为测试，但主要仍以 tmp_path SQLite 建库。",
+      "excluded_development": "真实付费 Provider 调用属于 CW-050；本项允许受控 Provider 替身；容量规模与类生产拓扑属于 CW-047。",
+      "remaining_work": "将钱包、口播、图片、分析/改写/ASR、独立生成逐类迁为 TEST-PG 独立多连接基线；不能以 H3 覆盖替代；补齐每类提交、领取、崩溃、超时、SUBMISSION_UNCERTAIN、回写及状态/账务差额断言；缺 PG 必须非零失败且 0 skip。",
+      "carried_requirement": "",
+      "file_scope": "server/tests/test_worker_crash_recovery.py；server/tests/test_wallet_billing_service.py；server/tests/test_oral_domain.py；server/tests/test_independent_creation.py；server/tests/test_customer_queue_fairness.py",
+      "acceptance_delta": "交付任务类别×状态×账务矩阵；每格标出真实 PG 连接数和 Provider 替身边界；同一幂等键重放新增收费任务=0；成功结算次数=1；确认失败释放次数=1；未知提交重提次数=0。",
+      "retained_acceptance": "同一操作重放不新增收费任务；成功只结算一次，已确认未收费失败只释放一次；SUBMISSION_UNCERTAIN 保留核验且不盲重提；断开客户会话不取消已受理云任务；混合任务按冻结策略检查并发和饥饿。 先在真实PG固定现有行为；缺陷场景保存失败日志，后续修复必须在同一可验证增量转绿。",
+      "completion_delta": "所有保留异步任务类别均在 TEST-PG 多连接门禁通过，0 fail/0 skip，并保留缺陷 RED→GREEN 证据。",
+      "retained_completion": "每类任务均有专属用例和允许的替身说明；未用 H3 测试替代其他任务类别，未把 Provider 成本记录等同钱包流水。 数据库基线不得由SQLite、mock持久化或缺PG跳过充当。",
+      "required_evidence": "任务类别矩阵、状态/账务差额断言、崩溃恢复日志、TEST-PG环境/多连接及失败到通过证据",
+      "evidence_level": "AUTOMATED_VERIFIED",
+      "source_evidence": [
+        {
+          "path": "server/tests/test_worker_crash_recovery.py",
+          "line": 283,
+          "why": "已有 PG Worker 崩溃后恢复专项入口。"
+        },
+        {
+          "path": "server/tests/test_customer_queue_fairness.py",
+          "line": 369,
+          "why": "已有并发 Worker 不重复领取的真实 PG 测试。"
+        },
+        {
+          "path": "server/tests/test_wallet_billing_service.py",
+          "line": 76,
+          "why": "钱包基线以 tmp_path 为参数，仍是 SQLite 持久化测试。"
+        }
+      ],
+      "other_branch_evidence": [
+        {
+          "branch": "codex/pr95-hardening-20260908",
+          "commit": "e06806b142e5366d9f7c3c56ff268fc44998a027",
+          "path": "server/tests/test_oral_domain.py",
+          "line": 1,
+          "why": "该分支新增口播/克隆幂等回归，但未整合且整体分支含大量客户端改动，不能计入基线。",
+          "not_baseline": true,
+          "baseline_equivalent_present": false
+        }
+      ],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-012",
+      "phase": "W2",
+      "title": "迁出旧入口中的共享类型和客户映射",
+      "kind": "代码与测试增量",
+      "original_status": "missing",
+      "owner_role": "前端负责人",
+      "dependencies": [
+        "CW-001",
+        "CW-002",
+        "CW-003",
+        "CW-004",
+        "CW-005",
+        "CW-053"
+      ],
+      "condition": "必需",
+      "reuse": "上下文类型和映射函数已有实现，但仍置于 App/RootApp；客户工作台仍反向导入 customerToCurrentUser。",
+      "excluded_development": "保留既有上下文字段与 customerToCurrentUser 的 owner/role/display-name 映射行为，剔除从零设计新数据模型。",
+      "remaining_work": "执行类型与映射的归属迁移，消除 Studio/LiveWorkspacePanel 对 App 的类型依赖和 CustomerWorkspace 对 RootApp 的运行时反向依赖；登记目的文件并校验图。",
+      "carried_requirement": "承接CW-008：修改类型与映射前，先复跑并补齐真实客户挂载、owner/role映射基线，保存修改前后结果。",
+      "file_scope": "client/src/App.tsx；client/src/RootApp.tsx；client/src/customer/CustomerWorkspace.tsx；client/src/studio/StudioWorkspace.tsx；client/src/studio/LiveWorkspacePanel.tsx",
+      "acceptance_delta": "仅迁移职责/引用；类型检查、依赖图和客户组件 owner/role 回归通过。",
+      "retained_acceptance": "TypeScript编译通过；客户入口依赖图不再通过类型/映射重新引入内部壳；项目、人物、任务等共用组件仍能挂载，owner和role不变。",
+      "completion_delta": "新公共位置唯一且无循环依赖，旧入口无消费者；无需重写映射业务规则。",
+      "retained_completion": "共享职责有唯一归属、无为保留旧入口而产生的循环依赖；删除旧 App 的前置条件已记录。",
+      "required_evidence": "依赖图、类型检查与组件专项",
+      "evidence_level": "AUTOMATED_VERIFIED",
+      "source_evidence": [
+        {
+          "path": "client/src/studio/StudioWorkspace.tsx",
+          "line": 9,
+          "why": "import type WorkspaceShell from App"
+        },
+        {
+          "path": "client/src/studio/LiveWorkspacePanel.tsx",
+          "line": 3,
+          "why": "类型从旧 App 派生"
+        },
+        {
+          "path": "client/src/customer/CustomerWorkspace.tsx",
+          "line": 16,
+          "why": "运行时反向导入 RootApp 映射"
+        },
+        {
+          "path": "client/src/RootApp.tsx",
+          "line": 205,
+          "why": "映射函数实现已存在、目标迁移尚未发生"
+        }
+      ],
+      "other_branch_evidence": [
+        {
+          "branch": "fix/frontend-completion-no-confirmation-20260907",
+          "commit": "cdfb4991a5d52bd83937c08227fbd5ac8aa25493",
+          "path": "client/src/customer/CustomerWorkspace.tsx",
+          "line": 304,
+          "why": "候选仍使用 RootApp 映射，不能当成类型拆分完成",
+          "count_as_current_completion": false
+        }
+      ],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-013",
+      "phase": "W2",
+      "title": "收敛客户根入口与路由恢复",
+      "kind": "代码与测试增量",
+      "original_status": "partial",
+      "owner_role": "前端负责人",
+      "dependencies": [
+        "CW-012",
+        "CW-002"
+      ],
+      "condition": "必需",
+      "reuse": "Tauri 所有路径及 /customer、/customer/* 已进入客户状态机；激活、登录、冲突、失效、撤销和配对返回壳已有实现与测试；Studio 已监听 hash 路由。",
+      "excluded_development": "剔除重新实现整套客户状态机与配对壳，复用既有 RootApp/CustomerPairingFlow/customer-state。",
+      "remaining_work": "普通浏览器根路径仍进入内部 App，/admin 同构建；收敛正式客户入口，补刷新/后退/深链接/历史 hash 与配对返回矩阵，并交接独立管理入口。",
+      "carried_requirement": "承接CW-008：修改根入口/路由前，先锁住客户真实挂载、刷新/后退/深链接、配对返回与身份隔离；CW-018后续复验不能替代此项前置。",
+      "file_scope": "client/src/RootApp.tsx；client/src/main.tsx；client/src/customer/customer-state.ts；client/src/customer/CustomerPairingFlow.tsx",
+      "acceptance_delta": "将已有客户路径用例保留为回归，仅新增根路径收敛及历史/配对导航缺口；所有入口未认证不得读写私有数据。",
+      "retained_acceptance": "客户启动、刷新、后退和深链接不出现内部令牌输入；未认证不发私有业务读写；配对取消与成功返回明确；错误路由不绕过身份验证。",
+      "completion_delta": "客户矩阵全部同一状态机且内部兜底删除，原激活/配对状态机不重建。",
+      "retained_completion": "入口矩阵全部通过，正式客户路径均落到同一套状态机；不是仅隐藏内部登录文案。",
+      "required_evidence": "路由状态矩阵、真实客户入口组件/E2E记录",
+      "evidence_level": "AUTOMATED_VERIFIED",
+      "source_evidence": [
+        {
+          "path": "client/src/RootApp.tsx",
+          "line": 33,
+          "why": "Tauri/customer 路由已有"
+        },
+        {
+          "path": "client/src/RootApp.tsx",
+          "line": 42,
+          "why": "其余正式根路径仍回落 App，管理仍同入口"
+        },
+        {
+          "path": "client/src/RootApp.tsx",
+          "line": 64,
+          "why": "显式配对返回后重新挂载客户 boot"
+        },
+        {
+          "path": "client/src/studio/StudioWorkspace.tsx",
+          "line": 884,
+          "why": "已有 hashchange 监听"
+        },
+        {
+          "path": "client/src/RootApp.test.tsx",
+          "line": 133,
+          "why": "已有配对 URL 测试"
+        }
+      ],
+      "other_branch_evidence": [
+        {
+          "branch": "fix/frontend-completion-no-confirmation-20260907",
+          "commit": "cdfb4991a5d52bd83937c08227fbd5ac8aa25493",
+          "path": "client/src/RootApp.tsx",
+          "line": 139,
+          "why": "候选增量只有 onLogout，根路由收敛未做",
+          "count_as_current_completion": false
+        }
+      ],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-014",
+      "phase": "W2",
+      "title": "决定并按需补齐游客激活门禁",
+      "kind": "条件实施与验收",
+      "original_status": "decision",
+      "owner_role": "产品负责人 + 前端负责人",
+      "dependencies": [
+        "CW-013",
+        "CW-009"
+      ],
+      "condition": "条件：CW-002明确保留游客浏览要求",
+      "reuse": "当前客户采用整屏激活；客户成功建立身份后才挂载工作台。公开游客壳及目标动作续接未实现；DEV ReviewWorkspace 不等同正式游客产品。",
+      "excluded_development": "不把 DEV review 示例壳当成已实现游客模式；CW-002 不启用游客时，本项登记 N/A，不再开发。",
+      "remaining_work": "先依据 CW-002 冻结是否保留游客浏览；仅在启用时新增公开壳、统一私有动作门禁、取消留页和一次续接，并覆盖自动保存/轮询/上传及多入口。",
+      "carried_requirement": "",
+      "file_scope": "client/src/RootApp.tsx；client/src/studio/StudioWorkspace.tsx；client/src/studio/LiveWorkspacePanel.tsx；client/src/customer/",
+      "acceptance_delta": "条件合同保持：启用则验证游客零私有请求、取消零写入、续接一次；未启用只以产品决策 N/A 关闭，不算功能完成。",
+      "retained_acceptance": "网络记录证明游客不请求私有列表、不伪造customer身份；取消留在原页且无写入；激活成功只恢复一次原目标；刷新、深链接和多入口同样受保护。",
+      "completion_delta": "先记录范围决策，不能无条件计入开发或凭空剔除。",
+      "retained_completion": "启用时完整用例通过；不启用时以CW-002决策登记不适用，不能把N/A当作已实现游客功能。",
+      "required_evidence": "条件决策、网络请求断言、取消/续接E2E",
+      "evidence_level": "条件启用则AUTOMATED_VERIFIED",
+      "source_evidence": [
+        {
+          "path": "client/src/RootApp.tsx",
+          "line": 18,
+          "why": "ReviewWorkspace 仅 DEV"
+        },
+        {
+          "path": "client/src/RootApp.tsx",
+          "line": 96,
+          "why": "未激活直接整屏 ActivationPage"
+        },
+        {
+          "path": "client/src/RootApp.tsx",
+          "line": 135,
+          "why": "工作台需 session.user 成立才挂载"
+        },
+        {
+          "path": "client/src/customer/CustomerWorkspace.tsx",
+          "line": 230,
+          "why": "还需 workspaceCredentialReady 才挂载 Studio"
+        }
+      ],
+      "other_branch_evidence": [],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-015",
+      "phase": "W2",
+      "title": "移除客户API地址与内部身份回退",
+      "kind": "代码与测试增量",
+      "original_status": "partial",
+      "owner_role": "前端负责人",
+      "dependencies": [
+        "CW-009",
+        "CW-012",
+        "CW-003"
+      ],
+      "condition": "必需",
+      "reuse": "已有客户凭据桥且使用 Symbol owner 防止旧组件卸载清掉新 session；客户 API 已有状态码分类/生命周期事件/Retry-After；管理侧已有 Cookie/CSRF、写幂等；对象下载 credentials:omit，上传只同 API origin 加业务身份。",
+      "excluded_development": "剔除重做客户 transport、owner 清理、管理 CSRF 和对象不携凭据基础；复用现有相关专项。",
+      "remaining_work": "移除 workspaceAccessToken 内部 token 优先、正式客户 loopback fallback 与开发身份路径，接入唯一地址来源；按客户构建验证缺地址、断网、过期/替换/429及敏感制品。",
+      "carried_requirement": "承接CW-008/011：复用现有客户API与origin测试，修改地址/凭据选择前补运行时缺地址、loopback拒绝及客户恢复错误基线。",
+      "file_scope": "client/src/api.ts；client/src/api.admin.ts；client/src/customer/useCustomerSession.ts；scripts/require_customer_api_base.mjs",
+      "acceptance_delta": "保留现有 owner/CSRF/对象凭据测试；增加正式客户地址与身份唯一性合同，错误恢复不回落内部身份。",
+      "retained_acceptance": "缺服务地址、网络断开、会话过期/被替换及429均有确定提示和重试；旧组件卸载不清理新session；直传/下载COS或Provider时不携客户Bearer；敏感凭据不进入Web Storage、日志或前端制品。",
+      "completion_delta": "仅新增移除后备/内部身份差额及复验，已有安全 transport 不重做。",
+      "retained_completion": "所有正式客户业务调用都满足地址/身份合同；错误处理不回退内部身份；相关专项及敏感信息检查通过。",
+      "required_evidence": "请求头/目标URL断言、生命周期和错误场景日志",
+      "evidence_level": "AUTOMATED_VERIFIED",
+      "source_evidence": [
+        {
+          "path": "client/src/api.ts",
+          "line": 35,
+          "why": "地址缺失仍返回 DEFAULT_API_BASE_URL"
+        },
+        {
+          "path": "client/src/api.ts",
+          "line": 1211,
+          "why": "owner-aware attach/cleanup 已实现"
+        },
+        {
+          "path": "client/src/api.ts",
+          "line": 1227,
+          "why": "仍 internalAccessToken 优先"
+        },
+        {
+          "path": "client/src/api.ts",
+          "line": 4586,
+          "why": "客户错误分类 transport 已存在"
+        },
+        {
+          "path": "client/src/api.ts",
+          "line": 2098,
+          "why": "对象下载 credentials omit"
+        },
+        {
+          "path": "client/src/api.admin.ts",
+          "line": 55,
+          "why": "缺 CSRF 明确拒绝"
+        },
+        {
+          "path": "client/src/api.test.ts",
+          "line": 2061,
+          "why": "旧 workspace cleanup 不清新 session 专项"
+        }
+      ],
+      "other_branch_evidence": [
+        {
+          "branch": "fix/frontend-completion-no-confirmation-20260907",
+          "commit": "cdfb4991a5d52bd83937c08227fbd5ac8aa25493",
+          "path": "client/src/customer/useCustomerSession.ts",
+          "line": 163,
+          "why": "候选有心跳代次/迟到结果保护，复用到 CW-017，不需另建心跳层",
+          "count_as_current_completion": false
+        }
+      ],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-016",
+      "phase": "W2",
+      "title": "修复两个客户钱包入口并锁定充值回归",
+      "kind": "代码与测试增量",
+      "original_status": "partial",
+      "owner_role": "前端负责人 + 后端复核",
+      "dependencies": [
+        "CW-001",
+        "CW-002",
+        "CW-003",
+        "CW-004",
+        "CW-005",
+        "CW-053",
+        "CW-009"
+      ],
+      "condition": "必需；优先修复",
+      "reuse": "CustomerWalletPanel、CustomerRechargeDialog、客户钱包/流水/充值/订单状态 API 与后台客户旧充值写拒绝均已实现；LiveWorkspacePanel 已可在收到 customerWallet 时渲染客户钱包，在 customerAccount 存在时渲染客户资料充值。",
+      "excluded_development": "剔除从零重做客户钱包面板、二维码充值对话框、客户充值后端与订单查询关闭轮询。",
+      "remaining_work": "CustomerWorkspace 只传 customerAccount，钱包分支却仅判断 customerWallet，使用记录和个人中心使用记录均落旧 WalletPanel；统一上下文并补两入口真实挂载测试，保留客户费率与后端旧写拒绝。",
+      "carried_requirement": "承接CW-008：从现有真实挂载基座增加两个钱包入口的生产响应形状失败测试，修复后转绿；同时记录充值method-path。",
+      "file_scope": "client/src/customer/CustomerWorkspace.tsx；client/src/studio/LiveWorkspacePanel.tsx；client/src/studio/MainPages.tsx；client/src/api.ts；server/app/wallet_routes.py；server/app/recharge_routes.py",
+      "acceptance_delta": "只验新增上下文/接线修复及两入口一致；红灯转绿，充值走客户接口；不改变后端内部费率隐藏或旧写拒绝规则。",
+      "retained_acceptance": "本项承接的原CW-008钱包失败测试转绿；两个入口都显示正确余额/计价/流水，无内部定价错误；充值不发POST /api/recharge-orders；过期session、重复点击、未支付、关闭与支付成功刷新均正确；后端拒绝旧客户充值写规则保持。",
+      "completion_delta": "两入口网络证据、余额/计价/流水/充值订单状态齐全；钱包后端基础与已有面板仅复验。",
+      "retained_completion": "两个入口端到端同一客户结果一致，禁止通过放开内部费率或权限规避问题；受影响账务/API回归通过。",
+      "required_evidence": "红绿证据、两入口请求记录、充值与订单状态用例",
+      "evidence_level": "AUTOMATED_VERIFIED",
+      "source_evidence": [
+        {
+          "path": "client/src/customer/CustomerWorkspace.tsx",
+          "line": 233,
+          "why": "仅传 customerAccount"
+        },
+        {
+          "path": "client/src/studio/LiveWorkspacePanel.tsx",
+          "line": 145,
+          "why": "wallet 只判断 customerWallet，否则旧 WalletPanel"
+        },
+        {
+          "path": "client/src/studio/MainPages.tsx",
+          "line": 1395,
+          "why": "个人中心使用记录也 openLive wallet"
+        },
+        {
+          "path": "client/src/api.ts",
+          "line": 1231,
+          "why": "旧钱包 GET /api/wallet 后强制内部定价"
+        },
+        {
+          "path": "server/app/wallet_routes.py",
+          "line": 79,
+          "why": "客户共享钱包响应不暴露内部价格"
+        },
+        {
+          "path": "server/app/recharge_routes.py",
+          "line": 283,
+          "why": "客户走旧充值写返回 CUSTOMER_RECHARGE_ROUTE_REQUIRED"
+        },
+        {
+          "path": "client/src/customer/CustomerWalletPanel.test.tsx",
+          "line": 160,
+          "why": "已有未支付订单恢复轮询测试"
+        }
+      ],
+      "other_branch_evidence": [
+        {
+          "branch": "fix/frontend-completion-no-confirmation-20260907",
+          "commit": "cdfb4991a5d52bd83937c08227fbd5ac8aa25493",
+          "path": "client/src/studio/LiveWorkspacePanel.tsx",
+          "line": 145,
+          "why": "候选仍只用 customerWallet 判钱包分支；不能将候选账号摘要等同两入口修复",
+          "count_as_current_completion": false
+        }
+      ],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-017",
+      "phase": "W2",
+      "title": "修复退出、凭据清理与恢复协议漂移",
+      "kind": "代码与测试增量",
+      "original_status": "partial",
+      "owner_role": "前端负责人 + 认证负责人",
+      "dependencies": [
+        "CW-015",
+        "CW-001"
+      ],
+      "condition": "必需",
+      "reuse": "当前已有 activate/login/conflict/switch/heartbeat/过期替换撤销状态、原生/内存 store、hook 内 server logout 和资料/设备 API。现有客户壳没有传入 logout，个人中心余额仍占位。",
+      "excluded_development": "剔除重建客户认证状态机、设备列表/配对基本 UI、资料 API 与 hook logout endpoint；整合本地候选的 onLogout 接线、资料/余额摘要与迟到心跳保护。",
+      "remaining_work": "整合候选后补退出网络/凭据存储失败可见结果、迟到退出不污染新 session、清理事件矩阵；修正空激活码自动恢复的前端代码/测试，与后端完整激活码+原设备指纹恢复合同一致；复验两设备/第三设备及稳定身份。",
+      "carried_requirement": "承接CW-008：先锁住退出失败、凭据清理失败、迟到响应与恢复协议漂移的失败用例，再做接线/恢复修复。",
+      "file_scope": "client/src/customer/useCustomerSession.ts；client/src/customer/customer-state.ts；client/src/customer/CustomerWorkspace.tsx；client/src/studio/MainPages.tsx",
+      "acceptance_delta": "保留已实现认证/设备规则为回归；重点验 onLogout 到服务端、故障区别、迟到请求隔离、恢复合同与真实 PG 响应；禁止保留空码恢复 mock 作为真实恢复证据。",
+      "retained_acceptance": "正常升级/重启及保留或可验证恢复身份的重装不新增设备槽；双设备普通登录不静默踢人，显式切换使旧会话写入失效，第三设备拒绝；在线logout成功立即释放服务端session，本地仅清session并保留device credential和device-instance-id；SESSION_EXPIRED/REPLACED同样保留设备凭据，DEVICE_REVOKED清device/session凭据但不把稳定标识当凭据删除；网络或存储失败有明确结果，不把本地退出称为服务端已释放，迟到logout不影响新session；资料/余额与服务端一致。",
+      "completion_delta": "候选按提交/文件复用并验证，只开发遗留故障/契约差额；原生凭据本身在 CW-022 复验，避免重复开发。",
+      "retained_completion": "已发客户登录生命周期和所有支持OS的凭据桥专项通过；候选已完成内容未被重复替换或遗漏。",
+      "required_evidence": "候选复用记录、session事件×清理材料矩阵、退出故障及设备竞态用例",
+      "evidence_level": "AUTOMATED_VERIFIED",
+      "source_evidence": [
+        {
+          "path": "client/src/customer/useCustomerSession.ts",
+          "line": 166,
+          "why": "已有保存设备凭据后登录/恢复"
+        },
+        {
+          "path": "client/src/RootApp.tsx",
+          "line": 139,
+          "why": "未把 session.logout 传给 CustomerWorkspace"
+        },
+        {
+          "path": "client/src/customer/useCustomerSession.ts",
+          "line": 556,
+          "why": "logout 有远端调用但 catch 吞掉远端和存储错误"
+        },
+        {
+          "path": "client/src/customer/useCustomerSession.ts",
+          "line": 322,
+          "why": "终态凭据清理使用未等待的 void 调用"
+        },
+        {
+          "path": "client/src/studio/MainPages.tsx",
+          "line": 1387,
+          "why": "余额占位非服务端事实"
+        },
+        {
+          "path": "client/src/customer/useCustomerSession.test.tsx",
+          "line": 144,
+          "why": "自动恢复测试 mock 允许空激活码"
+        },
+        {
+          "path": "client/src/api.ts",
+          "line": 4922,
+          "why": "customerRecover 仍发送空激活码"
+        },
+        {
+          "path": "server/app/activation_code_routes.py",
+          "line": 561,
+          "why": "后端拒绝无 code digest；首部明确完整码+同指纹，不应倒退"
+        }
+      ],
+      "other_branch_evidence": [
+        {
+          "branch": "fix/frontend-completion-no-confirmation-20260907",
+          "commit": "cdfb4991a5d52bd83937c08227fbd5ac8aa25493",
+          "path": "client/src/RootApp.tsx",
+          "line": 143,
+          "why": "onLogout 已接线",
+          "count_as_current_completion": false
+        },
+        {
+          "branch": "fix/frontend-completion-no-confirmation-20260907",
+          "commit": "cdfb4991a5d52bd83937c08227fbd5ac8aa25493",
+          "path": "client/src/customer/CustomerWorkspace.tsx",
+          "line": 314,
+          "why": "传递 logout/profile reload",
+          "count_as_current_completion": false
+        },
+        {
+          "branch": "fix/frontend-completion-no-confirmation-20260907",
+          "commit": "cdfb4991a5d52bd83937c08227fbd5ac8aa25493",
+          "path": "client/src/customer/useCustomerSession.ts",
+          "line": 594,
+          "why": "候选新增退出并发去重但仍吞掉失败",
+          "count_as_current_completion": false
+        },
+        {
+          "branch": "fix/frontend-completion-no-confirmation-20260907",
+          "commit": "cdfb4991a5d52bd83937c08227fbd5ac8aa25493",
+          "path": "client/src/studio/MainPages.tsx",
+          "line": 1856,
+          "why": "真实余额摘要与重试可复用",
+          "count_as_current_completion": false
+        }
+      ],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-018",
+      "phase": "W2",
+      "title": "整合保留业务的本地补丁与云端交互缺口",
+      "kind": "代码与测试增量",
+      "original_status": "partial",
+      "owner_role": "前端负责人 + 产品QA",
+      "dependencies": [
+        "CW-013",
+        "CW-015",
+        "CW-016",
+        "CW-017"
+      ],
+      "condition": "必需",
+      "reuse": "Studio 已有项目复刻、独立视频、口播、人物、文案、素材、爆款、任务、统计、资料路由；live.ts 接真实项目/人物/任务/云草稿/素材 API；共享旧业务组件有大量专项，发布未接入目前明确提示。",
+      "excluded_development": "剔除重新开发 F01–F12 页面壳、共享项目/人物/分镜/首帧/任务组件和已接业务 API；先复用候选针对分页、来源流转、预览、文案/IP、角色竞态等补丁。",
+      "remaining_work": "按 F01–F12 复验真实客户场景与关联链；修正 API 仍提示检查本地服务的云端错误；将当前未接视频链接解析、口播音频上传、分页/刷新/迟到请求等范围逐条与本地候选对照，只整合确认有效差额；发布功能继续诚实未接通。",
+      "carried_requirement": "承接CW-008：复用已有真实挂载和逐页行为用例，补云端文案及未覆盖身份/交接；CW-012/013各自先有前置回归，本项只做保留业务整体复验与具体缺口整合。",
+      "file_scope": "client/src/studio/；client/src/ProjectsPage.tsx；client/src/AnalysisWorkspace.tsx；client/src/ProjectDetailFlow.tsx；client/src/CharacterLibrary.tsx；client/src/TaskRecordsPanel.tsx",
+      "acceptance_delta": "保持 F01–F12 全链路验收，验收执行不等于重新开发；已实现路径只复验，失败项与未合候选差额明确登记。",
+      "retained_acceptance": "每个保留入口的列表→详情→表单→提交→结果/失败→继续操作可达；保留项目/人物/版本/首帧/批次关联；加载、空态、断网重试、取消和迟到响应不串用户/项目；未接通能力不伪装成功。",
+      "completion_delta": "每格标当前实现/复验结果/候选整合/剩余缺口，源未接能力不伪装成功；避免一项笼统重做全部前端。",
+      "retained_completion": "下文F01—F12功能矩阵的本地/自动化栏逐项取证；新增功能或候选缺口明确进入独立任务，不以架构收敛掩盖。",
+      "required_evidence": "功能矩阵、页面/网络记录、组件与业务E2E",
+      "evidence_level": "AUTOMATED_VERIFIED",
+      "source_evidence": [
+        {
+          "path": "client/src/studio/StudioWorkspace.tsx",
+          "line": 1741,
+          "why": "业务路由完整挂载映射已存在"
+        },
+        {
+          "path": "client/src/studio/live.ts",
+          "line": 793,
+          "why": "真实 loadStudioData 使用 API 适配"
+        },
+        {
+          "path": "client/src/studio/live.ts",
+          "line": 968,
+          "why": "云草稿恢复与保存已有"
+        },
+        {
+          "path": "client/src/studio/LiveWorkspacePanel.tsx",
+          "line": 100,
+          "why": "项目/分析/详情及人物任务复用链已存在"
+        },
+        {
+          "path": "client/src/studio/MainPages.tsx",
+          "line": 288,
+          "why": "视频链接解析当前未接入提示"
+        },
+        {
+          "path": "client/src/studio/CreationPages.tsx",
+          "line": 2862,
+          "why": "口播音频上传当前未接通提示"
+        },
+        {
+          "path": "client/src/api.ts",
+          "line": 2450,
+          "why": "客户上传故障仍提示本地服务"
+        },
+        {
+          "path": "client/src/studio/MainPages.tsx",
+          "line": 1303,
+          "why": "发布账号明确未接入"
+        }
+      ],
+      "other_branch_evidence": [
+        {
+          "branch": "fix/frontend-completion-no-confirmation-20260907",
+          "commit": "cdfb4991a5d52bd83937c08227fbd5ac8aa25493",
+          "path": "client/src/studio/MainPages.tsx",
+          "line": 1222,
+          "why": "候选任务详情按后端 ID 恢复与 user 保护可复用",
+          "count_as_current_completion": false
+        },
+        {
+          "branch": "fix/frontend-completion-no-confirmation-20260907",
+          "commit": "cdfb4991a5d52bd83937c08227fbd5ac8aa25493",
+          "path": "client/src/studio/StudioWorkspace.tsx",
+          "line": 258,
+          "why": "候选汇集多项前端修补；整合前需 CW-001 文件/提交选择，不得整支当基线完成",
+          "count_as_current_completion": false
+        }
+      ],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-019",
+      "phase": "W3",
+      "title": "拆出客户与管理员独立构建制品",
+      "kind": "代码与测试增量",
+      "original_status": "missing",
+      "owner_role": "前端构建负责人",
+      "dependencies": [
+        "CW-012",
+        "CW-013",
+        "CW-003",
+        "CW-001",
+        "CW-002",
+        "CW-004",
+        "CW-005",
+        "CW-053"
+      ],
+      "condition": "必需",
+      "reuse": "客户/内部/管理 React 页面本身都有实现，但当前 main 仅一个 RootApp，RootApp 静态 import AdminApp 与 App，Vite 没有客户/管理独立入口输出。",
+      "excluded_development": "剔除重新实现管理页面或客户工作台；保留现成 AdminApp、公共组件和 API 类型。",
+      "remaining_work": "在已登记路径实施客户/管理独立入口与构建输出；客户生产依赖图彻底排除内部/管理代码而非懒加载隐藏；管理静态资源随服务器部署。",
+      "carried_requirement": "承接CW-011：改入口前建立客户依赖图及管理代码排除断言；先拆清旧双包合同中共享断言的归属，交CW-020—024，不随旧文件删除客户保护。",
+      "file_scope": "client/src/main.tsx；client/src/RootApp.tsx；client/src/AdminApp.tsx；client/vite.config.ts；client/package.json",
+      "acceptance_delta": "只验入口/输出分离与现有管理功能回归；客户所有 chunk 不得含内部/管理入口。",
+      "retained_acceptance": "生产构建依赖图及解包文件均无管理/内部入口；不是用懒加载留管理chunk；管理站点的全部保留页面独立可用；共享API类型无漂移。",
+      "completion_delta": "构建图、解包清单/哈希与两类独立部署输出可复现；不计重做页面工作量。",
+      "retained_completion": "两类静态制品归属明确、自动构建可复现；客户包中管理代码排除检查和管理回归通过。",
+      "required_evidence": "构建依赖清单、产物文件清单/哈希、管理页面测试",
+      "evidence_level": "AUTOMATED_VERIFIED",
+      "source_evidence": [
+        {
+          "path": "client/src/main.tsx",
+          "line": 4,
+          "why": "唯一入口 import RootApp"
+        },
+        {
+          "path": "client/src/RootApp.tsx",
+          "line": 2,
+          "why": "静态 import AdminApp"
+        },
+        {
+          "path": "client/src/RootApp.tsx",
+          "line": 3,
+          "why": "静态 import App"
+        },
+        {
+          "path": "client/vite.config.ts",
+          "line": 33,
+          "why": "build 无多入口/独立输出设置"
+        },
+        {
+          "path": "client/package.json",
+          "line": 7,
+          "why": "唯一 build 命令"
+        }
+      ],
+      "other_branch_evidence": [
+        {
+          "branch": "fix/frontend-completion-no-confirmation-20260907",
+          "commit": "cdfb4991a5d52bd83937c08227fbd5ac8aa25493",
+          "path": "client/src/RootApp.tsx",
+          "line": 139,
+          "why": "候选仍同 RootApp，仅 session logout 接线不代表产物拆分",
+          "count_as_current_completion": false
+        }
+      ],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-020",
+      "phase": "W3",
+      "title": "将现有客户配置提升为唯一默认",
+      "kind": "代码与测试增量",
+      "original_status": "partial",
+      "owner_role": "桌面负责人",
+      "dependencies": [
+        "CW-019",
+        "CW-003",
+        "CW-001",
+        "CW-002",
+        "CW-004",
+        "CW-005",
+        "CW-053"
+      ],
+      "condition": "必需",
+      "reuse": "tauri.customer.conf.json 已定义既有 customer identifier、窗口 /customer、HTTPS CSP、resources 空列表及安装器 hook；专用 :customer build 已启用 --no-default-features 和 origin guard。",
+      "excluded_development": "剔除从零创建客户 Tauri 配置、identifier、窗口/HTTPS 策略和无资源 customer target；沿用既有命名空间。",
+      "remaining_work": "把现有客户配置和命令变成唯一默认，删除内部 default feature/config 对正式发行的影响；默认 dev/build/check 统一，并联动地址失败合同和 README。",
+      "carried_requirement": "承接CW-011：改默认配置前，按CW-003锁住已发客户identifier、app_data_dir、凭据命名空间与版本链；沿用旧客户身份，补默认构建及地址失败合同。",
+      "file_scope": "client/src-tauri/tauri.conf.json；client/src-tauri/tauri.customer.conf.json；client/src-tauri/Cargo.toml；package.json",
+      "acceptance_delta": "默认命令直接产生同一既有客户产品，保留身份/版本链；新增默认构建和缺地址失败测试即可。",
+      "retained_acceptance": "默认构建就得到客户包，不要求操作者记住:customer；无本地API地址回退；客户identifier、版本链及窗口权限保持；客户WebView正确连接明确的HTTPS后端。",
+      "completion_delta": "唯一默认配置/命令合同通过，原 customer 配置有效部分复用，内部发行不能误触发。",
+      "retained_completion": "唯一默认配置和命令合同通过；旧配置不再能意外生成内部发行包，文档与脚本一致。",
+      "required_evidence": "默认命令日志、配置diff、客户构建合同",
+      "evidence_level": "AUTOMATED_VERIFIED",
+      "source_evidence": [
+        {
+          "path": "client/src-tauri/tauri.customer.conf.json",
+          "line": 5,
+          "why": "客户 identifier 已冻结"
+        },
+        {
+          "path": "client/src-tauri/tauri.customer.conf.json",
+          "line": 20,
+          "why": "HTTPS CSP 已有"
+        },
+        {
+          "path": "client/src-tauri/tauri.customer.conf.json",
+          "line": 24,
+          "why": "resources 为空"
+        },
+        {
+          "path": "package.json",
+          "line": 22,
+          "why": "默认 tauri:build 仍未选 customer 配置"
+        },
+        {
+          "path": "package.json",
+          "line": 23,
+          "why": "专用客户命令已存在"
+        },
+        {
+          "path": "client/src-tauri/Cargo.toml",
+          "line": 13,
+          "why": "默认 local-sidecar 仍开启"
+        }
+      ],
+      "other_branch_evidence": [],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-021",
+      "phase": "W3",
+      "title": "删除桌面本地后端启动与管理资源",
+      "kind": "代码与测试增量",
+      "original_status": "partial",
+      "owner_role": "桌面负责人",
+      "dependencies": [
+        "CW-020",
+        "CW-003",
+        "CW-001",
+        "CW-002",
+        "CW-004",
+        "CW-005",
+        "CW-053"
+      ],
+      "condition": "必需；仅源码/制品裁剪，不触碰旧安装数据",
+      "reuse": "客户 --no-default-features 可编译掉 local-sidecar 启动链，客户配置 resources=[]；窗口、凭据和下载 handler 已与 local-sidecar 分开。",
+      "excluded_development": "剔除重做无 sidecar 特性隔离与原生桥；保留既有窗口/凭据/下载实现。",
+      "remaining_work": "源码仍有 BackendProcess、端口探测、BOOT_COMMAND、启动脚本、退出杀进程和默认 feature，需在唯一客户构建后删除并扩大制品检测；不能顺手删除旧安装数据。",
+      "carried_requirement": "承接CW-011：移除代码前扩大载荷/进程/端口与启动资源检测，保存原客户无sidecar合同及改后结果；不触碰旧安装数据。",
+      "file_scope": "client/src-tauri/src/lib.rs；client/src-tauri/Cargo.toml；client/src-tauri/resources/start-backend.sh；client/src-tauri/resources/start-backend.bat",
+      "acceptance_delta": "删除范围仅残留本地启动源码/资源/命令；复验现成桥和制品无 server/.venv/Python/FFmpeg/SQLite/启动器、无业务端口与数据库写入。",
+      "retained_acceptance": "客户安装包不含server/.venv/Python/FFmpeg后端分发/SQLite业务库/启动脚本；运行不启动本地API或Worker、不监听本地业务端口、不创建业务数据库；文件选择、凭据、下载仍工作。",
+      "completion_delta": "共享原生桥不重写；删除消费者与解包/运行证据完整，旧数据处置交 CW-039/CW-051。",
+      "retained_completion": "源码消费者已解除且产物实物检查通过；旧安装和数据实际清理仍受CW-024/CW-039/CW-051约束，不能随代码删除顺手卸载。",
+      "required_evidence": "依赖搜索、解包检查、进程/端口/文件系统快照",
+      "evidence_level": "AUTOMATED_VERIFIED",
+      "source_evidence": [
+        {
+          "path": "client/src-tauri/src/lib.rs",
+          "line": 20,
+          "why": "本地端口/BootCommand/BackendProcess 仍在 feature 中"
+        },
+        {
+          "path": "client/src-tauri/src/lib.rs",
+          "line": 40,
+          "why": "仍查找本地启动脚本"
+        },
+        {
+          "path": "client/src-tauri/src/lib.rs",
+          "line": 92,
+          "why": "凭据/下载 handlers 已独立"
+        },
+        {
+          "path": "client/src-tauri/src/lib.rs",
+          "line": 119,
+          "why": "仍有启动和退出清理链"
+        },
+        {
+          "path": "client/src-tauri/Cargo.toml",
+          "line": 13,
+          "why": "feature 默认启用"
+        },
+        {
+          "path": "client/src-tauri/tauri.customer.conf.json",
+          "line": 24,
+          "why": "客户资源排除已实现"
+        }
+      ],
+      "other_branch_evidence": [],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-022",
+      "phase": "W3",
+      "title": "复验原生凭据和旧版本设备身份兼容",
+      "kind": "复验",
+      "original_status": "verify",
+      "owner_role": "桌面负责人 + 安全复核",
+      "dependencies": [
+        "CW-003",
+        "CW-020"
+      ],
+      "condition": "必需；覆盖CW-002全部支持平台",
+      "reuse": "原生凭据库已经具备 Windows DPAPI 加密文件、macOS Keychain、固定 service/account、稳定 device-instance-id、Windows 注册表迁移镜像、原子同步写；clear_session 保留设备凭据，clear_all 不删除稳定 ID；各 OS 条件测试已存在。",
+      "excluded_development": "剔除重新实现加密 vault、DPAPI entropy、Keychain service/account、Windows 注册表稳定 ID、清理基础方法和相同目录重启 roundtrip。",
+      "remaining_work": "在 CW-020 沿用已发客户 identifier/app_data_dir 后，执行现成 OS 原生专项与受支持旧版本升级/重装/损坏/权限拒绝矩阵；核对 device_id/slot/epoch 和原密文可读，不凭函数存在当验收。前端清理故障/恢复合同差额统一由 CW-017 实现，新增支持平台差额由 CW-002 决策后登记。",
+      "carried_requirement": "承接CW-011：沿用原生凭据合同，只执行受支持旧版本与系统存储失败矩阵；前端恢复/清理缺陷交CW-017，不重复造凭据库。",
+      "file_scope": "client/src-tauri/src/customer_credentials.rs；client/src-tauri/tauri.customer.conf.json；client/src/customer/useCustomerSession.ts",
+      "acceptance_delta": "保留原验收强度但任务类型转兼容复验；正常采用既有 namespace 不新增 vault 开发；命名空间变更或新增平台若必要须另记增量，不能悄悄吞进复验任务。",
+      "retained_acceptance": "逐个旧版本升级、重启及保留或可验证恢复身份的重装后，device_id和slot仍映射原绑定，不新增槽位；新建session时epoch按服务端规则单调变化、不回退，旧会话不能复活；身份材料丢失或撤销时经明确恢复/审计流程处理，不仅凭指纹或激活码挤占槽位；旧密文可读或安全迁移，跨OS用户不可解密他人凭据；损坏/拒绝Keychain访问时提示恢复、不转明文或删除稳定标识冒充新设备；logout/失效/撤销按CW-017清理矩阵执行。",
+      "completion_delta": "当前代码不标整项完工；所有支持 OS/旧版本矩阵与清理/恢复前置任务通过才关闭，实机签名安装证据仍由 CW-046 提供。",
+      "retained_completion": "OS原生专项和版本升级样本通过；任何命名空间变化均有迁移/回滚证据，单纯保持应用名不算通过。",
+      "required_evidence": "各OS凭据测试、升级/重装前后device_id/slot/epoch对照、损坏与撤销恢复、迁移/回滚记录",
+      "evidence_level": "AUTOMATED_VERIFIED，实机在CW-046复验",
+      "source_evidence": [
+        {
+          "path": "client/src-tauri/src/customer_credentials.rs",
+          "line": 28,
+          "why": "稳定文件名与 DPAPI entropy 已有"
+        },
+        {
+          "path": "client/src-tauri/src/customer_credentials.rs",
+          "line": 87,
+          "why": "Windows registry 回读及旧 app-data ID 镜像迁移"
+        },
+        {
+          "path": "client/src-tauri/src/customer_credentials.rs",
+          "line": 105,
+          "why": "按 OS 使用 DPAPI/Keychain"
+        },
+        {
+          "path": "client/src-tauri/src/customer_credentials.rs",
+          "line": 146,
+          "why": "session/all 凭据清理已分离且不删稳定标识"
+        },
+        {
+          "path": "client/src-tauri/src/customer_credentials.rs",
+          "line": 268,
+          "why": "既有 Windows registry namespace"
+        },
+        {
+          "path": "client/src-tauri/src/customer_credentials.rs",
+          "line": 583,
+          "why": "Keychain SERVICE 已冻结"
+        },
+        {
+          "path": "client/src-tauri/src/customer_credentials.rs",
+          "line": 700,
+          "why": "Keychain account 由 app-data 目录命名"
+        },
+        {
+          "path": "client/src-tauri/src/customer_credentials.rs",
+          "line": 792,
+          "why": "稳定身份与 OS 加密/清理专项已存在"
+        },
+        {
+          "path": "docs/evidence/T29-EVIDENCE.md",
+          "line": 87,
+          "why": "历史记录明确真实 macOS/联合链路未验证"
+        }
+      ],
+      "other_branch_evidence": [],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-023",
+      "phase": "W3",
+      "title": "补齐下载取消、失败与支持平台差额",
+      "kind": "代码与测试增量",
+      "original_status": "partial",
+      "owner_role": "桌面负责人 + 前端QA",
+      "dependencies": [
+        "CW-015",
+        "CW-020"
+      ],
+      "condition": "必需",
+      "reuse": "已有 XHR 上传进度/abort、签名预览、对象请求不传 Bearer、Windows 保存框/路径授权、原生完成事件与查询补偿、非空文件校验、只允许完成记录打开目录、重复目标/晚到结果隔离测试。",
+      "excluded_development": "剔除重建上传通道、签名下载、Windows 原生保存桥、完成状态机和现成异常测试。",
+      "remaining_work": "复验客户收敛后的上传/预览/保存完整路径；重点补实际失败/取消后残留文件处置和支持平台差额。当前原生保存/打开目录仅 Windows，已开始的写盘下载不能取消；必须在 CW-002 明确支持平台和取消范围后登记差额，不能宣称现有覆盖多 OS 或下载中取消。",
+      "carried_requirement": "承接CW-011：修改下载/平台差额前锁住现有下载状态、文件完整性及目录授权；按范围补失败/取消及平台合同。",
+      "file_scope": "client/src/api.ts；client/src-tauri/src/video_downloads.rs；client/src/TaskRecordsPanel.tsx；client/src/studio/ContentPages.tsx",
+      "acceptance_delta": "保留真实非空文件/哈希、上传返回、取消不报成功、失败恢复及外部无 Bearer；验收文档明确保存框取消与下载中取消的能力边界，支持平台不得默改。",
+      "retained_acceptance": "上传/下载成功以实际非空文件与后端结果证明；取消不报告成功且清理临时文件；断网、过期URL、写权限不足、重复点击有确定恢复；对外对象请求无客户Bearer。",
+      "completion_delta": "基础实现复用；补齐确认的跨平台/清理差额并通过针对测试，真实签名实机验证交 CW-046，不将弹框当保存成功。",
+      "retained_completion": "每个支持平台的下载桥及失败用例通过，保留用户选择路径和可信完成反馈；不以弹出保存框当作保存成功。",
+      "required_evidence": "网络请求、文件哈希/大小、取消与失败测试",
+      "evidence_level": "AUTOMATED_VERIFIED，实机在CW-046复验",
+      "source_evidence": [
+        {
+          "path": "client/src/api.ts",
+          "line": 2404,
+          "why": "上传进度与 AbortSignal 通道"
+        },
+        {
+          "path": "client/src/api.ts",
+          "line": 1946,
+          "why": "Windows/Tauri 保存流程与浏览器仅 started 区分"
+        },
+        {
+          "path": "client/src/api.ts",
+          "line": 2022,
+          "why": "事件丢失查询补偿"
+        },
+        {
+          "path": "client/src/api.ts",
+          "line": 2098,
+          "why": "下载外部对象 credentials omit"
+        },
+        {
+          "path": "client/src-tauri/src/video_downloads.rs",
+          "line": 128,
+          "why": "只允许尚未开始下载的取消"
+        },
+        {
+          "path": "client/src-tauri/src/video_downloads.rs",
+          "line": 213,
+          "why": "非 Windows 明确拒绝原生保存"
+        },
+        {
+          "path": "client/src-tauri/src/video_downloads.rs",
+          "line": 339,
+          "why": "完成必须实际非空文件"
+        },
+        {
+          "path": "client/src-tauri/src/video_downloads.rs",
+          "line": 497,
+          "why": "单次路径授权和失败/取消/重复目的地测试"
+        },
+        {
+          "path": "client/src/TaskRecordsPanel.test.tsx",
+          "line": 332,
+          "why": "晚到下载不影响其他批次/用户测试"
+        }
+      ],
+      "other_branch_evidence": [],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-024",
+      "phase": "W3",
+      "title": "补齐安全升级和唯一签名发布流程",
+      "kind": "代码与测试增量",
+      "original_status": "partial",
+      "owner_role": "发布负责人",
+      "dependencies": [
+        "CW-021",
+        "CW-022",
+        "CW-023",
+        "CW-003",
+        "CW-005"
+      ],
+      "condition": "必需；本任务先在隔离测试机演练",
+      "reuse": "已有客户 NSIS hook：固定旧内部 per-user 路径检测、同步卸载、退出码/执行错误即 Abort；CI 会构建无签名客户包、检查启动器并归档 SHA。",
+      "excluded_development": "剔除从零建设客户 NSIS hook、卸载失败阻断和基础 SHA/包归档；复用现成机制并修改不满足数据保护的前置行为。",
+      "remaining_work": "当前 hook 在单一固定路径自动卸载且没有归档/迁移证明前置；补实际旧安装路径/运行进程/数据保护/回滚矩阵及唯一签名发布流程；现有 --no-sign 仅测试制品。",
+      "carried_requirement": "承接CW-011：先锁住旧安装路径/数据保护和升级失败合同，再修改安装hook及签名分发流程；真实签名/实机交CW-046。",
+      "file_scope": "client/src-tauri/customer-installer-hooks.nsh；client/src-tauri/；.github/workflows/ci.yml；发行与签名流程",
+      "acceptance_delta": "差额聚焦安全升级/数据保护/签名；保留已有失败阻断，支持路径有样本、凭据/数据先保护、失败可恢复。",
+      "retained_acceptance": "所有实际支持的旧安装路径有覆盖；未经已验证归档/迁移不先卸载；失败可恢复旧客户或保留可读数据；凭据不丢、支持版本不重复占设备；未签名包只能标内部测试。",
+      "completion_delta": "未签名只标测试；只有版本/平台/签名/SHA 与升级/恢复矩阵齐全才交 CW-046；真实旧数据切换仍待 CW-051。",
+      "retained_completion": "唯一客户制品含版本、平台、签名和SHA记录；升级/卸载运行手册可执行，真实存量数据切换等待CW-051。",
+      "required_evidence": "签名/哈希、旧包升级矩阵、卸载失败与恢复录像/日志",
+      "evidence_level": "AUTOMATED_VERIFIED，真实签名实机在CW-046",
+      "source_evidence": [
+        {
+          "path": "client/src-tauri/customer-installer-hooks.nsh",
+          "line": 5,
+          "why": "只检测一个固定旧内部安装路径"
+        },
+        {
+          "path": "client/src-tauri/customer-installer-hooks.nsh",
+          "line": 9,
+          "why": "直接先卸载，无数据已保护门禁"
+        },
+        {
+          "path": "client/src-tauri/customer-installer-hooks.nsh",
+          "line": 13,
+          "why": "卸载失败已有 Abort"
+        },
+        {
+          "path": ".github/workflows/ci.yml",
+          "line": 201,
+          "why": "当前构建无签名客户包"
+        },
+        {
+          "path": ".github/workflows/ci.yml",
+          "line": 233,
+          "why": "现有 SHA/归档基础"
+        },
+        {
+          "path": "package.json",
+          "line": 23,
+          "why": "客户命令明确 --no-sign"
+        }
+      ],
+      "other_branch_evidence": [],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-025",
+      "phase": "W4",
+      "title": "把现有PG保护扩展到全部运行环境",
+      "kind": "代码与测试增量",
+      "original_status": "partial",
+      "owner_role": "后端负责人",
+      "dependencies": [
+        "CW-007",
+        "CW-009",
+        "CW-053"
+      ],
+      "condition": "必需",
+      "reuse": "客户生产模式已强制 PostgreSQL、TLS，并拒绝 PG 与 DB_PATH 混配；API/Worker 均已有 PG 执行入口。",
+      "excluded_development": "历史 SQLite 只读迁移工具与已发布 migration 由 CW-060 隔离，不作为在线运行入口；SQL/类型与事务细节分别由 CW-054/055 收口。",
+      "remaining_work": "删除所有环境对 sqlite://、DB_PATH、自动 SQLite 建库的在线解析和 API/Worker/开发回退；让缺 DSN、SQLite URL、DB_PATH、PG 不可达、错 schema 在全部环境 fail-closed，且不生成 .db/-wal/-shm；验证桌面制品不接收 PG DSN，API 与 Worker 只连接同一登记 PG。",
+      "carried_requirement": "",
+      "file_scope": "server/app/db.py；server/app/db_pg.py；server/app/db_portable.py；server/app/bootstrap.py；server/app/auth.py；server/app/main.py；server/app/generation_worker.py；package.json",
+      "acceptance_delta": "新增 dev/test/CI/staging/production 启动拒绝矩阵：有效 PG 成功，其余配置全部非零且无 SQLite 文件副作用；API/Worker 并发启动需证明不会自行执行或竞争 schema migration。",
+      "retained_acceptance": "开发与生产模式分别验证有效PG可读写；缺DSN、SQLite URL、DB_PATH（含与PG混配）、PG不可达、错误schema均不得接业务/回落SQLite或创建.db/WAL；API/Worker启动不自动竞争schema；读写进入同环境PG，桌面不获得PG DSN。",
+      "completion_delta": "PG-01 通过且所有在线入口仅有 PG；SQLite 在线实现最终删除须等 CW-043 覆盖完成。",
+      "retained_completion": "PG-01运行入口验收通过；SQL/类型与事务契约由CW-054/055补齐，历史工具由CW-060隔离；最终SQLite在线实现移除须等CW-043覆盖完成。",
+      "required_evidence": "逐环境启动拒绝矩阵、连接与落库证据、PG配置/角色清单、schema readiness日志",
+      "evidence_level": "AUTOMATED_VERIFIED",
+      "source_evidence": [
+        {
+          "path": "server/app/db_pg.py",
+          "line": 122,
+          "why": "解析器仍接受 sqlite:// 和 DB_PATH 回退（第125—154行）。"
+        },
+        {
+          "path": "server/app/auth.py",
+          "line": 40,
+          "why": "请求数据库仍在无 DATABASE_URL 时走 DB_PATH/SQLite（第47—76行）。"
+        },
+        {
+          "path": "server/app/generation_worker.py",
+          "line": 1583,
+          "why": "SQLite Worker 正式函数仍存在并可达。"
+        },
+        {
+          "path": "server/app/bootstrap.py",
+          "line": 540,
+          "why": "客户生产已有 PG/COS readiness gate。"
+        }
+      ],
+      "other_branch_evidence": [],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-026",
+      "phase": "W4",
+      "title": "退出内部认证并复验客户fencing",
+      "kind": "代码与测试增量",
+      "original_status": "partial",
+      "owner_role": "认证负责人 + 独立安全复核",
+      "dependencies": [
+        "CW-025",
+        "CW-009",
+        "CW-003",
+        "CW-055"
+      ],
+      "condition": "必需",
+      "reuse": "客户 PG 读请求可验证 customer session；写请求具备事务内 fencing 原语；客户生产已禁止 internal access token 走业务读路径。",
+      "excluded_development": "管理员 session/CSRF 归 CW-027；旧路由最终取消注册归 CW-041。",
+      "remaining_work": "收敛后所有环境移除 internal Bearer、X-Dev-User-Id、固定桌面身份旁路；当前非客户生产仍接受；逐个保留业务路由证明 read owner 与 write fenced transaction 覆盖，入口后切换写入 0 副作用；使幂等重放重新执行授权，不可仅返回旧结果绕过当前会话。",
+      "carried_requirement": "",
+      "file_scope": "server/app/auth.py；server/app/customer_auth.py；server/app/customer_fence.py；server/app/permissions.py；各保留业务路由",
+      "acceptance_delta": "生成全部保留业务 method-path 的 read-owner/write-fence 表，漏项=0；TEST-PG 双连接制造 snapshot 后 epoch/lease/session 切换，所有迟到写业务行和账务行增量均为0。",
+      "retained_acceptance": "有效客户读写成功且仅限本人；两个客户越权、旧内部token、开发身份头、解绑/过期/被替换会话全部失败；入口校验后发生切换的迟到写也不落库；幂等重放不跳过授权。",
+      "completion_delta": "全部客户读写矩阵 0 fail/0 skip，旧身份与开发头在收敛运行方式不可达，独立安全复核通过。",
+      "retained_completion": "全部保留客户读写路由完成矩阵核验；安全专项通过且独立复核无未决身份/并发问题。",
+      "required_evidence": "method-path授权矩阵、PG竞态日志、安全复核",
+      "evidence_level": "AUTOMATED_VERIFIED",
+      "source_evidence": [
+        {
+          "path": "server/app/auth.py",
+          "line": 82,
+          "why": "get_current_user 仍接收 X-Dev-User-Id。"
+        },
+        {
+          "path": "server/app/auth.py",
+          "line": 115,
+          "why": "非 customer-production PG 仍接受 internal access token，且第132行保留 dev identity。"
+        },
+        {
+          "path": "server/app/customer_fence.py",
+          "line": 105,
+          "why": "无 PG 时 customer snapshot 返回 None，继续内部/桌面身份路径。"
+        },
+        {
+          "path": "server/app/customer_fence.py",
+          "line": 181,
+          "why": "已有事务内 session re-verification。"
+        }
+      ],
+      "other_branch_evidence": [],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-027",
+      "phase": "W4",
+      "title": "复用管理后台并收口权限差额",
+      "kind": "复验",
+      "original_status": "verify",
+      "owner_role": "管理后端负责人",
+      "dependencies": [
+        "CW-019",
+        "CW-026"
+      ],
+      "condition": "必需",
+      "reuse": "客户生产的 control 路由已转接逐管理员 session；写方法强制 AdminWriter，旧代理身份运行时拒绝；统一管理写合同已包含 confirm、reason、Idempotency-Key，并按真实 actor 记录；已有 admin session、CSRF、auditor 只读、过期/撤销与幂等专项测试。",
+      "excluded_development": "管理网页视觉及客户端制品隔离由前端/打包任务验收；真实生产角色 UAT 在 CW-047—050；收敛前内部 P0 proxy 兼容路径的物理删除由 CW-041/042 完成。",
+      "remaining_work": "无需预设重写后台鉴权；先按保留操作清单核验所有写路由确实使用 AdminWriter/写合同；在 TEST-PG 运行 admin/auditor/customer/无CSRF/过期session/旧proxy 全矩阵；仅在发现漏接路由时修复。",
+      "carried_requirement": "",
+      "file_scope": "server/app/control_auth.py；server/app/control_routes.py；server/app/admin_auth_routes.py；server/app/admin_write_contract.py；server/app/admin_*；client/src/admin/",
+      "acceptance_delta": "补一张保留管理操作→route→AdminReader/AdminWriter→audit event 的静态与动态核销表，漏项=0；真实 PG 下 actor/reason/idempotency/CSRF/auditor 测试 0 fail/0 skip。",
+      "retained_acceptance": "管理端可完成保留操作且actor/reason可追溯；客户凭据无法管理写，auditor写请求拒绝，缺CSRF或过期admin session拒绝；旧X-Control-Proxy-Token不恢复共享管理员权限。",
+      "completion_delta": "若矩阵无漏接则以“验收完成”关闭，不另立重构；发现漏接仅补对应路由和单行为测试。",
+      "retained_completion": "客户运营功能不丢失，管理网页与客户端制品/身份均隔离；全部管理写路由与审计回归通过。",
+      "required_evidence": "管理角色矩阵、操作审计、管理E2E",
+      "evidence_level": "AUTOMATED_VERIFIED",
+      "source_evidence": [
+        {
+          "path": "server/app/control_auth.py",
+          "line": 24,
+          "why": "旧 X-Control-Proxy-Token 在客户生产明确 403。"
+        },
+        {
+          "path": "server/app/control_auth.py",
+          "line": 73,
+          "why": "customer-production control 路由转逐管理员 session，写方法经 get_admin_writer。"
+        },
+        {
+          "path": "server/app/admin_write_contract.py",
+          "line": 77,
+          "why": "管理写统一要求 Idempotency-Key、confirm=true、非空 reason。"
+        },
+        {
+          "path": "server/tests/test_admin_auth.py",
+          "line": 1027,
+          "why": "已有 auditor 只读专项。"
+        }
+      ],
+      "other_branch_evidence": [],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-028",
+      "phase": "W4",
+      "title": "迁出共享设置工具并核销旧路由消费者",
+      "kind": "代码与测试增量",
+      "original_status": "partial",
+      "owner_role": "后端负责人",
+      "dependencies": [
+        "CW-026",
+        "CW-027",
+        "CW-003"
+      ],
+      "condition": "必需",
+      "reuse": "客户 wallet/recharge/settings 与 control 路由仍注册，客户合法兼容 API 尚未被误删；Provider 配置合并/测试等共享函数已有单一可运行实现。",
+      "excluded_development": "最终取消旧路由注册由 CW-041；源文件删除由 CW-042。",
+      "remaining_work": "control_routes 仍直接从 settings_routes 导入共享工具，尚未迁到中性现有模块；需要逐端点消费者证据、替代路径及“保留兼容/可删”冻结清单，不能按路径前缀推断；共享工具迁移后补客户和管理员合同回归。",
+      "carried_requirement": "",
+      "file_scope": "server/app/settings_routes.py；server/app/control_routes.py；server/app/settings.py；server/app/main.py；server/app/wallet_routes.py；server/app/recharge_routes.py",
+      "acceptance_delta": "每个候选端点必须登记实际调用者、认证角色、替代路径、兼容期限；未知消费者不得标可删；共享函数迁移前后同输入输出合同测试逐项相等。",
+      "retained_acceptance": "管理Provider配置测试、配置合并等在迁移后结果一致；通用/api/projects等客户路由不因缺customer前缀被删；仍被受支持客户调用的端点可用或明确要求升级，内部专用路由没有遗漏消费者。",
+      "completion_delta": "共享工具只留一份中性实现，消费者清单与兼容允许清单经评审冻结，CW-041 可据此取消注册。",
+      "retained_completion": "每个候选删除端点都有调用证据和替代路径；共享工具只留一份实现；最终取消注册由CW-041执行。",
+      "required_evidence": "函数/路由消费者清单、合同测试、兼容允许清单",
+      "evidence_level": "AUTOMATED_VERIFIED",
+      "source_evidence": [
+        {
+          "path": "server/app/control_routes.py",
+          "line": 41,
+          "why": "control_routes 直接复用 settings_routes 的 ProviderTester/merge 等帮助函数。"
+        },
+        {
+          "path": "server/app/main.py",
+          "line": 348,
+          "why": "recharge、wallet、settings 路由仍被主应用注册。"
+        },
+        {
+          "path": "server/app/storage.py",
+          "line": 224,
+          "why": "云存储配置转换属于可保留的共享能力，不能随旧设置路由误删。"
+        }
+      ],
+      "other_branch_evidence": [],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-029",
+      "phase": "W4",
+      "title": "复用账务核心并核验扣费、支付差额",
+      "kind": "代码与测试增量",
+      "original_status": "partial",
+      "owner_role": "账务负责人 + 独立复核",
+      "dependencies": [
+        "CW-010",
+        "CW-026",
+        "CW-016"
+      ],
+      "condition": "必需",
+      "reuse": "钱包核心已有 RESERVE/SETTLE/RELEASE、billing_round 与幂等语义；支付回调和充值路由已有服务端入口；已有重复、释放、结算、并发余额等测试，但大部分仍依赖 SQLite。",
+      "excluded_development": "真实 ZPay/Provider 回调验收归 CW-050；客户端显示金额不构成本项裁决证据；历史 migration 不在本项改写。",
+      "remaining_work": "把任务结果重复/乱序、未知提交、取消、客户隐藏记录、支付回调验签与跨用户订单全部迁成 TEST-PG 多连接矩阵；对每用例核对 available+reserved+ledger 差额为0并证明历史价格快照不可被现价改写；评估并有选择地重做其他分支的成本账本/口播幂等修复，禁止整体 cherry-pick 分叉分支。",
+      "carried_requirement": "",
+      "file_scope": "server/app/internal_billing.py；server/app/generation.py；server/app/oral.py；server/app/payment_routes.py；server/app/recharge_routes.py；server/app/wallet_routes.py",
+      "acceptance_delta": "支付/任务状态矩阵需断言每用户钱包、冻结、ledger、成本账本四套独立差额；所有重复/乱序路径新增账务行=预期精确值；伪造价格、未验签回调、跨用户订单均 4xx 且 0 数据副作用。",
+      "retained_acceptance": "同一支付回调/任务结果重复和乱序到达不重复记账；成功、确认失败、取消、未知提交各自账务正确；余额/冻结/流水逐用户差额为0；拒绝伪造价格、跨用户订单或未验签回调；客户删除记录不抹管理费用证据。",
+      "completion_delta": "账务与回调 TEST-PG 自动化 0 fail/0 skip，独立复核通过；其他分支仅逐补丁评估后重做/整合。",
+      "retained_completion": "账务与回调自动化零回归且独立复核通过；未改写022等历史迁移，未以客户端显示金额代替服务端裁决。",
+      "required_evidence": "支付/任务状态矩阵、账务核对报表、复核意见",
+      "evidence_level": "AUTOMATED_VERIFIED，真实链路在CW-050",
+      "source_evidence": [
+        {
+          "path": "server/app/internal_billing.py",
+          "line": 134,
+          "why": "现有 reserve_task_credits 使用 billing_round 和幂等流水。"
+        },
+        {
+          "path": "server/app/payment_routes.py",
+          "line": 51,
+          "why": "支付回调入口包含签名解析与错误边界。"
+        },
+        {
+          "path": "server/tests/test_wallet_billing_service.py",
+          "line": 149,
+          "why": "已有预占幂等行为测试，但 fixture 是 tmp_path SQLite。"
+        }
+      ],
+      "other_branch_evidence": [
+        {
+          "branch": "codex/local-main-cost-billing-20260908",
+          "commit": "e2175cb524f37038b0ce87899b3eca68140f423a",
+          "path": "server/app/generation_worker.py",
+          "line": 1016,
+          "why": "该分支补付费调用成本账本与 migration 防护；相对 bffc341 同时有大量删除/重编号，不能算基线或整体合并。",
+          "not_baseline": true,
+          "baseline_equivalent_present": false
+        },
+        {
+          "branch": "codex/pr3-core-fix-20260908",
+          "commit": "b5479ca32dff66754af3cfe389602cf3df8e2fa3",
+          "path": "server/app/generation_worker.py",
+          "line": 84,
+          "why": "该分支把视频拆解每次 Provider 调用独立记成本，尚未整合。",
+          "not_baseline": true,
+          "baseline_equivalent_present": false
+        },
+        {
+          "branch": "codex/pr95-hardening-20260908",
+          "commit": "e06806b142e5366d9f7c3c56ff268fc44998a027",
+          "path": "server/app/oral.py",
+          "line": 446,
+          "why": "该分支增加口播/克隆幂等防重，尚未整合。",
+          "not_baseline": true,
+          "baseline_equivalent_present": false
+        }
+      ],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-030",
+      "phase": "W4",
+      "title": "收敛各类Worker的PG调度与恢复差额",
+      "kind": "代码与测试增量",
+      "original_status": "partial",
+      "owner_role": "Worker负责人",
+      "dependencies": [
+        "CW-010",
+        "CW-002",
+        "CW-025",
+        "CW-029",
+        "CW-054",
+        "CW-055"
+      ],
+      "condition": "必需；新增公平能力按CW-002范围决定",
+      "reuse": "PG Worker 主循环和 H3 客户公平队列、租约回收、并发双领保护已存在；同一 Worker 入口已覆盖多类任务处理函数。",
+      "excluded_development": "是否新增跨口播完整轮转由 CW-002 决策；A1000/B100/C10 类生产负载归 CW-047。",
+      "remaining_work": "移除 run_sqlite_worker_round、run_forever、--db-path 与所有正式可达 SQLite Worker 路径；逐类验证口播、图片、分析/文案/ASR、H3/独立的领取、租约、迟到结果、未知提交和计费/成本边界；现有公平性主要锁定 H3 队列，不能推定所有任务类型无饥饿。",
+      "carried_requirement": "",
+      "file_scope": "server/app/generation_worker.py；server/app/generation.py；server/app/oral_worker.py；server/app/image_tasks.py；server/app/script_rewrite.py；server/app/script_from_audio.py",
+      "acceptance_delta": "每任务类型至少独立覆盖：2 Worker 同抢、lease 过期、迟到结果、Provider 超时、SUBMISSION_UNCERTAIN、重启恢复；混合队列按冻结阈值断言最大等待；两设备不能把同用户 running slot 从1变2。",
+      "retained_acceptance": "多Worker不重复领取/重复付费；迟到结果不能覆盖新lease；两设备不增加同用户并发；不同用户按各类已冻结等待阈值持续推进；关闭客户端不停止已受理任务；未知提交不会盲重提。",
+      "completion_delta": "所有正式 Worker 仅 PG；每类/混合 TEST-PG 证据齐全，0 重复领取、0 重复收费、0 盲重提。",
+      "retained_completion": "每种保留任务都有领取、重试、计费/非计费、失败恢复证据；跨口播完整轮转若尚未实现，不得用共享并发槽冒充，必须按范围补齐或明确限制并通过相应验收。",
+      "required_evidence": "逐类/混合任务压测、租约和Provider请求次数、恢复记录",
+      "evidence_level": "AUTOMATED_VERIFIED",
+      "source_evidence": [
+        {
+          "path": "server/app/generation_worker.py",
+          "line": 1583,
+          "why": "SQLite Worker round 仍完整存在。"
+        },
+        {
+          "path": "server/app/generation_worker.py",
+          "line": 1635,
+          "why": "并行存在 PG Worker round。"
+        },
+        {
+          "path": "server/app/generation_worker.py",
+          "line": 1681,
+          "why": "CLI main 仍负责在 PG/SQLite 路径间分派。"
+        },
+        {
+          "path": "server/tests/test_customer_queue_fairness.py",
+          "line": 322,
+          "why": "已有用户 round-robin 的 PG 公平队列测试。"
+        }
+      ],
+      "other_branch_evidence": [
+        {
+          "branch": "codex/pr3-core-fix-20260908",
+          "commit": "b5479ca32dff66754af3cfe389602cf3df8e2fa3",
+          "path": "server/app/generation_worker.py",
+          "line": 84,
+          "why": "分析 Provider 成本回写补丁可作为逐类核验参考，未整合。",
+          "not_baseline": true,
+          "baseline_equivalent_present": false
+        },
+        {
+          "branch": "codex/pr95-hardening-20260908",
+          "commit": "e06806b142e5366d9f7c3c56ff268fc44998a027",
+          "path": "server/app/oral.py",
+          "line": 446,
+          "why": "口播/克隆防重复提交补丁可作为参考，未整合。",
+          "not_baseline": true,
+          "baseline_equivalent_present": false
+        }
+      ],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-031",
+      "phase": "W4",
+      "title": "核销云端资产与授权下载的剩余回退",
+      "kind": "代码与测试增量",
+      "original_status": "partial",
+      "owner_role": "存储负责人",
+      "dependencies": [
+        "CW-025",
+        "CW-009"
+      ],
+      "condition": "必需",
+      "reuse": "客户生产 readiness 已要求 active_storage_provider=cos 并做私有 bucket readiness；COS URI 解析、bucket 匹配、签名/授权能力已存在。",
+      "excluded_development": "旧 local 资产搬迁归 CW-037；真实 COS 凭据链归 CW-050；可重建的本地临时处理中间文件可保留，但不得成为跨进程持久真源。",
+      "remaining_work": "关闭全部正式服务本地持久存储回退；当前无 COS 时 get_media_storage 仍返回 LocalStorageAdapter；保留历史 local URI 只作为迁移期可追溯输入，禁止新写；补 API A 上传/API B或Worker读取、跨用户/撤销session、签名过期重获、COS故障不落本地的跨实例测试。",
+      "carried_requirement": "",
+      "file_scope": "server/app/storage.py；server/app/media_routes.py；server/app/media.py；server/app/rbac_routes.py；server/app/bootstrap.py",
+      "acceptance_delta": "用两个独立 API 进程语义/连接和一个 Worker 验证同一 COS 对象可读；临时目录删除后业务仍可恢复；COS put/get/sign 任一故障均返回明确错误，本地持久文件新增数=0。",
+      "retained_acceptance": "API A上传后API B/其他Worker可读；跨用户/撤销会话不能读取私有资产；签名过期有明确重获方式；COS不可用不偷偷写本地；临时文件不作为跨进程真源；成片仍按DIRECT合同交付。",
+      "completion_delta": "新持久资产 provider=cos 比例100%；local 新写=0；授权、撤销、过期、跨节点和故障专项 0 fail。",
+      "retained_completion": "资产授权、跨实例可读和故障专项通过；所有仍引用local的持久数据可追溯到CW-037，未因local函数名删除云端签名能力。",
+      "required_evidence": "资产权限矩阵、跨节点用例、对象与临时目录检查",
+      "evidence_level": "AUTOMATED_VERIFIED",
+      "source_evidence": [
+        {
+          "path": "server/app/storage.py",
+          "line": 21,
+          "why": "StorageProvider 仍公开 cos/local/fake 三种持久适配。"
+        },
+        {
+          "path": "server/app/media_routes.py",
+          "line": 147,
+          "why": "无 COS 配置时第155行明确回退本地。"
+        },
+        {
+          "path": "server/app/media_routes.py",
+          "line": 163,
+          "why": "已持久化 local URI 仍可解析到本地适配器。"
+        },
+        {
+          "path": "server/app/bootstrap.py",
+          "line": 554,
+          "why": "客户生产 readiness 强制 PG 配置中的 active provider 为 cos。"
+        }
+      ],
+      "other_branch_evidence": [],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-032",
+      "phase": "W4",
+      "title": "补齐可重建后端交付包及配置检查",
+      "kind": "代码与测试增量",
+      "original_status": "partial",
+      "owner_role": "运维负责人 + 后端负责人",
+      "dependencies": [
+        "CW-004",
+        "CW-019",
+        "CW-025",
+        "CW-027",
+        "CW-031",
+        "CW-056",
+        "CW-057",
+        "CW-060"
+      ],
+      "condition": "必需",
+      "reuse": "已有客户环境模板、PG 单主机迁移锁、PITR 工具和可按 SHA 构建镜像的 rollout 脚本；构建阶段已检查 ffmpeg/ffprobe、Python 编译和关键模块导入。",
+      "excluded_development": "真实多实例拓扑、容灾切换归 CW-047/048；真实密钥/Provider/COS 链归 CW-050；历史 operator 工具由 CW-060 独立交付。",
+      "remaining_work": "rollout 依赖 /opt/video-replica-candidate/compose.yaml 等仓库外主机文件，尚非空白环境可重建的唯一默认包；仓库仍保留 internal P0 systemd 与 SQLite backup 单元，需从正式部署产物排除；补齐应用/迁移/备份角色、全进程连接池预算、首次管理员、健康检查和制品哈希的可执行验收。",
+      "carried_requirement": "",
+      "file_scope": "deploy/；server/app/bootstrap.py；server/app/settings.py；server/app/media_tools.py；server/app/main.py；server/pyproject.toml",
+      "acceptance_delta": "在空白隔离目录仅使用登记制品重建 API/Worker/Admin；未登记主机文件依赖数=0；缺 PG/COS/key/ffmpeg/ffprobe/codec 每项均独立 fail-fast；多个应用实例不得执行 schema DDL。",
+      "retained_acceptance": "在空白隔离环境按交付包可重建API/Worker/管理页；缺PG、私有COS、密钥或实际所需ffmpeg/ffprobe/codec时有可定位失败；密钥不进客户包/日志；迁移单次执行，多个实例不竞争改schema。 应用/迁移/备份角色及全进程连接池预算明确；PG备份和恢复命令可用，SQLite备份timer不进入正式部署；历史operator工具独立构建并经CW-060验收。",
+      "completion_delta": "唯一默认部署包、锁定依赖、角色/池预算、备份轮换和健康检查全部与实际命令一致；正式单元中 SQLite backup=0。",
+      "retained_completion": "完整部署包无需依赖未登记主机文件或旧镜像；参数、备份/轮换与健康检查文档匹配实际部署主线，明确生产环境仍需后续验收。",
+      "required_evidence": "可重建部署日志、配置检查、媒体探测/处理样本、制品哈希",
+      "evidence_level": "AUTOMATED_VERIFIED，真实拓扑在CW-047",
+      "source_evidence": [
+        {
+          "path": "deploy/customer-git-rollout.sh",
+          "line": 22,
+          "why": "部署根与 compose 路径固定到主机外部状态，第26行依赖外置 compose.yaml。"
+        },
+        {
+          "path": "deploy/customer-git-rollout.sh",
+          "line": 215,
+          "why": "脚本动态生成 Dockerfile 并检查 ffmpeg/ffprobe/模块导入。"
+        },
+        {
+          "path": "deploy/postgres/migrate.sh",
+          "line": 15,
+          "why": "迁移锁仅为 host-local，并要求 runbook 指定唯一迁移主机。"
+        },
+        {
+          "path": "server/pyproject.toml",
+          "line": 4,
+          "why": "项目描述仍是 internal desktop API，说明默认交付身份尚未完全收敛。"
+        }
+      ],
+      "other_branch_evidence": [],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-054",
+      "phase": "W4",
+      "title": "修复PG批量操作、查询类型与异常差额",
+      "kind": "代码与测试增量",
+      "original_status": "partial",
+      "owner_role": "后端负责人",
+      "dependencies": [
+        "CW-025",
+        "CW-053"
+      ],
+      "condition": "必需",
+      "reuse": "BusinessConnection 已提供 PG 原生 %s 执行和同时支持名称/位置的 row factory；若干 SQLite-only BEGIN/PRAGMA 被 PG 门面吞掉以维持现有事务边界。",
+      "excluded_development": "全域业务测试批量映射核销归 CW-058/059，但不能代替本项每调用者修改前的首批 PG 回归；在线 SQLite 实现最终删除归 CW-042。",
+      "remaining_work": "Postgres executemany 当前完全 no-op；必须定义真实空批/非空批合同；清除 sqlite3.Row/Error 类型与 SQL translator/PRAGMA/BEGIN IMMEDIATE 债务，逐调用者改为 PG 原生异常和数据类型；补金额/布尔/NULL/UTC/JSON、RETURNING/rowcount、唯一/FK/check、导出/trace 实际 PG 结果，逐调用者保留 RED→GREEN。",
+      "carried_requirement": "",
+      "file_scope": "server/app/db_portable.py；server/app/generation.py；server/app/internal_billing.py；server/app/analysis.py；server/app/characters.py；server/app/media.py；server/app/",
+      "acceptance_delta": "每个实际调用者先有 TEST-PG 持久化断言；不兼容路径先红后绿并绑定提交；非空 executemany 写入行数必须等于参数组数；失败后连接可复用且错误映射稳定。",
+      "retained_acceptance": "非空批量参数全部真实落库，空批无副作用；row按名称/位置及dict转换符合使用方；金额/布尔/NULL/UTC/JSON roundtrip正确；唯一/FK/check失败映射到既定业务结果且不污染连接；敏感数据检查读取实际PG结果，不能遍历空dump假通过。",
+      "completion_delta": "当前业务调用者的 SQLite 查询/行/异常债务核销为0，PG合同矩阵0 fail/0 skip，无 ORM/多后端新抽象。",
+      "retained_completion": "所有当前业务调用者改用PG原生行为，兼容语句/SQLite类型债务核销；接口数据形状和错误响应不回归，无新ORM或多后端抽象。 每个已改调用者都须有先于实现的PG回归记录及对应提交/运行证据；CW-058/059不能被用作延后补建首批回归的理由。",
+      "required_evidence": "调用者清单、批量/类型/异常/导出红绿用例、PG实际SQL与结果、逐调用者测试先行记录和RED→GREEN日志",
+      "evidence_level": "AUTOMATED_VERIFIED",
+      "source_evidence": [
+        {
+          "path": "server/app/db_portable.py",
+          "line": 228,
+          "why": "PG backend 已直接执行原生 SQL。"
+        },
+        {
+          "path": "server/app/db_portable.py",
+          "line": 249,
+          "why": "自定义 row 同时支持名称和位置访问。"
+        },
+        {
+          "path": "server/app/db_portable.py",
+          "line": 320,
+          "why": "门面仍显式模拟 SQLite 形状并吞 BEGIN IMMEDIATE/PRAGMA。"
+        },
+        {
+          "path": "server/app/db_portable.py",
+          "line": 350,
+          "why": "executemany 在 PG 下不执行任何写入。"
+        },
+        {
+          "path": "server/app/generation.py",
+          "line": 917,
+          "why": "业务调用者仍以 sqlite3.Row 注解持久化行。"
+        }
+      ],
+      "other_branch_evidence": [],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-055",
+      "phase": "W4",
+      "title": "补齐PG事务、连接池与提交边界验证",
+      "kind": "代码与测试增量",
+      "original_status": "partial",
+      "owner_role": "认证/数据库负责人 + 独立复核",
+      "dependencies": [
+        "CW-025",
+        "CW-009",
+        "CW-010"
+      ],
+      "condition": "必需",
+      "reuse": "pg_transaction 已使用连接池事务上下文统一提交/回滚，并校验 isolation allowlist；fenced_pg_transaction 持有最终提交权；BusinessConnection 在 PG 上的 commit/rollback 是刻意 no-op；基线已经包含 statement_timeout、idle_in_transaction_session_timeout 与池卫生参数。",
+      "excluded_development": "业务域全量映射核销归 CW-058/059；容量基准归 CW-047。",
+      "remaining_work": "补齐每个已迁调用者修改前 TEST-PG 回归与 RED→GREEN；当前证据不足以证明全调用链均未中途提交；增加池耗尽有界失败、断连、异常事务回收、死锁/serialization/timeout 的 SQLSTATE→幂等恢复矩阵；缺 PG 不得 skip；验证序列值不可回滚这一 PG 事实不会被误断言。",
+      "carried_requirement": "",
+      "file_scope": "server/app/db_pg.py；server/app/db_portable.py；server/app/customer_fence.py；server/app/auth.py；server/app/generation_worker.py；server/tests/test_db_pg.py；server/tests/test_customer_fencing.py",
+      "acceptance_delta": "池 max=N 时第N+1借用必须在配置 timeout 内失败并脱敏；归还后下一请求成功；QueryCanceled/DeadlockDetected/SerializationFailure/业务异常分别断言完整回滚、连接可复用、幂等重试不重复付费。",
+      "retained_acceptance": "业务内部commit不提前落账；入口后session/epoch/lease变化写入0副作用；业务异常回滚完整，未提交连接不返池继续污染下一请求；超时/死锁/序列化失败按既定幂等边界处理，无重复付费；池耗尽有有界失败及脱敏日志。",
+      "completion_delta": "PG-03 和独立审查通过；所有调用者具备先测证据，0 fail/0 skip；不得把 no-op commit 改为业务层中途提交。",
+      "retained_completion": "PG-03测试与独立审查通过；删除SQLite兼容不能把原no-op改成中途真提交，序列变化不能被误当成可随事务回滚。 每个已改调用者都须有先于实现的PG回归记录及对应提交/运行证据；CW-058/059不能被用作延后补建首批回归的理由。",
+      "required_evidence": "多连接竞态、提交/回滚断言、池耗尽回收日志、SQLSTATE与异常映射、逐调用者测试先行记录和RED→GREEN日志",
+      "evidence_level": "AUTOMATED_VERIFIED",
+      "source_evidence": [
+        {
+          "path": "server/app/db_pg.py",
+          "line": 234,
+          "why": "连接池配置含 check、lifetime、idle、timeout 与服务端超时 options。"
+        },
+        {
+          "path": "server/app/db_pg.py",
+          "line": 270,
+          "why": "外层 pg_transaction 统一拥有事务生命周期。"
+        },
+        {
+          "path": "server/app/db_portable.py",
+          "line": 320,
+          "why": "PG commit/rollback no-op 明确为保护 fenced 外层提交边界。"
+        },
+        {
+          "path": "server/app/customer_fence.py",
+          "line": 205,
+          "why": "session verifier 与业务 yield 位于同一 PG transaction。"
+        },
+        {
+          "path": "server/tests/test_db_pg.py",
+          "line": 450,
+          "why": "已有提交/回滚测试，但整套 PG 集成仍受缺库 skip 机制影响。"
+        }
+      ],
+      "other_branch_evidence": [
+        {
+          "branch": "codex/local-main-pg-timeouts-20260908",
+          "commit": "6a2f579e2c6706062cbcd8cdbed7ec151062c867",
+          "path": "server/app/db_pg.py",
+          "line": 55,
+          "why": "该分支同类服务端 timeout 配置已在 bffc341 基线出现等价实现，不构成新增完成量。",
+          "not_baseline": true,
+          "baseline_equivalent_present": true
+        }
+      ],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-056",
+      "phase": "W4",
+      "title": "补齐空PG及受支持旧PG升级矩阵",
+      "kind": "代码与测试增量",
+      "original_status": "partial",
+      "owner_role": "数据库负责人 + 迁移复核",
+      "dependencies": [
+        "CW-025",
+        "CW-053",
+        "CW-007",
+        "CW-003"
+      ],
+      "condition": "必需",
+      "reuse": "已有空 PG upgrade→downgrade→re-upgrade 和已发布 040 head→当前 head 的迁移演练；另有从 054 带钱包/生成代表数据升级并验证保持的数据场景。",
+      "excluded_development": "生产实际停写/升级执行归 CW-051；SQLite→PG 只读导入工具归 CW-034—039/CW-060。",
+      "remaining_work": "尚未冻结“所有已发且受支持 PG head”矩阵；当前仅覆盖若干起点，不能代表全部客户版本；迁移集成文件缺 PG 时整体 skip；必须改为必需门禁；Alembic env 仍支持默认/SQLite 与 offline SQL；当前 offline 输出不能当可执行升级证据；每个支持 head 需代表数据、完整约束/trigger/JSON/时间语义、identity/serial/ledger 下一写不碰撞和失败状态证据。",
+      "carried_requirement": "",
+      "file_scope": "server/migrations/env.py；server/migrations/versions/；server/scripts/sqlite_to_postgres.py；server/scripts/reconcile_customer_billing.py；server/tests/test_postgres_migrations.py；deploy/postgres/migrate.sh",
+      "acceptance_delta": "建立 supported_release_head→final_head 表，所有登记起点各跑独立真实 PG 数据副本，漏项=0、skip=0；每个起点核对 schema 对象、关键事实、约束和下一写；失败后 alembic_version/结构状态必须可判定。",
+      "retained_acceptance": "空库及全部支持旧PG起点→目标成功；表/列/PK/FK/check/部分唯一索引/trigger/时间与JSON语义符合登记；owner/钱包/订单/session/任务事实一致；identity/serial/ledger下一写不碰撞；失败不留半结构或未知状态；旧兼容代码能读前向schema；非空审计降级拒绝保留。",
+      "completion_delta": "PG-04 矩阵 0 漏项/0失败/0skip，单 head，历史 revision 哈希冻结；offline --sql 明确不作为交付升级脚本。",
+      "retained_completion": "PG-04矩阵0漏项/0失败；实际支持版本无未知head；只追加修复迁移；当前不把未验证--sql离线输出交付为可执行升级脚本。",
+      "required_evidence": "release-head矩阵、revision哈希、schema目录对比、代表数据/约束/下一写与回滚证据",
+      "evidence_level": "AUTOMATED_VERIFIED",
+      "source_evidence": [
+        {
+          "path": "server/tests/test_postgres_migrations.py",
+          "line": 142,
+          "why": "整个迁移集成模块缺 PG 时 skip。"
+        },
+        {
+          "path": "server/tests/test_postgres_migrations.py",
+          "line": 452,
+          "why": "已有 published 040 head 到当前 head 的真实 PG 演练。"
+        },
+        {
+          "path": "server/tests/test_postgres_migrations.py",
+          "line": 498,
+          "why": "已有空 PG 全链 upgrade/downgrade/re-upgrade。"
+        },
+        {
+          "path": "server/migrations/env.py",
+          "line": 35,
+          "why": "迁移 URL 仍允许环境缺失时使用 alembic.ini 默认，并保留 SQLite/offline 路径。"
+        }
+      ],
+      "other_branch_evidence": [
+        {
+          "branch": "codex/local-main-cost-billing-20260908",
+          "commit": "e2175cb524f37038b0ce87899b3eca68140f423a",
+          "path": "server/migrations/versions/064_operation_cost_rates.py",
+          "line": 42,
+          "why": "该分支含 migration downgrade/账本保护补丁，但 revision 编号链与基线分叉，须按当前 head 重做评估。",
+          "not_baseline": true,
+          "baseline_equivalent_present": false
+        }
+      ],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-057",
+      "phase": "W4",
+      "title": "统一剩余维护与种子CLI的PG入口",
+      "kind": "代码与测试增量",
+      "original_status": "partial",
+      "owner_role": "后端运维负责人",
+      "dependencies": [
+        "CW-025",
+        "CW-054",
+        "CW-053"
+      ],
+      "condition": "必需",
+      "reuse": "若干当前维护脚本已要求显式 PostgreSQL DSN；PG migrate 与 PITR backup/recovery 工具已存在。",
+      "excluded_development": "sqlite_to_postgres、reconcile_customer_billing 等一次性历史导入/核对工具保留在 CW-060 隔离制品，不应强改为无 SQLite；实际恢复演练归 CW-048。",
+      "remaining_work": "gate1_bootstrap、gate1_e2e、app.backup 与 internal backup systemd 仍是 SQLite 当前入口；盘点全部 HTTP 外命令，逐个标 current→PG、historical→CW-060、retire；未知项不得遗漏；当前命令必须拒绝缺/错 DSN 与 SQLite 参数，验证只读不写、写命令审计/幂等、备份目标与日志脱敏。",
+      "carried_requirement": "",
+      "file_scope": "server/scripts/；server/app/gate1_bootstrap.py；server/app/gate1_e2e.py；server/app/backup.py；scripts/；deploy/systemd/；deploy/postgres/",
+      "acceptance_delta": "输出 command×classification×database×role×write/audit/idempotency 矩阵；current 命令的 SQLite 接受数=0；逐命令有效 PG 成功；缺/错/SQLite DSN 非零失败且不创建数据库文件；只读命令业务表变化=0。",
+      "retained_acceptance": "逐命令有效PG成功，缺/错DSN或SQLite参数拒绝；读命令不修改业务，写命令审计和幂等不退化；配置/CLI不创建SQLite；备份作业实际目标PG且日志脱敏；旧命令有退出或PG替代说明。",
+      "completion_delta": "所有 HTTP 外当前业务入口纳入 PG-01/08，未登记 DB_PATH/SQLite timer=0；历史工具只能从 CW-060 隔离入口执行。",
+      "retained_completion": "HTTP之外的业务入口全部纳入PG-01/08，未发现未登记的DB_PATH/SQLite定时任务；历史备份/导入代码仅通过CW-060隔离工具可达。",
+      "required_evidence": "命令×数据库/身份矩阵、拒绝/审计/幂等记录、timer及备份目标清单",
+      "evidence_level": "AUTOMATED_VERIFIED",
+      "source_evidence": [
+        {
+          "path": "server/app/gate1_bootstrap.py",
+          "line": 23,
+          "why": "Gate1 bootstrap 直接 initialize_database 并包装 SQLite BusinessConnection。"
+        },
+        {
+          "path": "server/app/gate1_e2e.py",
+          "line": 469,
+          "why": "Gate1 E2E 固定创建 gate1.sqlite3。"
+        },
+        {
+          "path": "server/app/backup.py",
+          "line": 377,
+          "why": "当前 CLI 明确为 SQLite backup/restore tools。"
+        },
+        {
+          "path": "server/scripts/reconcile_dangling_billing_reservations.py",
+          "line": 33,
+          "why": "现有对账 CLI 已优先使用显式 PostgreSQL DSN。"
+        },
+        {
+          "path": "deploy/postgres/pitr-backup.sh",
+          "line": 34,
+          "why": "已有 pg_basebackup 与 pg_verifybackup 的 PG 备份链。"
+        }
+      ],
+      "other_branch_evidence": [],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-033",
+      "phase": "W5",
+      "title": "执行数据与资产快照恢复演练",
+      "kind": "复验",
+      "original_status": "verify",
+      "owner_role": "数据负责人",
+      "dependencies": [
+        "CW-005",
+        "CW-001",
+        "CW-002",
+        "CW-003",
+        "CW-004",
+        "CW-053"
+      ],
+      "condition": "必需；首先只读，复制在隔离位置",
+      "reuse": "已有SQLite一致快照（停写检查、writer fence、完整性、原件/快照SHA-256、0600）和PG16物理base backup、连续WAL、隔离恢复及100条跨域事实核验工具。",
+      "excluded_development": "从V3剩余开发中剔除SQLite快照算法、PG PITR脚本和100-fact verifier的重复实现及原SHA合同测试；不能剔除实际数据批次恢复。",
+      "remaining_work": "只读盘点每个当前PG/历史SQLite/对象批次；对实际PG执行隔离restore并记录版本、head、时间点、LSN/timeline（适用时）；封存SQLite原件并验证hash；核对业务、账务、未完任务和对象清单，登记访问责任人。",
+      "carried_requirement": "",
+      "file_scope": "server/scripts/sqlite_to_postgres.py；server/scripts/reconcile_customer_billing.py；server/app/backup.py；deploy/postgres/；实际源库和对象清单",
+      "acceptance_delta": "接受既有工具合同为CODE_PRESENT/AUTOMATED_VERIFIED，不再要求重复开发；保留实际源数据restore、当前head/业务/账务/对象核对和原件保护全部验收。",
+      "retained_acceptance": "实际restore后的PG关键数据、schema/head、关联/金额摘要一致；逻辑恢复不冒充PITR；SQLite封存前锁仅为获取一致视图，不改变业务内容，封存后原件hash不变；不修改原业务库或把凭据明文写入Git/CSV；未完任务/冻结额和对象位置齐备。",
+      "completion_delta": "仅当每个实际批次都有manifest/hash、成功隔离恢复日志、数据核对和责任人时完成；当前不得整项剔除。",
+      "retained_completion": "每个拟处理数据批次都有可恢复快照、完整性校验和访问责任人；没有可用备份时禁止执行数据写入或旧包卸载。",
+      "required_evidence": "备份manifest/hash、实际restore日志、PG版本/head/时间点、封存前后边界与脱敏业务核对",
+      "evidence_level": "隔离数据演练",
+      "source_evidence": [
+        {
+          "path": "server/app/backup.py",
+          "line": 164,
+          "why": "实现不可覆盖、私有、完整性检查的SQLite只读快照，并在writer fence内复核源hash/size/mtime。",
+          "line_end": 269
+        },
+        {
+          "path": "deploy/postgres/pitr-backup.sh",
+          "line": 34,
+          "why": "使用pg_basebackup流式WAL、pg_verifybackup及外部put/assert发布物理备份。",
+          "line_end": 50
+        },
+        {
+          "path": "deploy/postgres/pitr-restore-drill.sh",
+          "line": 34,
+          "why": "恢复入口限定staging、隔离目录/端口，拉取并校验base后按时间点重放WAL并运行事实核验。",
+          "line_end": 92
+        },
+        {
+          "path": "docs/evidence/T38-EVIDENCE.md",
+          "line": 86,
+          "why": "现有证据明确只完成仓库合同，真实archive/base/restore尚未运行，下一步仍需记录RPO/RTO等实际结果。",
+          "line_end": 100
+        },
+        {
+          "path": "outputs/customer-cloud-convergence-analysis-2026-09-08/客户版收敛工作任务清单.csv",
+          "line": "39",
+          "why": "原任务完工条件按每个拟处理数据批次要求可恢复快照、完整性和责任人，不能由通用脚本替代。"
+        }
+      ],
+      "other_branch_evidence": [],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-034",
+      "phase": "W5",
+      "title": "按需保留客户PG并归档内部数据",
+      "kind": "条件实施与验收",
+      "original_status": "decision",
+      "owner_role": "数据负责人 + 业务负责人",
+      "dependencies": [
+        "CW-033",
+        "CW-005",
+        "CW-056"
+      ],
+      "condition": "条件：该数据批次选择A",
+      "reuse": "已有客户PG运行历史、PG恢复工具、SQLite归档/恢复工具和PG保持为唯一业务真源的回滚原则，路线A通常无需新增导入程序。",
+      "excluded_development": "若CW-005正式选择A，可剔除A路线专属数据导入开发，复用现有PG升级/PITR和SQLite归档工具；不得把旧生产记录当成本次候选的A路线验收。",
+      "remaining_work": "先按实际批次裁决A/B/C；若选A，证明内部数据无需合入，升级保留PG至冻结head，演练前后核对客户/设备/session/项目/钱包，封存并实际恢复内部SQLite，同时扫描PG内local资产决定是否触发CW-037。",
+      "carried_requirement": "",
+      "file_scope": "data-deploy-audit.md §3A；受保护PG/SQLite副本及对象清单",
+      "acceptance_delta": "A选定后将验收收敛为实际PG不变性、必要schema升级、内部SQLite可恢复归档和local资产扫描；未选A则以CW-005证据关闭为N/A。",
+      "retained_acceptance": "演练前后客户PG业务记录/余额/设备关系不变；内部归档可恢复、不可继续误写；若保留PG自身仍有local资产，另执行CW-037而非假定无需迁移。",
+      "completion_delta": "必须取得批次路线与业务签字；选A时实际核对/归档恢复完成后才关闭，不能因已有客户PG而提前complete。",
+      "retained_completion": "业务确认无内部数据需合入，归档恢复证据齐备；非A批次以CW-005证据登记不适用，不能伪记迁移成功。",
+      "required_evidence": "A路线核对表、业务确认、归档恢复记录",
+      "evidence_level": "条件路线数据验收",
+      "source_evidence": [
+        {
+          "path": "docs/evidence/PRODUCTION-HOTFIX-RECONCILIATION-20260830.md",
+          "line": 10,
+          "why": "只证明旧生产镜像和045 head的历史客户PG，证据层级仍待该PR的PG16 CI，不能代表当前078候选。",
+          "line_end": 17
+        },
+        {
+          "path": "server/app/backup.py",
+          "line": 305,
+          "why": "已有SQLite完整性检查的备份/恢复原语，可用于受控归档恢复，不需另造通用复制器。",
+          "line_end": 349
+        },
+        {
+          "path": "docs/客户版部署与灰度手册.md",
+          "line": 15,
+          "why": "正本规定备份恢复只针对PG、SQLite仅作历史输入/归档，且实际restore和旧PG升级仍是后续门禁。",
+          "line_end": 17,
+          "v3_navigation_line_adjusted": true
+        },
+        {
+          "path": "outputs/customer-cloud-convergence-analysis-2026-09-08/客户版收敛工作任务清单.csv",
+          "line": "40",
+          "why": "A是按批次条件路线；非A只能登记不适用，不能伪记迁移成功。"
+        }
+      ],
+      "other_branch_evidence": [
+        {
+          "ref": "ops/deploy-8bd0374-20260902-170141@c89012dfa6868d0c5f19c56cf079fef2be7a3639",
+          "why": "存在旧候选生产部署支线，但不是当前收敛候选，也没有A路线数据/归档签收，不能提升状态。"
+        }
+      ],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-035",
+      "phase": "W5",
+      "title": "复用空PG导入器完成选中数据批次",
+      "kind": "条件实施与验收",
+      "original_status": "decision",
+      "owner_role": "数据负责人 + 数据复核",
+      "dependencies": [
+        "CW-033",
+        "CW-025",
+        "CW-005",
+        "CW-056",
+        "CW-060"
+      ],
+      "condition": "条件：该数据批次选择B",
+      "reuse": "T07已有维护窗、PG advisory lock、源/目标同head和schema检查、空目标保护、单事务导入、重放判定、序列重置及全量账务/资产引用对账；原SHA在PG16自动化中通过。",
+      "excluded_development": "若选择B，剔除空目标SQLite→PG导入器、基础对账器、失败回滚/同快照重放机制的重复开发；实际数据演练、最新head约束、用户资格和资产迁移不得剔除。",
+      "remaining_work": "裁决该批次是否B；通过CW-060交付独立operator制品；冻结原件并只在工作副本做必要规范化；把目标PG升级到最终head后对实际副本导入/重放/失败恢复，核对用户资格、约束、下一ID/流水和CW-037对象。",
+      "carried_requirement": "",
+      "file_scope": "server/scripts/sqlite_to_postgres.py；server/scripts/reconcile_customer_billing.py；server/migrations/versions/",
+      "acceptance_delta": "既有T07自动化不再作为待开发；B路线仍需在最终候选和实际受保护副本上证明首次导入、重放、失败恢复、约束/序列/账务和对象闭合。",
+      "retained_acceptance": "非空不一致目标被拒绝；首次导入完整、同一快照重放不新增，中断回滚无半导入；users/wallets/orders/transactions/projects/tasks/assets主键集合与源一致，每个钱包可由流水重算，PAID无CHARGE及CHARGE无PAID均为0；价格快照形状的PG check、code/user/session/order/CHARGE唯一约束和当前设备槽/fingerprint部分唯一索引真实存在且合法/非法样本均验证；实际文件由CW-037核验，不能把DB导入成功当作资产完工。 同时验证下一次ID/流水分配无碰撞、重放不回退序列；序列状态与事务数据分别核验，不能假定失败会回滚setval。导入阶段不创建写能力SQLite连接，缺PG目标不得以SQLite快照测试宣称通过。",
+      "completion_delta": "选B才执行；实际演练和资格转换签收通过后关闭。非B批次只能N/A，不能把原T07 19/24项测试当作批次完成。",
+      "retained_completion": "空库导入与重放演练、用户资格转换方案及账务对账全部通过；非B批次登记不适用；不直接把内部账户变成有效客户session。",
+      "required_evidence": "B路线导入日志、重复/失败恢复用例、全量对账",
+      "evidence_level": "条件路线数据验收",
+      "source_evidence": [
+        {
+          "path": "server/scripts/sqlite_to_postgres.py",
+          "line": 121,
+          "why": "导入要求源/目标等于发布head、确认维护窗并取得PG事务级迁移锁。",
+          "line_end": 176
+        },
+        {
+          "path": "server/scripts/sqlite_to_postgres.py",
+          "line": 524,
+          "why": "验证快照hash/权限，只读打开SQLite，在PG单事务内拒绝分叉非空目标、导入、重置序列并全量对账。",
+          "line_end": 603
+        },
+        {
+          "path": "server/scripts/reconcile_customer_billing.py",
+          "line": 922,
+          "why": "对SQLite/PG的标量及JSON资产引用、钱包、PAID/CHARGE和生成账务不变量进行数据库端核验。",
+          "line_end": 1153
+        },
+        {
+          "path": "docs/evidence/T07-EVIDENCE.md",
+          "line": 99,
+          "why": "原T07实现与PG16 CI已自动化验证，但结论明确不冒充真实生产迁移。",
+          "line_end": 109
+        },
+        {
+          "path": "docs/evidence/T07-EVIDENCE.md",
+          "line": 111,
+          "why": "原门禁保留R0/快照/空目标/单事务/资金不可回滚边界，并列出真实存量切换未测。",
+          "line_end": 136
+        }
+      ],
+      "other_branch_evidence": [],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-036",
+      "phase": "W5",
+      "title": "按需补齐已有PG选择性合并能力",
+      "kind": "条件实施与验收",
+      "original_status": "decision",
+      "owner_role": "数据负责人 + 架构/账务复核",
+      "dependencies": [
+        "CW-033",
+        "CW-025",
+        "CW-029",
+        "CW-005",
+        "CW-056",
+        "CW-060"
+      ],
+      "condition": "条件：该数据批次选择C",
+      "reuse": "可复用现有快照/账务/资产引用核对和PG数据库分配wallet ledger_sequence的触发器；当前T07导入器明确拒绝非空且不一致的目标，没有选择性合并实现。",
+      "excluded_development": "剔除通用快照、基础引用对账和目标PG序列触发器的重复开发；不得删除C路线专项工具、冲突/血缘/幂等恢复开发，只因现有空库导入器可用。",
+      "remaining_work": "先裁决是否选择C。若选择，新增并登记全FK及JSON/text内嵌ID矩阵、源目标映射和不可变血缘，实施不覆盖已有客户的选择性合并、目标序列分配、分批幂等/恢复及完整资金/对象核对。",
+      "carried_requirement": "",
+      "file_scope": "server/scripts/；server/migrations/versions/；server/app/internal_billing.py；新文件须先登记CW-006映射",
+      "acceptance_delta": "若C被选中，原冲突样本、全引用矩阵、源目标血缘、下一写、重放/失败恢复和账务闭合验收原样保留；未选C按证据N/A。",
+      "retained_acceptance": "已有客户不覆盖；相同ID/用户名不能自动合户；迁移后当前引用的旧ID残留/孤儿为0、owner一致；identity/serial/账务序列下一写无冲突，重放不倒退；merchant/provider单号、幂等键、计费轮次不碰撞；每批可重放，失败恢复不重复入账，PAID/CHARGE双向闭合且余额可由有来源流水重算。 目标正常新增流水验证触发器与下一序列无碰撞，不把源NULL序列伪造为已知历史顺序。",
+      "completion_delta": "在路线裁决前保持decision；选C后实质上是未开发专项，必须实现并独立复核，不能用解除空库保护或setval代替。",
+      "retained_completion": "冲突样本、逐批幂等、部分失败恢复、完整账务与资产引用对账均通过独立复核；不得以删除空库保护替代此任务；非C批次登记不适用。",
+      "required_evidence": "全量FK/JSON引用矩阵、源目标ID/账务序列血缘、冲突样本、下一写/重放/失败恢复及账务证据",
+      "evidence_level": "条件路线数据验收",
+      "source_evidence": [
+        {
+          "path": "server/scripts/sqlite_to_postgres.py",
+          "line": 559,
+          "why": "现有工具对非空分叉PG fail closed，直接证明它不能承担C路线。",
+          "line_end": 568
+        },
+        {
+          "path": "server/scripts/reconcile_customer_billing.py",
+          "line": 995,
+          "why": "已有PG侧JSON和标量资产孤儿核对可复用，但它只检查一致性，不做ID改写或合并。",
+          "line_end": 1137
+        },
+        {
+          "path": "server/migrations/versions/063_wallet_ledger_sequence.py",
+          "line": 52,
+          "why": "PG触发器拒绝调用方指定流水序列并由目标序列分配，提供C路线目标写入不变量。",
+          "line_end": 89
+        },
+        {
+          "path": "outputs/customer-cloud-convergence-analysis-2026-09-08/客户版收敛工作任务清单.csv",
+          "line": "42",
+          "why": "原任务已明确当前工具不支持，需专项设计实现；同时保留非C批次N/A规则。"
+        }
+      ],
+      "other_branch_evidence": [],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-037",
+      "phase": "W5",
+      "title": "按需迁移并校验历史local资产",
+      "kind": "条件实施与验收",
+      "original_status": "decision",
+      "owner_role": "存储负责人 + 数据负责人",
+      "dependencies": [
+        "CW-033",
+        "CW-031",
+        "CW-005"
+      ],
+      "condition": "条件：任一待保留数据存在local或非共享持久对象",
+      "reuse": "已有local/COS适配器、COS写入SHA-256元数据与put/get/head/copy/delete原语，数据库对账能查标量和JSON资产ID孤儿；没有跨provider的历史local→COS遍历、映射、引用切换和回滚工具。",
+      "excluded_development": "剔除COS基本对象API、local读取能力和数据库资产ID孤儿扫描的重复开发；不能把同一adapter内copy_object或单次真实素材上传当作历史资产迁移。",
+      "remaining_work": "先遍历所有保留表/字段和对象根裁决是否存在local/非共享持久对象。若存在，开发/登记幂等迁移operator，产出旧URI→新key映射，逐对象验证size/SHA-256/owner/授权读取，原子或可恢复地更新引用并保留回滚期源对象。",
+      "carried_requirement": "",
+      "file_scope": "server/app/storage.py；server/app/media_routes.py；server/scripts/reconcile_customer_billing.py；对象迁移工具",
+      "acceptance_delta": "适用性未定前保留条件门；若有local资产，原逐对象size/hash/owner/引用/权限/重放/失败恢复验收全部保留；若无，须用全引用和对象遍历证据关闭N/A。",
+      "retained_acceptance": "逐对象size/SHA-256/owner/引用数与授权可读检查通过；跨API/Worker可访问；重复复制不产生无主对象/越权；引用更新失败可恢复；保留数据中不再有待迁local引用。",
+      "completion_delta": "当前不能complete。只有全量扫描证明无待迁对象，或实际映射清单双向闭合且缺失为0，才可关闭。",
+      "retained_completion": "复制与引用双向清单闭合、缺失对象为0；若无资产需迁移，必须有遍历/引用扫描证据才可登记不适用，不能只查一张表。",
+      "required_evidence": "对象映射与校验摘要、权限读取/失败恢复记录",
+      "evidence_level": "条件路线数据验收",
+      "source_evidence": [
+        {
+          "path": "server/app/storage.py",
+          "line": 242,
+          "why": "URI解析支持local/cos/fake，但require_storage_match要求adapter与引用同provider，未提供跨provider迁移编排。",
+          "line_end": 260
+        },
+        {
+          "path": "server/app/storage.py",
+          "line": 466,
+          "why": "LocalStorageAdapter提供本地对象读写、同本地根复制、head和local URI。",
+          "line_end": 558
+        },
+        {
+          "path": "server/app/storage.py",
+          "line": 574,
+          "why": "CloudStorageAdapter提供COS put/get/copy/head并写SHA-256元数据，可作为迁移执行原语。",
+          "line_end": 727
+        },
+        {
+          "path": "server/scripts/reconcile_customer_billing.py",
+          "line": 1072,
+          "why": "现有扫描只验证数据库资产ID引用是否孤儿，不复制实物、不校验对象owner或更新URI。",
+          "line_end": 1137
+        },
+        {
+          "path": "outputs/customer-cloud-convergence-analysis-2026-09-08/客户版收敛工作任务清单.csv",
+          "line": "43",
+          "why": "任务条件取决于全量遍历证据；无资产时也不能只查单表后直接N/A。"
+        }
+      ],
+      "other_branch_evidence": [
+        {
+          "ref": "feat/material-library-linkage-completion@6bcc61de3702ae8998a8b499087a3c71c122fc9d",
+          "why": "该未集成支线记录一次真实生产COS图片素材上传和对象权限，但没有历史local资产遍历/映射/引用迁移，且不能代表当前候选。"
+        }
+      ],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-038",
+      "phase": "W5",
+      "title": "执行未完任务、额度和外部回执核对",
+      "kind": "复验",
+      "original_status": "verify",
+      "owner_role": "账务负责人 + Worker负责人",
+      "dependencies": [
+        "CW-010",
+        "CW-029",
+        "CW-030",
+        "CW-033",
+        "CW-034",
+        "CW-035",
+        "CW-036"
+      ],
+      "condition": "必需",
+      "reuse": "已有安全终结悬挂RESERVE的PG CLI、generation提交不确定对账操作、oral按证据人工SETTLE/RELEASE及幂等证据摘要、客户聚合页的运行中/需关注计数；代码明确不自动处理SUBMISSION_UNCERTAIN。",
+      "excluded_development": "剔除generation/oral终态悬挂账务扫描、证据化人工结算和提交不确定防盲重试机制的重复开发；不剔除切换批次的实际盘点、Provider回执核验和负责人签收。",
+      "remaining_work": "在选定数据副本停写后遍历全部排队/运行/归档失败/提交不确定/失败待补偿任务和冻结额；把每项绑定Provider回执与既有逻辑幂等键，分别排空、恢复、取消或进入受保护人工核验；运行dry-run/受控处置并复核钱包差额为0。新任务族或未被现有报表覆盖的状态须补盘点查询或报告。",
+      "carried_requirement": "",
+      "file_scope": "server/app/internal_billing.py；server/app/generation.py；server/app/oral_worker.py；server/scripts/reconcile_dangling_billing_reservations.py",
+      "acceptance_delta": "既有状态机与对账实现按原SHA复用；验收重点改为当前批次逐任务唯一处置、回执/幂等关联、未知项责任人和实际钱包/冻结闭合。",
+      "retained_acceptance": "停写模拟后每个未完任务有唯一处置；已收费/未知收费不自动再POST；成功/失败/取消后钱包和终态流水一致；未知项只有在受保护的人工核验队列中才可保留，不能重复释放或伪标成功。",
+      "completion_delta": "完成需要真实副本处置表、账务复核和负责人放行；仅运行悬挂RESERVE CLI或看到管理端计数不算完成。",
+      "retained_completion": "无未归属任务或无处置责任的冻结额，账务差额为0；需人工核验的例外有明确定义、负责人和不重复收费保护，切换放行须由账务负责人确认。",
+      "required_evidence": "待办处置表、外部回执引用、钱包对账与幂等证据",
+      "evidence_level": "数据/账务演练",
+      "source_evidence": [
+        {
+          "path": "server/scripts/reconcile_dangling_billing_reservations.py",
+          "line": 27,
+          "why": "PG CLI支持dry-run和受控批量终结安全候选，只输出聚合计数。",
+          "line_end": 73
+        },
+        {
+          "path": "server/app/internal_billing.py",
+          "line": 56,
+          "why": "扫描仅选已归档成功或确认失败/取消且无终态流水的RESERVE，明确排除SUBMISSION_UNCERTAIN。",
+          "line_end": 114
+        },
+        {
+          "path": "server/app/internal_billing.py",
+          "line": 465,
+          "why": "oral人工对账强制Provider结果/扣费证据、证据资产hash、同操作幂等和钱包/终态流水原子更新。",
+          "line_end": 642
+        },
+        {
+          "path": "server/app/generation.py",
+          "line": 3299,
+          "why": "普通重试对有provider_task_id或可能已触达Provider的任务fail closed，要求对账或管理员确认。",
+          "line_end": 3323
+        },
+        {
+          "path": "server/app/admin_customer_routes.py",
+          "line": 881,
+          "why": "管理查询可汇总generation运行中、SUBMISSION_UNCERTAIN/归档失败/质量失败和SETTLE消耗，但不是切换批次逐任务处置表。",
+          "line_end": 908
+        }
+      ],
+      "other_branch_evidence": [
+        {
+          "ref": "codex/local-main-pg-timeouts-20260908@6a2f579e2c6706062cbcd8cdbed7ec151062c867",
+          "why": "该未集成支线含进一步的口播/转写并发与供应商回执保护；集成前只算候选代码，不能提升当前基线或替代实际处置。"
+        }
+      ],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-039",
+      "phase": "W5",
+      "title": "完成副本演练与切换回滚手册定版",
+      "kind": "复验",
+      "original_status": "verify",
+      "owner_role": "数据负责人 + 运维/业务验收",
+      "dependencies": [
+        "CW-034",
+        "CW-035",
+        "CW-036",
+        "CW-037",
+        "CW-038"
+      ],
+      "condition": "必需；真实生产切换留CW-051",
+      "reuse": "已有T07维护窗/R0-R1数据回滚原则、PG PITR/故障runbook和应用回滚前向schema/资金事实红线；尚无针对实际A/B/C批次、最终head及当前对象/未完任务的完整副本演练和签收。",
+      "excluded_development": "剔除通用维护窗、基础PG PITR脚本、应用滚动/回滚原则的重复编写；不能剔除按已选路线组合后的实际数据副本演练、检查点和业务/运维签收。",
+      "remaining_work": "在CW-033/034-038完成后冻结所选批次runbook；对隔离副本演练停写、最后增量、对象切换、未知任务处置、校验和回退流量；用真实旧兼容代码验证前向schema读取，分别处理资金事实与序列状态并记录最后安全回退边界。",
+      "carried_requirement": "",
+      "file_scope": "数据演练产物；deploy/；docs/客户版部署与灰度手册.md",
+      "acceptance_delta": "通用runbook文字和原SHA合同不再重复开发；保留实际副本中途失败恢复、交易不被快照覆盖、旧兼容代码、PG真源和操作者检查点验收。",
+      "retained_acceptance": "模拟切换后用户/项目/版本/资产/设备/账务符合预期；模拟中途失败可恢复；已确认交易不会被快照回灌抹掉；回退旧兼容代码仍能读取前向schema；所有步骤有操作者和检查点。 回滚后业务仍在PG；生产回退不能恢复SQLite继续写。已确认资金事实与序列状态分别处置，不以快照覆盖消除差异。",
+      "completion_delta": "实际路线副本演练与签收完成后关闭；不代表CW-051生产切换已执行。",
+      "retained_completion": "演练和可执行runbook签收；所选路线、对象校验、未完任务及停写操作无未知项；仅表示生产切换已具备准备条件，实际授权和写入在CW-051。",
+      "required_evidence": "数据演练验收、停写/切换/回滚手册、签收",
+      "evidence_level": "数据副本演练通过；实际环境满足类生产条件才记STAGING_VERIFIED",
+      "source_evidence": [
+        {
+          "path": "docs/evidence/T07-EVIDENCE.md",
+          "line": 111,
+          "why": "已有R0、停写、快照、空目标、事务失败和资金事实不可数据库回滚的基础原则。",
+          "line_end": 119
+        },
+        {
+          "path": "docs/客户版部署与灰度手册.md",
+          "line": 410,
+          "why": "已有应用/配置/数据库回滚和资金/前向schema保护边界，但旧镜像兼容仍要求隔离实测。",
+          "line_end": 425,
+          "v3_navigation_line_adjusted": true
+        },
+        {
+          "path": "docs/evidence/T39-EVIDENCE.md",
+          "line": 23,
+          "why": "现有故障演练文档明确不是staging成功记录，所有实际演练未执行。",
+          "line_end": 25
+        },
+        {
+          "path": "outputs/customer-cloud-convergence-analysis-2026-09-08/客户版收敛工作任务清单.csv",
+          "line": "45",
+          "why": "任务要求所选路线、对象、未完任务和停写操作无未知项，并只提升到生产切换准备完成。"
+        }
+      ],
+      "other_branch_evidence": [],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-060",
+      "phase": "W5",
+      "title": "隔离既有历史SQLite工具与兼容测试",
+      "kind": "代码与测试增量",
+      "original_status": "partial",
+      "owner_role": "数据工具负责人 + QA",
+      "dependencies": [
+        "CW-005",
+        "CW-007",
+        "CW-053",
+        "CW-056"
+      ],
+      "condition": "必需；无待迁数据也须完成入口隔离与例外盘点",
+      "reuse": "历史SQLite快照、空PG导入、对账和大量兼容测试已经实现；当前客户热修发布脚本只显式复制app/migrations，但app wheel本身包含app.backup，发布脚本继承旧镜像且未清除server/scripts，仓库仍交付内部SQLite backup systemd单元，尚无可复建、版本化、哈希锁定的独立operator制品。",
+      "excluded_development": "剔除T07快照/导入/对账算法及其既有测试的重复开发；保留并只做制品边界、入口隔离、版本绑定、允许清单和TEST-IMPORT/TEST-HISTORY分类。",
+      "remaining_work": "把legacy采集/可选工作副本规范化/只读导入组织为独立operator包或一次性job并绑定最终head/hash；从在线app包移出或明确隔离app.backup，构建客户镜像时从干净基底显式排除SQLite scripts/backup timer并做实物扫描；登记已发布migration例外，缺PG时TEST-IMPORT/HISTORY fail而非伪通过，核对全部反向消费者。",
+      "carried_requirement": "",
+      "file_scope": "server/app/backup.py；server/app/db.py；server/scripts/sqlite_to_postgres.py；server/scripts/reconcile_customer_billing.py；server/migrations/；server/tests/test_sqlite_to_postgres.py；server/tests/test_migration_dialect_contract.py；deploy/",
+      "acceptance_delta": "不重写已验证迁移逻辑；新增验收集中在独立制品hash/文件清单、干净客户镜像不含入口、封存原件/工作副本边界、PG目标和TEST-IMPORT/HISTORY独立报告。",
+      "retained_acceptance": "封存前一致性锁不改变业务内容，封存后归档原件hash不变；必要schema升级只写隔离工作副本，导入只读新快照；目标PG明确，维护窗/锁/重放与脱敏报告权限符合平台；在线包/客户包和启动图不能调用该工具；TEST-IMPORT/TEST-HISTORY缺PG不伪通过。",
+      "completion_delta": "需完成小而实质的制品/依赖边界开发并自动化验收后才关闭；当前不是纯复验任务，也不能因客户脚本未主动复制server/scripts而视为已隔离。",
+      "retained_completion": "PG-09允许清单与独立工具制品可复建，版本绑定最终head；TEST-IMPORT/TEST-HISTORY仅证明历史输入兼容；原DB/backup模块的在线消费者全部已迁移或已登记待CW-042裁剪，不能留下未说明反向依赖。",
+      "required_evidence": "工具制品hash/文件清单、源保护/副本规范化/只读导入用例、TEST-IMPORT/TEST-HISTORY独立报告",
+      "evidence_level": "AUTOMATED_VERIFIED，仅历史输入兼容范围",
+      "source_evidence": [
+        {
+          "path": "server/scripts/sqlite_to_postgres.py",
+          "line": 33,
+          "why": "导入脚本直接依赖在线app.backup和同一server/scripts包，尚未形成独立operator边界。",
+          "line_end": 40
+        },
+        {
+          "path": "server/pyproject.toml",
+          "line": 51,
+          "why": "在线wheel打包整个app，因此app.backup会随应用包进入制品。",
+          "line_end": 52
+        },
+        {
+          "path": "deploy/customer-git-rollout.sh",
+          "line": 202,
+          "why": "热修镜像从OLD_IMAGE继承，只删除/替换app和migrations；未删除旧server/scripts，且复制app会继续包含backup.py。",
+          "line_end": 223
+        },
+        {
+          "path": "deploy/systemd/video-replica-backup.service",
+          "line": 1,
+          "why": "仓库仍含可运行的内部SQLite每日备份单元；虽有Internal P0注释，尚未由唯一客户正式制品清单排除并实物证明。",
+          "line_end": 18
+        },
+        {
+          "path": "docs/客户版部署与灰度手册.md",
+          "line": 15,
+          "why": "文档已要求历史导入工具独立且不进在线包，但同时承认当前命令只是旧实现基线，需CW-032/044/060重新核验。",
+          "line_end": 17,
+          "v3_navigation_line_adjusted": true
+        },
+        {
+          "path": "outputs/customer-cloud-convergence-analysis-2026-09-08/客户版收敛工作任务清单.csv",
+          "line": "46",
+          "why": "原完工条件还要求PG-09允许清单、独立制品可复建、最终head绑定和反向依赖清零/登记。"
+        }
+      ],
+      "other_branch_evidence": [],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-040",
+      "phase": "W6",
+      "title": "退出内部发行与专属运维入口",
+      "kind": "代码与测试增量",
+      "original_status": "partial",
+      "owner_role": "发布负责人 + 运维负责人",
+      "dependencies": [
+        "CW-021",
+        "CW-024",
+        "CW-032",
+        "CW-039",
+        "CW-057",
+        "CW-060"
+      ],
+      "condition": "必需；针对源码/发布路径，实际旧系统停写由CW-051执行",
+      "reuse": "客户 API@/Worker@、PG PITR、监控、维护服务和脚本已存在，可作为退出内部发行的替代路径；内部发行/服务/SQLite 备份仍完整保留。",
+      "excluded_development": "剔除重做客户 systemd 实例模板、PG PITR 脚本和已有监控维护基础；其真实运行证据另由相关运维任务负责。",
+      "remaining_work": "在调用/用途清单确认后删除内部 NSIS 构建、internal-p0 env/nginx/非模板 service、SQLite 专用备份和本地 launcher 的正式交付路径；保留有合法客户/离线迁移消费者部分。",
+      "carried_requirement": "",
+      "file_scope": "deploy/internal-p0.env.example；deploy/nginx/internal-p0.conf.example；deploy/systemd/；client/src-tauri/resources/；scripts/",
+      "acceptance_delta": "仅退休无客户消费者的内部交付项；默认发布仅客户桌面与后端；既有客户备份/监控/恢复须回归，不以文件名删除共用服务。",
+      "retained_acceptance": "默认发布清单只有客户包与后端部署；不再有可启动内部产品的正式命令；实际在用服务不因名字被误删；客户备份/监控/恢复仍可执行。",
+      "completion_delta": "消费者清单、删除 diff、替代部署回归/回滚证据齐全；不在本项停止真实进程或删除旧数据。",
+      "retained_completion": "消费者审计、替代部署和回滚证据齐备；源代码退休不自动删除现有数据、备份或运行中的旧进程。",
+      "required_evidence": "删除清单、调用搜索、客户部署/恢复合同",
+      "evidence_level": "AUTOMATED_VERIFIED",
+      "source_evidence": [
+        {
+          "path": ".github/workflows/ci.yml",
+          "line": 170,
+          "why": "内部 NSIS 正式 CI 步骤仍在"
+        },
+        {
+          "path": "deploy/systemd/video-replica-api.service",
+          "line": 2,
+          "why": "internal P0 API service 尚存"
+        },
+        {
+          "path": "deploy/systemd/video-replica-api@.service",
+          "line": 2,
+          "why": "客户实例模板已实现"
+        },
+        {
+          "path": "deploy/systemd/video-replica-backup.service",
+          "line": 11,
+          "why": "SQLite daily 备份仍是独立正式服务"
+        },
+        {
+          "path": "deploy/systemd/video-replica-pitr-backup.service",
+          "line": 12,
+          "why": "客户物理 PG PITR 调用已存在"
+        }
+      ],
+      "other_branch_evidence": [],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-041",
+      "phase": "W6",
+      "title": "退出内部身份及无合法消费者的入口",
+      "kind": "代码与测试增量",
+      "original_status": "partial",
+      "owner_role": "前后端负责人",
+      "dependencies": [
+        "CW-026",
+        "CW-027",
+        "CW-028",
+        "CW-016",
+        "CW-003",
+        "CW-039"
+      ],
+      "condition": "必需；合法客户兼容接口允许保留",
+      "reuse": "客户生产 PG 认证已拒绝内部 access token 并复用客户 session verifier；生产控制面已使用 admin session/CSRF，合法共享业务 API 保留。内部开发/非生产 PG 仍接受内部 token 和 proxy 身份，内部 App/WalletPanel/CLI 仍在。",
+      "excluded_development": "剔除重新实现客户生产身份拒绝和管理员 session 基础；保留合法共享 /api/projects 等业务路由及客户兼容 API。",
+      "remaining_work": "移除内部入口/旧钱包消费者、内部 token 签发认证、固定开发身份/共享代理模式及无合法消费者路由；把现有 production-only 边界扩展为唯一客户产品全部环境合同，更新兼容允许清单。",
+      "carried_requirement": "",
+      "file_scope": "client/src/App.tsx；client/src/WalletPanel.tsx；client/src/api.ts；server/app/internal_accounts.py；server/app/auth.py；server/app/control_auth.py；server/app/main.py",
+      "acceptance_delta": "保留当前生产拒绝用例为回归，新增全部正式环境内部身份拒绝/副作用 0、客户/管理员/回调正向矩阵；共享 API 按消费者保留。",
+      "retained_acceptance": "旧内部凭据和旁路请求按合同返回拒绝/不可达且副作用0；客户业务、管理员和支付回调回归通过；客户仍需的/api/projects等不被删；兼容白名单中无内部产品运行模式。",
+      "completion_delta": "退出真实内部运行模式并通过依赖图/白名单/副作用矩阵；先修客户钱包消费者再删旧面板，避免误删客户能力。",
+      "retained_completion": "每个删除项有替代消费者证据；新客户包不含内部界面/管理界面，服务器无法以内部身份模式运行；兼容接口保留理由、版本和后续处置清楚。",
+      "required_evidence": "路由/身份拒绝矩阵、构建依赖图、兼容允许清单",
+      "evidence_level": "AUTOMATED_VERIFIED",
+      "source_evidence": [
+        {
+          "path": "server/app/auth.py",
+          "line": 115,
+          "why": "production PG 已分离内部 token，但非生产仍可接受"
+        },
+        {
+          "path": "server/app/auth.py",
+          "line": 122,
+          "why": "内部令牌和开发身份分支仍存在"
+        },
+        {
+          "path": "server/app/control_auth.py",
+          "line": 87,
+          "why": "非生产仍回落 proxy-token 控制身份"
+        },
+        {
+          "path": "server/app/internal_accounts.py",
+          "line": 63,
+          "why": "内部 token 签发 CLI 尚存"
+        },
+        {
+          "path": "client/src/RootApp.tsx",
+          "line": 42,
+          "why": "内部/管理前端入口仍静态可达"
+        },
+        {
+          "path": "client/src/studio/LiveWorkspacePanel.tsx",
+          "line": 154,
+          "why": "旧 WalletPanel 仍被实际客户钱包路径消费"
+        }
+      ],
+      "other_branch_evidence": [],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-042",
+      "phase": "W6",
+      "title": "裁剪已无在线消费者的SQLite实现",
+      "kind": "代码与测试增量",
+      "original_status": "partial",
+      "owner_role": "后端负责人",
+      "dependencies": [
+        "CW-025",
+        "CW-031",
+        "CW-039",
+        "CW-043",
+        "CW-054",
+        "CW-055",
+        "CW-056",
+        "CW-057",
+        "CW-060"
+      ],
+      "condition": "必需；保留已发布迁移和必要离线工具",
+      "reuse": "客户生产已有PG拒绝SQLite保护及共享PG门面；内部SQLite实现仍被业务使用。",
+      "excluded_development": "重写现有PG连接/数据库业务模块；按internal名称删除共用账务。",
+      "remaining_work": "在历史工具独立和PG回归覆盖核销后，删除在线SQLite分支/配置/translator/回退及本地持久路径；保留精确历史例外。",
+      "carried_requirement": "",
+      "file_scope": "server/app/db.py；server/app/db_pg.py；server/app/db_portable.py；server/app/generation_worker.py；server/app/local_settings_key.py；server/app/settings.py；server/app/storage.py",
+      "acceptance_delta": "运行/制品可达SQLite=0；全部保留业务PG通过；已发布迁移字节不改。",
+      "retained_acceptance": "开发/API/Worker/管理/维护入口到SQLite业务连接的可达路径为0；有效PG正常，无效配置不产生.db/WAL；当前业务模块无sqlite3.Row/Error类型兼容债务或SQLite方言依赖，历史例外精确登记隔离；PG事务/fencing、空库与旧PG升级及全业务测试通过。",
+      "completion_delta": "逐符号消费者核销、禁止规则和真实启动观察同时通过，不能只grep。",
+      "retained_completion": "PG-01/02/03/04/09/10满足，SQLite仅剩精确登记的历史迁移输入/工具测试；没有在线可选SQLite模式，不能用“关键词全消失”或保留无限期运行兼容宣称完成。",
+      "required_evidence": "调用图/AST扫描、运行文件与连接观察、例外允许清单、PG全业务/历史迁移验证",
+      "evidence_level": "AUTOMATED_VERIFIED",
+      "source_evidence": [
+        {
+          "path": "server/app/db.py",
+          "line": 13,
+          "why": "SQLite连接入口仍存在"
+        },
+        {
+          "path": "server/app/db_pg.py",
+          "line": 122,
+          "why": "运行配置仍允许SQLite"
+        },
+        {
+          "path": "server/app/db_portable.py",
+          "line": 67,
+          "why": "在线兼容翻译层仍在"
+        }
+      ],
+      "other_branch_evidence": [],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-043",
+      "phase": "W6",
+      "title": "独立核销全业务PG测试覆盖",
+      "kind": "复验",
+      "original_status": "verify",
+      "owner_role": "测试负责人",
+      "dependencies": [
+        "CW-007",
+        "CW-009",
+        "CW-010",
+        "CW-003",
+        "CW-001",
+        "CW-002",
+        "CW-004",
+        "CW-005",
+        "CW-053",
+        "CW-018",
+        "CW-058",
+        "CW-059",
+        "CW-060"
+      ],
+      "condition": "必需；应先于CW-042执行",
+      "reuse": "已有大量PG专项与通用回归、V2 PG分类规则及字段定义。",
+      "excluded_development": "再次从零写同一组PG测试；与CW-058/059重复开发同一断言。",
+      "remaining_work": "对各实施增量生成的旧→PG/退出/历史例外映射做独立全量核销；有遗漏回到对应开发项补测。",
+      "carried_requirement": "",
+      "file_scope": "server/tests/；client/src/App.test.tsx；client/src/RootApp.test.tsx；client/src/customer/；client/src/studio/；e2e/customer/",
+      "acceptance_delta": "未分类/无替代或无退出依据=0；TEST-PG真实PG执行、无业务SQLite替代。",
+      "retained_acceptance": "数据库相关测试100%分类，TEST-PG类真实PG且SQLite连接/内存库替代为0；旧测试映射缺口0；权限/账务/租约/工作台/新模块无漏域；TEST-IMPORT/TEST-HISTORY单列有PG目标证据，测试失败不能通过删断言、mock持久化或skip隐藏。",
+      "completion_delta": "独立核销通过后才能裁剪CW-042；源码存在不提升为已执行。",
+      "retained_completion": "PG-06覆盖矩阵闭合且独立复核通过；旧SQLite历史成绩不充当当前业务成绩；CW-042可据此裁剪在线实现。",
+      "required_evidence": "旧用例→PG用例/退出理由/历史例外矩阵、分类数与实际执行结果、无依据删测审查",
+      "evidence_level": "AUTOMATED_VERIFIED",
+      "source_evidence": [
+        {
+          "path": "server/tests/test_postgres_migrations.py",
+          "line": 142,
+          "why": "既有PG测试与缺库skip现状"
+        },
+        {
+          "path": "docs/PostgreSQL唯一数据库实施与验收规范.md",
+          "line": 23,
+          "why": "分类规则已经形成"
+        }
+      ],
+      "other_branch_evidence": [],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-044",
+      "phase": "W6",
+      "title": "收口唯一客户CI、命令与交付文档",
+      "kind": "代码与测试增量",
+      "original_status": "partial",
+      "owner_role": "工程效能负责人",
+      "dependencies": [
+        "CW-040",
+        "CW-041",
+        "CW-042",
+        "CW-043",
+        "CW-019"
+      ],
+      "condition": "必需",
+      "reuse": "现有secret、Linux质量、Rust、浏览器E2E、Windows双包及客户包排除启动器检查已经配置。",
+      "excluded_development": "重建整套CI或重复实现客户包检查；重复制作已经同步的PG规范。",
+      "remaining_work": "删除内部发行任务，默认check/build/dev统一客户+PG；所有业务入口共用PG preflight和分类门禁，历史工具单列；按最终代码更新手册。",
+      "carried_requirement": "",
+      "file_scope": "package.json；client/package.json；.github/workflows/ci.yml；scripts/verify_no_secrets.sh；README.md；docs/；scripts/pg-fixture.sh；server/pyproject.toml；server/tests/conftest.py",
+      "acceptance_delta": "断PG业务命令非0；PG可用时全业务真实PG执行；CI保留所有原有质量职责且仅交付客户和后端。",
+      "retained_acceptance": "CI无内部包build/archive残留，客户包可追踪版本和SHA；前端、PG、Rust、E2E、构建和依赖审计职责不缺失；文档按空环境可执行且不再声称客户包携带后端或成片强制COS归档。 断开PG后上述业务命令均非0失败；PG可用时TEST-PG类100%执行，缺库skip=0；TEST-IMPORT/TEST-HISTORY独立结果仍须通过；记录server_version、起止head、隔离ID、执行/失败/skip数。",
+      "completion_delta": "最终CI/命令/文档与制品一致，无旁路或门禁缩减。",
+      "retained_completion": "变更命令、CI、用户/运维文档和任务证据一一对应；不会因为删内部包而削弱客户质量门。",
+      "required_evidence": "CI工作流结果、命令/文件映射、文档复核",
+      "evidence_level": "AUTOMATED_VERIFIED",
+      "source_evidence": [
+        {
+          "path": "package.json",
+          "line": 10,
+          "why": "已有全仓检查命令"
+        },
+        {
+          "path": ".github/workflows/ci.yml",
+          "line": 47,
+          "why": "已有PG服务"
+        },
+        {
+          "path": ".github/workflows/ci.yml",
+          "line": 175,
+          "why": "仍构建内部包"
+        },
+        {
+          "path": ".github/workflows/ci.yml",
+          "line": 222,
+          "why": "已有客户包排除本地启动器检查"
+        }
+      ],
+      "other_branch_evidence": [],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-058",
+      "phase": "W6",
+      "title": "补齐内容与资产测试的真实PG覆盖",
+      "kind": "代码与测试增量",
+      "original_status": "partial",
+      "owner_role": "内容域QA + 后端",
+      "dependencies": [
+        "CW-007",
+        "CW-054",
+        "CW-055",
+        "CW-056"
+      ],
+      "condition": "必需",
+      "reuse": "内容/素材/人物/工作台/爆款等已有行为测试与部分PG专项。",
+      "excluded_development": "重新开发全部内容功能或重写已有相同断言。",
+      "remaining_work": "沿调用者改造先移植现有持久化断言到真实PG；全量核销时补遗漏，保留合法Owner/关联/恢复/分页/JSON场景。",
+      "carried_requirement": "",
+      "file_scope": "server/tests/；server/tests/conftest.py；client/src/studio/；e2e/customer/",
+      "acceptance_delta": "此组TEST-PG 100%真实PG；每个旧断言有替代/退出依据；无缺库skip、无SQLite替代。",
+      "retained_acceptance": "该组TEST-PG类用例100%真实PG执行；owner/IDOR/版本关联/跨刷新恢复/分页筛选/隐藏审计/FK/JSON及批量种子逐项通过；SQLite替代和缺PGskip为0；每个旧断言有替代编号或有依据退休。",
+      "completion_delta": "红绿记录随实现形成，收口阶段只做全量映射和补漏，交独立核销。",
+      "retained_completion": "内容域映射闭合交CW-043复核，不以测试文件数减少代替覆盖；不重复扩建已有功能。",
+      "required_evidence": "逐模块旧→PG用例、分类数与PG版本/head、运行结果和删除理由、各实现任务的测试先行记录及遗漏补测红绿日志",
+      "evidence_level": "AUTOMATED_VERIFIED",
+      "source_evidence": [
+        {
+          "path": "server/tests/test_independent_creation.py",
+          "line": 91,
+          "why": "仍用SQLite覆盖数据库依赖"
+        },
+        {
+          "path": "server/tests/conftest.py",
+          "line": 8,
+          "why": "通用测试默认内部开发身份"
+        },
+        {
+          "path": "server/tests/test_postgres_migrations.py",
+          "line": 142,
+          "why": "PG测试基座已有"
+        }
+      ],
+      "other_branch_evidence": [],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-059",
+      "phase": "W6",
+      "title": "补齐账务与全部任务测试的真实PG覆盖",
+      "kind": "代码与测试增量",
+      "original_status": "partial",
+      "owner_role": "账务/Worker QA + 独立复核",
+      "dependencies": [
+        "CW-007",
+        "CW-054",
+        "CW-055",
+        "CW-056",
+        "CW-029",
+        "CW-030"
+      ],
+      "condition": "必需",
+      "reuse": "钱包/账务/Worker及客户权限有成熟断言，部分客户专项用PG。",
+      "excluded_development": "从零重写状态机/账务测试或以H3一组替代全部任务。",
+      "remaining_work": "将剩余SQLite钱包/任务断言移到真实PG多连接；补混合任务、未知收费、迟到lease/epoch写与实际锁约束；复用每次实现时的红绿记录。",
+      "carried_requirement": "",
+      "file_scope": "server/tests/；server/app/internal_billing.py；server/app/generation_worker.py；server/app/oral_worker.py；server/app/script_rewrite.py；server/app/script_from_audio.py",
+      "acceptance_delta": "账务差额/重复付费/重复入账=0；真实PG证明fencing及锁；旧测试100%映射。",
+      "retained_acceptance": "该组TEST-PG类100%真实PG执行且SQLite替代/缺PGskip为0；账务差额0、重复入账/重复付费0，旧lease/epoch回写拒绝；FOR UPDATE SKIP LOCKED/advisory lock/约束和不确定提交恢复实际证明；所有旧测试有映射。",
+      "completion_delta": "独立复核任务/财务覆盖，历史导入测试不算当前业务通过。",
+      "retained_completion": "财务和任务域PG覆盖独立复核通过，TEST-IMPORT/TEST-HISTORY历史工具测试不冒充当前业务；映射交CW-043汇总。",
+      "required_evidence": "逐域测试映射、真实约束/锁竞争/账务及Provider请求次数证据、各实现任务的测试先行记录及遗漏补测红绿日志",
+      "evidence_level": "AUTOMATED_VERIFIED",
+      "source_evidence": [
+        {
+          "path": "server/tests/test_wallet_billing_service.py",
+          "line": 21,
+          "why": "SQLite账务种子与既有断言"
+        },
+        {
+          "path": "server/tests/test_customer_security.py",
+          "line": 408,
+          "why": "客户数据库用例仍可能缺库skip"
+        },
+        {
+          "path": "server/tests/test_independent_creation.py",
+          "line": 91,
+          "why": "独立生成测试仍SQLite"
+        }
+      ],
+      "other_branch_evidence": [],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-045",
+      "phase": "W7",
+      "title": "在最终候选执行全量PG与制品门禁",
+      "kind": "复验",
+      "original_status": "verify",
+      "owner_role": "QA负责人",
+      "dependencies": [
+        "CW-044",
+        "CW-030",
+        "CW-039",
+        "CW-053",
+        "CW-056"
+      ],
+      "condition": "必需",
+      "reuse": "全量静态、前后端、Rust、构建、安全、客户E2E的命令与CI框架已具备。",
+      "excluded_development": "开发第二套同名全量门禁。",
+      "remaining_work": "在去重后全部增量整合的同一候选SHA重新执行全量PG及构建门；记录环境/head/哈希/退出码。",
+      "carried_requirement": "",
+      "file_scope": "package.json；.github/workflows/ci.yml；scripts/pg-fixture.sh；server/tests/；client/src/；e2e/",
+      "acceptance_delta": "必需检查0失败，PG缺库skip=0，SQLite业务替代=0；空PG及支持旧PG升级证据齐。",
+      "retained_acceptance": "必需检查0失败；全部TEST-PG类数据库用例真实PG执行、PG不可达skip=0、SQLite业务替代=0、未分类/无依据删测=0；PG-01—12当前层级要求和CW-009安全矩阵通过，TEST-IMPORT/TEST-HISTORY单列亦无失败；每次收尾全量pytest由npm run check统一一次，CI附加Rust/构建/审计/E2E齐备；相同SHA记录PG版本/head/隔离ID与制品hash。",
+      "completion_delta": "完成D1候选门；历史成绩和本轮5项纯逻辑检查均不替代。",
+      "retained_completion": "Gate A和“全环境PG开发完工”通过；空PG与每个受支持旧PG升级、查询/事务/工具和测试覆盖证据均齐。历史/旧SHA/SQLite成绩不能替代新门，后续改动重验受影响部分。",
+      "required_evidence": "PG-01—12矩阵、全量命令/退出码/执行与skip明细、PG版本/head/隔离ID、CI及制品hash",
+      "evidence_level": "AUTOMATED_VERIFIED",
+      "source_evidence": [
+        {
+          "path": "package.json",
+          "line": 10,
+          "why": "现成全仓入口"
+        },
+        {
+          "path": ".github/workflows/ci.yml",
+          "line": 112,
+          "why": "CI补充E2E/Rust/构建职责"
+        }
+      ],
+      "other_branch_evidence": [],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-046",
+      "phase": "W7",
+      "title": "执行签名包实机与旧版本升级验收",
+      "kind": "现场执行与验收",
+      "original_status": "external",
+      "owner_role": "桌面QA + 发布负责人",
+      "dependencies": [
+        "CW-045",
+        "CW-024",
+        "CW-022",
+        "CW-023"
+      ],
+      "condition": "必需；每个CW-002支持平台",
+      "reuse": "客户无 sidecar 配置、Windows CI 编译/无签名 NSIS 制品检查、凭据和下载单元合同已经存在；没有足以满足本项的真实签名+干净系统+旧包安装矩阵证据。",
+      "excluded_development": "剔除把单元测试/CI 无签名包再次建设为新功能；这些仅作为实机前置复验，不能剔除本项真实交付验收。",
+      "remaining_work": "按 CW-002 支持 OS 和 CW-003 旧版本安装路径清单取得签名制品，在干净系统/旧安装样本实测激活、重启升级、两设备、上传预览下载取消、卸载/失败恢复、数据保护和进程端口。",
+      "carried_requirement": "承接CW-011：使用CW-020冻结的客户标识与凭据路径、CW-024制品及CW-003兼容矩阵做签名安装/升级/重装/失败恢复实机验证。",
+      "file_scope": "客户签名安装包；CW-003兼容矩阵；CW-024安装手册",
+      "acceptance_delta": "保持原真实签名、无 Python/uv/FFmpeg/业务库、无本地业务进程端口、身份/数据安全、全部支持矩阵要求；不能降为代码存在或 Linux 单测。",
+      "retained_acceptance": "无需Python/uv/FFmpeg/业务数据库即可使用；无本地业务端口/API/Worker；升级不丢设备身份/凭据/用户文件；旧内部包先数据保护后卸载；签名、版本和包哈希真实有效。",
+      "completion_delta": "仍需 STAGING_VERIFIED 桌面实机证据；不以候选源码或 unsigned CI 包关闭，未支持平台必须来自事前产品决策。",
+      "retained_completion": "所有支持平台与受支持旧版本矩阵逐格通过；不支持项源自CW-002而非事后降级；未签名包不得进入客户灰度。",
+      "required_evidence": "OS/旧版本/安装路径矩阵、签名与哈希、实机录像/日志",
+      "evidence_level": "STAGING_VERIFIED（桌面实机范围）",
+      "source_evidence": [
+        {
+          "path": ".github/workflows/ci.yml",
+          "line": 201,
+          "why": "现有明示 unsigned customer NSIS"
+        },
+        {
+          "path": ".github/workflows/ci.yml",
+          "line": 204,
+          "why": "staging.example.invalid 仅合同制品地址"
+        },
+        {
+          "path": "docs/evidence/T36-EVIDENCE.md",
+          "line": 197,
+          "why": "真实 Windows staging origin/签名 installer 尚未验证"
+        },
+        {
+          "path": "docs/evidence/T29-EVIDENCE.md",
+          "line": 87,
+          "why": "历史原生凭据真实联合链路缺口"
+        },
+        {
+          "path": "client/src-tauri/src/video_downloads.rs",
+          "line": 213,
+          "why": "当前原生下载仅 Windows，不能用 Windows CI 冒充其他 OS"
+        }
+      ],
+      "other_branch_evidence": [],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-047",
+      "phase": "W7",
+      "title": "执行真实多实例与负载验收",
+      "kind": "现场执行与验收",
+      "original_status": "external",
+      "owner_role": "运维QA",
+      "dependencies": [
+        "CW-045",
+        "CW-032",
+        "CW-004"
+      ],
+      "condition": "必需",
+      "reuse": "仓库已有LB+双API+四Worker+PG主端点+私有COS部署形状和fail-closed探针；T27在单机PG fixture做过10,000队列/四线程Worker/连接池压测，T34在PG fixture做过客户主链E2E。",
+      "excluded_development": "剔除拓扑模板、基础health/readiness、10k本地压测和客户链E2E的重复开发；不把线程级四Worker或旧生产节点记录当作真实staging故障域/PG HA/混合负载验收。",
+      "remaining_work": "冻结同一候选SHA与CW-004阈值，在授权的真实staging部署LB、两个独立API、四个独立Worker、PG HA与私有COS；执行跨API双设备/切换/fencing、公平A/B/C与混合任务负载，保存实际EXPLAIN ANALYZE BUFFERS、锁/池等待、节点/资源和阈值结果。",
+      "carried_requirement": "",
+      "file_scope": "deploy/；docs/客户版测试与验收规格-V3.md §5/§8/§9 Gate B；CW-004负载与阈值表",
+      "acceptance_delta": "将代码/本地测试部分标为已具备；保留所有真实节点、跨节点状态、公平/混合负载、SQL计划和冻结阈值验收。",
+      "retained_acceptance": "两个API交替读写一致；双设备普通登录冲突不静默踢人，跨API显式切换仅新session在线，旧epoch迟到业务写/heartbeat/logout均不能影响新会话；A=1000/B=100/C=10且均符合运行条件时每轮均获机会，默认每用户running≤1且设备切换不改owner/排队顺序；四Worker领取无重复、无全局队首阻塞；10,000排队任务保存EXPLAIN (ANALYZE, BUFFERS)、锁等待和连接池等待证据；混合任务遵循CW-030逐类策略，API/登录/heartbeat/领取/锁等待及公平指标达到CW-004冻结阈值。",
+      "completion_delta": "只有Gate B在真实staging同SHA通过才完成；当前为外部环境验收，不需要预先重复写拓扑代码。",
+      "retained_completion": "Gate B的正常与负载部分通过，证据记录真实节点和资源；模拟Provider允许但要注明，不能宣称真实付费链路已通过。",
+      "required_evidence": "真实拓扑与节点、激活/双设备/切换逐例记录、公平与混合负载原始样本、SQL计划及PG/Worker日志",
+      "evidence_level": "STAGING_VERIFIED",
+      "source_evidence": [
+        {
+          "path": "docs/evidence/T36-EVIDENCE.md",
+          "line": 5,
+          "why": "仓库拓扑仅AUTOMATED_VERIFIED；无真实服务器、PG HA、COS或节点故障证据，明确禁止提升staging。",
+          "line_end": 16
+        },
+        {
+          "path": "docs/evidence/T36-EVIDENCE.md",
+          "line": 36,
+          "why": "实现了双API/四Worker/Nginx/PG writable与TLS等交付形状，可直接复用。",
+          "line_end": 76
+        },
+        {
+          "path": "docs/evidence/T27-EVIDENCE.md",
+          "line": 15,
+          "why": "已有10k索引、四worker线程消费、锁和池等待的PG fixture自动化证据。",
+          "line_end": 25
+        },
+        {
+          "path": "docs/evidence/T27-EVIDENCE.md",
+          "line": 111,
+          "why": "四Worker实为四线程在单个隔离库内消费及本地池饱和，不证明真实多主机故障域。",
+          "line_end": 143
+        },
+        {
+          "path": "docs/客户版部署与灰度手册.md",
+          "line": 24,
+          "why": "手册定义真实最小拓扑，并明确同机进程不足以证明STAGING_VERIFIED。",
+          "line_end": 37,
+          "v3_navigation_line_adjusted": true
+        }
+      ],
+      "other_branch_evidence": [
+        {
+          "ref": "ops/deploy-8bd0374-20260902-170141@c89012dfa6868d0c5f19c56cf079fef2be7a3639",
+          "why": "旧候选曾部署双API/四Worker，但与当前078候选分叉，且无PG HA/真实混合负载完整证据，只能作历史参考。"
+        }
+      ],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-048",
+      "phase": "W7",
+      "title": "执行故障、PITR与发布回退演练",
+      "kind": "现场执行与验收",
+      "original_status": "external",
+      "owner_role": "运维负责人 + 账务QA",
+      "dependencies": [
+        "CW-047",
+        "CW-039",
+        "CW-004"
+      ],
+      "condition": "必需；只在授权的隔离演练环境注入故障",
+      "reuse": "已有PG16物理备份+连续WAL、隔离PITR恢复、100事实verifier、staging-only故障演练操作单，以及API/Worker/PG/依赖故障的自动化合同。",
+      "excluded_development": "剔除PITR/故障演练脚本和操作单的重复开发；不能剔除实际异地取回、隔离restore、API/Worker kill、PG HA failover、受控依赖故障、真实告警及RTO/RPO记录。",
+      "remaining_work": "在授权staging按同一候选/回滚SHA执行全部故障；验证外部WAL/base真实可取、100事实逐笔恢复、API/Worker接管、PG HA切换、依赖幂等键/状态机、SUBMISSION_UNCERTAIN人工接管、P1 fired/resolved和兼容代码回退。",
+      "carried_requirement": "",
+      "file_scope": "deploy/postgres/；deploy/systemd/；docs/evidence/T38-EVIDENCE.md；docs/evidence/T39-EVIDENCE.md",
+      "acceptance_delta": "现有脚本/合同作为准备完成；原实际故障时间线、100事实、RTO/RPO、告警收发、资金与序列、回滚日志验收全保留。",
+      "retained_acceptance": "杀任一API仍可服务且单在线成立；Worker崩溃不重复收费；PG切换/恢复逐笔核对100个冻结样本事实；COS/Provider/ZPay分别断开、超时和恢复时沿用同一逻辑操作幂等键并保持状态机，不产生非幂等重复提交、重复扣费或入账，SUBMISSION_UNCERTAIN不盲目重提，恢复后闭合终态或进入可审计人工接管；RTO/RPO达到CW-004指标；外部P1告警真实送达/解除；回退代码保留前向schema和已确认交易。故障分支允许staging受控替身并注明，真实服务验收另见CW-050。 备份、restore和故障后的业务连接始终为PG，不以恢复SQLite代替客户恢复；序列分配和已确认资金事实分别核对。",
+      "completion_delta": "授权隔离staging实际演练成功且Gate B关闭后完成；pg_dump、脚本静态检查或CI不得代替。",
+      "retained_completion": "故障与恢复均有时间线、数据核对和实际成功记录；仅pg_dump或脚本文本检查不算PITR通过；Gate B全部完成。",
+      "required_evidence": "故障注入/告警时间线、各外部依赖幂等键与状态迁移断言、恢复校验、RTO/RPO、回滚日志",
+      "evidence_level": "STAGING_VERIFIED",
+      "source_evidence": [
+        {
+          "path": "deploy/postgres/pitr-preflight.sh",
+          "line": 31,
+          "why": "要求受保护backup身份、PG16/WAL归档，并强制WAL在外部归档真实可取后才通过。",
+          "line_end": 85
+        },
+        {
+          "path": "deploy/postgres/pitr-restore-drill.sh",
+          "line": 30,
+          "why": "恢复工具限定隔离staging并在指定时间点提升后执行100事实验证。",
+          "line_end": 92
+        },
+        {
+          "path": "docs/evidence/T38-EVIDENCE.md",
+          "line": 89,
+          "why": "真实archive/base/restore未运行，文档列出完整staging实际演练待办。",
+          "line_end": 100
+        },
+        {
+          "path": "docs/evidence/T39-EVIDENCE.md",
+          "line": 17,
+          "why": "故障合同为AUTOMATED_VERIFIED，但真实双API/四Worker/PG HA/stub故障全部未执行。",
+          "line_end": 25
+        },
+        {
+          "path": "docs/evidence/T39-EVIDENCE.md",
+          "line": 65,
+          "why": "仅自动化项已勾选，STAGING_VERIFIED、真实链和PRODUCTION_GO均未关闭。",
+          "line_end": 92
+        }
+      ],
+      "other_branch_evidence": [],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-049",
+      "phase": "W7",
+      "title": "按真实客户角色完成逐模块UAT",
+      "kind": "现场执行与验收",
+      "original_status": "external",
+      "owner_role": "产品验收负责人 + 真实测试用户",
+      "dependencies": [
+        "CW-046",
+        "CW-047",
+        "CW-018",
+        "CW-027",
+        "CW-029",
+        "CW-030"
+      ],
+      "condition": "必需；采用客户身份，不用admin代替",
+      "reuse": "已有PG fixture客户链E2E，覆盖激活、项目、Prompt、任务归档、第二设备冲突/切换、模拟ZPay回调；已有管理12页与客户组件浏览器截图，但客户组件使用内存模拟且不提交真实业务。",
+      "excluded_development": "剔除T34自动化主链和已有页面视觉/组件冒烟的重复建设；不能把TestClient、Fake Provider、直插资产或内存模拟页面当作F01-F12真实客户角色UAT。",
+      "remaining_work": "在CW-047真实staging由两名真实客户身份和规定管理员逐行执行F01-F12，从入口、详情、表单、任务到成功/失败/下一步；验证跨用户隔离、桌面关闭后云任务继续、钱包双入口、版本/首帧追溯，并记录范围外能力和缺陷复验。",
+      "carried_requirement": "",
+      "file_scope": "下文功能验收矩阵；客户桌面；管理网页；真实staging后端",
+      "acceptance_delta": "自动化和视觉复核不再重做；保留真实客户角色、两客户并行、逐模块主/失败路径、隐私隔离及证据关联的UAT。",
+      "retained_acceptance": "所有保留功能主流程与关键失败路径成功，私有数据不串用户；关闭桌面任务继续；钱包两个入口一致；复刻版本/首帧关系可追溯；发布功能若排除须诚实标未接通，不能计入完成率。",
+      "completion_delta": "F01-F12逐行真实staging签收且阻断清零后完成；当前外部UAT未执行。",
+      "retained_completion": "范围内每行有测试人、结果和证据；新发现缺口回归修复后再验收，未解决功能阻断不进入真实客户灰度。",
+      "required_evidence": "逐模块UAT清单、截图/录像、请求/任务/账务关联证据",
+      "evidence_level": "STAGING_VERIFIED",
+      "source_evidence": [
+        {
+          "path": "docs/evidence/T34-E2E-EVIDENCE.md",
+          "line": 15,
+          "why": "自动化覆盖主链和会话语义，但Provider/存储用Fake，分析/资产/首帧部分直接建模。",
+          "line_end": 30
+        },
+        {
+          "path": "docs/evidence/T34-E2E-EVIDENCE.md",
+          "line": 108,
+          "why": "明确仍未覆盖真实COS、视频拆解、真实浏览器双设备和真实Provider/ZPay。",
+          "line_end": 113
+        },
+        {
+          "path": "docs/evidence/admin-revamp/browser-qa.md",
+          "line": 5,
+          "why": "管理页在本机隔离数据库做视觉交互复核，未连接生产、真实支付或付费Provider。",
+          "line_end": 9
+        },
+        {
+          "path": "docs/evidence/admin-revamp/browser-qa.md",
+          "line": 30,
+          "why": "客户组件页面明确使用内存模拟、拦截业务写入，且不等于激活/Tauri/支付完整E2E。",
+          "line_end": 42
+        },
+        {
+          "path": "outputs/customer-cloud-convergence-analysis-2026-09-08/客户版收敛工作任务清单.csv",
+          "line": "58",
+          "why": "完工要求每个范围行有真实测试人、结果和证据，未解决功能阻断不得进入灰度。"
+        }
+      ],
+      "other_branch_evidence": [],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-050",
+      "phase": "W7",
+      "title": "执行真实激活、支付、COS与Provider链路",
+      "kind": "现场执行与验收",
+      "original_status": "external",
+      "owner_role": "业务验收负责人 + 运维/账务",
+      "dependencies": [
+        "CW-045",
+        "CW-046",
+        "CW-048",
+        "CW-049"
+      ],
+      "condition": "需真实账号/资源及已有或新增明确授权，准备工作先完成",
+      "reuse": "已有激活/钱包/Provider/COS/账务代码和自动化链；当前仓库另有生产COS生命周期规则删除证据，但那只证明桶保留策略，不证明同一候选的put/head/get/delete、真实ZPay与Provider联合链。",
+      "excluded_development": "剔除基础激活、模拟支付回调、COS adapter和Provider状态机的重复开发；历史零散真实COS操作或不同SHA成功样本不得拼成Gate C。",
+      "remaining_work": "在明确授权额度内冻结同一候选SHA，执行零额度激活、独立最低额真实ZPay、COS put/head/get/delete、真实Provider成功/确认失败/提交不确定；保存脱敏回执、结果引用、同一逻辑幂等键和钱包SETTLE/RELEASE闭合。",
+      "carried_requirement": "",
+      "file_scope": "docs/客户版测试与验收规格-V3.md Gate C；付款/Provider/COS配置；任务与账务审计",
+      "acceptance_delta": "代码和mock合同计入准备完成；原真实回执、同SHA、成功/失败/未知状态、一次SETTLE/RELEASE和敏感证据保护验收全部保留。",
+      "retained_acceptance": "同一发布SHA关联激活、真实支付回调、对象读写和可取得的生成结果；成功只SETTLE一次、确认未收费失败只RELEASE一次；未知提交不盲重提并有人工核验；不以mock/回填成功/仅余额截图替代回执。",
+      "completion_delta": "获得明确授权并完成Gate C真实联合链后关闭；缺账号/授权时保持external，不能标正式交付。",
+      "retained_completion": "Gate C通过，真实回执、结果和账务闭合；敏感原件受保护、Git证据脱敏；缺授权/账号时保持待外部验收，不能标正式交付完成。",
+      "required_evidence": "授权范围、真实请求回执/结果引用、账务核对、脱敏验收记录",
+      "evidence_level": "REAL_CHAIN_VERIFIED",
+      "source_evidence": [
+        {
+          "path": "docs/客户版任务清单-V3.md",
+          "line": 131,
+          "why": "原T40/T41仍未开始，真实链和灰度没有现成关闭证据。",
+          "line_end": 132,
+          "v3_navigation_line_adjusted": true
+        },
+        {
+          "path": "docs/evidence/T34-E2E-EVIDENCE.md",
+          "line": 27,
+          "why": "自动化客户链使用FakeH3/FakeStorage，真实COS和视频拆解不在门禁范围。",
+          "line_end": 30
+        },
+        {
+          "path": "docs/evidence/T45-EVIDENCE.md",
+          "line": 15,
+          "why": "安全/PG自动化虽已完成，但明确未连接或修改生产ZPay、COS、Provider，也未发码灰度。",
+          "line_end": 20
+        },
+        {
+          "path": "docs/evidence/cos-permanent-retention-production-2026-09-06.md",
+          "line": 16,
+          "why": "真实操作仅删除生命周期规则；应用凭据调用生命周期API仍403，且DIRECT结果不在该桶覆盖范围。",
+          "line_end": 32
+        },
+        {
+          "path": "docs/客户版任务清单-V3.md",
+          "line": 263,
+          "why": "EXT-03/04/05、COS-01、BILL-01/02/03和同SHA联合竖切仍明确待真实授权验收。",
+          "line_end": 270,
+          "v3_navigation_line_adjusted": true
+        }
+      ],
+      "other_branch_evidence": [
+        {
+          "ref": "feat/material-library-linkage-completion@6bcc61de3702ae8998a8b499087a3c71c122fc9d",
+          "why": "该未集成支线记录一次生产COS图片预签PUT/complete成功，只覆盖materials资源，不含同SHA ZPay/Provider/失败与提交不确定联合链。"
+        }
+      ],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-051",
+      "phase": "W7",
+      "title": "执行实际数据切换与分阶段灰度",
+      "kind": "现场执行与验收",
+      "original_status": "external",
+      "owner_role": "发布负责人 + 业务/账务批准人",
+      "dependencies": [
+        "CW-050",
+        "CW-039",
+        "CW-004",
+        "CW-003"
+      ],
+      "condition": "需生产迁移/发码/发布及每次扩大范围的明确授权",
+      "reuse": "已有生产滚动发布脚本、旧候选双API/四Worker部署历史、应用/前向schema回滚原则和未签名客户包合同；这些证据绑定旧045/053等head，不是当前078收敛候选，也未执行A/B/C最终处置、旧内部停写或10→100码灰度。",
+      "excluded_development": "剔除通用滚动部署/备份命令的重复开发；旧生产部署不能替代当前候选哈希锁定、真实数据处置、签名客户端、兼容窗口和分阶段放行。",
+      "remaining_work": "取得每次生产迁移/发码/扩大灰度授权；按CW-039执行A或B/C最终增量/对象/未完任务处置，部署CW-003锁定兼容制品，确认业务真源仍为PG且旧SQLite写服务为0；用签名包按10码再100码完整观察并记录No-Go/回滚。",
+      "carried_requirement": "",
+      "file_scope": "CW-039切换手册；CW-003客户端兼容矩阵；CW-004灰度阈值；生产制品/配置",
+      "acceptance_delta": "通用部署能力按既有实现复用；保留实际A/B/C最终对账、同SHA兼容包/回滚包、旧写为0、下一笔序列无碰撞及10/100码观察全部门禁。",
+      "retained_acceptance": "A的PG保留/内部归档停写，或B/C的最终增量/导入合并均逐项对账，无丢失及重复业务；旧客户端按兼容规则工作或提示升级；实际部署及备用回滚包匹配CW-003哈希，不临时从不确定提交重建；灰度按冻结观察时长/阈值收集真实指标；错账、双在线、旧写成功、跨用户、重复付费或数据丢失立即停止扩大并执行既定处置。 切换/回滚后业务真源均为PG，旧SQLite写入连接和服务为0；B/C导入的序列及下一笔实际客户写入不碰撞。",
+      "completion_delta": "每级授权、观察窗和放行记录齐全且全部灰度门通过后关闭；当前不得因已有生产站点或历史部署整项剔除。",
+      "retained_completion": "每一级授权、观察窗口和放行记录齐全；已发客户有明确升级/支持渠道；旧内部生产入口停用、数据保全，回滚不抹账；全部灰度门通过。",
+      "required_evidence": "变更窗口、A/B/C实际处置和最终对账、部署/回滚制品哈希、10/100分组观察及放行证据",
+      "evidence_level": "Gate D生产灰度验收",
+      "source_evidence": [
+        {
+          "path": "docs/evidence/PRODUCTION-HOTFIX-RECONCILIATION-20260830.md",
+          "line": 12,
+          "why": "历史生产镜像和数据库head为045，无法证明当前078候选的数据/制品一致。",
+          "line_end": 17
+        },
+        {
+          "path": "docs/evidence/PRODUCTION-HOTFIX-RECONCILIATION-20260830.md",
+          "line": 75,
+          "why": "只记录旧发布双API/四Worker和当次源码对账，且该变更未重跑生产迁移。",
+          "line_end": 83
+        },
+        {
+          "path": "docs/evidence/SCENE-LOOK-PRODUCTION-RELEASE-20260902.md",
+          "line": 22,
+          "why": "旧场景候选仅定义053 head发布门禁，真实付费/COS链和签名安装包仍未覆盖。",
+          "line_end": 39
+        },
+        {
+          "path": "docs/客户版部署与灰度手册.md",
+          "line": 384,
+          "why": "后端/桌面需要同SHA同步切换；旧桌面不自动更新，旧新API存在明确兼容边界。",
+          "line_end": 403,
+          "v3_navigation_line_adjusted": true
+        },
+        {
+          "path": "docs/客户版任务清单-V3.md",
+          "line": 131,
+          "why": "T40真实链、T41 10/100码和T42 Go/No-Go均仍为未开始。",
+          "line_end": 133,
+          "v3_navigation_line_adjusted": true
+        }
+      ],
+      "other_branch_evidence": [
+        {
+          "ref": "ops/deploy-8bd0374-20260902-170141@c89012dfa6868d0c5f19c56cf079fef2be7a3639",
+          "why": "该部署分支与当前基线各自有独有提交，只证明8bd0374旧候选的部署辅助，不能视为当前收敛发布或灰度。"
+        }
+      ],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    },
+    {
+      "id": "CW-052",
+      "phase": "W7",
+      "title": "完成四级完工签收与运维移交",
+      "kind": "现场执行与验收",
+      "original_status": "external",
+      "owner_role": "项目负责人 + 业务/运维签收",
+      "dependencies": [
+        "CW-045",
+        "CW-046",
+        "CW-047",
+        "CW-048",
+        "CW-049",
+        "CW-050",
+        "CW-051"
+      ],
+      "condition": "必需",
+      "reuse": "已有V3状态账本、分层证据模板、部署/PITR/故障手册和历史制品记录，可复用作为最终交接骨架；上游真实staging、UAT、联合链、灰度及签名客户端均未全部关闭。",
+      "excluded_development": "剔除最终验收模板和已有历史证据的重复撰写；不把不同SHA、不同环境或较低证据层级拼成PRODUCTION_GO。",
+      "remaining_work": "等CW-045—051实际关闭后，核对全部适用任务和条件N/A依据；汇总当前候选客户包/后端/配置/数据映射/备份恢复/告警值班/支持渠道/已知范围，完成业务与运维签收并归档旧内部发行物为非在线可恢复状态。",
+      "carried_requirement": "",
+      "file_scope": "docs/客户版任务清单-V3.md；docs/CUSTOMER-TASK-EVIDENCE-V3.md；docs/evidence/；最终交付包",
+      "acceptance_delta": "沿用现有账本和证据格式，只追加当前候选的最终证据；所有上游真实门和独立签收保持不变。",
+      "retained_acceptance": "代码与制品/环境证据一致；范围内无未解决功能/安全/账务/数据/并发阻断，所有强制检查通过；用户与运维能按手册安装、配置、恢复和处理会话/任务异常；归档可恢复且非在线内部运行模式。",
+      "completion_delta": "上游缺任一真实门时只报告已达到层级；业务与运维签收且PRODUCTION_GO成立后才complete。",
+      "retained_completion": "全部四级完工门及V3发布门满足，业务和运维完成签收后才标PRODUCTION_GO；缺任一真实门仅报告已达到的证据层级，不写全部完工。 PG-01—12全部到达所需层级，开发/业务测试/CI/staging/生产均PG；SQLite历史例外有责任人与退役条件。",
+      "required_evidence": "总验收表、签收、版本/制品清单、运维移交、最终账本",
+      "evidence_level": "PRODUCTION_GO",
+      "source_evidence": [
+        {
+          "path": "docs/客户版任务清单-V3.md",
+          "line": 131,
+          "why": "T40、T41、T42均未完成，最终Go/No-Go尚无可签署基础。",
+          "line_end": 133,
+          "v3_navigation_line_adjusted": true
+        },
+        {
+          "path": "docs/客户版任务清单-V3.md",
+          "line": 195,
+          "why": "桌面签名/实机仍待，生产与灰度矩阵明确NO-GO。",
+          "line_end": 196,
+          "v3_navigation_line_adjusted": true
+        },
+        {
+          "path": "docs/客户版任务清单-V3.md",
+          "line": 297,
+          "why": "REL-01至REL-04均待办，且只有PRODUCTION_GO可称完整客户版正式开放。",
+          "line_end": 300,
+          "v3_navigation_line_adjusted": true
+        },
+        {
+          "path": "docs/CUSTOMER-TASK-EVIDENCE-V3.md",
+          "line": 9,
+          "why": "最新PG统一增量只确认规范/任务定义，明确未执行真实数据导入或生产切换。",
+          "line_end": 13,
+          "v3_navigation_line_adjusted": true
+        },
+        {
+          "path": "outputs/customer-cloud-convergence-analysis-2026-09-08/客户版收敛工作任务清单.csv",
+          "line": "61",
+          "why": "最终关闭必须满足四级完工门、PG-01—12、签收和SQLite历史例外责任/退役条件。"
+        }
+      ],
+      "other_branch_evidence": [],
+      "state_source": "docs/客户版任务清单-V3.md §18"
+    }
+  ]
+}
