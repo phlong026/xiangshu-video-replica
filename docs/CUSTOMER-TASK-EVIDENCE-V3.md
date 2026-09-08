@@ -1,5 +1,15 @@
 # Customer Edition Task Evidence Record V3
 
+## PostgreSQL全面统一文档评审（2026-09-08，定义更新）
+
+本轮基于分析/任务定义提交822a3b8，确认全环境及所有业务数据库测试使用PG，新增PG-01—12合同；原CW-001—052保留，细化为60项工作定义，实施状态在任务账本§17。新增任务与文档检查不提升T03—T09、T45等历史证据等级。
+
+交付：[文档评审](../outputs/customer-cloud-convergence-analysis-2026-09-08/PostgreSQL全面统一文档评审报告.md)、[统一规范](PostgreSQL唯一数据库实施与验收规范.md)、[任务与验收V2](../outputs/customer-cloud-convergence-analysis-2026-09-08/客户版收敛详细任务清单与验收完工标准.md)、[定义校验](../outputs/customer-cloud-convergence-analysis-2026-09-08/task-list-validation.json)。只验证文档；未执行应用PG全套、真实数据导入或生产切换。后续每项关闭按§14记录测试类别与数据路线、PG版本/head/隔离ID、代码和制品SHA及实际结果。
+
+> 2026-09-08 PostgreSQL 全面统一增量：用户已确定开发、业务数据库测试、CI、staging、生产均使用 PostgreSQL；SQLite 仅限精确登记的离线历史输入、归档与兼容工具。
+> 实施与验收以[唯一数据库规范](PostgreSQL唯一数据库实施与验收规范.md)及 CW-001—060 为准。此前仅客户生产 PG、默认开发 SQLite、SQLite 业务测试可作为当前验收的口径不再适用。
+> 本次更新只确认规范和任务定义；原代码仍有 SQLite 分支，历史任务/测试记录保留原文，不据此声明实际迁移或生产切换已完成。
+
 ## 管理后台改版 W3–W17（2026-09-05，自动化与本地浏览器验证完成）
 
 分支 `feat/customer-v3-admin-revamp`，实施基线 `67cf008`。完成管理聚合、按秒计费和实际用量成本、个人提示词、客户端参数与钱包、圆滑趋势曲线。最终 `npm.cmd run check` 退出 0：前端 746 通过；后端 1633 通过/1 项因缺少 ffmpeg 跳过；密钥扫描、静态检查、Cargo 和 Mypy 通过。133 个受检源码指纹与最终工作树一致。后台 12 页及客户端 3 个组件完成参考图成对对照，明确保留真实数据及已裁决范围差异。

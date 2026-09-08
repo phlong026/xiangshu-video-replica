@@ -1,5 +1,9 @@
 # Agent 工作说明（短视频复刻 · 客户版 V3）
 
+> 2026-09-08 PostgreSQL 全面统一增量：用户已确定开发、业务数据库测试、CI、staging、生产均使用 PostgreSQL；SQLite 仅限精确登记的离线历史输入、归档与兼容工具。
+> 实施与验收以[唯一数据库规范](docs/PostgreSQL唯一数据库实施与验收规范.md)及 CW-001—060 为准。此前仅客户生产 PG、默认开发 SQLite、SQLite 业务测试可作为当前验收的口径不再适用。
+> 本次更新只确认规范和任务定义；原代码仍有 SQLite 分支，历史任务/测试记录保留原文，不据此声明实际迁移或生产切换已完成。
+
 > 面向任何接手本仓库的 AI 开发代理（ChatGPT/Codex 云端、本地 CLI、IDE agent）。
 > 完整协作流程与最新进度快照见 `docs/ChatGPT网页端开发交接提示词-V3.md`；任务进度一律以仓库账本为准，本文件不维护进度快照。
 
@@ -44,7 +48,7 @@
 ### 开发期（每任务每轮迭代，快）
 
 ```bash
-# server/ 目录；fixture 未启动时 PG 套件按 skip 运行
+# server/目录；先启动隔离PG。缺PG必须失败，现有skip行为需在CW-007/044中退出
 uv run python -m pytest tests/test_<受影响文件>.py -q   # 只跑专项，秒级
 uv run ruff check . && uv run ruff format --check . && uv run mypy app
 ```
@@ -56,7 +60,7 @@ uv run ruff check . && uv run ruff format --check . && uv run mypy app
 scripts/pg-fixture.sh start
 
 # 2) 服务端专项复验（server/ 目录；全量 pytest 不在这一步跑——它由第 3 步统一承载，避免双跑；
-#    fixture 未启动时 PG 套件按 skip 运行，不得声明 AUTOMATED_VERIFIED）
+#    缺PG或跳过数据库用例不得作为完成证据；目标门禁必须非0失败）
 uv run ruff check . && uv run ruff format --check . && uv run mypy app
 
 # 3) 全仓门禁（仓库根目录，等价于 CI Linux 质量门，覆盖前端/Tauri/服务端全套；
@@ -68,6 +72,6 @@ npm run check
 
 ## 环境变量备忘
 
-- PG 模式：`VIDEO_REPLICA_DATABASE_URL=postgresql://…`；客户生产 `VIDEO_REPLICA_CUSTOMER_PRODUCTION=true` 时 SQLite/缺 URL 直接 fail-closed 启动失败。
-- 内部联调：`VIDEO_REPLICA_DB_PATH` / `VIDEO_REPLICA_STORAGE_ROOT` / `VIDEO_REPLICA_DESKTOP_USER_ID`。
+- PG唯一数据库目标：所有运行环境显式配置`VIDEO_REPLICA_DATABASE_URL`；SQLite/DB_PATH/缺URL/不可达PG拒绝启动，不依赖生产开关。现有代码尚需CW-025/042实现全环境约束。
+- 旧`VIDEO_REPLICA_DB_PATH`/内部固定身份仅作迁移识别，不再作为推荐开发路径；业务测试遵循TEST-*分类，SQLite历史例外不得承载当前业务。
 - 密钥只进服务端密钥存储（Fernet 加密），永不入库、入码、入 PR。
