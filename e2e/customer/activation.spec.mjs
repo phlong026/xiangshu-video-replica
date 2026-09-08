@@ -1,4 +1,8 @@
 import { expect, test } from "@playwright/test";
+import {
+  openCustomerDevices,
+  waitForCustomerWorkspace,
+} from "./workspace-navigation.mjs";
 
 const CODE_A = "XS04-ABCDEFG-HJKLMNP-QRSTVWX-YZ23456";
 const CODE_B = "XS04-2345678-9ABCDEF-GHJKLMN-PQRSTVW";
@@ -17,10 +21,8 @@ test("customer activates a code and reaches the workspace", async ({
   await page.getByLabel("设备名称").fill("E2E Device A");
   await page.getByRole("button", { name: "激活并进入工作台" }).click();
 
-  // The workspace lands with the customer profile entry visible.
-  await expect(page.getByRole("button", { name: "打开个人中心" })).toBeVisible({
-    timeout: 20_000,
-  });
+  // The V1.4 workspace lands with the customer profile entry visible.
+  await waitForCustomerWorkspace(page);
 });
 
 test("activated workspace shows the first device in slot one and a wallet", async ({
@@ -32,15 +34,13 @@ test("activated workspace shows the first device in slot one and a wallet", asyn
   await page.getByLabel("设备名称").fill("E2E Device A");
   await page.getByRole("button", { name: "激活并进入工作台" }).click();
 
-  await page.getByRole("button", { name: "打开个人中心" }).click();
-  await page.getByRole("button", { name: "设备管理" }).click();
+  const deviceManagement = await openCustomerDevices(page);
 
   // Two-slot device view: the first device occupies slot one, and the
   // recharge action is reachable without any second main-code entry.
   await expect(page.getByText("E2E Device A").first()).toBeVisible({
     timeout: 20_000,
   });
-  const deviceManagement = page.getByRole("region", { name: "设备管理" });
   await expect(
     deviceManagement.getByRole("button", { name: "充值条数" }),
   ).toBeVisible();

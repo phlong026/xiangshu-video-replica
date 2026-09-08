@@ -29,6 +29,7 @@ const api = vi.hoisted(() => ({
   getCachedCharacterAssetUrl: vi.fn(),
   getGenerationBatch: vi.fn(),
   getLatestProjectAnalysis: vi.fn(),
+  getStudioDraft: vi.fn(),
   getStudioAnalytics: vi.fn(async () => null),
   getStudioStats: vi.fn(async () => null),
   getLatestScriptVersion: vi.fn(),
@@ -53,6 +54,7 @@ vi.mock("../api", () => api);
 import {
   cancelStudioTask,
   downloadStudioTaskResult,
+  loadCloudDraft,
   loadDraftMaterials,
   loadPersonAssets,
   loadProjectDraft,
@@ -245,6 +247,51 @@ describe("真实 Studio 只读适配器", () => {
         payload: { full_text: "已经保存的二创终稿。" },
         created_by_user_id: "user-1",
         created_at: "2026-09-05T09:00:00+08:00",
+      },
+    });
+  });
+
+  it("兼容没有编辑标记的旧云端草稿，保留已有 Prompt 与文案", async () => {
+    api.getStudioDraft.mockResolvedValue({
+      draft_kind: "copy",
+      payload: {
+        id: "legacy-draft",
+        projectId: "project-1",
+        selectedShotId: "shot-1",
+        prompt: "升级前保存的 Prompt",
+        script: {
+          id: "legacy-script",
+          title: "升级前作品名",
+          original: "升级前 ASR 原文",
+          text: "升级前文案",
+          version: 2,
+          confirmed: false,
+        },
+        referenceIds: [],
+        resolution: "768P",
+        ratio: "16:9",
+        duration: 8,
+        count: 1,
+        frameConfirmed: false,
+        style: "standard",
+        subtitles: false,
+        quoteRevision: 3,
+      },
+      script_confirmed: false,
+      revision: 4,
+      updated_at: "2026-09-07T10:00:00+08:00",
+    });
+
+    const restored = await loadCloudDraft();
+
+    expect(restored?.draft).toMatchObject({
+      prompt: "升级前保存的 Prompt",
+      promptEdited: true,
+      scriptEdited: true,
+      script: {
+        title: "升级前作品名",
+        original: "升级前 ASR 原文",
+        text: "升级前文案",
       },
     });
   });

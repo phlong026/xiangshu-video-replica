@@ -175,12 +175,18 @@ export type StudioDraft = {
   originalImageId?: string;
   imageId?: string;
   firstFrameId?: string;
+  /** 人物置换流程交接的已确认首帧版本。 */
+  firstFrameSelectionVersionId?: string;
   tailFrameId?: string;
   avatarId?: string;
   voiceId?: string;
   audioId?: string;
   script: StudioScript;
+  /** 当前脚本是否包含尚未发布为项目版本的本地编辑，包括主动清空。 */
+  scriptEdited?: boolean;
   prompt: string;
+  /** 当前 Prompt 是否包含尚未保存为项目版本的本地编辑，包括主动清空。 */
+  promptEdited?: boolean;
   referenceIds: string[];
   resolution: string;
   ratio: string;

@@ -143,11 +143,11 @@ export function LiveWorkspacePanel({
         />
       ) : null}
       {panel === "wallet" ? (
-        customerWallet ? (
+        customerSession ? (
           <CustomerWalletPanel
             key={walletRefreshKey}
-            store={customerWallet.store}
-            onSessionExpired={customerWallet.onSessionExpired}
+            store={customerSession.store}
+            onSessionExpired={customerSession.onSessionExpired}
             onRechargeRequested={(amountYuan) => openRecharge(amountYuan)}
           />
         ) : (

@@ -48,7 +48,9 @@ export function createDraft(): StudioDraft {
       version: 1,
       confirmed: false,
     },
+    scriptEdited: false,
     prompt: "",
+    promptEdited: false,
     referenceIds: [],
     resolution: "768P",
     ratio: "16:9",
@@ -119,22 +121,58 @@ export function patchStudioDraft(
   draft: StudioDraft,
   patch: Partial<StudioDraft>,
 ): StudioDraft {
+  const projectChanged =
+    Object.hasOwn(patch, "projectId") && patch.projectId !== draft.projectId;
+  const identityChanged =
+    projectChanged ||
+    (Object.hasOwn(patch, "ipId") && patch.ipId !== draft.ipId) ||
+    (Object.hasOwn(patch, "imageId") && patch.imageId !== draft.imageId);
+  const firstFrameChanged =
+    Object.hasOwn(patch, "firstFrameId") &&
+    patch.firstFrameId !== draft.firstFrameId;
   const next = {
     ...draft,
     ...patch,
     id: draft.id,
     quoteRevision: draft.quoteRevision + 1,
   };
+  if (projectChanged) {
+    const blank = createDraft();
+    if (!Object.hasOwn(patch, "prompt")) next.prompt = "";
+    if (!Object.hasOwn(patch, "promptEdited")) next.promptEdited = false;
+    if (!patch.script) next.script = blank.script;
+    if (!Object.hasOwn(patch, "scriptEdited")) next.scriptEdited = false;
+  }
   // Asset ownership must be reselected when identity changes, never relabelled.
   if (Object.hasOwn(patch, "ipId") && patch.ipId !== draft.ipId) {
     next.voiceId = undefined;
     next.avatarId = undefined;
     next.script = { ...next.script, confirmed: false };
   }
-  if (patch.imageId !== undefined && patch.imageId !== draft.imageId)
-    next.frameConfirmed = false;
+  if (identityChanged || firstFrameChanged) {
+    if (!Object.hasOwn(patch, "firstFrameId")) next.firstFrameId = undefined;
+    if (!Object.hasOwn(patch, "firstFrameSelectionVersionId"))
+      next.firstFrameSelectionVersionId = undefined;
+    if (!Object.hasOwn(patch, "frameConfirmed")) next.frameConfirmed = false;
+  }
   if (patch.script && patch.script.text !== draft.script.text)
     next.script = { ...patch.script, confirmed: false };
+  if (
+    patch.script &&
+    !projectChanged &&
+    patch.scriptEdited === undefined &&
+    (patch.script.title !== draft.script.title ||
+      patch.script.original !== draft.script.original ||
+      patch.script.text !== draft.script.text)
+  )
+    next.scriptEdited = true;
+  if (
+    Object.hasOwn(patch, "prompt") &&
+    !projectChanged &&
+    patch.promptEdited === undefined &&
+    patch.prompt !== draft.prompt
+  )
+    next.promptEdited = true;
   return next;
 }
 
