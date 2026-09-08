@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "task-definition-document-validation",
+  "captured_at_utc": "2026-09-08 13:12:09 UTC",
+  "analysis_branch": "codex/customer-cloud-convergence-analysis-20260908",
+  "analysis_report_commit": "d93c08893ac36ad5feb1c9c073c74dc3e607a946",
+  "source_base_sha": "bffc3419f9d89bf76fd4ad1bdad65dd824a44553",
+  "scope": "仅验证本轮任务文档与CSV定义的一致性、依赖和引用；未执行客户版拆分、迁移、安装或真实外部链路验收。",
+  "checks": {
+    "task_count": 52,
+    "phase_counts": {
+      "W0": 6,
+      "W1": 5,
+      "W2": 7,
+      "W3": 6,
+      "W4": 8,
+      "W5": 7,
+      "W6": 5,
+      "W7": 8
+    },
+    "dependency_edges": 158,
+    "dependency_graph_acyclic": true,
+    "markdown_csv_field_consistency": true,
+    "source_paths_checked": 197,
+    "local_links_checked": 9,
+    "pending_evidence_link": [],
+    "utf8_bom": true,
+    "source_fingerprints_checked": 414,
+    "source_drift": [],
+    "repository_secret_scan_exit_code": 0,
+    "document_secret_findings": [],
+    "issues": [],
+    "document_sha256": {
+      "客户版收敛详细任务清单与验收完工标准.md": "43069eb883207e39d285cd9d4b50aa387751302d1886c83eacf340df1b0df4b9",
+      "客户版收敛工作任务清单.csv": "f2cfeb9322ec0d47d38d2ca1e270de8d9ca48e121668f5bb412ec1c21b4c8ab8"
+    }
+  },
+  "independent_review": {
+    "role": "test-engineer",
+    "status": "approved",
+    "resolved_topics": [
+      "Gate B会话与公平队列细项",
+      "外部依赖故障状态机",
+      "V3安全子矩阵映射",
+      "迁移主键和账务断言",
+      "设备凭据清理及升级语义",
+      "A/B/C实际处置和兼容回滚制品",
+      "校验证据文件存在性与自述一致性"
+    ],
+    "evidence_file_followup": "completed：最终修改后全部9个本地链接、52项字段一致性与158条依赖重新核验通过。",
+    "verdict": "APPROVE"
+  },
+  "implementation_validation": {
+    "new_application_tests_run": false,
+    "reason": "本轮仅新增任务定义与校验证据；前轮24项检查仅属于分析基线，不能计为CW任务验收。",
+    "cw_tasks_completed_by_this_delivery": 0
+  },
+  "validation_method": {
+    "task_structure": "52项连续唯一编号、8阶段数量、全部14列非空、CSV与Markdown逐字段一致；CSV无公式起始字符。",
+    "dependencies": "检查全部显式CW前置引用；条件A/B/C路线保守计入依赖图，引用均存在且无环。",
+    "source_scope": "197处源码路径引用可解析；414项分析源码指纹全部保持一致。",
+    "security": "仓库verify_no_secrets.sh与新增文档的密钥/凭据/签名URL模式扫描；结果为0不等价于已完成应用安全行为验收。",
+    "reversibility": "仅新增文档和校验证据；提交前检查差异，提交后核验反向补丁可应用。"
+  }
+}
