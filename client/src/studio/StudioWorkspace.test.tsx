@@ -1972,7 +1972,12 @@ describe("视频生成（C2 独立创作）", () => {
       estimated_seconds: 8,
       estimated_price_fen: 960,
     });
+    // vi.clearAllMocks() only clears call records; leftover mock*ValueOnce
+    // queues from earlier tests would leak into the next one, so reset the
+    // oral mocks before reinstalling their permanent defaults.
+    api.getOralPrice.mockReset();
     api.getOralPrice.mockResolvedValue({ unit_price_fen: 500 });
+    api.createOralTask.mockReset();
     live.loadCloudDraft.mockResolvedValue(undefined);
     live.loadPersonAssets.mockResolvedValue({ assets: [], errors: [] });
     live.loadDraftMaterials.mockResolvedValue({
