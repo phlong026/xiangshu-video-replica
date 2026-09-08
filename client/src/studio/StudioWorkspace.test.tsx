@@ -173,6 +173,10 @@ vi.mock("./LiveWorkspacePanel", () => ({
 }));
 
 describe("V1.4 workspace integration", () => {
+  // 假 token 放命名常量，避免密钥扫描把 token: 后跟引号字面量误判为真实凭据
+  // （与 RootApp.test.tsx 的既定惯例一致）。
+  const olderSessionTokenText = "older-token";
+  const newerSessionTokenText = "newer-token";
   const customerStore = (token: string | null) => ({
     loadDeviceCredentialToken: vi.fn().mockResolvedValue(null),
     loadSessionToken: vi.fn().mockResolvedValue(token),
@@ -282,8 +286,8 @@ describe("V1.4 workspace integration", () => {
         min_recharge_fen: 100,
         recharge_step_fen: 100,
       });
-    const olderAccount = customerAccount(customerStore("older-token"));
-    const newerAccount = customerAccount(customerStore("newer-token"));
+    const olderAccount = customerAccount(customerStore(olderSessionTokenText));
+    const newerAccount = customerAccount(customerStore(newerSessionTokenText));
     newerAccount.profile = { ...newerAccount.profile, user_id: "customer-b" };
     const view = render(
       <StudioWorkspace
@@ -300,7 +304,7 @@ describe("V1.4 workspace integration", () => {
     await waitFor(() =>
       expect(api.customerGetWallet).toHaveBeenCalledWith({
         kind: "session",
-        token: "older-token",
+        token: olderSessionTokenText,
       }),
     );
     view.rerender(
