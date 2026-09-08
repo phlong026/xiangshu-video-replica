@@ -19,6 +19,9 @@ const api = vi.hoisted(() => ({
   compileGenerationPrompt: vi.fn(),
   createGenerationBatch: vi.fn(),
   createScriptVersion: vi.fn(),
+  createScriptFromAudioTask: vi.fn(),
+  getScriptFromAudioTask: vi.fn(),
+  getLatestScriptFromAudioTask: vi.fn(),
   defaultBatchProvider: vi.fn(async () => "metaso"),
   lockGenerationPrompt: vi.fn(),
   reviseGenerationPrompt: vi.fn(),
@@ -29,7 +32,10 @@ const api = vi.hoisted(() => ({
   getCachedCharacterAssetUrl: vi.fn(),
   getGenerationBatch: vi.fn(),
   getLatestProjectAnalysis: vi.fn(),
+  getLatestProjectShotCards: vi.fn(),
   getStudioDraft: vi.fn(),
+  listStudioSavedScripts: vi.fn(),
+  saveStudioSavedScript: vi.fn(),
   getStudioAnalytics: vi.fn(async () => null),
   getStudioStats: vi.fn(async () => null),
   getLatestScriptVersion: vi.fn(),
@@ -60,6 +66,7 @@ import {
   loadProjectDraft,
   loadStudioData,
   loadTaskPreview,
+  publishScriptVersion,
   reloadTasks,
   retryStudioTask,
 } from "./live";
@@ -950,6 +957,7 @@ describe("批次类型映射与取消", () => {
         expect.objectContaining({
           backendKind: "oral_task",
           backendId: "oral-1",
+          scriptText: "正文",
         }),
       ]),
     );
@@ -1063,6 +1071,7 @@ describe("runReplicaGeneration（复刻一键管线）", () => {
     resolution: "768P" as const,
     ratio: "16:9" as const,
     quantity: 1,
+    idempotencyKey: "replica-idempotency-1",
   };
 
   function mockHappyPath() {
@@ -1110,7 +1119,72 @@ describe("runReplicaGeneration（复刻一键管线）", () => {
       "project-1",
       "prompt-revised",
     );
+    expect(api.createGenerationBatch).toHaveBeenCalledWith(
+      "project-1",
+      expect.objectContaining({ idempotency_key: "replica-idempotency-1" }),
+    );
     expect(batch.id).toBe("batch-r1");
+  });
+
+  it("已确认工坊终稿以 custom 来源写入真实镜头映射并使用重编译 Prompt", async () => {
+    mockHappyPath();
+    await live.runReplicaGeneration("project-1", {
+      ...baseInput,
+      idempotencyKey: "confirmed-copy-request",
+      confirmedScriptText: "客户确认的新口播终稿",
+    });
+    expect(api.createScriptVersion).toHaveBeenCalledWith("project-1", {
+      source: "custom",
+      text: "客户确认的新口播终稿",
+      shot_card_version_id: "scv-1",
+    });
+    expect(api.compileGenerationPrompt).toHaveBeenCalledWith(
+      "project-1",
+      expect.objectContaining({ script_version_id: "script-1" }),
+    );
+    expect(api.reviseGenerationPrompt).not.toHaveBeenCalled();
+    expect(api.lockGenerationPrompt).toHaveBeenCalledWith(
+      "project-1",
+      "prompt-compiled",
+    );
+  });
+
+  it("建批响应不确定时复用已冻结的完整请求", async () => {
+    api.createScriptVersion.mockResolvedValue({
+      id: "script-first",
+      payload: { shot_card_version_id: "scv-1" },
+    });
+    api.compileGenerationPrompt.mockResolvedValue({
+      id: "prompt-compiled-first",
+      payload: { prompt_text: "编译产物提示词" },
+    });
+    api.reviseGenerationPrompt.mockResolvedValue({
+      id: "prompt-revised-first",
+      payload: { prompt_text: "编辑后的提示词" },
+    });
+    api.lockGenerationPrompt.mockResolvedValue({ id: "prompt-locked-first" });
+    api.createGenerationBatch
+      .mockRejectedValueOnce(new Error("提交结果未知，请安全重试。"))
+      .mockResolvedValueOnce({ id: "batch-replayed" });
+
+    await expect(
+      live.runReplicaGeneration("project-1", baseInput),
+    ).rejects.toThrow("提交结果未知");
+    await expect(
+      live.runReplicaGeneration("project-1", {
+        ...baseInput,
+        idempotencyKey: "replica-key-after-reenter",
+      }),
+    ).resolves.toEqual({ id: "batch-replayed" });
+
+    expect(api.createScriptVersion).toHaveBeenCalledOnce();
+    expect(api.compileGenerationPrompt).toHaveBeenCalledOnce();
+    expect(api.reviseGenerationPrompt).toHaveBeenCalledOnce();
+    expect(api.lockGenerationPrompt).toHaveBeenCalledOnce();
+    expect(api.createGenerationBatch).toHaveBeenCalledTimes(2);
+    expect(api.createGenerationBatch.mock.calls[1]).toEqual(
+      api.createGenerationBatch.mock.calls[0],
+    );
   });
 
   it("Prompt 未编辑时跳过 revise 直接锁定编译产物", async () => {
@@ -1139,6 +1213,114 @@ describe("runReplicaGeneration（复刻一键管线）", () => {
       text: "",
       shot_card_version_id: "scv-1",
     });
+  });
+});
+
+describe("工坊终稿与项目分镜脚本的状态边界", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("项目尚无分镜时返回不适用，不把终稿确认描述成同步失败", async () => {
+    api.getLatestProjectShotCards.mockResolvedValue(null);
+
+    await expect(
+      publishScriptVersion("project-without-shots", "纯口播终稿"),
+    ).resolves.toBe("not-applicable");
+    expect(api.createScriptVersion).not.toHaveBeenCalled();
+  });
+
+  it("有分镜时发布项目脚本，接口异常时返回失败", async () => {
+    api.getLatestProjectShotCards.mockResolvedValue({ id: "shots-v1" });
+    api.createScriptVersion.mockResolvedValue({ id: "script-v1" });
+    await expect(publishScriptVersion("project-1", "已映射终稿")).resolves.toBe(
+      "published",
+    );
+    expect(api.createScriptVersion).toHaveBeenCalledWith("project-1", {
+      source: "custom",
+      text: "已映射终稿",
+      shot_card_version_id: "shots-v1",
+    });
+
+    api.getLatestProjectShotCards.mockRejectedValueOnce(new Error("network"));
+    await expect(publishScriptVersion("project-1", "重试终稿")).resolves.toBe(
+      "failed",
+    );
+  });
+});
+
+describe("保存文案元数据", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("读取和保存保留人物、来源项目与来源种类", async () => {
+    api.listStudioSavedScripts.mockResolvedValue([
+      {
+        script_id: "saved-1",
+        title: "稿件",
+        original: "原文",
+        text: "新稿",
+        version: 3,
+        ip_id: "person-b",
+        source_project_id: "project-b",
+        source_kind: "viral",
+      },
+    ]);
+    const [script] = await live.loadSavedScriptList();
+    expect(script).toMatchObject({
+      ipId: "person-b",
+      sourceProjectId: "project-b",
+      sourceKind: "viral",
+      confirmed: false,
+    });
+    await live.persistSavedScript(script, "project-b", "person-current");
+    expect(api.saveStudioSavedScript).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ip_id: "person-current",
+        source_project_id: "project-b",
+        source_kind: "viral",
+      }),
+    );
+  });
+});
+
+describe("提取文案任务绑定", () => {
+  beforeEach(() => vi.clearAllMocks());
+  it("按提交的任务 ID 轮询并返回任务标识，不读取其他 latest 任务", async () => {
+    vi.useFakeTimers();
+    try {
+      api.createScriptFromAudioTask.mockResolvedValue({ id: "audio-owned" });
+      api.getScriptFromAudioTask.mockResolvedValue({
+        id: "audio-owned",
+        status: "SUCCEEDED",
+        result: { text: "本次转写" },
+      });
+      const result = live.extractScriptFromUpload("project-a", "asset-a");
+      await vi.advanceTimersByTimeAsync(2000);
+      await expect(result).resolves.toEqual({
+        text: "本次转写",
+        taskId: "audio-owned",
+      });
+      expect(api.getScriptFromAudioTask).toHaveBeenCalledWith("audio-owned");
+      expect(api.getLatestScriptFromAudioTask).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it("提供只读 latest 恢复合同，保留来源资产与错误", async () => {
+    api.getLatestScriptFromAudioTask.mockResolvedValue({
+      id: "audio-a",
+      status: "FAILED",
+      result: null,
+      error_message: "音轨错误",
+      source_asset_id: "asset-a",
+    });
+    await expect(live.loadLatestScriptFromUpload("project-a")).resolves.toEqual(
+      {
+        id: "audio-a",
+        status: "FAILED",
+        result: null,
+        errorMessage: "音轨错误",
+        sourceAssetId: "asset-a",
+      },
+    );
   });
 });
 

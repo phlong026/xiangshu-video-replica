@@ -227,6 +227,39 @@ def test_saved_scripts_crud_and_upsert(client: TestClient) -> None:
     assert missing.status_code == 404
 
 
+def test_saved_script_update_moves_it_to_the_front(client: TestClient) -> None:
+    headers = auth_headers("employee_1")
+    assert (
+        client.post(
+            SAVED_URL,
+            json=saved_script_body(script_id="older"),
+            headers=headers,
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            SAVED_URL,
+            json=saved_script_body(script_id="newer"),
+            headers=headers,
+        ).status_code
+        == 200
+    )
+
+    updated = client.post(
+        SAVED_URL,
+        json=saved_script_body(script_id="older", text="刚更新的文案"),
+        headers=headers,
+    )
+    assert updated.status_code == 200
+
+    listed = client.get(SAVED_URL, headers=headers)
+    assert [item["script_id"] for item in listed.json()["items"][:2]] == [
+        "older",
+        "newer",
+    ]
+
+
 def test_saved_scripts_isolated_per_user(client: TestClient) -> None:
     client.post(SAVED_URL, json=saved_script_body(), headers=auth_headers("employee_1"))
 

@@ -935,7 +935,11 @@ export function TaskDetailPage() {
     ["资产状态", result?.saved ? "已保存到素材库" : "以任务返回结果为准"],
   ];
   const recreate = (page: "copy" | "oral" | "replica") => {
-    if (!review && !task.draftSnapshot) {
+    const hasOralInputs =
+      task.backendKind === "oral_task" &&
+      (task.scriptText?.trim() ||
+        (page === "oral" && task.driverMode === "audio" && task.audioId));
+    if (!review && !task.draftSnapshot && !hasOralInputs) {
       openLive("tasks");
       notify(
         "请在原任务记录中使用重新生成，以保留服务端确认的镜头和素材参数。",
@@ -943,9 +947,13 @@ export function TaskDetailPage() {
       return;
     }
     patchState({ draft: draftFromTask(task) });
-    navigate(page, { returnTo: "task-detail" });
-    if (!review)
-      notify("已带入任务关联项目。编辑前请从项目读取已保存的脚本与素材版本。");
+    navigate(
+      page === "oral" && task.driverMode === "audio" ? "oral-audio" : page,
+      {
+        returnTo: "task-detail",
+      },
+    );
+    if (!review) notify("已创建新的创作草稿，请核对正文与素材后重新确认。");
   };
   const previewResult = async () => {
     const requestedTask = task;
@@ -1151,7 +1159,15 @@ export function TaskDetailPage() {
         <Panel>
           <h2>基于此任务再创作</h2>
           <div className="studio-recreate">
-            <Button onClick={() => recreate("copy")}>
+            <Button
+              onClick={() => recreate("copy")}
+              disabled={
+                !review &&
+                task.backendKind === "oral_task" &&
+                !task.scriptText?.trim() &&
+                !task.draftSnapshot?.script.text.trim()
+              }
+            >
               <Icon name="pen" />
               调整脚本
             </Button>

@@ -108,6 +108,30 @@ def auth_headers(user_id: str) -> dict[str, str]:
     return {"X-Dev-User-Id": user_id}
 
 
+@pytest.mark.parametrize(
+    ("content", "finish_reason", "code"),
+    [
+        (None, "stop", "DEEPSEEK_RESPONSE_INVALID"),
+        ([], "stop", "DEEPSEEK_RESPONSE_INVALID"),
+        ("未完成的正文", "length", "DEEPSEEK_RESPONSE_TRUNCATED"),
+    ],
+)
+def test_rewrite_rejects_invalid_or_truncated_provider_result(
+    monkeypatch: pytest.MonkeyPatch, content: object, finish_reason: str, code: str
+) -> None:
+    import io
+
+    response = {"choices": [{"message": {"content": content}, "finish_reason": finish_reason}]}
+    monkeypatch.setattr(
+        script_rewrite, "urlopen", lambda *args, **kwargs: io.BytesIO(json.dumps(response).encode())
+    )
+    with pytest.raises(HTTPException) as caught:
+        script_rewrite._request_deepseek(
+            base_url="https://example.invalid", api_key="fake", model="fake", source_text="原文"
+        )
+    assert caught.value.detail["code"] == code
+
+
 def configure_deepseek(db_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     key = Fernet.generate_key().decode("ascii")
     monkeypatch.setenv(SETTINGS_KEY_ENV, key)

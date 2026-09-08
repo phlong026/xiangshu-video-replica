@@ -80,6 +80,7 @@ export function withImportedProject(
   if (imported.projectId && imported.projectId === state.draft.projectId) {
     const current = state.draft.script;
     const newer =
+      !state.draft.scriptEdited &&
       imported.script.text &&
       (imported.script.id !== current.id ||
         imported.script.version > current.version);
@@ -106,19 +107,29 @@ export function withImportedProject(
 export function draftFromTask(task: StudioTask): StudioDraft {
   const fresh = createDraft();
   const snapshot = task.draftSnapshot;
+  const ipId = task.ipId ?? snapshot?.ipId;
   return {
     ...fresh,
     ...snapshot,
     id: fresh.id,
     projectId: task.projectId ?? snapshot?.projectId,
-    ipId: task.ipId ?? snapshot?.ipId,
+    ipId,
     avatarId: task.avatarId ?? snapshot?.avatarId,
     voiceId:
       task.driverMode === "audio"
         ? undefined
         : (task.voiceId ?? snapshot?.voiceId),
     audioId: task.audioId ?? snapshot?.audioId,
-    script: { ...(snapshot?.script ?? fresh.script), confirmed: false },
+    script: {
+      ...(snapshot?.script ?? fresh.script),
+      id: fresh.script.id,
+      title: task.title,
+      text: task.scriptText ?? snapshot?.script.text ?? "",
+      ipId,
+      version: 1,
+      confirmed: false,
+    },
+    scriptEdited: true,
     quoteRevision: 0,
   };
 }

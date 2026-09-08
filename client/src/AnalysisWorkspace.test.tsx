@@ -2661,7 +2661,7 @@ describe("AnalysisWorkspace workflow gates", () => {
     expect(
       await screen.findByText("将创建 4 个付费生成任务"),
     ).toBeInTheDocument();
-    expect(screen.getByText("预计费用：¥10.00")).toBeInTheDocument();
+    expect(screen.getByText("预计费用：¥1.44（9 分/秒）")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "开始生成" }));
     await waitFor(() => expect(onBatchCreated).toHaveBeenCalledTimes(1));

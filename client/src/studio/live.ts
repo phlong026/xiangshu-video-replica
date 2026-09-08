@@ -16,6 +16,7 @@ import {
   defaultBatchProvider,
   downloadMaterialAsset,
   type GenerationBatch,
+  type GenerationBatchInput,
   type GenerationBatchListItem,
   type GenerationRatio,
   getAssetDownloadUrl,
@@ -76,6 +77,33 @@ const projectLimit = 24;
 const personLimit = 8;
 const projectPreviewLimit = 8;
 const sceneLimit = 12;
+
+type FrozenReplicaRequest = {
+  fingerprint: string;
+  idempotencyKey: string;
+  projectId: string;
+  request: GenerationBatchInput;
+};
+
+const frozenReplicaRequests = new Map<string, FrozenReplicaRequest>();
+const frozenReplicaRequestsByContext = new Map<string, FrozenReplicaRequest>();
+
+function replicaRequestContextKey(projectId: string, fingerprint: string) {
+  return `${projectId}:${fingerprint}`;
+}
+
+function clearFrozenReplicaRequest(frozen: FrozenReplicaRequest) {
+  if (frozenReplicaRequests.get(frozen.idempotencyKey) === frozen) {
+    frozenReplicaRequests.delete(frozen.idempotencyKey);
+  }
+  const contextKey = replicaRequestContextKey(
+    frozen.projectId,
+    frozen.fingerprint,
+  );
+  if (frozenReplicaRequestsByContext.get(contextKey) === frozen) {
+    frozenReplicaRequestsByContext.delete(contextKey);
+  }
+}
 
 function errorText(error: unknown) {
   return error instanceof Error && error.message.trim()
@@ -675,6 +703,7 @@ function oralTask(row: OralTaskRecord): StudioTask {
     avatarId: row.avatar_id,
     voiceId: row.voice_id ?? undefined,
     audioId: row.audio_asset_id ?? undefined,
+    scriptText: row.script_text ?? undefined,
   };
 }
 
@@ -974,6 +1003,9 @@ function savedScriptFromRecord(record: {
   text: string;
   original: string | null;
   version: number;
+  ip_id?: string | null;
+  source_project_id?: string | null;
+  source_kind?: string | null;
 }): StudioScript {
   return {
     id: record.script_id,
@@ -982,6 +1014,9 @@ function savedScriptFromRecord(record: {
     text: record.text,
     version: record.version,
     confirmed: false,
+    ipId: record.ip_id ?? undefined,
+    sourceProjectId: record.source_project_id ?? undefined,
+    sourceKind: record.source_kind ?? undefined,
   };
 }
 
@@ -992,7 +1027,8 @@ export async function loadSavedScriptList(): Promise<StudioScript[]> {
 
 export async function persistSavedScript(
   script: StudioScript,
-  sourceProjectId?: string,
+  sourceProjectId: string | undefined = script.sourceProjectId,
+  ipId?: string,
 ): Promise<void> {
   const input: StudioSavedScriptInput = {
     script_id: script.id,
@@ -1000,31 +1036,35 @@ export async function persistSavedScript(
     text: script.text,
     original: script.original || null,
     version: script.version,
-    ip_id: null,
+    ip_id: ipId ?? script.ipId ?? null,
     source_project_id: sourceProjectId ?? null,
-    source_kind: sourceProjectId ? "project" : "upload",
+    source_kind: script.sourceKind ?? (sourceProjectId ? "project" : null),
   };
   await saveStudioSavedScript(input);
 }
 
-/** 终稿显式发布到项目脚本版本（C7 衔接点）：仅当草稿带 projectId 且项目已有
- * 镜头卡版本时可行（ScriptRequest 需要 shot_card_version_id）。任何失败都
- * 返回 false 由调用方软提示，绝不阻断"确认终稿"本身。 */
+export type ProjectScriptPublishResult =
+  | "published"
+  | "not-applicable"
+  | "failed";
+
+/** 终稿显式发布到项目脚本版本（C7 衔接点）。没有镜头卡表示当前稿只完成了
+ * 工坊确认，尚未进入复刻分镜阶段；该状态不是发布失败。 */
 export async function publishScriptVersion(
   projectId: string,
   text: string,
-): Promise<boolean> {
+): Promise<ProjectScriptPublishResult> {
   try {
     const shotCards = await getLatestProjectShotCards(projectId);
-    if (!shotCards) return false;
+    if (!shotCards) return "not-applicable";
     await createScriptVersion(projectId, {
       source: "custom",
       text,
       shot_card_version_id: shotCards.id,
     });
-    return true;
+    return "published";
   } catch {
-    return false;
+    return "failed";
   }
 }
 
@@ -1130,17 +1170,41 @@ export async function runReplicaGeneration(
   input: {
     promptText: string;
     originalScriptText: string;
+    confirmedScriptText?: string;
     shotCardVersionId: string;
     firstFrameAssetId: string;
     outputDurationSeconds: number;
     resolution: "768P" | "2K";
     ratio: GenerationRatio;
     quantity: number;
+    idempotencyKey: string;
+    isCurrent?: () => boolean;
   },
 ): Promise<GenerationBatch> {
+  const { idempotencyKey, isCurrent, ...stableInput } = input;
+  const fingerprint = JSON.stringify(stableInput);
+  const contextKey = replicaRequestContextKey(projectId, fingerprint);
+  const frozen =
+    frozenReplicaRequests.get(idempotencyKey) ??
+    frozenReplicaRequestsByContext.get(contextKey);
+  if (frozen) {
+    if (frozen.projectId !== projectId || frozen.fingerprint !== fingerprint) {
+      throw new Error("复刻提交参数已变化，请重新确认费用后再试。");
+    }
+    if (isCurrent && !isCurrent()) {
+      throw new Error("复刻页面已变化，本次旧提交已停止。");
+    }
+    const batch = await createGenerationBatch(projectId, frozen.request);
+    clearFrozenReplicaRequest(frozen);
+    return batch;
+  }
   const script = await createScriptVersion(projectId, {
-    source: input.originalScriptText.trim() ? "original" : "custom",
-    text: input.originalScriptText,
+    source: input.confirmedScriptText?.trim()
+      ? "custom"
+      : input.originalScriptText.trim()
+        ? "original"
+        : "custom",
+    text: input.confirmedScriptText?.trim() || input.originalScriptText,
     shot_card_version_id: input.shotCardVersionId,
   });
   const compiled = await compileGenerationPrompt(projectId, {
@@ -1155,22 +1219,38 @@ export async function runReplicaGeneration(
     (compiled.payload as Record<string, unknown>).prompt_text ?? "",
   );
   const finalPrompt =
-    input.promptText.trim() && input.promptText !== compiledText
+    !input.confirmedScriptText?.trim() &&
+    input.promptText.trim() &&
+    input.promptText !== compiledText
       ? await reviseGenerationPrompt(projectId, {
           base_prompt_version_id: compiled.id,
           prompt_text: input.promptText.trim(),
         })
       : compiled;
   const locked = await lockGenerationPrompt(projectId, finalPrompt.id);
-  return createGenerationBatch(projectId, {
+  if (isCurrent && !isCurrent()) {
+    throw new Error("复刻页面已变化，本次旧提交已停止。");
+  }
+  const request: GenerationBatchInput = {
     quantity: input.quantity,
     prompt_version_id: locked.id,
     first_frame_asset_id: input.firstFrameAssetId,
     output_duration_seconds: input.outputDurationSeconds,
     resolution: input.resolution,
     ratio: input.ratio,
-    idempotency_key: crypto.randomUUID(),
+    idempotency_key: idempotencyKey,
     provider: defaultBatchProvider(),
     fake_audio_quality: "ok",
-  });
+  };
+  const prepared = {
+    fingerprint,
+    idempotencyKey,
+    projectId,
+    request,
+  };
+  frozenReplicaRequests.set(idempotencyKey, prepared);
+  frozenReplicaRequestsByContext.set(contextKey, prepared);
+  const batch = await createGenerationBatch(projectId, request);
+  clearFrozenReplicaRequest(prepared);
+  return batch;
 }

@@ -197,7 +197,7 @@ def list_saved_scripts(
         """
         SELECT * FROM studio_saved_scripts
         WHERE user_id = %s
-        ORDER BY created_at DESC, id DESC
+        ORDER BY updated_at DESC, id DESC
         LIMIT %s
         """,
         (actor_id, MAX_SAVED_SCRIPTS_PER_USER),

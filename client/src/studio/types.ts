@@ -136,6 +136,8 @@ export type StudioTask = {
   voiceId?: string;
   audioId?: string;
   scriptVersion?: number;
+  /** 服务端记录的实际口播正文，用于基于历史任务创建新稿。 */
+  scriptText?: string;
 };
 export type StudioStats = {
   today_completed: number;
@@ -168,6 +170,9 @@ export type StudioScript = {
   text: string;
   version: number;
   confirmed: boolean;
+  ipId?: string;
+  sourceProjectId?: string;
+  sourceKind?: string;
 };
 export type StudioDraft = {
   id: string;
@@ -255,6 +260,7 @@ export type StudioContextValue = {
   referenceAssetsPending?: boolean;
   referenceAssetsError?: boolean;
   retryReferenceAssets?: () => void;
+  draftSaveStatus?: "idle" | "dirty" | "saving" | "saved" | "error";
   navigate: (page: StudioPage, patch?: Partial<StudioState>) => void;
   patchDraft: (patch: Partial<StudioDraft>) => void;
   patchState: (patch: Partial<StudioState>) => void;

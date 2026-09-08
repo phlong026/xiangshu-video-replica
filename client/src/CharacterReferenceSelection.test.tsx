@@ -296,8 +296,11 @@ describe("CharacterReferenceSelection", () => {
       />,
     );
 
-    await screen.findByText("人物参考图");
-    fireEvent.click(screen.getByRole("button", { name: "确认人物参考" }));
+    const confirm = await screen.findByRole("button", {
+      name: "确认人物参考",
+    });
+    await waitFor(() => expect(confirm).toBeEnabled());
+    fireEvent.click(confirm);
 
     await waitFor(() =>
       expect(api.selectCharacterReferences).toHaveBeenCalledOnce(),

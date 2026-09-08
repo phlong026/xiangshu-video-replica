@@ -800,7 +800,20 @@ def _request_deepseek(
         ) from exc
 
     try:
-        content = str(body["choices"][0]["message"]["content"]).strip()
+        choice = body["choices"][0]
+        content = choice["message"]["content"]
+        if not isinstance(content, str):
+            raise TypeError("rewrite content must be text")
+        if choice.get("finish_reason") == "length":
+            logger.warning("DeepSeek rewrite reached the output limit")
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "code": "DEEPSEEK_RESPONSE_TRUNCATED",
+                    "message": "改写结果超过输出上限，尚未生成完整文案，请缩短原文后重试。",
+                },
+            )
+        content = content.strip()
     except (KeyError, IndexError, TypeError) as exc:
         raise HTTPException(
             status_code=502,

@@ -146,7 +146,9 @@ describe("CharacterLibrary", () => {
     expect(
       await screen.findByRole("tab", { name: "场景造型" }),
     ).toHaveAttribute("aria-selected", "true");
-    expect(api.listCharacterSceneLooks).toHaveBeenCalledWith("identity-1");
+    await waitFor(() =>
+      expect(api.listCharacterSceneLooks).toHaveBeenCalledWith("identity-1"),
+    );
   });
 
   it("separates the base appearance from scene looks and directly generates a new look", async () => {

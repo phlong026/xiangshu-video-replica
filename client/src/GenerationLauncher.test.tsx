@@ -196,6 +196,15 @@ describe("GenerationLauncher Prompt 编译修订锁定（受控组件）", () =>
 
   it("恢复记录存在时显示恢复按钮并触发回调", () => {
     const { callbacks } = renderLauncher({
+      priceQuote: {
+        resolution: "768P",
+        duration_seconds: 15,
+        quantity: 1,
+        unit_price_fen_per_second: 9,
+        estimated_seconds: 15,
+        estimated_price_fen: 135,
+      },
+      priceQuoteStatus: "ready",
       promptVersion: promptVersionWith({}),
       recoveryRecord: { fingerprint: "f", key: "k", request: {} },
     });

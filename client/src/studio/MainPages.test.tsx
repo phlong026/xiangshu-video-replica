@@ -166,6 +166,65 @@ describe("V1.4 任务详情真实成片预览", () => {
     retryStudioTask.mockReset();
   });
 
+  it("真实口播任务调整脚本直接带回实际正文，不落入旧任务面板", () => {
+    const task = {
+      ...taskA,
+      backendKind: "oral_task" as const,
+      backendId: "oral-1",
+      driverMode: "text" as const,
+      scriptText: "实际用于生成的口播稿",
+      ipId: "person-a",
+      avatarId: "avatar-a",
+      voiceId: "voice-a",
+    };
+    const value = studio(task.id, { data: data([task]) });
+    useStudio.mockReturnValue(value);
+    render(<TaskDetailPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "调整脚本" }));
+
+    expect(value.patchState).toHaveBeenCalledWith({
+      draft: expect.objectContaining({
+        ipId: "person-a",
+        avatarId: "avatar-a",
+        voiceId: "voice-a",
+        script: expect.objectContaining({
+          text: task.scriptText,
+          confirmed: false,
+        }),
+      }),
+    });
+    expect(value.navigate).toHaveBeenCalledWith("copy", {
+      returnTo: "task-detail",
+    });
+    expect(value.openLive).not.toHaveBeenCalled();
+  });
+
+  it("真实音频口播再创作回到音频模式，未提供正文时禁用调整脚本", () => {
+    const task = {
+      ...taskA,
+      backendKind: "oral_task" as const,
+      backendId: "oral-audio-1",
+      driverMode: "audio" as const,
+      audioId: "audio-original",
+      ipId: "person-a",
+      avatarId: "avatar-a",
+    };
+    const value = studio(task.id, { data: data([task]) });
+    useStudio.mockReturnValue(value);
+    render(<TaskDetailPage />);
+
+    expect(screen.getByRole("button", { name: "调整脚本" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "新建草稿" }));
+
+    expect(value.navigate).toHaveBeenCalledWith("oral-audio", {
+      returnTo: "task-detail",
+    });
+    expect(value.patchState).toHaveBeenCalledWith({
+      draft: expect.objectContaining({ audioId: "audio-original" }),
+    });
+  });
+
   it("仅在用户点击后按需加载，并只回填发起任务的结果", async () => {
     const pending = deferred<StudioAsset | undefined>();
     const value = studio(taskA.id, { data: data([taskA, taskB]) });

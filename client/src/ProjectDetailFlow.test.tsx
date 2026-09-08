@@ -371,9 +371,27 @@ describe("ProjectDetailFlow", () => {
   });
 
   it("shows a generation quote failure instead of silently omitting the price", async () => {
-    vi.mocked(api.getGenerationPriceQuote).mockRejectedValue(
-      new Error("生成费用暂时无法读取"),
-    );
+    vi.mocked(api.getLatestProjectFirstFrames).mockResolvedValue({
+      version: firstFrameCandidatesVersion,
+      stale: false,
+    });
+    vi.mocked(api.getLatestProjectFirstFrameSelection).mockResolvedValue({
+      version: firstFrameSelectionVersion,
+      stale: false,
+    });
+    vi.mocked(api.getProjectFirstFrameHistory).mockResolvedValue([
+      firstFrameCandidatesVersion,
+    ]);
+    vi.mocked(api.getGenerationPriceQuote)
+      .mockRejectedValueOnce(new Error("生成费用暂时无法读取"))
+      .mockResolvedValueOnce({
+        resolution: "768P",
+        duration_seconds: 15,
+        quantity: 1,
+        unit_price_fen_per_second: 9,
+        estimated_seconds: 15,
+        estimated_price_fen: 135,
+      });
 
     render(
       <ProjectDetailFlow
@@ -385,6 +403,16 @@ describe("ProjectDetailFlow", () => {
     );
 
     expect(await screen.findByText("生成费用暂时无法读取")).toBeInTheDocument();
+    const submit = await screen.findByRole("button", {
+      name: "提交生成（1 条）",
+    });
+    expect(submit).toBeDisabled();
+    expect(api.createGenerationBatch).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "重新获取生成报价" }));
+
+    expect(await screen.findByText(/约 ¥1\.35/)).toBeInTheDocument();
+    expect(submit).toBeEnabled();
   });
 
   it("saves an edited reverse prompt directly to my prompts before any generation", async () => {
@@ -678,18 +706,32 @@ describe("ProjectDetailFlow", () => {
       kind: "generation_prompt",
       payload: { prompt_text: "保存过但已过时的手工 Prompt" },
     });
-    vi.mocked(api.compileGenerationPrompt).mockResolvedValue({
-      ...analysisVersion,
-      id: "prompt-compiled-custom-1",
-      kind: "generation_prompt",
-      payload: { prompt_text: "含新自定义文案的编译 Prompt" },
-    });
-    vi.mocked(api.lockGenerationPrompt).mockResolvedValue({
-      ...analysisVersion,
-      id: "prompt-locked-custom-1",
-      kind: "generation_prompt",
-      payload: { prompt_text: "含新自定义文案的编译 Prompt" },
-    });
+    vi.mocked(api.compileGenerationPrompt)
+      .mockResolvedValueOnce({
+        ...analysisVersion,
+        id: "prompt-compiled-custom-1",
+        kind: "generation_prompt",
+        payload: { prompt_text: "含新自定义文案的编译 Prompt" },
+      })
+      .mockResolvedValueOnce({
+        ...analysisVersion,
+        id: "prompt-compiled-custom-2",
+        kind: "generation_prompt",
+        payload: { prompt_text: "第二次编译出的不同版本" },
+      });
+    vi.mocked(api.lockGenerationPrompt)
+      .mockResolvedValueOnce({
+        ...analysisVersion,
+        id: "prompt-locked-custom-1",
+        kind: "generation_prompt",
+        payload: { prompt_text: "含新自定义文案的编译 Prompt" },
+      })
+      .mockResolvedValueOnce({
+        ...analysisVersion,
+        id: "prompt-locked-custom-2",
+        kind: "generation_prompt",
+        payload: { prompt_text: "第二次锁定出的不同版本" },
+      });
     const batch = {
       id: "batch-custom-1",
       project_id: project.id,
@@ -739,6 +781,9 @@ describe("ProjectDetailFlow", () => {
     });
     await waitFor(() => expect(startButton).toBeEnabled());
     fireEvent.click(startButton);
+    expect(screen.getByLabelText("自定义文案")).toBeDisabled();
+    expect(screen.getByLabelText("成片时长")).toBeDisabled();
+    expect(screen.getByLabelText("生成数量")).toBeDisabled();
 
     await waitFor(() =>
       expect(api.createScriptVersion).toHaveBeenCalledWith(project.id, {
@@ -771,6 +816,11 @@ describe("ProjectDetailFlow", () => {
       .calls[1]?.[1].idempotency_key;
     expect(firstIdempotencyKey).toBeTruthy();
     expect(secondIdempotencyKey).toBe(firstIdempotencyKey);
+    expect(api.compileGenerationPrompt).toHaveBeenCalledOnce();
+    expect(api.lockGenerationPrompt).toHaveBeenCalledOnce();
+    expect(vi.mocked(api.createGenerationBatch).mock.calls[1]?.[1]).toEqual(
+      vi.mocked(api.createGenerationBatch).mock.calls[0]?.[1],
+    );
   });
 
   it("keeps project navigation available while a first frame continues in the background", async () => {

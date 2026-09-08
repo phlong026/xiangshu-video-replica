@@ -1440,6 +1440,8 @@ export function MaterialsPage() {
   const [renameValue, setRenameValue] = useState("");
   const [groupValue, setGroupValue] = useState("");
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
+  const renameInputRef = useRef<HTMLInputElement | null>(null);
+  const groupInputRef = useRef<HTMLInputElement | null>(null);
   const reviewAssets = data.assets.filter(
     (asset) => kind === "全部" || asset.kind === kind,
   );
@@ -1586,12 +1588,13 @@ export function MaterialsPage() {
   };
 
   const saveName = async () => {
-    if (!selected?.materialId || !renameValue.trim()) return;
+    const title = renameInputRef.current?.value.trim() ?? renameValue.trim();
+    if (!selected?.materialId || !title) return;
     setBusyAction("rename");
     try {
       const updated = studioAssetFromMaterial(
         await updateMaterial(selected.materialId, {
-          title: renameValue.trim(),
+          title,
         }),
       );
       setSelectedAsset({ ...updated, url: selected.url });
@@ -1642,12 +1645,13 @@ export function MaterialsPage() {
   };
 
   const saveGroup = async () => {
-    if (!selected?.materialId || !groupValue.trim()) return;
+    const group = groupInputRef.current?.value.trim() ?? groupValue.trim();
+    if (!selected?.materialId || !group) return;
     setBusyAction("group");
     try {
       const updated = studioAssetFromMaterial(
         await updateMaterial(selected.materialId, {
-          group: groupValue.trim(),
+          group,
         }),
       );
       setSelectedAsset({ ...updated, url: selected.url });
@@ -1927,6 +1931,7 @@ export function MaterialsPage() {
                         aria-label="素材名称"
                         maxLength={120}
                         onChange={(event) => setRenameValue(event.target.value)}
+                        ref={renameInputRef}
                         value={renameValue}
                       />
                     </Field>
@@ -1944,6 +1949,7 @@ export function MaterialsPage() {
                         aria-label="素材分组"
                         maxLength={80}
                         onChange={(event) => setGroupValue(event.target.value)}
+                        ref={groupInputRef}
                         value={groupValue}
                       />
                     </Field>

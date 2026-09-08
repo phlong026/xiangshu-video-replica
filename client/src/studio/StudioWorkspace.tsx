@@ -93,6 +93,40 @@ type Props = ComponentProps<typeof WorkspaceShell> & {
   initialState?: StudioState;
 };
 
+type QuoteStatus = "idle" | "loading" | "ready" | "error";
+
+type GenerationQuoteInput = {
+  resolution: "768P" | "2K";
+  duration_seconds: number;
+  quantity: number;
+};
+
+type SubmissionEnvelope = { fingerprint: string; key: string };
+
+function quoteMatchesInput(
+  quote: GenerationPriceQuote | null,
+  input: GenerationQuoteInput,
+): quote is GenerationPriceQuote {
+  return Boolean(
+    quote &&
+      quote.resolution === input.resolution &&
+      quote.duration_seconds === input.duration_seconds &&
+      quote.quantity === input.quantity &&
+      quote.estimated_seconds === input.duration_seconds * input.quantity,
+  );
+}
+
+function videoQuoteInput(draft: StudioDraft): GenerationQuoteInput {
+  return {
+    resolution: draft.resolution === "2K" ? "2K" : "768P",
+    duration_seconds:
+      draft.duration >= 4 && draft.duration <= 15
+        ? Math.round(draft.duration)
+        : 8,
+    quantity: draft.count === 2 || draft.count === 4 ? draft.count : 1,
+  };
+}
+
 function mergeStudioAssets(
   current: StudioAsset[],
   incoming: StudioAsset[],
@@ -196,6 +230,8 @@ export function StudioWorkspace({
   const [state, setState] = useState<StudioState>(
     () => initialState || createState(routeFromHash(window.location.hash)),
   );
+  const studioPageRef = useRef(state.page);
+  studioPageRef.current = state.page;
   const [data, setData] = useState<StudioData>(() =>
     review && reviewData ? reviewData : emptyData,
   );
@@ -208,11 +244,18 @@ export function StudioWorkspace({
     null,
   );
   const [generation, setGeneration] = useState<StudioTask["type"]>();
+  const generationRef = useRef<StudioTask["type"] | undefined>(undefined);
+  const generationDialogRevisionRef = useRef(0);
+  const mountedRef = useRef(true);
   const [newCreation, setNewCreation] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [showSearch, setShowSearch] = useState(false);
   const [oralPriceFen, setOralPriceFen] = useState<number | null>(null);
+  const [oralQuoteStatus, setOralQuoteStatus] = useState<QuoteStatus>("idle");
+  const [oralQuoteError, setOralQuoteError] = useState("");
+  const [oralQuoteRevision, setOralQuoteRevision] = useState(0);
+  const [oralSubmitting, setOralSubmitting] = useState(false);
   // ---- 视频生成（C2 独立创作）----
   const [videoCapabilities, setVideoCapabilities] =
     useState<IndependentCapabilities>();
@@ -225,30 +268,81 @@ export function StudioWorkspace({
   const [videoQuote, setVideoQuote] = useState<GenerationPriceQuote | null>(
     null,
   );
+  const [videoQuoteStatus, setVideoQuoteStatus] = useState<QuoteStatus>("idle");
+  const [videoQuoteError, setVideoQuoteError] = useState("");
+  const [videoQuoteRevision, setVideoQuoteRevision] = useState(0);
   const [videoSubmitting, setVideoSubmitting] = useState(false);
+  const [draftSaveStatus, setDraftSaveStatus] = useState<
+    "idle" | "dirty" | "saving" | "saved" | "error"
+  >(review ? "saved" : "idle");
   const busyRef = useRef(false);
   const operationRef = useRef(0);
   const loadedPeopleRef = useRef(new Set<string>());
   const restoredAssetsRef = useRef<StudioAsset[]>([]);
+  const oralSubmittingRef = useRef(false);
+  const videoSubmittingRef = useRef(false);
+  const extractingRef = useRef(false);
+  const oralSubmissionRef = useRef<SubmissionEnvelope | null>(null);
+  const videoSubmissionRef = useRef<SubmissionEnvelope | null>(null);
   const notify = useCallback((message: string) => setNotice(message), []);
 
   // ---- 云端草稿（C7）----
   // 编辑后防抖自动保存；恢复只在用户尚未做任何编辑时生效，绝不覆盖进行中的输入。
   const DRAFT_AUTOSAVE_DELAY_MS = 2000;
   const latestDraftRef = useRef(state.draft);
+  generationRef.current = generation;
+  const closeGenerationDialog = useCallback(() => {
+    generationDialogRevisionRef.current += 1;
+    generationRef.current = undefined;
+    setGeneration(undefined);
+  }, []);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      generationDialogRevisionRef.current += 1;
+    };
+  }, []);
   const referenceAssetsRequestRef = useRef(0);
   const referenceAssetsDraftRef = useRef<StudioDraft | undefined>(undefined);
   const draftTouchedRef = useRef(false);
   const draftSaveTimerRef = useRef<number | undefined>(undefined);
+  const draftSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const draftSaveRevisionRef = useRef(0);
+  const persistDraftInOrder = useCallback((draft: StudioDraft) => {
+    const saveRevision = ++draftSaveRevisionRef.current;
+    const snapshot: StudioDraft = {
+      ...draft,
+      script: { ...draft.script },
+      referenceIds: [...draft.referenceIds],
+    };
+    if (mountedRef.current) setDraftSaveStatus("saving");
+    const request = draftSaveQueueRef.current.then(() =>
+      persistCloudDraft(snapshot),
+    );
+    draftSaveQueueRef.current = request.catch(() => {});
+    void request.then(
+      () => {
+        if (mountedRef.current && draftSaveRevisionRef.current === saveRevision)
+          setDraftSaveStatus("saved");
+      },
+      () => {
+        if (mountedRef.current && draftSaveRevisionRef.current === saveRevision)
+          setDraftSaveStatus("error");
+      },
+    );
+    return request;
+  }, []);
   const scheduleDraftSave = useCallback(() => {
     if (review) return;
+    setDraftSaveStatus("dirty");
     window.clearTimeout(draftSaveTimerRef.current);
     draftSaveTimerRef.current = window.setTimeout(() => {
-      void persistCloudDraft(latestDraftRef.current).catch(() => {
+      void persistDraftInOrder(latestDraftRef.current).catch(() => {
         notify("云端草稿保存失败，内容仍在本机，请稍后继续编辑。");
       });
     }, DRAFT_AUTOSAVE_DELAY_MS);
-  }, [review, notify]);
+  }, [review, notify, persistDraftInOrder]);
 
   const restoreDraftAssets = useCallback(
     async (draft: StudioDraft) => {
@@ -291,30 +385,37 @@ export function StudioWorkspace({
     void restoreDraftAssets(draft);
   }, [restoreDraftAssets]);
 
-  // 挂载时恢复云端草稿与我的文案；失败静默（只读路径，不阻塞工作区）。
+  // 挂载时分别恢复云端草稿与我的文案；一个读取失败不再阻断另一个。
   useEffect(() => {
     if (review) return;
     let active = true;
     void loadCloudDraft()
-      .then(async (restore) => {
-        const saved = await loadSavedScriptList().catch(() => []);
+      .then((restore) => {
         if (!active) return;
-        if (saved.length)
-          setState((previous) => ({ ...previous, savedScripts: saved }));
         if (restore && !draftTouchedRef.current) {
           latestDraftRef.current = restore.draft;
           setState((previous) => ({ ...previous, draft: restore.draft }));
+          setDraftSaveStatus("saved");
           notify("已恢复上次云端草稿，请核对内容并确认终稿。");
           void restoreDraftAssets(restore.draft);
         }
+      })
+      .catch(() => {});
+    void loadSavedScriptList()
+      .then((saved) => {
+        if (active)
+          setState((previous) => ({ ...previous, savedScripts: saved }));
       })
       .catch(() => {});
     return () => {
       active = false;
       referenceAssetsRequestRef.current += 1;
       window.clearTimeout(draftSaveTimerRef.current);
+      if (draftTouchedRef.current) {
+        void persistDraftInOrder(latestDraftRef.current).catch(() => {});
+      }
     };
-  }, [review, notify, restoreDraftAssets]);
+  }, [review, notify, persistDraftInOrder, restoreDraftAssets]);
   // 自动保存始终跟随最新草稿：导入项目、任务快照回填等不经 patchDraft 的
   // 路径也在这里并入追踪。
   useEffect(() => {
@@ -329,22 +430,42 @@ export function StudioWorkspace({
   }, [state.draft]);
   // 数字人口播提交前拉取单价（元/条）；失败保持 null 显示“待服务端报价”。
   useEffect(() => {
+    void oralQuoteRevision;
     if (review || generation !== "数字人口播") {
       setOralPriceFen(null);
+      setOralQuoteStatus("idle");
+      setOralQuoteError("");
       return;
     }
     let active = true;
+    setOralPriceFen(null);
+    setOralQuoteStatus("loading");
+    setOralQuoteError("");
     void getOralPrice()
       .then((price) => {
-        if (active) setOralPriceFen(price.unit_price_fen);
+        if (active) {
+          setOralPriceFen(price.unit_price_fen);
+          setOralQuoteStatus("ready");
+        }
       })
-      .catch(() => {
-        if (active) setOralPriceFen(null);
+      .catch((cause: unknown) => {
+        if (active) {
+          setOralPriceFen(null);
+          setOralQuoteStatus("error");
+          setOralQuoteError(
+            customerVisibleErrorMessage(cause, "口播报价读取失败，请重试。"),
+          );
+        }
       });
     return () => {
       active = false;
     };
-  }, [review, generation]);
+  }, [review, generation, oralQuoteRevision]);
+
+  const retryOralQuote = useCallback(
+    () => setOralQuoteRevision((value) => value + 1),
+    [],
+  );
 
   // 视频生成能力探测（扩展模式是否开放、单批上限）；审核模式不探测。
   // biome-ignore lint/correctness/useExhaustiveDependencies: 修订号专门用于用户点击后重新发起能力请求。
@@ -377,56 +498,128 @@ export function StudioWorkspace({
   );
 
   // 视频生成确认弹窗：按分辨率/时长/条数拉取按秒报价；草稿参数变化自动刷新。
-  const videoDuration = state.draft.duration;
-  const videoResolution = state.draft.resolution;
-  const videoCount = state.draft.count;
+  const videoDuration =
+    state.draft.duration >= 4 && state.draft.duration <= 15
+      ? Math.round(state.draft.duration)
+      : 8;
+  const videoResolution: GenerationQuoteInput["resolution"] =
+    state.draft.resolution === "2K" ? "2K" : "768P";
+  const videoCount =
+    state.draft.count === 2 || state.draft.count === 4 ? state.draft.count : 1;
+  const currentVideoQuoteInput: GenerationQuoteInput = {
+    resolution: videoResolution,
+    duration_seconds: videoDuration,
+    quantity: videoCount,
+  };
+  const videoQuoteReady =
+    videoQuoteStatus === "ready" &&
+    quoteMatchesInput(videoQuote, currentVideoQuoteInput);
   useEffect(() => {
+    void videoQuoteRevision;
     if (review || generation !== "视频生成") {
       setVideoQuote(null);
+      setVideoQuoteStatus("idle");
+      setVideoQuoteError("");
       return;
     }
     let active = true;
     setVideoQuote(null);
-    void getGenerationPriceQuote({
-      resolution: videoResolution === "2K" ? "2K" : "768P",
-      duration_seconds: (videoDuration >= 4 && videoDuration <= 15
-        ? Math.round(videoDuration)
-        : 8) as 4 | 15,
-      quantity: (videoCount === 2 || videoCount === 4 ? videoCount : 1) as
-        | 1
-        | 2
-        | 4,
-    })
+    setVideoQuoteStatus("loading");
+    setVideoQuoteError("");
+    const input = {
+      resolution: videoResolution,
+      duration_seconds: videoDuration,
+      quantity: videoCount,
+    };
+    void getGenerationPriceQuote(input)
       .then((quote) => {
-        if (active) setVideoQuote(quote);
+        if (!active) return;
+        if (!quoteMatchesInput(quote, input)) {
+          setVideoQuoteStatus("error");
+          setVideoQuoteError("视频报价参数与当前生成参数不一致，请重新获取。");
+          return;
+        }
+        setVideoQuote(quote);
+        setVideoQuoteStatus("ready");
       })
-      .catch(() => {
-        if (active) setVideoQuote(null);
+      .catch((cause: unknown) => {
+        if (active) {
+          setVideoQuote(null);
+          setVideoQuoteStatus("error");
+          setVideoQuoteError(
+            customerVisibleErrorMessage(cause, "视频报价读取失败，请重试。"),
+          );
+        }
       });
     return () => {
       active = false;
     };
-  }, [review, generation, videoDuration, videoResolution, videoCount]);
+  }, [
+    review,
+    generation,
+    videoDuration,
+    videoResolution,
+    videoCount,
+    videoQuoteRevision,
+  ]);
+
+  const retryVideoQuote = useCallback(
+    () => setVideoQuoteRevision((value) => value + 1),
+    [],
+  );
 
   const submitOralTask = async () => {
     if (currentUser.role === "auditor") {
       notify("当前账号为只读权限，不能提交生成。");
       return;
     }
+    if (
+      oralSubmittingRef.current ||
+      generationRef.current !== "数字人口播" ||
+      oralQuoteStatus !== "ready" ||
+      oralPriceFen === null
+    ) {
+      if (!oralSubmittingRef.current) notify("请先取得有效口播报价后再提交。");
+      return;
+    }
+    const dialogRevision = generationDialogRevisionRef.current;
+    const draft = latestDraftRef.current;
+    const draftFingerprint = JSON.stringify(draft);
+    const page = studioPageRef.current;
+    const isCurrent = () =>
+      mountedRef.current &&
+      generationDialogRevisionRef.current === dialogRevision &&
+      generationRef.current === "数字人口播" &&
+      studioPageRef.current === page &&
+      JSON.stringify(latestDraftRef.current) === draftFingerprint;
+    oralSubmittingRef.current = true;
+    setOralSubmitting(true);
     try {
       const mode = state.page === "oral-audio" ? "audio" : "text";
-      const input = buildOralInput(state.draft, mode);
-      const result = await createOralTask({
+      const input = buildOralInput(draft, mode);
+      const request = {
         identityId: input.ipId,
         avatarId: input.avatarId,
         voiceId: input.voiceId,
-        mode: mode === "audio" ? "AUDIO" : "TTS",
-        title: state.draft.script.title || "未命名口播",
-        scriptText: state.draft.script.text,
+        mode: mode === "audio" ? ("AUDIO" as const) : ("TTS" as const),
+        title: draft.script.title || "未命名口播",
+        scriptText: draft.script.text,
         audioAssetId: input.audioAssetId,
-        idempotencyKey: crypto.randomUUID(),
+      };
+      const fingerprint = JSON.stringify({ request, oralPriceFen });
+      if (oralSubmissionRef.current?.fingerprint !== fingerprint) {
+        oralSubmissionRef.current = {
+          fingerprint,
+          key: crypto.randomUUID(),
+        };
+      }
+      const result = await createOralTask({
+        ...request,
+        idempotencyKey: oralSubmissionRef.current.key,
       });
-      setGeneration(undefined);
+      oralSubmissionRef.current = null;
+      if (!isCurrent()) return;
+      closeGenerationDialog();
       if (result.status === "FAILED") {
         notify("口播任务提交未成功，请核对素材后重试。");
       } else {
@@ -435,9 +628,14 @@ export function StudioWorkspace({
         refresh();
       }
     } catch (cause: unknown) {
-      notify(
-        customerVisibleErrorMessage(cause, "口播任务提交失败，请稍后重试。"),
-      );
+      if (isCurrent()) {
+        notify(
+          customerVisibleErrorMessage(cause, "口播任务提交失败，请稍后重试。"),
+        );
+      }
+    } finally {
+      oralSubmittingRef.current = false;
+      setOralSubmitting(false);
     }
   };
   const refresh = useCallback(() => setRevision((value) => value + 1), []);
@@ -465,16 +663,35 @@ export function StudioWorkspace({
       notify("当前账号为只读权限，不能提交生成。");
       return;
     }
-    if (videoSubmitting) return;
+    if (videoSubmittingRef.current || generationRef.current !== "视频生成")
+      return;
+    const draft = latestDraftRef.current;
+    const draftFingerprint = JSON.stringify(draft);
+    const page = studioPageRef.current;
+    const dialogRevision = generationDialogRevisionRef.current;
+    const isCurrent = () =>
+      mountedRef.current &&
+      generationDialogRevisionRef.current === dialogRevision &&
+      generationRef.current === "视频生成" &&
+      studioPageRef.current === page &&
+      JSON.stringify(latestDraftRef.current) === draftFingerprint;
+    const quoteInput = videoQuoteInput(draft);
+    if (
+      videoQuoteStatus !== "ready" ||
+      !quoteMatchesInput(videoQuote, quoteInput)
+    ) {
+      notify("请先取得与当前参数一致的视频报价后再提交。");
+      return;
+    }
+    videoSubmittingRef.current = true;
     setVideoSubmitting(true);
     try {
-      const draft = latestDraftRef.current;
       const mode = resolveVideoMode(state.page, Boolean(draft.firstFrameId));
       if (mode === "r2v") {
         const error = referenceDraftError(draft);
         if (error) throw new Error(error);
       }
-      const result = await createIndependentVideoTask({
+      const request = {
         mode,
         prompt_text: draft.prompt,
         first_frame_asset_id:
@@ -488,28 +705,44 @@ export function StudioWorkspace({
           draft.duration >= 4 && draft.duration <= 15
             ? Math.round(draft.duration)
             : 8,
-        resolution: draft.resolution === "2K" ? "2K" : "768P",
+        resolution:
+          draft.resolution === "2K" ? ("2K" as const) : ("768P" as const),
         ratio: (SUPPORTED_VIDEO_RATIOS as readonly string[]).includes(
           draft.ratio,
         )
           ? (draft.ratio as GenerationRatio)
           : "adaptive",
         quantity: draft.count === 2 || draft.count === 4 ? draft.count : 1,
-        idempotency_key: crypto.randomUUID(),
         provider: defaultBatchProvider(),
+      };
+      const fingerprint = JSON.stringify({ request, videoQuote });
+      if (videoSubmissionRef.current?.fingerprint !== fingerprint) {
+        videoSubmissionRef.current = {
+          fingerprint,
+          key: crypto.randomUUID(),
+        };
+      }
+      const result = await createIndependentVideoTask({
+        ...request,
+        idempotency_key: videoSubmissionRef.current.key,
       });
-      setGeneration(undefined);
+      videoSubmissionRef.current = null;
+      if (!isCurrent()) return;
+      closeGenerationDialog();
       patchDraft({ videoBatchId: result.id });
       notify("视频生成任务已提交，可在预览区查看进度。");
       refresh();
     } catch (cause: unknown) {
-      notify(
-        customerVisibleErrorMessage(
-          cause,
-          "视频生成任务提交失败，请稍后重试。",
-        ),
-      );
+      if (isCurrent()) {
+        notify(
+          customerVisibleErrorMessage(
+            cause,
+            "视频生成任务提交失败，请稍后重试。",
+          ),
+        );
+      }
     } finally {
+      videoSubmittingRef.current = false;
       setVideoSubmitting(false);
     }
   };
@@ -704,18 +937,20 @@ export function StudioWorkspace({
     });
     scheduleDraftSave();
   };
+  const patchState: StudioContextValue["patchState"] = (patch) => {
+    if (Object.hasOwn(patch, "draft")) {
+      draftTouchedRef.current = true;
+      scheduleDraftSave();
+    }
+    setState((previous) => ({ ...previous, ...patch }));
+  };
   const extractionDraftId = state.draft.id;
   const extractionProjectId = state.draft.projectId;
   const extractionAssetId = state.draft.sourceAssetId;
   useEffect(() => {
-    if (
-      review ||
-      !extractionProjectId ||
-      !extractionAssetId ||
-      extractingRef.current
-    ) {
+    if (review) return;
+    if (!extractionProjectId || !extractionAssetId || extractingRef.current)
       return;
-    }
     let active = true;
     let timer: number | undefined;
     let reportedRunning = false;
@@ -729,20 +964,19 @@ export function StudioWorkspace({
           current.projectId !== extractionProjectId ||
           current.sourceAssetId !== extractionAssetId ||
           task.sourceAssetId !== extractionAssetId
-        ) {
+        )
           return;
-        }
         if (task.status === "PENDING" || task.status === "RUNNING") {
           extractingRef.current = true;
           if (!reportedRunning) {
             reportedRunning = true;
             notify("已恢复上次文案提取任务，正在后台继续处理…");
           }
-          timer = window.setTimeout(() => void restore(), 2_000);
+          timer = window.setTimeout(() => void restore(), 2000);
           return;
         }
+        extractingRef.current = false;
         if (task.status === "SUCCEEDED" && task.result?.text.trim()) {
-          extractingRef.current = false;
           const text = task.result.text;
           const restored = patchStudioDraft(current, {
             sourceId: extractionAssetId,
@@ -771,19 +1005,17 @@ export function StudioWorkspace({
           task.status === "FAILED" ||
           task.status === "SUBMISSION_UNCERTAIN"
         ) {
-          extractingRef.current = false;
           notify(task.errorMessage || "上次文案提取失败，可点击提取文案重试。");
         }
       } catch (cause: unknown) {
         extractingRef.current = false;
-        if (active) {
+        if (active)
           notify(
             customerVisibleErrorMessage(
               cause,
               "读取上次文案提取任务失败，可点击提取文案重试。",
             ),
           );
-        }
       }
     };
     void restore();
@@ -839,7 +1071,9 @@ export function StudioWorkspace({
     try {
       const imported = await loadProjectDraft(project);
       if (operation !== operationRef.current) return;
+      draftTouchedRef.current = true;
       setState((previous) => withImportedProject(previous, imported.draft));
+      scheduleDraftSave();
       if (imported.errors.length) notify(imported.errors.join("；"));
       else notify("已带入项目来源与已保存文案。请核对内容并确认终稿。");
     } catch (cause) {
@@ -924,11 +1158,24 @@ export function StudioWorkspace({
           }
         }
       }
+      if (kind === "数字人口播") {
+        setOralPriceFen(null);
+        setOralQuoteStatus("loading");
+        setOralQuoteError("");
+      }
+      if (kind === "视频生成") {
+        setVideoQuote(null);
+        setVideoQuoteStatus("loading");
+        setVideoQuoteError("");
+      }
+      generationDialogRevisionRef.current += 1;
+      generationRef.current = kind;
       setGeneration(kind);
     } catch (cause) {
       notify(cause instanceof Error ? cause.message : "请检查生成原材料");
     }
   };
+  const savingScriptRef = useRef(false);
   const saveDraft = () => {
     if (
       !state.draft.script.text.trim() &&
@@ -938,43 +1185,98 @@ export function StudioWorkspace({
       notify("请先填写创作内容。");
       return;
     }
-    const script = { ...state.draft.script };
-    setState((previous) => ({
-      ...previous,
-      savedScripts: [
-        ...previous.savedScripts.filter(
-          (item) => item.id !== previous.draft.script.id,
-        ),
-        script,
-      ],
-    }));
+    if (savingScriptRef.current) return;
+    const draft = latestDraftRef.current;
+    const script = {
+      ...draft.script,
+      ipId: draft.ipId,
+      sourceProjectId: draft.projectId,
+      sourceKind: draft.projectId ? "project" : "manual",
+    };
+    const addSavedScript = () =>
+      setState((previous) => ({
+        ...previous,
+        savedScripts: [
+          script,
+          ...previous.savedScripts.filter((item) => item.id !== script.id),
+        ],
+      }));
     if (review) {
+      addSavedScript();
       notify("已保留在本次工作区，可继续切换页面。");
       return;
     }
-    void persistSavedScript(script, state.draft.projectId)
-      .then(() => notify("已保存到我的文案，换设备登录也能找回。"))
-      .catch(() => notify("云端保存失败，本次仅保留在工作区，请稍后重试。"));
-    void persistCloudDraft({ ...state.draft, script }).catch(() => {});
+    savingScriptRef.current = true;
+    void persistSavedScript(script, draft.projectId, draft.ipId)
+      .then(() => {
+        addSavedScript();
+        notify("已保存到我的文案，换设备登录也能找回。");
+      })
+      .catch(() => notify("云端保存失败，请稍后重试。"))
+      .finally(() => {
+        savingScriptRef.current = false;
+      });
+    void persistDraftInOrder({ ...draft, script }).catch(() => {});
   };
+  const confirmingScriptRef = useRef(false);
   const confirmFinalDraft = () => {
-    const script = { ...state.draft.script, confirmed: true };
-    patchDraft({ script });
-    if (review) return;
-    // 立即持久化终稿（不等防抖），并软发布到项目脚本版本。
-    void persistCloudDraft({ ...state.draft, script }).catch(() => {});
-    if (!state.draft.projectId) return;
-    void publishScriptVersion(state.draft.projectId, script.text).then(
-      (published) => {
-        if (!published)
+    if (confirmingScriptRef.current) return;
+    const draft = latestDraftRef.current;
+    const script = { ...draft.script, confirmed: true };
+    if (review) {
+      setState((previous) => ({
+        ...previous,
+        draft: { ...previous.draft, script },
+      }));
+      return;
+    }
+    confirmingScriptRef.current = true;
+    window.clearTimeout(draftSaveTimerRef.current);
+    void persistDraftInOrder({ ...draft, script })
+      .then(async () => {
+        const current = latestDraftRef.current;
+        if (
+          current.id !== draft.id ||
+          current.script.id !== draft.script.id ||
+          current.script.text !== draft.script.text
+        ) {
+          notify("草稿已在确认期间发生变化，请核对后重新确认终稿。");
+          return;
+        }
+        latestDraftRef.current = { ...current, script };
+        setState((previous) => ({
+          ...previous,
+          draft: { ...previous.draft, script },
+        }));
+        if (!draft.projectId) {
+          notify("终稿已确认并保存到云端。");
+          return;
+        }
+        const publishResult = await publishScriptVersion(
+          draft.projectId,
+          script.text,
+        );
+        if (publishResult === "published") {
+          notify("终稿已确认，并已同步到来源项目。");
+        } else if (publishResult === "not-applicable") {
           notify(
-            "终稿已确认，但同步到项目脚本版本未成功，可稍后在来源分析中重试。",
+            "终稿已确认并保存。当前来源还没有分镜，进入视频复刻后再完成分镜脚本。",
           );
-      },
-    );
+        } else {
+          notify(
+            "终稿已确认，但同步到来源项目未成功，可稍后在来源分析中重试。",
+          );
+        }
+      })
+      .catch(() => notify("终稿确认失败，当前草稿仍保持待确认，请稍后重试。"))
+      .finally(() => {
+        confirmingScriptRef.current = false;
+      });
   };
-  const extractingRef = useRef(false);
-  const extractScriptFromUpload = () => {
+  const extractScriptFromUpload = (
+    projectIdOverride?: string,
+    assetIdOverride?: string,
+  ) => {
     if (review) {
       notify("审核示例不调用真实接口。");
       return;
@@ -984,8 +1286,10 @@ export function StudioWorkspace({
       return;
     }
     if (extractingRef.current) return;
-    const projectId = state.draft.projectId ?? state.draft.sourceId;
+    const projectId =
+      projectIdOverride ?? state.draft.projectId ?? state.draft.sourceId;
     const assetId =
+      assetIdOverride ??
       state.draft.sourceAssetId ??
       data.projects.find((project) => project.id === projectId)
         ?.reference_asset_id ??
@@ -996,13 +1300,25 @@ export function StudioWorkspace({
       return;
     }
     extractingRef.current = true;
+    const requestedDraftId = state.draft.id;
+    const requestedPage = state.page;
     notify("正在提取音频并转写文案，预计一到两分钟，请勿关闭页面…");
     void extractScriptFromUploadLive(projectId, assetId)
       .then(({ text }) => {
         extractingRef.current = false;
-        const currentScript = latestDraftRef.current.script;
+        const currentDraft = latestDraftRef.current;
+        if (
+          currentDraft.id !== requestedDraftId ||
+          currentDraft.projectId !== projectId ||
+          currentDraft.sourceAssetId !== assetId
+        ) {
+          notify("原文案提取任务已完成，因你已切换创作，未覆盖当前草稿。");
+          return;
+        }
+        const currentScript = currentDraft.script;
         patchDraft({
-          sourceId: projectId,
+          sourceId: assetId,
+          projectId,
           sourceAssetId: assetId,
           script: {
             ...currentScript,
@@ -1010,9 +1326,14 @@ export function StudioWorkspace({
             text: currentScript.text.trim() ? currentScript.text : text,
             confirmed: false,
           },
+          scriptEdited: true,
         });
-        navigate("copy", { returnTo: "workbench" });
-        notify("文案已提取，请在文案工坊核对内容并确认终稿。");
+        if (studioPageRef.current === requestedPage) {
+          navigate("copy", { returnTo: requestedPage });
+          notify("文案已提取，请在文案工坊核对内容并确认终稿。");
+        } else {
+          notify("文案已提取并写入当前草稿，可前往文案工坊核对。");
+        }
       })
       .catch((cause: unknown) => {
         extractingRef.current = false;
@@ -1032,9 +1353,10 @@ export function StudioWorkspace({
     referenceAssetsPending,
     referenceAssetsError,
     retryReferenceAssets,
+    draftSaveStatus,
     navigate,
     patchDraft,
-    patchState: (patch) => setState((previous) => ({ ...previous, ...patch })),
+    patchState,
     updateData: setData,
     notify,
     openPicker: setPicker,
@@ -1268,7 +1590,11 @@ export function StudioWorkspace({
             <Button
               variant="quiet"
               onClick={() => {
-                setState((previous) => ({ ...previous, draft: createDraft() }));
+                draftTouchedRef.current = true;
+                const draft = createDraft();
+                latestDraftRef.current = draft;
+                setState((previous) => ({ ...previous, draft }));
+                scheduleDraftSave();
                 navigate("workbench");
                 setNewCreation(false);
               }}
@@ -1280,7 +1606,7 @@ export function StudioWorkspace({
         {generation && (
           <StudioDialog
             title={`生成确认 · ${generation}`}
-            onClose={() => setGeneration(undefined)}
+            onClose={closeGenerationDialog}
           >
             <Hint>
               {review
@@ -1299,11 +1625,16 @@ export function StudioWorkspace({
               <div>
                 <dt>费用</dt>
                 <dd>
-                  {generation === "数字人口播" && oralPriceFen !== null
+                  {generation === "数字人口播" &&
+                  oralQuoteStatus === "ready" &&
+                  oralPriceFen !== null
                     ? `${(oralPriceFen / 100).toFixed(2)} 元/条`
-                    : generation === "视频生成" && videoQuote !== null
+                    : generation === "视频生成" && videoQuoteReady
                       ? `${(videoQuote.estimated_price_fen / 100).toFixed(2)} 元（${videoQuote.unit_price_fen_per_second} 分/秒 × ${videoQuote.estimated_seconds} 秒）`
-                      : "待服务端报价"}
+                      : oralQuoteStatus === "loading" ||
+                          videoQuoteStatus === "loading"
+                        ? "正在读取服务端报价…"
+                        : "待服务端报价"}
                 </dd>
               </div>
               <div>
@@ -1311,6 +1642,22 @@ export function StudioWorkspace({
                 <dd>尚未提交 · 未扣费</dd>
               </div>
             </dl>
+            {generation === "数字人口播" && oralQuoteError ? (
+              <div className="settings-error" role="alert">
+                <p>{oralQuoteError}</p>
+                <Button onClick={retryOralQuote} variant="outline">
+                  重新获取口播报价
+                </Button>
+              </div>
+            ) : null}
+            {generation === "视频生成" && videoQuoteError ? (
+              <div className="settings-error" role="alert">
+                <p>{videoQuoteError}</p>
+                <Button onClick={retryVideoQuote} variant="outline">
+                  重新获取视频报价
+                </Button>
+              </div>
+            ) : null}
             {review ||
             generation === "人物置换" ||
             generation === "视频复刻" ? (
@@ -1320,14 +1667,22 @@ export function StudioWorkspace({
             ) : generation === "视频生成" ? (
               <Button
                 variant="primary"
-                disabled={videoSubmitting}
+                disabled={videoSubmitting || !videoQuoteReady}
                 onClick={() => void submitVideoTask()}
               >
-                确认费用并提交
+                {videoSubmitting ? "提交中…" : "确认费用并提交"}
               </Button>
             ) : (
-              <Button variant="primary" onClick={() => void submitOralTask()}>
-                确认费用并提交
+              <Button
+                disabled={
+                  oralSubmitting ||
+                  oralQuoteStatus !== "ready" ||
+                  oralPriceFen === null
+                }
+                variant="primary"
+                onClick={() => void submitOralTask()}
+              >
+                {oralSubmitting ? "提交中…" : "确认费用并提交"}
               </Button>
             )}
             {!review &&
@@ -1335,7 +1690,7 @@ export function StudioWorkspace({
               generation !== "视频生成" && (
                 <Button
                   onClick={() => {
-                    setGeneration(undefined);
+                    closeGenerationDialog();
                     openLive("analysis");
                   }}
                 >
