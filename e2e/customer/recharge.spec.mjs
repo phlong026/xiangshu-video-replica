@@ -37,14 +37,17 @@ test("customer wallet creates a recharge order under the customer session", asyn
   await openCustomerWallet(page);
 
   // The customer-lane wallet panel loads (task #7): balance + recharge form.
-  await expect(page.getByRole("heading", { name: "充值条数" })).toBeVisible({
+  // V1.4 bills by seconds: the recharge section heading is 充值秒数额度.
+  await expect(page.getByRole("heading", { name: "充值秒数额度" })).toBeVisible({
     timeout: 20_000,
   });
   await expect(page.getByRole("button", { name: "充值100元" })).toBeVisible();
 
   // Read the balance before the recharge: PENDING must not credit the wallet.
-  const creditsCard = page.locator(".wallet-summary-card").nth(1);
-  const creditsBefore = await creditsCard.locator("strong").textContent();
+  // The first summary card shows 可用额度; its value is synchronous, unlike
+  // the second card whose price quotes load asynchronously.
+  const balanceCard = page.locator(".wallet-summary-card").first();
+  const creditsBefore = await balanceCard.locator("strong").textContent();
 
   // Clicking a preset opens the confirmation dialog.  Generating the QR then
   // posts POST /api/customer/recharge-orders; only the provider QR response
@@ -66,6 +69,6 @@ test("customer wallet creates a recharge order under the customer session", asyn
 
   // Credits are unchanged while the order is PENDING (BILL-01: the wallet is
   // credited only on the PAID callback).
-  const creditsAfter = await creditsCard.locator("strong").textContent();
+  const creditsAfter = await balanceCard.locator("strong").textContent();
   expect(creditsAfter).toBe(creditsBefore);
 });

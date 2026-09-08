@@ -12,9 +12,9 @@ test("customer activates a code and reaches the workspace", async ({
 }) => {
   await page.goto("/customer");
 
-  // First run shows the activation form.
+  // First run shows the activation form (V1.4 brand heading).
   await expect(
-    page.getByRole("heading", { name: "激活短视频复刻工作台" }),
+    page.getByRole("heading", { name: "激活众墅之家 · AI 即创" }),
   ).toBeVisible();
 
   await page.getByLabel("激活码").fill(CODE_A);
@@ -42,7 +42,7 @@ test("activated workspace shows the first device in slot one and a wallet", asyn
     timeout: 20_000,
   });
   await expect(
-    deviceManagement.getByRole("button", { name: "充值条数" }),
+    deviceManagement.getByRole("button", { name: "充值秒数" }),
   ).toBeVisible();
 
   // The pairing entry for a second device is present.
