@@ -1,0 +1,10 @@
+Time: 2026-09-07T04:05:37.458Z
+Source SHA256: d48301e101931192862a2b7c175b510f2b9c1ea90660b0bba8b521f455c4efc9
+Actual exported patchStudioDraft(project-a -> project-b): {"id":"draft-294907f6-cd49-4d5b-ae0b-4d5cb7977550","selectedShotId":"shot-2","script":{"id":"script-4aeda40a-335d-46cc-a668-0ad9359b27dd","title":"","original":"","text":"","version":1,"confirmed":false},"scriptEdited":false,"prompt":"","promptEdited":false,"referenceIds":["ref-a"],"resolution":"768P","ratio":"16:9","duration":8,"count":1,"frameConfirmed":true,"style":"standard","subtitles":false,"quoteRevision":1,"projectId":"project-b","ipId":"person-a","firstFrameId":"frame-a","tailFrameId":"tail-a","videoBatchId":"batch-a"}
+Actual exported patchStudioDraft(person-a -> person-b): {"id":"draft-294907f6-cd49-4d5b-ae0b-4d5cb7977550","selectedShotId":"shot-2","script":{"id":"script-42bb8f48-adc9-407e-bcf6-7dfd01d12a79","title":"","original":"","text":"","version":1,"confirmed":false},"scriptEdited":false,"prompt":"prompt-a","promptEdited":false,"referenceIds":["ref-a"],"resolution":"768P","ratio":"16:9","duration":8,"count":1,"frameConfirmed":true,"style":"standard","subtitles":false,"quoteRevision":1,"projectId":"project-a","ipId":"person-b","firstFrameId":"frame-a","tailFrameId":"tail-a","videoBatchId":"batch-a"}
+This probe evaluates pure draft state only; it does not call APIs or prove backend authorization.
+
+Final business-source verification: 2026-09-07T12:11:04.126195+08:00
+HEAD: 8d13f60e6316afce544d5961ad169aebab8ef7fa
+Changed since 12:05 snapshot: ['client/src/studio/CreationPages.test.tsx', 'client/src/studio/state.test.ts']
+All business source unchanged: True

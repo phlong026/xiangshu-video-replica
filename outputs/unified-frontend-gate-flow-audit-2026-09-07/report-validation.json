@@ -1,0 +1,16 @@
+{
+  "time_utc": "2026-09-07T04:19:24.483597+00:00",
+  "reports": 5,
+  "report_lines": 1258,
+  "local_links_checked": 16,
+  "issues": [],
+  "checks": "UTF-8, balanced fenced blocks, linked-file existence, narrow credential-pattern scan on reports. This is not an application security audit.",
+  "tested_snapshot_exit": 0,
+  "changed_during_tests": [],
+  "later_changes_outside_test_snapshot": [
+    "client/src/studio/CreationPages.test.tsx",
+    "client/src/studio/CreationPages.tsx"
+  ],
+  "branch": "feat/unified-frontend-gate-flow-audit-20260907",
+  "head": "8d13f60e6316afce544d5961ad169aebab8ef7fa"
+}

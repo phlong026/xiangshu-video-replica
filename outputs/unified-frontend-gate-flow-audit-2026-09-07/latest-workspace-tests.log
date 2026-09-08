@@ -1,0 +1,34 @@
+Started UTC: 2026-09-07T04:16:11.612621+00:00
+Command: npm test --workspace client -- src/RootApp.test.tsx src/customer/customer-state.test.ts src/customer/useCustomerSession.test.tsx src/customer/CustomerWorkspace.test.tsx src/customerApi.test.ts src/studio/CreationPages.test.tsx src/studio/StudioWorkspace.test.tsx src/studio/PeoplePages.test.tsx src/studio/live.test.ts src/studio/state.test.ts src/CharacterSelection.test.tsx src/SourceFrameSelection.test.tsx src/FirstFrameSelection.test.tsx
+
+> @video-replica/client@0.1.16 test
+> vitest run src/RootApp.test.tsx src/customer/customer-state.test.ts src/customer/useCustomerSession.test.tsx src/customer/CustomerWorkspace.test.tsx src/customerApi.test.ts src/studio/CreationPages.test.tsx src/studio/StudioWorkspace.test.tsx src/studio/PeoplePages.test.tsx src/studio/live.test.ts src/studio/state.test.ts src/CharacterSelection.test.tsx src/SourceFrameSelection.test.tsx src/FirstFrameSelection.test.tsx
+
+
+ RUN  v4.1.10 /Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client
+
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+
+ Test Files  13 passed (13)
+      Tests  277 passed (277)
+   Start at  12:16:12
+   Duration  4.75s (transform 6.60s, setup 4.99s, import 7.88s, tests 8.47s, environment 21.64s)

@@ -1,0 +1,16 @@
+
+> @video-replica/client@0.1.16 test
+> vitest run src/RootApp.test.tsx src/customer/customer-state.test.ts src/customer/useCustomerSession.test.tsx src/customer/CustomerWorkspace.test.tsx src/customerApi.test.ts
+
+
+ RUN  v4.1.10 /Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client
+
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+
+ Test Files  5 passed (5)
+      Tests  80 passed (80)
+   Start at  12:04:03
+   Duration  2.36s (transform 2.05s, setup 803ms, import 2.35s, tests 2.17s, environment 2.99s)
