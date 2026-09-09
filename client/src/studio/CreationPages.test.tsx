@@ -301,9 +301,6 @@ function studio(
 describe("V1.4 创作页面", () => {
   beforeEach(() => {
     useStudio.mockReset();
-    replicaApi.rewriteProjectScript.mockReset();
-    replicaApi.waitForScriptRewriteTask.mockReset();
-    replicaApi.getLatestScriptRewriteTask.mockReset().mockResolvedValue(null);
     replicaLive.loadSavedScriptList.mockReset().mockResolvedValue([]);
     replicaApi.getAssetDownloadUrl.mockReset();
     replicaApi.selectCharacterReferences.mockReset();
