@@ -6,12 +6,12 @@
 | --- | --- |
 | 任务/工作包 | CW-007 补齐 PG 测试隔离、客户种子与缺库硬门 |
 | Owner / Reviewer | Owner：ZCode 代理（hlong026 会话，2026-09-09）；Reviewer：独立复核子代理（结论见 §6）+ PR review |
-| 分支 / 基线 SHA | `feat/customer-v3-cw007-pg-test-foundation` / 基线 `origin/main@b211095` |
+| 分支 / 基线 SHA | `feat/customer-v3-cw007-pg-test-foundation`；原始开发基线 `origin/main@b211095`，2026-09-09 rebase 整合到 `origin/main@ce40db5`（drift #100/#101/#102 前端+viral 收编后），整合提交 `e3613ad` |
 | 上游规格段落 | V3 清单 §4 CW-007；保留验收底线全部条目 |
-| 改动文件 | 新增 `server/tests/pg_test_kit.py`、`server/tests/test_pg_test_kit.py`（已登记文件映射 `docs/客户版代码开发清单-V3.md` CW-007 增量节）；迁移 28 个既有 PG 测试文件至硬门（清单见 §2；含独立评审 P0 指出的 test_internal_access_tokens.py）；`AGENTS.md` 验证口径同步 |
+| 改动文件 | 新增 `server/tests/pg_test_kit.py`、`server/tests/test_pg_test_kit.py`（已登记文件映射 `docs/客户版代码开发清单-V3.md` CW-007 增量节）；迁移 28 个既有 PG 测试文件至硬门（清单见 §2；含独立评审 P0 指出的 test_internal_access_tokens.py）；`AGENTS.md` 验证口径同步；**ce40db5 整合扩展**：`test_postgres_migrations.py` HEAD_REVISION 076→080 + `test_viral_refresh.py`（#102 新增）缺库 skip→硬门 |
 | 失败测试或回归锁定 | 新增 `test_pg_test_kit.py` 9 用例即本项回归；既有 27 套件在迁移前后均保持绿（§3） |
 | 实现结果 | §2 交付明细；§3 验证结果 |
-| 验证命令与通过数 | 见 §3（kit 9/9、迁移套件 798 用例 0 fail 0 skip、硬门行为 fail/skip 双模式验证） |
+| 验证命令与通过数 | 见 §3（原基线 kit 9/9、迁移套件 798 用例 0 fail 0 skip、硬门行为 fail/skip 双模式验证）+ §3.1 整合复验（ce40db5：专项 186 + 全量 `npm run check` server 2117 passed 0 failed / client 1247） |
 | 证据层级 | AUTOMATED_VERIFIED（真实 PG16 fixture 上执行） |
 | 安全与可观测性 | 测试库 allowlist 拒绝非测试库/系统库（postgres/template*），清理永远不会触碰业务库 |
 | 迁移与回滚 | 纯测试基建 + 文档；回滚 = revert 本分支，不影响生产行为 |
@@ -45,6 +45,19 @@
 | 硬门：显式 opt-in 可跳过 | 同上 + `VIDEO_REPLICA_TEST_ALLOW_PG_SKIP=1` | 12 skipped，退出码 0（开发者快速通道） |
 | 静态门 | `ruff check tests --fix`、`ruff format tests`、`py_compile` 全部改动文件 | 0 error |
 | 全量门禁 | `npm run check`（本任务唯一一次全量 pytest，2026-09-09 本地） | **1926 passed, 1 warning, 0 failed**（765.84s）；secret 扫描/client biome+tsc+vitest/e2e/tauri/ruff/mypy 全部通过，exit 0 |
+
+### 3.1 整合复验（rebase 到 ce40db5 后，2026-09-09 本地重跑，Node 24 + PG16 fixture）
+
+| 验证 | 命令/场景 | 结果 |
+| --- | --- | --- |
+| 冲突解决正确性 | `test_postgres_migrations.py`（HEAD_REVISION 076→080，9 处断言 + 模块级 autouse 硬门） | **24 passed** |
+| viral 整合扩展 | `test_viral_refresh.py`（#102 新增 PG 用例迁硬门，真实建库跑通非 skip） | **5 passed** |
+| kit rebase 后完好 | `test_pg_test_kit.py` | **9 passed** |
+| 自动合并重叠文件 | activation_code_schema + admin_dashboard + admin_session + customer_devices + sqlite_to_postgres | **148 passed** |
+| 静态门 | server `ruff check` / `ruff format --check` / `mypy app` | All passed / 289 formatted / 104 files no issues |
+| **全量门禁（ce40db5 基线）** | `npm run check`（Node 24，唯一一次全量 pytest，770.76s） | **server 2117 passed, 0 failed；client 1247 passed（78 files）；secret/biome/tsc/cargo fmt+check/ruff/mypy 全绿** |
+
+> 全量数字从原基线 1926→2117（+191）来自 ce40db5 相对 b211095 新增的 viral 模块与 fp 前端测试；CW-007 增量本身零回归。全仓 PG 缺库 skip 复扫为零（含 drift 新增文件 test_viral_refresh.py）。
 
 ## 4. 逐套件迁移清单（27 文件）
 
