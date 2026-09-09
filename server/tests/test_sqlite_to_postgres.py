@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from pg_test_kit import require_pg_or_explicit_skip
 
 from app import backup as backup_module
 from app.backup import create_readonly_snapshot
@@ -615,24 +616,19 @@ def test_migration_advisory_lock_fails_closed() -> None:
 
 
 DEFAULT_PG_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
-PG_SKIP = "PostgreSQL fixture not reachable; run scripts/pg-fixture.sh start"
 
 
 def _pg_dsn() -> str:
     return os.environ.get("TEST_POSTGRESQL_URL", DEFAULT_PG_DSN)
 
 
-def _pg_available() -> bool:
-    try:
-        import psycopg
-
-        with psycopg.connect(_pg_dsn(), connect_timeout=3) as conn:
-            return conn.execute("SELECT 1").fetchone()[0] == 1
-    except Exception:
-        return False
+pg_only = pytest.mark.usefixtures("pg_hard_gate")
 
 
-pg_only = pytest.mark.skipif(not _pg_available(), reason=PG_SKIP)
+@pytest.fixture(scope="module")
+def pg_hard_gate() -> None:
+    """CW-007 hard gate: unreachable PG fails the suite (explicit opt-in may skip)."""
+    require_pg_or_explicit_skip()
 
 
 def _admin_dsn() -> str:

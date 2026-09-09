@@ -25,6 +25,7 @@ from pathlib import Path
 
 import psycopg
 import pytest
+from pg_test_kit import require_pg_or_explicit_skip
 
 from app.activation_code_service import (
     ACTIVATION_CODE_HMAC_KEY_ENV,
@@ -53,7 +54,6 @@ from app.activation_code_service import (
 )
 
 DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
-SKIP_REASON = "PostgreSQL fixture not reachable; start it via scripts/pg-fixture.sh start"
 
 TEST_HMAC_KEY_V1 = secrets.token_urlsafe(48)  # str env value, never a real secret
 TEST_HMAC_KEY_V2 = secrets.token_urlsafe(48)
@@ -289,15 +289,6 @@ def test_export_aead_key_resolution() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _pg_available(dsn: str) -> bool:
-    try:
-        conn = psycopg.connect(dsn, connect_timeout=3)
-        conn.close()
-    except Exception:
-        return False
-    return True
-
-
 T11_DB_NAME = "t11_activation_code_service"
 
 
@@ -319,8 +310,7 @@ def service_pg_dsn() -> Iterator[str]:
     from alembic import command
     from alembic.config import Config
 
-    if not _pg_available(_pg_dsn()):
-        pytest.skip(SKIP_REASON)
+    require_pg_or_explicit_skip(_pg_dsn())
     with psycopg.connect(_admin_dsn(), autocommit=True) as conn:
         conn.execute(f'DROP DATABASE IF EXISTS "{T11_DB_NAME}" WITH (FORCE)')
         conn.execute(f'CREATE DATABASE "{T11_DB_NAME}"')

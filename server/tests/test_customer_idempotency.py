@@ -22,6 +22,7 @@ from pathlib import Path
 
 import psycopg
 import pytest
+from pg_test_kit import require_pg_or_explicit_skip
 
 from app.customer_idempotency import (
     CUSTOMER_IDEMPOTENCY_AEAD_KEY_ENV,
@@ -35,7 +36,6 @@ from app.customer_idempotency import (
 )
 
 DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
-SKIP_REASON = "PostgreSQL fixture not reachable; start it via scripts/pg-fixture.sh start"
 
 ENVELOPES_TABLE = "customer_idempotency_envelopes"
 
@@ -197,7 +197,7 @@ def envelope_dsn() -> str:
         # Only the database-bound cases skip — the module-level units and the
         # missing-DSN CLI case must always run, or a machine without the
         # fixture reports a vacuous all-green (session review P3).
-        pytest.skip(SKIP_REASON)
+        require_pg_or_explicit_skip()
     from alembic import command
     from alembic.config import Config
 

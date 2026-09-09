@@ -22,6 +22,7 @@ from unittest.mock import Mock
 import psycopg
 import pytest
 from fastapi import HTTPException, Request
+from pg_test_kit import require_pg_or_explicit_skip
 from psycopg_pool import ConnectionPool
 
 from app.db_pg import (
@@ -39,18 +40,6 @@ from app.db_pg import (
 )
 
 DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
-
-
-def _pg_available(dsn: str) -> bool:
-    try:
-        # ``asyncio.wait_for(run_in_executor(...))`` cannot cancel a blocked
-        # libpq thread, so an unavailable fixture delayed collection by the
-        # driver's full default timeout. Bound the connection itself instead.
-        with psycopg.connect(dsn, connect_timeout=3):
-            pass
-    except Exception:
-        return False
-    return True
 
 
 PG_DSN = os.environ.get("TEST_POSTGRESQL_URL", DEFAULT_DSN)
@@ -390,9 +379,13 @@ def test_non_production_allows_sqlite() -> None:
 # Pool / transactions / server time (require the PG fixture)
 # ---------------------------------------------------------------------------
 
-pytestmark_pg = pytest.mark.skipif(
-    not _pg_available(PG_DSN), reason="PostgreSQL fixture not reachable"
-)
+pytestmark_pg = pytest.mark.usefixtures("pg_hard_gate")
+
+
+@pytest.fixture(scope="module")
+def pg_hard_gate() -> None:
+    """CW-007 hard gate: unreachable PG fails the suite (explicit opt-in may skip)."""
+    require_pg_or_explicit_skip()
 
 
 @pytestmark_pg
@@ -755,10 +748,7 @@ def test_pool_min_is_capped_at_the_hard_ceiling() -> None:
     assert (pool_min, pool_max) == (64, 64)
 
 
-@pytest.mark.skipif(
-    not _pg_available(PG_DSN),
-    reason="PostgreSQL fixture not available",
-)
+@pytest.mark.usefixtures("pg_hard_gate")
 def test_check_pg_ready_redacts_dsn_credentials() -> None:
     """PgReadyInfo.dsn must never carry the password (M1 review LOW)."""
     with _env(**{DATABASE_URL_ENV: PG_DSN}):

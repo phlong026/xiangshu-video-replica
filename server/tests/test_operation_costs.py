@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import psycopg
 import pytest
+from pg_test_kit import require_pg_or_explicit_skip
 
 from app.db_portable import BusinessConnection
 from app.operation_costs import (
@@ -176,7 +177,7 @@ def cost_dsn() -> Iterator[str]:
         with psycopg.connect(_dsn(), connect_timeout=3):
             pass
     except Exception:
-        pytest.skip("PostgreSQL fixture is not available")
+        require_pg_or_explicit_skip()
 
     admin_dsn = _database_dsn("postgres")
     target_dsn = _database_dsn(DB_NAME)

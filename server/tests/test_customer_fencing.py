@@ -45,6 +45,7 @@ import psycopg
 import pytest
 from fastapi import Depends, FastAPI, Request
 from fastapi.testclient import TestClient
+from pg_test_kit import require_pg_or_explicit_skip
 
 from app.activation_code_service import (
     ACTIVATION_CODE_HMAC_KEY_ENV,
@@ -54,7 +55,6 @@ from app.db_pg import DATABASE_URL_ENV, close_pg_pool
 from app.db_portable import BusinessConnection
 
 DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
-SKIP_REASON = "PostgreSQL fixture not reachable; start it via scripts/pg-fixture.sh start"
 
 T20_FENCING_DB_NAME = "t20_customer_fencing_test"
 
@@ -87,22 +87,12 @@ def _fencing_dsn() -> str:
     return _pg_dsn().rsplit("/", 1)[0] + f"/{T20_FENCING_DB_NAME}"
 
 
-def _pg_available(dsn: str) -> bool:
-    try:
-        conn = psycopg.connect(dsn, connect_timeout=3)
-        conn.close()
-    except Exception:
-        return False
-    return True
-
-
 @pytest.fixture(scope="module")
 def fencing_dsn() -> Iterator[str]:
     from alembic import command
     from alembic.config import Config
 
-    if not _pg_available(_pg_dsn()):
-        pytest.skip(SKIP_REASON)
+    require_pg_or_explicit_skip(_pg_dsn())
     with psycopg.connect(_admin_dsn(), autocommit=True) as conn:
         conn.execute(f'DROP DATABASE IF EXISTS "{T20_FENCING_DB_NAME}" WITH (FORCE)')
         conn.execute(f'CREATE DATABASE "{T20_FENCING_DB_NAME}"')

@@ -22,9 +22,13 @@ from typing import Any
 import asyncpg  # type: ignore[import-untyped]
 import psycopg
 import pytest
+from pg_test_kit import require_pg_or_explicit_skip
 
 DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
-SKIP_REASON = "PostgreSQL fixture not reachable; start it via scripts/pg-fixture.sh start"
+# PR#103(df7020c) 引入 pg_test_kit.require_pg_or_explicit_skip 模块级 autouse fixture，
+# 取代旧的 SKIP_REASON 常量（已无引用，随 main 基线删除）。
+# HEAD_REVISION 取本分支链尾 081：本分支 = main(→080) + 人物库线 081_oral_unit_price，
+# 迁移后 alembic 版本头即 081，9 处 assert version == HEAD_REVISION 依赖此值。
 HEAD_REVISION = "081_oral_unit_price"
 
 
@@ -126,23 +130,9 @@ def _pg_dsn() -> str:
     return os.environ.get("TEST_POSTGRESQL_URL", DEFAULT_DSN)
 
 
-def _pg_available(dsn: str) -> bool:
-    try:
-
-        async def probe() -> None:
-            conn = await asyncpg.connect(dsn)
-            await conn.close()
-
-        asyncio.run(asyncio.wait_for(probe(), timeout=3))
-    except Exception:
-        return False
-    return True
-
-
-pytestmark = pytest.mark.skipif(
-    not _pg_available(_pg_dsn()),
-    reason=SKIP_REASON,
-)
+@pytest.fixture(scope="module", autouse=True)
+def _require_pg() -> None:
+    require_pg_or_explicit_skip(_pg_dsn())
 
 
 def _run(coro_fn: Callable[[], Coroutine[Any, Any, None]]) -> None:

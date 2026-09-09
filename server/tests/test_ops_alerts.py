@@ -9,20 +9,13 @@ from pathlib import Path
 
 import psycopg
 import pytest
+from pg_test_kit import require_pg_or_explicit_skip
 
 DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 
 
 def _pg_dsn() -> str:
     return os.environ.get("TEST_POSTGRESQL_URL", DEFAULT_DSN)
-
-
-def _pg_available(dsn: str) -> bool:
-    try:
-        with psycopg.connect(dsn, connect_timeout=3):
-            return True
-    except Exception:
-        return False
 
 
 def test_cluster_probe_covers_the_frozen_alert_surface(
@@ -310,8 +303,7 @@ def test_advisory_lock_loss_skips_without_collecting_or_publishing(
 
 
 def test_all_cluster_queries_execute_on_a_fresh_pg16_database(tmp_path: Path) -> None:
-    if not _pg_available(_pg_dsn()):
-        pytest.skip("PostgreSQL fixture not reachable")
+    require_pg_or_explicit_skip(_pg_dsn())
 
     from alembic import command
     from alembic.config import Config

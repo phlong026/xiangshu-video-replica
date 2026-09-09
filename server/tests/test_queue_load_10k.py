@@ -35,13 +35,13 @@ os.environ.setdefault(
 
 import psycopg
 import pytest
+from pg_test_kit import require_pg_or_explicit_skip
 
 from app.db_pg import DATABASE_URL_ENV, close_pg_pool, pg_transaction
 from app.db_portable import BusinessConnection
 from app.generation import acquire_generation_task_lease, release_user_queue_slot_for_task
 
 DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
-SKIP_REASON = "PostgreSQL fixture not reachable; start it via scripts/pg-fixture.sh start"
 
 T27_DB_NAME = "t27_queue_load_test"
 
@@ -72,15 +72,6 @@ def _t27_dsn() -> str:
     return _pg_dsn().rsplit("/", 1)[0] + f"/{T27_DB_NAME}"
 
 
-def _pg_available(dsn: str) -> bool:
-    try:
-        conn = psycopg.connect(dsn, connect_timeout=3)
-        conn.close()
-    except Exception:
-        return False
-    return True
-
-
 # ---------------------------------------------------------------------------
 # PostgreSQL integration (dedicated migrated fixture database)
 # ---------------------------------------------------------------------------
@@ -91,8 +82,7 @@ def t27_dsn() -> Iterator[str]:
     from alembic import command
     from alembic.config import Config
 
-    if not _pg_available(_pg_dsn()):
-        pytest.skip(SKIP_REASON)
+    require_pg_or_explicit_skip(_pg_dsn())
     with psycopg.connect(_admin_dsn(), autocommit=True) as conn:
         conn.execute(f'DROP DATABASE IF EXISTS "{T27_DB_NAME}" WITH (FORCE)')
         conn.execute(f'CREATE DATABASE "{T27_DB_NAME}"')
