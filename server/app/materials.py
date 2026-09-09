@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -20,12 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.auth import CurrentUser
 from app.db_portable import BusinessConnection
 from app.media import MAX_UPLOAD_BYTES, UPLOAD_INTENT_EXPIRES_IN
-from app.media_tools import (
-    MediaToolFailed,
-    MediaToolUnavailable,
-    MediaValidationFailed,
-    inspect_media_bytes,
-)
+from app.media_tools import probe_duration_seconds, resolve_media_binary
 from app.permissions import require_asset_access, require_not_auditor, write_audit
 from app.storage import (
     StorageAdapter,
@@ -38,6 +34,7 @@ MaterialMediaType = Literal["image", "video", "audio"]
 MaterialSource = Literal["upload", "project", "character", "oral", "generation"]
 MaterialStatus = Literal["uploading", "ready", "unavailable"]
 MaterialDelivery = Literal["stored", "direct"]
+AudioPurpose = Literal["oral_audio", "voice_clone"]
 
 IMAGE_UPLOAD_LIMIT = 10 * 1024 * 1024
 ALLOWED_UPLOADS: dict[tuple[str, str], tuple[MaterialMediaType, str]] = {
@@ -52,13 +49,6 @@ ASSET_KIND_FOR_MEDIA: dict[MaterialMediaType, str] = {
     "image": "material_image",
     "video": "material_video",
     "audio": "material_audio",
-}
-MEDIA_SUFFIX_FOR_CONTENT_TYPE = {
-    "image/jpeg": ".jpg",
-    "image/png": ".png",
-    "audio/mpeg": ".mp3",
-    "video/mp4": ".mp4",
-    "video/quicktime": ".mov",
 }
 
 
@@ -112,6 +102,8 @@ class MaterialUploadIntentRequest(BaseModel):
     sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     title: str | None = Field(default=None, min_length=1, max_length=120)
     group: str | None = Field(default=None, min_length=1, max_length=80)
+    audio_purpose: AudioPurpose | None = None
+    duration_seconds: float | None = Field(default=None, gt=0)
 
 
 class MaterialUploadIntentResponse(BaseModel):
@@ -144,6 +136,8 @@ class PreparedMaterialUpload:
     content_type: str
     requested_size_bytes: int
     expected_sha256: str | None
+    audio_purpose: AudioPurpose | None = None
+    requested_duration_seconds: float | None = None
 
 
 @dataclass(frozen=True)
@@ -152,7 +146,7 @@ class ProbedMaterialUpload:
     storage_uri: str
     sha256: str
     size_bytes: int
-    duration_seconds: float | None
+    duration_seconds: float | None = None
 
 
 def material_error(status: int, code: str, message: str) -> HTTPException:
@@ -182,6 +176,51 @@ def validate_upload_request(
     if size_bytes > limit:
         raise material_error(413, "MATERIAL_TOO_LARGE", "素材文件超过允许大小。")
     return media_type, safe_suffix
+
+
+def validate_audio_contract(
+    *,
+    media_type: MaterialMediaType,
+    audio_purpose: AudioPurpose | None,
+    duration_seconds: float | None,
+) -> None:
+    if media_type != "audio":
+        if audio_purpose is not None or duration_seconds is not None:
+            raise material_error(
+                422,
+                "MATERIAL_AUDIO_PURPOSE_INVALID",
+                "非音频素材不能声明音频用途或时长。",
+            )
+        return
+    if audio_purpose is None:
+        raise material_error(
+            422,
+            "MATERIAL_AUDIO_PURPOSE_REQUIRED",
+            "音频素材必须声明完整口播或声音克隆用途。",
+        )
+    if duration_seconds is None:
+        raise material_error(
+            422,
+            "MATERIAL_AUDIO_DURATION_REQUIRED",
+            "音频用途素材必须提供可验证时长。",
+        )
+    if audio_purpose == "voice_clone" and not 5 <= duration_seconds <= 180:
+        raise material_error(
+            422,
+            "MATERIAL_AUDIO_DURATION_INVALID",
+            "声音克隆样本时长必须为 5–180 秒。",
+        )
+
+
+def probe_audio_duration(content: bytes) -> float | None:
+    try:
+        ffprobe = resolve_media_binary("ffprobe")
+        with tempfile.NamedTemporaryFile(suffix=".mp3") as audio_file:
+            audio_file.write(content)
+            audio_file.flush()
+            return probe_duration_seconds(ffprobe, Path(audio_file.name))
+    except (OSError, RuntimeError):
+        return None
 
 
 def _candidate_cte() -> str:
@@ -425,7 +464,17 @@ def material_item(row: Any) -> MaterialItem:
         if media_type == "image":
             uses = ["original_frame", "first_frame", "tail_frame", "reference"]
         elif media_type == "audio":
-            uses = ["oral_audio", "reference"]
+            purpose = metadata.get("audio_purpose")
+            duration = _duration(metadata)
+            duration_valid = duration is not None and duration > 0
+            if purpose == "voice_clone" and duration is not None:
+                duration_valid = 5 <= duration <= 180
+            if (
+                purpose in {"oral_audio", "voice_clone"}
+                and duration_valid
+                and metadata.get("audio_duration_verified") is True
+            ):
+                uses = [purpose]
         elif media_type == "video":
             uses = ["reference"]
     actions = ["preview"] if ready else []
@@ -559,6 +608,11 @@ def create_material_upload_intent(
         content_type=request.content_type,
         size_bytes=request.size_bytes,
     )
+    validate_audio_contract(
+        media_type=media_type,
+        audio_purpose=request.audio_purpose,
+        duration_seconds=request.duration_seconds,
+    )
     asset_id = str(uuid4())
     object_key = f"materials/{actor.id}/{asset_id}/original{safe_suffix}"
     intent = storage.create_upload_intent(
@@ -575,6 +629,9 @@ def create_material_upload_intent(
         "expected_sha256": request.sha256,
         "intent_expires_at": intent.expires_at.isoformat(),
     }
+    if request.audio_purpose is not None:
+        metadata["audio_purpose"] = request.audio_purpose
+        metadata["duration_seconds"] = request.duration_seconds
     storage_uri = f"{storage.provider}://{storage.bucket}/{intent.key}"
     with conn:
         conn.execute(
@@ -663,6 +720,16 @@ def prepare_material_upload(
         expected_sha256=(
             str(metadata["expected_sha256"]) if metadata.get("expected_sha256") else None
         ),
+        audio_purpose=(
+            cast(AudioPurpose, metadata["audio_purpose"])
+            if metadata.get("audio_purpose") in {"oral_audio", "voice_clone"}
+            else None
+        ),
+        requested_duration_seconds=(
+            float(metadata["duration_seconds"])
+            if isinstance(metadata.get("duration_seconds"), (int, float))
+            else None
+        ),
     )
 
 
@@ -682,20 +749,20 @@ def probe_material_upload(
         content = storage.get_object(prepared.storage_key)
     except OSError as exc:
         raise StorageBackendUnavailable("material object read failed") from exc
-    try:
-        inspection = inspect_media_bytes(
-            content,
-            suffix=MEDIA_SUFFIX_FOR_CONTENT_TYPE[prepared.content_type],
-            expected_type=prepared.media_type,
-        )
-    except MediaValidationFailed:
+    if not _content_matches(prepared.media_type, content):
         raise material_error(422, "MATERIAL_CONTENT_INVALID", "文件内容与素材类型不匹配。")
-    except (MediaToolFailed, MediaToolUnavailable) as exc:
-        raise material_error(
-            503,
-            "MATERIAL_VALIDATION_UNAVAILABLE",
-            "素材校验服务暂不可用，请稍后重试。",
-        ) from exc
+    duration_seconds = None
+    if prepared.media_type == "audio" and prepared.audio_purpose is not None:
+        duration_seconds = probe_audio_duration(content)
+        if duration_seconds is None:
+            raise material_error(422, "MATERIAL_AUDIO_INVALID", "无法读取音频时长。")
+        requested_duration = prepared.requested_duration_seconds
+        if requested_duration is None or abs(duration_seconds - requested_duration) > 1:
+            raise material_error(
+                422,
+                "MATERIAL_AUDIO_DURATION_MISMATCH",
+                "音频实际时长与上传声明不一致。",
+            )
     digest = hashlib.sha256(content).hexdigest()
     if prepared.expected_sha256 and digest != prepared.expected_sha256:
         raise material_error(409, "MATERIAL_HASH_MISMATCH", "上传文件校验失败。")
@@ -704,7 +771,7 @@ def probe_material_upload(
         storage_uri=stored.uri,
         sha256=digest,
         size_bytes=stored.size,
-        duration_seconds=inspection.duration_seconds,
+        duration_seconds=duration_seconds,
     )
 
 
@@ -722,9 +789,14 @@ def persist_material_upload(
     ).fetchone()
     metadata = _metadata(row["metadata_json"] if row is not None else "{}")
     metadata["upload_status"] = "READY"
-    metadata["media_validated"] = True
     if probed.duration_seconds is not None:
         metadata["duration_seconds"] = probed.duration_seconds
+        metadata["audio_duration_verified"] = True
+        validate_audio_contract(
+            media_type="audio",
+            audio_purpose=metadata.get("audio_purpose"),
+            duration_seconds=probed.duration_seconds,
+        )
     with conn:
         conn.execute(
             """
@@ -746,11 +818,7 @@ def persist_material_upload(
             action="studio.material.upload_complete",
             entity_type="asset",
             entity_id=prepared.asset_id,
-            metadata={
-                "media_type": prepared.media_type,
-                "size_bytes": probed.size_bytes,
-                "duration_seconds": probed.duration_seconds,
-            },
+            metadata={"media_type": prepared.media_type, "size_bytes": probed.size_bytes},
             commit=False,
         )
         result = require_material(conn, actor=actor, material_id=f"asset:{prepared.asset_id}")
@@ -886,3 +954,13 @@ def _upsert_preference(
         """,
         (actor_id, source_type, source_id, title, group, 1 if hidden else 0),
     )
+
+
+def _content_matches(media_type: MaterialMediaType, content: bytes) -> bool:
+    if media_type == "image":
+        return content.startswith(b"\x89PNG\r\n\x1a\n") or content.startswith(b"\xff\xd8\xff")
+    if media_type == "audio":
+        return content.startswith(b"ID3") or (
+            len(content) >= 2 and content[0] == 0xFF and content[1] & 0xE0 == 0xE0
+        )
+    return len(content) >= 12 and content[4:8] == b"ftyp"

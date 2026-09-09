@@ -1,0 +1,47 @@
+{
+  "time": "2026-09-07T04:17:09.589Z",
+  "sha256": "2a88339203dba7a0a36e7f2e44ca241ded61fa7599749c123d9d1097410a34fc",
+  "note": "Actual exported pure function; no API or DB calls.",
+  "initial": {
+    "projectId": "project-a",
+    "ipId": "person-a",
+    "imageId": "look-a",
+    "firstFrameId": "frame-a",
+    "firstFrameSelectionVersionId": "selection-a",
+    "frameConfirmed": true,
+    "tailFrameId": "tail-a",
+    "referenceIds": [
+      "ref-a"
+    ],
+    "videoBatchId": "batch-a",
+    "prompt": "prompt-a"
+  },
+  "projectChanged": {
+    "projectId": "project-b",
+    "ipId": "person-a",
+    "imageId": "look-a",
+    "firstFrameId": null,
+    "firstFrameSelectionVersionId": null,
+    "frameConfirmed": false,
+    "tailFrameId": "tail-a",
+    "referenceIds": [
+      "ref-a"
+    ],
+    "videoBatchId": "batch-a",
+    "prompt": ""
+  },
+  "personChanged": {
+    "projectId": "project-a",
+    "ipId": "person-b",
+    "imageId": "look-a",
+    "firstFrameId": null,
+    "firstFrameSelectionVersionId": null,
+    "frameConfirmed": false,
+    "tailFrameId": "tail-a",
+    "referenceIds": [
+      "ref-a"
+    ],
+    "videoBatchId": "batch-a",
+    "prompt": "prompt-a"
+  }
+}

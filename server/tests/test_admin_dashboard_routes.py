@@ -242,6 +242,60 @@ def test_dashboard_summary_counts(admin_headers: dict[str, str], client: TestCli
     assert today_trend[0]["cost_fen"] == 0
 
 
+def test_failed_todo_counts_oral_failures_when_no_video_failed(
+    admin_headers: dict[str, str], client: TestClient, dashboard_pg_dsn: str
+) -> None:
+    with psycopg.connect(dashboard_pg_dsn, autocommit=True) as conn:
+        conn.execute("UPDATE generation_tasks SET status = 'SUCCEEDED' WHERE id = 't_bad'")
+        conn.execute(
+            """
+            INSERT INTO person_identities (
+                id, owner_user_id, display_name, authorization_status,
+                source_quality_status, status, created_by
+            ) VALUES (
+                'dashboard-oral-identity', 'cust_1', '口播人物',
+                'AUTHORIZED', 'PASSED', 'ACTIVE', 'cust_1'
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO oral_avatars (
+                id, identity_id, owner_user_id, title, status,
+                source_kind, source_asset_id
+            ) VALUES (
+                'dashboard-oral-avatar', 'dashboard-oral-identity', 'cust_1',
+                '口播分身', 'READY', 'IMAGE', 'dashboard-source'
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO oral_tasks (
+                id, owner_user_id, identity_id, avatar_id, mode, title,
+                status, estimated_cost_fen, error_message, idempotency_key,
+                request_hash, submission_state, provider_charge_state
+            ) VALUES (
+                'dashboard-oral-failed', 'cust_1', 'dashboard-oral-identity',
+                'dashboard-oral-avatar', 'TTS', '失败口播', 'FAILED', 350,
+                '数字人服务生成失败', 'dashboard-oral-failed-key',
+                'dashboard-oral-failed-hash', 'FAILED', 'NOT_CHARGED'
+            )
+            """
+        )
+    try:
+        response = client.get("/api/control/dashboard/summary", headers=admin_headers)
+
+        assert response.status_code == 200, response.text
+        assert response.json()["todos"]["failed_tasks_7d"] == 1
+    finally:
+        with psycopg.connect(dashboard_pg_dsn, autocommit=True) as conn:
+            conn.execute("DELETE FROM oral_tasks WHERE id = 'dashboard-oral-failed'")
+            conn.execute("DELETE FROM oral_avatars WHERE id = 'dashboard-oral-avatar'")
+            conn.execute("DELETE FROM person_identities WHERE id = 'dashboard-oral-identity'")
+            conn.execute("UPDATE generation_tasks SET status = 'FAILED' WHERE id = 't_bad'")
+
+
 def test_dashboard_day_expressions_ignore_database_session_timezone(
     dashboard_pg_dsn: str,
 ) -> None:

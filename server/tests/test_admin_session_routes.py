@@ -157,6 +157,10 @@ def route_state(sessions_dsn: str) -> Iterator[str]:
             "activation_code_deliveries, activation_code_exports, activation_codes, "
             "activation_code_batches, admin_write_idempotency, admin_sessions, "
             "wallet_transactions, recharge_orders, wallets, users, "
+            "viral_refresh_tasks, viral_media_preparations, viral_import_tasks, "
+            "viral_video_favorites, "
+            "viral_video_visibility, "
+            "viral_videos, "
             "security_rate_limit_counters, security_auth_failures CASCADE"
         )
         conn.execute("SET session_replication_role = DEFAULT")
@@ -171,6 +175,15 @@ def route_state(sessions_dsn: str) -> Iterator[str]:
             "('admin_u', 'admin_u', 'Admin User', 'admin'), "
             "('auditor_u', 'auditor_u', 'Auditor User', 'auditor'), "
             "('customer_u', 'customer_u', 'Customer User', 'user')"
+        )
+        conn.execute(
+            "INSERT INTO viral_runtime_controls (id, collection_enabled, import_enabled) "
+            "VALUES (1, 1, 1) ON CONFLICT (id) DO UPDATE SET "
+            "collection_enabled = 1, import_enabled = 1, updated_by_user_id = NULL"
+        )
+        conn.execute(
+            "INSERT INTO viral_videos (platform, video_id, title, published_at) "
+            "VALUES ('douyin', 'admin-video/opaque=id', '后台下架测试', 1788700000)"
         )
         _seed_customer_with_session(conn)
     yield sessions_dsn
@@ -530,6 +543,62 @@ def test_auditor_cannot_flip_queue_mode(client: TestClient):
     denied = _queue_mode_write(client, headers, True)
     assert denied.status_code == 403
     assert denied.json()["detail"]["code"] == "AUDITOR_READ_ONLY"
+
+
+@pytest.mark.pg
+def test_admin_controls_viral_runtime_and_video_availability(
+    client: TestClient, route_state: str
+) -> None:
+    headers = _admin_session(client)
+    initial = client.get("/api/control/settings/viral", headers=headers)
+    assert initial.status_code == 200, initial.text
+    assert initial.json()["collection_enabled"] is True
+    assert initial.json()["import_enabled"] is True
+    assert initial.json()["source_configured"] is False
+    assert initial.json()["pending_refreshes"] == 0
+    assert initial.json()["platforms"][0]["refresh_status"] == "not_configured"
+
+    controls = client.patch(
+        "/api/control/settings/viral",
+        headers={**headers, "Idempotency-Key": "viral-controls-off"},
+        json={
+            "collection_enabled": False,
+            "import_enabled": False,
+            "confirm": True,
+            "reason": "上游异常熊断",
+        },
+    )
+    assert controls.status_code == 200, controls.text
+    assert controls.json()["collection_enabled"] is False
+    assert controls.json()["import_enabled"] is False
+
+    hidden = client.patch(
+        "/api/control/viral/videos/douyin/admin-video%2Fopaque%3Did/availability",
+        headers={**headers, "Idempotency-Key": "viral-hide-one"},
+        json={"status": "HIDDEN", "confirm": True, "reason": "源视频已下架"},
+    )
+    assert hidden.status_code == 200, hidden.text
+    assert hidden.json() == {
+        "platform": "douyin",
+        "video_id": "admin-video/opaque=id",
+        "status": "HIDDEN",
+    }
+
+    with psycopg.connect(route_state) as conn:
+        stored = conn.execute(
+            "SELECT collection_enabled, import_enabled FROM viral_runtime_controls WHERE id = 1"
+        ).fetchone()
+        visibility = conn.execute(
+            "SELECT status, reason FROM viral_video_visibility "
+            "WHERE platform = 'douyin' AND video_id = 'admin-video/opaque=id'"
+        ).fetchone()
+        audits = conn.execute(
+            "SELECT count(*) FROM audit_logs WHERE action IN "
+            "('viral_runtime.update', 'viral_video.availability_update')"
+        ).fetchone()
+    assert tuple(stored) == (0, 0)
+    assert tuple(visibility) == ("HIDDEN", "源视频已下架")
+    assert audits[0] == 2
 
 
 @pytest.mark.pg

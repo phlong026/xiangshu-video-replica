@@ -2,6 +2,7 @@ import { type ComponentProps, useState } from "react";
 import { AnalysisWorkspace } from "../AnalysisWorkspace";
 import type { WorkspaceShell } from "../App";
 import type { CurrentUser, GenerationBatch, Project } from "../api";
+import { CharacterLibrary } from "../CharacterLibrary";
 import { CustomerProfilePanel } from "../customer/CustomerProfilePanel";
 import { CustomerRechargeDialog } from "../customer/CustomerRechargeDialog";
 import { CustomerWalletPanel } from "../customer/CustomerWalletPanel";
@@ -23,6 +24,7 @@ export function LiveWorkspacePanel({
   customerWallet,
   project,
   characterIdentityId,
+  characterInitialTab = "base",
   handoffBatch = null,
   onClose,
   onBusyChange,
@@ -37,6 +39,7 @@ export function LiveWorkspacePanel({
   customerWallet?: CustomerWallet;
   project?: Project;
   characterIdentityId?: string;
+  characterInitialTab?: "base" | "scenes";
   handoffBatch?: GenerationBatch | null;
   onClose: () => void;
   onBusyChange: (busy: boolean) => void;
@@ -124,6 +127,14 @@ export function LiveWorkspacePanel({
           />
         )
       ) : null}
+      {panel === "characters" ? (
+        <CharacterLibrary
+          initialIdentityId={characterIdentityId}
+          initialTab={characterInitialTab}
+          userId={currentUser.id}
+          userRole={currentUser.role}
+        />
+      ) : null}
       {panel === "tasks" ? (
         <TaskRecordsPanel
           currentUserId={currentUser.id}
@@ -133,11 +144,11 @@ export function LiveWorkspacePanel({
         />
       ) : null}
       {panel === "wallet" ? (
-        customerWallet ? (
+        customerSession ? (
           <CustomerWalletPanel
             key={walletRefreshKey}
-            store={customerWallet.store}
-            onSessionExpired={customerWallet.onSessionExpired}
+            store={customerSession.store}
+            onSessionExpired={customerSession.onSessionExpired}
             onRechargeRequested={(amountYuan) => openRecharge(amountYuan)}
           />
         ) : (
@@ -152,6 +163,8 @@ export function LiveWorkspacePanel({
           onDismissPairing={customerAccount.onDismissPairing}
           onManualHeartbeat={customerAccount.onManualHeartbeat}
           onProfileUpdated={customerAccount.onProfileUpdated}
+          onRefreshProfile={customerAccount.onRefreshProfile}
+          onLogout={customerAccount.onLogout}
           onRecharge={(amountYuan) => openRecharge(amountYuan)}
           onRefreshDevices={customerAccount.onRefreshDevices}
           onResetActivationCode={customerAccount.onResetActivationCode}
@@ -159,6 +172,7 @@ export function LiveWorkspacePanel({
           onUnbind={customerAccount.onUnbind}
           onUpdateProfile={customerAccount.onUpdateProfile}
           profile={customerAccount.profile}
+          profileLoadError={customerAccount.profileLoadError}
           sessionRuntime={customerAccount.sessionRuntime}
           store={customerAccount.store}
           walletRefreshKey={walletRefreshKey}

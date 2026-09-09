@@ -276,10 +276,12 @@ export function Media({
   asset,
   alt,
   className = "",
+  onError,
 }: {
   asset?: StudioAsset;
   alt: string;
   className?: string;
+  onError?: (failedUrl?: string) => void;
 }) {
   const [failedSource, setFailedSource] = useState<string>();
   if (!asset)
@@ -294,7 +296,12 @@ export function Media({
       <div className={`studio-media studio-media--audio ${className}`}>
         <Waveform />
         {asset.url ? (
-          <audio controls src={asset.url} aria-label={alt}>
+          <audio
+            controls
+            src={asset.url}
+            aria-label={alt}
+            onError={() => onError?.(asset.url)}
+          >
             <track kind="captions" />
           </audio>
         ) : (
@@ -311,6 +318,7 @@ export function Media({
         src={asset.url}
         poster={asset.poster}
         aria-label={alt}
+        onError={() => onError?.(asset.url)}
       >
         <track kind="captions" />
       </video>
@@ -323,7 +331,10 @@ export function Media({
         <img
           src={src}
           alt={alt}
-          onError={() => setFailedSource(src)}
+          onError={() => {
+            setFailedSource(src);
+            onError?.(src);
+          }}
           loading="lazy"
         />
       ) : (

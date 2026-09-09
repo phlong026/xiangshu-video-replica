@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from app import viral_media
 from app.storage import LocalStorageAdapter
 from app.viral_decrypt import keystream
 from app.viral_media import (
@@ -407,3 +408,208 @@ def test_url_fetcher_rejects_non_public_targets() -> None:
     ):
         with pytest.raises(ViralMediaError):
             fetcher.fetch(url)
+
+
+def test_url_fetcher_rejects_redirect_to_private_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def resolve(host: str, *args: Any, **kwargs: Any):
+        ip = "93.184.216.34" if host == "cdn.example.com" else "127.0.0.1"
+        return [(2, 1, 6, "", (ip, 443))]
+
+    monkeypatch.setattr(viral_media.socket, "getaddrinfo", resolve)
+    with pytest.raises(ViralMediaError, match="公网"):
+        UrlFetcher(
+            connection_factory=lambda *args: _PinnedConnection(
+                _PinnedResponse(302, location="https://private.example/internal")
+            )
+        ).fetch("https://cdn.example.com/video.mp4")
+
+
+class _PinnedResponse:
+    def __init__(self, status: int, *, body: bytes = b"video", location: str | None = None):
+        self.status = status
+        self._body = body
+        self._read = False
+        self.headers = {"Content-Type": "video/mp4"}
+        if location is not None:
+            self.headers["Location"] = location
+
+    def read(self, _size: int = -1) -> bytes:
+        if self._read:
+            return b""
+        self._read = True
+        return self._body
+
+
+class _PinnedConnection:
+    def __init__(self, response: _PinnedResponse):
+        self.response = response
+        self.requests: list[tuple[str, str, dict[str, str]]] = []
+
+    def request(self, method: str, target: str, *, headers: dict[str, str]) -> None:
+        self.requests.append((method, target, headers))
+
+    def getresponse(self) -> _PinnedResponse:
+        return self.response
+
+    def close(self) -> None:
+        pass
+
+
+def test_url_fetcher_pins_validated_ip_against_dns_rebinding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dns_answers = iter(("93.184.216.34", "127.0.0.1"))
+    dns_calls: list[str] = []
+
+    def resolve(host: str, *args: Any, **kwargs: Any):
+        dns_calls.append(host)
+        ip = next(dns_answers)
+        return [(2, 1, 6, "", (ip, 443))]
+
+    connections: list[tuple[str, str, int, str]] = []
+
+    def connect(scheme: str, host: str, port: int, ip: str, timeout: float):
+        connections.append((scheme, host, port, ip))
+        # A normal hostname connection would now resolve to private loopback.
+        assert resolve(host)[0][4][0] == "127.0.0.1"
+        return _PinnedConnection(_PinnedResponse(200))
+
+    monkeypatch.setattr(viral_media.socket, "getaddrinfo", resolve)
+    fetcher = UrlFetcher(connection_factory=connect)
+
+    assert fetcher.fetch("https://media.example/video.mp4") == b"video"
+    assert dns_calls == ["media.example", "media.example"]
+    assert connections == [("https", "media.example", 443, "93.184.216.34")]
+
+
+def test_url_fetcher_revalidates_and_pins_each_redirect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    answers = {
+        "first.example": "93.184.216.34",
+        "second.example": "93.184.216.35",
+    }
+
+    def resolve(host: str, *args: Any, **kwargs: Any):
+        return [(2, 1, 6, "", (answers[host], 443))]
+
+    responses = iter(
+        (
+            _PinnedResponse(302, location="https://second.example/final.mp4"),
+            _PinnedResponse(200, body=b"final"),
+        )
+    )
+    connections: list[tuple[str, str]] = []
+
+    def connect(scheme: str, host: str, port: int, ip: str, timeout: float):
+        connections.append((host, ip))
+        return _PinnedConnection(next(responses))
+
+    monkeypatch.setattr(viral_media.socket, "getaddrinfo", resolve)
+    fetcher = UrlFetcher(connection_factory=connect)
+
+    assert fetcher.fetch("https://first.example/start.mp4") == b"final"
+    assert connections == [
+        ("first.example", "93.184.216.34"),
+        ("second.example", "93.184.216.35"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "url",
+    ("http://media.example:8080/video.mp4", "https://media.example:8443/video.mp4"),
+)
+def test_url_fetcher_rejects_nonstandard_initial_ports(
+    url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        viral_media.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [(2, 1, 6, "", ("93.184.216.34", 443))],
+    )
+
+    with pytest.raises(ViralMediaError, match="端口"):
+        UrlFetcher(
+            connection_factory=lambda *args: (_ for _ in ()).throw(
+                AssertionError("nonstandard port must be rejected before connection")
+            )
+        ).fetch(url)
+
+
+def test_url_fetcher_rejects_redirect_to_nonstandard_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        viral_media.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [(2, 1, 6, "", ("93.184.216.34", 443))],
+    )
+    connections = 0
+
+    def connect(*args: object):
+        nonlocal connections
+        connections += 1
+        return _PinnedConnection(
+            _PinnedResponse(302, location="https://second.example:8443/final.mp4")
+        )
+
+    with pytest.raises(ViralMediaError, match="端口"):
+        UrlFetcher(connection_factory=connect).fetch("https://first.example/start.mp4")
+    assert connections == 1
+
+
+def test_url_fetcher_rejects_mixed_public_and_private_dns_answers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        viral_media.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (2, 1, 6, "", ("93.184.216.34", 443)),
+            (2, 1, 6, "", ("127.0.0.1", 443)),
+        ],
+    )
+
+    with pytest.raises(ViralMediaError, match="公网"):
+        UrlFetcher(
+            connection_factory=lambda *args: (_ for _ in ()).throw(
+                AssertionError("private candidate must prevent connection")
+            )
+        ).fetch("https://mixed.example/video.mp4")
+
+
+def test_default_pinned_connections_use_ip_but_keep_https_sni(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Socket:
+        def getpeername(self):
+            return ("93.184.216.34", 443)
+
+        def close(self) -> None:
+            pass
+
+    class Context:
+        def __init__(self) -> None:
+            self.server_names: list[str] = []
+
+        def wrap_socket(self, sock: Socket, *, server_hostname: str):
+            self.server_names.append(server_hostname)
+            return sock
+
+    connected: list[tuple[tuple[str, int], float]] = []
+    context = Context()
+
+    def create_connection(target: tuple[str, int], timeout: float):
+        connected.append((target, timeout))
+        return Socket()
+
+    monkeypatch.setattr(viral_media.socket, "create_connection", create_connection)
+    monkeypatch.setattr(viral_media.ssl, "create_default_context", lambda: context)
+    connection = viral_media._pinned_connection("https", "media.example", 443, "93.184.216.34", 4.0)
+
+    connection.connect()
+
+    assert connected == [(("93.184.216.34", 443), 4.0)]
+    assert context.server_names == ["media.example"]

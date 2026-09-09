@@ -1,5 +1,11 @@
 # 短视频复刻工作台（xiangshu-video-replica）
 
+> 当前执行清单已更新为[本地实现去重V3](outputs/customer-cloud-convergence-analysis-2026-09-08/v3/客户版收敛剩余任务清单与验收完工标准-V3.md)：57项剩余排程，复用既有代码；原60项及CW-006/008/011保留追溯，当前状态仅见任务账本§18。此更新不代表代码或数据迁移已完成。
+
+> 2026-09-08 PostgreSQL 全面统一增量：用户已确定开发、业务数据库测试、CI、staging、生产均使用 PostgreSQL；SQLite 仅限精确登记的离线历史输入、归档与兼容工具。
+> 实施与验收以[唯一数据库规范](docs/PostgreSQL唯一数据库实施与验收规范.md)及 CW-001—060 为准。此前仅客户生产 PG、默认开发 SQLite、SQLite 业务测试可作为当前验收的口径不再适用。
+> 本次更新只确认规范和任务定义；原代码仍有 SQLite 分支，历史任务/测试记录保留原文，不据此声明实际迁移或生产切换已完成。
+
 AI 短视频复刻生产工作台：参考视频上传 → AI 拆解分镜 → 人物库与首帧 → Prompt/批次编排 → H3 视频生成 → 成片直链交付 → 按条计费。业务后端 FastAPI，桌面端 Tauri 2，客户生产数据真源 PostgreSQL 16。当前版本 0.1.16（2026-09-04）。
 
 ## V1.4 桌面工作面板（前端改版，未发布）
@@ -8,7 +14,9 @@ AI 短视频复刻生产工作台：参考视频上传 → AI 拆解分镜 → �
 
 模块包含工作台、爆款视频、文案工坊、视频创作、任务、人物及素材、发布与账户。现有上传/拆解/分镜/H3批次/下载及账户操作在同壳面板中复用；飞影口播、独立视频模式、采集内容服务和发布服务尚待后端接通。详见 [实施与能力对照](docs/evidence/FRONTEND-V14-IMPLEMENTATION.md) 和 [21状态浏览器复核](docs/evidence/frontend-v14-browser/README.md)。V1.4 是界面设计版本，不变更当前桌面发行版本号。
 
-## 两条产品线
+## 现有双版本基线与收敛目标
+
+下表记录当前代码及旧产品形态，供迁移核对；目标只保留客户桌面和PG后端，全环境数据库统一按文首新规范执行。
 
 | | 客户云版（当前主线） | 内部 P0 单机版（已收口） |
 | --- | --- | --- |
@@ -18,7 +26,7 @@ AI 短视频复刻生产工作台：参考视频上传 → AI 拆解分镜 → �
 | 计费 | 零额度激活 + ZPay 续充 + 管理端调账审计 | 内部价钱包 + ZPay 充值 |
 | 桌面构建 | `npm run tauri:build:customer`（直连远程 HTTPS API，独立应用标识） | `npm run tauri:build`（随包 `start-backend` 脚本） |
 
-客户版 V3 主线（任务 T01–T45）：PostgreSQL 全量迁移、激活码与首充、两设备单在线、用户公平队列、多实例生产与灰度基座、安全纵深加固均已交付并达到 `AUTOMATED_VERIFIED`；真实 ZPay / COS / 付费 Provider 小流量验收（T40）、灰度放量（T41）与生产 Go/No-Go（T42）按红线要求待人工授权执行。任务状态以 `docs/客户版任务清单-V3.md` 账本为准。
+客户版V3的PG运行基座、激活码、会话、队列和安全等已有各自历史自动化证据；这不等于开发/全部业务测试/运行入口已经统一PG。本次60项收敛任务状态见`docs/客户版任务清单-V3.md`§17；真实ZPay/COS/Provider、生产数据处置和灰度仍需相应实际证据。
 
 ## 架构与技术栈
 
@@ -50,20 +58,12 @@ npm install
 uv sync --project server --locked
 ```
 
-本地开发默认使用 SQLite 与开发身份模式：
+本次收敛的开发基线是隔离PostgreSQL16和客户身份，不再推荐SQLite启动流程。准备开发库、显式设置`VIDEO_REPLICA_DATABASE_URL`，按单所有者迁移流程将schema升级到当前发布head，再启动API与Worker；不要把生产DSN用于开发或测试。
 
-```powershell
-$env:VIDEO_REPLICA_ALLOW_DEV_IDENTITY_HEADER = "1"
-$env:VIDEO_REPLICA_AUTH_MODE = "development"
-npm run dev:server   # 终端 1：FastAPI（127.0.0.1:8000，启动时自动执行 Alembic 迁移）
-npm run dev:worker   # 终端 2：生成 Worker（拆解/人物/首帧/H3 任务领取、Provider 调用与结果交付）
-
-$env:VITE_DEV_USER_ID = "employee_1"   # 必须对应 users 表中已启用的用户
-npm run tauri:dev    # 终端 3：桌面端
-```
+当前代码仍有非生产SQLite fallback和旧dev命令；缺PG拒绝启动、合法客户种子与统一命令由CW-007/025/044交付。文档确定目标不代表这些改造已经落地。可复用的PG测试工具为`scripts/pg-fixture.sh`，开发库与其测试库必须隔离；客户桌面只连接后端API，不配置PG地址。
 
 - 开发身份 Header 只在 Vite 开发构建中发送；生产构建即使误设 `VITE_DEV_USER_ID` 也会忽略。
-- 切换 PostgreSQL 模式时设置 `VIDEO_REPLICA_DATABASE_URL=postgresql://…`；客户生产（`VIDEO_REPLICA_CUSTOMER_PRODUCTION=true`）下使用 SQLite 或缺少 DSN 会直接拒绝启动。
+- PostgreSQL是唯一业务数据库目标，必须显式提供`VIDEO_REPLICA_DATABASE_URL`。现有仅客户生产fail-closed须由CW-025扩展到开发/所有运行入口；不能靠关闭生产开关恢复SQLite。
 - 没有 COS 凭据时，设置 `VIDEO_REPLICA_STORAGE_ROOT` 并在管理设置中把 `active_storage_provider` 设为 `local`，即可完成图片等资产的开发联调（仅限开发/内测，生产图片资产只使用 COS）。
 - Provider API Key 与云存储凭据经 Fernet 加密写入数据库（Windows 下主密钥由当前用户 DPAPI 保护，macOS 使用钥匙串），启动时校验可解密；主密钥缺失不会覆盖已有配置。任何真实密钥不得进入代码、日志或 PR。
 - 只调试浏览器界面时运行 `npm run dev:client`；环境变量样例见 `.env.example`。
@@ -85,7 +85,7 @@ Windows 桌面端下载视频前显示保存对话框，取消时不发起下载
 开发期每轮迭代只跑受影响专项（秒级）：
 
 ```bash
-# server/ 目录；PG fixture 未启动时 PG 专项按 skip 运行
+# server/目录；目标门禁：先启动隔离PG，缺PG必须失败；当前skip行为由CW-007/044退出
 uv run python -m pytest tests/test_<受影响文件>.py -q
 uv run ruff check . && uv run ruff format --check . && uv run mypy app
 ```
@@ -127,7 +127,7 @@ npm run test:gate1             # 内部 FakeProvider 桌面纵向验收（隔离
 ## 红线（摘要）
 
 - 禁止引入 ORM、Redis、消息队列框架；禁止 SQLite/PG 双真源与双写。
-- 已发布 Alembic revision 只可追加修复，不得篡改；当前迁移链 head 为 `055_customer_batch_visibility`。
+- 已发布Alembic revision只可追加修复，不得篡改；实际发布head由CW-001/056重新固定，不能沿用旧文档中的055快照。
 - 任何真实 API key、激活码明文、设备/session token 不得进入代码、日志、测试夹具或 PR。
 - 证据层级逐级推进：`CODE_PRESENT → AUTOMATED_VERIFIED → STAGING_VERIFIED → REAL_CHAIN_VERIFIED → PRODUCTION_GO`；未过真实链路不得标 `PRODUCTION_GO`。
 - 真实 ZPay、付费 Provider、生产 COS 变更、对外发码、灰度扩大、公网发布必须先取得用户明确授权。

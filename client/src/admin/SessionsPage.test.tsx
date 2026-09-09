@@ -81,6 +81,122 @@ describe("SessionsPage", () => {
     expect(screen.queryByLabelText("客户 ID")).not.toBeInTheDocument();
   });
 
+  it("delegates embedded customer selection to the shared parent context", async () => {
+    const onCustomerChange = vi.fn();
+    const fetchMock = vi.fn((_url: string, _init?: RequestInit) =>
+      jsonResponse(sessionList()),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    render(<SessionsPage onCustomerChange={onCustomerChange} />);
+
+    await screen.findByText("customer_one");
+    fireEvent.change(screen.getByLabelText("客户 ID"), {
+      target: { value: "customer-b" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "查看客户" }));
+    expect(onCustomerChange).toHaveBeenCalledWith("customer-b");
+
+    fireEvent.click(screen.getByRole("button", { name: "选择客户" }));
+    expect(onCustomerChange).toHaveBeenCalledWith(CUSTOMER_ID);
+    fireEvent.click(screen.getByRole("button", { name: "全部在线" }));
+    expect(onCustomerChange).toHaveBeenCalledWith(undefined);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores a stale customer response after switching context", async () => {
+    let resolveCustomerA:
+      | ((value: Awaited<ReturnType<typeof jsonResponse>>) => void)
+      | undefined;
+    const customerB = {
+      ...sessionItem,
+      session_id: "sess-b",
+      user_id: "customer-b",
+      username: "customer_b",
+      device_name: "B 的电脑",
+    };
+    const fetchMock = vi.fn((url: string) => {
+      if (url.includes("customer-a")) {
+        return new Promise((resolve) => {
+          resolveCustomerA = resolve;
+        });
+      }
+      return jsonResponse({
+        items: [customerB],
+        total: 1,
+        limit: 50,
+        offset: 0,
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { rerender } = render(<SessionsPage userId="customer-a" />);
+    rerender(<SessionsPage userId="customer-b" />);
+    expect(await screen.findByText("customer_b")).toBeInTheDocument();
+
+    resolveCustomerA?.(
+      await jsonResponse({
+        items: [sessionItem],
+        total: 1,
+        limit: 50,
+        offset: 0,
+      }),
+    );
+
+    await waitFor(() => expect(screen.queryByText("customer_one")).toBeNull());
+    expect(screen.getByText("customer_b")).toBeInTheDocument();
+  });
+
+  it("does not apply an old revoke after leaving and returning to a customer", async () => {
+    setAdminCsrfToken("csrf-token-1");
+    let resolveRevoke:
+      | ((value: Awaited<ReturnType<typeof jsonResponse>>) => void)
+      | undefined;
+    const fetchMock = vi.fn((url: string) => {
+      if (url.includes("/revoke")) {
+        return new Promise((resolve) => {
+          resolveRevoke = resolve;
+        });
+      }
+      const isCustomerB = url.includes("customer-b");
+      const item = {
+        ...sessionItem,
+        session_id: isCustomerB ? "sess-b" : "sess-a",
+        user_id: isCustomerB ? "customer-b" : "customer-a",
+        username: isCustomerB ? "customer_b" : "customer_a",
+      };
+      return jsonResponse({ items: [item], total: 1, limit: 50, offset: 0 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { rerender } = render(<SessionsPage userId="customer-a" />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "强制下线 customer_a" }),
+    );
+    fireEvent.change(screen.getByLabelText("操作原因"), {
+      target: { value: "客户反馈异常登录" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "确认强制下线" }));
+
+    rerender(<SessionsPage userId="customer-b" />);
+    await screen.findByText("customer_b");
+    rerender(<SessionsPage userId="customer-a" />);
+    await screen.findByText("customer_a");
+    const listCallCount = fetchMock.mock.calls.filter(
+      ([url]) => !String(url).includes("/revoke"),
+    ).length;
+
+    resolveRevoke?.(await jsonResponse({ request_id: "old-revoke" }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole("status")).toBeNull();
+      expect(
+        fetchMock.mock.calls.filter(
+          ([url]) => !String(url).includes("/revoke"),
+        ),
+      ).toHaveLength(listCallCount);
+    });
+  });
+
   it("revokes a session with a reason and refreshes the live list", async () => {
     setAdminCsrfToken("csrf-token-1");
     const fetchMock = vi.fn((url: string, _init?: RequestInit) =>

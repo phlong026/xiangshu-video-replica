@@ -1419,6 +1419,72 @@ export async function updateQueueMode(
   return payload.fair_queue_enabled;
 }
 
+export type ViralRuntimeControls = {
+  collection_enabled: boolean;
+  import_enabled: boolean;
+  pending_imports: number;
+  running_imports: number;
+  failed_imports: number;
+  pending_refreshes: number;
+  running_refreshes: number;
+  failed_refreshes: number;
+  source_configured: boolean;
+  platforms: Array<{
+    platform: "douyin" | "wechat_channels";
+    cached_videos: number;
+    last_fetched_at: string | null;
+    refresh_status:
+      | "not_configured"
+      | "configured_only"
+      | "refreshing"
+      | "ok"
+      | "error";
+    last_refresh_error: string | null;
+  }>;
+};
+
+export async function fetchViralRuntimeControls(): Promise<ViralRuntimeControls> {
+  const response = await requestControl("/api/control/settings/viral", {
+    method: "GET",
+  });
+  if (!response.ok) {
+    throw await parseActivationError(response, "读取爆款视频运行状态失败");
+  }
+  return (await response.json()) as ViralRuntimeControls;
+}
+
+export async function updateViralRuntimeControls(
+  controls: Pick<ViralRuntimeControls, "collection_enabled" | "import_enabled">,
+  reason: string,
+  idempotencyKey?: string,
+): Promise<ViralRuntimeControls> {
+  return adminWrite<ViralRuntimeControls>(
+    "/api/control/settings/viral",
+    controls,
+    reason,
+    "更新爆款视频运行开关失败",
+    idempotencyKey,
+    "PATCH",
+  );
+}
+
+export async function updateViralVideoAvailability(
+  platform: "douyin" | "wechat_channels",
+  videoId: string,
+  status: "AVAILABLE" | "HIDDEN" | "UNAVAILABLE",
+  reason: string,
+  idempotencyKey?: string,
+): Promise<{ platform: string; video_id: string; status: string }> {
+  return adminWrite(
+    `/api/control/viral/videos/${encodeURIComponent(platform)}/${encodeURIComponent(videoId)}/availability`,
+    { status },
+    reason,
+    "更新爆款视频可用状态失败",
+    idempotencyKey,
+    "PATCH",
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Operation rates (W10 — 费率管理：上游成本费率与对外售价)
 // ---------------------------------------------------------------------------

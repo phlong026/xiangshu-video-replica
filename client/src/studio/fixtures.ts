@@ -99,15 +99,22 @@ function analyticsSample(days: 7 | 30): StudioAnalytics {
         ];
   return {
     range_days: days,
+    generated_at: "2026-09-06T12:00:00+00:00",
     today_completed: 8,
     range_completed: counts.reduce((sum, count) => sum + count, 0),
     total_completed: 156,
+    today_generation_batches: 6,
+    range_generation_batches: days === 7 ? 15 : 29,
+    total_generation_batches: 120,
+    range_generation_outputs: counts.reduce((sum, count) => sum + count, 0),
+    range_oral_outputs: 0,
     daily,
     kind_breakdown: kindBreakdown,
     recent_works: reviewWorks
       .slice(0, days === 7 ? 3 : 4)
       .map((work, index) => ({
         task_id: "task-completed",
+        task_kind: "generation" as const,
         batch_id: `batch-review-${index + 1}`,
         project_id: `project-review-${index + 1}`,
         title: work.title,
@@ -255,6 +262,7 @@ export function createReviewData(): StudioData {
       expression: "专业、通俗、不过度承诺",
       sheetId: "five-views",
       sceneLookCount: 3,
+      photoIds: ["zhang-courtyard", "construction", "zhang-studio"],
       avatars: [
         {
           id: "avatar-studio",
@@ -296,6 +304,7 @@ export function createReviewData(): StudioData {
       audience: "计划建房的业主",
       expression: "务实、可信",
       sceneLookCount: 1,
+      photoIds: ["li"],
       avatars: [
         {
           id: "avatar-li",
@@ -324,6 +333,7 @@ export function createReviewData(): StudioData {
       audience: "准备建房的农村家庭",
       expression: "亲切、清楚",
       sceneLookCount: 1,
+      photoIds: ["wang"],
       avatars: [],
       voices: [],
     },
@@ -492,7 +502,7 @@ export function createReviewState(page: StudioPage) {
     audioId: "speech",
     prompt:
       "镜头从庭院入口缓缓推进，展示新中式乡墅外立面，清晨自然光，画面平稳。",
-    referenceIds: ["villa", "courtyard-video"],
+    referenceIds: ["villa"],
     script: {
       id: "script-review",
       title: "张工 · 建房预算",

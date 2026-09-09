@@ -29,6 +29,7 @@ from app.oral import (
     ORAL_CONSENT_TEXT_VERSION,
     OralConflictError,
     OralDomainError,
+    OralTaskNotFoundError,
     cancel_oral_task,
     confirm_voice_clone,
     create_oral_consent,
@@ -59,12 +60,52 @@ def get_oral_vendor(conn: Database) -> HiflyClient:
 OralVendor = Annotated[HiflyClient, Depends(get_oral_vendor)]
 
 
+class OralTaskResponse(BaseModel):
+    id: str
+    status: Literal[
+        "QUEUED",
+        "SUBMITTING",
+        "RUNNING",
+        "ARCHIVING",
+        "SUBMISSION_UNCERTAIN",
+        "ARCHIVE_FAILED",
+        "SUCCEEDED",
+        "FAILED",
+        "CANCELLED",
+    ]
+    title: str
+    mode: Literal["TTS", "AUDIO"]
+    identity_id: str
+    avatar_id: str
+    voice_id: str | None
+    script_text: str | None
+    audio_asset_id: str | None
+    status_message: str | None = None
+    error_message: str | None = None
+    result_asset_id: str | None
+    duration_sec: int | None
+    estimated_cost_fen: int
+    billing_status: str | None = None
+    available_actions: list[str] = Field(default_factory=list)
+    created_at: str
+    updated_at: str
+
+
+class OralTaskPageResponse(BaseModel):
+    items: list[OralTaskResponse]
+    total: int
+    limit: int
+    offset: int
+
+
 class OralError(HTTPException):
     def __init__(self, code: str, message: str, status_code: int = 422) -> None:
         super().__init__(status_code=status_code, detail={"code": code, "message": message})
 
 
 def _domain_guard(exc: OralDomainError) -> HTTPException:
+    if isinstance(exc, OralTaskNotFoundError):
+        return OralError("ORAL_TASK_NOT_FOUND", str(exc), status_code=404)
     if isinstance(exc, OralConflictError):
         return OralError("ORAL_IDEMPOTENCY_CONFLICT", str(exc), status_code=409)
     return OralError("ORAL_REQUEST_INVALID", str(exc))
@@ -378,16 +419,32 @@ def create_oral_generation_task(
     }
 
 
-@router.get("/tasks")
+@router.get("/tasks", response_model=OralTaskPageResponse)
 def list_oral_generation_tasks(
     conn: Database,
     actor: AuthenticatedUser,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
-) -> list[dict[str, Any]]:
-    return _serialize_tasks_for_owner(conn, list_oral_tasks(conn, actor=actor, limit=limit))
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> dict[str, Any]:
+    rows, total = list_oral_tasks(
+        conn,
+        actor=actor,
+        limit=limit,
+        offset=offset,
+    )
+    return {
+        "items": _serialize_tasks_for_owner(conn, rows),
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
 
 
-@router.get("/tasks/{task_id}")
+@router.get(
+    "/tasks/{task_id}",
+    response_model=OralTaskResponse,
+    responses={404: {"description": "口播任务不存在或不属于当前账号"}},
+)
 def read_oral_generation_task(
     task_id: str,
     conn: Database,

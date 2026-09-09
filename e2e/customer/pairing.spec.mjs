@@ -1,12 +1,19 @@
-import { chromium, expect, test } from "@playwright/test";
+import { expect, test } from "@playwright/test";
+import {
+  openCustomerDevices,
+  waitForCustomerWorkspace,
+} from "./workspace-navigation.mjs";
 
 const CODE_C = "XS04-XYZ2345-6789ABC-DEFGHJK-MNPQRST";
 const DEVICE_B_NAME = "E2E Device B";
 
-test("second-device pairing: enroll waits, primary approves, polling completes binding", async () => {
-  const browser = await chromium.launch();
-  const deviceA = await browser.newContext();
-  const deviceB = await browser.newContext();
+test("second-device pairing: enroll waits, primary approves, polling completes binding", async ({
+  browser,
+}, testInfo) => {
+  const baseURL = testInfo.project.use.baseURL;
+  expect(baseURL, "customer E2E project must configure baseURL").toBeTruthy();
+  const deviceA = await browser.newContext({ baseURL });
+  const deviceB = await browser.newContext({ baseURL });
   const pageA = await deviceA.newPage();
   const pageB = await deviceB.newPage();
 
@@ -15,11 +22,7 @@ test("second-device pairing: enroll waits, primary approves, polling completes b
   await pageA.getByLabel("激活码").fill(CODE_C);
   await pageA.getByLabel("设备名称").fill("E2E Device A");
   await pageA.getByRole("button", { name: "激活并进入工作台" }).click();
-  await expect(pageA.getByRole("button", { name: "打开个人中心" })).toBeVisible(
-    {
-      timeout: 20_000,
-    },
-  );
+  await waitForCustomerWorkspace(pageA);
 
   // Device B enrolls on the pairing entry with its own fingerprint.
   await pageB.goto("/customer/pairing");
@@ -33,8 +36,7 @@ test("second-device pairing: enroll waits, primary approves, polling completes b
   ).toBeVisible();
 
   // Device A approves the pending pairing in its device view.
-  await pageA.getByRole("button", { name: "打开个人中心" }).click();
-  await pageA.getByRole("button", { name: "设备管理" }).click();
+  await openCustomerDevices(pageA);
   await expect(pageA.getByText("新的设备绑定请求")).toBeVisible({
     timeout: 20_000,
   });
@@ -54,18 +56,13 @@ test("second-device pairing: enroll waits, primary approves, polling completes b
   const conflict = pageB.getByRole("dialog", { name: "检测到会话冲突" });
   await expect(conflict).toBeVisible();
   await conflict.getByRole("button", { name: "切换到本设备" }).click();
-  await expect(pageB.getByRole("button", { name: "打开个人中心" })).toBeVisible(
-    {
-      timeout: 20_000,
-    },
-  );
-  await pageB.getByRole("button", { name: "打开个人中心" }).click();
-  await pageB.getByRole("button", { name: "设备管理" }).click();
+  await openCustomerDevices(pageB);
   await expect(
     pageB
       .getByRole("region", { name: "设备管理" })
       .getByText(DEVICE_B_NAME, { exact: true }),
   ).toBeVisible();
 
-  await browser.close();
+  await deviceA.close();
+  await deviceB.close();
 });

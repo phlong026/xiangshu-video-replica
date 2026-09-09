@@ -230,9 +230,6 @@ export function SourceFrameSelection({
           );
         }
       }
-      if (readOnly) {
-        return;
-      }
       const previewResults = await Promise.allSettled(
         payload.candidates.map(async (candidate) => {
           const download = await getAssetDownloadUrl(candidate.asset_id);
@@ -509,9 +506,6 @@ export function SourceFrameSelection({
       ) : null}
       {!isLoading && !error && candidates.length === 0 ? (
         <p className="file-note">尚未提取候选源画面。</p>
-      ) : null}
-      {readOnly && candidates.length > 0 ? (
-        <p className="status-note">只读身份不加载素材预览。</p>
       ) : null}
       {candidates.length > 0 ? (
         <details

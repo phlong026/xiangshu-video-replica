@@ -1,0 +1,138 @@
+[
+  {
+    "left": "local main",
+    "right": "chore/agents-push-checklist",
+    "exit_code": 0,
+    "conflicts": [],
+    "output": "5f7afc87c99004e31b1831d1b04a97279aa519b4\n",
+    "stderr": ""
+  },
+  {
+    "left": "local main",
+    "right": "chore/ignore-desktop-runtime-logs",
+    "exit_code": 0,
+    "conflicts": [],
+    "output": "80809660e4ce07f900fee37ac57bebeda945ba82\n",
+    "stderr": ""
+  },
+  {
+    "left": "local main",
+    "right": "codex/character-ip-oral-completion",
+    "exit_code": 1,
+    "conflicts": [
+      "client/src/generated/api.ts",
+      "server/app/generation_worker.py",
+      "server/app/oral_routes.py",
+      "server/app/oral_worker.py",
+      "server/migrations/versions/065_oral_durable_billing.py",
+      "server/tests/test_activation_code_schema.py",
+      "server/tests/test_character_domain.py",
+      "server/tests/test_characters.py",
+      "server/tests/test_customer_devices.py",
+      "server/tests/test_customer_queue_fairness.py",
+      "server/tests/test_db.py",
+      "server/tests/test_internal_billing.py",
+      "server/tests/test_oral_domain.py",
+      "server/tests/test_postgres_migrations.py",
+      "server/tests/test_recharge_orders.py",
+      "server/tests/test_settings.py",
+      "server/tests/test_studio_stats.py"
+    ],
+    "output": "b3f3c224888e8b9528e08186b44ad966e4cef826\nclient/src/generated/api.ts\nserver/app/generation_worker.py\nserver/app/oral_routes.py\nserver/app/oral_worker.py\nserver/migrations/versions/065_oral_durable_billing.py\nserver/tests/test_activation_code_schema.py\nserver/tests/test_character_domain.py\nserver/tests/test_characters.py\nserver/tests/test_customer_devices.py\nserver/tests/test_customer_queue_fairness.py\nserver/tests/test_db.py\nserver/tests/test_internal_billing.py\nserver/tests/test_oral_domain.py\nserver/tests/test_postgres_migrations.py\nserver/tests/test_recharge_orders.py\nserver/tests/test_settings.py\nserver/tests/test_studio_stats.py\n\nAuto-merging client/src/AdminApp.test.tsx\nAuto-merging client/src/GenerationComposer.test.tsx\nAuto-merging client/src/admin/PaymentSettingsSection.tsx\nAuto-merging client/src/api.admin.test.ts\nAuto-merging client/src/api.test.ts\nAuto-merging client/src/api.ts\nAuto-merging client/src/generated/api.ts\nCONFLICT (content): Merge conflict in client/src/generated/api.ts\nAuto-merging client/src/studio/ContentPages.test.tsx\nAuto-merging client/src/studio/MainPages.test.tsx\nAuto-merging client/src/studio/MainPages.tsx\nAuto-merging client/src/studio/live.test.ts\nAuto-merging client/src/studio/live.ts\nAuto-merging client/src/studio/types.ts\nAuto-merging client/src/useGenerationDrafts.ts\nAuto-merging server/app/control_routes.py\nAuto-merging server/app/generation.py\nAuto-merging server/app/generation_routes.py\nAuto-merging server/app/generation_worker.py\nCONFLICT (content): Merge conflict in server/app/generation_worker.py\nAuto-merging server/app/internal_billing.py\nAuto-merging server/app/oral.py\nAuto-merging server/app/oral_routes.py\nCONFLICT (content): Merge conflict in server/app/oral_routes.py\nAuto-merging server/app/oral_worker.py\nCONFLICT (content): Merge conflict in server/app/oral_worker.py\nCONFLICT (modify/delete): server/migrations/versions/065_oral_durable_billing.py deleted in aab50997323f73efb6d63de61ea07005ae0ca4a5 and modified in 899ee7c29a5c373c543babbbf6e6f017e63fe492.  Version 899ee7c29a5c373c543babbbf6e6f017e63fe492 of server/migrations/versions/065_oral_durable_billing.py left in tree.\nAuto-merging server/tests/test_activation_code_schema.py\nCONFLICT (content): Merge conflict in server/tests/test_activation_code_schema.py\nAuto-merging server/tests/test_character_domain.py\nCONFLICT (content): Merge conflict in server/tests/test_character_domain.py\nAuto-merging server/tests/test_characters.py\nCONFLICT (content): Merge conflict in server/tests/test_characters.py\nAuto-merging server/tests/test_customer_devices.py\nCONFLICT (content): Merge conflict in server/tests/test_customer_devices.py\nAuto-merging server/tests/test_customer_queue_fairness.py\nCONFLICT (content): Merge conflict in server/tests/test_customer_queue_fairness.py\nAuto-merging server/tests/test_db.py\nCONFLICT (content): Merge conflict in server/tests/test_db.py\nAuto-merging server/tests/test_internal_admin.py\nAuto-merging server/tests/test_internal_billing.py\nCONFLICT (content): Merge conflict in server/tests/test_internal_billing.py\nAuto-merging server/tests/test_oral_domain.py\nCONFLICT (content): Merge conflict in server/tests/test_oral_domain.py\nAuto-merging server/tests/test_postgres_migrations.py\nCONFLICT (content): Merge conflict in server/tests/test_postgres_migrations.py\nAuto-merging server/tests/test_recharge_orders.py\nCONFLICT (content): Merge conflict in server/tests/test_recharge_orders.py\nAuto-merging server/tests/test_settings.py\nCONFLICT (content): Merge conflict in server/tests/test_settings.py\nAuto-merging server/tests/test_studio_stats.py\nCONFLICT (content): Merge conflict in server/tests/test_studio_stats.py\n",
+    "stderr": ""
+  },
+  {
+    "left": "local main",
+    "right": "codex/frontend-v1.4",
+    "exit_code": 0,
+    "conflicts": [],
+    "output": "abde666242bb876c21e64c84d865d0b7a8b27718\n",
+    "stderr": ""
+  },
+  {
+    "left": "local main",
+    "right": "feat/c5-publish-module",
+    "exit_code": 1,
+    "conflicts": [
+      "client/src/studio/MainPages.test.tsx",
+      "client/src/studio/live.ts",
+      "server/tests/test_activation_code_schema.py",
+      "server/tests/test_character_domain.py",
+      "server/tests/test_characters.py",
+      "server/tests/test_customer_devices.py",
+      "server/tests/test_db.py",
+      "server/tests/test_internal_billing.py",
+      "server/tests/test_postgres_migrations.py",
+      "server/tests/test_recharge_orders.py",
+      "server/tests/test_settings.py"
+    ],
+    "output": "72cd930b8bb4a1529b805381564fc4d0254e87de\nclient/src/studio/MainPages.test.tsx\nclient/src/studio/live.ts\nserver/tests/test_activation_code_schema.py\nserver/tests/test_character_domain.py\nserver/tests/test_characters.py\nserver/tests/test_customer_devices.py\nserver/tests/test_db.py\nserver/tests/test_internal_billing.py\nserver/tests/test_postgres_migrations.py\nserver/tests/test_recharge_orders.py\nserver/tests/test_settings.py\n\nAuto-merging client/src/api.ts\nAuto-merging client/src/studio/AnalyticsPage.test.tsx\nAuto-merging client/src/studio/MainPages.test.tsx\nCONFLICT (content): Merge conflict in client/src/studio/MainPages.test.tsx\nAuto-merging client/src/studio/MainPages.tsx\nAuto-merging client/src/studio/fixtures.ts\nAuto-merging client/src/studio/live.ts\nCONFLICT (content): Merge conflict in client/src/studio/live.ts\nAuto-merging docs/未接通能力边界-任务拆解-2026-09-06.md\nAuto-merging server/app/studio_routes.py\nAuto-merging server/tests/test_activation_code_schema.py\nCONFLICT (content): Merge conflict in server/tests/test_activation_code_schema.py\nAuto-merging server/tests/test_character_domain.py\nCONFLICT (content): Merge conflict in server/tests/test_character_domain.py\nAuto-merging server/tests/test_characters.py\nCONFLICT (content): Merge conflict in server/tests/test_characters.py\nAuto-merging server/tests/test_customer_devices.py\nCONFLICT (content): Merge conflict in server/tests/test_customer_devices.py\nAuto-merging server/tests/test_db.py\nCONFLICT (content): Merge conflict in server/tests/test_db.py\nAuto-merging server/tests/test_internal_billing.py\nCONFLICT (content): Merge conflict in server/tests/test_internal_billing.py\nAuto-merging server/tests/test_postgres_migrations.py\nCONFLICT (content): Merge conflict in server/tests/test_postgres_migrations.py\nAuto-merging server/tests/test_recharge_orders.py\nCONFLICT (content): Merge conflict in server/tests/test_recharge_orders.py\nAuto-merging server/tests/test_settings.py\nCONFLICT (content): Merge conflict in server/tests/test_settings.py\n",
+    "stderr": ""
+  },
+  {
+    "left": "local main",
+    "right": "feat/character-library-page-closure",
+    "exit_code": 0,
+    "conflicts": [],
+    "output": "4267c4097c7061bb51cd40933da2813cf2857e93\n",
+    "stderr": ""
+  },
+  {
+    "left": "local main",
+    "right": "fix/frontend-completion-no-confirmation-20260907",
+    "exit_code": 0,
+    "conflicts": [],
+    "output": "0fbee5498e52cca21230b7105e35a7e334daf1eb\n",
+    "stderr": ""
+  },
+  {
+    "left": "local main",
+    "right": "fix/frontend-fp20-favorites-20260908",
+    "exit_code": 0,
+    "conflicts": [],
+    "output": "7418bb98c033380115b556472a71b5c8927b21f2\n",
+    "stderr": ""
+  },
+  {
+    "left": "local main",
+    "right": "fix/frontend-fp25-backend-20260908",
+    "exit_code": 0,
+    "conflicts": [],
+    "output": "54c39dabe8ff8a890a86caa8fd17504e0ac7c2c9\n",
+    "stderr": ""
+  },
+  {
+    "left": "local main",
+    "right": "fix/material-library-isolation-and-completion",
+    "exit_code": 1,
+    "conflicts": [
+      "client/src/studio/CreationPages.tsx",
+      "client/src/studio/state.ts",
+      "docs/CUSTOMER-TASK-EVIDENCE-V3.md",
+      "\"docs/\\345\\256\\242\\346\\210\\267\\347\\211\\210\\344\\273\\273\\345\\212\\241\\346\\270\\205\\345\\215\\225-V3.md\"",
+      "server/app/generation.py",
+      "server/app/generation_worker.py",
+      "server/app/oral_worker.py",
+      "server/migrations/versions/065_oral_durable_billing.py",
+      "server/tests/test_generation.py",
+      "server/tests/test_oral_domain.py",
+      "server/tests/test_studio_stats.py"
+    ],
+    "output": "407e10a1d7c6ca095a17cd9c7b76da054e00766b\nclient/src/studio/CreationPages.tsx\nclient/src/studio/state.ts\ndocs/CUSTOMER-TASK-EVIDENCE-V3.md\n\"docs/\\345\\256\\242\\346\\210\\267\\347\\211\\210\\344\\273\\273\\345\\212\\241\\346\\270\\205\\345\\215\\225-V3.md\"\nserver/app/generation.py\nserver/app/generation_worker.py\nserver/app/oral_worker.py\nserver/migrations/versions/065_oral_durable_billing.py\nserver/tests/test_generation.py\nserver/tests/test_oral_domain.py\nserver/tests/test_studio_stats.py\n\nAuto-merging client/src/studio/ContentPages.test.tsx\nAuto-merging client/src/studio/CreationPages.test.tsx\nAuto-merging client/src/studio/CreationPages.tsx\nCONFLICT (content): Merge conflict in client/src/studio/CreationPages.tsx\nAuto-merging client/src/studio/StudioWorkspace.test.tsx\nAuto-merging client/src/studio/StudioWorkspace.tsx\nAuto-merging client/src/studio/fixtures.ts\nAuto-merging client/src/studio/state.ts\nCONFLICT (content): Merge conflict in client/src/studio/state.ts\nAuto-merging docs/CUSTOMER-TASK-EVIDENCE-V3.md\nCONFLICT (content): Merge conflict in docs/CUSTOMER-TASK-EVIDENCE-V3.md\nAuto-merging docs/客户版任务清单-V3.md\nCONFLICT (content): Merge conflict in docs/客户版任务清单-V3.md\nAuto-merging docs/未接通能力边界-任务拆解-2026-09-06.md\nAuto-merging server/app/generation.py\nCONFLICT (content): Merge conflict in server/app/generation.py\nAuto-merging server/app/generation_worker.py\nCONFLICT (content): Merge conflict in server/app/generation_worker.py\nAuto-merging server/app/oral.py\nAuto-merging server/app/oral_worker.py\nCONFLICT (content): Merge conflict in server/app/oral_worker.py\nCONFLICT (modify/delete): server/migrations/versions/065_oral_durable_billing.py deleted in aab50997323f73efb6d63de61ea07005ae0ca4a5 and modified in 435adbbb14559c968cd16d14fe6fb9ba0f30880a.  Version 435adbbb14559c968cd16d14fe6fb9ba0f30880a of server/migrations/versions/065_oral_durable_billing.py left in tree.\nAuto-merging server/tests/test_customer_chain_e2e.py\nAuto-merging server/tests/test_generation.py\nCONFLICT (content): Merge conflict in server/tests/test_generation.py\nAuto-merging server/tests/test_oral_domain.py\nCONFLICT (content): Merge conflict in server/tests/test_oral_domain.py\nAuto-merging server/tests/test_studio_stats.py\nCONFLICT (content): Merge conflict in server/tests/test_studio_stats.py\n",
+    "stderr": ""
+  },
+  {
+    "left": "fix/frontend-completion-no-confirmation-20260907",
+    "right": "fix/frontend-fp20-favorites-20260908",
+    "exit_code": 1,
+    "output": "5adafccd9c3de455dc828418883c899e3a07e95f\nserver/tests/test_db.py\nserver/tests/test_postgres_migrations.py\n\nAuto-merging client/src/studio/ContentPages.test.tsx\nAuto-merging client/src/studio/ContentPages.tsx\nAuto-merging server/tests/test_db.py\nCONFLICT (content): Merge conflict in server/tests/test_db.py\nAuto-merging server/tests/test_postgres_migrations.py\nCONFLICT (content): Merge conflict in server/tests/test_postgres_migrations.py\n",
+    "stderr": ""
+  },
+  {
+    "left": "fix/frontend-completion-no-confirmation-20260907",
+    "right": "fix/frontend-fp25-backend-20260908",
+    "exit_code": 0,
+    "output": "0fbee5498e52cca21230b7105e35a7e334daf1eb\n",
+    "stderr": ""
+  }
+]

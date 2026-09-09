@@ -1,5 +1,11 @@
 import type { ShotCard } from "./../api";
-import type { StudioDraft, StudioPage, StudioState, StudioTask } from "./types";
+import type {
+  StudioAsset,
+  StudioDraft,
+  StudioPage,
+  StudioState,
+  StudioTask,
+} from "./types";
 
 export const pageTitles: Record<StudioPage, string> = {
   workbench: "工作台",
@@ -27,14 +33,119 @@ export const pageTitles: Record<StudioPage, string> = {
 };
 
 export function routeFromHash(hash: string): StudioPage {
-  const raw = hash.replace(/^#(?:studio\/)?/, "");
+  return studioRouteFromHash(hash).page;
+}
+
+const selectableStateKeys = [
+  "selectedVideoId",
+  "selectedTaskId",
+  "selectedTaskKind",
+  "selectedTaskBackendId",
+  "selectedAssetId",
+  "selectedPersonId",
+  "returnTo",
+] as const;
+
+function decodeRouteId(value: string) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return "";
+  }
+}
+
+export function studioRouteFromHash(hash: string): Pick<
+  StudioState,
+  (typeof selectableStateKeys)[number]
+> & {
+  page: StudioPage;
+} {
+  const value = hash.replace(/^#/, "");
+  const [path, query = ""] = value.split("?", 2);
+  const raw = path.replace(/^studio\//, "");
   const aliases: Record<string, StudioPage> = {
     projects: "replica",
     characters: "people",
     wallet: "profile",
   };
-  if (Object.hasOwn(aliases, raw)) return aliases[raw];
-  return Object.hasOwn(pageTitles, raw) ? (raw as StudioPage) : "workbench";
+  const params = new URLSearchParams(query);
+  const result: ReturnType<typeof studioRouteFromHash> = {
+    page: Object.hasOwn(aliases, raw)
+      ? aliases[raw]
+      : Object.hasOwn(pageTitles, raw)
+        ? (raw as StudioPage)
+        : "workbench",
+    selectedVideoId: undefined,
+    selectedTaskId: undefined,
+    selectedTaskKind: undefined,
+    selectedTaskBackendId: undefined,
+    selectedAssetId: undefined,
+    selectedPersonId: undefined,
+    returnTo: undefined,
+  };
+  const taskMatch = raw.match(
+    /^task-detail\/(generation_batch|oral_task)\/([^/]+)$/,
+  );
+  if (taskMatch) {
+    const kind = taskMatch[1] as "generation_batch" | "oral_task";
+    const backendId = decodeRouteId(taskMatch[2] ?? "");
+    result.page = "task-detail";
+    result.selectedTaskKind = kind;
+    result.selectedTaskBackendId = backendId;
+    result.selectedTaskId =
+      kind === "oral_task" ? `oral-${backendId}` : backendId;
+  }
+  result.selectedVideoId = params.get("video") ?? undefined;
+  result.selectedAssetId = params.get("asset") ?? undefined;
+  result.selectedPersonId = params.get("person") ?? undefined;
+  const returnTo = params.get("returnTo");
+  if (returnTo && Object.hasOwn(pageTitles, returnTo)) {
+    result.returnTo = returnTo as StudioPage;
+  }
+  return result;
+}
+
+export function studioHashForState(state: StudioState): string {
+  const params = new URLSearchParams();
+  if (state.selectedVideoId && state.page === "viral-detail")
+    params.set("video", state.selectedVideoId);
+  if (state.selectedAssetId && state.page === "materials")
+    params.set("asset", state.selectedAssetId);
+  if (state.selectedPersonId && state.page.startsWith("person-"))
+    params.set("person", state.selectedPersonId);
+  if (state.returnTo) params.set("returnTo", state.returnTo);
+  const path =
+    state.page === "task-detail" &&
+    state.selectedTaskKind &&
+    state.selectedTaskBackendId
+      ? `task-detail/${state.selectedTaskKind}/${encodeURIComponent(state.selectedTaskBackendId)}`
+      : state.page;
+  const query = params.toString();
+  return `#studio/${path}${query ? `?${query}` : ""}`;
+}
+
+export function navigateStudioState(
+  state: StudioState,
+  page: StudioPage,
+  patch: Partial<StudioState> = {},
+): StudioState {
+  const keepTaskContext =
+    page === "task-detail" || patch.returnTo === "task-detail";
+  const keepPersonContext = page.startsWith("person-");
+  return {
+    ...state,
+    selectedVideoId: undefined,
+    selectedTaskId: keepTaskContext ? state.selectedTaskId : undefined,
+    selectedTaskKind: keepTaskContext ? state.selectedTaskKind : undefined,
+    selectedTaskBackendId: keepTaskContext
+      ? state.selectedTaskBackendId
+      : undefined,
+    selectedAssetId: undefined,
+    selectedPersonId: keepPersonContext ? state.selectedPersonId : undefined,
+    returnTo: undefined,
+    ...patch,
+    page,
+  };
 }
 
 export function createDraft(): StudioDraft {
@@ -75,6 +186,7 @@ export function withImportedProject(
   if (imported.projectId && imported.projectId === state.draft.projectId) {
     const current = state.draft.script;
     const newer =
+      !state.draft.scriptEdited &&
       imported.script.text &&
       (imported.script.id !== current.id ||
         imported.script.version > current.version);
@@ -92,6 +204,8 @@ export function withImportedProject(
     draft: imported,
     selectedVideoId: undefined,
     selectedTaskId: undefined,
+    selectedTaskKind: undefined,
+    selectedTaskBackendId: undefined,
     selectedAssetId: undefined,
     selectedPersonId: undefined,
     returnTo: undefined,
@@ -101,19 +215,29 @@ export function withImportedProject(
 export function draftFromTask(task: StudioTask): StudioDraft {
   const fresh = createDraft();
   const snapshot = task.draftSnapshot;
+  const ipId = task.ipId ?? snapshot?.ipId;
   return {
     ...fresh,
     ...snapshot,
     id: fresh.id,
     projectId: task.projectId ?? snapshot?.projectId,
-    ipId: task.ipId ?? snapshot?.ipId,
+    ipId,
     avatarId: task.avatarId ?? snapshot?.avatarId,
     voiceId:
       task.driverMode === "audio"
         ? undefined
         : (task.voiceId ?? snapshot?.voiceId),
     audioId: task.audioId ?? snapshot?.audioId,
-    script: { ...(snapshot?.script ?? fresh.script), confirmed: false },
+    script: {
+      ...(snapshot?.script ?? fresh.script),
+      id: fresh.script.id,
+      title: task.title,
+      text: task.scriptText ?? snapshot?.script.text ?? "",
+      ipId,
+      version: 1,
+      confirmed: false,
+    },
+    scriptEdited: true,
     quoteRevision: 0,
   };
 }
@@ -122,9 +246,12 @@ export function patchStudioDraft(
   draft: StudioDraft,
   patch: Partial<StudioDraft>,
 ): StudioDraft {
+  const sourceChanged =
+    Object.hasOwn(patch, "sourceId") && patch.sourceId !== draft.sourceId;
   const projectChanged =
     Object.hasOwn(patch, "projectId") && patch.projectId !== draft.projectId;
   const identityChanged =
+    sourceChanged ||
     projectChanged ||
     (Object.hasOwn(patch, "ipId") && patch.ipId !== draft.ipId) ||
     (Object.hasOwn(patch, "imageId") && patch.imageId !== draft.imageId);
@@ -137,15 +264,26 @@ export function patchStudioDraft(
     id: draft.id,
     quoteRevision: draft.quoteRevision + 1,
   };
-  if (projectChanged) {
+  if (sourceChanged) {
+    if (!Object.hasOwn(patch, "projectId")) next.projectId = undefined;
+    if (!Object.hasOwn(patch, "sourceAssetId")) next.sourceAssetId = undefined;
+    if (!Object.hasOwn(patch, "originalImageId"))
+      next.originalImageId = undefined;
+    if (!Object.hasOwn(patch, "tailFrameId")) next.tailFrameId = undefined;
+    if (!Object.hasOwn(patch, "audioId")) next.audioId = undefined;
+    if (!Object.hasOwn(patch, "referenceIds")) next.referenceIds = [];
+  }
+  if (projectChanged || sourceChanged) {
     const blank = createDraft();
     if (!Object.hasOwn(patch, "prompt")) next.prompt = "";
     if (!Object.hasOwn(patch, "promptEdited")) next.promptEdited = false;
     if (!patch.script) next.script = blank.script;
     if (!Object.hasOwn(patch, "scriptEdited")) next.scriptEdited = false;
+    next.script = { ...next.script, confirmed: false };
   }
   // Asset ownership must be reselected when identity changes, never relabelled.
   if (Object.hasOwn(patch, "ipId") && patch.ipId !== draft.ipId) {
+    if (!Object.hasOwn(patch, "imageId")) next.imageId = undefined;
     next.voiceId = undefined;
     next.avatarId = undefined;
     next.script = { ...next.script, confirmed: false };
@@ -161,6 +299,7 @@ export function patchStudioDraft(
   if (
     patch.script &&
     !projectChanged &&
+    !sourceChanged &&
     patch.scriptEdited === undefined &&
     (patch.script.title !== draft.script.title ||
       patch.script.original !== draft.script.original ||
@@ -170,6 +309,7 @@ export function patchStudioDraft(
   if (
     Object.hasOwn(patch, "prompt") &&
     !projectChanged &&
+    !sourceChanged &&
     patch.promptEdited === undefined &&
     patch.prompt !== draft.prompt
   )
@@ -217,6 +357,59 @@ export const SUPPORTED_VIDEO_RATIOS = [
   "3:4",
   "9:16",
 ] as const;
+
+export const DEFAULT_MAX_REFERENCE_IMAGES = 4;
+
+export function validateReferenceImages(
+  referenceIds: string[],
+  availableAssets: StudioAsset[],
+  maxReferenceImages = DEFAULT_MAX_REFERENCE_IMAGES,
+) {
+  const assetById = new Map(availableAssets.map((asset) => [asset.id, asset]));
+  const seen = new Set<string>();
+  const images: StudioAsset[] = [];
+  let invalidCount = 0;
+  let duplicateCount = 0;
+
+  for (const id of referenceIds) {
+    if (seen.has(id)) {
+      duplicateCount += 1;
+      continue;
+    }
+    seen.add(id);
+    const asset = assetById.get(id);
+    if (asset?.kind !== "image") {
+      invalidCount += 1;
+      continue;
+    }
+    images.push(asset);
+  }
+
+  const limit = Math.max(0, Math.floor(maxReferenceImages));
+  const overLimitCount = Math.max(0, images.length - limit);
+  const issues: string[] = [];
+  if (invalidCount > 0)
+    issues.push(`参考图仅支持图片，旧草稿中有 ${invalidCount} 项无效素材。`);
+  if (duplicateCount > 0)
+    issues.push(
+      `参考图不能重复选择，旧草稿中有 ${duplicateCount} 项重复素材。`,
+    );
+  if (overLimitCount > 0)
+    issues.push(
+      `当前最多选择 ${limit} 张参考图，旧草稿已超出 ${overLimitCount} 张。`,
+    );
+
+  return {
+    images,
+    imageIds: images.map((asset) => asset.id),
+    repairIds: images.slice(0, limit).map((asset) => asset.id),
+    limit,
+    invalidCount,
+    duplicateCount,
+    overLimitCount,
+    issues,
+  };
+}
 
 /** 文图生页签有首帧即 I2V（可选尾帧），无首帧为 T2V；参考生页签为 R2V。 */
 export function resolveVideoMode(

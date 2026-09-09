@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Pagination } from "../admin/ui/Pagination";
 import {
   type CreatedRechargeOrder,
   CustomerApiError,
@@ -11,8 +12,10 @@ import {
   type GenerationPriceQuote,
   getGenerationPriceQuote,
   type RechargeOrder,
+  type RechargeOrderPage,
   type WalletSnapshot,
   type WalletTransaction,
+  type WalletTransactionPage,
 } from "../api";
 import type { CustomerCredentialStore } from "./useCustomerSession";
 import "./customer-wallet.css";
@@ -20,6 +23,7 @@ import "./customer-wallet.css";
 const RECHARGE_PRESETS_YUAN = [50, 100, 200, 500, 1000] as const;
 const ORDER_POLL_INTERVAL_MS = 2_000;
 const MAX_ORDER_POLL_ATTEMPTS = 30;
+const HISTORY_PAGE_SIZE = 20;
 
 /** The customer wallet view (task #7): balance, recharge and orders under the
  * customer session. Mirrors the internal WalletPanel but talks to the
@@ -35,17 +39,39 @@ export function CustomerWalletPanel({
   onRechargeRequested?: (amountYuan: number) => void;
 }) {
   const [wallet, setWallet] = useState<WalletSnapshot | null>(null);
-  const [transactions, setTransactions] = useState<WalletTransaction[]>([]);
+  const [transactionPage, setTransactionPage] =
+    useState<WalletTransactionPage | null>(null);
   const [orders, setOrders] = useState<RechargeOrder[]>([]);
+  const [orderHistoryPage, setOrderHistoryPage] =
+    useState<RechargeOrderPage | null>(null);
+  const [showOrderHistory, setShowOrderHistory] = useState(false);
   const [customAmount, setCustomAmount] = useState("");
   const [pendingOrderNo, setPendingOrderNo] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  const [summaryError, setSummaryError] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isCreating, setIsCreating] = useState(false);
   const [closingOrderNo, setClosingOrderNo] = useState<string | null>(null);
   const [priceQuotes, setPriceQuotes] = useState<GenerationPriceQuote[]>([]);
   const [quoteError, setQuoteError] = useState("");
+  const [isTransactionLoading, setIsTransactionLoading] = useState(false);
+  const [transactionError, setTransactionError] = useState("");
+  const [failedTransactionOffset, setFailedTransactionOffset] = useState<
+    number | null
+  >(null);
+  const [isOrderHistoryLoading, setIsOrderHistoryLoading] = useState(false);
+  const [orderHistoryError, setOrderHistoryError] = useState("");
+  const [failedOrderHistoryOffset, setFailedOrderHistoryOffset] = useState<
+    number | null
+  >(null);
+  const summaryRequestIdRef = useRef(0);
+  const transactionRequestIdRef = useRef(0);
+  const orderHistoryRequestIdRef = useRef(0);
+  const showOrderHistoryRef = useRef(showOrderHistory);
+  const transactionOffsetRef = useRef(0);
+  const orderHistoryOffsetRef = useRef(0);
+  showOrderHistoryRef.current = showOrderHistory;
 
   const loadSession = useCallback(async (): Promise<{
     kind: "session";
@@ -59,43 +85,136 @@ export function CustomerWalletPanel({
     return { kind: "session", token };
   }, [store, onSessionExpired]);
 
-  const refresh = useCallback(async () => {
-    const credential = await loadSession();
-    if (credential === null) {
-      return;
-    }
-    const [nextWallet, transactionPage, orderPage] = await Promise.all([
-      customerGetWallet(credential),
-      customerListWalletTransactions(credential),
-      customerListRechargeOrders(credential),
-    ]);
-    setWallet(nextWallet);
-    setTransactions(transactionPage.items);
-    setOrders(orderPage.items.filter((order) => order.status !== "CLOSED"));
-    // Codex P2 (PR #65): the pending order number lives only in component
-    // state, so reopening/remounting the wallet (or exhausting the poll
-    // window) would never resume tracking an outstanding payment. Derive the
-    // most recent still-pending order from the fetched list and restart the
-    // status poll — unless one is already being tracked.
-    const pending = orderPage.items.find((order) => order.status === "PENDING");
-    if (pending) {
-      setPendingOrderNo((current) => current ?? pending.order_no);
+  const loadSummary = useCallback(async () => {
+    const requestId = ++summaryRequestIdRef.current;
+    try {
+      const credential = await loadSession();
+      if (credential === null || requestId !== summaryRequestIdRef.current) {
+        return;
+      }
+      const [nextWallet, recentOrderPage] = await Promise.all([
+        customerGetWallet(credential),
+        customerListRechargeOrders(credential, {
+          limit: HISTORY_PAGE_SIZE,
+          offset: 0,
+        }),
+      ]);
+      if (requestId !== summaryRequestIdRef.current) {
+        return;
+      }
+      setWallet(nextWallet);
+      setSummaryError("");
+      setOrders(
+        recentOrderPage.items.filter((order) => order.status !== "CLOSED"),
+      );
+      // Codex P2 (PR #65): the pending order number lives only in component
+      // state, so reopening/remounting the wallet (or exhausting the poll
+      // window) would never resume tracking an outstanding payment. Derive the
+      // most recent still-pending order from the fetched list and restart the
+      // status poll — unless one is already being tracked.
+      const pending = recentOrderPage.items.find(
+        (order) => order.status === "PENDING",
+      );
+      if (pending) {
+        setPendingOrderNo((current) => current ?? pending.order_no);
+      }
+    } catch (cause) {
+      if (requestId === summaryRequestIdRef.current) {
+        setSummaryError(errorMessage(cause, "钱包暂不可用，请稍后重试。"));
+        throw cause;
+      }
     }
   }, [loadSession]);
 
+  const loadTransactions = useCallback(
+    async (offset: number) => {
+      const requestId = ++transactionRequestIdRef.current;
+      setIsTransactionLoading(true);
+      setTransactionError("");
+      try {
+        const credential = await loadSession();
+        if (
+          credential === null ||
+          requestId !== transactionRequestIdRef.current
+        ) {
+          return;
+        }
+        const nextPage = await customerListWalletTransactions(credential, {
+          limit: HISTORY_PAGE_SIZE,
+          offset,
+        });
+        if (requestId !== transactionRequestIdRef.current) {
+          return;
+        }
+        setTransactionPage(nextPage);
+        transactionOffsetRef.current = nextPage.offset;
+        setFailedTransactionOffset(null);
+      } catch (cause) {
+        if (requestId === transactionRequestIdRef.current) {
+          setTransactionError(errorMessage(cause, "额度流水加载失败"));
+          setFailedTransactionOffset(offset);
+        }
+      } finally {
+        if (requestId === transactionRequestIdRef.current) {
+          setIsTransactionLoading(false);
+        }
+      }
+    },
+    [loadSession],
+  );
+
+  const loadOrderHistory = useCallback(
+    async (offset: number) => {
+      const requestId = ++orderHistoryRequestIdRef.current;
+      setIsOrderHistoryLoading(true);
+      setOrderHistoryError("");
+      try {
+        const credential = await loadSession();
+        if (
+          credential === null ||
+          requestId !== orderHistoryRequestIdRef.current
+        ) {
+          return;
+        }
+        const nextPage = await customerListRechargeOrders(credential, {
+          limit: HISTORY_PAGE_SIZE,
+          offset,
+        });
+        if (requestId !== orderHistoryRequestIdRef.current) {
+          return;
+        }
+        setOrderHistoryPage(nextPage);
+        orderHistoryOffsetRef.current = nextPage.offset;
+        setFailedOrderHistoryOffset(null);
+      } catch (cause) {
+        if (requestId === orderHistoryRequestIdRef.current) {
+          setOrderHistoryError(errorMessage(cause, "充值记录加载失败"));
+          setFailedOrderHistoryOffset(offset);
+        }
+      } finally {
+        if (requestId === orderHistoryRequestIdRef.current) {
+          setIsOrderHistoryLoading(false);
+        }
+      }
+    },
+    [loadSession],
+  );
+
+  const refresh = useCallback(async () => {
+    const requests: Promise<void>[] = [
+      loadSummary(),
+      loadTransactions(transactionOffsetRef.current),
+    ];
+    if (showOrderHistoryRef.current) {
+      requests.push(loadOrderHistory(orderHistoryOffsetRef.current));
+    }
+    await Promise.allSettled(requests);
+  }, [loadOrderHistory, loadSummary, loadTransactions]);
+
   useEffect(() => {
     let active = true;
-    refresh()
-      .then(() => {
-        if (active) {
-          setError("");
-        }
-      })
-      .catch((cause: unknown) => {
-        if (active) {
-          setError(errorMessage(cause, "钱包暂不可用，请稍后重试。"));
-        }
-      })
+    Promise.all([loadSummary(), loadTransactions(0)])
+      .catch(() => undefined)
       .finally(() => {
         if (active) {
           setIsLoading(false);
@@ -103,8 +222,11 @@ export function CustomerWalletPanel({
       });
     return () => {
       active = false;
+      summaryRequestIdRef.current += 1;
+      transactionRequestIdRef.current += 1;
+      orderHistoryRequestIdRef.current += 1;
     };
-  }, [refresh]);
+  }, [loadSummary, loadTransactions]);
 
   useEffect(() => {
     let active = true;
@@ -204,6 +326,13 @@ export function CustomerWalletPanel({
     };
   }, [pendingOrderNo, refresh, loadSession]);
 
+  const refreshOrderViews = useCallback(() => {
+    void loadSummary().catch(() => undefined);
+    if (showOrderHistoryRef.current) {
+      void loadOrderHistory(orderHistoryOffsetRef.current);
+    }
+  }, [loadOrderHistory, loadSummary]);
+
   async function startRecharge(amountYuan: number) {
     if (!wallet || isCreating) {
       return;
@@ -237,7 +366,7 @@ export function CustomerWalletPanel({
       setPendingOrderNo(created.order_no);
       setNotice("支付页已打开，本页会自动确认到账。");
       submitPaymentForm(created);
-      setOrders((current) => [createdOrderStatus(created), ...current]);
+      refreshOrderViews();
     } catch (cause) {
       setError(errorMessage(cause, "创建充值订单失败。"));
     } finally {
@@ -270,8 +399,21 @@ export function CustomerWalletPanel({
       setOrders((current) =>
         current.filter((order) => order.order_no !== orderNo),
       );
+      setOrderHistoryPage((current) =>
+        current
+          ? {
+              ...current,
+              items: current.items.map((order) =>
+                order.order_no === orderNo
+                  ? { ...order, status: "CLOSED" }
+                  : order,
+              ),
+            }
+          : current,
+      );
       setPendingOrderNo((current) => (current === orderNo ? null : current));
       setNotice("待支付订单已删除。");
+      refreshOrderViews();
     } catch (cause) {
       setError(errorMessage(cause, "删除待支付订单失败，请稍后重试。"));
     } finally {
@@ -286,10 +428,19 @@ export function CustomerWalletPanel({
   if (!wallet) {
     return (
       <section className="settings-error" role="alert">
-        {error || "钱包暂不可用。"}
+        <span>{summaryError || "钱包暂不可用。"}</span>
+        <button
+          className="secondary-button"
+          onClick={() => void loadSummary().catch(() => undefined)}
+          type="button"
+        >
+          重新加载钱包
+        </button>
       </section>
     );
   }
+
+  const transactions = transactionPage?.items ?? [];
 
   return (
     <section className="wallet-page" aria-label="余额与充值">
@@ -382,7 +533,38 @@ export function CustomerWalletPanel({
       </section>
 
       <section className="wallet-section" aria-labelledby="orders-title">
-        <h2 id="orders-title">最近充值订单</h2>
+        <div className="wallet-section__heading">
+          <h2 id="orders-title">最近充值订单</h2>
+          <button
+            className="secondary-button"
+            onClick={() => {
+              const nextVisible = !showOrderHistory;
+              showOrderHistoryRef.current = nextVisible;
+              setShowOrderHistory(nextVisible);
+              if (nextVisible) {
+                orderHistoryOffsetRef.current = 0;
+                void loadOrderHistory(0);
+              } else {
+                orderHistoryRequestIdRef.current += 1;
+              }
+            }}
+            type="button"
+          >
+            {showOrderHistory ? "收起全部充值记录" : "查看全部充值记录"}
+          </button>
+        </div>
+        {summaryError ? (
+          <div className="settings-error" role="alert">
+            <span>{summaryError}</span>
+            <button
+              className="secondary-button"
+              onClick={() => void loadSummary().catch(() => undefined)}
+              type="button"
+            >
+              重新加载钱包和最近订单
+            </button>
+          </div>
+        ) : null}
         <div className="table-scroll">
           <table className="internal-table">
             <thead>
@@ -430,6 +612,70 @@ export function CustomerWalletPanel({
         </div>
       </section>
 
+      {showOrderHistory ? (
+        <section
+          className="wallet-section"
+          aria-labelledby="order-history-title"
+        >
+          <h2 id="order-history-title">充值订单历史</h2>
+          <div className="table-scroll">
+            <table className="internal-table">
+              <thead>
+                <tr>
+                  <th>订单号</th>
+                  <th>金额</th>
+                  <th>到账秒数</th>
+                  <th>状态</th>
+                </tr>
+              </thead>
+              <tbody>
+                {orderHistoryPage?.items.length ? (
+                  orderHistoryPage.items.map((order) => (
+                    <tr key={order.order_no}>
+                      <td>{order.order_no}</td>
+                      <td>{formatFen(order.amount_fen)}</td>
+                      <td>{order.credits}</td>
+                      <td>{orderStatusLabel(order.status)}</td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={4}>
+                      {isOrderHistoryLoading
+                        ? "正在读取充值记录"
+                        : "暂无充值记录"}
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+          {orderHistoryError ? (
+            <div className="settings-error" role="alert">
+              <span>{orderHistoryError}</span>
+              <button
+                className="secondary-button"
+                onClick={() =>
+                  void loadOrderHistory(
+                    failedOrderHistoryOffset ?? orderHistoryPage?.offset ?? 0,
+                  )
+                }
+                type="button"
+              >
+                重试加载充值记录
+              </button>
+            </div>
+          ) : null}
+          <Pagination
+            disabled={isOrderHistoryLoading}
+            limit={orderHistoryPage?.limit ?? HISTORY_PAGE_SIZE}
+            offset={orderHistoryPage?.offset ?? 0}
+            onPageChange={(nextOffset) => void loadOrderHistory(nextOffset)}
+            total={orderHistoryPage?.total ?? 0}
+          />
+        </section>
+      ) : null}
+
       <section className="wallet-section" aria-labelledby="ledger-title">
         <h2 id="ledger-title">额度流水</h2>
         <div className="table-scroll">
@@ -460,6 +706,29 @@ export function CustomerWalletPanel({
             </tbody>
           </table>
         </div>
+        {transactionError ? (
+          <div className="settings-error" role="alert">
+            <span>{transactionError}</span>
+            <button
+              className="secondary-button"
+              onClick={() =>
+                void loadTransactions(
+                  failedTransactionOffset ?? transactionPage?.offset ?? 0,
+                )
+              }
+              type="button"
+            >
+              重试加载额度流水
+            </button>
+          </div>
+        ) : null}
+        <Pagination
+          disabled={isTransactionLoading}
+          limit={transactionPage?.limit ?? HISTORY_PAGE_SIZE}
+          offset={transactionPage?.offset ?? 0}
+          onPageChange={(nextOffset) => void loadTransactions(nextOffset)}
+          total={transactionPage?.total ?? 0}
+        />
       </section>
     </section>
   );
@@ -481,18 +750,6 @@ function submitPaymentForm(order: CreatedRechargeOrder) {
   document.body.append(form);
   form.submit();
   form.remove();
-}
-
-function createdOrderStatus(order: CreatedRechargeOrder): RechargeOrder {
-  return {
-    order_no: order.order_no,
-    status: order.status,
-    amount_fen: order.amount_fen,
-    credits: order.credits,
-    channel: order.form_fields.type ?? "",
-    created_at: new Date().toISOString(),
-    paid_at: null,
-  };
 }
 
 function formatFen(amountFen: number): string {

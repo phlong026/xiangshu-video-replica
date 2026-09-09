@@ -1,0 +1,95 @@
+{
+  "schema_version": 2,
+  "artifact_kind": "postgresql-unification-document-review",
+  "captured_at_utc": "2026-09-08 14:01:21 UTC",
+  "analysis_branch": "codex/customer-cloud-convergence-analysis-20260908",
+  "previous_definition_commit": "822a3b86ea2a09a98d435857774f28dea1044eb2",
+  "source_base_sha": "bffc3419f9d89bf76fd4ad1bdad65dd824a44553",
+  "scope": "PostgreSQL全面统一的文档评审、60项定义及验收标准更新；不证明代码改造、数据库迁移或生产切换已执行。",
+  "task_checks": {
+    "task_count": 60,
+    "phase_counts": {
+      "W0": 7,
+      "W1": 5,
+      "W2": 7,
+      "W3": 6,
+      "W4": 12,
+      "W5": 8,
+      "W6": 7,
+      "W7": 8
+    },
+    "dependency_edges": 212,
+    "dependency_graph_acyclic": true,
+    "markdown_csv_field_consistency": true,
+    "source_paths_checked": 258,
+    "local_links_checked": 13,
+    "pending_evidence_link": [],
+    "utf8_bom": true,
+    "source_fingerprints_checked": 414,
+    "source_drift": [],
+    "repository_secret_scan_exit_code": 0,
+    "document_secret_findings": [],
+    "issues": [],
+    "document_sha256": {
+      "客户版收敛详细任务清单与验收完工标准.md": "10add323e23387980017e637f8200e03ea9d4284aeece168d5ffd4e2f38b1b32",
+      "客户版收敛工作任务清单.csv": "9b1e9b0f65f030b3187a7bc3a0ac7a54806349301d274a7ef4d8e896ce93f9c5"
+    }
+  },
+  "document_checks": {
+    "ledger_count": 60,
+    "ledger_matches_definitions": true,
+    "pg_contract_count": 12,
+    "changed_doc_links_checked": 52,
+    "changed_file_count": 14,
+    "changes_are_documents_only": true,
+    "document_manifest_sha256": {
+      "AGENTS.md": "bf17bbd30b0c1c63116abdf7782522494f0617d4049e222f0dcb1d465419b3a8",
+      "README.md": "6145baadc0521bc7caea74bcfa570433d492ff5b14c949160ff78b41b38822c0",
+      "docs/CUSTOMER-TASK-EVIDENCE-V3.md": "97f181900184efce2f38797a65b5a2c5034baa7914a715ee7fd250312b5fc5e5",
+      "docs/PostgreSQL唯一数据库实施与验收规范.md": "07aa26d6da11cdcff9734f0a1d1ee93173ccce5e38db157f3822102c3fc7841c",
+      "docs/客户版代码开发清单-V3.md": "3eaed88a385e2a7f08b8fa819dea0b2c35477f54b560a1634457ebc3c456ffb4",
+      "docs/客户版任务清单-V3.md": "f68d61a46d1334bc10c306452b9a59a3d143dcd10361fe07c0aabba0afc03c45",
+      "docs/客户版开发计划-V3.md": "23ce7f19674ba8210089adc234d82379d5e05c5cf9249ac3b22c180ce20463ab",
+      "docs/客户版测试与验收规格-V3.md": "fd07d79bc84ab6da6ca1a8a456de98450e4279016bdbe45aac64b909ad1d450d",
+      "docs/客户版激活码完整开发文档-V3.md": "ec0b3491bca736ddcf9ea8a37c310de6b8c7d143b93dbf90be2e44ade90a2306",
+      "docs/客户版部署与灰度手册.md": "47d7251bc425c86cbdd8932a3c8a394b3d2ed0ac1ab36be6ca025f84510448ef",
+      "outputs/customer-cloud-convergence-analysis-2026-09-08/PostgreSQL全面统一文档评审报告.md": "12a00374fafbc8025c3395b4c29239d2d7272add28385479e08cdf4d8697fa05",
+      "outputs/customer-cloud-convergence-analysis-2026-09-08/客户版收敛工作任务清单.csv": "9b1e9b0f65f030b3187a7bc3a0ac7a54806349301d274a7ef4d8e896ce93f9c5",
+      "outputs/customer-cloud-convergence-analysis-2026-09-08/客户版收敛详细任务清单与验收完工标准.md": "10add323e23387980017e637f8200e03ea9d4284aeece168d5ffd4e2f38b1b32"
+    },
+    "sensitive_pattern_findings": [],
+    "issues": []
+  },
+  "independent_review": {
+    "status": "approved",
+    "roles": [
+      "test-engineer",
+      "critic"
+    ],
+    "scope": "任务定义、依赖、文档一致性与验收设计；不属于代码实现或数据库迁移通过证据",
+    "verdicts": [
+      {
+        "role": "test-engineer",
+        "verdict": "APPROVE",
+        "resolved": "逐调用者真实PG测试先行；CW-010多连接基线；CW-058/059仅全量映射核销与遗漏补测",
+        "remaining_material_findings": 0
+      },
+      {
+        "role": "critic",
+        "verdict": "APPROVE",
+        "resolved": "CW-032依赖CW-060；CW-034依赖CW-056；最终MD/CSV/账本、212条依赖、哈希与证据层级一致",
+        "remaining_material_findings": 0
+      }
+    ],
+    "post_review_format_only": "删除评审报告末尾多余空行；未变更语义，完整工作树差异及哈希已重新校验。"
+  },
+  "implementation_validation": {
+    "application_code_changed": false,
+    "application_tests_run": false,
+    "actual_database_migration_run": false,
+    "production_cutover_run": false,
+    "cw_tasks_completed_by_document_delivery": 0
+  },
+  "history_policy": "旧分析、24项契约检查和T03—T09等证据保留原范围；V1任务定义/校验从822a3b8恢复。任何旧SQLite/旧SHA成绩均不替代当前PG业务验收。",
+  "validation_method": "60个唯一编号、阶段计数、全部字段、212条前置引用/无环、CSV UTF-8 BOM、账本标题/阶段映射、12项PG合同、修改文档链接、源码路径、414源码指纹、文档凭据扫描及git diff HEAD --check及暂存差异反向补丁检查。"
+}

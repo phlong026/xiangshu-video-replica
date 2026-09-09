@@ -2176,7 +2176,7 @@ describe("App", () => {
     expect(apiKeyInput).toHaveAttribute("placeholder", "已保存，留空不修改");
     expect(apiKeyInput).toHaveAttribute("type", "password");
     fireEvent.click(screen.getAllByRole("button", { name: "显示API Key" })[0]);
-    expect(apiKeyInput).toHaveAttribute("type", "text");
+    await waitFor(() => expect(apiKeyInput).toHaveAttribute("type", "text"));
     fireEvent.click(screen.getAllByRole("button", { name: "隐藏API Key" })[0]);
     expect(apiKeyInput).toHaveAttribute("type", "password");
     expect(screen.getByText("模型服务")).toBeInTheDocument();

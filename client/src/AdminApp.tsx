@@ -37,7 +37,7 @@ type AuthPhase =
   | "password-setup"
   | "ready";
 
-type AdminTab =
+export type AdminTab =
   | "overview"
   | "analytics"
   | "funds"
@@ -110,6 +110,38 @@ const navigationIcons: Record<AdminTab, string> = {
   systemSettings: settingsIcon,
 };
 
+const adminTabs = new Set<AdminTab>(Object.keys(tabPageTitles) as AdminTab[]);
+const adminIntents = new Set([
+  "costDetails",
+  "issueCodes",
+  "codes",
+  "customerAdjustments",
+  "failedGenerationRecords",
+  "rates",
+]);
+
+export function adminRouteFromHash(hash: string): {
+  tab: AdminTab;
+  intent: string;
+} {
+  const [path, query = ""] = hash.replace(/^#/, "").split("?", 2);
+  const requested = path.replace(/^admin\//, "") as AdminTab;
+  return {
+    tab: adminTabs.has(requested) ? requested : "overview",
+    intent: (() => {
+      const intent = new URLSearchParams(query).get("intent") ?? "";
+      return adminIntents.has(intent) ? intent : "";
+    })(),
+  };
+}
+
+function adminHash(tab: AdminTab, intent = "") {
+  const params = new URLSearchParams();
+  if (intent) params.set("intent", intent);
+  const query = params.toString();
+  return `#admin/${tab}${query ? `?${query}` : ""}`;
+}
+
 export function AdminApp() {
   const [authPhase, setAuthPhase] = useState<AuthPhase>("checking");
   const [actor, setActor] = useState<AdminActorInfo | null>(null);
@@ -118,8 +150,9 @@ export function AdminApp() {
   const [recoveryCredential, setRecoveryCredential] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
-  const [activeTab, setActiveTab] = useState<AdminTab>("overview");
-  const [navigationIntent, setNavigationIntent] = useState("");
+  const initialRoute = adminRouteFromHash(window.location.hash);
+  const [activeTab, setActiveTab] = useState<AdminTab>(initialRoute.tab);
+  const [navigationIntent, setNavigationIntent] = useState(initialRoute.intent);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const [isCompactNavigation, setIsCompactNavigation] = useState(() =>
@@ -133,12 +166,35 @@ export function AdminApp() {
       : true,
   );
 
+  const navigateAdmin = useCallback((tab: AdminTab, intent = "") => {
+    setActiveTab(tab);
+    setNavigationIntent(intent);
+    window.history.pushState(null, "", adminHash(tab, intent));
+  }, []);
+
+  useEffect(() => {
+    const current = adminRouteFromHash(window.location.hash);
+    const normalized = adminHash(current.tab, current.intent);
+    if (window.location.hash !== normalized)
+      window.history.replaceState(null, "", normalized);
+    const restore = () => {
+      const route = adminRouteFromHash(window.location.hash);
+      setActiveTab(route.tab);
+      setNavigationIntent(route.intent);
+    };
+    window.addEventListener("hashchange", restore);
+    window.addEventListener("popstate", restore);
+    return () => {
+      window.removeEventListener("hashchange", restore);
+      window.removeEventListener("popstate", restore);
+    };
+  }, []);
+
   const handleSessionExpired = useCallback(
     (message = "会话已失效，请重新登录。") => {
       clearAdminActivationSession();
       setActor(null);
       setAuthPhase("anonymous");
-      setActiveTab("overview");
       setLoginPassword("");
       setRecoveryCredential("");
       setNewPassword("");
@@ -219,7 +275,9 @@ export function AdminApp() {
       setActor(result.actor);
       setLoginPassword("");
       setAuthPhase("ready");
-      setActiveTab("overview");
+      const route = adminRouteFromHash(window.location.hash);
+      setActiveTab(route.tab);
+      setNavigationIntent(route.intent);
     } catch (cause) {
       setError(adminActivationErrorMessage(cause, "后台登录失败"));
     }
@@ -493,8 +551,7 @@ export function AdminApp() {
                         key={tab.id}
                         type="button"
                         onClick={() => {
-                          setActiveTab(tab.id);
-                          setNavigationIntent("");
+                          navigateAdmin(tab.id);
                           // C3：切标签清掉上一页残留的全局提示。
                           setError("");
                           setNotice("");
@@ -542,21 +599,22 @@ export function AdminApp() {
                 ariaLabel="运营概览快捷导航"
                 items={tabGroups[0].tabs}
                 active={activeTab}
-                onChange={(tab) => setActiveTab(tab as AdminTab)}
+                onChange={(tab) => navigateAdmin(tab as AdminTab)}
               />
               <OverviewPage
                 readOnly={readOnly}
                 onNavigate={(destination) => {
-                  setNavigationIntent(destination);
                   const routes: Record<string, AdminTab> = {
                     issueCodes: "customersMgmt",
                     codes: "customersMgmt",
                     customerAdjustments: "customersMgmt",
                     costDetails: "analytics",
+                    failedGenerationRecords: "generationRecords",
                     rates: "systemSettings",
                   };
-                  setActiveTab(
+                  navigateAdmin(
                     routes[destination] ?? (destination as AdminTab),
+                    destination,
                   );
                 }}
               />
@@ -585,7 +643,16 @@ export function AdminApp() {
               initiallyShowGenerator={navigationIntent === "issueCodes"}
             />
           ) : null}
-          {activeTab === "generationRecords" ? <GenerationRecordsPage /> : null}
+          {activeTab === "generationRecords" ? (
+            <GenerationRecordsPage
+              key={`generationRecords:${navigationIntent}`}
+              initialStatus={
+                navigationIntent === "failedGenerationRecords"
+                  ? "FAILED"
+                  : undefined
+              }
+            />
+          ) : null}
           {activeTab === "auditCenter" ? <AuditCenterPage /> : null}
           {activeTab === "systemSettings" ? (
             <SystemSettingsPage

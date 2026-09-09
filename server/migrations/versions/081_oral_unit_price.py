@@ -1,7 +1,7 @@
-"""077_oral_unit_price — make the per-render oral price configurable.
+"""081_oral_unit_price — make the per-render oral price configurable.
 
-Revision ID: 077_oral_unit_price
-Revises: 076_studio_notification_preferences
+Revision ID: 081_oral_unit_price
+Revises: 080_viral_link_resolution_receipts
 """
 
 from __future__ import annotations
@@ -9,8 +9,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = "077_oral_unit_price"
-down_revision = "076_studio_notification_preferences"
+revision = "081_oral_unit_price"
+down_revision = "080_viral_link_resolution_receipts"
 branch_labels = None
 depends_on = None
 

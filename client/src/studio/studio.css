@@ -1015,7 +1015,7 @@
   position: relative;
   display: block;
   width: 100%;
-  aspect-ratio: 1 / 1.17;
+  aspect-ratio: 9 / 16;
   overflow: hidden;
   border: 0;
   border-radius: 7px 7px 0 0;
@@ -1173,6 +1173,9 @@
   margin-top: 3px;
 }
 .studio-page-actions {
+  min-width: 0;
+  padding: 0;
+  border: 0;
   display: flex;
   justify-content: flex-end;
   gap: 12px;

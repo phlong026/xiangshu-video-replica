@@ -1,0 +1,108 @@
+
+> @video-replica/client@0.1.16 test
+> vitest run src/studio/live.test.ts -t 提取文案任务绑定|任务标识明确
+
+
+ RUN  v4.1.10 /Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client
+
+ ❯ src/studio/live.test.ts (39 tests | 3 failed | 36 skipped) 5011ms
+     × 任务标识明确区分生成批次与口播任务 7ms
+     × 按提交的任务 ID 轮询并返回任务标识，不读取其他 latest 任务 5002ms
+     × 提供只读 latest 恢复合同，保留来源资产与错误 1ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 3 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/studio/live.test.ts > 批次类型映射与取消 > 任务标识明确区分生成批次与口播任务
+AssertionError: expected [ { id: 'batch-1', …(11) }, …(1) ] to deeply equal ArrayContaining{…}
+
+- Expected
++ Received
+
+- ArrayContaining [
+-   ObjectContaining {
++ [
++   {
+      "backendId": "batch-1",
+      "backendKind": "generation_batch",
++     "backendStatus": "RUNNING",
++     "batchId": "batch-1",
++     "id": "batch-1",
++     "progress": 37,
++     "projectId": "project-1",
++     "resultId": undefined,
++     "status": "running",
++     "submitted": "2026-09-05T09:30:00+08:00",
++     "title": "庭院镜头生成",
++     "type": "视频复刻",
+    },
+-   ObjectContaining {
++   {
++     "audioId": undefined,
++     "avatarId": "avatar-1",
+      "backendId": "oral-1",
+      "backendKind": "oral_task",
+-     "scriptText": "正文",
++     "backendStatus": "QUEUED",
++     "batchId": undefined,
++     "billingStatus": undefined,
++     "driverMode": "text",
++     "id": "oral-oral-1",
++     "ipId": "person-1",
++     "resultId": undefined,
++     "retryAction": undefined,
++     "status": "queued",
++     "submitted": "2026-09-06T09:00:00Z",
++     "title": "张工口播",
++     "type": "数字人口播",
++     "voiceId": "voice-1",
+    },
+  ]
+
+ ❯ src/studio/live.test.ts:939:19
+    937|     const tasks = await reloadTasks(user);
+    938|
+    939|     expect(tasks).toEqual(
+       |                   ^
+    940|       expect.arrayContaining([
+    941|         expect.objectContaining({
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/3]⎯
+
+ FAIL  src/studio/live.test.ts > 提取文案任务绑定 > 按提交的任务 ID 轮询并返回任务标识，不读取其他 latest 任务
+Error: Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+ ❯ src/studio/live.test.ts:1210:3
+    1208| describe("提取文案任务绑定", () => {
+    1209|   beforeEach(() => vi.clearAllMocks());
+    1210|   it("按提交的任务 ID 轮询并返回任务标识，不读取其他 latest 任务", async () => {
+       |   ^
+    1211|     vi.useFakeTimers();
+    1212|     try {
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/3]⎯
+
+ FAIL  src/studio/live.test.ts > 提取文案任务绑定 > 提供只读 latest 恢复合同，保留来源资产与错误
+TypeError: loadLatestScriptFromUpload is not a function
+ ❯ src/studio/live.test.ts:1224:23
+    1222|   it("提供只读 latest 恢复合同，保留来源资产与错误", async () => {
+    1223|     api.getLatestScriptFromAudioTask.mockResolvedValue({ id: "audio-a"…
+    1224|     await expect(live.loadLatestScriptFromUpload("project-a")).resolve…
+       |                       ^
+    1225|   });
+    1226| });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/3]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  3 failed | 36 skipped (39)
+   Start at  16:40:17
+   Duration  5.63s (transform 77ms, setup 86ms, import 75ms, tests 5.01s, environment 365ms)
+
+npm error Lifecycle script `test` failed with error:
+npm error code 1
+npm error path /Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client
+npm error workspace @video-replica/client@0.1.16
+npm error location /Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client
+npm error command failed
+npm error command sh -c vitest run src/studio/live.test.ts -t '提取文案任务绑定|任务标识明确'

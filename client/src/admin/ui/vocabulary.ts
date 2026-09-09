@@ -72,6 +72,7 @@ export const PLATFORM_LABELS: LabelMap = {
 
 export const GENERATION_RECORD_TYPE_LABELS: LabelMap = {
   VIDEO: "视频生成",
+  ORAL_VIDEO: "口播视频",
   FIRST_FRAME_IMAGE: "人物置换首帧",
   CHARACTER_SHEET_IMAGE: "人物五视图",
   CHARACTER_VIEW_IMAGE: "人物单视图",
@@ -92,6 +93,9 @@ export const GENERATION_STATUS_LABELS: LabelMap = {
   CANCELLED: "已取消",
   RETRYING: "重试中",
   UNKNOWN: "待核对",
+  SUBMISSION_UNCERTAIN: "提交结果待核对",
+  ARCHIVING: "归档中",
+  ARCHIVE_FAILED: "归档失败",
 };
 
 /** 查词典并回退到原始值——未知状态原样展示，便于发现新枚举。 */

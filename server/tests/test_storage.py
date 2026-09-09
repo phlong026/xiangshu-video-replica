@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -38,13 +39,20 @@ class FakeCosClient:
     def put_object(self, **kwargs: object) -> None:
         self.calls.append(("put", kwargs))
 
+    def copy_object(self, **kwargs: object) -> None:
+        self.calls.append(("copy", kwargs))
+
     def get_object(self, **kwargs: object) -> dict[str, object]:
         self.calls.append(("get", kwargs))
         return {"Body": FakeCosBody(b"video")}
 
     def head_object(self, **kwargs: object) -> dict[str, str]:
         self.calls.append(("head", kwargs))
-        return {"Content-Length": "5", "Content-Type": "video/mp4"}
+        return {
+            "Content-Length": "5",
+            "Content-Type": "video/mp4",
+            "x-cos-meta-sha256": "cached-digest",
+        }
 
     def head_bucket(self, **kwargs: object) -> dict[str, str]:
         self.calls.append(("head-bucket", kwargs))
@@ -61,8 +69,14 @@ class FakeCosBody:
     def get_raw_stream(self) -> FakeCosBody:
         return self
 
-    def read(self) -> bytes:
-        return self.content
+    def read(self, size: int = -1) -> bytes:
+        if not self.content:
+            return b""
+        if size < 0:
+            result, self.content = self.content, b""
+            return result
+        result, self.content = self.content[:size], self.content[size:]
+        return result
 
 
 class FakeCosNoSuchResourceClient(FakeCosClient):
@@ -100,6 +114,68 @@ def test_fake_adapter_supports_cos_business_flow() -> None:
 
     assert cos_object is not None
     assert cos_object.uri.startswith("cos://")
+
+
+def test_fake_adapter_copies_cached_media_to_project_namespace() -> None:
+    storage = FakeStorageAdapter(provider="fake", bucket="private-bucket")
+    storage.put_object("viral/douyin/v1.mp4", b"video", content_type="video/mp4")
+
+    copied = storage.copy_object(
+        "viral/douyin/v1.mp4",
+        "projects/p1/source/reference.mp4",
+    )
+
+    assert copied.key == "projects/p1/source/reference.mp4"
+    assert copied.sha256
+    assert storage.get_object(copied.key) == b"video"
+
+
+def test_local_adapter_copies_without_removing_source(tmp_path: Path) -> None:
+    storage = LocalStorageAdapter(root=tmp_path)
+    storage.put_object("viral/douyin/v1.mp4", b"video", content_type="video/mp4")
+
+    copied = storage.copy_object(
+        "viral/douyin/v1.mp4",
+        "projects/p1/source/reference.mp4",
+    )
+
+    assert copied.size == 5
+    assert copied.sha256
+    assert storage.get_object("viral/douyin/v1.mp4") == b"video"
+    assert storage.get_object(copied.key) == b"video"
+
+
+def test_local_adapter_streams_only_requested_object_range(tmp_path: Path) -> None:
+    storage = LocalStorageAdapter(root=tmp_path)
+    storage.put_object("viral/douyin/v1.mp4", b"0123456789", content_type="video/mp4")
+
+    chunks = list(
+        storage.iter_object(
+            "viral/douyin/v1.mp4",
+            start=2,
+            end=7,
+            chunk_size=3,
+        )
+    )
+
+    assert chunks == [b"234", b"567"]
+
+
+def test_local_adapter_heads_large_object_without_reading_it_all_at_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = LocalStorageAdapter(root=tmp_path)
+    storage.put_object("viral/douyin/v1.mp4", b"0123456789", content_type="video/mp4")
+
+    def forbid_read_bytes(_path: Path) -> bytes:
+        raise AssertionError("head_object must not call Path.read_bytes")
+
+    monkeypatch.setattr(Path, "read_bytes", forbid_read_bytes)
+    stored = storage.head_object("viral/douyin/v1.mp4")
+
+    assert stored is not None
+    assert stored.size == 10
+    assert stored.sha256 == hashlib.sha256(b"0123456789").hexdigest()
 
 
 def test_local_storage_maps_filesystem_write_failure_to_backend_unavailable(
@@ -147,6 +223,9 @@ def test_cloud_adapter_signs_and_operates_on_one_private_object() -> None:
     assert upload.headers == {"Content-Type": "video/mp4"}
     assert download.method == "GET"
     assert stored.uri == "cos://private-bucket/tenant-a/projects/p1/source/reference.mp4"
+    assert next(call for call in client.calls if call[0] == "put")[1]["Metadata"] == {
+        "x-cos-meta-sha256": hashlib.sha256(b"video").hexdigest()
+    }
     assert adapter.get_object(upload.key) == b"video"
     assert head is not None
     assert head.size == 5
@@ -173,6 +252,69 @@ def test_cloud_adapter_signs_and_operates_on_one_private_object() -> None:
             "Key": "tenant-a/projects/p1/source/reference.mp4",
             "Expired": 600,
             "SignHost": True,
+        },
+    )
+
+
+def test_cloud_adapter_uses_server_side_copy_for_project_asset() -> None:
+    client = FakeCosClient()
+    adapter = CloudStorageAdapter(
+        CloudStorageConfig(
+            provider="cos",
+            bucket="private-bucket",
+            access_key_id="public-id",
+            secret_access_key="very-secret-key",
+            region="ap-shanghai",
+            key_prefix="tenant-a",
+        ),
+        client=client,
+    )
+
+    copied = adapter.copy_object(
+        "viral/douyin/v1.mp4",
+        "projects/p1/source/reference.mp4",
+    )
+
+    assert copied.key == "tenant-a/projects/p1/source/reference.mp4"
+    assert copied.sha256 == "cached-digest"
+    assert client.calls[0] == (
+        "copy",
+        {
+            "Bucket": "private-bucket",
+            "Key": "tenant-a/projects/p1/source/reference.mp4",
+            "CopySource": {
+                "Bucket": "private-bucket",
+                "Key": "tenant-a/viral/douyin/v1.mp4",
+                "Region": "ap-shanghai",
+            },
+        },
+    )
+
+
+def test_cloud_adapter_streams_with_provider_range() -> None:
+    client = FakeCosClient()
+    adapter = CloudStorageAdapter(
+        CloudStorageConfig(
+            provider="cos",
+            bucket="private-bucket",
+            access_key_id="public-id",
+            secret_access_key="very-secret-key",
+            region="ap-shanghai",
+            key_prefix="tenant-a",
+        ),
+        client=client,
+    )
+
+    assert (
+        b"".join(adapter.iter_object("viral/douyin/v1.mp4", start=2, end=4, chunk_size=2))
+        == b"video"
+    )
+    assert client.calls[0] == (
+        "get",
+        {
+            "Bucket": "private-bucket",
+            "Key": "tenant-a/viral/douyin/v1.mp4",
+            "Range": "bytes=2-4",
         },
     )
 

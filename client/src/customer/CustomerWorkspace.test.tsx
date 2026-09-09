@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CustomerDeviceListResponse, CustomerProfile } from "../api";
 import { CustomerWorkspace } from "./CustomerWorkspace";
@@ -88,6 +94,7 @@ describe("CustomerWorkspace (T31)", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
   function stubDeviceFetch() {
@@ -197,6 +204,7 @@ describe("CustomerWorkspace (T31)", () => {
       <CustomerWorkspace
         user={user}
         store={fakeStore()}
+        onLogout={vi.fn()}
         onSessionExpired={vi.fn()}
       />,
     );
@@ -221,6 +229,7 @@ describe("CustomerWorkspace (T31)", () => {
       <CustomerWorkspace
         user={user}
         store={fakeStore()}
+        onLogout={vi.fn()}
         onSessionExpired={vi.fn()}
       />,
     );
@@ -249,6 +258,7 @@ describe("CustomerWorkspace (T31)", () => {
       <CustomerWorkspace
         user={user}
         store={fakeStore()}
+        onLogout={vi.fn()}
         onSessionExpired={vi.fn()}
       />,
     );
@@ -281,6 +291,7 @@ describe("CustomerWorkspace (T31)", () => {
       <CustomerWorkspace
         user={user}
         store={fakeStore()}
+        onLogout={vi.fn()}
         onSessionExpired={vi.fn()}
       />,
     );
@@ -290,9 +301,273 @@ describe("CustomerWorkspace (T31)", () => {
     fireEvent.click(screen.getByRole("button", { name: "暂不处理" }));
 
     expect(
+      await screen.findByText("已暂不处理，可稍后在设备管理中继续确认。"),
+    ).toBeInTheDocument();
+    expect(
       fetchMock.mock.calls.some(([url]) => String(url).includes("/reject")),
     ).toBe(false);
+    expect(
+      fetchMock.mock.calls.some(
+        ([url, init]) =>
+          String(url).includes("/device-pairings/") &&
+          (init?.method === "DELETE" || init?.method === "POST"),
+      ),
+    ).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: /^设备管理/ }));
+    expect(
+      await screen.findByRole("heading", { name: "新的设备绑定请求" }),
+    ).toBeInTheDocument();
   });
+
+  it("shows a non-auth profile failure and retries without hanging", async () => {
+    let profileAttempts = 0;
+    let allowProfileSuccess = false;
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/api/customer/profile")) {
+        profileAttempts += 1;
+        return allowProfileSuccess
+          ? jsonResponse(mockProfile)
+          : jsonResponse({ detail: "upstream unavailable" }, 500);
+      }
+      if (url.endsWith("/api/customer/devices")) {
+        return jsonResponse(mockDevices);
+      }
+      if (url.endsWith("/health")) {
+        return jsonResponse({ status: "ok", service: "video-replica-api" });
+      }
+      return jsonResponse([]);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <CustomerWorkspace
+        user={user}
+        store={fakeStore()}
+        onLogout={vi.fn()}
+        onSessionExpired={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: /^用户档案$/ }));
+    await screen.findByRole("heading", { name: "用户档案" });
+    fireEvent.click(screen.getByRole("tab", { name: "设备管理" }));
+
+    expect(
+      await screen.findByText("账号资料加载失败，请稍后重试。"),
+    ).toBeInTheDocument();
+    const attemptsBeforeRetry = profileAttempts;
+    allowProfileSuccess = true;
+    fireEvent.click(screen.getByRole("button", { name: "重新加载账号资料" }));
+
+    expect(
+      await screen.findByRole("heading", { name: mockProfile.display_name }),
+    ).toBeInTheDocument();
+    expect(profileAttempts).toBe(attemptsBeforeRetry + 1);
+  });
+
+  it("retries profile loading from the studio account overview", async () => {
+    let profileAttempts = 0;
+    let allowProfileSuccess = false;
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/api/customer/profile")) {
+        profileAttempts += 1;
+        return allowProfileSuccess
+          ? jsonResponse(mockProfile)
+          : jsonResponse({ detail: "upstream unavailable" }, 500);
+      }
+      if (url.endsWith("/api/customer/wallet")) {
+        return jsonResponse({
+          available_credits: 0,
+          reserved_credits: 0,
+          internal_unit_price_fen: 100,
+          min_recharge_fen: 100,
+          recharge_step_fen: 100,
+        });
+      }
+      if (url.endsWith("/api/customer/devices")) {
+        return jsonResponse(mockDevices);
+      }
+      if (url.endsWith("/health")) {
+        return jsonResponse({ status: "ok", service: "video-replica-api" });
+      }
+      return jsonResponse([]);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <CustomerWorkspace
+        user={user}
+        store={fakeStore()}
+        onLogout={vi.fn()}
+        onSessionExpired={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: /^用户档案$/ }));
+    expect(
+      await screen.findByText("账号资料加载失败，请稍后重试。"),
+    ).toBeInTheDocument();
+    const attemptsBeforeRetry = profileAttempts;
+    allowProfileSuccess = true;
+    fireEvent.click(screen.getByRole("button", { name: "重试资料查询" }));
+
+    expect(
+      await screen.findByRole("heading", {
+        name: new RegExp(mockProfile.display_name),
+      }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("账号资料加载失败，请稍后重试。")).toBeNull();
+    expect(profileAttempts).toBe(attemptsBeforeRetry + 1);
+  });
+
+  it("does not send a profile request after its credential read belongs to an unmounted workspace", async () => {
+    const olderSessionText = "older-workspace-session";
+    const currentSessionText = "current-workspace-session";
+    let resolveOlderCredential: ((value: string) => void) | undefined;
+    const delayedOlderCredential = new Promise<string>((resolve) => {
+      resolveOlderCredential = resolve;
+    });
+    const olderStore = fakeStore();
+    vi.mocked(olderStore.loadSessionToken)
+      .mockResolvedValueOnce(olderSessionText)
+      .mockResolvedValueOnce(olderSessionText)
+      .mockReturnValueOnce(delayedOlderCredential);
+    const currentStore = fakeStore();
+    vi.mocked(currentStore.loadSessionToken).mockResolvedValue(
+      currentSessionText,
+    );
+    let olderProfileCalls = 0;
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (url.endsWith("/api/customer/profile")) {
+        const authorization = new Headers(init?.headers).get("Authorization");
+        if (authorization === `Bearer ${olderSessionText}`) {
+          olderProfileCalls += 1;
+          return olderProfileCalls === 1
+            ? jsonResponse({ detail: "upstream unavailable" }, 500)
+            : jsonResponse(
+                {
+                  detail: {
+                    code: "SESSION_EXPIRED",
+                    message: "older session expired",
+                  },
+                },
+                401,
+              );
+        }
+        return jsonResponse(mockProfile);
+      }
+      if (url.endsWith("/api/customer/devices")) {
+        return jsonResponse(mockDevices);
+      }
+      if (url.endsWith("/health")) {
+        return jsonResponse({ status: "ok", service: "video-replica-api" });
+      }
+      return jsonResponse([]);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const olderExpired = vi.fn();
+    const olderWorkspace = render(
+      <CustomerWorkspace
+        user={user}
+        store={olderStore}
+        onLogout={vi.fn()}
+        onSessionExpired={olderExpired}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: /^用户档案$/ }));
+    await screen.findByRole("heading", { name: "用户档案" });
+    fireEvent.click(screen.getByRole("tab", { name: "设备管理" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "重新加载账号资料" }),
+    );
+    await waitFor(() => {
+      expect(olderStore.loadSessionToken).toHaveBeenCalledTimes(3);
+    });
+
+    olderWorkspace.unmount();
+    render(
+      <CustomerWorkspace
+        user={user}
+        store={currentStore}
+        onLogout={vi.fn()}
+        onSessionExpired={vi.fn()}
+      />,
+    );
+    await screen.findByRole("navigation", { name: "主要导航" });
+    await act(async () => {
+      resolveOlderCredential?.(olderSessionText);
+      await delayedOlderCredential;
+    });
+
+    await waitFor(() => expect(olderProfileCalls).toBe(1));
+    expect(olderExpired).not.toHaveBeenCalled();
+  });
+
+  it.each(["confirm", "credential"] as const)(
+    "does not unbind after the lease expires during %s",
+    async (expiryPhase) => {
+      const initialNow = Date.now();
+      let currentNow = initialNow;
+      vi.spyOn(Date, "now").mockImplementation(() => currentNow);
+      let holdCredentialRead = false;
+      let releaseCredentialRead: ((value: string) => void) | undefined;
+      const delayedCredential = new Promise<string>((resolve) => {
+        releaseCredentialRead = resolve;
+      });
+      const store = fakeStore();
+      vi.mocked(store.loadDeviceCredentialToken).mockImplementation(() =>
+        holdCredentialRead
+          ? delayedCredential
+          : Promise.resolve(deviceTokenText),
+      );
+      const fetchMock = stubDeviceFetch();
+      vi.stubGlobal("fetch", fetchMock);
+      vi.spyOn(window, "confirm").mockImplementation(() => {
+        if (expiryPhase === "confirm") {
+          currentNow = initialNow + 61_000;
+        }
+        return true;
+      });
+
+      render(
+        <CustomerWorkspace
+          user={user}
+          sessionRuntime={{
+            connectivity: "reachable",
+            lastHeartbeatAt: new Date(initialNow).toISOString(),
+            leaseExpiresAt: new Date(initialNow + 60_000).toISOString(),
+          }}
+          store={store}
+          onLogout={vi.fn()}
+          onSessionExpired={vi.fn()}
+        />,
+      );
+      await openDeviceManagement();
+      await waitFor(() => {
+        expect(store.loadDeviceCredentialToken).toHaveBeenCalledTimes(2);
+      });
+      holdCredentialRead = expiryPhase === "credential";
+
+      fireEvent.click(screen.getByRole("button", { name: "解绑当前设备" }));
+      if (expiryPhase === "credential") {
+        currentNow = initialNow + 61_000;
+        releaseCredentialRead?.(deviceTokenText);
+      }
+
+      expect(
+        await screen.findByText("会话租约已过期，请重新登录后管理设备。"),
+      ).toBeInTheDocument();
+      expect(
+        fetchMock.mock.calls.some(
+          ([url, init]) =>
+            url.endsWith("/api/customer/devices/device-1") &&
+            init?.method === "DELETE",
+        ),
+      ).toBe(false);
+    },
+  );
 
   it("deletes an invalid pairing request and reloads the device list", async () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
@@ -302,6 +577,7 @@ describe("CustomerWorkspace (T31)", () => {
       <CustomerWorkspace
         user={user}
         store={fakeStore()}
+        onLogout={vi.fn()}
         onSessionExpired={vi.fn()}
       />,
     );

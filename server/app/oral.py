@@ -57,6 +57,10 @@ class OralConflictError(OralDomainError):
     """An idempotency key was reused for a different request."""
 
 
+class OralTaskNotFoundError(OralDomainError):
+    """The requested task is absent from the current actor's scope."""
+
+
 def oral_unit_price_fen(conn: BusinessConnection) -> int:
     """Per-task list price for oral renders; admin-configurable via billing."""
     try:
@@ -155,6 +159,26 @@ def _require_biometric_source_asset(
             detail={"code": "ASSET_NOT_FOUND", "message": "Asset does not exist."},
         )
     return asset
+
+
+def _require_audio_purpose(asset: dict[str, Any], expected: str, label: str) -> None:
+    try:
+        metadata = json.loads(str(asset.get("metadata_json") or "{}"))
+    except (TypeError, ValueError):
+        metadata = {}
+    purpose = metadata.get("audio_purpose") if isinstance(metadata, dict) else None
+    duration = metadata.get("duration_seconds") if isinstance(metadata, dict) else None
+    verified = metadata.get("audio_duration_verified") if isinstance(metadata, dict) else None
+    duration_value = (
+        float(duration)
+        if isinstance(duration, (int, float)) and not isinstance(duration, bool)
+        else None
+    )
+    duration_valid = duration_value is not None and duration_value > 0
+    if expected == "voice_clone" and duration_value is not None:
+        duration_valid = 5 <= duration_value <= 180
+    if purpose != expected or verified is not True or not duration_valid:
+        raise OralDomainError(f"{label}用途不匹配，请重新选择")
 
 
 def _request_hash(payload: dict[str, Any]) -> str:
@@ -452,6 +476,7 @@ def start_voice_clone(
         media_type="audio",
         label="音频素材",
     )
+    _require_audio_purpose(asset, "voice_clone", "声音克隆样本")
     _require_valid_consent(
         conn,
         actor=actor,
@@ -688,13 +713,14 @@ def create_oral_task(
         effective_voice = None
         if not audio_asset_id:
             raise OralDomainError("请上传完整的口播音频")
-        _require_source_asset(
+        audio_asset = _require_source_asset(
             conn,
             actor=actor,
             asset_id=audio_asset_id,
             media_type="audio",
             label="口播音频",
         )
+        _require_audio_purpose(audio_asset, "oral_audio", "口播音频")
 
     price = oral_unit_price_fen(conn)
     task_id = str(uuid4())
@@ -827,7 +853,7 @@ def _vendor_voice_id(conn: BusinessConnection, voice_id: str) -> str:
 def _oral_task_row(conn: BusinessConnection, task_id: str) -> dict[str, Any]:
     row = conn.execute("SELECT * FROM oral_tasks WHERE id = %s", (task_id,)).fetchone()
     if row is None:
-        raise OralDomainError("口播任务不存在")
+        raise OralTaskNotFoundError("口播任务不存在")
     return dict(row)
 
 
@@ -842,7 +868,7 @@ def read_oral_task(
         (task_id, actor.id),
     ).fetchone()
     if row is None:
-        raise OralDomainError("口播任务不存在")
+        raise OralTaskNotFoundError("口播任务不存在")
     return dict(row)
 
 
@@ -1323,18 +1349,26 @@ def read_voice_clone(
 
 
 def list_oral_tasks(
-    conn: BusinessConnection, *, actor: CurrentUser, limit: int = 20
-) -> list[dict[str, Any]]:
+    conn: BusinessConnection,
+    *,
+    actor: CurrentUser,
+    limit: int = 20,
+    offset: int = 0,
+) -> tuple[list[dict[str, Any]], int]:
+    total_row = conn.execute(
+        "SELECT COUNT(*) AS total FROM oral_tasks WHERE owner_user_id = %s",
+        (actor.id,),
+    ).fetchone()
     rows = conn.execute(
         """
         SELECT * FROM oral_tasks
         WHERE owner_user_id = %s
         ORDER BY created_at DESC
-        LIMIT %s
+        LIMIT %s OFFSET %s
         """,
-        (actor.id, max(1, min(100, limit))),
+        (actor.id, max(1, min(100, limit)), max(0, offset)),
     ).fetchall()
-    return [dict(row) for row in rows]
+    return [dict(row) for row in rows], int(total_row["total"] if total_row else 0)
 
 
 def oral_price_quote(conn: BusinessConnection) -> dict[str, int]:

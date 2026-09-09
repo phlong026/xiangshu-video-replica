@@ -1,0 +1,105 @@
+{
+  "schema_version": 3,
+  "captured_at_utc": "2026-09-08T15:51:29.276017+00:00",
+  "scope": "Document/task-definition review only, not runtime or migration acceptance",
+  "summary": {
+    "old_tasks": 60,
+    "whole_tasks_satisfying_all_current_acceptance": 0,
+    "reusable_implementation_tasks": 39,
+    "missing_target_structure": 2,
+    "preparation_or_conditional": 12,
+    "external_acceptance": 7,
+    "merged_schedule_items": 3,
+    "remaining_schedule_items": 57,
+    "status_counts": {
+      "decision": 12,
+      "partial": 32,
+      "verify": 7,
+      "missing": 2,
+      "external": 7
+    },
+    "work_kind_counts": {
+      "准备与决策": 6,
+      "代码与测试增量": 32,
+      "条件实施与验收": 5,
+      "复验": 7,
+      "现场执行与验收": 7
+    },
+    "dependency_edges": 241,
+    "dependency_graph_acyclic": true
+  },
+  "audit_tasks": 60,
+  "active_tasks": 57,
+  "retired_schedule_ids": [
+    "CW-006",
+    "CW-008",
+    "CW-011"
+  ],
+  "dependencies": 241,
+  "acyclic": true,
+  "md_csv_ledger_consistent": true,
+  "source_fingerprints_checked": 546,
+  "source_drift": [],
+  "source_evidence_references": 270,
+  "fixed_branch_references": 20,
+  "document_links_checked": 318,
+  "repository_secret_scan_exit_code": 0,
+  "document_manifest_sha256": {
+    "AGENTS.md": "b6f70e7863a0dc87f6a82cf1e63d19a40515e7bb5f5f7f3e1b66b84b09abcb44",
+    "README.md": "d3a7b83662c936e74b2fce4baab63a3e69b44d938ec0a942bf377a938a207316",
+    "docs/CUSTOMER-TASK-EVIDENCE-V3.md": "ab54e8a61281538f38aaee1707e2d8f4a0c08dc056c6383729de91d84e166132",
+    "docs/PostgreSQL唯一数据库实施与验收规范.md": "71f2b27b49df84941f7928f6c51e59339d01ac516a5cd71831aecbaf7b88e3fa",
+    "docs/客户版代码开发清单-V3.md": "46da3291e83da01f39cb290c9d0e1e6bfdac1157f18cfe0529937cfa36453a41",
+    "docs/客户版任务清单-V3.md": "6cc49c476134d681957f3e71cc0a619380bc3f9fedb5f3133a96bbc4baac3e6a",
+    "docs/客户版开发计划-V3.md": "39817fbc4f718ffaa1d4877c57d6e05f9f181ead2b39fe33fb546003f16fd157",
+    "docs/客户版测试与验收规格-V3.md": "1371302b610efca1441b4e534fe6a9f2bc4fc701a46ec4fac0a333145c8229e5",
+    "docs/客户版激活码完整开发文档-V3.md": "48a82deb9e39e800a9038cb509bf108296825529fb7fc720e632cdda012063f8",
+    "docs/客户版部署与灰度手册.md": "26cb4529b3e0574431fa1e3d1d474012ff1d5d56f453d2ef4b81b390b7d4daa7",
+    "outputs/customer-cloud-convergence-analysis-2026-09-08/v3/60项任务本地实现核查与剔除报告-V3.md": "9c2acdcee5ded0082d48e698fc70af14e06480b180c39e93498636e2f4908ecf",
+    "outputs/customer-cloud-convergence-analysis-2026-09-08/v3/60项任务本地实现核查对照表-V3.csv": "38d863a6f82f81012324f24b662ab5217e9081c67bd4a7700d135395834c56b6",
+    "outputs/customer-cloud-convergence-analysis-2026-09-08/v3/audit/backend.json": "805274c1f03f74e323bd188d6888c52ae5ef722408eccbe2856befec9e0f6af1",
+    "outputs/customer-cloud-convergence-analysis-2026-09-08/v3/audit/data-delivery.json": "b8b2e9ed2aebd97a680a2d28248d3249791aaf726c98acfef30cc91fd337a8da",
+    "outputs/customer-cloud-convergence-analysis-2026-09-08/v3/audit/database-config-checks.json": "c44c4f1225eb3c7e8d160d8e7419e67def03aae1e179985bb9006102fc3f8577",
+    "outputs/customer-cloud-convergence-analysis-2026-09-08/v3/audit/database-config-checks.log": "09fde4dc98a3bbe33e400be990b546914205924e938f7c75fb45788e076194cc",
+    "outputs/customer-cloud-convergence-analysis-2026-09-08/v3/audit/database-signals.json": "0e3618bd5f598483a5982f225b665dae152d829d42ce693f2a03fe37a349c302",
+    "outputs/customer-cloud-convergence-analysis-2026-09-08/v3/audit/final-plan-review.md": "d216fe740b73281f52156972998d2ff604f367a7e6e8556329f3b64bb7b3adef",
+    "outputs/customer-cloud-convergence-analysis-2026-09-08/v3/audit/final-test-review.md": "445ceba90cd446f2c9f61e55f0e9e2b77861b726a68bcd45717fbbf879b18afb",
+    "outputs/customer-cloud-convergence-analysis-2026-09-08/v3/audit/frontend.json": "9e3cebb5fbf8bd15d9ae138094ef6642ee42dd3117354abf229f5e8e9c4afb5f",
+    "outputs/customer-cloud-convergence-analysis-2026-09-08/v3/audit/local-contract-checks.json": "043d070d2dcd34749ef23c89148caddf52291faf62a2322b054d9b9675f71e93",
+    "outputs/customer-cloud-convergence-analysis-2026-09-08/v3/audit/local-contract-checks.log": "2ae8f2817e9958cc181e54334e64cdb0f822408aefd258f49af7ed61b53a91ca",
+    "outputs/customer-cloud-convergence-analysis-2026-09-08/v3/audit/planning-quality.json": "10a9935cc5e3dffb1e84b5f5dd2725197020790d520aaf61ed39f447a2c58451",
+    "outputs/customer-cloud-convergence-analysis-2026-09-08/v3/audit/worktree-status.json": "787cd29834073a71db65dd99160239139be606b9eac02e2b7a757b406f7c50c7",
+    "outputs/customer-cloud-convergence-analysis-2026-09-08/v3/baseline.json": "3b28bc4ec112238af4896a021506042f0c79e981d4f5abdaa674787cd1f80116",
+    "outputs/customer-cloud-convergence-analysis-2026-09-08/v3/task-definitions.json": "8d6cdcc262236c70b3a7e9f356dbcc7ac38ad44c012be6198670693044e5a884",
+    "outputs/customer-cloud-convergence-analysis-2026-09-08/v3/客户版收敛剩余任务清单-V3.csv": "4e7088cee9ebec33289a82585344a973d004b6fd49223ae9289dacf73773fdf9",
+    "outputs/customer-cloud-convergence-analysis-2026-09-08/v3/客户版收敛剩余任务清单与验收完工标准-V3.md": "12e80efa06a79a18d258914f69a945d9b2473f86e11ce9013b5a77f915ae99c3"
+  },
+  "independent_review": {
+    "status": "approved",
+    "scope": "Final V3 task definitions and acceptance design only",
+    "reviews": [
+      {
+        "role": "test-engineer",
+        "verdict": "APPROVE",
+        "file": "audit/final-test-review.md",
+        "remaining_material_findings": 0
+      },
+      {
+        "role": "critic",
+        "verdict": "APPROVE",
+        "file": "audit/final-plan-review.md",
+        "remaining_material_findings": 0
+      }
+    ]
+  },
+  "implementation_validation": {
+    "application_code_changed": false,
+    "business_pg_tests_run": false,
+    "actual_migration_run": false,
+    "production_action_run": false,
+    "whole_cw_tasks_closed": 0,
+    "pure_contract_tests_passed": 17,
+    "deselected_tests": 46
+  },
+  "issues": []
+}

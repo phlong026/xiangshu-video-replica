@@ -148,7 +148,10 @@ def test_today_boundary_follows_beijing_day(tmp_path: Path) -> None:
             id, batch_id, provider, model, status, created_at, updated_at
         ) VALUES (?, ?, 'metaso', 'MiniMax-H3', 'SUCCEEDED', '2026-09-05 12:00:00', ?)
         """,
-        [("t-before", "b-1", "2026-09-05 15:59:00"), ("t-after", "b-1", "2026-09-05 16:01:00")],
+        [
+            ("t-before", "b-1", "2026-09-05T15:59:00+00:00"),
+            ("t-after", "b-1", "2026-09-05T09:01:00-07:00"),
+        ],
     )
     connection.commit()
     conn = BusinessConnection.sqlite(connection)

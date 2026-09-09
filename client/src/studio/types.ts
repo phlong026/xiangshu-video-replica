@@ -1,4 +1,9 @@
-import type { CurrentUser, Project, StudioAnalytics } from "../api";
+import type {
+  CurrentUser,
+  IndependentCapabilities,
+  Project,
+  StudioAnalytics,
+} from "../api";
 
 export type StudioPage =
   | "workbench"
@@ -63,6 +68,7 @@ export type StudioVoice = {
   id: string;
   name: string;
   confirmed: boolean;
+  isDefault?: boolean;
   status?: "PENDING" | "RUNNING" | "READY" | "FAILED";
   submissionState?:
     | "LOCAL_PENDING"
@@ -84,6 +90,8 @@ export type StudioPerson = {
   expression: string;
   sheetId?: string;
   sceneLookCount: number;
+  photoIds: string[];
+  photoCount?: number;
   avatars: StudioAvatar[];
   voices: StudioVoice[];
 };
@@ -143,6 +151,8 @@ export type StudioTask = {
   voiceId?: string;
   audioId?: string;
   scriptVersion?: number;
+  /** 服务端记录的实际口播正文，用于基于历史任务创建新稿。 */
+  scriptText?: string;
 };
 export type StudioStats = {
   today_completed: number;
@@ -167,6 +177,12 @@ export type StudioData = {
    * 加载失败为 null，看板页回退"尚未就绪"空态。 */
   analytics7: StudioAnalytics | null;
   analytics30: StudioAnalytics | null;
+  pagination?: {
+    people?: { nextCursor: string | null; total: number };
+    scenes?: Record<string, { loaded: number; total: number }>;
+    generationTasks?: { nextCursor: string | null; total: number };
+    oralTasks?: { loaded: number; total: number };
+  };
 };
 export type StudioScript = {
   id: string;
@@ -175,6 +191,9 @@ export type StudioScript = {
   text: string;
   version: number;
   confirmed: boolean;
+  ipId?: string;
+  sourceProjectId?: string;
+  sourceKind?: "viral" | "project" | "link" | "upload";
 };
 export type StudioDraft = {
   id: string;
@@ -221,6 +240,7 @@ export type PickerKind =
   | "avatar"
   | "voice"
   | "audio"
+  | "voice-audio"
   | "avatar-photo";
 export type StudioPublishDraft = {
   id: string;
@@ -237,6 +257,8 @@ export type StudioState = {
   draft: StudioDraft;
   selectedVideoId?: string;
   selectedTaskId?: string;
+  selectedTaskKind?: "generation_batch" | "oral_task";
+  selectedTaskBackendId?: string;
   selectedAssetId?: string;
   returnTo?: StudioPage;
   selectedPersonId?: string;
@@ -246,6 +268,7 @@ export type StudioState = {
 };
 export type LivePanel =
   | "projects"
+  | "characters"
   | "tasks"
   | "profile"
   | "wallet"
@@ -255,6 +278,13 @@ export type StudioContextValue = {
   data: StudioData;
   review: boolean;
   user: CurrentUser;
+  videoCapabilities?: IndependentCapabilities;
+  videoCapabilitiesStatus?: "loading" | "ready" | "error";
+  retryVideoCapabilities?: () => void;
+  referenceAssetsPending?: boolean;
+  referenceAssetsError?: boolean;
+  retryReferenceAssets?: () => void;
+  draftSaveStatus?: "idle" | "dirty" | "saving" | "saved" | "error";
   navigate: (page: StudioPage, patch?: Partial<StudioState>) => void;
   patchDraft: (patch: Partial<StudioDraft>) => void;
   patchState: (patch: Partial<StudioState>) => void;
@@ -264,9 +294,9 @@ export type StudioContextValue = {
   openLive: (panel: LivePanel) => void;
   requestGeneration: (kind: StudioTask["type"]) => void;
   saveDraft: () => void;
-  /** 确认终稿：置 confirmed + 立即云端持久化；带 projectId 时软发布到项目脚本版本。 */
+  /** 确认终稿：云端保存成功后置 confirmed；项目已有分镜时再同步项目脚本。 */
   confirmFinalDraft: () => void;
   /** 上传来源视频 → 提取文案（script-from-audio）→ 回填草稿并跳文案工坊。 */
-  extractScriptFromUpload: () => void;
+  extractScriptFromUpload: (projectId?: string, assetId?: string) => void;
   refresh: () => void;
 };

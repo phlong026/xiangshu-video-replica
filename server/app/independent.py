@@ -196,6 +196,12 @@ def create_independent_batch(
             raise generation_error(
                 422, "INDEPENDENT_REFERENCE_REQUIRED", "参考生视频至少选择一张参考图。"
             )
+        if len(set(request.reference_asset_ids)) != len(request.reference_asset_ids):
+            raise generation_error(
+                422,
+                "INDEPENDENT_REFERENCE_DUPLICATE",
+                "参考图不能重复选择。",
+            )
 
     # 与复刻流同源的生产红线：客户生产禁止模拟任务；metaso 需配置就绪并
     # 遵守付费试用限额。仅对“真正的新提交”生效，幂等回放在此之前返回。

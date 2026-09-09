@@ -1,5 +1,17 @@
 # Customer Edition Task Evidence Record V3
 
+> 当前执行清单已更新为[本地实现去重V3](../outputs/customer-cloud-convergence-analysis-2026-09-08/v3/客户版收敛剩余任务清单与验收完工标准-V3.md)：57项剩余排程，复用既有代码；原60项及CW-006/008/011保留追溯，当前状态仅见任务账本§18。此更新不代表代码或数据迁移已完成。
+
+## PostgreSQL全面统一文档评审（2026-09-08，定义更新）
+
+本轮基于分析/任务定义提交822a3b8，确认全环境及所有业务数据库测试使用PG，新增PG-01—12合同；原CW-001—052保留，细化为60项工作定义，实施状态在任务账本§17。新增任务与文档检查不提升T03—T09、T45等历史证据等级。
+
+交付：[文档评审](../outputs/customer-cloud-convergence-analysis-2026-09-08/PostgreSQL全面统一文档评审报告.md)、[统一规范](PostgreSQL唯一数据库实施与验收规范.md)、[任务与验收V2](../outputs/customer-cloud-convergence-analysis-2026-09-08/客户版收敛详细任务清单与验收完工标准.md)、[定义校验](../outputs/customer-cloud-convergence-analysis-2026-09-08/task-list-validation.json)。只验证文档；未执行应用PG全套、真实数据导入或生产切换。后续每项关闭按§14记录测试类别与数据路线、PG版本/head/隔离ID、代码和制品SHA及实际结果。
+
+> 2026-09-08 PostgreSQL 全面统一增量：用户已确定开发、业务数据库测试、CI、staging、生产均使用 PostgreSQL；SQLite 仅限精确登记的离线历史输入、归档与兼容工具。
+> 实施与验收以[唯一数据库规范](PostgreSQL唯一数据库实施与验收规范.md)及 CW-001—060 为准。此前仅客户生产 PG、默认开发 SQLite、SQLite 业务测试可作为当前验收的口径不再适用。
+> 本次更新只确认规范和任务定义；原代码仍有 SQLite 分支，历史任务/测试记录保留原文，不据此声明实际迁移或生产切换已完成。
+
 ## 管理后台改版 W3–W17（2026-09-05，自动化与本地浏览器验证完成）
 
 分支 `feat/customer-v3-admin-revamp`，实施基线 `67cf008`。完成管理聚合、按秒计费和实际用量成本、个人提示词、客户端参数与钱包、圆滑趋势曲线。最终 `npm.cmd run check` 退出 0：前端 746 通过；后端 1633 通过/1 项因缺少 ffmpeg 跳过；密钥扫描、静态检查、Cargo 和 Mypy 通过。133 个受检源码指纹与最终工作树一致。后台 12 页及客户端 3 个组件完成参考图成对对照，明确保留真实数据及已裁决范围差异。
@@ -993,3 +1005,10 @@ Owner / Reviewer：账务/后端（Agent 执行）/ Codex + connector 评审（P
 未测试项：REAL_CHAIN_VERIFIED、PRODUCTION_GO（T35 + T40）、浏览器冲突/切换 UI E2E（需 Tauri vault；续充浏览器 E2E 已交付 PR #66，`npm run test:customer-e2e` 4 用例）
 Lore 提交 SHA：5e6373d（PR #65 feat/customer-wallet）
 ```
+
+## 本地实现核查与去重定义V3（文档证据）
+
+- 输入：V2定义bf6aab8，应用基线bffc341；新输出与57项任务见 outputs/customer-cloud-convergence-analysis-2026-09-08/v3/。
+- 原60项逐项核对：39项有可复用代码/测试/工具，2项目标结构尚缺；准备/条件与现场任务另计。CW-006/008/011合并到具体实施及通用要求，不作为已验收完成。
+- 本轮17项定向纯逻辑/配置合同通过（5项AST/preflight、12项生产配置；另46项未选）；未执行PG业务测试、实际迁移、真实付费或生产切换。
+- 静态一致性、原源码指纹、固定分支对象、依赖/链接/CSV/账本及独立文档复核结果以 v3/validation.json 为准。应用实际证据级别未提升，57项实施状态仍待相应工作与验收。

@@ -1,0 +1,95 @@
+Audit started: 2026-09-07T12:05:11.738033+08:00
+HEAD: 8d13f60e6316afce544d5961ad169aebab8ef7fa
+Command: npm --prefix client test -- src/studio/CreationPages.test.tsx src/studio/StudioWorkspace.test.tsx src/studio/PeoplePages.test.tsx src/studio/live.test.ts src/studio/state.test.ts src/CharacterSelection.test.tsx src/SourceFrameSelection.test.tsx src/FirstFrameSelection.test.tsx
+Source SHA256 before tests:
+47d2aee7c72b72f3adc88cdc5c529297595353355cf9622c8c1f4e9607883d6f  client/src/CharacterSelection.tsx
+5b99c7c9c3897dd8e44d39b99bb0c72a4463353154da76b60de3829805280796  client/src/FirstFrameSelection.tsx
+f9237d161197bb8b8d40738a3eb1218f6ccb2de8689e7504cd41976da0b5cd8d  client/src/SourceFrameSelection.tsx
+f06616eb3b8a1b1a7264175768efaaeb334eb2abf3a4b7383219218d70744ddd  client/src/api.ts
+d44a4f35daead4fa533810644a4c0fd6c7df82caab1be05d17bca35967d4b833  client/src/studio/AnalyticsPage.test.tsx
+99c20df0ae1d2d750f7d3527b41dbf08dfe97946b236997258aa8dbb99beee54  client/src/studio/AnalyticsPage.tsx
+4b87173c0d3d2dce9c9e58f8f6e3f5b0eeab4970838d91ee6ac981eede8174b3  client/src/studio/ContentPages.test.tsx
+e3d3a7e1257f410b1a2f9d31dfd7c67f1baae74006ea28d4c7a30313d1586a99  client/src/studio/ContentPages.tsx
+a937c71f3079dca1456de9ece11c29e2568c4edd2cc942432cd37ef9aac988a4  client/src/studio/CreationNavigation.tsx
+519c56a0c822d7998699983bd7abe888fe18451e3eb693ab806b19b0855b2eba  client/src/studio/CreationPages.test.tsx
+2baf50bc9cc4eeaa401a2da019017666486cecf0c513fa9d2adc8312a6237d23  client/src/studio/CreationPages.tsx
+53256c7cb8c0d670b7c93675968e52b3aac3adfe709368b4660dd4c80a89bc0c  client/src/studio/LiveWorkspacePanel.test.tsx
+4c70088323271e5e1ba5ef2865d771020fac5a7538868c3f2568de1793b359dc  client/src/studio/LiveWorkspacePanel.tsx
+b1fe224edfb70454491ca0c038d0039d3d9783eac84f96450968e4435ede5403  client/src/studio/MainPages.test.tsx
+e7614bc541b3838e05c617c101d74e0be4234c07289b1ab609d947e1c43b1559  client/src/studio/MainPages.tsx
+424a51ab29f870d56fd4ea9d6ccb294e1c68c2e68c8c35d83ede44376a742a54  client/src/studio/PeoplePages.test.tsx
+7d23414c5cd89efc7204775873411ee7085b1ed777f9c72677f803303795cb86  client/src/studio/PeoplePages.tsx
+4bab8498112a63ef91a73f3b9d51b5fcd7d0317ba7fd948e926ce8f3022d7588  client/src/studio/ReviewWorkspace.tsx
+70218a852d8a003f1fd88a1ffdc6fd0caa7a8c06fc080ce39615408c523874ab  client/src/studio/StudioWorkspace.test.tsx
+446060adb0b12291687bd9940829fa9641bd9a8f21ccff15bf95b433f598db56  client/src/studio/StudioWorkspace.tsx
+85cbe07befeb97ca8eac0e81947519af0361cbc18c8fc2d8cb28cee904f37ce9  client/src/studio/context.tsx
+ac56269e1844c4c72d41cabe0b0791e5e8e7e2c7530e1f7066ff1667c169e667  client/src/studio/fixtures.ts
+2d3136d612fdb5ed6eadef3fb4e9b98e5ef44a9abe3b6a0fca32b05c7e63fbf2  client/src/studio/live.test.ts
+fca5631c126395be19b562cb90c23c0da47ae6ce892b06fee413b7a5cedd17ab  client/src/studio/live.ts
+8f57cedcf217c9c59cb76dbac2e827522e6aacce85d4aebff39b12048a78b6ca  client/src/studio/state.test.ts
+d48301e101931192862a2b7c175b510f2b9c1ea90660b0bba8b521f455c4efc9  client/src/studio/state.ts
+92544b1e897505f1727558acb14a3aa07dbb46352a662f64ce1521407eaceca5  client/src/studio/types.ts
+ffc94fe0791e49ce71bd23e69345ac0a1b1e929583275e330f3c9861d84ef271  client/src/studio/ui.tsx
+
+
+> @video-replica/client@0.1.16 test
+> vitest run src/studio/CreationPages.test.tsx src/studio/StudioWorkspace.test.tsx src/studio/PeoplePages.test.tsx src/studio/live.test.ts src/studio/state.test.ts src/CharacterSelection.test.tsx src/SourceFrameSelection.test.tsx src/FirstFrameSelection.test.tsx
+
+
+ RUN  v4.1.10 /Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client
+
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+
+ Test Files  8 passed (8)
+      Tests  193 passed (193)
+   Start at  12:05:12
+   Duration  4.87s (transform 3.20s, setup 1.43s, import 4.19s, tests 11.25s, environment 6.39s)
+
+
+Exit code: 0
+Audit finished: 2026-09-07T12:05:17.061960+08:00
+Source SHA256 after tests:
+47d2aee7c72b72f3adc88cdc5c529297595353355cf9622c8c1f4e9607883d6f  client/src/CharacterSelection.tsx
+5b99c7c9c3897dd8e44d39b99bb0c72a4463353154da76b60de3829805280796  client/src/FirstFrameSelection.tsx
+f9237d161197bb8b8d40738a3eb1218f6ccb2de8689e7504cd41976da0b5cd8d  client/src/SourceFrameSelection.tsx
+f06616eb3b8a1b1a7264175768efaaeb334eb2abf3a4b7383219218d70744ddd  client/src/api.ts
+d44a4f35daead4fa533810644a4c0fd6c7df82caab1be05d17bca35967d4b833  client/src/studio/AnalyticsPage.test.tsx
+99c20df0ae1d2d750f7d3527b41dbf08dfe97946b236997258aa8dbb99beee54  client/src/studio/AnalyticsPage.tsx
+4b87173c0d3d2dce9c9e58f8f6e3f5b0eeab4970838d91ee6ac981eede8174b3  client/src/studio/ContentPages.test.tsx
+e3d3a7e1257f410b1a2f9d31dfd7c67f1baae74006ea28d4c7a30313d1586a99  client/src/studio/ContentPages.tsx
+a937c71f3079dca1456de9ece11c29e2568c4edd2cc942432cd37ef9aac988a4  client/src/studio/CreationNavigation.tsx
+519c56a0c822d7998699983bd7abe888fe18451e3eb693ab806b19b0855b2eba  client/src/studio/CreationPages.test.tsx
+2baf50bc9cc4eeaa401a2da019017666486cecf0c513fa9d2adc8312a6237d23  client/src/studio/CreationPages.tsx
+53256c7cb8c0d670b7c93675968e52b3aac3adfe709368b4660dd4c80a89bc0c  client/src/studio/LiveWorkspacePanel.test.tsx
+4c70088323271e5e1ba5ef2865d771020fac5a7538868c3f2568de1793b359dc  client/src/studio/LiveWorkspacePanel.tsx
+b1fe224edfb70454491ca0c038d0039d3d9783eac84f96450968e4435ede5403  client/src/studio/MainPages.test.tsx
+e7614bc541b3838e05c617c101d74e0be4234c07289b1ab609d947e1c43b1559  client/src/studio/MainPages.tsx
+424a51ab29f870d56fd4ea9d6ccb294e1c68c2e68c8c35d83ede44376a742a54  client/src/studio/PeoplePages.test.tsx
+7d23414c5cd89efc7204775873411ee7085b1ed777f9c72677f803303795cb86  client/src/studio/PeoplePages.tsx
+4bab8498112a63ef91a73f3b9d51b5fcd7d0317ba7fd948e926ce8f3022d7588  client/src/studio/ReviewWorkspace.tsx
+70218a852d8a003f1fd88a1ffdc6fd0caa7a8c06fc080ce39615408c523874ab  client/src/studio/StudioWorkspace.test.tsx
+446060adb0b12291687bd9940829fa9641bd9a8f21ccff15bf95b433f598db56  client/src/studio/StudioWorkspace.tsx
+85cbe07befeb97ca8eac0e81947519af0361cbc18c8fc2d8cb28cee904f37ce9  client/src/studio/context.tsx
+ac56269e1844c4c72d41cabe0b0791e5e8e7e2c7530e1f7066ff1667c169e667  client/src/studio/fixtures.ts
+2d3136d612fdb5ed6eadef3fb4e9b98e5ef44a9abe3b6a0fca32b05c7e63fbf2  client/src/studio/live.test.ts
+fca5631c126395be19b562cb90c23c0da47ae6ce892b06fee413b7a5cedd17ab  client/src/studio/live.ts
+8f57cedcf217c9c59cb76dbac2e827522e6aacce85d4aebff39b12048a78b6ca  client/src/studio/state.test.ts
+d48301e101931192862a2b7c175b510f2b9c1ea90660b0bba8b521f455c4efc9  client/src/studio/state.ts
+92544b1e897505f1727558acb14a3aa07dbb46352a662f64ce1521407eaceca5  client/src/studio/types.ts
+ffc94fe0791e49ce71bd23e69345ac0a1b1e929583275e330f3c9861d84ef271  client/src/studio/ui.tsx
+Changed during test: []

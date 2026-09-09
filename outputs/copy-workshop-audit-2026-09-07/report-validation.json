@@ -1,0 +1,10 @@
+{
+  "controls": 27,
+  "gaps_or_risks": 23,
+  "proposed_acceptance_cases": 24,
+  "source_reference_count": 25,
+  "missing_references": [],
+  "invalid_files_or_lines": [],
+  "snapshot_hashes_match": true,
+  "csv_utf8_bom": true
+}

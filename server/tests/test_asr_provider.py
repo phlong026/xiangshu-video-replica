@@ -161,3 +161,70 @@ def test_missing_api_key_rejected() -> None:
     provider = DashScopeFunAsr(make_config(api_key=""), transport=StubTransport([]))
     with pytest.raises(AsrProviderError, match="未配置"):
         provider.transcribe("https://media.example/a.m4a", duration_sec=10.0)
+
+
+def test_async_receipt_is_checkpointed_before_poll_and_can_resume() -> None:
+    events = []
+    result_output = {
+        "results": [
+            {"subtask_status": "SUCCEEDED", "transcription_url": "https://result.example/text"}
+        ]
+    }
+    responses = [
+        (200, json.dumps({"output": {"task_id": "durable-task"}}).encode()),
+        (200, json.dumps({"output": {"task_status": "SUCCEEDED", **result_output}}).encode()),
+        (200, json.dumps({"transcripts": [{"text": "已识别全文"}]}).encode()),
+    ]
+    transport = StubTransport(responses)
+    provider = DashScopeFunAsr(make_config(), transport=transport)
+    result = provider.transcribe(
+        "https://media.example/source.m4a",
+        duration_sec=400,
+        on_submitted=lambda task_id: events.append((task_id, len(transport.calls))),
+        heartbeat=lambda: None,
+    )
+    assert result.text == "已识别全文"
+    assert events == [("durable-task", 1)]
+    resumed_transport = StubTransport(responses[1:])
+    resumed = DashScopeFunAsr(make_config(), transport=resumed_transport)
+    assert resumed.resume("durable-task", heartbeat=lambda: None).text == result.text
+    assert [method for method, _ in resumed_transport.calls] == ["GET", "GET"]
+
+
+@pytest.mark.parametrize("response", [(503, b"{}"), (200, b'{"output":{}}')])
+def test_async_submit_without_reliable_receipt_is_uncertain(response) -> None:
+    from app.asr import AsrSubmissionUncertain
+
+    provider = DashScopeFunAsr(make_config(), transport=StubTransport([response]))
+    with pytest.raises(AsrSubmissionUncertain):
+        provider.transcribe("https://media.example/long.m4a", duration_sec=400)
+
+
+def test_known_receipt_result_download_failure_can_resume() -> None:
+    from app.asr import AsrTaskPending
+
+    transport = StubTransport(
+        [
+            (
+                200,
+                json.dumps(
+                    {
+                        "output": {
+                            "task_status": "SUCCEEDED",
+                            "results": [
+                                {
+                                    "subtask_status": "SUCCEEDED",
+                                    "transcription_url": "https://result.example/text",
+                                }
+                            ],
+                        }
+                    }
+                ).encode(),
+            ),
+            (503, b"{}"),
+        ]
+    )
+    provider = DashScopeFunAsr(make_config(), transport=transport)
+    with pytest.raises(AsrTaskPending):
+        provider.resume("existing")
+    assert [method for method, _ in transport.calls] == ["GET", "GET"]

@@ -1,0 +1,171 @@
+{
+  "remote_main": "835f35686d3ad8bb511134b6a6c2e8cd687a7bba",
+  "repository_properties": {
+    "allow_merge_commit": true,
+    "allow_rebase_merge": true,
+    "allow_squash_merge": true,
+    "default_branch": "main",
+    "delete_branch_on_merge": false,
+    "private": true
+  },
+  "open_prs": [
+    {
+      "baseRefName": "codex/frontend-v1.4",
+      "headRefName": "feat/c5-publish-module",
+      "headRefOid": "7e5450a777852d01d265cc64df09eb3d1eaf2d87",
+      "isDraft": false,
+      "mergeStateStatus": "DIRTY",
+      "mergeable": "CONFLICTING",
+      "number": 96,
+      "reviewDecision": "",
+      "statusCheckRollup": [],
+      "title": "C5: platform publish module (accounts, records, publish worker, vendors + studio wiring)",
+      "url": "https://github.com/phlong026/xiangshu-video-replica/pull/96"
+    },
+    {
+      "baseRefName": "main",
+      "headRefName": "codex/frontend-v1.4",
+      "headRefOid": "985ef46ad0b45d7ab47dd56bc1e1436c43cce93f",
+      "isDraft": true,
+      "mergeStateStatus": "CLEAN",
+      "mergeable": "MERGEABLE",
+      "number": 95,
+      "reviewDecision": "",
+      "statusCheckRollup": [
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-09-06T16:23:44Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/phlong026/xiangshu-video-replica/actions/runs/34045282475/job/101519138465",
+          "name": "Secret scan",
+          "startedAt": "2026-09-06T16:23:30Z",
+          "status": "COMPLETED",
+          "workflowName": "Continuous Integration"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-09-06T16:47:57Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/phlong026/xiangshu-video-replica/actions/runs/34045282475/job/101519138325",
+          "name": "Linux quality gate",
+          "startedAt": "2026-09-06T16:23:30Z",
+          "status": "COMPLETED",
+          "workflowName": "Continuous Integration"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-09-06T16:41:01Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/phlong026/xiangshu-video-replica/actions/runs/34045282475/job/101519138521",
+          "name": "Windows Tauri and NSIS",
+          "startedAt": "2026-09-06T16:23:30Z",
+          "status": "COMPLETED",
+          "workflowName": "Continuous Integration"
+        }
+      ],
+      "title": "完善 V1.4 工作区与爆款视频数据及播放链路",
+      "url": "https://github.com/phlong026/xiangshu-video-replica/pull/95"
+    },
+    {
+      "baseRefName": "main",
+      "headRefName": "chore/ignore-desktop-runtime-logs",
+      "headRefOid": "e216a8fb54ee25d9883ac3ff79d6ade29d61286d",
+      "isDraft": false,
+      "mergeStateStatus": "UNSTABLE",
+      "mergeable": "MERGEABLE",
+      "number": 94,
+      "reviewDecision": "",
+      "statusCheckRollup": [
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-09-04T07:59:20Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/phlong026/xiangshu-video-replica/actions/runs/33851231135/job/100954268893",
+          "name": "Secret scan",
+          "startedAt": "2026-09-04T07:59:09Z",
+          "status": "COMPLETED",
+          "workflowName": "Continuous Integration"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-09-04T08:33:23Z",
+          "conclusion": "FAILURE",
+          "detailsUrl": "https://github.com/phlong026/xiangshu-video-replica/actions/runs/33851231135/job/100954268845",
+          "name": "Linux quality gate",
+          "startedAt": "2026-09-04T07:59:09Z",
+          "status": "COMPLETED",
+          "workflowName": "Continuous Integration"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-09-04T08:21:14Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/phlong026/xiangshu-video-replica/actions/runs/33851231135/job/100954268724",
+          "name": "Windows Tauri and NSIS",
+          "startedAt": "2026-09-04T07:59:12Z",
+          "status": "COMPLETED",
+          "workflowName": "Continuous Integration"
+        }
+      ],
+      "title": "chore: ignore desktop runtime logs under src-tauri resources",
+      "url": "https://github.com/phlong026/xiangshu-video-replica/pull/94"
+    },
+    {
+      "baseRefName": "main",
+      "headRefName": "chore/agents-push-checklist",
+      "headRefOid": "7b79ebc2f08cc1f6d23a811bce0f8b3915b8ee5e",
+      "isDraft": false,
+      "mergeStateStatus": "CLEAN",
+      "mergeable": "MERGEABLE",
+      "number": 93,
+      "reviewDecision": "",
+      "statusCheckRollup": [
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-09-04T07:59:14Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/phlong026/xiangshu-video-replica/actions/runs/33851223010/job/100954240898",
+          "name": "Secret scan",
+          "startedAt": "2026-09-04T07:59:02Z",
+          "status": "COMPLETED",
+          "workflowName": "Continuous Integration"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-09-04T08:26:33Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/phlong026/xiangshu-video-replica/actions/runs/33851223010/job/100954240801",
+          "name": "Linux quality gate",
+          "startedAt": "2026-09-04T07:59:02Z",
+          "status": "COMPLETED",
+          "workflowName": "Continuous Integration"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-09-04T08:20:34Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/phlong026/xiangshu-video-replica/actions/runs/33851223010/job/100954240905",
+          "name": "Windows Tauri and NSIS",
+          "startedAt": "2026-09-04T07:59:03Z",
+          "status": "COMPLETED",
+          "workflowName": "Continuous Integration"
+        }
+      ],
+      "title": "chore: add pre-push commit checklist to agent workflow",
+      "url": "https://github.com/phlong026/xiangshu-video-replica/pull/93"
+    }
+  ],
+  "protection_check": {
+    "status": 403,
+    "message": "Upgrade to GitHub Pro or make this repository public to enable this feature."
+  },
+  "rulesets_check": {
+    "status": 403,
+    "message": "Upgrade to GitHub Pro or make this repository public to enable this feature."
+  },
+  "main_branch": {
+    "name": "main",
+    "protected": false,
+    "sha": "835f35686d3ad8bb511134b6a6c2e8cd687a7bba"
+  }
+}

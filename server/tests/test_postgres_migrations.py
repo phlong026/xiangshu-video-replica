@@ -25,7 +25,7 @@ import pytest
 
 DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 SKIP_REASON = "PostgreSQL fixture not reachable; start it via scripts/pg-fixture.sh start"
-HEAD_REVISION = "077_oral_unit_price"
+HEAD_REVISION = "081_oral_unit_price"
 
 
 def test_customer_batch_visibility_migration_preserves_generation_and_billing(

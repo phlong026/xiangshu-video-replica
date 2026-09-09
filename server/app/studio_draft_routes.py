@@ -62,7 +62,7 @@ def remove_studio_draft(
     db: BusinessDbDep,
 ) -> StudioDraftDeleteResponse:
     with db.write() as (conn, actor):
-        delete_studio_draft(conn, actor_id=actor.id, kind=draft_kind)
+        delete_studio_draft(conn, actor=actor, kind=draft_kind)
     return StudioDraftDeleteResponse(deleted=True)
 
 
@@ -89,5 +89,5 @@ def remove_saved_script(
     db: BusinessDbDep,
 ) -> SavedScriptDeleteResponse:
     with db.write() as (conn, actor):
-        delete_saved_script(conn, actor_id=actor.id, script_id=script_id)
+        delete_saved_script(conn, actor=actor, script_id=script_id)
     return SavedScriptDeleteResponse(deleted=True)

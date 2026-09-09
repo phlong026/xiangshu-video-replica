@@ -131,10 +131,10 @@ describe("CharacterLibrary", () => {
     vi.mocked(api.getLatestCharacterSheetTask).mockResolvedValue(null);
     vi.mocked(api.getLatestSceneLookTask).mockResolvedValue(null);
     vi.mocked(api.listSimpleCharacterLibraryPage).mockImplementation(
-      async () => ({
-        items: await api.listSimpleCharacterLibrary(),
-        next_cursor: null,
-      }),
+      async () => {
+        const items = await api.listSimpleCharacterLibrary();
+        return { items, next_cursor: null, total: items.length };
+      },
     );
     vi.spyOn(window, "confirm").mockReturnValue(true);
   });
@@ -192,10 +192,22 @@ describe("CharacterLibrary", () => {
       views: viewsFor("asset-13"),
     };
     vi.mocked(api.listSimpleCharacterLibraryPage)
-      .mockResolvedValueOnce({ items: firstPage, next_cursor: "page-2" })
-      .mockResolvedValueOnce({ items: [thirteenth], next_cursor: null })
-      .mockResolvedValueOnce({ items: [firstPage[11]], next_cursor: null })
-      .mockResolvedValueOnce({ items: [], next_cursor: null });
+      .mockResolvedValueOnce({
+        items: firstPage,
+        next_cursor: "page-2",
+        total: 13,
+      })
+      .mockResolvedValueOnce({
+        items: [thirteenth],
+        next_cursor: null,
+        total: 13,
+      })
+      .mockResolvedValueOnce({
+        items: [firstPage[11]],
+        next_cursor: null,
+        total: 13,
+      })
+      .mockResolvedValueOnce({ items: [], next_cursor: null, total: 13 });
 
     render(<CharacterLibrary userRole="employee" userId="employee_1" />);
 
@@ -239,7 +251,11 @@ describe("CharacterLibrary", () => {
       finishPage = resolve;
     });
     vi.mocked(api.listSimpleCharacterLibraryPage)
-      .mockResolvedValueOnce({ items: [entry], next_cursor: "page-2" })
+      .mockResolvedValueOnce({
+        items: [entry],
+        next_cursor: "page-2",
+        total: 2,
+      })
       .mockReturnValueOnce(pendingPage);
     vi.mocked(api.uploadSimpleCharacter).mockResolvedValue({
       identity_id: "identity-new",
@@ -280,7 +296,7 @@ describe("CharacterLibrary", () => {
       await screen.findByRole("button", { name: "查看人物 新人物 大图" }),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "加载更多人物" })).toBeEnabled();
-    finishPage({ items: [], next_cursor: null });
+    finishPage({ items: [], next_cursor: null, total: 2 });
   });
 
   it("separates the base appearance from scene looks and directly generates a new look", async () => {
@@ -503,7 +519,7 @@ describe("CharacterLibrary", () => {
     });
     fireEvent.change(screen.getByLabelText("授权图片"), {
       target: {
-        files: [new File(["png"], "source.png", { type: "image/png" })],
+        files: [new File(["webp"], "source.webp", { type: "image/webp" })],
       },
     });
     fireEvent.click(
@@ -516,6 +532,9 @@ describe("CharacterLibrary", () => {
         expect.any(File),
         "林夏",
       ),
+    );
+    expect(vi.mocked(api.uploadSimpleCharacter).mock.calls[0]?.[1].type).toBe(
+      "image/webp",
     );
     expect(await screen.findByAltText("林夏 正脸近景")).toBeInTheDocument();
     expect(screen.getByText(/五视图拼合图已生成/)).toBeInTheDocument();

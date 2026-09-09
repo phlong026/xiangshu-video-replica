@@ -1,0 +1,353 @@
+[
+  {
+    "id": "CW-001",
+    "status": "decision",
+    "existing": "已固定 bffc341 应用源、bf6aab8 文档输入；本轮快照47个本地分支、546项源文件及76个迁移，唯一head078。",
+    "exclude_scope": "重复做未指定边界的全仓摸底；已有Git与迁移基线生成能力。",
+    "remaining": "将其他本地分支的保留补丁整合到正式候选，冻结候选SHA、变更来源、回滚点及责任；本轮快照只代表审计输入。",
+    "evidence": [
+      {
+        "path": "outputs/customer-cloud-convergence-analysis-2026-09-08/v3/baseline.json",
+        "line": 1,
+        "why": "本轮固定的本地引用与源文件指纹"
+      },
+      {
+        "path": "server/migrations/versions/078_viral_module_launch.py",
+        "line": 1,
+        "why": "当前迁移链末端"
+      }
+    ],
+    "other_branch_evidence": [],
+    "acceptance_delta": "候选包含明确选择的补丁；迁移单head、历史revision不改；WIP与回退点可恢复。",
+    "completion_delta": "集成人确认正式候选与补丁决议；不能用分析分支代替最终集成版本。"
+  },
+  {
+    "id": "CW-002",
+    "status": "decision",
+    "existing": "客户桌面+后端、全环境PG已由用户确认，现有工作台模块可从源码枚举。",
+    "exclude_scope": "数据库类型、双产品是否收敛、是否重写已有业务的重复选型。",
+    "remaining": "仅冻结支持OS、游客门禁、发布管理现有边界、跨任务公平范围及条件项；映射真实角色UAT。",
+    "evidence": [
+      {
+        "path": "docs/PostgreSQL唯一数据库实施与验收规范.md",
+        "line": 7,
+        "why": "已经确定的环境范围"
+      },
+      {
+        "path": "client/src/studio/types.ts",
+        "line": 1,
+        "why": "现有工作台业务类型"
+      }
+    ],
+    "other_branch_evidence": [],
+    "acceptance_delta": "保留功能/OS/条件任务都有明确范围，不把未接通功能当完成。",
+    "completion_delta": "范围责任人确认，所有条件任务有启用或N/A事实依据。"
+  },
+  {
+    "id": "CW-003",
+    "status": "decision",
+    "existing": "当前客户Tauri配置、API类型和凭据命名空间已有代码。",
+    "exclude_scope": "重新设计客户API或凭据存储。",
+    "remaining": "盘点实际发出的旧版本与哈希；冻结API/安装身份兼容窗口和退出判断；仓库不能证明实际分发数量。",
+    "evidence": [
+      {
+        "path": "client/src-tauri/tauri.customer.conf.json",
+        "line": 1,
+        "why": "现有客户制品配置"
+      },
+      {
+        "path": "client/src-tauri/src/customer_credentials.rs",
+        "line": 1,
+        "why": "旧凭据兼容必须基于此实现"
+      }
+    ],
+    "other_branch_evidence": [],
+    "acceptance_delta": "受支持旧版→新后端、新版→上一兼容后端逐格记录，拒绝不兼容版本无内部身份回退。",
+    "completion_delta": "实际版本清单和停止支持依据签认后才允许删旧接口。"
+  },
+  {
+    "id": "CW-004",
+    "status": "decision",
+    "existing": "PG16 fixture、CI数据库服务、HA/运维部署说明已有基础。",
+    "exclude_scope": "从零建设PG16测试容器及重复编写抽象部署方案。",
+    "remaining": "确认真实环境的交付主线、PG版本/角色/连接池总预算、节点资源、负载及RTO/RPO/灰度数值。",
+    "evidence": [
+      {
+        "path": "scripts/pg-fixture.sh",
+        "line": 4,
+        "why": "已有本地容器生命周期"
+      },
+      {
+        "path": ".github/workflows/ci.yml",
+        "line": 47,
+        "why": "已有PG16 CI服务"
+      },
+      {
+        "path": "docs/客户版部署与灰度手册.md",
+        "line": 3,
+        "why": "已有运维手册",
+        "v3_navigation_line_adjusted": true
+      }
+    ],
+    "other_branch_evidence": [],
+    "acceptance_delta": "所有指标包含数值、采样窗口、环境与责任；开发/测试/生产隔离。",
+    "completion_delta": "冻结拓扑和指标；未定参数不以文档示例冒充实测。"
+  },
+  {
+    "id": "CW-005",
+    "status": "decision",
+    "existing": "已有SQLite→空PG导入及PG账務核对工具，A/B/C定义已确定。",
+    "exclude_scope": "重复选择PG或重复实现空库导入器。",
+    "remaining": "真实数据批次只读盘点、价值/owner归属与A/B/C路线签认；不能默认无内部数据。",
+    "evidence": [
+      {
+        "path": "server/scripts/sqlite_to_postgres.py",
+        "line": 1,
+        "why": "现有导入器"
+      },
+      {
+        "path": "server/scripts/reconcile_customer_billing.py",
+        "line": 1,
+        "why": "现有账务核对"
+      }
+    ],
+    "other_branch_evidence": [],
+    "acceptance_delta": "每批来源/目标/owner与路线明确；原件保护、不按用户名合户。",
+    "completion_delta": "业务确认条件项及不适用理由；敏感原始数据不进入交付文档。"
+  },
+  {
+    "id": "CW-006",
+    "status": "decision",
+    "existing": "V2已将60项写入唯一账本§17，已有文件映射§14、12组PG规范和证据记录；原基线“尚未写入状态账本”已过时。",
+    "exclude_scope": "重新登记同一批60个空任务及重建规范文件；本轮V3映射同步可直接复用。",
+    "remaining": "在去重后的条目领取时落实具体Owner/Reviewer、候选/数据/兼容决议及授权记录；随实际增量更新文件映射。",
+    "evidence": [
+      {
+        "path": "docs/客户版任务清单-V3.md",
+        "line": 382,
+        "why": "已有60项登记",
+        "v3_navigation_line_adjusted": true
+      },
+      {
+        "path": "docs/客户版代码开发清单-V3.md",
+        "line": 428,
+        "why": "已有PG增量文件映射",
+        "v3_navigation_line_adjusted": true
+      },
+      {
+        "path": "docs/PostgreSQL唯一数据库实施与验收规范.md",
+        "line": 1,
+        "why": "已有统一规范"
+      }
+    ],
+    "other_branch_evidence": [],
+    "acceptance_delta": "V3旧新任务映射完整；单一账本；每项Owner/Reviewer具体可追溯，新文件先登记。",
+    "completion_delta": "本轮定义同步不关闭未来实施/签收责任。"
+  },
+  {
+    "id": "CW-007",
+    "status": "partial",
+    "existing": "已有PG16 Docker fixture、CI PG服务、PG测试建库与客户种子；不需从零建PG支持。",
+    "exclude_scope": "重写容器/PG驱动和已有客户种子场景。",
+    "remaining": "统一测试资源命名/清理边界与PG preflight；移除当前业务缺PG skip和开发身份默认；补连续两次/中断/并发隔离验证。",
+    "evidence": [
+      {
+        "path": "scripts/pg-fixture.sh",
+        "line": 4,
+        "why": "固定共享容器和库名需加强隔离"
+      },
+      {
+        "path": "server/tests/conftest.py",
+        "line": 8,
+        "why": "当前默认开发身份"
+      },
+      {
+        "path": "server/tests/test_postgres_migrations.py",
+        "line": 142,
+        "why": "缺PG仍skip"
+      }
+    ],
+    "other_branch_evidence": [],
+    "acceptance_delta": "TEST-PG缺库/错目标非0；两客户三设备种子可复用；共享全量串行、独立专项互不污染。",
+    "completion_delta": "所有数据库测试进入合法隔离PG，无SQLite或skip替代。"
+  },
+  {
+    "id": "CW-042",
+    "status": "partial",
+    "existing": "客户生产已有PG拒绝SQLite保护及共享PG门面；内部SQLite实现仍被业务使用。",
+    "exclude_scope": "重写现有PG连接/数据库业务模块；按internal名称删除共用账务。",
+    "remaining": "在历史工具独立和PG回归覆盖核销后，删除在线SQLite分支/配置/translator/回退及本地持久路径；保留精确历史例外。",
+    "evidence": [
+      {
+        "path": "server/app/db.py",
+        "line": 13,
+        "why": "SQLite连接入口仍存在"
+      },
+      {
+        "path": "server/app/db_pg.py",
+        "line": 122,
+        "why": "运行配置仍允许SQLite"
+      },
+      {
+        "path": "server/app/db_portable.py",
+        "line": 67,
+        "why": "在线兼容翻译层仍在"
+      }
+    ],
+    "other_branch_evidence": [],
+    "acceptance_delta": "运行/制品可达SQLite=0；全部保留业务PG通过；已发布迁移字节不改。",
+    "completion_delta": "逐符号消费者核销、禁止规则和真实启动观察同时通过，不能只grep。"
+  },
+  {
+    "id": "CW-043",
+    "status": "verify",
+    "existing": "已有大量PG专项与通用回归、V2 PG分类规则及字段定义。",
+    "exclude_scope": "再次从零写同一组PG测试；与CW-058/059重复开发同一断言。",
+    "remaining": "对各实施增量生成的旧→PG/退出/历史例外映射做独立全量核销；有遗漏回到对应开发项补测。",
+    "evidence": [
+      {
+        "path": "server/tests/test_postgres_migrations.py",
+        "line": 142,
+        "why": "既有PG测试与缺库skip现状"
+      },
+      {
+        "path": "docs/PostgreSQL唯一数据库实施与验收规范.md",
+        "line": 23,
+        "why": "分类规则已经形成"
+      }
+    ],
+    "other_branch_evidence": [],
+    "acceptance_delta": "未分类/无替代或无退出依据=0；TEST-PG真实PG执行、无业务SQLite替代。",
+    "completion_delta": "独立核销通过后才能裁剪CW-042；源码存在不提升为已执行。"
+  },
+  {
+    "id": "CW-044",
+    "status": "partial",
+    "existing": "现有secret、Linux质量、Rust、浏览器E2E、Windows双包及客户包排除启动器检查已经配置。",
+    "exclude_scope": "重建整套CI或重复实现客户包检查；重复制作已经同步的PG规范。",
+    "remaining": "删除内部发行任务，默认check/build/dev统一客户+PG；所有业务入口共用PG preflight和分类门禁，历史工具单列；按最终代码更新手册。",
+    "evidence": [
+      {
+        "path": "package.json",
+        "line": 10,
+        "why": "已有全仓检查命令"
+      },
+      {
+        "path": ".github/workflows/ci.yml",
+        "line": 47,
+        "why": "已有PG服务"
+      },
+      {
+        "path": ".github/workflows/ci.yml",
+        "line": 175,
+        "why": "仍构建内部包"
+      },
+      {
+        "path": ".github/workflows/ci.yml",
+        "line": 222,
+        "why": "已有客户包排除本地启动器检查"
+      }
+    ],
+    "other_branch_evidence": [],
+    "acceptance_delta": "断PG业务命令非0；PG可用时全业务真实PG执行；CI保留所有原有质量职责且仅交付客户和后端。",
+    "completion_delta": "最终CI/命令/文档与制品一致，无旁路或门禁缩减。"
+  },
+  {
+    "id": "CW-045",
+    "status": "verify",
+    "existing": "全量静态、前后端、Rust、构建、安全、客户E2E的命令与CI框架已具备。",
+    "exclude_scope": "开发第二套同名全量门禁。",
+    "remaining": "在去重后全部增量整合的同一候选SHA重新执行全量PG及构建门；记录环境/head/哈希/退出码。",
+    "evidence": [
+      {
+        "path": "package.json",
+        "line": 10,
+        "why": "现成全仓入口"
+      },
+      {
+        "path": ".github/workflows/ci.yml",
+        "line": 112,
+        "why": "CI补充E2E/Rust/构建职责"
+      }
+    ],
+    "other_branch_evidence": [],
+    "acceptance_delta": "必需检查0失败，PG缺库skip=0，SQLite业务替代=0；空PG及支持旧PG升级证据齐。",
+    "completion_delta": "完成D1候选门；历史成绩和本轮5项纯逻辑检查均不替代。"
+  },
+  {
+    "id": "CW-053",
+    "status": "decision",
+    "existing": "已有数据库门面/调用地图与12组PG合同；本轮补充按文件词法信号清单。",
+    "exclude_scope": "重复扫描同一关键词并将文件数当覆盖结论。",
+    "remaining": "逐函数/fixture/业务表细分实际连接、类型引用、迁移和TEST分类；精确历史allowlist及责任/退役条件；形成可逐项核销表。",
+    "evidence": [
+      {
+        "path": "outputs/customer-cloud-convergence-analysis-2026-09-08/v3/audit/database-signals.json",
+        "line": 1,
+        "why": "本轮信号清单仅作定位"
+      },
+      {
+        "path": "docs/PostgreSQL唯一数据库实施与验收规范.md",
+        "line": 23,
+        "why": "已有分类规范"
+      }
+    ],
+    "other_branch_evidence": [],
+    "acceptance_delta": "每个数据库消费者和测试行为归类，无宽泛目录豁免；线上数据未知单列。",
+    "completion_delta": "审查完成语义级清单；词法扫描不算本项整体验收。"
+  },
+  {
+    "id": "CW-058",
+    "status": "partial",
+    "existing": "内容/素材/人物/工作台/爆款等已有行为测试与部分PG专项。",
+    "exclude_scope": "重新开发全部内容功能或重写已有相同断言。",
+    "remaining": "沿调用者改造先移植现有持久化断言到真实PG；全量核销时补遗漏，保留合法Owner/关联/恢复/分页/JSON场景。",
+    "evidence": [
+      {
+        "path": "server/tests/test_independent_creation.py",
+        "line": 91,
+        "why": "仍用SQLite覆盖数据库依赖"
+      },
+      {
+        "path": "server/tests/conftest.py",
+        "line": 8,
+        "why": "通用测试默认内部开发身份"
+      },
+      {
+        "path": "server/tests/test_postgres_migrations.py",
+        "line": 142,
+        "why": "PG测试基座已有"
+      }
+    ],
+    "other_branch_evidence": [],
+    "acceptance_delta": "此组TEST-PG 100%真实PG；每个旧断言有替代/退出依据；无缺库skip、无SQLite替代。",
+    "completion_delta": "红绿记录随实现形成，收口阶段只做全量映射和补漏，交独立核销。"
+  },
+  {
+    "id": "CW-059",
+    "status": "partial",
+    "existing": "钱包/账务/Worker及客户权限有成熟断言，部分客户专项用PG。",
+    "exclude_scope": "从零重写状态机/账务测试或以H3一组替代全部任务。",
+    "remaining": "将剩余SQLite钱包/任务断言移到真实PG多连接；补混合任务、未知收费、迟到lease/epoch写与实际锁约束；复用每次实现时的红绿记录。",
+    "evidence": [
+      {
+        "path": "server/tests/test_wallet_billing_service.py",
+        "line": 21,
+        "why": "SQLite账务种子与既有断言"
+      },
+      {
+        "path": "server/tests/test_customer_security.py",
+        "line": 408,
+        "why": "客户数据库用例仍可能缺库skip"
+      },
+      {
+        "path": "server/tests/test_independent_creation.py",
+        "line": 91,
+        "why": "独立生成测试仍SQLite"
+      }
+    ],
+    "other_branch_evidence": [],
+    "acceptance_delta": "账务差额/重复付费/重复入账=0；真实PG证明fencing及锁；旧测试100%映射。",
+    "completion_delta": "独立复核任务/财务覆盖，历史导入测试不算当前业务通过。"
+  }
+]

@@ -1,9 +1,10 @@
 """工作台"提取文案"链路：上传视频 → 抽音轨 → ASR 转写（异步任务）。
 
-任务编排与 ``script_rewrite`` 同款（PENDING→RUNNING→终态 + 租约恢复 +
-SUBMISSION_UNCERTAIN）。管线：存储取原视频字节 → 本机 ffmpeg 抽小音轨 →
-临时对象上传存储并拿签名 URL → ASR 转写 → **临时音频即删**（成功与失败
-终态都删除，重试时重新抽取）。转写全文放在任务 result_json——原始上传
+任务编排使用 PENDING→RUNNING→终态、租约与提交不确定门禁。首次执行：
+存储取原视频 → ffmpeg 抽音轨 → 登记并上传临时对象 → ASR 转写。异步回执
+即刻入库，恢复时继续查询原任务；成功或明确失败后删除临时对象，清理失败
+由 Worker 复删。无回执的不确定任务保留音频至签名 URL 过期。转写全文放在
+任务 result_json——原始上传
 没有镜头卡版本，无法写生成门禁管制的 ``/projects/{id}/scripts``，文案
 工坊从任务结果取文本回填草稿，终稿发布仍走唯一的显式脚本版本路径。
 """
@@ -15,17 +16,22 @@ import json
 import logging
 import sqlite3
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
 from uuid import uuid4
 
+from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.asr import (
     AsrProvider,
     AsrProviderError,
+    AsrSubmissionUncertain,
+    AsrTaskPending,
+    DashScopeFunAsr,
     TranscriptResult,
     get_asr_provider,
 )
@@ -67,6 +73,7 @@ class ScriptFromAudioTaskResponse(BaseModel):
 
     id: str
     project_id: str
+    source_asset_id: str
     status: str
     attempt: int
     result: ScriptFromAudioResult | None
@@ -94,6 +101,7 @@ def script_from_audio_task_response(row: sqlite3.Row) -> ScriptFromAudioTaskResp
     return ScriptFromAudioTaskResponse(
         id=str(row["id"]),
         project_id=str(row["project_id"]),
+        source_asset_id=str(row["source_asset_id"]),
         status=str(row["status"]),
         attempt=int(row["attempt"]),
         result=result,
@@ -128,11 +136,12 @@ class PreparedScriptFromAudio:
     asr: AsrProvider
     ffmpeg_path: str
     ffprobe_path: str | None
+    audio_object_key: str
+    provider_task_id: str | None = None
+    audio_deleted: bool = False
 
 
 def script_from_audio_error(status_code: int, code: str, message: str) -> Exception:
-    from fastapi import HTTPException
-
     return HTTPException(status_code=status_code, detail={"code": code, "message": message})
 
 
@@ -163,9 +172,9 @@ def enqueue_script_from_audio_task(
     )
     # Fail fast before a task is accepted; the worker re-resolves the
     # provider later and never persists credentials in request_json.
-    get_asr_provider(conn)
+    _configured_asr(conn)
     asset = conn.execute(
-        "SELECT id FROM assets WHERE id = %s AND project_id = %s",
+        "SELECT * FROM assets WHERE id = %s AND project_id = %s",
         (source_asset_id, project_id),
     ).fetchone()
     if asset is None:
@@ -174,6 +183,7 @@ def enqueue_script_from_audio_task(
             "SCRIPT_FROM_AUDIO_SOURCE_ASSET_MISSING",
             "来源视频不存在或已删除，请重新上传。",
         )
+    _validate_source(asset)
     request_payload = {"source_asset_id": source_asset_id}
     request_hash = hashlib.sha256(
         json.dumps(
@@ -240,6 +250,11 @@ def enqueue_script_from_audio_task(
     ).fetchone()
     if row is None:
         row = conn.execute(
+            "SELECT * FROM script_from_audio_tasks WHERE project_id=%s AND idempotency_key=%s",
+            (project_id, idempotency_key),
+        ).fetchone()
+    if row is None:
+        row = conn.execute(
             """
             SELECT * FROM script_from_audio_tasks
             WHERE project_id = %s AND status IN ('PENDING','RUNNING')
@@ -252,6 +267,10 @@ def enqueue_script_from_audio_task(
             409,
             "SCRIPT_FROM_AUDIO_ENQUEUE_CONFLICT",
             "提取任务状态已经变化，请重试。",
+        )
+    if str(row["request_hash"]) != request_hash:
+        raise script_from_audio_error(
+            409, "SCRIPT_FROM_AUDIO_ENQUEUE_CONFLICT", "该项目已有不同来源的提取任务，请等待完成。"
         )
     from app.permissions import write_audit
 
@@ -281,7 +300,7 @@ def acquire_script_from_audio_task(
         SET status = 'PENDING', locked_by = NULL, locked_until = NULL,
             error_code = NULL, error_message_redacted = NULL, retryable = 0,
             updated_at = %s
-        WHERE status = 'RUNNING' AND provider_started_at IS NULL
+        WHERE status = 'RUNNING' AND (provider_started_at IS NULL OR provider_task_id IS NOT NULL)
           AND locked_until IS NOT NULL AND locked_until <= %s
         """,
         (now, now),
@@ -293,7 +312,7 @@ def acquire_script_from_audio_task(
             error_code = 'SCRIPT_FROM_AUDIO_SUBMISSION_UNCERTAIN',
             error_message_redacted = %s, retryable = 0,
             completed_at = %s, updated_at = %s
-        WHERE status = 'RUNNING' AND provider_started_at IS NOT NULL
+        WHERE status = 'RUNNING' AND provider_started_at IS NOT NULL AND provider_task_id IS NULL
           AND locked_until IS NOT NULL AND locked_until <= %s
         """,
         (
@@ -312,12 +331,12 @@ def acquire_script_from_audio_task(
             error_code = NULL, error_message_redacted = NULL, retryable = 0
         WHERE id = (
             SELECT id FROM script_from_audio_tasks
-            WHERE status = 'PENDING'
+            WHERE status = 'PENDING' AND (next_attempt_at IS NULL OR next_attempt_at <= %s)
             ORDER BY created_at, id LIMIT 1 FOR UPDATE SKIP LOCKED
         ) AND status = 'PENDING'
         RETURNING *
         """,
-        (worker_id, locked_until, now, now),
+        (worker_id, locked_until, now, now, now),
     ).fetchone()
     conn.commit()
     if row is None:
@@ -336,9 +355,37 @@ def _require_leased_task(conn: BusinessConnection, lease: ScriptFromAudioTaskLea
         "SELECT * FROM script_from_audio_tasks WHERE id = %s AND status = 'RUNNING'",
         (lease.id,),
     ).fetchone()
-    if row is None or str(row["locked_by"]) != lease.worker_id:
+    if (
+        row is None
+        or str(row["locked_by"]) != lease.worker_id
+        or int(row["attempt"]) != lease.attempt
+        or str(row["locked_until"] or "") <= _time_text(datetime.now(UTC))
+    ):
         raise script_from_audio_error(409, "SCRIPT_FROM_AUDIO_LEASE_LOST", "任务租约已失效。")
     return cast(sqlite3.Row, row)
+
+
+def _configured_asr(conn: BusinessConnection) -> AsrProvider:
+    try:
+        return get_asr_provider(conn)
+    except (AsrProviderError, ValueError) as exc:
+        logger.warning("ASR configuration unavailable: %s", type(exc).__name__)
+        raise script_from_audio_error(
+            503,
+            "SCRIPT_FROM_AUDIO_SERVICE_UNAVAILABLE",
+            "语音转写服务暂不可用，请联系管理员检查配置。",
+        ) from exc
+
+
+def _validate_source(asset: sqlite3.Row) -> None:
+    if not str(asset["content_type"] or "").lower().startswith(("audio/", "video/")):
+        raise script_from_audio_error(
+            422, "SCRIPT_FROM_AUDIO_SOURCE_TYPE_INVALID", "请选择有效的视频或音频文件。"
+        )
+    if int(asset["size_bytes"] or 0) > SCRIPT_FROM_AUDIO_MAX_SOURCE_BYTES:
+        raise script_from_audio_error(
+            413, "SCRIPT_FROM_AUDIO_SOURCE_TOO_LARGE", "来源文件过大，请压缩后重新上传。"
+        )
 
 
 def prepare_script_from_audio_task(
@@ -350,6 +397,19 @@ def prepare_script_from_audio_task(
     row = _require_leased_task(conn, lease)
     payload = json.loads(str(row["request_json"]))
     asset_id = str(payload.get("source_asset_id", ""))
+    if row["provider_task_id"] is not None:
+        return PreparedScriptFromAudio(
+            task_id=lease.id,
+            project_id=lease.project_id,
+            asset_id=asset_id,
+            object_key="",
+            storage=storage,
+            asr=_configured_asr(conn),
+            ffmpeg_path="",
+            ffprobe_path=None,
+            audio_object_key=str(row["audio_object_key"] or ""),
+            provider_task_id=str(row["provider_task_id"]),
+        )
     asset = conn.execute(
         "SELECT * FROM assets WHERE id = %s AND project_id = %s",
         (asset_id, lease.project_id),
@@ -360,6 +420,7 @@ def prepare_script_from_audio_task(
             "SCRIPT_FROM_AUDIO_SOURCE_ASSET_MISSING",
             "来源视频不存在或已删除，请重新上传。",
         )
+    _validate_source(asset)
     storage_uri = str(asset["storage_uri"])
     object_key = _object_key_from_uri(storage_uri)
     try:
@@ -371,15 +432,24 @@ def prepare_script_from_audio_task(
             "SCRIPT_FROM_AUDIO_MEDIA_TOOL_MISSING",
             str(exc),
         ) from exc
+    audio_key = str(row["audio_object_key"] or f"tmp/asr/{lease.project_id}/{lease.id}.m4a")
+    conn.execute(
+        "UPDATE script_from_audio_tasks SET audio_object_key=%s WHERE id=%s "
+        "AND status='RUNNING' AND locked_by=%s AND attempt=%s",
+        (audio_key, lease.id, lease.worker_id, lease.attempt),
+    )
+    conn.commit()
     return PreparedScriptFromAudio(
         task_id=lease.id,
         project_id=lease.project_id,
         asset_id=asset_id,
         object_key=object_key,
         storage=storage,
-        asr=get_asr_provider(conn),
+        asr=_configured_asr(conn),
         ffmpeg_path=ffmpeg_path,
         ffprobe_path=ffprobe_path,
+        audio_object_key=audio_key,
+        provider_task_id=None if row["provider_task_id"] is None else str(row["provider_task_id"]),
     )
 
 
@@ -388,50 +458,124 @@ def mark_script_from_audio_submission_started(
     *,
     lease: ScriptFromAudioTaskLease,
 ) -> None:
-    conn.execute(
+    updated = conn.execute(
         """
         UPDATE script_from_audio_tasks
         SET provider_started_at = %s, updated_at = %s
-        WHERE id = %s
+        WHERE id = %s AND status='RUNNING' AND locked_by=%s AND attempt=%s
+          AND locked_until > %s
         """,
-        (_time_text(datetime.now(UTC)), _time_text(datetime.now(UTC)), lease.id),
+        (
+            _time_text(datetime.now(UTC)),
+            _time_text(datetime.now(UTC)),
+            lease.id,
+            lease.worker_id,
+            lease.attempt,
+            _time_text(datetime.now(UTC)),
+        ),
     )
+    if updated.rowcount != 1:
+        raise script_from_audio_error(409, "SCRIPT_FROM_AUDIO_LEASE_LOST", "任务租约已失效。")
+    conn.commit()
+
+
+def checkpoint_script_from_audio_task(
+    conn: BusinessConnection,
+    *,
+    lease: ScriptFromAudioTaskLease,
+    provider_task_id: str | None = None,
+) -> None:
+    now = datetime.now(UTC)
+    updated = conn.execute(
+        "UPDATE script_from_audio_tasks SET provider_task_id=COALESCE(%s,provider_task_id), "
+        "locked_until=%s, updated_at=%s WHERE id=%s AND status='RUNNING' "
+        "AND locked_by=%s AND attempt=%s AND locked_until>%s",
+        (
+            provider_task_id,
+            _time_text(now + timedelta(minutes=SCRIPT_FROM_AUDIO_TASK_LEASE_MINUTES)),
+            _time_text(now),
+            lease.id,
+            lease.worker_id,
+            lease.attempt,
+            _time_text(now),
+        ),
+    )
+    if updated.rowcount != 1:
+        raise script_from_audio_error(409, "SCRIPT_FROM_AUDIO_LEASE_LOST", "任务租约已失效。")
     conn.commit()
 
 
 def perform_script_from_audio_task(
     work: PreparedScriptFromAudio,
+    *,
+    before_provider_call: Callable[[], None] | None = None,
+    on_submitted: Callable[[str], None] | None = None,
+    heartbeat: Callable[[], None] | None = None,
 ) -> TranscriptResult:
-    """抽取 → 临时对象 → 转写 → 即删。临时对象在 finally 中无条件清理。"""
-    video_bytes = work.storage.get_object(work.object_key)
-    tmp_key = f"tmp/asr/{work.project_id}/{hashlib.sha256(video_bytes).hexdigest()[:32]}.m4a"
-    with tempfile.TemporaryDirectory(prefix="script-from-audio-") as tmp_dir:
-        video_path = Path(tmp_dir) / "source-video"
-        audio_path = Path(tmp_dir) / "extracted-audio.m4a"
-        video_path.write_bytes(video_bytes)
-        try:
-            extract_audio(work.ffmpeg_path, video_path, audio_path)
-            audio_bytes = audio_path.read_bytes()
-        except MediaToolFailed as exc:
-            raise AsrProviderError(f"音轨抽取失败：{exc}") from exc
-        duration = (
-            probe_duration_seconds(work.ffprobe_path, audio_path) if work.ffprobe_path else None
-        )
-        work.storage.put_object(tmp_key, audio_bytes, content_type="audio/mp4")
-        try:
+    """Known receipts resume without another upload/POST; pending work retains its audio."""
+    keep_audio = False
+    try:
+        if heartbeat is not None:
+            heartbeat()
+        if work.provider_task_id is not None:
+            if not isinstance(work.asr, DashScopeFunAsr):
+                raise AsrProviderError("当前转写配置无法恢复已有任务，请检查配置。")
+            return work.asr.resume(work.provider_task_id, heartbeat=heartbeat)
+        metadata = work.storage.head_object(work.object_key)
+        if metadata is not None and metadata.size > SCRIPT_FROM_AUDIO_MAX_SOURCE_BYTES:
+            raise script_from_audio_error(
+                413, "SCRIPT_FROM_AUDIO_SOURCE_TOO_LARGE", "来源文件过大，请压缩后重新上传。"
+            )
+        video_bytes = work.storage.get_object(work.object_key)
+        if len(video_bytes) > SCRIPT_FROM_AUDIO_MAX_SOURCE_BYTES:
+            raise script_from_audio_error(
+                413, "SCRIPT_FROM_AUDIO_SOURCE_TOO_LARGE", "来源文件过大，请压缩后重新上传。"
+            )
+        with tempfile.TemporaryDirectory(prefix="script-from-audio-") as tmp_dir:
+            video_path = Path(tmp_dir) / "source-video"
+            audio_path = Path(tmp_dir) / "extracted-audio.m4a"
+            video_path.write_bytes(video_bytes)
+            try:
+                extract_audio(work.ffmpeg_path, video_path, audio_path)
+                audio_bytes = audio_path.read_bytes()
+            except MediaToolFailed as exc:
+                raise AsrProviderError(f"音轨抽取失败：{exc}") from exc
+            duration = (
+                probe_duration_seconds(work.ffprobe_path, audio_path) if work.ffprobe_path else None
+            )
+            if heartbeat is not None:
+                heartbeat()
+            work.storage.put_object(work.audio_object_key, audio_bytes, content_type="audio/mp4")
             intent = work.storage.create_download_intent(
-                tmp_key,
+                work.audio_object_key,
                 expires_in=_DOWNLOAD_INTENT_EXPIRES,
                 can_read=True,
             )
-            transcript = work.asr.transcribe(intent.url, duration_sec=duration)
-        finally:
-            # 转写用完即删（决策 #6）：成功、失败一律清理，不留音频残留。
+            if before_provider_call is not None:
+                before_provider_call()
+            if isinstance(work.asr, DashScopeFunAsr):
+                return work.asr.transcribe(
+                    intent.url,
+                    duration_sec=duration,
+                    on_submitted=on_submitted,
+                    heartbeat=heartbeat,
+                )
+            return work.asr.transcribe(intent.url, duration_sec=duration)
+    except (AsrTaskPending, AsrSubmissionUncertain):
+        keep_audio = True
+        raise
+    finally:
+        if not keep_audio and work.audio_object_key:
             try:
-                work.storage.delete_object(tmp_key, actor_id="script-from-audio-worker")
-            except Exception:  # pragma: no cover - cleanup best effort
-                logger.warning("temporary ASR audio cleanup failed for key %s", tmp_key)
-    return transcript
+                # A superseded worker must not delete the current attempt's input.
+                if heartbeat is not None:
+                    heartbeat()
+                work.storage.delete_object(
+                    work.audio_object_key, actor_id="script-from-audio-worker"
+                )
+                work.audio_deleted = True
+            except Exception:
+                logger.warning("temporary ASR audio cleanup deferred for task %s", work.task_id)
 
 
 def complete_script_from_audio_task(
@@ -439,6 +583,7 @@ def complete_script_from_audio_task(
     *,
     lease: ScriptFromAudioTaskLease,
     result: TranscriptResult,
+    audio_deleted: bool = False,
 ) -> None:
     now = _time_text(datetime.now(UTC))
     result_payload = {
@@ -446,22 +591,29 @@ def complete_script_from_audio_task(
         "duration_sec": result.duration_sec,
         "language": result.language,
     }
-    conn.execute(
+    updated = conn.execute(
         """
         UPDATE script_from_audio_tasks
         SET status = 'SUCCEEDED', result_json = %s,
             error_code = NULL, error_message_redacted = NULL, retryable = 0,
             completed_at = %s, updated_at = %s, locked_by = NULL,
-            locked_until = NULL, provider_started_at = NULL
-        WHERE id = %s
+            locked_until = NULL, provider_started_at = NULL,
+            audio_object_key = CASE WHEN %s=1 THEN NULL ELSE audio_object_key END
+        WHERE id = %s AND status='RUNNING' AND locked_by=%s AND attempt=%s AND locked_until>%s
         """,
         (
             json.dumps(result_payload, ensure_ascii=False, sort_keys=True),
             now,
             now,
+            int(audio_deleted),
             lease.id,
+            lease.worker_id,
+            lease.attempt,
+            now,
         ),
     )
+    if updated.rowcount != 1:
+        raise script_from_audio_error(409, "SCRIPT_FROM_AUDIO_LEASE_LOST", "任务租约已失效。")
     conn.commit()
 
 
@@ -471,11 +623,33 @@ def fail_script_from_audio_task(
     lease: ScriptFromAudioTaskLease,
     cause: Exception,
     submission_started: bool,
+    audio_deleted: bool = False,
 ) -> None:
     logger.warning("script-from-audio task %s failed: %s", lease.id, type(cause).__name__)
     now = _time_text(datetime.now(UTC))
+    row = conn.execute(
+        "SELECT provider_task_id FROM script_from_audio_tasks WHERE id=%s "
+        "AND status='RUNNING' AND locked_by=%s AND attempt=%s AND locked_until>%s",
+        (lease.id, lease.worker_id, lease.attempt, now),
+    ).fetchone()
+    if row is None:
+        return
+    has_receipt = row["provider_task_id"] is not None
     retryable = 1 if not submission_started else 0
-    if submission_started and isinstance(cause, AsrProviderError):
+    next_attempt_at = None
+    if has_receipt and (
+        isinstance(cause, AsrTaskPending)
+        or (isinstance(cause, HTTPException) and cause.status_code == 503)
+    ):
+        status = "PENDING"
+        code = "SCRIPT_FROM_AUDIO_RESUMING"
+        retryable = 0
+        next_attempt_at = _time_text(datetime.now(UTC) + timedelta(seconds=10))
+    elif isinstance(cause, (AsrTaskPending, AsrSubmissionUncertain)):
+        status = "SUBMISSION_UNCERTAIN"
+        code = "SCRIPT_FROM_AUDIO_SUBMISSION_UNCERTAIN"
+        retryable = 0
+    elif submission_started and isinstance(cause, AsrProviderError):
         status = "FAILED"
         code = "SCRIPT_FROM_AUDIO_PROVIDER_FAILED"
     elif submission_started:
@@ -490,17 +664,23 @@ def fail_script_from_audio_task(
         SET status = %s, error_code = %s,
             error_message_redacted = %s, retryable = %s,
             completed_at = %s, updated_at = %s, locked_by = NULL,
-            locked_until = NULL
-        WHERE id = %s
+            locked_until = NULL, next_attempt_at=%s,
+            audio_object_key = CASE WHEN %s=1 THEN NULL ELSE audio_object_key END
+        WHERE id = %s AND status='RUNNING' AND locked_by=%s AND attempt=%s AND locked_until>%s
         """,
         (
             status,
             code,
             _redacted_message(cause),
             retryable,
+            None if status == "PENDING" else now,
             now,
-            now,
+            next_attempt_at,
+            int(audio_deleted),
             lease.id,
+            lease.worker_id,
+            lease.attempt,
+            now,
         ),
     )
     conn.commit()
@@ -533,8 +713,6 @@ def latest_script_from_audio_task(
 def _redacted_message(cause: Exception) -> str:
     if isinstance(cause, AsrProviderError):
         return str(cause)
-    from fastapi import HTTPException
-
     if isinstance(cause, HTTPException):
         detail = cause.detail
         if isinstance(detail, dict) and detail.get("message"):

@@ -20,6 +20,7 @@ from typing import Literal
 
 FFMPEG_DIR_ENV = "VIDEO_REPLICA_FFMPEG_DIR"
 FFMPEG_TIMEOUT_SECONDS = 300
+IMAGE_DECODE_TIMEOUT_SECONDS = 15
 logger = logging.getLogger(__name__)
 
 
@@ -253,6 +254,41 @@ def _positive_int(value: object) -> int | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
+
+
+def validate_image_decodable(ffmpeg_path: str, content: bytes) -> None:
+    """Decode one image frame in an isolated ffmpeg process without writing output."""
+    command = [
+        ffmpeg_path,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-xerror",
+        "-threads",
+        "1",
+        "-i",
+        "pipe:0",
+        "-map",
+        "0:v:0",
+        "-frames:v",
+        "1",
+        "-f",
+        "null",
+        "-",
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            input=content,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=IMAGE_DECODE_TIMEOUT_SECONDS,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        logger.warning("ffmpeg image validation failed to run: %s", type(exc).__name__)
+        raise MediaToolFailed("ffmpeg 图片解码校验执行失败") from exc
+    if completed.returncode != 0:
+        raise MediaToolFailed("ffmpeg 无法解码图片")
 
 
 def _run(command: list[str]) -> None:

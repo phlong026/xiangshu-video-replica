@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { openCustomerWallet } from "./workspace-navigation.mjs";
 
 const CODE_RECHARGE = "XS04-1234567-89ABCDE-FGHJKMN-PQRSTVW";
 
@@ -32,22 +33,23 @@ test("customer wallet creates a recharge order under the customer session", asyn
   await page.getByLabel("设备名称").fill("E2E Recharge Device");
   await page.getByRole("button", { name: "激活并进入工作台" }).click();
 
-  // The workspace lands; the wallet view lives in the customer profile.
-  await expect(page.getByRole("button", { name: "打开个人中心" })).toBeVisible({
-    timeout: 20_000,
-  });
-  await page.getByRole("button", { name: "打开个人中心" }).click();
-  await page.getByRole("button", { name: "余额与记录" }).click();
+  // The V1.4 workspace reaches the customer wallet through 用户档案 > 使用记录.
+  await openCustomerWallet(page);
 
   // The customer-lane wallet panel loads (task #7): balance + recharge form.
-  await expect(page.getByRole("heading", { name: "充值条数" })).toBeVisible({
-    timeout: 20_000,
-  });
+  // V1.4 bills by seconds: the recharge section heading is 充值秒数额度.
+  await expect(page.getByRole("heading", { name: "充值秒数额度" })).toBeVisible(
+    {
+      timeout: 20_000,
+    },
+  );
   await expect(page.getByRole("button", { name: "充值100元" })).toBeVisible();
 
   // Read the balance before the recharge: PENDING must not credit the wallet.
-  const creditsCard = page.locator(".wallet-summary-card").nth(1);
-  const creditsBefore = await creditsCard.locator("strong").textContent();
+  // The first summary card shows 可用额度; its value is synchronous, unlike
+  // the second card whose price quotes load asynchronously.
+  const balanceCard = page.locator(".wallet-summary-card").first();
+  const creditsBefore = await balanceCard.locator("strong").textContent();
 
   // Clicking a preset opens the confirmation dialog.  Generating the QR then
   // posts POST /api/customer/recharge-orders; only the provider QR response
@@ -69,6 +71,6 @@ test("customer wallet creates a recharge order under the customer session", asyn
 
   // Credits are unchanged while the order is PENDING (BILL-01: the wallet is
   // credited only on the PAID callback).
-  const creditsAfter = await creditsCard.locator("strong").textContent();
+  const creditsAfter = await balanceCard.locator("strong").textContent();
   expect(creditsAfter).toBe(creditsBefore);
 });

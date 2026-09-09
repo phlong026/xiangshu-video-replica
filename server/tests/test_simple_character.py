@@ -22,6 +22,7 @@ from fastapi import HTTPException, UploadFile
 from fastapi.testclient import TestClient
 
 import app.rbac_routes as rbac_routes
+import app.simple_character as simple_character
 import app.simple_character_routes as simple_character_routes
 from app.auth import CurrentUser, get_database
 from app.character_identity import REQUIRED_CHARACTER_VIEW_TYPES
@@ -52,10 +53,12 @@ from app.media import storage_key_from_uri
 from app.media_routes import get_media_storage
 from app.simple_character import (
     SIMPLE_CONTACT_SHEET_MODEL,
+    PreparedSimpleCharacterGeneration,
     _decode_png_rgb,
     contact_sheet_placeholder_png,
     crop_contact_sheet_views,
     delete_simple_character_identity,
+    store_simple_character_publication,
 )
 from app.storage import FakeStorageAdapter
 
@@ -178,7 +181,7 @@ def scene_sheet_inspection(*, identity_score: float = 0.95) -> SceneContactSheet
 
 @pytest.fixture()
 def contact_sheet_provider() -> StubContactSheetProvider:
-    return StubContactSheetProvider()
+    return StubContactSheetProvider(sheet_content=build_five_panel_sheet_png())
 
 
 @pytest.fixture()
@@ -247,6 +250,7 @@ def test_upload_intent_returns_direct_upload_contract(client: TestClient) -> Non
     assert payload["generate_url"] == "/api/simple-characters/tasks/generate"
     assert payload["max_size_bytes"] == 10 * 1024 * 1024
     assert "image/png" in payload["allowed_content_types"]
+    assert "image/webp" in payload["allowed_content_types"]
     assert payload["required_form_fields"] == ["file", "display_name", "idempotency_key"]
     assert payload["task_status_url_template"] == "/api/simple-characters/task-status/{task_id}"
 
@@ -466,6 +470,133 @@ def test_simple_character_rejects_unsupported_content_type(client: TestClient) -
     assert response.json()["detail"]["code"] == "SIMPLE_CHARACTER_IMAGE_TYPE_UNSUPPORTED"
 
 
+@pytest.mark.parametrize(
+    ("filename", "content", "content_type"),
+    [
+        pytest.param("portrait.png", b"\x89PNG\r\n\x1a\n", "image/png", id="png-header"),
+        pytest.param("portrait.jpg", b"\xff\xd8\xff\xd9", "image/jpeg", id="jpeg-header"),
+        pytest.param(
+            "portrait.webp",
+            b"RIFF\x04\x00\x00\x00WEBP",
+            "image/webp",
+            id="webp-header",
+        ),
+        pytest.param(
+            "portrait.jpg",
+            deterministic_png(b"mime-mismatch"),
+            "image/jpeg",
+            id="mime-mismatch",
+        ),
+        pytest.param(
+            "portrait.png",
+            bytes.fromhex(
+                "89504e470d0a1a0a0000000d494844520000012c000000c80802000000"
+                "ddbd4b020000000949444154789c630000000100015eff7df900000000"
+                "49454e44ae426082"
+            ),
+            "image/png",
+            id="png-invalid-pixels",
+        ),
+        pytest.param(
+            "portrait.jpg",
+            bytes.fromhex("ffd8ffc000070800010001ffda000278ffd9"),
+            "image/jpeg",
+            id="jpeg-invalid-pixels",
+        ),
+        pytest.param(
+            "portrait.webp",
+            bytes.fromhex("524946461800000057454250565038200c0000000000009d012a010001000000"),
+            "image/webp",
+            id="webp-invalid-pixels",
+        ),
+    ],
+)
+def test_simple_character_rejects_invalid_image_bytes(
+    client: TestClient,
+    db_path: Path,
+    contact_sheet_provider: StubContactSheetProvider,
+    filename: str,
+    content: bytes,
+    content_type: str,
+) -> None:
+    response = client.post(
+        "/api/simple-characters/project-owned/generate",
+        headers=headers("employee_1"),
+        files={"file": (filename, content, content_type)},
+        data={"display_name": "荣哥"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "SIMPLE_CHARACTER_IMAGE_INVALID"
+    assert contact_sheet_provider.calls == []
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        assert conn.execute("SELECT 1 FROM person_identities").fetchone() is None
+
+
+def test_simple_character_accepts_webp_source(
+    client: TestClient,
+    contact_sheet_provider: StubContactSheetProvider,
+) -> None:
+    source = bytes.fromhex(
+        "524946461e000000574542505650384c110000002f0000000007d0fffef7bfff8188e87f0000"
+    )
+    response = client.post(
+        "/api/simple-characters/project-owned/generate",
+        headers=headers("employee_1"),
+        files={"file": ("portrait.webp", source, "image/webp")},
+        data={"display_name": "荣哥"},
+    )
+
+    assert response.status_code == 201, response.text
+    provider_source = contact_sheet_provider.calls[-1]["source_image"]
+    assert getattr(provider_source, "content") == source
+    assert getattr(provider_source, "content_type") == "image/webp"
+
+
+def test_simple_character_accepts_jpeg_source(
+    client: TestClient,
+    contact_sheet_provider: StubContactSheetProvider,
+) -> None:
+    source = bytes.fromhex(
+        "ffd8ffe000104a46494600010200000100010000fffe00104c61766336322e32382e31303200"
+        "ffdb004300083e3e493e49555555555555645d64686868646464646868687070708383837070"
+        "70686870707c7c83838f938f8787838793939b9b9bbabab2b2d9d9e0ffffffffc4004b000101"
+        "00000000000000000000000000000008010100000000000000000000000000000000100100"
+        "000000000000000000000000000000110100000000000000000000000000000000ffc00011"
+        "080010001003012200021100031100ffda000c03010002110311003f009fc007ffd9"
+    )
+    response = client.post(
+        "/api/simple-characters/project-owned/generate",
+        headers=headers("employee_1"),
+        files={"file": ("portrait.jpg", source, "image/jpeg")},
+        data={"display_name": "荣哥"},
+    )
+
+    assert response.status_code == 201, response.text
+    provider_source = contact_sheet_provider.calls[-1]["source_image"]
+    assert getattr(provider_source, "content") == source
+    assert getattr(provider_source, "content_type") == "image/jpeg"
+
+
+def test_character_sheet_task_rejects_invalid_image_before_storage(
+    client: TestClient,
+    db_path: Path,
+    storage: FakeStorageAdapter,
+) -> None:
+    response = client.post(
+        "/api/simple-characters/tasks/generate",
+        headers=headers("employee_1"),
+        files={"file": ("portrait.png", b"\x89PNG\r\n\x1a\n", "image/png")},
+        data={"display_name": "荣哥", "idempotency_key": "invalid-source"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "SIMPLE_CHARACTER_IMAGE_INVALID"
+    assert storage._objects == {}
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        assert conn.execute("SELECT 1 FROM character_sheet_tasks").fetchone() is None
+
+
 def test_simple_character_rejects_empty_name(client: TestClient) -> None:
     response = client.post(
         "/api/simple-characters/project-owned/generate",
@@ -519,14 +650,14 @@ def test_simple_character_generation_runs_provider_work_off_the_event_loop(
 
     monkeypatch.setattr(storage, "put_object", observed_put_object)
 
-    upload_content = deterministic_png(b"threaded-character-source")
+    source_content = deterministic_png(b"async-character-source")
 
     class InMemoryUpload:
-        size = len(upload_content)
+        size = len(source_content)
         content_type = "image/png"
 
         async def read(self) -> bytes:
-            return upload_content
+            return source_content
 
     async def prepare_character():
         return await simple_character_routes._prepare_simple_character_upload(
@@ -545,7 +676,7 @@ def test_simple_character_generation_runs_provider_work_off_the_event_loop(
 
     content, content_type, persona_name, prepared = asyncio.run(prepare_character())
 
-    assert content == upload_content
+    assert content == source_content
     assert content_type == "image/png"
     assert persona_name == "荣哥"
     assert prepared.generation.contact_content == contact_sheet_provider.sheet_content
@@ -735,11 +866,13 @@ def test_generate_creates_contact_sheet_asset(
         ).fetchone()
         assert row is not None
         assert row["kind"] == "character_contact_sheet"
-        assert row["sha256"] == hashlib.sha256(STUB_CONTACT_SHEET).hexdigest()
+        assert row["sha256"] == hashlib.sha256(contact_sheet_provider.sheet_content).hexdigest()
         metadata = json.loads(str(row["metadata_json"]))
         assert metadata["character_version_id"] == payload["character_version_id"]
         assert metadata["generation_source"] == "image_provider"
-        assert storage.get_object(str(metadata["object_key"])) == STUB_CONTACT_SHEET
+        assert (
+            storage.get_object(str(metadata["object_key"])) == contact_sheet_provider.sheet_content
+        )
 
         snapshot = json.loads(
             str(
@@ -851,7 +984,7 @@ def test_character_cache_downloads_once_and_serves_local_copy(
     parsed = urlsplit(second.json()["url"])
     cached = client.get(f"{parsed.path}?{parsed.query}")
     assert cached.status_code == 200
-    assert cached.content == STUB_CONTACT_SHEET
+    assert cached.content == build_five_panel_sheet_png()
     assert cached.headers["content-type"].startswith("image/png")
 
     invalid_signature = client.get(f"{parsed.path}?{parsed.query}x")
@@ -974,7 +1107,7 @@ def test_customer_character_cache_is_shared_across_api_replicas(
     cached = client.get(f"{parsed.path}?{parsed.query}")
 
     assert cached.status_code == 200, cached.text
-    assert cached.content == STUB_CONTACT_SHEET
+    assert cached.content == build_five_panel_sheet_png()
     assert cached.headers["content-type"].startswith("image/png")
     assert not second_replica_home.exists()
 
@@ -1015,6 +1148,55 @@ def test_contact_sheet_provider_failure_is_visible_and_does_not_publish(
 
     with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         assert conn.execute("SELECT 1 FROM person_identities").fetchone() is None
+
+
+def test_undecodable_provider_sheet_is_visible_and_does_not_publish(
+    client: TestClient,
+    db_path: Path,
+    storage: FakeStorageAdapter,
+    contact_sheet_provider: StubContactSheetProvider,
+) -> None:
+    contact_sheet_provider.sheet_content = b"contact-sheet-image"
+
+    response = generate_global(client)
+
+    assert response.status_code == 502, response.text
+    assert response.json()["detail"]["code"] == "CONTACT_SHEET_PROVIDER_INVALID_OUTPUT"
+    assert storage._objects == {}
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        assert conn.execute("SELECT 1 FROM person_identities").fetchone() is None
+        assert conn.execute("SELECT 1 FROM character_assets").fetchone() is None
+
+
+def test_prepared_publication_rejects_uncroppable_sheet_before_storage(
+    storage: FakeStorageAdapter,
+) -> None:
+    actor = CurrentUser(
+        id="employee_1",
+        username="employee_1",
+        display_name="Employee One",
+        role="employee",
+    )
+    generation = PreparedSimpleCharacterGeneration(
+        version_id="version-invalid-sheet",
+        contact_content=corrupt_png(build_five_panel_sheet_png(), "ihdr-compression"),
+        contact_content_type="image/png",
+        contact_source="image_provider",
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        store_simple_character_publication(
+            actor=actor,
+            storage=storage,
+            source_content=deterministic_png(b"prepared-publication-source"),
+            source_content_type="image/png",
+            display_name="荣哥",
+            generation=generation,
+        )
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.detail["code"] == "CONTACT_SHEET_PROVIDER_INVALID_OUTPUT"
+    assert storage._objects == {}
 
 
 def test_unconfigured_local_provider_keeps_explicit_placeholder_path(
@@ -1120,7 +1302,7 @@ def test_library_cursor_is_bound_to_actor_scope_and_query(client: TestClient) ->
         headers=headers("employee_1"),
     )
     assert no_matches.status_code == 200
-    assert no_matches.json() == {"items": [], "next_cursor": None}
+    assert no_matches.json() == {"items": [], "next_cursor": None, "total": 0}
 
     oversized = client.get(
         "/api/simple-characters/library",
@@ -1424,7 +1606,7 @@ def test_other_employee_cannot_see_or_update_ip_profile(client: TestClient) -> N
         "expression_style": "越权风格",
     }
 
-    for user_id in ("employee_2", "auditor_1"):
+    for user_id in ("employee_2",):
         response = client.patch(
             f"/api/simple-characters/identities/{created['identity_id']}/profile",
             headers=headers(user_id),
@@ -1444,6 +1626,70 @@ def test_other_employee_cannot_see_or_update_ip_profile(client: TestClient) -> N
     ).json()["items"]
     assert owner_library[0]["display_name"] == "荣哥"
     assert owner_library[0]["role"] == ""
+
+
+def test_auditor_cannot_rename_or_update_ip_profile_without_side_effects(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    created = generate_global(client).json()
+    identity_id = created["identity_id"]
+    profile_url = f"/api/simple-characters/identities/{identity_id}/profile"
+
+    renamed = client.patch(
+        f"/api/simple-characters/identities/{identity_id}/name",
+        headers=headers("auditor_1"),
+        json={"display_name": "审计员越权命名"},
+    )
+    updated = client.patch(
+        profile_url,
+        headers=headers("auditor_1"),
+        json={
+            "display_name": "审计员越权档案",
+            "role": "越权角色",
+            "service_scope": "越权范围",
+            "target_audience": "越权人群",
+            "expression_style": "越权风格",
+        },
+    )
+
+    assert renamed.status_code == 403
+    assert renamed.json()["detail"]["code"] == "ROLE_FORBIDDEN"
+    assert updated.status_code == 403
+    assert updated.json()["detail"]["code"] == "ROLE_FORBIDDEN"
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        identity = conn.execute(
+            "SELECT display_name FROM person_identities WHERE id = %s", (identity_id,)
+        ).fetchone()
+        persona = conn.execute(
+            "SELECT occupation, ip_profile_revision FROM character_personas WHERE id = %s",
+            (created["persona_id"],),
+        ).fetchone()
+    assert identity["display_name"] == "荣哥"
+    assert persona["occupation"] is None
+    assert persona["ip_profile_revision"] == 0
+
+
+def test_customer_can_update_own_ip_profile(client: TestClient, db_path: Path) -> None:
+    created = generate_global(client).json()
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        conn.execute("UPDATE users SET role = 'customer' WHERE id = 'employee_1'")
+        conn.commit()
+
+    response = client.patch(
+        f"/api/simple-characters/identities/{created['identity_id']}/profile",
+        headers=headers("employee_1"),
+        json={
+            "display_name": "客户自有IP",
+            "role": "乡墅顾问",
+            "service_scope": "建房咨询",
+            "target_audience": "返乡业主",
+            "expression_style": "专业直接",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["display_name"] == "客户自有IP"
 
 
 def test_ip_profile_update_does_not_modify_scene_persona(
@@ -2223,10 +2469,14 @@ def test_owner_generates_and_lists_a_direct_publish_scene_look(
         headers=headers("employee_1"),
     )
     assert looks.status_code == 200, looks.text
-    assert looks.json() == [
+    look_page = looks.json()
+    assert look_page["total"] == 1
+    assert look_page["limit"] == 12
+    assert look_page["offset"] == 0
+    assert look_page["items"] == [
         {
             **result,
-            "published_at": looks.json()[0]["published_at"],
+            "published_at": look_page["items"][0]["published_at"],
         }
     ]
 
@@ -2270,6 +2520,7 @@ def test_owner_generates_and_lists_a_direct_publish_scene_look(
 
 def test_scene_looks_hide_foreign_identities_and_reject_auditors(
     client: TestClient,
+    db_path: Path,
 ) -> None:
     created = generate_global(client).json()
     identity_id = created["identity_id"]
@@ -2294,6 +2545,136 @@ def test_scene_looks_hide_foreign_identities_and_reject_auditors(
         },
     )
     assert auditor.status_code == 403
+    assert auditor.json()["detail"]["code"] == "ROLE_FORBIDDEN"
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM character_sheet_tasks "
+                "WHERE idempotency_key = 'scene-look-auditor'"
+            ).fetchone()[0]
+            == 0
+        )
+
+
+def test_customer_can_enqueue_own_scene_look(client: TestClient, db_path: Path) -> None:
+    created = generate_global(client).json()
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        conn.execute("UPDATE users SET role = 'customer' WHERE id = 'employee_1'")
+        conn.commit()
+
+    response = client.post(
+        f"/api/simple-characters/identities/{created['identity_id']}/scene-looks/tasks/generate",
+        headers=headers("employee_1"),
+        json={
+            "scene_name": "客户讲解",
+            "scene_description": "现代客厅",
+            "costume_description": "商务休闲装",
+            "idempotency_key": "customer-scene-look",
+        },
+    )
+
+    assert response.status_code == 202, response.text
+
+
+def test_scene_look_page_limits_database_rows_and_returns_scoped_total(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    created = generate_global(client).json()
+    identity_id = created["identity_id"]
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        for index in range(13):
+            persona_id = f"scene-page-persona-{index:02d}"
+            conn.execute(
+                """
+                INSERT INTO character_personas (
+                    id, identity_id, name, appearance_constraints_json,
+                    usage_scope_json, created_by, created_at, updated_at
+                ) VALUES (%s, %s, %s, %s, '[]', 'employee_1', %s, %s)
+                """,
+                (
+                    persona_id,
+                    identity_id,
+                    f"场景 {index:02d}",
+                    json.dumps({"appearance_type": "scene"}),
+                    f"2026-09-07T00:{index:02d}:00Z",
+                    f"2026-09-07T00:{index:02d}:00Z",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO character_versions (
+                    id, persona_id, version_number, status,
+                    publication_snapshot_json, publication_hash,
+                    published_at, published_by, created_by
+                ) VALUES (%s, %s, 1, 'PUBLISHED', %s, %s, %s,
+                          'employee_1', 'employee_1')
+                """,
+                (
+                    f"scene-page-version-{index:02d}",
+                    persona_id,
+                    json.dumps(
+                        {
+                            "contact_sheet_asset_id": f"sheet-{index:02d}",
+                            "generation_source": "test",
+                        }
+                    ),
+                    "0" * 64,
+                    f"2026-09-07T00:{index:02d}:00Z",
+                ),
+            )
+        for version_number in range(2, 202):
+            conn.execute(
+                """
+                INSERT INTO character_versions (
+                    id, persona_id, version_number, status,
+                    publication_snapshot_json, publication_hash,
+                    published_at, published_by, created_by
+                ) VALUES (%s, %s, %s, 'PUBLISHED', %s, %s, %s,
+                          'employee_1', 'employee_1')
+                """,
+                (
+                    f"unrelated-base-version-{version_number:03d}",
+                    created["persona_id"],
+                    version_number,
+                    json.dumps(
+                        {
+                            "contact_sheet_asset_id": f"base-sheet-{version_number:03d}",
+                            "generation_source": "test",
+                        }
+                    ),
+                    "1" * 64,
+                    f"2026-09-06T{version_number % 24:02d}:00:00Z",
+                ),
+            )
+        conn.commit()
+        statements: list[str] = []
+        conn.set_trace_callback(statements.append)
+        page = simple_character.list_simple_scene_looks_page(
+            conn,
+            actor=CurrentUser(
+                id="employee_1",
+                username="employee_1",
+                display_name="Employee One",
+                role="employee",
+            ),
+            identity_id=identity_id,
+            limit=12,
+            offset=12,
+        )
+
+    assert page.total == 13
+    assert [item.scene_name for item in page.items] == ["场景 00"]
+    page_queries = [
+        " ".join(statement.upper().split())
+        for statement in statements
+        if "FROM CHARACTER_PERSONAS AS PERSONA" in statement.upper()
+    ]
+    assert len(page_queries) == 2
+    page_query = next(statement for statement in page_queries if "LIMIT 12 OFFSET 12" in statement)
+    assert "ROW_NUMBER" not in page_query
+    assert page_query.index("WITH PAGED_PERSONAS AS") < page_query.index("LATEST_VERSIONS AS")
+    assert "JOIN PAGED_PERSONAS AS PERSONA" in page_query
 
 
 def test_scene_look_rejects_archived_identity_before_enqueue(
@@ -2442,6 +2823,62 @@ def build_solid_sheet_png(width: int = 300, height: int = 200) -> bytes:
     )
 
 
+def corrupt_png(sheet: bytes, corruption: str) -> bytes:
+    if corruption == "missing-iend":
+        return sheet[:-12]
+    mutable = bytearray(sheet)
+    position = 8
+    while position < len(mutable):
+        length = struct.unpack(">I", mutable[position : position + 4])[0]
+        chunk_type = bytes(mutable[position + 4 : position + 8])
+        crc_position = position + 8 + length
+        if corruption == "ihdr-crc" and chunk_type == b"IHDR":
+            mutable[crc_position] ^= 0x01
+            return bytes(mutable)
+        if corruption == "ihdr-compression" and chunk_type == b"IHDR":
+            mutable[position + 18] = 1
+            new_crc = zlib.crc32(bytes(mutable[position + 4 : crc_position])) & 0xFFFFFFFF
+            mutable[crc_position : crc_position + 4] = struct.pack(">I", new_crc)
+            return bytes(mutable)
+        if corruption == "idat-crc" and chunk_type == b"IDAT":
+            mutable[crc_position] ^= 0x01
+            return bytes(mutable)
+        if corruption == "idat-data" and chunk_type == b"IDAT":
+            mutable[position + 8] ^= 0x01
+            new_crc = zlib.crc32(bytes(mutable[position + 4 : crc_position])) & 0xFFFFFFFF
+            mutable[crc_position : crc_position + 4] = struct.pack(">I", new_crc)
+            return bytes(mutable)
+        if corruption == "idat-crc-removed" and chunk_type == b"IDAT":
+            return bytes(mutable[:crc_position] + mutable[crc_position + 4 :])
+        position = crc_position + 4
+    raise AssertionError(f"missing PNG chunk for corruption: {corruption}")
+
+
+def test_simple_character_rejects_png_with_invalid_compressed_stream(
+    client: TestClient,
+    db_path: Path,
+    contact_sheet_provider: StubContactSheetProvider,
+) -> None:
+    response = client.post(
+        "/api/simple-characters/generate",
+        headers=headers("employee_1"),
+        files={
+            "file": (
+                "portrait.png",
+                corrupt_png(deterministic_png(b"corrupt-source"), "idat-data"),
+                "image/png",
+            )
+        },
+        data={"display_name": "荣哥"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "SIMPLE_CHARACTER_IMAGE_INVALID"
+    assert contact_sheet_provider.calls == []
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        assert conn.execute("SELECT 1 FROM person_identities").fetchone() is None
+
+
 def _mirror_pixels(row: bytes) -> bytes:
     """Reverse the pixel order of an RGB row, keeping channel order."""
     return b"".join(row[i : i + 3] for i in range(len(row) - 3, -1, -3))
@@ -2499,6 +2936,28 @@ def test_crop_contact_sheet_views_returns_none_for_undecodable_sheets() -> None:
     assert crop_contact_sheet_views(build_five_panel_sheet_png(), "image/jpeg") is None
     # Truncated PNG data fails decoding instead of producing garbage views.
     assert crop_contact_sheet_views(build_five_panel_sheet_png()[:200], "image/png") is None
+    for corruption in (
+        "missing-iend",
+        "ihdr-crc",
+        "ihdr-compression",
+        "idat-crc",
+        "idat-crc-removed",
+        "idat-data",
+    ):
+        assert (
+            crop_contact_sheet_views(
+                corrupt_png(build_five_panel_sheet_png(), corruption),
+                "image/png",
+            )
+            is None
+        )
+
+
+def test_crop_contact_sheet_views_honors_decompressed_size_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(simple_character, "SIMPLE_PNG_MAX_DECOMPRESSED_BYTES", 64)
+    assert crop_contact_sheet_views(build_five_panel_sheet_png(), "image/png") is None
 
 
 def test_generate_crops_views_from_provider_sheet(
@@ -2550,18 +3009,35 @@ def test_generate_crops_views_from_provider_sheet(
         )
 
 
-def test_generate_rejects_undecodable_provider_output_without_publishing(
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "truncated",
+        "missing-iend",
+        "ihdr-crc",
+        "ihdr-compression",
+        "idat-crc",
+        "idat-crc-removed",
+        "idat-data",
+    ],
+)
+def test_generate_rejects_invalid_provider_sheet_without_placeholder_views(
     client: TestClient,
     db_path: Path,
     storage: FakeStorageAdapter,
     contact_sheet_provider: StubContactSheetProvider,
+    corruption: str,
 ) -> None:
-    contact_sheet_provider.sheet_content = b"contact-sheet-image"
-
+    """Invalid provider output must not create approved placeholder views."""
+    sheet = build_five_panel_sheet_png()
+    contact_sheet_provider.sheet_content = (
+        sheet[:200] if corruption == "truncated" else corrupt_png(sheet, corruption)
+    )
     response = generate_global(client)
     assert response.status_code == 502, response.text
     assert response.json()["detail"]["code"] == "CONTACT_SHEET_PROVIDER_INVALID_OUTPUT"
+    assert storage._objects == {}
 
     with BusinessConnection.sqlite(connect_database(db_path)) as conn:
         assert conn.execute("SELECT 1 FROM person_identities").fetchone() is None
-    assert storage._objects == {}
+        assert conn.execute("SELECT 1 FROM character_assets").fetchone() is None

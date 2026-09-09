@@ -3,6 +3,8 @@ import {
   type ReactNode,
   useCallback,
   useEffect,
+  useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -10,16 +12,20 @@ import type { WorkspaceShell } from "../App";
 import {
   createIndependentVideoTask,
   createOralTask,
+  customerGetWallet,
   customerVisibleErrorMessage,
   defaultBatchProvider,
   type GenerationBatch,
   type GenerationPriceQuote,
   type GenerationRatio,
+  getAssetDownloadUrl,
   getGenerationBatch,
   getGenerationPriceQuote,
   getIndependentCapabilities,
   getOralPrice,
+  getWallet,
   type IndependentCapabilities,
+  listMaterials,
   type Project,
 } from "../api";
 import { SettingsPanel } from "../SettingsPanel";
@@ -37,24 +43,29 @@ import {
   ReplicaPage,
   VideoPage,
 } from "./CreationPages";
+import { createCloudDraftQueue } from "./cloudDraftQueue";
 import { StudioContext, useStudio } from "./context";
 import { LiveWorkspacePanel } from "./LiveWorkspacePanel";
 import {
   extractScriptFromUpload as extractScriptFromUploadLive,
   loadCloudDraft,
   loadDraftMaterials,
+  loadLatestScriptFromUpload,
   loadPersonAssets,
   loadProjectDraft,
   loadSavedScriptList,
   loadStudioData,
+  loadViralVideos,
   persistCloudDraft,
   persistSavedScript,
   publishScriptVersion,
   reloadStats,
   reloadTasks,
+  studioAssetFromMaterial,
 } from "./live";
 import {
   ProfilePage,
+  type StudioAccountSummary,
   TaskDetailPage,
   TasksPage,
   WorkbenchPage,
@@ -64,11 +75,15 @@ import {
   buildOralInput,
   createDraft,
   createState,
+  DEFAULT_MAX_REFERENCE_IMAGES,
+  navigateStudioState,
   pageTitles,
   patchStudioDraft,
   resolveVideoMode,
-  routeFromHash,
   SUPPORTED_VIDEO_RATIOS,
+  studioHashForState,
+  studioRouteFromHash,
+  validateReferenceImages,
   withImportedProject,
 } from "./state";
 import type {
@@ -89,6 +104,53 @@ type Props = ComponentProps<typeof WorkspaceShell> & {
   reviewData?: StudioData;
   initialState?: StudioState;
 };
+
+type QuoteStatus = "idle" | "loading" | "ready" | "error";
+
+type GenerationQuoteInput = {
+  resolution: "768P" | "2K";
+  duration_seconds: number;
+  quantity: number;
+};
+
+type SubmissionEnvelope = { fingerprint: string; key: string };
+type WalletSummary = Pick<
+  StudioAccountSummary,
+  "walletStatus" | "availableCredits"
+>;
+
+function walletSummaryLabel(summary: WalletSummary) {
+  if (summary.walletStatus === "ready" && summary.availableCredits !== null) {
+    return `${summary.availableCredits} 秒`;
+  }
+  if (summary.walletStatus === "loading") return "查询中";
+  if (summary.walletStatus === "error") return "读取失败";
+  return "未查询";
+}
+
+function quoteMatchesInput(
+  quote: GenerationPriceQuote | null,
+  input: GenerationQuoteInput,
+): quote is GenerationPriceQuote {
+  return Boolean(
+    quote &&
+      quote.resolution === input.resolution &&
+      quote.duration_seconds === input.duration_seconds &&
+      quote.quantity === input.quantity &&
+      quote.estimated_seconds === input.duration_seconds * input.quantity,
+  );
+}
+
+function videoQuoteInput(draft: StudioDraft): GenerationQuoteInput {
+  return {
+    resolution: draft.resolution === "2K" ? "2K" : "768P",
+    duration_seconds:
+      draft.duration >= 4 && draft.duration <= 15
+        ? Math.round(draft.duration)
+        : 8,
+    quantity: draft.count === 2 || draft.count === 4 ? draft.count : 1,
+  };
+}
 
 function mergeStudioAssets(
   current: StudioAsset[],
@@ -120,6 +182,16 @@ const emptyData: StudioData = {
   analytics30: null,
 };
 const TASKS_POLL_INTERVAL_MS = 20_000;
+const ORAL_SUBTITLE_PRESET = {
+  st_show: true,
+  st_font_size: 30,
+  st_primary_color: "0xFFFFFF",
+  st_outline_color: "0x000000",
+};
+
+function savedDraftScope(accountId: string, draft: StudioDraft) {
+  return JSON.stringify([accountId, draft]);
+}
 const creationPages = new Set<StudioPage>([
   "replica",
   "replacement",
@@ -190,9 +262,13 @@ export function StudioWorkspace({
 }: Props) {
   // Review is an explicit development entry; failed requests never enable it.
   const review = Boolean(import.meta.env.DEV && reviewData);
-  const [state, setState] = useState<StudioState>(
-    () => initialState || createState(routeFromHash(window.location.hash)),
-  );
+  const [state, setState] = useState<StudioState>(() => {
+    if (initialState) return initialState;
+    const route = studioRouteFromHash(window.location.hash);
+    return { ...createState(route.page), ...route };
+  });
+  const studioPageRef = useRef(state.page);
+  studioPageRef.current = state.page;
   const [data, setData] = useState<StudioData>(() =>
     review && reviewData ? reviewData : emptyData,
   );
@@ -205,45 +281,334 @@ export function StudioWorkspace({
     null,
   );
   const [generation, setGeneration] = useState<StudioTask["type"]>();
+  const generationRef = useRef<StudioTask["type"] | undefined>(undefined);
+  const generationDialogRevisionRef = useRef(0);
+  const mountedRef = useRef(true);
   const [newCreation, setNewCreation] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [showSearch, setShowSearch] = useState(false);
+  const [walletRevision, setWalletRevision] = useState(0);
+  const walletRequestRef = useRef<{
+    userId: string;
+    revision: number;
+  } | null>(null);
+  const walletStore = customerAccount?.store ?? customerWallet?.store;
+  const onWalletSessionExpired =
+    customerAccount?.onSessionExpired ?? customerWallet?.onSessionExpired;
+  const [walletSummary, setWalletSummary] = useState<WalletSummary>(() => ({
+    walletStatus: review
+      ? "ready"
+      : walletStore || currentUser.role !== "customer"
+        ? "loading"
+        : "unknown",
+    availableCredits: review ? 2680 : null,
+  }));
+  const retryWallet = useCallback(
+    () => setWalletRevision((value) => value + 1),
+    [],
+  );
+  const accountSummary: StudioAccountSummary = {
+    ...walletSummary,
+    retryWallet,
+    retryProfile: customerAccount
+      ? () => void customerAccount.onRefreshProfile()
+      : undefined,
+    profile: customerAccount?.profile ?? null,
+    profileLoadError: customerAccount?.profileLoadError ?? "",
+  };
   const [oralPriceFen, setOralPriceFen] = useState<number | null>(null);
+  const [oralQuoteStatus, setOralQuoteStatus] = useState<QuoteStatus>("idle");
+  const [oralQuoteError, setOralQuoteError] = useState("");
+  const [oralQuoteRevision, setOralQuoteRevision] = useState(0);
+  const [oralSubmitting, setOralSubmitting] = useState(false);
   // ---- 视频生成（C2 独立创作）----
   const [videoCapabilities, setVideoCapabilities] =
     useState<IndependentCapabilities>();
+  const [videoCapabilitiesStatus, setVideoCapabilitiesStatus] = useState<
+    "loading" | "ready" | "error"
+  >(review ? "ready" : "loading");
+  const [videoCapabilitiesRevision, setVideoCapabilitiesRevision] = useState(0);
+  const [referenceAssetsPending, setReferenceAssetsPending] = useState(false);
+  const [referenceAssetsError, setReferenceAssetsError] = useState(false);
   const [videoQuote, setVideoQuote] = useState<GenerationPriceQuote | null>(
     null,
   );
+  const [videoQuoteStatus, setVideoQuoteStatus] = useState<QuoteStatus>("idle");
+  const [videoQuoteError, setVideoQuoteError] = useState("");
+  const [videoQuoteRevision, setVideoQuoteRevision] = useState(0);
   const [videoSubmitting, setVideoSubmitting] = useState(false);
-  const [oralSubmitting, setOralSubmitting] = useState(false);
-  const oralSubmissionInFlightRef = useRef(false);
-  const oralSubmissionRef = useRef<{
-    fingerprint: string;
-    idempotencyKey: string;
-  } | null>(null);
   const busyRef = useRef(false);
+  const pendingRouteRef = useRef<
+    ReturnType<typeof studioRouteFromHash> | undefined
+  >(undefined);
   const operationRef = useRef(0);
   const loadedPeopleRef = useRef(new Set<string>());
   const restoredAssetsRef = useRef<StudioAsset[]>([]);
+  const oralSubmittingRef = useRef(false);
+  const videoSubmittingRef = useRef(false);
+  const oralSubmitAttemptRef = useRef(0);
+  const videoSubmitAttemptRef = useRef(0);
+  const oralSubmissionRef = useRef<SubmissionEnvelope | null>(null);
+  const videoSubmissionRef = useRef<SubmissionEnvelope | null>(null);
+  const currentUserRoleRef = useRef(currentUser.role);
+  const permissionGenerationRef = useRef(0);
+  if (currentUserRoleRef.current !== currentUser.role) {
+    currentUserRoleRef.current = currentUser.role;
+    permissionGenerationRef.current += 1;
+    operationRef.current += 1;
+    generationDialogRevisionRef.current += 1;
+    oralSubmitAttemptRef.current += 1;
+    videoSubmitAttemptRef.current += 1;
+    pendingRouteRef.current = undefined;
+  }
   const notify = useCallback((message: string) => setNotice(message), []);
+
+  useEffect(() => {
+    const request = { userId: currentUser.id, revision: walletRevision };
+    walletRequestRef.current = request;
+    if (review) {
+      setWalletSummary({
+        walletStatus: "ready",
+        availableCredits: 2680,
+      });
+      return;
+    }
+    if (!walletStore || !onWalletSessionExpired) {
+      if (currentUser.role !== "customer") {
+        setWalletSummary({ walletStatus: "loading", availableCredits: null });
+        void getWallet()
+          .then((wallet) => {
+            if (request !== walletRequestRef.current) return;
+            setWalletSummary({
+              walletStatus: "ready",
+              availableCredits: wallet.available_credits,
+            });
+          })
+          .catch(() => {
+            if (request !== walletRequestRef.current) return;
+            setWalletSummary({ walletStatus: "error", availableCredits: null });
+          });
+        return () => {
+          if (walletRequestRef.current === request) {
+            walletRequestRef.current = null;
+          }
+        };
+      }
+      setWalletSummary({
+        walletStatus: "unknown",
+        availableCredits: null,
+      });
+      return;
+    }
+    setWalletSummary({
+      walletStatus: "loading",
+      availableCredits: null,
+    });
+    void walletStore
+      .loadSessionToken()
+      .then((token) => {
+        if (request !== walletRequestRef.current) return null;
+        if (!token) {
+          onWalletSessionExpired();
+          throw new Error("登录已失效");
+        }
+        return customerGetWallet({ kind: "session", token });
+      })
+      .then((wallet) => {
+        if (!wallet || request !== walletRequestRef.current) return;
+        setWalletSummary({
+          walletStatus: "ready",
+          availableCredits: wallet.available_credits,
+        });
+      })
+      .catch(() => {
+        if (request !== walletRequestRef.current) return;
+        setWalletSummary({
+          walletStatus: "error",
+          availableCredits: null,
+        });
+      });
+    return () => {
+      if (walletRequestRef.current === request) walletRequestRef.current = null;
+    };
+  }, [
+    currentUser.id,
+    currentUser.role,
+    onWalletSessionExpired,
+    review,
+    walletRevision,
+    walletStore,
+  ]);
 
   // ---- 云端草稿（C7）----
   // 编辑后防抖自动保存；恢复只在用户尚未做任何编辑时生效，绝不覆盖进行中的输入。
   const DRAFT_AUTOSAVE_DELAY_MS = 2000;
   const latestDraftRef = useRef(state.draft);
+  generationRef.current = generation;
+  const closeGenerationDialog = useCallback(() => {
+    generationDialogRevisionRef.current += 1;
+    generationRef.current = undefined;
+    setGeneration(undefined);
+  }, []);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      generationDialogRevisionRef.current += 1;
+    };
+  }, []);
   const draftTouchedRef = useRef(false);
   const draftSaveTimerRef = useRef<number | undefined>(undefined);
-  const scheduleDraftSave = useCallback(() => {
-    if (review) return;
+
+  const [cloudDraftQueue] = useState(() =>
+    createCloudDraftQueue(persistCloudDraft),
+  );
+  const saveOperationRef = useRef(0);
+  const saveMountedRef = useRef(false);
+  const saveAccountRef = useRef(currentUser.id);
+  const savePermissionGenerationRef = useRef(permissionGenerationRef.current);
+  const saveScopeRef = useRef(savedDraftScope(currentUser.id, state.draft));
+  const renderedSaveScope = savedDraftScope(currentUser.id, state.draft);
+  const renderedPermissionGeneration = permissionGenerationRef.current;
+  useLayoutEffect(() => {
+    if (
+      saveAccountRef.current === currentUser.id &&
+      saveScopeRef.current === renderedSaveScope &&
+      savePermissionGenerationRef.current === renderedPermissionGeneration
+    )
+      return;
+    if (
+      saveAccountRef.current !== currentUser.id ||
+      currentUserRoleRef.current === "auditor"
+    ) {
+      draftTouchedRef.current = false;
+    }
     window.clearTimeout(draftSaveTimerRef.current);
-    draftSaveTimerRef.current = window.setTimeout(() => {
-      void persistCloudDraft(latestDraftRef.current).catch(() => {
-        notify("云端草稿保存失败，内容仍在本机，请稍后继续编辑。");
-      });
-    }, DRAFT_AUTOSAVE_DELAY_MS);
-  }, [review, notify]);
+    draftSaveTimerRef.current = undefined;
+    saveAccountRef.current = currentUser.id;
+    saveScopeRef.current = renderedSaveScope;
+    savePermissionGenerationRef.current = renderedPermissionGeneration;
+    saveOperationRef.current += 1;
+  }, [currentUser.id, renderedPermissionGeneration, renderedSaveScope]);
+  const referenceAssetsRequestRef = useRef(0);
+  const referenceAssetsDraftRef = useRef<StudioDraft | undefined>(undefined);
+  useEffect(() => {
+    saveMountedRef.current = true;
+    return () => {
+      saveMountedRef.current = false;
+      saveOperationRef.current += 1;
+      window.clearTimeout(draftSaveTimerRef.current);
+    };
+  }, []);
+  const persistCloudDraftForScope = useCallback(
+    (draft: StudioDraft, accountId: string, isCurrent: () => boolean) =>
+      cloudDraftQueue.persist(
+        savedDraftScope(accountId, draft),
+        draft,
+        isCurrent,
+      ),
+    [cloudDraftQueue],
+  );
+  const scheduleDraftSave = useCallback(
+    (draft: StudioDraft) => {
+      if (review || currentUserRoleRef.current === "auditor") return;
+      const accountId = currentUser.id;
+      const expectedScope = savedDraftScope(accountId, draft);
+      const operation = saveOperationRef.current;
+      const permissionGeneration = permissionGenerationRef.current;
+      window.clearTimeout(draftSaveTimerRef.current);
+      draftSaveTimerRef.current = window.setTimeout(() => {
+        if (
+          !saveMountedRef.current ||
+          currentUserRoleRef.current === "auditor" ||
+          permissionGenerationRef.current !== permissionGeneration ||
+          operation !== saveOperationRef.current ||
+          accountId !== saveAccountRef.current ||
+          expectedScope !== saveScopeRef.current
+        )
+          return;
+        void persistCloudDraftForScope(draft, accountId, () =>
+          Boolean(
+            saveMountedRef.current &&
+              currentUserRoleRef.current !== "auditor" &&
+              permissionGenerationRef.current === permissionGeneration &&
+              operation === saveOperationRef.current &&
+              accountId === saveAccountRef.current &&
+              expectedScope === saveScopeRef.current,
+          ),
+        ).catch(() => {
+          if (
+            saveMountedRef.current &&
+            currentUserRoleRef.current !== "auditor" &&
+            permissionGenerationRef.current === permissionGeneration &&
+            operation === saveOperationRef.current &&
+            accountId === saveAccountRef.current &&
+            expectedScope === saveScopeRef.current
+          )
+            notify("云端草稿保存失败，内容仍在本机，请稍后继续编辑。");
+        });
+      }, DRAFT_AUTOSAVE_DELAY_MS);
+    },
+    [review, currentUser.id, notify, persistCloudDraftForScope],
+  );
+
+  useEffect(() => {
+    if (currentUser.role !== "auditor") return;
+    window.clearTimeout(draftSaveTimerRef.current);
+    draftSaveTimerRef.current = undefined;
+    generationRef.current = undefined;
+    oralSubmissionRef.current = null;
+    videoSubmissionRef.current = null;
+    oralSubmittingRef.current = false;
+    videoSubmittingRef.current = false;
+    setPicker(undefined);
+    setGeneration(undefined);
+    setOralSubmitting(false);
+    setVideoSubmitting(false);
+  }, [currentUser.role]);
+
+  const restoreDraftAssets = useCallback(
+    async (draft: StudioDraft) => {
+      const request = ++referenceAssetsRequestRef.current;
+      referenceAssetsDraftRef.current = draft;
+      setReferenceAssetsPending(true);
+      setReferenceAssetsError(false);
+      try {
+        const restored = await loadDraftMaterials(draft);
+        if (
+          request !== referenceAssetsRequestRef.current ||
+          latestDraftRef.current.id !== draft.id
+        )
+          return;
+        setReferenceAssetsPending(false);
+        restoredAssetsRef.current = restored.assets;
+        setData((previous) => ({
+          ...previous,
+          assets: mergeStudioAssets(previous.assets, restored.assets),
+        }));
+        if (restored.unavailableIds.length) {
+          notify("草稿已恢复，部分原素材已不可用，请重新选择。");
+        }
+      } catch {
+        if (
+          request !== referenceAssetsRequestRef.current ||
+          latestDraftRef.current.id !== draft.id
+        )
+          return;
+        setReferenceAssetsPending(false);
+        setReferenceAssetsError(true);
+      }
+    },
+    [notify],
+  );
+
+  const retryReferenceAssets = useCallback(() => {
+    const draft = referenceAssetsDraftRef.current;
+    if (!draft || draft.id !== latestDraftRef.current.id) return;
+    void restoreDraftAssets(draft);
+  }, [restoreDraftAssets]);
+
   // 挂载时恢复云端草稿与我的文案；失败静默（只读路径，不阻塞工作区）。
   useEffect(() => {
     if (review) return;
@@ -258,140 +623,228 @@ export function StudioWorkspace({
           latestDraftRef.current = restore.draft;
           setState((previous) => ({ ...previous, draft: restore.draft }));
           notify("已恢复上次云端草稿，请核对内容并确认终稿。");
-          const restored = await loadDraftMaterials(restore.draft).catch(
-            () => null,
-          );
-          if (!active || !restored) return;
-          restoredAssetsRef.current = restored.assets;
-          setData((previous) => ({
-            ...previous,
-            assets: mergeStudioAssets(previous.assets, restored.assets),
-          }));
-          if (restored.unavailableIds.length) {
-            notify("草稿已恢复，部分原素材已不可用，请重新选择。");
-          }
+          void restoreDraftAssets(restore.draft);
         }
       })
       .catch(() => {});
     return () => {
       active = false;
+      referenceAssetsRequestRef.current += 1;
       window.clearTimeout(draftSaveTimerRef.current);
     };
-  }, [review, notify]);
+  }, [review, notify, restoreDraftAssets]);
   // 自动保存始终跟随最新草稿：导入项目、任务快照回填等不经 patchDraft 的
   // 路径也在这里并入追踪。
   useEffect(() => {
     latestDraftRef.current = state.draft;
-  }, [state.draft]);
+    const restoringDraft = referenceAssetsDraftRef.current;
+    if (restoringDraft && restoringDraft.id !== state.draft.id) {
+      referenceAssetsRequestRef.current += 1;
+      referenceAssetsDraftRef.current = undefined;
+      setReferenceAssetsPending(false);
+      setReferenceAssetsError(false);
+    }
+    if (draftTouchedRef.current) scheduleDraftSave(state.draft);
+  }, [state.draft, scheduleDraftSave]);
   // 数字人口播提交前拉取单价（元/条）；失败保持 null 显示“待服务端报价”。
   useEffect(() => {
+    void oralQuoteRevision;
     if (review || generation !== "数字人口播") {
       setOralPriceFen(null);
+      setOralQuoteStatus("idle");
+      setOralQuoteError("");
       return;
     }
     let active = true;
+    setOralPriceFen(null);
+    setOralQuoteStatus("loading");
+    setOralQuoteError("");
     void getOralPrice()
       .then((price) => {
-        if (active) setOralPriceFen(price.unit_price_fen);
+        if (active) {
+          setOralPriceFen(price.unit_price_fen);
+          setOralQuoteStatus("ready");
+        }
       })
-      .catch(() => {
-        if (active) setOralPriceFen(null);
+      .catch((cause: unknown) => {
+        if (active) {
+          setOralPriceFen(null);
+          setOralQuoteStatus("error");
+          setOralQuoteError(
+            customerVisibleErrorMessage(cause, "口播报价读取失败，请重试。"),
+          );
+        }
       });
     return () => {
       active = false;
     };
-  }, [review, generation]);
+  }, [review, generation, oralQuoteRevision]);
+
+  const retryOralQuote = useCallback(
+    () => setOralQuoteRevision((value) => value + 1),
+    [],
+  );
 
   // 视频生成能力探测（扩展模式是否开放、单批上限）；审核模式不探测。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 修订号专门用于用户点击后重新发起能力请求。
   useEffect(() => {
     if (review) return;
     let active = true;
+    setVideoCapabilities(undefined);
+    setVideoCapabilitiesStatus("loading");
     void getIndependentCapabilities()
       .then((capabilities) => {
-        if (active) setVideoCapabilities(capabilities);
+        if (active) {
+          setVideoCapabilities(capabilities);
+          setVideoCapabilitiesStatus("ready");
+        }
       })
       .catch(() => {
-        if (active) setVideoCapabilities(undefined);
+        if (active) {
+          setVideoCapabilities(undefined);
+          setVideoCapabilitiesStatus("error");
+        }
       });
     return () => {
       active = false;
     };
-  }, [review]);
+  }, [review, videoCapabilitiesRevision]);
+
+  const retryVideoCapabilities = useCallback(
+    () => setVideoCapabilitiesRevision((value) => value + 1),
+    [],
+  );
 
   // 视频生成确认弹窗：按分辨率/时长/条数拉取按秒报价；草稿参数变化自动刷新。
-  const videoDuration = state.draft.duration;
-  const videoResolution = state.draft.resolution;
-  const videoCount = state.draft.count;
+  const videoDuration =
+    state.draft.duration >= 4 && state.draft.duration <= 15
+      ? Math.round(state.draft.duration)
+      : 8;
+  const videoResolution: GenerationQuoteInput["resolution"] =
+    state.draft.resolution === "2K" ? "2K" : "768P";
+  const videoCount =
+    state.draft.count === 2 || state.draft.count === 4 ? state.draft.count : 1;
+  const currentVideoQuoteInput: GenerationQuoteInput = {
+    resolution: videoResolution,
+    duration_seconds: videoDuration,
+    quantity: videoCount,
+  };
+  const videoQuoteReady =
+    videoQuoteStatus === "ready" &&
+    quoteMatchesInput(videoQuote, currentVideoQuoteInput);
   useEffect(() => {
+    void videoQuoteRevision;
     if (review || generation !== "视频生成") {
       setVideoQuote(null);
+      setVideoQuoteStatus("idle");
+      setVideoQuoteError("");
       return;
     }
     let active = true;
     setVideoQuote(null);
-    void getGenerationPriceQuote({
-      resolution: videoResolution === "2K" ? "2K" : "768P",
-      duration_seconds: (videoDuration >= 4 && videoDuration <= 15
-        ? Math.round(videoDuration)
-        : 8) as 4 | 15,
-      quantity: (videoCount === 2 || videoCount === 4 ? videoCount : 1) as
-        | 1
-        | 2
-        | 4,
-    })
+    setVideoQuoteStatus("loading");
+    setVideoQuoteError("");
+    const input = {
+      resolution: videoResolution,
+      duration_seconds: videoDuration,
+      quantity: videoCount,
+    };
+    void getGenerationPriceQuote(input)
       .then((quote) => {
-        if (active) setVideoQuote(quote);
+        if (!active) return;
+        if (!quoteMatchesInput(quote, input)) {
+          setVideoQuoteStatus("error");
+          setVideoQuoteError("视频报价参数与当前生成参数不一致，请重新获取。");
+          return;
+        }
+        setVideoQuote(quote);
+        setVideoQuoteStatus("ready");
       })
-      .catch(() => {
-        if (active) setVideoQuote(null);
+      .catch((cause: unknown) => {
+        if (active) {
+          setVideoQuote(null);
+          setVideoQuoteStatus("error");
+          setVideoQuoteError(
+            customerVisibleErrorMessage(cause, "视频报价读取失败，请重试。"),
+          );
+        }
       });
     return () => {
       active = false;
     };
-  }, [review, generation, videoDuration, videoResolution, videoCount]);
+  }, [
+    review,
+    generation,
+    videoDuration,
+    videoResolution,
+    videoCount,
+    videoQuoteRevision,
+  ]);
+
+  const retryVideoQuote = useCallback(
+    () => setVideoQuoteRevision((value) => value + 1),
+    [],
+  );
 
   const submitOralTask = async () => {
-    if (currentUser.role === "auditor") {
+    if (currentUserRoleRef.current === "auditor") {
       notify("当前账号为只读权限，不能提交生成。");
       return;
     }
-    if (oralSubmissionInFlightRef.current) return;
+    if (
+      oralSubmittingRef.current ||
+      generationRef.current !== "数字人口播" ||
+      oralQuoteStatus !== "ready" ||
+      oralPriceFen === null
+    ) {
+      if (!oralSubmittingRef.current) notify("请先取得有效口播报价后再提交。");
+      return;
+    }
+    const dialogRevision = generationDialogRevisionRef.current;
+    const permissionGeneration = permissionGenerationRef.current;
+    const attempt = ++oralSubmitAttemptRef.current;
+    const draft = latestDraftRef.current;
+    const draftFingerprint = JSON.stringify(draft);
+    const page = studioPageRef.current;
+    const isCurrent = () =>
+      mountedRef.current &&
+      currentUserRoleRef.current !== "auditor" &&
+      permissionGenerationRef.current === permissionGeneration &&
+      generationDialogRevisionRef.current === dialogRevision &&
+      generationRef.current === "数字人口播" &&
+      studioPageRef.current === page &&
+      JSON.stringify(latestDraftRef.current) === draftFingerprint;
+    oralSubmittingRef.current = true;
+    setOralSubmitting(true);
     try {
       const mode = state.page === "oral-audio" ? "audio" : "text";
-      const input = buildOralInput(state.draft, mode);
-      const subtitle =
-        mode === "text" ? { st_show: input.subtitles } : undefined;
-      const fingerprint = JSON.stringify({
+      const input = buildOralInput(draft, mode);
+      const request = {
         identityId: input.ipId,
         avatarId: input.avatarId,
         voiceId: input.voiceId,
-        mode,
-        title: state.draft.script.title,
-        scriptText: mode === "text" ? state.draft.script.text : undefined,
+        mode: mode === "audio" ? ("AUDIO" as const) : ("TTS" as const),
+        title: draft.script.title || "未命名口播",
+        scriptText: draft.script.text,
         audioAssetId: input.audioAssetId,
-        subtitle,
-      });
-      const previous = oralSubmissionRef.current;
-      const idempotencyKey =
-        previous?.fingerprint === fingerprint
-          ? previous.idempotencyKey
-          : crypto.randomUUID();
-      oralSubmissionRef.current = { fingerprint, idempotencyKey };
-      oralSubmissionInFlightRef.current = true;
-      setOralSubmitting(true);
+        ...(input.mode === "text" && input.subtitles
+          ? { subtitle: ORAL_SUBTITLE_PRESET }
+          : {}),
+      };
+      const fingerprint = JSON.stringify(request);
+      if (oralSubmissionRef.current?.fingerprint !== fingerprint) {
+        oralSubmissionRef.current = {
+          fingerprint,
+          key: crypto.randomUUID(),
+        };
+      }
       const result = await createOralTask({
-        identityId: input.ipId,
-        avatarId: input.avatarId,
-        voiceId: input.voiceId,
-        mode: mode === "audio" ? "AUDIO" : "TTS",
-        title: state.draft.script.title || "未命名口播",
-        scriptText: mode === "text" ? state.draft.script.text : undefined,
-        audioAssetId: input.audioAssetId,
-        subtitle,
-        idempotencyKey,
+        ...request,
+        idempotencyKey: oralSubmissionRef.current.key,
       });
+      if (!isCurrent()) return;
       oralSubmissionRef.current = null;
-      setGeneration(undefined);
+      closeGenerationDialog();
       if (result.status === "FAILED") {
         notify("口播任务提交未成功，请核对素材后重试。");
       } else {
@@ -400,27 +853,76 @@ export function StudioWorkspace({
         refresh();
       }
     } catch (cause: unknown) {
-      notify(
-        customerVisibleErrorMessage(cause, "口播任务提交失败，请稍后重试。"),
-      );
+      if (isCurrent()) {
+        notify(
+          customerVisibleErrorMessage(cause, "口播任务提交失败，请稍后重试。"),
+        );
+      }
     } finally {
-      oralSubmissionInFlightRef.current = false;
-      setOralSubmitting(false);
+      if (oralSubmitAttemptRef.current === attempt) {
+        oralSubmittingRef.current = false;
+        setOralSubmitting(false);
+      }
     }
   };
   const refresh = useCallback(() => setRevision((value) => value + 1), []);
 
+  const referenceDraftError = (draft: StudioDraft): string | undefined => {
+    if (referenceAssetsPending) return "草稿参考图仍在恢复，请稍后重试。";
+    if (referenceAssetsError) return "草稿参考图读取失败，请先重试。";
+    if (videoCapabilitiesStatus === "error")
+      return "视频生成能力读取失败，请先重试。";
+    if (!videoCapabilities) return "视频生成能力尚未读取完成，请稍后重试。";
+    if (!videoCapabilities.r2v_enabled)
+      return "该模式需要完成供应商核对后开放，敬请期待。";
+    const validation = validateReferenceImages(
+      draft.referenceIds,
+      [...data.assets, ...data.materials],
+      videoCapabilities.max_reference_images,
+    );
+    if (validation.issues[0]) return validation.issues[0];
+    if (validation.imageIds.length === 0) return "请至少选择一张参考图";
+    return undefined;
+  };
+
   const submitVideoTask = async () => {
-    if (currentUser.role === "auditor") {
+    if (currentUserRoleRef.current === "auditor") {
       notify("当前账号为只读权限，不能提交生成。");
       return;
     }
-    if (videoSubmitting) return;
+    if (videoSubmittingRef.current || generationRef.current !== "视频生成")
+      return;
+    const draft = latestDraftRef.current;
+    const draftFingerprint = JSON.stringify(draft);
+    const page = studioPageRef.current;
+    const dialogRevision = generationDialogRevisionRef.current;
+    const permissionGeneration = permissionGenerationRef.current;
+    const attempt = ++videoSubmitAttemptRef.current;
+    const isCurrent = () =>
+      mountedRef.current &&
+      currentUserRoleRef.current !== "auditor" &&
+      permissionGenerationRef.current === permissionGeneration &&
+      generationDialogRevisionRef.current === dialogRevision &&
+      generationRef.current === "视频生成" &&
+      studioPageRef.current === page &&
+      JSON.stringify(latestDraftRef.current) === draftFingerprint;
+    const quoteInput = videoQuoteInput(draft);
+    if (
+      videoQuoteStatus !== "ready" ||
+      !quoteMatchesInput(videoQuote, quoteInput)
+    ) {
+      notify("请先取得与当前参数一致的视频报价后再提交。");
+      return;
+    }
+    videoSubmittingRef.current = true;
     setVideoSubmitting(true);
     try {
-      const draft = latestDraftRef.current;
       const mode = resolveVideoMode(state.page, Boolean(draft.firstFrameId));
-      const result = await createIndependentVideoTask({
+      if (mode === "r2v") {
+        const error = referenceDraftError(draft);
+        if (error) throw new Error(error);
+      }
+      const request = {
         mode,
         prompt_text: draft.prompt,
         first_frame_asset_id:
@@ -434,29 +936,47 @@ export function StudioWorkspace({
           draft.duration >= 4 && draft.duration <= 15
             ? Math.round(draft.duration)
             : 8,
-        resolution: draft.resolution === "2K" ? "2K" : "768P",
+        resolution:
+          draft.resolution === "2K" ? ("2K" as const) : ("768P" as const),
         ratio: (SUPPORTED_VIDEO_RATIOS as readonly string[]).includes(
           draft.ratio,
         )
           ? (draft.ratio as GenerationRatio)
           : "adaptive",
         quantity: draft.count === 2 || draft.count === 4 ? draft.count : 1,
-        idempotency_key: crypto.randomUUID(),
         provider: defaultBatchProvider(),
+      };
+      const fingerprint = JSON.stringify(request);
+      if (videoSubmissionRef.current?.fingerprint !== fingerprint) {
+        videoSubmissionRef.current = {
+          fingerprint,
+          key: crypto.randomUUID(),
+        };
+      }
+      const result = await createIndependentVideoTask({
+        ...request,
+        idempotency_key: videoSubmissionRef.current.key,
       });
-      setGeneration(undefined);
+      if (!isCurrent()) return;
+      videoSubmissionRef.current = null;
+      closeGenerationDialog();
       patchDraft({ videoBatchId: result.id });
       notify("视频生成任务已提交，可在预览区查看进度。");
       refresh();
     } catch (cause: unknown) {
-      notify(
-        customerVisibleErrorMessage(
-          cause,
-          "视频生成任务提交失败，请稍后重试。",
-        ),
-      );
+      if (isCurrent()) {
+        notify(
+          customerVisibleErrorMessage(
+            cause,
+            "视频生成任务提交失败，请稍后重试。",
+          ),
+        );
+      }
     } finally {
-      setVideoSubmitting(false);
+      if (videoSubmitAttemptRef.current === attempt) {
+        videoSubmittingRef.current = false;
+        setVideoSubmitting(false);
+      }
     }
   };
 
@@ -466,7 +986,8 @@ export function StudioWorkspace({
     if (revision > 0) loadedPeopleRef.current.clear();
     let active = true;
     setData((previous) => ({ ...previous, loading: true }));
-    void loadStudioData(currentUser)
+    const coreLoad = loadStudioData(currentUser, { includeViral: false });
+    void coreLoad
       .then((result) => {
         if (active)
           setData({
@@ -484,6 +1005,28 @@ export function StudioWorkspace({
             ],
           });
       });
+    void loadViralVideos()
+      .then((viral) =>
+        coreLoad.then(() => {
+          if (!active) return;
+          setData((previous) => ({
+            ...previous,
+            videos:
+              viral.videos.length || viral.errors.length
+                ? viral.videos
+                : previous.videos,
+            errors: [
+              ...previous.errors.filter(
+                (message) => !message.includes("爆款失败"),
+              ),
+              ...viral.errors,
+            ],
+          }));
+        }),
+      )
+      .catch(() => {
+        // 爆款区独立容错，不覆盖已加载的项目和任务。
+      });
     return () => {
       active = false;
     };
@@ -500,7 +1043,16 @@ export function StudioWorkspace({
       if (document.hidden || busyRef.current) return;
       void reloadTasks(currentUser)
         .then((tasks) => {
-          setData((previous) => ({ ...previous, tasks }));
+          setData((previous) => {
+            const refreshedIds = new Set(tasks.map((task) => task.id));
+            return {
+              ...previous,
+              tasks: [
+                ...tasks,
+                ...previous.tasks.filter((task) => !refreshedIds.has(task.id)),
+              ],
+            };
+          });
         })
         .catch(() => {});
       void reloadStats().then((stats) => {
@@ -546,9 +1098,23 @@ export function StudioWorkspace({
                   sceneLookCount: result.assets.filter(
                     (asset) => asset.source === "人物库场景造型",
                   ).length,
+                  photoIds: result.assets
+                    .filter((asset) => !asset.composite)
+                    .map((asset) => asset.id),
+                  photoCount: result.total,
                 }
               : person,
           ),
+          pagination: {
+            ...previous.pagination,
+            scenes: {
+              ...previous.pagination?.scenes,
+              [personToLoad]: {
+                loaded: result.loaded,
+                total: result.total,
+              },
+            },
+          },
           errors: [...previous.errors, ...result.errors],
         }));
         if (result.errors.length) loadedPeopleRef.current.delete(personToLoad);
@@ -565,14 +1131,14 @@ export function StudioWorkspace({
 
   useEffect(() => {
     const onHashChange = () => {
+      const route = studioRouteFromHash(window.location.hash);
       if (busyRef.current) {
+        pendingRouteRef.current = route;
         notify("当前操作正在处理中，请等待完成后切换页面。");
         return;
       }
-      setState((previous) => ({
-        ...previous,
-        page: routeFromHash(window.location.hash),
-      }));
+      operationRef.current += 1;
+      setState((previous) => ({ ...previous, ...route }));
       setLivePanel(undefined);
     };
     window.addEventListener("hashchange", onHashChange);
@@ -589,14 +1155,18 @@ export function StudioWorkspace({
       return;
     }
     operationRef.current += 1;
-    setState((previous) => ({ ...previous, ...patch, page }));
-    window.history.pushState(null, "", `#studio/${page}`);
+    setState((previous) => {
+      const nextState = navigateStudioState(previous, page, patch);
+      window.history.pushState(null, "", studioHashForState(nextState));
+      return nextState;
+    });
     setMenuOpen(false);
     setShowSearch(false);
     setLivePanel(undefined);
     window.scrollTo?.({ top: 0 });
   };
   const patchDraft = (patch: Partial<StudioDraft>) => {
+    if (currentUserRoleRef.current === "auditor") return;
     if (Object.hasOwn(patch, "ipId") && patch.ipId !== state.draft.ipId)
       notify(
         "人物已更换，请重新选择该人物的分身和声音，并核对文案中的自我介绍。",
@@ -625,8 +1195,101 @@ export function StudioWorkspace({
       }
       return { ...previous, draft: next };
     });
-    scheduleDraftSave();
   };
+  const extractionDraftId = state.draft.id;
+  const extractionProjectId = state.draft.projectId;
+  const extractionAssetId = state.draft.sourceAssetId;
+  useEffect(() => {
+    if (
+      review ||
+      !extractionProjectId ||
+      !extractionAssetId ||
+      extractingRef.current
+    ) {
+      return;
+    }
+    let active = true;
+    let timer: number | undefined;
+    let reportedRunning = false;
+    const restore = async () => {
+      try {
+        const task = await loadLatestScriptFromUpload(extractionProjectId);
+        if (!active || !task) return;
+        const current = latestDraftRef.current;
+        if (
+          current.id !== extractionDraftId ||
+          current.projectId !== extractionProjectId ||
+          current.sourceAssetId !== extractionAssetId ||
+          task.sourceAssetId !== extractionAssetId
+        ) {
+          return;
+        }
+        if (task.status === "PENDING" || task.status === "RUNNING") {
+          extractingRef.current = true;
+          if (!reportedRunning) {
+            reportedRunning = true;
+            notify("已恢复上次文案提取任务，正在后台继续处理…");
+          }
+          timer = window.setTimeout(() => void restore(), 2_000);
+          return;
+        }
+        if (task.status === "SUCCEEDED" && task.result?.text.trim()) {
+          extractingRef.current = false;
+          const text = task.result.text;
+          const restored = patchStudioDraft(current, {
+            sourceId: extractionAssetId,
+            projectId: extractionProjectId,
+            sourceAssetId: extractionAssetId,
+            script: {
+              ...current.script,
+              original: text,
+              text: current.script.text.trim() ? current.script.text : text,
+              confirmed: false,
+            },
+            scriptEdited: true,
+          });
+          draftTouchedRef.current = true;
+          latestDraftRef.current = restored;
+          setState((previous) => ({ ...previous, draft: restored }));
+          notify(
+            current.script.text.trim()
+              ? "文案提取已完成，已保留你的编辑并补回来源原文。"
+              : "文案提取已完成，已恢复到当前草稿。",
+          );
+          return;
+        }
+        if (
+          task.status === "FAILED" ||
+          task.status === "SUBMISSION_UNCERTAIN"
+        ) {
+          extractingRef.current = false;
+          notify(task.errorMessage || "上次文案提取失败，可点击提取文案重试。");
+        }
+      } catch (cause: unknown) {
+        extractingRef.current = false;
+        if (active) {
+          notify(
+            customerVisibleErrorMessage(
+              cause,
+              "读取上次文案提取任务失败，可点击提取文案重试。",
+            ),
+          );
+        }
+      }
+    };
+    void restore();
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+      extractingRef.current = false;
+    };
+  }, [
+    review,
+    extractionDraftId,
+    extractionProjectId,
+    extractionAssetId,
+    notify,
+  ]);
   const openLive = (panel: LivePanel) => {
     if (review) {
       notify(
@@ -675,7 +1338,7 @@ export function StudioWorkspace({
     }
   };
   const requestGeneration = (kind: StudioTask["type"]) => {
-    if (currentUser.role === "auditor") {
+    if (currentUserRoleRef.current === "auditor") {
       notify("当前账号为只读权限，不能提交生成。");
       return;
     }
@@ -703,7 +1366,9 @@ export function StudioWorkspace({
           input.mode === "audio" &&
           !data.assets.some(
             (asset) =>
-              asset.id === input.audioAssetId && asset.kind === "audio",
+              asset.id === input.audioAssetId &&
+              asset.kind === "audio" &&
+              (!asset.allowedUses || asset.allowedUses.includes("oral_audio")),
           )
         )
           throw new Error("完整口播音频已失效，请重新选择");
@@ -733,6 +1398,10 @@ export function StudioWorkspace({
         if (mode === "r2v" && state.draft.referenceIds.length === 0) {
           throw new Error("请至少选择一张参考图");
         }
+        if (mode === "r2v") {
+          const error = referenceDraftError(state.draft);
+          if (error) throw new Error(error);
+        }
         if (videoCapabilities) {
           const gated =
             (mode === "t2v" && !videoCapabilities.t2v_enabled) ||
@@ -747,12 +1416,28 @@ export function StudioWorkspace({
           }
         }
       }
+      if (kind === "数字人口播") {
+        setOralPriceFen(null);
+        setOralQuoteStatus("loading");
+        setOralQuoteError("");
+      }
+      if (kind === "视频生成") {
+        setVideoQuote(null);
+        setVideoQuoteStatus("loading");
+        setVideoQuoteError("");
+      }
+      generationDialogRevisionRef.current += 1;
+      generationRef.current = kind;
       setGeneration(kind);
     } catch (cause) {
       notify(cause instanceof Error ? cause.message : "请检查生成原材料");
     }
   };
   const saveDraft = () => {
+    if (currentUserRoleRef.current === "auditor") {
+      notify("当前账号为只读权限，不能保存或确认创作内容。");
+      return;
+    }
     if (
       !state.draft.script.text.trim() &&
       !state.draft.prompt.trim() &&
@@ -761,35 +1446,113 @@ export function StudioWorkspace({
       notify("请先填写创作内容。");
       return;
     }
-    const script = { ...state.draft.script };
-    setState((previous) => ({
-      ...previous,
-      savedScripts: [
-        ...previous.savedScripts.filter(
-          (item) => item.id !== previous.draft.script.id,
-        ),
-        script,
-      ],
-    }));
+    const draft = state.draft;
+    const accountId = currentUser.id;
+    const expectedScope = savedDraftScope(accountId, draft);
+    const operation = ++saveOperationRef.current;
+    const permissionGeneration = permissionGenerationRef.current;
+    window.clearTimeout(draftSaveTimerRef.current);
+    const isCurrentSave = () =>
+      saveMountedRef.current &&
+      currentUserRoleRef.current !== "auditor" &&
+      permissionGenerationRef.current === permissionGeneration &&
+      saveOperationRef.current === operation &&
+      saveAccountRef.current === accountId &&
+      saveScopeRef.current === expectedScope;
+    const script = {
+      ...draft.script,
+      ipId: draft.ipId,
+      sourceProjectId: draft.projectId,
+      // 服务端 source_kind 契约为 viral/project/link/upload，无来源项目时归为 upload。
+      sourceKind: draft.projectId ? ("project" as const) : ("upload" as const),
+    };
+    const recordSavedVersion = (cloudSynced: boolean) =>
+      setState((previous) => {
+        if (savedDraftScope(accountId, previous.draft) !== expectedScope) {
+          return previous;
+        }
+        return {
+          ...previous,
+          draft: cloudSynced
+            ? { ...previous.draft, scriptEdited: false }
+            : previous.draft,
+          savedScripts: [
+            ...previous.savedScripts.filter((item) => item.id !== script.id),
+            script,
+          ],
+        };
+      });
     if (review) {
+      recordSavedVersion(true);
       notify("已保留在本次工作区，可继续切换页面。");
       return;
     }
-    void persistSavedScript(script, state.draft.projectId)
-      .then(() => notify("已保存到我的文案，换设备登录也能找回。"))
-      .catch(() => notify("云端保存失败，本次仅保留在工作区，请稍后重试。"));
-    void persistCloudDraft({ ...state.draft, script }).catch(() => {});
+
+    void persistSavedScript(script, draft.projectId, draft.ipId)
+      .then(async () => {
+        if (!isCurrentSave()) return;
+        try {
+          await persistCloudDraftForScope(
+            {
+              ...draft,
+              script,
+              scriptEdited: false,
+            },
+            accountId,
+            isCurrentSave,
+          );
+        } catch {
+          if (isCurrentSave()) {
+            recordSavedVersion(false);
+            notify("版本已保存，但云端草稿同步失败，请再次点击保存版本重试。");
+          }
+          return;
+        }
+        if (!isCurrentSave()) return;
+        draftTouchedRef.current = false;
+        recordSavedVersion(true);
+        notify("已保存到我的文案，换设备登录也能找回。");
+      })
+      .catch(() => {
+        if (isCurrentSave()) {
+          notify("云端保存失败，本次仅保留在工作区，请稍后重试。");
+        }
+      });
   };
   const confirmFinalDraft = () => {
+    if (currentUserRoleRef.current === "auditor") {
+      notify("当前账号为只读权限，不能保存或确认创作内容。");
+      return;
+    }
     const script = { ...state.draft.script, confirmed: true };
+    const draft = patchStudioDraft(state.draft, { script });
+    const accountId = currentUser.id;
+    const previousScope = savedDraftScope(accountId, state.draft);
+    const confirmedScope = savedDraftScope(accountId, draft);
     patchDraft({ script });
     if (review) return;
     // 立即持久化终稿（不等防抖），并软发布到项目脚本版本。
-    void persistCloudDraft({ ...state.draft, script }).catch(() => {});
+    const permissionGeneration = permissionGenerationRef.current;
+    void persistCloudDraftForScope(draft, accountId, () =>
+      Boolean(
+        saveMountedRef.current &&
+          currentUserRoleRef.current !== "auditor" &&
+          permissionGenerationRef.current === permissionGeneration &&
+          saveAccountRef.current === accountId &&
+          (saveScopeRef.current === previousScope ||
+            saveScopeRef.current === confirmedScope),
+      ),
+    ).catch(() => {});
     if (!state.draft.projectId) return;
     void publishScriptVersion(state.draft.projectId, script.text).then(
-      (published) => {
-        if (!published)
+      (result) => {
+        if (
+          currentUserRoleRef.current === "auditor" ||
+          permissionGenerationRef.current !== permissionGeneration
+        )
+          return;
+        // not-applicable = 项目尚无分镜，属正常边界，不提示失败。
+        if (result === "failed")
           notify(
             "终稿已确认，但同步到项目脚本版本未成功，可稍后在来源分析中重试。",
           );
@@ -802,7 +1565,7 @@ export function StudioWorkspace({
       notify("审核示例不调用真实接口。");
       return;
     }
-    if (currentUser.role === "auditor") {
+    if (currentUserRoleRef.current === "auditor") {
       notify("当前账号为只读权限，不能提交生成。");
       return;
     }
@@ -819,10 +1582,16 @@ export function StudioWorkspace({
       return;
     }
     extractingRef.current = true;
+    const permissionGeneration = permissionGenerationRef.current;
     notify("正在提取音频并转写文案，预计一到两分钟，请勿关闭页面…");
     void extractScriptFromUploadLive(projectId, assetId)
       .then(({ text }) => {
         extractingRef.current = false;
+        if (
+          currentUserRoleRef.current === "auditor" ||
+          permissionGenerationRef.current !== permissionGeneration
+        )
+          return;
         const currentScript = latestDraftRef.current.script;
         patchDraft({
           sourceId: projectId,
@@ -839,6 +1608,11 @@ export function StudioWorkspace({
       })
       .catch((cause: unknown) => {
         extractingRef.current = false;
+        if (
+          currentUserRoleRef.current === "auditor" ||
+          permissionGenerationRef.current !== permissionGeneration
+        )
+          return;
         notify(
           customerVisibleErrorMessage(cause, "文案提取失败，请稍后重试。"),
         );
@@ -849,6 +1623,12 @@ export function StudioWorkspace({
     data,
     review,
     user: currentUser,
+    videoCapabilities,
+    videoCapabilitiesStatus,
+    retryVideoCapabilities,
+    referenceAssetsPending,
+    referenceAssetsError,
+    retryReferenceAssets,
     navigate,
     patchDraft,
     patchState: (patch) => setState((previous) => ({ ...previous, ...patch })),
@@ -957,13 +1737,13 @@ export function StudioWorkspace({
           <button
             type="button"
             className={`studio-account-entry ${state.page === "profile" ? "is-active" : ""}`}
-            aria-label={`用户档案，积分 ${review ? "2680" : "—"}`}
+            aria-label={`用户档案，积分 ${walletSummaryLabel(walletSummary)}`}
             onClick={() => navigate("profile")}
           >
             <WorkspaceUserAvatar currentUser={currentUser} review={review} />
             <span className="studio-account-points">
               <small>积分</small>
-              <strong>{review ? "2680" : "—"}</strong>
+              <strong>{walletSummaryLabel(walletSummary)}</strong>
             </span>
           </button>
         </aside>
@@ -1033,6 +1813,13 @@ export function StudioWorkspace({
                 onClose={closeLive}
                 onBusyChange={(busy) => {
                   busyRef.current = busy;
+                  if (!busy && pendingRouteRef.current) {
+                    const pendingRoute = pendingRouteRef.current;
+                    pendingRouteRef.current = undefined;
+                    operationRef.current += 1;
+                    setState((previous) => ({ ...previous, ...pendingRoute }));
+                    setLivePanel(undefined);
+                  }
                 }}
                 onBatchCreated={(batch) => {
                   setHandoffBatch(batch);
@@ -1049,7 +1836,10 @@ export function StudioWorkspace({
                 onRefresh={refresh}
               />
             ) : (
-              <StudioPageContent page={state.page} />
+              <StudioPageContent
+                page={state.page}
+                accountSummary={accountSummary}
+              />
             )}
           </div>
           <footer className="studio-version">
@@ -1106,7 +1896,7 @@ export function StudioWorkspace({
         {generation && (
           <StudioDialog
             title={`生成确认 · ${generation}`}
-            onClose={() => setGeneration(undefined)}
+            onClose={closeGenerationDialog}
           >
             <Hint>
               {review
@@ -1125,11 +1915,16 @@ export function StudioWorkspace({
               <div>
                 <dt>费用</dt>
                 <dd>
-                  {generation === "数字人口播" && oralPriceFen !== null
+                  {generation === "数字人口播" &&
+                  oralQuoteStatus === "ready" &&
+                  oralPriceFen !== null
                     ? `${(oralPriceFen / 100).toFixed(2)} 元/条`
-                    : generation === "视频生成" && videoQuote !== null
+                    : generation === "视频生成" && videoQuoteReady
                       ? `${(videoQuote.estimated_price_fen / 100).toFixed(2)} 元（${videoQuote.unit_price_fen_per_second} 分/秒 × ${videoQuote.estimated_seconds} 秒）`
-                      : "待服务端报价"}
+                      : oralQuoteStatus === "loading" ||
+                          videoQuoteStatus === "loading"
+                        ? "正在读取服务端报价…"
+                        : "待服务端报价"}
                 </dd>
               </div>
               <div>
@@ -1137,6 +1932,22 @@ export function StudioWorkspace({
                 <dd>尚未提交 · 未扣费</dd>
               </div>
             </dl>
+            {generation === "数字人口播" && oralQuoteError ? (
+              <div className="settings-error" role="alert">
+                <p>{oralQuoteError}</p>
+                <Button onClick={retryOralQuote} variant="outline">
+                  重新获取口播报价
+                </Button>
+              </div>
+            ) : null}
+            {generation === "视频生成" && videoQuoteError ? (
+              <div className="settings-error" role="alert">
+                <p>{videoQuoteError}</p>
+                <Button onClick={retryVideoQuote} variant="outline">
+                  重新获取视频报价
+                </Button>
+              </div>
+            ) : null}
             {review ||
             generation === "人物置换" ||
             generation === "视频复刻" ? (
@@ -1146,15 +1957,19 @@ export function StudioWorkspace({
             ) : generation === "视频生成" ? (
               <Button
                 variant="primary"
-                disabled={videoSubmitting}
+                disabled={videoSubmitting || !videoQuoteReady}
                 onClick={() => void submitVideoTask()}
               >
-                确认费用并提交
+                {videoSubmitting ? "提交中…" : "确认费用并提交"}
               </Button>
             ) : (
               <Button
+                disabled={
+                  oralSubmitting ||
+                  oralQuoteStatus !== "ready" ||
+                  oralPriceFen === null
+                }
                 variant="primary"
-                disabled={oralSubmitting}
                 onClick={() => void submitOralTask()}
               >
                 {oralSubmitting ? "提交中…" : "确认费用并提交"}
@@ -1165,7 +1980,7 @@ export function StudioWorkspace({
               generation !== "视频生成" && (
                 <Button
                   onClick={() => {
-                    setGeneration(undefined);
+                    closeGenerationDialog();
                     openLive("analysis");
                   }}
                 >
@@ -1213,7 +2028,13 @@ export function StudioWorkspace({
   );
 }
 
-function StudioPageContent({ page }: { page: StudioPage }) {
+function StudioPageContent({
+  page,
+  accountSummary,
+}: {
+  page: StudioPage;
+  accountSummary: StudioAccountSummary;
+}) {
   switch (page) {
     case "workbench":
       return <WorkbenchPage />;
@@ -1253,7 +2074,7 @@ function StudioPageContent({ page }: { page: StudioPage }) {
     case "settings":
       return <StudioSettingsPage />;
     case "profile":
-      return <ProfilePage />;
+      return <ProfilePage accountSummary={accountSummary} />;
   }
 }
 
@@ -1312,6 +2133,169 @@ export function StudioDialog({
   );
 }
 
+function AudioMaterialPicker({
+  onClose,
+  onSelect,
+  purpose,
+}: {
+  onClose: () => void;
+  onSelect: (asset: StudioAsset) => void;
+  purpose: "oral_audio" | "voice_clone";
+}) {
+  const [query, setQuery] = useState("");
+  const [activeQuery, setActiveQuery] = useState("");
+  const [page, setPage] = useState(1);
+  const [items, setItems] = useState<StudioAsset[]>([]);
+  const [hasMore, setHasMore] = useState(false);
+  const [status, setStatus] = useState<"loading" | "ready" | "error">(
+    "loading",
+  );
+  const [retryRevision, setRetryRevision] = useState(0);
+  const operationRef = useRef(0);
+
+  useEffect(() => {
+    void retryRevision;
+    const operation = ++operationRef.current;
+    setStatus("loading");
+    void listMaterials({
+      mediaType: "audio",
+      query: activeQuery,
+      page,
+      pageSize: 12,
+    })
+      .then(async (result) => {
+        const usable = result.items.filter(
+          (item) =>
+            item.status === "ready" &&
+            item.asset_id &&
+            item.allowed_uses.includes(purpose),
+        );
+        const urls = await Promise.allSettled(
+          usable.map((item) =>
+            getAssetDownloadUrl(item.asset_id as string).then(
+              (response) => response.url,
+            ),
+          ),
+        );
+        if (operation !== operationRef.current) return;
+        const next = usable.map((item, index) => ({
+          ...studioAssetFromMaterial(item),
+          url:
+            urls[index]?.status === "fulfilled" ? urls[index].value : undefined,
+        }));
+        setItems((current) =>
+          page === 1 ? next : mergeStudioAssets(current, next),
+        );
+        setHasMore(result.page * result.page_size < result.total);
+        setStatus("ready");
+      })
+      .catch(() => {
+        if (operation === operationRef.current) setStatus("error");
+      });
+    return () => {
+      operationRef.current += 1;
+    };
+  }, [activeQuery, page, purpose, retryRevision]);
+
+  return (
+    <StudioDialog
+      title={purpose === "oral_audio" ? "选择完整口播音频" : "选择声音克隆样本"}
+      onClose={onClose}
+    >
+      <form
+        className="studio-picker-search"
+        onSubmit={(event) => {
+          event.preventDefault();
+          setItems([]);
+          setPage(1);
+          setActiveQuery(query.trim());
+        }}
+      >
+        <input
+          aria-label="搜索云端音频"
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="输入音频名称"
+          value={query}
+        />
+        <Button type="submit" variant="outline">
+          搜索
+        </Button>
+      </form>
+      {status === "error" ? (
+        <Empty
+          title="音频素材读取失败"
+          description="请检查网络后重试。"
+          action={
+            <Button
+              variant="outline"
+              onClick={() => setRetryRevision((value) => value + 1)}
+            >
+              重试
+            </Button>
+          }
+        />
+      ) : status === "loading" && items.length === 0 ? (
+        <Empty title="正在读取音频" description="正在查询云端素材库。" />
+      ) : items.length === 0 ? (
+        <Empty
+          title="没有可用音频"
+          description={
+            purpose === "oral_audio"
+              ? "可继续查询下一页，或返回口播页上传完整 MP3。"
+              : "可继续查询下一页，或返回声音页上传合规样本。"
+          }
+          action={
+            hasMore ? (
+              <Button
+                variant="outline"
+                onClick={() => setPage((value) => value + 1)}
+              >
+                加载更多音频
+              </Button>
+            ) : undefined
+          }
+        />
+      ) : (
+        <>
+          <div className="studio-picker-grid">
+            {items.map((asset) => (
+              <article key={asset.id} className="studio-picker-audio">
+                <strong>{asset.name}</strong>
+                <small>
+                  {asset.source} · {asset.duration ?? "时长未知"}
+                </small>
+                {asset.url ? (
+                  <audio
+                    controls
+                    src={asset.url}
+                    aria-label={`预听${asset.name}`}
+                  >
+                    <track kind="captions" label="口播音频" />
+                  </audio>
+                ) : (
+                  <small>预听地址暂不可用</small>
+                )}
+                <Button variant="outline" onClick={() => onSelect(asset)}>
+                  选择{asset.name}
+                </Button>
+              </article>
+            ))}
+          </div>
+          {hasMore && (
+            <Button
+              disabled={status === "loading"}
+              variant="outline"
+              onClick={() => setPage((value) => value + 1)}
+            >
+              {status === "loading" ? "加载中…" : "加载更多音频"}
+            </Button>
+          )}
+        </>
+      )}
+    </StudioDialog>
+  );
+}
+
 function StudioPicker({
   kind,
   onClose,
@@ -1319,8 +2303,86 @@ function StudioPicker({
   kind: PickerKind;
   onClose: () => void;
 }) {
-  const { state, data, patchDraft, navigate, notify } = useStudio();
+  const {
+    state,
+    data,
+    patchDraft,
+    updateData,
+    navigate,
+    notify,
+    user,
+    videoCapabilities,
+  } = useStudio();
+  const readOnly = user.role === "auditor";
   const person = data.people.find((item) => item.id === state.draft.ipId);
+  const usesCloudImages =
+    kind === "reference" || kind === "first-frame" || kind === "tail-frame";
+  const cloudImageCandidates = useMemo(
+    () =>
+      usesCloudImages
+        ? data.materials.filter(
+            (material) =>
+              material.kind === "image" &&
+              !data.assets.some((asset) => asset.id === material.id) &&
+              (kind !== "reference" ||
+                !state.draft.referenceIds.includes(material.id)),
+          )
+        : [],
+    [
+      data.assets,
+      data.materials,
+      kind,
+      state.draft.referenceIds,
+      usesCloudImages,
+    ],
+  );
+  const cloudImagePageSize = 6;
+  const [cloudImagePage, setCloudImagePage] = useState(1);
+  const [cloudImageUrls, setCloudImageUrls] = useState<Record<string, string>>(
+    {},
+  );
+  const cloudImageOperationRef = useRef(0);
+  const cloudImagePages = Math.max(
+    1,
+    Math.ceil(cloudImageCandidates.length / cloudImagePageSize),
+  );
+  const visibleCloudImages = useMemo(
+    () =>
+      cloudImageCandidates.slice(
+        (cloudImagePage - 1) * cloudImagePageSize,
+        cloudImagePage * cloudImagePageSize,
+      ),
+    [cloudImageCandidates, cloudImagePage],
+  );
+  useEffect(() => {
+    if (!usesCloudImages) return;
+    const operation = ++cloudImageOperationRef.current;
+    const visible = visibleCloudImages;
+    void Promise.allSettled(
+      visible.map((asset) =>
+        asset.url
+          ? Promise.resolve(asset.url)
+          : asset.assetId
+            ? getAssetDownloadUrl(asset.assetId).then((result) => result.url)
+            : Promise.resolve(undefined),
+      ),
+    ).then((results) => {
+      if (operation !== cloudImageOperationRef.current) return;
+      setCloudImageUrls(
+        Object.fromEntries(
+          visible.flatMap((asset, index) => {
+            const result = results[index];
+            return result?.status === "fulfilled" && result.value
+              ? [[asset.id, result.value]]
+              : [];
+          }),
+        ),
+      );
+    });
+    return () => {
+      cloudImageOperationRef.current += 1;
+    };
+  }, [usesCloudImages, visibleCloudImages]);
   const title: Record<PickerKind, string> = {
     person: "选择人物 IP",
     image: "选择人物形象照片",
@@ -1331,30 +2393,48 @@ function StudioPicker({
     avatar: "选择口播分身",
     voice: "选择已确认声音",
     audio: "选择完整口播音频",
+    "voice-audio": "选择声音克隆样本",
     "avatar-photo": "选择单张照片制作分身",
   };
   const select = (patch: Partial<StudioDraft>) => {
+    if (readOnly) return;
     patchDraft(patch);
     onClose();
   };
+  if (kind === "audio" || kind === "voice-audio") {
+    return (
+      <AudioMaterialPicker
+        onClose={onClose}
+        purpose={kind === "audio" ? "oral_audio" : "voice_clone"}
+        onSelect={(asset) => {
+          updateData((current) => ({
+            ...current,
+            assets: mergeStudioAssets(current.assets, [asset]),
+          }));
+          select({ audioId: asset.id, voiceId: undefined });
+        }}
+      />
+    );
+  }
   // 视频生成的帧/参考选择额外提供素材库图片（C9 通道，用户归属）。
-  const materials =
-    kind === "reference" || kind === "first-frame" || kind === "tail-frame"
-      ? data.materials.filter(
-          (material) => !data.assets.some((asset) => asset.id === material.id),
-        )
-      : [];
+  const materials = visibleCloudImages.map((material) => ({
+    ...material,
+    url: material.url ?? cloudImageUrls[material.id],
+  }));
+  const referenceValidation = validateReferenceImages(
+    state.draft.referenceIds,
+    [...data.assets, ...data.materials],
+    videoCapabilities?.max_reference_images ?? DEFAULT_MAX_REFERENCE_IMAGES,
+  );
   const assets = [...materials, ...data.assets].filter((asset) =>
-    kind === "audio"
-      ? asset.kind === "audio"
-      : kind === "reference"
-        ? true
-        : asset.kind === "image" &&
-          !asset.composite &&
-          (kind !== "avatar-photo" || asset.source === "人物库场景造型") &&
-          ((kind !== "image" && kind !== "avatar-photo") ||
-            !person ||
-            asset.personId === person.id),
+    kind === "reference"
+      ? asset.kind === "image" && !state.draft.referenceIds.includes(asset.id)
+      : asset.kind === "image" &&
+        !asset.composite &&
+        (kind !== "avatar-photo" || asset.source === "人物库场景造型") &&
+        ((kind !== "image" && kind !== "avatar-photo") ||
+          !person ||
+          asset.personId === person.id),
   );
   return (
     <StudioDialog title={title[kind]} onClose={onClose}>
@@ -1423,6 +2503,26 @@ function StudioPicker({
                         notify(
                           "已选择单张照片作为制作原料。照片尚不是口播分身，需完成制作后才能使用。",
                         );
+                      } else if (kind === "reference") {
+                        if (referenceValidation.issues.length > 0) {
+                          notify("请先整理旧草稿中的无效参考素材。");
+                          return;
+                        }
+                        if (
+                          referenceValidation.imageIds.length >=
+                          referenceValidation.limit
+                        ) {
+                          notify(
+                            `当前最多选择 ${referenceValidation.limit} 张参考图。`,
+                          );
+                          return;
+                        }
+                        select({
+                          referenceIds: [
+                            ...referenceValidation.imageIds,
+                            asset.id,
+                          ],
+                        });
                       } else
                         select(
                           kind === "image"
@@ -1436,16 +2536,7 @@ function StudioPicker({
                                 ? { firstFrameId: asset.id }
                                 : kind === "tail-frame"
                                   ? { tailFrameId: asset.id }
-                                  : kind === "audio"
-                                    ? { audioId: asset.id, voiceId: undefined }
-                                    : {
-                                        referenceIds: [
-                                          ...new Set([
-                                            ...state.draft.referenceIds,
-                                            asset.id,
-                                          ]),
-                                        ],
-                                      },
+                                  : { audioId: asset.id, voiceId: undefined },
                         );
                     }}
                   >
@@ -1459,6 +2550,29 @@ function StudioPicker({
                   </button>
                 ))}
       </div>
+      {usesCloudImages && cloudImageCandidates.length > cloudImagePageSize ? (
+        <nav className="content-pagination" aria-label="图片素材分页">
+          <Button
+            aria-label="上一页素材"
+            disabled={cloudImagePage === 1}
+            variant="outline"
+            onClick={() => setCloudImagePage((page) => page - 1)}
+          >
+            ‹
+          </Button>
+          <span>
+            {cloudImagePage} / {cloudImagePages}
+          </span>
+          <Button
+            aria-label="下一页素材"
+            disabled={cloudImagePage === cloudImagePages}
+            variant="outline"
+            onClick={() => setCloudImagePage((page) => page + 1)}
+          >
+            ›
+          </Button>
+        </nav>
+      ) : null}
       {((kind === "voice" &&
         !person?.voices.some((voice) => voice.confirmed)) ||
         (kind === "avatar" &&

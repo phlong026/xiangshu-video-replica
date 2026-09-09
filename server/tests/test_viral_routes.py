@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import time
 from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import pytest
 from fastapi.testclient import TestClient
@@ -110,6 +112,12 @@ def client(tmp_path: Path) -> Iterator[tuple[TestClient, StubViralClient]]:
             VALUES ('employee_1', 'employee_1', 'Employee One', 'employee')
             """
         )
+        conn.execute(
+            """
+            INSERT INTO users (id, username, display_name, role)
+            VALUES ('employee_2', 'employee_2', 'Employee Two', 'employee')
+            """
+        )
 
     def database_override() -> Iterator[BusinessConnection]:
         conn = BusinessConnection.sqlite(connect_database(database_path))
@@ -151,6 +159,14 @@ def test_list_douyin_videos_aggregates_categories(
     assert first["platform"] == "douyin"
     assert first["tags"] == ["标签一", "标签二"]
     assert first["hasPlayableAudio"] is True
+    assert first["isFavorite"] is False
+    assert first["availability"] == "available"
+    assert payload["total"] == 8
+    assert payload["hasMore"] is False
+    assert payload["nextCursor"] is None
+    assert payload["refreshing"] is False
+    assert payload["refreshError"] is None
+    assert payload["dataVersion"] == payload["fetchedAt"]
     # 供应商红线：响应正文不得出现数据源供应商名称。
     assert "tikhub" not in response.text.lower()
 
@@ -163,6 +179,39 @@ def test_list_videos_uses_cache_within_ttl(client: tuple[TestClient, StubViralCl
     second = http.get("/api/viral/videos", params={"platform": "douyin"}, headers=_AUTH_HEADERS)
     assert second.status_code == 200
     assert len(stub.douyin_calls) == calls_after_first
+
+
+def test_refresh_does_not_hold_database_connection_during_upstream_calls(
+    client: tuple[TestClient, StubViralClient], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import app.viral_routes as routes
+
+    held = False
+    original_refresh_connection = routes._refresh_connection
+
+    @contextmanager
+    def tracked_refresh_connection(request_conn):
+        nonlocal held
+        with original_refresh_connection(request_conn) as refresh_conn:
+            held = True
+            try:
+                yield refresh_conn
+            finally:
+                held = False
+
+    original_fetch = routes._fetch_videos
+
+    def guarded_fetch(*args, **kwargs):
+        assert held is False
+        return original_fetch(*args, **kwargs)
+
+    monkeypatch.setattr(routes, "_refresh_connection", tracked_refresh_connection)
+    monkeypatch.setattr(routes, "_fetch_videos", guarded_fetch)
+    http, _ = client
+
+    response = http.get("/api/viral/videos", params={"platform": "douyin"}, headers=_AUTH_HEADERS)
+
+    assert response.status_code == 200
 
 
 def test_list_videos_refetches_after_ttl(client: tuple[TestClient, StubViralClient]) -> None:
@@ -193,6 +242,38 @@ def test_list_videos_refetches_after_ttl(client: tuple[TestClient, StubViralClie
     assert len(stub.douyin_calls) > calls_after_first
 
 
+def test_collection_switch_keeps_cache_readable_without_upstream_calls(
+    client: tuple[TestClient, StubViralClient],
+) -> None:
+    http, stub = client
+    first = http.get(
+        "/api/viral/videos",
+        params={"platform": "douyin"},
+        headers=_AUTH_HEADERS,
+    )
+    assert first.status_code == 200
+    calls_after_first = len(stub.douyin_calls)
+    from app.viral_routes import _open_worker_connection
+
+    conn, close = _open_worker_connection()
+    try:
+        conn.execute("UPDATE viral_runtime_controls SET collection_enabled = 0 WHERE id = 1")
+        conn.execute("UPDATE viral_fetch_state SET fetched_at = '2000-01-01 00:00:00'")
+        conn.commit()
+    finally:
+        close()
+
+    cached = http.get(
+        "/api/viral/videos",
+        params={"platform": "douyin"},
+        headers=_AUTH_HEADERS,
+    )
+    assert cached.status_code == 200
+    assert cached.json()["items"]
+    assert cached.json()["stale"] is True
+    assert len(stub.douyin_calls) == calls_after_first
+
+
 def test_list_wechat_videos_and_latest_sort(client: tuple[TestClient, StubViralClient]) -> None:
     http, stub = client
     response = http.get(
@@ -205,6 +286,207 @@ def test_list_wechat_videos_and_latest_sort(client: tuple[TestClient, StubViralC
     assert stub.wechat_calls[0]["sort"] == "latest"
     latest_item = response.json()["items"][0]
     assert latest_item["likeDisplay"] == "1.2万"
+
+
+def test_list_videos_supports_opaque_cursor(client: tuple[TestClient, StubViralClient]) -> None:
+    http, stub = client
+    first = http.get(
+        "/api/viral/videos",
+        params={"platform": "wechat_channels", "limit": 5},
+        headers=_AUTH_HEADERS,
+    )
+    assert first.status_code == 200
+    first_payload = first.json()
+    assert len(first_payload["items"]) == 5
+    assert first_payload["total"] == 12
+    assert first_payload["hasMore"] is True
+    assert isinstance(first_payload["nextCursor"], str)
+    assert "wx-" not in first_payload["nextCursor"]
+
+    second = http.get(
+        "/api/viral/videos",
+        params={
+            "platform": "wechat_channels",
+            "limit": 5,
+            "cursor": first_payload["nextCursor"],
+        },
+        headers=_AUTH_HEADERS,
+    )
+    assert second.status_code == 200
+    assert not (
+        {item["videoId"] for item in first_payload["items"]}
+        & {item["videoId"] for item in second.json()["items"]}
+    )
+
+    calls_before_invalid = len(stub.wechat_calls)
+    invalid = http.get(
+        "/api/viral/videos",
+        params={"platform": "wechat_channels", "cursor": "not-a-cursor"},
+        headers=_AUTH_HEADERS,
+    )
+    assert invalid.status_code == 400
+    assert invalid.json()["detail"]["code"] == "VIRAL_CURSOR_INVALID"
+    assert len(stub.wechat_calls) == calls_before_invalid
+
+
+def test_detail_and_favorites_use_authenticated_actor(
+    client: tuple[TestClient, StubViralClient],
+) -> None:
+    http, _ = client
+    seeded = http.get(
+        "/api/viral/videos",
+        params={"platform": "douyin"},
+        headers=_AUTH_HEADERS,
+    )
+    video_id = seeded.json()["items"][0]["videoId"]
+
+    detail = http.get(f"/api/viral/videos/douyin/{video_id}", headers=_AUTH_HEADERS)
+    assert detail.status_code == 200
+    assert detail.json()["videoId"] == video_id
+    assert detail.json()["isFavorite"] is False
+
+    added = http.put(
+        f"/api/viral/favorites/douyin/{video_id}?user_id=employee_2",
+        headers=_AUTH_HEADERS,
+    )
+    assert added.status_code == 200
+    assert added.json() == {"isFavorite": True}
+    assert http.put(f"/api/viral/favorites/douyin/{video_id}", headers=_AUTH_HEADERS).json() == {
+        "isFavorite": True
+    }
+
+    favorites = http.get("/api/viral/favorites", headers=_AUTH_HEADERS)
+    assert favorites.status_code == 200
+    assert favorites.json()["total"] == 1
+    assert favorites.json()["items"][0]["videoId"] == video_id
+    assert favorites.json()["items"][0]["isFavorite"] is True
+    assert (
+        http.get("/api/viral/favorites", headers={"X-Dev-User-Id": "employee_2"}).json()["total"]
+        == 0
+    )
+
+    removed = http.delete(f"/api/viral/favorites/douyin/{video_id}", headers=_AUTH_HEADERS)
+    assert removed.status_code == 200
+    assert removed.json() == {"isFavorite": False}
+    assert http.get("/api/viral/favorites", headers=_AUTH_HEADERS).json()["total"] == 0
+
+
+def test_detail_supports_encoded_opaque_video_id(
+    client: tuple[TestClient, StubViralClient],
+) -> None:
+    from app.viral_routes import _open_worker_connection
+    from app.viral_store import upsert_viral_videos
+
+    opaque_id = "opaque/id=value"
+    conn, close = _open_worker_connection()
+    try:
+        upsert_viral_videos(
+            conn,
+            [_video(platform="douyin", video_id=opaque_id, category="施工避坑")],
+        )
+    finally:
+        close()
+    http, _ = client
+
+    detail = http.get(
+        f"/api/viral/videos/douyin/{quote(opaque_id, safe='')}",
+        headers=_AUTH_HEADERS,
+    )
+
+    assert detail.status_code == 200
+    assert detail.json()["videoId"] == opaque_id
+
+
+def test_favorites_route_exposes_pagination_contract(
+    client: tuple[TestClient, StubViralClient],
+) -> None:
+    http, _ = client
+    seeded = http.get(
+        "/api/viral/videos",
+        params={"platform": "wechat_channels", "limit": 12},
+        headers=_AUTH_HEADERS,
+    )
+    assert seeded.status_code == 200
+    for item in seeded.json()["items"][:3]:
+        assert (
+            http.put(
+                f"/api/viral/favorites/wechat_channels/{item['videoId']}",
+                headers=_AUTH_HEADERS,
+            ).status_code
+            == 200
+        )
+
+    first = http.get(
+        "/api/viral/favorites",
+        params={"limit": 2},
+        headers=_AUTH_HEADERS,
+    )
+    assert first.status_code == 200
+    assert len(first.json()["items"]) == 2
+    assert first.json()["total"] == 3
+    assert first.json()["hasMore"] is True
+    assert isinstance(first.json()["nextCursor"], str)
+
+    second = http.get(
+        "/api/viral/favorites",
+        params={"limit": 2, "cursor": first.json()["nextCursor"]},
+        headers=_AUTH_HEADERS,
+    )
+    assert second.status_code == 200
+    assert len(second.json()["items"]) == 1
+    assert second.json()["hasMore"] is False
+
+
+def test_detail_reports_hidden_availability(client: tuple[TestClient, StubViralClient]) -> None:
+    http, _ = client
+    response = http.get(
+        "/api/viral/videos",
+        params={"platform": "douyin"},
+        headers=_AUTH_HEADERS,
+    )
+    video_id = response.json()["items"][0]["videoId"]
+    assert (
+        http.put(f"/api/viral/favorites/douyin/{video_id}", headers=_AUTH_HEADERS).status_code
+        == 200
+    )
+    from app.viral_routes import _open_worker_connection
+
+    conn, close = _open_worker_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO viral_video_visibility (platform, video_id, status)
+            VALUES (%s, %s, 'HIDDEN')
+            """,
+            ("douyin", video_id),
+        )
+        conn.commit()
+    finally:
+        close()
+
+    detail = http.get(f"/api/viral/videos/douyin/{video_id}", headers=_AUTH_HEADERS)
+    assert detail.status_code == 200
+    assert detail.json()["availability"] == "hidden"
+    favorites = http.get(
+        "/api/viral/favorites",
+        params={"platform": "douyin"},
+        headers=_AUTH_HEADERS,
+    )
+    assert favorites.status_code == 200
+    assert len(favorites.json()["items"]) == 1
+    favorite = favorites.json()["items"][0]
+    assert favorite["videoId"] == video_id
+    assert favorite["isFavorite"] is True
+    assert favorite["availability"] == "hidden"
+    listed = http.get("/api/viral/videos", params={"platform": "douyin"}, headers=_AUTH_HEADERS)
+    assert video_id not in {item["videoId"] for item in listed.json()["items"]}
+    media = http.post(
+        "/api/viral/videos/media",
+        json={"platform": "douyin", "videoId": video_id, "kind": "video"},
+        headers=_AUTH_HEADERS,
+    )
+    assert media.status_code == 409
+    assert media.json()["detail"]["code"] == "VIRAL_VIDEO_UNAVAILABLE"
 
 
 def test_list_videos_rejects_invalid_platform(client: tuple[TestClient, StubViralClient]) -> None:
@@ -264,7 +546,7 @@ def test_media_unknown_video_returns_404(client: tuple[TestClient, StubViralClie
 
 
 class _StubLocalStorage:
-    """最小本地存储桩：head/get 即可驱动签名文件路由."""
+    """最小本地存储桩：head/stream 驱动签名文件路由."""
 
     def __init__(self, objects: dict[str, tuple[bytes, str]]) -> None:
         self.objects = objects
@@ -285,6 +567,12 @@ class _StubLocalStorage:
 
     def get_object(self, key):
         return self.objects[key][0]
+
+    def iter_object(self, key, *, start=0, end=None, chunk_size=1024 * 1024):
+        content = self.objects[key][0]
+        stop = len(content) if end is None else end + 1
+        for offset in range(start, stop, chunk_size):
+            yield content[offset : min(stop, offset + chunk_size)]
 
 
 def test_local_media_url_converts_to_signed_file_route(
@@ -337,6 +625,15 @@ def test_local_media_url_converts_to_signed_file_route(
     assert file_response.status_code == 200
     assert file_response.content == b"ID3-fake-audio"
     assert file_response.headers["content-type"] == "audio/mpeg"
+    assert file_response.headers["accept-ranges"] == "bytes"
+    ranged = http.get(url, headers={"Range": "bytes=4-7"})
+    assert ranged.status_code == 206
+    assert ranged.content == b"ID3-fake-audio"[4:8]
+    assert ranged.headers["content-range"] == "bytes 4-7/14"
+    assert ranged.headers["content-length"] == "4"
+    unsatisfiable = http.get(url, headers={"Range": "bytes=99-"})
+    assert unsatisfiable.status_code == 416
+    assert unsatisfiable.headers["content-range"] == "bytes */14"
     # 篡改签名被拒绝。
     tampered = url.replace("sig=", "sig=x")
     assert http.get(tampered).status_code == 403

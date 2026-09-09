@@ -11,14 +11,23 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from app.db import connect_database, initialize_database
 from app.db_portable import BusinessConnection
 from app.viral_store import (
     VIRAL_FETCH_TTL,
+    InvalidViralCursorError,
+    add_viral_favorite,
     fetch_state_is_fresh,
     get_viral_video,
+    is_viral_favorite,
+    list_favorite_viral_video_page,
+    list_favorite_viral_videos,
+    list_viral_video_page,
     list_viral_videos,
     mark_fetch_state,
+    remove_viral_favorite,
     update_viral_statistics,
     upsert_viral_videos,
     viral_fetched_at,
@@ -188,6 +197,243 @@ def test_list_hides_stale_and_minecraft_rows_without_deleting_them(tmp_path: Pat
         assert [video.video_id for video in listed] == ["recent"]
         assert get_viral_video(conn, platform="wechat_channels", video_id="stale") is not None
         assert get_viral_video(conn, platform="wechat_channels", video_id="game") is not None
+    finally:
+        conn.close()
+
+
+def test_list_page_uses_stable_keyset_cursor_and_reports_total(tmp_path: Path) -> None:
+    db_path = tmp_path / "viral.db"
+    initialize_database(db_path).close()
+    conn = _open(db_path)
+    try:
+        now = int(datetime.now(UTC).timestamp())
+        videos = [
+            replace(
+                _video(video_id=f"video-{index:02d}", published_at=now - index),
+                likes=100 - index,
+            )
+            for index in range(35)
+        ]
+        upsert_viral_videos(conn, videos)
+
+        first = list_viral_video_page(
+            conn,
+            platform="wechat_channels",
+            sort="hot",
+            limit=12,
+        )
+        second = list_viral_video_page(
+            conn,
+            platform="wechat_channels",
+            sort="hot",
+            limit=12,
+            cursor=first.next_cursor,
+        )
+        third = list_viral_video_page(
+            conn,
+            platform="wechat_channels",
+            sort="hot",
+            limit=12,
+            cursor=second.next_cursor,
+        )
+
+        ids = [video.video_id for page in (first, second, third) for video in page.items]
+        assert ids == [f"video-{index:02d}" for index in range(35)]
+        assert first.total == second.total == third.total == 35
+        assert first.has_more is True and second.has_more is True
+        assert third.has_more is False and third.next_cursor is None
+    finally:
+        conn.close()
+
+
+def test_list_cursor_expires_when_refresh_version_changes(tmp_path: Path) -> None:
+    db_path = tmp_path / "viral.db"
+    initialize_database(db_path).close()
+    conn = _open(db_path)
+    try:
+        now = int(datetime.now(UTC).timestamp())
+        upsert_viral_videos(
+            conn,
+            [
+                replace(
+                    _video(video_id=f"versioned-{index:02d}", published_at=now - index),
+                    likes=100 - index,
+                )
+                for index in range(5)
+            ],
+        )
+        first = list_viral_video_page(conn, platform="wechat_channels", sort="hot", limit=2)
+        assert first.next_cursor is not None
+
+        mark_fetch_state(conn, platform="wechat_channels", sort="hot")
+
+        with pytest.raises(InvalidViralCursorError):
+            list_viral_video_page(
+                conn,
+                platform="wechat_channels",
+                sort="hot",
+                limit=2,
+                cursor=first.next_cursor,
+            )
+    finally:
+        conn.close()
+
+
+def test_favorites_are_persistent_idempotent_and_isolated_by_user(tmp_path: Path) -> None:
+    db_path = tmp_path / "viral.db"
+    initialize_database(db_path).close()
+    conn = _open(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO users (id, username, display_name, role)
+            VALUES ('user-a', 'user-a', 'User A', 'employee')
+            """
+        )
+        conn.commit()
+        upsert_viral_videos(conn, [_video(video_id="favorite")])
+
+        assert add_viral_favorite(
+            conn,
+            user_id="user-a",
+            platform="wechat_channels",
+            video_id="favorite",
+        )
+        assert not add_viral_favorite(
+            conn,
+            user_id="user-a",
+            platform="wechat_channels",
+            video_id="favorite",
+        )
+        assert is_viral_favorite(
+            conn,
+            user_id="user-a",
+            platform="wechat_channels",
+            video_id="favorite",
+        )
+        assert not is_viral_favorite(
+            conn,
+            user_id="user-b",
+            platform="wechat_channels",
+            video_id="favorite",
+        )
+        assert [video.video_id for video in list_favorite_viral_videos(conn, user_id="user-a")] == [
+            "favorite"
+        ]
+        assert list_favorite_viral_videos(conn, user_id="user-b") == []
+
+        assert remove_viral_favorite(
+            conn,
+            user_id="user-a",
+            platform="wechat_channels",
+            video_id="favorite",
+        )
+        assert not remove_viral_favorite(
+            conn,
+            user_id="user-a",
+            platform="wechat_channels",
+            video_id="favorite",
+        )
+    finally:
+        conn.close()
+
+
+def test_recent_list_excludes_unknown_and_future_publish_times(tmp_path: Path) -> None:
+    db_path = tmp_path / "viral.db"
+    initialize_database(db_path).close()
+    conn = _open(db_path)
+    try:
+        now = int(datetime.now(UTC).timestamp())
+        upsert_viral_videos(
+            conn,
+            [
+                replace(_video(video_id="recent"), published_at=now - 60),
+                replace(_video(video_id="unknown"), published_at=None),
+                replace(_video(video_id="future"), published_at=now + 86_400),
+            ],
+        )
+
+        listed = list_viral_video_page(
+            conn,
+            platform="wechat_channels",
+            sort="latest",
+            limit=10,
+        )
+
+        assert [video.video_id for video in listed.items] == ["recent"]
+        assert listed.total == 1
+    finally:
+        conn.close()
+
+
+def test_favorites_support_stable_keyset_pagination(tmp_path: Path) -> None:
+    db_path = tmp_path / "viral.db"
+    initialize_database(db_path).close()
+    conn = _open(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO users (id, username, display_name, role)
+            VALUES ('user-a', 'user-a', 'User A', 'employee')
+            """
+        )
+        conn.commit()
+        videos = [_video(video_id=f"favorite-{index:02d}") for index in range(55)]
+        upsert_viral_videos(conn, videos)
+        for video in videos:
+            add_viral_favorite(
+                conn,
+                user_id="user-a",
+                platform="wechat_channels",
+                video_id=video.video_id,
+            )
+
+        first = list_favorite_viral_video_page(conn, user_id="user-a", limit=50)
+        second = list_favorite_viral_video_page(
+            conn,
+            user_id="user-a",
+            limit=50,
+            cursor=first.next_cursor,
+        )
+
+        ids = [video.video_id for page in (first, second) for video in page.items]
+        assert len(ids) == 55
+        assert len(set(ids)) == 55
+        assert first.total == second.total == 55
+        assert first.has_more is True
+        assert second.has_more is False
+        assert second.next_cursor is None
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("platform", [None, "wechat_channels"])
+def test_favorite_page_order_uses_covering_index_without_temp_sort(
+    tmp_path: Path, platform: str | None
+) -> None:
+    db_path = tmp_path / "viral.db"
+    initialize_database(db_path).close()
+    conn = _open(db_path)
+    try:
+        platform_sql = "AND f.platform = ?" if platform is not None else ""
+        params: tuple[object, ...] = (
+            ("user-a", platform, 51) if platform is not None else ("user-a", 51)
+        )
+        plan = conn.execute(
+            f"""
+            EXPLAIN QUERY PLAN
+            SELECT v.*, f.created_at AS favorite_created_at
+            FROM viral_video_favorites f
+            JOIN viral_videos v
+              ON v.platform = f.platform AND v.video_id = f.video_id
+            WHERE f.user_id = ? {platform_sql}
+            ORDER BY f.created_at DESC, f.platform ASC, f.video_id ASC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+        details = [str(row["detail"]) for row in plan]
+        assert not any("TEMP B-TREE" in detail for detail in details), details
     finally:
         conn.close()
 

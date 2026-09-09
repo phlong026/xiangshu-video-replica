@@ -152,11 +152,14 @@ export function WorkspaceShell({
     onApprovePairing: (pairingId: string) => void;
     onDismissPairing: (pairingId: string) => void;
     onProfileUpdated: (profile: CustomerProfile) => void;
+    onRefreshProfile: () => Promise<void>;
+    onLogout: () => Promise<void>;
     onRefreshDevices: () => Promise<void>;
     onResetActivationCode: () => Promise<CustomerActivationCodeReset>;
     onUnbind: (deviceId: string) => void;
     onUpdateProfile: (displayName: string) => Promise<CustomerProfile>;
     profile: CustomerProfile | null;
+    profileLoadError: string;
     store: CustomerCredentialStore;
     onSessionExpired: () => void;
     /** Live heartbeat/lease health from the customer session hook; absent
@@ -460,6 +463,8 @@ export function WorkspaceShell({
                 onApprovePairing={customerAccount.onApprovePairing}
                 onDismissPairing={customerAccount.onDismissPairing}
                 onProfileUpdated={customerAccount.onProfileUpdated}
+                onRefreshProfile={customerAccount.onRefreshProfile}
+                onLogout={customerAccount.onLogout}
                 onRecharge={openRecharge}
                 onRefreshDevices={customerAccount.onRefreshDevices}
                 onResetActivationCode={customerAccount.onResetActivationCode}
@@ -467,6 +472,7 @@ export function WorkspaceShell({
                 onUnbind={customerAccount.onUnbind}
                 onUpdateProfile={customerAccount.onUpdateProfile}
                 profile={customerAccount.profile}
+                profileLoadError={customerAccount.profileLoadError}
                 store={customerAccount.store}
                 walletRefreshKey={walletRefreshKey}
               />

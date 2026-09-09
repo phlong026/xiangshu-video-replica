@@ -197,13 +197,18 @@ def dashboard_summary(_actor: AdminReader) -> dict[str, Any]:
         failed_tasks_7d = int(
             _one(
                 conn,
-                """
-                SELECT count(*) FROM generation_tasks
-                WHERE status = 'FAILED'
-                  AND created_at_utc >= (
-                      ((now() AT TIME ZONE 'Asia/Shanghai')::date - 6)::timestamp
-                      AT TIME ZONE 'Asia/Shanghai'
-                  )
+                f"""
+                SELECT
+                    (SELECT count(*) FROM generation_tasks
+                     WHERE status = 'FAILED'
+                       AND created_at_utc >= (
+                           ((now() AT TIME ZONE 'Asia/Shanghai')::date - 6)::timestamp
+                           AT TIME ZONE 'Asia/Shanghai'
+                       ))
+                  + (SELECT count(*) FROM oral_tasks
+                     WHERE status = 'FAILED'
+                       AND {_day_expr("created_at")} >=
+                           (now() AT TIME ZONE 'Asia/Shanghai')::date - 6)
                 """,
             )
         )

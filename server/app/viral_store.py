@@ -11,11 +11,13 @@ SQLite 由 ``translate_to_sqlite`` 翻译）。
 
 from __future__ import annotations
 
+import binascii
 import json
 import threading
-from dataclasses import replace
+from base64 import urlsafe_b64decode, urlsafe_b64encode
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal, cast
 
 from app.db_portable import BusinessConnection
 from app.viral_tikhub import MAX_TAGS, ViralVideo, WechatVideoDetail, is_irrelevant_viral_video
@@ -27,6 +29,7 @@ _STATISTICS_METADATA_KEYS = (STATISTICS_CHECKED_AT_KEY, STATISTICS_RETRY_AT_KEY)
 _METADATA_LOOKUP_CHUNK_SIZE = 400
 # 桌面服务是单进程；统一串行化 native_json 的读改写，避免不同请求互相覆盖。
 _NATIVE_JSON_RMW_LOCK = threading.RLock()
+ViralAvailability = Literal["available", "hidden", "unavailable"]
 
 _UPSERT_SQL = """
 INSERT INTO viral_videos (
@@ -64,9 +67,23 @@ ON CONFLICT (platform, video_id) DO UPDATE SET
 """
 
 _ORDER_BY = {
-    "hot": "likes DESC, published_at DESC, video_id",
-    "latest": "published_at DESC, likes DESC, video_id",
+    "hot": "likes DESC, COALESCE(published_at, -1) DESC, video_id",
+    "latest": "COALESCE(published_at, -1) DESC, likes DESC, video_id",
 }
+
+_AVAILABILITY_VALUES = {"available", "hidden", "unavailable"}
+
+
+class InvalidViralCursorError(ValueError):
+    """Raised when a list cursor is malformed or belongs to another query."""
+
+
+@dataclass(frozen=True)
+class ViralVideoPage:
+    items: list[ViralVideo]
+    total: int
+    has_more: bool
+    next_cursor: str | None
 
 
 def _row_to_video(row: Any) -> ViralVideo:
@@ -177,25 +194,202 @@ def _merge_cached_statistics_metadata(
     return merged
 
 
-def upsert_viral_videos(conn: BusinessConnection, videos: list[ViralVideo]) -> None:
+def upsert_viral_videos(
+    conn: BusinessConnection, videos: list[ViralVideo], *, commit: bool = True
+) -> None:
     """按 (platform, video_id) 去重写入/刷新条目."""
     with _NATIVE_JSON_RMW_LOCK:
         for video in _merge_cached_statistics_metadata(conn, videos):
             conn.execute(_UPSERT_SQL, _video_row(video))
-        conn.commit()
+        if commit:
+            conn.commit()
 
 
 def list_viral_videos(conn: BusinessConnection, *, platform: str, sort: str) -> list[ViralVideo]:
     order = _ORDER_BY.get(sort, _ORDER_BY["hot"])
+    now = int(datetime.now(UTC).timestamp())
     rows = conn.execute(
         f"""
         SELECT * FROM viral_videos
-        WHERE platform = %s AND (published_at IS NULL OR published_at >= %s)
+        WHERE platform = %s AND published_at BETWEEN %s AND %s
         ORDER BY {order}
         """,
-        (platform, int((datetime.now(UTC) - timedelta(days=7)).timestamp())),
+        (platform, now - int(timedelta(days=7).total_seconds()), now),
     ).fetchall()
     return [_row_to_video(row) for row in rows if not is_irrelevant_viral_video(str(row["title"]))]
+
+
+def _cursor_values(video: ViralVideo, sort: str) -> tuple[int, int, str]:
+    published_at = video.published_at if video.published_at is not None else -1
+    if sort == "latest":
+        return published_at, video.likes, video.video_id
+    return video.likes, published_at, video.video_id
+
+
+def _encode_cursor(video: ViralVideo, *, platform: str, sort: str, data_version: str | None) -> str:
+    payload = {
+        "v": 2,
+        "p": platform,
+        "s": sort,
+        "d": data_version,
+        "k": list(_cursor_values(video, sort)),
+    }
+    encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    return urlsafe_b64encode(encoded).decode("ascii").rstrip("=")
+
+
+def _decode_cursor(
+    cursor: str, *, platform: str, sort: str
+) -> tuple[tuple[int, int, str], str | None]:
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        payload = json.loads(urlsafe_b64decode(padded.encode("ascii")))
+        values = payload["k"]
+        if (
+            payload.get("v") != 2
+            or payload.get("p") != platform
+            or payload.get("s") != sort
+            or not isinstance(values, list)
+            or len(values) != 3
+            or not isinstance(values[0], int)
+            or not isinstance(values[1], int)
+            or not isinstance(values[2], str)
+        ):
+            raise ValueError
+        data_version = payload.get("d")
+        if data_version is not None and not isinstance(data_version, str):
+            raise ValueError
+        return (values[0], values[1], values[2]), data_version
+    except (
+        AttributeError,
+        binascii.Error,
+        KeyError,
+        TypeError,
+        ValueError,
+        json.JSONDecodeError,
+        UnicodeDecodeError,
+    ) as exc:
+        raise InvalidViralCursorError("invalid viral video cursor") from exc
+
+
+def validate_viral_cursor(cursor: str, *, platform: str, sort: str) -> None:
+    _decode_cursor(cursor, platform=platform, sort=sort)
+
+
+def _page_boundary_sql(sort: str, values: tuple[int, int, str]) -> tuple[str, tuple[object, ...]]:
+    first, second, video_id = values
+    if sort == "latest":
+        return (
+            """
+            AND (
+                COALESCE(published_at, -1) < %s
+                OR (COALESCE(published_at, -1) = %s AND likes < %s)
+                OR (COALESCE(published_at, -1) = %s AND likes = %s AND video_id > %s)
+            )
+            """,
+            (first, first, second, first, second, video_id),
+        )
+    return (
+        """
+        AND (
+            likes < %s
+            OR (likes = %s AND COALESCE(published_at, -1) < %s)
+            OR (likes = %s AND COALESCE(published_at, -1) = %s AND video_id > %s)
+        )
+        """,
+        (first, first, second, first, second, video_id),
+    )
+
+
+def _recent_relevant_total(
+    conn: BusinessConnection, *, platform: str, cutoff: int, now: int
+) -> int:
+    rows = conn.execute(
+        """
+        SELECT title FROM viral_videos
+        WHERE platform = %s AND published_at BETWEEN %s AND %s
+          AND NOT EXISTS (
+              SELECT 1 FROM viral_video_visibility visibility
+              WHERE visibility.platform = viral_videos.platform
+                AND visibility.video_id = viral_videos.video_id
+                AND visibility.status != 'AVAILABLE'
+          )
+        """,
+        (platform, cutoff, now),
+    ).fetchall()
+    return sum(not is_irrelevant_viral_video(str(row["title"])) for row in rows)
+
+
+def list_viral_video_page(
+    conn: BusinessConnection,
+    *,
+    platform: str,
+    sort: str,
+    limit: int,
+    cursor: str | None = None,
+) -> ViralVideoPage:
+    """Read one stable keyset page without loading all video rows into memory."""
+    order = _ORDER_BY.get(sort, _ORDER_BY["hot"])
+    cutoff = int((datetime.now(UTC) - timedelta(days=7)).timestamp())
+    now = int(datetime.now(UTC).timestamp())
+    data_version = viral_fetched_at(conn, platform=platform, sort=sort)
+    boundary = None
+    if cursor:
+        boundary, cursor_version = _decode_cursor(cursor, platform=platform, sort=sort)
+        if cursor_version != data_version:
+            raise InvalidViralCursorError("viral video cursor data version changed")
+    collected: list[ViralVideo] = []
+    exhausted = False
+    chunk_size = max(32, min(100, limit * 2))
+
+    while len(collected) <= limit and not exhausted:
+        boundary_sql, boundary_params = (
+            _page_boundary_sql(sort, boundary) if boundary is not None else ("", ())
+        )
+        rows = conn.execute(
+            f"""
+            SELECT * FROM viral_videos
+            WHERE platform = %s AND published_at BETWEEN %s AND %s
+              AND NOT EXISTS (
+                  SELECT 1 FROM viral_video_visibility visibility
+                  WHERE visibility.platform = viral_videos.platform
+                    AND visibility.video_id = viral_videos.video_id
+                    AND visibility.status != 'AVAILABLE'
+              )
+            {boundary_sql}
+            ORDER BY {order}
+            LIMIT %s
+            """,
+            (platform, cutoff, now, *boundary_params, chunk_size),
+        ).fetchall()
+        exhausted = len(rows) < chunk_size
+        if not rows:
+            break
+        for row in rows:
+            video = _row_to_video(row)
+            if not is_irrelevant_viral_video(video.title):
+                collected.append(video)
+                if len(collected) > limit:
+                    break
+        boundary = _cursor_values(_row_to_video(rows[-1]), sort)
+
+    items = collected[:limit]
+    has_more = len(collected) > limit
+    return ViralVideoPage(
+        items=items,
+        total=_recent_relevant_total(conn, platform=platform, cutoff=cutoff, now=now),
+        has_more=has_more,
+        next_cursor=(
+            _encode_cursor(
+                items[-1],
+                platform=platform,
+                sort=sort,
+                data_version=data_version,
+            )
+            if has_more and items
+            else None
+        ),
+    )
 
 
 def get_viral_video(conn: BusinessConnection, *, platform: str, video_id: str) -> ViralVideo | None:
@@ -207,6 +401,232 @@ def get_viral_video(conn: BusinessConnection, *, platform: str, video_id: str) -
         (platform, video_id),
     ).fetchone()
     return _row_to_video(row) if row is not None else None
+
+
+def viral_video_availabilities(
+    conn: BusinessConnection, *, platform: str, video_ids: list[str]
+) -> dict[str, ViralAvailability]:
+    if not video_ids:
+        return {}
+    placeholders = ", ".join("%s" for _ in video_ids)
+    rows = conn.execute(
+        f"""
+        SELECT video_id, status FROM viral_video_visibility
+        WHERE platform = %s AND video_id IN ({placeholders})
+        """,
+        (platform, *video_ids),
+    ).fetchall()
+    result: dict[str, ViralAvailability] = {}
+    for row in rows:
+        value = str(row["status"]).lower()
+        if value in _AVAILABILITY_VALUES:
+            result[str(row["video_id"])] = cast(ViralAvailability, value)
+    return result
+
+
+def viral_video_availability(
+    conn: BusinessConnection, *, platform: str, video_id: str
+) -> ViralAvailability:
+    return viral_video_availabilities(conn, platform=platform, video_ids=[video_id]).get(
+        video_id, "available"
+    )
+
+
+def viral_runtime_controls(conn: BusinessConnection) -> tuple[bool, bool]:
+    row = conn.execute(
+        "SELECT collection_enabled, import_enabled FROM viral_runtime_controls WHERE id = 1"
+    ).fetchone()
+    if row is None:
+        return False, False
+    return bool(row["collection_enabled"]), bool(row["import_enabled"])
+
+
+def is_viral_favorite(
+    conn: BusinessConnection, *, user_id: str, platform: str, video_id: str
+) -> bool:
+    return (
+        conn.execute(
+            """
+            SELECT 1 FROM viral_video_favorites
+            WHERE user_id = %s AND platform = %s AND video_id = %s
+            """,
+            (user_id, platform, video_id),
+        ).fetchone()
+        is not None
+    )
+
+
+def favorite_viral_video_ids(
+    conn: BusinessConnection, *, user_id: str, platform: str, video_ids: list[str]
+) -> set[str]:
+    if not video_ids:
+        return set()
+    placeholders = ", ".join("%s" for _ in video_ids)
+    rows = conn.execute(
+        f"""
+        SELECT video_id FROM viral_video_favorites
+        WHERE user_id = %s AND platform = %s AND video_id IN ({placeholders})
+        """,
+        (user_id, platform, *video_ids),
+    ).fetchall()
+    return {str(row["video_id"]) for row in rows}
+
+
+def add_viral_favorite(
+    conn: BusinessConnection, *, user_id: str, platform: str, video_id: str
+) -> bool:
+    cursor = conn.execute(
+        """
+        INSERT INTO viral_video_favorites (user_id, platform, video_id)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (user_id, platform, video_id) DO NOTHING
+        """,
+        (user_id, platform, video_id),
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+def remove_viral_favorite(
+    conn: BusinessConnection, *, user_id: str, platform: str, video_id: str
+) -> bool:
+    cursor = conn.execute(
+        """
+        DELETE FROM viral_video_favorites
+        WHERE user_id = %s AND platform = %s AND video_id = %s
+        """,
+        (user_id, platform, video_id),
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+def list_favorite_viral_videos(
+    conn: BusinessConnection, *, user_id: str, platform: str | None = None
+) -> list[ViralVideo]:
+    platform_sql = "AND f.platform = %s" if platform is not None else ""
+    params: tuple[object, ...] = (user_id, platform) if platform is not None else (user_id,)
+    rows = conn.execute(
+        f"""
+        SELECT v.* FROM viral_video_favorites f
+        JOIN viral_videos v ON v.platform = f.platform AND v.video_id = f.video_id
+        WHERE f.user_id = %s {platform_sql}
+        ORDER BY f.created_at DESC, f.platform, f.video_id
+        """,
+        params,
+    ).fetchall()
+    return [_row_to_video(row) for row in rows]
+
+
+def _encode_favorite_cursor(
+    *, created_at: str, platform: str, video_id: str, platform_filter: str | None
+) -> str:
+    payload = {
+        "v": 1,
+        "t": "favorite",
+        "p": platform_filter,
+        "k": [created_at, platform, video_id],
+    }
+    encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    return urlsafe_b64encode(encoded).decode("ascii").rstrip("=")
+
+
+def _decode_favorite_cursor(cursor: str, *, platform_filter: str | None) -> tuple[str, str, str]:
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        payload = json.loads(urlsafe_b64decode(padded.encode("ascii")))
+        values = payload["k"]
+        if (
+            payload.get("v") != 1
+            or payload.get("t") != "favorite"
+            or payload.get("p") != platform_filter
+            or not isinstance(values, list)
+            or len(values) != 3
+            or any(not isinstance(value, str) for value in values)
+        ):
+            raise ValueError
+        return values[0], values[1], values[2]
+    except (
+        AttributeError,
+        binascii.Error,
+        KeyError,
+        TypeError,
+        ValueError,
+        json.JSONDecodeError,
+        UnicodeDecodeError,
+    ) as exc:
+        raise InvalidViralCursorError("invalid favorite cursor") from exc
+
+
+def list_favorite_viral_video_page(
+    conn: BusinessConnection,
+    *,
+    user_id: str,
+    limit: int,
+    platform: str | None = None,
+    cursor: str | None = None,
+) -> ViralVideoPage:
+    """Read a user's favorites without loading the full collection."""
+    platform_sql = "AND f.platform = %s" if platform is not None else ""
+    platform_params: tuple[object, ...] = (platform,) if platform is not None else ()
+    boundary_sql = ""
+    boundary_params: tuple[object, ...] = ()
+    if cursor is not None:
+        created_at, boundary_platform, video_id = _decode_favorite_cursor(
+            cursor, platform_filter=platform
+        )
+        boundary_sql = """
+            AND (
+                f.created_at < %s
+                OR (f.created_at = %s AND f.platform > %s)
+                OR (f.created_at = %s AND f.platform = %s AND f.video_id > %s)
+            )
+        """
+        boundary_params = (
+            created_at,
+            created_at,
+            boundary_platform,
+            created_at,
+            boundary_platform,
+            video_id,
+        )
+    rows = conn.execute(
+        f"""
+        SELECT v.*, f.created_at AS favorite_created_at
+        FROM viral_video_favorites f
+        JOIN viral_videos v ON v.platform = f.platform AND v.video_id = f.video_id
+        WHERE f.user_id = %s {platform_sql} {boundary_sql}
+        ORDER BY f.created_at DESC, f.platform, f.video_id
+        LIMIT %s
+        """,
+        (user_id, *platform_params, *boundary_params, limit + 1),
+    ).fetchall()
+    total_row = conn.execute(
+        f"""
+        SELECT COUNT(*) AS count
+        FROM viral_video_favorites f
+        JOIN viral_videos v ON v.platform = f.platform AND v.video_id = f.video_id
+        WHERE f.user_id = %s {platform_sql}
+        """,
+        (user_id, *platform_params),
+    ).fetchone()
+    has_more = len(rows) > limit
+    page_rows = rows[:limit]
+    return ViralVideoPage(
+        items=[_row_to_video(row) for row in page_rows],
+        total=int(total_row["count"]) if total_row is not None else 0,
+        has_more=has_more,
+        next_cursor=(
+            _encode_favorite_cursor(
+                created_at=str(page_rows[-1]["favorite_created_at"]),
+                platform=str(page_rows[-1]["platform"]),
+                video_id=str(page_rows[-1]["video_id"]),
+                platform_filter=platform,
+            )
+            if has_more and page_rows
+            else None
+        ),
+    )
 
 
 def update_viral_cover(
@@ -285,6 +705,9 @@ def update_viral_statistics(
         native = _native_from_json(row["native_json"])
         native[STATISTICS_CHECKED_AT_KEY] = datetime.now(UTC).isoformat()
         native.pop(STATISTICS_RETRY_AT_KEY, None)
+        description = getattr(detail, "description", None)
+        if description:
+            native["source_description"] = description
         conn.execute(
             """
             UPDATE viral_videos SET

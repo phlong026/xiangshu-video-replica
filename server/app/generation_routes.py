@@ -79,8 +79,10 @@ from app.script_rewrite import (
     enqueue_script_rewrite_task,
     latest_script_rewrite_task,
     load_script_rewrite_task,
+    require_current_script_rewrite_source,
     require_owned_script_rewrite_identity,
     script_rewrite_task_result,
+    validated_script_rewrite_request,
 )
 
 router = APIRouter(prefix="/api", tags=["generation"])
@@ -102,6 +104,8 @@ class ScriptRewriteTaskResponse(BaseModel):
     identity_id: str | None
     ip_profile_hash: str | None
     ip_profile_snapshot: ScriptRewriteIpProfileSummary | None
+    source_asset_id: str | None
+    source_text: str
     status: str
     attempt: int
     result: ScriptRewriteResult | None
@@ -165,6 +169,7 @@ def rewrite_project_script(
             source_text=request.text,
             idempotency_key=request.idempotency_key or str(uuid4()),
             identity_id=request.identity_id,
+            source_asset_id=request.source_asset_id,
         )
         return script_rewrite_task_response(row)
 
@@ -198,6 +203,7 @@ def read_latest_script_rewrite_task(
     actor: AuthenticatedUser,
     identity_scope: Literal["all", "identity", "none"] = Query(default="all"),
     identity_id: str | None = Query(default=None, min_length=1, max_length=128),
+    source_asset_id: str | None = Query(default=None, min_length=1, max_length=128),
 ) -> ScriptRewriteTaskResponse | None:
     require_project_access(
         conn,
@@ -228,12 +234,26 @@ def read_latest_script_rewrite_task(
             actor=actor,
             identity_id=identity_id,
         )
+    if source_asset_id is not None:
+        require_current_script_rewrite_source(
+            conn,
+            actor=actor,
+            project_id=project_id,
+            source_asset_id=source_asset_id,
+        )
     row = latest_script_rewrite_task(
         conn,
         project_id=project_id,
         identity_id=identity_id,
         identity_scope=identity_scope,
     )
+    if row is not None and source_asset_id is not None:
+        try:
+            request = validated_script_rewrite_request(row)
+        except ValueError as exc:
+            raise _script_rewrite_request_integrity_error(row["id"], exc) from exc
+        if request.source_asset_id != source_asset_id:
+            return None
     return None if row is None else script_rewrite_task_response(row)
 
 
@@ -244,12 +264,18 @@ def script_rewrite_task_response(row: sqlite3.Row) -> ScriptRewriteTaskResponse:
         identity_id=None if row["identity_id"] is None else str(row["identity_id"]),
         expected_hash=None if row["ip_profile_hash"] is None else str(row["ip_profile_hash"]),
     )
+    try:
+        request = validated_script_rewrite_request(row)
+    except ValueError as exc:
+        raise _script_rewrite_request_integrity_error(row["id"], exc) from exc
     return ScriptRewriteTaskResponse(
         id=str(row["id"]),
         project_id=str(row["project_id"]),
         identity_id=None if row["identity_id"] is None else str(row["identity_id"]),
         ip_profile_hash=(None if row["ip_profile_hash"] is None else str(row["ip_profile_hash"])),
         ip_profile_snapshot=snapshot,
+        source_asset_id=request.source_asset_id,
+        source_text=request.source_text,
         status=str(row["status"]),
         attempt=int(row["attempt"]),
         result=script_rewrite_task_result(row),
@@ -262,6 +288,17 @@ def script_rewrite_task_response(row: sqlite3.Row) -> ScriptRewriteTaskResponse:
         updated_at=str(row["updated_at"]),
         started_at=None if row["started_at"] is None else str(row["started_at"]),
         completed_at=(None if row["completed_at"] is None else str(row["completed_at"])),
+    )
+
+
+def _script_rewrite_request_integrity_error(task_id: object, cause: Exception) -> HTTPException:
+    logger.error("Script rewrite task %s has invalid request payload: %s", task_id, cause)
+    return HTTPException(
+        status_code=500,
+        detail={
+            "code": "SCRIPT_REWRITE_REQUEST_INTEGRITY_ERROR",
+            "message": "改写任务原文校验失败，请重新提交。",
+        },
     )
 
 

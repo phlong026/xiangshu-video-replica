@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   completeMaterialUpload,
   confirmOralVoice,
@@ -12,8 +12,14 @@ import {
   updateSimpleCharacterProfile,
   uploadMaterial,
 } from "../api";
-import { CharacterLibrary } from "../CharacterLibrary";
 import { useStudio } from "./context";
+import {
+  loadMorePeople,
+  loadPersonAssets,
+  readAudioDuration,
+  uploadOralAudioMaterial,
+  validateOralAudioFile,
+} from "./live";
 import type { StudioPage, StudioPerson } from "./types";
 import { Button, Empty, Field, Hint, Media, Panel, Tabs } from "./ui";
 import "./people.css";
@@ -35,6 +41,18 @@ type CloneSubmission = {
   idempotencyKey: string;
   consentId?: string;
 };
+
+const MISSING_ORAL_SOURCE_CODES = new Set([
+  "ASSET_NOT_FOUND",
+  "MATERIAL_NOT_FOUND",
+  "SOURCE_ASSET_NOT_FOUND",
+]);
+
+function isMissingOralSource(cause: unknown): boolean {
+  if (!cause || typeof cause !== "object") return false;
+  const code = (cause as { code?: string }).code?.trim().toUpperCase();
+  return MISSING_ORAL_SOURCE_CODES.has(code ?? "");
+}
 
 function createCloneIdempotencyKey(kind: "avatar" | "voice") {
   const suffix =
@@ -115,35 +133,51 @@ function selectedPerson(people: StudioPerson[], id?: string) {
 }
 
 export function PeoplePage() {
-  const { data, navigate, refresh, review, state, user } = useStudio();
+  const { data, navigate, openLive, review, updateData, notify, user } =
+    useStudio();
+  const readOnly = user.role === "auditor";
   const [roleFilter, setRoleFilter] = useState("全部");
-  if (!review) {
-    return (
-      <section className="people-page" aria-label="人物库">
-        <div className="people-toolbar">
-          <div>
-            <h1>人物库</h1>
-            <p>统一管理人物定位、五视图、场景造型、口播分身与声音</p>
-          </div>
-        </div>
-        <CharacterLibrary
-          initialIdentityId={state.selectedPersonId}
-          initialTab={state.selectedPersonId ? "scenes" : "base"}
-          onChanged={refresh}
-          onOpenProfile={(identityId) =>
-            navigate("person-ip", { selectedPersonId: identityId })
-          }
-          userId={user.id}
-          userRole={user.role}
-        />
-      </section>
-    );
-  }
+  const [loadingMore, setLoadingMore] = useState(false);
   const people = data.people;
   const visiblePeople =
     roleFilter === "全部"
       ? people
       : people.filter((person) => person.role === roleFilter);
+  const peoplePage = data.pagination?.people;
+  const loadNextPeoplePage = async () => {
+    if (review || loadingMore || !peoplePage?.nextCursor) return;
+    setLoadingMore(true);
+    try {
+      const result = await loadMorePeople(peoplePage.nextCursor);
+      updateData((current) => {
+        const knownPeople = new Set(current.people.map((person) => person.id));
+        const knownAssets = new Set(current.assets.map((asset) => asset.id));
+        return {
+          ...current,
+          people: [
+            ...current.people,
+            ...result.people.filter((person) => !knownPeople.has(person.id)),
+          ],
+          assets: [
+            ...current.assets,
+            ...result.assets.filter((asset) => !knownAssets.has(asset.id)),
+          ],
+          errors: [...current.errors, ...result.errors],
+          pagination: {
+            ...current.pagination,
+            people: {
+              nextCursor: result.nextCursor,
+              total: result.total,
+            },
+          },
+        };
+      });
+    } catch (cause) {
+      notify(customerVisibleErrorMessage(cause, "加载更多人物失败，请重试。"));
+    } finally {
+      setLoadingMore(false);
+    }
+  };
   return (
     <section className="people-page" aria-label="人物库">
       <div className="people-toolbar">
@@ -153,8 +187,11 @@ export function PeoplePage() {
         </div>
         <Button
           aria-label="新增人物"
+          disabled={readOnly}
           variant="primary"
-          onClick={() => navigate("people")}
+          onClick={() => {
+            if (!readOnly) openLive("characters");
+          }}
         >
           ＋ 新增人物
         </Button>
@@ -178,7 +215,14 @@ export function PeoplePage() {
           title="还没有人物"
           description="从人物库创建第一位乡墅行业 IP。"
           action={
-            <Button variant="primary" onClick={() => navigate("people")}>
+            <Button
+              disabled={readOnly}
+              variant="primary"
+              onClick={() => {
+                if (readOnly) return;
+                openLive("characters");
+              }}
+            >
               新增人物
             </Button>
           }
@@ -196,6 +240,19 @@ export function PeoplePage() {
           ))}
         </div>
       )}
+      {peoplePage && peoplePage.total > people.length ? (
+        <div className="people-pagination">
+          <span>
+            已加载 {people.length} / {peoplePage.total} 位人物
+          </span>
+          <Button
+            disabled={loadingMore || !peoplePage.nextCursor}
+            onClick={() => void loadNextPeoplePage()}
+          >
+            {loadingMore ? "正在加载…" : "加载更多人物"}
+          </Button>
+        </div>
+      ) : null}
       <Hint>
         普通照片用于画面创作；口播需要可用分身，文案模式还需要已确认声音。
       </Hint>
@@ -210,10 +267,12 @@ function PersonCard({
   person: StudioPerson;
   onOpen(): void;
 }) {
-  const { navigate } = useStudio();
+  const { navigate, review } = useStudio();
   const portrait = person.portrait;
   const voices = person.voices.filter((voice) => voice.confirmed).length;
   const avatars = person.avatars.filter((avatar) => avatar.ready).length;
+  const photoCount =
+    person.photoCount ?? (review ? person.photoIds.length : undefined);
   return (
     <article className="person-card">
       <Media
@@ -237,7 +296,11 @@ function PersonCard({
         <h2>{person.name}</h2>
         <p>{person.role}</p>
         <div className="person-card__meta">
-          <span>✓ 场景造型 {person.sceneLookCount} 套</span>
+          <span>
+            {photoCount === undefined
+              ? "形象照片数量未知"
+              : `✓ 形象照片 ${photoCount} 张`}
+          </span>
           <span>✓ 口播分身 {avatars} 个</span>
           <span className={voices ? "" : "is-warning"}>
             {voices ? `✓ 可用声音 ${voices} 个` : "！声音待添加"}
@@ -331,7 +394,9 @@ function PersonHeader({ person }: { person: StudioPerson }) {
 }
 
 function IpPanel({ person }: { person: StudioPerson }) {
-  const { review, updateData, navigate, notify, patchDraft } = useStudio();
+  const { review, updateData, navigate, notify, patchDraft, user } =
+    useStudio();
+  const readOnly = user.role === "auditor";
   const [saving, setSaving] = useState(false);
   const [draft, setDraft] = useState(() => ({
     name: person.name,
@@ -343,7 +408,7 @@ function IpPanel({ person }: { person: StudioPerson }) {
   const update = (key: keyof typeof draft, value: string) =>
     setDraft((current) => ({ ...current, [key]: value }));
   const save = async () => {
-    if (saving) return;
+    if (readOnly || saving) return;
     if (review) {
       updateData((data) => ({
         ...data,
@@ -382,30 +447,35 @@ function IpPanel({ person }: { person: StudioPerson }) {
         <h2>人物定位</h2>
         <Field label="姓名">
           <input
+            disabled={readOnly}
             value={draft.name}
             onChange={(event) => update("name", event.target.value)}
           />
         </Field>
         <Field label="身份">
           <input
+            disabled={readOnly}
             value={draft.role}
             onChange={(event) => update("role", event.target.value)}
           />
         </Field>
         <Field label="服务范围">
           <input
+            disabled={readOnly}
             value={draft.scope}
             onChange={(event) => update("scope", event.target.value)}
           />
         </Field>
         <Field label="目标人群">
           <input
+            disabled={readOnly}
             value={draft.audience}
             onChange={(event) => update("audience", event.target.value)}
           />
         </Field>
         <Field label="表达特点">
           <input
+            disabled={readOnly}
             value={draft.expression}
             onChange={(event) => update("expression", event.target.value)}
           />
@@ -420,12 +490,18 @@ function IpPanel({ person }: { person: StudioPerson }) {
         <Hint>文案工坊会引用此定位生成更贴合乡墅行业的内容。</Hint>
       </Panel>
       <div className="person-footer">
-        <Button variant="primary" disabled={saving} onClick={() => void save()}>
+        <Button
+          variant="primary"
+          disabled={readOnly || saving}
+          onClick={() => void save()}
+        >
           {review ? "保存定位草稿" : saving ? "保存中…" : "保存 IP 定位"}
         </Button>
         <Button
+          disabled={readOnly}
           variant="outline"
           onClick={() => {
+            if (readOnly) return;
             patchDraft({ ipId: person.id });
             navigate("copy", { selectedPersonId: person.id });
           }}
@@ -438,13 +514,63 @@ function IpPanel({ person }: { person: StudioPerson }) {
 }
 
 function PhotosPanel({ person }: { person: StudioPerson }) {
-  const { navigate, patchDraft, data, notify } = useStudio();
+  const {
+    openLive,
+    navigate,
+    patchDraft,
+    data,
+    notify,
+    review,
+    updateData,
+    user,
+  } = useStudio();
+  const readOnly = user.role === "auditor";
+  const [loadingMore, setLoadingMore] = useState(false);
   const assets = data.assets.filter(
-    (asset) =>
-      asset.personId === person.id &&
-      asset.kind === "image" &&
-      (asset.composite || asset.source === "人物库场景造型"),
+    (asset) => asset.personId === person.id && asset.kind === "image",
   );
+  const scenePage = data.pagination?.scenes?.[person.id];
+  const loadNextScenes = async () => {
+    if (review || loadingMore || !scenePage) return;
+    setLoadingMore(true);
+    try {
+      const result = await loadPersonAssets(person.id, scenePage.loaded);
+      updateData((current) => {
+        const knownAssets = new Set(current.assets.map((asset) => asset.id));
+        const nextAssets = result.assets.filter(
+          (asset) => !knownAssets.has(asset.id),
+        );
+        return {
+          ...current,
+          assets: [...current.assets, ...nextAssets],
+          people: current.people.map((entry) =>
+            entry.id === person.id
+              ? {
+                  ...entry,
+                  photoIds: [
+                    ...entry.photoIds,
+                    ...nextAssets.map((asset) => asset.id),
+                  ],
+                  photoCount: result.total,
+                }
+              : entry,
+          ),
+          errors: [...current.errors, ...result.errors],
+          pagination: {
+            ...current.pagination,
+            scenes: {
+              ...current.pagination?.scenes,
+              [person.id]: { loaded: result.loaded, total: result.total },
+            },
+          },
+        };
+      });
+    } catch (cause) {
+      notify(customerVisibleErrorMessage(cause, "加载更多场景失败，请重试。"));
+    } finally {
+      setLoadingMore(false);
+    }
+  };
   return (
     <div className="photos-panel">
       <div className="panel-heading">
@@ -454,8 +580,10 @@ function PhotosPanel({ person }: { person: StudioPerson }) {
         </div>
         <div>
           <Button
+            disabled={readOnly}
             variant="outline"
             onClick={() => {
+              if (readOnly) return;
               notify(`正在打开${person.name}的五视图与场景造型。`);
               navigate("people", { selectedPersonId: person.id });
             }}
@@ -463,8 +591,10 @@ function PhotosPanel({ person }: { person: StudioPerson }) {
             管理形象照
           </Button>
           <Button
+            disabled={readOnly}
             variant="primary"
             onClick={() => {
+              if (readOnly) return;
               notify(`将在人物管理中为${person.name}选择并生成场景形象照。`);
               navigate("people", { selectedPersonId: person.id });
             }}
@@ -497,10 +627,12 @@ function PhotosPanel({ person }: { person: StudioPerson }) {
             description="前往人物管理上传照片创建。"
             action={
               <Button
+                disabled={readOnly}
                 variant="outline"
-                onClick={() =>
-                  navigate("people", { selectedPersonId: person.id })
-                }
+                onClick={() => {
+                  if (readOnly) return;
+                  openLive("characters");
+                }}
               >
                 打开人物管理
               </Button>
@@ -518,8 +650,10 @@ function PhotosPanel({ person }: { person: StudioPerson }) {
               <strong>{asset.name}</strong>
               <div>
                 <Button
+                  disabled={readOnly}
                   variant="outline"
                   onClick={() => {
+                    if (readOnly) return;
                     patchDraft({ ipId: person.id, imageId: asset.id });
                     navigate("person-avatars", {
                       selectedPersonId: person.id,
@@ -530,8 +664,10 @@ function PhotosPanel({ person }: { person: StudioPerson }) {
                   制作口播分身
                 </Button>
                 <Button
+                  disabled={readOnly}
                   variant="primary"
                   onClick={() => {
+                    if (readOnly) return;
                     patchDraft({ ipId: person.id, imageId: asset.id });
                     navigate("replacement", {
                       selectedPersonId: person.id,
@@ -545,6 +681,16 @@ function PhotosPanel({ person }: { person: StudioPerson }) {
             </Panel>
           ))}
       </div>
+      {scenePage && scenePage.loaded < scenePage.total ? (
+        <div className="people-pagination">
+          <span>
+            已加载 {scenePage.loaded} / {scenePage.total} 套场景
+          </span>
+          <Button disabled={loadingMore} onClick={() => void loadNextScenes()}>
+            {loadingMore ? "正在加载…" : "加载更多场景"}
+          </Button>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -559,22 +705,35 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
     patchDraft,
     notify,
     refresh,
+    user,
   } = useStudio();
+  const readOnly = user.role === "auditor";
   const [title, setTitle] = useState(`${person.name}照片分身`);
   const [busy, setBusy] = useState(false);
   const [consentedSourceId, setConsentedSourceId] = useState<string>();
   const [error, setError] = useState<string>();
   const [uploadProgress, setUploadProgress] = useState<number>();
   const [uploadedVideo, setUploadedVideo] = useState<UploadedOralSource>();
+  const [invalidPhotoSourceKey, setInvalidPhotoSourceKey] = useState<string>();
   const cloneSubmissionRef = useRef<CloneSubmission | undefined>(undefined);
   const ready = person.avatars.filter((avatar) => avatar.ready);
   const pending = person.avatars.filter((avatar) => !avatar.ready);
-  const sourceAsset = data.assets.find(
+  const selectedPhotoAsset = data.assets.find(
     (asset) =>
       asset.id === state.draft.imageId &&
       asset.kind === "image" &&
       asset.personId === person.id &&
-      asset.source === "人物库场景造型",
+      !asset.composite,
+  );
+  const selectedPhotoSourceKey = selectedPhotoAsset
+    ? `${person.id}:IMAGE:${selectedPhotoAsset.id}`
+    : undefined;
+  const sourceAsset =
+    invalidPhotoSourceKey === selectedPhotoSourceKey
+      ? undefined
+      : selectedPhotoAsset;
+  const photoSelectionInvalid = Boolean(
+    state.draft.imageId && (!selectedPhotoAsset || !sourceAsset),
   );
   const selectedSourceAssetId = sourceAsset?.id;
   const previousSourceAssetId = useRef(selectedSourceAssetId);
@@ -608,9 +767,44 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
     : sourceAsset
       ? { id: sourceAsset.id, name: sourceAsset.name, kind: "IMAGE" as const }
       : undefined;
+  const sourceKey = source
+    ? `${person.id}:${source.kind}:${source.id}`
+    : undefined;
+  const selectionLifecycleKey = uploadedVideo
+    ? `${person.id}:VIDEO:${uploadedVideo.assetId}`
+    : `${person.id}:IMAGE:${state.draft.imageId ?? ""}`;
+  const selectionLifecycleRef = useRef(selectionLifecycleKey);
+  const contextVersionRef = useRef(0);
+  const mountedRef = useRef(true);
+  const activeOperationRef = useRef<
+    { contextVersion: number; id: number; selectionKey: string } | undefined
+  >(undefined);
+  const operationSequenceRef = useRef(0);
+  const isCurrentOperation = (
+    operation: NonNullable<typeof activeOperationRef.current>,
+  ) =>
+    mountedRef.current &&
+    operation.contextVersion === contextVersionRef.current &&
+    operation.selectionKey === selectionLifecycleRef.current &&
+    activeOperationRef.current === operation;
+  // Invalidate before a parent layout effect can settle an earlier request.
+  useLayoutEffect(() => {
+    selectionLifecycleRef.current = selectionLifecycleKey;
+    contextVersionRef.current += 1;
+    activeOperationRef.current = undefined;
+    setBusy(false);
+  }, [selectionLifecycleKey]);
+  useLayoutEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      contextVersionRef.current += 1;
+      activeOperationRef.current = undefined;
+    };
+  }, []);
   const consented = Boolean(source && consentedSourceId === source.id);
   const handleVideoUpload = async (file: File) => {
-    if (review || busy) return;
+    if (review || readOnly || busy) return;
     const validationError = validateOralSource(file, "video");
     if (validationError) {
       setError(validationError);
@@ -636,7 +830,14 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
     }
   };
   const startClone = async () => {
-    if (review || busy || !source || !consented) return;
+    if (review || readOnly || busy || !source || !consented) return;
+    const operation = {
+      contextVersion: contextVersionRef.current,
+      id: operationSequenceRef.current + 1,
+      selectionKey: selectionLifecycleRef.current,
+    };
+    operationSequenceRef.current = operation.id;
+    activeOperationRef.current = operation;
     setBusy(true);
     setError(undefined);
     try {
@@ -663,6 +864,7 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
           sourceAssetId: source.id,
           purpose: "AVATAR",
         });
+        if (!isCurrentOperation(operation)) return;
         submission.consentId = consent.id;
       }
       await createOralAvatarClone({
@@ -673,16 +875,28 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
         consentId: submission.consentId,
         idempotencyKey: submission.idempotencyKey,
       });
+      if (!isCurrentOperation(operation)) return;
       notify(
         `${source.kind === "VIDEO" ? "视频" : "照片"}分身已提交，可在本页刷新制作状态。`,
       );
       refresh();
     } catch (cause) {
+      if (!isCurrentOperation(operation)) return;
+      if (source.kind === "IMAGE" && isMissingOralSource(cause)) {
+        setInvalidPhotoSourceKey(sourceKey);
+        setConsentedSourceId(undefined);
+        cloneSubmissionRef.current = undefined;
+        setError(undefined);
+        return;
+      }
       const message = customerVisibleErrorMessage(cause, "口播分身制作失败");
       setError(message);
       notify(message);
     } finally {
-      setBusy(false);
+      if (isCurrentOperation(operation)) {
+        activeOperationRef.current = undefined;
+        setBusy(false);
+      }
     }
   };
   const refreshClone = async (avatarId: string) => {
@@ -713,8 +927,10 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
                 {avatar.origin} · {avatar.duration}
               </p>
               <Button
+                disabled={readOnly}
                 variant="outline"
                 onClick={() => {
+                  if (readOnly) return;
                   patchDraft({ ipId: person.id, avatarId: avatar.id });
                   navigate(state.returnTo ?? "oral", {
                     selectedPersonId: person.id,
@@ -761,13 +977,19 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
         <h2>制作口播分身</h2>
         <p>只使用当前人物的素材，不会新建人物。完成后可直接用于数字人口播。</p>
         <Button
+          disabled={readOnly}
           variant="outline"
           onClick={() => {
-            patchDraft({ ipId: person.id });
+            if (readOnly) return;
+            patchDraft({
+              ipId: person.id,
+              ...(photoSelectionInvalid ? { imageId: undefined } : {}),
+            });
+            setInvalidPhotoSourceKey(undefined);
             openPicker("avatar-photo");
           }}
         >
-          用形象照片制作
+          {photoSelectionInvalid ? "重新选择形象照片" : "用形象照片制作"}
         </Button>
         {review ? (
           <Button
@@ -781,7 +1003,7 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
             <input
               accept=".mp4,.mov,video/mp4,video/quicktime"
               aria-label="选择人物视频"
-              disabled={busy}
+              disabled={readOnly || busy}
               type="file"
               onChange={(event) => {
                 const file = event.target.files?.[0];
@@ -792,6 +1014,7 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
         )}
         <Field label="分身名称">
           <input
+            disabled={readOnly}
             value={title}
             onChange={(event) => {
               setTitle(event.target.value);
@@ -804,7 +1027,9 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
             ? `已上传：${uploadedVideo.fileName}`
             : sourceAsset
               ? `已选：${sourceAsset.name}`
-              : "请先选择当前人物的一张场景形象照。"}
+              : photoSelectionInvalid
+                ? "所选照片已失效或不属于当前人物，请重新选择。"
+                : "请先选择当前人物的一张场景形象照。"}
         </p>
         {uploadProgress !== undefined ? <p>上传中 {uploadProgress}%</p> : null}
         {error ? <p role="alert">{error}</p> : null}
@@ -812,7 +1037,7 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
           <input
             aria-label="确认分身克隆授权"
             checked={consented}
-            disabled={review || busy}
+            disabled={review || readOnly || busy || !source}
             type="checkbox"
             onChange={(event) => {
               cloneSubmissionRef.current = undefined;
@@ -826,7 +1051,7 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
         <Hint>支持 MP4/MOV，上限 50 MB；分身制作为异步任务。</Hint>
         <Button
           variant="primary"
-          disabled={review || busy || !source || !consented}
+          disabled={review || readOnly || busy || !source || !consented}
           onClick={() => void startClone()}
         >
           {busy
@@ -849,19 +1074,49 @@ function VoicePanel({ person }: { person: StudioPerson }) {
     updateData,
     notify,
     refresh,
+    user,
   } = useStudio();
+  const readOnly = user.role === "auditor";
   const [title, setTitle] = useState(`${person.name}本人音色`);
   const [busy, setBusy] = useState(false);
   const [consentedSourceId, setConsentedSourceId] = useState<string>();
   const [error, setError] = useState<string>();
   const [uploadProgress, setUploadProgress] = useState<number>();
   const [uploadedAudio, setUploadedAudio] = useState<UploadedOralSource>();
+  const uploadInputRef = useRef<HTMLInputElement>(null);
+  const uploadAbortRef = useRef<AbortController | undefined>(undefined);
+  const uploadOperationRef = useRef(0);
+  const personContextRef = useRef(person.id);
+  const mountedRef = useRef(true);
   const cloneSubmissionRef = useRef<CloneSubmission | undefined>(undefined);
   const sourceAsset = data.assets.find(
-    (asset) => asset.id === state.draft.audioId && asset.kind === "audio",
+    (asset) =>
+      asset.id === state.draft.audioId &&
+      asset.kind === "audio" &&
+      (!asset.allowedUses || asset.allowedUses.includes("voice_clone")),
   );
   const selectedSourceAssetId = sourceAsset?.id;
   const previousSourceAssetId = useRef(selectedSourceAssetId);
+  useLayoutEffect(() => {
+    personContextRef.current = person.id;
+    uploadOperationRef.current += 1;
+    uploadAbortRef.current?.abort();
+    uploadAbortRef.current = undefined;
+    setBusy(false);
+    setUploadProgress(undefined);
+    setUploadedAudio(undefined);
+    setConsentedSourceId(undefined);
+    cloneSubmissionRef.current = undefined;
+  }, [person.id]);
+  useLayoutEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      uploadOperationRef.current += 1;
+      uploadAbortRef.current?.abort();
+      uploadAbortRef.current = undefined;
+    };
+  }, []);
   useEffect(() => {
     if (previousSourceAssetId.current === selectedSourceAssetId) return;
     previousSourceAssetId.current = selectedSourceAssetId;
@@ -892,31 +1147,87 @@ function VoicePanel({ person }: { person: StudioPerson }) {
       ? { id: sourceAsset.id, name: sourceAsset.name }
       : undefined;
   const consented = Boolean(source && consentedSourceId === source.id);
+  const cancelAudioUpload = () => {
+    uploadOperationRef.current += 1;
+    uploadAbortRef.current?.abort();
+    uploadAbortRef.current = undefined;
+    setBusy(false);
+    setUploadProgress(undefined);
+    if (uploadInputRef.current) uploadInputRef.current.value = "";
+  };
   const handleAudioUpload = async (file: File) => {
-    if (review || busy) return;
-    const validationError = validateOralSource(file, "audio");
+    if (review || readOnly || busy) return;
+    const validationError = validateOralAudioFile(file);
     if (validationError) {
       setError(validationError);
       return;
     }
+    const operation = ++uploadOperationRef.current;
+    const personId = person.id;
+    uploadAbortRef.current?.abort();
+    const controller = new AbortController();
+    uploadAbortRef.current = controller;
     setBusy(true);
     setError(undefined);
     setConsentedSourceId(undefined);
     cloneSubmissionRef.current = undefined;
     setUploadProgress(0);
     try {
-      setUploadedAudio(
-        await uploadOralSource(file, "声音克隆样本", setUploadProgress),
+      const duration = await readAudioDuration(file);
+      if (
+        !mountedRef.current ||
+        personId !== personContextRef.current ||
+        operation !== uploadOperationRef.current
+      )
+        return;
+      if (duration < 5 || duration > 180) {
+        setError("声音克隆样本时长必须为 5–180 秒。");
+        return;
+      }
+      const uploaded = await uploadOralAudioMaterial(
+        file,
+        "voice_clone",
+        duration,
+        (progress) => {
+          if (
+            mountedRef.current &&
+            personId === personContextRef.current &&
+            operation === uploadOperationRef.current
+          )
+            setUploadProgress(progress);
+        },
+        controller.signal,
       );
+      if (
+        !mountedRef.current ||
+        personId !== personContextRef.current ||
+        operation !== uploadOperationRef.current
+      )
+        return;
+      setUploadedAudio({ assetId: uploaded.id, fileName: file.name });
     } catch (cause) {
+      if (
+        !mountedRef.current ||
+        personId !== personContextRef.current ||
+        operation !== uploadOperationRef.current
+      )
+        return;
       setError(customerVisibleErrorMessage(cause, "声音样本上传失败"));
     } finally {
-      setBusy(false);
-      setUploadProgress(undefined);
+      if (
+        mountedRef.current &&
+        personId === personContextRef.current &&
+        operation === uploadOperationRef.current
+      ) {
+        uploadAbortRef.current = undefined;
+        setBusy(false);
+        setUploadProgress(undefined);
+        if (uploadInputRef.current) uploadInputRef.current.value = "";
+      }
     }
   };
   const startClone = async () => {
-    if (review || busy || !source || !consented) return;
+    if (review || readOnly || busy || !source || !consented) return;
     setBusy(true);
     setError(undefined);
     try {
@@ -968,7 +1279,7 @@ function VoicePanel({ person }: { person: StudioPerson }) {
     }
   };
   const confirmVoice = async (voiceId: string) => {
-    if (busy) return;
+    if (readOnly || busy) return;
     setBusy(true);
     setError(undefined);
     try {
@@ -1052,8 +1363,10 @@ function VoicePanel({ person }: { person: StudioPerson }) {
               )}
               {voice.confirmed ? (
                 <Button
+                  disabled={readOnly}
                   variant="primary"
                   onClick={() => {
+                    if (readOnly) return;
                     patchDraft({ ipId: person.id, voiceId: voice.id });
                     navigate(state.returnTo ?? "oral", {
                       selectedPersonId: person.id,
@@ -1079,7 +1392,7 @@ function VoicePanel({ person }: { person: StudioPerson }) {
                   (review && !voice.status) ? (
                   <Button
                     variant="primary"
-                    disabled={busy}
+                    disabled={readOnly || busy}
                     onClick={() => void confirmVoice(voice.id)}
                   >
                     确认使用此声音
@@ -1100,10 +1413,12 @@ function VoicePanel({ person }: { person: StudioPerson }) {
         <h2>克隆声音</h2>
         <p>仅使用本人或已获授权的声音样本，建议 5–180 秒（3 分钟）清晰干声。</p>
         <Button
+          disabled={readOnly}
           variant="outline"
           onClick={() => {
+            if (readOnly) return;
             patchDraft({ ipId: person.id });
-            openPicker("audio");
+            openPicker("voice-audio");
           }}
         >
           从素材选择声音样本
@@ -1111,9 +1426,10 @@ function VoicePanel({ person }: { person: StudioPerson }) {
         {review ? null : (
           <Field label="上传声音样本">
             <input
+              ref={uploadInputRef}
               accept=".mp3,audio/mpeg"
               aria-label="选择声音样本"
-              disabled={busy}
+              disabled={readOnly || busy}
               type="file"
               onChange={(event) => {
                 const file = event.target.files?.[0];
@@ -1124,6 +1440,7 @@ function VoicePanel({ person }: { person: StudioPerson }) {
         )}
         <Field label="声音名称">
           <input
+            disabled={readOnly}
             value={title}
             onChange={(event) => {
               setTitle(event.target.value);
@@ -1140,12 +1457,17 @@ function VoicePanel({ person }: { person: StudioPerson }) {
               : "请先选择声音样本。"}
         </p>
         {uploadProgress !== undefined ? <p>上传中 {uploadProgress}%</p> : null}
+        {uploadProgress !== undefined ? (
+          <Button variant="outline" onClick={cancelAudioUpload}>
+            取消上传
+          </Button>
+        ) : null}
         {error ? <p role="alert">{error}</p> : null}
         <label>
           <input
             aria-label="确认声音克隆授权"
             checked={consented}
-            disabled={review || busy}
+            disabled={review || readOnly || busy}
             type="checkbox"
             onChange={(event) => {
               cloneSubmissionRef.current = undefined;
@@ -1158,7 +1480,7 @@ function VoicePanel({ person }: { person: StudioPerson }) {
         </label>
         <Button
           variant="primary"
-          disabled={review || busy || !source || !consented}
+          disabled={review || readOnly || busy || !source || !consented}
           onClick={() => void startClone()}
         >
           {busy ? "提交中…" : "开始克隆声音"}

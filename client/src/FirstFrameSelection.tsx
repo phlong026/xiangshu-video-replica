@@ -199,9 +199,6 @@ export function FirstFrameSelection({
         } else {
           setStatus("");
         }
-        if (readOnly) {
-          return;
-        }
         const previews = await Promise.allSettled(
           payload.candidates.map(async (candidate) => {
             const download = await getAssetDownloadUrl(candidate.asset_id);
@@ -237,7 +234,6 @@ export function FirstFrameSelection({
       legacyCharacterSelected,
       onSelectionChange,
       projectId,
-      readOnly,
       referenceSelectionId,
       simplified,
       sourceFrameSelectionId,
@@ -600,9 +596,6 @@ export function FirstFrameSelection({
             <p className="settings-error">
               模拟输出：尚未调用正式图像生成服务。
             </p>
-          ) : null}
-          {readOnly ? (
-            <p className="status-note">只读身份不加载素材预览。</p>
           ) : null}
           <fieldset className="first-frame-options">
             <legend>

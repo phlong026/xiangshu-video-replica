@@ -1,5 +1,11 @@
 # Agent 工作说明（短视频复刻 · 客户版 V3）
 
+> 当前执行清单已更新为[本地实现去重V3](outputs/customer-cloud-convergence-analysis-2026-09-08/v3/客户版收敛剩余任务清单与验收完工标准-V3.md)：57项剩余排程，复用既有代码；原60项及CW-006/008/011保留追溯，当前状态仅见任务账本§18。此更新不代表代码或数据迁移已完成。
+
+> 2026-09-08 PostgreSQL 全面统一增量：用户已确定开发、业务数据库测试、CI、staging、生产均使用 PostgreSQL；SQLite 仅限精确登记的离线历史输入、归档与兼容工具。
+> 实施与验收以[唯一数据库规范](docs/PostgreSQL唯一数据库实施与验收规范.md)及 CW-001—060 为准。此前仅客户生产 PG、默认开发 SQLite、SQLite 业务测试可作为当前验收的口径不再适用。
+> 本次更新只确认规范和任务定义；原代码仍有 SQLite 分支，历史任务/测试记录保留原文，不据此声明实际迁移或生产切换已完成。
+
 > 面向任何接手本仓库的 AI 开发代理（ChatGPT/Codex 云端、本地 CLI、IDE agent）。
 > 完整协作流程与最新进度快照见 `docs/ChatGPT网页端开发交接提示词-V3.md`；任务进度一律以仓库账本为准，本文件不维护进度快照。
 
@@ -24,10 +30,11 @@
 
 1. 从最新 main 切分支 `feat/customer-v3-tXX-短横线描述`；同一时间只开一个任务分支（多分支同改账本会连环冲突）。
 2. 测试先行：先写失败测试（红），再实现（绿）。
-3. 全量验证零回归后提 PR：标题 `TXX: <英文摘要>`；三门禁 CI 全绿（secret 扫描 / Linux 质量门 / Windows NSIS）；受保护 main 仅接受 squash merge（所有者账号 phlong026）。
-4. 同一 PR 内更新账本：任务清单任务状态 + 头部状态行 + §12 工作包状态、`docs/CUSTOMER-TASK-EVIDENCE-V3.md` 登记、`docs/evidence/TXX-EVIDENCE.md`（证据文件统一存放于 `docs/evidence/`，结构参照 `docs/evidence/T06-EVIDENCE.md`，含 §14 模板全文；2026-08-21 M0 评审 M8 起不再放仓库根目录）。
-5. 一个 PR 只承载一个任务；评审评论逐条实质修复后 resolve，不得当作流程噪音跳过。
-6. 需人工授权的动作（真实 ZPay / 付费 Provider / 生产 COS 变更 / 对外发码 / 灰度扩大 / 公网发布）必须先取得用户明确授权。
+3. push 前核对提交清单（防并发会话污染任务 PR）：先 `git fetch origin --prune`，再确认 `git log origin/main..HEAD --oneline` 中是且仅是本任务的提交；发现其他会话/他人的提交时，先摘出到独立分支（或与所有者确认处理方式），严禁混入任务 PR——squash 合并后外来提交将不可逆地进入 main（2026-08-22 曾有并发会话提交混入 PR #39）。push 后、合并前再核对一次 PR 的 Commits 列表。
+4. 全量验证零回归后提 PR：标题 `TXX: <英文摘要>`；三门禁 CI 全绿（secret 扫描 / Linux 质量门 / Windows NSIS）；受保护 main 仅接受 squash merge（所有者账号 phlong026）。
+5. 同一 PR 内更新账本：任务清单任务状态 + 头部状态行 + §12 工作包状态、`docs/CUSTOMER-TASK-EVIDENCE-V3.md` 登记、`docs/evidence/TXX-EVIDENCE.md`（证据文件统一存放于 `docs/evidence/`，结构参照 `docs/evidence/T06-EVIDENCE.md`，含 §14 模板全文；2026-08-21 M0 评审 M8 起不再放仓库根目录）。
+6. 一个 PR 只承载一个任务；评审评论逐条实质修复后 resolve，不得当作流程噪音跳过。
+7. 需人工授权的动作（真实 ZPay / 付费 Provider / 生产 COS 变更 / 对外发码 / 灰度扩大 / 公网发布）必须先取得用户明确授权。
 
 ## 硬红线（摘要）
 
@@ -44,7 +51,7 @@
 ### 开发期（每任务每轮迭代，快）
 
 ```bash
-# server/ 目录；fixture 未启动时 PG 套件按 skip 运行
+# server/目录；先启动隔离PG。缺PG必须失败，现有skip行为需在CW-007/044中退出
 uv run python -m pytest tests/test_<受影响文件>.py -q   # 只跑专项，秒级
 uv run ruff check . && uv run ruff format --check . && uv run mypy app
 ```
@@ -56,7 +63,7 @@ uv run ruff check . && uv run ruff format --check . && uv run mypy app
 scripts/pg-fixture.sh start
 
 # 2) 服务端专项复验（server/ 目录；全量 pytest 不在这一步跑——它由第 3 步统一承载，避免双跑；
-#    fixture 未启动时 PG 套件按 skip 运行，不得声明 AUTOMATED_VERIFIED）
+#    缺PG或跳过数据库用例不得作为完成证据；目标门禁必须非0失败）
 uv run ruff check . && uv run ruff format --check . && uv run mypy app
 
 # 3) 全仓门禁（仓库根目录，等价于 CI Linux 质量门，覆盖前端/Tauri/服务端全套；
@@ -68,6 +75,6 @@ npm run check
 
 ## 环境变量备忘
 
-- PG 模式：`VIDEO_REPLICA_DATABASE_URL=postgresql://…`；客户生产 `VIDEO_REPLICA_CUSTOMER_PRODUCTION=true` 时 SQLite/缺 URL 直接 fail-closed 启动失败。
-- 内部联调：`VIDEO_REPLICA_DB_PATH` / `VIDEO_REPLICA_STORAGE_ROOT` / `VIDEO_REPLICA_DESKTOP_USER_ID`。
+- PG唯一数据库目标：所有运行环境显式配置`VIDEO_REPLICA_DATABASE_URL`；SQLite/DB_PATH/缺URL/不可达PG拒绝启动，不依赖生产开关。现有代码尚需CW-025/042实现全环境约束。
+- 旧`VIDEO_REPLICA_DB_PATH`/内部固定身份仅作迁移识别，不再作为推荐开发路径；业务测试遵循TEST-*分类，SQLite历史例外不得承载当前业务。
 - 密钥只进服务端密钥存储（Fernet 加密），永不入库、入码、入 PR。

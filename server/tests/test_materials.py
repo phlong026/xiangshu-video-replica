@@ -1,20 +1,18 @@
 from __future__ import annotations
 
 import sqlite3
-import subprocess
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
+import app.materials as materials
 from app.auth import get_database
-from app.character_image_generation import deterministic_png
 from app.db import connect_database, initialize_database
 from app.db_portable import BusinessConnection
 from app.main import app
 from app.media_routes import get_media_storage
-from app.media_tools import resolve_media_binary
 from app.storage import FakeStorageAdapter, LocalStorageAdapter
 
 
@@ -29,30 +27,6 @@ def db_path(tmp_path: Path) -> Iterator[Path]:
 @pytest.fixture()
 def storage() -> FakeStorageAdapter:
     return FakeStorageAdapter(provider="fake", bucket="private-bucket")
-
-
-@pytest.fixture(scope="session")
-def valid_mp3_bytes(tmp_path_factory: pytest.TempPathFactory) -> bytes:
-    path = tmp_path_factory.mktemp("material-media") / "speech.mp3"
-    subprocess.run(
-        [
-            resolve_media_binary("ffmpeg"),
-            "-v",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            "anullsrc=r=16000:cl=mono",
-            "-t",
-            "1",
-            "-codec:a",
-            "mp3",
-            str(path),
-        ],
-        check=True,
-        capture_output=True,
-    )
-    return path.read_bytes()
 
 
 @pytest.fixture()
@@ -187,17 +161,20 @@ def test_direct_result_is_visible_but_not_presented_as_cloud_asset(client: TestC
 def test_upload_audio_to_storage_then_complete_and_list_it(
     client: TestClient,
     storage: FakeStorageAdapter,
-    valid_mp3_bytes: bytes,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(materials, "probe_audio_duration", lambda _content: 42.0)
     intent = client.post(
         "/api/studio/materials/upload-intent",
         headers=auth_headers(),
         json={
             "filename": "讲解.mp3",
             "content_type": "audio/mpeg",
-            "size_bytes": len(valid_mp3_bytes),
+            "size_bytes": 11,
             "title": "完整口播音频",
             "group": "口播素材",
+            "audio_purpose": "oral_audio",
+            "duration_seconds": 42,
         },
     )
     assert intent.status_code == 200
@@ -205,15 +182,14 @@ def test_upload_audio_to_storage_then_complete_and_list_it(
     assert body["material_id"] == f"asset:{body['asset_id']}"
     assert body["storage_key"].startswith("materials/employee_1/")
 
-    storage.put_object(body["storage_key"], valid_mp3_bytes, content_type="audio/mpeg")
+    storage.put_object(body["storage_key"], b"ID3abcdefgh", content_type="audio/mpeg")
     completed = client.post(
         f"/api/studio/materials/uploads/{body['asset_id']}/complete",
         headers=auth_headers(),
     )
     assert completed.status_code == 200, completed.text
     assert completed.json()["status"] == "ready"
-    assert completed.json()["size_bytes"] == len(valid_mp3_bytes)
-    assert completed.json()["duration_seconds"] == pytest.approx(1, abs=0.2)
+    assert completed.json()["size_bytes"] == 11
 
     listed = client.get(
         "/api/studio/materials?media_type=audio",
@@ -222,9 +198,114 @@ def test_upload_audio_to_storage_then_complete_and_list_it(
     assert listed.status_code == 200
     material = listed.json()["items"][0]
     assert material["title"] == "完整口播音频"
-    assert material["allowed_uses"] == ["oral_audio", "reference"]
+    assert material["allowed_uses"] == ["oral_audio"]
+    assert material["duration_seconds"] == 42
     assert material["delivery"] == "stored"
     assert material["saved"] is True
+
+
+@pytest.mark.parametrize(
+    ("purpose", "duration", "expected_code"),
+    [
+        (None, None, "MATERIAL_AUDIO_PURPOSE_REQUIRED"),
+        ("voice_clone", 4.9, "MATERIAL_AUDIO_DURATION_INVALID"),
+        ("voice_clone", 180.1, "MATERIAL_AUDIO_DURATION_INVALID"),
+        ("oral_audio", None, "MATERIAL_AUDIO_DURATION_REQUIRED"),
+    ],
+)
+def test_audio_upload_intent_enforces_purpose_duration_contract(
+    client: TestClient,
+    purpose: str,
+    duration: float | None,
+    expected_code: str,
+) -> None:
+    response = client.post(
+        "/api/studio/materials/upload-intent",
+        headers=auth_headers(),
+        json={
+            "filename": "voice.mp3",
+            "content_type": "audio/mpeg",
+            "size_bytes": 10,
+            "audio_purpose": purpose,
+            "duration_seconds": duration,
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == expected_code
+
+
+def test_audio_complete_rejects_duration_that_differs_from_browser_claim(
+    client: TestClient,
+    storage: FakeStorageAdapter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(materials, "probe_audio_duration", lambda _content: 181.0)
+    intent = client.post(
+        "/api/studio/materials/upload-intent",
+        headers=auth_headers(),
+        json={
+            "filename": "voice.mp3",
+            "content_type": "audio/mpeg",
+            "size_bytes": 3,
+            "audio_purpose": "voice_clone",
+            "duration_seconds": 30,
+        },
+    ).json()
+    storage.put_object(intent["storage_key"], b"ID3", content_type="audio/mpeg")
+
+    response = client.post(
+        f"/api/studio/materials/uploads/{intent['asset_id']}/complete",
+        headers=auth_headers(),
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "MATERIAL_AUDIO_DURATION_MISMATCH"
+
+
+def test_historical_audio_without_verified_purpose_is_read_only(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    with connect_database(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO assets (
+                id, project_id, kind, storage_uri, sha256, size_bytes,
+                content_type, metadata_json, created_by_user_id
+            ) VALUES ('legacy-audio', NULL, 'material_audio', 'local://materials/legacy.mp3',
+                      'legacy-hash', 9, 'audio/mpeg',
+                      '{"audio_purpose":"oral_audio","duration_seconds":42}',
+                      'employee_1')
+            """
+        )
+
+    response = client.get(
+        "/api/studio/materials?media_type=audio",
+        headers=auth_headers(),
+    )
+
+    assert response.status_code == 200
+    legacy = next(item for item in response.json()["items"] if item["asset_id"] == "legacy-audio")
+    assert legacy["status"] == "ready"
+    assert legacy["allowed_uses"] == []
+
+
+def test_non_audio_upload_rejects_audio_purpose(client: TestClient) -> None:
+    response = client.post(
+        "/api/studio/materials/upload-intent",
+        headers=auth_headers(),
+        json={
+            "filename": "photo.png",
+            "content_type": "image/png",
+            "size_bytes": 10,
+            "audio_purpose": "oral_audio",
+            "duration_seconds": 12,
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "MATERIAL_AUDIO_PURPOSE_INVALID"
 
 
 @pytest.mark.parametrize(
@@ -314,10 +395,12 @@ def test_complete_rejects_bytes_that_do_not_match_declared_media(
         json={
             "filename": "voice.mp3",
             "content_type": "audio/mpeg",
-            "size_bytes": 11,
+            "size_bytes": 12,
+            "audio_purpose": "voice_clone",
+            "duration_seconds": 30,
         },
     ).json()
-    storage.put_object(intent["storage_key"], b"ID3abcdefgh", content_type="audio/mpeg")
+    storage.put_object(intent["storage_key"], b"not an audio", content_type="audio/mpeg")
 
     response = client.post(
         f"/api/studio/materials/uploads/{intent['asset_id']}/complete",
@@ -333,7 +416,7 @@ def test_local_material_upload_uses_authenticated_api_endpoint(
 ) -> None:
     local = LocalStorageAdapter(root=tmp_path / "objects", bucket="local-private")
     app.dependency_overrides[get_media_storage] = lambda: local
-    content = deterministic_png(b"material-image")
+    content = b"\x89PNG\r\n\x1a\nbody"
     intent = client.post(
         "/api/studio/materials/upload-intent",
         headers=auth_headers(),
@@ -372,6 +455,8 @@ def test_other_user_cannot_complete_material_upload(
             "filename": "voice.mp3",
             "content_type": "audio/mpeg",
             "size_bytes": 3,
+            "audio_purpose": "voice_clone",
+            "duration_seconds": 30,
         },
     ).json()
     storage.put_object(intent["storage_key"], b"ID3", content_type="audio/mpeg")

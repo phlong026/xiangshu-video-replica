@@ -1,0 +1,28 @@
+
+> @video-replica/client@0.1.16 test
+> vitest run src/studio/ContentPages.test.tsx src/studio/CreationPages.test.tsx src/studio/StudioWorkspace.test.tsx src/studio/state.test.ts src/studio/live.test.ts src/studio/MainPages.test.tsx
+
+
+ RUN  v4.1.10 /Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻/client
+
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+Not implemented: Window's scrollTo() method
+
+ Test Files  6 passed (6)
+      Tests  186 passed (186)
+   Start at  12:50:48
+   Duration  16.65s (transform 6.53s, setup 3.71s, import 9.44s, tests 31.92s, environment 18.71s)

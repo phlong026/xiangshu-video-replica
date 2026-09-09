@@ -25,6 +25,12 @@ import {
   saveGenerationPrompt,
   waitForScriptRewriteTask,
 } from "./api";
+import {
+  clearScriptRewriteIdempotencyKey,
+  type ScriptRewriteScope,
+  scriptRewriteIdempotencyKey,
+  shouldClearScriptRewriteIdempotencyKey,
+} from "./studio/scriptRewrite";
 
 export type ScriptSource = "original" | "custom";
 
@@ -42,6 +48,8 @@ export type IdempotencyRecord = {
   key: string;
   request: GenerationBatchInput;
 };
+
+export type GenerationQuoteStatus = "idle" | "loading" | "ready" | "error";
 
 const DEFAULT_LIMITS: GenerationRuntimeLimits = {
   min_quantity: 1,
@@ -67,6 +75,7 @@ type UseGenerationDraftsInput = {
   readOnly: boolean;
   referenceSelectionId: string | null;
   shotCardVersionId: string;
+  sourceAssetId: string | null;
 };
 
 export function useGenerationDrafts({
@@ -81,6 +90,7 @@ export function useGenerationDrafts({
   readOnly,
   referenceSelectionId,
   shotCardVersionId,
+  sourceAssetId,
 }: UseGenerationDraftsInput) {
   const [scriptVersion, setScriptVersion] = useState<GenerationVersion | null>(
     null,
@@ -104,6 +114,11 @@ export function useGenerationDrafts({
   const [priceQuote, setPriceQuote] = useState<GenerationPriceQuote | null>(
     null,
   );
+  const [priceQuoteStatus, setPriceQuoteStatus] =
+    useState<GenerationQuoteStatus>("idle");
+  const [priceQuoteError, setPriceQuoteError] = useState("");
+  const [priceQuoteContextKey, setPriceQuoteContextKey] = useState("");
+  const [priceQuoteRevision, setPriceQuoteRevision] = useState(0);
   const [savedPrompts, setSavedPrompts] = useState<GenerationVersion[]>([]);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -115,6 +130,18 @@ export function useGenerationDrafts({
   const actionGenerationRef = useRef(0);
   const identityIdRef = useRef(identityId);
   identityIdRef.current = identityId;
+  const rewriteContext = JSON.stringify([
+    currentUserId,
+    projectId,
+    sourceAssetId,
+    identityId ?? null,
+    scriptText,
+  ]);
+  const rewriteContextRef = useRef(rewriteContext);
+  if (rewriteContextRef.current !== rewriteContext) {
+    rewriteContextRef.current = rewriteContext;
+    actionGenerationRef.current += 1;
+  }
   const isCreatingBatchRef = useRef(false);
   const idempotencyRecordRef = useRef<IdempotencyRecord | null>(null);
 
@@ -137,7 +164,7 @@ export function useGenerationDrafts({
       getLatestScriptVersion(projectId),
       getLatestGenerationPrompt(projectId),
       getGenerationRuntimeLimits(),
-      getLatestScriptRewriteTask(projectId, identityId),
+      getLatestScriptRewriteTask(projectId, identityId, sourceAssetId),
     ])
       .then(([scriptState, promptState, runtime, latestRewriteTask]) => {
         if (!active || loadGeneration !== loadGenerationRef.current) {
@@ -147,12 +174,12 @@ export function useGenerationDrafts({
         setQuantityInput(String(runtime.min_quantity));
 
         const restoredScript = scriptState.version;
+        const restoredScriptText =
+          readPayloadString(restoredScript, "full_text") ?? originalScript;
         setScriptVersion(restoredScript);
         const restoredSource = readScriptSource(restoredScript);
         setScriptSource(restoredSource);
-        setScriptText(
-          readPayloadString(restoredScript, "full_text") ?? originalScript,
-        );
+        setScriptText(restoredScriptText);
         setScriptStale(
           scriptState.stale ||
             (restoredScript !== null &&
@@ -200,10 +227,26 @@ export function useGenerationDrafts({
 
         if (
           latestRewriteTask &&
-          rewriteTaskMatchesIdentity(latestRewriteTask, identityId) &&
+          rewriteTaskMatchesScope(
+            latestRewriteTask,
+            identityId,
+            sourceAssetId,
+            restoredScriptText,
+          ) &&
           shouldRecoverScriptRewrite(latestRewriteTask, restoredScript)
         ) {
+          const recoveredScope: ScriptRewriteScope = {
+            accountId: currentUserId,
+            projectId,
+            sourceAssetId: sourceAssetId ?? "",
+            identityId: identityId ?? "",
+            scriptId: restoredScript?.id ?? "unsaved",
+            scriptVersion: restoredScript?.version_number ?? 0,
+            text: restoredScriptText,
+          };
+          const recoveredKey = scriptRewriteIdempotencyKey(recoveredScope);
           if (latestRewriteTask.status === "SUCCEEDED") {
+            clearScriptRewriteIdempotencyKey(recoveredScope, recoveredKey);
             applyRecoveredScriptRewrite(
               latestRewriteTask,
               identityId,
@@ -216,6 +259,12 @@ export function useGenerationDrafts({
             latestRewriteTask.status === "FAILED" ||
             latestRewriteTask.status === "SUBMISSION_UNCERTAIN"
           ) {
+            if (
+              latestRewriteTask.status === "FAILED" &&
+              !latestRewriteTask.retryable
+            ) {
+              clearScriptRewriteIdempotencyKey(recoveredScope, recoveredKey);
+            }
             setError(
               latestRewriteTask.error_message ||
                 (latestRewriteTask.status === "SUBMISSION_UNCERTAIN"
@@ -229,8 +278,17 @@ export function useGenerationDrafts({
                 if (
                   active &&
                   loadGeneration === loadGenerationRef.current &&
-                  rewriteTaskMatchesIdentity(completedTask, identityId)
+                  rewriteTaskMatchesScope(
+                    completedTask,
+                    identityId,
+                    sourceAssetId,
+                    restoredScriptText,
+                  )
                 ) {
+                  clearScriptRewriteIdempotencyKey(
+                    recoveredScope,
+                    recoveredKey,
+                  );
                   applyRecoveredScriptRewrite(
                     completedTask,
                     identityId,
@@ -243,6 +301,12 @@ export function useGenerationDrafts({
               })
               .catch((requestError) => {
                 if (active && loadGeneration === loadGenerationRef.current) {
+                  if (shouldClearScriptRewriteIdempotencyKey(requestError)) {
+                    clearScriptRewriteIdempotencyKey(
+                      recoveredScope,
+                      recoveredKey,
+                    );
+                  }
                   setError(errorMessage(requestError, "AI 改写失败。"));
                   setMessage("");
                 }
@@ -278,6 +342,7 @@ export function useGenerationDrafts({
     projectId,
     referenceSelectionId,
     shotCardVersionId,
+    sourceAssetId,
   ]);
 
   useEffect(() => {
@@ -343,34 +408,93 @@ export function useGenerationDrafts({
       payloadMatchesOrMissing(promptVersion, "resolution", resolution) &&
       payloadMatchesOrMissing(promptVersion, "ratio", ratio),
   );
+  const quotedResolution = recoveryRecord?.request.resolution ?? resolution;
+  const quotedDuration =
+    recoveryRecord?.request.output_duration_seconds ?? duration;
+  const quotedQuantity = recoveryRecord?.request.quantity ?? quantity;
+  const quoteInputValid = recoveryRecord
+    ? Number.isInteger(quotedDuration) &&
+      quotedDuration >= 4 &&
+      quotedDuration <= 15 &&
+      quotedQuantity !== null &&
+      isCustomerQuantity(quotedQuantity)
+    : durationValid &&
+      quotedQuantity !== null &&
+      isCustomerQuantity(quotedQuantity);
+  const currentQuoteContextKey = recoveryRecord
+    ? `recovery:${recoveryRecord.key}`
+    : `current:${quotedResolution}:${quotedDuration}:${quotedQuantity ?? "invalid"}`;
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 恢复记录即使参数相同也必须重新报价后才能重放付费请求。
   useEffect(() => {
+    void priceQuoteRevision;
     let active = true;
     if (
       typeof getGenerationPriceQuote !== "function" ||
-      !durationValid ||
-      quantity === null ||
-      !isCustomerQuantity(quantity)
+      !quoteInputValid ||
+      quotedQuantity === null
     ) {
       setPriceQuote(null);
+      setPriceQuoteStatus("idle");
+      setPriceQuoteError("");
+      setPriceQuoteContextKey("");
       return;
     }
+    const input = {
+      resolution: quotedResolution,
+      duration_seconds: quotedDuration,
+      quantity: quotedQuantity,
+    };
     setPriceQuote(null);
-    getGenerationPriceQuote({
-      resolution,
-      duration_seconds: duration as 4 | 15,
-      quantity,
-    })
+    setPriceQuoteStatus("loading");
+    setPriceQuoteError("");
+    setPriceQuoteContextKey("");
+    getGenerationPriceQuote(input)
       .then((quote) => {
-        if (active) setPriceQuote(quote);
+        if (!active) return;
+        if (
+          quote.resolution !== input.resolution ||
+          quote.duration_seconds !== input.duration_seconds ||
+          quote.quantity !== input.quantity ||
+          quote.estimated_seconds !== input.duration_seconds * input.quantity
+        ) {
+          setPriceQuoteStatus("error");
+          setPriceQuoteError("生成报价参数与当前生成参数不一致，请重新获取。");
+          return;
+        }
+        setPriceQuote(quote);
+        setPriceQuoteStatus("ready");
+        setPriceQuoteContextKey(currentQuoteContextKey);
       })
-      .catch(() => {
-        if (active) setPriceQuote(null);
+      .catch((requestError: unknown) => {
+        if (!active) return;
+        setPriceQuote(null);
+        setPriceQuoteStatus("error");
+        setPriceQuoteError(
+          errorMessage(requestError, "读取生成费用失败，请重试。"),
+        );
       });
     return () => {
       active = false;
     };
-  }, [duration, durationValid, quantity, resolution]);
+  }, [
+    priceQuoteRevision,
+    quoteInputValid,
+    quotedDuration,
+    quotedQuantity,
+    quotedResolution,
+    recoveryRecord?.key,
+    currentQuoteContextKey,
+  ]);
+  const priceQuoteReady = Boolean(
+    priceQuoteStatus === "ready" &&
+      priceQuoteContextKey === currentQuoteContextKey &&
+      priceQuote &&
+      priceQuote.resolution === quotedResolution &&
+      priceQuote.duration_seconds === quotedDuration &&
+      priceQuote.quantity === quotedQuantity &&
+      priceQuote.estimated_seconds === quotedDuration * priceQuote.quantity,
+  );
   const canCompile = Boolean(
     !readOnly &&
       scriptVersion &&
@@ -390,6 +514,7 @@ export function useGenerationDrafts({
       promptParametersMatch &&
       quantity !== null &&
       durationValid &&
+      priceQuoteReady &&
       !recoveryRecordConflicts &&
       !busyAction,
   );
@@ -419,17 +544,39 @@ export function useGenerationDrafts({
     setBusyAction("rewrite");
     setError("");
     setMessage("");
+    const requestScope: ScriptRewriteScope = {
+      accountId: currentUserId,
+      projectId,
+      sourceAssetId: sourceAssetId ?? "",
+      identityId: identityId ?? "",
+      scriptId: scriptVersion?.id ?? "unsaved",
+      scriptVersion: scriptVersion?.version_number ?? 0,
+      text,
+    };
+    const idempotencyKey = scriptRewriteIdempotencyKey(requestScope);
     try {
       const task = identityId
-        ? await rewriteProjectScript(projectId, text, identityId)
-        : await rewriteProjectScript(projectId, text);
+        ? await rewriteProjectScript(
+            projectId,
+            text,
+            identityId,
+            sourceAssetId ?? undefined,
+            idempotencyKey,
+          )
+        : await rewriteProjectScript(
+            projectId,
+            text,
+            undefined,
+            sourceAssetId ?? undefined,
+            idempotencyKey,
+          );
       if (
         actionGeneration !== actionGenerationRef.current ||
         !sameIdentity(identityIdRef.current, identityId)
       ) {
         return;
       }
-      if (!rewriteTaskMatchesIdentity(task, identityId)) {
+      if (!rewriteTaskMatchesScope(task, identityId, sourceAssetId, text)) {
         setError("改写任务的人物与当前选择不一致，已停止回填。");
         return;
       }
@@ -441,10 +588,11 @@ export function useGenerationDrafts({
       if (
         actionGeneration !== actionGenerationRef.current ||
         !sameIdentity(identityIdRef.current, identityId) ||
-        !rewriteTaskMatchesIdentity(completedTask, identityId)
+        !rewriteTaskMatchesScope(completedTask, identityId, sourceAssetId, text)
       ) {
         return;
       }
+      clearScriptRewriteIdempotencyKey(requestScope, idempotencyKey);
       applyRecoveredScriptRewrite(
         completedTask,
         identityId,
@@ -454,6 +602,9 @@ export function useGenerationDrafts({
         setError,
       );
     } catch (requestError) {
+      if (shouldClearScriptRewriteIdempotencyKey(requestError)) {
+        clearScriptRewriteIdempotencyKey(requestScope, idempotencyKey);
+      }
       if (
         actionGeneration === actionGenerationRef.current &&
         sameIdentity(identityIdRef.current, identityId)
@@ -696,8 +847,12 @@ export function useGenerationDrafts({
       !recoveryRecord ||
       readOnly ||
       busyAction ||
-      isCreatingBatchRef.current
+      isCreatingBatchRef.current ||
+      !priceQuoteReady
     ) {
+      if (!priceQuoteReady) {
+        setError(priceQuoteError || "请先取得待恢复请求的有效报价后再继续。");
+      }
       return;
     }
     idempotencyRecordRef.current = recoveryRecord;
@@ -729,6 +884,12 @@ export function useGenerationDrafts({
     if (quantity === null) {
       setError(
         quantityError || "生成数量不在允许范围内，请先在「生成设置」中调整。",
+      );
+      return;
+    }
+    if (!priceQuoteReady) {
+      setError(
+        priceQuoteError || "请先取得与当前参数一致的生成报价后再开始生成。",
       );
       return;
     }
@@ -929,6 +1090,9 @@ export function useGenerationDrafts({
     resolution,
     ratio,
     priceQuote,
+    priceQuoteStatus,
+    priceQuoteError,
+    priceQuoteReady,
     savedPrompts,
     duration,
     durationValid,
@@ -956,6 +1120,7 @@ export function useGenerationDrafts({
     setOutputDuration,
     setResolution,
     setRatio,
+    retryPriceQuote: () => setPriceQuoteRevision((value) => value + 1),
     applySavedPrompt,
     createBatch,
     recoverBatch,
@@ -1014,6 +1179,19 @@ function rewriteTaskMatchesIdentity(
   identityId: string | null | undefined,
 ): boolean {
   return sameIdentity(task.identity_id, identityId);
+}
+
+function rewriteTaskMatchesScope(
+  task: ScriptRewriteTask,
+  identityId: string | null | undefined,
+  sourceAssetId: string | null | undefined,
+  sourceText: string,
+): boolean {
+  return (
+    rewriteTaskMatchesIdentity(task, identityId) &&
+    (task.source_asset_id ?? null) === (sourceAssetId ?? null) &&
+    task.source_text === sourceText
+  );
 }
 
 function sameIdentity(

@@ -525,6 +525,91 @@ def test_control_generation_records_include_paid_images_and_ai_scoring(
         )
         conn.execute(
             """
+            INSERT INTO person_identities (
+                id, owner_user_id, display_name, authorization_status,
+                source_quality_status, status, created_by
+            ) VALUES (%s, %s, %s, 'AUTHORIZED', 'PASSED', 'ACTIVE', %s)
+            """,
+            ("oral-record-identity", "user_1", "口播人物", "user_1"),
+        )
+        conn.execute(
+            """
+            INSERT INTO oral_avatars (
+                id, identity_id, owner_user_id, title, vendor_avatar_id,
+                status, source_kind, source_asset_id
+            ) VALUES (%s, %s, %s, %s, %s, 'READY', 'IMAGE', %s)
+            """,
+            (
+                "oral-record-avatar",
+                "oral-record-identity",
+                "user_1",
+                "口播分身",
+                "hifly-avatar-record",
+                "oral-source-record",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO oral_tasks (
+                id, owner_user_id, identity_id, avatar_id, mode, title,
+                status, vendor_task_id, estimated_cost_fen, error_message,
+                idempotency_key, request_hash, submission_state,
+                billing_round, provider_charge_state
+            ) VALUES (%s, %s, %s, %s, 'TTS', %s, 'FAILED', %s, %s, %s,
+                      %s, %s, 'FAILED', 1, 'CHARGED')
+            """,
+            (
+                "oral-failed-record",
+                "user_1",
+                "oral-record-identity",
+                "oral-record-avatar",
+                "口播失败记录",
+                "hifly-task-record",
+                350,
+                "Authorization: Bearer leaked-token; https://vendor.test/result?signature=leaked",
+                "oral-failed-record-key",
+                "oral-failed-record-hash",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO oral_tasks (
+                id, owner_user_id, identity_id, avatar_id, mode, title,
+                status, vendor_task_id, result_asset_id, estimated_cost_fen,
+                idempotency_key, request_hash, submission_state,
+                provider_charge_state
+            ) VALUES (%s, %s, %s, %s, 'AUDIO', %s, 'SUCCEEDED', %s, %s, %s,
+                      %s, %s, 'SUBMITTED', 'CHARGED')
+            """,
+            (
+                "oral-succeeded-record",
+                "user_1",
+                "oral-record-identity",
+                "oral-record-avatar",
+                "口播成功记录",
+                "hifly-success-task-record",
+                "oral-result-asset-record",
+                350,
+                "oral-succeeded-record-key",
+                "oral-succeeded-record-hash",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO wallet_transactions (
+                id, user_id, type, available_delta, reserved_delta,
+                oral_task_id, billing_round, idempotency_key
+            ) VALUES (%s, %s, 'SETTLE', 0, -12, %s, 1, %s)
+            """,
+            (
+                "oral-failed-record-settle",
+                "user_1",
+                "oral-failed-record",
+                "oral-failed-record-settle-key",
+            ),
+        )
+        conn.execute(
+            """
             INSERT INTO first_frame_tasks (
                 id, project_id, created_by_user_id, idempotency_key, request_hash,
                 request_json, status, result_version_id, completed_at
@@ -610,6 +695,33 @@ def test_control_generation_records_include_paid_images_and_ai_scoring(
     assert by_id["source-local-record"]["record_type"] == "SOURCE_FRAME_AI_SCORE"
     assert by_id["source-local-record"]["provider"] == "apilio_gemini"
     assert by_id["source-local-record"]["provider_cost_status"] == "UNAVAILABLE"
+    assert by_id["oral-failed-record"] == {
+        "record_id": "oral-failed-record",
+        "record_type": "ORAL_VIDEO",
+        "operation": "TTS",
+        "user_id": "user_1",
+        "username": "operator-1",
+        "display_name": "Operator One",
+        "project_id": None,
+        "project_name": None,
+        "status": "FAILED",
+        "provider": "hifly",
+        "model": None,
+        "provider_cost": None,
+        "provider_cost_status": "UNAVAILABLE",
+        "record_data_status": "VALID",
+        "charged_credits": 12,
+        "result_reference": None,
+        "provider_reference": "hifly-task-record",
+        "error_code": "ORAL_TASK_FAILED",
+        "error_message": "数字人口播生成失败，请核对供应商任务和服务配置。",
+        "created_at": by_id["oral-failed-record"]["created_at"],
+        "completed_at": by_id["oral-failed-record"]["completed_at"],
+    }
+    assert by_id["oral-succeeded-record"]["result_reference"] == "oral-result-asset-record"
+    assert by_id["oral-succeeded-record"]["provider_reference"] == "hifly-success-task-record"
+    assert "leaked-token" not in response.text
+    assert "signature=leaked" not in response.text
 
     videos = client.get(
         "/api/control/generation-records?record_type=VIDEO&username=operator&status=RUNNING",
@@ -618,6 +730,14 @@ def test_control_generation_records_include_paid_images_and_ai_scoring(
     assert videos.status_code == 200, videos.text
     assert videos.json()["total"] == 1
     assert [item["record_id"] for item in videos.json()["items"]] == ["video-estimated-record"]
+
+    oral_failures = client.get(
+        "/api/control/generation-records?record_type=ORAL_VIDEO&status=FAILED",
+        headers=control_headers,
+    )
+    assert oral_failures.status_code == 200, oral_failures.text
+    assert oral_failures.json()["total"] == 1
+    assert [item["record_id"] for item in oral_failures.json()["items"]] == ["oral-failed-record"]
 
     process_records = client.get(
         "/api/control/generation-records?record_type=SOURCE_FRAME_PROCESS",

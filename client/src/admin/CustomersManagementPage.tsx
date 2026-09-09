@@ -33,12 +33,7 @@ export function CustomersManagementPage({
 }) {
   const [tab, setTab] = useState<string>(initialTab);
   const [showGenerator, setShowGenerator] = useState(initiallyShowGenerator);
-  const [sessionUserId, setSessionUserId] = useState<string | undefined>(
-    undefined,
-  );
-  const [deviceUserId, setDeviceUserId] = useState<string | undefined>(
-    undefined,
-  );
+  const [selectedUserId, setSelectedUserId] = useState<string | undefined>();
   return (
     <div>
       <TabBar
@@ -62,12 +57,11 @@ export function CustomersManagementPage({
           embedded
           readOnly={readOnly}
           onOpenDevices={(userId) => {
-            setDeviceUserId(userId);
-            setSessionUserId(userId);
+            setSelectedUserId(userId);
             setTab("devices");
           }}
           onOpenSessions={(userId) => {
-            setSessionUserId(userId);
+            setSelectedUserId(userId);
             setTab("devices");
           }}
         />
@@ -81,8 +75,12 @@ export function CustomersManagementPage({
       ) : null}
       {tab === "devices" ? (
         <div className="admin-devices-sessions-layout">
-          <DevicesPage readOnly={readOnly} userId={deviceUserId} />
-          <SessionsPage readOnly={readOnly} userId={sessionUserId} />
+          <DevicesPage readOnly={readOnly} userId={selectedUserId} />
+          <SessionsPage
+            readOnly={readOnly}
+            userId={selectedUserId}
+            onCustomerChange={setSelectedUserId}
+          />
         </div>
       ) : null}
     </div>

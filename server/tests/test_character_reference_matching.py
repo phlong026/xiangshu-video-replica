@@ -616,6 +616,42 @@ def test_employee_can_choose_one_to_four_published_assets_and_roles_fail_closed(
     assert auditor.status_code == 403
 
 
+def test_reference_selection_auditor_has_no_side_effect_and_customer_can_select(
+    client: TestClient,
+    db_path: Path,
+) -> None:
+    seeded = context(db_path)
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        before = conn.execute(
+            "SELECT COUNT(*) FROM versions WHERE kind = 'character_reference_selection'"
+        ).fetchone()[0]
+
+    denied = client.post(
+        "/api/projects/project-owned/character-reference-selection",
+        headers=headers("auditor_1"),
+        json=reference_selection_payload(seeded),
+    )
+
+    assert denied.status_code == 403
+    assert denied.json()["detail"]["code"] == "ROLE_FORBIDDEN"
+    with BusinessConnection.sqlite(connect_database(db_path)) as conn:
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM versions WHERE kind = 'character_reference_selection'"
+            ).fetchone()[0]
+            == before
+        )
+        conn.execute("UPDATE users SET role = 'customer' WHERE id = 'employee_1'")
+        conn.commit()
+
+    selected = client.post(
+        "/api/projects/project-owned/character-reference-selection",
+        headers=headers("employee_1"),
+        json=reference_selection_payload(seeded),
+    )
+    assert selected.status_code == 201, selected.text
+
+
 def test_selection_rejects_an_input_binding_that_changed_before_persistence(
     client: TestClient,
     db_path: Path,

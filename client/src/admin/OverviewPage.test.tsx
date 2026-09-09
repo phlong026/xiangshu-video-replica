@@ -101,6 +101,9 @@ describe("OverviewPage", () => {
     const missingRates = screen.getByText("费率未配置科目").closest("li");
     fireEvent.click(within(missingRates as HTMLElement).getByRole("button"));
     expect(onNavigate).toHaveBeenCalledWith("rates");
+    const failedTasks = screen.getByText("失败任务待处理").closest("li");
+    fireEvent.click(within(failedTasks as HTMLElement).getByRole("button"));
+    expect(onNavigate).toHaveBeenCalledWith("failedGenerationRecords");
   });
 
   it("shows an error banner when the summary request fails", async () => {

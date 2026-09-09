@@ -1,0 +1,10 @@
+{
+  "source_base_sha": "bffc3419f9d89bf76fd4ad1bdad65dd824a44553",
+  "command": "PYTHONPATH=server VIDEO_REPLICA_DISABLE_LOCAL_KEYSTORE=1 '<existing-project>/server/.venv/bin/python' -m pytest -o addopts='' server/tests/test_customer_ha_smoke.py -q -k 'customer_desktop_build or release_desktop or customer_cloud_build or nginx_contract or systemd_contract or maintenance_and_pg_migration'",
+  "working_directory": "/Users/honor.pei/Documents/订单项目/乡墅爆款短视频复刻-客户版收敛分析",
+  "result": "24 passed, 14 deselected, 1 warning in 1.16s",
+  "exit_code": 0,
+  "python": "3.13 (existing local virtualenv; not CI Python 3.12)",
+  "warning": "StarletteDeprecationWarning: testclient httpx usage deprecated",
+  "scope": "Selected source/config contracts and API-origin validator; no shared PostgreSQL fixture, no real COS/Provider/ZPay, no installed desktop execution, no full suite and no CI rerun. This does not prove customer-only refactoring has happened."
+}
