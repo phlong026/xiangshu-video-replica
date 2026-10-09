@@ -1,0 +1,1077 @@
+"""WeChat Pay V3 Native payment client implementation.
+
+Implements the encryption primitives, configuration parsing, platform-certificate
+management, and HTTP client for WeChat Pay V3 Native code payment flows. Follows
+the zpay.py patterns: opener dependency injection, strict URL validation, response
+size limits, and layered exception classification.
+
+Security considerations:
+- Request signing uses SHA256withRSA over the 5-line METHOD/URL/TIMESTAMP/NONCE/BODY message.
+- API responses are signature-verified against the platform certificate selected by the
+  Wechatpay-Serial header before their bodies are trusted.
+- The /v3/certificates response is trusted via its api_v3_key AES-256-GCM auth tag, which
+  avoids needing a certificate in order to verify the certificate download itself.
+- Merchant private keys are loaded from decrypted provider_settings and are never logged.
+- 验签有两条来源：平台证书（Wechatpay-Serial 为证书序列号）与微信支付公钥
+  （Wechatpay-Serial 以 PUB_KEY_ID_ 开头）。新商户只能用公钥，老商户切换期间两者
+  会灰度混用，所以按每次应答/回调自带的 Wechatpay-Serial 选择验签来源。
+
+TODO(CW-069 cycle 3): add WeChatNativeProvider conforming to the PaymentProvider
+Protocol plus registry wiring.
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import logging
+import os
+import secrets
+import threading
+import time
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import AbstractContextManager, contextmanager, nullcontext
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Protocol, Self, cast
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote, urlsplit
+from urllib.request import Request, urlopen
+
+from cryptography import x509
+from cryptography.exceptions import InvalidSignature, InvalidTag
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey, RSAPublicKey
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+from app.external_calls import (
+    FAILED_BODY_LIMIT,
+    CallContext,
+    CallTimer,
+    Outcome,
+    current_call_context,
+    external_call_context,
+    record_external_call,
+    summarize_request_body,
+)
+
+# -----------------------------------------------------------------------------
+# Constants (API paths & schemas)
+# -----------------------------------------------------------------------------
+
+WECHAT_API_BASE = "https://api.mch.weixin.qq.com"
+NATIVE_ORDER_PATH = "/v3/pay/transactions/native"
+CERTIFICATES_PATH = "/v3/certificates"
+ORDER_QUERY_PATH_TEMPLATE = "/v3/pay/transactions/out-trade-no/{out_trade_no}"
+WECHAT_NOTIFY_PATH = "/api/payments/wechat_native/notify"
+AUTH_SCHEMA = "WECHATPAY2-SHA256-RSA2048"
+PUBLIC_BASE_URL_ENV = "PUBLIC_BASE_URL"
+AES_GCM_KEY_LENGTH = 32  # 256 bits
+WECHAT_TIMEOUT_SECONDS = 10.0
+MAX_WECHAT_RESPONSE_BYTES = 256 * 1024
+MAX_WECHAT_ERROR_BODY_BYTES = 4 * 1024
+CERTIFICATE_CACHE_TTL_SECONDS = 12 * 60 * 60
+# 未知序列号触发的证书下载在此间隔内至多一次：回调在验签前就要按请求头里的序列号
+# 取证书，而这个头任何人都能伪造。不设下限时每个伪造回调都会在全局锁里打一次
+# /v3/certificates，既会被微信限流，也会让真实回调排队等锁直到超时。
+CERTIFICATE_MIN_REFRESH_INTERVAL_SECONDS = 60.0
+# 微信支付公钥 ID 的固定前缀；Wechatpay-Serial 带这个前缀说明是用公钥体系签的。
+PUBLIC_KEY_ID_PREFIX = "PUB_KEY_ID_"
+WECHAT_USER_AGENT = "customer-v3-wechat-native/1.0"
+
+# 第三方调用日志（P0-9）里的服务商标识与接口名。
+WECHAT_CALL_PROVIDER = "wechat_pay"
+ENDPOINT_NATIVE_ORDER = "native_order"
+ENDPOINT_ORDER_QUERY = "order_query"
+ENDPOINT_CERTIFICATES = "certificates"
+# 微信答了 2xx 却没能通过验签 / 解析 / 字段校验时写进调用日志的错误码。
+WECHAT_INVALID_RESPONSE_CODE = "WECHAT_RESPONSE_INVALID"
+# 微信返回给排查用的响应头：请求编号能让微信侧客服直接定位这一次调用。
+_LOGGED_RESPONSE_HEADERS = ("Content-Type", "Request-ID", "Retry-After")
+
+# How long a Native order stays payable. WeChat's own default is two hours; we
+# state it explicitly so the local order, the QR and the expiry sweep all agree
+# on one number instead of each assuming the gateway default.
+NATIVE_ORDER_VALIDITY_SECONDS = 2 * 60 * 60
+# WeChat rejects a time_expire that is not comfortably in the future, so an
+# order with less than this much life left can no longer be given a QR.
+NATIVE_ORDER_MIN_REMAINING_SECONDS = 120
+# How long an order may sit PENDING before the reconciliation sweep stops
+# trusting the callback path alone and asks WeChat directly
+# (scripts/reconcile_pending_native_orders). A callback normally lands within
+# seconds; the grace only has to outlast a transient outage, and stays far
+# short of the payment window so a lost callback is recovered while the order
+# can still be settled in the same maintenance pass that would close it.
+NATIVE_RECONCILIATION_GRACE_SECONDS = 10 * 60
+# WeChat retries a payment notification on a fixed backoff schedule that tops
+# out at roughly 24 hours (15s...6h). Inside the payment window plus this drain
+# horizon an order can still become PAID — by a payment, a retrying callback,
+# or the reconciliation sweep — so it blocks switching the merchant identity
+# and legacy credit conversion. Past the horizon nothing can land anymore:
+# payment is impossible (the code_url retired with the window), callbacks are
+# exhausted, and the sweep has asked WeChat about whatever was real.
+NATIVE_SETTLEMENT_DRAIN_SECONDS = 24 * 60 * 60
+# How long a Native order blocks merchant-identity changes and legacy credit
+# conversion: the payment window plus the callback drain horizon.
+NATIVE_MERCHANT_SWITCH_BLOCK_SECONDS = (
+    NATIVE_ORDER_VALIDITY_SECONDS + NATIVE_SETTLEMENT_DRAIN_SECONDS
+)
+
+logger = logging.getLogger(__name__)
+
+
+# -----------------------------------------------------------------------------
+# Core data classes (merchant/deployment configs)
+# -----------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class WeChatMerchantConfig:
+    """Decrypted merchant configuration from provider_settings."""
+
+    appid: str
+    mchid: str
+    serial_no: str
+    api_v3_key: str
+    private_key_pem: str
+    # 微信支付公钥模式（可选）：要么都为空（只用平台证书），要么成对配置。
+    public_key_id: str = ""
+    public_key_pem: str = ""
+
+
+@dataclass(frozen=True)
+class WeChatDeploymentConfig:
+    """Deployment URLs derived from environment variables."""
+
+    notify_url: str
+
+
+# -----------------------------------------------------------------------------
+# Exception hierarchy (classification per zpay pattern)
+# -----------------------------------------------------------------------------
+
+
+class WeChatNativeError(RuntimeError):
+    """Base error for WeChat Native operations."""
+
+    def __init__(
+        self, message: str, *, status_code: int = 502, wechat_code: str | None = None
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        # 微信错误体里的业务码（ORDER_NOT_EXIST、SIGN_ERROR…）。自检要据此区分
+        # “凭据已被接受、只是订单不存在”和真正的凭据错误，不能去解析消息文本。
+        self.wechat_code = wechat_code
+
+
+class WeChatSignatureError(WeChatNativeError):
+    """Invalid signature or cryptographic verification failure."""
+
+    pass
+
+
+# -----------------------------------------------------------------------------
+# Cryptographic primitives (pure functions - testable without network/DB)
+# -----------------------------------------------------------------------------
+
+
+def build_request_signature_message(
+    *, method: str, url_path: str, timestamp: str, nonce: str, body: str
+) -> str:
+    """Build request signature message: METHOD\\nURL\\nTIMESTAMP\\nNONCE\\nBODY\\n."""
+    return f"{method}\n{url_path}\n{timestamp}\n{nonce}\n{body}\n"
+
+
+def build_response_verify_message(*, timestamp: str, nonce: str, body: str) -> str:
+    """Build response verification message (server→client): TIMESTAMP\\nNONCE\\nBODY\\n."""
+    return f"{timestamp}\n{nonce}\n{body}\n"
+
+
+def load_private_key(private_key_pem: str) -> RSAPrivateKey:
+    """Load unencrypted PEM private key as RSAPrivateKey (runtime type check for mypy strict)."""
+    key_bytes = private_key_pem.encode("utf-8")
+    key = serialization.load_pem_private_key(key_bytes, password=None)
+    if not isinstance(key, RSAPrivateKey):
+        raise WeChatNativeError("WeChat merchant private key must be RSA")
+    return key
+
+
+def load_public_key(public_key_pem: str) -> RSAPublicKey:
+    """Load a PEM public key (the WeChat Pay public key) as RSAPublicKey."""
+    try:
+        key = serialization.load_pem_public_key(public_key_pem.encode("utf-8"))
+    except ValueError as exc:
+        raise WeChatNativeError("微信支付公钥不是有效的 PEM 公钥") from exc
+    if not isinstance(key, RSAPublicKey):
+        raise WeChatNativeError("微信支付公钥必须是 RSA 公钥")
+    return key
+
+
+def sign_sha256_rsa(*, private_key_pem: str, message: str) -> str:
+    """Sign message with RSA SHA256, return Base64-encoded signature."""
+    private_key = load_private_key(private_key_pem)
+    msg_bytes = message.encode("utf-8")
+    sig_bytes = private_key.sign(msg_bytes, padding.PKCS1v15(), hashes.SHA256())
+    return base64.b64encode(sig_bytes).decode("ascii")
+
+
+def verify_sha256_rsa(*, public_key: RSAPublicKey, signature_b64: str, message: str) -> bool:
+    """Verify RSA SHA256 signature, return True on success or False on any failure."""
+    try:
+        sig_bytes = base64.b64decode(signature_b64, validate=True)
+    except ValueError:
+        return False
+    try:
+        msg_bytes = message.encode("utf-8")
+        public_key.verify(sig_bytes, msg_bytes, padding.PKCS1v15(), hashes.SHA256())
+    except InvalidSignature:
+        return False
+    return True
+
+
+def build_authorization_header(
+    *,
+    mchid: str,
+    serial_no: str,
+    private_key_pem: str,
+    method: str,
+    url_path: str,
+    body: str,
+    timestamp: str,
+    nonce: str,
+) -> str:
+    """Build full Authorization header: WECHATPAY2-SHA256-RSA2048 mchid=...,signature=..."""
+    message = build_request_signature_message(
+        method=method, url_path=url_path, timestamp=timestamp, nonce=nonce, body=body
+    )
+    signature = sign_sha256_rsa(private_key_pem=private_key_pem, message=message)
+    return (
+        f'{AUTH_SCHEMA} mchid="{mchid}",nonce_str="{nonce}",'
+        f'timestamp="{timestamp}",serial_no="{serial_no}",signature="{signature}"'
+    )
+
+
+def decrypt_aes_256_gcm(
+    *, api_v3_key: str, nonce: str, associated_data: str, ciphertext_b64: str
+) -> bytes:
+    """Decrypt ciphertext using AES-256-GCM, return plaintext bytes."""
+    key = api_v3_key.encode("utf-8")
+    if len(key) != AES_GCM_KEY_LENGTH:
+        raise WeChatNativeError("WeChat api_v3_key must be exactly 32 bytes")
+    try:
+        ciphertext = base64.b64decode(ciphertext_b64, validate=True)
+    except ValueError as exc:
+        raise WeChatNativeError("Ciphertext is not valid Base64") from exc
+    aesgcm = AESGCM(key)
+    try:
+        aad_bytes = associated_data.encode("utf-8")
+        return aesgcm.decrypt(nonce.encode("utf-8"), ciphertext, aad_bytes)
+    except InvalidTag as exc:
+        raise WeChatSignatureError("AES-256-GCM authentication tag mismatch") from exc
+
+
+# -----------------------------------------------------------------------------
+# Configuration parsing (load from SettingsRepository.provider_settings)
+# -----------------------------------------------------------------------------
+
+
+def merchant_config_from_settings(settings: Mapping[str, str]) -> WeChatMerchantConfig:
+    """Parse WeChat Native settings from provider_settings row."""
+    appid = settings.get("appid", "").strip()
+    mchid = settings.get("mchid", "").strip()
+    serial_no = settings.get("serial_no", "").strip()
+    api_v3_key = settings.get("api_v3_key", "").strip()
+    private_key = settings.get("private_key", "").strip()
+    if not all([appid, mchid, serial_no, api_v3_key, private_key]):
+        raise ValueError("WeChat Native merchant settings are incomplete")
+    if len(api_v3_key.encode("utf-8")) != AES_GCM_KEY_LENGTH:
+        raise ValueError("WeChat api_v3_key must be exactly 32 bytes")
+    public_key_id = settings.get("public_key_id", "").strip()
+    public_key_pem = settings.get("public_key", "").strip()
+    # 只填一半会让公钥签名的回调全部验签失败，且要等到真实回调才暴露，所以在
+    # 保存和加载时就拒绝。
+    if bool(public_key_id) != bool(public_key_pem):
+        raise ValueError("微信支付公钥 ID 与公钥必须同时填写或同时留空")
+    if public_key_id:
+        if not public_key_id.startswith(PUBLIC_KEY_ID_PREFIX):
+            raise ValueError(f"微信支付公钥 ID 必须以 {PUBLIC_KEY_ID_PREFIX} 开头")
+        try:
+            load_public_key(public_key_pem)
+        except WeChatNativeError as exc:
+            raise ValueError(str(exc)) from exc
+    return WeChatMerchantConfig(
+        appid=appid,
+        mchid=mchid,
+        serial_no=serial_no,
+        api_v3_key=api_v3_key,
+        private_key_pem=private_key,
+        public_key_id=public_key_id,
+        public_key_pem=public_key_pem,
+    )
+
+
+def deployment_config_from_environment() -> WeChatDeploymentConfig:
+    """Derive WeChat Native deployment URLs from PUBLIC_BASE_URL (HTTPS origin only)."""
+    public_base_url = os.environ.get(PUBLIC_BASE_URL_ENV, "").strip()
+    parsed = urlsplit(public_base_url)
+    if (
+        parsed.scheme != "https"
+        or not parsed.netloc
+        or parsed.hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("PUBLIC_BASE_URL must be an HTTPS origin without path, query, or fragment")
+    return WeChatDeploymentConfig(notify_url=f"https://{parsed.netloc}{WECHAT_NOTIFY_PATH}")
+
+
+# -----------------------------------------------------------------------------
+# Cycle 2: HTTP transport protocols (opener dependency injection per zpay.py)
+# -----------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class WeChatNativeOrderResult:
+    """Result of a successful Native order placement."""
+
+    code_url: str
+    response_digest: str
+
+
+@dataclass(frozen=True)
+class WeChatOrderQueryResult:
+    """Result of an out-trade-no order query."""
+
+    trade_state: str
+    paid: bool
+    out_trade_no: str
+    transaction_id: str | None
+    amount_fen: int | None
+    response_digest: str
+
+
+@dataclass(frozen=True)
+class WeChatPlatformCertificate:
+    """A decrypted WeChat platform certificate used to verify API responses."""
+
+    serial_no: str
+    public_key: RSAPublicKey
+    not_after: datetime
+
+
+class WeChatHTTPResponse(Protocol):
+    def __enter__(self) -> Self: ...
+
+    def __exit__(self, *_: object) -> None: ...
+
+    def read(self, amount: int = -1) -> bytes: ...
+
+    def getheader(self, name: str, default: str | None = None) -> str | None: ...
+
+
+class WeChatHTTPOpener(Protocol):
+    def __call__(self, request: Request, *, timeout: float) -> WeChatHTTPResponse: ...
+
+
+@dataclass
+class _PendingCall:
+    """已收到 2xx 应答、但还没通过校验的一次调用；有了结论才写调用日志。
+
+    HTTP 200 只说明网关收了请求。验签、JSON 解析、字段校验任何一步拒绝，这次调用
+    对排查来说就是失败：得按失败保留期留存并带上原因，不能先记成成功再没人改。
+    """
+
+    fields: dict[str, object]
+    # 请求发出时的任务归属。结算发生在订单上下文之外（证书刷新不能记到订单名下），
+    # 所以要在这里存下来，结算时再带回去。
+    context: CallContext | None
+    settled: bool = False
+
+    def settle(
+        self,
+        outcome: Outcome,
+        *,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        if self.settled:
+            return
+        self.settled = True
+        fields = {**self.fields, "outcome": outcome}
+        if error_code is not None:
+            fields["error_code"] = error_code
+        if error_message is not None:
+            fields["error_message"] = error_message
+        if self.context is None:
+            record_external_call(**fields)
+            return
+        with external_call_context(
+            self.context.task_type, self.context.task_id, attempt=self.context.attempt
+        ):
+            record_external_call(**fields)
+
+
+@dataclass(frozen=True)
+class _RawResponse:
+    """Raw HTTP response body plus the Wechatpay-* verification headers."""
+
+    body: bytes
+    timestamp: str | None
+    nonce: str | None
+    signature: str | None
+    serial: str | None
+    # 待结算的调用日志；由 :func:`_validated` 在校验有结论后写入。
+    call: _PendingCall | None = field(default=None, compare=False, repr=False)
+
+
+@contextmanager
+def _validated(raw: _RawResponse) -> Iterator[None]:
+    """包住对应答的校验：全部通过记成功，任何一步拒绝就改记为解析失败并照旧抛出。"""
+    try:
+        yield
+    except Exception as exc:  # noqa: BLE001 — 只改写日志结论，异常原样向上抛
+        if raw.call is not None:
+            raw.call.settle(
+                "PARSE_ERROR",
+                error_code=WECHAT_INVALID_RESPONSE_CODE,
+                error_message=str(exc),
+            )
+        raise
+    if raw.call is not None:
+        raw.call.settle("SUCCEEDED")
+
+
+def wechat_error_detail(exc: HTTPError) -> str:
+    """Summarize a WeChat error response as ``HTTP <status> code=... message=...``.
+
+    WeChat names the actionable cause (``SIGN_ERROR``, ``NOAUTH``, ``PARAM_ERROR``,
+    ``ORDERPAID``, ...) only in the error body. Without it every misconfiguration —
+    wrong serial_no, wrong private key, merchant not enabled for Native — reads as
+    the same opaque transport failure in the logs. The read is bounded and any
+    failure to parse degrades to the bare status rather than masking the original
+    error. The result is for server-side logs only; routes answer customers with
+    their own fixed messages.
+    """
+    return _summarize_wechat_error(exc)[0]
+
+
+def _read_error_body(exc: HTTPError) -> bytes:
+    """Read a WeChat error response once (bounded); an unreadable body is empty."""
+    if getattr(exc, "fp", None) is None:
+        return b""
+    try:
+        return exc.read(FAILED_BODY_LIMIT)
+    except (OSError, ValueError):
+        return b""
+
+
+def _summarize_error_body(status_code: int, body: bytes) -> tuple[str, str | None]:
+    """Log summary (``HTTP <status> code=... message=...``) plus WeChat's business code."""
+    status = f"HTTP {status_code}"
+    # 摘要只看开头一小段：更长的错误页几乎不会是微信的 JSON 错误体，解析失败就降级成
+    # 裸状态码，不能因此盖住原始错误。
+    try:
+        payload = json.loads(body[:MAX_WECHAT_ERROR_BODY_BYTES].decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return status, None
+    if not isinstance(payload, dict):
+        return status, None
+    parts = [status]
+    code = payload.get("code")
+    wechat_code = code if isinstance(code, str) and code else None
+    if wechat_code:
+        parts.append(f"code={wechat_code}")
+    message = payload.get("message")
+    if isinstance(message, str) and message:
+        parts.append(f"message={message[:200]}")
+    return " ".join(parts), wechat_code
+
+
+def _summarize_wechat_error(exc: HTTPError) -> tuple[str, str | None]:
+    """The log summary of a WeChat error response plus its business code, if any."""
+    if getattr(exc, "fp", None) is None:
+        return f"HTTP {exc.code}", None
+    try:
+        body = exc.read(MAX_WECHAT_ERROR_BODY_BYTES)
+    except (OSError, ValueError):
+        return f"HTTP {exc.code}", None
+    return _summarize_error_body(exc.code, body)
+
+
+def _logged_request_summary(request: Request) -> object:
+    """Request summary for the call log: the order fields, minus the customer's IP.
+
+    The body carries ``scene_info.payer_client_ip`` — a customer's address is
+    personal data with no diagnostic value here. Authorization never enters the
+    summary (headers are not recorded at all).
+    """
+    # 这个客户端只会发 bytes 请求体（或没有请求体的 GET）；其它形态不摘要。
+    data = request.data
+    summary = summarize_request_body(data if isinstance(data, bytes) else None)
+    if isinstance(summary, dict) and "scene_info" in summary:
+        summary["scene_info"] = "[已省略：含客户 IP]"
+    return summary
+
+
+def _logged_response_headers(response: WeChatHTTPResponse) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    for name in _LOGGED_RESPONSE_HEADERS:
+        value = response.getheader(name)
+        if value:
+            headers[name] = value
+    return headers
+
+
+def _execute_request(
+    opener: WeChatHTTPOpener,
+    request: Request,
+    *,
+    timeout_seconds: float,
+    endpoint: str,
+) -> _RawResponse:
+    """Send a request, classify transport errors, and enforce the response size cap.
+
+    Every call is written to the third-party call log (P0-9) — this is the single
+    place all WeChat traffic passes through, so the business flow stays untouched.
+    Transport failures and non-2xx answers are recorded right here; a 2xx answer is
+    only handed back as a pending call, and the caller settles it (:func:`_validated`)
+    once the signature and payload checks have a verdict. Recording never raises: a
+    log write that fails only warns.
+    """
+    timer = CallTimer()
+    common = {
+        "provider": WECHAT_CALL_PROVIDER,
+        "endpoint": endpoint,
+        "method": request.get_method(),
+        "url": request.full_url,
+        "request_summary": _logged_request_summary(request),
+    }
+    try:
+        with opener(request, timeout=timeout_seconds) as response:
+            body = response.read(MAX_WECHAT_RESPONSE_BYTES + 1)
+            timestamp = response.getheader("Wechatpay-Timestamp")
+            nonce = response.getheader("Wechatpay-Nonce")
+            signature = response.getheader("Wechatpay-Signature")
+            serial = response.getheader("Wechatpay-Serial")
+            response_headers = _logged_response_headers(response)
+            status = int(getattr(response, "status", 200) or 200)
+    except HTTPError as exc:
+        error_body = _read_error_body(exc)
+        detail, wechat_code = _summarize_error_body(exc.code, error_body)
+        record_external_call(
+            **common,
+            outcome="PROVIDER_ERROR",
+            http_status=exc.code,
+            response_headers=dict(exc.headers.items()) if exc.headers else None,
+            response_body=error_body,
+            latency_ms=timer.elapsed_ms(),
+        )
+        logger.warning("WeChat API rejected the request: %s", detail)
+        raise WeChatNativeError(
+            f"WeChat API request failed ({detail})", wechat_code=wechat_code
+        ) from exc
+    except (TimeoutError, URLError, OSError) as exc:
+        timed_out = isinstance(exc, TimeoutError) or (
+            isinstance(exc, URLError) and isinstance(exc.reason, TimeoutError)
+        )
+        record_external_call(
+            **common,
+            outcome="TIMEOUT" if timed_out else "NETWORK_ERROR",
+            latency_ms=timer.elapsed_ms(),
+            error_message=(
+                f"等待 {timeout_seconds:g} 秒未收到响应" if timed_out else type(exc).__name__
+            ),
+        )
+        logger.warning("WeChat API request failed: %s", type(exc).__name__)
+        raise WeChatNativeError("WeChat API request timed out", status_code=504) from exc
+    pending = _PendingCall(
+        fields={
+            **common,
+            "http_status": status,
+            "response_headers": response_headers,
+            # 平台证书下载的响应是 api_v3_key 加密的证书密文，对排查没有价值，只记元数据。
+            "response_body": None if endpoint == ENDPOINT_CERTIFICATES else body,
+            "latency_ms": timer.elapsed_ms(),
+        },
+        context=current_call_context(),
+    )
+    if len(body) > MAX_WECHAT_RESPONSE_BYTES:
+        pending.settle(
+            "PARSE_ERROR",
+            error_code=WECHAT_INVALID_RESPONSE_CODE,
+            error_message=f"应答体超过 {MAX_WECHAT_RESPONSE_BYTES} 字节上限",
+        )
+        raise WeChatNativeError("WeChat API response is too large")
+    return _RawResponse(
+        body=body,
+        timestamp=timestamp,
+        nonce=nonce,
+        signature=signature,
+        serial=serial,
+        call=pending,
+    )
+
+
+def _parse_json_object(body: bytes) -> dict[str, object]:
+    """Decode a JSON object body, raising WeChatNativeError on malformed input."""
+    try:
+        decoded = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise WeChatNativeError("WeChat response is not valid JSON") from exc
+    if not isinstance(decoded, dict):
+        raise WeChatNativeError("WeChat response is not a JSON object")
+    return {str(key): value for key, value in decoded.items()}
+
+
+# -----------------------------------------------------------------------------
+# Cycle 2: platform certificate download / decrypt / cache / TTL rotation
+# -----------------------------------------------------------------------------
+
+
+class PlatformCertificateManager:
+    """Downloads, decrypts, caches, and TTL-rotates WeChat platform certificates.
+
+    The /v3/certificates response is trusted via the api_v3_key AES-256-GCM
+    authentication tag rather than signature verification, which avoids the
+    chicken-and-egg problem of needing a certificate to verify the download of
+    the certificates themselves.
+    """
+
+    def __init__(
+        self,
+        *,
+        opener: WeChatHTTPOpener | None = None,
+        timeout_seconds: float = WECHAT_TIMEOUT_SECONDS,
+        cache_ttl_seconds: float = CERTIFICATE_CACHE_TTL_SECONDS,
+        min_refresh_interval_seconds: float = CERTIFICATE_MIN_REFRESH_INTERVAL_SECONDS,
+        clock: Callable[[], float] | None = None,
+    ) -> None:
+        self._opener = opener or cast(WeChatHTTPOpener, urlopen)
+        self._timeout_seconds = timeout_seconds
+        self._cache_ttl_seconds = cache_ttl_seconds
+        self._min_refresh_interval_seconds = min_refresh_interval_seconds
+        self._clock = clock or time.monotonic
+        self._cache: dict[str, WeChatPlatformCertificate] = {}
+        self._fetched_at: float | None = None
+        # 最近一次尝试下载的时刻（不论成败），用于给下载限频。
+        self._last_refresh_attempt: float | None = None
+        # One manager is shared by every request (see default_certificate_manager),
+        # and callbacks settle on a thread pool, so refreshes must be serialized:
+        # without this every concurrent caller on a cold cache would download the
+        # certificates again, which is exactly the burst WeChat rate-limits.
+        self._lock = threading.Lock()
+
+    def get_certificate(
+        self, merchant: WeChatMerchantConfig, serial_no: str
+    ) -> WeChatPlatformCertificate:
+        """Return the cached certificate for serial_no, refreshing when stale or missing.
+
+        Refreshes are rate-limited (``min_refresh_interval_seconds``): inside the
+        interval an unknown serial fails fast instead of downloading again. When a
+        refresh is throttled or fails, a certificate already in the stale cache is
+        still served — it was authenticated by the api_v3_key tag when downloaded,
+        and platform certificates live for years.
+        """
+        certificate = self._cached(serial_no)
+        if certificate is not None:
+            return certificate
+        with self._lock:
+            # Another thread may have refreshed while this one waited.
+            certificate = self._cached(serial_no)
+            if certificate is not None:
+                return certificate
+            now = self._clock()
+            last_attempt = self._last_refresh_attempt
+            if last_attempt is None or now - last_attempt >= self._min_refresh_interval_seconds:
+                self._last_refresh_attempt = now
+                try:
+                    self._refresh(merchant, now=now)
+                except WeChatNativeError:
+                    stale = self._cache.get(serial_no)
+                    if stale is None:
+                        raise
+                    logger.warning("WeChat certificate refresh failed; serving the cached copy")
+                    return stale
+            certificate = self._cache.get(serial_no)
+        if certificate is None:
+            raise WeChatNativeError("WeChat platform certificate serial not found")
+        return certificate
+
+    def _cached(self, serial_no: str) -> WeChatPlatformCertificate | None:
+        """The cached certificate for serial_no, or None when stale or absent."""
+        fetched_at = self._fetched_at
+        if fetched_at is None or (self._clock() - fetched_at) >= self._cache_ttl_seconds:
+            return None
+        return self._cache.get(serial_no)
+
+    def check_credentials(self, merchant: WeChatMerchantConfig) -> int:
+        """Live credential probe: download the platform certificates once.
+
+        Proves the whole merchant triple — the signed request is only accepted
+        when ``mchid`` is enabled for Native and ``serial_no`` names a
+        certificate matching ``private_key`` — and that ``api_v3_key`` decrypts
+        the downloaded list. Returns the certificate count; raises
+        ``WeChatNativeError`` (carrying WeChat's error code in the message)
+        otherwise. Always hits the network on purpose: a diagnostic that
+        answered from cache would prove nothing about the credentials.
+        """
+        with self._lock:
+            request = self._build_request(merchant)
+            raw = _execute_request(
+                self._opener,
+                request,
+                timeout_seconds=self._timeout_seconds,
+                endpoint=ENDPOINT_CERTIFICATES,
+            )
+            with _validated(raw):
+                self._cache = self._parse_certificates(merchant, raw.body)
+            self._fetched_at = self._last_refresh_attempt = self._clock()
+            return len(self._cache)
+
+    def _refresh(self, merchant: WeChatMerchantConfig, *, now: float) -> None:
+        request = self._build_request(merchant)
+        raw = _execute_request(
+            self._opener,
+            request,
+            timeout_seconds=self._timeout_seconds,
+            endpoint=ENDPOINT_CERTIFICATES,
+        )
+        with _validated(raw):
+            self._cache = self._parse_certificates(merchant, raw.body)
+        self._fetched_at = now
+
+    def _build_request(self, merchant: WeChatMerchantConfig) -> Request:
+        authorization = build_authorization_header(
+            mchid=merchant.mchid,
+            serial_no=merchant.serial_no,
+            private_key_pem=merchant.private_key_pem,
+            method="GET",
+            url_path=CERTIFICATES_PATH,
+            body="",
+            timestamp=str(int(time.time())),
+            nonce=secrets.token_hex(16),
+        )
+        request = Request(WECHAT_API_BASE + CERTIFICATES_PATH, method="GET")
+        request.add_header("Authorization", authorization)
+        request.add_header("Accept", "application/json")
+        request.add_header("User-Agent", WECHAT_USER_AGENT)
+        return request
+
+    def _parse_certificates(
+        self, merchant: WeChatMerchantConfig, body: bytes
+    ) -> dict[str, WeChatPlatformCertificate]:
+        try:
+            decoded = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise WeChatNativeError("WeChat certificates response is invalid") from exc
+        if not isinstance(decoded, dict) or not isinstance(decoded.get("data"), list):
+            raise WeChatNativeError("WeChat certificates response is invalid")
+        certificates: dict[str, WeChatPlatformCertificate] = {}
+        for item in decoded["data"]:
+            certificate = self._parse_one(merchant, item)
+            if certificate is not None:
+                certificates[certificate.serial_no] = certificate
+        if not certificates:
+            raise WeChatNativeError("WeChat certificates response had no usable certificates")
+        return certificates
+
+    def _parse_one(
+        self, merchant: WeChatMerchantConfig, item: object
+    ) -> WeChatPlatformCertificate | None:
+        if not isinstance(item, dict):
+            return None
+        serial = item.get("serial_no")
+        encrypt = item.get("encrypt_certificate")
+        if not isinstance(serial, str) or not isinstance(encrypt, dict):
+            return None
+        nonce = encrypt.get("nonce")
+        ciphertext = encrypt.get("ciphertext")
+        associated_data = encrypt.get("associated_data")
+        if not isinstance(nonce, str) or not isinstance(ciphertext, str):
+            return None
+        associated = associated_data if isinstance(associated_data, str) else ""
+        cert_pem = decrypt_aes_256_gcm(
+            api_v3_key=merchant.api_v3_key,
+            nonce=nonce,
+            associated_data=associated,
+            ciphertext_b64=ciphertext,
+        )
+        certificate = x509.load_pem_x509_certificate(cert_pem)
+        public_key = certificate.public_key()
+        if not isinstance(public_key, RSAPublicKey):
+            raise WeChatNativeError("WeChat platform certificate must be RSA")
+        return WeChatPlatformCertificate(
+            serial_no=serial,
+            public_key=public_key,
+            not_after=certificate.not_valid_after_utc,
+        )
+
+
+_DEFAULT_CERTIFICATE_MANAGER: PlatformCertificateManager | None = None
+_DEFAULT_CERTIFICATE_MANAGER_LOCK = threading.Lock()
+
+
+def default_certificate_manager() -> PlatformCertificateManager:
+    """The process-wide platform-certificate manager used by production callers.
+
+    Providers and clients are constructed per request (the registry hands back a
+    fresh instance on every ``get_payment_provider``), so a per-instance manager
+    starts cold every time and the 12-hour cache never applies: each order and
+    each callback would re-download ``/v3/certificates``. Sharing one manager is
+    what makes that TTL real. Tests that inject an opener or a manager keep their
+    own isolated instance.
+    """
+    global _DEFAULT_CERTIFICATE_MANAGER
+    with _DEFAULT_CERTIFICATE_MANAGER_LOCK:
+        if _DEFAULT_CERTIFICATE_MANAGER is None:
+            _DEFAULT_CERTIFICATE_MANAGER = PlatformCertificateManager()
+        return _DEFAULT_CERTIFICATE_MANAGER
+
+
+class CertificateSource(Protocol):
+    def get_certificate(
+        self, merchant: WeChatMerchantConfig, serial_no: str
+    ) -> WeChatPlatformCertificate: ...
+
+
+def resolve_verification_key(
+    merchant: WeChatMerchantConfig, serial: str, cert_manager: CertificateSource
+) -> RSAPublicKey:
+    """The public key that must have signed a response/callback carrying ``serial``.
+
+    A ``PUB_KEY_ID_`` serial is answered from the merchant's configured WeChat Pay
+    public key and never reaches the certificate manager: public-key merchants
+    have no platform certificates to download, and a forged serial of that shape
+    must not cost a network round trip either. Any other serial names a platform
+    certificate. Raises ``WeChatNativeError`` when no key is available.
+    """
+    if serial.startswith(PUBLIC_KEY_ID_PREFIX):
+        if not merchant.public_key_id or serial != merchant.public_key_id:
+            # 配置缺失或与微信实际使用的公钥 ID 不一致：按“暂不可用”上报，回调
+            # 拿到 5xx 由微信重试，运营补好配置后仍能入账。
+            raise WeChatNativeError("微信支付公钥 ID 与商户配置不一致")
+        return load_public_key(merchant.public_key_pem)
+    return cert_manager.get_certificate(merchant, serial).public_key
+
+
+# -----------------------------------------------------------------------------
+# Cycle 2: WeChat Pay V3 Native HTTP client (order placement + query)
+# -----------------------------------------------------------------------------
+
+
+class WeChatNativeClient:
+    """WeChat Pay V3 Native client: places orders and queries them by out_trade_no.
+
+    Every API response is signature-verified against the platform certificate
+    matching the Wechatpay-Serial header before its body is trusted.
+    """
+
+    def __init__(
+        self,
+        *,
+        opener: WeChatHTTPOpener | None = None,
+        timeout_seconds: float = WECHAT_TIMEOUT_SECONDS,
+        cert_manager: PlatformCertificateManager | None = None,
+    ) -> None:
+        self._opener = opener or cast(WeChatHTTPOpener, urlopen)
+        self._timeout_seconds = timeout_seconds
+        if cert_manager is not None:
+            self._cert_manager = cert_manager
+        elif opener is None:
+            # Production path: share the process-wide cache so the TTL applies.
+            self._cert_manager = default_certificate_manager()
+        else:
+            # An injected opener must also serve the certificate download, so this
+            # client keeps its own manager bound to that opener.
+            self._cert_manager = PlatformCertificateManager(
+                opener=self._opener, timeout_seconds=timeout_seconds
+            )
+
+    def create_native_order(
+        self,
+        *,
+        merchant: WeChatMerchantConfig,
+        deployment: WeChatDeploymentConfig,
+        out_trade_no: str,
+        description: str,
+        amount_fen: int,
+        attach: str | None = None,
+        client_ip: str | None = None,
+        time_expire: str | None = None,
+    ) -> WeChatNativeOrderResult:
+        """Place a Native order and return the weixin:// code_url for QR rendering.
+
+        ``time_expire`` is an RFC 3339 instant after which WeChat stops accepting
+        payment for this order. Passing it keeps the gateway's idea of the order's
+        life identical to ours instead of relying on WeChat's implicit default.
+        """
+        if amount_fen <= 0:
+            raise WeChatNativeError("WeChat native order amount must be positive")
+        payload: dict[str, object] = {
+            "appid": merchant.appid,
+            "mchid": merchant.mchid,
+            "description": description,
+            "out_trade_no": out_trade_no,
+            "notify_url": deployment.notify_url,
+            "amount": {"total": amount_fen, "currency": "CNY"},
+        }
+        if time_expire:
+            payload["time_expire"] = time_expire
+        if attach:
+            payload["attach"] = attach
+        if client_ip:
+            payload["scene_info"] = {"payer_client_ip": client_ip}
+        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        # 下单调用归到这笔订单的商户单号下：客服拿订单号就能翻到微信的应答原文。
+        with external_call_context("RECHARGE_ORDER", out_trade_no):
+            raw = self._request(
+                merchant,
+                method="POST",
+                url_path=NATIVE_ORDER_PATH,
+                body=body,
+                endpoint=ENDPOINT_NATIVE_ORDER,
+            )
+        with _validated(raw):
+            verified = self._verify_response(merchant, raw)
+            parsed = _parse_json_object(verified)
+            code_url = parsed.get("code_url")
+            if not isinstance(code_url, str) or not code_url:
+                raise WeChatNativeError("WeChat native order response is missing code_url")
+        return WeChatNativeOrderResult(
+            code_url=code_url, response_digest=hashlib.sha256(raw.body).hexdigest()
+        )
+
+    def query_order(
+        self, *, merchant: WeChatMerchantConfig, out_trade_no: str
+    ) -> WeChatOrderQueryResult:
+        """Query an order by out_trade_no and normalize the trade_state into paid/unpaid."""
+        return self._query_order(merchant=merchant, out_trade_no=out_trade_no, order_scoped=True)
+
+    def _query_order(
+        self, *, merchant: WeChatMerchantConfig, out_trade_no: str, order_scoped: bool
+    ) -> WeChatOrderQueryResult:
+        """``order_scoped=False`` 用于凭据自检：它查的是编造的订单号，不能记到真实订单名下。"""
+        # mchid 是该接口必填的 query 参数，缺了微信直接回 PARAM_ERROR。签名串里的
+        # URL 也必须含完整 query，所以拼进 url_path，让签名与请求用同一个值。
+        url_path = (
+            ORDER_QUERY_PATH_TEMPLATE.format(out_trade_no=quote(out_trade_no, safe=""))
+            + "?mchid="
+            + quote(merchant.mchid, safe="")
+        )
+        # 只把「发出查单请求」这一步归到订单名下（与下单同一口径）。验签时可能顺带刷新
+        # 平台证书，那次下载不属于任何订单，所以验签和解析要放在这个 with 之外。
+        scope: AbstractContextManager[None] = (
+            external_call_context("RECHARGE_ORDER", out_trade_no) if order_scoped else nullcontext()
+        )
+        with scope:
+            raw = self._request(
+                merchant,
+                method="GET",
+                url_path=url_path,
+                body="",
+                endpoint=ENDPOINT_ORDER_QUERY,
+            )
+        with _validated(raw):
+            verified = self._verify_response(merchant, raw)
+            parsed = _parse_json_object(verified)
+            trade_state = parsed.get("trade_state")
+            if not isinstance(trade_state, str) or not trade_state:
+                raise WeChatNativeError("WeChat order query response is missing trade_state")
+            if parsed.get("out_trade_no") != out_trade_no:
+                raise WeChatNativeError("WeChat order query number mismatch")
+        paid = trade_state == "SUCCESS"
+        transaction_id = parsed.get("transaction_id")
+        amount_fen: int | None = None
+        amount = parsed.get("amount")
+        if paid and isinstance(amount, dict):
+            total = amount.get("total")
+            if isinstance(total, int):
+                amount_fen = total
+        return WeChatOrderQueryResult(
+            trade_state=trade_state,
+            paid=paid,
+            out_trade_no=out_trade_no,
+            transaction_id=transaction_id if isinstance(transaction_id, str) else None,
+            amount_fen=amount_fen,
+            response_digest=hashlib.sha256(raw.body).hexdigest(),
+        )
+
+    def check_public_key_credentials(self, merchant: WeChatMerchantConfig) -> None:
+        """Live credential probe for public-key merchants (no platform certificates).
+
+        Queries an order number that cannot exist: WeChat answers
+        ``ORDER_NOT_EXIST`` only after it has accepted the signed request, which
+        proves ``mchid`` + ``serial_no`` + ``private_key``. Any other failure is
+        raised with WeChat's error code in its message.
+        """
+        probe_order_no = "SELFCHECK" + secrets.token_hex(8)
+        try:
+            # 直接走不带订单归属的内部查单：探测用的订单号是编的，不能记成一笔真实
+            # 充值订单的调用（调用日志里它只是一条没有任务归属的凭据自检）。
+            self._query_order(merchant=merchant, out_trade_no=probe_order_no, order_scoped=False)
+        except WeChatNativeError as exc:
+            if exc.wechat_code == "ORDER_NOT_EXIST":
+                return
+            raise
+        raise WeChatNativeError("自检探测订单意外存在，无法判断凭据状态")
+
+    def _request(
+        self,
+        merchant: WeChatMerchantConfig,
+        *,
+        method: str,
+        url_path: str,
+        body: str,
+        endpoint: str,
+    ) -> _RawResponse:
+        authorization = build_authorization_header(
+            mchid=merchant.mchid,
+            serial_no=merchant.serial_no,
+            private_key_pem=merchant.private_key_pem,
+            method=method,
+            url_path=url_path,
+            body=body,
+            timestamp=str(int(time.time())),
+            nonce=secrets.token_hex(16),
+        )
+        data = body.encode("utf-8") if method == "POST" else None
+        request = Request(WECHAT_API_BASE + url_path, data=data, method=method)
+        request.add_header("Authorization", authorization)
+        request.add_header("Accept", "application/json")
+        request.add_header("User-Agent", WECHAT_USER_AGENT)
+        if merchant.public_key_id:
+            # 切换期内微信按这个请求头决定应答用公钥体系还是平台证书签名；不带时
+            # 回落到平台证书，而公钥商户根本没有平台证书可用。
+            request.add_header("Wechatpay-Serial", merchant.public_key_id)
+        if data is not None:
+            request.add_header("Content-Type", "application/json")
+        return _execute_request(
+            self._opener, request, timeout_seconds=self._timeout_seconds, endpoint=endpoint
+        )
+
+    def _verify_response(self, merchant: WeChatMerchantConfig, raw: _RawResponse) -> bytes:
+        if (
+            raw.timestamp is None
+            or raw.nonce is None
+            or raw.signature is None
+            or raw.serial is None
+        ):
+            raise WeChatSignatureError("WeChat response is missing verification headers")
+        public_key = resolve_verification_key(merchant, raw.serial, self._cert_manager)
+        try:
+            body_text = raw.body.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise WeChatNativeError("WeChat response body is not valid UTF-8") from exc
+        message = build_response_verify_message(
+            timestamp=raw.timestamp, nonce=raw.nonce, body=body_text
+        )
+        if not verify_sha256_rsa(
+            public_key=public_key, signature_b64=raw.signature, message=message
+        ):
+            raise WeChatSignatureError("WeChat response signature verification failed")
+        return raw.body

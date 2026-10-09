@@ -1,0 +1,161 @@
+name: Desktop installers
+
+on:
+  workflow_dispatch:
+    inputs:
+      api_base_url:
+        description: Customer HTTPS API origin
+        type: string
+        required: true
+        default: https://video.zszhj.cn
+  push:
+    # The task branch makes the first build reviewable before merging to main.
+    branches: [main, feat/desktop-actions-20260917]
+    # v* 标签是正式发布入口：打 tag 必发三平台包并挂到 GitHub Releases
+    # （标签推送不适用 paths 过滤，保证发版不受改动路径影响）。
+    tags: ['v*']
+    paths:
+      - 'client/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.cargo/**'
+      - '.github/workflows/desktop-build.yml'
+      - 'scripts/release/collect-desktop-artifacts.mjs'
+      - 'scripts/require_customer_api_base.mjs'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-installers-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-x86_64
+            runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            bundles: nsis
+            bundle_dir: nsis
+            config: src-tauri/tauri.customer.conf.json
+            binary_arch: x86_64
+          - platform: macos-arm64
+            runner: macos-15
+            target: aarch64-apple-darwin
+            bundles: app
+            bundle_dir: dmg
+            config: src-tauri/tauri.macos.conf.json
+            binary_arch: arm64
+          - platform: macos-x86_64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+            bundles: app
+            bundle_dir: dmg
+            config: src-tauri/tauri.macos.conf.json
+            binary_arch: x86_64
+    defaults:
+      run:
+        shell: bash
+    env:
+      VITE_API_BASE_URL: ${{ inputs.api_base_url || 'https://video.zszhj.cn' }}
+      RUST_TARGET: ${{ matrix.target }}
+      BUNDLE_CONFIG: ${{ matrix.config }}
+      BUNDLE_TYPES: ${{ matrix.bundles }}
+      BUNDLE_DIR: ${{ matrix.bundle_dir }}
+      BINARY_ARCH: ${{ matrix.binary_arch }}
+      PLATFORM: ${{ matrix.platform }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - name: Validate customer API origin
+        run: npm run require:customer-api-base
+      - name: Install Rust target
+        run: |
+          rustup toolchain install stable --profile minimal --target "$RUST_TARGET"
+          rustup default stable
+      - name: Install JavaScript dependencies
+        run: npm ci
+      - name: Scan source for secrets
+        run: npm run check:security
+      # bundle.resources 现在包含 ffmpeg.exe/ffprobe.exe，缺失会让 tauri build
+      # 直接失败，所以必须在打包前把 ffmpeg 产物放到 resources/ffmpeg/。
+      # 国内源对海外 runner 不可达，改从本仓库 Release 资产取（CDN 分发）
+      - name: Fetch ffmpeg binaries from release
+        if: runner.os == 'Windows'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p client/src-tauri/resources/ffmpeg
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --pattern "ffmpeg.exe" --pattern "ffprobe.exe" \
+            --dir client/src-tauri/resources/ffmpeg
+          test -s client/src-tauri/resources/ffmpeg/ffmpeg.exe
+          test -s client/src-tauri/resources/ffmpeg/ffprobe.exe
+      - name: Build desktop installer
+        run: |
+          sign_args=()
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            sign_args=(--no-sign)
+          fi
+          npm run tauri --workspace client -- build \
+            --config "$BUNDLE_CONFIG" --bundles "$BUNDLE_TYPES" \
+            --target "$RUST_TARGET" --ci "${sign_args[@]}" \
+            -- --locked --no-default-features
+      - name: Create macOS disk image
+        if: runner.os == 'macOS'
+        run: |
+          apps=(".cargo-target/$RUST_TARGET/release/bundle/macos/"*.app)
+          [[ ${#apps[@]} -eq 1 && -d "${apps[0]}" ]]
+          stage=$(mktemp -d "$RUNNER_TEMP/desktop-dmg.XXXXXX")
+          ditto "${apps[0]}" "$stage/$(basename "${apps[0]}")"
+          ln -s /Applications "$stage/Applications"
+          version=$(node -p 'require("./package.json").version')
+          output=".cargo-target/$RUST_TARGET/release/bundle/dmg"
+          mkdir -p "$output"
+          # Native image creation does not need a Finder automation session.
+          hdiutil create -volname "众墅之家 AI 爆款视频工具 $version" -srcfolder "$stage" \
+            -format UDZO "$output/VideoReplica_${version}_${PLATFORM}.dmg"
+      - name: Verify macOS application and disk image
+        if: runner.os == 'macOS'
+        run: |
+          apps=(".cargo-target/$RUST_TARGET/release/bundle/macos/"*.app)
+          images=(".cargo-target/$RUST_TARGET/release/bundle/dmg/"*.dmg)
+          [[ ${#apps[@]} -eq 1 && -d "${apps[0]}" ]]
+          [[ ${#images[@]} -eq 1 && -f "${images[0]}" ]]
+          codesign --verify --deep --strict "${apps[0]}"
+          lipo "${apps[0]}/Contents/MacOS/video-replica-desktop" -verify_arch "$BINARY_ARCH"
+          hdiutil verify "${images[0]}"
+      - name: Collect installer and provenance
+        run: |
+          node scripts/release/collect-desktop-artifacts.mjs "$PLATFORM" \
+            ".cargo-target/$RUST_TARGET/release/bundle/$BUNDLE_DIR" \
+            "output/desktop/$PLATFORM"
+          # Keep provenance beside the installer; never upload the whole workspace.
+          test -f "output/desktop/$PLATFORM/manifest.json"
+          test -f "output/desktop/$PLATFORM/SHA256SUMS.txt"
+          test -f "output/desktop/$PLATFORM/RELEASE-CHANNEL.txt"
+      # Release 资产不走存储配额；三个平台并行创建用 || true 容忍重复
+      - name: Publish installer to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG_NAME" --title "众墅之家 AI 爆款视频工具 $TAG_NAME" \
+            --notes "自动更新通道发布产物。API: $VITE_API_BASE_URL" 2>/dev/null || true
+          gh release upload "$TAG_NAME" output/desktop/$PLATFORM/* --clobber
+

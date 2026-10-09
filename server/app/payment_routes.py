@@ -1,0 +1,543 @@
+from __future__ import annotations
+
+import logging
+import sqlite3
+from typing import Annotated, Literal
+from uuid import uuid4
+
+import psycopg
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
+
+# Import to trigger provider registration
+import app.zpay_provider  # noqa: F401
+from app.admin_auth_routes import AdminWriter
+from app.admin_write_contract import AdminWriteContract, write_with_idempotency
+from app.admin_write_contract import require_write_contract as _require_write_contract
+from app.auth import CurrentUser, Database
+from app.control_auth import ControlUser
+from app.db_portable import BusinessConnection
+from app.ops_metrics import get_or_create_request_id
+from app.payment_provider import (
+    MerchantConfig,
+    OrderQueryError,
+    PaymentProvider,
+    get_payment_provider,
+)
+from app.permissions import write_audit
+from app.recharge_routes import RechargeOrderStatusResponse
+from app.wechat_native_provider import (
+    WECHAT_CALLBACK_CERT_UNAVAILABLE,
+    WeChatNativeProvider,
+)
+from app.zpay_payments import (
+    WECHAT_NATIVE_SETTLEMENT_SPEC,
+    ZPAY_SETTLEMENT_SPEC,
+    PaymentConfirmationError,
+    confirm_recharge_payment,
+    read_recharge_order,
+    serialize_recharge_order,
+)
+
+router = APIRouter(prefix="/api", tags=["payments"])
+logger = logging.getLogger(__name__)
+
+
+class PaidLedgerRepairResponse(BaseModel):
+    order_no: str
+    outcome: Literal["repaired", "already_recorded"]
+    credits: int
+
+
+def _repair_paid_order_ledger(conn: BusinessConnection, order_no: str) -> PaidLedgerRepairResponse:
+    if not conn.is_postgres:
+        raise HTTPException(503, detail={"code": "LEDGER_REPAIR_UNAVAILABLE"})
+    with conn.raw.transaction():
+        # 与支付结算同样先锁订单，再锁钱包；并发补记/结算只允许一个入账事实。
+        order = conn.execute(
+            "SELECT id, user_id, status, credits FROM recharge_orders "
+            "WHERE merchant_order_no = %s FOR UPDATE",
+            (order_no,),
+        ).fetchone()
+        if order is None:
+            raise HTTPException(
+                404, detail={"code": "RECHARGE_ORDER_NOT_FOUND", "message": "订单不存在。"}
+            )
+        if order["status"] != "PAID":
+            raise HTTPException(
+                409,
+                detail={"code": "LEDGER_REPAIR_ORDER_NOT_PAID", "message": "仅可补记已支付订单。"},
+            )
+        credits = int(order["credits"])
+        existing = conn.execute(
+            "SELECT user_id, available_delta, reserved_delta FROM wallet_transactions "
+            "WHERE recharge_order_id = %s AND type = 'CHARGE'",
+            (str(order["id"]),),
+        ).fetchall()
+        if existing:
+            if (
+                len(existing) != 1
+                or existing[0]["user_id"] != order["user_id"]
+                or int(existing[0]["available_delta"]) != credits
+                or int(existing[0]["reserved_delta"]) != 0
+            ):
+                raise HTTPException(
+                    409,
+                    detail={
+                        "code": "LEDGER_REPAIR_CHARGE_CONFLICT",
+                        "message": "已有入账流水与订单不符，请人工核对。",
+                    },
+                )
+            return PaidLedgerRepairResponse(
+                order_no=order_no, outcome="already_recorded", credits=credits
+            )
+        wallet = conn.execute(
+            "SELECT available_credits, reserved_credits FROM wallets WHERE user_id = %s FOR UPDATE",
+            (str(order["user_id"]),),
+        ).fetchone()
+        if wallet is None or credits <= 0:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "LEDGER_REPAIR_WALLET_INVALID",
+                    "message": "钱包或订单积分快照不完整，请人工核对。",
+                },
+            )
+        ledger = conn.execute(
+            "SELECT COALESCE(SUM(available_delta), 0) AS available, "
+            "COALESCE(SUM(reserved_delta), 0) AS reserved "
+            "FROM wallet_transactions WHERE user_id = %s",
+            (str(order["user_id"]),),
+        ).fetchone()
+        if int(wallet["available_credits"]) != int(ledger["available"]) or int(
+            wallet["reserved_credits"]
+        ) != int(ledger["reserved"]):
+            # 缺流水但钱包已加分时不能再加一次；先进入钱包异常核对，不能猜测旧入账。
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "LEDGER_REPAIR_WALLET_MISMATCH",
+                    "message": "钱包与已有流水不符，请先核对，暂不自动补记。",
+                },
+            )
+        updated = conn.execute(
+            "UPDATE wallets SET available_credits = available_credits + %s, "
+            "updated_at = CURRENT_TIMESTAMP "
+            "WHERE user_id = %s AND available_credits <= 2147483647 - %s",
+            (credits, str(order["user_id"]), credits),
+        )
+        if updated.rowcount != 1:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "WALLET_CREDIT_OVERFLOW",
+                    "message": "积分超出钱包范围，请人工核对。",
+                },
+            )
+        conn.execute(
+            "INSERT INTO wallet_transactions (id, user_id, type, available_delta, reserved_delta, "
+            "recharge_order_id, idempotency_key, auth_source) "
+            "VALUES (%s, %s, 'CHARGE', %s, 0, %s, %s, 'internal')",
+            (
+                str(uuid4()),
+                str(order["user_id"]),
+                credits,
+                str(order["id"]),
+                f"paid-ledger-repair:{order['id']}",
+            ),
+        )
+        return PaidLedgerRepairResponse(order_no=order_no, outcome="repaired", credits=credits)
+
+
+@router.post(
+    "/control/recharge-orders/{order_no}/repair-ledger", response_model=PaidLedgerRepairResponse
+)
+def repair_paid_order_ledger(
+    order_no: str,
+    body: AdminWriteContract,
+    request: Request,
+    response: Response,
+    actor: AdminWriter,
+) -> dict[str, object]:
+    _key, reason = _require_write_contract(request, body)
+    current_user = CurrentUser(
+        id=actor.user_id, username=actor.username, display_name=actor.display_name, role="admin"
+    )
+
+    def business(raw: psycopg.Connection, request_id: str) -> dict[str, object]:
+        conn = BusinessConnection.postgres(raw)
+        result = _repair_paid_order_ledger(conn, order_no)
+        write_audit(
+            conn,
+            actor=current_user,
+            action="payment.ledger_repair",
+            entity_type="recharge_order",
+            entity_id=order_no,
+            metadata={
+                "reason": reason,
+                "outcome": result.outcome,
+                "credits": result.credits,
+                "request_id": request_id,
+            },
+        )
+        return result.model_dump()
+
+    return write_with_idempotency(request, response, actor, body, business, success_status=200)
+
+
+def get_zpay_provider() -> PaymentProvider:
+    """Dependency: get the ZPay payment provider."""
+    return get_payment_provider("zpay")
+
+
+ZPayProviderDep = Annotated[PaymentProvider, Depends(get_zpay_provider)]
+
+
+def get_wechat_provider() -> WeChatNativeProvider:
+    """Dependency: the WeChat Native provider, typed for raw-body callback verify."""
+    provider = get_payment_provider("wechat_native")
+    assert isinstance(provider, WeChatNativeProvider)
+    return provider
+
+
+WeChatProviderDep = Annotated[WeChatNativeProvider, Depends(get_wechat_provider)]
+
+
+@router.get("/payments/zpay/notify", response_class=PlainTextResponse)
+def zpay_notify(
+    request: Request,
+    conn: Database,
+    provider: ZPayProviderDep,
+) -> PlainTextResponse:
+    params = _unique_query_params(request)
+    merchant = _load_merchant_config(conn, provider)
+
+    # Use provider abstraction for notification verification
+    verification = provider.verify_notification(params, merchant)
+    if not verification.valid:
+        logger.warning("ZPay callback rejected: %s", verification.error_code)
+        return PlainTextResponse("failure", status_code=400)
+
+    assert verification.merchant_order_no is not None
+    assert verification.provider_trade_no is not None
+    assert verification.amount_fen is not None
+    assert verification.channel is not None
+    assert verification.source_digest is not None
+
+    try:
+        confirm_recharge_payment(
+            conn,
+            merchant_order_no=verification.merchant_order_no,
+            provider_trade_no=verification.provider_trade_no,
+            amount_fen=verification.amount_fen,
+            channel=verification.channel,
+            source_digest=verification.source_digest,
+            allowed_channels=merchant.allowed_channels,
+        )
+    except PaymentConfirmationError as exc:
+        logger.warning("ZPay callback rejected: %s", exc.code)
+        return PlainTextResponse("failure", status_code=exc.status_code)
+    except (sqlite3.OperationalError, psycopg.errors.OperationalError) as exc:
+        logger.warning("ZPay callback deferred because the payment database is busy: %s", exc)
+        return PlainTextResponse("retry", status_code=503)
+    return PlainTextResponse("success")
+
+
+@router.get("/payments/zpay/return", response_class=HTMLResponse)
+def zpay_return() -> HTMLResponse:
+    return HTMLResponse(
+        "<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'>"
+        "<title>支付确认中</title></head><body><main><h1>正在确认支付</h1>"
+        "<p>请返回内部系统查看充值状态。</p></main></body></html>"
+    )
+
+
+@router.post("/payments/wechat_native/notify")
+async def wechat_native_notify(
+    request: Request,
+    conn: Database,
+    provider: WeChatProviderDep,
+) -> JSONResponse:
+    """WeChat Pay V3 Native transaction callback.
+
+    Verifies the exact raw body against the Wechatpay-* headers (platform-certificate
+    signature + AES-256-GCM resource decryption) then idempotently settles the recharge
+    order through the shared confirm routine with the wechat_native spec (which writes
+    the transaction_id column, not provider_trade_no). Answers the WeChat JSON
+    acknowledgement shape rather than zpay's plain text: ``{"code":"SUCCESS"}`` stops
+    retries, ``{"code":"FAIL"}`` (with a 5xx status for transient faults) triggers them.
+    """
+    # 只有读原始请求体需要事件循环；其余全是同步阻塞调用（查库读商户配置、可能
+    # 下载平台证书最长 10 秒、等订单行锁），放在事件循环上会拖住整个进程的所有
+    # 请求，所以整体移进线程池。
+    raw_body = await request.body()
+    return await run_in_threadpool(
+        _handle_wechat_notification,
+        conn,
+        provider,
+        raw_body=raw_body,
+        timestamp=request.headers.get("Wechatpay-Timestamp"),
+        nonce=request.headers.get("Wechatpay-Nonce"),
+        signature=request.headers.get("Wechatpay-Signature"),
+        serial=request.headers.get("Wechatpay-Serial"),
+    )
+
+
+def _handle_wechat_notification(
+    conn: BusinessConnection,
+    provider: WeChatNativeProvider,
+    *,
+    raw_body: bytes,
+    timestamp: str | None,
+    nonce: str | None,
+    signature: str | None,
+    serial: str | None,
+) -> JSONResponse:
+    try:
+        merchant = provider.load_merchant_config(conn)
+    except ValueError as exc:
+        logger.warning("WeChat callback rejected: merchant config invalid: %s", exc)
+        return _wechat_fail("WECHAT_CONFIGURATION_INVALID", status_code=503)
+
+    result = provider.verify_notification_raw(
+        raw_body=raw_body,
+        timestamp=timestamp,
+        nonce=nonce,
+        signature=signature,
+        serial=serial,
+        merchant=merchant,
+    )
+    if not result.authenticated:
+        # A missing/unfetchable platform certificate is transient -> 503 so WeChat
+        # retries; a bad signature/body is final -> 400.
+        status_code = 503 if result.error_code == WECHAT_CALLBACK_CERT_UNAVAILABLE else 400
+        logger.warning("WeChat callback rejected: %s", result.error_code)
+        return _wechat_fail(
+            result.error_code or "WECHAT_CALLBACK_REJECTED", status_code=status_code
+        )
+    if result.error_code is not None:
+        # Authentic but not settleable (e.g. SUCCESS missing its transaction_id).
+        logger.warning("WeChat callback payload invalid: %s", result.error_code)
+        return _wechat_fail(result.error_code, status_code=400)
+    if result.trade_state != "SUCCESS":
+        # Authentic non-final state (NOTPAY/USERPAYING/...): ACK so WeChat stops this
+        # push and re-notifies when the trade reaches a terminal state.
+        return _wechat_success()
+
+    # An authentic SUCCESS with no error_code carries every settlement field (the
+    # provider's payload guard rejects an incomplete SUCCESS as PAYLOAD_INVALID).
+    assert result.merchant_order_no is not None
+    assert result.provider_trade_no is not None
+    assert result.amount_fen is not None
+    assert result.channel is not None
+    assert result.source_digest is not None
+    try:
+        # Runs on the threadpool (see wechat_native_notify): synchronous PG lock
+        # waits must not block dependency teardown on the event loop, since another
+        # callback may hold the order lock until commit.
+        confirm_recharge_payment(
+            conn,
+            merchant_order_no=result.merchant_order_no,
+            provider_trade_no=result.provider_trade_no,
+            amount_fen=result.amount_fen,
+            channel=result.channel,
+            source_digest=result.source_digest,
+            allowed_channels=merchant.allowed_channels,
+            provider_spec=WECHAT_NATIVE_SETTLEMENT_SPEC,
+        )
+    except PaymentConfirmationError as exc:
+        logger.warning("WeChat callback settlement rejected: %s", exc.code)
+        return _wechat_fail(exc.code, status_code=exc.status_code)
+    except (sqlite3.OperationalError, psycopg.errors.OperationalError) as exc:
+        logger.warning("WeChat callback deferred because the payment database is busy: %s", exc)
+        return _wechat_fail("PAYMENT_DATABASE_BUSY", status_code=503)
+    return _wechat_success()
+
+
+@router.post(
+    "/control/recharge-orders/{order_no}/sync",
+    response_model=RechargeOrderStatusResponse,
+)
+def sync_recharge_order(
+    order_no: str,
+    body: AdminWriteContract,
+    request: Request,
+    conn: Database,
+    _actor: ControlUser,
+) -> RechargeOrderStatusResponse:
+    """Manual single-order query with the admin write contract (A4, A2).
+
+    The operator must send confirm + reason + an Idempotency-Key like every
+    other control-plane write, and the attempt lands an ``audit_logs`` row:
+    a manual sync can credit a wallet, so it must name who asked for it.
+    The query itself stays naturally idempotent (PAID orders replay, the
+    confirmed credit is unique-constrained), so no snapshot layer is needed.
+
+    资金中心方案（P1）：所有渠道统一一个「查单补单」入口，网关按订单自身的
+    provider 字段分派——微信订单不再只能从客户详情核验。
+    """
+    _syncable_providers = ("zpay", "wechat_native")
+    _key, reason = _require_write_contract(request, body)
+    request_id = get_or_create_request_id(request)
+    write_audit(
+        conn,
+        actor=_actor,
+        action="payment.sync",
+        entity_type="recharge_order",
+        entity_id=order_no,
+        metadata={"reason": reason, "request_id": request_id},
+    )
+    local_order = read_recharge_order(conn, merchant_order_no=order_no)
+    if local_order is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "RECHARGE_ORDER_NOT_FOUND",
+                "message": "Recharge order does not exist.",
+            },
+        )
+    if str(local_order["status"]) == "PAID":
+        return RechargeOrderStatusResponse(**serialize_recharge_order(local_order))
+    if str(local_order["status"]) != "PENDING":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "RECHARGE_ORDER_NOT_SYNCABLE",
+                "message": "Recharge order is not waiting for payment.",
+            },
+        )
+    provider_name = str(local_order["provider"])
+    if provider_name not in _syncable_providers:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "RECHARGE_ORDER_NOT_SYNCABLE",
+                "message": "This order is not placed through a payment channel.",
+            },
+        )
+    provider = get_payment_provider(provider_name)
+
+    merchant = _load_merchant_config(conn, provider)
+    try:
+        deployment = provider.load_deployment_config()
+    except ValueError as exc:
+        # 红线：供应商名称既不得出现在对外响应文案里，也不得出现在日志里
+        # （AGENTS.md 三者并列：API 响应 / 界面文案 / 日志）。上游 ValueError
+        # 的消息文本本身可能带供应商名，因此这里只记异常类型，不记 str(exc)。
+        logger.warning("Recharge order sync failed on deployment config: %s", type(exc).__name__)
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "PAYMENT_CHANNEL_UNAVAILABLE",
+                "message": "支付通道配置不完整，暂时无法同步订单状态。",
+            },
+        ) from exc
+    try:
+        remote_order = provider.query_order(
+            merchant=merchant,
+            deployment=deployment,
+            merchant_order_no=order_no,
+        )
+    except OrderQueryError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={
+                "code": "PAYMENT_QUERY_FAILED",
+                "message": "支付通道订单状态暂时无法确认。",
+            },
+        ) from exc
+
+    if not remote_order.paid:
+        return RechargeOrderStatusResponse(**serialize_recharge_order(local_order))
+    if (
+        remote_order.merchant_order_no != order_no
+        or remote_order.provider_trade_no is None
+        or remote_order.amount_fen is None
+        or remote_order.channel is None
+    ):
+        # 与同函数内 PAYMENT_QUERY_FAILED 口径一致：控制面响应同样不得出现
+        # 供应商名称（红线覆盖 API 响应/界面文案/日志，不区分客户面还是管理面）。
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "PAYMENT_QUERY_RESPONSE_INVALID",
+                "message": "支付通道返回的订单数据不完整，暂时无法确认。",
+            },
+        )
+
+    try:
+        confirmed = confirm_recharge_payment(
+            conn,
+            merchant_order_no=order_no,
+            provider_trade_no=remote_order.provider_trade_no,
+            amount_fen=remote_order.amount_fen,
+            channel=remote_order.channel,
+            source_digest=remote_order.response_digest,
+            allowed_channels=merchant.allowed_channels,
+            # 微信的支付凭证落在 transaction_id 列，结算规范必须跟着渠道走。
+            provider_spec=WECHAT_NATIVE_SETTLEMENT_SPEC
+            if provider_name == "wechat_native"
+            else ZPAY_SETTLEMENT_SPEC,
+        )
+    except PaymentConfirmationError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+    except sqlite3.OperationalError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "PAYMENT_DATABASE_BUSY",
+                "message": "Payment settlement is temporarily busy.",
+            },
+        ) from exc
+    return RechargeOrderStatusResponse(**serialize_recharge_order(confirmed))
+
+
+def _load_merchant_config(
+    conn: BusinessConnection,
+    provider: PaymentProvider,
+) -> MerchantConfig:
+    """Load merchant configuration via the provider abstraction."""
+    try:
+        return provider.load_merchant_config(conn)
+    except ValueError as exc:
+        # 红线：供应商名称既不得出现在对外响应文案里，也不得出现在日志里
+        # （AGENTS.md 三者并列：API 响应 / 界面文案 / 日志）。上游 ValueError
+        # 的消息文本本身可能带供应商名，因此这里只记异常类型，不记 str(exc)。
+        logger.warning("Payment provider merchant config invalid: %s", type(exc).__name__)
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "PAYMENT_CHANNEL_UNAVAILABLE",
+                "message": "支付通道配置不完整，暂时无法处理该操作。",
+            },
+        ) from exc
+
+
+def _unique_query_params(request: Request) -> dict[str, str]:
+    params: dict[str, str] = {}
+    for name, value in request.query_params.multi_items():
+        if name in params:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "ZPAY_DUPLICATE_PARAMETER",
+                    "message": "ZPay callback contains duplicate parameters.",
+                },
+            )
+        params[name] = value
+    return params
+
+
+def _wechat_success() -> JSONResponse:
+    """WeChat JSON acknowledgement that stops the notification retries."""
+    return JSONResponse(content={"code": "SUCCESS", "message": "OK"})
+
+
+def _wechat_fail(code: str, *, status_code: int) -> JSONResponse:
+    """WeChat JSON failure; a 5xx status makes WeChat retry the notification."""
+    return JSONResponse(content={"code": "FAIL", "message": code}, status_code=status_code)
