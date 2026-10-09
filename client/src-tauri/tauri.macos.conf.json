@@ -1,0 +1,25 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "targets": [
+      "app",
+      "dmg"
+    ],
+    "resources": [],
+    "icon": [
+      "icons/icon.icns"
+    ],
+    "longDescription": "连接客户云服务的众墅之家 AI 爆款视频工具 macOS 桌面端。",
+    "macOS": {
+      "signingIdentity": "-"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDU2RTY3QzAzRDQzQjBBODYKUldTR0NqdlVBM3ptVm9PZzcvU2M0OG03b1ZtdkFaSGIxQlpZdFBnNytQWWVYbjdRSHR5T0phWW0K",
+      "endpoints": [
+        "https://video.zszhj.cn/downloads/customer-cloud/stable.json"
+      ]
+    }
+  }
+}
