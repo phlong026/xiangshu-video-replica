@@ -270,6 +270,7 @@ class ScriptedVendorTransport:
         *,
         headers: dict[str, str],
         body: bytes | None = None,
+        timeout_seconds: float | None = None,
     ) -> bytes:
         self.calls.append((method, url))
         if method == "PUT":

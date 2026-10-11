@@ -37,11 +37,20 @@ class WireTransport(HiflyHttpTransport):
     def __init__(self, response: dict[str, Any]) -> None:
         self.response = response
         self.payload: dict[str, Any] = {}
+        self.timeouts: list[float | None] = []
 
     def request(
-        self, method: str, url: str, *, headers: Mapping[str, str], body: bytes | None = None
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: Mapping[str, str],
+        body: bytes | None = None,
+        timeout_seconds: float | None = None,
     ) -> bytes:
-        self.payload = json.loads(body) if body else {}
+        self.timeouts.append(timeout_seconds)
+        if body and method.upper() != "PUT":
+            self.payload = json.loads(body)
         return json.dumps(self.response).encode()
 
 
@@ -261,3 +270,123 @@ def test_legacy_invalid_subtitle_fails_worker_without_submission(subtitle: Any) 
     assert result.outcome == "failed"
     assert "字幕" in (result.message or "")
     assert transport.payload == {}
+
+
+# --------------------------------------------------------------------------- #
+# Binary-lane deadline: the material PUT and the result GET carry payloads up
+# to the 50MB upload cap and must not inherit the 60s JSON API budget
+# (2026-10-11: a 38.6MB avatar material failed at exactly 60s, terminally).
+# --------------------------------------------------------------------------- #
+
+
+def test_binary_lanes_use_extended_deadline_and_json_api_keeps_default() -> None:
+    from app.hifly import HiflyUploadTarget
+
+    vendor, transport = client({"code": 0, "data": {}})
+    vendor._request("GET", "/api/v2/hifly/account/credit")
+    vendor.upload_file(
+        HiflyUploadTarget(
+            upload_url="https://upload.example/file",
+            content_type="video/mp4",
+            file_id="file-test",
+        ),
+        b"bytes",
+    )
+    vendor.download("https://media.example/result.mp4")
+    assert transport.timeouts == [None, 300.0, 300.0]
+
+
+def test_urllib_transport_applies_json_and_binary_deadlines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import hifly
+
+    captured: list[float] = []
+
+    def fake_recorded_urlopen(
+        _request: Any, *, timeout: float, **_kwargs: Any
+    ) -> tuple[bytes, Any, int]:
+        captured.append(timeout)
+        return b"{}", None, 200
+
+    monkeypatch.setattr(hifly, "recorded_urlopen", fake_recorded_urlopen)
+    transport = hifly.UrllibHiflyHttpTransport()
+    transport.request("POST", "https://hfw-api.hifly.cc/api/v2/hifly/account/credit", headers={})
+    transport.request("PUT", "https://upload.example/file", headers={}, body=b"bytes")
+    # A direct transport call without an override keeps the JSON API budget;
+    # the 300s binary budget is the client's choice (asserted separately).
+    transport.request(
+        "PUT", "https://upload.example/file", headers={}, body=b"bytes", timeout_seconds=300.0
+    )
+    assert captured == [60.0, 60.0, 300.0]
+
+    captured.clear()
+    custom = hifly.UrllibHiflyHttpTransport(timeout_seconds=45.0)
+    custom.request("GET", "https://hfw-api.hifly.cc/api/v2/hifly/account/credit", headers={})
+    assert captured == [45.0]
+
+
+# --------------------------------------------------------------------------- #
+# Material transfer retry: ticket+PUT are idempotent (fresh ticket per attempt,
+# no vendor task exists before create_*), so a transport timeout retries once
+# instead of terminally failing the avatar at the first blip.
+# --------------------------------------------------------------------------- #
+
+
+class FlakyUploadVendor:
+    def __init__(self, failures_before_success: int, exception: Exception) -> None:
+        self.failures_before_success = failures_before_success
+        self.exception = exception
+        self.ticket_calls = 0
+        self.upload_calls = 0
+
+    def create_upload_url(self, extension: str):  # type: ignore[no-untyped-def]
+        self.ticket_calls += 1
+        if self.failures_before_success >= self.ticket_calls:
+            raise self.exception
+        from app.hifly import HiflyUploadTarget
+
+        return HiflyUploadTarget(
+            upload_url="https://upload.example/retry",
+            content_type="video/mp4",
+            file_id=f"file-{self.ticket_calls}",
+        )
+
+    def upload_file(self, target, content: bytes) -> None:  # type: ignore[no-untyped-def]
+        self.upload_calls += 1
+
+
+def test_material_transfer_retries_timeout_with_fresh_ticket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.hifly import HiflyTimeoutError
+    from app.oral_worker import _transfer_material_to_vendor
+
+    monkeypatch.setattr("app.oral_worker.time.sleep", lambda _seconds: None)
+    vendor = FlakyUploadVendor(1, HiflyTimeoutError("数字人服务请求超时，请稍后重试"))
+    target = _transfer_material_to_vendor(vendor, content=b"material", extension="mp4")
+    assert target.file_id == "file-2"
+    assert vendor.ticket_calls == 2 and vendor.upload_calls == 1
+
+
+def test_material_transfer_raises_after_exhausting_timeout_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.hifly import HiflyTimeoutError
+    from app.oral_worker import ORAL_MATERIAL_TRANSFER_ATTEMPTS, _transfer_material_to_vendor
+
+    monkeypatch.setattr("app.oral_worker.time.sleep", lambda _seconds: None)
+    vendor = FlakyUploadVendor(99, HiflyTimeoutError("数字人服务请求超时，请稍后重试"))
+    with pytest.raises(HiflyTimeoutError):
+        _transfer_material_to_vendor(vendor, content=b"material", extension="mp4")
+    assert vendor.ticket_calls == ORAL_MATERIAL_TRANSFER_ATTEMPTS
+
+
+def test_material_transfer_does_not_retry_vendor_rejections() -> None:
+    from app.hifly import HiflyError
+    from app.oral_worker import _transfer_material_to_vendor
+
+    vendor = FlakyUploadVendor(99, HiflyError("数字人服务余额不足，请联系管理员", vendor_code=1002))
+    with pytest.raises(HiflyError):
+        _transfer_material_to_vendor(vendor, content=b"material", extension="mp4")
+    assert vendor.ticket_calls == 1 and vendor.upload_calls == 0

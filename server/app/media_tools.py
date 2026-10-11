@@ -89,6 +89,7 @@ def normalize_generated_video(
     target_height: int,
     max_bytes: int = GENERATED_VIDEO_MAX_BYTES,
     max_duration_seconds: float | None = GENERATED_VIDEO_MAX_SECONDS,
+    max_long_side: int | None = None,
 ) -> NormalizedGeneratedVideo:
     """Fit existing MP4 display pixels into a square-pixel canvas without cropping.
 
@@ -97,7 +98,17 @@ def normalize_generated_video(
     probing and full decoding. Media bytes, tool diagnostics and temporary paths
     are never logged.
     The caller owns target resolution selection, archiving and billing.
+
+    ``max_long_side`` optionally caps the display canvas' longer side (e.g.
+    1920 for the oral-avatar derivative): sources above the cap are scaled
+    down proportionally (aspect preserved to the even pixel, so at most one
+    padding pixel row/column appears) instead of being uploaded at full phone
+    resolution. Below the cap the behavior is byte-identical to before.
     """
+    if max_long_side is not None and (
+        isinstance(max_long_side, bool) or not isinstance(max_long_side, int) or max_long_side < 2
+    ):
+        raise MediaValidationFailed("视频长边上限无效")
     if any(
         isinstance(value, bool) or not isinstance(value, int) or not 2 <= value <= 4096 or value % 2
         for value in (target_width, target_height)
@@ -129,6 +140,10 @@ def normalize_generated_video(
                 source.height,
             ):
                 display_target_width, display_target_height = target_height, target_width
+            if max_long_side is not None:
+                display_target_width, display_target_height = _cap_display_dimensions(
+                    display_target_width, display_target_height, max_long_side
+                )
             transformed = (
                 source.width != display_target_width
                 or source.height != display_target_height
@@ -282,6 +297,22 @@ def _fit_generated_display(dar: Fraction, width: int, height: int) -> tuple[int,
     if min(fitted) < 2:
         raise MediaValidationFailed("成片显示比例无法适配目标尺寸")
     return fitted
+
+
+def _cap_display_dimensions(width: int, height: int, max_long_side: int) -> tuple[int, int]:
+    """Scale (width, height) down proportionally when its long side exceeds the cap.
+
+    Aspect is preserved as exactly as even dimensions allow; the pad filter
+    absorbs the sub-pixel remainder, so at most one black row/column appears.
+    No-op when the long side is already within the cap.
+    """
+    long_side = max(width, height)
+    if long_side <= max_long_side:
+        return width, height
+    scale = Fraction(max_long_side, long_side)
+    capped_width = max(2, int(width * scale) // 2 * 2)
+    capped_height = max(2, int(height * scale) // 2 * 2)
+    return capped_width, capped_height
 
 
 def _run_generated_tool(command: list[str], deadline: float, *, probe: bool = False) -> bytes:
