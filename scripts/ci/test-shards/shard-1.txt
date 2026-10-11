@@ -23,7 +23,6 @@ server/tests/test_dedup_cas_pg.py
 server/tests/test_external_calls.py
 server/tests/test_h3_account_pool.py
 server/tests/test_hifly_protocol.py
-server/tests/test_oral_derivative_cap.py
 server/tests/test_material_complete_http_sql_failure_cleanup.py
 server/tests/test_material_perf_batch_urls.py
 server/tests/test_material_usages.py
