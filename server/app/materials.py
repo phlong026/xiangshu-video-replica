@@ -1282,6 +1282,7 @@ def _rebuild_registered_video_derivative(
             content,
             target_width=inspection.width,
             target_height=inspection.height,
+            max_bytes=MAX_UPLOAD_BYTES,
             max_duration_seconds=GENERATED_VIDEO_MAX_SECONDS,
         )
         compatible_asset_id = str(uuid4())
@@ -1761,8 +1762,13 @@ def probe_material_upload(
         if inspection.width is None or inspection.height is None:
             raise material_error(422, "MATERIAL_VIDEO_INVALID", "视频尺寸无效，无法生成兼容版本。")
         try:
+            # 预算跟上传上限而非 GENERATED_VIDEO_MAX_BYTES（成片默认 50MB）：
+            # 200MB 源的兼容件输入/输出都可能超过 50MB，否则派生必然失败。
             normalized = normalize_generated_video(
-                content, target_width=inspection.width, target_height=inspection.height
+                content,
+                target_width=inspection.width,
+                target_height=inspection.height,
+                max_bytes=MAX_UPLOAD_BYTES,
             )
         except MediaValidationFailed as exc:
             raise material_error(

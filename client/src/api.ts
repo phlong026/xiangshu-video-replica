@@ -2996,7 +2996,7 @@ function uploadStorageObject(
     // prefix) as JSON requests. Absolute provider URLs retain their signature.
     const uploadUrl = resolveManagedMediaUrl(intent.url);
     request.open(intent.method, uploadUrl);
-    // Scale the timeout with the payload (~200KB/s) so large 50MB uploads are
+    // Scale the timeout with the payload (~200KB/s) so large 200MB uploads are
     // not cut off on slow links, while small files keep a tight bound.
     request.timeout = Math.max(60_000, Math.ceil(file.size / 200));
     // CW-015: only an upload aimed at the API origin carries the workspace

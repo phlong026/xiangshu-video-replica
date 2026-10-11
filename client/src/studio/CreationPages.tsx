@@ -159,10 +159,10 @@ const EMPTY_GENERATION_VERSION_STATE: GenerationVersionState = {
 };
 
 // S10（本地预检）：参考视频的硬性门槛，与 server/app/media.py 同源
-// （MAX_UPLOAD_BYTES = 50MB，MIN/MAX_DURATION_SECONDS = 4.0 / 15.0，
+// （MAX_UPLOAD_BYTES = 200MB，MIN/MAX_DURATION_SECONDS = 4.0 / 15.0，
 // DURATION_ROUNDING_TOLERANCE_SECONDS = 0.1）。超限文件不必整段上传完、
 // 等服务端 ffprobe 才拒绝；取整容差同样对齐，本地预检不比服务端更严。
-const MAX_REPLICA_SOURCE_BYTES = 50 * 1024 * 1024;
+const MAX_REPLICA_SOURCE_BYTES = 200 * 1024 * 1024;
 const MIN_REPLICA_SOURCE_SECONDS = 4;
 const MAX_REPLICA_SOURCE_SECONDS = 15;
 const REPLICA_DURATION_TOLERANCE_SECONDS = 0.1;
@@ -1864,7 +1864,7 @@ export function ReplicaPage() {
     // / 换源等会推进会话号），本次选择在预检完成后整体作废，不抢占新会话。
     const sessionAtPick = uploadOperationRef.current;
     if (file.size > MAX_REPLICA_SOURCE_BYTES) {
-      notify("参考视频不能超过 50 MB，请压缩后再上传。");
+      notify("参考视频不能超过 200 MB，请压缩后再上传。");
       return;
     }
     let duration: number | undefined;

@@ -22,7 +22,10 @@ from pathlib import Path
 from typing import Literal
 
 FFMPEG_DIR_ENV = "VIDEO_REPLICA_FFMPEG_DIR"
-FFMPEG_TIMEOUT_SECONDS = 300
+# 探测+转码+全解码校验共享的预算。输入预算放大到 200MB 后，非 h264 源的
+# 兼容转码（HEVC 4K 等）300s 可能不够，放宽到 600s；h264 源不触发转码，
+# 成功路径耗时不受此上限影响。
+FFMPEG_TIMEOUT_SECONDS = 600
 IMAGE_DECODE_TIMEOUT_SECONDS = 15
 # 规范化比单纯解码多了缩放与 PNG 编码，1 亿像素上限的原图需要更宽的预算。
 IMAGE_NORMALIZE_TIMEOUT_SECONDS = 30

@@ -176,7 +176,7 @@ def test_generation_context_target_duration_does_not_enter_analysis_prompt() -> 
     assert '"duration_seconds": 15' not in prompt
 
 
-@pytest.mark.parametrize("source_size_bytes", [None, 50 * 1024 * 1024 + 1])
+@pytest.mark.parametrize("source_size_bytes", [None, 200 * 1024 * 1024 + 1])
 def test_unbounded_source_is_not_downloaded_and_degrades_to_video_review(
     caplog: pytest.LogCaptureFixture,
     source_size_bytes: int | None,

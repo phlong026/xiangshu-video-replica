@@ -422,7 +422,7 @@ export function ProjectsPage({
             拖入或选择参考视频，自动拆解
           </p>
           <p className="projects-upload-zone__note">
-            支持一次选择多个 MP4 / MOV（4–15 秒，不超过 50MB）；每个视频
+            支持一次选择多个 MP4 / MOV（4–15 秒，不超过 200MB）；每个视频
             创建一个项目并自动拆解出提示词。
           </p>
           <button

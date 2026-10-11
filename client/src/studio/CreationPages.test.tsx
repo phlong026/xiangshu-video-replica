@@ -4871,17 +4871,17 @@ describe("视频复刻（模块①）", () => {
     fireEvent.change(input);
   }
 
-  it("上传本地预检：超过 50 MB 的参考视频直接拦截，不发上传请求", async () => {
-    // 回归：超过服务端 MAX_UPLOAD_BYTES(50MB) 的文件此前要整段传完、服务端
+  it("上传本地预检：超过 200 MB 的参考视频直接拦截，不发上传请求", async () => {
+    // 回归：超过服务端 MAX_UPLOAD_BYTES(200MB) 的文件此前要整段传完、服务端
     // ffprobe 后才被拒绝，白付一次大文件传输。选文件后本地立即拦截。
     const value = openReplicaUpload();
     replicaLive.uploadWorkbenchSourceVideo.mockClear();
 
-    pickUploadFile("big.mp4", 50 * 1024 * 1024 + 1);
+    pickUploadFile("big.mp4", 200 * 1024 * 1024 + 1);
 
     await waitFor(() =>
       expect(value.notify).toHaveBeenCalledWith(
-        "参考视频不能超过 50 MB，请压缩后再上传。",
+        "参考视频不能超过 200 MB，请压缩后再上传。",
       ),
     );
     expect(replicaLive.uploadWorkbenchSourceVideo).not.toHaveBeenCalled();

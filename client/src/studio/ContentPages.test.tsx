@@ -4456,7 +4456,7 @@ describe("V1.4 内容与运营页面", () => {
     expect(disclosure).not.toHaveAttribute("open");
     fireEvent.click(screen.getByText("缓存说明"));
     expect(disclosure).toHaveAttribute("open");
-    expect(screen.getByText(/单个文件不超过 50 MB/)).toBeInTheDocument();
+    expect(screen.getByText(/单个文件不超过 200 MB/)).toBeInTheDocument();
   });
 
   it("素材页一次批量签名当前页并在翻页后加载下一页", async () => {
@@ -5365,12 +5365,12 @@ describe("V1.4 内容与运营页面", () => {
     const bigVideo = new File([new Uint8Array(4)], "big.mp4", {
       type: "video/mp4",
     });
-    Object.defineProperty(bigVideo, "size", { value: 51 * 1024 * 1024 });
+    Object.defineProperty(bigVideo, "size", { value: 201 * 1024 * 1024 });
     // 上线前检查 P2-6：音频超限按实际类型报错，不再误称「视频」。
     const bigAudio = new File([new Uint8Array(4)], "big.mp3", {
       type: "audio/mpeg",
     });
-    Object.defineProperty(bigAudio, "size", { value: 51 * 1024 * 1024 });
+    Object.defineProperty(bigAudio, "size", { value: 201 * 1024 * 1024 });
     const okImage = new File([new Uint8Array(4)], "ok.png", {
       type: "image/png",
     });
@@ -5383,8 +5383,8 @@ describe("V1.4 内容与运营页面", () => {
     );
     const queue = screen.getByLabelText("上传队列");
     expect(queue).toHaveTextContent("图片不能超过 10 MB");
-    expect(queue).toHaveTextContent("视频不能超过 50 MB");
-    expect(queue).toHaveTextContent("音频不能超过 50 MB");
+    expect(queue).toHaveTextContent("视频不能超过 200 MB");
+    expect(queue).toHaveTextContent("音频不能超过 200 MB");
   });
 
   it("MATERIAL-UX-04：服务端去重复用时提示已复用已有素材", async () => {
