@@ -147,7 +147,13 @@ def _vendor_message(code: int, msg: str) -> str:
 
 
 class HiflyHttpTransport:
-    """Minimal HTTP surface the client needs (mirrors the Metaso transport)."""
+    """Minimal HTTP surface the client needs (mirrors the Metaso transport).
+
+    ``timeout_seconds`` is the per-request deadline override: ``None`` keeps
+    the transport's configured default (the JSON API budget). The client only
+    sets it for the binary lanes (material PUT / result GET), whose payloads
+    are orders of magnitude larger than the JSON envelope calls.
+    """
 
     def request(
         self,
@@ -156,13 +162,20 @@ class HiflyHttpTransport:
         *,
         headers: Mapping[str, str],
         body: bytes | None = None,
+        timeout_seconds: float | None = None,
     ) -> bytes:
         raise NotImplementedError
 
 
 class UrllibHiflyHttpTransport(HiflyHttpTransport):
-    def __init__(self, *, timeout_seconds: float = 60.0) -> None:
+    def __init__(
+        self,
+        *,
+        timeout_seconds: float = 60.0,
+        binary_timeout_seconds: float = 300.0,
+    ) -> None:
         self.timeout_seconds = timeout_seconds
+        self.binary_timeout_seconds = binary_timeout_seconds
 
     def request(
         self,
@@ -171,13 +184,15 @@ class UrllibHiflyHttpTransport(HiflyHttpTransport):
         *,
         headers: Mapping[str, str],
         body: bytes | None = None,
+        timeout_seconds: float | None = None,
     ) -> bytes:
+        effective_timeout = self.timeout_seconds if timeout_seconds is None else timeout_seconds
         try:
             request = Request(url, data=body, headers=dict(headers), method=method)
             # 口播接口的原始响应落调用日志：失败原因（如声音样本太短）可在管理端查到。
             response_body, _headers, _status = recorded_urlopen(
                 request,
-                timeout=self.timeout_seconds,
+                timeout=effective_timeout,
                 provider="hifly",
                 endpoint=endpoint_from_url(url),
                 opener=urlopen,
@@ -276,7 +291,16 @@ def _require_text(value: Any, field: str) -> str:
 
 
 class HiflyClient:
-    """Typed HiFly V2 client. One instance per configured provider token."""
+    """Typed HiFly V2 client. One instance per configured provider token.
+
+    ``binary_timeout_seconds`` is the deadline for the two binary lanes
+    (``upload_file`` PUT of the whole material, ``download`` GET of the
+    finished video). Those payloads routinely reach the 50 MB upload cap and
+    must survive an egress link well below 2 Mbps, so they deliberately get a
+    wider budget than the 60 s JSON API deadline; production evidence
+    (2026-10-11) showed a 38.6 MB 4K avatar material failing at exactly 60 s
+    and the avatar being marked FAILED with no retry.
+    """
 
     def __init__(
         self,
@@ -284,10 +308,12 @@ class HiflyClient:
         api_key: str,
         transport: HiflyHttpTransport | None = None,
         base_url: str = HIFLY_BASE_URL,
+        binary_timeout_seconds: float = 300.0,
     ) -> None:
         self.api_key = api_key
         self.transport = transport or UrllibHiflyHttpTransport()
         self.base_url = base_url.rstrip("/")
+        self.binary_timeout_seconds = binary_timeout_seconds
 
     # -- envelope -----------------------------------------------------------
 
@@ -634,11 +660,17 @@ class HiflyClient:
             target.upload_url,
             headers={"Content-Type": target.content_type},
             body=content,
+            timeout_seconds=self.binary_timeout_seconds,
         )
 
     def download(self, url: str) -> bytes:
         """Fetch a binary result (temporary video URL) from the vendor."""
-        return self.transport.request("GET", url, headers={"Accept": "*/*"})
+        return self.transport.request(
+            "GET",
+            url,
+            headers={"Accept": "*/*"},
+            timeout_seconds=self.binary_timeout_seconds,
+        )
 
     def _extract_task_id(self, data: Mapping[str, Any]) -> str:
         task_id = data.get("task_id")

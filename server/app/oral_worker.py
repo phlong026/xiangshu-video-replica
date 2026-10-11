@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -25,7 +26,13 @@ from app.generation import (
     read_runtime_limits,
     shared_generation_capacity_available,
 )
-from app.hifly import HiflyClient, HiflyError, HiflySubmissionUncertain
+from app.hifly import (
+    HiflyClient,
+    HiflyError,
+    HiflySubmissionUncertain,
+    HiflyTimeoutError,
+    HiflyUploadTarget,
+)
 from app.internal_billing import finalize_oral_billing, release_oral_queue_slot
 from app.media import storage_key_from_uri
 from app.media_tools import (
@@ -49,6 +56,14 @@ ORAL_ARCHIVE_MAX_BYTES = 512 * 1024 * 1024
 ORAL_MAX_POLL_AGE_SECONDS = 2 * 60 * 60
 # 供应商任务卡死超窗的对外中性文案（供应商原始状态不透传给客户）。
 ORAL_POLL_TIMEOUT_MESSAGE = "数字人服务任务超过自动轮询窗口，已转入人工核对"
+
+# 素材传输（申请上传凭证 + PUT 全量字节）的重试预算。传输是幂等的：每次重试
+# 都用全新凭证，厂商侧在 create_* 之前不会产生任何任务，弃用的凭证只是孤儿。
+# 客户上传上限 50MB（MAX_UPLOAD_BYTES/派生件同上限），出口带宽最差 ~1.3Mbps
+# 时一次 PUT 需 300s（binary_timeout_seconds）；两次尝试 + 两次凭证 + 退避
+# ≈ 725s，因此 claim 租期必须 ≥ 900s，否则传输中途就会被过期隔离判死。
+ORAL_MATERIAL_TRANSFER_ATTEMPTS = 2
+ORAL_MATERIAL_TRANSFER_RETRY_DELAY_SECONDS = 2
 
 OralWorkKind = Literal[
     "avatar_submit",
@@ -251,9 +266,16 @@ def claim_oral_work(
     conn: BusinessConnection,
     *,
     worker_id: str,
-    lease_seconds: int = 120,
+    lease_seconds: int = 900,
 ) -> OralWorkLease | None:
-    """Claim one oral operation with CAS; expired paid submissions quarantine."""
+    """Claim one oral operation with CAS; expired paid submissions quarantine.
+
+    900s covers the worst-case submit I/O: two material-transfer attempts at
+    the 300s binary deadline plus tickets, backoff, storage fetch and media
+    inspection (see ORAL_MATERIAL_TRANSFER_ATTEMPTS). A shorter lease would
+    quarantine a healthy large upload mid-flight; the cost is only that a
+    worker crash keeps its SUBMITTING record quarantined-waiting longer.
+    """
     now = _now()
     now_text = _iso(now)
     expires = _iso(now + timedelta(seconds=lease_seconds))
@@ -431,6 +453,40 @@ def _object_bytes(storage: StorageAdapter, uri: str) -> bytes:
     return storage.get_object(storage_key_from_uri(uri))
 
 
+def _transfer_material_to_vendor(
+    vendor: HiflyClient,
+    *,
+    content: bytes,
+    extension: str,
+) -> HiflyUploadTarget:
+    """Request a fresh upload ticket and PUT the material, retrying timeouts.
+
+    Only the idempotent pre-creation steps are retried: a fresh ticket is
+    issued per attempt and no vendor task exists until the create_* call, so
+    a retry can never duplicate vendor work. Non-timeout errors (vendor
+    envelope codes, auth, malformed tickets) propagate immediately — retrying
+    those cannot succeed.
+    """
+    last_timeout: HiflyTimeoutError | None = None
+    for attempt in range(1, ORAL_MATERIAL_TRANSFER_ATTEMPTS + 1):
+        try:
+            target = vendor.create_upload_url(extension)
+            vendor.upload_file(target, content)
+            return target
+        except HiflyTimeoutError as exc:
+            last_timeout = exc
+            logger.warning(
+                "ORAL material transfer timed out (attempt %s/%s, %s bytes)",
+                attempt,
+                ORAL_MATERIAL_TRANSFER_ATTEMPTS,
+                len(content),
+            )
+            if attempt < ORAL_MATERIAL_TRANSFER_ATTEMPTS:
+                time.sleep(ORAL_MATERIAL_TRANSFER_RETRY_DELAY_SECONDS)
+    assert last_timeout is not None
+    raise last_timeout
+
+
 def perform_oral_work(
     lease: OralWorkLease,
     *,
@@ -566,8 +622,7 @@ def _perform_submission(
             suffix=f".{extension}",
             expected_type="image" if image_source else "video",
         )
-        target = vendor.create_upload_url(extension)
-        vendor.upload_file(target, content)
+        target = _transfer_material_to_vendor(vendor, content=content, extension=extension)
         creator = (
             vendor.create_avatar_by_image
             if str(row["source_kind"]) == "IMAGE"
@@ -584,8 +639,7 @@ def _perform_submission(
             min_duration_seconds=5,
             max_duration_seconds=180,
         )
-        target = vendor.create_upload_url("mp3")
-        vendor.upload_file(target, normalized)
+        target = _transfer_material_to_vendor(vendor, content=normalized, extension="mp3")
         language = str(row.get("language") or DEFAULT_VOICE_LANGUAGE)
         task_id = vendor.create_voice(
             title=str(row["title"])[:20],
@@ -605,8 +659,7 @@ def _perform_submission(
     else:
         content = _object_bytes(storage, str(row["audio_storage_uri"]))
         inspect_media_bytes(content, suffix=".mp3", expected_type="audio")
-        target = vendor.create_upload_url("mp3")
-        vendor.upload_file(target, content)
+        target = _transfer_material_to_vendor(vendor, content=content, extension="mp3")
         task_id = vendor.create_video_by_audio(
             avatar=str(row["vendor_avatar_id"]),
             title=oral_vendor_title(str(row["title"]), row.get("vendor_short_ref")),
