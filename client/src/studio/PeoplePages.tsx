@@ -84,7 +84,7 @@ const personTabs: Array<{ id: StudioPage; label: string }> = [
   { id: "person-voices", label: "声音档案" },
 ];
 
-const MAX_ORAL_SOURCE_BYTES = 50 * 1024 * 1024;
+const MAX_ORAL_SOURCE_BYTES = 200 * 1024 * 1024;
 const ORAL_POLL_INTERVAL_MS = 6_000;
 const ORAL_POLL_MAX_ATTEMPTS = 50;
 
@@ -109,7 +109,7 @@ function validateOralSource(file: File, kind: "video" | "audio") {
     return kind === "video" ? "仅支持 MP4 或 MOV 视频。" : "仅支持 MP3 音频。";
   }
   if (file.size <= 0) return "上传文件不能为空。";
-  if (file.size > MAX_ORAL_SOURCE_BYTES) return "上传文件不能超过 50 MB。";
+  if (file.size > MAX_ORAL_SOURCE_BYTES) return "上传文件不能超过 200 MB。";
   return undefined;
 }
 
@@ -1489,7 +1489,7 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
             <strong>
               {ready.length ? "创建新的分身" : "创建你的第一个分身"}
             </strong>
-            <span>MP4 / MOV · 最大 50 MB</span>
+            <span>MP4 / MOV · 最大 200 MB</span>
           </button>
         </div>
         {pending.length ? (
@@ -1648,7 +1648,7 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
                   : "选择电脑中的 MP4 / MOV 视频"}
               </span>
               <small>
-                {uploadedVideo ? "点击更换视频" : "单个文件不超过 50 MB"}
+                {uploadedVideo ? "点击更换视频" : "单个文件不超过 200 MB"}
               </small>
             </button>
             {uploadProgress !== undefined ? (

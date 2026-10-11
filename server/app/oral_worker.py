@@ -59,9 +59,10 @@ ORAL_POLL_TIMEOUT_MESSAGE = "数字人服务任务超过自动轮询窗口，已
 
 # 素材传输（申请上传凭证 + PUT 全量字节）的重试预算。传输是幂等的：每次重试
 # 都用全新凭证，厂商侧在 create_* 之前不会产生任何任务，弃用的凭证只是孤儿。
-# 客户上传上限 50MB（MAX_UPLOAD_BYTES/派生件同上限），出口带宽最差 ~1.3Mbps
-# 时一次 PUT 需 300s（binary_timeout_seconds）；两次尝试 + 两次凭证 + 退避
-# ≈ 725s，因此 claim 租期必须 ≥ 900s，否则传输中途就会被过期隔离判死。
+# 上限路径是厂商直拉签名 URL（_vendor_fetchable_url），本传输仅兜底：本地/
+# 内存存储回落自上传。素材上限 200MB（MAX_UPLOAD_BYTES）时一次 PUT 需出口
+# ~5.3Mbps 才能在 300s（binary_timeout_seconds）内完成；两次尝试 + 凭证 +
+# 退避 ≈ 725s，因此 claim 租期必须 ≥ 900s，否则传输中途就会被过期隔离判死。
 ORAL_MATERIAL_TRANSFER_ATTEMPTS = 2
 ORAL_MATERIAL_TRANSFER_RETRY_DELAY_SECONDS = 2
 

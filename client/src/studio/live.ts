@@ -104,7 +104,7 @@ const projectLimit = 24;
 const personLimit = 8;
 const projectPreviewLimit = 8;
 const sceneLimit = 12;
-const MAX_ORAL_SOURCE_BYTES = 50 * 1024 * 1024;
+const MAX_ORAL_SOURCE_BYTES = 200 * 1024 * 1024;
 
 type FrozenReplicaRequest = {
   storageKey: string;
@@ -227,7 +227,7 @@ export function validateOralAudioFile(
       : "仅支持 MP3 音频。";
   }
   if (file.size <= 0) return "上传文件不能为空。";
-  if (file.size > MAX_ORAL_SOURCE_BYTES) return "上传文件不能超过 50 MB。";
+  if (file.size > MAX_ORAL_SOURCE_BYTES) return "上传文件不能超过 200 MB。";
   return undefined;
 }
 

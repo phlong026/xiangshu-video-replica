@@ -168,9 +168,9 @@ function formatMaterialSize(bytes?: number): string | undefined {
 }
 
 // MATERIAL-UX-04：客户端大小预校验，与服务端 materials.py / media.py 常量对齐
-// （图片 10 MB，其余 50 MB）；超限在客户端拦截，不等后端 413。
+// （图片 10 MB，其余 200 MB）；超限在客户端拦截，不等后端 413。
 const UPLOAD_IMAGE_LIMIT = 10 * 1024 * 1024;
-const UPLOAD_FILE_LIMIT = 50 * 1024 * 1024;
+const UPLOAD_FILE_LIMIT = 200 * 1024 * 1024;
 
 // 素材库是通用入口，音频必须声明用途（服务端 MATERIAL_AUDIO_PURPOSE_REQUIRED），
 // 因此按探测时长取一个「最宽可用」用途，避免让用户先选用途再上传：
@@ -231,7 +231,7 @@ function uploadSizeError(file: File): string | undefined {
       : file.type.startsWith("video/")
         ? "视频"
         : "文件";
-  const limitLabel = isImage ? "10 MB" : "50 MB";
+  const limitLabel = isImage ? "10 MB" : "200 MB";
   if (file.size > (isImage ? UPLOAD_IMAGE_LIMIT : UPLOAD_FILE_LIMIT)) {
     return `${noun}不能超过 ${limitLabel}`;
   }
@@ -4064,7 +4064,7 @@ function MaterialsPageContent() {
             <summary>缓存说明</summary>
             <p>
               首屏优先在线预览并复用已有本机缓存；视频和音频首次播放时后台缓存。
-              单个文件不超过 50 MB，超限继续在线预览。
+              单个文件不超过 200 MB，超限继续在线预览。
             </p>
           </details>
           {cacheMessage ? <p role="status">{cacheMessage}</p> : null}

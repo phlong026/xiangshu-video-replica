@@ -1481,11 +1481,11 @@ describe("PeoplePages", () => {
     );
 
     const tooLarge = new File(["video"], "large.mp4", { type: "video/mp4" });
-    Object.defineProperty(tooLarge, "size", { value: 50 * 1024 * 1024 + 1 });
+    Object.defineProperty(tooLarge, "size", { value: 200 * 1024 * 1024 + 1 });
     fireEvent.change(screen.getByLabelText("选择人物视频"), {
       target: { files: [tooLarge] },
     });
-    expect(screen.getByRole("alert")).toHaveTextContent("不能超过 50 MB");
+    expect(screen.getByRole("alert")).toHaveTextContent("不能超过 200 MB");
   });
 
   it("审核示例模式不上传人物视频", () => {

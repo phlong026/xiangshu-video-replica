@@ -51,7 +51,10 @@ _ALLOWED_TYPE_SUFFIX_PAIRS: dict[str, set[str]] = {
     "audio/x-wav": {".wav"},
     "audio/aac": {".aac"},
 }
-MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+# 平台素材单文件上限（素材库/复刻参考/拆解源/代理上传/管理端拉取共用）。
+# 2026-10-11 应产品要求 50MB→200MB：飞影 API 对分身视频素材无大小限制，
+# 且 #112 后厂商经签名 URL 直拉 COS，上限不再受服务器出口带宽约束。
+MAX_UPLOAD_BYTES = 200 * 1024 * 1024
 MIN_DURATION_SECONDS = 4.0
 MAX_DURATION_SECONDS = 15.0
 DURATION_ROUNDING_TOLERANCE_SECONDS = 0.1
