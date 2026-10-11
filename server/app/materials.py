@@ -65,11 +65,6 @@ from app.storage import (
 
 MaterialMediaType = Literal["image", "video", "audio"]
 MaterialSource = Literal["upload", "project", "character", "oral", "generation"]
-# 口播分身兼容派生件的长边上限（1080p 级）。厂商训练与工作台预览都不需要手机
-# 原拍 4K；不设上限时派生件与原片同体积（2026-10-11 实测 38.6MB），提交给数字
-# 人厂商的上传在公网出口上极易超时。与 hifly.binary_timeout_seconds、
-# ORAL_MATERIAL_TRANSFER_ATTEMPTS 共同决定大素材能否提交成功。
-ORAL_COMPATIBLE_MAX_LONG_SIDE = 1920
 # MATERIAL-UX-03：列表排序维度。created_desc 为默认，与既有行为逐字一致。
 MaterialSort = Literal["created_desc", "created_asc", "title_asc", "size_desc"]
 MaterialStatus = Literal["uploading", "ready", "unavailable"]
@@ -1288,7 +1283,6 @@ def _rebuild_registered_video_derivative(
             target_width=inspection.width,
             target_height=inspection.height,
             max_duration_seconds=GENERATED_VIDEO_MAX_SECONDS,
-            max_long_side=ORAL_COMPATIBLE_MAX_LONG_SIDE,
         )
         compatible_asset_id = str(uuid4())
         stored = storage.put_object(
@@ -1767,13 +1761,8 @@ def probe_material_upload(
         if inspection.width is None or inspection.height is None:
             raise material_error(422, "MATERIAL_VIDEO_INVALID", "视频尺寸无效，无法生成兼容版本。")
         try:
-            # 口播兼容件的分辨率上限：厂商训练与预览都不需要手机原拍 4K，长边
-            # 压到 1080p 级（1920），派生件体积才回得了一个可稳定上传的量级。
             normalized = normalize_generated_video(
-                content,
-                target_width=inspection.width,
-                target_height=inspection.height,
-                max_long_side=ORAL_COMPATIBLE_MAX_LONG_SIDE,
+                content, target_width=inspection.width, target_height=inspection.height
             )
         except MediaValidationFailed as exc:
             raise material_error(
