@@ -132,7 +132,12 @@ from app.oral_worker import (
     request_oral_archive_retry,
 )
 from app.permissions import AuditedSecurityDenial, persist_security_denial
-from app.storage import FakeStorageAdapter, StoredObject
+from app.storage import (
+    DownloadIntent,
+    FakeStorageAdapter,
+    StoragePermissionError,
+    StoredObject,
+)
 
 CW010_ORAL_DB_NAME = "cw010_oral_test"
 
@@ -2314,6 +2319,117 @@ def test_voice_clone_transcode_failure_never_calls_provider(
     assert result.outcome == "failed"
     assert result.message == "媒体校验服务暂不可用，请稍后重试"
     assert transport.calls == []
+
+
+class PresignableSourceStorage(FakeSourceStorage):
+    """Overrides presigning exactly like the production COS adapter."""
+
+    def __init__(self, media: OralTestMedia) -> None:
+        super().__init__(media)
+        self.presigned_keys: list[str] = []
+
+    def create_download_intent(
+        self, key: str, *, expires_in: Any, can_read: bool
+    ) -> DownloadIntent:
+        if not can_read:
+            raise StoragePermissionError(f"download denied for {key}")
+        self.presigned_keys.append(key)
+        return DownloadIntent(
+            method="GET",
+            url=f"https://assets.example.com/{key}?q-signature=test-signature",
+            key=key,
+            expires_at=datetime.now(tz=UTC) + expires_in,
+        )
+
+
+def test_avatar_submit_lets_vendor_pull_presigned_source(
+    fake_source_storage: FakeSourceStorage,
+) -> None:
+    """能签出公网 URL 时，素材由厂商拉取，不经服务器出口自上传。"""
+    storage = PresignableSourceStorage(fake_source_storage.media)
+    vendor, transport = make_vendor()
+    captured: dict[str, Any] = {}
+
+    def capture_create(body: bytes | None) -> bytes:
+        captured.update(json.loads(body or b"{}"))
+        return envelope({"task_id": "avatar-url-task"})
+
+    transport.on("POST", "/api/v2/hifly/avatar/create_by_video", capture_create)
+
+    result = perform_oral_work(
+        OralWorkLease(
+            kind="avatar_submit",
+            record_id="avatar-url",
+            worker_id="url-worker",
+            lease_token="url-lease",
+            attempt_count=1,
+            row={
+                "source_storage_uri": "fake://assets/avatar-source.mp4",
+                "source_kind": "VIDEO",
+                "title": "4K分身",
+            },
+        ),
+        vendor=vendor,
+        storage=storage,
+    )
+
+    assert result.outcome == "submitted"
+    assert result.provider_task_id == "avatar-url-task"
+    assert captured["video_url"].startswith("https://assets.example.com/")
+    assert "file_id" not in captured
+    assert captured["aigc_flag"] == 1
+    # 无上传凭证调用、无素材 PUT：出口带宽零消耗。
+    assert transport.put_bodies == []
+    assert all("create_upload_url" not in url for _, url in transport.calls)
+    assert storage.presigned_keys == ["avatar-source.mp4"]
+
+
+def test_avatar_submit_without_public_presign_falls_back_to_upload(
+    fake_source_storage: FakeSourceStorage,
+) -> None:
+    """本地/内存存储签不出公网 URL，回落到凭证+自上传路径（既有行为）。"""
+    vendor, transport = make_vendor()
+    captured: dict[str, Any] = {}
+
+    def capture_create(body: bytes | None) -> bytes:
+        captured.update(json.loads(body or b"{}"))
+        return envelope({"task_id": "avatar-upload-task"})
+
+    transport.on(
+        "POST",
+        "/api/v2/hifly/tool/create_upload_url",
+        envelope(
+            {
+                "upload_url": "https://up.example/avatar",
+                "content_type": "video/mp4",
+                "file_id": "avatar-file",
+            }
+        ),
+    )
+    transport.on("POST", "/api/v2/hifly/avatar/create_by_video", capture_create)
+
+    result = perform_oral_work(
+        OralWorkLease(
+            kind="avatar_submit",
+            record_id="avatar-upload",
+            worker_id="upload-worker",
+            lease_token="upload-lease",
+            attempt_count=1,
+            row={
+                "source_storage_uri": "fake://assets/avatar-source.mp4",
+                "source_kind": "VIDEO",
+                "title": "本地分身",
+            },
+        ),
+        vendor=vendor,
+        storage=fake_source_storage,
+    )
+
+    assert result.outcome == "submitted"
+    assert result.provider_task_id == "avatar-upload-task"
+    assert captured["file_id"] == "avatar-file"
+    assert "video_url" not in captured
+    assert len(transport.put_bodies) == 1
 
 
 def test_voice_audio_media_commands_restrict_protocols_and_fail_on_decode_errors(

@@ -453,6 +453,35 @@ def _object_bytes(storage: StorageAdapter, uri: str) -> bytes:
     return storage.get_object(storage_key_from_uri(uri))
 
 
+# 厂商拉取素材的签名 URL 有效期。飞影拿到 create_* 受理凭证后的实际拉取时刻
+# 取决于其队列，签短期 URL 可能让训练任务取不到素材；24h 是保守上限。
+# 签名参数（q-signature 等）已入 external_calls 脱敏清单，落日志不含凭据。
+ORAL_AVATAR_SOURCE_URL_TTL = timedelta(hours=24)
+
+
+def _vendor_fetchable_url(storage: StorageAdapter, uri: str) -> str | None:
+    """Sign a presigned GET URL the vendor can pull directly, or None.
+
+    分身素材优先走「厂商自行拉取」（create_by_video 的 video_url/image_url）：
+    大素材不再消耗服务器出口带宽自上传（2026-10-11：4K 38.6MB 自上传 60s 超时
+    事故）。只有当存储能签出公网可达的 https URL 时才可用——本地/内存适配器
+    签出的是 local://、cos:// 等非公网 scheme，厂商无法访问，返回 None 让调用
+    方回落到自上传路径。
+    """
+    try:
+        intent = storage.create_download_intent(
+            storage_key_from_uri(uri),
+            expires_in=ORAL_AVATAR_SOURCE_URL_TTL,
+            can_read=True,
+        )
+    except Exception as exc:  # noqa: BLE001 - 签名失败一律回落自上传，不区分后端
+        logger.warning(
+            "ORAL avatar source presign failed; falling back to upload: %s", type(exc).__name__
+        )
+        return None
+    return intent.url if intent.url.startswith("https://") else None
+
+
 def _transfer_material_to_vendor(
     vendor: HiflyClient,
     *,
@@ -622,13 +651,25 @@ def _perform_submission(
             suffix=f".{extension}",
             expected_type="image" if image_source else "video",
         )
+        title = str(row["title"])[:20]
+        # 首选厂商自行拉取：素材不经服务器出口，4K 大文件不再受自上传带宽约束。
+        source_url = _vendor_fetchable_url(storage, str(row["source_storage_uri"]))
+        if source_url is not None:
+            task_id = (
+                vendor.create_avatar_by_image(title=title, image_url=source_url, aigc_flag=True)
+                if image_source
+                else vendor.create_avatar_by_video(
+                    title=title, video_url=source_url, aigc_flag=True
+                )
+            )
+            return OralWorkResult("submitted", provider_task_id=task_id)
         target = _transfer_material_to_vendor(vendor, content=content, extension=extension)
         creator = (
             vendor.create_avatar_by_image
             if str(row["source_kind"]) == "IMAGE"
             else vendor.create_avatar_by_video
         )
-        task_id = creator(title=str(row["title"])[:20], file_id=target.file_id, aigc_flag=True)
+        task_id = creator(title=title, file_id=target.file_id, aigc_flag=True)
         return OralWorkResult("submitted", provider_task_id=task_id)
     if lease.kind == "voice_submit":
         content = _object_bytes(storage, str(row["source_storage_uri"]))
