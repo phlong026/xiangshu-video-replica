@@ -545,6 +545,33 @@ def _time_text(value: datetime) -> str:
     return value.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def private_source_task(
+    conn: BusinessConnection, *, owner_user_id: str, sha256: str, size_bytes: int
+) -> sqlite3.Row | None:
+    """私有音轨也按真实内容串行核对；更换项目或幂等键不能绕过未知提交。"""
+    conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+        (f"private-asr:{owner_user_id}:{sha256}:{size_bytes}",),
+    )
+    row = conn.execute(
+        "SELECT t.* FROM script_from_audio_tasks t JOIN assets a ON a.id=t.source_asset_id "
+        "AND a.project_id=t.project_id WHERE t.created_by_user_id=%s AND a.sha256=%s "
+        "AND a.size_bytes=%s AND (t.status IN ('PENDING','RUNNING','SUBMISSION_UNCERTAIN') "
+        "OR (t.status='FAILED' AND t.provider_started_at IS NOT NULL "
+        "AND COALESCE(t.error_code,'')<>'SCRIPT_FROM_AUDIO_PROVIDER_CONFIRMED_FAILED')) "
+        "ORDER BY CASE WHEN t.status='SUBMISSION_UNCERTAIN' OR t.status='FAILED' "
+        "THEN 0 ELSE 1 END,t.created_at,t.id LIMIT 1",
+        (owner_user_id, sha256, size_bytes),
+    ).fetchone()
+    if row is not None and row["status"] in {"SUBMISSION_UNCERTAIN", "FAILED"}:
+        raise script_from_audio_error(
+            409,
+            "SCRIPT_FROM_AUDIO_SOURCE_UNCERTAIN",
+            "该音轨的上次提交结果尚未确认，请核对原任务；更换请求不能重新提交。",
+        )
+    return None if row is None else cast(sqlite3.Row, row)
+
+
 def enqueue_script_from_audio_task(
     conn: BusinessConnection,
     *,
@@ -602,6 +629,15 @@ def enqueue_script_from_audio_task(
                 "提取内容已经变化，请重新提交。",
             )
         return cast(sqlite3.Row, replay)
+    if viral_source is None:
+        source_task = private_source_task(
+            conn,
+            owner_user_id=str(getattr(actor, "id")),
+            sha256=str(asset["sha256"]),
+            size_bytes=int(asset["size_bytes"]),
+        )
+        if source_task is not None:
+            return source_task
     active = conn.execute(
         """
         SELECT * FROM script_from_audio_tasks

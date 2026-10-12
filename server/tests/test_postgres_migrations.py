@@ -62,7 +62,7 @@ DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 # 积分单行配置表）追加在其后，故链尾为 20260930T1400_registration_bonus_settings。
 # 迁移后 alembic 版本头即该值，9 处 assert version == HEAD_REVISION 依赖此值。
 # 新增业务防重迁移必须进入真实升级测试，不能停留在旧链尾制造假通过。
-HEAD_REVISION = "20261012T0500_nullable_viral_metrics"
+HEAD_REVISION = "20261012T0600_viral_copy_upload_receipts"
 
 
 def test_viral_script_cache_migration_preserves_results_without_task_foreign_keys(

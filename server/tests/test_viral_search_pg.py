@@ -1411,16 +1411,22 @@ def _patch_refresh_infra(monkeypatch) -> None:
 
 def test_copy_returns_cached_transcript_and_null_on_miss(search_client, route_state) -> None:
     """GET /search/copy：只回「有没有 / 买没买过」（只读、免费），绝不下发正文."""
-    headers, _ = account(search_client, "copy_read")
+    headers, uid = account(search_client, "copy_read")
     payload = json.dumps(
         {
             "text": "已缓存文案",
             "duration_sec": 12.0,
-            "archive": {"platform": "douyin", "video_id": "v-copy-1", "sha256": "a" * 64},
+            "archive": {
+                "platform": "douyin",
+                "video_id": "v-copy-1",
+                "sha256": "a" * 64,
+                "storage_uri": "local://viral/v-copy-1.mp4",
+            },
         },
         ensure_ascii=False,
     )
     with psycopg.connect(route_state) as raw:
+        _seed_source_video(raw, uid, platform="douyin", video_id="v-copy-1")
         raw.execute(
             "INSERT INTO viral_script_cache (platform, video_id, result_json) "
             "VALUES ('douyin', 'v-copy-1', %s) ON CONFLICT (platform, video_id) "
@@ -1443,8 +1449,7 @@ def test_copy_returns_cached_transcript_and_null_on_miss(search_client, route_st
         headers=headers,
         params={"platform": "douyin", "videoId": "v-copy-absent"},
     )
-    assert miss.status_code == 200
-    assert miss.json() == {"available": False, "updatedAt": None, "purchased": False}
+    assert miss.status_code == 404, miss.text
 
 
 def test_discoveries_list_today_and_validate_date(search_client, route_state) -> None:
@@ -1582,6 +1587,18 @@ def _seed_source_video(raw, uid, *, platform: str, video_id: str, tariff: int | 
             video_id,
             json.dumps({"export_id": "exp-1", "object_nonce_id": "nonce-1"}),
         ),
+    )
+    raw.execute(
+        "UPDATE viral_videos SET collection_published=1,pushed_at=now() "
+        "WHERE platform=%s AND video_id=%s",
+        (platform, video_id),
+    )
+    raw.execute(
+        "INSERT INTO viral_media_preparations(id,platform,video_id,media_kind,status,storage_uri) "
+        "VALUES(%s,%s,%s,'video','SUCCEEDED',%s) "
+        "ON CONFLICT(platform,video_id,media_kind) DO UPDATE SET "
+        "status='SUCCEEDED',storage_uri=excluded.storage_uri",
+        (f"source-{platform}-{video_id}", platform, video_id, f"local://viral/{video_id}.mp4"),
     )
     raw.execute(
         "UPDATE wallets SET available_credits=50, reserved_credits=0 WHERE user_id=%s", (uid,)

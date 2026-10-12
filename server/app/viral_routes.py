@@ -50,6 +50,7 @@ from app.viral_store import (
     favorite_viral_video_ids,
     fetch_state_is_fresh,
     get_viral_video,
+    is_customer_visible_viral_video,
     is_viral_favorite,
     list_favorite_viral_video_page,
     list_viral_video_page,
@@ -486,6 +487,18 @@ def _require_stored_video(
     return video
 
 
+def require_customer_viral_access(
+    conn: BusinessConnection, *, actor: AuthenticatedUser, platform: str, video_id: str
+) -> ViralVideo:
+    """已知 ID 也必须满足列表权限，计费和读取素材不能成为私有内容的旁路。"""
+    video = _require_stored_video(conn, platform=platform, video_id=video_id)
+    if not is_customer_visible_viral_video(
+        conn, platform=platform, video_id=video_id, user_id=actor.id
+    ):
+        raise HTTPException(status_code=404, detail={"code": "VIRAL_VIDEO_NOT_FOUND"})
+    return video
+
+
 @router.put("/favorites/{platform}/{video_id:path}", response_model=ViralFavoriteMutationResponse)
 def add_viral_video_favorite(
     db: BusinessDbDep,
@@ -493,7 +506,7 @@ def add_viral_video_favorite(
     video_id: str,
 ) -> ViralFavoriteMutationResponse:
     with db.write() as (conn, actor):
-        _require_stored_video(conn, platform=platform, video_id=video_id, require_available=True)
+        require_customer_viral_access(conn, actor=actor, platform=platform, video_id=video_id)
         add_viral_favorite(conn, user_id=actor.id, platform=platform, video_id=video_id)
     return ViralFavoriteMutationResponse(isFavorite=True)
 
@@ -526,7 +539,15 @@ def fetch_viral_video_statistics(
     from app.viral_statistics import _load_wechat_videos
 
     videos = _load_wechat_videos(conn, payload.videoIds)
-    return ViralStatisticsResponse(items=[_item(video) for video in videos])
+    return ViralStatisticsResponse(
+        items=[
+            _item(video)
+            for video in videos
+            if is_customer_visible_viral_video(
+                conn, platform=video.platform, video_id=video.video_id, user_id=actor.id
+            )
+        ]
+    )
 
 
 @router.post("/videos/media", response_model=ViralMediaResponse)
@@ -536,8 +557,8 @@ def fetch_viral_video_media(payload: ViralMediaRequest, db: BusinessDbDep) -> Vi
             400, detail={"code": "VIRAL_PLATFORM_INVALID", "message": "不支持的视频平台"}
         )
     with db.write() as (conn, actor):
-        video = _require_stored_video(
-            conn, platform=payload.platform, video_id=payload.videoId, require_available=True
+        video = require_customer_viral_access(
+            conn, actor=actor, platform=payload.platform, video_id=payload.videoId
         )
         storage = get_media_storage(conn)
     try:
@@ -551,8 +572,8 @@ def fetch_viral_video_media(payload: ViralMediaRequest, db: BusinessDbDep) -> Vi
             detail={"code": "VIRAL_MEDIA_PREPARATION_BUSY", "message": str(exc)},
         ) from exc
     with db.write() as (conn, actor):
-        video = _require_stored_video(
-            conn, platform=payload.platform, video_id=payload.videoId, require_available=True
+        video = require_customer_viral_access(
+            conn, actor=actor, platform=payload.platform, video_id=payload.videoId
         )
     return ViralMediaResponse(
         video=_item(video),
@@ -660,14 +681,6 @@ def fetch_viral_video_source(
             status_code=400,
             detail={"code": "VIRAL_PLATFORM_INVALID", "message": "不支持的视频平台"},
         )
-    if client is None:
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "code": "VIRAL_SOURCE_UNAVAILABLE",
-                "message": "爆款视频数据源暂不可用，请联系管理员。",
-            },
-        )
     with db.write() as (conn, actor):
         with conn:
             require_not_auditor(
@@ -679,9 +692,17 @@ def fetch_viral_video_source(
             )
             # 只发内容池里已有的视频。否则本端点会变成「拿任意 videoId 去上游取直链」
             # 的开放代理，把供应商配额暴露给任何登录用户。
-            video = _require_stored_video(
-                conn, platform=payload.platform, video_id=payload.videoId, require_available=True
+            video = require_customer_viral_access(
+                conn, actor=actor, platform=payload.platform, video_id=payload.videoId
             )
+            if client is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "code": "VIRAL_SOURCE_UNAVAILABLE",
+                        "message": "爆款视频数据源暂不可用，请联系管理员。",
+                    },
+                )
             # 循环导入：viral_search_routes 反向依赖本模块的 ViralVideoItem，
             # 只能在函数内延迟导入。
             from app.viral_search_routes import require_priced_viral_service
@@ -746,19 +767,28 @@ def fetch_viral_video_source(
     except Exception:
         release_reservation()
         raise
-    with db.write() as (conn, completed_actor):
-        with conn:
-            if completed_actor.id != actor.id:
-                raise HTTPException(status_code=401, detail={"code": "SESSION_REPLACED"})
-            finish_source(conn, source_id, units=1, succeeded=True, service=VIRAL_SOURCE_SERVICE)
-            charged = int(
-                conn.execute(
-                    "SELECT charged_credits FROM billing_operations "
-                    "WHERE service=%s AND source_id=%s AND user_id=%s "
-                    "ORDER BY billing_round DESC LIMIT 1",
-                    (VIRAL_SOURCE_SERVICE, source_id, actor.id),
-                ).fetchone()[0]
-            )
+    try:
+        with db.write() as (conn, completed_actor):
+            with conn:
+                if completed_actor.id != actor.id:
+                    raise HTTPException(status_code=401, detail={"code": "SESSION_REPLACED"})
+                require_customer_viral_access(
+                    conn, actor=completed_actor, platform=payload.platform, video_id=payload.videoId
+                )
+                finish_source(
+                    conn, source_id, units=1, succeeded=True, service=VIRAL_SOURCE_SERVICE
+                )
+                charged = int(
+                    conn.execute(
+                        "SELECT charged_credits FROM billing_operations "
+                        "WHERE service=%s AND source_id=%s AND user_id=%s "
+                        "ORDER BY billing_round DESC LIMIT 1",
+                        (VIRAL_SOURCE_SERVICE, source_id, actor.id),
+                    ).fetchone()[0]
+                )
+    except Exception:
+        release_reservation()
+        raise
     return ViralSourceResponse(
         platform=payload.platform,
         videoId=payload.videoId,
@@ -824,6 +854,9 @@ def get_viral_cover(
     video = get_viral_video(conn, platform=platform, video_id=video_id)
     if (
         video is None
+        or not is_customer_visible_viral_video(
+            conn, platform=platform, video_id=video_id, user_id=""
+        )
         or "\\" in video_id
         or any(part in {".", ".."} for part in video_id.split("/"))
     ):
@@ -843,7 +876,7 @@ def get_viral_cover(
     return Response(
         content=content,
         media_type=guess_image_content_type(content, key),
-        headers={"Cache-Control": "public, max-age=604800"},
+        headers={"Cache-Control": "no-store"},
     )
 
 
@@ -883,6 +916,30 @@ def download_viral_media_file(
         raise HTTPException(
             status_code=503, detail={"code": "STORAGE_BACKEND_UNAVAILABLE"}
         ) from None
+    # 签名允许无身份头播放，但不能让撤回后的旧签名继续暴露客户素材。
+    # 管理端预览同用此路由，仍保留在职管理员审核未发布素材的权限。
+    principal = conn.execute("SELECT role,is_active FROM users WHERE id=%s", (user_id,)).fetchone()
+    source = conn.execute(
+        "SELECT p.platform,p.video_id FROM viral_media_preparations p "
+        "JOIN viral_videos v ON v.platform=p.platform AND v.video_id=p.video_id "
+        "WHERE p.storage_uri=%s AND p.status='SUCCEEDED' AND v.deleted_at IS NULL",
+        (stored.uri,),
+    ).fetchone()
+    if (
+        principal is None
+        or not principal["is_active"]
+        or source is None
+        or (
+            principal["role"] not in {"admin", "auditor"}
+            and not is_customer_visible_viral_video(
+                conn,
+                platform=str(source["platform"]),
+                video_id=str(source["video_id"]),
+                user_id=user_id,
+            )
+        )
+    ):
+        raise HTTPException(status_code=404, detail={"code": "OBJECT_NOT_FOUND"})
     start, end, is_partial = _requested_byte_range(range_header, stored.size)
     content_length = end - start + 1
     headers = {
@@ -1073,6 +1130,7 @@ def charge_viral_copy(
     )
     if _copy_purchased(conn, source_id):
         return 0, True
+    require_customer_viral_access(conn, actor=actor, platform=platform, video_id=video_id)
     accept_operation(
         conn,
         user_id=actor.id,
@@ -1109,13 +1167,7 @@ def get_viral_video_detail(
     字段与免费列表完全同源（列表本就免费返回同样的字段），所以它不是绕过计费的
     入口，只是同一条内容在库里的读取口径。
     """
-    from app.viral_store import is_customer_visible_viral_video
-
-    if not is_customer_visible_viral_video(
-        conn, platform=platform, video_id=video_id, user_id=actor.id
-    ):
-        raise HTTPException(status_code=404, detail={"code": "VIRAL_VIDEO_NOT_FOUND"})
-    video = _require_stored_video(conn, platform=platform, video_id=video_id)
+    video = require_customer_viral_access(conn, actor=actor, platform=platform, video_id=video_id)
     availability = viral_video_availability(conn, platform=platform, video_id=video_id)
     return _item(
         video,
@@ -1144,8 +1196,8 @@ def open_viral_video_detail(
     ``finish_source``，两者与内容读取同处一个事务——内容读不到（404/409）或事务
     回滚时预留一并消失，**失败不扣费**。
 
-    免费分支有三类，客户端据 ``billing`` 区分：已购买（``deduped``）、已下架 /
-    不可用（``billable=false``）、以及审核账号读取**已购买**内容（不产生新扣费）。
+    已购买内容在仍可访问时免费重放（``deduped``）；未发布、下架和删除均返回 404，
+    历史购买详情不会重新授予公共内容访问权。审核账号可读取已购买的可见内容。
     审核账号不得产生新的客户扣费，所以首次购买前先过 ``require_not_auditor``；
     这与 ``/videos/source`` 等计费端点同一口径。
     """
@@ -1159,14 +1211,16 @@ def open_viral_video_detail(
 
     with db.write() as (conn, actor):
         with conn:
-            video = _require_stored_video(conn, platform=payload.platform, video_id=payload.videoId)
+            video = require_customer_viral_access(
+                conn, actor=actor, platform=payload.platform, video_id=payload.videoId
+            )
             availability = viral_video_availability(
                 conn, platform=payload.platform, video_id=payload.videoId
             )
             source_id = _detail_source_id(
                 resolve_wallet_owner(conn, actor.id), payload.platform, payload.videoId
             )
-            billable = availability == "available"
+            billable = True
             charged = 0
             deduped = billable and _detail_purchased(conn, source_id)
             if billable and not deduped:
@@ -1185,6 +1239,10 @@ def open_viral_video_detail(
                 conn.execute(
                     "SELECT pg_advisory_xact_lock(hashtext(%s))",
                     ("billing:user:" + actor.id,),
+                )
+                # 等待并发购买锁期间可能已经撤回，预留前再次使用同一权限规则。
+                video = require_customer_viral_access(
+                    conn, actor=actor, platform=payload.platform, video_id=payload.videoId
                 )
                 if _detail_purchased(conn, source_id):
                     deduped = True
@@ -1262,13 +1320,11 @@ def claim_viral_video_copy(
         with conn:
             # 删除只撤回公共发现；删除前已受理的成果保留在个人任务中，不能
             # 因公共行不可见而收了转写费却无交付，也不能凭视频 ID 领取他人成果。
-            deleted = conn.execute(
-                "SELECT deleted_at FROM viral_videos WHERE platform=%s AND video_id=%s",
-                (payload.platform, payload.videoId),
-            ).fetchone()
             hit = cached_transcript(conn, platform=payload.platform, video_id=payload.videoId)
-            source_deleted = deleted is None or deleted["deleted_at"] is not None
-            if payload.taskId is not None and (source_deleted or hit is None):
+            accessible = is_customer_visible_viral_video(
+                conn, platform=payload.platform, video_id=payload.videoId, user_id=actor.id
+            )
+            if payload.taskId is not None and (not accessible or hit is None):
                 task = conn.execute(
                     "SELECT result_json,updated_at FROM script_from_audio_tasks "
                     "WHERE id=%s AND created_by_user_id=%s AND status='SUCCEEDED' "
@@ -1284,9 +1340,9 @@ def claim_viral_video_copy(
                     "AND state='SUCCEEDED' AND charged_credits>0 LIMIT 1",
                     (payload.taskId,),
                 ).fetchone()
-                # 旧成功上传任务无法再重走 worker 的可信来源升级；已结算的个人
-                # 转写仍可领取。未付转写费的共享等待者不能由此绕过存量领取费。
-                if source_deleted or paid_asr is not None:
+                # 已受理任务的私有快照在撤回后仍归创建人所有；来源仍可访问时，
+                # 未付转写费的共享等待者不能由此绕过存量领取费。
+                if not accessible or paid_asr is not None:
                     result = json.loads(str(task["result_json"]))
                     return ViralCopyClaimResponse(
                         text=str(result["text"]),
@@ -1298,19 +1354,36 @@ def claim_viral_video_copy(
                             billable=False,
                         ),
                     )
-            _require_stored_video(conn, platform=payload.platform, video_id=payload.videoId)
+            if not accessible:
+                owned_copy = hit is not None and (
+                    viral_copy_purchased(
+                        conn, user_id=actor.id, platform=payload.platform, video_id=payload.videoId
+                    )
+                    or viral_copy_producer_wallet(
+                        conn, platform=payload.platform, video_id=payload.videoId
+                    )
+                    == resolve_wallet_owner(conn, actor.id)
+                )
+                if not owned_copy or hit is None:
+                    raise HTTPException(status_code=404, detail={"code": "VIRAL_VIDEO_NOT_FOUND"})
+                return ViralCopyClaimResponse(
+                    text=hit.result.text,
+                    updatedAt=hit.updated_at,
+                    billing=ViralCopyBilling(
+                        charged=0,
+                        unit=SERVICES[VIRAL_COPY_SERVICE].unit,
+                        deduped=True,
+                        billable=False,
+                    ),
+                )
             if hit is None:
                 return ViralCopyClaimResponse(
                     text=None,
                     updatedAt=None,
                     billing=ViralCopyBilling(charged=0, unit=SERVICES[VIRAL_COPY_SERVICE].unit),
                 )
-            # 已下架 / 不可用的内容不计费（与「查看详情」同口径），但仍把已有文案
-            # 交给用户：内容早已产出，此时再收费等于对一条看不成的视频收钱。
-            billable = (
-                viral_video_availability(conn, platform=payload.platform, video_id=payload.videoId)
-                == "available"
-            )
+            # 只有仍可访问的来源进入新的文案交付计费。
+            billable = True
             charged, deduped = charge_viral_copy(
                 conn,
                 actor=actor,

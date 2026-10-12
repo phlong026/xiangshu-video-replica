@@ -102,7 +102,7 @@ REPO_ROOT = SERVER_DIR.parent
 # 20261008T1000_viral_cohort_import_sources（ADM-C01 漏斗全来源口径）至
 # 20261008T1600_support_tickets（ADM-09 工单闭环）依次追加其上，故链尾为该值。
 # 新增业务防重迁移必须进入真实升级测试，不能停留在旧链尾制造假通过。
-HEAD_REVISION = "20261012T0500_nullable_viral_metrics"
+HEAD_REVISION = "20261012T0600_viral_copy_upload_receipts"
 
 
 @pytest.mark.pg
@@ -400,20 +400,20 @@ FAILSTATE_DATABASE = "cw056_failstate_test"
 # 已发布链哈希与支持的发行起点保持冻结，不因这次 merge revision 改写。
 # 2026-10-12 在全新隔离 PostgreSQL 16.15 实测：先核原发行 head 的目录和计数
 # 与既有冻结值完全一致，再升级追加迁移采集以下新值；不改已发布链指纹。
-# 0500 仅移除 likes 非空约束和默认值；表名与计数保持不变，摘要已按真实 PG 重测。
-HEAD_SCHEMA_COUNTS = {
-    "tables": 131,
-    "columns": 1450,
-    "identity_columns": 0,
-    "sequences": 8,
-    "jsonb_columns": 11,
-    "timestamptz_columns": 108,
-    "triggers": 61,
-    "partial_indexes": 41,
-    "unique_constraints": 42,
-    "check_constraints": 385,
+# 0600 追加上传暂存回执表；以下计数、表名和摘要已在新建 PG16 中重测。
+HEAD_SCHEMA_COUNTS: dict[str, int] = {
+    "check_constraints": 386,
+    "columns": 1464,
     "foreign_keys": 216,
-    "primary_keys": 131,
+    "identity_columns": 0,
+    "jsonb_columns": 11,
+    "partial_indexes": 42,
+    "primary_keys": 132,
+    "sequences": 8,
+    "tables": 132,
+    "timestamptz_columns": 112,
+    "triggers": 61,
+    "unique_constraints": 43,
 }
 
 # head 的表名全集。counts 只能证明「数量没漂」，证明不了「同一批表」：
@@ -434,7 +434,7 @@ HEAD_SCHEMA_COUNTS = {
 # CW-076 的增量：users.password_hash / users.registration_source 两列 + 三条 CHECK
 # （blank/known/self_register-has-password），090 之上重挂 20260912T1400 后探针再重算
 # （columns +2=938、check_constraints +3=236，digest b678939f…，表名集不变）。
-HEAD_TABLE_NAMES = (
+HEAD_TABLE_NAMES: tuple[str, ...] = (
     "activation_code_activations",
     "activation_code_batches",
     "activation_code_deliveries",
@@ -548,6 +548,7 @@ HEAD_TABLE_NAMES = (
     "viral_content_measurement_state",
     "viral_content_sources",
     "viral_content_usage_events",
+    "viral_copy_upload_receipts",
     "viral_fetch_state",
     "viral_import_tasks",
     "viral_keyword_runs",
@@ -668,7 +669,7 @@ HEAD_TABLE_NAMES = (
 # 由 migration_manifest.py --print-schema 在联合 head 的全新 PG16 中测得；
 # 旧已发布链仍保持字节冻结。
 # 合并生产线 pushed_at 与 ADM 批量表列后重算，随合并迁移验证回填。
-HEAD_SCHEMA_DIGEST = "06754135ced6fdaa2723ecab6e176e6abad8fc023923ffb50bb0c4217057d236"
+HEAD_SCHEMA_DIGEST = "446f69da56b8d610d28042946f4baa7371f0320c7769e1b480e60482504240a8"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (

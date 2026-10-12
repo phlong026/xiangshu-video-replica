@@ -1384,8 +1384,8 @@ def test_collected_video_list_projects_card_fields_and_status_segments(
     # 未落地长期封面副本时不下发源站外链（外链会过期，且代理路由取不到对象）。
     assert pending["cover_url"] is None
     assert "tags_json" not in pending
-    # 已归档封面 → 只下发站内代理地址（免登录，`<img>` 可直接加载）。
-    assert items["ready-video"]["cover_url"] == "/api/viral/covers/douyin/ready-video"
+    # 已归档封面由管理会话代理，`<img>` 自动携带同站管理Cookie。
+    assert items["ready-video"]["cover_url"] == "/api/control/viral/covers/douyin/ready-video"
     assert items["ready-video"]["tags"] == ["乡村别墅"]
 
     def segment(status: str) -> set[str]:
@@ -5423,3 +5423,93 @@ def test_platform_probe_rejects_changed_price_before_fake_channel(client, route_
     assert calls == []
     with psycopg.connect(route_state) as raw:
         assert raw.execute("SELECT count(*) FROM viral_platform_probes").fetchone()[0] == 0
+
+
+@pytest.mark.pg
+@pytest.mark.parametrize("actor", ["admin_u", "auditor_u"])
+@pytest.mark.parametrize("availability", ["AVAILABLE", "HIDDEN"])
+def test_admin_private_cover_requires_reader_session_and_serves_unpublished_archive(
+    client: TestClient,
+    route_state: str,
+    monkeypatch: pytest.MonkeyPatch,
+    actor: str,
+    availability: str,
+) -> None:
+    from types import SimpleNamespace
+
+    from app import media_routes
+    from app.viral_media import viral_cover_key
+
+    video_id = "admin-video/opaque=id"
+    key = viral_cover_key("douyin", video_id)
+    image = b"\x89PNG\r\n\x1a\nfixture-image"
+    calls: list[str] = []
+
+    class Storage:
+        def head_object(self, requested: str):
+            calls.append(requested)
+            assert requested == key
+            return SimpleNamespace(size=len(image))
+
+        def get_object(self, requested: str):
+            assert requested == key
+            return image
+
+    monkeypatch.setattr(media_routes, "get_media_storage", lambda conn: Storage())
+    with psycopg.connect(route_state) as conn:
+        conn.execute("UPDATE viral_videos SET cover_key=%s,collection_published=0", (key,))
+        conn.execute(
+            "INSERT INTO viral_video_visibility(platform,video_id,status) VALUES('douyin',%s,%s)",
+            (video_id, availability),
+        )
+    path = "/api/control/viral/covers/douyin/admin-video%2Fopaque%3Did"
+    assert client.get(path).status_code in {401, 403}
+    assert calls == []
+    headers = _admin_session(client, actor)
+    listing = client.get("/api/control/viral/videos", headers=headers).json()
+    assert listing["items"][0]["cover_url"] == path
+    response = client.get(path)
+    assert response.status_code == 200, response.text
+    assert response.content == image
+    assert response.headers["content-type"] == "image/png"
+    assert response.headers["cache-control"] == "private, no-store"
+    assert len(calls) == 1
+    # 已发出的管理会话也必须重新校验角色，不能被降权客户沿用。
+    with psycopg.connect(route_state) as conn:
+        conn.execute("UPDATE users SET role='user' WHERE id=%s", (actor,))
+    assert client.get(path).status_code in {401, 403}
+    assert len(calls) == 1
+
+
+@pytest.mark.pg
+@pytest.mark.parametrize("case", ["missing", "deleted", "no_cover", "storage_down"])
+def test_admin_private_cover_missing_and_storage_failure_are_closed(
+    client: TestClient, route_state: str, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    from app import media_routes
+    from app.storage import StorageBackendUnavailable
+    from app.viral_media import viral_cover_key
+
+    calls: list[str] = []
+    video_id = "admin-video/opaque=id"
+
+    class Storage:
+        def head_object(self, requested: str):
+            calls.append(requested)
+            raise StorageBackendUnavailable("isolated test")
+
+    monkeypatch.setattr(media_routes, "get_media_storage", lambda conn: Storage())
+    with psycopg.connect(route_state) as conn:
+        if case != "no_cover":
+            conn.execute(
+                "UPDATE viral_videos SET cover_key=%s", (viral_cover_key("douyin", video_id),)
+            )
+        if case == "deleted":
+            conn.execute("UPDATE viral_videos SET deleted_at=now()")
+    _admin_session(client)
+    path = "/api/control/viral/covers/douyin/" + (
+        "not-found" if case == "missing" else "admin-video%2Fopaque%3Did"
+    )
+    response = client.get(path)
+    assert response.status_code == (503 if case == "storage_down" else 404), response.text
+    assert len(calls) == (1 if case == "storage_down" else 0)

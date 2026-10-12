@@ -4423,6 +4423,26 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/control/viral/covers/{platform}/{video_id}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Read Admin Viral Cover
+     * @description 选片需查看未发布和下架素材，封面只向有效管理会话开放。
+     */
+    get: operations["read_admin_viral_cover_api_control_viral_covers__platform___video_id__get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/control/viral/videos/{platform}/{video_id}/preview": {
     parameters: {
       query?: never;
@@ -6772,8 +6792,8 @@ export interface paths {
      *     ``finish_source``，两者与内容读取同处一个事务——内容读不到（404/409）或事务
      *     回滚时预留一并消失，**失败不扣费**。
      *
-     *     免费分支有三类，客户端据 ``billing`` 区分：已购买（``deduped``）、已下架 /
-     *     不可用（``billable=false``）、以及审核账号读取**已购买**内容（不产生新扣费）。
+     *     已购买内容在仍可访问时免费重放（``deduped``）；未发布、下架和删除均返回 404，
+     *     历史购买详情不会重新授予公共内容访问权。审核账号可读取已购买的可见内容。
      *     审核账号不得产生新的客户扣费，所以首次购买前先过 ``require_not_auditor``；
      *     这与 ``/videos/source`` 等计费端点同一口径。
      */
@@ -24943,6 +24963,38 @@ export interface operations {
           "application/json": {
             [key: string]: unknown;
           };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_admin_viral_cover_api_control_viral_covers__platform___video_id__get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        platform: "douyin" | "wechat_channels";
+        video_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": unknown;
         };
       };
       /** @description Validation Error */

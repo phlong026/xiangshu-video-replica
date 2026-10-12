@@ -1888,6 +1888,11 @@ def reclaim_expired_content_objects_throttled(storage: StorageAdapter) -> dict[s
         with pg_transaction() as raw_conn:
             conn = BusinessConnection.postgres(raw_conn)
             result = content_store.reclaim_expired_content_objects(conn, storage)
+            from app.viral_copy_uploads import reclaim_staged_uploads
+
+            staging = reclaim_staged_uploads(conn, storage)
+            for key in ("deleted", "failed", "skipped"):
+                result[key] = result.get(key, 0) + staging[key]
     except Exception:  # noqa: BLE001 - reclaiming is maintenance, never block work
         logger.warning("content reclaim sweep failed", exc_info=True)
         return {}

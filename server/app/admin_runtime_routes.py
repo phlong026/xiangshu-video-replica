@@ -28,7 +28,7 @@ from typing import Annotated, Literal
 from urllib.parse import quote
 
 import psycopg
-from fastapi import APIRouter, HTTPException, Query, Request, Response
+from fastapi import APIRouter, HTTPException, Path, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.admin_auth_routes import AdminReader, AdminWriter, SuperAdminReader, SuperAdminWriter
@@ -912,7 +912,7 @@ def _collected_video_payload(row: dict[str, object]) -> dict[str, object]:
     # 封面只下发站内代理地址（源站签名链接会过期，且代理路由不受 Referer 限制）；
     # 未归档封面副本时留空，前端渲染占位而不是加载一个必坏的外链。
     item["cover_url"] = (
-        f"/api/viral/covers/{item['platform']}/{quote(str(item['video_id']), safe='')}"
+        f"/api/control/viral/covers/{item['platform']}/{quote(str(item['video_id']), safe='')}"
         if item.get("cover_key")
         else None
     )
@@ -1970,6 +1970,47 @@ def read_viral_video_business_details(
         "sourceKeywords": [str(r[0]) for r in words],
         "relatedVideos": [_collected_video_payload(dict(r)) for r in related],
     }
+
+
+@router.get("/viral/covers/{platform}/{video_id:path}")
+def read_admin_viral_cover(
+    platform: Literal["douyin", "wechat_channels"],
+    video_id: Annotated[str, Path(min_length=1, max_length=256)],
+    _actor: AdminReader,
+) -> Response:
+    """选片需查看未发布和下架素材，封面只向有效管理会话开放。"""
+    from app.media_routes import get_media_storage
+    from app.storage import StorageBackendUnavailable
+    from app.viral_media import guess_image_content_type, viral_cover_key
+    from app.viral_store import get_viral_video
+
+    if "\\" in video_id or any(part in {".", ".."} for part in video_id.split("/")):
+        raise http_error(404, "OBJECT_NOT_FOUND", "封面不存在。")
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        video = get_viral_video(conn, platform=platform, video_id=video_id)
+        if video is None or not video.cover_key:
+            raise http_error(404, "OBJECT_NOT_FOUND", "封面不存在。")
+        storage = get_media_storage(conn)
+    # 路径绑定已存在视频，不能把数据库字段或请求参数当任意存储对象授权。
+    key = viral_cover_key(platform, video_id)
+    try:
+        if storage.head_object(key) is None:
+            raise http_error(404, "OBJECT_NOT_FOUND", "封面不存在。")
+        content = storage.get_object(key)
+    except StorageBackendUnavailable:
+        raise http_error(503, "STORAGE_BACKEND_UNAVAILABLE", "封面暂时无法读取。") from None
+    with pg_transaction() as raw:
+        if (
+            get_viral_video(BusinessConnection.postgres(raw), platform=platform, video_id=video_id)
+            is None
+        ):
+            raise http_error(404, "OBJECT_NOT_FOUND", "封面不存在。")
+    return Response(
+        content=content,
+        media_type=guess_image_content_type(content, key),
+        headers={"Cache-Control": "private, no-store"},
+    )
 
 
 @router.get("/viral/videos/{platform}/{video_id:path}/preview")

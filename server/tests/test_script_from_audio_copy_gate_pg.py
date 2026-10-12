@@ -38,7 +38,7 @@ def gate_client(client):
     client.app.dependency_overrides.clear()
 
 
-def _seed_viral_copy_video(raw, uid: str, *, video_id: str) -> None:
+def _seed_viral_copy_video(raw, uid: str, *, video_id: str, published: bool = False) -> None:
     """一条可获取文案的视频：内容池有行 + 账号有钱 + 共享缓存里有结果."""
     raw.execute(
         "INSERT INTO viral_videos (platform, video_id, title, author, native_json) "
@@ -46,6 +46,23 @@ def _seed_viral_copy_video(raw, uid: str, *, video_id: str) -> None:
         "DO UPDATE SET deleted_at = NULL",
         (video_id,),
     )
+    archive = {"platform": "douyin", "video_id": video_id, "sha256": "a" * 64}
+    if published:
+        # 公共购买必须模拟真实发布完成，缓存存在不等于有客户读取授权。
+        archive["storage_uri"] = f"local://viral/copy-gate/{video_id}.mp4"
+        raw.execute(
+            "UPDATE viral_videos SET collection_published=1,pushed_at=now(), "
+            "homepage_starts_at=NULL,homepage_ends_at=NULL WHERE platform='douyin' AND video_id=%s",
+            (video_id,),
+        )
+        raw.execute(
+            "INSERT INTO viral_media_preparations "
+            "(id,platform,video_id,media_kind,status,storage_uri) "
+            "VALUES(%s,'douyin',%s,'video','SUCCEEDED',%s) "
+            "ON CONFLICT(platform,video_id,media_kind) DO UPDATE SET "
+            "status='SUCCEEDED',storage_uri=excluded.storage_uri",
+            (f"copy-gate-{video_id}", video_id, archive["storage_uri"]),
+        )
     raw.execute(
         "UPDATE wallets SET available_credits=50, reserved_credits=0 WHERE user_id=%s", (uid,)
     )
@@ -64,7 +81,7 @@ def _seed_viral_copy_video(raw, uid: str, *, video_id: str) -> None:
                 {
                     "text": _COPY_TEXT,
                     "duration_sec": 12.0,
-                    "archive": {"platform": "douyin", "video_id": video_id, "sha256": "a" * 64},
+                    "archive": archive,
                 },
                 ensure_ascii=False,
             ),
@@ -193,7 +210,7 @@ def test_viral_task_hides_text_until_copy_claimed(gate_client, route_state) -> N
     project_id = "proj-gate-viral"
     video_id = "v-gate-viral"
     with psycopg.connect(route_state) as raw:
-        _seed_viral_copy_video(raw, uid, video_id=video_id)
+        _seed_viral_copy_video(raw, uid, video_id=video_id, published=True)
         _seed_task(raw, uid, task_id=task_id, project_id=project_id, video_id=video_id)
         raw.commit()
 
@@ -270,7 +287,7 @@ def test_copy_claim_producer_free_and_others_pay_once(gate_client, route_state) 
     project_id = "proj-gate-producer"
     video_id = "v-gate-producer"
     with psycopg.connect(route_state) as raw:
-        _seed_viral_copy_video(raw, uid, video_id=video_id)
+        _seed_viral_copy_video(raw, uid, video_id=video_id, published=True)
         _seed_task(raw, uid, task_id=task_id, project_id=project_id, video_id=video_id)
         # 缓存绑定生产者：这条文案是 uid 的任务转写出来的。
         raw.execute(

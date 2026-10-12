@@ -354,10 +354,18 @@ def get_viral_search_copy(
     ``text`` 变成 null 会按「未命中」重走一次提取，由上传链路计费，不会白拿。
     """
     hit = cached_transcript(conn, platform=platform, video_id=videoId)
+    purchased = viral_copy_purchased(conn, user_id=actor.id, platform=platform, video_id=videoId)
+    from app.usage_billing import resolve_wallet_owner
+    from app.viral_routes import require_customer_viral_access, viral_copy_producer_wallet
+
+    if not purchased and viral_copy_producer_wallet(
+        conn, platform=platform, video_id=videoId
+    ) != resolve_wallet_owner(conn, actor.id):
+        require_customer_viral_access(conn, actor=actor, platform=platform, video_id=videoId)
     return ViralCopyStatusResponse(
         available=hit is not None,
         updatedAt=hit.updated_at if hit is not None else None,
-        purchased=viral_copy_purchased(conn, user_id=actor.id, platform=platform, video_id=videoId),
+        purchased=purchased,
     )
 
 
