@@ -549,7 +549,7 @@ function missingWechatVideo(): StudioVideo {
   const base = studio();
   return {
     ...base.data.videos[1],
-    likes: 0,
+    likes: null,
     likeDisplay: null,
     comments: null,
     shares: null,
@@ -587,74 +587,95 @@ function wechatStatisticsPayload() {
 }
 
 describe("V1.4 内容与运营页面", () => {
-  it("首页到期先移出，重新读取失败也不会保留旧条目", async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    vi.setSystemTime(new Date("2026-10-01T12:00:00Z"));
-    try {
-      // 客户本机时钟比服务器快1小时，排期仍按服务器窗口。
-      listViralVideos
-        .mockResolvedValueOnce({
-          items: [
-            viralItem(1, {
-              title: "到期专题",
-              homepageEndsAt: "2026-10-01T11:00:02Z",
-            }),
-          ],
-          serverTime: "2026-10-01T11:00:00Z",
-          nextChangeAt: "2026-10-01T11:00:02Z",
-        })
-        .mockRejectedValue(new Error("离线"));
-      const base = studio();
-      render(
-        <StatefulViralPage
-          value={studio({ review: false, data: { ...base.data, videos: [] } })}
-        />,
-      );
-      await screen.findByText("到期专题");
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(1_000);
-      });
-      expect(screen.getByText("到期专题")).toBeInTheDocument();
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(1_050);
-      });
-      expect(screen.queryByText("到期专题")).toBeNull();
-      expect(listViralVideos).toHaveBeenCalledTimes(2);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
+  it.each([true, false])(
+    "发布条目到期先移出，刷新失败也不保留（首页：%s）",
+    async (homepageFeatured) => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      vi.setSystemTime(new Date("2026-10-01T12:00:00Z"));
+      try {
+        // 客户本机时钟比服务器快1小时，排期仍按服务器窗口。
+        listViralVideos
+          .mockResolvedValueOnce({
+            items: [
+              viralItem(1, {
+                title: "到期专题",
+                homepageFeatured,
+                homepageEndsAt: "2026-10-01T11:00:02Z",
+              }),
+            ],
+            serverTime: "2026-10-01T11:00:00Z",
+            nextChangeAt: null,
+          })
+          .mockRejectedValue(new Error("离线"));
+        const base = studio();
+        render(
+          <StatefulViralPage
+            value={studio({
+              review: false,
+              data: { ...base.data, videos: [] },
+            })}
+          />,
+        );
+        await screen.findByText("到期专题");
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(1_000);
+        });
+        expect(screen.getByText("到期专题")).toBeInTheDocument();
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(1_050);
+        });
+        expect(screen.queryByText("到期专题")).toBeNull();
+        expect(listViralVideos).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
-  it("当前页面为空时也按下一上线边界重新读取", async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    vi.setSystemTime(new Date("2026-10-01T12:00:00Z"));
-    try {
-      listViralVideos
-        .mockResolvedValueOnce({
-          items: [],
-          serverTime: "2026-10-01T12:00:00Z",
-          nextChangeAt: "2026-10-01T12:00:02Z",
-        })
-        .mockResolvedValue({ items: [viralItem(2, { title: "新上线专题" })] });
-      const base = studio();
-      render(
-        <StatefulViralPage
-          value={studio({ review: false, data: { ...base.data, videos: [] } })}
-        />,
-      );
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(50);
-      });
-      expect(screen.queryByText("新上线专题")).toBeNull();
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(2_050);
-      });
-      expect(screen.getByText("新上线专题")).toBeInTheDocument();
-      expect(listViralVideos).toHaveBeenCalledTimes(2);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
+  it.each([true, false])(
+    "空页按下一上线边界展示发布条目（首页：%s）",
+    async (homepageFeatured) => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      vi.setSystemTime(new Date("2026-10-01T12:00:00Z"));
+      try {
+        listViralVideos
+          .mockResolvedValueOnce({
+            items: [],
+            serverTime: "2026-10-01T12:00:00Z",
+            nextChangeAt: "2026-10-01T12:00:02Z",
+          })
+          .mockResolvedValue({
+            items: [
+              viralItem(2, {
+                title: "新上线专题",
+                homepageFeatured,
+                homepageStartsAt: "2026-10-01T12:00:02Z",
+              }),
+            ],
+          });
+        const base = studio();
+        render(
+          <StatefulViralPage
+            value={studio({
+              review: false,
+              data: { ...base.data, videos: [] },
+            })}
+          />,
+        );
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(50);
+        });
+        expect(screen.queryByText("新上线专题")).toBeNull();
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(2_050);
+        });
+        expect(screen.getByText("新上线专题")).toBeInTheDocument();
+        expect(listViralVideos).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it("默认首页保留低赞置首与跨页同序结果，不再二次按点赞排序", async () => {
     const base = studio();
@@ -2256,7 +2277,7 @@ describe("V1.4 内容与运营页面", () => {
     });
   });
 
-  it("未知爆款统计显示短横线", () => {
+  it("未知爆款统计逐项显示待核验", () => {
     const base = studio();
     useStudio.mockReturnValue(
       studio({
@@ -2275,9 +2296,165 @@ describe("V1.4 内容与运营页面", () => {
     );
     render(<ViralPage />);
 
-    expect(screen.getByTitle("评论")).toHaveTextContent("—");
-    expect(screen.getByTitle("转发")).toHaveTextContent("—");
-    expect(screen.getByTitle("收藏")).toHaveTextContent("—");
+    expect(screen.getByTitle("评论")).toHaveTextContent("待核验");
+    expect(screen.getByTitle("转发")).toHaveTextContent("待核验");
+    expect(screen.getByTitle("收藏")).toHaveTextContent("待核验");
+  });
+
+  it.each([0, 1])(
+    "两平台卡片与详情逐字段区分未知、真零和已有统计：%s",
+    (platformIndex) => {
+      const base = studio();
+      const video = {
+        ...base.data.videos[platformIndex],
+        likes: 1200,
+        likeDisplay: null,
+        comments: null,
+        shares: 0,
+        collections: null,
+        statisticsUpdatedAt: "2026-10-12T08:00:00Z",
+        statisticsCheckedAt: "2026-10-12T09:00:00Z",
+        statisticsStatus: "partial" as const,
+        statisticsSource:
+          platformIndex === 0 ? "platform_search" : "platform_detail",
+      };
+      const value = studio({ data: { ...base.data, videos: [video] } });
+      useStudio.mockReturnValue(value);
+      const view = render(<ViralPage />);
+      if (platformIndex === 1)
+        fireEvent.click(screen.getByRole("tab", { name: /视频号/ }));
+      expect(screen.getByText(/统计来源：/)).toHaveTextContent(
+        platformIndex === 0 ? "平台搜索" : "互动核验",
+      );
+      expect(screen.getByTitle("点赞")).toHaveTextContent("1,200");
+      expect(screen.getByTitle("评论")).toHaveTextContent("待核验");
+      expect(screen.getByTitle("转发")).toHaveTextContent(/^0$/);
+      expect(screen.getByTitle("收藏")).toHaveTextContent("待核验");
+      expect(
+        screen.getByText(/统计时间：2026-10-12T08:00:00Z/),
+      ).toHaveTextContent("本次部分指标未更新");
+      view.unmount();
+      useStudio.mockReturnValue({
+        ...value,
+        state: {
+          ...value.state,
+          page: "viral-detail",
+          selectedVideoId: video.id,
+        },
+      });
+      render(<ViralDetailPage />);
+      expect(screen.getByTitle("点赞")).toHaveTextContent("1,200");
+      expect(screen.getByTitle("评论")).toHaveTextContent("待核验");
+      expect(screen.getByTitle("转发")).toHaveTextContent(/^0$/);
+      expect(
+        screen.getByText(/最近核验：2026-10-12T09:00:00Z/),
+      ).toBeInTheDocument();
+    },
+  );
+
+  it("缺字段刷新保留1200赞并提示本次未完整更新", async () => {
+    listViralVideos.mockReturnValue(new Promise(() => {}));
+    const base = studio();
+    const video = {
+      ...missingWechatVideo(),
+      likes: 1200,
+      statisticsUpdatedAt: "2026-10-12T08:00:00Z",
+    };
+    fetchViralVideoStatistics.mockResolvedValue({
+      items: [
+        viralItem(1, {
+          platform: "wechat_channels",
+          videoId: video.nativeId,
+          likes: null,
+          comments: null,
+          shares: null,
+          collects: null,
+          likeDisplay: null,
+          statisticsUpdatedAt: null,
+          statisticsCheckedAt: "2026-10-12T09:00:00Z",
+          statisticsStatus: "partial",
+        }),
+      ],
+    });
+    render(
+      <StatefulViralPage
+        value={studio({
+          review: false,
+          data: { ...base.data, videos: [video] },
+        })}
+      />,
+    );
+    fireEvent.click(screen.getByRole("tab", { name: /视频号/ }));
+    await waitFor(() =>
+      expect(screen.getByText(/本次部分指标未更新/)).toBeInTheDocument(),
+    );
+    expect(screen.getByTitle("点赞")).toHaveTextContent("1,200");
+    expect(screen.getByTitle("评论")).toHaveTextContent("待核验");
+    expect(
+      screen.getByText(/统计时间：2026-10-12T08:00:00Z/),
+    ).toBeInTheDocument();
+  });
+
+  it("非首页发布条目在客户列表首屏和下一页可见，私有导入不混入", async () => {
+    const base = studio();
+    const first = viralItem(71, {
+      homepageFeatured: false,
+      title: "普通发布首屏",
+    });
+    const second = viralItem(72, {
+      homepageFeatured: false,
+      title: "普通发布次页",
+    });
+    const privateVideo = {
+      ...base.data.videos[0],
+      homepageFeatured: false,
+      id: "private",
+      nativeId: "private",
+      title: "私有链接导入",
+    };
+    listViralVideos
+      .mockResolvedValueOnce({
+        platform: "douyin",
+        sort: "hot",
+        categories: [],
+        items: [first],
+        fetchedAt: null,
+        hasMore: true,
+        nextCursor: "published-page-2",
+        total: 2,
+      })
+      .mockResolvedValueOnce({
+        platform: "douyin",
+        sort: "hot",
+        categories: [],
+        items: [second],
+        fetchedAt: null,
+        hasMore: false,
+        nextCursor: null,
+        total: 2,
+      });
+    render(
+      <StatefulViralPage
+        value={studio({
+          review: false,
+          data: { ...base.data, videos: [privateVideo] },
+        })}
+      />,
+    );
+    expect(await screen.findByText("普通发布首屏")).toBeInTheDocument();
+    expect(screen.queryByText("私有链接导入")).not.toBeInTheDocument();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "加载更多视频" }),
+    );
+    expect(await screen.findByText("普通发布次页")).toBeInTheDocument();
+    expect(screen.getByText("普通发布首屏")).toBeInTheDocument();
+    expect(listViralVideos).toHaveBeenNthCalledWith(1, "douyin", "hot", {
+      limit: 12,
+    });
+    expect(listViralVideos).toHaveBeenNthCalledWith(2, "douyin", "hot", {
+      limit: 12,
+      cursor: "published-page-2",
+    });
   });
 
   it("非审核列表为当前可见的视频号完整统计查询缓存且每页仅一次", async () => {
@@ -2354,7 +2531,7 @@ describe("V1.4 内容与运营页面", () => {
     fireEvent.click(screen.getByRole("tab", { name: /视频号/ }));
 
     // 缺统计的卡片四项都是「—」：点赞也不显示 0（0 会被读成已到手的真实数据）。
-    expect(screen.getByTitle("点赞")).toHaveTextContent("—");
+    expect(screen.getByTitle("点赞")).toHaveTextContent("待核验");
     expect(
       await screen.findByText("1 条视频号的互动统计还没补全"),
     ).toBeInTheDocument();
@@ -2414,7 +2591,7 @@ describe("V1.4 内容与运营页面", () => {
     await act(async () => {
       release?.(wechatStatisticsPayload());
     });
-    expect(screen.getByTitle("评论")).toHaveTextContent("—");
+    expect(screen.getByTitle("评论")).toHaveTextContent("待核验");
     expect(
       screen.getByText("1 条视频号的互动统计还没补全"),
     ).toBeInTheDocument();
@@ -2486,7 +2663,7 @@ describe("V1.4 内容与运营页面", () => {
     render(<ViralPage />);
     fireEvent.click(screen.getByRole("tab", { name: /视频号/ }));
 
-    expect(screen.getByTitle("点赞")).toHaveTextContent("—");
+    expect(screen.getByTitle("点赞")).toHaveTextContent("待核验");
     expect(screen.queryByText(/还没补全/)).toBeNull();
     expect(fetchViralVideoStatistics).not.toHaveBeenCalled();
     expect(refreshViralVideoStatistics).not.toHaveBeenCalled();
@@ -2576,7 +2753,6 @@ describe("V1.4 内容与运营页面", () => {
     await waitFor(() =>
       expect(listViralVideos).toHaveBeenCalledWith("douyin", "latest", {
         limit: 12,
-        featuredOnly: true,
       }),
     );
   });
@@ -2635,7 +2811,6 @@ describe("V1.4 内容与运营页面", () => {
     await waitFor(() =>
       expect(listViralVideos).toHaveBeenCalledWith("douyin", "hot", {
         limit: 12,
-        featuredOnly: true,
       }),
     );
     const loadMore = await screen.findByRole("button", {
@@ -2646,7 +2821,6 @@ describe("V1.4 内容与运营页面", () => {
       expect(listViralVideos).toHaveBeenCalledWith("douyin", "hot", {
         limit: 12,
         cursor: "cursor-2",
-        featuredOnly: true,
       }),
     );
   });
@@ -2773,7 +2947,6 @@ describe("V1.4 内容与运营页面", () => {
     expect(listViralVideos).toHaveBeenLastCalledWith("douyin", "hot", {
       limit: 12,
       cursor: "cursor-2",
-      featuredOnly: true,
     });
   });
 
@@ -2819,11 +2992,9 @@ describe("V1.4 内容与运营页面", () => {
     expect(listViralVideos).toHaveBeenNthCalledWith(2, "douyin", "hot", {
       limit: 12,
       cursor: "expired-cursor",
-      featuredOnly: true,
     });
     expect(listViralVideos).toHaveBeenNthCalledWith(3, "douyin", "hot", {
       limit: 12,
-      featuredOnly: true,
     });
     expect(listViralVideos).toHaveBeenCalledTimes(3);
   });
@@ -2876,7 +3047,6 @@ describe("V1.4 内容与运营页面", () => {
     await waitFor(() =>
       expect(listViralVideos).toHaveBeenLastCalledWith("douyin", "hot", {
         limit: 12,
-        featuredOnly: true,
       }),
     );
     resolveOldPage?.({
@@ -2976,7 +3146,6 @@ describe("V1.4 内容与运营页面", () => {
     await waitFor(() =>
       expect(listViralVideos).toHaveBeenCalledWith("wechat_channels", "hot", {
         limit: 12,
-        featuredOnly: true,
       }),
     );
 
@@ -3625,7 +3794,7 @@ describe("V1.4 内容与运营页面", () => {
     expect(screen.getByRole("tab", { name: "抖音 0" })).toBeInTheDocument();
     expect(screen.getByText("暂无爆款视频")).toBeInTheDocument();
     expect(
-      screen.getByText("管理端尚未配置上首页的爆款视频，配置后自动展示。"),
+      screen.getByText("暂无已发布且可用的爆款视频，发布后自动展示。"),
     ).toBeInTheDocument();
     expect(
       screen.queryByText("采集参数仅在管理后台配置。"),
@@ -3650,6 +3819,7 @@ describe("V1.4 内容与运营页面", () => {
     fireEvent.click(screen.getByRole("button", { name: "用于音频口播" }));
     expect(selectedValue.patchDraft).toHaveBeenCalledWith({
       audioId: "audio-1",
+      driverMode: "audio",
       ipId: "person-1",
       voiceId: undefined,
     });
@@ -3932,6 +4102,7 @@ describe("V1.4 内容与运营页面", () => {
 
     expect(value.patchDraft).toHaveBeenCalledWith({
       audioId: "audio-cloud-1",
+      driverMode: "audio",
       ipId: "person-1",
       voiceId: undefined,
     });
@@ -5811,6 +5982,7 @@ describe("V1.4 内容与运营页面", () => {
     );
     expect(value.patchDraft).toHaveBeenCalledWith({
       audioId: "aud-1",
+      driverMode: "audio",
       ipId: undefined,
       voiceId: undefined,
     });

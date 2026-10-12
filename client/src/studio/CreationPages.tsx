@@ -167,18 +167,22 @@ const MIN_REPLICA_SOURCE_SECONDS = 4;
 const MAX_REPLICA_SOURCE_SECONDS = 15;
 const REPLICA_DURATION_TOLERANCE_SECONDS = 0.1;
 
-// S11（换源稳定性）：换源 / 重来前取消旧的排队中 / 运行中拆解任务，服务端在
-// 取消事务里即时释放预留积分；否则旧任务既看不到结果又继续计费。取消是尽力
-// 而为——任何失败都不得挡住换源 / 清空这一主操作，服务端对账仍会兜底结算。
-async function cancelPreviousAnalysisTask(
-  taskId: string | undefined,
-  status: string | undefined,
-): Promise<void> {
-  if (!taskId || (status !== "PENDING" && status !== "RUNNING")) return;
+// 清空页面与云端取消是两件事；只有服务端明确返回取消终态才可告知已取消。
+async function cancelPreviousAnalysisTask(taskId: string): Promise<string> {
   try {
-    await cancelAnalysisTask(taskId);
+    const task = await cancelAnalysisTask(taskId);
+    if (task?.error_code === "ANALYSIS_TASK_CANCELLED") {
+      return "云端已确认取消旧拆解任务；积分以账单记录为准。";
+    }
+    if (task?.status === "SUCCEEDED") {
+      return "旧拆解任务已完成，未取消；可在原项目查看成果，费用以账单记录为准。";
+    }
+    if (task?.status === "FAILED") {
+      return "旧拆解任务已失败结束，并非本次取消；费用以账单记录为准。";
+    }
+    return "尚未确认取消，旧拆解任务可能仍在进行；请回原项目核对任务和账单。";
   } catch {
-    // 静默：换源是主操作，取消只是清理。
+    return "取消结果未确认，旧拆解任务可能仍在进行；页面重置不代表取消或退回积分，请回原项目核对任务和账单。";
   }
 }
 
@@ -1305,7 +1309,10 @@ export function CopyPage() {
               <Button
                 variant="primary"
                 disabled={!state.draft.script.confirmed || oralLengthExceeded}
-                onClick={() => navigate("oral", { returnTo: "copy" })}
+                onClick={() => {
+                  patchDraft({ driverMode: "text" });
+                  navigate("oral", { returnTo: "copy" });
+                }}
               >
                 用于数字人口播
               </Button>
@@ -1501,6 +1508,21 @@ export function ReplicaPage() {
 
   const [restoreBusy, setRestoreBusy] = useState(false);
   const [restoreError, setRestoreError] = useState("");
+  const [cancellationNotices, setCancellationNotices] = useState<
+    Record<string, string>
+  >({});
+  const requestPreviousCancellation = async (
+    taskId: string | undefined,
+    status: string | undefined,
+  ) => {
+    if (!taskId || (status !== "PENDING" && status !== "RUNNING")) return;
+    setCancellationNotices((current) => ({
+      ...current,
+      [taskId]: "正在请求取消旧拆解任务，尚未确认受理；旧任务可能仍在进行。",
+    }));
+    const message = await cancelPreviousAnalysisTask(taskId);
+    setCancellationNotices((current) => ({ ...current, [taskId]: message }));
+  };
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const uploadOperationRef = useRef(0);
   const uploadAbortRef = useRef<AbortController | null>(null);
@@ -1630,8 +1652,9 @@ export function ReplicaPage() {
   // 一起清掉，页面才真的回到起点。
   const startFreshReplica = () => {
     if (readOnly) return;
-    // S11：清空绑定前取消旧的排队中 / 运行中任务（含跨会话恢复的 PENDING/
-    // RUNNING 草稿），否则任务继续计费且结果再也看不到。
+    // 保留旧任务标识用于明确反馈；本地清空不代表云端已停止。
+    uploadOperationRef.current += 1;
+    uploadAbortRef.current?.abort();
     const previousTaskId = state.draft.analysisTaskId;
     const previousTaskStatus = state.draft.analysisTaskStatus;
     // S8：重来接管会话——旧会话号前进一位并立即释放忙碌态，旧任务迟到的
@@ -1664,8 +1687,10 @@ export function ReplicaPage() {
       scriptEdited: false,
     });
     discardSavedDraft();
-    void cancelPreviousAnalysisTask(previousTaskId, previousTaskStatus);
-    notify("已清空本次复刻，上传新的参考视频即可重新开始。");
+    void requestPreviousCancellation(previousTaskId, previousTaskStatus);
+    notify(
+      "已清空本页复刻内容，云端取消结果请查看页面提示；原项目和任务记录仍保留。",
+    );
   };
 
   const restoreSavedProject = useCallback(
@@ -1922,8 +1947,9 @@ export function ReplicaPage() {
         abortController.signal,
       );
       if (operation !== uploadOperationRef.current) return;
-      // S11：换源在即，取消旧的排队中 / 运行中拆解任务并即时释放预留积分。
-      await cancelPreviousAnalysisTask(previousTaskId, previousTaskStatus);
+      // 取消结果单独展示，不能把换源成功当作已停止或已退积分。
+      await requestPreviousCancellation(previousTaskId, previousTaskStatus);
+      if (operation !== uploadOperationRef.current) return;
       restoreOperationRef.current += 1;
       restoreBusyRef.current = false;
       setRestoreBusy(false);
@@ -2488,6 +2514,11 @@ export function ReplicaPage() {
   return (
     <section className="creation-page creation-replica">
       <CreationNavigation />
+      {Object.entries(cancellationNotices).map(([taskId, message]) => (
+        <p key={taskId} role="status" aria-live="polite">
+          旧拆解任务 {taskId}：{message}
+        </p>
+      ))}
       <nav className="replica-steps" aria-label="复刻步骤导航">
         {replicaSteps.map((step, index) => (
           <button
@@ -2625,9 +2656,8 @@ export function ReplicaPage() {
                           ? "重新拆解"
                           : "启动 AI 拆解"}
                     </Button>
-                    {/* S8：换源 / 重来是拆解进行中的取消式出口（S11 保证它们
-                        会取消在途任务），不能被忙碌态锁死；只有拆解按钮自身
-                        禁用，防重复提交。 */}
+                    {/* 换源 / 重来可在拆解期间使用；云端取消需另行确认，
+                        只有拆解按钮自身禁用以防重复提交。 */}
                     <Button
                       disabled={readOnly}
                       variant="outline"
@@ -5389,7 +5419,17 @@ export function OralPage() {
   const scriptReady = Boolean(
     state.draft.script.confirmed && state.draft.script.text.trim(),
   );
-  const ready = Boolean(person && avatar && voice && scriptReady);
+  const audioMode =
+    state.draft.driverMode === "audio" || state.page === "oral-audio";
+  const audio = data.assets.find(
+    (asset) =>
+      asset.id === state.draft.audioId &&
+      asset.kind === "audio" &&
+      (!asset.allowedUses || asset.allowedUses.includes("oral_audio")),
+  );
+  const ready = Boolean(
+    person && avatar && (audioMode ? audio : voice && scriptReady),
+  );
   const manage = (page: "person-avatars" | "person-voices") =>
     navigate(page, { returnTo: "oral", selectedPersonId: state.draft.ipId });
   return (
@@ -5403,11 +5443,37 @@ export function OralPage() {
         </Button>
         <div>
           <h1>数字人口播</h1>
-          <p>选好视频分身和自己的声音，让文案成为新口播。</p>
+          <p>
+            {audioMode
+              ? "选好视频分身，用已有完整音频制作口播。"
+              : "选好视频分身和自己的声音，让文案成为新口播。"}
+          </p>
         </div>
       </header>
       <CreationNavigation />
-      <OralJourney step={3} />
+      <div className="creation-style-controls">
+        <Button
+          variant={!audioMode ? "outline" : "quiet"}
+          disabled={readOnly}
+          onClick={() => {
+            patchDraft({ driverMode: "text" });
+            navigate("oral");
+          }}
+        >
+          文案驱动
+        </Button>
+        <Button
+          variant={audioMode ? "outline" : "quiet"}
+          disabled={readOnly}
+          onClick={() => {
+            patchDraft({ driverMode: "audio" });
+            navigate("oral-audio");
+          }}
+        >
+          已有音频
+        </Button>
+      </div>
+      {!audioMode && <OralJourney step={3} />}
       <div className="oral-composer-grid">
         <Panel className="oral-source-panel">
           <PersonIdentity person={person} />
@@ -5434,7 +5500,9 @@ export function OralPage() {
                 <small>已就绪 · 真人视频创建</small>
               </div>
               <span className="oral-source-label">
-                分身来源预览，成片会按文案和声音重新生成。
+                {audioMode
+                  ? "分身来源预览，成片会按所选音频重新生成。"
+                  : "分身来源预览，成片会按文案和声音重新生成。"}
               </span>
               <Button variant="quiet" onClick={() => manage("person-avatars")}>
                 管理口播分身
@@ -5454,84 +5522,125 @@ export function OralPage() {
               }
             />
           )}
-          <div className="oral-voice-choice">
-            <div className="creation-panel-title-row">
-              <span>克隆声音</span>
+          {!audioMode && (
+            <div className="oral-voice-choice">
+              <div className="creation-panel-title-row">
+                <span>克隆声音</span>
+                <Button
+                  variant="outline"
+                  disabled={readOnly}
+                  onClick={() => openPicker("voice")}
+                >
+                  更换声音
+                </Button>
+              </div>
+              <div className="creation-voice-row">
+                <strong>{voice?.name ?? "未选择已确认声音"}</strong>
+                <small>{voice ? "已试听确认" : "需在声音档案中试听确认"}</small>
+              </div>
+              {voice?.url ? (
+                <audio
+                  controls
+                  preload="none"
+                  src={voice.url}
+                  aria-label={`${voice.name}试听`}
+                >
+                  <track kind="captions" label="声音样本" />
+                </audio>
+              ) : null}
+              <Button variant="quiet" onClick={() => manage("person-voices")}>
+                管理声音
+              </Button>
+            </div>
+          )}
+        </Panel>
+        <Panel className="oral-script-panel">
+          {audioMode ? (
+            <>
+              <div className="oral-panel-heading">
+                <h2>完整口播音频</h2>
+              </div>
+              <p>{audio?.name ?? "请选择可用于口播的完整音频"}</p>
+              {audio?.url && (
+                <audio
+                  controls
+                  preload="none"
+                  src={audio.url}
+                  aria-label="口播音频预览"
+                >
+                  <track kind="captions" label="口播音频" />
+                </audio>
+              )}
               <Button
                 variant="outline"
                 disabled={readOnly}
-                onClick={() => openPicker("voice")}
+                onClick={() =>
+                  navigate("materials", { returnTo: "oral-audio" })
+                }
               >
-                更换声音
+                选择口播音频
               </Button>
-            </div>
-            <div className="creation-voice-row">
-              <strong>{voice?.name ?? "未选择已确认声音"}</strong>
-              <small>{voice ? "已试听确认" : "需在声音档案中试听确认"}</small>
-            </div>
-            {voice?.url ? (
-              <audio
-                controls
-                preload="none"
-                src={voice.url}
-                aria-label={`${voice.name}试听`}
-              >
-                <track kind="captions" label="声音样本" />
-              </audio>
-            ) : null}
-            <Button variant="quiet" onClick={() => manage("person-voices")}>
-              管理声音
-            </Button>
-          </div>
-        </Panel>
-        <Panel className="oral-script-panel">
-          <div className="oral-panel-heading">
-            <h2>口播文案</h2>
-            <span className="oral-source-label">
-              {scriptReady ? "已确认终稿" : "待确认终稿"}
-            </span>
-          </div>
-          <div className="creation-readonly-script">
-            <div>
-              <span>来源：文案工坊</span>
-              <strong>V{state.draft.script.version}</strong>
-            </div>
-            <h3>{state.draft.script.title || "未命名作品"}</h3>
-            <p>{state.draft.script.text || "去文案工坊填写并确认口播文案。"}</p>
-            <button
-              type="button"
-              onClick={() => navigate("copy", { returnTo: "oral" })}
-            >
-              去文案工坊修改
-            </button>
-          </div>
-          <div className="oral-script-meta">
-            <span>{state.draft.script.text.trim().length} 字</span>
-            <span>成片时长随口播内容确定</span>
-          </div>
-          <div className="creation-style-controls">
-            <span>标准口播</span>
-            <span>字幕</span>
-            <Button
-              disabled={readOnly}
-              variant={!state.draft.subtitles ? "outline" : "quiet"}
-              onClick={() => patchDraft({ subtitles: false })}
-            >
-              不添加
-            </Button>
-            <Button
-              disabled={readOnly}
-              variant={state.draft.subtitles ? "outline" : "quiet"}
-              onClick={() => patchDraft({ subtitles: true })}
-            >
-              添加
-            </Button>
-          </div>
+              <Hint>
+                直接使用所选音频，不生成配音，也不使用草稿中的文案或克隆声音。
+              </Hint>
+            </>
+          ) : (
+            <>
+              <div className="oral-panel-heading">
+                <h2>口播文案</h2>
+                <span className="oral-source-label">
+                  {scriptReady ? "已确认终稿" : "待确认终稿"}
+                </span>
+              </div>
+              <div className="creation-readonly-script">
+                <div>
+                  <span>来源：文案工坊</span>
+                  <strong>V{state.draft.script.version}</strong>
+                </div>
+                <h3>{state.draft.script.title || "未命名作品"}</h3>
+                <p>
+                  {state.draft.script.text || "去文案工坊填写并确认口播文案。"}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => navigate("copy", { returnTo: "oral" })}
+                >
+                  去文案工坊修改
+                </button>
+              </div>
+              <div className="oral-script-meta">
+                <span>{state.draft.script.text.trim().length} 字</span>
+                <span>成片时长随口播内容确定</span>
+              </div>
+              <div className="creation-style-controls">
+                <span>标准口播</span>
+                <span>字幕</span>
+                <Button
+                  disabled={readOnly}
+                  variant={!state.draft.subtitles ? "outline" : "quiet"}
+                  onClick={() => patchDraft({ subtitles: false })}
+                >
+                  不添加
+                </Button>
+                <Button
+                  disabled={readOnly}
+                  variant={state.draft.subtitles ? "outline" : "quiet"}
+                  onClick={() => patchDraft({ subtitles: true })}
+                >
+                  添加
+                </Button>
+              </div>
+            </>
+          )}
           <div className="oral-readiness">
             {[
               ["视频分身", Boolean(avatar)],
-              ["克隆声音", Boolean(voice)],
-              ["文案终稿", scriptReady],
+              ...(audioMode
+                ? [["完整音频", Boolean(audio)]]
+                : [
+                    ["克隆声音", Boolean(voice)],
+                    ["文案终稿", scriptReady],
+                  ]),
             ].map(([label, complete]) => (
               <span key={String(label)} className={complete ? "is-ready" : ""}>
                 <Icon name={complete ? "check" : "clock"} size={14} />

@@ -314,7 +314,40 @@ export function failMaterialPreview(
 }
 
 function viralLikesLabel(video: StudioVideo) {
-  return video.likeDisplay ?? formatCount(video.likes);
+  return video.likes == null
+    ? "待核验"
+    : (video.likeDisplay ?? formatCount(video.likes));
+}
+
+function viralMetricLabel(value: number | null | undefined) {
+  return value == null ? "待核验" : formatCount(value);
+}
+
+function ViralStatisticsNote({ video }: { video: StudioVideo }) {
+  const status = video.statisticsStatus;
+  const source =
+    video.statisticsSource === "platform_search"
+      ? "平台搜索"
+      : video.statisticsSource === "platform_detail"
+        ? "互动核验"
+        : "待核验";
+  if (!video.statisticsUpdatedAt && !video.statisticsCheckedAt && !status)
+    return null;
+  return (
+    <Hint>
+      统计来源：{source} · 统计时间：{video.statisticsUpdatedAt ?? "待核验"}
+      {video.statisticsCheckedAt
+        ? ` · 最近核验：${video.statisticsCheckedAt}`
+        : ""}
+      {status === "partial"
+        ? " · 本次部分指标未更新，保留已有数据"
+        : status === "failed"
+          ? " · 本次更新失败，保留已有数据"
+          : status === "unknown"
+            ? " · 指标待核验"
+            : ""}
+    </Hint>
+  );
 }
 
 function viralPublishLabel(video: StudioVideo) {
@@ -363,11 +396,17 @@ function updateViralStatistics(
       return item && video.platformKey === item.platform
         ? {
             ...video,
-            likes: item.likes,
-            comments: item.comments,
-            shares: item.shares,
-            collections: item.collects,
-            likeDisplay: item.likeDisplay,
+            likes: item.likes ?? video.likes,
+            comments: item.comments ?? video.comments,
+            shares: item.shares ?? video.shares,
+            collections: item.collects ?? video.collections,
+            likeDisplay:
+              item.likes == null ? video.likeDisplay : item.likeDisplay,
+            statisticsUpdatedAt:
+              item.statisticsUpdatedAt ?? video.statisticsUpdatedAt,
+            statisticsCheckedAt: item.statisticsCheckedAt,
+            statisticsStatus: item.statisticsStatus,
+            statisticsSource: item.statisticsSource,
           }
         : video;
     }),
@@ -707,14 +746,11 @@ function ViralCover({
 
 /** 统计行（参考统计行四字段常显）：点赞 / 评论 / 转发 / 收藏。 */
 function ViralStatsRow({ video }: { video: StudioVideo }) {
-  // 视频号的互动统计要单独补采，还没补全时四个字段一律显示「—」：点赞在搜索结果里
-  // 可能是 0 或一个饱和的展示值，与其余三项不同源，单独显示会被读成「统计已到手」。
-  const missing = viralStatisticsMissing(video);
   const stats: Array<[string, string, string]> = [
-    ["heart", "点赞", missing ? "—" : viralLikesLabel(video)],
-    ["comment", "评论", missing ? "—" : formatCount(video.comments ?? null)],
-    ["share", "转发", missing ? "—" : formatCount(video.shares)],
-    ["star", "收藏", missing ? "—" : formatCount(video.collections)],
+    ["heart", "点赞", viralLikesLabel(video)],
+    ["comment", "评论", viralMetricLabel(video.comments)],
+    ["share", "转发", viralMetricLabel(video.shares)],
+    ["star", "收藏", viralMetricLabel(video.collections)],
   ];
   return (
     <div className="viral-card-stats">
@@ -1022,6 +1058,7 @@ function ViralCard({
             {video.title}
           </button>
         </h3>
+        <ViralStatisticsNote video={video} />
         <div className="viral-card-tags">
           {video.hasCopy && (
             <span
@@ -1131,22 +1168,21 @@ export function ViralPage() {
   );
   paginationContextKeyRef.current = paginationContextKey;
 
-  // 爆款网格 == 管理端策展的「首页展示」条目。`data.videos` 是共享存储，链接导入
-  // 与搜索结果也会往里塞条目（详情页要靠它按 id 找视频），那些条目没有首页展示
-  // 标记，必须挡在网格之外——否则会以「缓存失败」的形态出现在爆款列表里。
-  // 平台计数与分类筛选同用这份策展集合，否则会出现「有分类没有卡片」的空点击。
-  // 「我的收藏」不受此限：收藏是服务端状态，允许包含已下首页的视频。
+  // 公共列表回执决定客户发布可见性；共享状态还含私有导入，不能直接全部展示。
+  // 首次回执前保留已有首页缓存；非首页发布条目凭本页接口回执进入同一网格。
   const curated = useMemo(
     () =>
       data.videos.filter(
         (item) =>
-          item.homepageFeatured === true &&
+          (item.homepageFeatured === true ||
+            availabilityByKey.get(`${item.platformKey}:${item.nativeId}`) ===
+              "available") &&
           (!item.homepageStartsAt ||
             Date.parse(item.homepageStartsAt) <= homepageNow) &&
           (!item.homepageEndsAt ||
             Date.parse(item.homepageEndsAt) > homepageNow),
       ),
-    [data.videos, homepageNow],
+    [data.videos, homepageNow, availabilityByKey],
   );
   useEffect(() => {
     if (review || scope !== "all") return;
@@ -1154,7 +1190,10 @@ export function ViralPage() {
     const boundaries = [
       nextHomepageChange,
       ...data.videos.flatMap((item) =>
-        item.platformKey === platformKey && item.homepageFeatured
+        item.platformKey === platformKey &&
+        (item.homepageFeatured ||
+          availabilityByKey.get(`${item.platformKey}:${item.nativeId}`) ===
+            "available")
           ? [item.homepageStartsAt, item.homepageEndsAt]
           : [],
       ),
@@ -1163,7 +1202,7 @@ export function ViralPage() {
       .map(Date.parse)
       .filter((value) => Number.isFinite(value) && value > now);
     const refresh = () => {
-      // 先移除过期条目；网络失败也不能把已到期内容留在打开中的首页。
+      // 先移除过期条目；网络失败也不能把已到期内容留在公共列表。
       setHomepageNow(Date.now() - homepageClockOffset);
       setListReloadRevision((revision) => revision + 1);
     };
@@ -1185,6 +1224,7 @@ export function ViralPage() {
     };
   }, [
     data.videos,
+    availabilityByKey,
     homepageClockOffset,
     homepageNow,
     nextHomepageChange,
@@ -1210,7 +1250,7 @@ export function ViralPage() {
               ? (left.homepageRank ?? 2147483647) -
                 (right.homepageRank ?? 2147483647)
               : 0) ||
-            right.likes - left.likes ||
+            (right.likes ?? -1) - (left.likes ?? -1) ||
             left.id.localeCompare(right.id, undefined, { numeric: true })
           );
         }
@@ -1323,7 +1363,6 @@ export function ViralPage() {
     setHasMore(false);
     void listViralVideos(platformKey, sortKey, {
       limit: viralPageSize,
-      featuredOnly: true,
     })
       .then((result) => {
         if (
@@ -1575,7 +1614,6 @@ export function ViralPage() {
           : await listViralVideos(platformKey, sortKey, {
               limit: viralPageSize,
               cursor: nextCursor,
-              featuredOnly: true,
             });
       if (!isCurrent()) return;
       const incoming = result.items.map(studioVideoFromViral);
@@ -1755,7 +1793,7 @@ export function ViralPage() {
               setSort(event.target.value as "热门优先" | "最新")
             }
           >
-            <option value="热门优先">首页推荐</option>
+            <option value="热门优先">热门优先</option>
             <option value="最新">最新</option>
           </select>
         </label>
@@ -1867,7 +1905,7 @@ export function ViralPage() {
               ? "收藏爆款视频后，可以在这里统一查看。"
               : refreshStatus
                 ? refreshStatus
-                : "管理端尚未配置上首页的爆款视频，配置后自动展示。"
+                : "暂无已发布且可用的爆款视频，发布后自动展示。"
           }
         />
       )}
@@ -2164,9 +2202,9 @@ export function ViralDetailPage() {
       : "—");
   const metrics: Array<[string, string, string]> = [
     ["heart", "点赞", viralLikesLabel(video)],
-    ["comment", "评论", formatCount(video.comments ?? null)],
-    ["share", "转发", formatCount(video.shares)],
-    ["star", "收藏", formatCount(video.collections)],
+    ["comment", "评论", viralMetricLabel(video.comments)],
+    ["share", "转发", viralMetricLabel(video.shares)],
+    ["star", "收藏", viralMetricLabel(video.collections)],
   ];
   const goExtract = (task: ViralImportTask) => {
     if (!task.canTranscribe || !task.projectId || !task.sourceAssetId) {
@@ -2363,6 +2401,7 @@ export function ViralDetailPage() {
             <span className="viral-detail-published">发布 {published}</span>
             <span>时长 {video.duration}</span>
           </div>
+          <ViralStatisticsNote video={video} />
           {detailBilling && (
             <p className="viral-media-status is-ready" role="status">
               {detailBilling.billable === false
@@ -4352,6 +4391,7 @@ function MaterialsPageContent() {
                         retainForDraft(asset);
                         patchDraft({
                           audioId: asset.id,
+                          driverMode: "audio",
                           ipId: asset.personId,
                           voiceId: undefined,
                         });
@@ -4734,6 +4774,7 @@ function MaterialsPageContent() {
                     retainForDraft(selected);
                     patchDraft({
                       audioId: selected.id,
+                      driverMode: "audio",
                       ipId: selected.personId,
                       voiceId: undefined,
                     });

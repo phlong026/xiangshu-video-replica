@@ -14603,6 +14603,8 @@ export interface components {
     };
     /** ViralCopyClaimRequest */
     ViralCopyClaimRequest: {
+      /** Taskid */
+      taskId?: string | null;
       /** Platform */
       platform: string;
       /** Videoid */
@@ -15293,7 +15295,19 @@ export interface components {
       /** Durationms */
       durationMs: number;
       /** Likes */
-      likes: number;
+      likes: number | null;
+      /** Statisticsupdatedat */
+      statisticsUpdatedAt?: string | null;
+      /** Statisticscheckedat */
+      statisticsCheckedAt?: string | null;
+      /**
+       * Statisticsstatus
+       * @default unknown
+       * @enum {string}
+       */
+      statisticsStatus: "updated" | "partial" | "failed" | "unknown";
+      /** Statisticssource */
+      statisticsSource?: string | null;
       /** Comments */
       comments: number | null;
       /** Shares */
@@ -24661,7 +24675,7 @@ export interface operations {
           | null;
         collected_from?: string | null;
         collected_to?: string | null;
-        attention?: "missing_cover" | null;
+        attention?: ("missing_cover" | "unknown_statistics") | null;
         source_keyword?: string;
         published_from?: string | null;
         published_to?: string | null;

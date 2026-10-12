@@ -3737,16 +3737,42 @@ describe("V1.4 创作页面", () => {
     expect(current.patchDraft).not.toHaveBeenCalled();
   });
 
-  it("旧音频口播入口也只展示视频分身、克隆声音和文案", () => {
-    useStudio.mockReturnValue(
-      studio({ state: { ...studio().state, page: "oral-audio" } }),
-    );
-    render(<OralPage />);
+  it("音频口播只需完整音频和分身，不依赖文案与声音", () => {
+    const value = studio();
+    value.state.page = "oral-audio";
+    value.state.draft.driverMode = "audio";
+    value.state.draft.voiceId = undefined;
+    value.state.draft.script.text = "";
+    value.state.draft.script.confirmed = false;
+    value.data.assets.push({
+      id: "audio-1",
+      name: "完整讲解",
+      kind: "audio",
+      group: "素材",
+      source: "上传",
+      saved: true,
+      allowedUses: ["oral_audio"],
+    });
+    useStudio.mockReturnValue(value);
+    const view = render(<OralPage />);
     expect(
-      screen.getByRole("heading", { name: "口播文案" }),
+      screen.getByRole("heading", { name: "完整口播音频" }),
     ).toBeInTheDocument();
-    expect(screen.queryByLabelText("选择口播音频")).toBeNull();
-    expect(screen.queryByRole("tab", { name: "用已有音频生成" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "口播文案" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "更换声音" })).toBeNull();
+    const submit = screen.getByRole("button", { name: "生成口播视频" });
+    expect(submit).toBeEnabled();
+    fireEvent.click(submit);
+    expect(value.requestGeneration).toHaveBeenCalledWith("数字人口播");
+    value.data.assets = value.data.assets.filter(
+      (asset) => asset.id !== "audio-1",
+    );
+    view.rerender(<OralPage />);
+    expect(submit).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "选择口播音频" }));
+    expect(value.navigate).toHaveBeenCalledWith("materials", {
+      returnTo: "oral-audio",
+    });
   });
 
   it("文案口播不再把未实现的网感模板表现为可用", () => {
@@ -5329,6 +5355,61 @@ describe("视频复刻（模块①）", () => {
         expect.objectContaining({ projectId: "project-upload-4" }),
       ),
     );
+    expect(
+      screen.getByText(/取消结果未确认，旧拆解任务可能仍在进行/),
+    ).toBeInTheDocument();
+  });
+
+  it.each([
+    [
+      "cancelled",
+      { status: "FAILED", error_code: "ANALYSIS_TASK_CANCELLED" },
+      "云端已确认取消旧拆解任务",
+    ],
+    ["completed", { status: "SUCCEEDED" }, "旧拆解任务已完成，未取消"],
+    [
+      "failed",
+      { status: "FAILED", error_code: "OTHER_FAILURE" },
+      "旧拆解任务已失败结束，并非本次取消",
+    ],
+    ["running", { status: "RUNNING" }, "尚未确认取消，旧拆解任务可能仍在进行"],
+    ["network", null, "取消结果未确认，旧拆解任务可能仍在进行"],
+  ])("重置页面分别呈现云端取消结果：%s", async (_kind, result, message) => {
+    const value = replicaStudio();
+    value.state.draft.analysisTaskId = "task-reset";
+    value.state.draft.analysisTaskStatus = "RUNNING";
+    replicaApi.getAnalysisTask.mockResolvedValue({
+      id: "task-reset",
+      status: "RUNNING",
+    });
+    replicaApi.waitForAnalysisTask.mockImplementation(
+      () => new Promise(() => {}),
+    );
+    let settle: (() => void) | undefined;
+    replicaApi.cancelAnalysisTask.mockImplementation(
+      () =>
+        new Promise((resolve, reject) => {
+          settle = () =>
+            result ? resolve(result) : reject(new Error("offline"));
+        }),
+    );
+    useStudio.mockReturnValue(value);
+    render(<ReplicaPage />);
+    fireEvent.click(screen.getByRole("button", { name: "开始新的复刻" }));
+    expect(
+      screen.getByText(/正在请求取消旧拆解任务，尚未确认受理/),
+    ).toBeInTheDocument();
+    expect(value.patchDraft).toHaveBeenCalledWith(
+      expect.objectContaining({ projectId: undefined }),
+    );
+    settle?.();
+    await waitFor(() =>
+      expect(screen.getByText(new RegExp(String(message)))).toBeInTheDocument(),
+    );
+    expect(value.notify).toHaveBeenCalledWith(
+      expect.stringContaining("原项目和任务记录仍保留"),
+    );
+    expect(replicaApi.cancelAnalysisTask).toHaveBeenCalledTimes(1);
   });
 
   it("重开页面时自动接回草稿里在途的拆解任务，不重复创建", async () => {

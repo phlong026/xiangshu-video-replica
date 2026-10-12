@@ -53,7 +53,7 @@ class ViralQualityRules:
     exclude_words: tuple[str, ...] = ()
 
     def rejects(self, video: ViralVideo) -> bool:
-        if self.min_likes is not None and video.likes < self.min_likes:
+        if self.min_likes is not None and video.likes is not None and video.likes < self.min_likes:
             return True
         # 时长为 0 表示上游没给（并非真的 0 毫秒）：无法判断就不因时长规则误杀，
         # 否则一个不返回时长的平台会被「最短 15 秒」整批拒光。

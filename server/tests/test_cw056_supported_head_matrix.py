@@ -102,7 +102,7 @@ REPO_ROOT = SERVER_DIR.parent
 # 20261008T1000_viral_cohort_import_sources（ADM-C01 漏斗全来源口径）至
 # 20261008T1600_support_tickets（ADM-09 工单闭环）依次追加其上，故链尾为该值。
 # 新增业务防重迁移必须进入真实升级测试，不能停留在旧链尾制造假通过。
-HEAD_REVISION = "20261012T0300_refund_source_allocations"
+HEAD_REVISION = "20261012T0500_nullable_viral_metrics"
 
 
 @pytest.mark.pg
@@ -399,7 +399,8 @@ FAILSTATE_DATABASE = "cw056_failstate_test"
 # 联合 head 在全新隔离 PG16 中重测：兼容派生表、原始素材外键与主线诊断告警 DDL 同时存在。
 # 已发布链哈希与支持的发行起点保持冻结，不因这次 merge revision 改写。
 # 2026-10-12 在全新隔离 PostgreSQL 16.15 实测：先核原发行 head 的目录和计数
-# 与既有冻结值完全一致，再升级三条追加迁移采集以下新值；不改已发布链指纹。
+# 与既有冻结值完全一致，再升级追加迁移采集以下新值；不改已发布链指纹。
+# 0500 仅移除 likes 非空约束和默认值；表名与计数保持不变，摘要已按真实 PG 重测。
 HEAD_SCHEMA_COUNTS = {
     "tables": 131,
     "columns": 1450,
@@ -667,7 +668,7 @@ HEAD_TABLE_NAMES = (
 # 由 migration_manifest.py --print-schema 在联合 head 的全新 PG16 中测得；
 # 旧已发布链仍保持字节冻结。
 # 合并生产线 pushed_at 与 ADM 批量表列后重算，随合并迁移验证回填。
-HEAD_SCHEMA_DIGEST = "72c9e598ee6d0998581686aa1bbc8142bb022cf5de2467de1861f29bb2edc8f9"
+HEAD_SCHEMA_DIGEST = "06754135ced6fdaa2723ecab6e176e6abad8fc023923ffb50bb0c4217057d236"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (

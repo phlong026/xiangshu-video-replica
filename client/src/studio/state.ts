@@ -78,7 +78,6 @@ export function studioRouteFromHash(hash: string): Pick<
     projects: "replica",
     characters: "people",
     wallet: "profile",
-    "oral-audio": "oral",
   };
   const params = new URLSearchParams(query);
   const result: ReturnType<typeof studioRouteFromHash> = {
@@ -156,6 +155,14 @@ export function navigateStudioState(
     selectedPersonId: keepPersonContext ? state.selectedPersonId : undefined,
     returnTo: undefined,
     ...patch,
+    ...(page === "oral-audio"
+      ? {
+          draft: {
+            ...(patch.draft ?? state.draft),
+            driverMode: "audio" as const,
+          },
+        }
+      : {}),
     page,
   };
 }
@@ -164,6 +171,7 @@ export function createDraft(): StudioDraft {
   return {
     id: `draft-${crypto.randomUUID()}`,
     videoName: "未命名视频",
+    driverMode: "text",
     selectedShotId: "shot-2",
     script: {
       id: `script-${crypto.randomUUID()}`,
@@ -190,7 +198,15 @@ export function createDraft(): StudioDraft {
 }
 
 export function createState(page: StudioPage = "workbench"): StudioState {
-  return { page, draft: createDraft(), savedScripts: [], favorites: [] };
+  return {
+    page,
+    draft: {
+      ...createDraft(),
+      driverMode: page === "oral-audio" ? "audio" : "text",
+    },
+    savedScripts: [],
+    favorites: [],
+  };
 }
 
 export function withImportedProject(
@@ -230,17 +246,17 @@ export function draftFromTask(task: StudioTask): StudioDraft {
   const fresh = createDraft();
   const snapshot = task.draftSnapshot;
   const ipId = task.ipId ?? snapshot?.ipId;
+  const driverMode = task.driverMode ?? snapshot?.driverMode ?? "text";
   return {
     ...fresh,
     ...snapshot,
     id: fresh.id,
     projectId: task.projectId ?? snapshot?.projectId,
     ipId,
+    driverMode,
     avatarId: task.avatarId ?? snapshot?.avatarId,
     voiceId:
-      task.driverMode === "audio"
-        ? undefined
-        : (task.voiceId ?? snapshot?.voiceId),
+      driverMode === "audio" ? undefined : (task.voiceId ?? snapshot?.voiceId),
     audioId: task.audioId ?? snapshot?.audioId,
     script: {
       ...(snapshot?.script ?? fresh.script),
@@ -383,7 +399,10 @@ export function patchStudioDraft(
   return next;
 }
 
-export function buildOralInput(draft: StudioDraft, mode: "text" | "audio") {
+export function buildOralInput(
+  draft: StudioDraft,
+  mode: "text" | "audio" = draft.driverMode ?? "text",
+) {
   if (mode === "text" && (!draft.script.confirmed || !draft.script.text.trim()))
     throw new Error("请先在文案工坊确认终稿");
   if (!draft.ipId || !draft.avatarId)

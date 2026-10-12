@@ -58,7 +58,17 @@ def _seed_viral_copy_video(raw, uid: str, *, video_id: str) -> None:
         "INSERT INTO viral_script_cache (platform, video_id, result_json) "
         "VALUES ('douyin', %s, %s) ON CONFLICT (platform, video_id) DO UPDATE "
         "SET result_json=excluded.result_json",
-        (video_id, json.dumps({"text": _COPY_TEXT, "duration_sec": 12.0}, ensure_ascii=False)),
+        (
+            video_id,
+            json.dumps(
+                {
+                    "text": _COPY_TEXT,
+                    "duration_sec": 12.0,
+                    "archive": {"platform": "douyin", "video_id": video_id, "sha256": "a" * 64},
+                },
+                ensure_ascii=False,
+            ),
+        ),
     )
 
 
@@ -136,6 +146,22 @@ def test_enqueue_cache_hit_skips_asr_billing_and_gates_response(gate_client, rou
             "'hash-imp', '{}', 'SUCCEEDED')",
             (uid, project_id, asset_id, video_id),
         )
+        from app.content_store import retain_content_object
+        from app.db_portable import BusinessConnection
+
+        conn = BusinessConnection.postgres(raw)
+        content, _ = retain_content_object(
+            conn,
+            sha256="a" * 64,
+            size_bytes=1024,
+            content_type="video/mp4",
+            provider="cos",
+            bucket="bucket",
+            object_key=f"{asset_id}.mp4",
+            scope="global",
+            pinned=True,
+        )
+        raw.execute("UPDATE assets SET content_object_id=%s WHERE id=%s", (content.id, asset_id))
         raw.commit()
 
     created = gate_client.post(
@@ -375,3 +401,65 @@ def test_viral_task_text_is_never_leaked_by_latest_for_other_project(
         ).status_code
         == 404
     )
+
+
+@pytest.mark.parametrize("window", ["queued", "running", "completed"])
+def test_deleted_video_retains_only_owners_accepted_task_delivery(gate_client, route_state, window):
+    headers, uid = account(gate_client, "deleted_owner")
+    other_headers, _ = account(gate_client, "deleted_other")
+    with psycopg.connect(route_state) as raw:
+        _seed_viral_copy_video(raw, uid, video_id="deleted-video")
+        _seed_task(
+            raw,
+            uid,
+            task_id="accepted-task",
+            project_id="accepted-project",
+            video_id="deleted-video",
+        )
+        # 分别重现受理、处理中、完成未领取时撤回公共内容；私人任务保留。
+        if window != "completed":
+            raw.execute(
+                "UPDATE script_from_audio_tasks SET status=%s,result_json=NULL "
+                "WHERE id='accepted-task'",
+                ("PENDING" if window == "queued" else "RUNNING",),
+            )
+        raw.execute("UPDATE viral_videos SET deleted_at=now() WHERE video_id='deleted-video'")
+    body = {"platform": "douyin", "videoId": "deleted-video", "taskId": "accepted-task"}
+    if window != "completed":
+        assert (
+            gate_client.post("/api/viral/videos/copy/claim", headers=headers, json=body).status_code
+            == 404
+        )
+        with psycopg.connect(route_state) as raw:
+            raw.execute(
+                "UPDATE script_from_audio_tasks SET status='SUCCEEDED', result_json=%s "
+                "WHERE id='accepted-task'",
+                (json.dumps({"text": _COPY_TEXT, "duration_sec": 12.5}),),
+            )
+    result = gate_client.post("/api/viral/videos/copy/claim", headers=headers, json=body)
+    assert result.status_code == 200, result.text
+    assert result.json()["text"] == _COPY_TEXT
+    assert result.json()["billing"]["charged"] == 0
+    assert result.json()["billing"]["billable"] is False
+    assert (
+        gate_client.post(
+            "/api/viral/videos/copy/claim", headers=other_headers, json=body
+        ).status_code
+        == 404
+    )
+    assert (
+        gate_client.post(
+            "/api/viral/videos/copy/claim",
+            headers=headers,
+            json={"platform": "douyin", "videoId": "deleted-video"},
+        ).status_code
+        == 404
+    )
+    with psycopg.connect(route_state) as raw:
+        assert _wallet(raw, uid) == (50, 0)
+        assert (
+            raw.execute(
+                "SELECT count(*) FROM billing_operations WHERE service='viral_copy'"
+            ).fetchone()[0]
+            == 0
+        )

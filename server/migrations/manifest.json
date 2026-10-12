@@ -5,7 +5,7 @@
       "001_core"
     ],
     "heads": [
-      "20261012T0300_refund_source_allocations"
+      "20261012T0500_nullable_viral_metrics"
     ],
     "parents": {
       "001_core": null,
@@ -185,9 +185,10 @@
       "20261008T1600_support_tickets": "20261008T1500_recharge_package_window",
       "20261012T0100_admin_adjustment_operations": "20261008T1600_support_tickets",
       "20261012T0200_character_request_keys": "20261012T0100_admin_adjustment_operations",
-      "20261012T0300_refund_source_allocations": "20261012T0200_character_request_keys"
+      "20261012T0300_refund_source_allocations": "20261012T0200_character_request_keys",
+      "20261012T0500_nullable_viral_metrics": "20261012T0300_refund_source_allocations"
     },
-    "revision_count": 166
+    "revision_count": 167
   },
   "manifest_schema_version": 1,
   "naming_policy": {
@@ -865,6 +866,10 @@
     "20261012T0300_refund_source_allocations": {
       "file": "versions/20261012T0300_refund_source_allocations.py",
       "sha256": "2f5633eb7034369321be7e6c179fdeda16e81d11662cc58f04d638f282cb84f6"
+    },
+    "20261012T0500_nullable_viral_metrics": {
+      "file": "versions/20261012T0500_nullable_viral_metrics.py",
+      "sha256": "a124e445075fd9e97177232e2a5e8fe08f7e3ef67947dd837775084deb409db6"
     }
   },
   "task": "MIGRATION-GUARD-20260912"

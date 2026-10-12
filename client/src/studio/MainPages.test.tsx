@@ -1023,6 +1023,33 @@ describe("V1.4 工作台新版首页布局", () => {
     expect(screen.queryByText("灵感视频 6")).not.toBeInTheDocument();
   });
 
+  it("未知点赞保留待核验，真实零点赞可显示且排序高于未知", () => {
+    useStudio.mockReturnValue(
+      studio(undefined, {
+        state: createState("workbench"),
+        data: data(
+          [],
+          [
+            {
+              ...videos[0],
+              id: "unknown",
+              title: "待核验视频",
+              likes: null,
+              likeDisplay: "0",
+            },
+            { ...videos[1], id: "zero", title: "零赞视频", likes: 0 },
+          ],
+        ),
+      }),
+    );
+    const { container } = render(<WorkbenchPage />);
+    expect(screen.getByText("热度 待核验")).toBeInTheDocument();
+    const cards = container.querySelectorAll(".studio-home-viral-card");
+    expect(cards[0]).toHaveTextContent("零赞视频");
+    expect(cards[0]).toHaveTextContent("0");
+    expect(cards[1]).toHaveTextContent("待核验");
+  });
+
   it("首页精选先按跨平台置顶顺序展示，未置顶再按热度排序", () => {
     const rankedVideos: StudioVideo[] = [
       { ...videos[0], id: "douyin-hot", title: "抖音高热", likes: 999_999 },

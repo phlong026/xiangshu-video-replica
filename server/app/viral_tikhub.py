@@ -206,7 +206,7 @@ class ViralVideo:
     verified: bool
     cover_url: str | None
     duration_ms: int
-    likes: int
+    likes: int | None
     comments: int | None
     shares: int | None
     collects: int | None
@@ -246,6 +246,10 @@ class ViralVideo:
             ),
             "durationMs": self.duration_ms,
             "likes": self.likes,
+            "statisticsUpdatedAt": self.native.get("_statistics_updated_at"),
+            "statisticsCheckedAt": self.native.get("_statistics_checked_at"),
+            "statisticsStatus": self.native.get("_statistics_status", "unknown"),
+            "statisticsSource": self.native.get("_statistics_source"),
             "comments": self.comments,
             "shares": self.shares,
             "collects": self.collects,
@@ -569,10 +573,10 @@ def normalize_douyin_aweme(aweme: Mapping[str, Any], category: str) -> ViralVide
         verified=bool(author_block.get("is_verified")),
         cover_url=pick_douyin_cover(video_block),
         duration_ms=max(duration_ms, 0),
-        likes=_optional_count(stats.get("digg_count")) or 0,
-        comments=_optional_count(stats.get("comment_count")) or 0,
-        shares=_optional_count(stats.get("share_count")) or 0,
-        collects=_optional_count(stats.get("collect_count")) or 0,
+        likes=_optional_count(stats.get("digg_count")),
+        comments=_optional_count(stats.get("comment_count")),
+        shares=_optional_count(stats.get("share_count")),
+        collects=_optional_count(stats.get("collect_count")),
         published_at=_optional_count(aweme.get("create_time")),
         published_display=None,
         like_display=None,
@@ -611,7 +615,7 @@ def normalize_wechat_item(item: Mapping[str, Any], category: str) -> ViralVideo 
         verified=False,
         cover_url=str(item.get("image") or "") or None,
         duration_ms=parse_wechat_duration_ms(str(item.get("duration") or "")) or 0,
-        likes=parse_compact_count(like_display if isinstance(like_display, str) else None) or 0,
+        likes=_optional_count(like_display),
         comments=None,
         shares=None,
         collects=None,

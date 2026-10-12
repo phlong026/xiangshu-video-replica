@@ -1697,6 +1697,12 @@
   }
 }
 
+/* 取消反馈独立于重置后的内容区，保留阅读边距并容纳较长任务标识。 */
+.creation-replica > p[role="status"] {
+  margin: 16px 20px;
+  overflow-wrap: anywhere;
+}
+
 .creation-replica > .studio-panel,
 .creation-replica > details,
 .creation-replica > .creation-upload-row,

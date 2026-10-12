@@ -143,7 +143,11 @@ export type StudioVideo = {
   poster: string;
   videoUrl?: string;
   duration: string;
-  likes: number;
+  likes: number | null;
+  statisticsUpdatedAt?: string | null;
+  statisticsCheckedAt?: string | null;
+  statisticsStatus?: "updated" | "partial" | "failed" | "unknown";
+  statisticsSource?: string | null;
   collections: number | null;
   shares: number | null;
   description: string;
@@ -247,6 +251,8 @@ export type StudioScript = {
   sourceKind?: "viral" | "project" | "link" | "upload";
 };
 export type StudioDraft = {
+  /** 音频口播与文字口播在草稿恢复时仍保持同一驱动方式。 */
+  driverMode?: "text" | "audio";
   /** 独立视频生成批次的用户可见名称。 */
   videoName?: string;
   pendingRewrite?: {

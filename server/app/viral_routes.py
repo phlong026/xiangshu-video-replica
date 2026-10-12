@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import hmac
+import json
 import logging
 import time
 from datetime import UTC, datetime, timedelta
@@ -56,6 +57,7 @@ from app.viral_store import (
     remove_viral_favorite,
     validate_viral_cursor,
     viral_fetched_at,
+    viral_publication_clock,
     viral_video_availabilities,
     viral_video_availability,
 )
@@ -105,7 +107,11 @@ class ViralVideoItem(BaseModel):
     verified: bool
     coverUrl: str | None
     durationMs: int
-    likes: int
+    likes: int | None
+    statisticsUpdatedAt: str | None = None
+    statisticsCheckedAt: str | None = None
+    statisticsStatus: Literal["updated", "partial", "failed", "unknown"] = "unknown"
+    statisticsSource: str | None = None
     comments: int | None
     shares: int | None
     collects: int | None
@@ -182,6 +188,7 @@ class ViralDetailViewResponse(BaseModel):
 
 
 class ViralCopyClaimRequest(BaseModel):
+    taskId: str | None = Field(default=None, min_length=1, max_length=128)
     platform: str = Field(min_length=1)
     videoId: str = Field(min_length=1, max_length=512)
 
@@ -323,21 +330,7 @@ def list_viral_videos(
                 detail={"code": "VIRAL_CURSOR_INVALID", "message": "分页游标无效，请刷新列表"},
             ) from exc
     fresh = fetch_state_is_fresh(conn, platform=platform, sort=sort, max_age=VIRAL_LIST_CACHE_TTL)
-    homepage_clock: tuple[str, str | None] = ("", None)
-    if featured_only:
-        from app.viral_content_state import ready_sql
-
-        clock = conn.execute(
-            "SELECT now(),(SELECT min(boundary) FROM viral_videos v "
-            "CROSS JOIN LATERAL (VALUES (v.homepage_starts_at),(v.homepage_ends_at)) "
-            "change(boundary) WHERE v.platform=%s AND v.homepage_featured=1 "
-            f"AND v.deleted_at IS NULL AND {ready_sql()} AND boundary>now() "
-            "AND NOT EXISTS (SELECT 1 FROM viral_video_visibility vis "
-            "WHERE vis.platform=v.platform AND vis.video_id=v.video_id "
-            "AND vis.status!='AVAILABLE'))",
-            (platform,),
-        ).fetchone()
-        homepage_clock = (clock[0].isoformat(), clock[1].isoformat() if clock[1] else None)
+    homepage_clock = viral_publication_clock(conn, platform=platform, featured_only=featured_only)
     refreshing, refresh_error = viral_refresh_status(conn, platform=platform, sort=SORT_HOT)
     try:
         page = list_viral_video_page(
@@ -395,8 +388,8 @@ def list_viral_videos(
         total=page.total,
         hasMore=page.has_more,
         nextCursor=page.next_cursor,
-        serverTime=homepage_clock[0] if featured_only else None,
-        nextChangeAt=homepage_clock[1] if featured_only else None,
+        serverTime=homepage_clock[0],
+        nextChangeAt=homepage_clock[1],
     )
 
 
@@ -1116,6 +1109,12 @@ def get_viral_video_detail(
     字段与免费列表完全同源（列表本就免费返回同样的字段），所以它不是绕过计费的
     入口，只是同一条内容在库里的读取口径。
     """
+    from app.viral_store import is_customer_visible_viral_video
+
+    if not is_customer_visible_viral_video(
+        conn, platform=platform, video_id=video_id, user_id=actor.id
+    ):
+        raise HTTPException(status_code=404, detail={"code": "VIRAL_VIDEO_NOT_FOUND"})
     video = _require_stored_video(conn, platform=platform, video_id=video_id)
     availability = viral_video_availability(conn, platform=platform, video_id=video_id)
     return _item(
@@ -1261,8 +1260,45 @@ def claim_viral_video_copy(
         )
     with db.write() as (conn, actor):
         with conn:
-            _require_stored_video(conn, platform=payload.platform, video_id=payload.videoId)
+            # 删除只撤回公共发现；删除前已受理的成果保留在个人任务中，不能
+            # 因公共行不可见而收了转写费却无交付，也不能凭视频 ID 领取他人成果。
+            deleted = conn.execute(
+                "SELECT deleted_at FROM viral_videos WHERE platform=%s AND video_id=%s",
+                (payload.platform, payload.videoId),
+            ).fetchone()
             hit = cached_transcript(conn, platform=payload.platform, video_id=payload.videoId)
+            source_deleted = deleted is None or deleted["deleted_at"] is not None
+            if payload.taskId is not None and (source_deleted or hit is None):
+                task = conn.execute(
+                    "SELECT result_json,updated_at FROM script_from_audio_tasks "
+                    "WHERE id=%s AND created_by_user_id=%s AND status='SUCCEEDED' "
+                    "AND request_json::jsonb->'viral_source'=%s::jsonb",
+                    (payload.taskId, actor.id, json.dumps([payload.platform, payload.videoId])),
+                ).fetchone()
+                if task is None or task["result_json"] is None:
+                    raise HTTPException(
+                        status_code=404, detail={"code": "VIRAL_COPY_TASK_NOT_FOUND"}
+                    )
+                paid_asr = conn.execute(
+                    "SELECT 1 FROM billing_operations WHERE source_id=%s AND service='asr' "
+                    "AND state='SUCCEEDED' AND charged_credits>0 LIMIT 1",
+                    (payload.taskId,),
+                ).fetchone()
+                # 旧成功上传任务无法再重走 worker 的可信来源升级；已结算的个人
+                # 转写仍可领取。未付转写费的共享等待者不能由此绕过存量领取费。
+                if source_deleted or paid_asr is not None:
+                    result = json.loads(str(task["result_json"]))
+                    return ViralCopyClaimResponse(
+                        text=str(result["text"]),
+                        updatedAt=str(task["updated_at"]),
+                        billing=ViralCopyBilling(
+                            charged=0,
+                            unit=SERVICES[VIRAL_COPY_SERVICE].unit,
+                            deduped=True,
+                            billable=False,
+                        ),
+                    )
+            _require_stored_video(conn, platform=payload.platform, video_id=payload.videoId)
             if hit is None:
                 return ViralCopyClaimResponse(
                     text=None,

@@ -453,3 +453,14 @@ def test_known_receipt_result_download_failure_can_resume() -> None:
     with pytest.raises(AsrTaskPending):
         provider.resume("existing")
     assert [method for method, _ in transport.calls] == ["GET", "GET"]
+
+
+@pytest.mark.parametrize("status", ["FAILED", "CANCELED"])
+def test_only_confirmed_provider_terminal_status_allows_explicit_new_round(status):
+    from app.asr import AsrConfirmedFailure
+
+    transport = StubTransport([(200, json.dumps({"output": {"task_status": status}}).encode())])
+    provider = DashScopeFunAsr(make_config(), transport=transport)
+    with pytest.raises(AsrConfirmedFailure):
+        provider.resume("known-receipt")
+    assert all(method == "GET" for method, _ in transport.calls)

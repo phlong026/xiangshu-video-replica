@@ -262,8 +262,7 @@ def _record_link_failure(
 
 
 def _resolved_video(resolved: ResolvedViralLink) -> ViralVideo:
-    # 链接导入只保证媒体本身可复刻；互动字段随解析上游给的走，缺的留空（`likes`
-    # 无「未知」取值，只能写 0），管理端按「字段待补全」提示，不拿 0 当真实互动。
+    # 链接导入只保证媒体本身可复刻；缺失互动保留未知，不把 0 冒充平台统计。
     metadata = resolved.metadata
     return ViralVideo(
         platform=resolved.platform,
@@ -275,7 +274,7 @@ def _resolved_video(resolved: ResolvedViralLink) -> ViralVideo:
         verified=metadata.verified,
         cover_url=resolved.cover_url,
         duration_ms=resolved.duration_ms,
-        likes=metadata.likes or 0,
+        likes=metadata.likes,
         comments=metadata.comments,
         shares=metadata.shares,
         collects=metadata.collects,
@@ -683,14 +682,11 @@ def _require_available_viral_video(
     return video
 
 
-def _viral_copy_object_key(owner_user_id: str, idempotency_key: str) -> str:
-    """按 (用户, 幂等键) 定址，重放覆盖同一对象而不是留下孤儿.
-
-    同一把幂等键上的请求体恒定——复用它换不同字节会先被 ``request_hash`` 挡下，
-    所以覆盖写不会改变任何已登记资产的内容。
-    """
+def _viral_copy_object_key(owner_user_id: str, idempotency_key: str, content: bytes = b"") -> str:
+    """每次写入独立对象：冲突请求及同字节重放都不能截断已受理任务的音轨。"""
     digest = hashlib.sha256(f"{owner_user_id}:{idempotency_key}".encode()).hexdigest()
-    return f"{_VIRAL_COPY_OBJECT_PREFIX}/{digest}.m4a"
+    content_digest = hashlib.sha256(content).hexdigest()
+    return f"{_VIRAL_COPY_OBJECT_PREFIX}/{digest}/{content_digest}/{uuid4().hex}.m4a"
 
 
 async def _read_viral_copy_audio(file: UploadFile, *, inline_max_bytes: int | None) -> bytes:
@@ -764,13 +760,7 @@ def _probe_viral_copy_duration(content: bytes) -> float:
 def _validate_viral_copy_duration(
     *, duration: float, video: ViralVideo, inline_max_seconds: float | None
 ) -> None:
-    """时长校验：先与内容池登记的时长对齐，再按直传上限拦截.
-
-    内容池的时长是服务端按 platform+videoId 从平台取回的，而共享文案缓存是跨用户
-    复用的，所以必须确认上传的音轨确实属于这支视频：一条随便什么录音都能写进别人的
-    文案区，是这里唯一能廉价设下的门槛（缓存命中不经过本校验，命中的是各自链路上
-    已核对过的结果）。
-    """
+    """时长仅作上传错误预检，不能证明音轨属于原视频或授权写入共享缓存。"""
     expected = video.duration_ms / 1000 if video.duration_ms > 0 else None
     if expected is not None and not (expected * 0.75 - 3 <= duration <= expected * 1.25 + 3):
         raise HTTPException(
@@ -883,7 +873,16 @@ async def extract_viral_video_copy(
         # 共享缓存命中：不必让用户白等一次上传，交付按生产者判定收费——自己的
         # 文案（或已购买过）免费，别人的文案首提扣一次「获取文案」费。未命中才走
         # 上传转写。
-        hit = cached_transcript(conn, platform=platform, video_id=video_id)
+        existing_upload = conn.execute(
+            "SELECT id FROM viral_import_tasks WHERE owner_user_id=%s AND idempotency_key=%s",
+            (actor.id, key),
+        ).fetchone()
+        # 已有请求必须校验原指纹，不能被后来出现的共享命中绕过同键冲突检查。
+        hit = (
+            None
+            if existing_upload is not None
+            else cached_transcript(conn, platform=platform, video_id=video_id)
+        )
         if hit is not None:
             charged, deduped = charge_viral_copy(
                 conn, actor=actor, platform=platform, video_id=video_id
@@ -912,7 +911,7 @@ async def extract_viral_video_copy(
         duration=duration, video=video, inline_max_seconds=inline_max_seconds
     )
     stored = _store_viral_copy_audio(
-        storage, key=_viral_copy_object_key(owner_user_id, key), content=content
+        storage, key=_viral_copy_object_key(owner_user_id, key, content), content=content
     )
     with db.write() as (conn, actor):
         with conn:

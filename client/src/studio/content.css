@@ -2248,3 +2248,27 @@ span.viral-card-cover-empty.content-player-viral-poster {
     padding-right: 0;
   }
 }
+
+/* 爆款卡片含四项指标与操作，窄屏不能沿用桌面的三列下限。 */
+@media (max-width: 980px) {
+  .content-video-grid-viral {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .content-viral-toolbar {
+    flex-wrap: wrap;
+    gap: 12px 20px;
+  }
+  .content-viral-toolbar .content-platform-tabs {
+    min-height: 42px;
+    flex-wrap: wrap;
+    gap: 20px;
+  }
+  .content-viral-toolbar .content-platform-tabs button {
+    white-space: nowrap;
+  }
+}
+@media (max-width: 620px) {
+  .content-video-grid-viral {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

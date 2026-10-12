@@ -17,6 +17,32 @@ import {
 } from "./referencePrompt";
 import { StudioWorkspace } from "./StudioWorkspace";
 import { createState } from "./state";
+import type { StudioContextValue } from "./types";
+
+const extractionProbe = vi.hoisted(() => ({
+  current: null as StudioContextValue | null,
+  desktop: false,
+}));
+vi.mock("./context", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./context")>();
+  return {
+    ...actual,
+    useStudio: () => {
+      const value = actual.useStudio();
+      extractionProbe.current = value;
+      return value;
+    },
+  };
+});
+vi.mock("./viralCache", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  cacheAvailable: () => extractionProbe.desktop,
+}));
+
+function currentExtractionContext() {
+  if (!extractionProbe.current) throw new Error("工作区上下文尚未挂载");
+  return extractionProbe.current;
+}
 
 async function findEnabledButton(name: string, container?: HTMLElement) {
   const queries = container ? within(container) : screen;
@@ -100,6 +126,8 @@ const live = vi.hoisted(() => ({
     }),
   ),
   extractViralCopy: vi.fn(),
+  startViralCopyExtraction: vi.fn(),
+  awaitScriptFromAudioTask: vi.fn(),
   // 爆款正文交付与计费点：默认未命中，具体用例再覆盖。
   claimExtractedViralCopy: vi.fn(async (): Promise<string | null> => null),
 }));
@@ -716,6 +744,10 @@ describe("V1.4 workspace integration", () => {
     // F-06 本地草稿会跨用例残留（防抖写入 localStorage），逐用例隔离
     window.localStorage.clear();
     vi.clearAllMocks();
+    extractionProbe.desktop = false;
+    live.startViralCopyExtraction.mockReset();
+    live.awaitScriptFromAudioTask.mockReset();
+    live.loadLatestScriptFromUpload.mockResolvedValue(null);
     live.loadProjectDraft.mockReset();
     api.createViralImportTask.mockReset();
     api.claimViralCopy.mockReset();
@@ -891,6 +923,43 @@ describe("V1.4 workspace integration", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("← 返回创作")).toBeInTheDocument();
   });
+  it("基础资料晚到不会擦除已先返回的爆款列表", async () => {
+    const core = {
+      ...createReviewData(),
+      videos: [],
+      homepageVideos: [],
+      loading: false,
+    };
+    let resolveCore: (value: typeof core) => void = () => {};
+    live.loadStudioData.mockReturnValue(
+      new Promise((resolve) => {
+        resolveCore = resolve;
+      }),
+    );
+    render(
+      <StudioWorkspace
+        currentUser={reviewUser}
+        initialState={createState("workbench")}
+      />,
+    );
+    await waitFor(() => expect(live.loadStudioData).toHaveBeenCalled());
+    const video = {
+      ...createReviewData().videos[0],
+      id: "published-first",
+      title: "先返回的公共视频",
+    };
+    act(() =>
+      currentExtractionContext().updateData((previous) => ({
+        ...previous,
+        videos: [video],
+      })),
+    );
+    await act(async () => resolveCore(core));
+    expect(
+      currentExtractionContext().data.videos.map((item) => item.id),
+    ).toContain("published-first");
+  });
+
   it("素材选择器已加载的尾帧预览在选中后保留到创作页面", async () => {
     const material = {
       id: "tail-cloud",
@@ -2631,6 +2700,290 @@ describe("V1.4 workspace integration", () => {
       );
     });
 
+    it.each([false, true])(
+      "同事件换来源后桌面缓存%s回填并保存",
+      async (delayed) => {
+        extractionProbe.desktop = true;
+        live.loadStudioData.mockResolvedValue(emptyStudioData);
+        live.loadCloudDraft.mockResolvedValue(undefined);
+        let complete!: (value: unknown) => void;
+        const receipt = {
+          kind: "cache",
+          text: "新视频原文",
+          billing: { charged: 0 },
+        };
+        live.startViralCopyExtraction.mockImplementation(() =>
+          delayed
+            ? new Promise((resolve) => {
+                complete = resolve;
+              })
+            : Promise.resolve(receipt),
+        );
+        render(
+          <StudioWorkspace
+            currentUser={reviewUser}
+            initialState={createState("workbench")}
+          />,
+        );
+        await waitFor(() => expect(extractionProbe.current).not.toBeNull());
+        act(() => {
+          currentExtractionContext().patchDraft({ sourceId: "viral-new" });
+          currentExtractionContext().extractViralCopy({
+            platformKey: "douyin",
+            nativeId: "new",
+          });
+        });
+        if (delayed) await act(async () => complete(receipt));
+        expect(await screen.findByLabelText("来源原文")).toHaveValue(
+          "新视频原文",
+        );
+        await waitFor(
+          () =>
+            expect(live.persistCloudDraft).toHaveBeenCalledWith(
+              expect.objectContaining({
+                sourceId: "viral-new",
+                script: expect.objectContaining({ original: "新视频原文" }),
+              }),
+            ),
+          { timeout: 4000 },
+        );
+        expect(live.startViralCopyExtraction).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it.each(["cache", "task", "error"])(
+      "快速换源后忽略旧桌面%s响应",
+      async (kind) => {
+        extractionProbe.desktop = true;
+        live.loadStudioData.mockResolvedValue(emptyStudioData);
+        live.loadCloudDraft.mockResolvedValue(undefined);
+        let complete!: (value: unknown) => void;
+        let fail!: (cause: Error) => void;
+        live.startViralCopyExtraction.mockImplementation(
+          () =>
+            new Promise((resolve, reject) => {
+              complete = resolve;
+              fail = reject;
+            }),
+        );
+        render(
+          <StudioWorkspace
+            currentUser={reviewUser}
+            initialState={createState("workbench")}
+          />,
+        );
+        act(() => {
+          currentExtractionContext().patchDraft({ sourceId: "viral-a" });
+          currentExtractionContext().extractViralCopy({
+            platformKey: "douyin",
+            nativeId: "a",
+          });
+        });
+        act(() =>
+          currentExtractionContext().patchDraft({ sourceId: "viral-b" }),
+        );
+        await act(async () =>
+          kind === "error"
+            ? fail(new Error("旧源失败"))
+            : complete(
+                kind === "task"
+                  ? {
+                      kind,
+                      taskId: "a-task",
+                      projectId: "a-project",
+                      sourceAssetId: "a-asset",
+                    }
+                  : { kind, text: "A原文", billing: { charged: 0 } },
+              ),
+        );
+        expect(currentExtractionContext().state.draft.sourceId).toBe("viral-b");
+        expect(currentExtractionContext().state.draft.script.original).not.toBe(
+          "A原文",
+        );
+        expect(screen.queryByText("旧源失败")).not.toBeInTheDocument();
+        expect(live.awaitScriptFromAudioTask).not.toHaveBeenCalled();
+      },
+    );
+
+    it("桌面任务身份领取一次并防恢复路径重复领取", async () => {
+      extractionProbe.desktop = true;
+      live.loadStudioData.mockResolvedValue(emptyStudioData);
+      live.loadCloudDraft.mockResolvedValue(undefined);
+      live.startViralCopyExtraction.mockResolvedValue({
+        kind: "task",
+        taskId: "owned",
+        projectId: "project-new",
+        sourceAssetId: "asset-new",
+      });
+      live.awaitScriptFromAudioTask.mockResolvedValue({
+        text: null,
+        taskId: "owned",
+        viralSource: { platform: "douyin", videoId: "new" },
+        copyClaimRequired: true,
+      });
+      live.loadLatestScriptFromUpload.mockResolvedValue({
+        id: "owned",
+        status: "SUCCEEDED",
+        sourceAssetId: "asset-new",
+        result: { text: null },
+        copyClaimRequired: true,
+        viralSource: { platform: "douyin", videoId: "new" },
+      });
+      live.claimExtractedViralCopy.mockResolvedValue("已领取正文");
+      render(
+        <StudioWorkspace
+          currentUser={reviewUser}
+          initialState={createState("workbench")}
+        />,
+      );
+      act(() => {
+        currentExtractionContext().patchDraft({ sourceId: "viral-new" });
+        currentExtractionContext().extractViralCopy({
+          platformKey: "douyin",
+          nativeId: "new",
+        });
+      });
+      expect(await screen.findByLabelText("来源原文")).toHaveValue(
+        "已领取正文",
+      );
+      await waitFor(() =>
+        expect(live.loadLatestScriptFromUpload).toHaveBeenCalledWith(
+          "project-new",
+        ),
+      );
+      expect(live.claimExtractedViralCopy).toHaveBeenCalledExactlyOnceWith(
+        "douyin",
+        "new",
+        "owned",
+      );
+      expect(live.extractScriptFromUpload).not.toHaveBeenCalled();
+    });
+
+    it.each([false, true])(
+      "旧任务晚完成%s不领取或污染新来源",
+      async (privateText) => {
+        live.loadStudioData.mockResolvedValue(emptyStudioData);
+        live.loadCloudDraft.mockResolvedValue(undefined);
+        let complete!: (value: unknown) => void;
+        live.awaitScriptFromAudioTask.mockImplementation(
+          () =>
+            new Promise((resolve) => {
+              complete = resolve;
+            }),
+        );
+        render(
+          <StudioWorkspace
+            currentUser={reviewUser}
+            initialState={createState("workbench")}
+          />,
+        );
+        act(() => {
+          currentExtractionContext().patchDraft({
+            projectId: "a",
+            sourceId: "a-asset",
+            sourceAssetId: "a-asset",
+          });
+          currentExtractionContext().extractScriptFromUpload(
+            "a",
+            "a-asset",
+            "a-task",
+          );
+        });
+        act(() =>
+          currentExtractionContext().patchDraft({
+            sourceId: "b",
+            sourceAssetId: "b",
+            projectId: "b",
+          }),
+        );
+        await act(async () =>
+          complete({
+            text: privateText ? "私有A原文" : null,
+            taskId: "a-task",
+            viralSource: { platform: "douyin", videoId: "a" },
+            copyClaimRequired: !privateText,
+          }),
+        );
+        expect(live.claimExtractedViralCopy).not.toHaveBeenCalled();
+        expect(currentExtractionContext().state.draft.sourceId).toBe("b");
+        expect(currentExtractionContext().state.draft.script.original).not.toBe(
+          "私有A原文",
+        );
+      },
+    );
+
+    it("私有任务正文直接交付，不领取共享文案", async () => {
+      live.loadStudioData.mockResolvedValue(emptyStudioData);
+      live.loadCloudDraft.mockResolvedValue(undefined);
+      live.awaitScriptFromAudioTask.mockResolvedValue({
+        text: "仅本人任务正文",
+        taskId: "private-owned",
+        copyClaimRequired: false,
+      });
+      render(
+        <StudioWorkspace
+          currentUser={reviewUser}
+          initialState={createState("workbench")}
+        />,
+      );
+      act(() => {
+        currentExtractionContext().patchDraft({
+          projectId: "private-project",
+          sourceId: "private-asset",
+          sourceAssetId: "private-asset",
+        });
+        currentExtractionContext().extractScriptFromUpload(
+          "private-project",
+          "private-asset",
+          "private-owned",
+          { platformKey: "douyin", nativeId: "old-video" },
+        );
+      });
+      expect(await screen.findByLabelText("来源原文")).toHaveValue(
+        "仅本人任务正文",
+      );
+      expect(live.claimExtractedViralCopy).not.toHaveBeenCalled();
+    });
+
+    it.each(["miss", "error"])(
+      "Web旧来源%s不再导入或弹错误",
+      async (outcome) => {
+        live.loadStudioData.mockResolvedValue(emptyStudioData);
+        live.loadCloudDraft.mockResolvedValue(undefined);
+        let complete!: (value: unknown) => void;
+        let reject!: (value: Error) => void;
+        api.claimViralCopy.mockImplementation(
+          () =>
+            new Promise((resolve, fail) => {
+              complete = resolve;
+              reject = fail;
+            }),
+        );
+        const fallback = vi.fn();
+        render(
+          <StudioWorkspace
+            currentUser={reviewUser}
+            initialState={createState("workbench")}
+          />,
+        );
+        act(() => {
+          currentExtractionContext().patchDraft({ sourceId: "a" });
+          currentExtractionContext().extractViralCopy(
+            { platformKey: "douyin", nativeId: "a" },
+            { onCacheMiss: fallback },
+          );
+        });
+        act(() => currentExtractionContext().patchDraft({ sourceId: "b" }));
+        await act(async () =>
+          outcome === "miss"
+            ? complete({ text: null })
+            : reject(new Error("旧Web来源错误")),
+        );
+        expect(fallback).not.toHaveBeenCalled();
+        expect(screen.queryByText("旧Web来源错误")).not.toBeInTheDocument();
+      },
+    );
+
     it("恢复爆款提取任务时正文按 claim 取回并回填", async () => {
       live.loadStudioData.mockResolvedValue(emptyStudioData);
       live.loadCloudDraft.mockResolvedValue(undefined);
@@ -2657,6 +3010,7 @@ describe("V1.4 workspace integration", () => {
       expect(live.claimExtractedViralCopy).toHaveBeenCalledWith(
         "douyin",
         "v-native-1",
+        "asr-viral",
       );
       fireEvent.click(screen.getByRole("button", { name: "文案工坊" }));
       expect(screen.getByLabelText("来源原文")).toHaveValue(
@@ -3930,15 +4284,57 @@ describe("视频生成（C2 独立创作）", () => {
     );
   });
 
-  it("旧音频页面提交统一使用 TTS、克隆声音和字幕配置", async () => {
+  it("音频历史路由和云端恢复均保留驱动方式", async () => {
+    const restored = createReviewState("oral-audio").draft;
+    restored.voiceId = undefined;
+    restored.script.text = "";
+    restored.script.confirmed = false;
+    live.loadCloudDraft.mockResolvedValue({
+      draft: restored,
+      updatedAt: "2026-10-12T00:00:00Z",
+    });
+    live.loadStudioData.mockResolvedValue(createReviewData());
+    render(
+      <StudioWorkspace
+        currentUser={reviewUser}
+        initialState={createReviewState("oral")}
+      />,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: RESTORE }));
+    expect(
+      await screen.findByRole("heading", { name: "完整口播音频" }),
+    ).toBeInTheDocument();
+    expect(window.location.hash).toBe("#studio/oral-audio");
+    await act(async () => {
+      window.history.pushState(null, "", "#studio/materials");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+    await act(async () => {
+      window.history.pushState(null, "", "#studio/oral-audio");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+    expect(await findEnabledButton("生成口播视频")).toBeEnabled();
+    fireEvent.click(await findEnabledButton("生成口播视频"));
+    await waitFor(() =>
+      expect(api.getOralPrice).toHaveBeenCalledWith({
+        audio_asset_id: "speech",
+      }),
+    );
+    expect(api.createOralTask).not.toHaveBeenCalled();
+  });
+
+  it("音频页面按音频报价提交，不传旧文案声音字幕", async () => {
     api.createOralTask.mockResolvedValue({ id: "oral-1", status: "QUEUED" });
     live.loadStudioData.mockResolvedValue(createReviewData());
     const initial = createReviewState("oral-audio");
     initial.draft.subtitles = true;
+    initial.draft.voiceId = undefined;
+    initial.draft.script.text = "";
+    initial.draft.script.confirmed = false;
     render(<StudioWorkspace currentUser={reviewUser} initialState={initial} />);
 
     expect(await findEnabledButton("生成口播视频")).toBeEnabled();
-    expect(screen.queryByRole("button", { name: "添加" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "添加" })).toBeNull();
     fireEvent.click(await findEnabledButton("生成口播视频"));
     expect(await screen.findByText("5.00 元/秒")).toBeInTheDocument();
     fireEvent.click(await findEnabledButton("确认费用并提交"));
@@ -3946,11 +4342,14 @@ describe("视频生成（C2 独立创作）", () => {
     await waitFor(() => expect(api.createOralTask).toHaveBeenCalledTimes(1));
     expect(api.createOralTask.mock.calls[0]?.[0]).toEqual(
       expect.objectContaining({
-        mode: "TTS",
-        voiceId: "voice-1",
+        mode: "AUDIO",
+        audioAssetId: "speech",
       }),
     );
-    expect(api.createOralTask.mock.calls[0]?.[0]).toHaveProperty("subtitle");
+    expect(api.getOralPrice).toHaveBeenCalledWith({ audio_asset_id: "speech" });
+    const submitted = api.createOralTask.mock.calls[0]?.[0];
+    for (const field of ["subtitle", "voiceId", "scriptText"])
+      expect(submitted).not.toHaveProperty(field);
   });
 
   it("旧口播响应不会关闭后来重新打开的生成弹窗", async () => {

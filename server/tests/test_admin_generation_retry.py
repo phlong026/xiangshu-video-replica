@@ -160,13 +160,10 @@ def _record_released_quote(dsn: str, task_id: str, *, release: bool = True) -> s
 
 
 def _wallet(dsn: str) -> tuple[int, int]:
-    row = (
-        psycopg.connect(dsn)
-        .execute(
+    with psycopg.connect(dsn) as conn:
+        row = conn.execute(
             "SELECT available_credits, reserved_credits FROM wallets WHERE user_id = 'u-owner'"
-        )
-        .fetchone()
-    )
+        ).fetchone()
     assert row is not None
     return int(row[0]), int(row[1])
 
@@ -186,11 +183,10 @@ def _task_row(dsn: str, task_id: str) -> dict[str, Any]:
 
 
 def _operation_count(dsn: str, task_id: str) -> int:
-    row = (
-        psycopg.connect(dsn)
-        .execute("SELECT count(*) FROM generation_task_operations WHERE task_id = %s", (task_id,))
-        .fetchone()
-    )
+    with psycopg.connect(dsn) as conn:
+        row = conn.execute(
+            "SELECT count(*) FROM generation_task_operations WHERE task_id = %s", (task_id,)
+        ).fetchone()
     assert row is not None
     return int(row[0])
 

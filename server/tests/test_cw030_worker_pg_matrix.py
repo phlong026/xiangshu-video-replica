@@ -39,6 +39,7 @@ have no fairness rotation and this suite registers (not fakes) that limit.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from collections.abc import Iterator
@@ -1558,11 +1559,11 @@ def _seed_viral_copy(
         dsn,
         "INSERT INTO assets(id,project_id,kind,storage_uri,sha256,size_bytes,"
         "content_type,created_by_user_id,metadata_json) VALUES (%s,%s,'reference_video',"
-        "'fake://copies/source.mp4',%s,16,'video/mp4',%s,%s)",
+        "'fake://copies/source.mp4',%s,5,'video/mp4',%s,%s)",
         (
             f"copy-asset-{user}",
             f"copy-{user}",
-            "b" * 64,
+            hashlib.sha256(b"video").hexdigest(),
             user,
             json.dumps({"duration_seconds": 12, "platform": platform, "video_id": "123"}),
         ),
@@ -1575,6 +1576,26 @@ def _seed_viral_copy(
             "VALUES (%s,%s,%s,%s,%s,'123','copy',%s,'hash','{}','SUCCEEDED')",
             (f"import-{user}", user, f"copy-{user}", f"copy-asset-{user}", platform, user),
         )
+
+    if imported:
+        from app.content_store import retain_content_object
+
+        with psycopg.connect(dsn) as raw:
+            conn = BusinessConnection.postgres(raw)
+            obj, _ = retain_content_object(
+                conn,
+                sha256=hashlib.sha256(b"video").hexdigest(),
+                size_bytes=5,
+                content_type="video/mp4",
+                provider="fake",
+                bucket="copies",
+                object_key="source.mp4",
+                scope="global",
+                pinned=True,
+            )
+            conn.execute(
+                "UPDATE assets SET content_object_id=%s WHERE id=%s", (obj.id, f"copy-asset-{user}")
+            )
 
 
 def _enqueue_copy(dsn: str, user: str, key: str) -> Any:
@@ -3864,7 +3885,12 @@ def test_first_frame_reconcile_rejects_non_uncertain_task(pg_state: str) -> None
 # ---------------------------------------------------------------------------
 
 _COPY_RESULT_JSON = json.dumps(
-    {"text": "服务器共享的原视频文案", "duration_sec": 12.0, "language": "zh"}
+    {
+        "text": "服务器共享的原视频文案",
+        "duration_sec": 12.0,
+        "language": "zh",
+        "archive": {"platform": "douyin", "video_id": "123", "sha256": "b" * 64},
+    }
 )
 
 
@@ -3923,7 +3949,7 @@ def _seed_copy_fixture(dsn: str) -> None:
     )
 
 
-def _handler_db(dsn: str) -> Any:
+def _handler_db(dsn: str, user: str = "u1") -> Any:
     """只喂真实 PG 写事务的 ``BusinessDb`` 替身（处理器分支用例用，不覆盖会话围栏）."""
     from contextlib import contextmanager
 
@@ -3932,7 +3958,7 @@ def _handler_db(dsn: str) -> Any:
     @contextmanager
     def write() -> Any:
         with psycopg.connect(dsn) as raw:
-            yield BusinessConnection.postgres(raw), CurrentUser("u1", "u1", "u1", "employee")
+            yield BusinessConnection.postgres(raw), CurrentUser(user, user, user, "employee")
 
     class Db:
         def write(self) -> Any:
@@ -4026,7 +4052,7 @@ def _no_provider(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(pipeline, "_configured_asr", call)
 
 
-def test_viral_copy_upload_registers_marked_audio_and_binds_shared_cache(
+def test_viral_copy_upload_is_private_and_cannot_bind_shared_cache(
     pg_state: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """登记 → 身份可映射 → 复用租约任务 → 共享缓存生产者绑定 + 按秒预留."""
@@ -4061,7 +4087,7 @@ def test_viral_copy_upload_registers_marked_audio_and_binds_shared_cache(
         conn = BusinessConnection.postgres(raw)
         row = conn.execute("SELECT * FROM assets WHERE id=%s", (source.asset_id,)).fetchone()
         assert row is not None
-        assert _viral_source(conn, row) == ("douyin", "123")
+        assert _viral_source(conn, row) is None
 
     class Provider:
         name = "fake-copy-asr"
@@ -4072,14 +4098,8 @@ def test_viral_copy_upload_registers_marked_audio_and_binds_shared_cache(
     monkeypatch.setattr(pipeline, "_configured_asr", lambda conn: Provider())
     task = _enqueue_registered_copy(pg_state, source, key="copy-1")
     assert task["status"] == "PENDING"
-    assert (
-        _one(
-            pg_state,
-            "SELECT producer_task_id FROM viral_script_cache "
-            "WHERE platform='douyin' AND video_id='123'",
-        )
-        == task["id"]
-    )
+    assert _one(pg_state, "SELECT count(*) FROM viral_script_cache") == 0
+    assert "viral_source" not in json.loads(task["request_json"])
     operations = _rows(pg_state, "SELECT budget_units FROM billing_operations WHERE service='asr'")
     assert [float(item["budget_units"]) for item in operations] == [12.0]
 
@@ -4103,7 +4123,7 @@ def test_viral_copy_upload_replay_reuses_project_asset_and_task(pg_state: str) -
     assert conflict.value.status_code == 409
 
 
-def test_viral_source_gate_opens_for_server_verified_import_audio(pg_state: str) -> None:
+def test_viral_source_gate_rejects_independent_audio_without_original_video(pg_state: str) -> None:
     """`reference_audio` 的放行凭据是服务端写下的导入任务行.
 
     2026-09-30 拍板：链接解析返回的音频可直接用于文案，导入资产可能是
@@ -4149,10 +4169,10 @@ def test_viral_source_gate_opens_for_server_verified_import_audio(pg_state: str)
         conn = BusinessConnection.postgres(raw)
         row = conn.execute("SELECT * FROM assets WHERE id='plain-audio'").fetchone()
         assert row is not None
-        assert _viral_source(conn, row) == ("douyin", "123")
+        assert _viral_source(conn, row) is None
 
 
-def test_viral_copy_upload_serves_shared_cache_without_submission(
+def test_viral_copy_upload_private_task_does_not_use_unrelated_shared_cache(
     pg_state: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """共享缓存已就绪时，登记后的入队直接落终态，不解析 provider、不产生调用."""
@@ -4162,12 +4182,14 @@ def test_viral_copy_upload_serves_shared_cache_without_submission(
         "INSERT INTO viral_script_cache(platform,video_id,result_json) VALUES ('douyin','123',%s)",
         (_COPY_RESULT_JSON,),
     )
-    _no_provider(monkeypatch)
+    from app import script_from_audio as pipeline
+
+    monkeypatch.setattr(pipeline, "_configured_asr", lambda conn: object())
     source = _register_copy(pg_state, key="cache-hit")
     task = _enqueue_registered_copy(pg_state, source, key="cache-hit")
-    assert task["status"] == "SUCCEEDED"
-    assert json.loads(str(task["result_json"]))["text"] == "服务器共享的原视频文案"
-    assert _one(pg_state, "SELECT count(*) FROM billing_attempts") == 0
+    assert task["status"] == "PENDING"
+    assert task["result_json"] is None
+    assert "viral_source" not in json.loads(task["request_json"])
 
 
 async def test_viral_copy_handler_serves_shared_cache_and_bills_the_delivery(
@@ -4303,4 +4325,386 @@ def test_viral_copy_cache_hit_survives_zero_balance_but_wrong_owner_cannot_read(
                 source_asset_id="copy-asset-u1",
                 idempotency_key="unauthorized",
             )
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("label", ["FAILED", "CANCELED"])
+def test_confirmed_asr_failure_allows_one_new_producer_and_fences_old_lease(
+    pg_state, monkeypatch, label
+):
+    from app.asr import AsrConfirmedFailure, TranscriptResult
+    from app.script_from_audio import (
+        complete_script_from_audio_task,
+        mark_script_from_audio_submission_started,
+    )
+
+    storage, calls = _copy_fixture(pg_state, monkeypatch)
+    _seed_viral_copy(pg_state, "u1")
+    _seed_viral_copy(pg_state, "u2")
+    first = _enqueue_copy(pg_state, "u1", "failed-first")
+    lease = _audio_lease(pg_state, "old-producer")
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        mark_script_from_audio_submission_started(conn, lease=lease)
+        fail_script_from_audio_task(
+            conn, lease=lease, cause=AsrConfirmedFailure(label), submission_started=True
+        )
+    second = _enqueue_copy(pg_state, "u2", "new-round")
+    follower = _enqueue_copy(pg_state, "u1", "follow-round")
+    assert _one(pg_state, "SELECT producer_task_id FROM viral_script_cache") == second["id"]
+    assert first["id"] != second["id"] != follower["id"]
+    with pg_transaction() as raw:
+        with pytest.raises(HTTPException):
+            complete_script_from_audio_task(
+                BusinessConnection.postgres(raw),
+                lease=lease,
+                result=TranscriptResult("旧结果", 12, "zh"),
+            )
+    _run_copy(pg_state, storage)
+    _run_copy(pg_state, storage)
+    assert len(calls) == 1
+    assert _one(pg_state, "SELECT producer_task_id FROM viral_script_cache") == second["id"]
+
+
+def test_upload_content_addressing_cannot_overwrite_original_on_conflict_or_db_failure():
+    from app.viral_import_routes import _store_viral_copy_audio, _viral_copy_object_key
+
+    storage = FakeStorageAdapter(provider="fake", bucket="copies")
+    original = b"original audio"
+    conflict = b"different audio"
+    original_key = _viral_copy_object_key("u1", "same-key", original)
+    other_key = _viral_copy_object_key("u1", "same-key", conflict)
+    assert original_key != other_key
+    _store_viral_copy_audio(storage, key=original_key, content=original)
+    _store_viral_copy_audio(storage, key=other_key, content=conflict)
+    # 后续数据库冲突或失败不会回写原对象；同字节重放也不得截断正在被读取的对象。
+    assert storage.get_object(original_key) == original
+    assert _viral_copy_object_key("u1", "same-key", original) != original_key
+
+
+@pytest.mark.parametrize("replacement", [b"wrong", b"wrong larger bytes"])
+def test_asr_worker_checks_digest_and_size_before_any_provider_call(
+    pg_state, monkeypatch, replacement
+):
+    storage, calls = _copy_fixture(pg_state, monkeypatch)
+    _seed_viral_copy(pg_state, "u1")
+    task = _enqueue_copy(pg_state, "u1", "original")
+    storage.put_object("source.mp4", replacement, content_type="video/mp4")
+    _run_copy(pg_state, storage)
+    assert calls == []
+    assert _task_status(pg_state, "script_from_audio_tasks", task["id"]) == "FAILED"
+    assert _one(pg_state, "SELECT result_json FROM viral_script_cache") is None
+
+
+def test_different_archive_version_cannot_reuse_or_replace_valid_shared_text(pg_state, monkeypatch):
+    storage, calls = _copy_fixture(pg_state, monkeypatch)
+    _seed_viral_copy(pg_state, "u1")
+    _seed_viral_copy(pg_state, "u2")
+    _enqueue_copy(pg_state, "u1", "original")
+    _run_copy(pg_state, storage)
+    before = _one(pg_state, "SELECT result_json FROM viral_script_cache")
+    _exec(pg_state, "UPDATE assets SET sha256=%s WHERE id='copy-asset-u2'", ("a" * 64,))
+    task = _enqueue_copy(pg_state, "u2", "changed")
+    assert task["status"] == "PENDING"
+    assert "viral_source" not in json.loads(task["request_json"])
+    assert _one(pg_state, "SELECT result_json FROM viral_script_cache") == before
+
+
+async def test_copy_handler_conflicting_retry_keeps_winning_object_and_private_task(
+    pg_state, monkeypatch
+):
+    import io
+
+    from fastapi import Response, UploadFile
+
+    from app import script_from_audio as pipeline
+    from app import viral_import_routes as routes
+    from app.viral_import import ViralImportError
+
+    _seed_copy_fixture(pg_state)
+    storage = FakeStorageAdapter(provider="fake", bucket="copies")
+    monkeypatch.setattr(routes, "get_media_storage", lambda conn: storage)
+    monkeypatch.setattr(routes, "_inline_audio_limits", lambda conn, storage: (None, None))
+    monkeypatch.setattr(routes, "_probe_viral_copy_duration", lambda content: 12.0)
+    monkeypatch.setattr(pipeline, "_configured_asr", lambda conn: object())
+
+    async def submit(content):
+        return await routes.extract_viral_video_copy(
+            response=Response(),
+            db=_handler_db(pg_state),
+            platform="douyin",
+            video_id="123",
+            file=UploadFile(file=io.BytesIO(content)),
+            idempotency_key="one-logical-request",
+        )
+
+    original = b"0000ftypM4A original voice"
+    result = await submit(original)
+    again = await submit(original)
+    assert again.task_id == result.task_id
+    # 即使其他来源的共享正文后来就绪，也不能跳过已有幂等请求的字节比较。
+    _exec(
+        pg_state,
+        "INSERT INTO viral_script_cache(platform,video_id,result_json) VALUES('douyin','123',%s)",
+        (_COPY_RESULT_JSON,),
+    )
+    with pytest.raises(ViralImportError) as conflict:
+        await submit(b"0000ftypM4A unrelated voice")
+    assert conflict.value.status_code == 409
+    row = _rows(pg_state, "SELECT storage_uri FROM assets WHERE id=%s", (result.source_asset_id,))[
+        0
+    ]
+    key = str(row["storage_uri"]).split("fake://copies/", 1)[1]
+    assert storage.get_object(key) == original
+    assert _one(pg_state, "SELECT count(*) FROM script_from_audio_tasks") == 1
+    request = _one(pg_state, "SELECT request_json FROM script_from_audio_tasks")
+    assert "viral_source" not in json.loads(request)
+
+
+@pytest.mark.parametrize(
+    "archive",
+    [
+        None,
+        {"platform": "douyin", "video_id": "other", "sha256": "a" * 64},
+        {"platform": "douyin", "video_id": "123", "sha256": "invalid"},
+    ],
+)
+def test_unverified_or_mismatched_cache_never_delivers_text(pg_state, archive):
+    from app.script_from_audio import cached_transcript, cached_transcripts
+
+    _seed_copy_fixture(pg_state)
+    payload = {"text": "不能交付的旧正文", "duration_sec": 12.0}
+    if archive is not None:
+        payload["archive"] = archive
+    raw_payload = json.dumps(payload, ensure_ascii=False)
+    _exec(
+        pg_state,
+        "INSERT INTO viral_script_cache(platform,video_id,result_json) VALUES('douyin','123',%s)",
+        (raw_payload,),
+    )
+    with psycopg.connect(pg_state) as raw:
+        conn = BusinessConnection.postgres(raw)
+        assert cached_transcript(conn, platform="douyin", video_id="123") is None
+        assert cached_transcripts(conn, [("douyin", "123")]) == {}
+    assert _one(pg_state, "SELECT result_json FROM viral_script_cache") == raw_payload
+
+
+def test_preupgrade_untrusted_audio_task_finishes_privately_without_poisoning_cache(
+    pg_state, monkeypatch
+):
+    from app.script_from_audio import script_from_audio_task_response
+    from app.viral_import import ViralCopyUpload
+
+    storage, calls = _copy_fixture(pg_state, monkeypatch)
+    stored = storage.put_object("uploaded.m4a", b"private upload", content_type="audio/mp4")
+    source = _register_copy(pg_state, key="old-upload", upload=ViralCopyUpload(stored, 12.0))
+    task = _enqueue_registered_copy(pg_state, source, key="old-upload")
+    old_payload = {"source_asset_id": source.asset_id, "viral_source": ["douyin", "123"]}
+    _exec(
+        pg_state,
+        "UPDATE script_from_audio_tasks SET request_json=%s WHERE id=%s",
+        (json.dumps(old_payload), task["id"]),
+    )
+    _exec(
+        pg_state,
+        "INSERT INTO viral_script_cache(platform,video_id,producer_task_id) "
+        "VALUES('douyin','123',%s)",
+        (task["id"],),
+    )
+    _run_copy(pg_state, storage)
+    assert len(calls) == 1
+    row = _rows(pg_state, "SELECT * FROM script_from_audio_tasks WHERE id=%s", (task["id"],))[0]
+    response = script_from_audio_task_response(row)
+    assert response.status == "SUCCEEDED"
+    assert response.copy_claim_required is False
+    assert response.result.text == "服务器共享的原视频文案"
+    assert _one(pg_state, "SELECT result_json FROM viral_script_cache") is None
+    assert _one(pg_state, "SELECT producer_task_id FROM viral_script_cache") is None
+
+
+@pytest.mark.parametrize("window", ["queued", "running", "completed"])
+def test_deleted_source_worker_billing_and_private_delivery_remain_consistent(
+    pg_state, monkeypatch, window
+):
+    from app import script_from_audio as pipeline
+    from app.viral_routes import ViralCopyClaimRequest, claim_viral_video_copy
+
+    storage, calls = _copy_fixture(pg_state, monkeypatch)
+    _seed_viral_copy(pg_state, "u1")
+    _exec(
+        pg_state,
+        "INSERT INTO viral_videos(platform,video_id,title) VALUES('douyin','123','source') "
+        "ON CONFLICT(platform,video_id) DO UPDATE SET deleted_at=NULL",
+    )
+    task = _enqueue_copy(pg_state, "u1", "accepted-before-delete")
+    assert _one(pg_state, "SELECT reserved_credits FROM wallets WHERE user_id='u1'") == 24
+
+    def delete_source():
+        _exec(
+            pg_state,
+            "UPDATE viral_videos SET deleted_at=now() WHERE platform='douyin' AND video_id='123'",
+        )
+
+    if window == "queued":
+        delete_source()
+    elif window == "running":
+        original_provider = pipeline._configured_asr(None)
+
+        class Provider:
+            name = "fake-deletion-window"
+
+            def transcribe(self, url, *, duration_sec=None):
+                assert _task_status(pg_state, "script_from_audio_tasks", task["id"]) == "RUNNING"
+                delete_source()
+                return original_provider.transcribe(url, duration_sec=duration_sec)
+
+        monkeypatch.setattr(pipeline, "_configured_asr", lambda conn: Provider())
+    _run_copy(pg_state, storage)
+    if window == "completed":
+        delete_source()
+    assert len(calls) == 1
+    assert _task_status(pg_state, "script_from_audio_tasks", task["id"]) == "SUCCEEDED"
+    assert _one(pg_state, "SELECT reserved_credits FROM wallets WHERE user_id='u1'") == 0
+    assert _one(pg_state, "SELECT available_credits FROM wallets WHERE user_id='u1'") == 976
+    assert _rows(
+        pg_state,
+        "SELECT state,charged_credits FROM billing_operations WHERE source_id=%s",
+        (task["id"],),
+    ) == [{"state": "SUCCEEDED", "charged_credits": 24}]
+    request = ViralCopyClaimRequest(platform="douyin", videoId="123", taskId=task["id"])
+    for _ in range(2):
+        delivered = claim_viral_video_copy(request, _handler_db(pg_state))
+        assert delivered.text == "服务器共享的原视频文案"
+        assert delivered.billing.charged == 0
+    with pytest.raises(HTTPException) as other:
+        claim_viral_video_copy(request, _handler_db(pg_state, "u2"))
+    assert other.value.status_code == 404
+    assert _one(pg_state, "SELECT count(*) FROM billing_operations WHERE service='viral_copy'") == 0
+    assert _one(pg_state, "SELECT available_credits FROM wallets WHERE user_id='u1'") == 976
+
+
+def test_valid_second_archive_is_private_and_cannot_replace_first_archive_cache(
+    pg_state, monkeypatch
+):
+    from app.content_store import retain_content_object
+    from app.script_from_audio import script_from_audio_task_response
+
+    storage, calls = _copy_fixture(pg_state, monkeypatch)
+    _seed_viral_copy(pg_state, "u1")
+    _seed_viral_copy(pg_state, "u2")
+    _enqueue_copy(pg_state, "u1", "first-version")
+    _run_copy(pg_state, storage)
+    original_cache = _one(pg_state, "SELECT result_json FROM viral_script_cache")
+    stored = storage.put_object("second.mp4", b"different valid video", content_type="video/mp4")
+    with psycopg.connect(pg_state) as raw:
+        conn = BusinessConnection.postgres(raw)
+        obj, _ = retain_content_object(
+            conn,
+            sha256=stored.sha256,
+            size_bytes=stored.size,
+            content_type="video/mp4",
+            provider="fake",
+            bucket="copies",
+            object_key="second.mp4",
+            scope="global",
+            pinned=True,
+        )
+        conn.execute(
+            "UPDATE assets SET content_object_id=%s,sha256=%s,size_bytes=%s,storage_uri=%s "
+            "WHERE id='copy-asset-u2'",
+            (obj.id, stored.sha256, stored.size, stored.uri),
+        )
+    task = _enqueue_copy(pg_state, "u2", "second-version")
+    assert task["status"] == "PENDING"
+    assert "viral_source" not in json.loads(task["request_json"])
+    _run_copy(pg_state, storage)
+    response = script_from_audio_task_response(
+        _rows(pg_state, "SELECT * FROM script_from_audio_tasks WHERE id=%s", (task["id"],))[0]
+    )
+    assert response.status == "SUCCEEDED" and response.result.text
+    assert response.copy_claim_required is False
+    assert len(calls) == 2
+    assert _one(pg_state, "SELECT result_json FROM viral_script_cache") == original_cache
+
+
+def test_legacy_successful_paid_upload_remains_privately_claimable_without_shared_proof(
+    pg_state, monkeypatch
+):
+    from app.viral_import import ViralCopyUpload
+    from app.viral_routes import ViralCopyClaimRequest, claim_viral_video_copy
+
+    storage, calls = _copy_fixture(pg_state, monkeypatch)
+    stored = storage.put_object("legacy.m4a", b"legacy private voice", content_type="audio/mp4")
+    source = _register_copy(pg_state, key="legacy-paid", upload=ViralCopyUpload(stored, 12.0))
+    task = _enqueue_registered_copy(pg_state, source, key="legacy-paid")
+    _run_copy(pg_state, storage)
+    assert len(calls) == 1
+    assert (
+        _one(
+            pg_state,
+            "SELECT charged_credits FROM billing_operations WHERE source_id=%s",
+            (task["id"],),
+        )
+        == 24
+    )
+    # 重现旧版本已成功且已结算的上传任务及没有归档证明的缓存；不改真实结算回执。
+    old_request = {"source_asset_id": source.asset_id, "viral_source": ["douyin", "123"]}
+    old_result = _one(
+        pg_state, "SELECT result_json FROM script_from_audio_tasks WHERE id=%s", (task["id"],)
+    )
+    _exec(
+        pg_state,
+        "UPDATE script_from_audio_tasks SET request_json=%s WHERE id=%s",
+        (json.dumps(old_request), task["id"]),
+    )
+    _exec(
+        pg_state,
+        "INSERT INTO viral_videos(platform,video_id,title) VALUES('douyin','123','source') "
+        "ON CONFLICT(platform,video_id) DO UPDATE SET deleted_at=NULL",
+    )
+    _exec(
+        pg_state,
+        "INSERT INTO viral_script_cache(platform,video_id,producer_task_id,result_json) "
+        "VALUES('douyin','123',%s,%s)",
+        (task["id"], old_result),
+    )
+    request = ViralCopyClaimRequest(platform="douyin", videoId="123", taskId=task["id"])
+    for _ in range(2):
+        result = claim_viral_video_copy(request, _handler_db(pg_state))
+        assert result.text == "服务器共享的原视频文案"
+        assert result.billing.charged == 0
+    with pytest.raises(HTTPException) as other:
+        claim_viral_video_copy(request, _handler_db(pg_state, "u2"))
+    assert other.value.status_code == 404
+    assert _one(pg_state, "SELECT available_credits FROM wallets WHERE user_id='u1'") == 976
+    assert _one(pg_state, "SELECT result_json FROM viral_script_cache") == old_result
+    assert _one(pg_state, "SELECT count(*) FROM billing_operations WHERE service='viral_copy'") == 0
+
+
+def test_legacy_unpaid_cache_waiter_cannot_use_private_paid_fallback(pg_state, monkeypatch):
+    from app.viral_routes import ViralCopyClaimRequest, claim_viral_video_copy
+
+    storage, calls = _copy_fixture(pg_state, monkeypatch)
+    _seed_viral_copy(pg_state, "u1")
+    _seed_viral_copy(pg_state, "u2")
+    _enqueue_copy(pg_state, "u1", "producer")
+    _run_copy(pg_state, storage)
+    waiter = _enqueue_copy(pg_state, "u2", "cached")
+    assert waiter["status"] == "SUCCEEDED"
+    _exec(
+        pg_state,
+        "INSERT INTO viral_videos(platform,video_id,title) VALUES('douyin','123','source') "
+        "ON CONFLICT(platform,video_id) DO UPDATE SET deleted_at=NULL",
+    )
+    _exec(
+        pg_state,
+        "UPDATE viral_script_cache SET result_json=%s",
+        (json.dumps({"text": "legacy", "duration_sec": 12}),),
+    )
+    result = claim_viral_video_copy(
+        ViralCopyClaimRequest(platform="douyin", videoId="123", taskId=waiter["id"]),
+        _handler_db(pg_state, "u2"),
+    )
+    assert result.text is None
+    assert result.billing.charged == 0
     assert len(calls) == 1

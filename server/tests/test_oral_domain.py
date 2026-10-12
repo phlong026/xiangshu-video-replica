@@ -2854,21 +2854,27 @@ def test_create_oral_task_rejects_unready_assets(scene: str) -> None:
         )
 
 
+@pytest.mark.parametrize("mode", ["TTS", "AUDIO"])
 def test_oral_billing_cancel_releases_once_and_success_settles_once(
-    scene: str, fake_source_storage: FakeSourceStorage
+    scene: str, fake_source_storage: FakeSourceStorage, mode: str
 ) -> None:
     avatar_id, voice_id = _seed_ready_assets()
+    if mode == "AUDIO":
+        _exec(
+            "UPDATE assets SET metadata_json = %s WHERE id = 'asset-audio'",
+            ('{"audio_purpose":"oral_audio","duration_seconds":2,"audio_duration_verified":true}',),
+        )
     vendor, _ = make_vendor()
 
     cancelled = _create_task(
         actor=actor(),
         identity_id="ident-1",
         avatar_id=avatar_id,
-        voice_id=voice_id,
-        mode="TTS",
+        voice_id=voice_id if mode == "TTS" else None,
+        mode=mode,
         title="取消任务",
-        script_text="文案",
-        audio_asset_id=None,
+        script_text="文案" if mode == "TTS" else None,
+        audio_asset_id="asset-audio" if mode == "AUDIO" else None,
         subtitle=None,
         idempotency_key="oral-cancel-billing",
         vendor=vendor,
@@ -2883,11 +2889,11 @@ def test_oral_billing_cancel_releases_once_and_success_settles_once(
         actor=actor(),
         identity_id="ident-1",
         avatar_id=avatar_id,
-        voice_id=voice_id,
-        mode="TTS",
+        voice_id=voice_id if mode == "TTS" else None,
+        mode=mode,
         title="成功任务",
-        script_text="文案",
-        audio_asset_id=None,
+        script_text="文案" if mode == "TTS" else None,
+        audio_asset_id="asset-audio" if mode == "AUDIO" else None,
         subtitle=None,
         idempotency_key="oral-success-billing",
         vendor=vendor,
@@ -2923,21 +2929,28 @@ def test_oral_billing_cancel_releases_once_and_success_settles_once(
 
 
 @pytest.mark.parametrize("status", ["SUBMISSION_UNCERTAIN", "ARCHIVE_FAILED"])
+@pytest.mark.parametrize("mode", ["TTS", "AUDIO"])
 def test_oral_billing_keeps_uncertain_and_archive_failed_reservations_frozen(
     scene: str,
     fake_source_storage: FakeSourceStorage,
     status: str,
+    mode: str,
 ) -> None:
     avatar_id, voice_id = _seed_ready_assets()
+    if mode == "AUDIO":
+        _exec(
+            "UPDATE assets SET metadata_json = %s WHERE id = 'asset-audio'",
+            ('{"audio_purpose":"oral_audio","duration_seconds":2,"audio_duration_verified":true}',),
+        )
     task = _create_task(
         actor=actor(),
         identity_id="ident-1",
         avatar_id=avatar_id,
-        voice_id=voice_id,
-        mode="TTS",
+        voice_id=voice_id if mode == "TTS" else None,
+        mode=mode,
         title="冻结任务",
-        script_text="文案",
-        audio_asset_id=None,
+        script_text="文案" if mode == "TTS" else None,
+        audio_asset_id="asset-audio" if mode == "AUDIO" else None,
         subtitle=None,
         idempotency_key=f"oral-frozen-{status}",
     )
@@ -3174,14 +3187,32 @@ def test_refresh_oral_task_archives_result_asset(
     assert asset["project_id"] is None
 
 
+@pytest.mark.parametrize("mode", ["TTS", "AUDIO"])
 def test_task_create_never_calls_vendor_inside_request_transaction(
-    scene: str, fake_source_storage: FakeSourceStorage
+    scene: str, fake_source_storage: FakeSourceStorage, mode: str
 ) -> None:
     avatar_id, voice_id = _seed_ready_assets()
+    if mode == "AUDIO":
+        _exec(
+            "UPDATE assets SET metadata_json = %s WHERE id = 'asset-audio'",
+            ('{"audio_purpose":"oral_audio","duration_seconds":2,"audio_duration_verified":true}',),
+        )
     vendor, transport = make_vendor()
+    if mode == "AUDIO":
+        transport.on(
+            "POST",
+            "/api/v2/hifly/tool/create_upload_url",
+            envelope(
+                {
+                    "upload_url": "https://up.example/audio",
+                    "content_type": "audio/mpeg",
+                    "file_id": "file-audio",
+                }
+            ),
+        )
     transport.on(
         "POST",
-        "/api/v2/hifly/video/create_by_tts",
+        f"/api/v2/hifly/video/create_by_{'tts' if mode == 'TTS' else 'audio'}",
         json.dumps({"code": 1002, "msg": "credit", "data": {}}).encode(),
     )
 
@@ -3189,11 +3220,11 @@ def test_task_create_never_calls_vendor_inside_request_transaction(
         actor=actor(),
         identity_id="ident-1",
         avatar_id=avatar_id,
-        voice_id=voice_id,
-        mode="TTS",
+        voice_id=voice_id if mode == "TTS" else None,
+        mode=mode,
         title="t",
-        script_text="文案",
-        audio_asset_id=None,
+        script_text="文案" if mode == "TTS" else None,
+        audio_asset_id="asset-audio" if mode == "AUDIO" else None,
         subtitle=None,
         idempotency_key="idem-key-0004",
         vendor=vendor,
@@ -3221,25 +3252,45 @@ def test_task_create_never_calls_vendor_inside_request_transaction(
     assert _wallet("employee_1") == (20, 0)
 
 
+@pytest.mark.parametrize("mode", ["TTS", "AUDIO"])
 def test_oral_task_uncertain_submission_freezes_credit_and_never_retries(
-    scene: str, fake_source_storage: FakeSourceStorage
+    scene: str, fake_source_storage: FakeSourceStorage, mode: str
 ) -> None:
     avatar_id, voice_id = _seed_ready_assets()
+    if mode == "AUDIO":
+        _exec(
+            "UPDATE assets SET metadata_json = %s WHERE id = 'asset-audio'",
+            ('{"audio_purpose":"oral_audio","duration_seconds":2,"audio_duration_verified":true}',),
+        )
     vendor, transport = make_vendor()
+    if mode == "AUDIO":
+        transport.on(
+            "POST",
+            "/api/v2/hifly/tool/create_upload_url",
+            envelope(
+                {
+                    "upload_url": "https://up.example/audio",
+                    "content_type": "audio/mpeg",
+                    "file_id": "file-audio",
+                }
+            ),
+        )
 
     def uncertain(_body: bytes | None) -> bytes:
         raise HiflyError("connection dropped")
 
-    transport.on("POST", "/api/v2/hifly/video/create_by_tts", uncertain)
+    transport.on(
+        "POST", f"/api/v2/hifly/video/create_by_{'tts' if mode == 'TTS' else 'audio'}", uncertain
+    )
     created = _create_task(
         actor=actor(),
         identity_id="ident-1",
         avatar_id=avatar_id,
-        voice_id=voice_id,
-        mode="TTS",
+        voice_id=voice_id if mode == "TTS" else None,
+        mode=mode,
         title="不确定提交",
-        script_text="禁止盲目重提。",
-        audio_asset_id=None,
+        script_text="禁止盲目重提。" if mode == "TTS" else None,
+        audio_asset_id="asset-audio" if mode == "AUDIO" else None,
         subtitle=None,
         idempotency_key="oral-worker-uncertain-key",
     )
@@ -3255,7 +3306,14 @@ def test_oral_task_uncertain_submission_freezes_credit_and_never_retries(
     )
     assert _claim("second-worker") is None
     assert _wallet("employee_1") == (19, 1)
-    assert sum(1 for _, url in transport.calls if url.endswith("video/create_by_tts")) == 1
+    assert (
+        sum(
+            1
+            for _, url in transport.calls
+            if url.endswith(f"video/create_by_{'tts' if mode == 'TTS' else 'audio'}")
+        )
+        == 1
+    )
 
 
 def test_uncertain_submit_releases_slot_only_after_successful_cas(scene: str) -> None:
@@ -4926,3 +4984,34 @@ def test_clone_rename_routes(scene: str) -> None:
             assert client.patch(path, json={"title": "长" * 61}).status_code == 422
             assert client.patch(path, json={"title": "x", "status": "READY"}).status_code == 422
     assert transport.calls == []
+
+
+def test_audio_oral_recycled_asset_rejects_before_reservation(
+    scene: str, fake_source_storage: FakeSourceStorage
+) -> None:
+    avatar_id, _ = _seed_ready_assets()
+    _exec(
+        "UPDATE assets SET metadata_json = %s WHERE id = 'asset-audio'",
+        ('{"audio_purpose":"oral_audio","duration_seconds":42,"audio_duration_verified":true}',),
+    )
+    _exec(
+        "INSERT INTO studio_material_preferences (user_id,source_type,source_id,hidden) "
+        "VALUES ('employee_1','asset','asset-audio',1)"
+    )
+    before = _wallet("employee_1")
+    with pytest.raises(OralDomainError, match="已移除"):
+        _create_task(
+            actor=actor(),
+            identity_id="ident-1",
+            avatar_id=avatar_id,
+            voice_id=None,
+            mode="AUDIO",
+            title="音频口播",
+            script_text=None,
+            audio_asset_id="asset-audio",
+            subtitle=None,
+            idempotency_key="recycled-audio",
+        )
+    assert _wallet("employee_1") == before
+    assert _count("SELECT COUNT(*) FROM oral_tasks WHERE idempotency_key='recycled-audio'") == 0
+    assert _count("SELECT COUNT(*) FROM wallet_transactions WHERE type='RESERVE'") == 0

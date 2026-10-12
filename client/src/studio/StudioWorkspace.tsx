@@ -334,7 +334,13 @@ export function StudioWorkspace({
   // Review is an explicit development entry; failed requests never enable it.
   const review = Boolean(import.meta.env.DEV && reviewData);
   const [state, setState] = useState<StudioState>(() => {
-    if (initialState) return initialState;
+    if (initialState)
+      return initialState.page === "oral-audio"
+        ? {
+            ...initialState,
+            draft: { ...initialState.draft, driverMode: "audio" },
+          }
+        : initialState;
     const route = studioRouteFromHash(window.location.hash);
     return { ...createState(route.page), ...route };
   });
@@ -435,6 +441,7 @@ export function StudioWorkspace({
   const [videoSubmitRejected, setVideoSubmitRejected] = useState(false);
   const operationRef = useRef(0);
   const loadedPeopleRef = useRef(new Set<string>());
+  const dataAccountRef = useRef(workspaceUser.id);
   const restoredAssetsRef = useRef<StudioAsset[]>([]);
   const oralSubmittingRef = useRef(false);
   const videoSubmittingRef = useRef(false);
@@ -772,7 +779,17 @@ export function StudioWorkspace({
     setPendingRestore(null);
     setRestoreError("");
     latestDraftRef.current = restore.draft;
-    setState((previous) => ({ ...previous, draft: restore.draft }));
+    setState((previous) => {
+      const page: StudioState["page"] =
+        previous.page === "oral" || previous.page === "oral-audio"
+          ? restore.draft.driverMode === "audio"
+            ? "oral-audio"
+            : "oral"
+          : previous.page;
+      const next = { ...previous, page, draft: restore.draft };
+      window.history.replaceState(null, "", studioHashForState(next));
+      return next;
+    });
     notify("已恢复上次云端草稿，请核对内容并确认终稿。");
     void restoreDraftAssets(restore.draft);
   };
@@ -824,7 +841,11 @@ export function StudioWorkspace({
     setOralPriceFen(null);
     setOralQuoteStatus("loading");
     setOralQuoteError("");
-    void getOralPrice({ script_text: state.draft.script.text })
+    void getOralPrice(
+      state.draft.driverMode === "audio"
+        ? { audio_asset_id: state.draft.audioId }
+        : { script_text: state.draft.script.text },
+    )
       .then((price) => {
         if (active) {
           if (!isCurrentQuote(price)) {
@@ -859,7 +880,14 @@ export function StudioWorkspace({
     return () => {
       active = false;
     };
-  }, [review, generation, oralQuoteRevision, state.draft.script.text]);
+  }, [
+    review,
+    generation,
+    oralQuoteRevision,
+    state.draft.script.text,
+    state.draft.driverMode,
+    state.draft.audioId,
+  ]);
 
   const retryOralQuote = useCallback(
     () => setOralQuoteRevision((value) => value + 1),
@@ -1031,16 +1059,18 @@ export function StudioWorkspace({
     oralSubmittingRef.current = true;
     setOralSubmitting(true);
     try {
-      const mode = "text";
-      const input = buildOralInput(draft, mode);
+      const input = buildOralInput(draft);
       const request = {
         identityId: input.ipId,
         avatarId: input.avatarId,
-        voiceId: input.voiceId,
-        mode: "TTS" as const,
         title: draft.script.title || "未命名口播",
-        scriptText: draft.script.text,
-        audioAssetId: input.audioAssetId,
+        ...(input.mode === "audio"
+          ? { mode: "AUDIO" as const, audioAssetId: input.audioAssetId }
+          : {
+              mode: "TTS" as const,
+              voiceId: input.voiceId,
+              scriptText: draft.script.text,
+            }),
         ...(input.mode === "text" && input.subtitles
           ? { subtitle: ORAL_SUBTITLE_PRESET }
           : {}),
@@ -1245,15 +1275,23 @@ export function StudioWorkspace({
     // profile refresh. Its person cache must be invalidated at the same time.
     loadedPeopleRef.current.clear();
     let active = true;
-    setData((previous) => ({ ...previous, loading: true }));
+    const sameAccount = dataAccountRef.current === workspaceUser.id;
+    dataAccountRef.current = workspaceUser.id;
+    setData((previous) => ({
+      ...(sameAccount ? previous : emptyData),
+      loading: true,
+    }));
     const coreLoad = loadStudioData(workspaceUser, { includeViral: false });
     void coreLoad
       .then((result) => {
         if (active)
-          setData({
+          setData((previous) => ({
             ...result,
+            // 爆款列表独立加载；基础资料的空占位不能擦掉先返回的公共列表回执。
+            videos: previous.videos.length ? previous.videos : result.videos,
+            homepageVideos: previous.homepageVideos,
             assets: mergeStudioAssets(result.assets, restoredAssetsRef.current),
-          });
+          }));
       })
       .catch((cause: unknown) => {
         if (active)
@@ -1396,7 +1434,7 @@ export function StudioWorkspace({
     const onHashChange = () => {
       const route = studioRouteFromHash(window.location.hash);
       operationRef.current += 1;
-      setState((previous) => ({ ...previous, ...route }));
+      setState((previous) => navigateStudioState(previous, route.page, route));
       if (livePanel) refresh();
       setLivePanel(undefined);
     };
@@ -1431,32 +1469,33 @@ export function StudioWorkspace({
         "人物已更换，请重新选择该人物的分身和声音，并核对文案中的自我介绍。",
       );
     draftTouchedRef.current = true;
-    setState((previous) => {
-      const next = patchStudioDraft(previous.draft, patch);
-      if (patch.ipId && patch.ipId !== previous.draft.ipId) {
-        const owner = data.people.find((person) => person.id === patch.ipId);
-        // Explicit handoffs may select an asset together with its verified owner.
-        if (
-          patch.avatarId &&
-          owner?.avatars.some(
-            (avatar) =>
-              avatar.id === patch.avatarId &&
-              avatar.ready &&
-              avatar.origin === "视频制作",
-          )
+    const previousDraft = latestDraftRef.current;
+    const next = patchStudioDraft(previousDraft, patch);
+    if (patch.ipId && patch.ipId !== previousDraft.ipId) {
+      const owner = data.people.find((person) => person.id === patch.ipId);
+      // Explicit handoffs may select an asset together with its verified owner.
+      if (
+        patch.avatarId &&
+        owner?.avatars.some(
+          (avatar) =>
+            avatar.id === patch.avatarId &&
+            avatar.ready &&
+            avatar.origin === "视频制作",
         )
-          next.avatarId = patch.avatarId;
-        if (
-          patch.voiceId &&
-          owner?.voices.some(
-            (voice) => voice.id === patch.voiceId && voice.confirmed,
-          )
+      )
+        next.avatarId = patch.avatarId;
+      if (
+        patch.voiceId &&
+        owner?.voices.some(
+          (voice) => voice.id === patch.voiceId && voice.confirmed,
         )
-          next.voiceId = patch.voiceId;
-        next.script = { ...next.script, confirmed: false };
-      }
-      return { ...previous, draft: next };
-    });
+      )
+        next.voiceId = patch.voiceId;
+      next.script = { ...next.script, confirmed: false };
+    }
+    // 同一事件内换来源后立即提取，异步回填门禁必须读取新作用域。
+    latestDraftRef.current = next;
+    setState((previous) => ({ ...previous, draft: next }));
     // persistNow：跳转类调用（复刻页「去 AI 视频创作」）要求立即落库——
     // 用户下一屏就可能刷新或退出，这份草稿不能停在 2 秒防抖窗口里。
     // 与自动保存共用同一条云草稿队列；先清掉排队中的旧防抖保存，避免它
@@ -1464,7 +1503,7 @@ export function StudioWorkspace({
     if (options?.persistNow && !review) {
       const accountId = currentUser.id;
       const permissionGeneration = permissionGenerationRef.current;
-      const draft = patchStudioDraft(state.draft, patch);
+      const draft = next;
       window.clearTimeout(draftSaveTimerRef.current);
       draftSaveTimerRef.current = undefined;
       void persistCloudDraftForScope(draft, accountId, () =>
@@ -1481,6 +1520,7 @@ export function StudioWorkspace({
   };
   const extractionDraftId = state.draft.id;
   const extractionProjectId = state.draft.projectId;
+  const deliveredExtractionTasksRef = useRef(new Set<string>());
   const extractionAssetId = state.draft.sourceAssetId;
   useEffect(() => {
     if (
@@ -1492,6 +1532,17 @@ export function StudioWorkspace({
       return;
     }
     let active = true;
+    const restorationAccount = saveAccountRef.current;
+    const restorationPermission = permissionGenerationRef.current;
+    const restorationStillCurrent = () =>
+      active &&
+      saveMountedRef.current &&
+      saveAccountRef.current === restorationAccount &&
+      permissionGenerationRef.current === restorationPermission &&
+      currentUserRoleRef.current !== "auditor" &&
+      latestDraftRef.current.id === extractionDraftId &&
+      latestDraftRef.current.projectId === extractionProjectId &&
+      latestDraftRef.current.sourceAssetId === extractionAssetId;
     let timer: number | undefined;
     let reportedRunning = false;
     // 恢复轮询必须有界（上线审查 P1-2）：worker 崩溃会把任务永远停在 RUNNING，
@@ -1502,7 +1553,7 @@ export function StudioWorkspace({
     const restore = async () => {
       try {
         const task = await loadLatestScriptFromUpload(extractionProjectId);
-        if (!active || !task) return;
+        if (!restorationStillCurrent() || !task) return;
         const current = latestDraftRef.current;
         if (
           current.id !== extractionDraftId ||
@@ -1531,6 +1582,8 @@ export function StudioWorkspace({
         }
         if (task.status === "SUCCEEDED") {
           extractingRef.current = false;
+          const deliveryKey = JSON.stringify([saveAccountRef.current, task.id]);
+          if (deliveredExtractionTasksRef.current.has(deliveryKey)) return;
           // 普通任务正文随任务接口下发；爆款任务正文为 null，凭任务里带的视频身份
           // 回「获取文案」取一次（交付免费，2026-10-04 拍板）。
           const text = task.result?.text ?? "";
@@ -1542,9 +1595,11 @@ export function StudioWorkspace({
               const claimed = await claimExtractedViralCopy(
                 viralSource.platform,
                 viralSource.videoId,
+                task.id,
               );
-              if (!active) return;
+              if (!restorationStillCurrent()) return;
               if (claimed) {
+                deliveredExtractionTasksRef.current.add(deliveryKey);
                 const restored = patchStudioDraft(current, {
                   sourceId: extractionAssetId,
                   projectId: extractionProjectId,
@@ -1712,7 +1767,7 @@ export function StudioWorkspace({
     }
     try {
       if (kind === "数字人口播") {
-        const input = buildOralInput(state.draft, "text");
+        const input = buildOralInput(state.draft);
         const person = data.people.find((item) => item.id === input.ipId);
         if (
           !person?.avatars.some(
@@ -2002,6 +2057,26 @@ export function StudioWorkspace({
       latestDraftRef.current.sourceAssetId,
     ]);
     const extractionAccount = currentUser.id;
+    const extractionDraftId = latestDraftRef.current.id;
+    const scopeStillCurrent = () => {
+      const draft = latestDraftRef.current;
+      return (
+        saveMountedRef.current &&
+        saveAccountRef.current === extractionAccount &&
+        permissionGenerationRef.current === permissionGeneration &&
+        currentUserRoleRef.current !== "auditor" &&
+        (JSON.stringify([
+          draft.id,
+          draft.projectId,
+          draft.sourceId,
+          draft.sourceAssetId,
+        ]) === extractionScope ||
+          (explicitSource &&
+            draft.id === extractionDraftId &&
+            draft.projectId === projectId &&
+            (draft.sourceAssetId ?? draft.sourceId) === assetId))
+      );
+    };
     extractingRef.current = true;
     const permissionGeneration = permissionGenerationRef.current;
     notify("正在提取音频并转写文案，预计一到两分钟，请勿关闭页面…");
@@ -2015,95 +2090,89 @@ export function StudioWorkspace({
         ? awaitScriptFromAudioTask(preparedTaskId)
         : extractScriptFromUploadLive(projectId, assetId)
     )
-      .then(async ({ text: taskText }) => {
-        // 爆款链路：转写完成只代表结果进了共享缓存，正文凭视频身份回「获取文案」
-        // 交付（2026-10-04 拍板：交付不再计费）。正文也只在 claim 回执里——服务端
-        // 任务接口对爆款任务不下发正文，这里没有「取不到就退回任务结果」的旁路；
-        // 欠下的交付由下次「提取文案」补齐（桌面端 claim-first 秒回，不再走转写）。
-        let text = taskText;
-        let copyDeliveryError: string | null = null;
-        if (copyClaim) {
-          try {
-            const claimed = await claimExtractedViralCopy(
-              copyClaim.platformKey,
-              copyClaim.nativeId,
-            );
-            if (claimed) {
-              text = claimed;
-            }
-          } catch (cause: unknown) {
-            // 服务端文案常带处置指引（如「请联系管理员」），折叠成通用提示
-            // 会让这类可运营问题只能上服务器查日志。
-            copyDeliveryError = customerVisibleErrorMessage(
-              cause,
-              "「获取文案」未完成，请稍后重试。",
-            );
+      .then(
+        async ({ text: taskText, taskId, viralSource, copyClaimRequired }) => {
+          // 爆款链路：转写完成只代表结果进了共享缓存，正文凭视频身份回「获取文案」
+          // 交付（2026-10-04 拍板：交付不再计费）。正文也只在 claim 回执里——服务端
+          // 任务接口对爆款任务不下发正文，这里没有「取不到就退回任务结果」的旁路；
+          // 欠下的交付由下次「提取文案」补齐（桌面端 claim-first 秒回，不再走转写）。
+          if (!scopeStillCurrent()) {
+            extractingRef.current = false;
+            endCopyExtractionProgress();
+            return;
           }
-        }
-        extractingRef.current = false;
-        endCopyExtractionProgress();
-        if (
-          currentUserRoleRef.current === "auditor" ||
-          permissionGenerationRef.current !== permissionGeneration
-        )
-          return;
-        const currentDraft = latestDraftRef.current;
-        if (
-          saveAccountRef.current !== extractionAccount ||
-          (JSON.stringify([
-            currentDraft.id,
-            currentDraft.projectId,
-            currentDraft.sourceId,
-            currentDraft.sourceAssetId,
-          ]) !== extractionScope &&
-            !(
-              explicitSource &&
-              currentDraft.projectId === projectId &&
-              (currentDraft.sourceAssetId ?? currentDraft.sourceId) === assetId
-            ))
-        )
-          return;
-        if (!text) {
-          // claim 未完成（未命中 / 失败）：正文拿不到就不能把空文案写进草稿，
-          // 也不能假装交付已完成——失败原因原样透传，让用户照着处置。
-          navigate("copy", { returnTo: "workbench" });
-          notify(
-            copyDeliveryError ??
-              "文案已提取，但「获取文案」未完成，暂未交付正文；请重新提取补齐（不会重扣转写费）。",
+          let text = taskText;
+          let copyDeliveryError: string | null = null;
+          const claimIdentity = viralSource
+            ? {
+                platformKey: viralSource.platform,
+                nativeId: viralSource.videoId,
+              }
+            : copyClaim;
+          if (!taskText && claimIdentity && copyClaimRequired !== false) {
+            try {
+              const claimed = await claimExtractedViralCopy(
+                claimIdentity.platformKey,
+                claimIdentity.nativeId,
+                taskId,
+              );
+              if (claimed) {
+                text = claimed;
+              }
+            } catch (cause: unknown) {
+              // 服务端文案常带处置指引（如「请联系管理员」），折叠成通用提示
+              // 会让这类可运营问题只能上服务器查日志。
+              copyDeliveryError = customerVisibleErrorMessage(
+                cause,
+                "「获取文案」未完成，请稍后重试。",
+              );
+            }
+          }
+          extractingRef.current = false;
+          endCopyExtractionProgress();
+          if (!scopeStillCurrent()) return;
+          const currentDraft = latestDraftRef.current;
+          if (!text) {
+            // claim 未完成（未命中 / 失败）：正文拿不到就不能把空文案写进草稿，
+            // 也不能假装交付已完成——失败原因原样透传，让用户照着处置。
+            navigate("copy", { returnTo: "workbench" });
+            notify(
+              copyDeliveryError ??
+                "文案已提取，但「获取文案」未完成，暂未交付正文；请重新提取补齐（不会重扣转写费）。",
+            );
+            return;
+          }
+          const sameSource =
+            currentDraft.projectId === projectId &&
+            (currentDraft.sourceAssetId ?? currentDraft.sourceId) === assetId;
+          const currentScript = sameSource
+            ? currentDraft.script
+            : createDraft().script;
+          deliveredExtractionTasksRef.current.add(
+            JSON.stringify([extractionAccount, taskId]),
           );
-          return;
-        }
-        const sameSource =
-          currentDraft.projectId === projectId &&
-          (currentDraft.sourceAssetId ?? currentDraft.sourceId) === assetId;
-        const currentScript = sameSource
-          ? currentDraft.script
-          : createDraft().script;
-        patchDraft({
-          projectId,
-          sourceId: assetId,
-          sourceAssetId: assetId,
-          scriptEdited: true,
-          script: {
-            ...currentScript,
-            original: text,
-            text: hasCopyResult(currentScript) ? currentScript.text : "",
-            resultKind: hasCopyResult(currentScript) ? "manual" : "extracted",
-            confirmed: false,
-          },
-        });
-        navigate("copy", { returnTo: "workbench" });
-        setWalletRevision((value) => value + 1);
-        notify("文案已提取，请核对原文并选择二创方式。");
-      })
+          patchDraft({
+            projectId,
+            sourceId: assetId,
+            sourceAssetId: assetId,
+            scriptEdited: true,
+            script: {
+              ...currentScript,
+              original: text,
+              text: hasCopyResult(currentScript) ? currentScript.text : "",
+              resultKind: hasCopyResult(currentScript) ? "manual" : "extracted",
+              confirmed: false,
+            },
+          });
+          navigate("copy", { returnTo: "workbench" });
+          setWalletRevision((value) => value + 1);
+          notify("文案已提取，请核对原文并选择二创方式。");
+        },
+      )
       .catch((cause: unknown) => {
         extractingRef.current = false;
         endCopyExtractionProgress();
-        if (
-          currentUserRoleRef.current === "auditor" ||
-          permissionGenerationRef.current !== permissionGeneration
-        )
-          return;
+        if (!scopeStillCurrent()) return;
         setWalletRevision((value) => value + 1);
         notify(
           customerVisibleErrorMessage(cause, "文案提取失败，请稍后重试。"),
@@ -2201,6 +2270,22 @@ export function StudioWorkspace({
       latestDraftRef.current.sourceAssetId,
     ]);
 
+    const scopeStillCurrent = () => {
+      const draft = latestDraftRef.current;
+      return (
+        saveMountedRef.current &&
+        saveAccountRef.current === extractionAccount &&
+        permissionGenerationRef.current === permissionGeneration &&
+        currentUserRoleRef.current !== "auditor" &&
+        JSON.stringify([
+          draft.id,
+          draft.projectId,
+          draft.sourceId,
+          draft.sourceAssetId,
+        ]) === extractionScope
+      );
+    };
+
     if (!cacheAvailable()) {
       // Web 端 claim-first：命中共享缓存即秒回正文（交付免费），跳过整次导入；
       // 未命中交给调用方的导入 → 转写链路（转写完成后再凭视频身份 claim 交付）。
@@ -2215,6 +2300,7 @@ export function StudioWorkspace({
       void claimViralCopy(platformKey as ViralPlatform, nativeId)
         .then((claimed) => {
           extractingRef.current = false;
+          if (!scopeStillCurrent()) return;
           if (!claimed.text) {
             // 未命中：本次分文未扣，走调用方的导入 → 转写链路。
             onCacheMiss();
@@ -2230,11 +2316,7 @@ export function StudioWorkspace({
           extractingRef.current = false;
           // 读不到计费口径（未定价 / 停用 / 网络失败）时继续导入会白花一次转写费，
           // 与桌面端同策略：如实提示，不做静默回落。
-          if (
-            currentUserRoleRef.current === "auditor" ||
-            permissionGenerationRef.current !== permissionGeneration
-          )
-            return;
+          if (!scopeStillCurrent()) return;
           if (
             openWalletIfInsufficientCredits(cause, {
               notify,
@@ -2259,6 +2341,11 @@ export function StudioWorkspace({
       nativeId,
     })
       .then((receipt) => {
+        if (!scopeStillCurrent()) {
+          extractingRef.current = false;
+          endCopyExtractionProgress();
+          return;
+        }
         if (receipt.kind === "task") {
           // 未命中共享缓存：服务端已建好任务，交给与上传链路完全相同的轮询与回填通道。
           // 带上这条视频的身份，转写完成后回来取文案（首提取者的交付与计费点）。
@@ -2282,11 +2369,7 @@ export function StudioWorkspace({
       .catch((cause: unknown) => {
         extractingRef.current = false;
         endCopyExtractionProgress();
-        if (
-          currentUserRoleRef.current === "auditor" ||
-          permissionGenerationRef.current !== permissionGeneration
-        )
-          return;
+        if (!scopeStillCurrent()) return;
         if (
           openWalletIfInsufficientCredits(cause, {
             notify,
@@ -2631,7 +2714,9 @@ export function StudioWorkspace({
               {review
                 ? "当前为效果审核，不会创建真实生成任务，也不会扣费。"
                 : generation === "数字人口播"
-                  ? "将创建一条数字人口播任务，提交前请核对文案与声音。"
+                  ? state.draft.driverMode === "audio"
+                    ? "将使用完整音频创建数字人口播任务，提交前请核对音频与分身。"
+                    : "将创建一条数字人口播任务，提交前请核对文案与声音。"
                   : generation === "视频生成"
                     ? "将按提示词与参数创建视频生成任务，按秒计费，提交前请核对。"
                     : "此独立创作接口尚未接入。现有项目复刻可通过已实现的生成流程报价与提交。"}

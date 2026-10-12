@@ -292,10 +292,8 @@ def register_viral_copy_source(
     ——``uq_script_from_audio_tasks_active_project`` 允许一个项目至多一条在制任务，
     共用一个占位项目会让并发的第二次提取被「已有任务在进行」挡掉。
 
-    写一条 ``SUCCEEDED`` 的 ``viral_import_tasks`` 行有两个作用：它是幂等键的持有
-    者，也是 ``script_from_audio._viral_source`` 把资产映射回 ``(platform,
-    video_id)`` 的唯一凭据。视频身份由服务端按内容池校验后写在这里，客户端上传的
-    只有音轨字节本身。
+    ``SUCCEEDED`` 导入行持有幂等键并记录用户选择的视频身份；这不是上传字节
+    属于该视频的证明。客户端音轨只形成私有成果，不能写入跨用户共享文案。
     """
     request_hash = viral_copy_request_hash(
         platform=video.platform,
@@ -377,8 +375,7 @@ def register_viral_copy_source(
                     "duration_seconds": upload.duration_seconds,
                     "platform": video.platform,
                     "video_id": video.video_id,
-                    # 服务端写下的凭据：只有本端点登记的 reference_audio 才能作为
-                    # 共享文案的身份依据（解析器下发的独立音轨可能是背景音乐）。
+                    # 记录上传来路供审计；此标记不能作为共享文案的来源证明。
                     "viral_copy_upload": True,
                     "import_task_id": task_id,
                 },

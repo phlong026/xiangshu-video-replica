@@ -8003,7 +8003,11 @@ export type ViralVideoItem = {
   verified: boolean;
   coverUrl: string | null;
   durationMs: number;
-  likes: number;
+  likes: number | null;
+  statisticsUpdatedAt?: string | null;
+  statisticsCheckedAt?: string | null;
+  statisticsStatus?: "updated" | "partial" | "failed" | "unknown";
+  statisticsSource?: string | null;
   comments: number | null;
   shares: number | null;
   collects: number | null;
@@ -8543,13 +8547,18 @@ export function fetchViralCopy(
 export function claimViralCopy(
   platform: ViralPlatform,
   videoId: string,
+  taskId?: string,
 ): Promise<ViralCopyClaimResponse> {
   return requestApiJson<ViralCopyClaimResponse>(
     "/api/viral/videos/copy/claim",
     "获取文案失败",
     {
       method: "POST",
-      body: JSON.stringify({ platform, videoId }),
+      body: JSON.stringify({
+        platform,
+        videoId,
+        ...(taskId ? { taskId } : {}),
+      }),
     },
     VIRAL_LIST_TIMEOUT_MS,
   );

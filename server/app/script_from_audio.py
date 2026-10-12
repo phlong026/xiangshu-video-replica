@@ -29,6 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app import content_store
 from app.asr import (
+    AsrConfirmedFailure,
     AsrProvider,
     AsrProviderError,
     AsrSubmissionUncertain,
@@ -180,6 +181,8 @@ class PreparedScriptFromAudio:
     cached_result: TranscriptResult | None = None
     # True = 结果直接来自共享缓存（没有真实转写发生），完成阶段不结算转写费。
     from_cache: bool = False
+    source_sha256: str | None = None
+    source_size: int | None = None
 
 
 class ScriptCachePending(Exception):
@@ -187,22 +190,54 @@ class ScriptCachePending(Exception):
 
 
 def _viral_source(conn: BusinessConnection, asset: sqlite3.Row) -> tuple[str, str] | None:
-    # Only server-verified imports can participate in cross-user reuse. User
-    # supplied asset metadata is not proof of a public video's identity.
+    # 客户端音轨与独立解析音频都不能证明原视频口播身份；只有服务端归档
+    # 的原视频及其不可变内容对象可以成为跨用户共享的生产者。
     row = conn.execute(
-        "SELECT platform,video_id FROM viral_import_tasks WHERE source_asset_id=%s "
-        "AND project_id=%s AND status='SUCCEEDED' ORDER BY created_at,id LIMIT 1",
-        (asset["id"], asset["project_id"]),
+        "SELECT i.platform,i.video_id FROM viral_import_tasks i "
+        "JOIN content_objects c ON c.id=%s AND c.sha256=%s AND c.size_bytes=%s "
+        "AND c.scope='global' "
+        "WHERE i.source_asset_id=%s AND i.project_id=%s AND i.status='SUCCEEDED' "
+        "AND %s='reference_video' ORDER BY i.created_at,i.id LIMIT 1",
+        (
+            asset["content_object_id"],
+            asset["sha256"],
+            asset["size_bytes"],
+            asset["id"],
+            asset["project_id"],
+            asset["kind"],
+        ),
     ).fetchone()
     if row is None:
         return None
-    # 视频与音频素材都凭服务端写下的导入任务行放行：音频有两条来路——链接导入直接
-    # 缓存的解析音频（2026-09-30 拍板可用于转写）与客户端本地抽取后上传的音轨
-    # （决策 #15）。两者都由服务端创建资产并在内容池校验过视频身份，客户端自报的
-    # 元数据一律不算数。
-    if asset["kind"] in ("reference_video", "reference_audio"):
-        return str(row["platform"]), str(row["video_id"])
-    return None
+    source = (str(row["platform"]), str(row["video_id"]))
+    # 同视频重归档不是同一版本；已有正文不覆盖，新版本先按私有成果交付。
+    cached = conn.execute(
+        "SELECT t.request_json,c.result_json FROM viral_script_cache c "
+        "LEFT JOIN script_from_audio_tasks t "
+        "ON t.id=c.producer_task_id WHERE c.platform=%s AND c.video_id=%s",
+        source,
+    ).fetchone()
+    if cached is not None:
+        try:
+            fingerprint = json.loads(str(cached["request_json"] or "{}")).get(
+                "viral_archive_sha256"
+            )
+            if fingerprint is None and cached["result_json"] is not None:
+                fingerprint = (
+                    json.loads(str(cached["result_json"])).get("archive", {}).get("sha256")
+                )
+        except (ValueError, TypeError, AttributeError):
+            return None
+        if fingerprint is not None and fingerprint != asset["sha256"]:
+            return None
+    current = conn.execute(
+        "SELECT storage_uri FROM viral_media_preparations WHERE platform=%s AND video_id=%s "
+        "AND media_kind='video' AND status='SUCCEEDED'",
+        source,
+    ).fetchone()
+    if current is not None and current["storage_uri"] != asset["storage_uri"]:
+        return None
+    return source
 
 
 def _cached_transcript(raw: object) -> TranscriptResult | None:
@@ -236,6 +271,45 @@ def _iso_updated_at(value: object) -> str:
     return value.isoformat() if isinstance(value, datetime) else str(value)
 
 
+def _verified_cache_result(raw: object, source: tuple[str, str]) -> TranscriptResult | None:
+    """共享正文必须带服务端写入的归档版本凭据，错配或旧无凭据正文只保留不交付。"""
+    if raw is None:
+        return None
+    try:
+        value = json.loads(str(raw))
+        archive = value.get("archive", {})
+        digest = archive.get("sha256", "")
+        if (archive.get("platform"), archive.get("video_id")) != source:
+            return None
+        if (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(c not in "0123456789abcdef" for c in digest)
+        ):
+            return None
+    except (ValueError, TypeError, AttributeError):
+        return None
+    return _cached_transcript(raw)
+
+
+def _cache_archive_is_current(
+    conn: BusinessConnection, raw: object, source: tuple[str, str]
+) -> bool:
+    # 同一平台 ID 重新归档后不能交付旧版本的正文；归档缺失不会撤销个人已受理成果。
+    current = conn.execute(
+        "SELECT storage_uri FROM viral_media_preparations WHERE platform=%s AND video_id=%s "
+        "AND media_kind='video' AND status='SUCCEEDED'",
+        source,
+    ).fetchone()
+    if current is None:
+        return True
+    try:
+        archive = json.loads(str(raw)).get("archive", {})
+        return bool(archive.get("storage_uri")) and archive["storage_uri"] == current["storage_uri"]
+    except (ValueError, TypeError, AttributeError):
+        return False
+
+
 def cached_transcript(
     conn: BusinessConnection, *, platform: str, video_id: str
 ) -> CachedTranscriptHit | None:
@@ -246,8 +320,10 @@ def cached_transcript(
     ).fetchone()
     if row is None:
         return None
-    result = _cached_transcript(row["result_json"])
-    if result is None:
+    result = _verified_cache_result(row["result_json"], (platform, video_id))
+    if result is None or not _cache_archive_is_current(
+        conn, row["result_json"], (platform, video_id)
+    ):
         return None
     return CachedTranscriptHit(result=result, updated_at=_iso_updated_at(row["updated_at"]))
 
@@ -270,8 +346,12 @@ def cached_transcripts(
             tuple(params),
         ).fetchall()
         for row in rows:
-            result = _cached_transcript(row["result_json"])
-            if result is None:
+            result = _verified_cache_result(
+                row["result_json"], (str(row["platform"]), str(row["video_id"]))
+            )
+            if result is None or not _cache_archive_is_current(
+                conn, row["result_json"], (str(row["platform"]), str(row["video_id"]))
+            ):
                 continue
             hits[(str(row["platform"]), str(row["video_id"]))] = CachedTranscriptHit(
                 result=result, updated_at=_iso_updated_at(row["updated_at"])
@@ -292,7 +372,9 @@ def _historical_transcripts(
             "JOIN viral_import_tasks i ON i.source_asset_id=t.source_asset_id "
             "AND i.project_id=t.project_id JOIN assets a ON a.id=t.source_asset_id "
             "WHERE i.platform=%s AND i.video_id=%s AND i.status='SUCCEEDED' "
-            "AND a.kind='reference_video' AND (t.status IN "
+            "AND a.kind='reference_video' AND a.content_object_id IS NOT NULL "
+            "AND COALESCE(t.error_code,'')<>'SCRIPT_FROM_AUDIO_PROVIDER_CONFIRMED_FAILED' "
+            "AND (t.status IN "
             "('PENDING','RUNNING','SUBMISSION_UNCERTAIN','SUCCEEDED') "
             "OR t.provider_started_at IS NOT NULL) "
             "AND (%s::text IS NULL OR (t.id<>%s AND NOT (t.request_json::jsonb ? 'viral_source'))) "
@@ -316,7 +398,7 @@ def _lock_script_cache(conn: BusinessConnection, source: tuple[str, str]) -> sql
         ).fetchone(),
     )
     producer = conn.execute(
-        "SELECT status,provider_started_at FROM script_from_audio_tasks WHERE id=%s",
+        "SELECT status,provider_started_at,error_code FROM script_from_audio_tasks WHERE id=%s",
         (cache["producer_task_id"],),
     ).fetchone()
     if cache["result_json"] is None and (
@@ -324,7 +406,10 @@ def _lock_script_cache(conn: BusinessConnection, source: tuple[str, str]) -> sql
         or (
             producer is not None
             and producer["status"] == "FAILED"
-            and producer["provider_started_at"] is None
+            and (
+                producer["provider_started_at"] is None
+                or producer["error_code"] == "SCRIPT_FROM_AUDIO_PROVIDER_CONFIRMED_FAILED"
+            )
         )
     ):
         previous = _historical_transcripts(
@@ -369,21 +454,64 @@ def _lock_script_cache(conn: BusinessConnection, source: tuple[str, str]) -> sql
                     (previous_result["result_json"], *source),
                 ).fetchone(),
             )
+    if (
+        cache["result_json"] is not None
+        and _verified_cache_result(cache["result_json"], source) is None
+    ):
+        proof = conn.execute(
+            "SELECT a.sha256,a.storage_uri FROM script_from_audio_tasks t "
+            "JOIN assets a ON a.id=t.source_asset_id AND a.project_id=t.project_id "
+            "JOIN content_objects c ON c.id=a.content_object_id AND c.sha256=a.sha256 "
+            "AND c.size_bytes=a.size_bytes AND c.scope='global' "
+            "JOIN viral_import_tasks i ON i.source_asset_id=a.id AND i.project_id=a.project_id "
+            "WHERE t.id=%s AND a.kind='reference_video' AND i.platform=%s AND i.video_id=%s "
+            "AND i.status='SUCCEEDED'",
+            (cache["producer_task_id"], *source),
+        ).fetchone()
+        if proof is not None:
+            value = json.loads(str(cache["result_json"]))
+            # 已带不同来源凭据视为错配，不能覆盖其证据重新认证。
+            if "archive" not in value:
+                value["archive"] = {
+                    "platform": source[0],
+                    "video_id": source[1],
+                    "sha256": str(proof["sha256"]),
+                    "storage_uri": str(proof["storage_uri"]),
+                }
+                cache = cast(
+                    sqlite3.Row,
+                    conn.execute(
+                        "UPDATE viral_script_cache SET result_json=%s "
+                        "WHERE platform=%s AND video_id=%s RETURNING *",
+                        (json.dumps(value, ensure_ascii=False), *source),
+                    ).fetchone(),
+                )
     return cache
 
 
 def _cache_producer_state(conn: BusinessConnection, cache: sqlite3.Row) -> str:
+    if (
+        cache["result_json"] is not None
+        and _verified_cache_result(
+            cache["result_json"], (str(cache["platform"]), str(cache["video_id"]))
+        )
+        is None
+    ):
+        return "UNCERTAIN"
     if cache["producer_task_id"] is None:
         return "AVAILABLE"
     producer = conn.execute(
-        "SELECT status,provider_started_at FROM script_from_audio_tasks WHERE id=%s",
+        "SELECT status,provider_started_at,error_code FROM script_from_audio_tasks WHERE id=%s",
         (cache["producer_task_id"],),
     ).fetchone()
     # A missing producer may have been deleted while a paid request was in
     # flight. Its disappearance must never authorize another submission.
     if producer is None:
         return "UNCERTAIN"
-    if producer["status"] == "FAILED" and producer["provider_started_at"] is None:
+    if producer["status"] == "FAILED" and (
+        producer["provider_started_at"] is None
+        or producer["error_code"] == "SCRIPT_FROM_AUDIO_PROVIDER_CONFIRMED_FAILED"
+    ):
         if any(
             old["status"] != "SUCCEEDED" or _cached_transcript(old["result_json"])
             for old in _historical_transcripts(
@@ -492,11 +620,20 @@ def enqueue_script_from_audio_task(
         return cast(sqlite3.Row, active)
 
     cache = _lock_script_cache(conn, viral_source) if viral_source else None
-    cached = _cached_transcript(cache["result_json"]) if cache is not None else None
+    if cache is not None and _viral_source(conn, asset) != viral_source:
+        cache = None
+        viral_source = None
+    cached = (
+        _verified_cache_result(cache["result_json"], viral_source)
+        if cache is not None and viral_source is not None
+        else None
+    )
     if cache is not None:
         if cached is None and _cache_producer_state(conn, cache) == "UNCERTAIN":
             raise _cache_uncertain()
         request_payload["viral_source"] = [cache["platform"], cache["video_id"]]
+        request_payload["viral_archive_sha256"] = str(asset["sha256"])
+        request_payload["viral_archive_uri"] = str(asset["storage_uri"])
     if cached is None and (cache is None or _cache_producer_state(conn, cache) == "AVAILABLE"):
         _configured_asr(conn)
 
@@ -705,6 +842,37 @@ def _validate_source(asset: sqlite3.Row) -> None:
         )
 
 
+def _verified_task_payload(conn: BusinessConnection, row: sqlite3.Row) -> dict[str, object]:
+    payload: dict[str, object] = json.loads(str(row["request_json"]))
+    source = payload.get("viral_source")
+    if not isinstance(source, list) or len(source) != 2 or payload.get("viral_archive_sha256"):
+        return payload
+    # 升级时已有未完成任务仍可能来自旧客户端音轨闸门；不能让旧任务继续污染共享。
+    asset = conn.execute(
+        "SELECT * FROM assets WHERE id=%s AND project_id=%s",
+        (row["source_asset_id"], row["project_id"]),
+    ).fetchone()
+    trusted = None if asset is None else _viral_source(conn, asset)
+    if trusted == (str(source[0]), str(source[1])) and asset is not None:
+        payload["viral_archive_sha256"] = str(asset["sha256"])
+        payload["viral_archive_uri"] = str(asset["storage_uri"])
+    else:
+        del payload["viral_source"]
+        conn.execute(
+            "UPDATE viral_script_cache SET producer_task_id=NULL WHERE platform=%s AND video_id=%s "
+            "AND producer_task_id=%s AND result_json IS NULL",
+            (*source, row["id"]),
+        )
+    changed = conn.execute(
+        "UPDATE script_from_audio_tasks SET request_json=%s WHERE id=%s AND status='RUNNING' "
+        "AND locked_by=%s AND attempt=%s AND locked_until::timestamptz>now()",
+        (json.dumps(payload, ensure_ascii=False), row["id"], row["locked_by"], row["attempt"]),
+    )
+    if changed.rowcount != 1:
+        raise script_from_audio_error(409, "SCRIPT_FROM_AUDIO_LEASE_LOST", "任务租约已失效。")
+    return payload
+
+
 def prepare_script_from_audio_task(
     conn: BusinessConnection,
     *,
@@ -712,12 +880,12 @@ def prepare_script_from_audio_task(
     storage: StorageAdapter,
 ) -> PreparedScriptFromAudio:
     row = _require_leased_task(conn, lease)
-    payload = json.loads(str(row["request_json"]))
+    payload = _verified_task_payload(conn, row)
     asset_id = str(payload.get("source_asset_id", ""))
-    source = payload.get("viral_source")
+    source = cast(list[str] | None, payload.get("viral_source"))
     if source is not None:
         cache = _lock_script_cache(conn, (str(source[0]), str(source[1])))
-        cached = _cached_transcript(cache["result_json"])
+        cached = _verified_cache_result(cache["result_json"], (str(source[0]), str(source[1])))
         if cached is not None:
             conn.commit()
             return PreparedScriptFromAudio(
@@ -798,6 +966,8 @@ def prepare_script_from_audio_task(
         ffprobe_path=ffprobe_path,
         audio_object_key=audio_key,
         provider_task_id=None if row["provider_task_id"] is None else str(row["provider_task_id"]),
+        source_sha256=str(asset["sha256"]) if asset["sha256"] else None,
+        source_size=int(asset["size_bytes"]) if asset["size_bytes"] is not None else None,
     )
 
 
@@ -886,6 +1056,13 @@ def perform_script_from_audio_task(
             raise script_from_audio_error(
                 413, "SCRIPT_FROM_AUDIO_SOURCE_TOO_LARGE", "来源文件过大，请压缩后重新上传。"
             )
+        if (work.source_size is not None and len(video_bytes) != work.source_size) or (
+            work.source_sha256 is not None
+            and hashlib.sha256(video_bytes).hexdigest() != work.source_sha256
+        ):
+            raise script_from_audio_error(
+                409, "SCRIPT_FROM_AUDIO_SOURCE_CHANGED", "来源素材校验失败，请重新上传。"
+            )
         with tempfile.TemporaryDirectory(prefix="script-from-audio-") as tmp_dir:
             video_path = Path(tmp_dir) / "source-video"
             audio_path = Path(tmp_dir) / "extracted-audio.m4a"
@@ -949,13 +1126,22 @@ def complete_script_from_audio_task(
     from_cache: bool = False,
 ) -> None:
     now = _time_text(datetime.now(UTC))
-    result_payload = {
+    result_payload: dict[str, object] = {
         "text": result.text,
         "duration_sec": result.duration_sec,
         "language": result.language,
     }
     row = _require_leased_task(conn, lease)
-    source = json.loads(str(row["request_json"])).get("viral_source")
+    request_payload = _verified_task_payload(conn, row)
+    source = cast(list[str] | None, request_payload.get("viral_source"))
+    archive_digest = request_payload.get("viral_archive_sha256")
+    if source is not None and archive_digest is not None:
+        result_payload["archive"] = {
+            "platform": str(source[0]),
+            "video_id": str(source[1]),
+            "sha256": str(archive_digest),
+            "storage_uri": request_payload.get("viral_archive_uri"),
+        }
     result_json = json.dumps(result_payload, ensure_ascii=False, sort_keys=True)
     if source is not None and _cached_transcript(result_json) is None:
         raise AsrProviderError("转写结果缺少有效文案或时长，请联系管理员核实。")
@@ -1062,6 +1248,10 @@ def fail_script_from_audio_task(
     elif isinstance(cause, (AsrTaskPending, AsrSubmissionUncertain)):
         status = "SUBMISSION_UNCERTAIN"
         code = "SCRIPT_FROM_AUDIO_SUBMISSION_UNCERTAIN"
+        retryable = 0
+    elif isinstance(cause, AsrConfirmedFailure):
+        status = "FAILED"
+        code = "SCRIPT_FROM_AUDIO_PROVIDER_CONFIRMED_FAILED"
         retryable = 0
     elif submission_started and isinstance(cause, AsrProviderError):
         status = "FAILED"

@@ -454,7 +454,14 @@ def _seed_copy_video(
             (
                 platform,
                 video_id,
-                json.dumps({"text": _COPY_TEXT, "duration_sec": 12.0}, ensure_ascii=False),
+                json.dumps(
+                    {
+                        "text": _COPY_TEXT,
+                        "duration_sec": 12.0,
+                        "archive": {"platform": platform, "video_id": video_id, "sha256": "a" * 64},
+                    },
+                    ensure_ascii=False,
+                ),
             ),
         )
     else:

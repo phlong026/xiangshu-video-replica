@@ -1174,6 +1174,10 @@ export function studioVideoFromViral(item: ViralVideoItem): StudioVideo {
     authorAvatar: item.authorAvatar,
     verified: item.verified,
     comments: item.comments,
+    statisticsUpdatedAt: item.statisticsUpdatedAt,
+    statisticsCheckedAt: item.statisticsCheckedAt,
+    statisticsStatus: item.statisticsStatus,
+    statisticsSource: item.statisticsSource,
     publishedAt: item.publishedAt,
     publishedDisplay: item.publishedDisplay,
     likeDisplay: item.likeDisplay,
@@ -1196,8 +1200,8 @@ export async function loadViralVideos(): Promise<{
   errors: string[];
 }> {
   const results = await Promise.allSettled([
-    listViralVideos("douyin", "hot", { featuredOnly: true }),
-    listViralVideos("wechat_channels", "hot", { featuredOnly: true }),
+    listViralVideos("douyin", "hot"),
+    listViralVideos("wechat_channels", "hot"),
   ]);
   const labels = ["抖音", "视频号"];
   const videos: StudioVideo[] = [];
@@ -1470,6 +1474,7 @@ function draftFromPayload(payload: unknown): StudioDraft | null {
     payload.rewriteWordCount <= 5000
       ? payload.rewriteWordCount
       : undefined;
+  merged.driverMode = payload.driverMode === "audio" ? "audio" : "text";
   merged.style = "standard";
   // 分仓迁移：升级前参考生视频的六段式正文就存在 prompt 里，分仓后参考页会看起来
   // 被清空。只搬结构明确的六段式——文/图模式的集成描述不含段名，不会被误搬；
@@ -1711,10 +1716,17 @@ export async function loadPersonAssets(
  * 成功返回转写结果；爆款任务的正文为 null——服务端任务接口不下发正文，调用方要凭
  * 任务的 viral_source 回「获取文案」claim 取（那里才是交付点，交付免费）。失败抛出带
  * 服务端文案的 Error（含 SUBMISSION_UNCERTAIN）。 */
+export type ScriptExtractionResult = {
+  text: string | null;
+  taskId: string;
+  viralSource?: { platform: string; videoId: string };
+  copyClaimRequired: boolean;
+};
+
 export async function extractScriptFromUpload(
   projectId: string,
   assetId: string,
-): Promise<{ text: string | null; taskId: string }> {
+): Promise<ScriptExtractionResult> {
   const submitted = await createScriptFromAudioTask(
     projectId,
     assetId,
@@ -1727,13 +1739,23 @@ export async function extractScriptFromUpload(
  * 爆款任务成功时 text 为 null（正文按 claim 回执下发），见 extractScriptFromUpload。 */
 export async function awaitScriptFromAudioTask(
   taskId: string,
-): Promise<{ text: string | null; taskId: string }> {
+): Promise<ScriptExtractionResult> {
   const maxAttempts = 150;
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     await new Promise((resolve) => window.setTimeout(resolve, 2000));
     const task = await getScriptFromAudioTask(taskId);
     if (task.status === "SUCCEEDED" && task.result) {
-      return { text: task.result.text ?? null, taskId: task.id };
+      return {
+        text: task.result.text ?? null,
+        taskId: task.id,
+        viralSource: task.viral_source
+          ? {
+              platform: task.viral_source.platform,
+              videoId: task.viral_source.video_id,
+            }
+          : undefined,
+        copyClaimRequired: task.copy_claim_required ?? false,
+      };
     }
     if (task.status === "FAILED" || task.status === "SUBMISSION_UNCERTAIN") {
       throw new Error(task.error_message || "文案提取失败，请稍后重试。");
@@ -1815,8 +1837,13 @@ export async function startViralCopyExtraction(video: {
 export async function claimExtractedViralCopy(
   platformKey: string,
   nativeId: string,
+  taskId?: string,
 ): Promise<string | null> {
-  const claimed = await claimViralCopy(platformKey as ViralPlatform, nativeId);
+  const claimed = await claimViralCopy(
+    platformKey as ViralPlatform,
+    nativeId,
+    taskId,
+  );
   return claimed.text;
 }
 

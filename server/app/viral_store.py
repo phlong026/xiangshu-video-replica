@@ -22,6 +22,7 @@ from typing import Any, Literal, cast
 from uuid import uuid4
 
 from app.db_portable import BusinessConnection
+from app.viral_content_state import customer_visible_sql
 from app.viral_homepage import live_homepage_sql
 from app.viral_tikhub import MAX_TAGS, ViralVideo, WechatVideoDetail, is_irrelevant_viral_video
 
@@ -36,6 +37,9 @@ _STATISTICS_METADATA_KEYS = (
     STATISTICS_CHECKED_AT_KEY,
     STATISTICS_RETRY_AT_KEY,
     STATISTICS_OBJECT_ID_KEY,
+    "_statistics_updated_at",
+    "_statistics_field_times",
+    "_statistics_source",
 )
 _METADATA_LOOKUP_CHUNK_SIZE = 400
 # 桌面服务是单进程；统一串行化 native_json 的读改写，避免不同请求互相覆盖。
@@ -63,13 +67,14 @@ ON CONFLICT (platform, video_id) DO UPDATE SET
     verified = excluded.verified,
     cover_url = COALESCE(excluded.cover_url, viral_videos.cover_url),
     duration_ms = COALESCE(NULLIF(excluded.duration_ms, 0), viral_videos.duration_ms),
-    likes = excluded.likes,
+    likes = COALESCE(excluded.likes, viral_videos.likes),
     comments = COALESCE(excluded.comments, viral_videos.comments),
     shares = COALESCE(excluded.shares, viral_videos.shares),
     collects = COALESCE(excluded.collects, viral_videos.collects),
     published_at = COALESCE(excluded.published_at, viral_videos.published_at),
     published_display = COALESCE(excluded.published_display, viral_videos.published_display),
-    like_display = excluded.like_display,
+    like_display = CASE WHEN excluded.likes IS NOT NULL THEN excluded.like_display
+                        ELSE viral_videos.like_display END,
     tags_json = CASE WHEN excluded.tags_json = '[]' THEN viral_videos.tags_json
                      ELSE excluded.tags_json END,
     play_url = COALESCE(excluded.play_url, viral_videos.play_url),
@@ -79,8 +84,8 @@ ON CONFLICT (platform, video_id) DO UPDATE SET
 """
 
 _ORDER_BY = {
-    "hot": "likes DESC, COALESCE(published_at, -1) DESC, video_id",
-    "latest": "COALESCE(published_at, -1) DESC, likes DESC, video_id",
+    "hot": "COALESCE(likes, -1) DESC, COALESCE(published_at, -1) DESC, video_id",
+    "latest": "COALESCE(published_at, -1) DESC, COALESCE(likes, -1) DESC, video_id",
 }
 
 _AVAILABILITY_VALUES = {"available", "hidden", "unavailable"}
@@ -90,16 +95,7 @@ _VIRAL_RANK_SENTINEL = 2147483647
 
 # Metadata is staged by the collector; only a completed batch is published.
 # Keep this predicate common to page rows and totals.
-_PUBLISHED_SQL = """
-    AND deleted_at IS NULL
-    AND (COALESCE(cover_url,'')='' OR cover_key IS NOT NULL)
-    AND EXISTS (
-        SELECT 1 FROM viral_media_preparations media
-        WHERE media.platform = viral_videos.platform AND media.video_id = viral_videos.video_id
-            AND media.media_kind = 'video' AND media.status = 'SUCCEEDED'
-            AND media.storage_uri IS NOT NULL
-    )
-"""
+_PUBLISHED_SQL = "AND " + customer_visible_sql("viral_videos")
 
 
 class InvalidViralCursorError(ValueError):
@@ -137,7 +133,7 @@ def _row_to_video(row: Any) -> ViralVideo:
             str(mapping["homepage_ends_at"]) if mapping.get("homepage_ends_at") else None
         ),
         duration_ms=int(mapping.get("duration_ms") or 0),
-        likes=int(mapping.get("likes") or 0),
+        likes=mapping.get("likes"),
         comments=mapping.get("comments"),
         shares=mapping.get("shares"),
         collects=mapping.get("collects"),
@@ -221,13 +217,36 @@ def _merge_cached_statistics_metadata(
     merged: list[ViralVideo] = []
     for video in videos:
         metadata = cached.get((video.platform, video.video_id))
-        if not metadata:
-            merged.append(video)
-            continue
         native = dict(video.native)
-        native.update(metadata)
+        native.update(metadata or {})
+        _record_statistics(
+            native,
+            {name: getattr(video, name) for name in ("likes", "comments", "shares", "collects")},
+            source="platform_search",
+        )
         merged.append(replace(video, native=native))
     return merged
+
+
+def _record_statistics(
+    native: dict[str, Any], values: dict[str, int | None], *, source: str
+) -> None:
+    now = datetime.now(UTC).isoformat()
+    present = [name for name, value in values.items() if value is not None]
+    native["_statistics_checked_at"] = now
+    native["_statistics_status"] = (
+        "updated"
+        if len(present) == len(values)
+        else "partial"
+        if present or native.get("_statistics_updated_at")
+        else "unknown"
+    )
+    if present:
+        native["_statistics_updated_at"] = now
+        native["_statistics_source"] = source
+        times = dict(native.get("_statistics_field_times") or {})
+        times.update({name: now for name in present})
+        native["_statistics_field_times"] = times
 
 
 def upsert_viral_videos(
@@ -262,8 +281,9 @@ def list_viral_videos(conn: BusinessConnection, *, platform: str, sort: str) -> 
     rows = conn.execute(
         f"""
         SELECT * FROM viral_videos
-        WHERE platform = %s AND collection_published=1
-        AND (published_at BETWEEN %s AND %s OR pushed_at IS NOT NULL)
+        WHERE platform = %s AND ((collection_published=1
+        AND (published_at BETWEEN %s AND %s OR pushed_at IS NOT NULL))
+        OR {live_homepage_sql()})
         {_PUBLISHED_SQL}
         ORDER BY {order}
         """,
@@ -328,11 +348,21 @@ def _cursor_values(video: ViralVideo, sort: str, *, featured: bool = False) -> t
         # featured 排序以置顶序为先：NULLS LAST 用 int4 上限哨兵编码进游标。
         rank = video.homepage_rank if video.homepage_rank is not None else _VIRAL_RANK_SENTINEL
         if sort == "latest":
-            return (rank, published_at, video.likes, video.video_id)
-        return (rank, video.likes, published_at, video.video_id)
+            return (
+                rank,
+                published_at,
+                (video.likes if video.likes is not None else -1),
+                video.video_id,
+            )
+        return (
+            rank,
+            (video.likes if video.likes is not None else -1),
+            published_at,
+            video.video_id,
+        )
     if sort == "latest":
-        return (published_at, video.likes, video.video_id)
-    return (video.likes, published_at, video.video_id)
+        return (published_at, (video.likes if video.likes is not None else -1), video.video_id)
+    return ((video.likes if video.likes is not None else -1), published_at, video.video_id)
 
 
 def _encode_cursor(
@@ -412,8 +442,8 @@ def _page_boundary_sql(
             """
             AND (
                 COALESCE(published_at, -1) < %s
-                OR (COALESCE(published_at, -1) = %s AND likes < %s)
-                OR (COALESCE(published_at, -1) = %s AND likes = %s AND video_id > %s)
+                OR (COALESCE(published_at, -1) = %s AND COALESCE(likes, -1) < %s)
+                OR (COALESCE(published_at, -1) = %s AND COALESCE(likes, -1) = %s AND video_id > %s)
             )
             """,
             (first, first, second, first, second, video_id),
@@ -421,9 +451,9 @@ def _page_boundary_sql(
     return (
         """
         AND (
-            likes < %s
-            OR (likes = %s AND COALESCE(published_at, -1) < %s)
-            OR (likes = %s AND COALESCE(published_at, -1) = %s AND video_id > %s)
+            COALESCE(likes, -1) < %s
+            OR (COALESCE(likes, -1) = %s AND COALESCE(published_at, -1) < %s)
+            OR (COALESCE(likes, -1) = %s AND COALESCE(published_at, -1) = %s AND video_id > %s)
         )
         """,
         (first, first, second, first, second, video_id),
@@ -438,7 +468,8 @@ def _recent_relevant_total(
         SELECT title FROM viral_videos
         WHERE platform = %s
           AND (%s OR (collection_published=1
-              AND (published_at BETWEEN %s AND %s OR pushed_at IS NOT NULL)))
+              AND (published_at BETWEEN %s AND %s OR pushed_at IS NOT NULL))
+              OR {live_homepage_sql()})
           AND (NOT %s OR {live_homepage_sql()})
           {_PUBLISHED_SQL}
           AND NOT EXISTS (
@@ -559,7 +590,8 @@ def list_viral_video_page(
             SELECT * FROM viral_videos
             WHERE platform = %s
               AND (%s OR (collection_published=1
-                  AND (published_at BETWEEN %s AND %s OR pushed_at IS NOT NULL)))
+                  AND (published_at BETWEEN %s AND %s OR pushed_at IS NOT NULL))
+              OR {live_homepage_sql()})
               AND (NOT %s OR {live_homepage_sql()})
               {_PUBLISHED_SQL}
               AND NOT EXISTS (
@@ -616,6 +648,51 @@ def get_viral_video(conn: BusinessConnection, *, platform: str, video_id: str) -
         (platform, video_id),
     ).fetchone()
     return _row_to_video(row) if row is not None else None
+
+
+def viral_publication_clock(
+    conn: BusinessConnection, *, platform: str, featured_only: bool
+) -> tuple[str, str | None]:
+    # 只报告有效公共资产真实可见性改变的时刻，私有导入不会贡献边界。
+    # 秒级发布时间窗口包含端点，因此七天后的下一秒才真正移出列表。
+    visible_before = customer_visible_sql("v", at="(change.boundary - interval '1 microsecond')")
+    visible_after = customer_visible_sql("v", at="change.boundary")
+    row = conn.execute(
+        "SELECT now(), (SELECT min(change.boundary) FROM viral_videos v "
+        "CROSS JOIN LATERAL (VALUES (v.homepage_starts_at), (v.homepage_ends_at), "
+        "(to_timestamp(v.published_at)), (to_timestamp(v.published_at + 604801))) "
+        "change(boundary) WHERE v.platform=%s AND (NOT %s OR v.homepage_featured=1) "
+        f"AND change.boundary>now() AND (({visible_before}) != ({visible_after})))",
+        (platform, featured_only),
+    ).fetchone()
+    return row[0].isoformat(), row[1].isoformat() if row[1] else None
+
+
+def is_customer_visible_viral_video(
+    conn: BusinessConnection, *, platform: str, video_id: str, user_id: str
+) -> bool:
+    return (
+        conn.execute(
+            "SELECT 1 FROM viral_videos v WHERE v.platform=%s AND v.video_id=%s AND "
+            + customer_accessible_viral_sql("v"),
+            (platform, video_id, user_id),
+        ).fetchone()
+        is not None
+    )
+
+
+def customer_accessible_viral_sql(alias: str = "v") -> str:
+    # 私人导入只授予提交者访问；公开下架/软删除不会因导入记录而重新暴露。
+    return (
+        f"({customer_visible_sql(alias)} OR ({alias}.deleted_at IS NULL AND NOT EXISTS "
+        "(SELECT 1 FROM viral_video_visibility access_vis "
+        f"WHERE access_vis.platform={alias}.platform "
+        f"AND access_vis.video_id={alias}.video_id AND access_vis.status!='AVAILABLE') "
+        "AND EXISTS (SELECT 1 FROM viral_import_tasks own_import "
+        "WHERE own_import.owner_user_id=%s "
+        f"AND own_import.platform={alias}.platform AND own_import.video_id={alias}.video_id "
+        "AND own_import.status='SUCCEEDED')))"
+    )
 
 
 def viral_video_availabilities(
@@ -1005,7 +1082,16 @@ def update_viral_statistics(
         if row is None:
             return
         native = _native_from_json(row["native_json"])
-        native[STATISTICS_CHECKED_AT_KEY] = datetime.now(UTC).isoformat()
+        _record_statistics(
+            native,
+            {
+                "likes": detail.like_count,
+                "comments": detail.comment_count,
+                "shares": detail.forward_count,
+                "collects": detail.fav_count,
+            },
+            source="platform_detail",
+        )
         native.pop(STATISTICS_RETRY_AT_KEY, None)
         object_id = str(getattr(detail, "object_id", ""))
         if object_id.isascii() and object_id.isdigit() and len(object_id) <= 20:
@@ -1049,6 +1135,7 @@ def mark_viral_statistics_failure(
         if row is None:
             return
         native = _native_from_json(row["native_json"])
+        native["_statistics_status"] = "failed"
         native[STATISTICS_RETRY_AT_KEY] = datetime.now(UTC).isoformat()
         conn.execute(
             """

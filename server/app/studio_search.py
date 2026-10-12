@@ -12,6 +12,7 @@ from app.db_portable import BusinessConnection
 from app.materials import list_materials
 from app.simple_character import list_simple_library_page
 from app.sql_pagination import PAGE_CLAUSE
+from app.viral_store import customer_accessible_viral_sql
 
 SearchKind = Literal["video", "script", "person", "material"]
 
@@ -103,12 +104,11 @@ def search_studio(
             columns = "content.script_id AS id, content.title, '' AS platform"
         else:
             source = "viral_videos AS content"
-            predicate = """strpos(lower(content.title || ' ' || content.author), lower(%s)) > 0
-                AND NOT EXISTS (SELECT 1 FROM viral_video_visibility AS visibility
-                    WHERE visibility.platform = content.platform
-                    AND visibility.video_id = content.video_id
-                    AND visibility.status IN ('hidden', 'unavailable'))"""
-            parameters = (query,)
+            predicate = (
+                "strpos(lower(content.title || ' ' || content.author), lower(%s)) > 0 AND "
+                + customer_accessible_viral_sql("content")
+            )
+            parameters = (query, actor.id)
             columns = "content.video_id AS id, content.title, content.platform"
         row = conn.execute(
             f"SELECT COUNT(*) AS total FROM {source} WHERE {predicate}",

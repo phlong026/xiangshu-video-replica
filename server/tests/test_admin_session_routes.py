@@ -1253,13 +1253,15 @@ def test_seven_day_visibility_uses_database_clock_when_collection_is_paused(
             "VALUES('customer_u','douyin','old-favorite')"
         )
         conn = BusinessConnection.postgres(raw)
+        # 普通入口与后台客户可见集合一致，也包含仍有效的长期首页推荐。
         assert [v.video_id for v in list_viral_videos(conn, platform="douyin", sort="hot")] == [
-            "seventh-day"
+            "seventh-day",
+            "old-featured",
         ]
         assert [
             v.video_id
             for v in list_viral_video_page(conn, platform="douyin", sort="hot", limit=12).items
-        ] == ["seventh-day"]
+        ] == ["seventh-day", "old-featured"]
         assert [
             v.video_id
             for v in list_viral_video_page(

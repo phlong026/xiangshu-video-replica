@@ -231,15 +231,12 @@ def _content_url(record_type: str, record_id: str) -> str:
 
 
 def _audit_count(media_dsn: str, entity_id: str) -> int:
-    row = (
-        psycopg.connect(media_dsn)
-        .execute(
+    with psycopg.connect(media_dsn) as conn:
+        row = conn.execute(
             "SELECT count(*) FROM audit_logs"
             " WHERE action = 'generation_record.content_view' AND entity_id = %s",
             (entity_id,),
-        )
-        .fetchone()
-    )
+        ).fetchone()
     assert row is not None
     return int(row[0])
 

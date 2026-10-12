@@ -314,7 +314,12 @@ def test_normalizers_ignore_malformed_numeric_fields() -> None:
     )
 
     assert douyin is not None
-    assert (douyin.likes, douyin.comments, douyin.shares, douyin.collects) == (0, 0, 0, 0)
+    assert (douyin.likes, douyin.comments, douyin.shares, douyin.collects) == (
+        None,
+        None,
+        None,
+        None,
+    )
     assert douyin.published_at is None
     assert wechat is not None
     assert wechat.published_at is None

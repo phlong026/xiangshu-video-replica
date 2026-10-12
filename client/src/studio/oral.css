@@ -273,7 +273,8 @@
   margin-top: 22px;
 }
 
-.oral-voice-choice audio {
+.oral-voice-choice audio,
+.oral-script-panel audio {
   width: 100%;
   height: 34px;
   margin-top: 12px;

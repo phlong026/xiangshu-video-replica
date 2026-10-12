@@ -62,7 +62,7 @@ DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 # 积分单行配置表）追加在其后，故链尾为 20260930T1400_registration_bonus_settings。
 # 迁移后 alembic 版本头即该值，9 处 assert version == HEAD_REVISION 依赖此值。
 # 新增业务防重迁移必须进入真实升级测试，不能停留在旧链尾制造假通过。
-HEAD_REVISION = "20261012T0300_refund_source_allocations"
+HEAD_REVISION = "20261012T0500_nullable_viral_metrics"
 
 
 def test_viral_script_cache_migration_preserves_results_without_task_foreign_keys(
@@ -2412,3 +2412,52 @@ def test_pg_refund_downgrade_guard_and_shape_round_trip() -> None:
             ).fetchone() == (-1,)
     finally:
         _drop_database(db_name)
+
+
+def test_nullable_viral_metrics_upgrade_and_lossless_downgrade() -> None:
+    from alembic import command
+    from sqlalchemy.exc import DBAPIError
+
+    database_name = "nullable_viral_metrics_test"
+    dsn = _pg_dsn().rsplit("/", 1)[0] + f"/{database_name}"
+    _drop_database(database_name)
+    with psycopg.connect(_admin_dsn(), autocommit=True) as conn:
+        conn.execute(f'CREATE DATABASE "{database_name}"')
+    try:
+        config = _alembic_config(dsn.replace("postgresql://", "postgresql+psycopg://"))
+        command.upgrade(config, "head")
+        with psycopg.connect(dsn) as conn:
+            conn.execute(
+                "INSERT INTO viral_videos(platform,video_id,category,title,author,likes) "
+                "VALUES('douyin','unknown','test','测试','测试',NULL)"
+            )
+        with pytest.raises(DBAPIError, match="存在未知互动统计"):
+            command.downgrade(config, "20261012T0300_refund_source_allocations")
+        with psycopg.connect(dsn) as conn:
+            assert (
+                conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+                == HEAD_REVISION
+            )
+            assert (
+                conn.execute("SELECT likes FROM viral_videos WHERE video_id='unknown'").fetchone()[
+                    0
+                ]
+                is None
+            )
+            conn.execute("DELETE FROM viral_videos WHERE video_id='unknown'")
+        command.downgrade(config, "20261012T0300_refund_source_allocations")
+        with psycopg.connect(dsn) as conn:
+            row = conn.execute(
+                "SELECT is_nullable,column_default FROM information_schema.columns "
+                "WHERE table_name='viral_videos' AND column_name='likes'"
+            ).fetchone()
+            assert row == ("NO", "0")
+        command.upgrade(config, "head")
+        with psycopg.connect(dsn) as conn:
+            row = conn.execute(
+                "SELECT is_nullable,column_default FROM information_schema.columns "
+                "WHERE table_name='viral_videos' AND column_name='likes'"
+            ).fetchone()
+            assert row == ("YES", None)
+    finally:
+        _drop_database(database_name)

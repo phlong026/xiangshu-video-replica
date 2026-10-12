@@ -865,6 +865,9 @@ _COLLECTED_VIRAL_ROW_SELECT = f"""
         {content_state_sql()} AS content_state,
         {customer_visible_sql()} AS customer_visible,
         v.native_json::jsonb->>'_statistics_checked_at' AS statistics_checked_at,
+        v.native_json::jsonb->>'_statistics_updated_at' AS statistics_updated_at,
+        COALESCE(v.native_json::jsonb->>'_statistics_status','unknown') AS statistics_status,
+        v.native_json::jsonb->>'_statistics_source' AS statistics_source,
         v.native_json::jsonb->>'_statistics_retry_at' AS statistics_retry_at,
         (COALESCE(v.cover_url,'') != '') AS cover_required,
         COALESCE(m.status,'NOT_STARTED') AS media_status,m.storage_uri,
@@ -961,6 +964,9 @@ _COLLECTED_VIDEO_COLUMNS = (
     "homepage_live",
     "cover_key",
     "statistics_checked_at",
+    "statistics_updated_at",
+    "statistics_status",
+    "statistics_source",
     "statistics_retry_at",
     "cover_required",
     "media_status",
@@ -986,7 +992,7 @@ _USAGE_TOTAL_SQL = f"{_USAGE_DETAIL_SQL} + {_USAGE_COPY_SQL} + {_USAGE_FAVORITE_
 _SORT_EXPRESSIONS = {
     # 默认采集时间倒序；likes/published 按内容表现；usage 按客户使用量。
     "created": "v.created_at DESC,v.platform,v.video_id",
-    "likes": "v.likes DESC,v.created_at DESC,v.platform,v.video_id",
+    "likes": "v.likes DESC NULLS LAST,v.created_at DESC,v.platform,v.video_id",
     "published": "v.published_at DESC NULLS LAST,v.created_at DESC,v.platform,v.video_id",
     "usage": (f"{_USAGE_TOTAL_SQL} DESC,v.created_at DESC,v.platform,v.video_id"),
 }
@@ -1006,7 +1012,7 @@ def read_collected_viral_videos(
     cohort_stage: CohortStage | None = None,
     collected_from: date | None = None,
     collected_to: date | None = None,
-    attention: Literal["missing_cover"] | None = None,
+    attention: Literal["missing_cover", "unknown_statistics"] | None = None,
     source_keyword: Annotated[str, Query(max_length=100)] = "",
     published_from: date | None = None,
     published_to: date | None = None,
@@ -1038,6 +1044,8 @@ def read_collected_viral_videos(
             f"AND ({STAGES[cohort_stage]}))"
         )
         params.extend(cohort_params)
+    if attention == "unknown_statistics":
+        filters += " AND v.likes IS NULL"
     if attention == "missing_cover":
         # 与总览 tile 同口径（ADM-C04）：无 cover_key 即缺——链接导入的抖音视频
         # 解析结果可能连源站 cover_url 都不带，旧口径（cover_url 非空才算缺）
@@ -2596,6 +2604,26 @@ def curate_collected_viral_videos_batch(
             )
             for entry in unready_entries[platform]:
                 entry["task_id"] = queued_task
+        # 受理数不能冒充客户可用数；返回与客户读路径同一时刻的权威状态。
+        for item in updated:
+            current = conn.execute(
+                f"SELECT {customer_visible_sql()} AS visible, "
+                "v.homepage_starts_at>now() AS scheduled, "
+                "v.deleted_at IS NOT NULL AS deleted FROM viral_videos v "
+                "WHERE v.platform=%s AND v.video_id=%s",
+                (item["platform"], item["video_id"]),
+            ).fetchone()
+            visible = bool(current and current[0])
+            item["customer_visible"] = visible
+            item["publication_state"] = (
+                "visible"
+                if visible
+                else "preparing"
+                if item.get("queued_for_preparation")
+                else "scheduled"
+                if current and current[1]
+                else "hidden"
+            )
         return {
             "action": payload.action,
             "count": sum(1 for item in updated if not item.get("queued_for_preparation")),

@@ -81,6 +81,10 @@ def _confirmed_duration(value: object, *, divisor: float = 1) -> float | None:
         return None
 
 
+class AsrConfirmedFailure(AsrProviderError):
+    """供应商明确报告 FAILED/CANCELED，已确认无可交付结果。"""
+
+
 class AsrSubmissionUncertain(AsrProviderError):
     """The transport cannot prove whether a submit was accepted."""
 
@@ -390,7 +394,7 @@ class DashScopeFunAsr:
                     if item.get("subtask_status") == "FAILED":
                         message = str(item.get("message") or item.get("code") or "")
                         break
-                raise AsrProviderError(f"语音转写任务失败：{message or task_status}")
+                raise AsrConfirmedFailure(f"语音转写任务失败：{message or task_status}")
         raise AsrTaskPending("语音转写任务轮询超时，正在继续查询原任务。")
 
     def _download_transcription(self, output: dict[str, Any]) -> TranscriptResult:

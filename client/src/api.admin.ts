@@ -3305,6 +3305,15 @@ export type CollectedViralVideo = {
   archive_status?: string | null;
   archive_error?: string | null;
   statistics_checked_at?: string | null;
+  statistics_updated_at?: string | null;
+  statistics_status?:
+    | "updated"
+    | "complete"
+    | "partial"
+    | "failed"
+    | "failure"
+    | "unknown";
+  statistics_source?: string | null;
   statistics_retry_at?: string | null;
   cover_required?: boolean;
   cover_key?: string | null;
@@ -3319,7 +3328,7 @@ export type CollectedViralVideo = {
   verified?: boolean;
   tags?: string[];
   duration_ms: number;
-  likes: number;
+  likes: number | null;
   /** 方案 P1 内容模块 C-1：客户使用计数（详情查看 / 文案提取 / 收藏）。 */
   usage_detail_count?: number;
   usage_copy_count?: number;
@@ -3468,7 +3477,7 @@ export async function listCollectedViralVideos(options: {
   cohortStage?: "collected" | "prepared" | "homepage" | "detail" | "copy";
   collectedFrom?: string;
   collectedTo?: string;
-  attention?: "missing_cover";
+  attention?: "missing_cover" | "unknown_statistics";
   contentState?: CollectedViralVideo["content_state"];
   sourceKeyword?: string;
   publishedFrom?: string;
@@ -3575,6 +3584,14 @@ export type ViralBatchCurationResult = {
     deleted?: boolean;
     published?: boolean;
     queued_for_preparation?: boolean;
+    customer_visible?: boolean;
+    publication_state?:
+      | "visible"
+      | "preparing"
+      | "scheduled"
+      | "failed"
+      | "hidden"
+      | "unknown";
     task_id?: string | null;
   }[];
 };
@@ -3811,6 +3828,8 @@ export function refreshCollectedVideoStatistics(
       | "collects"
       | "statistics_checked_at"
       | "statistics_retry_at"
+      | "statistics_updated_at"
+      | "statistics_source"
     > & { statistics_status: "complete" | "partial" | "failure" }
   >(
     `/api/control/viral/videos/wechat_channels/${encodeURIComponent(video.video_id)}/statistics`,

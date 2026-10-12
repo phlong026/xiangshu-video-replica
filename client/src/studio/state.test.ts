@@ -8,6 +8,7 @@ import {
   DEFAULT_MAX_REFERENCE_VIDEOS,
   draftFromTask,
   hasCopyResult,
+  navigateStudioState,
   patchStudioDraft,
   resolveSubmittedRatio,
   routeFromHash,
@@ -307,6 +308,7 @@ describe("V1.4 交接合同", () => {
     expect(next.id).not.toBe(original.id);
     expect(next.sourceId).toBe("source-original");
     expect(next.audioId).toBe("speech-original");
+    expect(next.driverMode).toBe("audio");
     expect(next.voiceId).toBeUndefined();
     expect(next.script.confirmed).toBe(false);
     expect(next.script.text).toBe("旧任务的脚本");
@@ -314,7 +316,7 @@ describe("V1.4 交接合同", () => {
   it("首页默认工作台，旧路由有确定映射", () => {
     expect(routeFromHash("")).toBe("workbench");
     expect(routeFromHash("#projects")).toBe("replica");
-    expect(routeFromHash("#studio/oral-audio")).toBe("oral");
+    expect(routeFromHash("#studio/oral-audio")).toBe("oral-audio");
     expect(routeFromHash("#settings")).toBe("settings");
     expect(routeFromHash("#admin")).toBe("workbench");
   });
@@ -376,6 +378,37 @@ describe("V1.4 交接合同", () => {
       avatarId: "avatar",
       audioAssetId: "speech",
     });
+  });
+  it("音频入口和返回保留草稿驱动模式，刷新路由不降为文字", () => {
+    const initial = createState();
+    const audio = navigateStudioState(initial, "oral-audio");
+    expect(audio.draft.driverMode).toBe("audio");
+    expect(
+      createState(routeFromHash(studioHashForState(audio))).draft.driverMode,
+    ).toBe("audio");
+    const materials = navigateStudioState(audio, "materials");
+    expect(navigateStudioState(materials, "oral").draft.driverMode).toBe(
+      "audio",
+    );
+  });
+  it("音频草稿默认按音频构建，旧文字和声音不进入请求", () => {
+    const draft = {
+      ...createDraft(),
+      driverMode: "audio" as const,
+      ipId: "ip",
+      avatarId: "avatar",
+      audioId: "audio",
+      voiceId: "old-voice",
+    };
+    draft.script.text = "旧文字";
+    expect(buildOralInput(draft)).toMatchObject({
+      mode: "audio",
+      audioAssetId: "audio",
+    });
+    expect(buildOralInput(draft)).not.toHaveProperty("voiceId");
+    expect(() => buildOralInput({ ...draft, audioId: undefined })).toThrow(
+      "完整口播音频",
+    );
   });
   it("文案模式需要已确认终稿和声音，不提交音频", () => {
     const draft = createDraft();

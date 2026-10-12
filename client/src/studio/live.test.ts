@@ -599,6 +599,23 @@ describe("真实 Studio 只读适配器", () => {
     await expect(discardCloudDraft()).rejects.toThrow("boom");
   });
 
+  it.each(["audio", "text"] as const)(
+    "云端草稿恢复保留%s口播模式",
+    async (driverMode) => {
+      api.getStudioDraft.mockResolvedValue({
+        draft_kind: "copy",
+        payload: { ...createDraft(), driverMode, audioId: "saved-audio" },
+        script_confirmed: false,
+        revision: 1,
+        updated_at: "2026-10-12T00:00:00Z",
+      });
+      expect((await loadCloudDraft())?.draft).toMatchObject({
+        driverMode,
+        audioId: "saved-audio",
+      });
+    },
+  );
+
   it("恢复旧模板草稿时迁移到当前真实可用的标准口播", async () => {
     api.getStudioDraft.mockResolvedValue({
       draft_kind: "copy",
@@ -1947,6 +1964,8 @@ describe("提取文案任务绑定", () => {
       await expect(result).resolves.toEqual({
         text: "本次转写",
         taskId: "audio-owned",
+        viralSource: undefined,
+        copyClaimRequired: false,
       });
       expect(api.getScriptFromAudioTask).toHaveBeenCalledWith("audio-owned");
       expect(api.getLatestScriptFromAudioTask).not.toHaveBeenCalled();
@@ -1970,6 +1989,8 @@ describe("提取文案任务绑定", () => {
       await expect(result).resolves.toEqual({
         text: null,
         taskId: "audio-gated",
+        viralSource: { platform: "douyin", videoId: "v-1" },
+        copyClaimRequired: true,
       });
     } finally {
       vi.useRealTimers();
@@ -2344,6 +2365,27 @@ describe("爆款视频封面地址", () => {
     ).toMatchObject({ homepageRank: null });
   });
 
+  it("指标缺失及采集时效直接投影，不伪造为零", () => {
+    expect(
+      live.studioVideoFromViral({
+        ...item,
+        likes: null,
+        comments: null,
+        statisticsUpdatedAt: "2026-10-12T08:00:00Z",
+        statisticsCheckedAt: "2026-10-12T09:00:00Z",
+        statisticsStatus: "partial",
+        statisticsSource: "platform",
+      }),
+    ).toMatchObject({
+      likes: null,
+      comments: null,
+      statisticsUpdatedAt: "2026-10-12T08:00:00Z",
+      statisticsCheckedAt: "2026-10-12T09:00:00Z",
+      statisticsStatus: "partial",
+      statisticsSource: "platform",
+    });
+  });
+
   it("合并抖音与视频号精选时保留各自置顶顺序", async () => {
     api.listViralVideos.mockImplementation(async (platform: string) => ({
       platform,
@@ -2367,6 +2409,8 @@ describe("爆款视频封面地址", () => {
       ],
       errors: [],
     });
+    expect(api.listViralVideos).toHaveBeenCalledWith("douyin", "hot");
+    expect(api.listViralVideos).toHaveBeenCalledWith("wechat_channels", "hot");
   });
 });
 
@@ -2577,7 +2621,19 @@ describe("claimExtractedViralCopy（转写完成后的交付点，交付免费�
     await expect(live.claimExtractedViralCopy("douyin", "v-1")).resolves.toBe(
       "刚转写好的文案",
     );
-    expect(api.claimViralCopy).toHaveBeenCalledWith("douyin", "v-1");
+    expect(api.claimViralCopy).toHaveBeenCalledWith("douyin", "v-1", undefined);
+  });
+
+  it("凭个人任务领取时保留 taskId，不另建转写任务", async () => {
+    api.claimViralCopy.mockResolvedValue({ text: "个人已付费成果" });
+    await expect(
+      live.claimExtractedViralCopy("douyin", "removed", "owned-task"),
+    ).resolves.toBe("个人已付费成果");
+    expect(api.claimViralCopy).toHaveBeenCalledWith(
+      "douyin",
+      "removed",
+      "owned-task",
+    );
   });
 
   it("缓存尚未写入时返回 null，让调用方以任务结果兜底", async () => {

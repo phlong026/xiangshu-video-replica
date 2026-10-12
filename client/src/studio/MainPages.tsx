@@ -89,6 +89,7 @@ const statusIcons: Record<StudioTask["status"], string> = {
 };
 
 function formatWorkbenchLikes(video: StudioVideo) {
+  if (video.likes == null) return "待核验";
   if (video.likeDisplay) return video.likeDisplay;
   if (video.likes >= 10000) {
     return `${(video.likes / 10000).toFixed(1).replace(".0", "")}万`;
@@ -330,7 +331,7 @@ export function WorkbenchPage() {
         return 1;
       }
       return (
-        right.likes - left.likes ||
+        (right.likes ?? -1) - (left.likes ?? -1) ||
         left.id.localeCompare(right.id, undefined, { numeric: true })
       );
     })

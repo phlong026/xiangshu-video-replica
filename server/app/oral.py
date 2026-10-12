@@ -895,6 +895,15 @@ def create_oral_task(
                 script_text=script_text, audio_asset_id=audio_asset_id
             ),
         )
+        if mode == "AUDIO":
+            # 已移入回收侧的音频不能由旧草稿重新受理；已接受任务的交付不受影响。
+            hidden_audio = conn.execute(
+                "SELECT 1 FROM studio_material_preferences "
+                "WHERE user_id = %s AND source_type = 'asset' AND source_id = %s AND hidden = 1",
+                (actor.id, audio_asset_id),
+            ).fetchone()
+            if hidden_audio is not None:
+                raise OralDomainError("口播音频已移除，请恢复素材或重新选择")
         conn.execute(
             """
             INSERT INTO oral_tasks (

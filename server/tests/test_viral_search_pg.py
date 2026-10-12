@@ -243,7 +243,12 @@ def test_cached_transcript_and_batch_lookup(route_state: str) -> None:
     from app.script_from_audio import cached_transcript, cached_transcripts
 
     payload = json.dumps(
-        {"text": "农村自建房避坑指南", "duration_sec": 15.0, "language": "zh"},
+        {
+            "text": "农村自建房避坑指南",
+            "duration_sec": 15.0,
+            "language": "zh",
+            "archive": {"platform": "douyin", "video_id": "v-1", "sha256": "a" * 64},
+        },
         ensure_ascii=False,
     )
     with psycopg.connect(route_state) as raw:
@@ -673,7 +678,14 @@ def test_search_flags_has_copy_on_cache_hit(search_client, route_state, monkeypa
     _patch_search_infra(monkeypatch)
     _use_search_stub(search_client, _SearchStub())
     headers, uid = account(search_client, "search_copy")
-    payload = json.dumps({"text": "已有文案", "duration_sec": 12.0}, ensure_ascii=False)
+    payload = json.dumps(
+        {
+            "text": "已有文案",
+            "duration_sec": 12.0,
+            "archive": {"platform": "douyin", "video_id": "v-1", "sha256": "a" * 64},
+        },
+        ensure_ascii=False,
+    )
     with psycopg.connect(route_state) as raw:
         raw.execute(
             "UPDATE wallets SET available_credits=50, reserved_credits=0 WHERE user_id=%s", (uid,)
@@ -1400,7 +1412,14 @@ def _patch_refresh_infra(monkeypatch) -> None:
 def test_copy_returns_cached_transcript_and_null_on_miss(search_client, route_state) -> None:
     """GET /search/copy：只回「有没有 / 买没买过」（只读、免费），绝不下发正文."""
     headers, _ = account(search_client, "copy_read")
-    payload = json.dumps({"text": "已缓存文案", "duration_sec": 12.0}, ensure_ascii=False)
+    payload = json.dumps(
+        {
+            "text": "已缓存文案",
+            "duration_sec": 12.0,
+            "archive": {"platform": "douyin", "video_id": "v-copy-1", "sha256": "a" * 64},
+        },
+        ensure_ascii=False,
+    )
     with psycopg.connect(route_state) as raw:
         raw.execute(
             "INSERT INTO viral_script_cache (platform, video_id, result_json) "
@@ -1706,7 +1725,19 @@ def test_content_pool_list_flags_copy_hits(source_client, route_state) -> None:
     from app.viral_store import upsert_viral_videos
 
     headers, _uid = account(source_client, "pool_hascopy")
-    payload = json.dumps({"text": "池内已有文案", "duration_sec": 15.0}, ensure_ascii=False)
+    payload = json.dumps(
+        {
+            "text": "池内已有文案",
+            "duration_sec": 15.0,
+            "archive": {
+                "platform": "douyin",
+                "video_id": "v-pool-copy",
+                "sha256": "a" * 64,
+                "storage_uri": "local://media/viral/copy.mp4",
+            },
+        },
+        ensure_ascii=False,
+    )
     with psycopg.connect(route_state) as raw:
         raw.execute(
             "INSERT INTO viral_script_cache (platform, video_id, result_json) "
@@ -1774,3 +1805,220 @@ def test_source_rejects_unpriced_service_before_reserving(source_client, route_s
             ).fetchone()[0]
             == 0
         )
+
+
+@pytest.mark.parametrize("platform", ["douyin", "wechat_channels"])
+def test_missing_statistics_preserve_observed_values_and_mark_partial(
+    route_state: str, platform: str
+) -> None:
+    from app.viral_store import get_viral_video, upsert_viral_videos
+
+    with psycopg.connect(route_state) as raw:
+        conn = BusinessConnection.postgres(raw)
+        video = replace(_viral_seed(platform), likes=1200, comments=2, shares=3, collects=4)
+        upsert_viral_videos(conn, [video])
+        upsert_viral_videos(
+            conn, [replace(video, likes=None, comments=None, shares=None, collects=None)]
+        )
+        stored = get_viral_video(conn, platform=platform, video_id=video.video_id)
+        assert stored is not None and stored.likes == 1200
+        assert stored.to_client_dict()["statisticsStatus"] == "partial"
+        assert stored.to_client_dict()["statisticsUpdatedAt"]
+        upsert_viral_videos(conn, [replace(video, likes=0)])
+        assert get_viral_video(conn, platform=platform, video_id=video.video_id).likes == 0
+        upsert_viral_videos(conn, [replace(video, video_id="unknown", likes=None)])
+        assert get_viral_video(conn, platform=platform, video_id="unknown").likes is None
+
+
+@pytest.mark.parametrize(
+    "state,expected",
+    [
+        ("unpublished", False),
+        ("published", True),
+        ("future", False),
+        ("expired", False),
+        ("hidden", False),
+        ("unavailable", False),
+        ("deleted", False),
+        ("unready", False),
+    ],
+)
+def test_workspace_video_search_matches_public_visibility(
+    route_state: str, state: str, expected: bool
+) -> None:
+    from types import SimpleNamespace
+
+    from app.studio_search import search_studio
+    from app.viral_store import is_customer_visible_viral_video, upsert_viral_videos
+
+    with psycopg.connect(route_state) as raw:
+        conn = BusinessConnection.postgres(raw)
+        raw.execute("DELETE FROM viral_media_preparations WHERE video_id='v-1'")
+        raw.execute("DELETE FROM viral_video_visibility WHERE video_id='v-1'")
+        raw.execute("DELETE FROM viral_videos WHERE video_id='v-1' AND platform='douyin'")
+        video = replace(_viral_seed(), title="专用可见性核验", cover_url=None)
+        upsert_viral_videos(conn, [video])
+        raw.execute(
+            "UPDATE viral_videos SET collection_published=%s,pushed_at=now() WHERE video_id='v-1'",
+            (0 if state == "unpublished" else 1,),
+        )
+        if state != "unready":
+            raw.execute(
+                "INSERT INTO viral_media_preparations"
+                "(id,platform,video_id,media_kind,status,storage_uri) VALUES"
+                "('visibility-media','douyin','v-1','video','SUCCEEDED','archive/test.mp4')"
+            )
+        if state in ("future", "expired"):
+            column = "homepage_starts_at" if state == "future" else "homepage_ends_at"
+            offset = "1 day" if state == "future" else "-1 day"
+            raw.execute(
+                f"UPDATE viral_videos SET {column}=now()+%s::interval WHERE video_id='v-1'",
+                (offset,),
+            )
+        if state in ("hidden", "unavailable"):
+            raw.execute(
+                "INSERT INTO viral_video_visibility(platform,video_id,status) "
+                "VALUES('douyin','v-1',%s)",
+                (state.upper(),),
+            )
+        if state == "deleted":
+            raw.execute("UPDATE viral_videos SET deleted_at=now() WHERE video_id='v-1'")
+        raw.commit()
+        result = search_studio(
+            conn,
+            actor=SimpleNamespace(id="viewer"),
+            query="专用可见性核验",
+            kind="video",
+            page=1,
+            page_size=20,
+        )
+        assert result.total == int(expected)
+        assert len(result.items) == int(expected)
+        assert (
+            is_customer_visible_viral_video(
+                conn, platform="douyin", video_id="v-1", user_id="viewer"
+            )
+            is expected
+        )
+
+
+def test_workspace_search_private_import_is_owner_scoped(route_state: str) -> None:
+    from types import SimpleNamespace
+
+    from app.studio_search import search_studio
+    from app.viral_store import upsert_viral_videos
+
+    with psycopg.connect(route_state) as raw:
+        conn = BusinessConnection.postgres(raw)
+        raw.execute("DELETE FROM viral_import_tasks WHERE id='private-import-task'")
+        raw.execute("DELETE FROM users WHERE id='private-owner'")
+        raw.execute(
+            "INSERT INTO users(id,username,display_name,role) "
+            "VALUES('private-owner','private-owner','测试','member')"
+        )
+        upsert_viral_videos(
+            conn,
+            [replace(_viral_seed(video_id="private-import"), title="私人导入核验", cover_url=None)],
+        )
+        raw.execute(
+            "INSERT INTO viral_import_tasks(id,owner_user_id,platform,video_id,purpose,"
+            "idempotency_key,request_hash,request_json,status) VALUES"
+            "('private-import-task','private-owner','douyin','private-import','replica',"
+            "'private-key','hash','{}','SUCCEEDED')"
+        )
+        raw.commit()
+        for owner, expected in [("private-owner", 1), ("other-user", 0)]:
+            result = search_studio(
+                conn,
+                actor=SimpleNamespace(id=owner),
+                query="私人导入核验",
+                kind="video",
+                page=1,
+                page_size=10,
+            )
+            assert result.total == expected and len(result.items) == expected
+
+
+@pytest.mark.parametrize("boundary", ["start", "end"])
+def test_regular_published_list_returns_next_visibility_boundary(
+    source_client, route_state, boundary: str
+) -> None:
+    from app.viral_store import upsert_viral_videos
+
+    headers, _ = account(source_client, f"public_clock_{boundary}")
+    with psycopg.connect(route_state) as raw:
+        raw.execute("DELETE FROM viral_media_preparations WHERE video_id LIKE 'clock-%%'")
+        raw.execute("DELETE FROM viral_video_visibility WHERE video_id LIKE 'clock-%%'")
+        raw.execute("DELETE FROM viral_videos WHERE video_id LIKE 'clock-%%'")
+    ids = [
+        f"clock-{boundary}-{kind}" for kind in ("public", "private", "hidden", "unready", "deleted")
+    ]
+    with psycopg.connect(route_state) as raw:
+        conn = BusinessConnection.postgres(raw)
+        upsert_viral_videos(
+            conn, [replace(_viral_seed(video_id=key), cover_url=None) for key in ids]
+        )
+        for key in ids:
+            raw.execute(
+                "INSERT INTO viral_media_preparations "
+                "(id,platform,video_id,media_kind,status,storage_uri) "
+                "VALUES(%s,'douyin',%s,'video','SUCCEEDED','local://clock/video.mp4') "
+                "ON CONFLICT(platform,video_id,media_kind) DO UPDATE SET status='SUCCEEDED'",
+                (key, key),
+            )
+            raw.execute(
+                "UPDATE viral_videos SET collection_published=1,pushed_at=now(), "
+                "homepage_featured=0,homepage_starts_at=now()-interval '1 hour', "
+                "homepage_ends_at=now()+interval '1 hour' WHERE platform='douyin' AND video_id=%s",
+                (key,),
+            )
+        target = ids[0]
+        if boundary == "start":
+            raw.execute(
+                "UPDATE viral_videos SET homepage_starts_at=now()+interval '1 hour', "
+                "homepage_ends_at=now()+interval '2 hours' WHERE video_id=%s",
+                (target,),
+            )
+        for key in ids[1:]:
+            raw.execute(
+                "UPDATE viral_videos SET homepage_starts_at=now()+interval '5 minutes' "
+                "WHERE video_id=%s",
+                (key,),
+            )
+        raw.execute("UPDATE viral_videos SET collection_published=0 WHERE video_id=%s", (ids[1],))
+        raw.execute(
+            "INSERT INTO viral_video_visibility(platform,video_id,status) "
+            "VALUES('douyin',%s,'HIDDEN') "
+            "ON CONFLICT(platform,video_id) DO UPDATE SET status='HIDDEN'",
+            (ids[2],),
+        )
+        raw.execute(
+            "UPDATE viral_media_preparations SET status='PENDING' WHERE video_id=%s", (ids[3],)
+        )
+        raw.execute("UPDATE viral_videos SET deleted_at=now() WHERE video_id=%s", (ids[4],))
+        expected = raw.execute(
+            f"SELECT homepage_{'starts' if boundary == 'start' else 'ends'}_at "
+            "FROM viral_videos WHERE video_id=%s",
+            (target,),
+        ).fetchone()[0]
+    response = source_client.get(
+        "/api/viral/videos", headers=headers, params={"featured_only": False, "limit": 50}
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert datetime.fromisoformat(body["nextChangeAt"]) == expected
+    assert datetime.fromisoformat(body["serverTime"]) < expected
+    assert (target in {item["videoId"] for item in body["items"]}) is (boundary == "end")
+    with psycopg.connect(route_state) as raw:
+        raw.execute(
+            f"UPDATE viral_videos SET homepage_{'starts' if boundary == 'start' else 'ends'}_at "
+            "=now()-interval '1 second' WHERE video_id=%s",
+            (target,),
+        )
+    refreshed = source_client.get(
+        "/api/viral/videos", headers=headers, params={"featured_only": False, "limit": 50}
+    )
+    assert refreshed.status_code == 200, refreshed.text
+    assert (target in {item["videoId"] for item in refreshed.json()["items"]}) is (
+        boundary == "start"
+    )

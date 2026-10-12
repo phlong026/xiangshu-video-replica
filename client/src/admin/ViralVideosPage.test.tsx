@@ -75,7 +75,10 @@ function isWrite(init: RequestInit | undefined) {
 type Write = (
   url: string,
   init: RequestInit | undefined,
-) => ReturnType<typeof respond> | undefined;
+) =>
+  | ReturnType<typeof respond>
+  | Promise<ReturnType<typeof respond>>
+  | undefined;
 
 /**
  * 本页挂载即并发三个读接口（列表、概览、采集配置），写接口又分准备 /
@@ -88,6 +91,7 @@ function installFetch(
     overview?: () => unknown;
     controls?: () => unknown;
     search?: () => unknown;
+    detailVideo?: () => unknown;
     write?: Write;
   } = {},
 ) {
@@ -106,7 +110,7 @@ function installFetch(
       });
     if (url.includes("/details?"))
       return respond({
-        video: row(),
+        video: overrides.detailVideo?.() ?? row(),
         media: {
           audio: { status: "SUCCEEDED", ready: true },
           video: { status: "NOT_STARTED", ready: false },
@@ -689,6 +693,8 @@ describe("ViralVideosPage", () => {
       screen.queryByRole("tab", { name: "实时搜索入库" }),
     ).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "详情" })).toBeInTheDocument();
+    for (const checkbox of screen.getAllByRole("checkbox"))
+      expect(checkbox).toBeDisabled();
   });
 
   it("仅点击补齐本页互动才调用写接口，保留真实零值和未提供字段", async () => {
@@ -792,6 +798,268 @@ describe("ViralVideosPage", () => {
       "X-Admin-CSRF": "csrf-curation-test",
       "Idempotency-Key": expect.any(String),
     });
+  });
+
+  it("搜索对象不在库当前页时仍能在当前搜索批量准备，确认列出准确平台和ID", async () => {
+    const found = [
+      row({ video_id: "search-a", title: "搜索甲" }),
+      row({ platform: "douyin", video_id: "search-b", title: "搜索乙" }),
+    ];
+    const fetchMock = installFetch({
+      list: () => ({ items: [], total: 0 }),
+      search: () => ({ items: found }),
+      write: () =>
+        respond({
+          count: 0,
+          items: found.map((video) => ({
+            ...video,
+            queued_for_preparation: true,
+          })),
+        }),
+    });
+    render(
+      <ViralVideosPage
+        initialSearch={{ keyword: "庭院", platform: "douyin" }}
+      />,
+    );
+    await screen.findByRole("region", { name: "实时搜索上游" });
+    fireEvent.click(
+      screen
+        .getByRole("region", { name: "实时搜索上游" })
+        .querySelector('button[type="submit"]') as HTMLButtonElement,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "确认费用并执行" }),
+    );
+    await screen.findByText("搜索甲");
+    fireEvent.click(screen.getByLabelText("选择「搜索甲」"));
+    fireEvent.click(screen.getByLabelText("选择「搜索乙」"));
+    expect(screen.getByRole("region", { name: "批量操作" })).toHaveTextContent(
+      "已选 2 项",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "批量准备素材" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("视频号 · 搜索甲 · search-a");
+    expect(dialog).toHaveTextContent("抖音 · 搜索乙 · search-b");
+    fireEvent.click(within(dialog).getByRole("button", { name: "确认操作" }));
+    await screen.findByText(/已排队准备 2 条素材/);
+    const batch = writesOf(fetchMock).find(([url]) =>
+      url.includes("curation:batch"),
+    );
+    expect(JSON.parse(String(batch?.[1]?.body)).items).toEqual(
+      found.map(({ platform, video_id }) => ({ platform, video_id })),
+    );
+  });
+
+  it.each(["error", "middle500", "cancel"])(
+    "补采%s停止新请求，在途全部收敛之前禁止新批，异常保留续发键",
+    async (mode) => {
+      const videos = Array.from({ length: 7 }, (_, index) =>
+        row({ video_id: `batch-${index}`, title: `内容${index}` }),
+      );
+      const pending: Array<{
+        resolve: (value: ReturnType<typeof respond>) => void;
+        reject: (reason: Error) => void;
+      }> = [];
+      const fetchMock = installFetch({
+        list: () => ({ items: videos, total: videos.length }),
+        write: (url) =>
+          url.endsWith("/statistics")
+            ? new Promise<ReturnType<typeof respond>>((resolve, reject) =>
+                pending.push({ resolve, reject }),
+              )
+            : undefined,
+      });
+      render(<ViralVideosPage />);
+      await screen.findByText("内容0");
+      fireEvent.click(screen.getByRole("button", { name: "补齐本页互动" }));
+      fireEvent.click(
+        await screen.findByRole("button", { name: "确认费用并执行" }),
+      );
+      await waitFor(() => expect(pending).toHaveLength(3));
+      if (mode === "error") pending[0].reject(new Error("network fixture"));
+      else if (mode === "middle500")
+        pending[1].resolve(
+          respond(
+            { detail: { code: "SERVICE_UNAVAILABLE", message: "暂不可用" } },
+            500,
+          ),
+        );
+      else fireEvent.click(screen.getByRole("button", { name: /取消/ }));
+      await screen.findByText(/等待.*请求|等待在途/);
+      expect(
+        screen.getByRole("button", { name: "补齐本页互动" }),
+      ).toBeDisabled();
+      expect(pending).toHaveLength(3);
+      for (const [index, request] of pending.entries())
+        if (mode === "cancel" || index !== (mode === "middle500" ? 1 : 0))
+          request.resolve(
+            respond({
+              likes: 1200,
+              comments: null,
+              shares: null,
+              collects: null,
+              statistics_status: "partial",
+            }),
+          );
+      await screen.findByText(/已收敛 3\/7/);
+      expect(
+        screen.getByRole("button", { name: "补齐本页互动" }),
+      ).toBeEnabled();
+      expect(
+        writesOf(fetchMock).filter(([url]) => url.endsWith("/statistics")),
+      ).toHaveLength(3);
+      if (mode === "error") {
+        const firstCall = writesOf(fetchMock).find(([url]) =>
+          url.includes("batch-0/statistics"),
+        );
+        fireEvent.click(screen.getByRole("button", { name: "补齐本页互动" }));
+        fireEvent.click(
+          await screen.findByRole("button", { name: "确认费用并执行" }),
+        );
+        await waitFor(() => expect(pending).toHaveLength(6));
+        const calls = writesOf(fetchMock).filter(([url]) =>
+          url.includes("batch-0/statistics"),
+        );
+        expect(calls).toHaveLength(2);
+        expect(calls[1][1]?.headers).toMatchObject({
+          "Idempotency-Key": new Headers(firstCall?.[1]?.headers).get(
+            "Idempotency-Key",
+          ),
+        });
+        fireEvent.click(screen.getByRole("button", { name: "取消" }));
+        for (const request of pending.slice(3))
+          request.resolve(
+            respond({ likes: 1200, statistics_status: "complete" }),
+          );
+        await screen.findByText(/人工停止：已收敛 3\/7/);
+      }
+    },
+  );
+
+  it("未知点赞不伪装0，抖音同时显示统计时间与本次缺失沿用旧值", async () => {
+    installFetch({
+      list: () => ({
+        items: [
+          row({
+            platform: "douyin",
+            likes: null,
+            statistics_status: "partial",
+            statistics_updated_at: "2026-10-10T08:00:00Z",
+            statistics_source: "platform_search",
+          }),
+        ],
+        total: 1,
+      }),
+    });
+    render(<ViralVideosPage />);
+    await screen.findByText("庭院施工案例");
+    expect(screen.getByText(/点赞未知，待核验/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/统计时间：.*2026.*本次仅更新部分字段/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/来源：平台搜索/)).toBeInTheDocument();
+    expect(screen.getByText("点赞").closest("div")).not.toHaveTextContent(
+      "点赞0",
+    );
+  });
+
+  it("发布3条可见7条准备时不把受理算可用，逐项结果可核对", async () => {
+    const rows = Array.from({ length: 10 }, (_, index) =>
+      row({ video_id: `publish-${index}`, title: `发布片${index}` }),
+    );
+    installFetch({
+      list: () => ({ items: rows, total: 10 }),
+      write: () =>
+        respond({
+          count: 10,
+          items: rows.map((video, index) => ({
+            ...video,
+            customer_visible: index < 3,
+            queued_for_preparation: index >= 3,
+            publication_state: index < 3 ? "visible" : "preparing",
+          })),
+        }),
+    });
+    render(<ViralVideosPage />);
+    await screen.findByText("发布片0");
+    fireEvent.click(screen.getByLabelText("选择本页全部视频"));
+    fireEvent.click(
+      within(screen.getByRole("region", { name: "批量操作" })).getByRole(
+        "button",
+        { name: "发布给客户" },
+      ),
+    );
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText(/操作原因/), {
+      target: { value: "人工选片确认" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "确认操作" }));
+    await screen.findByText(/客户可见 3 条，准备中 7 条，失败 0 条/);
+    const results = screen.getByRole("region", { name: "逐项发布结果" });
+    expect(within(results).getAllByText(/客户可见可用/)).toHaveLength(3);
+    expect(within(results).getAllByText(/准备中，客户尚不可用/)).toHaveLength(
+      7,
+    );
+  });
+
+  it("搜索卡片通过非付费详情核对准备终态，保留选择且不再次调用搜索", async () => {
+    const ready = row({
+      video_id: "off-page",
+      title: "页外视频",
+      archive_status: "SUCCEEDED",
+      customer_visible: true,
+    });
+    const pending = {
+      ...ready,
+      archive_status: "PENDING",
+      media_status: "NOT_STARTED",
+      storage_uri: null,
+      customer_visible: false,
+    };
+    const fetchMock = installFetch({
+      list: () => ({ items: [], total: 0 }),
+      search: () => ({ items: [pending] }),
+      detailVideo: () => ready,
+    });
+    render(
+      <ViralVideosPage
+        initialSearch={{ keyword: "庭院", platform: "douyin" }}
+      />,
+    );
+    fireEvent.click(
+      screen
+        .getByRole("region", { name: "实时搜索上游" })
+        .querySelector('button[type="submit"]') as HTMLButtonElement,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "确认费用并执行" }),
+    );
+    await screen.findByText("页外视频");
+    fireEvent.click(screen.getByLabelText("选择「页外视频」"));
+    fireEvent.click(screen.getByRole("button", { name: "刷新列表状态" }));
+    await screen.findByText("客户可见可用", {}, { timeout: 2500 });
+    expect(screen.getByLabelText("选择「页外视频」")).toBeChecked();
+    expect(
+      fetchMock.mock.calls.filter(([url]) =>
+        url.includes("/api/control/viral/search"),
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("未知互动独立筛选发送服务端条件，列表刷新不获取付费指标", async () => {
+    const fetchMock = installFetch();
+    render(<ViralVideosPage />);
+    await screen.findByText("庭院施工案例");
+    fireEvent.click(screen.getByRole("button", { name: "待核验互动" }));
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(([url]) =>
+          url.includes("attention=unknown_statistics"),
+        ),
+      ).toBe(true),
+    );
+    expect(writesOf(fetchMock)).toHaveLength(0);
   });
 
   afterEach(() => {
